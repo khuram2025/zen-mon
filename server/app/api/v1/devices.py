@@ -21,13 +21,17 @@ router = APIRouter(prefix="/devices", tags=["Devices"])
 async def list_devices(
     status: str | None = None,
     group_id: UUID | None = None,
+    device_type: str | None = None,
+    location: str | None = None,
     search: str | None = None,
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    devices, total = await device_service.get_devices(db, status, group_id, search, skip, limit)
+    devices, total = await device_service.get_devices(
+        db, status, group_id, device_type, location, search, skip, limit
+    )
     return {
         "data": [_device_to_response(d) for d in devices],
         "meta": {"total": total, "skip": skip, "limit": limit},
@@ -49,6 +53,27 @@ async def list_groups(
 ):
     groups = await device_service.get_device_groups(db)
     return groups
+
+
+@router.get("/locations")
+async def list_locations(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return await device_service.get_distinct_locations(db)
+
+
+@router.post("/bulk-delete")
+async def bulk_delete_devices(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    ids = data.get("device_ids", [])
+    if not ids:
+        raise HTTPException(status_code=400, detail="No device IDs provided")
+    deleted = await device_service.bulk_delete_devices(db, [UUID(i) for i in ids])
+    return {"deleted": deleted}
 
 
 @router.post("", response_model=DeviceResponse, status_code=201)

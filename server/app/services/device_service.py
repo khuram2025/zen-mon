@@ -11,6 +11,8 @@ async def get_devices(
     db: AsyncSession,
     status: str | None = None,
     group_id: UUID | None = None,
+    device_type: str | None = None,
+    location: str | None = None,
     search: str | None = None,
     skip: int = 0,
     limit: int = 50,
@@ -21,6 +23,10 @@ async def get_devices(
         query = query.where(Device.status == status)
     if group_id:
         query = query.where(Device.group_id == group_id)
+    if device_type:
+        query = query.where(Device.device_type == device_type)
+    if location:
+        query = query.where(Device.location.ilike(f"%{location}%"))
     if search:
         query = query.where(
             Device.hostname.ilike(f"%{search}%") | Device.ip_address.cast(str).ilike(f"%{search}%")
@@ -36,6 +42,25 @@ async def get_devices(
     devices = result.scalars().all()
 
     return devices, total
+
+
+async def get_distinct_locations(db: AsyncSession) -> list[str]:
+    result = await db.execute(
+        select(Device.location)
+        .where(Device.location.isnot(None))
+        .where(Device.location != "")
+        .distinct()
+        .order_by(Device.location)
+    )
+    return [row[0] for row in result.all()]
+
+
+async def bulk_delete_devices(db: AsyncSession, device_ids: list[UUID]) -> int:
+    result = await db.execute(
+        delete(Device).where(Device.id.in_(device_ids))
+    )
+    await db.commit()
+    return result.rowcount
 
 
 async def get_device(db: AsyncSession, device_id: UUID) -> Device | None:
