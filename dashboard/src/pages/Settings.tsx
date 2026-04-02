@@ -587,7 +587,7 @@ function GatewaysTab({ showToast }: { showToast: (type: 'success' | 'error', msg
                 label="API URL"
                 value={sms.api_url}
                 onChange={(v) => updateSms('api_url', v)}
-                placeholder="https://ht.cequens.sa/Send"
+                placeholder="https://api.smsprovider.com/send"
               />
               <div className="grid grid-cols-2 gap-3">
                 <Select
