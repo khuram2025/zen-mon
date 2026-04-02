@@ -276,6 +276,7 @@ export function DeviceDetailPage() {
         <StatusCard
           title="Current Status"
           value={device.status === 'up' ? 'Online' : device.status === 'down' ? 'Offline' : device.status.charAt(0).toUpperCase() + device.status.slice(1)}
+          subtitle={device.status === 'up' ? 'Responding normally' : device.status === 'down' ? timeAgo(device.last_seen) : undefined}
           icon={device.status === 'up' ? <Wifi className="w-5 h-5" /> : <WifiOff className="w-5 h-5" />}
           color={stColor}
         />
@@ -293,9 +294,10 @@ export function DeviceDetailPage() {
         />
         <StatusCard
           title="Last Seen"
-          value={timeAgo(device.last_seen)}
+          value={device.status === 'up' ? 'Active Now' : timeAgo(device.last_seen)}
+          subtitle={device.status === 'up' && device.last_seen ? `Last check ${timeAgo(device.last_seen)}` : undefined}
           icon={<Clock className="w-5 h-5" />}
-          color="var(--text-secondary)"
+          color={device.status === 'up' ? 'var(--status-up)' : 'var(--text-secondary)'}
         />
       </div>
 
