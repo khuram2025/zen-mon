@@ -121,7 +121,7 @@ CREATE INDEX idx_alerts_active ON alerts(status) WHERE status = 'active';
 CREATE TABLE notification_channels (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name        VARCHAR(255) NOT NULL,
-    type        VARCHAR(50) NOT NULL CHECK (type IN ('email', 'webhook', 'slack', 'telegram')),
+    type        VARCHAR(50) NOT NULL CHECK (type IN ('email', 'sms', 'webhook', 'slack', 'telegram')),
     config      JSONB NOT NULL,
     enabled     BOOLEAN DEFAULT TRUE,
     created_at  TIMESTAMPTZ DEFAULT NOW()
