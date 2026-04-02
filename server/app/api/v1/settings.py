@@ -187,8 +187,38 @@ async def test_smtp(
     if not config.host or not config.from_email:
         raise HTTPException(status_code=400, detail="SMTP configuration is incomplete")
 
-    # Validate config is present; actual sending would be done by a background service.
-    return {"message": "SMTP configuration is valid", "recipient": data.recipient}
+    # Actually try to send a test email
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = f"{config.from_name} <{config.from_email}>"
+        msg["To"] = data.recipient
+        msg["Subject"] = "ZenPlus SMTP Test"
+        msg.attach(MIMEText(
+            "This is a test email from ZenPlus Monitoring System.\n\n"
+            "If you received this, your SMTP configuration is working correctly.",
+            "plain",
+        ))
+
+        if config.encryption == "ssl":
+            server = smtplib.SMTP_SSL(config.host, config.port, timeout=10)
+        else:
+            server = smtplib.SMTP(config.host, config.port, timeout=10)
+            if config.encryption == "tls":
+                server.starttls()
+
+        if config.username:
+            server.login(config.username, config.password)
+
+        server.sendmail(config.from_email, data.recipient, msg.as_string())
+        server.quit()
+
+        return {"message": f"Test email sent to {data.recipient}", "recipient": data.recipient}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"SMTP test failed: {str(e)}")
 
 
 @router.post("/gateways/sms/test")

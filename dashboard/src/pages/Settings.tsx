@@ -414,9 +414,13 @@ function GatewaysTab({ showToast }: { showToast: (type: 'success' | 'error', msg
     onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'Failed to save SMTP settings'),
   })
 
+  const [smtpTestEmail, setSmtpTestEmail] = useState('')
   const smtpTest = useMutation({
-    mutationFn: () => api.post('/settings/gateways/smtp/test'),
-    onSuccess: () => showToast('success', 'SMTP test email sent successfully'),
+    mutationFn: () => api.post('/settings/gateways/smtp/test', { recipient: smtpTestEmail || smtp.from_email || 'test@example.com' }),
+    onSuccess: (data: unknown) => {
+      const d = data as Record<string, unknown>
+      showToast('success', d?.message ? String(d.message) : 'SMTP test sent')
+    },
     onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'SMTP test failed'),
   })
 
@@ -523,24 +527,35 @@ function GatewaysTab({ showToast }: { showToast: (type: 'success' | 'error', msg
           />
         </div>
 
-        <div className="flex items-center justify-end gap-2 mt-6 pt-4 border-t border-[var(--bg-elevated)]">
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => smtpTest.mutate()}
-            loading={smtpTest.isPending}
-            disabled={!smtp.host || !smtp.from_email}
-          >
-            <Send className="w-3.5 h-3.5" />
-            Test Connection
-          </Button>
-          <Button
-            size="sm"
-            onClick={() => smtpSave.mutate()}
-            loading={smtpSave.isPending}
-          >
-            Save
-          </Button>
+        <div className="mt-6 pt-4 border-t border-[var(--bg-elevated)] space-y-3">
+          <div className="flex items-center gap-2">
+            <input
+              type="email"
+              value={smtpTestEmail}
+              onChange={(e) => setSmtpTestEmail(e.target.value)}
+              placeholder="Test email e.g. admin@company.com"
+              className="flex-1 bg-[var(--bg-tertiary)] text-[var(--text-primary)] px-3 py-2 rounded-lg border border-[var(--bg-elevated)] focus:outline-none focus:border-[var(--accent)] text-xs font-mono placeholder:text-[var(--text-muted)]/40"
+            />
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => smtpTest.mutate()}
+              loading={smtpTest.isPending}
+              disabled={!smtpTestEmail || !smtp.host}
+            >
+              <Send className="w-3.5 h-3.5" />
+              Test
+            </Button>
+          </div>
+          <div className="flex justify-end">
+            <Button
+              size="sm"
+              onClick={() => smtpSave.mutate()}
+              loading={smtpSave.isPending}
+            >
+              Save
+            </Button>
+          </div>
         </div>
       </Card>
 
