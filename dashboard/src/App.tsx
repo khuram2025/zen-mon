@@ -9,6 +9,7 @@ import { DevicesPage } from '@/pages/Devices'
 import { DeviceDetailPage } from '@/pages/DeviceDetail'
 import { AlertsPage } from '@/pages/Alerts'
 import { AddDevicePage } from '@/pages/AddDevice'
+import { SettingsPage } from '@/pages/Settings'
 
 function ProtectedLayout() {
   const { isAuthenticated, checkAuth } = useAuthStore()
@@ -33,7 +34,7 @@ function ProtectedLayout() {
           <Route path="/devices/:id" element={<DeviceDetailPage />} />
           <Route path="/alerts" element={<AlertsPage />} />
           <Route path="/topology" element={<div className="text-[var(--text-muted)]">Topology - Coming in Phase 3</div>} />
-          <Route path="/settings" element={<div className="text-[var(--text-muted)]">Settings - Coming Soon</div>} />
+          <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>
     </div>
