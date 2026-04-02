@@ -61,7 +61,7 @@ class AlertRuleUpdate(BaseModel):
     enabled: Optional[bool] = None
 
     metric: Optional[str] = Field(None, pattern="^(ping_status|rtt|packet_loss|jitter)$")
-    operator: Optional[str] = Field(None, pattern="^(>|<|>=|<=|==|!=)$")
+    operator: Optional[str] = Field(None, pattern="^(>|<|>=|<=|==|!=|eq|neq|gt|lt|gte|lte)$")
     threshold: Optional[float] = None
 
     trigger_on: Optional[str] = Field(None, pattern="^(any|down|up|degraded)$")
@@ -81,6 +81,14 @@ class AlertRuleUpdate(BaseModel):
     schedule_start: Optional[str] = None
     schedule_end: Optional[str] = None
     schedule_days: Optional[list[int]] = None
+
+    # Message templates
+    email_subject: Optional[str] = None
+    email_body: Optional[str] = None
+    sms_template: Optional[str] = None
+    recovery_email_subject: Optional[str] = None
+    recovery_email_body: Optional[str] = None
+    recovery_sms_template: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------

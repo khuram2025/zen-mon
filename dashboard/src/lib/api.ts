@@ -43,7 +43,16 @@ class ApiClient {
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ error: { message: response.statusText } }))
-      throw new Error(error.error?.message || error.detail || response.statusText)
+      const detail = error.detail
+      let msg: string
+      if (typeof detail === 'string') {
+        msg = detail
+      } else if (Array.isArray(detail)) {
+        msg = detail.map((d: { msg?: string; loc?: string[] }) => d.msg || JSON.stringify(d)).join('; ')
+      } else {
+        msg = error.error?.message || error.message || response.statusText
+      }
+      throw new Error(msg)
     }
 
     if (response.status === 204) {
