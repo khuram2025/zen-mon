@@ -81,14 +81,25 @@ def get_device_metrics(
 
     points = []
     for row in result.result_rows:
+        raw_is_up = row[6]
+        if granularity == "raw":
+            is_up = bool(raw_is_up)  # 0/1 -> False/True
+        else:
+            is_up = float(raw_is_up) > 0.5 if raw_is_up is not None else None
+
+        # rtt_ms: if device was down, rtt is 0 - show as null for cleaner charts
+        rtt = row[1]
+        if not is_up:
+            rtt = None
+
         points.append(MetricPoint(
             timestamp=row[0],
-            rtt_ms=row[1],
+            rtt_ms=rtt,
             packet_loss=row[2],
             jitter_ms=row[3],
             min_rtt_ms=row[4],
             max_rtt_ms=row[5],
-            is_up=bool(row[6]) if granularity == "raw" else row[6] > 0.5,
+            is_up=is_up,
         ))
 
     client.close()
