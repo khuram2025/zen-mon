@@ -1,7 +1,11 @@
 package pinger
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -285,6 +289,11 @@ func (e *Engine) processStatusChange(ctx context.Context, result *PingResult) {
 			}
 		}()
 
+		// Evaluate alert rules via API
+		go func() {
+			e.evaluateAlerts(ctx, device, oldStatus, newStatus, result)
+		}()
+
 		// Publish to Redis
 		go func() {
 			if err := e.publisher.PublishStatusChange(ctx, sc); err != nil {
@@ -292,4 +301,45 @@ func (e *Engine) processStatusChange(ctx context.Context, result *PingResult) {
 			}
 		}()
 	}
+}
+
+func (e *Engine) evaluateAlerts(ctx context.Context, device *Device, oldStatus, newStatus string, result *PingResult) {
+	apiURL := fmt.Sprintf("http://localhost:8000/api/v1/alert-engine/evaluate")
+
+	payload := map[string]interface{}{
+		"device_id":   device.ID.String(),
+		"hostname":    device.Hostname,
+		"ip_address":  device.IPAddress.String(),
+		"old_status":  oldStatus,
+		"new_status":  newStatus,
+		"rtt_ms":      float64(result.RTT.Microseconds()) / 1000.0,
+		"packet_loss": result.PacketLoss,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		e.logger.Errorf("Failed to marshal alert payload: %v", err)
+		return
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(body))
+	if err != nil {
+		e.logger.Errorf("Failed to create alert request: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		e.logger.Errorf("Failed to call alert engine: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	var result2 map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result2)
+
+	sent := result2["notifications_sent"]
+	e.logger.Infof("Alert evaluation: %s %s→%s, notifications sent: %v", device.Hostname, oldStatus, newStatus, sent)
 }
