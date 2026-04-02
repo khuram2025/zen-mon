@@ -1151,6 +1151,12 @@ const defaultRule = {
   schedule_end: null as string | null,
   schedule_days: [1, 2, 3, 4, 5, 6, 7],
   enabled: true,
+  email_subject: '[{severity}] {status}: {rule_name}',
+  email_body: '{status_intro}\n\nRule: {rule_name}\nSeverity: {severity}\nDevice: {hostname} ({ip_address})\nStatus: {status}\nGroup: {group}\nLocation: {location}\nType: {device_type}\nMetric: {metric} {operator} {threshold}\nTime: {timestamp}\n\n--\nZenPlus Network Monitoring System',
+  sms_template: '[ZenPlus {severity}] {hostname} ({ip_address}) is {status}. Rule: {rule_name}',
+  recovery_email_subject: '[{severity}] RESOLVED: {rule_name}',
+  recovery_email_body: '',
+  recovery_sms_template: '[ZenPlus {severity}] {hostname} ({ip_address}) is {status}. RESOLVED: {rule_name}',
 }
 
 function getScopeType(rule: typeof defaultRule): string {
@@ -1276,6 +1282,7 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
   const [form, setForm] = useState(defaultRule)
   const [scopeType, setScopeType] = useState('all')
   const [scheduleOpen, setScheduleOpen] = useState(false)
+  const [templatesOpen, setTemplatesOpen] = useState(false)
   const [previewData, setPreviewData] = useState<{ alert: AlertPreview; recovery: AlertPreview | null } | null>(null)
 
   const { data: rulesData } = useQuery({
@@ -1349,6 +1356,7 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
     setForm(defaultRule)
     setScopeType('all')
     setScheduleOpen(false)
+    setTemplatesOpen(false)
   }
 
   function startEdit(rule: AlertRule) {
@@ -1374,6 +1382,12 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
       schedule_end: rule.schedule_end,
       schedule_days: rule.schedule_days || [1, 2, 3, 4, 5, 6, 7],
       enabled: rule.enabled,
+      email_subject: (rule as any).email_subject || defaultRule.email_subject,
+      email_body: (rule as any).email_body || defaultRule.email_body,
+      sms_template: (rule as any).sms_template || defaultRule.sms_template,
+      recovery_email_subject: (rule as any).recovery_email_subject || defaultRule.recovery_email_subject,
+      recovery_email_body: (rule as any).recovery_email_body || '',
+      recovery_sms_template: (rule as any).recovery_sms_template || defaultRule.recovery_sms_template,
     })
     setScopeType(rule.group_id ? 'group' : rule.device_type ? 'type' : rule.location ? 'location' : rule.device_id ? 'device' : 'all')
     setShowPanel(true)
@@ -1801,6 +1815,77 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
                         })}
                       </div>
                     </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Message Templates Section (collapsible) */}
+              <div>
+                <button
+                  onClick={() => setTemplatesOpen(!templatesOpen)}
+                  className="flex items-center gap-2 text-xs font-semibold text-[var(--text-secondary)] uppercase tracking-wider mb-3 hover:text-[var(--text-primary)] transition-colors"
+                >
+                  {templatesOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                  <Mail className="w-3.5 h-3.5" />
+                  Message Templates
+                </button>
+                {templatesOpen && (
+                  <div className="space-y-4 bg-[var(--bg-primary)] rounded-lg p-4 border border-[var(--bg-elevated)] animate-in fade-in duration-200">
+                    <div className="bg-[var(--accent)]/5 rounded-lg p-3 border border-[var(--accent)]/10">
+                      <p className="text-[10px] text-[var(--accent)] font-medium mb-1">Available Variables</p>
+                      <div className="flex flex-wrap gap-1">
+                        {['{hostname}','{ip_address}','{status}','{severity}','{rule_name}','{group}','{location}','{device_type}','{metric}','{operator}','{threshold}','{timestamp}','{duration}','{rtt}','{packet_loss}','{status_intro}'].map(v => (
+                          <code key={v} className="text-[10px] bg-[var(--bg-secondary)] px-1.5 py-0.5 rounded text-[var(--text-secondary)] cursor-pointer hover:text-[var(--accent)]"
+                            onClick={() => navigator.clipboard.writeText(v)}
+                            title="Click to copy">{v}</code>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="block text-xs font-medium text-[var(--text-secondary)]">Email Subject</label>
+                      <input type="text" value={form.email_subject}
+                        onChange={(e) => updateForm('email_subject', e.target.value)}
+                        className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--bg-secondary)] border border-[var(--bg-elevated)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]" />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="block text-xs font-medium text-[var(--text-secondary)]">Email Body</label>
+                      <textarea value={form.email_body}
+                        onChange={(e) => updateForm('email_body', e.target.value)}
+                        rows={6}
+                        className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--bg-secondary)] border border-[var(--bg-elevated)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)] resize-none" />
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="block text-xs font-medium text-[var(--text-secondary)]">SMS Message</label>
+                      <textarea value={form.sms_template}
+                        onChange={(e) => updateForm('sms_template', e.target.value)}
+                        rows={2}
+                        className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--bg-secondary)] border border-[var(--bg-elevated)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)] resize-none" />
+                      <p className="text-[10px] text-[var(--text-muted)]">{form.sms_template.length} characters (160 max for single SMS)</p>
+                    </div>
+
+                    {form.recovery_alert && (
+                      <>
+                        <div className="border-t border-[var(--bg-elevated)] pt-3 mt-3">
+                          <p className="text-[10px] font-semibold text-green-400 uppercase tracking-wider mb-3">Recovery Templates</p>
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="block text-xs font-medium text-[var(--text-secondary)]">Recovery Email Subject</label>
+                          <input type="text" value={form.recovery_email_subject}
+                            onChange={(e) => updateForm('recovery_email_subject', e.target.value)}
+                            className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--bg-secondary)] border border-[var(--bg-elevated)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]" />
+                        </div>
+                        <div className="space-y-1.5">
+                          <label className="block text-xs font-medium text-[var(--text-secondary)]">Recovery SMS Message</label>
+                          <textarea value={form.recovery_sms_template}
+                            onChange={(e) => updateForm('recovery_sms_template', e.target.value)}
+                            rows={2}
+                            className="w-full px-3 py-2 rounded-lg text-xs font-mono bg-[var(--bg-secondary)] border border-[var(--bg-elevated)] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)] resize-none" />
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
               </div>

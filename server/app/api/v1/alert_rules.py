@@ -46,6 +46,14 @@ class AlertRuleCreate(BaseModel):
     schedule_end: Optional[str] = None    # HH:MM
     schedule_days: Optional[list[int]] = None  # 1-7 (Mon-Sun)
 
+    # Message templates
+    email_subject: Optional[str] = None
+    email_body: Optional[str] = None
+    sms_template: Optional[str] = None
+    recovery_email_subject: Optional[str] = None
+    recovery_email_body: Optional[str] = None
+    recovery_sms_template: Optional[str] = None
+
 
 class AlertRuleUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=255)
@@ -85,6 +93,8 @@ _RULE_COLUMNS = (
     "device_id, group_id, severity, notify_channels, cooldown, "
     "device_type, location, trigger_on, recovery_alert, "
     "min_duration, max_repeat, schedule_start, schedule_end, schedule_days, "
+    "email_subject, email_body, sms_template, "
+    "recovery_email_subject, recovery_email_body, recovery_sms_template, "
     "created_at, updated_at, created_by"
 )
 
@@ -120,6 +130,12 @@ def _row_to_dict(row) -> dict:
         "schedule_start": schedule_start,
         "schedule_end": schedule_end,
         "schedule_days": row.schedule_days if row.schedule_days else [],
+        "email_subject": row.email_subject,
+        "email_body": row.email_body,
+        "sms_template": row.sms_template,
+        "recovery_email_subject": row.recovery_email_subject,
+        "recovery_email_body": row.recovery_email_body,
+        "recovery_sms_template": row.recovery_sms_template,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         "created_by": str(row.created_by) if row.created_by else None,
@@ -171,6 +187,12 @@ async def create_alert_rule(
         "schedule_start": data.schedule_start,
         "schedule_end": data.schedule_end,
         "schedule_days": json.dumps(data.schedule_days) if data.schedule_days else None,
+        "email_subject": getattr(data, 'email_subject', None),
+        "email_body": getattr(data, 'email_body', None),
+        "sms_template": getattr(data, 'sms_template', None),
+        "recovery_email_subject": getattr(data, 'recovery_email_subject', None),
+        "recovery_email_body": getattr(data, 'recovery_email_body', None),
+        "recovery_sms_template": getattr(data, 'recovery_sms_template', None),
         "created_at": now,
         "updated_at": now,
         "created_by": user.id,
@@ -183,13 +205,18 @@ async def create_alert_rule(
             "device_id, group_id, severity, notify_channels, cooldown, "
             "device_type, location, trigger_on, recovery_alert, "
             "min_duration, max_repeat, schedule_start, schedule_end, schedule_days, "
+            "email_subject, email_body, sms_template, "
+            "recovery_email_subject, recovery_email_body, recovery_sms_template, "
             "created_at, updated_at, created_by) "
             "VALUES "
             "(:name, :description, :enabled, :metric, :operator, :threshold, :duration, "
             ":device_id, :group_id, :severity, CAST(:notify_channels AS jsonb), :cooldown, "
             ":device_type, :location, :trigger_on, :recovery_alert, "
             ":min_duration, :max_repeat, CAST(:schedule_start AS time), CAST(:schedule_end AS time), "
-            "CAST(:schedule_days AS jsonb), :created_at, :updated_at, :created_by) "
+            "CAST(:schedule_days AS jsonb), "
+            ":email_subject, :email_body, :sms_template, "
+            ":recovery_email_subject, :recovery_email_body, :recovery_sms_template, "
+            ":created_at, :updated_at, :created_by) "
             f"RETURNING {_RULE_COLUMNS}"
         ),
         params,
@@ -314,61 +341,80 @@ async def toggle_alert_rule(
     }
 
 
+def _render_template(template: str, variables: dict) -> str:
+    """Replace {var_name} placeholders with values."""
+    result = template
+    for key, value in variables.items():
+        result = result.replace(f"{{{key}}}", str(value))
+    return result
+
+
 def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
     """Build a preview/simulation alert message from a rule."""
-    severity = rule_dict.get("severity", "warning").upper()
-    name = rule_dict.get("name", "Alert Rule")
     trigger = rule_dict.get("trigger_on", "any")
-    metric = rule_dict.get("metric", "ping_status")
-    operator = rule_dict.get("operator", "==")
-    threshold = rule_dict.get("threshold", 0)
-    device_type = rule_dict.get("device_type", "")
-    location = rule_dict.get("location", "")
-
-    scope_desc = "any device"
-    if device_type:
-        scope_desc = f"any {device_type}"
-    if location:
-        scope_desc = f"devices at {location}"
-
     if is_recovery:
-        status_text = "RECOVERED"
-        subject = f"[{severity}] RESOLVED: {name}"
-        body_intro = "The following alert has been resolved:"
         device_status = "UP"
+        status_intro = "The following alert has been resolved:"
     else:
-        status_text = trigger.upper() if trigger != "any" else "ALERT"
-        subject = f"[{severity}] {status_text}: {name}"
-        body_intro = "An alert has been triggered:"
-        device_status = "DOWN" if trigger == "down" else "DEGRADED" if trigger == "degraded" else "ALERT"
+        device_status = "DOWN" if trigger == "down" else "DEGRADED" if trigger == "degraded" else "UP" if trigger == "up" else "ALERT"
+        status_intro = "An alert has been triggered:"
 
-    # Simulated device info
-    sim_hostname = "core-router-01"
-    sim_ip = "10.0.0.1"
+    # Template variables available to users
+    variables = {
+        "severity": rule_dict.get("severity", "warning").upper(),
+        "rule_name": rule_dict.get("name", "Alert Rule"),
+        "hostname": "core-router-01",
+        "ip_address": "10.0.0.1",
+        "status": device_status,
+        "status_intro": status_intro,
+        "device_type": rule_dict.get("device_type") or "router",
+        "group": "Core Network",
+        "location": rule_dict.get("location") or "DC-1 Rack A1",
+        "metric": rule_dict.get("metric", "ping_status"),
+        "operator": rule_dict.get("operator", "=="),
+        "threshold": str(rule_dict.get("threshold", 0)),
+        "timestamp": "2026-04-02 12:00:00 UTC",
+        "duration": "3m 25s",
+        "rtt": "45.2ms",
+        "packet_loss": "15%",
+    }
 
-    email_body = f"""{body_intro}
-
-Rule: {name}
-Severity: {severity}
-Device: {sim_hostname} ({sim_ip})
-Status: {device_status}
-Metric: {metric} {operator} {threshold}
-Scope: {scope_desc}
-Time: 2026-04-02 12:00:00 UTC
-
---
-ZenPlus Network Monitoring System"""
-
-    sms_body = f"[ZenPlus {severity}] {sim_hostname} ({sim_ip}) is {device_status}. Rule: {name}"
+    # Get templates from rule or use defaults
+    if is_recovery:
+        subject_tpl = rule_dict.get("recovery_email_subject") or "[{severity}] RESOLVED: {rule_name}"
+        body_tpl = rule_dict.get("recovery_email_body") or rule_dict.get("email_body") or (
+            "{status_intro}\n\n"
+            "Rule: {rule_name}\nSeverity: {severity}\n"
+            "Device: {hostname} ({ip_address})\nStatus: {status}\n"
+            "Group: {group}\nLocation: {location}\nType: {device_type}\n"
+            "Metric: {metric} {operator} {threshold}\nTime: {timestamp}\n\n"
+            "--\nZenPlus Network Monitoring System"
+        )
+        sms_tpl = rule_dict.get("recovery_sms_template") or "[ZenPlus {severity}] {hostname} ({ip_address}) is {status}. RESOLVED: {rule_name}"
+    else:
+        subject_tpl = rule_dict.get("email_subject") or "[{severity}] {status}: {rule_name}"
+        body_tpl = rule_dict.get("email_body") or (
+            "{status_intro}\n\n"
+            "Rule: {rule_name}\nSeverity: {severity}\n"
+            "Device: {hostname} ({ip_address})\nStatus: {status}\n"
+            "Group: {group}\nLocation: {location}\nType: {device_type}\n"
+            "Metric: {metric} {operator} {threshold}\nTime: {timestamp}\n\n"
+            "--\nZenPlus Network Monitoring System"
+        )
+        sms_tpl = rule_dict.get("sms_template") or "[ZenPlus {severity}] {hostname} ({ip_address}) is {status}. Rule: {rule_name}"
 
     return {
-        "subject": subject,
-        "email_body": email_body,
-        "sms_body": sms_body,
-        "sim_hostname": sim_hostname,
-        "sim_ip": sim_ip,
+        "subject": _render_template(subject_tpl, variables),
+        "email_body": _render_template(body_tpl, variables),
+        "sms_body": _render_template(sms_tpl, variables),
+        "sim_hostname": variables["hostname"],
+        "sim_ip": variables["ip_address"],
         "device_status": device_status,
-        "severity": severity,
+        "severity": variables["severity"],
+        # Return raw templates for editing
+        "email_subject_template": subject_tpl,
+        "email_body_template": body_tpl,
+        "sms_template": sms_tpl,
     }
 
 
