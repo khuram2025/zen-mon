@@ -891,7 +891,10 @@ function ChannelsTab({ showToast }: { showToast: (type: 'success' | 'error', msg
 
   const testMutation = useMutation({
     mutationFn: (id: string) => api.post(`/settings/channels/${id}/test`),
-    onSuccess: () => showToast('success', 'Test notification sent'),
+    onSuccess: (data: unknown) => {
+      const d = data as Record<string, unknown>
+      showToast('success', d?.message ? String(d.message) : 'Test notification sent')
+    },
     onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'Test failed'),
   })
 

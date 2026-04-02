@@ -521,8 +521,14 @@ async def test_channel(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    import httpx
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    # Get channel
     result = await db.execute(
-        text("SELECT id, name, type, config, enabled FROM notification_channels WHERE id = :id"),
+        text("SELECT id, name, type, config, enabled, gateway_id FROM notification_channels WHERE id = :id"),
         {"id": channel_id},
     )
     row = result.first()
@@ -531,23 +537,178 @@ async def test_channel(
     if not row.enabled:
         raise HTTPException(status_code=400, detail="Channel is disabled")
 
-    # Validate channel configuration based on type
     config = row.config or {}
     channel_type = row.type
+    test_message = "ZenPlus Test: This is a test notification from your monitoring system."
 
-    if channel_type == "email" and not config.get("recipients"):
-        raise HTTPException(status_code=400, detail="Email channel has no recipients configured")
-    if channel_type == "sms" and not config.get("phone_numbers"):
-        raise HTTPException(status_code=400, detail="SMS channel has no phone numbers configured")
-    if channel_type == "webhook" and not config.get("url"):
-        raise HTTPException(status_code=400, detail="Webhook channel has no URL configured")
-    if channel_type == "slack" and not config.get("webhook_url"):
-        raise HTTPException(status_code=400, detail="Slack channel has no webhook URL configured")
-    if channel_type == "telegram" and (not config.get("bot_token") or not config.get("chat_id")):
-        raise HTTPException(status_code=400, detail="Telegram channel is missing bot_token or chat_id")
+    # ─── SMS Channel ───
+    if channel_type == "sms":
+        phone_numbers = config.get("phone_numbers", "")
+        if not phone_numbers:
+            raise HTTPException(status_code=400, detail="SMS channel has no phone numbers configured")
 
-    return {
-        "message": f"Channel '{row.name}' configuration is valid",
-        "channel_id": str(row.id),
-        "type": channel_type,
-    }
+        # Find the gateway (linked or default)
+        gw_id = row.gateway_id or config.get("gateway_id")
+        if gw_id:
+            gw_result = await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})
+        else:
+            gw_result = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'sms' AND is_default = true LIMIT 1"))
+        gw_row = gw_result.first()
+
+        if not gw_row:
+            # Fallback to system_settings
+            gw_config = await _get_system_setting(db, "sms")
+            if not gw_config:
+                raise HTTPException(status_code=400, detail="No SMS gateway configured")
+        else:
+            gw_config = gw_row.config
+
+        sms_cfg = SmsConfig(**gw_config)
+        if not sms_cfg.enabled:
+            raise HTTPException(status_code=400, detail="SMS gateway is disabled")
+
+        if sms_cfg.provider == "custom_http":
+            if not sms_cfg.api_url:
+                raise HTTPException(status_code=400, detail="SMS gateway API URL not configured")
+
+            template = sms_cfg.request_template or ""
+            template = template.replace("{recipients}", phone_numbers)
+            template = template.replace("{message}", test_message)
+            template = template.replace("{sender}", sms_cfg.sender_name or "ZenPlus")
+            template = template.replace("{hostname}", "test-device")
+            template = template.replace("{ip_address}", "0.0.0.0")
+            template = template.replace("{status}", "TEST")
+
+            headers = dict(sms_cfg.custom_headers) if sms_cfg.custom_headers else {}
+            auth = None
+            if sms_cfg.auth_type == "basic" and sms_cfg.auth_username:
+                auth = (sms_cfg.auth_username, sms_cfg.auth_password)
+            elif sms_cfg.auth_type == "bearer" and sms_cfg.auth_token_value:
+                headers["Authorization"] = f"Bearer {sms_cfg.auth_token_value}"
+
+            try:
+                async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+                    if sms_cfg.http_method.upper() == "POST":
+                        if sms_cfg.content_type == "application/json":
+                            try:
+                                import json as json_mod
+                                body = json_mod.loads(template)
+                                resp = await client.post(sms_cfg.api_url, json=body, headers=headers, auth=auth)
+                            except (ValueError,):
+                                resp = await client.post(sms_cfg.api_url, content=template, headers=headers, auth=auth)
+                        else:
+                            resp = await client.post(sms_cfg.api_url, content=template, headers=headers, auth=auth)
+                    else:
+                        url = sms_cfg.api_url
+                        if template:
+                            sep = "&" if "?" in url else "?"
+                            url = f"{url}{sep}{template}"
+                        resp = await client.get(url, headers=headers, auth=auth)
+
+                return {
+                    "message": f"Test SMS sent to {phone_numbers}. API status: {resp.status_code}",
+                    "status_code": resp.status_code,
+                    "response": resp.text[:300],
+                }
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"SMS send failed: {str(e)}")
+        else:
+            return {"message": f"SMS test via {sms_cfg.provider} not implemented yet. Numbers: {phone_numbers}"}
+
+    # ─── Email Channel ───
+    elif channel_type == "email":
+        recipients = config.get("recipients", "")
+        if not recipients:
+            raise HTTPException(status_code=400, detail="Email channel has no recipients configured")
+
+        # Find SMTP gateway
+        gw_id = row.gateway_id or config.get("gateway_id")
+        if gw_id:
+            gw_result = await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})
+        else:
+            gw_result = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'smtp' AND is_default = true LIMIT 1"))
+        gw_row = gw_result.first()
+
+        if not gw_row:
+            gw_config = await _get_system_setting(db, "smtp")
+            if not gw_config:
+                raise HTTPException(status_code=400, detail="No SMTP gateway configured")
+        else:
+            gw_config = gw_row.config
+
+        smtp_cfg = SmtpConfig(**gw_config)
+        if not smtp_cfg.enabled:
+            raise HTTPException(status_code=400, detail="SMTP gateway is disabled")
+        if not smtp_cfg.host:
+            raise HTTPException(status_code=400, detail="SMTP gateway host not configured")
+
+        recipient_list = [r.strip() for r in recipients.split(",") if r.strip()]
+        try:
+            msg = MIMEMultipart()
+            msg["From"] = f"{smtp_cfg.from_name} <{smtp_cfg.from_email}>"
+            msg["To"] = ", ".join(recipient_list)
+            msg["Subject"] = "ZenPlus Test Notification"
+            msg.attach(MIMEText(
+                f"This is a test email from ZenPlus Monitoring System.\n\n"
+                f"Channel: {row.name}\n"
+                f"Recipients: {recipients}\n\n"
+                f"If you received this, your email notification channel is working correctly.",
+                "plain",
+            ))
+
+            if smtp_cfg.encryption == "ssl":
+                server = smtplib.SMTP_SSL(smtp_cfg.host, smtp_cfg.port, timeout=10)
+            else:
+                server = smtplib.SMTP(smtp_cfg.host, smtp_cfg.port, timeout=10)
+                if smtp_cfg.encryption == "tls":
+                    server.starttls()
+            if smtp_cfg.username:
+                server.login(smtp_cfg.username, smtp_cfg.password)
+            server.sendmail(smtp_cfg.from_email, recipient_list, msg.as_string())
+            server.quit()
+            return {"message": f"Test email sent to {recipients}"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Email send failed: {str(e)}")
+
+    # ─── Webhook ───
+    elif channel_type == "webhook":
+        url = config.get("url", "")
+        if not url:
+            raise HTTPException(status_code=400, detail="Webhook URL not configured")
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, json={"text": test_message, "source": "zenplus_test"})
+            return {"message": f"Webhook sent. Status: {resp.status_code}"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Webhook failed: {str(e)}")
+
+    # ─── Slack ───
+    elif channel_type == "slack":
+        webhook_url = config.get("webhook_url", "")
+        if not webhook_url:
+            raise HTTPException(status_code=400, detail="Slack webhook URL not configured")
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(webhook_url, json={"text": test_message})
+            return {"message": f"Slack message sent. Status: {resp.status_code}"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Slack failed: {str(e)}")
+
+    # ─── Telegram ───
+    elif channel_type == "telegram":
+        bot_token = config.get("bot_token", "")
+        chat_id = config.get("chat_id", "")
+        if not bot_token or not chat_id:
+            raise HTTPException(status_code=400, detail="Telegram bot_token or chat_id missing")
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                    json={"chat_id": chat_id, "text": test_message},
+                )
+            return {"message": f"Telegram message sent. Status: {resp.status_code}"}
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Telegram failed: {str(e)}")
+
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown channel type: {channel_type}")
