@@ -9,6 +9,7 @@ import { DevicesPage } from '@/pages/Devices'
 import { DeviceDetailPage } from '@/pages/DeviceDetail'
 import { AlertsPage } from '@/pages/Alerts'
 import { AddDevicePage } from '@/pages/AddDevice'
+import { EditDevicePage } from '@/pages/EditDevice'
 import { SettingsPage } from '@/pages/Settings'
 
 function ProtectedLayout() {
@@ -32,6 +33,7 @@ function ProtectedLayout() {
           <Route path="/devices" element={<DevicesPage />} />
           <Route path="/devices/new" element={<AddDevicePage />} />
           <Route path="/devices/:id" element={<DeviceDetailPage />} />
+          <Route path="/devices/:id/edit" element={<EditDevicePage />} />
           <Route path="/alerts" element={<AlertsPage />} />
           <Route path="/topology" element={<div className="text-[var(--text-muted)]">Topology - Coming in Phase 3</div>} />
           <Route path="/settings" element={<SettingsPage />} />
