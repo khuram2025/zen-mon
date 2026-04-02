@@ -31,10 +31,28 @@ class SmtpConfig(BaseModel):
 
 
 class SmsConfig(BaseModel):
-    provider: str = ""  # twilio / vonage / generic
-    api_key: str = ""
-    api_secret: str = ""
+    provider: str = "custom_http"  # twilio / vonage / custom_http
+    # Twilio/Vonage fields
+    account_sid: str = ""
+    auth_token: str = ""
     from_number: str = ""
+    # Custom HTTP API fields
+    api_url: str = ""
+    http_method: str = "GET"  # GET / POST
+    content_type: str = ""  # application/json, application/x-www-form-urlencoded, or empty for query params
+    auth_type: str = "none"  # none / basic / bearer / query_param
+    auth_username: str = ""
+    auth_password: str = ""
+    auth_token_value: str = ""
+    # URL template with placeholders: {recipients}, {message}, {sender}
+    # For GET: params appended as query string
+    # For POST: body template
+    request_template: str = ""
+    # Custom headers as JSON string
+    custom_headers: dict = {}
+    # Sender name for the SMS
+    sender_name: str = ""
+    # Enable/disable
     enabled: bool = False
 
 

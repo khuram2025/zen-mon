@@ -51,10 +51,20 @@ interface SMTPConfig {
 }
 
 interface SMSConfig {
-  provider: 'twilio' | 'vonage' | 'custom'
+  provider: 'twilio' | 'vonage' | 'custom_http'
   account_sid: string
   auth_token: string
   from_number: string
+  api_url: string
+  http_method: 'GET' | 'POST'
+  content_type: string
+  auth_type: 'none' | 'basic' | 'bearer' | 'query_param'
+  auth_username: string
+  auth_password: string
+  auth_token_value: string
+  request_template: string
+  custom_headers: Record<string, string>
+  sender_name: string
   enabled: boolean
 }
 
@@ -360,10 +370,20 @@ const defaultSMTP: SMTPConfig = {
 }
 
 const defaultSMS: SMSConfig = {
-  provider: 'twilio',
+  provider: 'custom_http',
   account_sid: '',
   auth_token: '',
   from_number: '',
+  api_url: '',
+  http_method: 'GET',
+  content_type: '',
+  auth_type: 'none',
+  auth_username: '',
+  auth_password: '',
+  auth_token_value: '',
+  request_template: '',
+  custom_headers: {},
+  sender_name: '',
   enabled: false,
 }
 
@@ -528,8 +548,8 @@ function GatewaysTab({ showToast }: { showToast: (type: 'success' | 'error', msg
               <MessageSquare className="w-5 h-5 text-emerald-400" />
             </div>
             <div>
-              <h3 className="text-sm font-semibold text-[var(--text-primary)]">SMS Configuration</h3>
-              <p className="text-xs text-[var(--text-muted)]">Text message gateway for alerts</p>
+              <h3 className="text-sm font-semibold text-[var(--text-primary)]">SMS / Message Gateway</h3>
+              <p className="text-xs text-[var(--text-muted)]">Twilio, Vonage, or any custom HTTP SMS API</p>
             </div>
           </div>
           <Toggle checked={sms.enabled} onChange={(v) => updateSms('enabled', v)} />
@@ -543,31 +563,89 @@ function GatewaysTab({ showToast }: { showToast: (type: 'success' | 'error', msg
             options={[
               { value: 'twilio', label: 'Twilio' },
               { value: 'vonage', label: 'Vonage' },
-              { value: 'custom', label: 'Custom API' },
+              { value: 'custom_http', label: 'Custom HTTP API' },
             ]}
           />
-          <Input
-            label="Account SID"
-            value={sms.account_sid}
-            onChange={(v) => updateSms('account_sid', v)}
-            placeholder="AC..."
-            required
-          />
-          <Input
-            label="Auth Token"
-            type="password"
-            value={sms.auth_token}
-            onChange={(v) => updateSms('auth_token', v)}
-            placeholder="••••••••"
-            required
-          />
-          <Input
-            label="From Number"
-            value={sms.from_number}
-            onChange={(v) => updateSms('from_number', v)}
-            placeholder="+1234567890"
-            required
-          />
+
+          {/* Twilio / Vonage fields */}
+          {(sms.provider === 'twilio' || sms.provider === 'vonage') && (
+            <>
+              <Input label="Account SID" value={sms.account_sid} onChange={(v) => updateSms('account_sid', v)} placeholder="AC..." />
+              <Input label="Auth Token" type="password" value={sms.auth_token} onChange={(v) => updateSms('auth_token', v)} placeholder="••••••••" />
+              <Input label="From Number" value={sms.from_number} onChange={(v) => updateSms('from_number', v)} placeholder="+1234567890" />
+            </>
+          )}
+
+          {/* Custom HTTP API fields */}
+          {sms.provider === 'custom_http' && (
+            <>
+              <Input
+                label="API URL"
+                value={sms.api_url}
+                onChange={(v) => updateSms('api_url', v)}
+                placeholder="https://ht.cequens.sa/Send"
+              />
+              <div className="grid grid-cols-2 gap-3">
+                <Select
+                  label="HTTP Method"
+                  value={sms.http_method}
+                  onChange={(v) => updateSms('http_method', v as 'GET' | 'POST')}
+                  options={[{ value: 'GET', label: 'GET' }, { value: 'POST', label: 'POST' }]}
+                />
+                <Select
+                  label="Content Type"
+                  value={sms.content_type}
+                  onChange={(v) => updateSms('content_type', v)}
+                  options={[
+                    { value: '', label: 'Query Parameters (GET)' },
+                    { value: 'application/json', label: 'JSON Body' },
+                    { value: 'application/x-www-form-urlencoded', label: 'Form URL Encoded' },
+                  ]}
+                />
+              </div>
+              <Select
+                label="Authentication"
+                value={sms.auth_type}
+                onChange={(v) => updateSms('auth_type', v as SMSConfig['auth_type'])}
+                options={[
+                  { value: 'none', label: 'None (credentials in URL/body)' },
+                  { value: 'basic', label: 'Basic Auth (username:password)' },
+                  { value: 'bearer', label: 'Bearer Token' },
+                  { value: 'query_param', label: 'Query Parameter Auth' },
+                ]}
+              />
+              {sms.auth_type === 'basic' && (
+                <div className="grid grid-cols-2 gap-3">
+                  <Input label="Username" value={sms.auth_username} onChange={(v) => updateSms('auth_username', v)} placeholder="Username" />
+                  <Input label="Password" type="password" value={sms.auth_password} onChange={(v) => updateSms('auth_password', v)} placeholder="Password" />
+                </div>
+              )}
+              {sms.auth_type === 'bearer' && (
+                <Input label="Bearer Token" type="password" value={sms.auth_token_value} onChange={(v) => updateSms('auth_token_value', v)} placeholder="Token..." />
+              )}
+              <Input label="Sender Name" value={sms.sender_name} onChange={(v) => updateSms('sender_name', v)} placeholder="ZenPlus" />
+              <div>
+                <label className="block text-xs font-medium text-[var(--text-muted)] mb-1.5">
+                  Request Template
+                </label>
+                <textarea
+                  value={sms.request_template}
+                  onChange={(e) => updateSms('request_template', e.target.value)}
+                  rows={4}
+                  placeholder={'Example for GET query params:\nUserName=MyUser&Password=MyPass&MessageType=text&Recipients={recipients}&SenderName={sender}&MessageText={message}\n\nExample for JSON POST:\n{"to": "{recipients}", "from": "{sender}", "text": "{message}"}'}
+                  className="w-full bg-[var(--bg-tertiary)] text-[var(--text-primary)] px-3 py-2 rounded-lg border border-[var(--bg-elevated)] focus:outline-none focus:border-[var(--accent)] text-xs font-mono placeholder:text-[var(--text-muted)]/40 resize-none"
+                />
+                <p className="text-[10px] text-[var(--text-muted)] mt-1.5 leading-relaxed">
+                  Available placeholders: <code className="bg-[var(--bg-tertiary)] px-1 rounded">{'{recipients}'}</code> (comma-separated numbers),
+                  <code className="bg-[var(--bg-tertiary)] px-1 rounded ml-1">{'{message}'}</code> (alert text),
+                  <code className="bg-[var(--bg-tertiary)] px-1 rounded ml-1">{'{sender}'}</code> (sender name),
+                  <code className="bg-[var(--bg-tertiary)] px-1 rounded ml-1">{'{hostname}'}</code>,
+                  <code className="bg-[var(--bg-tertiary)] px-1 rounded ml-1">{'{ip_address}'}</code>,
+                  <code className="bg-[var(--bg-tertiary)] px-1 rounded ml-1">{'{status}'}</code>
+                </p>
+              </div>
+            </>
+          )}
         </div>
 
         <div className="flex items-center justify-end gap-2 mt-6 pt-4 border-t border-[var(--bg-elevated)]">
@@ -576,7 +654,7 @@ function GatewaysTab({ showToast }: { showToast: (type: 'success' | 'error', msg
             size="sm"
             onClick={() => smsTest.mutate()}
             loading={smsTest.isPending}
-            disabled={!sms.account_sid || !sms.from_number}
+            disabled={sms.provider === 'custom_http' ? !sms.api_url : !sms.account_sid}
           >
             <Send className="w-3.5 h-3.5" />
             Test SMS
