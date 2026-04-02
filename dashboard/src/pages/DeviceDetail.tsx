@@ -294,8 +294,8 @@ export function DeviceDetailPage() {
         />
         <StatusCard
           title="Last Seen"
-          value={device.status === 'up' ? 'Active Now' : timeAgo(device.last_seen)}
-          subtitle={device.status === 'up' && device.last_seen ? `Last check ${timeAgo(device.last_seen)}` : undefined}
+          value={device.status === 'up' ? (device.last_seen && (Date.now() - new Date(device.last_seen).getTime()) < 120000 ? 'Active Now' : timeAgo(device.last_seen)) : timeAgo(device.last_seen)}
+          subtitle={device.status === 'up' ? `Checking every ${device.ping_interval}s` : device.status === 'down' ? 'Device unreachable' : undefined}
           icon={<Clock className="w-5 h-5" />}
           color={device.status === 'up' ? 'var(--status-up)' : 'var(--text-secondary)'}
         />

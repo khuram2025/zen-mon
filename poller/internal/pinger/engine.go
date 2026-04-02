@@ -237,6 +237,13 @@ func (e *Engine) processStatusChange(ctx context.Context, result *PingResult) {
 
 		device.LastSeen = result.Timestamp
 		device.LastRTT = rttMs
+
+		// Always update last_seen/rtt in PostgreSQL on successful ping
+		go func() {
+			if err := e.loader.UpdateDeviceStatus(ctx, device.ID, newStatus, result.Timestamp, rttMs); err != nil {
+				e.logger.Errorf("Failed to update device last_seen in PG: %v", err)
+			}
+		}()
 	}
 
 	if newStatus != oldStatus {
