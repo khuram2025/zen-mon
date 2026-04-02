@@ -79,7 +79,18 @@ interface NotificationChannel {
   type: 'email' | 'sms' | 'webhook' | 'slack' | 'telegram'
   config: Record<string, string>
   enabled: boolean
+  gateway_id: string | null
+  gateway_name: string | null
   created_at: string
+}
+
+interface Gateway {
+  id: string
+  name: string
+  type: 'smtp' | 'sms'
+  config: Record<string, unknown>
+  is_default: boolean
+  enabled: boolean
 }
 
 interface AlertRule {
@@ -848,6 +859,14 @@ function ChannelsTab({ showToast }: { showToast: (type: 'success' | 'error', msg
   })
   const channels = channelsResp?.data || []
 
+  const { data: gatewaysResp } = useQuery({
+    queryKey: ['settings', 'gateways-list'],
+    queryFn: () => api.get<{ data: Gateway[] }>('/settings/gateways/list'),
+  })
+  const gateways = gatewaysResp?.data || []
+  const smtpGateways = gateways.filter(g => g.type === 'smtp')
+  const smsGateways = gateways.filter(g => g.type === 'sms')
+
   const saveMutation = useMutation({
     mutationFn: () =>
       editId
@@ -949,6 +968,21 @@ function ChannelsTab({ showToast }: { showToast: (type: 'success' | 'error', msg
                 })}
               </div>
             </div>
+            {/* Gateway selector for email/sms */}
+            {(form.type === 'email' || form.type === 'sms') && (
+              <Select
+                label="Gateway"
+                value={form.config.gateway_id || ''}
+                onChange={(v) => setForm((f) => ({ ...f, config: { ...f.config, gateway_id: v } }))}
+                options={[
+                  { value: '', label: 'Default Gateway' },
+                  ...(form.type === 'email' ? smtpGateways : smsGateways).map(g => ({
+                    value: g.id,
+                    label: `${g.name}${g.is_default ? ' (default)' : ''}${!g.enabled ? ' [disabled]' : ''}`,
+                  })),
+                ]}
+              />
+            )}
             <ChannelFormFields
               type={form.type}
               config={form.config}
@@ -1008,6 +1042,9 @@ function ChannelsTab({ showToast }: { showToast: (type: 'success' | 'error', msg
                         {ch.name}
                       </span>
                       <Badge color={color}>{ch.type}</Badge>
+                      {ch.gateway_name && (
+                        <Badge color="#8B5CF6">{ch.gateway_name}</Badge>
+                      )}
                       {ch.enabled ? (
                         <Badge color="#22C55E">active</Badge>
                       ) : (

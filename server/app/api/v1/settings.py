@@ -123,7 +123,7 @@ def _json_dumps(obj) -> str:
 
 
 def _row_to_channel(row) -> dict:
-    return {
+    d = {
         "id": str(row.id),
         "name": row.name,
         "type": row.type,
@@ -132,10 +132,119 @@ def _row_to_channel(row) -> dict:
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
+    if hasattr(row, 'gateway_id'):
+        d["gateway_id"] = str(row.gateway_id) if row.gateway_id else None
+    if hasattr(row, 'gateway_name'):
+        d["gateway_name"] = row.gateway_name if row.gateway_name else None
+    return d
+
+
+def _row_to_gateway(row) -> dict:
+    return {
+        "id": str(row.id),
+        "name": row.name,
+        "type": row.type,
+        "config": row.config if row.config else {},
+        "is_default": row.is_default,
+        "enabled": row.enabled,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
 
 
 # ---------------------------------------------------------------------------
-# Gateway endpoints
+# Gateway endpoints (multi-gateway CRUD)
+# ---------------------------------------------------------------------------
+
+@router.get("/gateways/list")
+async def list_gateways(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        text("SELECT id, name, type, config, is_default, enabled, created_at, updated_at FROM notification_gateways ORDER BY type, name")
+    )
+    return {"data": [_row_to_gateway(r) for r in result.fetchall()]}
+
+
+@router.post("/gateways", status_code=201)
+async def create_gateway(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    now = datetime.now(timezone.utc)
+    result = await db.execute(
+        text(
+            "INSERT INTO notification_gateways (name, type, config, is_default, enabled, created_at, updated_at) "
+            "VALUES (:name, :type, CAST(:config AS jsonb), :is_default, :enabled, :created_at, :updated_at) "
+            "RETURNING id, name, type, config, is_default, enabled, created_at, updated_at"
+        ),
+        {
+            "name": data.get("name", ""),
+            "type": data.get("type", "smtp"),
+            "config": _json_dumps(data.get("config", {})),
+            "is_default": data.get("is_default", False),
+            "enabled": data.get("enabled", True),
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+    await db.commit()
+    row = result.first()
+    return _row_to_gateway(row)
+
+
+@router.put("/gateways/{gateway_id}")
+async def update_gateway(
+    gateway_id: UUID,
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    fields = {k: v for k, v in data.items() if k in ("name", "type", "config", "is_default", "enabled")}
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    set_parts = ["updated_at = :updated_at"]
+    params: dict = {"id": gateway_id, "updated_at": datetime.now(timezone.utc)}
+
+    for key, value in fields.items():
+        if key == "config":
+            set_parts.append("config = CAST(:config AS jsonb)")
+            params["config"] = _json_dumps(value)
+        else:
+            set_parts.append(f"{key} = :{key}")
+            params[key] = value
+
+    result = await db.execute(
+        text(f"UPDATE notification_gateways SET {', '.join(set_parts)} WHERE id = :id "
+             "RETURNING id, name, type, config, is_default, enabled, created_at, updated_at"),
+        params,
+    )
+    await db.commit()
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Gateway not found")
+    return _row_to_gateway(row)
+
+
+@router.delete("/gateways/{gateway_id}", status_code=204)
+async def delete_gateway(
+    gateway_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        text("DELETE FROM notification_gateways WHERE id = :id"), {"id": gateway_id}
+    )
+    await db.commit()
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Gateway not found")
+
+
+# ---------------------------------------------------------------------------
+# Legacy gateway endpoints (kept for backward compat)
 # ---------------------------------------------------------------------------
 
 @router.get("/gateways", response_model=GatewaysResponse)
@@ -308,8 +417,11 @@ async def list_channels(
     user: User = Depends(get_current_user),
 ):
     result = await db.execute(
-        text("SELECT id, name, type, config, enabled, created_at, updated_at "
-             "FROM notification_channels ORDER BY created_at DESC")
+        text("SELECT c.id, c.name, c.type, c.config, c.enabled, c.created_at, c.updated_at, "
+             "c.gateway_id, g.name AS gateway_name "
+             "FROM notification_channels c "
+             "LEFT JOIN notification_gateways g ON g.id = c.gateway_id "
+             "ORDER BY c.created_at DESC")
     )
     rows = result.fetchall()
     return {"data": [_row_to_channel(r) for r in rows]}
@@ -322,17 +434,19 @@ async def create_channel(
     user: User = Depends(get_current_user),
 ):
     now = datetime.now(timezone.utc)
+    gateway_id = data.config.get("gateway_id") if data.config else None
     result = await db.execute(
         text(
-            "INSERT INTO notification_channels (name, type, config, enabled, created_at, updated_at) "
-            "VALUES (:name, :type, CAST(:config AS jsonb), :enabled, :created_at, :updated_at) "
-            "RETURNING id, name, type, config, enabled, created_at, updated_at"
+            "INSERT INTO notification_channels (name, type, config, enabled, gateway_id, created_at, updated_at) "
+            "VALUES (:name, :type, CAST(:config AS jsonb), :enabled, :gateway_id, :created_at, :updated_at) "
+            "RETURNING id, name, type, config, enabled, gateway_id, created_at, updated_at"
         ),
         {
             "name": data.name,
             "type": data.type,
             "config": _json_dumps(data.config),
             "enabled": data.enabled,
+            "gateway_id": gateway_id,
             "created_at": now,
             "updated_at": now,
         },
