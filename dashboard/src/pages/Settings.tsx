@@ -1090,10 +1090,10 @@ function ChannelsTab({ showToast }: { showToast: (type: 'success' | 'error', msg
 // ─── Tab 3: Alert Rules ───────────────────────────────────────────────────────
 
 const triggerOptions = [
-  { value: 'device_down', label: 'Device Goes Down' },
-  { value: 'device_up', label: 'Device Comes Up' },
-  { value: 'status_change', label: 'Any Status Change' },
-  { value: 'device_degraded', label: 'Device Degraded' },
+  { value: 'down', label: 'Device Goes Down' },
+  { value: 'up', label: 'Device Comes Up' },
+  { value: 'any', label: 'Any Status Change' },
+  { value: 'degraded', label: 'Device Degraded' },
 ]
 
 const metricOptions = [
