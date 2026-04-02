@@ -142,7 +142,7 @@ function ToastContainer({ toasts, onDismiss }: { toasts: Toast[]; onDismiss: (id
           )}
         >
           {t.type === 'success' ? <CheckCircle2 className="w-4 h-4" /> : <XCircle className="w-4 h-4" />}
-          {t.message}
+          {typeof t.message === 'string' ? t.message : JSON.stringify(t.message)}
           <button onClick={() => onDismiss(t.id)} className="ml-2 opacity-60 hover:opacity-100">
             <X className="w-3 h-3" />
           </button>
@@ -411,13 +411,13 @@ function GatewaysTab({ showToast }: { showToast: (type: 'success' | 'error', msg
       queryClient.invalidateQueries({ queryKey: ['settings', 'gateways'] })
       showToast('success', 'SMTP settings saved successfully')
     },
-    onError: (e: Error) => showToast('error', e.message || 'Failed to save SMTP settings'),
+    onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'Failed to save SMTP settings'),
   })
 
   const smtpTest = useMutation({
     mutationFn: () => api.post('/settings/gateways/smtp/test'),
     onSuccess: () => showToast('success', 'SMTP test email sent successfully'),
-    onError: (e: Error) => showToast('error', e.message || 'SMTP test failed'),
+    onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'SMTP test failed'),
   })
 
   const smsSave = useMutation({
@@ -426,13 +426,13 @@ function GatewaysTab({ showToast }: { showToast: (type: 'success' | 'error', msg
       queryClient.invalidateQueries({ queryKey: ['settings', 'gateways'] })
       showToast('success', 'SMS settings saved successfully')
     },
-    onError: (e: Error) => showToast('error', e.message || 'Failed to save SMS settings'),
+    onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'Failed to save SMS settings'),
   })
 
   const smsTest = useMutation({
     mutationFn: () => api.post('/settings/gateways/sms/test'),
     onSuccess: () => showToast('success', 'SMS test message sent successfully'),
-    onError: (e: Error) => showToast('error', e.message || 'SMS test failed'),
+    onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'SMS test failed'),
   })
 
   const updateSmtp = <K extends keyof SMTPConfig>(key: K, value: SMTPConfig[K]) =>
@@ -828,7 +828,7 @@ function ChannelsTab({ showToast }: { showToast: (type: 'success' | 'error', msg
       showToast('success', editId ? 'Channel updated' : 'Channel created')
       resetForm()
     },
-    onError: (e: Error) => showToast('error', e.message || 'Failed to save channel'),
+    onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'Failed to save channel'),
   })
 
   const deleteMutation = useMutation({
@@ -837,13 +837,13 @@ function ChannelsTab({ showToast }: { showToast: (type: 'success' | 'error', msg
       queryClient.invalidateQueries({ queryKey: ['settings', 'channels'] })
       showToast('success', 'Channel deleted')
     },
-    onError: (e: Error) => showToast('error', e.message || 'Failed to delete channel'),
+    onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'Failed to delete channel'),
   })
 
   const testMutation = useMutation({
     mutationFn: (id: string) => api.post(`/settings/channels/${id}/test`),
     onSuccess: () => showToast('success', 'Test notification sent'),
-    onError: (e: Error) => showToast('error', e.message || 'Test failed'),
+    onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'Test failed'),
   })
 
   function resetForm() {
@@ -1130,7 +1130,7 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
       showToast('success', editId ? 'Rule updated' : 'Rule created')
       resetPanel()
     },
-    onError: (e: Error) => showToast('error', e.message || 'Failed to save rule'),
+    onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'Failed to save rule'),
   })
 
   const deleteMutation = useMutation({
@@ -1139,13 +1139,13 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
       queryClient.invalidateQueries({ queryKey: ['alert-rules'] })
       showToast('success', 'Rule deleted')
     },
-    onError: (e: Error) => showToast('error', e.message || 'Failed to delete rule'),
+    onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'Failed to delete rule'),
   })
 
   const toggleMutation = useMutation({
     mutationFn: (id: string) => api.post(`/alert-rules/${id}/toggle`),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['alert-rules'] }),
-    onError: (e: Error) => showToast('error', e.message || 'Failed to toggle rule'),
+    onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'Failed to toggle rule'),
   })
 
   function resetPanel() {
@@ -1645,9 +1645,10 @@ export function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabId>('gateways')
   const [toasts, setToasts] = useState<Toast[]>([])
 
-  const showToast = useCallback((type: 'success' | 'error', message: string) => {
+  const showToast = useCallback((type: 'success' | 'error', message: unknown) => {
     const id = ++toastId
-    setToasts((prev) => [...prev, { id, type, message }])
+    const msg = typeof message === 'string' ? message : message instanceof Error ? message.message : JSON.stringify(message)
+    setToasts((prev) => [...prev, { id, type, message: msg }])
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4000)
   }, [])
 
