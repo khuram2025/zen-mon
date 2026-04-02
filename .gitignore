@@ -1,0 +1,59 @@
+# ─── Go ───
+poller/bin/
+poller/vendor/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# ─── Python ───
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Node / React ───
+node_modules/
+dashboard/dist/
+dashboard/build/
+.next/
+*.tsbuildinfo
+
+# ─── Environment ───
+.env
+.env.local
+.env.production
+.env.*.local
+
+# ─── IDE ───
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── Docker ───
+docker-compose.override.yml
+
+# ─── Logs ───
+*.log
+logs/
+
+# ─── Data volumes (local dev) ───
+data/
+tmp/

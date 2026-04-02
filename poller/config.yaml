@@ -1,0 +1,19 @@
+# ZenPlus Poller Configuration
+# Environment variables override these values
+
+poller:
+  id: poller-01
+  ping:
+    timeout: 3s
+    count: 3
+    interval: 500ms
+    batch_size: 500
+    privileged: true
+  status:
+    down_threshold: 3
+    degraded_rtt_ms: 100
+    degraded_loss_pct: 10
+  device_sync_interval: 60s
+
+health:
+  port: 8081
