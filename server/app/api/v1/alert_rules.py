@@ -312,3 +312,237 @@ async def toggle_alert_rule(
         "enabled": row.enabled,
         "message": f"Rule '{ row.name }' {'enabled' if row.enabled else 'disabled'}",
     }
+
+
+def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
+    """Build a preview/simulation alert message from a rule."""
+    severity = rule_dict.get("severity", "warning").upper()
+    name = rule_dict.get("name", "Alert Rule")
+    trigger = rule_dict.get("trigger_on", "any")
+    metric = rule_dict.get("metric", "ping_status")
+    operator = rule_dict.get("operator", "==")
+    threshold = rule_dict.get("threshold", 0)
+    device_type = rule_dict.get("device_type", "")
+    location = rule_dict.get("location", "")
+
+    scope_desc = "any device"
+    if device_type:
+        scope_desc = f"any {device_type}"
+    if location:
+        scope_desc = f"devices at {location}"
+
+    if is_recovery:
+        status_text = "RECOVERED"
+        subject = f"[{severity}] RESOLVED: {name}"
+        body_intro = "The following alert has been resolved:"
+        device_status = "UP"
+    else:
+        status_text = trigger.upper() if trigger != "any" else "ALERT"
+        subject = f"[{severity}] {status_text}: {name}"
+        body_intro = "An alert has been triggered:"
+        device_status = "DOWN" if trigger == "down" else "DEGRADED" if trigger == "degraded" else "ALERT"
+
+    # Simulated device info
+    sim_hostname = "core-router-01"
+    sim_ip = "10.0.0.1"
+
+    email_body = f"""{body_intro}
+
+Rule: {name}
+Severity: {severity}
+Device: {sim_hostname} ({sim_ip})
+Status: {device_status}
+Metric: {metric} {operator} {threshold}
+Scope: {scope_desc}
+Time: 2026-04-02 12:00:00 UTC
+
+--
+ZenPlus Network Monitoring System"""
+
+    sms_body = f"[ZenPlus {severity}] {sim_hostname} ({sim_ip}) is {device_status}. Rule: {name}"
+
+    return {
+        "subject": subject,
+        "email_body": email_body,
+        "sms_body": sms_body,
+        "sim_hostname": sim_hostname,
+        "sim_ip": sim_ip,
+        "device_status": device_status,
+        "severity": severity,
+    }
+
+
+@router.post("/{rule_id}/preview")
+async def preview_alert_rule(
+    rule_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    result = await db.execute(
+        text(f"SELECT {_RULE_COLUMNS} FROM alert_rules WHERE id = :id"),
+        {"id": rule_id},
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+
+    rule = _row_to_dict(row)
+    alert_msg = _build_alert_message(rule, is_recovery=False)
+    recovery_msg = _build_alert_message(rule, is_recovery=True) if rule.get("recovery_alert") else None
+
+    return {
+        "alert": alert_msg,
+        "recovery": recovery_msg,
+    }
+
+
+@router.post("/{rule_id}/simulate")
+async def simulate_alert_rule(
+    rule_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    import httpx
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    # Get rule
+    result = await db.execute(
+        text(f"SELECT {_RULE_COLUMNS} FROM alert_rules WHERE id = :id"),
+        {"id": rule_id},
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+
+    rule = _row_to_dict(row)
+    alert_msg = _build_alert_message(rule)
+    notify_channels = rule.get("notify_channels", [])
+    results = []
+
+    if not notify_channels:
+        return {"message": "No notification channels configured for this rule", "results": []}
+
+    for ch_id in notify_channels:
+        ch_result = await db.execute(
+            text("SELECT id, name, type, config, enabled, gateway_id FROM notification_channels WHERE id = :id"),
+            {"id": ch_id},
+        )
+        ch_row = ch_result.first()
+        if not ch_row:
+            results.append({"channel": ch_id, "status": "error", "detail": "Channel not found"})
+            continue
+        if not ch_row.enabled:
+            results.append({"channel": ch_row.name, "status": "skipped", "detail": "Channel disabled"})
+            continue
+
+        ch_config = ch_row.config or {}
+
+        try:
+            if ch_row.type == "sms":
+                phones = ch_config.get("phone_numbers", "")
+                if not phones:
+                    results.append({"channel": ch_row.name, "status": "error", "detail": "No phone numbers"})
+                    continue
+
+                # Get SMS gateway
+                gw_id = ch_row.gateway_id or ch_config.get("gateway_id")
+                if gw_id:
+                    gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})
+                else:
+                    gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'sms' AND is_default = true LIMIT 1"))
+                gw_row = gw_res.first()
+                if not gw_row:
+                    gw_raw = await db.execute(text("SELECT value FROM system_settings WHERE key = 'sms'"))
+                    gw_row2 = gw_raw.first()
+                    gw_cfg = gw_row2[0] if gw_row2 else None
+                else:
+                    gw_cfg = gw_row.config
+
+                if not gw_cfg:
+                    results.append({"channel": ch_row.name, "status": "error", "detail": "No SMS gateway"})
+                    continue
+
+                if gw_cfg.get("provider") == "custom_http" and gw_cfg.get("api_url"):
+                    template = gw_cfg.get("request_template", "")
+                    template = template.replace("{recipients}", phones)
+                    template = template.replace("{message}", alert_msg["sms_body"])
+                    template = template.replace("{sender}", gw_cfg.get("sender_name", "ZenPlus"))
+                    template = template.replace("{hostname}", alert_msg["sim_hostname"])
+                    template = template.replace("{ip_address}", alert_msg["sim_ip"])
+                    template = template.replace("{status}", alert_msg["device_status"])
+
+                    headers = dict(gw_cfg.get("custom_headers", {}))
+                    auth = None
+                    if gw_cfg.get("auth_type") == "basic":
+                        auth = (gw_cfg.get("auth_username", ""), gw_cfg.get("auth_password", ""))
+
+                    async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+                        if gw_cfg.get("http_method", "GET").upper() == "POST":
+                            resp = await client.post(gw_cfg["api_url"], content=template, headers=headers, auth=auth)
+                        else:
+                            url = gw_cfg["api_url"]
+                            sep = "&" if "?" in url else "?"
+                            url = f"{url}{sep}{template}" if template else url
+                            resp = await client.get(url, headers=headers, auth=auth)
+
+                    results.append({"channel": ch_row.name, "type": "sms", "status": "sent", "detail": f"Status {resp.status_code}", "recipients": phones})
+                else:
+                    results.append({"channel": ch_row.name, "type": "sms", "status": "skipped", "detail": f"Provider {gw_cfg.get('provider')} not supported for simulation"})
+
+            elif ch_row.type == "email":
+                recipients = ch_config.get("recipients", "")
+                if not recipients:
+                    results.append({"channel": ch_row.name, "status": "error", "detail": "No recipients"})
+                    continue
+
+                gw_id = ch_row.gateway_id or ch_config.get("gateway_id")
+                if gw_id:
+                    gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})
+                else:
+                    gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'smtp' AND is_default = true LIMIT 1"))
+                gw_row = gw_res.first()
+                if not gw_row:
+                    gw_raw = await db.execute(text("SELECT value FROM system_settings WHERE key = 'smtp'"))
+                    gw_row2 = gw_raw.first()
+                    gw_cfg = gw_row2[0] if gw_row2 else None
+                else:
+                    gw_cfg = gw_row.config
+
+                if not gw_cfg or not gw_cfg.get("host"):
+                    results.append({"channel": ch_row.name, "status": "error", "detail": "No SMTP gateway configured"})
+                    continue
+
+                recipient_list = [r.strip() for r in recipients.split(",") if r.strip()]
+                msg = MIMEMultipart()
+                msg["From"] = f"{gw_cfg.get('from_name', 'ZenPlus')} <{gw_cfg.get('from_email', '')}>"
+                msg["To"] = ", ".join(recipient_list)
+                msg["Subject"] = f"[SIMULATION] {alert_msg['subject']}"
+                msg.attach(MIMEText(f"*** THIS IS A SIMULATION ***\n\n{alert_msg['email_body']}", "plain"))
+
+                enc = gw_cfg.get("encryption", "tls")
+                if enc == "ssl":
+                    server = smtplib.SMTP_SSL(gw_cfg["host"], gw_cfg.get("port", 465), timeout=10)
+                else:
+                    server = smtplib.SMTP(gw_cfg["host"], gw_cfg.get("port", 587), timeout=10)
+                    if enc == "tls":
+                        server.starttls()
+                if gw_cfg.get("username"):
+                    server.login(gw_cfg["username"], gw_cfg.get("password", ""))
+                server.sendmail(gw_cfg.get("from_email", ""), recipient_list, msg.as_string())
+                server.quit()
+                results.append({"channel": ch_row.name, "type": "email", "status": "sent", "detail": f"Sent to {recipients}"})
+
+            else:
+                results.append({"channel": ch_row.name, "type": ch_row.type, "status": "skipped", "detail": "Simulation not supported for this type"})
+
+        except Exception as e:
+            results.append({"channel": ch_row.name, "status": "error", "detail": str(e)[:200]})
+
+    sent = sum(1 for r in results if r["status"] == "sent")
+    return {
+        "message": f"Simulation complete: {sent}/{len(results)} notifications sent",
+        "alert_preview": alert_msg,
+        "results": results,
+    }

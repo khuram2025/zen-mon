@@ -1161,6 +1161,114 @@ function getScopeType(rule: typeof defaultRule): string {
   return 'all'
 }
 
+interface AlertPreview {
+  subject: string
+  email_body: string
+  sms_body: string
+  severity: string
+  device_status: string
+  sim_hostname: string
+  sim_ip: string
+}
+
+function PreviewModal({ preview, recovery, onClose }: {
+  preview: AlertPreview
+  recovery: AlertPreview | null
+  onClose: () => void
+}) {
+  const [tab, setTab] = useState<'email' | 'sms'>('email')
+  const [showRecovery, setShowRecovery] = useState(false)
+  const current = showRecovery && recovery ? recovery : preview
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative bg-[var(--bg-secondary)] border border-[var(--bg-elevated)] rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--bg-elevated)]">
+          <div>
+            <h3 className="text-sm font-semibold text-[var(--text-primary)]">Message Preview</h3>
+            <p className="text-xs text-[var(--text-muted)] mt-0.5">How the alert notification will look</p>
+          </div>
+          <button onClick={onClose} className="p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)]">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex items-center gap-1 px-6 pt-4">
+          <button onClick={() => setTab('email')}
+            className={cn('flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors',
+              tab === 'email' ? 'bg-[var(--accent)]/10 text-[var(--accent)]' : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]')}>
+            <Mail className="w-3.5 h-3.5" /> Email
+          </button>
+          <button onClick={() => setTab('sms')}
+            className={cn('flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors',
+              tab === 'sms' ? 'bg-emerald-500/10 text-emerald-400' : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]')}>
+            <MessageSquare className="w-3.5 h-3.5" /> SMS
+          </button>
+          <div className="flex-1" />
+          {recovery && (
+            <button onClick={() => setShowRecovery(!showRecovery)}
+              className={cn('flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors',
+                showRecovery ? 'bg-green-500/10 text-green-400' : 'text-[var(--text-muted)] hover:text-[var(--text-secondary)]')}>
+              {showRecovery ? 'Showing Recovery' : 'Show Recovery'}
+            </button>
+          )}
+        </div>
+
+        {/* Content */}
+        <div className="p-6 overflow-y-auto flex-1">
+          {tab === 'email' ? (
+            <div className="bg-[var(--bg-primary)] rounded-xl border border-[var(--bg-elevated)] overflow-hidden">
+              {/* Email header */}
+              <div className="px-4 py-3 border-b border-[var(--bg-elevated)] space-y-1.5">
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-[var(--text-muted)] w-16">Subject:</span>
+                  <span className="text-[var(--text-primary)] font-medium">{current.subject}</span>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-[var(--text-muted)] w-16">From:</span>
+                  <span className="text-[var(--text-secondary)]">ZenPlus Alerts &lt;alerts@zenplus.io&gt;</span>
+                </div>
+                <div className="flex items-center gap-2 text-xs">
+                  <span className="text-[var(--text-muted)] w-16">To:</span>
+                  <span className="text-[var(--text-secondary)]">ops@company.com</span>
+                </div>
+              </div>
+              {/* Email body */}
+              <pre className="px-4 py-4 text-xs text-[var(--text-secondary)] whitespace-pre-wrap font-mono leading-relaxed">
+                {current.email_body}
+              </pre>
+            </div>
+          ) : (
+            <div className="max-w-sm mx-auto">
+              {/* Phone mockup */}
+              <div className="bg-[var(--bg-primary)] rounded-2xl border border-[var(--bg-elevated)] p-4">
+                <div className="flex items-center gap-2 mb-3 pb-3 border-b border-[var(--bg-elevated)]">
+                  <div className="w-8 h-8 rounded-full bg-[var(--accent)]/20 flex items-center justify-center">
+                    <MessageSquare className="w-4 h-4 text-[var(--accent)]" />
+                  </div>
+                  <div>
+                    <div className="text-xs font-medium text-[var(--text-primary)]">ZenPlus Alerts</div>
+                    <div className="text-[10px] text-[var(--text-muted)]">SMS Notification</div>
+                  </div>
+                </div>
+                <div className="bg-[var(--accent)]/5 rounded-xl p-3">
+                  <p className="text-sm text-[var(--text-primary)] leading-relaxed">{current.sms_body}</p>
+                </div>
+                <div className="text-[10px] text-[var(--text-muted)] text-right mt-2">
+                  {current.sms_body.length} characters
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', msg: string) => void }) {
   const queryClient = useQueryClient()
   const [showPanel, setShowPanel] = useState(false)
@@ -1168,6 +1276,7 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
   const [form, setForm] = useState(defaultRule)
   const [scopeType, setScopeType] = useState('all')
   const [scheduleOpen, setScheduleOpen] = useState(false)
+  const [previewData, setPreviewData] = useState<{ alert: AlertPreview; recovery: AlertPreview | null } | null>(null)
 
   const { data: rulesData } = useQuery({
     queryKey: ['alert-rules'],
@@ -1216,6 +1325,22 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
     mutationFn: (id: string) => api.post(`/alert-rules/${id}/toggle`),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['alert-rules'] }),
     onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'Failed to toggle rule'),
+  })
+
+  const previewMutation = useMutation({
+    mutationFn: (id: string) => api.post<{ alert: AlertPreview; recovery: AlertPreview | null }>(`/alert-rules/${id}/preview`),
+    onSuccess: (data) => setPreviewData(data as { alert: AlertPreview; recovery: AlertPreview | null }),
+    onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'Failed to load preview'),
+  })
+
+  const simulateMutation = useMutation({
+    mutationFn: (id: string) => api.post<{ message: string; results: { channel: string; type: string; status: string; detail: string }[] }>(`/alert-rules/${id}/simulate`),
+    onSuccess: (data: unknown) => {
+      const d = data as { message: string; results: { channel: string; status: string; detail: string }[] }
+      const details = d.results.map(r => `${r.channel}: ${r.status}`).join(', ')
+      showToast('success', `${d.message}${details ? ` (${details})` : ''}`)
+    },
+    onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'Simulation failed'),
   })
 
   function resetPanel() {
@@ -1321,7 +1446,17 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
                       <p className="text-xs text-[var(--text-muted)] mt-1 truncate">{rule.description}</p>
                     )}
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1">
+                    <Button variant="ghost" size="sm" onClick={() => previewMutation.mutate(rule.id)}
+                      title="Preview message">
+                      <Eye className="w-3.5 h-3.5" />
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => {
+                      if (confirm(`Send test notification for "${rule.name}" to all configured channels?`))
+                        simulateMutation.mutate(rule.id)
+                    }} title="Simulate alert">
+                      <Zap className="w-3.5 h-3.5 text-amber-400" />
+                    </Button>
                     <Toggle
                       checked={rule.enabled}
                       onChange={() => toggleMutation.mutate(rule.id)}
@@ -1696,6 +1831,15 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
             </div>
           </div>
         </>
+      )}
+
+      {/* Preview Modal */}
+      {previewData && (
+        <PreviewModal
+          preview={previewData.alert}
+          recovery={previewData.recovery}
+          onClose={() => setPreviewData(null)}
+        />
       )}
     </div>
   )
