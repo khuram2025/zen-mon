@@ -1,10 +1,10 @@
 from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, text, cast, String
 from sqlalchemy.orm import selectinload
 
 from app.models.device import Device, DeviceGroup
-from app.schemas.device import DeviceCreate, DeviceUpdate, DeviceSummary
+from app.schemas.device import DeviceCreate, DeviceUpdate, DeviceSummary, DeviceBulkImportItem, BulkImportResult
 
 
 async def get_devices(
@@ -98,6 +98,90 @@ async def get_device_summary(db: AsyncSession) -> DeviceSummary:
         unknown=counts.get("unknown", 0),
         maintenance=counts.get("maintenance", 0),
     )
+
+
+async def bulk_import_devices(
+    db: AsyncSession,
+    items: list[DeviceBulkImportItem],
+    user_id: UUID | None = None,
+) -> BulkImportResult:
+    created = 0
+    skipped = 0
+    errors = []
+
+    # Pre-fetch group name -> id mapping
+    group_result = await db.execute(select(DeviceGroup.id, DeviceGroup.name))
+    group_map = {row[1].lower(): row[0] for row in group_result.all()}
+
+    for i, item in enumerate(items):
+        try:
+            # Resolve group name to ID
+            group_id = None
+            if item.group_name:
+                group_id = group_map.get(item.group_name.lower())
+
+            # Check for duplicate IP using raw SQL to avoid INET type issues
+            dup_result = await db.execute(
+                text("SELECT id FROM devices WHERE host(ip_address) = :ip"),
+                {"ip": item.ip_address},
+            )
+            if dup_result.scalar_one_or_none():
+                skipped += 1
+                errors.append(f"Row {i+1}: IP {item.ip_address} already exists (skipped)")
+                continue
+
+            device = Device(
+                hostname=item.hostname,
+                ip_address=item.ip_address,
+                device_type=item.device_type,
+                location=item.location,
+                group_id=group_id,
+                tags=item.tags,
+                ping_enabled=item.ping_enabled,
+                ping_interval=item.ping_interval,
+                description=item.description,
+                created_by=user_id,
+            )
+            db.add(device)
+            await db.flush()
+            created += 1
+        except Exception as e:
+            await db.rollback()
+            skipped += 1
+            errors.append(f"Row {i+1}: {str(e)}")
+
+    await db.commit()
+
+    return BulkImportResult(
+        total=len(items),
+        created=created,
+        skipped=skipped,
+        errors=errors,
+    )
+
+
+async def export_devices(db: AsyncSession) -> list[dict]:
+    result = await db.execute(
+        select(Device).options(selectinload(Device.group)).order_by(Device.hostname)
+    )
+    devices = result.scalars().all()
+
+    return [
+        {
+            "hostname": d.hostname,
+            "ip_address": str(d.ip_address),
+            "device_type": d.device_type,
+            "location": d.location or "",
+            "group_name": d.group.name if d.group else "",
+            "tags": d.tags or [],
+            "ping_enabled": d.ping_enabled,
+            "ping_interval": d.ping_interval,
+            "status": d.status,
+            "last_rtt_ms": d.last_rtt_ms,
+            "description": d.description or "",
+        }
+        for d in devices
+    ]
 
 
 async def get_device_groups(db: AsyncSession) -> list[dict]:

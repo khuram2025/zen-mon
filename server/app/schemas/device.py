@@ -66,3 +66,40 @@ class DeviceGroupResponse(BaseModel):
     device_count: int = 0
 
     model_config = {"from_attributes": True}
+
+
+class DeviceBulkImportItem(BaseModel):
+    hostname: str = Field(..., max_length=255)
+    ip_address: str = Field(..., max_length=45)
+    device_type: str = Field(default="other")
+    location: Optional[str] = None
+    group_name: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+    ping_enabled: bool = True
+    ping_interval: int = Field(default=60, ge=10, le=3600)
+    description: Optional[str] = None
+
+
+class BulkImportRequest(BaseModel):
+    devices: list[DeviceBulkImportItem]
+
+
+class BulkImportResult(BaseModel):
+    total: int
+    created: int
+    skipped: int
+    errors: list[str]
+
+
+class DeviceExportItem(BaseModel):
+    hostname: str
+    ip_address: str
+    device_type: str
+    location: Optional[str]
+    group_name: Optional[str]
+    tags: list[str]
+    ping_enabled: bool
+    ping_interval: int
+    status: str
+    last_rtt_ms: Optional[float]
+    description: Optional[str]

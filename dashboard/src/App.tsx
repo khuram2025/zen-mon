@@ -8,6 +8,7 @@ import { DashboardPage } from '@/pages/Dashboard'
 import { DevicesPage } from '@/pages/Devices'
 import { DeviceDetailPage } from '@/pages/DeviceDetail'
 import { AlertsPage } from '@/pages/Alerts'
+import { AddDevicePage } from '@/pages/AddDevice'
 
 function ProtectedLayout() {
   const { isAuthenticated, checkAuth } = useAuthStore()
@@ -28,6 +29,7 @@ function ProtectedLayout() {
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/devices" element={<DevicesPage />} />
+          <Route path="/devices/new" element={<AddDevicePage />} />
           <Route path="/devices/:id" element={<DeviceDetailPage />} />
           <Route path="/alerts" element={<AlertsPage />} />
           <Route path="/topology" element={<div className="text-[var(--text-muted)]">Topology - Coming in Phase 3</div>} />

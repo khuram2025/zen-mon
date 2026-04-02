@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useDevices } from '@/hooks/useDevices'
 import { StatusIndicator } from '@/components/dashboard/StatusIndicator'
 import { formatRTT, timeAgo } from '@/lib/utils'
-import { Plus, Search } from 'lucide-react'
+import { Plus, Search, Upload, Download } from 'lucide-react'
 import type { DeviceStatus } from '@/types'
 
 const statusFilters = ['all', 'up', 'down', 'degraded', 'unknown'] as const
@@ -29,13 +29,22 @@ export function DevicesPage() {
     <div>
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-xl font-semibold text-[var(--text-primary)]">Devices</h2>
-        <button
-          onClick={() => navigate('/devices/new')}
-          className="flex items-center gap-2 bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
-        >
-          <Plus className="w-4 h-4" />
-          Add Device
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => { navigate('/devices/new'); }}
+            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+          >
+            <Upload className="w-4 h-4" />
+            Import
+          </button>
+          <button
+            onClick={() => navigate('/devices/new')}
+            className="flex items-center gap-2 bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+            Add Device
+          </button>
+        </div>
       </div>
 
       {/* Filters */}

@@ -1,6 +1,7 @@
 from uuid import UUID
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -8,6 +9,7 @@ from app.core.security import get_current_user
 from app.models.user import User
 from app.schemas.device import (
     DeviceCreate, DeviceUpdate, DeviceResponse, DeviceSummary, DeviceGroupResponse,
+    BulkImportRequest, BulkImportResult,
 )
 from app.schemas.metric import MetricResponse, StatusChangeEvent
 from app.services import device_service, metric_service
@@ -57,6 +59,24 @@ async def create_device(
 ):
     device = await device_service.create_device(db, data, user.id)
     return _device_to_response(device)
+
+
+@router.post("/bulk-import", response_model=BulkImportResult)
+async def bulk_import_devices(
+    data: BulkImportRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return await device_service.bulk_import_devices(db, data.devices, user.id)
+
+
+@router.get("/export")
+async def export_devices(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    devices = await device_service.export_devices(db)
+    return JSONResponse(content={"devices": devices})
 
 
 @router.get("/{device_id}", response_model=DeviceResponse)
