@@ -9,7 +9,7 @@
 # ║    Status:         sudo zenplus status                         ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
-set -euo pipefail
+set -uo pipefail
 
 # ─── Configuration ────────────────────────────────────────────────
 ZENPLUS_HOME="/opt/zenplus"
@@ -99,32 +99,54 @@ install_prerequisites() {
     # Docker
     if ! command -v docker &>/dev/null; then
         info "Installing Docker..."
-        curl -fsSL https://get.docker.com | sh > /dev/null 2>&1
-        systemctl enable docker --now
-        log "Docker installed"
+        if curl -fsSL https://get.docker.com | sh; then
+            systemctl enable docker --now 2>/dev/null || true
+            log "Docker installed"
+        else
+            err "Docker installation failed. Check network connectivity."
+        fi
     else
+        systemctl enable docker --now 2>/dev/null || true
         log "Docker already installed ($(docker --version | cut -d' ' -f3))"
     fi
 
     # Docker Compose plugin
     if ! docker compose version &>/dev/null; then
         info "Installing Docker Compose plugin..."
-        apt-get install -y -qq docker-compose-plugin > /dev/null 2>&1
-        log "Docker Compose plugin installed"
+        apt-get install -y -qq docker-compose-plugin 2>/dev/null || true
+        if ! docker compose version &>/dev/null; then
+            warn "Docker Compose plugin not available, trying standalone..."
+            COMPOSE_URL="https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)"
+            curl -fsSL "$COMPOSE_URL" -o /usr/local/bin/docker-compose 2>/dev/null && chmod +x /usr/local/bin/docker-compose || true
+        fi
+        log "Docker Compose installed"
     else
         log "Docker Compose already installed"
     fi
 
     # Go
-    if ! command -v go &>/dev/null || [[ "$(go version 2>/dev/null | grep -oP '\d+\.\d+')" < "1.22" ]]; then
+    if ! command -v go &>/dev/null || [[ "$(go version 2>/dev/null | grep -oP '\d+\.\d+' | head -1)" < "1.22" ]]; then
         info "Installing Go 1.22..."
         GO_VERSION="1.22.5"
-        wget -q "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -O /tmp/go.tar.gz
-        rm -rf /usr/local/go
-        tar -C /usr/local -xzf /tmp/go.tar.gz
-        rm /tmp/go.tar.gz
-        ln -sf /usr/local/go/bin/go /usr/local/bin/go
-        log "Go ${GO_VERSION} installed"
+        ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
+        GO_URL="https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz"
+        info "Downloading from $GO_URL ..."
+        if wget -q --timeout=60 "$GO_URL" -O /tmp/go.tar.gz; then
+            rm -rf /usr/local/go
+            tar -C /usr/local -xzf /tmp/go.tar.gz
+            rm -f /tmp/go.tar.gz
+            ln -sf /usr/local/go/bin/go /usr/local/bin/go
+            log "Go ${GO_VERSION} installed"
+        else
+            warn "Failed to download Go from $GO_URL"
+            info "Trying apt-get install golang-go as fallback..."
+            apt-get install -y -qq golang-go 2>/dev/null || true
+            if command -v go &>/dev/null; then
+                log "Go installed via apt ($(go version | cut -d' ' -f3))"
+            else
+                err "Failed to install Go. Please install manually and re-run."
+            fi
+        fi
     else
         log "Go already installed ($(go version | cut -d' ' -f3))"
     fi
@@ -132,9 +154,17 @@ install_prerequisites() {
     # Node.js 20+
     if ! command -v node &>/dev/null || [[ "$(node -v 2>/dev/null | cut -d'.' -f1 | tr -d 'v')" -lt 20 ]]; then
         info "Installing Node.js 20..."
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - > /dev/null 2>&1
-        apt-get install -y -qq nodejs > /dev/null 2>&1
-        log "Node.js $(node -v) installed"
+        if curl -fsSL https://deb.nodesource.com/setup_20.x | bash - > /dev/null 2>&1; then
+            apt-get install -y -qq nodejs > /dev/null 2>&1
+        else
+            warn "NodeSource setup failed, trying apt..."
+            apt-get install -y -qq nodejs npm > /dev/null 2>&1 || true
+        fi
+        if command -v node &>/dev/null; then
+            log "Node.js $(node -v) installed"
+        else
+            err "Failed to install Node.js. Please install manually and re-run."
+        fi
     else
         log "Node.js already installed ($(node -v))"
     fi
@@ -173,21 +203,31 @@ fetch_code() {
     if [[ -d "$ZENPLUS_HOME/.git" ]]; then
         info "Pulling latest changes..."
         cd "$ZENPLUS_HOME"
-        sudo -u "$ZENPLUS_USER" git fetch origin
-        sudo -u "$ZENPLUS_USER" git reset --hard "origin/$ZENPLUS_BRANCH"
+        git config --global --add safe.directory "$ZENPLUS_HOME" 2>/dev/null || true
+        git fetch origin
+        git reset --hard "origin/$ZENPLUS_BRANCH"
         CURRENT_VERSION=$(git rev-parse --short HEAD)
         log "Updated to $CURRENT_VERSION"
     else
         info "Cloning repository..."
-        # Clone into temp and move (in case ZENPLUS_HOME has data/)
-        rm -rf /tmp/zenplus-clone
-        git clone -b "$ZENPLUS_BRANCH" "$ZENPLUS_REPO" /tmp/zenplus-clone
-        # Move git files, keep data/logs/backups
-        shopt -s dotglob
-        cp -rn /tmp/zenplus-clone/* "$ZENPLUS_HOME/" 2>/dev/null || true
-        cp -r /tmp/zenplus-clone/.git "$ZENPLUS_HOME/.git" 2>/dev/null || true
-        rm -rf /tmp/zenplus-clone
-        shopt -u dotglob
+        # Save existing data dirs
+        for dir in data logs backups; do
+            [[ -d "$ZENPLUS_HOME/$dir" ]] && mv "$ZENPLUS_HOME/$dir" "/tmp/zenplus-save-$dir" 2>/dev/null || true
+        done
+        ENV_BACKUP=""
+        [[ -f "$ZENPLUS_HOME/.env" ]] && ENV_BACKUP=$(cat "$ZENPLUS_HOME/.env")
+
+        rm -rf "$ZENPLUS_HOME"
+        git clone -b "$ZENPLUS_BRANCH" "$ZENPLUS_REPO" "$ZENPLUS_HOME"
+
+        # Restore saved dirs
+        for dir in data logs backups; do
+            [[ -d "/tmp/zenplus-save-$dir" ]] && mv "/tmp/zenplus-save-$dir" "$ZENPLUS_HOME/$dir"
+        done
+        mkdir -p "$ZENPLUS_HOME"/{data,logs,backups,bin}
+
+        [[ -n "$ENV_BACKUP" ]] && echo "$ENV_BACKUP" > "$ZENPLUS_HOME/.env"
+
         CURRENT_VERSION=$(cd "$ZENPLUS_HOME" && git rev-parse --short HEAD)
         log "Cloned version $CURRENT_VERSION"
     fi
@@ -266,9 +306,17 @@ build_components() {
     # Build React dashboard
     info "Building React dashboard..."
     cd "$ZENPLUS_HOME/dashboard"
-    sudo -u "$ZENPLUS_USER" npm install --silent 2>/dev/null
-    sudo -u "$ZENPLUS_USER" npx vite build 2>/dev/null
-    log "Dashboard built"
+    sudo -u "$ZENPLUS_USER" npm install 2>&1 | tail -3
+    if [[ -f node_modules/.bin/vite ]]; then
+        sudo -u "$ZENPLUS_USER" ./node_modules/.bin/vite build 2>&1 | tail -5
+    else
+        sudo -u "$ZENPLUS_USER" npx vite build 2>&1 | tail -5
+    fi
+    if [[ -d "$ZENPLUS_HOME/dashboard/dist" ]]; then
+        log "Dashboard built ($(ls dist/assets/*.js 2>/dev/null | wc -l) JS bundles)"
+    else
+        warn "Dashboard build may have failed - dist/ not found"
+    fi
 
     mkdir -p "$ZENPLUS_HOME/bin"
     chown -R "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME"
@@ -282,8 +330,11 @@ start_infrastructure() {
 
     cd "$ZENPLUS_HOME"
 
+    # Ensure .env is sourced for docker compose
+    source "$ZENPLUS_HOME/.env" 2>/dev/null || true
+
     # Start PostgreSQL, ClickHouse, Redis
-    docker compose up -d postgres clickhouse redis
+    docker compose up -d postgres clickhouse redis 2>&1 | grep -v "^$\|level=warning"
 
     info "Waiting for databases to be healthy..."
     local retries=30
@@ -312,31 +363,46 @@ run_migrations() {
     cd "$ZENPLUS_HOME"
     source .env
 
+    # Determine Postgres user - docker-compose uses 'zenplus' but init SQL creates as 'netpulse' schema
+    # Try both users
+    PG_USER="zenplus"
+    if ! docker compose exec -T postgres psql -U "$PG_USER" -c "SELECT 1" &>/dev/null; then
+        PG_USER="netpulse"
+    fi
+    info "Using PostgreSQL user: $PG_USER"
+
     # Run migration scripts if they exist
     for migration in scripts/migrate-*.sql; do
         [[ -f "$migration" ]] || continue
         info "Running $migration..."
-        docker compose exec -T postgres psql -U netpulse -f "/dev/stdin" < "$migration" 2>/dev/null || true
+        docker compose exec -T postgres psql -U "$PG_USER" < "$migration" 2>&1 | tail -3 || true
     done
 
-    # Fix ClickHouse tables
+    # Fix ClickHouse tables - run each statement individually
     info "Ensuring ClickHouse schema..."
+    CH_PASS="${CLICKHOUSE_PASSWORD:-$CH_PASSWORD}"
     for sql_file in scripts/init-clickhouse.sql scripts/fix-clickhouse.sql; do
         [[ -f "$sql_file" ]] || continue
+        # Copy file into container and run
+        docker cp "$sql_file" zenplus-clickhouse:/tmp/init.sql 2>/dev/null || true
         docker compose exec -T clickhouse clickhouse-client \
-            --password "$CH_PASSWORD" --multiquery \
-            < "$sql_file" 2>/dev/null || true
+            --password "$CH_PASS" --multiquery \
+            --queries-file /tmp/init.sql 2>/dev/null || true
     done
 
     # Generate proper bcrypt hash for admin user
+    info "Setting admin password..."
     ADMIN_HASH=$("$ZENPLUS_HOME/venv/bin/python3" -c "
 from passlib.context import CryptContext
 print(CryptContext(schemes=['bcrypt'], deprecated='auto').hash('admin123'))
-" 2>/dev/null)
+" 2>/dev/null || echo "")
 
     if [[ -n "$ADMIN_HASH" ]]; then
-        docker compose exec -T postgres psql -U netpulse -c \
+        docker compose exec -T postgres psql -U "$PG_USER" -c \
             "UPDATE users SET password_hash = '$ADMIN_HASH' WHERE username = 'admin';" 2>/dev/null || true
+        log "Admin password set"
+    else
+        warn "Could not generate admin password hash"
     fi
 
     log "Migrations complete"
@@ -360,9 +426,10 @@ Type=simple
 User=$ZENPLUS_USER
 WorkingDirectory=$ZENPLUS_HOME/server
 EnvironmentFile=$ZENPLUS_HOME/.env
-Environment=DATABASE_URL=postgresql+asyncpg://netpulse:\${POSTGRES_PASSWORD}@localhost:5432/netpulse
+Environment=DATABASE_URL=postgresql+asyncpg://zenplus:\${POSTGRES_PASSWORD}@localhost:5432/zenplus
 Environment=CLICKHOUSE_HOST=localhost
-Environment=CLICKHOUSE_DB=netpulse
+Environment=CLICKHOUSE_DB=zenplus
+Environment=CLICKHOUSE_USER=default
 Environment=CLICKHOUSE_PASSWORD=\${CLICKHOUSE_PASSWORD}
 Environment=REDIS_URL=redis://:\${REDIS_PASSWORD}@localhost:6379/0
 ExecStart=$ZENPLUS_HOME/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
@@ -385,9 +452,9 @@ Type=simple
 User=$ZENPLUS_USER
 WorkingDirectory=$ZENPLUS_HOME
 EnvironmentFile=$ZENPLUS_HOME/.env
-Environment=POSTGRES_DB=netpulse
-Environment=POSTGRES_USER=netpulse
-Environment=CLICKHOUSE_DB=netpulse
+Environment=POSTGRES_DB=zenplus
+Environment=POSTGRES_USER=zenplus
+Environment=CLICKHOUSE_DB=zenplus
 ExecStart=$ZENPLUS_HOME/bin/zenplus-poller
 Restart=always
 RestartSec=5
@@ -484,7 +551,7 @@ create_cli() {
 
     cat > /usr/local/bin/zenplus <<'CLIEOF'
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 ZENPLUS_HOME="/opt/zenplus"
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'; BOLD='\033[1m'
