@@ -75,23 +75,26 @@ interface NotificationChannel {
 interface AlertRule {
   id: string
   name: string
-  description: string
-  trigger_on: string
-  metric: string
-  condition_operator: string
-  condition_threshold: number
-  recovery_alert: boolean
-  scope: string
-  scope_value: string
-  severity: 'info' | 'warning' | 'critical'
-  channel_ids: string[]
-  cooldown_minutes: number
-  min_duration_seconds: number
-  max_repeat: number
-  schedule_start: string
-  schedule_end: string
-  schedule_days: number[]
+  description: string | null
   enabled: boolean
+  metric: string
+  operator: string
+  threshold: number
+  duration: number
+  device_id: string | null
+  group_id: string | null
+  severity: 'info' | 'warning' | 'critical'
+  notify_channels: string[]
+  cooldown: number
+  device_type: string | null
+  location: string | null
+  trigger_on: string
+  recovery_alert: boolean
+  min_duration: number
+  max_repeat: number
+  schedule_start: string | null
+  schedule_end: string | null
+  schedule_days: number[]
   created_at: string
 }
 
@@ -731,10 +734,11 @@ function ChannelsTab({ showToast }: { showToast: (type: 'success' | 'error', msg
     enabled: true,
   })
 
-  const { data: channels = [] } = useQuery({
+  const { data: channelsResp } = useQuery({
     queryKey: ['settings', 'channels'],
-    queryFn: () => api.get<NotificationChannel[]>('/settings/channels'),
+    queryFn: () => api.get<{ data: NotificationChannel[] }>('/settings/channels'),
   })
+  const channels = channelsResp?.data || []
 
   const saveMutation = useMutation({
     mutationFn: () =>
@@ -978,25 +982,35 @@ const cooldownOptions = [
 
 const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
-const defaultRule: Omit<AlertRule, 'id' | 'created_at'> = {
+const defaultRule = {
   name: '',
   description: '',
-  trigger_on: 'device_down',
+  trigger_on: 'down',
   metric: 'ping_status',
-  condition_operator: '>',
-  condition_threshold: 0,
+  operator: '==',
+  threshold: 0,
   recovery_alert: false,
-  scope: 'all',
-  scope_value: '',
-  severity: 'critical',
-  channel_ids: [],
-  cooldown_minutes: 5,
-  min_duration_seconds: 0,
+  device_id: null as string | null,
+  group_id: null as string | null,
+  device_type: null as string | null,
+  location: null as string | null,
+  severity: 'critical' as 'info' | 'warning' | 'critical',
+  notify_channels: [] as string[],
+  cooldown: 300,
+  min_duration: 0,
   max_repeat: 0,
-  schedule_start: '00:00',
-  schedule_end: '23:59',
-  schedule_days: [0, 1, 2, 3, 4, 5, 6],
+  schedule_start: null as string | null,
+  schedule_end: null as string | null,
+  schedule_days: [1, 2, 3, 4, 5, 6, 7],
   enabled: true,
+}
+
+function getScopeType(rule: typeof defaultRule): string {
+  if (rule.group_id) return 'group'
+  if (rule.device_type) return 'type'
+  if (rule.location) return 'location'
+  if (rule.device_id) return 'device'
+  return 'all'
 }
 
 function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', msg: string) => void }) {
@@ -1004,27 +1018,31 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
   const [showPanel, setShowPanel] = useState(false)
   const [editId, setEditId] = useState<string | null>(null)
   const [form, setForm] = useState(defaultRule)
+  const [scopeType, setScopeType] = useState('all')
   const [scheduleOpen, setScheduleOpen] = useState(false)
 
-  const { data: rules = [] } = useQuery({
+  const { data: rulesData } = useQuery({
     queryKey: ['alert-rules'],
-    queryFn: () => api.get<AlertRule[]>('/alert-rules'),
+    queryFn: () => api.get<{ data: AlertRule[] }>('/alert-rules'),
   })
+  const rules = rulesData?.data || []
 
-  const { data: channels = [] } = useQuery({
+  const { data: channelsData } = useQuery({
     queryKey: ['settings', 'channels'],
-    queryFn: () => api.get<NotificationChannel[]>('/settings/channels'),
+    queryFn: () => api.get<{ data: NotificationChannel[] }>('/settings/channels'),
   })
+  const channels = channelsData?.data || []
 
   const { data: groups = [] } = useQuery({
     queryKey: ['devices', 'groups'],
     queryFn: () => api.get<DeviceGroup[]>('/devices/groups'),
   })
 
-  const { data: locations = [] } = useQuery({
+  const { data: rawLocations = [] } = useQuery({
     queryKey: ['devices', 'locations'],
-    queryFn: () => api.get<LocationItem[]>('/devices/locations'),
+    queryFn: () => api.get<string[]>('/devices/locations'),
   })
+  const locations: LocationItem[] = rawLocations.map((l: string) => ({ location: l }))
 
   const saveMutation = useMutation({
     mutationFn: () =>
@@ -1056,6 +1074,7 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
     setShowPanel(false)
     setEditId(null)
     setForm(defaultRule)
+    setScopeType('all')
     setScheduleOpen(false)
   }
 
@@ -1063,24 +1082,27 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
     setEditId(rule.id)
     setForm({
       name: rule.name,
-      description: rule.description,
-      trigger_on: rule.trigger_on,
+      description: rule.description || '',
+      trigger_on: rule.trigger_on || 'any',
       metric: rule.metric,
-      condition_operator: rule.condition_operator,
-      condition_threshold: rule.condition_threshold,
+      operator: rule.operator,
+      threshold: rule.threshold,
       recovery_alert: rule.recovery_alert,
-      scope: rule.scope,
-      scope_value: rule.scope_value,
+      device_id: rule.device_id,
+      group_id: rule.group_id,
+      device_type: rule.device_type,
+      location: rule.location,
       severity: rule.severity,
-      channel_ids: rule.channel_ids || [],
-      cooldown_minutes: rule.cooldown_minutes,
-      min_duration_seconds: rule.min_duration_seconds,
+      notify_channels: rule.notify_channels || [],
+      cooldown: rule.cooldown,
+      min_duration: rule.min_duration,
       max_repeat: rule.max_repeat,
-      schedule_start: rule.schedule_start || '00:00',
-      schedule_end: rule.schedule_end || '23:59',
-      schedule_days: rule.schedule_days || [0, 1, 2, 3, 4, 5, 6],
+      schedule_start: rule.schedule_start,
+      schedule_end: rule.schedule_end,
+      schedule_days: rule.schedule_days || [1, 2, 3, 4, 5, 6, 7],
       enabled: rule.enabled,
     })
+    setScopeType(rule.group_id ? 'group' : rule.device_type ? 'type' : rule.location ? 'location' : rule.device_id ? 'device' : 'all')
     setShowPanel(true)
   }
 
@@ -1093,7 +1115,13 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
     critical: { color: '#EF4444', icon: AlertCircle },
   }
 
-  const scopeLabel = (s: string) => scopeOptions.find((o) => o.value === s)?.label || s
+  const scopeLabel = (rule: AlertRule) => {
+    if (rule.group_id) return 'Group'
+    if (rule.device_type) return rule.device_type.charAt(0).toUpperCase() + rule.device_type.slice(1).replace('_',' ')
+    if (rule.location) return rule.location
+    if (rule.device_id) return 'Device'
+    return 'All Devices'
+  }
   const triggerLabel = (s: string) => triggerOptions.find((o) => o.value === s)?.label || s
 
   return (
@@ -1136,7 +1164,7 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
                         {rule.name}
                       </span>
                       <Badge color={sev.color}>{rule.severity}</Badge>
-                      <Badge color="#6366F1">{scopeLabel(rule.scope)}</Badge>
+                      <Badge color="#6366F1">{scopeLabel(rule)}</Badge>
                       <span className="text-[10px] text-[var(--text-muted)] bg-[var(--bg-tertiary)] px-2 py-0.5 rounded">
                         {triggerLabel(rule.trigger_on)}
                       </span>
@@ -1231,15 +1259,15 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
                     <div className="grid grid-cols-2 gap-3">
                       <Select
                         label="Condition"
-                        value={form.condition_operator}
-                        onChange={(v) => updateForm('condition_operator', v)}
+                        value={form.operator}
+                        onChange={(v) => updateForm('operator', v)}
                         options={operatorOptions}
                       />
                       <Input
                         label="Threshold"
                         type="text"
-                        value={form.condition_threshold}
-                        onChange={(v) => updateForm('condition_threshold', parseFloat(v) || 0)}
+                        value={form.threshold}
+                        onChange={(v) => updateForm('threshold', parseFloat(v) || 0)}
                         placeholder={form.metric === 'rtt' ? '100 (ms)' : form.metric === 'packet_loss' ? '10 (%)' : '50 (ms)'}
                       />
                     </div>
@@ -1266,46 +1294,61 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
                 <div className="space-y-3 bg-[var(--bg-primary)] rounded-lg p-4 border border-[var(--bg-elevated)]">
                   <Select
                     label="Apply To"
-                    value={form.scope}
-                    onChange={(v) => updateForm('scope', v)}
+                    value={scopeType}
+                    onChange={(v) => {
+                      setScopeType(v)
+                      updateForm('device_id', null)
+                      updateForm('group_id', null)
+                      updateForm('device_type', null)
+                      updateForm('location', null)
+                    }}
                     options={scopeOptions}
                   />
-                  {form.scope === 'group' && (
+                  {scopeType === 'group' && (
                     <Select
                       label="Device Group"
-                      value={form.scope_value}
-                      onChange={(v) => updateForm('scope_value', v)}
+                      value={form.group_id || ''}
+                      onChange={(v) => updateForm('group_id', v || null)}
                       options={[
                         { value: '', label: 'Select a group...' },
                         ...groups.map((g) => ({ value: g.id, label: g.name })),
                       ]}
                     />
                   )}
-                  {form.scope === 'location' && (
+                  {scopeType === 'location' && (
                     <Select
                       label="Location"
-                      value={form.scope_value}
-                      onChange={(v) => updateForm('scope_value', v)}
+                      value={form.location || ''}
+                      onChange={(v) => updateForm('location', v || null)}
                       options={[
                         { value: '', label: 'Select a location...' },
                         ...locations.map((l) => ({ value: l.location, label: l.location })),
                       ]}
                     />
                   )}
-                  {form.scope === 'type' && (
-                    <Input
+                  {scopeType === 'type' && (
+                    <Select
                       label="Device Type"
-                      value={form.scope_value}
-                      onChange={(v) => updateForm('scope_value', v)}
-                      placeholder="e.g. router, switch, server"
+                      value={form.device_type || ''}
+                      onChange={(v) => updateForm('device_type', v || null)}
+                      options={[
+                        { value: '', label: 'Select type...' },
+                        { value: 'router', label: 'Router' },
+                        { value: 'switch', label: 'Switch' },
+                        { value: 'firewall', label: 'Firewall' },
+                        { value: 'server', label: 'Server' },
+                        { value: 'access_point', label: 'Access Point' },
+                        { value: 'printer', label: 'Printer' },
+                        { value: 'other', label: 'Other' },
+                      ]}
                     />
                   )}
-                  {form.scope === 'device' && (
+                  {scopeType === 'device' && (
                     <Input
                       label="Device ID"
-                      value={form.scope_value}
-                      onChange={(v) => updateForm('scope_value', v)}
-                      placeholder="Enter device ID"
+                      value={form.device_id || ''}
+                      onChange={(v) => updateForm('device_id', v || null)}
+                      placeholder="Enter device UUID"
                     />
                   )}
                 </div>
@@ -1356,7 +1399,7 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
                     ) : (
                       <div className="space-y-1.5">
                         {channels.map((ch) => {
-                          const checked = form.channel_ids.includes(ch.id)
+                          const checked = form.notify_channels.includes(ch.id)
                           return (
                             <label
                               key={ch.id}
@@ -1370,10 +1413,10 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
                                 checked={checked}
                                 onChange={() => {
                                   updateForm(
-                                    'channel_ids',
+                                    'notify_channels',
                                     checked
-                                      ? form.channel_ids.filter((id) => id !== ch.id)
-                                      : [...form.channel_ids, ch.id]
+                                      ? form.notify_channels.filter((id) => id !== ch.id)
+                                      : [...form.notify_channels, ch.id]
                                   )
                                 }}
                                 className="w-3.5 h-3.5 rounded border-[var(--bg-elevated)] bg-[var(--bg-primary)] text-[var(--accent)] focus:ring-[var(--accent)]/30"
@@ -1391,15 +1434,15 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
                   <div className="grid grid-cols-3 gap-3">
                     <Select
                       label="Cooldown"
-                      value={String(form.cooldown_minutes)}
-                      onChange={(v) => updateForm('cooldown_minutes', parseInt(v))}
+                      value={String(form.cooldown)}
+                      onChange={(v) => updateForm('cooldown', parseInt(v))}
                       options={cooldownOptions}
                     />
                     <Input
                       label="Min Duration (sec)"
                       type="text"
-                      value={form.min_duration_seconds}
-                      onChange={(v) => updateForm('min_duration_seconds', parseInt(v) || 0)}
+                      value={form.min_duration}
+                      onChange={(v) => updateForm('min_duration', parseInt(v) || 0)}
                       placeholder="0"
                     />
                     <Input
