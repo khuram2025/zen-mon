@@ -429,9 +429,13 @@ function GatewaysTab({ showToast }: { showToast: (type: 'success' | 'error', msg
     onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'Failed to save SMS settings'),
   })
 
+  const [smsTestNumber, setSmsTestNumber] = useState('')
   const smsTest = useMutation({
-    mutationFn: () => api.post('/settings/gateways/sms/test'),
-    onSuccess: () => showToast('success', 'SMS test message sent successfully'),
+    mutationFn: () => api.post('/settings/gateways/sms/test', { recipient: smsTestNumber || sms.from_number || '0000' }),
+    onSuccess: (data: unknown) => {
+      const d = data as Record<string, unknown>
+      showToast('success', d?.message ? String(d.message) : 'SMS test sent')
+    },
     onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'SMS test failed'),
   })
 
@@ -648,24 +652,35 @@ function GatewaysTab({ showToast }: { showToast: (type: 'success' | 'error', msg
           )}
         </div>
 
-        <div className="flex items-center justify-end gap-2 mt-6 pt-4 border-t border-[var(--bg-elevated)]">
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => smsTest.mutate()}
-            loading={smsTest.isPending}
-            disabled={sms.provider === 'custom_http' ? !sms.api_url : !sms.account_sid}
-          >
-            <Send className="w-3.5 h-3.5" />
-            Test SMS
-          </Button>
-          <Button
-            size="sm"
-            onClick={() => smsSave.mutate()}
-            loading={smsSave.isPending}
-          >
-            Save
-          </Button>
+        <div className="mt-6 pt-4 border-t border-[var(--bg-elevated)] space-y-3">
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={smsTestNumber}
+              onChange={(e) => setSmsTestNumber(e.target.value)}
+              placeholder="Test number e.g. 00966590964890"
+              className="flex-1 bg-[var(--bg-tertiary)] text-[var(--text-primary)] px-3 py-2 rounded-lg border border-[var(--bg-elevated)] focus:outline-none focus:border-[var(--accent)] text-xs font-mono placeholder:text-[var(--text-muted)]/40"
+            />
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => smsTest.mutate()}
+              loading={smsTest.isPending}
+              disabled={!smsTestNumber || (sms.provider === 'custom_http' ? !sms.api_url : !sms.account_sid)}
+            >
+              <Send className="w-3.5 h-3.5" />
+              Test SMS
+            </Button>
+          </div>
+          <div className="flex justify-end">
+            <Button
+              size="sm"
+              onClick={() => smsSave.mutate()}
+              loading={smsSave.isPending}
+            >
+              Save
+            </Button>
+          </div>
         </div>
       </Card>
     </div>

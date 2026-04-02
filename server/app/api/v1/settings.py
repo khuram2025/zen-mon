@@ -197,6 +197,8 @@ async def test_sms(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    import httpx
+
     sms_raw = await _get_system_setting(db, "sms")
     if not sms_raw:
         raise HTTPException(status_code=400, detail="SMS not configured")
@@ -204,10 +206,66 @@ async def test_sms(
     config = SmsConfig(**sms_raw)
     if not config.enabled:
         raise HTTPException(status_code=400, detail="SMS gateway is disabled")
-    if not config.provider or not config.api_key:
-        raise HTTPException(status_code=400, detail="SMS configuration is incomplete")
 
-    return {"message": "SMS configuration is valid", "recipient": data.recipient}
+    if config.provider == "custom_http":
+        if not config.api_url:
+            raise HTTPException(status_code=400, detail="API URL is required for Custom HTTP")
+
+        # Build the request from template
+        test_message = "ZenPlus Test Alert: This is a test SMS from your monitoring system."
+        template = config.request_template or ""
+        template = template.replace("{recipients}", data.recipient)
+        template = template.replace("{message}", test_message)
+        template = template.replace("{sender}", config.sender_name or "ZenPlus")
+        template = template.replace("{hostname}", "test-device")
+        template = template.replace("{ip_address}", "0.0.0.0")
+        template = template.replace("{status}", "TEST")
+
+        # Build headers
+        headers = dict(config.custom_headers) if config.custom_headers else {}
+        auth = None
+        if config.auth_type == "basic" and config.auth_username:
+            auth = (config.auth_username, config.auth_password)
+        elif config.auth_type == "bearer" and config.auth_token_value:
+            headers["Authorization"] = f"Bearer {config.auth_token_value}"
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+                if config.http_method.upper() == "POST":
+                    if config.content_type == "application/json":
+                        # Try to parse template as JSON, fallback to raw
+                        try:
+                            import json as json_mod
+                            body = json_mod.loads(template)
+                            resp = await client.post(config.api_url, json=body, headers=headers, auth=auth)
+                        except (json_mod.JSONDecodeError, ValueError):
+                            headers["Content-Type"] = config.content_type or "text/plain"
+                            resp = await client.post(config.api_url, content=template, headers=headers, auth=auth)
+                    elif config.content_type == "application/x-www-form-urlencoded":
+                        resp = await client.post(config.api_url, content=template, headers={**headers, "Content-Type": config.content_type}, auth=auth)
+                    else:
+                        resp = await client.post(config.api_url, content=template, headers=headers, auth=auth)
+                else:
+                    # GET - append template as query string
+                    url = config.api_url
+                    if template:
+                        sep = "&" if "?" in url else "?"
+                        url = f"{url}{sep}{template}"
+                    resp = await client.get(url, headers=headers, auth=auth)
+
+                return {
+                    "message": f"SMS test sent. API responded with status {resp.status_code}",
+                    "status_code": resp.status_code,
+                    "response": resp.text[:200],
+                    "recipient": data.recipient,
+                }
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"SMS send failed: {str(e)}")
+    else:
+        # Twilio/Vonage - validate config
+        if not config.account_sid or not config.auth_token:
+            raise HTTPException(status_code=400, detail="Account SID and Auth Token are required")
+        return {"message": "SMS configuration is valid (Twilio/Vonage send not implemented yet)", "recipient": data.recipient}
 
 
 # ---------------------------------------------------------------------------
