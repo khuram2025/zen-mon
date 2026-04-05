@@ -1,9 +1,10 @@
+import base64
 from uuid import UUID
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -122,6 +123,84 @@ def _json_dumps(obj) -> str:
     return json.dumps(obj)
 
 
+# ---------------------------------------------------------------------------
+# Company Settings
+# ---------------------------------------------------------------------------
+
+class CompanySettings(BaseModel):
+    company_name: str = ""
+    company_address: str = ""
+    company_email: str = ""
+    company_phone: str = ""
+    company_website: str = ""
+    timezone: str = "UTC"
+    date_format: str = "YYYY-MM-DD"
+    time_format: str = "24h"
+
+
+@router.get("/company")
+async def get_company_settings(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    raw = await _get_system_setting(db, "company")
+    if raw:
+        return CompanySettings(**raw).model_dump()
+    return CompanySettings().model_dump()
+
+
+@router.put("/company")
+async def update_company_settings(
+    data: CompanySettings,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    await _upsert_system_setting(db, "company", data.model_dump())
+    return {"message": "Company settings updated"}
+
+
+@router.post("/company/logo")
+async def upload_company_logo(
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if file.content_type not in ("image/png", "image/jpeg", "image/svg+xml", "image/webp"):
+        raise HTTPException(status_code=400, detail="Only PNG, JPEG, SVG, or WebP images are allowed")
+
+    content = await file.read()
+    if len(content) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Logo must be less than 2MB")
+
+    logo_b64 = base64.b64encode(content).decode()
+    await _upsert_system_setting(db, "company_logo", {
+        "data": logo_b64,
+        "content_type": file.content_type,
+        "filename": file.filename,
+    })
+    return {"message": "Logo uploaded successfully"}
+
+
+@router.get("/company/logo")
+async def get_company_logo(
+    db: AsyncSession = Depends(get_db),
+):
+    raw = await _get_system_setting(db, "company_logo")
+    if not raw or not raw.get("data"):
+        raise HTTPException(status_code=404, detail="No logo uploaded")
+
+    content = base64.b64decode(raw["data"])
+    return Response(content=content, media_type=raw.get("content_type", "image/png"))
+
+
+@router.get("/timezone")
+async def get_timezone(db: AsyncSession = Depends(get_db)):
+    """Public endpoint for timezone (no auth required)."""
+    raw = await _get_system_setting(db, "company")
+    tz = raw.get("timezone", "UTC") if raw else "UTC"
+    return {"timezone": tz}
+
+
 def _row_to_channel(row) -> dict:
     d = {
         "id": str(row.id),
@@ -150,6 +229,164 @@ def _row_to_gateway(row) -> dict:
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Legacy gateway endpoints — MUST be before parameterized {gateway_id} routes
+# ---------------------------------------------------------------------------
+
+@router.get("/gateways", response_model=GatewaysResponse)
+async def get_gateways(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    smtp_raw = await _get_system_setting(db, "smtp")
+    sms_raw = await _get_system_setting(db, "sms")
+    return GatewaysResponse(
+        smtp=SmtpConfig(**smtp_raw) if smtp_raw else SmtpConfig(),
+        sms=SmsConfig(**sms_raw) if sms_raw else SmsConfig(),
+    )
+
+
+@router.put("/gateways/smtp")
+async def update_smtp_legacy(
+    data: SmtpConfig,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    await _upsert_system_setting(db, "smtp", data.model_dump())
+    return {"message": "SMTP settings updated"}
+
+
+@router.put("/gateways/sms")
+async def update_sms_legacy(
+    data: SmsConfig,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    await _upsert_system_setting(db, "sms", data.model_dump())
+    return {"message": "SMS settings updated"}
+
+
+@router.post("/gateways/smtp/test")
+async def test_smtp_legacy(
+    data: SmtpTestRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    smtp_raw = await _get_system_setting(db, "smtp")
+    if not smtp_raw:
+        raise HTTPException(status_code=400, detail="SMTP not configured")
+
+    config = SmtpConfig(**smtp_raw)
+    if not config.enabled:
+        raise HTTPException(status_code=400, detail="SMTP gateway is disabled")
+    if not config.host or not config.from_email:
+        raise HTTPException(status_code=400, detail="SMTP configuration is incomplete")
+
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = f"{config.from_name} <{config.from_email}>"
+        msg["To"] = data.recipient
+        msg["Subject"] = "ZenPlus SMTP Test"
+        msg.attach(MIMEText(
+            "This is a test email from ZenPlus Monitoring System.\n\n"
+            "If you received this, your SMTP configuration is working correctly.",
+            "plain",
+        ))
+
+        if config.encryption == "ssl":
+            server = smtplib.SMTP_SSL(config.host, config.port, timeout=10)
+        else:
+            server = smtplib.SMTP(config.host, config.port, timeout=10)
+            if config.encryption == "tls":
+                server.starttls()
+
+        if config.username:
+            server.login(config.username, config.password)
+
+        server.sendmail(config.from_email, data.recipient, msg.as_string())
+        server.quit()
+
+        return {"message": f"Test email sent to {data.recipient}", "recipient": data.recipient}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"SMTP test failed: {str(e)}")
+
+
+@router.post("/gateways/sms/test")
+async def test_sms_legacy(
+    data: SmsTestRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    import httpx
+
+    sms_raw = await _get_system_setting(db, "sms")
+    if not sms_raw:
+        raise HTTPException(status_code=400, detail="SMS not configured")
+
+    config = SmsConfig(**sms_raw)
+    if not config.enabled:
+        raise HTTPException(status_code=400, detail="SMS gateway is disabled")
+
+    if config.provider == "custom_http":
+        if not config.api_url:
+            raise HTTPException(status_code=400, detail="API URL is required for Custom HTTP")
+
+        test_message = "ZenPlus Test Alert: This is a test SMS from your monitoring system."
+        template = config.request_template or ""
+        template = template.replace("{recipients}", data.recipient)
+        template = template.replace("{message}", test_message)
+        template = template.replace("{sender}", config.sender_name or "ZenPlus")
+        template = template.replace("{hostname}", "test-device")
+        template = template.replace("{ip_address}", "0.0.0.0")
+        template = template.replace("{status}", "TEST")
+
+        headers = dict(config.custom_headers) if config.custom_headers else {}
+        auth = None
+        if config.auth_type == "basic" and config.auth_username:
+            auth = (config.auth_username, config.auth_password)
+        elif config.auth_type == "bearer" and config.auth_token_value:
+            headers["Authorization"] = f"Bearer {config.auth_token_value}"
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+                if config.http_method.upper() == "POST":
+                    if config.content_type == "application/json":
+                        try:
+                            import json as json_mod
+                            body = json_mod.loads(template)
+                            resp = await client.post(config.api_url, json=body, headers=headers, auth=auth)
+                        except (ValueError, Exception):
+                            headers["Content-Type"] = config.content_type or "text/plain"
+                            resp = await client.post(config.api_url, content=template, headers=headers, auth=auth)
+                    elif config.content_type == "application/x-www-form-urlencoded":
+                        resp = await client.post(config.api_url, content=template, headers={**headers, "Content-Type": config.content_type}, auth=auth)
+                    else:
+                        resp = await client.post(config.api_url, content=template, headers=headers, auth=auth)
+                else:
+                    url = config.api_url
+                    if template:
+                        sep = "&" if "?" in url else "?"
+                        url = f"{url}{sep}{template}"
+                    resp = await client.get(url, headers=headers, auth=auth)
+
+                return {
+                    "message": f"SMS test sent. API responded with status {resp.status_code}",
+                    "status_code": resp.status_code,
+                    "response": resp.text[:200],
+                    "recipient": data.recipient,
+                }
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"SMS send failed: {str(e)}")
+    else:
+        if not config.account_sid or not config.auth_token:
+            raise HTTPException(status_code=400, detail="Account SID and Auth Token are required")
+        return {"message": "SMS configuration is valid (Twilio/Vonage send not implemented yet)", "recipient": data.recipient}
 
 
 # ---------------------------------------------------------------------------
@@ -241,170 +478,6 @@ async def delete_gateway(
     await db.commit()
     if result.rowcount == 0:
         raise HTTPException(status_code=404, detail="Gateway not found")
-
-
-# ---------------------------------------------------------------------------
-# Legacy gateway endpoints (kept for backward compat)
-# ---------------------------------------------------------------------------
-
-@router.get("/gateways", response_model=GatewaysResponse)
-async def get_gateways(
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    smtp_raw = await _get_system_setting(db, "smtp")
-    sms_raw = await _get_system_setting(db, "sms")
-    return GatewaysResponse(
-        smtp=SmtpConfig(**smtp_raw) if smtp_raw else SmtpConfig(),
-        sms=SmsConfig(**sms_raw) if sms_raw else SmsConfig(),
-    )
-
-
-@router.put("/gateways/smtp")
-async def update_smtp(
-    data: SmtpConfig,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    await _upsert_system_setting(db, "smtp", data.model_dump())
-    return {"message": "SMTP settings updated"}
-
-
-@router.put("/gateways/sms")
-async def update_sms(
-    data: SmsConfig,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    await _upsert_system_setting(db, "sms", data.model_dump())
-    return {"message": "SMS settings updated"}
-
-
-@router.post("/gateways/smtp/test")
-async def test_smtp(
-    data: SmtpTestRequest,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    smtp_raw = await _get_system_setting(db, "smtp")
-    if not smtp_raw:
-        raise HTTPException(status_code=400, detail="SMTP not configured")
-
-    config = SmtpConfig(**smtp_raw)
-    if not config.enabled:
-        raise HTTPException(status_code=400, detail="SMTP gateway is disabled")
-    if not config.host or not config.from_email:
-        raise HTTPException(status_code=400, detail="SMTP configuration is incomplete")
-
-    # Actually try to send a test email
-    import smtplib
-    from email.mime.text import MIMEText
-    from email.mime.multipart import MIMEMultipart
-
-    try:
-        msg = MIMEMultipart()
-        msg["From"] = f"{config.from_name} <{config.from_email}>"
-        msg["To"] = data.recipient
-        msg["Subject"] = "ZenPlus SMTP Test"
-        msg.attach(MIMEText(
-            "This is a test email from ZenPlus Monitoring System.\n\n"
-            "If you received this, your SMTP configuration is working correctly.",
-            "plain",
-        ))
-
-        if config.encryption == "ssl":
-            server = smtplib.SMTP_SSL(config.host, config.port, timeout=10)
-        else:
-            server = smtplib.SMTP(config.host, config.port, timeout=10)
-            if config.encryption == "tls":
-                server.starttls()
-
-        if config.username:
-            server.login(config.username, config.password)
-
-        server.sendmail(config.from_email, data.recipient, msg.as_string())
-        server.quit()
-
-        return {"message": f"Test email sent to {data.recipient}", "recipient": data.recipient}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"SMTP test failed: {str(e)}")
-
-
-@router.post("/gateways/sms/test")
-async def test_sms(
-    data: SmsTestRequest,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    import httpx
-
-    sms_raw = await _get_system_setting(db, "sms")
-    if not sms_raw:
-        raise HTTPException(status_code=400, detail="SMS not configured")
-
-    config = SmsConfig(**sms_raw)
-    if not config.enabled:
-        raise HTTPException(status_code=400, detail="SMS gateway is disabled")
-
-    if config.provider == "custom_http":
-        if not config.api_url:
-            raise HTTPException(status_code=400, detail="API URL is required for Custom HTTP")
-
-        # Build the request from template
-        test_message = "ZenPlus Test Alert: This is a test SMS from your monitoring system."
-        template = config.request_template or ""
-        template = template.replace("{recipients}", data.recipient)
-        template = template.replace("{message}", test_message)
-        template = template.replace("{sender}", config.sender_name or "ZenPlus")
-        template = template.replace("{hostname}", "test-device")
-        template = template.replace("{ip_address}", "0.0.0.0")
-        template = template.replace("{status}", "TEST")
-
-        # Build headers
-        headers = dict(config.custom_headers) if config.custom_headers else {}
-        auth = None
-        if config.auth_type == "basic" and config.auth_username:
-            auth = (config.auth_username, config.auth_password)
-        elif config.auth_type == "bearer" and config.auth_token_value:
-            headers["Authorization"] = f"Bearer {config.auth_token_value}"
-
-        try:
-            async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
-                if config.http_method.upper() == "POST":
-                    if config.content_type == "application/json":
-                        # Try to parse template as JSON, fallback to raw
-                        try:
-                            import json as json_mod
-                            body = json_mod.loads(template)
-                            resp = await client.post(config.api_url, json=body, headers=headers, auth=auth)
-                        except (json_mod.JSONDecodeError, ValueError):
-                            headers["Content-Type"] = config.content_type or "text/plain"
-                            resp = await client.post(config.api_url, content=template, headers=headers, auth=auth)
-                    elif config.content_type == "application/x-www-form-urlencoded":
-                        resp = await client.post(config.api_url, content=template, headers={**headers, "Content-Type": config.content_type}, auth=auth)
-                    else:
-                        resp = await client.post(config.api_url, content=template, headers=headers, auth=auth)
-                else:
-                    # GET - append template as query string
-                    url = config.api_url
-                    if template:
-                        sep = "&" if "?" in url else "?"
-                        url = f"{url}{sep}{template}"
-                    resp = await client.get(url, headers=headers, auth=auth)
-
-                return {
-                    "message": f"SMS test sent. API responded with status {resp.status_code}",
-                    "status_code": resp.status_code,
-                    "response": resp.text[:200],
-                    "recipient": data.recipient,
-                }
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"SMS send failed: {str(e)}")
-    else:
-        # Twilio/Vonage - validate config
-        if not config.account_sid or not config.auth_token:
-            raise HTTPException(status_code=400, detail="Account SID and Auth Token are required")
-        return {"message": "SMS configuration is valid (Twilio/Vonage send not implemented yet)", "recipient": data.recipient}
 
 
 # ---------------------------------------------------------------------------

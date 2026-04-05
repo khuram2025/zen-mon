@@ -352,6 +352,24 @@ function ImportDevices() {
           setParseError('No devices found in file')
           return
         }
+
+        // Validate: reject placeholder/template data
+        const hasPlaceholders = data.some(d =>
+          String(d.hostname || '').includes('REPLACE') ||
+          String(d.ip_address || '').includes('REPLACE')
+        )
+        if (hasPlaceholders) {
+          setParseError('File contains placeholder data (REPLACE-...). Please edit the template with your real device information before importing.')
+          return
+        }
+
+        // Validate: every row must have hostname and ip_address
+        const invalid = data.filter(d => !d.hostname || !d.ip_address)
+        if (invalid.length > 0) {
+          setParseError(`${invalid.length} row(s) are missing hostname or ip_address. Every device must have both fields.`)
+          return
+        }
+
         setImportData(data)
       } catch (err) {
         setParseError(`Failed to parse file: ${err instanceof Error ? err.message : 'Unknown error'}`)
@@ -361,13 +379,13 @@ function ImportDevices() {
   }
 
   const csvTemplate = `hostname,ip_address,device_type,location,group_name,ping_enabled,ping_interval,description,tags
-core-router-01,10.0.0.1,router,DC-1 Rack A1,Core Network,true,30,Primary core router,critical;core
-web-server-01,10.0.10.1,server,DC-1 Rack C1,Servers,true,60,Production web server,production;web`
+REPLACE-hostname-1,REPLACE-IP-1,router,REPLACE-location,REPLACE-group,true,30,REPLACE-description,tag1;tag2
+REPLACE-hostname-2,REPLACE-IP-2,server,REPLACE-location,REPLACE-group,true,60,REPLACE-description,tag1;tag2`
 
   const jsonTemplate = JSON.stringify({
     devices: [
-      { hostname: "core-router-01", ip_address: "10.0.0.1", device_type: "router", location: "DC-1 Rack A1", group_name: "Core Network", ping_enabled: true, ping_interval: 30, description: "Primary core router", tags: ["critical", "core"] },
-      { hostname: "web-server-01", ip_address: "10.0.10.1", device_type: "server", location: "DC-1 Rack C1", group_name: "Servers", ping_enabled: true, ping_interval: 60, description: "Production web server", tags: ["production", "web"] },
+      { hostname: "REPLACE-hostname-1", ip_address: "REPLACE-IP-1", device_type: "router", location: "REPLACE-location", group_name: "REPLACE-group", ping_enabled: true, ping_interval: 30, description: "REPLACE-description", tags: ["tag1", "tag2"] },
+      { hostname: "REPLACE-hostname-2", ip_address: "REPLACE-IP-2", device_type: "server", location: "REPLACE-location", group_name: "REPLACE-group", ping_enabled: true, ping_interval: 60, description: "REPLACE-description", tags: ["tag1", "tag2"] },
     ]
   }, null, 2)
 

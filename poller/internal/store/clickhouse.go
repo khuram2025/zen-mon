@@ -8,17 +8,20 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/google/uuid"
+	"github.com/zenplus/poller/internal/checker"
 	"github.com/zenplus/poller/internal/config"
 	"github.com/zenplus/poller/internal/pinger"
 )
 
 // ClickHouseStore handles metric writes to ClickHouse.
 type ClickHouseStore struct {
-	conn          driver.Conn
-	batchSize     int
-	flushInterval time.Duration
-	buffer        chan *pinger.PingResult
-	done          chan struct{}
+	conn            driver.Conn
+	batchSize       int
+	flushInterval   time.Duration
+	buffer          chan *pinger.PingResult
+	serviceBuffer   chan *checker.ServiceCheckResult
+	done            chan struct{}
 }
 
 // NewClickHouseStore connects to ClickHouse.
@@ -50,6 +53,7 @@ func NewClickHouseStore(cfg *config.Config) (*ClickHouseStore, error) {
 		batchSize:     cfg.ClickHouse.BatchSize,
 		flushInterval: cfg.ClickHouse.FlushInterval,
 		buffer:        make(chan *pinger.PingResult, cfg.ClickHouse.BatchSize*2),
+		serviceBuffer: make(chan *checker.ServiceCheckResult, cfg.ClickHouse.BatchSize*2),
 		done:          make(chan struct{}),
 	}
 
@@ -67,11 +71,10 @@ func (s *ClickHouseStore) WriteResult(result *pinger.PingResult) {
 	select {
 	case s.buffer <- result:
 	default:
-		// Buffer full, drop oldest (shouldn't happen with proper sizing)
 	}
 }
 
-// RunBatchWriter starts the background batch writer goroutine.
+// RunBatchWriter starts the background batch writer goroutine for ping metrics.
 func (s *ClickHouseStore) RunBatchWriter(ctx context.Context) {
 	ticker := time.NewTicker(s.flushInterval)
 	defer ticker.Stop()
@@ -157,4 +160,142 @@ func (s *ClickHouseStore) WriteStatusChange(ctx context.Context, sc *pinger.Stat
 		INSERT INTO device_status_log (device_id, timestamp, old_status, new_status, reason, duration_sec)
 		VALUES (?, ?, ?, ?, ?, ?)
 	`, sc.DeviceID, sc.Timestamp, sc.OldStatus, sc.NewStatus, sc.Reason, durationSec)
+}
+
+// --- Service Check Methods ---
+
+// WriteServiceResult queues a service check result for batch insertion.
+func (s *ClickHouseStore) WriteServiceResult(result *checker.ServiceCheckResult) {
+	select {
+	case s.serviceBuffer <- result:
+	default:
+	}
+}
+
+// RunServiceBatchWriter starts the background batch writer for service metrics.
+func (s *ClickHouseStore) RunServiceBatchWriter(ctx context.Context) {
+	ticker := time.NewTicker(s.flushInterval)
+	defer ticker.Stop()
+
+	batch := make([]*checker.ServiceCheckResult, 0, s.batchSize)
+
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		if err := s.insertServiceBatch(ctx, batch); err != nil {
+			fmt.Printf("ERROR: Failed to flush service metrics batch: %v\n", err)
+		}
+		batch = batch[:0]
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			flush()
+			return
+		case <-s.done:
+			flush()
+			return
+		case result := <-s.serviceBuffer:
+			batch = append(batch, result)
+			if len(batch) >= s.batchSize {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		}
+	}
+}
+
+func (s *ClickHouseStore) insertServiceBatch(ctx context.Context, results []*checker.ServiceCheckResult) error {
+	batch, err := s.conn.PrepareBatch(ctx, `
+		INSERT INTO service_metrics (
+			service_check_id, device_id, timestamp, check_type, is_up,
+			response_ms, status_code, tls_days_remaining, tls_valid,
+			content_matched, error_message, poller_id
+		)
+	`)
+	if err != nil {
+		return fmt.Errorf("prepare service batch: %w", err)
+	}
+
+	for _, r := range results {
+		isUp := uint8(0)
+		if r.IsUp {
+			isUp = 1
+		}
+
+		deviceID := &uuid.Nil
+		if r.DeviceID != nil {
+			deviceID = r.DeviceID
+		}
+
+		var statusCode *uint16
+		if r.StatusCode > 0 {
+			sc := uint16(r.StatusCode)
+			statusCode = &sc
+		}
+
+		var tlsDays *int32
+		if r.TLSDaysRemaining != nil {
+			d := int32(*r.TLSDaysRemaining)
+			tlsDays = &d
+		}
+
+		var tlsValid *uint8
+		if r.TLSValid != nil {
+			v := uint8(0)
+			if *r.TLSValid {
+				v = 1
+			}
+			tlsValid = &v
+		}
+
+		var contentMatched *uint8
+		if r.ContentMatched != nil {
+			v := uint8(0)
+			if *r.ContentMatched {
+				v = 1
+			}
+			contentMatched = &v
+		}
+
+		var errMsg *string
+		if r.Error != "" {
+			errMsg = &r.Error
+		}
+
+		err := batch.Append(
+			r.ServiceCheckID,
+			deviceID,
+			r.Timestamp,
+			r.CheckType,
+			isUp,
+			float64(r.ResponseTime.Microseconds())/1000.0,
+			statusCode,
+			tlsDays,
+			tlsValid,
+			contentMatched,
+			errMsg,
+			r.PollerID,
+		)
+		if err != nil {
+			return fmt.Errorf("append to service batch: %w", err)
+		}
+	}
+
+	return batch.Send()
+}
+
+// WriteServiceStatusChange logs a service check status transition.
+func (s *ClickHouseStore) WriteServiceStatusChange(ctx context.Context, sc *checker.ServiceStatusChange, durationSec uint64) error {
+	deviceIDStr := uuid.Nil.String()
+	if sc.DeviceID != nil {
+		deviceIDStr = sc.DeviceID.String()
+	}
+
+	query := fmt.Sprintf(`INSERT INTO service_status_log (service_check_id, device_id, timestamp, check_type, old_status, new_status, reason, duration_sec) VALUES ('%s', '%s', now(), '%s', '%s', '%s', '%s', %d)`,
+		sc.ServiceCheckID.String(), deviceIDStr, sc.CheckType, sc.OldStatus, sc.NewStatus, sc.Reason, durationSec)
+	return s.conn.Exec(ctx, query)
 }

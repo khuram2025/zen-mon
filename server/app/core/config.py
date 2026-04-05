@@ -14,7 +14,8 @@ class Settings(BaseSettings):
 
     # ClickHouse
     CLICKHOUSE_HOST: str = "localhost"
-    CLICKHOUSE_PORT: int = 8123
+    CLICKHOUSE_PORT: int = 9000           # Native protocol (Go poller)
+    CLICKHOUSE_HTTP_PORT: int = 8123      # HTTP protocol (Python clickhouse-connect)
     CLICKHOUSE_DB: str = "zenplus"
     CLICKHOUSE_USER: str = "default"
     CLICKHOUSE_PASSWORD: str = "clickhouse_dev"

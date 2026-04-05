@@ -35,6 +35,10 @@ import {
   EyeOff,
   CheckCircle2,
   XCircle,
+  Building2,
+  Upload,
+  MapPin,
+  Image,
 } from 'lucide-react'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -1932,7 +1936,217 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
 
 // ─── Main Settings Page ───────────────────────────────────────────────────────
 
+// ─── Tab: Company Settings ────────────────────────────────────────────────────
+
+interface CompanyConfig {
+  company_name: string
+  company_address: string
+  company_email: string
+  company_phone: string
+  company_website: string
+  timezone: string
+  date_format: string
+  time_format: string
+}
+
+const defaultCompany: CompanyConfig = {
+  company_name: '', company_address: '', company_email: '', company_phone: '',
+  company_website: '', timezone: 'UTC', date_format: 'YYYY-MM-DD', time_format: '24h',
+}
+
+const timezones = [
+  'UTC', 'Asia/Riyadh', 'Asia/Dubai', 'Asia/Karachi', 'Asia/Kolkata', 'Asia/Shanghai', 'Asia/Tokyo',
+  'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Istanbul',
+  'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+  'Africa/Cairo', 'Africa/Johannesburg', 'Australia/Sydney', 'Pacific/Auckland',
+]
+
+function CompanyTab({ showToast }: { showToast: (type: 'success' | 'error', msg: string) => void }) {
+  const queryClient = useQueryClient()
+  const { data: companyData } = useQuery({
+    queryKey: ['company-settings'],
+    queryFn: () => api.get<CompanyConfig>('/settings/company'),
+  })
+
+  const [company, setCompany] = useState<CompanyConfig>(defaultCompany)
+  const [logoPreview, setLogoPreview] = useState<string | null>(null)
+  const [uploading, setUploading] = useState(false)
+
+  useEffect(() => {
+    if (companyData) setCompany(companyData)
+  }, [companyData])
+
+  // Try to load logo
+  useEffect(() => {
+    fetch('/api/v1/settings/company/logo')
+      .then(r => { if (r.ok) return r.blob(); throw new Error('no logo') })
+      .then(b => setLogoPreview(URL.createObjectURL(b)))
+      .catch(() => setLogoPreview(null))
+  }, [])
+
+  const saveMutation = useMutation({
+    mutationFn: () => api.put('/settings/company', company),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['company-settings'] })
+      showToast('success', 'Company settings saved')
+    },
+    onError: (e: unknown) => showToast('error', e instanceof Error ? e.message : 'Failed to save'),
+  })
+
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (file.size > 2 * 1024 * 1024) { showToast('error', 'Logo must be less than 2MB'); return }
+
+    setUploading(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      const token = localStorage.getItem('token')
+      const resp = await fetch('/api/v1/settings/company/logo', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+        body: formData,
+      })
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ detail: 'Upload failed' }))
+        throw new Error(err.detail || 'Upload failed')
+      }
+      setLogoPreview(URL.createObjectURL(file))
+      showToast('success', 'Logo uploaded successfully')
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Upload failed')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  const update = <K extends keyof CompanyConfig>(key: K, value: CompanyConfig[K]) =>
+    setCompany(prev => ({ ...prev, [key]: value }))
+
+  const inputCls = 'w-full bg-[var(--bg-tertiary)] text-[var(--text-primary)] px-3 py-2.5 rounded-lg border border-[var(--bg-elevated)] focus:border-[var(--accent)] focus:outline-none text-sm'
+
+  return (
+    <div className="space-y-6">
+      {/* Company Identity */}
+      <div className="bg-[var(--bg-secondary)] rounded-xl border border-[var(--bg-elevated)] p-6">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-8 h-8 rounded-lg bg-[var(--accent)]/10 flex items-center justify-center">
+            <Building2 className="w-4 h-4 text-[var(--accent)]" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-[var(--text-primary)]">Company Information</h3>
+            <p className="text-xs text-[var(--text-muted)]">Your organization identity shown across the system</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Logo Upload */}
+          <div className="flex flex-col items-center">
+            <div className="w-32 h-32 rounded-2xl bg-[var(--bg-tertiary)] border-2 border-dashed border-[var(--bg-elevated)] flex items-center justify-center overflow-hidden mb-3">
+              {logoPreview ? (
+                <img src={logoPreview} alt="Company Logo" className="w-full h-full object-contain p-2" />
+              ) : (
+                <div className="text-center">
+                  <Image className="w-8 h-8 text-[var(--text-muted)] mx-auto mb-1" />
+                  <span className="text-[10px] text-[var(--text-muted)]">No logo</span>
+                </div>
+              )}
+            </div>
+            <label className={cn(
+              'flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium cursor-pointer transition-colors',
+              uploading ? 'bg-[var(--bg-tertiary)] text-[var(--text-muted)]' : 'bg-[var(--accent)]/10 text-[var(--accent)] hover:bg-[var(--accent)]/20'
+            )}>
+              {uploading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Upload className="w-3.5 h-3.5" />}
+              {uploading ? 'Uploading...' : 'Upload Logo'}
+              <input type="file" accept="image/png,image/jpeg,image/svg+xml,image/webp" onChange={handleLogoUpload} className="hidden" />
+            </label>
+            <span className="text-[10px] text-[var(--text-muted)] mt-1">PNG, JPG, SVG. Max 2MB</span>
+          </div>
+
+          {/* Company Details */}
+          <div className="lg:col-span-2 grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div className="sm:col-span-2">
+              <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1.5">Company Name</label>
+              <input className={inputCls} value={company.company_name} onChange={e => update('company_name', e.target.value)} placeholder="Acme Corporation" />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1.5">Address</label>
+              <input className={inputCls} value={company.company_address} onChange={e => update('company_address', e.target.value)} placeholder="123 Main Street, Jeddah, Saudi Arabia" />
+            </div>
+            <div>
+              <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1.5">Email</label>
+              <input className={inputCls} type="email" value={company.company_email} onChange={e => update('company_email', e.target.value)} placeholder="admin@company.com" />
+            </div>
+            <div>
+              <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1.5">Phone</label>
+              <input className={inputCls} value={company.company_phone} onChange={e => update('company_phone', e.target.value)} placeholder="+966 12 345 6789" />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1.5">Website</label>
+              <input className={inputCls} value={company.company_website} onChange={e => update('company_website', e.target.value)} placeholder="https://company.com" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Regional & Display Settings */}
+      <div className="bg-[var(--bg-secondary)] rounded-xl border border-[var(--bg-elevated)] p-6">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center">
+            <Globe className="w-4 h-4 text-emerald-400" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-[var(--text-primary)]">Regional & Display</h3>
+            <p className="text-xs text-[var(--text-muted)]">Timezone and format settings applied across the entire system</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div>
+            <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1.5">Timezone</label>
+            <select className={inputCls} value={company.timezone} onChange={e => update('timezone', e.target.value)}>
+              {timezones.map(tz => <option key={tz} value={tz}>{tz.replace(/_/g, ' ')}</option>)}
+            </select>
+            <p className="text-[10px] text-[var(--text-muted)] mt-1">All timestamps in the system will use this timezone</p>
+          </div>
+          <div>
+            <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1.5">Date Format</label>
+            <select className={inputCls} value={company.date_format} onChange={e => update('date_format', e.target.value)}>
+              <option value="YYYY-MM-DD">2026-04-05 (ISO)</option>
+              <option value="DD/MM/YYYY">05/04/2026 (UK)</option>
+              <option value="MM/DD/YYYY">04/05/2026 (US)</option>
+              <option value="DD.MM.YYYY">05.04.2026 (EU)</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1.5">Time Format</label>
+            <select className={inputCls} value={company.time_format} onChange={e => update('time_format', e.target.value)}>
+              <option value="24h">24-hour (14:30)</option>
+              <option value="12h">12-hour (2:30 PM)</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {/* Save Button */}
+      <div className="flex justify-end">
+        <button
+          onClick={() => saveMutation.mutate()}
+          disabled={saveMutation.isPending}
+          className="flex items-center gap-2 px-6 py-2.5 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors disabled:opacity-50"
+        >
+          {saveMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+          {saveMutation.isPending ? 'Saving...' : 'Save Company Settings'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+
 const tabs = [
+  { id: 'company', label: 'Company', icon: Building2, description: 'Organization' },
   { id: 'gateways', label: 'Gateways', icon: Mail, description: 'Email & SMS' },
   { id: 'channels', label: 'Channels', icon: Bell, description: 'Notification' },
   { id: 'rules', label: 'Alert Rules', icon: ShieldAlert, description: 'Triggers' },
@@ -1941,7 +2155,7 @@ const tabs = [
 type TabId = (typeof tabs)[number]['id']
 
 export function SettingsPage() {
-  const [activeTab, setActiveTab] = useState<TabId>('gateways')
+  const [activeTab, setActiveTab] = useState<TabId>('company')
   const [toasts, setToasts] = useState<Toast[]>([])
 
   const showToast = useCallback((type: 'success' | 'error', message: unknown) => {
@@ -1964,7 +2178,7 @@ export function SettingsPage() {
         </div>
         <div>
           <h2 className="text-xl font-semibold text-[var(--text-primary)]">Settings</h2>
-          <p className="text-xs text-[var(--text-muted)]">Configure gateways, notification channels, and alert rules</p>
+          <p className="text-xs text-[var(--text-muted)]">Company info, gateways, notification channels, and alert rules</p>
         </div>
       </div>
 
@@ -1996,6 +2210,7 @@ export function SettingsPage() {
 
       {/* Tab Content */}
       <div className="transition-all duration-200">
+        {activeTab === 'company' && <CompanyTab showToast={showToast} />}
         {activeTab === 'gateways' && <GatewaysTab showToast={showToast} />}
         {activeTab === 'channels' && <ChannelsTab showToast={showToast} />}
         {activeTab === 'rules' && <AlertRulesTab showToast={showToast} />}

@@ -47,10 +47,11 @@ type StatusChange struct {
 
 // HealthStatus represents the health of the poller engine.
 type HealthStatus struct {
-	Status       string `json:"status"`
-	PollerID     string `json:"poller_id"`
-	DeviceCount  int    `json:"device_count"`
-	ActivePings  int    `json:"active_pings"`
-	Uptime       string `json:"uptime"`
-	LastCycleMs  int64  `json:"last_cycle_ms"`
+	Status            string `json:"status"`
+	PollerID          string `json:"poller_id"`
+	DeviceCount       int    `json:"device_count"`
+	ServiceCheckCount int    `json:"service_check_count"`
+	ActivePings       int    `json:"active_pings"`
+	Uptime            string `json:"uptime"`
+	LastCycleMs       int64  `json:"last_cycle_ms"`
 }

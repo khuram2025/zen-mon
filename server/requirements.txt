@@ -12,3 +12,8 @@ sse-starlette==2.2.1
 redis[hiredis]==5.2.1
 httpx==0.28.1
 clickhouse-connect==0.8.9
+
+# PDF Reports
+fpdf2==2.8.2
+matplotlib==3.9.4
+Pillow==11.1.0

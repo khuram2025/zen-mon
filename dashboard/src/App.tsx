@@ -11,6 +11,11 @@ import { AlertsPage } from '@/pages/Alerts'
 import { AddDevicePage } from '@/pages/AddDevice'
 import { EditDevicePage } from '@/pages/EditDevice'
 import { SettingsPage } from '@/pages/Settings'
+import { ServiceChecksPage } from '@/pages/ServiceChecks'
+import { ServiceCheckDetailPage } from '@/pages/ServiceCheckDetail'
+import { AddServiceCheckPage } from '@/pages/AddServiceCheck'
+import { EditServiceCheckPage } from '@/pages/EditServiceCheck'
+import { ReportsPage } from '@/pages/Reports'
 
 function ProtectedLayout() {
   const { isAuthenticated, checkAuth } = useAuthStore()
@@ -34,7 +39,12 @@ function ProtectedLayout() {
           <Route path="/devices/new" element={<AddDevicePage />} />
           <Route path="/devices/:id" element={<DeviceDetailPage />} />
           <Route path="/devices/:id/edit" element={<EditDevicePage />} />
+          <Route path="/service-checks" element={<ServiceChecksPage />} />
+          <Route path="/service-checks/new" element={<AddServiceCheckPage />} />
+          <Route path="/service-checks/:id" element={<ServiceCheckDetailPage />} />
+          <Route path="/service-checks/:id/edit" element={<EditServiceCheckPage />} />
           <Route path="/alerts" element={<AlertsPage />} />
+          <Route path="/reports" element={<ReportsPage />} />
           <Route path="/topology" element={<div className="text-[var(--text-muted)]">Topology - Coming in Phase 3</div>} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>

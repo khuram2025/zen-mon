@@ -35,7 +35,7 @@ async def get_db() -> AsyncSession:
 def get_clickhouse_client():
     return clickhouse_connect.get_client(
         host=settings.CLICKHOUSE_HOST,
-        port=settings.CLICKHOUSE_PORT,
+        port=settings.CLICKHOUSE_HTTP_PORT,
         database=settings.CLICKHOUSE_DB,
         username=settings.CLICKHOUSE_USER,
         password=settings.CLICKHOUSE_PASSWORD,

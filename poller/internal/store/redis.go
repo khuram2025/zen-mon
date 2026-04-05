@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/zenplus/poller/internal/checker"
 	"github.com/zenplus/poller/internal/config"
 	"github.com/zenplus/poller/internal/pinger"
 )
@@ -16,9 +17,11 @@ type RedisStore struct {
 }
 
 const (
-	ChannelMetrics      = "zenplus:metrics"
-	ChannelStatusChange = "zenplus:status_change"
-	ChannelAlerts       = "zenplus:alerts"
+	ChannelMetrics             = "zenplus:metrics"
+	ChannelStatusChange        = "zenplus:status_change"
+	ChannelAlerts              = "zenplus:alerts"
+	ChannelServiceMetrics      = "zenplus:service_metrics"
+	ChannelServiceStatusChange = "zenplus:service_status_change"
 )
 
 // NewRedisStore connects to Redis.
@@ -70,4 +73,37 @@ func (s *RedisStore) PublishStatusChange(ctx context.Context, sc *pinger.StatusC
 		return err
 	}
 	return s.client.Publish(ctx, ChannelStatusChange, data).Err()
+}
+
+// PublishServiceMetric publishes a service check result.
+func (s *RedisStore) PublishServiceMetric(ctx context.Context, result *checker.ServiceCheckResult) error {
+	data, err := json.Marshal(map[string]interface{}{
+		"service_check_id": result.ServiceCheckID.String(),
+		"check_type":       result.CheckType,
+		"is_up":            result.IsUp,
+		"response_ms":      float64(result.ResponseTime.Microseconds()) / 1000.0,
+		"status_code":      result.StatusCode,
+		"error":            result.Error,
+		"timestamp":        result.Timestamp,
+	})
+	if err != nil {
+		return err
+	}
+	return s.client.Publish(ctx, ChannelServiceMetrics, data).Err()
+}
+
+// PublishServiceStatusChange publishes a service check status change.
+func (s *RedisStore) PublishServiceStatusChange(ctx context.Context, sc *checker.ServiceStatusChange) error {
+	data, err := json.Marshal(map[string]interface{}{
+		"service_check_id": sc.ServiceCheckID.String(),
+		"check_type":       sc.CheckType,
+		"old_status":       sc.OldStatus,
+		"new_status":       sc.NewStatus,
+		"reason":           sc.Reason,
+		"timestamp":        sc.Timestamp,
+	})
+	if err != nil {
+		return err
+	}
+	return s.client.Publish(ctx, ChannelServiceStatusChange, data).Err()
 }

@@ -1,27 +1,7 @@
-version: '3.8'
+# ZenPlus — Production docker-compose
+# Only ClickHouse runs in Docker; PostgreSQL & Redis are native host services.
 
 services:
-  # ─── Infrastructure ───
-  postgres:
-    image: postgres:16-alpine
-    container_name: zenplus-postgres
-    environment:
-      POSTGRES_DB: zenplus
-      POSTGRES_USER: zenplus
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-zenplus_dev}
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./scripts/init-postgres.sql:/docker-entrypoint-initdb.d/01-init.sql
-      - ./scripts/seed-devices.sql:/docker-entrypoint-initdb.d/02-seed.sql
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U zenplus"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
   clickhouse:
     image: clickhouse/clickhouse-server:24-alpine
     container_name: zenplus-clickhouse
@@ -31,106 +11,23 @@ services:
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse_dev}
     ports:
-      - "8123:8123"
-      - "9000:9000"
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
     volumes:
       - clickhouse_data:/var/lib/clickhouse
       - ./scripts/init-clickhouse.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
       test: ["CMD", "clickhouse-client", "--password", "${CLICKHOUSE_PASSWORD:-clickhouse_dev}", "--query", "SELECT 1"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 15s
     restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    container_name: zenplus-redis
-    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_dev}
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_dev}", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-  # ─── Application ───
-  poller:
-    build:
-      context: ./poller
-      dockerfile: Dockerfile
-    container_name: zenplus-poller
-    cap_add:
-      - NET_RAW
-    depends_on:
-      postgres:
-        condition: service_healthy
-      clickhouse:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: zenplus
-      POSTGRES_USER: zenplus
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-zenplus_dev}
-      CLICKHOUSE_HOST: clickhouse
-      CLICKHOUSE_PORT: 9000
-      CLICKHOUSE_DB: zenplus
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse_dev}
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:-redis_dev}
-      POLLER_ID: ${POLLER_ID:-poller-01}
-    ports:
-      - "8081:8081"
-    restart: unless-stopped
-
-  server:
-    build:
-      context: ./server
-      dockerfile: Dockerfile
-    container_name: zenplus-server
-    depends_on:
-      postgres:
-        condition: service_healthy
-      clickhouse:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: postgresql+asyncpg://zenplus:${POSTGRES_PASSWORD:-zenplus_dev}@postgres:5432/zenplus
-      CLICKHOUSE_HOST: clickhouse
-      CLICKHOUSE_PORT: 8123
-      CLICKHOUSE_DB: zenplus
-      CLICKHOUSE_USER: default
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse_dev}
-      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_dev}@redis:6379/0
-      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-in-production}
-      API_HOST: 0.0.0.0
-      API_PORT: 8000
-    ports:
-      - "8000:8000"
-    restart: unless-stopped
-
-  dashboard:
-    build:
-      context: ./dashboard
-      dockerfile: Dockerfile
-    container_name: zenplus-dashboard
-    depends_on:
-      - server
-    ports:
-      - "3000:80"
-    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
-  postgres_data:
   clickhouse_data:
-  redis_data:

@@ -62,8 +62,17 @@ func main() {
 	defer redisStore.Close()
 	sugar.Info("Connected to Redis")
 
-	// Create ping engine
-	engine, err := pinger.NewEngine(cfg, pgStore, chStore, redisStore, sugar)
+	// Create ping engine (pgStore implements all interfaces)
+	engine, err := pinger.NewEngine(
+		cfg,
+		pgStore,    // DeviceLoader
+		chStore,    // MetricWriter
+		redisStore, // EventPublisher
+		pgStore,    // ServiceCheckLoader
+		chStore,    // ServiceMetricWriter
+		redisStore, // ServiceEventPublisher
+		sugar,
+	)
 	if err != nil {
 		sugar.Fatalf("Failed to create ping engine: %v", err)
 	}

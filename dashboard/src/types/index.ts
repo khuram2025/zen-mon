@@ -101,3 +101,63 @@ export interface LoginResponse {
   expires_in: number
   user: User
 }
+
+export type ServiceCheckType = 'http' | 'tcp' | 'tls'
+export type ServiceStatus = 'up' | 'down' | 'degraded' | 'warning' | 'unknown'
+
+export interface ServiceCheck {
+  id: string
+  device_id: string | null
+  device_hostname: string | null
+  name: string
+  check_type: ServiceCheckType
+  enabled: boolean
+  target_host: string
+  target_port: number | null
+  target_url: string | null
+  http_method: string
+  http_expected_status: number
+  http_content_match: string | null
+  http_follow_redirects: boolean
+  tls_warn_days: number
+  tls_critical_days: number
+  check_interval: number
+  timeout: number
+  status: ServiceStatus
+  last_check_at: string | null
+  last_response_ms: number | null
+  last_error: string | null
+  tls_expiry_date: string | null
+  tls_days_remaining: number | null
+  tls_issuer: string | null
+  tls_subject: string | null
+  description: string | null
+  created_at: string
+  updated_at: string | null
+}
+
+export interface ServiceCheckSummary {
+  total: number
+  up: number
+  down: number
+  warning: number
+  degraded: number
+  unknown: number
+}
+
+export interface ServiceMetricPoint {
+  timestamp: string
+  response_ms: number | null
+  is_up: boolean | null
+  status_code: number | null
+  tls_days_remaining: number | null
+  error_message: string | null
+}
+
+export interface ServiceMetricResponse {
+  service_check_id: string
+  granularity: string
+  from_time: string
+  to_time: string
+  points: ServiceMetricPoint[]
+}
