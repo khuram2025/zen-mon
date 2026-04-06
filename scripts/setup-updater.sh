@@ -17,14 +17,13 @@ set -e
 
 ZENPLUS_DIR="/opt/zenplus"
 VENV="${ZENPLUS_DIR}/venv"
-RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+RED='\033[0;31m'
 NC='\033[0m'
 
 log()  { echo -e "${GREEN}[setup]${NC} $1"; }
 warn() { echo -e "${YELLOW}[setup]${NC} $1"; }
-err()  { echo -e "${RED}[setup]${NC} $1"; }
 
 echo ""
 echo "============================================"
@@ -32,26 +31,21 @@ echo "  ZenPlus OTA Updater Setup"
 echo "============================================"
 echo ""
 
-# ─── 1. Install Python dependencies ──────────────────────────────────────────
+# ─── 1. Python dependencies ──────────────────────────────────────────────────
 log "Checking Python dependencies ..."
 if [ -f "${VENV}/bin/pip" ]; then
-    "${VENV}/bin/pip" install -q cryptography httpx 2>/dev/null
+    "${VENV}/bin/pip" install -q cryptography httpx openpyxl 2>/dev/null
+    if [ -f "${ZENPLUS_DIR}/server/requirements.txt" ]; then
+        "${VENV}/bin/pip" install -q -r "${ZENPLUS_DIR}/server/requirements.txt" 2>/dev/null
+    fi
     log "Python deps OK"
-else
-    err "Virtual env not found at ${VENV}. Skipping pip install."
 fi
 
-# ─── 2. Install pip requirements if requirements.txt changed ──────────────────
-if [ -f "${ZENPLUS_DIR}/server/requirements.txt" ]; then
-    log "Installing server requirements ..."
-    "${VENV}/bin/pip" install -q -r "${ZENPLUS_DIR}/server/requirements.txt" 2>/dev/null
-fi
-
-# ─── 3. Create updater directories ───────────────────────────────────────────
+# ─── 2. Create updater directories ───────────────────────────────────────────
 log "Creating updater directories ..."
 mkdir -p "${ZENPLUS_DIR}/updater/"{config,logs,backups,keys}
 
-# ─── 4. Create default agent.conf if missing ─────────────────────────────────
+# ─── 3. Default agent.conf if missing ────────────────────────────────────────
 AGENT_CONF="${ZENPLUS_DIR}/updater/config/agent.conf"
 if [ ! -f "${AGENT_CONF}" ]; then
     log "Creating default agent.conf ..."
@@ -85,88 +79,86 @@ log_rotate_count = 5
 CONF
     chmod 600 "${AGENT_CONF}"
 else
-    log "agent.conf already exists, keeping current credentials"
+    log "agent.conf exists, keeping credentials"
 fi
 
-# ─── 5. Install systemd units ────────────────────────────────────────────────
+# ─── 4. Install systemd units ────────────────────────────────────────────────
 log "Installing systemd units ..."
 cp "${ZENPLUS_DIR}/updater/systemd/zenplus-updater.service" /etc/systemd/system/
 cp "${ZENPLUS_DIR}/updater/systemd/zenplus-updater.timer" /etc/systemd/system/
 
-# ─── 6. Install polkit rule ──────────────────────────────────────────────────
+# ─── 5. Install polkit rule (detect version) ─────────────────────────────────
 log "Installing polkit rule ..."
-mkdir -p /etc/polkit-1/rules.d
-cp "${ZENPLUS_DIR}/updater/polkit/50-zenplus-updater.rules" /etc/polkit-1/rules.d/
+POLKIT_VER=$(pkaction --version 2>/dev/null | grep -oP '[\d.]+' || echo "0.0")
+POLKIT_MINOR=$(echo "$POLKIT_VER" | cut -d. -f2)
 
-# ─── 7. Fix NoNewPrivileges on zenplus-api ────────────────────────────────────
+if [ "${POLKIT_MINOR:-0}" -ge 106 ] 2>/dev/null; then
+    mkdir -p /etc/polkit-1/rules.d
+    cp "${ZENPLUS_DIR}/updater/polkit/50-zenplus-updater.rules" /etc/polkit-1/rules.d/
+    log "Installed .rules (polkit >= 0.106)"
+else
+    mkdir -p /etc/polkit-1/localauthority/50-local.d
+    cp "${ZENPLUS_DIR}/updater/polkit/zenplus-updater.pkla" /etc/polkit-1/localauthority/50-local.d/
+    log "Installed .pkla (polkit < 0.106)"
+fi
+systemctl restart polkit 2>/dev/null || true
+
+# ─── 6. Fix NoNewPrivileges on zenplus-api ────────────────────────────────────
 if grep -q "NoNewPrivileges=true" /etc/systemd/system/zenplus-api.service 2>/dev/null; then
     log "Fixing NoNewPrivileges on zenplus-api ..."
     sed -i 's/NoNewPrivileges=true/NoNewPrivileges=false/' /etc/systemd/system/zenplus-api.service
-    RESTART_API=1
 fi
 
-# ─── 8. Reload systemd and enable timer ──────────────────────────────────────
+# ─── 7. Reload systemd and enable timer ──────────────────────────────────────
 log "Reloading systemd ..."
 systemctl daemon-reload
 systemctl enable zenplus-updater.timer
 systemctl restart zenplus-updater.timer
 
-# ─── 9. Rebuild dashboard ────────────────────────────────────────────────────
-DASHBOARD_DIR="${ZENPLUS_DIR}/dashboard"
-if [ -f "${DASHBOARD_DIR}/package.json" ]; then
+# ─── 8. Rebuild dashboard ────────────────────────────────────────────────────
+if [ -f "${ZENPLUS_DIR}/dashboard/package.json" ]; then
     log "Rebuilding dashboard ..."
-    cd "${DASHBOARD_DIR}"
+    cd "${ZENPLUS_DIR}/dashboard"
     npm install --silent 2>/dev/null
     npm run build 2>/dev/null
-    log "Dashboard built"
     cd "${ZENPLUS_DIR}"
+    log "Dashboard built"
 fi
 
-# ─── 10. Restart services ────────────────────────────────────────────────────
+# ─── 9. Restart services ─────────────────────────────────────────────────────
 log "Restarting services ..."
-systemctl restart zenplus-api 2>/dev/null || warn "zenplus-api restart failed"
-systemctl restart zenplus-poller 2>/dev/null || warn "zenplus-poller restart failed"
-systemctl restart nginx 2>/dev/null || warn "nginx restart failed"
+systemctl restart zenplus-api nginx 2>/dev/null || true
+systemctl restart zenplus-poller 2>/dev/null || true
 
-if [ "${RESTART_API}" = "1" ]; then
-    sleep 1
-    systemctl restart zenplus-api 2>/dev/null
-fi
-
-# ─── 11. Verify ──────────────────────────────────────────────────────────────
+# ─── 10. Verify ──────────────────────────────────────────────────────────────
 echo ""
-log "Verifying services ..."
+log "Verifying ..."
 for svc in zenplus-api zenplus-poller nginx zenplus-updater.timer; do
-    status=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
-    if [ "$status" = "active" ] || [ "$status" = "waiting" ]; then
-        echo -e "  ${GREEN}✓${NC} $svc ($status)"
+    st=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
+    if [ "$st" = "active" ] || [ "$st" = "waiting" ]; then
+        echo -e "  ${GREEN}✓${NC} $svc"
     else
-        echo -e "  ${RED}✗${NC} $svc ($status)"
+        echo -e "  ${RED}✗${NC} $svc ($st)"
     fi
 done
 
-# Check registration
 APPLIANCE_ID=$(grep -Po '(?<=^id = ).*' "${AGENT_CONF}" 2>/dev/null || echo "")
 echo ""
 if [ -n "${APPLIANCE_ID}" ]; then
     echo -e "  ${GREEN}✓${NC} Registered: ${APPLIANCE_ID}"
 else
-    echo -e "  ${YELLOW}!${NC} Not registered — go to Settings > Updates to enter your license key"
+    echo -e "  ${YELLOW}!${NC} Not registered"
 fi
 
 echo ""
 echo "============================================"
 echo "  Setup complete!"
 echo ""
-echo "  Next steps:"
 if [ -z "${APPLIANCE_ID}" ]; then
-echo "  1. Open the dashboard in your browser"
-echo "  2. Go to Settings > Updates tab"
-echo "  3. Enter your license key and click Register"
-echo "  4. Updates will flow automatically"
+echo "  Open dashboard > Settings > Updates"
+echo "  Enter your license key to register"
 else
-echo "  Appliance is registered and ready for OTA updates."
-echo "  Updates check every 4 hours automatically."
+echo "  Ready for OTA updates (every 4h)"
 fi
 echo "============================================"
 echo ""

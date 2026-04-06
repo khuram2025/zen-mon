@@ -1,0 +1,6 @@
+[Allow zenplus to manage updater service]
+Identity=unix-user:zenplus
+Action=org.freedesktop.systemd1.manage-units
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes
