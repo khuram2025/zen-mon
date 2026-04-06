@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import {
@@ -18,9 +18,13 @@ import {
   ChevronUp,
   FileSpreadsheet,
   Table2,
+  MapPin,
+  Cpu,
+  Network,
+  Search,
 } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
-import { useDeviceGroups } from '@/hooks/useDevices'
+import { useDeviceGroups, useDeviceLocations, useDeviceTypes } from '@/hooks/useDevices'
 
 /* ------------------------------------------------------------------ */
 /*  Types & Constants                                                  */
@@ -78,12 +82,12 @@ const REPORT_TYPES: ReportType[] = [
   },
 ]
 
-type PeriodKey = '24h' | '7d' | '30d' | 'custom'
+type PeriodKey = 'last_24h' | 'last_7d' | 'last_30d' | 'custom'
 
 const PERIODS: { key: PeriodKey; label: string }[] = [
-  { key: '24h', label: '24h' },
-  { key: '7d', label: '7 Days' },
-  { key: '30d', label: '30 Days' },
+  { key: 'last_24h', label: '24h' },
+  { key: 'last_7d', label: '7 Days' },
+  { key: 'last_30d', label: '30 Days' },
   { key: 'custom', label: 'Custom' },
 ]
 
@@ -103,22 +107,75 @@ const FORMATS: FormatOption[] = [
 ]
 
 /* ------------------------------------------------------------------ */
+/*  Chip toggle                                                        */
+/* ------------------------------------------------------------------ */
+
+function ChipToggle({
+  items,
+  selected,
+  onToggle,
+}: {
+  items: string[]
+  selected: string[]
+  onToggle: (item: string) => void
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {items.map((item) => {
+        const checked = selected.includes(item)
+        return (
+          <button
+            key={item}
+            type="button"
+            onClick={() => onToggle(item)}
+            className={cn(
+              'flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-all',
+              checked
+                ? 'border-[var(--accent,#6366F1)]/40 bg-[var(--accent,#6366F1)]/10 text-[var(--accent,#6366F1)]'
+                : 'border-[var(--bg-elevated,#2D3140)] text-[var(--text-secondary,#9BA1B0)] hover:bg-[var(--bg-tertiary,#242832)]',
+            )}
+          >
+            <span
+              className={cn(
+                'flex h-3 w-3 shrink-0 items-center justify-center rounded-sm border transition-colors',
+                checked
+                  ? 'border-transparent bg-[var(--accent,#6366F1)]'
+                  : 'border-[var(--bg-elevated,#2D3140)]',
+              )}
+            >
+              {checked && <Check className="h-2 w-2 text-white" strokeWidth={3} />}
+            </span>
+            {item}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
 /*  Component                                                          */
 /* ------------------------------------------------------------------ */
 
 export function ReportsPage() {
   const [selectedType, setSelectedType] = useState<string | null>(null)
-  const [period, setPeriod] = useState<PeriodKey>('7d')
+  const [period, setPeriod] = useState<PeriodKey>('last_7d')
   const [fromTime, setFromTime] = useState('')
   const [toTime, setToTime] = useState('')
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [selectedGroups, setSelectedGroups] = useState<string[]>([])
+  const [selectedLocations, setSelectedLocations] = useState<string[]>([])
+  const [selectedDeviceTypes, setSelectedDeviceTypes] = useState<string[]>([])
+  const [ipInput, setIpInput] = useState('')
+  const [selectedIPs, setSelectedIPs] = useState<string[]>([])
   const [format, setFormat] = useState<ExportFormat>('pdf')
   const [generating, setGenerating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
 
   const { data: deviceGroups = [] } = useDeviceGroups()
+  const { data: locations = [] } = useDeviceLocations()
+  const { data: deviceTypes = [] } = useDeviceTypes()
 
   useQuery({
     queryKey: ['report-types'],
@@ -127,11 +184,57 @@ export function ReportsPage() {
 
   const activeReport = REPORT_TYPES.find((r) => r.key === selectedType)
 
-  function toggleGroup(id: string) {
-    setSelectedGroups((prev) =>
-      prev.includes(id) ? prev.filter((g) => g !== id) : [...prev, id],
-    )
+  function toggle<T extends string>(setter: React.Dispatch<React.SetStateAction<T[]>>) {
+    return (item: T) =>
+      setter((prev) =>
+        prev.includes(item) ? prev.filter((g) => g !== item) : [...prev, item],
+      )
   }
+
+  const totalFilters =
+    selectedGroups.length + selectedLocations.length + selectedDeviceTypes.length + selectedIPs.length
+
+  function clearAllFilters() {
+    setSelectedGroups([])
+    setSelectedLocations([])
+    setSelectedDeviceTypes([])
+    setSelectedIPs([])
+    setIpInput('')
+  }
+
+  function addIP() {
+    const trimmed = ipInput.trim()
+    if (trimmed && !selectedIPs.includes(trimmed)) {
+      setSelectedIPs((prev) => [...prev, trimmed])
+    }
+    setIpInput('')
+  }
+
+  function removeIP(ip: string) {
+    setSelectedIPs((prev) => prev.filter((i) => i !== ip))
+  }
+
+  // Resolve device_ids from IPs — we pass them as device_ids in the payload
+  // Actually, the backend filters by device_ids (UUIDs). For IP filtering,
+  // we need to use the devices API to resolve IPs to IDs, or better: add
+  // the IPs as a separate field. But since the backend _fetch_devices already
+  // queries by id/group/location/device_type, we can add IP filtering too.
+  // For now, we'll pass IPs in device_ids field — actually let's handle it
+  // differently: we fetch all devices matching the IP and resolve their IDs.
+
+  // We'll use the existing useDevices to get a lightweight list.
+  const { data: allDevicesResponse } = useQuery({
+    queryKey: ['devices-for-filter'],
+    queryFn: () => api.get<{ items: Array<{ id: string; ip_address: string }> }>('/devices?limit=5000'),
+    staleTime: 60_000,
+  })
+
+  const resolvedDeviceIdsFromIPs = useMemo(() => {
+    if (selectedIPs.length === 0 || !allDevicesResponse?.items) return undefined
+    return allDevicesResponse.items
+      .filter((d) => selectedIPs.includes(d.ip_address))
+      .map((d) => d.id)
+  }, [selectedIPs, allDevicesResponse])
 
   async function handleGenerate() {
     if (!selectedType) return
@@ -154,8 +257,11 @@ export function ReportsPage() {
         payload.from_time = fromTime
         payload.to_time = toTime
       }
-      if (selectedGroups.length > 0) {
-        payload.group_ids = selectedGroups
+      if (selectedGroups.length > 0) payload.group_ids = selectedGroups
+      if (selectedLocations.length > 0) payload.locations = selectedLocations
+      if (selectedDeviceTypes.length > 0) payload.device_types = selectedDeviceTypes
+      if (resolvedDeviceIdsFromIPs && resolvedDeviceIdsFromIPs.length > 0) {
+        payload.device_ids = resolvedDeviceIdsFromIPs
       }
 
       const token = localStorage.getItem('token')
@@ -177,7 +283,6 @@ export function ReportsPage() {
       const url = window.URL.createObjectURL(blob)
       const anchor = document.createElement('a')
       anchor.href = url
-
       const ext = format === 'excel' ? 'xlsx' : format
       anchor.download = `${selectedType}_report_${new Date().toISOString().slice(0, 10)}.${ext}`
       document.body.appendChild(anchor)
@@ -221,10 +326,7 @@ export function ReportsPage() {
               >
                 Reports
               </h1>
-              <p
-                className="text-xs"
-                style={{ color: 'var(--text-muted, #5F6578)' }}
-              >
+              <p className="text-xs" style={{ color: 'var(--text-muted, #5F6578)' }}>
                 Generate & export infrastructure reports
               </p>
             </div>
@@ -234,10 +336,10 @@ export function ReportsPage() {
         {/* ---- Main Grid: 2-column layout ----------------------------- */}
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1fr_340px]">
 
-          {/* ---- Left: Report Type Selection + Config ------------------- */}
+          {/* ---- Left Column ------------------------------------------- */}
           <div className="space-y-5">
 
-            {/* Report Type Cards - compact horizontal list */}
+            {/* Report Type Cards */}
             <section>
               <h2
                 className="mb-3 text-[11px] font-semibold uppercase tracking-widest"
@@ -269,25 +371,14 @@ export function ReportsPage() {
                           : 'var(--bg-secondary, #1A1D27)',
                       }}
                     >
-                      <div
-                        className={cn(
-                          'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors',
-                          rt.accentBg,
-                        )}
-                      >
+                      <div className={cn('flex h-9 w-9 shrink-0 items-center justify-center rounded-lg', rt.accentBg)}>
                         <Icon className={cn('h-4 w-4', rt.accent)} />
                       </div>
                       <div className="min-w-0 flex-1">
-                        <div
-                          className="text-[13px] font-semibold"
-                          style={{ color: 'var(--text-primary, #E8EAED)' }}
-                        >
+                        <div className="text-[13px] font-semibold" style={{ color: 'var(--text-primary, #E8EAED)' }}>
                           {rt.label}
                         </div>
-                        <div
-                          className="truncate text-[11px]"
-                          style={{ color: 'var(--text-secondary, #9BA1B0)' }}
-                        >
+                        <div className="truncate text-[11px]" style={{ color: 'var(--text-secondary, #9BA1B0)' }}>
                           {rt.shortDesc}
                         </div>
                       </div>
@@ -302,7 +393,7 @@ export function ReportsPage() {
               </div>
             </section>
 
-            {/* Filters - collapsible */}
+            {/* ---- Filters Panel (collapsible) --------------------------- */}
             <section
               className="rounded-xl border"
               style={{
@@ -316,79 +407,149 @@ export function ReportsPage() {
                 style={{ color: 'var(--text-secondary, #9BA1B0)' }}
               >
                 <Filter className="h-3.5 w-3.5" />
-                <span>Device Group Filters</span>
-                {selectedGroups.length > 0 && (
+                <span>Filters</span>
+                {totalFilters > 0 && (
                   <span
-                    className="inline-flex h-4.5 min-w-[18px] items-center justify-center rounded-full px-1.5 text-[10px] font-bold text-white"
+                    className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full px-1.5 text-[10px] font-bold text-white"
                     style={{ background: 'var(--accent, #6366F1)' }}
                   >
-                    {selectedGroups.length}
+                    {totalFilters}
                   </span>
                 )}
                 <span className="ml-auto">
-                  {filtersOpen ? (
-                    <ChevronUp className="h-3.5 w-3.5" />
-                  ) : (
-                    <ChevronDown className="h-3.5 w-3.5" />
-                  )}
+                  {filtersOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
                 </span>
               </button>
 
               {filtersOpen && (
                 <div
-                  className="border-t px-4 pb-4 pt-3"
+                  className="space-y-4 border-t px-4 pb-4 pt-3"
                   style={{ borderColor: 'var(--bg-tertiary, #242832)' }}
                 >
-                  {deviceGroups.length === 0 ? (
-                    <p
-                      className="text-xs italic"
-                      style={{ color: 'var(--text-muted, #5F6578)' }}
-                    >
-                      No device groups available. All devices will be included.
-                    </p>
-                  ) : (
-                    <div className="flex flex-wrap gap-2">
-                      {deviceGroups.map((group: { id: string; name: string }) => {
-                        const checked = selectedGroups.includes(group.id)
-                        return (
-                          <label
-                            key={group.id}
-                            className={cn(
-                              'flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition-all',
-                              checked
-                                ? 'border-[var(--accent,#6366F1)]/40 bg-[var(--accent,#6366F1)]/10'
-                                : 'border-[var(--bg-elevated,#2D3140)] hover:border-[var(--bg-elevated,#2D3140)] hover:bg-[var(--bg-tertiary,#242832)]',
-                            )}
-                            style={{ color: checked ? 'var(--accent, #6366F1)' : 'var(--text-secondary, #9BA1B0)' }}
-                          >
-                            <span
+
+                  {/* Device Groups */}
+                  {deviceGroups.length > 0 && (
+                    <div>
+                      <div className="mb-2 flex items-center gap-1.5">
+                        <Network className="h-3 w-3" style={{ color: 'var(--text-muted, #5F6578)' }} />
+                        <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted, #5F6578)' }}>
+                          Device Groups
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {deviceGroups.map((group: { id: string; name: string }) => {
+                          const checked = selectedGroups.includes(group.id)
+                          return (
+                            <button
+                              key={group.id}
+                              type="button"
+                              onClick={() => toggle(setSelectedGroups)(group.id)}
                               className={cn(
-                                'flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border transition-colors',
+                                'flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium transition-all',
                                 checked
-                                  ? 'border-transparent bg-[var(--accent,#6366F1)]'
-                                  : 'border-[var(--bg-elevated,#2D3140)]',
+                                  ? 'border-[var(--accent,#6366F1)]/40 bg-[var(--accent,#6366F1)]/10 text-[var(--accent,#6366F1)]'
+                                  : 'border-[var(--bg-elevated,#2D3140)] text-[var(--text-secondary,#9BA1B0)] hover:bg-[var(--bg-tertiary,#242832)]',
                               )}
                             >
-                              {checked && <Check className="h-2.5 w-2.5 text-white" strokeWidth={3} />}
-                            </span>
-                            <input
-                              type="checkbox"
-                              className="sr-only"
-                              checked={checked}
-                              onChange={() => toggleGroup(group.id)}
-                            />
-                            {group.name}
-                          </label>
-                        )
-                      })}
+                              <span
+                                className={cn(
+                                  'flex h-3 w-3 shrink-0 items-center justify-center rounded-sm border transition-colors',
+                                  checked ? 'border-transparent bg-[var(--accent,#6366F1)]' : 'border-[var(--bg-elevated,#2D3140)]',
+                                )}
+                              >
+                                {checked && <Check className="h-2 w-2 text-white" strokeWidth={3} />}
+                              </span>
+                              {group.name}
+                            </button>
+                          )
+                        })}
+                      </div>
                     </div>
                   )}
-                  {selectedGroups.length > 0 && (
+
+                  {/* Locations */}
+                  {locations.length > 0 && (
+                    <div>
+                      <div className="mb-2 flex items-center gap-1.5">
+                        <MapPin className="h-3 w-3" style={{ color: 'var(--text-muted, #5F6578)' }} />
+                        <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted, #5F6578)' }}>
+                          Location
+                        </span>
+                      </div>
+                      <ChipToggle items={locations} selected={selectedLocations} onToggle={toggle(setSelectedLocations)} />
+                    </div>
+                  )}
+
+                  {/* Device Types */}
+                  {deviceTypes.length > 0 && (
+                    <div>
+                      <div className="mb-2 flex items-center gap-1.5">
+                        <Cpu className="h-3 w-3" style={{ color: 'var(--text-muted, #5F6578)' }} />
+                        <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted, #5F6578)' }}>
+                          Device Type
+                        </span>
+                      </div>
+                      <ChipToggle items={deviceTypes} selected={selectedDeviceTypes} onToggle={toggle(setSelectedDeviceTypes)} />
+                    </div>
+                  )}
+
+                  {/* Device IPs */}
+                  <div>
+                    <div className="mb-2 flex items-center gap-1.5">
+                      <Search className="h-3 w-3" style={{ color: 'var(--text-muted, #5F6578)' }} />
+                      <span className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted, #5F6578)' }}>
+                        Device IP Address
+                      </span>
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={ipInput}
+                        onChange={(e) => setIpInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') { e.preventDefault(); addIP() }
+                        }}
+                        placeholder="e.g. 192.168.1.1"
+                        className="min-w-0 flex-1 rounded-md border px-2.5 py-1.5 text-[11px] outline-none placeholder:text-[var(--text-muted,#5F6578)] focus:ring-1 focus:ring-[var(--accent,#6366F1)]"
+                        style={{
+                          background: 'var(--bg-tertiary, #242832)',
+                          borderColor: 'var(--bg-elevated, #2D3140)',
+                          color: 'var(--text-primary, #E8EAED)',
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={addIP}
+                        className="rounded-md px-3 py-1.5 text-[11px] font-medium text-white transition-colors hover:opacity-90"
+                        style={{ background: 'var(--accent, #6366F1)' }}
+                      >
+                        Add
+                      </button>
+                    </div>
+                    {selectedIPs.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {selectedIPs.map((ip) => (
+                          <span
+                            key={ip}
+                            className="inline-flex items-center gap-1 rounded-md border border-[var(--accent,#6366F1)]/40 bg-[var(--accent,#6366F1)]/10 px-2 py-0.5 text-[11px] font-medium text-[var(--accent,#6366F1)]"
+                          >
+                            {ip}
+                            <button type="button" onClick={() => removeIP(ip)} className="ml-0.5 hover:text-white">
+                              <X className="h-2.5 w-2.5" />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Clear All */}
+                  {totalFilters > 0 && (
                     <button
-                      onClick={() => setSelectedGroups([])}
-                      className="mt-2 text-[11px] font-medium text-[var(--text-muted,#5F6578)] transition-colors hover:text-[var(--text-primary,#E8EAED)]"
+                      onClick={clearAllFilters}
+                      className="text-[11px] font-medium text-[var(--text-muted,#5F6578)] transition-colors hover:text-[var(--text-primary,#E8EAED)]"
                     >
-                      Clear all
+                      Clear all filters
                     </button>
                   )}
                 </div>
@@ -396,16 +557,13 @@ export function ReportsPage() {
             </section>
           </div>
 
-          {/* ---- Right: Configuration Panel ------------------------------ */}
+          {/* ---- Right Column ------------------------------------------- */}
           <div className="space-y-4">
 
             {/* Period Selection */}
             <section
               className="rounded-xl border p-4"
-              style={{
-                background: 'var(--bg-secondary, #1A1D27)',
-                borderColor: 'var(--bg-tertiary, #242832)',
-              }}
+              style={{ background: 'var(--bg-secondary, #1A1D27)', borderColor: 'var(--bg-tertiary, #242832)' }}
             >
               <label
                 className="mb-2.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest"
@@ -423,17 +581,12 @@ export function ReportsPage() {
                       onClick={() => setPeriod(p.key)}
                       className={cn(
                         'flex-1 rounded-lg px-2 py-1.5 text-[12px] font-medium transition-all duration-150',
-                        active
-                          ? 'text-white shadow-sm'
-                          : 'hover:text-[var(--text-primary,#E8EAED)]',
+                        active ? 'text-white shadow-sm' : 'hover:text-[var(--text-primary,#E8EAED)]',
                       )}
                       style={
                         active
                           ? { background: 'var(--accent, #6366F1)' }
-                          : {
-                              background: 'var(--bg-tertiary, #242832)',
-                              color: 'var(--text-secondary, #9BA1B0)',
-                            }
+                          : { background: 'var(--bg-tertiary, #242832)', color: 'var(--text-secondary, #9BA1B0)' }
                       }
                     >
                       {p.label}
@@ -441,45 +594,26 @@ export function ReportsPage() {
                   )
                 })}
               </div>
-
               {period === 'custom' && (
                 <div className="mt-3 grid grid-cols-2 gap-2">
                   <div>
-                    <label
-                      className="mb-1 block text-[10px] font-medium uppercase"
-                      style={{ color: 'var(--text-muted, #5F6578)' }}
-                    >
-                      From
-                    </label>
+                    <label className="mb-1 block text-[10px] font-medium uppercase" style={{ color: 'var(--text-muted, #5F6578)' }}>From</label>
                     <input
                       type="date"
                       value={fromTime}
                       onChange={(e) => setFromTime(e.target.value)}
                       className="w-full rounded-lg border px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-[var(--accent,#6366F1)]"
-                      style={{
-                        background: 'var(--bg-tertiary, #242832)',
-                        borderColor: 'var(--bg-elevated, #2D3140)',
-                        color: 'var(--text-primary, #E8EAED)',
-                      }}
+                      style={{ background: 'var(--bg-tertiary, #242832)', borderColor: 'var(--bg-elevated, #2D3140)', color: 'var(--text-primary, #E8EAED)' }}
                     />
                   </div>
                   <div>
-                    <label
-                      className="mb-1 block text-[10px] font-medium uppercase"
-                      style={{ color: 'var(--text-muted, #5F6578)' }}
-                    >
-                      To
-                    </label>
+                    <label className="mb-1 block text-[10px] font-medium uppercase" style={{ color: 'var(--text-muted, #5F6578)' }}>To</label>
                     <input
                       type="date"
                       value={toTime}
                       onChange={(e) => setToTime(e.target.value)}
                       className="w-full rounded-lg border px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-[var(--accent,#6366F1)]"
-                      style={{
-                        background: 'var(--bg-tertiary, #242832)',
-                        borderColor: 'var(--bg-elevated, #2D3140)',
-                        color: 'var(--text-primary, #E8EAED)',
-                      }}
+                      style={{ background: 'var(--bg-tertiary, #242832)', borderColor: 'var(--bg-elevated, #2D3140)', color: 'var(--text-primary, #E8EAED)' }}
                     />
                   </div>
                 </div>
@@ -489,10 +623,7 @@ export function ReportsPage() {
             {/* Export Format Selection */}
             <section
               className="rounded-xl border p-4"
-              style={{
-                background: 'var(--bg-secondary, #1A1D27)',
-                borderColor: 'var(--bg-tertiary, #242832)',
-              }}
+              style={{ background: 'var(--bg-secondary, #1A1D27)', borderColor: 'var(--bg-tertiary, #242832)' }}
             >
               <label
                 className="mb-2.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-widest"
@@ -515,36 +646,16 @@ export function ReportsPage() {
                           ? 'border-[var(--accent,#6366F1)]/40 shadow-[0_0_0_1px_rgba(99,102,241,0.25)]'
                           : 'border-transparent hover:bg-[var(--bg-tertiary,#242832)]',
                       )}
-                      style={{
-                        background: active
-                          ? 'rgba(99,102,241,0.08)'
-                          : 'transparent',
-                      }}
+                      style={{ background: active ? 'rgba(99,102,241,0.08)' : 'transparent' }}
                     >
-                      <div
-                        className={cn(
-                          'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg',
-                          active ? 'bg-[var(--accent,#6366F1)]/20' : 'bg-[var(--bg-tertiary,#242832)]',
-                        )}
-                      >
-                        <Icon
-                          className="h-4 w-4"
-                          style={{ color: active ? 'var(--accent, #6366F1)' : 'var(--text-muted, #5F6578)' }}
-                        />
+                      <div className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-lg', active ? 'bg-[var(--accent,#6366F1)]/20' : 'bg-[var(--bg-tertiary,#242832)]')}>
+                        <Icon className="h-4 w-4" style={{ color: active ? 'var(--accent, #6366F1)' : 'var(--text-muted, #5F6578)' }} />
                       </div>
                       <div className="min-w-0 flex-1">
-                        <div
-                          className="text-[12px] font-semibold"
-                          style={{ color: active ? 'var(--accent, #6366F1)' : 'var(--text-primary, #E8EAED)' }}
-                        >
+                        <div className="text-[12px] font-semibold" style={{ color: active ? 'var(--accent, #6366F1)' : 'var(--text-primary, #E8EAED)' }}>
                           {f.label}
                         </div>
-                        <div
-                          className="text-[10px]"
-                          style={{ color: 'var(--text-muted, #5F6578)' }}
-                        >
-                          {f.desc}
-                        </div>
+                        <div className="text-[10px]" style={{ color: 'var(--text-muted, #5F6578)' }}>{f.desc}</div>
                       </div>
                       {active && (
                         <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-[var(--accent,#6366F1)]">
@@ -557,9 +668,45 @@ export function ReportsPage() {
               </div>
             </section>
 
+            {/* Active Filters Summary */}
+            {totalFilters > 0 && (
+              <div
+                className="rounded-lg border px-3 py-2.5"
+                style={{ background: 'var(--bg-secondary, #1A1D27)', borderColor: 'var(--bg-tertiary, #242832)' }}
+              >
+                <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted, #5F6578)' }}>
+                  Active Filters
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {selectedGroups.map((gid) => {
+                    const g = deviceGroups.find((gr: { id: string; name: string }) => gr.id === gid)
+                    return (
+                      <span key={`g-${gid}`} className="rounded bg-indigo-500/15 px-1.5 py-0.5 text-[10px] font-medium text-indigo-400">
+                        {g?.name || gid}
+                      </span>
+                    )
+                  })}
+                  {selectedLocations.map((l) => (
+                    <span key={`l-${l}`} className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-400">
+                      {l}
+                    </span>
+                  ))}
+                  {selectedDeviceTypes.map((t) => (
+                    <span key={`t-${t}`} className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-400">
+                      {t}
+                    </span>
+                  ))}
+                  {selectedIPs.map((ip) => (
+                    <span key={`ip-${ip}`} className="rounded bg-cyan-500/15 px-1.5 py-0.5 text-[10px] font-medium text-cyan-400">
+                      {ip}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Generate Button + Status */}
             <div>
-              {/* Error */}
               {error && (
                 <div className="mb-3 flex items-start gap-2.5 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3.5 py-3">
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
@@ -567,16 +714,12 @@ export function ReportsPage() {
                     <p className="text-[12px] font-medium text-rose-300">Generation failed</p>
                     <p className="mt-0.5 truncate text-[11px] text-rose-400/80">{error}</p>
                   </div>
-                  <button
-                    onClick={() => setError(null)}
-                    className="text-rose-400 transition-colors hover:text-rose-300"
-                  >
+                  <button onClick={() => setError(null)} className="text-rose-400 transition-colors hover:text-rose-300">
                     <X className="h-3.5 w-3.5" />
                   </button>
                 </div>
               )}
 
-              {/* Success */}
               {success && (
                 <div className="mb-3 flex items-center gap-2.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3.5 py-3">
                   <Check className="h-4 w-4 shrink-0 text-emerald-400" />
@@ -598,14 +741,12 @@ export function ReportsPage() {
                       : 'hover:opacity-90 active:scale-[0.995]',
                 )}
                 style={{
-                  background:
-                    generating || !selectedType
-                      ? 'var(--bg-elevated, #2D3140)'
-                      : 'linear-gradient(135deg, var(--accent, #6366F1), var(--accent-hover, #818CF8))',
-                  boxShadow:
-                    generating || !selectedType
-                      ? 'none'
-                      : '0 4px 20px -4px rgba(99,102,241,0.4)',
+                  background: generating || !selectedType
+                    ? 'var(--bg-elevated, #2D3140)'
+                    : 'linear-gradient(135deg, var(--accent, #6366F1), var(--accent-hover, #818CF8))',
+                  boxShadow: generating || !selectedType
+                    ? 'none'
+                    : '0 4px 20px -4px rgba(99,102,241,0.4)',
                 }}
               >
                 {generating ? (
@@ -616,21 +757,15 @@ export function ReportsPage() {
                 ) : (
                   <>
                     <Download className="h-4 w-4" />
-                    <span>
-                      {activeReport
-                        ? `Generate ${activeFormat.label}`
-                        : 'Select a report type'}
-                    </span>
+                    <span>{activeReport ? `Generate ${activeFormat.label}` : 'Select a report type'}</span>
                   </>
                 )}
               </button>
 
               {activeReport && (
-                <p
-                  className="mt-2 text-center text-[10px]"
-                  style={{ color: 'var(--text-muted, #5F6578)' }}
-                >
+                <p className="mt-2 text-center text-[10px]" style={{ color: 'var(--text-muted, #5F6578)' }}>
                   {activeReport.label} &middot; {PERIODS.find((p) => p.key === period)?.label} &middot; {activeFormat.label}
+                  {totalFilters > 0 && ` \u00b7 ${totalFilters} filter${totalFilters > 1 ? 's' : ''}`}
                 </p>
               )}
             </div>

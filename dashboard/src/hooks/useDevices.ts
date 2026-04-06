@@ -57,3 +57,10 @@ export function useDeviceLocations() {
     queryFn: () => api.get<string[]>('/devices/locations'),
   })
 }
+
+export function useDeviceTypes() {
+  return useQuery({
+    queryKey: ['device-types'],
+    queryFn: () => api.get<string[]>('/devices/device-types'),
+  })
+}

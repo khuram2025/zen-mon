@@ -141,6 +141,8 @@ async def _collect_data(
     to_time: Optional[datetime] = None,
     device_ids: Optional[list[str]] = None,
     group_ids: Optional[list[str]] = None,
+    locations: Optional[list[str]] = None,
+    device_types: Optional[list[str]] = None,
 ) -> dict:
     """Fetch all data needed for *report_type* and return as a dict."""
 
@@ -164,7 +166,8 @@ async def _collect_data(
 
     # --- Devices ----------------------------------------------------------
     if need_devices or need_alerts:
-        devices = await _fetch_devices(db, device_ids, group_ids)
+        devices = await _fetch_devices(db, device_ids, group_ids,
+                                       locations=locations, device_types=device_types)
         data["devices"] = devices
         d_ids = [d["id"] for d in devices]
         ping_rows = _fetch_ping_metrics(start, end, d_ids)
@@ -518,11 +521,13 @@ async def generate_excel_report(
     to_time: Optional[datetime] = None,
     device_ids: Optional[list[str]] = None,
     group_ids: Optional[list[str]] = None,
+    locations: Optional[list[str]] = None,
+    device_types: Optional[list[str]] = None,
 ) -> bytes:
     """Generate a styled Excel (.xlsx) workbook and return it as bytes."""
 
     data = await _collect_data(db, report_type, period, from_time, to_time,
-                               device_ids, group_ids)
+                               device_ids, group_ids, locations, device_types)
 
     wb = Workbook()
 
@@ -551,11 +556,13 @@ async def generate_csv_report(
     to_time: Optional[datetime] = None,
     device_ids: Optional[list[str]] = None,
     group_ids: Optional[list[str]] = None,
+    locations: Optional[list[str]] = None,
+    device_types: Optional[list[str]] = None,
 ) -> bytes:
     """Generate a CSV export and return it as UTF-8 encoded bytes."""
 
     data = await _collect_data(db, report_type, period, from_time, to_time,
-                               device_ids, group_ids)
+                               device_ids, group_ids, locations, device_types)
 
     sio = io.StringIO()
     writer = csv.writer(sio)

@@ -112,6 +112,14 @@ async def list_locations(
     return await device_service.get_distinct_locations(db)
 
 
+@router.get("/device-types")
+async def list_device_types(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return await device_service.get_distinct_device_types(db)
+
+
 @router.post("/bulk-delete")
 async def bulk_delete_devices(
     data: dict,

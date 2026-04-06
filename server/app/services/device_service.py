@@ -55,6 +55,17 @@ async def get_distinct_locations(db: AsyncSession) -> list[str]:
     return [row[0] for row in result.all()]
 
 
+async def get_distinct_device_types(db: AsyncSession) -> list[str]:
+    result = await db.execute(
+        select(Device.device_type)
+        .where(Device.device_type.isnot(None))
+        .where(Device.device_type != "")
+        .distinct()
+        .order_by(Device.device_type)
+    )
+    return [row[0] for row in result.all()]
+
+
 async def bulk_delete_devices(db: AsyncSession, device_ids: list[UUID]) -> int:
     result = await db.execute(
         delete(Device).where(Device.id.in_(device_ids))

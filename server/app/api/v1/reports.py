@@ -30,6 +30,8 @@ class ReportRequest(BaseModel):
     to_time: Optional[datetime] = None
     device_ids: Optional[list[str]] = None
     group_ids: Optional[list[str]] = None
+    locations: Optional[list[str]] = None
+    device_types: Optional[list[str]] = None
     format: str = "pdf"  # pdf | excel | csv
 
 
@@ -43,16 +45,20 @@ async def generate_report_endpoint(
     ts = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
 
     try:
+        common_args = dict(
+            db=db,
+            report_type=data.report_type,
+            period=data.period,
+            from_time=data.from_time,
+            to_time=data.to_time,
+            device_ids=data.device_ids,
+            group_ids=data.group_ids,
+            locations=data.locations,
+            device_types=data.device_types,
+        )
+
         if data.format == "excel":
-            content = await generate_excel_report(
-                db=db,
-                report_type=data.report_type,
-                period=data.period,
-                from_time=data.from_time,
-                to_time=data.to_time,
-                device_ids=data.device_ids,
-                group_ids=data.group_ids,
-            )
+            content = await generate_excel_report(**common_args)
             filename = f"ZenPlus-{name}-{ts}.xlsx"
             return Response(
                 content=content,
@@ -64,15 +70,7 @@ async def generate_report_endpoint(
             )
 
         elif data.format == "csv":
-            content = await generate_csv_report(
-                db=db,
-                report_type=data.report_type,
-                period=data.period,
-                from_time=data.from_time,
-                to_time=data.to_time,
-                device_ids=data.device_ids,
-                group_ids=data.group_ids,
-            )
+            content = await generate_csv_report(**common_args)
             filename = f"ZenPlus-{name}-{ts}.csv"
             return Response(
                 content=content,
@@ -85,15 +83,7 @@ async def generate_report_endpoint(
 
         else:
             # Default: PDF
-            pdf_bytes = await generate_report(
-                db=db,
-                report_type=data.report_type,
-                period=data.period,
-                from_time=data.from_time,
-                to_time=data.to_time,
-                device_ids=data.device_ids,
-                group_ids=data.group_ids,
-            )
+            pdf_bytes = await generate_report(**common_args)
             filename = f"ZenPlus-{name}-{ts}.pdf"
             return Response(
                 content=bytes(pdf_bytes),

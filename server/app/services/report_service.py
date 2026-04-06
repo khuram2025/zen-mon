@@ -111,8 +111,15 @@ def _resolve_period(
     """Return (start, end, human-readable label)."""
     now = datetime.now(timezone.utc)
     if period == "custom" and from_time and to_time:
-        label = f"{from_time:%Y-%m-%d %H:%M} - {to_time:%Y-%m-%d %H:%M} UTC"
-        return from_time, to_time, label
+        # Ensure tz-aware; if user picked a date the time is 00:00 so
+        # extend to_time to end-of-day (23:59:59) to include the full day.
+        start = from_time.replace(tzinfo=timezone.utc) if from_time.tzinfo is None else from_time
+        end = to_time.replace(tzinfo=timezone.utc) if to_time.tzinfo is None else to_time
+        # If to_time has no meaningful time component (midnight), extend to end of day
+        if end.hour == 0 and end.minute == 0 and end.second == 0:
+            end = end.replace(hour=23, minute=59, second=59)
+        label = f"{start:%Y-%m-%d} - {end:%Y-%m-%d} UTC"
+        return start, end, label
     mapping = {
         "last_24h": (timedelta(hours=24), "Last 24 Hours"),
         "last_7d": (timedelta(days=7), "Last 7 Days"),
@@ -536,7 +543,9 @@ async def _fetch_company_info(db: AsyncSession) -> dict:
 
 def _build_device_filter_sql(device_ids: list[str] | None,
                              group_ids: list[str] | None,
-                             alias: str = "d") -> tuple[str, dict]:
+                             alias: str = "d",
+                             locations: list[str] | None = None,
+                             device_types: list[str] | None = None) -> tuple[str, dict]:
     """Build WHERE clause fragments and params for device filtering."""
     clauses = []
     params: dict = {}
@@ -546,6 +555,12 @@ def _build_device_filter_sql(device_ids: list[str] | None,
     if group_ids:
         clauses.append(f"{alias}.group_id = ANY(:group_ids)")
         params["group_ids"] = group_ids
+    if locations:
+        clauses.append(f"{alias}.location = ANY(:locations)")
+        params["locations"] = locations
+    if device_types:
+        clauses.append(f"{alias}.device_type = ANY(:device_types)")
+        params["device_types"] = device_types
     where = " AND ".join(clauses)
     return where, params
 
@@ -566,8 +581,11 @@ def _ch_service_filter(service_ids: list[str] | None) -> str:
 
 async def _fetch_devices(db: AsyncSession,
                          device_ids: list[str] | None = None,
-                         group_ids: list[str] | None = None) -> list[dict]:
-    filt, params = _build_device_filter_sql(device_ids, group_ids, "d")
+                         group_ids: list[str] | None = None,
+                         locations: list[str] | None = None,
+                         device_types: list[str] | None = None) -> list[dict]:
+    filt, params = _build_device_filter_sql(device_ids, group_ids, "d",
+                                            locations=locations, device_types=device_types)
     where = f"WHERE {filt}" if filt else ""
     q = text(f"""
         SELECT d.id, d.hostname, d.ip_address, d.device_type, d.location,
@@ -831,20 +849,21 @@ async def _build_executive_summary(pdf: ZenPlusReport, db: AsyncSession,
     top5 = sorted(problem_scores.items(), key=lambda x: x[1], reverse=True)[:5]
     if top5:
         dev_map = {str(d["id"]): d for d in devices}
-        headers = ["Hostname", "IP", "Status", "Alerts", "Downtime", "Avg RTT"]
+        headers = ["Hostname", "IP", "Status", "Uptime %", "Downtime", "Avg RTT"]
         rows = []
         for did, score in top5:
             d = dev_map.get(did, {})
+            uptime = _device_uptime_pct(ping_rows, did)
             stats = _device_rtt_stats(ping_rows, did)
             rows.append([
                 d.get("hostname", "-"),
                 d.get("ip_address", "-"),
                 (d.get("status") or "-").upper(),
-                str(device_alert_count.get(did, 0)),
+                _fmt_pct(uptime),
                 _fmt_duration(device_downtime.get(did, 0)),
                 _fmt_ms(stats["avg"]),
             ])
-        pdf.data_table(headers, rows, col_widths=[40, 30, 20, 20, 30, 30])
+        pdf.data_table(headers, rows, col_widths=[40, 30, 20, 22, 30, 30])
     else:
         pdf.muted_text("No problematic devices detected in this period.")
 
@@ -1216,6 +1235,8 @@ async def generate_report(
     to_time: datetime | None = None,
     device_ids: list[str] | None = None,
     group_ids: list[str] | None = None,
+    locations: list[str] | None = None,
+    device_types: list[str] | None = None,
 ) -> bytes:
     """Generate a professional PDF report and return the raw PDF bytes."""
 
@@ -1241,10 +1262,12 @@ async def generate_report(
     )
     pdf.alias_nb_pages()
 
-    # Resolve filtered device IDs for group-based filtering
+    # Resolve filtered device IDs from all filter criteria
     resolved_device_ids = device_ids
-    if group_ids and not device_ids:
-        devices = await _fetch_devices(db, device_ids=None, group_ids=group_ids)
+    has_filters = group_ids or locations or device_types
+    if has_filters and not device_ids:
+        devices = await _fetch_devices(db, device_ids=None, group_ids=group_ids,
+                                       locations=locations, device_types=device_types)
         resolved_device_ids = [str(d["id"]) for d in devices]
 
     # Build requested sections
