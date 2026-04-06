@@ -63,3 +63,9 @@ tmp/
 
 # ─── Compiled binaries ───
 bin/zenplus-poller
+
+# ─── Local/server files ───
+int/
+.cache/
+go/
+docker-compose.yml.bak

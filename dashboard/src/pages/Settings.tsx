@@ -50,6 +50,10 @@ import {
   Sparkles,
   CircleDot,
   Copy,
+  Download,
+  RefreshCw,
+  Server,
+  Terminal,
 } from 'lucide-react'
 import { useAuthStore } from '@/stores/authStore'
 import type { User as UserType, Role, SubscriptionInfo } from '@/types'
@@ -2751,6 +2755,400 @@ function BarChart({ className }: { className?: string }) {
 }
 
 
+// ─── Updates Tab ──────────────────────────────────────────────────────────────
+
+interface UpdateHistoryRecord {
+  version: string
+  from_version: string
+  status: string
+  changelog: string
+  severity: string
+  error: string
+  started_at: string
+  updated_at: string
+  completed_at: string
+}
+
+interface UpdateStatus {
+  current_version: string
+  installed_at: string
+  appliance_id: string
+  server_url: string
+  auto_update: boolean
+  check_interval_hours: number
+  maintenance_window_start: string
+  maintenance_window_end: string
+  last_check: string
+  next_check: string
+  timer_active: boolean
+  updater_running: boolean
+  last_update: UpdateHistoryRecord | null
+  active_update: UpdateHistoryRecord | null
+  history: UpdateHistoryRecord[]
+  recent_log: string[]
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const colors: Record<string, string> = {
+    success: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+    failed: 'bg-red-500/10 text-red-400 border-red-500/20',
+    rolled_back: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
+    downloading: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
+    applying: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
+  }
+  return (
+    <span className={cn('px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase border', colors[status] || 'bg-[var(--bg-tertiary)] text-[var(--text-muted)]')}>
+      {status.replace('_', ' ')}
+    </span>
+  )
+}
+
+function UpdatesTab({ showToast }: { showToast: (t: 'success' | 'error', m: unknown) => void }) {
+  const [checking, setChecking] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const [showLog, setShowLog] = useState(false)
+  const queryClient = useQueryClient()
+
+  const { data: status, isLoading } = useQuery<UpdateStatus>({
+    queryKey: ['update-status'],
+    queryFn: () => api.get('/system/update-status'),
+    refetchInterval: (query) => {
+      const d = query.state.data
+      return d?.updater_running || d?.active_update ? 5000 : 30000
+    },
+  })
+
+  const [config, setConfig] = useState({
+    auto_update: true,
+    check_interval_hours: 4,
+    maintenance_window_start: '',
+    maintenance_window_end: '',
+  })
+
+  useEffect(() => {
+    if (status) {
+      setConfig({
+        auto_update: status.auto_update,
+        check_interval_hours: status.check_interval_hours,
+        maintenance_window_start: status.maintenance_window_start,
+        maintenance_window_end: status.maintenance_window_end,
+      })
+    }
+  }, [status])
+
+  const handleCheckNow = async () => {
+    setChecking(true)
+    try {
+      await api.post('/system/check-update', {})
+      showToast('success', 'Update check triggered — checking for updates...')
+      setTimeout(() => queryClient.invalidateQueries({ queryKey: ['update-status'] }), 3000)
+    } catch (err) {
+      showToast('error', err)
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      await api.put('/system/update-config', config)
+      showToast('success', 'Update settings saved')
+      queryClient.invalidateQueries({ queryKey: ['update-status'] })
+    } catch (err) {
+      showToast('error', err)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const fmtDate = (d: string) => {
+    if (!d) return '—'
+    try { return new Date(d).toLocaleString() } catch { return d }
+  }
+
+  const inputCls = 'w-full bg-[var(--bg-tertiary)] text-[var(--text-primary)] px-3 py-2.5 rounded-lg border border-[var(--bg-elevated)] focus:border-[var(--accent)] focus:outline-none text-sm'
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <Loader2 className="w-6 h-6 animate-spin text-[var(--accent)]" />
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+
+      {/* Active Update Banner */}
+      {status?.active_update && (
+        <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl p-5 flex items-center gap-4">
+          <Loader2 className="w-6 h-6 animate-spin text-blue-400 flex-shrink-0" />
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-blue-300">
+              Update in progress: v{status.active_update.from_version} → v{status.active_update.version}
+            </p>
+            <p className="text-xs text-blue-400/70 mt-0.5">
+              Status: {status.active_update.status} — Started {fmtDate(status.active_update.started_at)}
+            </p>
+            {status.active_update.changelog && (
+              <p className="text-xs text-[var(--text-muted)] mt-1">{status.active_update.changelog}</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Last Update Error Banner */}
+      {status?.last_update?.status === 'failed' && (
+        <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-5">
+          <div className="flex items-start gap-3">
+            <XCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-semibold text-red-300">
+                Last update failed: v{status.last_update.from_version} → v{status.last_update.version}
+              </p>
+              <p className="text-xs text-red-400/80 mt-1 font-mono bg-red-500/5 rounded-lg p-2.5 break-all">
+                {status.last_update.error || 'Unknown error'}
+              </p>
+              <p className="text-[10px] text-[var(--text-muted)] mt-2">
+                {fmtDate(status.last_update.completed_at)}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Last Update Success Banner */}
+      {status?.last_update?.status === 'success' && (
+        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl p-4 flex items-center gap-3">
+          <CheckCircle2 className="w-5 h-5 text-emerald-400 flex-shrink-0" />
+          <div>
+            <p className="text-sm font-medium text-emerald-300">
+              Last update successful: v{status.last_update.version}
+            </p>
+            <p className="text-[10px] text-[var(--text-muted)]">{fmtDate(status.last_update.completed_at)}</p>
+          </div>
+        </div>
+      )}
+
+      {/* System Status */}
+      <div className="bg-[var(--bg-secondary)] rounded-xl border border-[var(--bg-elevated)] p-6">
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-[var(--accent)]/10 flex items-center justify-center">
+              <Server className="w-4 h-4 text-[var(--accent)]" />
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-[var(--text-primary)]">System Status</h3>
+              <p className="text-xs text-[var(--text-muted)]">Current appliance version and update agent</p>
+            </div>
+          </div>
+          <button
+            onClick={handleCheckNow}
+            disabled={checking || !!status?.active_update}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+          >
+            {checking || status?.updater_running
+              ? <Loader2 className="w-4 h-4 animate-spin" />
+              : <RefreshCw className="w-4 h-4" />}
+            {status?.updater_running ? 'Checking...' : 'Check for Updates'}
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="bg-[var(--bg-tertiary)] rounded-lg p-4">
+            <p className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] mb-1">Current Version</p>
+            <p className="text-lg font-bold text-[var(--accent)]">{status?.current_version || 'Unknown'}</p>
+            {status?.installed_at && (
+              <p className="text-[10px] text-[var(--text-muted)] mt-0.5">Installed {fmtDate(status.installed_at)}</p>
+            )}
+          </div>
+          <div className="bg-[var(--bg-tertiary)] rounded-lg p-4">
+            <p className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] mb-1">Appliance ID</p>
+            <p className="text-xs font-mono text-[var(--text-secondary)] break-all">{status?.appliance_id || 'Not registered'}</p>
+          </div>
+          <div className="bg-[var(--bg-tertiary)] rounded-lg p-4">
+            <p className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] mb-1">Update Server</p>
+            <p className="text-xs text-[var(--text-secondary)]">{status?.server_url || '—'}</p>
+            <p className="text-[10px] text-[var(--text-muted)] mt-0.5">Next check: {status?.next_check ? fmtDate(status.next_check) : '—'}</p>
+          </div>
+          <div className="bg-[var(--bg-tertiary)] rounded-lg p-4">
+            <p className="text-[10px] uppercase tracking-wider text-[var(--text-muted)] mb-1">Auto-Update Timer</p>
+            <div className="flex items-center gap-2">
+              <span className={cn('w-2 h-2 rounded-full', status?.timer_active ? 'bg-emerald-400' : 'bg-red-400')} />
+              <p className="text-sm font-medium text-[var(--text-primary)]">
+                {status?.timer_active ? `Active (every ${status.check_interval_hours}h)` : 'Inactive'}
+              </p>
+            </div>
+            {status?.last_check && (
+              <p className="text-[10px] text-[var(--text-muted)] mt-0.5">Last: {fmtDate(status.last_check)}</p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Update History */}
+      {status?.history && status.history.length > 0 && (
+        <div className="bg-[var(--bg-secondary)] rounded-xl border border-[var(--bg-elevated)] p-6">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-8 h-8 rounded-lg bg-purple-500/10 flex items-center justify-center">
+              <Clock className="w-4 h-4 text-purple-400" />
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-[var(--text-primary)]">Update History</h3>
+              <p className="text-xs text-[var(--text-muted)]">Recent update attempts and results</p>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            {status.history.map((r, i) => (
+              <div key={i} className="flex items-center gap-4 bg-[var(--bg-tertiary)] rounded-lg p-3.5">
+                <div className="flex-shrink-0">
+                  {r.status === 'success' && <CheckCircle2 className="w-4.5 h-4.5 text-emerald-400" />}
+                  {r.status === 'failed' && <XCircle className="w-4.5 h-4.5 text-red-400" />}
+                  {r.status === 'rolled_back' && <AlertTriangle className="w-4.5 h-4.5 text-orange-400" />}
+                  {(r.status === 'downloading' || r.status === 'applying') && <Loader2 className="w-4.5 h-4.5 text-blue-400 animate-spin" />}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm font-medium text-[var(--text-primary)]">
+                      v{r.from_version} → v{r.version}
+                    </span>
+                    <StatusBadge status={r.status} />
+                    {r.severity && r.severity !== 'normal' && (
+                      <span className="text-[10px] text-orange-400 uppercase font-semibold">{r.severity}</span>
+                    )}
+                  </div>
+                  {r.changelog && (
+                    <p className="text-xs text-[var(--text-muted)] mt-0.5 truncate">{r.changelog}</p>
+                  )}
+                  {r.error && (
+                    <p className="text-xs text-red-400 mt-1 font-mono bg-red-500/5 rounded px-2 py-1 break-all">{r.error}</p>
+                  )}
+                </div>
+                <div className="text-[10px] text-[var(--text-muted)] text-right whitespace-nowrap flex-shrink-0">
+                  <p>{fmtDate(r.started_at)}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Update Configuration */}
+      <div className="bg-[var(--bg-secondary)] rounded-xl border border-[var(--bg-elevated)] p-6">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-8 h-8 rounded-lg bg-blue-500/10 flex items-center justify-center">
+            <Download className="w-4 h-4 text-blue-400" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-[var(--text-primary)]">Update Settings</h3>
+            <p className="text-xs text-[var(--text-muted)]">Configure automatic update behavior</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+          <div className="flex items-center justify-between bg-[var(--bg-tertiary)] rounded-lg p-4">
+            <div>
+              <p className="text-sm font-medium text-[var(--text-primary)]">Automatic Updates</p>
+              <p className="text-xs text-[var(--text-muted)]">Automatically apply updates when available</p>
+            </div>
+            <Toggle checked={config.auto_update} onChange={(v) => setConfig(p => ({ ...p, auto_update: v }))} />
+          </div>
+
+          <div>
+            <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1.5">Check Interval</label>
+            <select
+              className={inputCls}
+              value={config.check_interval_hours}
+              onChange={(e) => setConfig(p => ({ ...p, check_interval_hours: parseInt(e.target.value) }))}
+            >
+              <option value={1}>Every 1 hour</option>
+              <option value={2}>Every 2 hours</option>
+              <option value={4}>Every 4 hours</option>
+              <option value={6}>Every 6 hours</option>
+              <option value={12}>Every 12 hours</option>
+              <option value={24}>Every 24 hours</option>
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1.5">Maintenance Window Start</label>
+            <input
+              type="time"
+              className={inputCls}
+              value={config.maintenance_window_start}
+              onChange={(e) => setConfig(p => ({ ...p, maintenance_window_start: e.target.value }))}
+            />
+            <p className="text-[10px] text-[var(--text-muted)] mt-1">Leave empty for anytime</p>
+          </div>
+
+          <div>
+            <label className="block text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1.5">Maintenance Window End</label>
+            <input
+              type="time"
+              className={inputCls}
+              value={config.maintenance_window_end}
+              onChange={(e) => setConfig(p => ({ ...p, maintenance_window_end: e.target.value }))}
+            />
+            <p className="text-[10px] text-[var(--text-muted)] mt-1">Updates only applied in this window</p>
+          </div>
+        </div>
+
+        <div className="flex justify-end">
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-[var(--accent)] text-white text-sm font-medium hover:opacity-90 transition-opacity disabled:opacity-50"
+          >
+            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+            Save Settings
+          </button>
+        </div>
+      </div>
+
+      {/* Agent Log */}
+      <div className="bg-[var(--bg-secondary)] rounded-xl border border-[var(--bg-elevated)] p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 flex items-center justify-center">
+              <Terminal className="w-4 h-4 text-emerald-400" />
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-[var(--text-primary)]">Agent Log</h3>
+              <p className="text-xs text-[var(--text-muted)]">Raw update agent output</p>
+            </div>
+          </div>
+          <button
+            onClick={() => setShowLog(!showLog)}
+            className="flex items-center gap-1.5 text-xs text-[var(--accent)] hover:underline"
+          >
+            {showLog ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+            {showLog ? 'Hide' : 'Show'} Log
+          </button>
+        </div>
+
+        {showLog && (
+          <div className="bg-[#0d1117] rounded-lg p-4 font-mono text-xs text-emerald-400 max-h-80 overflow-y-auto">
+            {status?.recent_log && status.recent_log.length > 0 ? (
+              status.recent_log.map((line, i) => (
+                <div key={i} className={cn('py-0.5 whitespace-pre-wrap break-all',
+                  line.includes('[ERROR]') && 'text-red-400',
+                  line.includes('[WARNING]') && 'text-yellow-400',
+                )}>
+                  {line}
+                </div>
+              ))
+            ) : (
+              <p className="text-[var(--text-muted)]">No log entries yet</p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 const tabs = [
   { id: 'company', label: 'Company', icon: Building2, description: 'Organization' },
   { id: 'gateways', label: 'Gateways', icon: Mail, description: 'Email & SMS' },
@@ -2758,6 +3156,7 @@ const tabs = [
   { id: 'rules', label: 'Alert Rules', icon: ShieldAlert, description: 'Triggers' },
   { id: 'users', label: 'Users & Roles', icon: Users, description: 'Access' },
   { id: 'subscription', label: 'Subscription', icon: CreditCard, description: 'License' },
+  { id: 'updates', label: 'Updates', icon: Download, description: 'System' },
 ] as const
 
 type TabId = (typeof tabs)[number]['id']
@@ -2824,6 +3223,7 @@ export function SettingsPage() {
         {activeTab === 'rules' && <AlertRulesTab showToast={showToast} />}
         {activeTab === 'users' && <UsersTab showToast={showToast} />}
         {activeTab === 'subscription' && <SubscriptionTab showToast={showToast} />}
+        {activeTab === 'updates' && <UpdatesTab showToast={showToast} />}
       </div>
 
       {/* Toasts */}

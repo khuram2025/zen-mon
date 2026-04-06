@@ -1,0 +1,24 @@
+[Unit]
+Description=ZenPlus OTA Update Agent
+After=network-online.target
+Wants=network-online.target
+Documentation=https://zentryc.com/docs/updater
+
+[Service]
+Type=oneshot
+ExecStart=/opt/zenplus/venv/bin/python -m updater
+WorkingDirectory=/opt/zenplus
+Environment=PYTHONPATH=/opt/zenplus
+
+# No sandboxing — agent needs full access for service restarts, migrations, etc.
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zenplus-updater
+
+# Timeout
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
