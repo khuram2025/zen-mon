@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query'
 import ReactECharts from 'echarts-for-react'
 import { useDevices, useDeviceSummary, useDeviceGroups, useDeviceLocations } from '@/hooks/useDevices'
 import { StatusIndicator } from '@/components/dashboard/StatusIndicator'
@@ -29,6 +29,7 @@ import {
   AlertCircle,
   Loader2,
   LayoutGrid,
+  Plus,
 } from 'lucide-react'
 
 // ---------------------------------------------------------------------------
@@ -56,6 +57,16 @@ const DEVICE_TYPE_LABELS: Record<string, string> = {
 }
 
 const PAGE_SIZE = 25
+
+const TIME_RANGES = [
+  { label: '1h', hours: 1 },
+  { label: '6h', hours: 6 },
+  { label: '12h', hours: 12 },
+  { label: '24h', hours: 24 },
+  { label: '3d', hours: 72 },
+  { label: '7d', hours: 168 },
+  { label: '30d', hours: 720 },
+]
 
 // ---------------------------------------------------------------------------
 // Inline FilterDropdown
@@ -204,14 +215,18 @@ function DeleteDialog({
 export function DevicesPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const [searchParams, setSearchParams] = useSearchParams()
 
-  // Filters
-  const [search, setSearch] = useState('')
-  const [statusFilter, setStatusFilter] = useState<string>('')
-  const [typeFilter, setTypeFilter] = useState<string>('')
-  const [groupFilter, setGroupFilter] = useState<string>('')
-  const [locationFilter, setLocationFilter] = useState<string>('')
+  // Filters — initialize from URL search params
+  const [search, setSearch] = useState(searchParams.get('search') || '')
+  const [statusFilter, setStatusFilter] = useState<string>(searchParams.get('status') || '')
+  const [typeFilter, setTypeFilter] = useState<string>(searchParams.get('type') || '')
+  const [groupFilter, setGroupFilter] = useState<string>(searchParams.get('group') || '')
+  const [locationFilter, setLocationFilter] = useState<string>(searchParams.get('location') || '')
   const [page, setPage] = useState(0)
+
+  // Time range
+  const [rangeHours, setRangeHours] = useState(24)
 
   // Selection
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -239,6 +254,14 @@ export function DevicesPage() {
   const devices: Device[] = devicesResponse?.data ?? []
   const totalDevices = devicesResponse?.meta?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(totalDevices / PAGE_SIZE))
+
+  // Uptime stats
+  const { data: uptimeStats } = useQuery({
+    queryKey: ['device-uptime-stats', rangeHours],
+    queryFn: () => api.get<{ hours: number; devices: Record<string, number> }>(`/devices/dashboard/uptime-stats?hours=${rangeHours}`),
+    refetchInterval: 30_000,
+  })
+  const deviceUptime = uptimeStats?.devices ?? {}
 
   // All-devices fetch for heatmap (lightweight — uses summary total as limit)
   const { data: allDevicesResponse } = useDevices({ limit: summary.total || 200, skip: 0 })
@@ -411,9 +434,28 @@ export function DevicesPage() {
             Monitoring {summary.total} device{summary.total !== 1 ? 's' : ''} across your network
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <LayoutGrid className="h-5 w-5 text-[var(--text-muted)]" />
-          <span className="text-sm text-[var(--text-muted)]">ZenPlus Network Monitor</span>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center rounded-lg border border-[var(--bg-elevated)] bg-[var(--bg-secondary)] overflow-hidden">
+            {TIME_RANGES.map(r => (
+              <button key={r.hours} onClick={() => setRangeHours(r.hours)}
+                className={cn(
+                  "px-3 py-1.5 text-xs font-medium transition-all",
+                  rangeHours === r.hours
+                    ? "bg-[var(--accent)] text-white"
+                    : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
+                )}>
+                {r.label}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={() => navigate('/devices/new')}
+            className="flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium text-white transition-all hover:brightness-110"
+            style={{ background: 'var(--accent)' }}
+          >
+            <Plus size={16} />
+            Add Device
+          </button>
         </div>
       </div>
 
@@ -421,47 +463,38 @@ export function DevicesPage() {
       {/* 1. TOP VISUAL SECTION                                              */}
       {/* ================================================================== */}
       <div className="mb-6 overflow-hidden rounded-xl border border-[var(--bg-tertiary)] bg-[var(--bg-secondary)]">
-        <div className="grid grid-cols-1 lg:grid-cols-5">
-          {/* Left: Summary Cards (3 cols) */}
-          <div className="col-span-1 grid grid-cols-2 gap-px border-r border-[var(--bg-tertiary)] p-4 sm:grid-cols-3 lg:col-span-3">
-            {summaryCards.map((card) => {
-              const Icon = card.icon
-              return (
-                <div
-                  key={card.label}
-                  className="group relative overflow-hidden rounded-lg border border-[var(--bg-tertiary)]/60 bg-[var(--bg-primary)]/50 p-4 transition-colors hover:border-[var(--bg-elevated)] hover:bg-[var(--bg-primary)]"
-                >
-                  {/* Colored left bar */}
-                  <div className="absolute inset-y-0 left-0 w-1 rounded-l-lg" style={{ backgroundColor: card.color }} />
-
-                  <div className="flex items-start justify-between pl-2">
-                    <div>
-                      <div className="mb-1 flex items-center gap-2">
-                        <div
-                          className="flex h-8 w-8 items-center justify-center rounded-lg"
-                          style={{ backgroundColor: `${card.color}15` }}
-                        >
-                          <Icon className="h-4 w-4" style={{ color: card.color }} />
-                        </div>
-                      </div>
-                      <p className="mt-2 text-xs font-medium uppercase tracking-wider text-[var(--text-muted)]">{card.label}</p>
-                      <p className="mt-1 text-3xl font-bold tabular-nums text-[var(--text-primary)]">{card.count}</p>
-                      {card.statusKey && (
-                        <p className="mt-1 text-xs text-[var(--text-muted)]">{pct(card.count)}% of total</p>
-                      )}
-                      {!card.statusKey && (
-                        <p className="mt-1 text-xs text-[var(--text-muted)]">All monitored</p>
-                      )}
+        <div className="grid grid-cols-1 lg:grid-cols-7 gap-0">
+          {/* Left: 5 Summary Cards stacked in a grid */}
+          <div className="lg:col-span-5 p-4">
+            <div className="grid grid-cols-5 gap-3 h-full">
+              {summaryCards.map((card) => {
+                const Icon = card.icon
+                return (
+                  <div
+                    key={card.label}
+                    className="relative flex flex-col rounded-lg border border-[var(--bg-tertiary)]/60 bg-[var(--bg-primary)]/50 p-4 transition-colors hover:border-[var(--bg-elevated)] hover:bg-[var(--bg-primary)]"
+                  >
+                    <div className="absolute inset-x-0 top-0 h-[3px] rounded-t-lg" style={{ backgroundColor: card.color }} />
+                    <div
+                      className="flex h-9 w-9 items-center justify-center rounded-lg mb-3"
+                      style={{ backgroundColor: `${card.color}12` }}
+                    >
+                      <Icon className="h-4 w-4" style={{ color: card.color }} />
                     </div>
+                    <p className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)] mb-1">{card.label}</p>
+                    <p className="text-2xl font-bold tabular-nums mt-auto" style={{ color: card.color }}>{card.count}</p>
+                    <p className="mt-1 text-[11px] text-[var(--text-muted)]">
+                      {card.statusKey ? `${pct(card.count)}% of total` : 'All monitored'}
+                    </p>
                   </div>
-                </div>
-              )
-            })}
+                )
+              })}
+            </div>
           </div>
 
-          {/* Right: Ring Chart (2 cols) */}
-          <div className="col-span-1 flex items-center justify-center p-4 lg:col-span-2">
-            <ReactECharts option={ringOption} style={{ width: '100%', height: 300 }} opts={{ renderer: 'canvas' }} />
+          {/* Right: Donut Chart */}
+          <div className="lg:col-span-2 flex items-center justify-center border-t lg:border-t-0 lg:border-l border-[var(--bg-tertiary)] p-4">
+            <ReactECharts option={ringOption} style={{ width: '100%', height: 260 }} opts={{ renderer: 'canvas' }} />
           </div>
         </div>
       </div>
@@ -605,6 +638,7 @@ export function DevicesPage() {
                 <th className="px-4 py-3">Type</th>
                 <th className="px-4 py-3">Group</th>
                 <th className="px-4 py-3">Location</th>
+                <th className="px-4 py-3 text-right">Uptime</th>
                 <th className="px-4 py-3 text-right">RTT</th>
                 <th className="px-4 py-3 text-right">Last Seen</th>
               </tr>
@@ -613,7 +647,7 @@ export function DevicesPage() {
               {isLoading
                 ? Array.from({ length: 8 }).map((_, i) => (
                     <tr key={i}>
-                      {Array.from({ length: 9 }).map((_, j) => (
+                      {Array.from({ length: 10 }).map((_, j) => (
                         <td key={j} className="px-4 py-3.5">
                           <div className="h-4 w-20 animate-pulse rounded bg-[var(--bg-tertiary)]" />
                         </td>
@@ -705,6 +739,26 @@ export function DevicesPage() {
                         {/* Location */}
                         <td className="px-4 py-3.5">
                           <span className="text-sm text-[var(--text-secondary)]">{device.location || '\u2014'}</span>
+                        </td>
+
+                        {/* Uptime */}
+                        <td className="px-4 py-3.5 text-right">
+                          {deviceUptime[device.id] !== undefined ? (
+                            <span
+                              className={cn(
+                                'font-mono text-sm font-medium',
+                                deviceUptime[device.id] >= 99
+                                  ? 'text-green-400'
+                                  : deviceUptime[device.id] >= 95
+                                    ? 'text-yellow-400'
+                                    : 'text-red-400'
+                              )}
+                            >
+                              {deviceUptime[device.id].toFixed(2)}%
+                            </span>
+                          ) : (
+                            <span className="text-xs text-[var(--text-muted)]">&mdash;</span>
+                          )}
                         </td>
 
                         {/* RTT */}

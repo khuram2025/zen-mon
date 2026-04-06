@@ -175,6 +175,14 @@ def _chart_to_bytes(fig: plt.Figure) -> bytes:
 def _make_donut(labels: list[str], values: list[float],
                 colors: list[str], center_text: str = "") -> bytes:
     fig, ax = plt.subplots(figsize=(4, 4))
+    if not labels or not values or sum(values) == 0:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                fontsize=12, color=HEX_MUTED, transform=ax.transAxes)
+        ax.set_xlim(-1, 1)
+        ax.set_ylim(-1, 1)
+        ax.set_aspect("equal")
+        ax.axis("off")
+        return _chart_to_bytes(fig)
     wedges, _ = ax.pie(
         values, labels=None, colors=colors,
         startangle=90, wedgeprops=dict(width=0.45, edgecolor="white", linewidth=2),
@@ -199,6 +207,10 @@ def _make_line_chart(timestamps: list[datetime], values: list[float],
                      ylabel: str = "", color: str = HEX_PRIMARY) -> bytes:
     fig, ax = plt.subplots(figsize=(8, 3.5))
     _setup_chart_style()
+    if not timestamps or not values or len(timestamps) < 2:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                fontsize=12, color=HEX_MUTED, transform=ax.transAxes)
+        return _chart_to_bytes(fig)
     ax.plot(timestamps, values, color=color, linewidth=1.4, alpha=0.9)
     ax.fill_between(timestamps, values, alpha=0.08, color=color)
     ax.set_ylabel(ylabel, fontsize=8, color=HEX_MUTED)
@@ -212,6 +224,10 @@ def _make_bar_chart(labels: list[str], values: list[float],
                     ylabel: str = "") -> bytes:
     fig, ax = plt.subplots(figsize=(8, 3.5))
     _setup_chart_style()
+    if not labels or not values:
+        ax.text(0.5, 0.5, "No data", ha="center", va="center",
+                fontsize=12, color=HEX_MUTED, transform=ax.transAxes)
+        return _chart_to_bytes(fig)
     bars = ax.bar(labels, values, color=colors, width=0.6, edgecolor="white", linewidth=0.5)
     ax.set_ylabel(ylabel, fontsize=8, color=HEX_MUTED)
     for bar, val in zip(bars, values):

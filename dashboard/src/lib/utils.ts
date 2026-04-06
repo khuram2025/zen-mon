@@ -48,3 +48,38 @@ export function timeAgo(date: string | null): string {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
   return `${Math.floor(seconds / 86400)}d ago`
 }
+
+
+export function formatDateTime(date: string | null, timezone: string = 'UTC'): string {
+  if (!date) return 'Never'
+  try {
+    return new Date(date).toLocaleString('en-US', { timeZone: timezone, year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
+  } catch {
+    return new Date(date).toLocaleString()
+  }
+}
+
+export function formatTime(date: string | null, timezone: string = 'UTC'): string {
+  if (!date) return ''
+  try {
+    return new Date(date).toLocaleTimeString('en-US', { timeZone: timezone, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
+  } catch {
+    return new Date(date).toLocaleTimeString()
+  }
+}
+
+export function formatDateTimeFromTs(ts: number | string, timezone: string = 'UTC'): string {
+  try {
+    return new Date(ts).toLocaleString('en-US', { timeZone: timezone, year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
+  } catch {
+    return new Date(ts).toLocaleString()
+  }
+}
+
+export function formatTimeFromTs(ts: number | string, timezone: string = 'UTC'): string {
+  try {
+    return new Date(ts).toLocaleTimeString('en-US', { timeZone: timezone, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
+  } catch {
+    return new Date(ts).toLocaleTimeString()
+  }
+}

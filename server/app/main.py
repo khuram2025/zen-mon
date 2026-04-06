@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
-from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports
+from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, discovery, users, subscription
 from app.api.v1 import settings as settings_api
 from app.api.websocket import realtime
 
@@ -36,6 +36,9 @@ def create_app() -> FastAPI:
     app.include_router(service_checks.router, prefix="/api/v1")
     app.include_router(reports.router, prefix="/api/v1")
     app.include_router(realtime.router, prefix="/api/v1")
+    app.include_router(discovery.router, prefix="/api/v1")
+    app.include_router(users.router, prefix="/api/v1")
+    app.include_router(subscription.router, prefix="/api/v1")
 
     @app.get("/api/v1/system/health")
     async def health_check():

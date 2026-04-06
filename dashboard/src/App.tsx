@@ -16,6 +16,7 @@ import { ServiceCheckDetailPage } from '@/pages/ServiceCheckDetail'
 import { AddServiceCheckPage } from '@/pages/AddServiceCheck'
 import { EditServiceCheckPage } from '@/pages/EditServiceCheck'
 import { ReportsPage } from '@/pages/Reports'
+import { DiscoveryPage } from '@/pages/Discovery'
 
 function ProtectedLayout() {
   const { isAuthenticated, checkAuth } = useAuthStore()
@@ -45,7 +46,7 @@ function ProtectedLayout() {
           <Route path="/service-checks/:id/edit" element={<EditServiceCheckPage />} />
           <Route path="/alerts" element={<AlertsPage />} />
           <Route path="/reports" element={<ReportsPage />} />
-          <Route path="/topology" element={<div className="text-[var(--text-muted)]">Topology - Coming in Phase 3</div>} />
+          <Route path="/discovery" element={<DiscoveryPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>

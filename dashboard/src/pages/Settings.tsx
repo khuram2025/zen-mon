@@ -39,7 +39,20 @@ import {
   Upload,
   MapPin,
   Image,
+  Users,
+  Crown,
+  Shield,
+  KeyRound,
+  UserPlus,
+  UserCog,
+  BadgeCheck,
+  CreditCard,
+  Sparkles,
+  CircleDot,
+  Copy,
 } from 'lucide-react'
+import { useAuthStore } from '@/stores/authStore'
+import type { User as UserType, Role, SubscriptionInfo } from '@/types'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -2145,11 +2158,606 @@ function CompanyTab({ showToast }: { showToast: (type: 'success' | 'error', msg:
 }
 
 
+// ─── Users & Roles Tab ───────────────────────────────────────────────────────
+
+const ROLE_COLORS: Record<string, string> = {
+  admin: '#EF4444',
+  operator: '#F59E0B',
+  viewer: '#3B82F6',
+  read_only: '#6B7280',
+}
+
+const ROLE_ICONS: Record<string, typeof Crown> = {
+  admin: Crown,
+  operator: UserCog,
+  viewer: Eye,
+  read_only: Shield,
+}
+
+function UsersTab({ showToast }: { showToast: (t: 'success' | 'error', m: unknown) => void }) {
+  const queryClient = useQueryClient()
+  const { user: currentUser } = useAuthStore()
+  const [showCreateModal, setShowCreateModal] = useState(false)
+  const [editUser, setEditUser] = useState<UserType | null>(null)
+  const [resetPwUser, setResetPwUser] = useState<UserType | null>(null)
+  const [deleteUser, setDeleteUser] = useState<UserType | null>(null)
+  const [newPassword, setNewPassword] = useState('')
+  const [showPw, setShowPw] = useState(false)
+  const [form, setForm] = useState({ username: '', email: '', password: '', full_name: '', role: 'viewer', is_active: true })
+
+  const { data: users = [], isLoading } = useQuery({
+    queryKey: ['admin-users'],
+    queryFn: () => api.get<UserType[]>('/users'),
+  })
+
+  const { data: roles = [] } = useQuery({
+    queryKey: ['roles'],
+    queryFn: () => api.get<Role[]>('/users/roles'),
+  })
+
+  const createMutation = useMutation({
+    mutationFn: (data: typeof form) => api.post('/users', data),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['admin-users'] }); queryClient.invalidateQueries({ queryKey: ['roles'] }); setShowCreateModal(false); resetForm(); showToast('success', 'User created successfully') },
+    onError: (e) => showToast('error', e),
+  })
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, ...data }: { id: string; email?: string; full_name?: string; role?: string; is_active?: boolean }) => api.put(`/users/${id}`, data),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['admin-users'] }); queryClient.invalidateQueries({ queryKey: ['roles'] }); setEditUser(null); showToast('success', 'User updated successfully') },
+    onError: (e) => showToast('error', e),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => api.delete(`/users/${id}`),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['admin-users'] }); queryClient.invalidateQueries({ queryKey: ['roles'] }); setDeleteUser(null); showToast('success', 'User deleted successfully') },
+    onError: (e) => showToast('error', e),
+  })
+
+  const resetPwMutation = useMutation({
+    mutationFn: ({ id, new_password }: { id: string; new_password: string }) => api.post(`/users/${id}/reset-password`, { new_password }),
+    onSuccess: () => { setResetPwUser(null); setNewPassword(''); showToast('success', 'Password reset successfully') },
+    onError: (e) => showToast('error', e),
+  })
+
+  function resetForm() {
+    setForm({ username: '', email: '', password: '', full_name: '', role: 'viewer', is_active: true })
+    setShowPw(false)
+  }
+
+  function openEdit(u: UserType) {
+    setEditUser(u)
+    setForm({ username: u.username, email: u.email, password: '', full_name: u.full_name || '', role: u.role, is_active: u.is_active ?? true })
+  }
+
+  const inputCls = "w-full rounded-lg border border-[var(--bg-elevated)] bg-[var(--bg-tertiary)] px-3 py-2 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] focus:ring-1 focus:ring-[var(--accent)]/30"
+  const labelCls = "block text-xs font-medium text-[var(--text-muted)] uppercase tracking-wider mb-1.5"
+
+  return (
+    <div className="space-y-6">
+      {/* Roles Overview */}
+      <div className="rounded-xl border border-[var(--bg-elevated)] bg-[var(--bg-secondary)] p-6">
+        <div className="flex items-center gap-2 mb-4">
+          <Shield className="w-5 h-5 text-[var(--accent)]" />
+          <h3 className="text-base font-semibold text-[var(--text-primary)]">Roles & Permissions</h3>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+          {roles.map(role => {
+            const Icon = ROLE_ICONS[role.id] || Shield
+            const color = ROLE_COLORS[role.id] || '#6B7280'
+            return (
+              <div key={role.id} className="rounded-lg border border-[var(--bg-elevated)] bg-[var(--bg-primary)]/50 p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ backgroundColor: `${color}15` }}>
+                    <Icon className="w-4 h-4" style={{ color }} />
+                  </div>
+                  <div>
+                    <div className="text-sm font-semibold text-[var(--text-primary)]">{role.name}</div>
+                    <div className="text-[10px] text-[var(--text-muted)]">{role.user_count} user{role.user_count !== 1 ? 's' : ''}</div>
+                  </div>
+                </div>
+                <p className="text-xs text-[var(--text-muted)] leading-relaxed">{role.description}</p>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {role.permissions.slice(0, 4).map(p => (
+                    <span key={p} className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-muted)]">{p}</span>
+                  ))}
+                  {role.permissions.length > 4 && (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)] text-[var(--text-muted)]">+{role.permissions.length - 4} more</span>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Users List */}
+      <div className="rounded-xl border border-[var(--bg-elevated)] bg-[var(--bg-secondary)] p-6">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <Users className="w-5 h-5 text-[var(--accent)]" />
+            <h3 className="text-base font-semibold text-[var(--text-primary)]">Users</h3>
+            <span className="text-xs text-[var(--text-muted)] bg-[var(--bg-tertiary)] px-2 py-0.5 rounded-full">{users.length}</span>
+          </div>
+          <button onClick={() => { resetForm(); setShowCreateModal(true) }} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors">
+            <UserPlus className="w-4 h-4" />
+            Add User
+          </button>
+        </div>
+
+        {isLoading ? (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="w-6 h-6 animate-spin text-[var(--accent)]" />
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-[var(--bg-elevated)] text-left text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                  <th className="px-4 py-3">User</th>
+                  <th className="px-4 py-3">Role</th>
+                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Last Login</th>
+                  <th className="px-4 py-3">Created</th>
+                  <th className="px-4 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[var(--bg-elevated)]/60">
+                {users.map(u => {
+                  const roleColor = ROLE_COLORS[u.role] || '#6B7280'
+                  const RIcon = ROLE_ICONS[u.role] || Shield
+                  const isSelf = currentUser?.id === u.id
+                  return (
+                    <tr key={u.id} className="hover:bg-[var(--bg-primary)]/40 transition-colors">
+                      <td className="px-4 py-3.5">
+                        <div className="flex items-center gap-3">
+                          <div className="w-9 h-9 rounded-full flex items-center justify-center text-white text-sm font-bold" style={{ background: roleColor }}>
+                            {(u.full_name || u.username).charAt(0).toUpperCase()}
+                          </div>
+                          <div>
+                            <div className="text-sm font-semibold text-[var(--text-primary)] flex items-center gap-1.5">
+                              {u.full_name || u.username}
+                              {isSelf && <span className="text-[9px] bg-[var(--accent)]/10 text-[var(--accent)] px-1.5 py-0.5 rounded-full font-medium">You</span>}
+                            </div>
+                            <div className="text-xs text-[var(--text-muted)]">{u.email}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3.5">
+                        <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full" style={{ backgroundColor: `${roleColor}15`, color: roleColor }}>
+                          <RIcon className="w-3 h-3" />
+                          {u.role.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3.5">
+                        {u.is_active !== false ? (
+                          <span className="inline-flex items-center gap-1 text-xs font-medium text-green-400"><span className="w-1.5 h-1.5 rounded-full bg-green-400" /> Active</span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 text-xs font-medium text-red-400"><span className="w-1.5 h-1.5 rounded-full bg-red-400" /> Inactive</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3.5 text-sm text-[var(--text-muted)]">
+                        {u.last_login ? new Date(u.last_login).toLocaleDateString() : 'Never'}
+                      </td>
+                      <td className="px-4 py-3.5 text-sm text-[var(--text-muted)]">
+                        {u.created_at ? new Date(u.created_at).toLocaleDateString() : '—'}
+                      </td>
+                      <td className="px-4 py-3.5 text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <button onClick={() => openEdit(u)} className="p-1.5 rounded-lg hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors" title="Edit">
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                          <button onClick={() => { setResetPwUser(u); setNewPassword('') }} className="p-1.5 rounded-lg hover:bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors" title="Reset Password">
+                            <KeyRound className="w-3.5 h-3.5" />
+                          </button>
+                          {!isSelf && (
+                            <button onClick={() => setDeleteUser(u)} className="p-1.5 rounded-lg hover:bg-red-500/10 text-[var(--text-muted)] hover:text-red-400 transition-colors" title="Delete">
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Create User Modal */}
+      {showCreateModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-2xl border border-[var(--bg-elevated)] bg-[var(--bg-secondary)] p-6 shadow-2xl">
+            <div className="flex items-center justify-between mb-5">
+              <div className="flex items-center gap-2">
+                <UserPlus className="w-5 h-5 text-[var(--accent)]" />
+                <h3 className="text-lg font-semibold text-[var(--text-primary)]">Create New User</h3>
+              </div>
+              <button onClick={() => setShowCreateModal(false)} className="p-1 rounded-lg hover:bg-[var(--bg-tertiary)]"><X className="w-4 h-4 text-[var(--text-muted)]" /></button>
+            </div>
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className={labelCls}>Username *</label>
+                  <input className={inputCls} placeholder="john.doe" value={form.username} onChange={e => setForm(f => ({ ...f, username: e.target.value }))} />
+                </div>
+                <div>
+                  <label className={labelCls}>Full Name</label>
+                  <input className={inputCls} placeholder="John Doe" value={form.full_name} onChange={e => setForm(f => ({ ...f, full_name: e.target.value }))} />
+                </div>
+              </div>
+              <div>
+                <label className={labelCls}>Email *</label>
+                <input className={inputCls} type="email" placeholder="john@example.com" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} />
+              </div>
+              <div>
+                <label className={labelCls}>Password *</label>
+                <div className="relative">
+                  <input className={inputCls} type={showPw ? 'text' : 'password'} placeholder="Minimum 6 characters" value={form.password} onChange={e => setForm(f => ({ ...f, password: e.target.value }))} />
+                  <button type="button" onClick={() => setShowPw(!showPw)} className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)]">
+                    {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className={labelCls}>Role</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {roles.map(r => {
+                    const Icon = ROLE_ICONS[r.id] || Shield
+                    const color = ROLE_COLORS[r.id] || '#6B7280'
+                    const selected = form.role === r.id
+                    return (
+                      <button key={r.id} type="button" onClick={() => setForm(f => ({ ...f, role: r.id }))}
+                        className={cn("flex items-center gap-2 rounded-lg border p-3 text-left transition-all", selected ? "border-[var(--accent)] bg-[var(--accent)]/5" : "border-[var(--bg-elevated)] hover:border-[var(--bg-elevated)]/80 hover:bg-[var(--bg-tertiary)]")}>
+                        <Icon className="w-4 h-4" style={{ color }} />
+                        <div>
+                          <div className="text-xs font-semibold text-[var(--text-primary)]">{r.name}</div>
+                          <div className="text-[10px] text-[var(--text-muted)] line-clamp-1">{r.description.split('.')[0]}</div>
+                        </div>
+                        {selected && <CheckCircle2 className="w-4 h-4 text-[var(--accent)] ml-auto flex-shrink-0" />}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-[var(--bg-elevated)]">
+              <button onClick={() => setShowCreateModal(false)} className="px-4 py-2 rounded-lg text-sm text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] transition-colors">Cancel</button>
+              <button onClick={() => createMutation.mutate(form)} disabled={createMutation.isPending || !form.username || !form.email || !form.password}
+                className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors disabled:opacity-50">
+                {createMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <UserPlus className="w-4 h-4" />}
+                Create User
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit User Modal */}
+      {editUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-2xl border border-[var(--bg-elevated)] bg-[var(--bg-secondary)] p-6 shadow-2xl">
+            <div className="flex items-center justify-between mb-5">
+              <div className="flex items-center gap-2">
+                <Pencil className="w-5 h-5 text-[var(--accent)]" />
+                <h3 className="text-lg font-semibold text-[var(--text-primary)]">Edit User &mdash; {editUser.username}</h3>
+              </div>
+              <button onClick={() => setEditUser(null)} className="p-1 rounded-lg hover:bg-[var(--bg-tertiary)]"><X className="w-4 h-4 text-[var(--text-muted)]" /></button>
+            </div>
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className={labelCls}>Username</label>
+                  <input className={cn(inputCls, 'opacity-60 cursor-not-allowed')} value={editUser.username} disabled />
+                </div>
+                <div>
+                  <label className={labelCls}>Full Name</label>
+                  <input className={inputCls} value={form.full_name} onChange={e => setForm(f => ({ ...f, full_name: e.target.value }))} />
+                </div>
+              </div>
+              <div>
+                <label className={labelCls}>Email</label>
+                <input className={inputCls} type="email" value={form.email} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} />
+              </div>
+              <div>
+                <label className={labelCls}>Role</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {roles.map(r => {
+                    const Icon = ROLE_ICONS[r.id] || Shield
+                    const color = ROLE_COLORS[r.id] || '#6B7280'
+                    const selected = form.role === r.id
+                    return (
+                      <button key={r.id} type="button" onClick={() => setForm(f => ({ ...f, role: r.id }))}
+                        className={cn("flex items-center gap-2 rounded-lg border p-3 text-left transition-all", selected ? "border-[var(--accent)] bg-[var(--accent)]/5" : "border-[var(--bg-elevated)] hover:border-[var(--bg-elevated)]/80 hover:bg-[var(--bg-tertiary)]")}>
+                        <Icon className="w-4 h-4" style={{ color }} />
+                        <div>
+                          <div className="text-xs font-semibold text-[var(--text-primary)]">{r.name}</div>
+                        </div>
+                        {selected && <CheckCircle2 className="w-4 h-4 text-[var(--accent)] ml-auto flex-shrink-0" />}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-[var(--bg-elevated)] p-3">
+                <div>
+                  <div className="text-sm font-medium text-[var(--text-primary)]">Account Status</div>
+                  <div className="text-xs text-[var(--text-muted)]">{form.is_active ? 'User can log in and access the system' : 'User is blocked from accessing the system'}</div>
+                </div>
+                <button type="button" onClick={() => setForm(f => ({ ...f, is_active: !f.is_active }))}>
+                  {form.is_active ? <ToggleRight className="w-8 h-8 text-green-400" /> : <ToggleLeft className="w-8 h-8 text-[var(--text-muted)]" />}
+                </button>
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-[var(--bg-elevated)]">
+              <button onClick={() => setEditUser(null)} className="px-4 py-2 rounded-lg text-sm text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] transition-colors">Cancel</button>
+              <button onClick={() => updateMutation.mutate({ id: editUser.id, email: form.email, full_name: form.full_name, role: form.role, is_active: form.is_active })} disabled={updateMutation.isPending}
+                className="flex items-center gap-2 px-5 py-2 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors disabled:opacity-50">
+                {updateMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+                Save Changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reset Password Modal */}
+      {resetPwUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border border-[var(--bg-elevated)] bg-[var(--bg-secondary)] p-6 shadow-2xl">
+            <div className="flex items-center justify-between mb-5">
+              <div className="flex items-center gap-2">
+                <KeyRound className="w-5 h-5 text-amber-400" />
+                <h3 className="text-lg font-semibold text-[var(--text-primary)]">Reset Password</h3>
+              </div>
+              <button onClick={() => setResetPwUser(null)} className="p-1 rounded-lg hover:bg-[var(--bg-tertiary)]"><X className="w-4 h-4 text-[var(--text-muted)]" /></button>
+            </div>
+            <p className="text-sm text-[var(--text-muted)] mb-4">Set a new password for <strong className="text-[var(--text-primary)]">{resetPwUser.username}</strong></p>
+            <div>
+              <label className={labelCls}>New Password</label>
+              <div className="relative">
+                <input className={inputCls} type={showPw ? 'text' : 'password'} placeholder="Minimum 6 characters" value={newPassword} onChange={e => setNewPassword(e.target.value)} />
+                <button type="button" onClick={() => setShowPw(!showPw)} className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)]">
+                  {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+            <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-[var(--bg-elevated)]">
+              <button onClick={() => setResetPwUser(null)} className="px-4 py-2 rounded-lg text-sm text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] transition-colors">Cancel</button>
+              <button onClick={() => resetPwMutation.mutate({ id: resetPwUser.id, new_password: newPassword })} disabled={resetPwMutation.isPending || newPassword.length < 6}
+                className="flex items-center gap-2 px-5 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-sm font-medium transition-colors disabled:opacity-50">
+                {resetPwMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
+                Reset Password
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete User Modal */}
+      {deleteUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border border-[var(--bg-elevated)] bg-[var(--bg-secondary)] p-6 shadow-2xl">
+            <div className="flex items-center justify-between mb-5">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-red-400" />
+                <h3 className="text-lg font-semibold text-[var(--text-primary)]">Delete User</h3>
+              </div>
+              <button onClick={() => setDeleteUser(null)} className="p-1 rounded-lg hover:bg-[var(--bg-tertiary)]"><X className="w-4 h-4 text-[var(--text-muted)]" /></button>
+            </div>
+            <p className="text-sm text-[var(--text-muted)]">Are you sure you want to permanently delete <strong className="text-[var(--text-primary)]">{deleteUser.username}</strong>? This action cannot be undone.</p>
+            <div className="flex justify-end gap-3 mt-6 pt-4 border-t border-[var(--bg-elevated)]">
+              <button onClick={() => setDeleteUser(null)} className="px-4 py-2 rounded-lg text-sm text-[var(--text-muted)] hover:bg-[var(--bg-tertiary)] transition-colors">Cancel</button>
+              <button onClick={() => deleteMutation.mutate(deleteUser.id)} disabled={deleteMutation.isPending}
+                className="flex items-center gap-2 px-5 py-2 rounded-lg bg-red-500 hover:bg-red-600 text-white text-sm font-medium transition-colors disabled:opacity-50">
+                {deleteMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                Delete User
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+// ─── Subscription Tab ────────────────────────────────────────────────────────
+
+function SubscriptionTab({ showToast }: { showToast: (t: 'success' | 'error', m: unknown) => void }) {
+  const queryClient = useQueryClient()
+  const [licenseKey, setLicenseKey] = useState('')
+
+  const { data: sub, isLoading } = useQuery({
+    queryKey: ['subscription'],
+    queryFn: () => api.get<SubscriptionInfo>('/subscription'),
+  })
+
+  const activateMutation = useMutation({
+    mutationFn: (key: string) => api.post('/subscription/activate', { license_key: key }),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['subscription'] }); setLicenseKey(''); showToast('success', 'License key saved') },
+    onError: (e) => showToast('error', e),
+  })
+
+  if (isLoading || !sub) {
+    return <div className="flex items-center justify-center py-20"><Loader2 className="w-6 h-6 animate-spin text-[var(--accent)]" /></div>
+  }
+
+  const isExpired = sub.status === 'expired'
+  const isNearExpiry = sub.days_remaining <= 7 && sub.days_remaining > 0
+  const progressPct = sub.days_remaining > 0 ? Math.max(0, ((30 - sub.days_remaining) / 30) * 100) : 100
+
+  function UsageBar({ label, used, max, icon: Icon }: { label: string; used: number; max: number; icon: typeof Users }) {
+    const pct = max > 0 ? (used / max) * 100 : 0
+    const color = pct >= 90 ? '#EF4444' : pct >= 70 ? '#F59E0B' : '#22C55E'
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Icon className="w-4 h-4 text-[var(--text-muted)]" />
+            <span className="text-sm text-[var(--text-secondary)]">{label}</span>
+          </div>
+          <span className="text-sm font-mono font-semibold" style={{ color }}>
+            {used} <span className="text-[var(--text-muted)] font-normal">/ {max}</span>
+          </span>
+        </div>
+        <div className="h-2 rounded-full bg-[var(--bg-tertiary)] overflow-hidden">
+          <div className="h-full rounded-full transition-all duration-500" style={{ width: `${Math.min(pct, 100)}%`, background: color }} />
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Plan Header Card */}
+      <div className="relative overflow-hidden rounded-2xl border border-[var(--bg-elevated)] bg-gradient-to-br from-[var(--bg-secondary)] to-[var(--bg-primary)]">
+        <div className="absolute top-0 right-0 w-64 h-64 rounded-full opacity-[0.03]" style={{ background: 'var(--accent)', filter: 'blur(80px)' }} />
+        <div className="relative p-8">
+          <div className="flex items-start justify-between">
+            <div>
+              <div className="flex items-center gap-3 mb-2">
+                <div className="w-12 h-12 rounded-xl flex items-center justify-center" style={{ background: sub.plan === 'trial' ? '#F59E0B15' : sub.plan === 'enterprise' ? '#8B5CF615' : '#6366F115' }}>
+                  {sub.plan === 'trial' ? <Sparkles className="w-6 h-6 text-amber-400" /> : sub.plan === 'enterprise' ? <Crown className="w-6 h-6 text-purple-400" /> : <BadgeCheck className="w-6 h-6 text-indigo-400" />}
+                </div>
+                <div>
+                  <h3 className="text-2xl font-bold text-[var(--text-primary)] capitalize">{sub.plan} Plan</h3>
+                  <p className="text-sm text-[var(--text-muted)]">
+                    {sub.plan === 'trial' ? 'Free trial period' : `Licensed to ${sub.activated_by || 'your organization'}`}
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div className="text-right">
+              {isExpired ? (
+                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold bg-red-500/10 text-red-400">
+                  <XCircle className="w-3.5 h-3.5" /> Expired
+                </span>
+              ) : isNearExpiry ? (
+                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold bg-amber-500/10 text-amber-400">
+                  <AlertTriangle className="w-3.5 h-3.5" /> Expiring Soon
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold bg-green-500/10 text-green-400">
+                  <CheckCircle2 className="w-3.5 h-3.5" /> Active
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Time Info */}
+          <div className="mt-6 grid grid-cols-3 gap-6">
+            <div>
+              <div className="text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1">Started</div>
+              <div className="text-sm font-medium text-[var(--text-primary)]">{new Date(sub.started_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</div>
+            </div>
+            <div>
+              <div className="text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1">Expires</div>
+              <div className="text-sm font-medium text-[var(--text-primary)]">{new Date(sub.expires_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</div>
+            </div>
+            <div>
+              <div className="text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1">Days Remaining</div>
+              <div className="text-2xl font-bold font-mono" style={{ color: isExpired ? '#EF4444' : isNearExpiry ? '#F59E0B' : '#22C55E' }}>
+                {sub.days_remaining}
+              </div>
+            </div>
+          </div>
+
+          {/* Expiry progress */}
+          <div className="mt-4">
+            <div className="h-1.5 rounded-full bg-[var(--bg-tertiary)] overflow-hidden">
+              <div className="h-full rounded-full transition-all duration-700" style={{
+                width: `${progressPct}%`,
+                background: isExpired ? '#EF4444' : isNearExpiry ? '#F59E0B' : 'var(--accent)',
+              }} />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Usage & Features */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Usage */}
+        <div className="rounded-xl border border-[var(--bg-elevated)] bg-[var(--bg-secondary)] p-6">
+          <div className="flex items-center gap-2 mb-5">
+            <BarChart className="w-5 h-5 text-[var(--accent)]" />
+            <h3 className="text-base font-semibold text-[var(--text-primary)]">Usage</h3>
+          </div>
+          <div className="space-y-5">
+            <UsageBar label="Devices" used={sub.usage.devices} max={sub.max_devices} icon={CircleDot} />
+            <UsageBar label="Service Checks" used={sub.usage.service_checks} max={sub.max_service_checks} icon={Zap} />
+            <UsageBar label="Users" used={sub.usage.users} max={sub.max_users} icon={Users} />
+          </div>
+        </div>
+
+        {/* Features */}
+        <div className="rounded-xl border border-[var(--bg-elevated)] bg-[var(--bg-secondary)] p-6">
+          <div className="flex items-center gap-2 mb-5">
+            <Sparkles className="w-5 h-5 text-[var(--accent)]" />
+            <h3 className="text-base font-semibold text-[var(--text-primary)]">Included Features</h3>
+          </div>
+          <div className="space-y-2.5">
+            {sub.features.map((f, i) => (
+              <div key={i} className="flex items-center gap-2.5">
+                <CheckCircle2 className="w-4 h-4 text-green-400 flex-shrink-0" />
+                <span className="text-sm text-[var(--text-secondary)]">{f}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* License Key Activation */}
+      <div className="rounded-xl border border-[var(--bg-elevated)] bg-[var(--bg-secondary)] p-6">
+        <div className="flex items-center gap-2 mb-4">
+          <KeyRound className="w-5 h-5 text-[var(--accent)]" />
+          <h3 className="text-base font-semibold text-[var(--text-primary)]">License Activation</h3>
+        </div>
+        <p className="text-sm text-[var(--text-muted)] mb-4">
+          Enter a license key to upgrade your subscription. Contact your sales representative to obtain a license key.
+        </p>
+        {sub.license_key && (
+          <div className="flex items-center gap-2 mb-4 p-3 rounded-lg bg-green-500/5 border border-green-500/20">
+            <BadgeCheck className="w-4 h-4 text-green-400" />
+            <span className="text-sm text-green-400 font-medium">License key registered</span>
+            <span className="text-xs text-[var(--text-muted)] font-mono ml-2">{sub.license_key.slice(0, 8)}...{sub.license_key.slice(-4)}</span>
+          </div>
+        )}
+        <div className="flex gap-3">
+          <input
+            className="flex-1 rounded-lg border border-[var(--bg-elevated)] bg-[var(--bg-tertiary)] px-4 py-2.5 text-sm text-[var(--text-primary)] font-mono placeholder:text-[var(--text-muted)] focus:outline-none focus:border-[var(--accent)] focus:ring-1 focus:ring-[var(--accent)]/30"
+            placeholder="XXXX-XXXX-XXXX-XXXX"
+            value={licenseKey}
+            onChange={e => setLicenseKey(e.target.value)}
+          />
+          <button
+            onClick={() => activateMutation.mutate(licenseKey)}
+            disabled={activateMutation.isPending || !licenseKey.trim()}
+            className="flex items-center gap-2 px-6 py-2.5 rounded-lg bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-sm font-medium transition-colors disabled:opacity-50"
+          >
+            {activateMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
+            Activate
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Used by SubscriptionTab - simple bar chart icon substitute
+function BarChart({ className }: { className?: string }) {
+  return <Zap className={className} />
+}
+
+
 const tabs = [
   { id: 'company', label: 'Company', icon: Building2, description: 'Organization' },
   { id: 'gateways', label: 'Gateways', icon: Mail, description: 'Email & SMS' },
   { id: 'channels', label: 'Channels', icon: Bell, description: 'Notification' },
   { id: 'rules', label: 'Alert Rules', icon: ShieldAlert, description: 'Triggers' },
+  { id: 'users', label: 'Users & Roles', icon: Users, description: 'Access' },
+  { id: 'subscription', label: 'Subscription', icon: CreditCard, description: 'License' },
 ] as const
 
 type TabId = (typeof tabs)[number]['id']
@@ -2178,7 +2786,7 @@ export function SettingsPage() {
         </div>
         <div>
           <h2 className="text-xl font-semibold text-[var(--text-primary)]">Settings</h2>
-          <p className="text-xs text-[var(--text-muted)]">Company info, gateways, notification channels, and alert rules</p>
+          <p className="text-xs text-[var(--text-muted)]">Company info, gateways, notification channels, alert rules, users, and subscription</p>
         </div>
       </div>
 
@@ -2214,6 +2822,8 @@ export function SettingsPage() {
         {activeTab === 'gateways' && <GatewaysTab showToast={showToast} />}
         {activeTab === 'channels' && <ChannelsTab showToast={showToast} />}
         {activeTab === 'rules' && <AlertRulesTab showToast={showToast} />}
+        {activeTab === 'users' && <UsersTab showToast={showToast} />}
+        {activeTab === 'subscription' && <SubscriptionTab showToast={showToast} />}
       </div>
 
       {/* Toasts */}

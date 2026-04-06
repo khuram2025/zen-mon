@@ -5,13 +5,17 @@ import { api } from '@/lib/api'
 import { StatusIndicator } from '@/components/dashboard/StatusIndicator'
 import { StatusCard } from '@/components/dashboard/StatusCard'
 import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
-import { formatRTT, timeAgo, statusColors, cn } from '@/lib/utils'
+import { formatRTT, timeAgo, statusColors, cn, formatDateTime, formatTime } from '@/lib/utils'
+import { useTimezone } from '@/hooks/useSettings'
+import { generateDeviceReport } from '@/lib/deviceReport'
+import type { StatusEvent as ReportStatusEvent } from '@/lib/deviceReport'
 import {
   ArrowLeft, Clock, Gauge, Wifi, WifiOff,
   MapPin, Tag, Trash2, Edit3, RefreshCw, Copy,
   Monitor, Server, Shield, Radio, Printer, HelpCircle,
   AlertTriangle, CheckCircle, X, ExternalLink, Activity,
-  ArrowUpCircle, ArrowDownCircle, History,
+  ArrowUpCircle, ArrowDownCircle, History, Calendar,
+  FileDown, Loader2,
 } from 'lucide-react'
 import type { Device, DeviceStatus, MetricResponse } from '@/types'
 
@@ -21,6 +25,8 @@ const timeRanges = [
   { label: '24h', hours: 24 },
   { label: '7d', hours: 168 },
   { label: '30d', hours: 720 },
+  { label: '90d', hours: 2160 },
+  { label: '1y', hours: 8760 },
 ]
 
 const typeIcons: Record<string, typeof Monitor> = {
@@ -75,7 +81,7 @@ function DeleteConfirm({ hostname, onConfirm, onCancel }: {
 }
 
 // ─── Uptime Bar ───
-function UptimeBar({ points }: { points: { is_up: boolean | null; timestamp: string }[] }) {
+function UptimeBar({ points, timezone }: { points: { is_up: boolean | null; timestamp: string }[]; timezone: string }) {
   if (points.length === 0) return null
   const total = points.length
   const upCount = points.filter(p => p.is_up === true || (p.is_up as unknown as number) === 1).length
@@ -98,25 +104,29 @@ function UptimeBar({ points }: { points: { is_up: boolean | null; timestamp: str
               key={i}
               className="flex-1 min-w-[2px] transition-colors hover:opacity-80"
               style={{ backgroundColor: isUp ? '#22C55E' : isDown ? '#EF4444' : '#2D3140' }}
-              title={`${new Date(p.timestamp).toLocaleTimeString()} - ${isUp ? 'UP' : 'DOWN'}`}
+              title={`${formatTime(p.timestamp, timezone)} - ${isUp ? 'UP' : 'DOWN'}`}
             />
           )
         })}
       </div>
       <div className="flex justify-between mt-1">
-        <span className="text-[10px] text-[var(--text-muted)]">{points.length > 0 ? new Date(points[0]!.timestamp).toLocaleTimeString() : ''}</span>
+        <span className="text-[10px] text-[var(--text-muted)]">{points.length > 0 ? formatTime(points[0]!.timestamp, timezone) : ''}</span>
         <div className="flex items-center gap-3">
           <span className="flex items-center gap-1 text-[10px] text-[var(--text-muted)]"><span className="w-2 h-2 rounded-sm bg-[#22C55E]" />Up</span>
           <span className="flex items-center gap-1 text-[10px] text-[var(--text-muted)]"><span className="w-2 h-2 rounded-sm bg-[#EF4444]" />Down</span>
         </div>
-        <span className="text-[10px] text-[var(--text-muted)]">{points.length > 0 ? new Date(points[points.length - 1]!.timestamp).toLocaleTimeString() : ''}</span>
+        <span className="text-[10px] text-[var(--text-muted)]">{points.length > 0 ? formatTime(points[points.length - 1]!.timestamp, timezone) : ''}</span>
       </div>
     </div>
   )
 }
 
-// ─── Incident Table ───
-function IncidentTable({ events }: { events: StatusEvent[] }) {
+// ─── Incident Table with Pagination ───
+const INCIDENTS_PER_PAGE = 20
+
+function IncidentTable({ events, timezone }: { events: StatusEvent[]; timezone: string }) {
+  const [page, setPage] = useState(0)
+
   if (events.length === 0) {
     return (
       <div className="text-center py-8 text-[var(--text-muted)] text-sm">
@@ -132,47 +142,93 @@ function IncidentTable({ events }: { events: StatusEvent[] }) {
     return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`
   }
 
+  const totalPages = Math.ceil(events.length / INCIDENTS_PER_PAGE)
+  const safePage = Math.min(page, totalPages - 1)
+  const pagedEvents = events.slice(safePage * INCIDENTS_PER_PAGE, (safePage + 1) * INCIDENTS_PER_PAGE)
+
   return (
-    <div className="overflow-hidden rounded-lg border border-[var(--bg-elevated)]">
-      <table className="w-full text-xs">
-        <thead>
-          <tr className="bg-[var(--bg-tertiary)]">
-            <th className="text-left px-3 py-2.5 font-semibold text-[var(--text-muted)] uppercase tracking-wider">Time</th>
-            <th className="text-left px-3 py-2.5 font-semibold text-[var(--text-muted)] uppercase tracking-wider">Change</th>
-            <th className="text-left px-3 py-2.5 font-semibold text-[var(--text-muted)] uppercase tracking-wider">Reason</th>
-            <th className="text-right px-3 py-2.5 font-semibold text-[var(--text-muted)] uppercase tracking-wider">Duration</th>
-          </tr>
-        </thead>
-        <tbody>
-          {events.map((e, i) => {
-            const isDown = e.new_status === 'down' || e.new_status === 'degraded'
-            return (
-              <tr key={i} className="border-t border-[var(--bg-elevated)]/50 hover:bg-[var(--bg-tertiary)]/50">
-                <td className="px-3 py-2.5 font-mono text-[var(--text-secondary)]">
-                  {new Date(e.timestamp).toLocaleString()}
-                </td>
-                <td className="px-3 py-2.5">
-                  <div className="flex items-center gap-1.5">
-                    {isDown
-                      ? <ArrowDownCircle className="w-3.5 h-3.5 text-red-400" />
-                      : <ArrowUpCircle className="w-3.5 h-3.5 text-green-400" />
-                    }
-                    <span className="uppercase font-medium" style={{ color: statusColors[e.old_status as DeviceStatus] || '#6B7280' }}>
-                      {e.old_status}
-                    </span>
-                    <span className="text-[var(--text-muted)]">→</span>
-                    <span className="uppercase font-medium" style={{ color: statusColors[e.new_status as DeviceStatus] || '#6B7280' }}>
-                      {e.new_status}
-                    </span>
-                  </div>
-                </td>
-                <td className="px-3 py-2.5 text-[var(--text-muted)]">{e.reason}</td>
-                <td className="px-3 py-2.5 text-right font-mono text-[var(--text-secondary)]">{formatDuration(e.duration_sec)}</td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
+    <div>
+      <div className="overflow-hidden rounded-lg border border-[var(--bg-elevated)]">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="bg-[var(--bg-tertiary)]">
+              <th className="text-left px-3 py-2.5 font-semibold text-[var(--text-muted)] uppercase tracking-wider">Time</th>
+              <th className="text-left px-3 py-2.5 font-semibold text-[var(--text-muted)] uppercase tracking-wider">Change</th>
+              <th className="text-left px-3 py-2.5 font-semibold text-[var(--text-muted)] uppercase tracking-wider">Reason</th>
+              <th className="text-right px-3 py-2.5 font-semibold text-[var(--text-muted)] uppercase tracking-wider">Duration</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pagedEvents.map((e, i) => {
+              const isDown = e.new_status === 'down' || e.new_status === 'degraded'
+              return (
+                <tr key={i} className="border-t border-[var(--bg-elevated)]/50 hover:bg-[var(--bg-tertiary)]/50">
+                  <td className="px-3 py-2.5 font-mono text-[var(--text-secondary)]">
+                    {formatDateTime(e.timestamp, timezone)}
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <div className="flex items-center gap-1.5">
+                      {isDown
+                        ? <ArrowDownCircle className="w-3.5 h-3.5 text-red-400" />
+                        : <ArrowUpCircle className="w-3.5 h-3.5 text-green-400" />
+                      }
+                      <span className="uppercase font-medium" style={{ color: statusColors[e.old_status as DeviceStatus] || '#6B7280' }}>
+                        {e.old_status}
+                      </span>
+                      <span className="text-[var(--text-muted)]">→</span>
+                      <span className="uppercase font-medium" style={{ color: statusColors[e.new_status as DeviceStatus] || '#6B7280' }}>
+                        {e.new_status}
+                      </span>
+                    </div>
+                  </td>
+                  <td className="px-3 py-2.5 text-[var(--text-muted)]">{e.reason}</td>
+                  <td className="px-3 py-2.5 text-right font-mono text-[var(--text-secondary)]">{formatDuration(e.duration_sec)}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between mt-3 px-1">
+          <span className="text-xs text-[var(--text-muted)]">
+            Showing {safePage * INCIDENTS_PER_PAGE + 1}–{Math.min((safePage + 1) * INCIDENTS_PER_PAGE, events.length)} of {events.length}
+          </span>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => setPage(0)}
+              disabled={safePage === 0}
+              className="px-2 py-1 rounded text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              First
+            </button>
+            <button
+              onClick={() => setPage(p => Math.max(0, p - 1))}
+              disabled={safePage === 0}
+              className="px-2.5 py-1 rounded text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              Prev
+            </button>
+            <span className="text-xs text-[var(--text-secondary)] px-2 font-mono">
+              {safePage + 1} / {totalPages}
+            </span>
+            <button
+              onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+              disabled={safePage >= totalPages - 1}
+              className="px-2.5 py-1 rounded text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              Next
+            </button>
+            <button
+              onClick={() => setPage(totalPages - 1)}
+              disabled={safePage >= totalPages - 1}
+              className="px-2 py-1 rounded text-xs font-medium bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+            >
+              Last
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -249,7 +305,16 @@ export function DeviceDetailPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [rangeHours, setRangeHours] = useState(24)
+  const [showCustom, setShowCustom] = useState(false)
+  const [customFrom, setCustomFrom] = useState('')
+  const [customTo, setCustomTo] = useState('')
+  // Applied custom range: only set when user clicks Apply
+  const [appliedFrom, setAppliedFrom] = useState('')
+  const [appliedTo, setAppliedTo] = useState('')
+  const [useCustomRange, setUseCustomRange] = useState(false)
   const [showDelete, setShowDelete] = useState(false)
+  const [generatingPdf, setGeneratingPdf] = useState(false)
+  const timezone = useTimezone()
 
   const { data: device, isLoading, error } = useQuery({
     queryKey: ['device', id],
@@ -259,22 +324,28 @@ export function DeviceDetailPage() {
   })
 
   const now = new Date()
-  const from = new Date(now.getTime() - rangeHours * 60 * 60 * 1000)
+  const effectiveFrom = useCustomRange && appliedFrom ? new Date(appliedFrom) : new Date(now.getTime() - rangeHours * 60 * 60 * 1000)
+  const effectiveTo = useCustomRange && appliedTo ? new Date(appliedTo) : now
+  const effectiveHours = (effectiveTo.getTime() - effectiveFrom.getTime()) / 3600000
 
   const { data: metrics } = useQuery({
-    queryKey: ['device-metrics', id, rangeHours],
+    queryKey: ['device-metrics', id, useCustomRange ? `custom-${appliedFrom}-${appliedTo}` : rangeHours],
     queryFn: () => api.get<MetricResponse>(
-      `/devices/${id}/metrics?from=${from.toISOString()}&to=${now.toISOString()}&granularity=${rangeHours <= 6 ? 'raw' : 'auto'}`
+      `/devices/${id}/metrics?from=${effectiveFrom.toISOString()}&to=${effectiveTo.toISOString()}&granularity=${effectiveHours <= 6 ? 'raw' : 'auto'}`
     ),
     enabled: !!id && !!device,
-    refetchInterval: 30_000,
+    refetchInterval: useCustomRange ? false : 30_000,
   })
 
+  // Status history: pass same time range, use higher limit for large ranges
+  const historyLimit = effectiveHours > 2160 ? 1000 : effectiveHours > 720 ? 500 : effectiveHours > 168 ? 200 : 100
   const { data: statusHistory = [] } = useQuery({
-    queryKey: ['device-status-history', id],
-    queryFn: () => api.get<StatusEvent[]>(`/devices/${id}/status-history`),
+    queryKey: ['device-status-history', id, useCustomRange ? `custom-${appliedFrom}-${appliedTo}` : rangeHours],
+    queryFn: () => api.get<StatusEvent[]>(
+      `/devices/${id}/status-history?from=${effectiveFrom.toISOString()}&to=${effectiveTo.toISOString()}&limit=${historyLimit}`
+    ),
     enabled: !!id && !!device,
-    refetchInterval: 30_000,
+    refetchInterval: useCustomRange ? false : 30_000,
   })
 
   const deleteMutation = useMutation({
@@ -311,6 +382,26 @@ export function DeviceDetailPage() {
   const TypeIcon = typeIcons[device.device_type] || HelpCircle
   const stColor = statusColors[device.status as DeviceStatus] || '#6B7280'
 
+  const handleDownloadReport = async () => {
+    if (generatingPdf) return
+    setGeneratingPdf(true)
+    try {
+      await generateDeviceReport({
+        device,
+        points,
+        incidents: statusHistory as ReportStatusEvent[],
+        rangeHours: effectiveHours,
+        fromDate: effectiveFrom,
+        toDate: effectiveTo,
+        timezone,
+      })
+    } catch (err) {
+      console.error('PDF generation failed:', err)
+    } finally {
+      setGeneratingPdf(false)
+    }
+  }
+
   return (
     <div>
       {/* Header */}
@@ -337,9 +428,16 @@ export function DeviceDetailPage() {
             </div>
           </div>
         </div>
-        <button onClick={() => navigate(`/devices/${id}/edit`)} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--bg-tertiary)] text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors">
-          <Edit3 className="w-4 h-4" /> Edit
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={handleDownloadReport} disabled={generatingPdf || points.length === 0}
+            className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--accent)] text-sm text-white font-medium hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+            {generatingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}
+            {generatingPdf ? 'Generating...' : 'PDF Report'}
+          </button>
+          <button onClick={() => navigate(`/devices/${id}/edit`)} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--bg-tertiary)] text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors">
+            <Edit3 className="w-4 h-4" /> Edit
+          </button>
+        </div>
       </div>
 
       {/* KPI Cards */}
@@ -387,18 +485,46 @@ export function DeviceDetailPage() {
           <div className="bg-[var(--bg-secondary)] rounded-xl border border-[var(--bg-elevated)] p-5">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-sm font-semibold text-[var(--text-primary)]">Response Time & Packet Loss</h3>
-              <div className="flex gap-1">
+              <div className="flex items-center gap-1.5 flex-wrap justify-end">
                 {timeRanges.map((r) => (
-                  <button key={r.label} onClick={() => setRangeHours(r.hours)}
+                  <button key={r.label} onClick={() => { setRangeHours(r.hours); setUseCustomRange(false); setShowCustom(false) }}
                     className={cn('px-3 py-1 rounded text-xs font-medium transition-colors',
-                      rangeHours === r.hours ? 'bg-[var(--accent)] text-white' : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)]')}>
+                      !useCustomRange && rangeHours === r.hours ? 'bg-[var(--accent)] text-white' : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)]')}>
                     {r.label}
                   </button>
                 ))}
+                <button onClick={() => setShowCustom(!showCustom)}
+                  className={cn('px-2.5 py-1 rounded text-xs font-medium transition-colors flex items-center gap-1',
+                    useCustomRange ? 'bg-[var(--accent)] text-white' : 'bg-[var(--bg-tertiary)] text-[var(--text-muted)] hover:text-[var(--text-primary)]')}>
+                  <Calendar size={12} /> Custom
+                </button>
+                {showCustom && (
+                  <div className="flex items-center gap-2 ml-1">
+                    <input type="datetime-local" value={customFrom}
+                      onChange={e => setCustomFrom(e.target.value)}
+                      className="rounded border border-[var(--bg-elevated)] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]" />
+                    <span className="text-xs text-[var(--text-muted)]">to</span>
+                    <input type="datetime-local" value={customTo}
+                      onChange={e => setCustomTo(e.target.value)}
+                      className="rounded border border-[var(--bg-elevated)] bg-[var(--bg-tertiary)] px-2 py-1 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]" />
+                    <button onClick={() => {
+                        if (customFrom && customTo) {
+                          setAppliedFrom(customFrom)
+                          setAppliedTo(customTo)
+                          setUseCustomRange(true)
+                        }
+                      }}
+                      disabled={!customFrom || !customTo}
+                      className="px-3 py-1 rounded text-xs font-medium text-white transition-all hover:brightness-110 disabled:opacity-40"
+                      style={{ background: 'var(--accent)' }}>
+                      Apply
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
             {points.length > 0 ? (
-              <TimeSeriesChart data={points} height={320} showPacketLoss />
+              <TimeSeriesChart data={points} height={320} showPacketLoss timezone={timezone} rangeHours={effectiveHours} />
             ) : (
               <div className="h-[320px] flex flex-col items-center justify-center text-[var(--text-muted)] gap-2">
                 <Activity className="w-8 h-8 opacity-30" />
@@ -410,7 +536,7 @@ export function DeviceDetailPage() {
           {/* Uptime bar */}
           {points.length > 0 && (
             <div className="bg-[var(--bg-secondary)] rounded-xl border border-[var(--bg-elevated)] p-5">
-              <UptimeBar points={points} />
+              <UptimeBar points={points} timezone={timezone} />
             </div>
           )}
 
@@ -421,7 +547,7 @@ export function DeviceDetailPage() {
               <h3 className="text-sm font-semibold text-[var(--text-primary)]">Incident History</h3>
               <span className="text-[10px] text-[var(--text-muted)] bg-[var(--bg-tertiary)] px-2 py-0.5 rounded-full">{statusHistory.length} events</span>
             </div>
-            <IncidentTable events={statusHistory} />
+            <IncidentTable events={statusHistory} timezone={timezone} />
           </div>
         </div>
 
@@ -458,9 +584,9 @@ export function DeviceDetailPage() {
           <div className="bg-[var(--bg-secondary)] rounded-xl border border-[var(--bg-elevated)] p-5">
             <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-4">Timeline</h3>
             <div className="space-y-3">
-              <InfoRow label="Last Seen" value={device.last_seen ? new Date(device.last_seen).toLocaleString() : 'Never'} />
-              <InfoRow label="Created" value={new Date(device.created_at).toLocaleString()} />
-              <InfoRow label="Updated" value={new Date(device.updated_at).toLocaleString()} />
+              <InfoRow label="Last Seen" value={device.last_seen ? formatDateTime(device.last_seen, timezone) : 'Never'} />
+              <InfoRow label="Created" value={formatDateTime(device.created_at, timezone)} />
+              <InfoRow label="Updated" value={formatDateTime(device.updated_at, timezone)} />
             </div>
           </div>
         </div>

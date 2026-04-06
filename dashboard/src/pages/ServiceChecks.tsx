@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query'
 import ReactECharts from 'echarts-for-react'
 import { useServiceChecks, useServiceCheckSummary } from '@/hooks/useServiceChecks'
 import { formatRTT, timeAgo, cn } from '@/lib/utils'
@@ -23,6 +23,7 @@ import {
   Trash2,
   X,
   Filter,
+  Plus,
 } from 'lucide-react'
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -36,6 +37,16 @@ const STATUS_COLORS: Record<string, string> = {
 }
 
 const PAGE_SIZE = 20
+
+const TIME_RANGES = [
+  { label: '1h', hours: 1 },
+  { label: '6h', hours: 6 },
+  { label: '12h', hours: 12 },
+  { label: '24h', hours: 24 },
+  { label: '3d', hours: 72 },
+  { label: '7d', hours: 168 },
+  { label: '30d', hours: 720 },
+]
 
 // ── Inline FilterDropdown ──────────────────────────────────────────────────────
 
@@ -182,12 +193,14 @@ function DeleteDialog({
 export function ServiceChecksPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const [searchParams, setSearchParams] = useSearchParams()
 
-  // Filters
-  const [search, setSearch] = useState('')
-  const [typeFilter, setTypeFilter] = useState('')
-  const [statusFilter, setStatusFilter] = useState('')
+  // Filters — initialize from URL search params
+  const [search, setSearch] = useState(searchParams.get('search') || '')
+  const [typeFilter, setTypeFilter] = useState(searchParams.get('type') || '')
+  const [statusFilter, setStatusFilter] = useState(searchParams.get('status') || '')
   const [page, setPage] = useState(0)
+  const [rangeHours, setRangeHours] = useState(24)
 
   // Selection
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
@@ -208,6 +221,14 @@ export function ServiceChecksPage() {
   const checks: ServiceCheck[] = checksResponse?.data ?? []
   const totalRecords = checksResponse?.meta?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(totalRecords / PAGE_SIZE))
+
+  // Uptime stats
+  const { data: uptimeStats } = useQuery({
+    queryKey: ['service-check-uptime-stats', rangeHours],
+    queryFn: () => api.get<{ hours: number; checks: Record<string, number> }>(`/service-checks/uptime-stats?hours=${rangeHours}`),
+    refetchInterval: 30_000,
+  })
+  const checkUptime = uptimeStats?.checks ?? {}
 
   // All checks for heatmap (lightweight, first page of a large set)
   const { data: allChecksResponse } = useServiceChecks({ limit: 200, skip: 0 })
@@ -383,18 +404,41 @@ export function ServiceChecksPage() {
               Monitor HTTP, TCP, and TLS endpoints across your infrastructure
             </p>
           </div>
-          <button
-            onClick={handleExport}
-            className="flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all hover:brightness-110"
-            style={{
-              background: 'var(--bg-tertiary)',
-              color: 'var(--text-primary)',
-              border: '1px solid rgba(255,255,255,0.06)',
-            }}
-          >
-            <Download size={16} />
-            Export JSON
-          </button>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center rounded-lg overflow-hidden" style={{ border: '1px solid rgba(255,255,255,0.06)', background: 'var(--bg-secondary)' }}>
+              {TIME_RANGES.map(r => (
+                <button key={r.hours} onClick={() => setRangeHours(r.hours)}
+                  className={cn(
+                    "px-3 py-1.5 text-xs font-medium transition-all",
+                    rangeHours === r.hours
+                      ? "bg-[var(--accent)] text-white"
+                      : "text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-tertiary)]"
+                  )}>
+                  {r.label}
+                </button>
+              ))}
+            </div>
+            <button
+              onClick={handleExport}
+              className="flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition-all hover:brightness-110"
+              style={{
+                background: 'var(--bg-tertiary)',
+                color: 'var(--text-primary)',
+                border: '1px solid rgba(255,255,255,0.06)',
+              }}
+            >
+              <Download size={16} />
+              Export JSON
+            </button>
+            <button
+              onClick={() => navigate('/service-checks/new')}
+              className="flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium text-white transition-all hover:brightness-110"
+              style={{ background: 'var(--accent)' }}
+            >
+              <Plus size={16} />
+              Add Service Check
+            </button>
+          </div>
         </div>
 
         {/* ── 1. Top Visual Section ──────────────────────────────────────── */}
@@ -623,6 +667,9 @@ export function ServiceChecksPage() {
                     Device
                   </th>
                   <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--text-secondary)' }}>
+                    Uptime
+                  </th>
+                  <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--text-secondary)' }}>
                     Response
                   </th>
                   <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--text-secondary)' }}>
@@ -633,7 +680,7 @@ export function ServiceChecksPage() {
               <tbody>
                 {isLoading ? (
                   <tr>
-                    <td colSpan={8} className="px-4 py-20 text-center">
+                    <td colSpan={9} className="px-4 py-20 text-center">
                       <div className="flex flex-col items-center gap-3">
                         <div className="h-8 w-8 animate-spin rounded-full border-2 border-indigo-500 border-t-transparent" />
                         <span className="text-sm" style={{ color: 'var(--text-muted)' }}>Loading service checks...</span>
@@ -642,7 +689,7 @@ export function ServiceChecksPage() {
                   </tr>
                 ) : checks.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="px-4 py-20 text-center">
+                    <td colSpan={9} className="px-4 py-20 text-center">
                       <div className="flex flex-col items-center gap-2">
                         <Activity size={32} style={{ color: 'var(--text-muted)' }} />
                         <span className="text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>No service checks found</span>
@@ -735,6 +782,26 @@ export function ServiceChecksPage() {
                         {/* Device */}
                         <td className="px-4 py-3 text-sm" style={{ color: 'var(--text-secondary)' }}>
                           {check.device_hostname || '—'}
+                        </td>
+
+                        {/* Uptime */}
+                        <td className="px-4 py-3 text-right">
+                          {checkUptime[check.id] !== undefined ? (
+                            <span
+                              className={cn(
+                                'font-mono text-sm font-medium',
+                                checkUptime[check.id] >= 99
+                                  ? 'text-green-400'
+                                  : checkUptime[check.id] >= 95
+                                    ? 'text-yellow-400'
+                                    : 'text-red-400'
+                              )}
+                            >
+                              {checkUptime[check.id].toFixed(2)}%
+                            </span>
+                          ) : (
+                            <span className="text-xs" style={{ color: 'var(--text-muted)' }}>—</span>
+                          )}
                         </td>
 
                         {/* Response */}

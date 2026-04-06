@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -44,6 +44,65 @@ async def service_check_summary(
     current_user: User = Depends(get_current_user),
 ):
     return await service_check_service.get_service_check_summary(db)
+
+
+@router.get("/uptime-stats")
+async def service_check_uptime_stats(
+    hours: int = Query(default=24, ge=1, le=8760),
+    current_user: User = Depends(get_current_user),
+):
+    """Get uptime percentages per service check over a time range from ClickHouse metrics."""
+    from app.core.database import get_clickhouse_client
+    client = get_clickhouse_client()
+
+    to_time = datetime.utcnow()
+    from_time = to_time - timedelta(hours=hours)
+
+    tables_to_try = []
+    if hours <= 6:
+        tables_to_try = ["service_metrics"]
+    elif hours <= 168:
+        tables_to_try = ["service_metrics_5m", "service_metrics"]
+    else:
+        tables_to_try = ["service_metrics_5m", "service_metrics"]
+
+    uptime_map = {}
+    for table in tables_to_try:
+        if table == "service_metrics":
+            query = f"""
+                SELECT service_check_id,
+                       countIf(is_up = 1) AS up_count,
+                       count() AS total_count
+                FROM zenplus.{table}
+                WHERE timestamp >= %(from)s AND timestamp <= %(to)s
+                GROUP BY service_check_id
+            """
+        else:
+            query = f"""
+                SELECT service_check_id,
+                       sum(uptime_pct * sample_count) AS weighted_up,
+                       sum(sample_count) AS total_count
+                FROM zenplus.{table}
+                WHERE timestamp >= %(from)s AND timestamp <= %(to)s
+                GROUP BY service_check_id
+            """
+        try:
+            result = client.query(query, parameters={"from": from_time, "to": to_time})
+            if len(result.result_rows) > 0:
+                for row in result.result_rows:
+                    check_id = str(row[0])
+                    up = row[1]
+                    total = row[2]
+                    if table == "service_metrics":
+                        uptime_map[check_id] = round((up / total * 100) if total > 0 else 0, 2)
+                    else:
+                        uptime_map[check_id] = round((up / total * 100) if total > 0 else 0, 2)
+                break
+        except Exception:
+            continue
+
+    client.close()
+    return {"hours": hours, "from": from_time.isoformat(), "to": to_time.isoformat(), "checks": uptime_map}
 
 
 @router.post("", response_model=ServiceCheckResponse, status_code=201)

@@ -92,7 +92,38 @@ export interface User {
   email: string
   full_name: string | null
   role: string
+  is_active?: boolean
   last_login: string | null
+  created_at?: string
+  updated_at?: string
+}
+
+export interface Role {
+  id: string
+  name: string
+  description: string
+  permissions: string[]
+  user_count: number
+}
+
+export interface SubscriptionInfo {
+  id: string
+  plan: string
+  status: string
+  started_at: string
+  expires_at: string
+  max_devices: number
+  max_service_checks: number
+  max_users: number
+  license_key: string | null
+  activated_by: string | null
+  days_remaining: number
+  usage: {
+    devices: number
+    service_checks: number
+    users: number
+  }
+  features: string[]
 }
 
 export interface LoginResponse {

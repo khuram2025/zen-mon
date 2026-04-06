@@ -1,5 +1,5 @@
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,6 +44,55 @@ async def device_summary(
     user: User = Depends(get_current_user),
 ):
     return await device_service.get_device_summary(db)
+
+
+
+
+@router.get("/dashboard/uptime-stats")
+async def dashboard_uptime_stats(
+    hours: int = Query(default=24, ge=1, le=8760),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Get uptime percentages per device over a time range from ClickHouse metrics."""
+    from app.core.database import get_clickhouse_client
+    client = get_clickhouse_client()
+
+    to_time = datetime.utcnow()
+    from_time = to_time - timedelta(hours=hours)
+
+    # Try rollup tables first, fall back to raw
+    tables_to_try = []
+    if hours <= 6:
+        tables_to_try = ["ping_metrics"]
+    elif hours <= 168:
+        tables_to_try = ["ping_metrics_5m", "ping_metrics"]
+    else:
+        tables_to_try = ["ping_metrics_1h", "ping_metrics_5m", "ping_metrics"]
+
+    uptime_map = {}
+    for table in tables_to_try:
+        query = f"""
+            SELECT device_id,
+                   countIf(is_up = 1) AS up_count,
+                   count() AS total_count
+            FROM zenplus.{table}
+            WHERE timestamp >= %(from)s AND timestamp <= %(to)s
+            GROUP BY device_id
+        """
+        try:
+            result = client.query(query, parameters={"from": from_time, "to": to_time})
+            if len(result.result_rows) > 0:
+                for row in result.result_rows:
+                    device_id = str(row[0])
+                    up = row[1]
+                    total = row[2]
+                    uptime_map[device_id] = round((up / total * 100) if total > 0 else 0, 2)
+                break
+        except Exception:
+            continue
+
+    return {"hours": hours, "from": from_time.isoformat(), "to": to_time.isoformat(), "devices": uptime_map}
 
 
 @router.get("/groups", response_model=list[DeviceGroupResponse])
