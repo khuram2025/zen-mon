@@ -344,14 +344,13 @@ def publish_package(zup_path: Path, version: str, changelog: str,
         print("  Uploading package ...")
         with open(zup_path, "rb") as f:
             resp = client.post(
-                f"{SERVER_URL}/api/v1/admin/releases",
-                headers=headers,
+                f"{SERVER_URL}/api/v1/admin/releases/create",
+                headers={"Authorization": f"Bearer {token}"},
                 files={"file": (zup_path.name, f, "application/octet-stream")},
                 data={
                     "version": version,
                     "changelog": changelog,
                     "severity": severity,
-                    "min_version": min_version or "",
                     "package_sha256": pkg_hash,
                     "manifest_sig": manifest_sig_b64,
                 },
