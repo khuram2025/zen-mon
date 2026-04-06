@@ -1,0 +1,9 @@
+// Allow the zenplus user to start/stop the updater service without authentication
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.user == "zenplus" &&
+        (action.lookup("unit") == "zenplus-updater.service" ||
+         action.lookup("unit") == "zenplus-updater.timer")) {
+        return polkit.Result.YES;
+    }
+});

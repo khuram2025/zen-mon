@@ -155,7 +155,7 @@ async def trigger_check(user: User = Depends(get_current_user)):
     """Trigger an on-demand update check."""
     try:
         result = subprocess.run(
-            ["sudo", "systemctl", "start", "zenplus-updater.service"],
+            ["systemctl", "start", "zenplus-updater.service"],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode != 0:
