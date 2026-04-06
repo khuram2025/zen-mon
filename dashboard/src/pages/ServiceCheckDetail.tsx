@@ -139,6 +139,10 @@ export function ServiceCheckDetailPage() {
   const [showDelete, setShowDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<{
+    status: string; response_time_ms: number; error: string; details: Record<string, unknown>
+  } | null>(null)
 
   const rangeHours = timeRanges[rangeIdx].hours
   const now = useMemo(() => dayjs(), [rangeIdx]) // eslint-disable-line
@@ -171,6 +175,21 @@ export function ServiceCheckDetailPage() {
     navigator.clipboard.writeText(check?.target_url || `${check?.target_host}:${check?.target_port}`)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
+  }
+
+  const runTest = async () => {
+    setTesting(true)
+    setTestResult(null)
+    try {
+      const res = await api.post<{
+        status: string; response_time_ms: number; error: string; details: Record<string, unknown>
+      }>(`/service-checks/${id}/test`, {})
+      setTestResult(res)
+    } catch (e) {
+      setTestResult({ status: 'down', response_time_ms: 0, error: e instanceof Error ? e.message : 'Test failed', details: {} })
+    } finally {
+      setTesting(false)
+    }
   }
 
   // ─── Chart ───
@@ -408,6 +427,10 @@ export function ServiceCheckDetailPage() {
           <div className="bg-[var(--bg-secondary)] rounded-xl border border-[var(--bg-elevated)] p-5">
             <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">Quick Actions</h3>
             <div className="grid grid-cols-2 gap-2">
+              <button onClick={runTest} disabled={testing} className="flex items-center gap-2 p-3 rounded-lg bg-[var(--accent)]/10 text-xs text-[var(--accent)] hover:bg-[var(--accent)]/20 transition-colors disabled:opacity-50 col-span-2 justify-center font-medium">
+                {testing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
+                {testing ? 'Testing...' : 'Test Now'}
+              </button>
               <button onClick={copyTarget} className="flex items-center gap-2 p-3 rounded-lg bg-[var(--bg-tertiary)] text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors">
                 {copied ? <CheckCircle className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
                 {copied ? 'Copied!' : 'Copy Target'}
@@ -425,6 +448,63 @@ export function ServiceCheckDetailPage() {
               </button>
             </div>
           </div>
+
+          {/* Test Result */}
+          {testResult && (
+            <div className={cn(
+              'rounded-xl border p-5',
+              testResult.status === 'up'
+                ? 'bg-emerald-500/5 border-emerald-500/20'
+                : 'bg-red-500/5 border-red-500/20'
+            )}>
+              <div className="flex items-center gap-2 mb-3">
+                {testResult.status === 'up'
+                  ? <CheckCircle className="w-4 h-4 text-emerald-400" />
+                  : <XCircle className="w-4 h-4 text-red-400" />}
+                <h3 className="text-sm font-semibold text-[var(--text-primary)]">Test Result</h3>
+                <span className={cn('ml-auto text-xs font-bold', testResult.status === 'up' ? 'text-emerald-400' : 'text-red-400')}>
+                  {testResult.status.toUpperCase()}
+                </span>
+              </div>
+              <div className="space-y-2 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-[var(--text-muted)]">Response Time</span>
+                  <span className="font-mono text-[var(--text-primary)]">{testResult.response_time_ms.toFixed(1)} ms</span>
+                </div>
+                {testResult.error && (
+                  <div className="bg-red-500/10 rounded-lg px-3 py-2 text-red-400 font-mono break-all">
+                    {testResult.error}
+                  </div>
+                )}
+                {testResult.details.status_code !== undefined && (
+                  <div className="flex justify-between">
+                    <span className="text-[var(--text-muted)]">HTTP Status</span>
+                    <span className="font-mono text-[var(--text-primary)]">{String(testResult.details.status_code)}</span>
+                  </div>
+                )}
+                {testResult.details.body_length !== undefined && (
+                  <div className="flex justify-between">
+                    <span className="text-[var(--text-muted)]">Body Size</span>
+                    <span className="font-mono text-[var(--text-primary)]">{String(testResult.details.body_length)} bytes</span>
+                  </div>
+                )}
+                {testResult.details.expires !== undefined && (
+                  <div className="flex justify-between">
+                    <span className="text-[var(--text-muted)]">Certificate Expires</span>
+                    <span className="font-mono text-[var(--text-primary)]">{String(testResult.details.expires)}</span>
+                  </div>
+                )}
+                {testResult.details.content_match !== undefined && (
+                  <div className="flex justify-between">
+                    <span className="text-[var(--text-muted)]">Content Match</span>
+                    <span className={cn('font-mono', testResult.details.content_match ? 'text-emerald-400' : 'text-red-400')}>
+                      {testResult.details.content_match ? 'Found' : 'Not Found'}
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Check Configuration */}
           <div className="bg-[var(--bg-secondary)] rounded-xl border border-[var(--bg-elevated)] p-5">

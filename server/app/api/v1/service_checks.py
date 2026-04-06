@@ -197,3 +197,121 @@ async def get_service_check_status_history(
     return service_metric_service.get_service_status_history(
         check_id, from_time=from_time, to_time=to_time, limit=limit,
     )
+
+
+@router.post("/{check_id}/test")
+async def test_service_check(
+    check_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Run an on-demand test of a service check and return the result."""
+    import socket
+    import ssl
+    import time
+    import httpx
+
+    check = await service_check_service.get_service_check(db, check_id)
+    if not check:
+        raise HTTPException(status_code=404, detail="Service check not found")
+
+    result = {
+        "check_id": str(check_id),
+        "check_type": check.check_type,
+        "target": check.target_url or f"{check.target_host}:{check.target_port}",
+        "status": "unknown",
+        "response_time_ms": 0,
+        "error": "",
+        "details": {},
+    }
+
+    start = time.monotonic()
+
+    try:
+        if check.check_type == "http":
+            url = check.target_url or f"http://{check.target_host}:{check.target_port or 80}"
+            async with httpx.AsyncClient(
+                timeout=check.timeout,
+                follow_redirects=check.http_follow_redirects,
+                verify=False,
+            ) as client:
+                method = (check.http_method or "GET").upper()
+                resp = await client.request(method, url)
+
+            elapsed = (time.monotonic() - start) * 1000
+            result["response_time_ms"] = round(elapsed, 1)
+            result["details"]["status_code"] = resp.status_code
+            result["details"]["headers"] = dict(resp.headers)
+            result["details"]["body_length"] = len(resp.content)
+
+            expected = check.http_expected_status or 200
+            if resp.status_code == expected:
+                result["status"] = "up"
+            else:
+                result["status"] = "down"
+                result["error"] = f"Expected HTTP {expected}, got {resp.status_code}"
+
+            # Content match
+            if check.http_content_match:
+                body = resp.text
+                if check.http_content_match in body:
+                    result["details"]["content_match"] = True
+                else:
+                    result["status"] = "down"
+                    result["error"] = f"Content match failed: '{check.http_content_match}' not found"
+                    result["details"]["content_match"] = False
+
+        elif check.check_type == "tcp":
+            host = check.target_host
+            port = check.target_port or 80
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(check.timeout)
+            sock.connect((host, port))
+            elapsed = (time.monotonic() - start) * 1000
+            sock.close()
+            result["response_time_ms"] = round(elapsed, 1)
+            result["status"] = "up"
+            result["details"]["connected"] = True
+
+        elif check.check_type == "tls":
+            host = check.target_host
+            port = check.target_port or 443
+            ctx = ssl.create_default_context()
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(check.timeout)
+            wrapped = ctx.wrap_socket(sock, server_hostname=host)
+            wrapped.connect((host, port))
+            elapsed = (time.monotonic() - start) * 1000
+            cert = wrapped.getpeercert()
+            wrapped.close()
+            result["response_time_ms"] = round(elapsed, 1)
+            result["status"] = "up"
+            result["details"]["connected"] = True
+            if cert:
+                result["details"]["subject"] = dict(x[0] for x in cert.get("subject", []))
+                result["details"]["issuer"] = dict(x[0] for x in cert.get("issuer", []))
+                result["details"]["expires"] = cert.get("notAfter", "")
+                result["details"]["serial"] = cert.get("serialNumber", "")
+
+    except (socket.timeout, TimeoutError):
+        elapsed = (time.monotonic() - start) * 1000
+        result["response_time_ms"] = round(elapsed, 1)
+        result["status"] = "down"
+        result["error"] = f"Connection timed out after {check.timeout}s"
+    except ConnectionRefusedError:
+        elapsed = (time.monotonic() - start) * 1000
+        result["response_time_ms"] = round(elapsed, 1)
+        result["status"] = "down"
+        result["error"] = "Connection refused"
+    except ssl.SSLError as e:
+        elapsed = (time.monotonic() - start) * 1000
+        result["response_time_ms"] = round(elapsed, 1)
+        result["status"] = "down"
+        result["error"] = f"TLS error: {e}"
+    except Exception as e:
+        elapsed = (time.monotonic() - start) * 1000
+        result["response_time_ms"] = round(elapsed, 1)
+        result["status"] = "down"
+        result["error"] = str(e)
+
+    return result
