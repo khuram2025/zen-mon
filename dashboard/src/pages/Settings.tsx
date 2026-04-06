@@ -2807,6 +2807,8 @@ function UpdatesTab({ showToast }: { showToast: (t: 'success' | 'error', m: unkn
   const [checking, setChecking] = useState(false)
   const [saving, setSaving] = useState(false)
   const [showLog, setShowLog] = useState(false)
+  const [licenseKey, setLicenseKey] = useState('')
+  const [registering, setRegistering] = useState(false)
   const queryClient = useQueryClient()
 
   const { data: status, isLoading } = useQuery<UpdateStatus>({
@@ -2862,6 +2864,26 @@ function UpdatesTab({ showToast }: { showToast: (t: 'success' | 'error', m: unkn
     }
   }
 
+  const handleRegister = async () => {
+    if (!licenseKey.trim()) {
+      showToast('error', 'Please enter a license key')
+      return
+    }
+    setRegistering(true)
+    try {
+      const res = await api.post<{ appliance_id: string }>('/system/register', { license_key: licenseKey.trim() })
+      showToast('success', `Appliance registered! ID: ${res.appliance_id}`)
+      setLicenseKey('')
+      queryClient.invalidateQueries({ queryKey: ['update-status'] })
+    } catch (err) {
+      showToast('error', err)
+    } finally {
+      setRegistering(false)
+    }
+  }
+
+  const isRegistered = !!(status?.appliance_id)
+
   const fmtDate = (d: string) => {
     if (!d) return '—'
     try { return new Date(d).toLocaleString() } catch { return d }
@@ -2879,6 +2901,49 @@ function UpdatesTab({ showToast }: { showToast: (t: 'success' | 'error', m: unkn
 
   return (
     <div className="space-y-6">
+
+      {/* Registration Card */}
+      {!isRegistered && (
+        <div className="bg-[var(--bg-secondary)] rounded-xl border border-amber-500/30 p-6">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="w-8 h-8 rounded-lg bg-amber-500/10 flex items-center justify-center">
+              <KeyRound className="w-4 h-4 text-amber-400" />
+            </div>
+            <div>
+              <h3 className="text-sm font-semibold text-[var(--text-primary)]">Appliance Not Registered</h3>
+              <p className="text-xs text-[var(--text-muted)]">Enter your license key to register this appliance with the update server</p>
+            </div>
+          </div>
+          <div className="flex gap-3">
+            <input
+              type="text"
+              className="flex-1 bg-[var(--bg-tertiary)] text-[var(--text-primary)] px-4 py-2.5 rounded-lg border border-[var(--bg-elevated)] focus:border-amber-400 focus:outline-none text-sm font-mono"
+              placeholder="Enter license key (e.g. ZP-XXXX-XXXX-XXXX)"
+              value={licenseKey}
+              onChange={(e) => setLicenseKey(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleRegister()}
+            />
+            <button
+              onClick={handleRegister}
+              disabled={registering || !licenseKey.trim()}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-amber-500 text-white text-sm font-medium hover:bg-amber-600 transition-colors disabled:opacity-50"
+            >
+              {registering ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
+              Register
+            </button>
+          </div>
+        </div>
+      )}
+
+      {isRegistered && !status?.timer_active && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-4 flex items-center gap-3">
+          <AlertTriangle className="w-5 h-5 text-amber-400 flex-shrink-0" />
+          <div>
+            <p className="text-sm font-medium text-amber-300">Update timer is not active</p>
+            <p className="text-xs text-[var(--text-muted)]">Run: <code className="bg-[var(--bg-tertiary)] px-1.5 py-0.5 rounded text-[10px]">sudo bash /opt/zenplus/scripts/setup-updater.sh</code> to enable automatic updates</p>
+          </div>
+        </div>
+      )}
 
       {/* Active Update Banner */}
       {status?.active_update && (
