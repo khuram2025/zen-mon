@@ -10,54 +10,100 @@ from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.user import User
 from app.services.report_service import generate_report
+from app.services.export_service import generate_excel_report, generate_csv_report
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
+REPORT_NAMES = {
+    'executive_summary': 'Executive-Summary',
+    'device_health': 'Device-Health',
+    'service_health': 'Service-Health',
+    'alert_analysis': 'Alert-Analysis',
+    'full_report': 'Full-Report',
+}
+
 
 class ReportRequest(BaseModel):
-    report_type: str = "executive_summary"  # executive_summary | device_health | service_health | alert_analysis | full_report
-    period: str = "last_24h"  # last_24h | last_7d | last_30d | custom
+    report_type: str = "executive_summary"
+    period: str = "last_24h"
     from_time: Optional[datetime] = None
     to_time: Optional[datetime] = None
     device_ids: Optional[list[str]] = None
     group_ids: Optional[list[str]] = None
+    format: str = "pdf"  # pdf | excel | csv
 
 
 @router.post("/generate")
-async def generate_pdf_report(
+async def generate_report_endpoint(
     data: ReportRequest,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    name = REPORT_NAMES.get(data.report_type, 'Report')
+    ts = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+
     try:
-        pdf_bytes = await generate_report(
-            db=db,
-            report_type=data.report_type,
-            period=data.period,
-            from_time=data.from_time,
-            to_time=data.to_time,
-            device_ids=data.device_ids,
-            group_ids=data.group_ids,
-        )
+        if data.format == "excel":
+            content = await generate_excel_report(
+                db=db,
+                report_type=data.report_type,
+                period=data.period,
+                from_time=data.from_time,
+                to_time=data.to_time,
+                device_ids=data.device_ids,
+                group_ids=data.group_ids,
+            )
+            filename = f"ZenPlus-{name}-{ts}.xlsx"
+            return Response(
+                content=content,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{filename}"',
+                    "Content-Length": str(len(content)),
+                },
+            )
 
-        report_names = {
-            'executive_summary': 'Executive-Summary',
-            'device_health': 'Device-Health',
-            'service_health': 'Service-Health',
-            'alert_analysis': 'Alert-Analysis',
-            'full_report': 'Full-Report',
-        }
-        name = report_names.get(data.report_type, 'Report')
-        filename = f"ZenPlus-{name}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.pdf"
+        elif data.format == "csv":
+            content = await generate_csv_report(
+                db=db,
+                report_type=data.report_type,
+                period=data.period,
+                from_time=data.from_time,
+                to_time=data.to_time,
+                device_ids=data.device_ids,
+                group_ids=data.group_ids,
+            )
+            filename = f"ZenPlus-{name}-{ts}.csv"
+            return Response(
+                content=content,
+                media_type="text/csv",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{filename}"',
+                    "Content-Length": str(len(content)),
+                },
+            )
 
-        return Response(
-            content=bytes(pdf_bytes),
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": f'attachment; filename="{filename}"',
-                "Content-Length": str(len(pdf_bytes)),
-            },
-        )
+        else:
+            # Default: PDF
+            pdf_bytes = await generate_report(
+                db=db,
+                report_type=data.report_type,
+                period=data.period,
+                from_time=data.from_time,
+                to_time=data.to_time,
+                device_ids=data.device_ids,
+                group_ids=data.group_ids,
+            )
+            filename = f"ZenPlus-{name}-{ts}.pdf"
+            return Response(
+                content=bytes(pdf_bytes),
+                media_type="application/pdf",
+                headers={
+                    "Content-Disposition": f'attachment; filename="{filename}"',
+                    "Content-Length": str(len(pdf_bytes)),
+                },
+            )
+
     except Exception as e:
         import traceback
         traceback.print_exc()
