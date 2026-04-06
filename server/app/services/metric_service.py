@@ -35,6 +35,12 @@ def get_device_metrics(
 
     client = get_clickhouse_client()
 
+    params = {
+        "device_id": str(device_id),
+        "from_time": from_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "to_time": to_time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
     if granularity == "raw":
         query = f"""
             SELECT
@@ -70,14 +76,29 @@ def get_device_metrics(
             LIMIT 5000
         """
 
-    result = client.query(
-        query,
-        parameters={
-            "device_id": str(device_id),
-            "from_time": from_time.strftime("%Y-%m-%d %H:%M:%S"),
-            "to_time": to_time.strftime("%Y-%m-%d %H:%M:%S"),
-        },
-    )
+    result = client.query(query, parameters=params)
+
+    # Fallback: if rollup table is empty, aggregate from raw data
+    if not result.result_rows and granularity != "raw":
+        interval = "5 MINUTE" if granularity == "5m" else "1 HOUR"
+        query = f"""
+            SELECT
+                toStartOfInterval(timestamp, INTERVAL {interval}) AS ts,
+                avg(rtt_ms) AS rtt_ms,
+                avg(packet_loss) AS packet_loss,
+                avg(jitter_ms) AS jitter_ms,
+                min(min_rtt_ms) AS min_rtt_ms,
+                max(max_rtt_ms) AS max_rtt_ms,
+                avg(is_up) AS is_up
+            FROM ping_metrics
+            WHERE device_id = %(device_id)s
+              AND timestamp >= %(from_time)s
+              AND timestamp <= %(to_time)s
+            GROUP BY ts
+            ORDER BY ts
+            LIMIT 5000
+        """
+        result = client.query(query, parameters=params)
 
     points = []
     for row in result.result_rows:
