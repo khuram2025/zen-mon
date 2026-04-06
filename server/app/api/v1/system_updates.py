@@ -21,6 +21,8 @@ VERSION_FILE = Path("/opt/zenplus/.version")
 LOG_FILE = UPDATER_DIR / "logs" / "update.log"
 
 
+# ─── Models ───────────────────────────────────────────────────────────────────
+
 class UpdateConfig(BaseModel):
     auto_update: bool = True
     check_interval_hours: int = 4
@@ -58,6 +60,12 @@ class UpdateStatus(BaseModel):
     history: list[UpdateHistoryRecord] = []
     recent_log: list[str] = []
 
+
+class RegisterRequest(BaseModel):
+    license_key: str
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _get_version_info() -> tuple[str, str]:
     """Return (version, installed_at) from .version file."""
@@ -106,6 +114,8 @@ def _get_timer_info() -> dict:
         return {"active": False, "next": "", "last": ""}
 
 
+# ─── Endpoints ────────────────────────────────────────────────────────────────
+
 @router.get("/update-status")
 async def get_update_status(user: User = Depends(get_current_user)):
     """Get full update agent status including history and errors."""
@@ -132,7 +142,6 @@ async def get_update_status(user: User = Depends(get_current_user)):
     except (json.JSONDecodeError, OSError):
         pass
 
-    # Find last completed + active update
     last_update = None
     active_update = None
     for r in history_raw:
@@ -141,7 +150,6 @@ async def get_update_status(user: User = Depends(get_current_user)):
         if r.get("status") in ("success", "failed", "rolled_back") and not last_update:
             last_update = UpdateHistoryRecord(**r)
 
-    # Check if updater is currently running
     updater_running = False
     try:
         result = subprocess.run(
@@ -192,21 +200,16 @@ async def update_config(body: UpdateConfig, user: User = Depends(get_current_use
     _write_config(config)
 
     # Update systemd timer interval
-    timer_path = Path("/etc/systemd/system/zenplus-updater.timer")
-    if timer_path.exists():
-        try:
-            content = timer_path.read_text()
-            # Replace OnUnitActiveSec line
-            import re
-            content = re.sub(
-                r"OnUnitActiveSec=.*",
-                f"OnUnitActiveSec={body.check_interval_hours}h",
-                content,
-            )
-            timer_path.write_text(content)
-            subprocess.run(["systemctl", "daemon-reload"], timeout=10)
-        except Exception:
-            pass
+    try:
+        subprocess.run(
+            ["sudo", "sed", "-i",
+             f"s/OnUnitActiveSec=.*/OnUnitActiveSec={body.check_interval_hours}h/",
+             "/etc/systemd/system/zenplus-updater.timer"],
+            timeout=10, capture_output=True,
+        )
+        subprocess.run(["sudo", "systemctl", "daemon-reload"], timeout=10, capture_output=True)
+    except Exception:
+        pass
 
     return {"status": "ok", "message": "Configuration updated"}
 
@@ -228,47 +231,33 @@ async def trigger_check(user: User = Depends(get_current_user)):
 
 # ─── Registration ─────────────────────────────────────────────────────────────
 
-class RegisterRequest(BaseModel):
-    license_key: str
-
-
-class RegistrationStatus(BaseModel):
-    registered: bool
-    appliance_id: str
-    server_url: str
-
-
 @router.get("/registration")
 async def get_registration(user: User = Depends(get_current_user)):
     """Get current registration status."""
     config = _read_config()
     appliance_id = config.get("appliance", "id", fallback="")
-    return RegistrationStatus(
-        registered=bool(appliance_id),
-        appliance_id=appliance_id,
-        server_url=config.get("server", "url", fallback="https://zentryc.com"),
-    )
+    return {
+        "registered": bool(appliance_id),
+        "appliance_id": appliance_id,
+        "server_url": config.get("server", "url", fallback="https://zentryc.com"),
+    }
 
 
 @router.post("/register")
 async def register_appliance(body: RegisterRequest, user: User = Depends(get_current_user)):
     """Register this appliance with zentryc.com using a license key."""
     import httpx
+    import os
     import platform
-    from pathlib import Path
 
     config = _read_config()
     server_url = config.get("server", "url", fallback="https://zentryc.com")
 
-    # Collect system info
     version, _ = _get_version_info()
     hostname = platform.node()
-
-    # Get arch
     machine = platform.machine().lower()
     arch = "amd64" if machine in ("x86_64", "amd64") else "arm64" if machine in ("aarch64", "arm64") else machine
 
-    # Get OS version
     os_version = "linux"
     try:
         os_release = Path("/etc/os-release").read_text()
@@ -281,7 +270,6 @@ async def register_appliance(body: RegisterRequest, user: User = Depends(get_cur
     except OSError:
         pass
 
-    # Call zentryc.com registration API
     try:
         async with httpx.AsyncClient(timeout=30, verify=True) as client:
             resp = await client.post(
@@ -310,15 +298,11 @@ async def register_appliance(body: RegisterRequest, user: User = Depends(get_cur
     except httpx.RequestError as e:
         raise HTTPException(status_code=502, detail=f"Cannot reach update server: {e}")
 
-    # Save credentials to agent.conf
     if not config.has_section("appliance"):
         config.add_section("appliance")
     config.set("appliance", "id", appliance_id)
     config.set("appliance", "api_key", api_key)
     _write_config(config)
-
-    # Secure the config file
-    import os
     os.chmod(str(CONFIG_PATH), 0o600)
 
     return {
@@ -328,13 +312,14 @@ async def register_appliance(body: RegisterRequest, user: User = Depends(get_cur
     }
 
 
+# ─── Health ───────────────────────────────────────────────────────────────────
+
 @router.get("/health")
 async def system_health():
     """Comprehensive health check."""
     checks = {}
     checks["api"] = "ok"
 
-    # PostgreSQL
     try:
         result = subprocess.run(
             ["pg_isready", "-h", "127.0.0.1", "-p", "5432"],
@@ -344,7 +329,6 @@ async def system_health():
     except Exception:
         checks["postgresql"] = "error"
 
-    # ClickHouse
     try:
         import httpx as _httpx
         r = _httpx.get("http://127.0.0.1:8123/ping", timeout=3)
@@ -352,7 +336,6 @@ async def system_health():
     except Exception:
         checks["clickhouse"] = "error"
 
-    # Redis
     try:
         result = subprocess.run(
             ["redis-cli", "-h", "127.0.0.1", "ping"],
@@ -363,7 +346,6 @@ async def system_health():
     except Exception:
         checks["redis"] = "error"
 
-    # Services
     for svc in ["zenplus-api", "zenplus-poller", "netmon-gunicorn", "nginx"]:
         try:
             result = subprocess.run(
