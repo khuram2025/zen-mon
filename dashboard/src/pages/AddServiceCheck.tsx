@@ -1,6 +1,6 @@
-import { useState, useCallback } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useState, useCallback, useEffect } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Globe, Plug, ShieldCheck, ArrowLeft, Loader2 } from 'lucide-react';
 import { api } from '@/lib/api';
 
@@ -60,6 +60,8 @@ function extractHostFromUrl(url: string): string {
 export function AddServiceCheckPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const [searchParams] = useSearchParams();
+  const cloneId = searchParams.get('clone');
 
   const [checkType, setCheckType] = useState<CheckType>('http');
   const [name, setName] = useState('');
@@ -86,6 +88,47 @@ export function AddServiceCheckPage() {
   const [criticalDays, setCriticalDays] = useState(7);
 
   const [error, setError] = useState<string | null>(null);
+
+  // Pre-fill form when cloning an existing service check
+  const { data: cloneSource } = useQuery({
+    queryKey: ['service-check', cloneId],
+    queryFn: () => api.get<Record<string, unknown>>(`/service-checks/${cloneId}`),
+    enabled: !!cloneId,
+  });
+
+  useEffect(() => {
+    if (cloneSource) {
+      setCheckType((cloneSource.check_type as CheckType) || 'http');
+      setName(`${cloneSource.name || ''} (Copy)`);
+      setDeviceId((cloneSource.device_id as string) || '');
+      setCheckInterval((cloneSource.check_interval as number) || 60);
+      setTimeout((cloneSource.timeout as number) || 10);
+      setDescription((cloneSource.description as string) || '');
+
+      // HTTP fields
+      if (cloneSource.check_type === 'http') {
+        setUrl((cloneSource.target_url as string) || '');
+        setHttpMethod((cloneSource.http_method as HttpMethod) || 'GET');
+        setExpectedStatus((cloneSource.http_expected_status as number) || 200);
+        setContentMatch((cloneSource.http_content_match as string) || '');
+        setFollowRedirects(cloneSource.http_follow_redirects !== false);
+      }
+
+      // TCP fields
+      if (cloneSource.check_type === 'tcp') {
+        setTcpHost((cloneSource.target_host as string) || '');
+        setTcpPort(cloneSource.target_port ? String(cloneSource.target_port) : '');
+      }
+
+      // TLS fields
+      if (cloneSource.check_type === 'tls') {
+        setTlsHost((cloneSource.target_host as string) || '');
+        setTlsPort((cloneSource.target_port as number) || 443);
+        setWarnDays((cloneSource.tls_warn_days as number) || 30);
+        setCriticalDays((cloneSource.tls_critical_days as number) || 7);
+      }
+    }
+  }, [cloneSource]);
 
   const mutation = useMutation({
     mutationFn: (data: ServiceCheckPayload) => api.post('/service-checks', data),
@@ -184,7 +227,7 @@ export function AddServiceCheckPage() {
           >
             <ArrowLeft className="w-4 h-4 text-[var(--text-secondary)]" />
           </Link>
-          <h1 className="text-2xl font-semibold tracking-tight">Add Service Check</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">{cloneId ? 'Duplicate Service Check' : 'Add Service Check'}</h1>
         </div>
 
         {/* Error banner */}

@@ -31,6 +31,7 @@ export function useServiceCheck(id: string) {
     queryKey: ['service-check', id],
     queryFn: () => api.get<ServiceCheck>(`/service-checks/${id}`),
     enabled: !!id,
+    refetchInterval: 30_000,
   })
 }
 

@@ -1,5 +1,5 @@
-import { useState, useRef, type FormEvent, type ChangeEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useState, useRef, useEffect, type FormEvent, type ChangeEvent } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import type { DeviceGroup } from '@/types'
@@ -50,6 +50,8 @@ const pingIntervals = [
 function SingleDeviceForm() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const [searchParams] = useSearchParams()
+  const cloneId = searchParams.get('clone')
   const [success, setSuccess] = useState(false)
   const [error, setError] = useState('')
 
@@ -64,6 +66,29 @@ function SingleDeviceForm() {
     description: '',
     tags: '',
   })
+
+  // Pre-fill form when cloning an existing device
+  const { data: cloneSource } = useQuery({
+    queryKey: ['device', cloneId],
+    queryFn: () => api.get<Record<string, unknown>>(`/devices/${cloneId}`),
+    enabled: !!cloneId,
+  })
+
+  useEffect(() => {
+    if (cloneSource) {
+      setForm({
+        hostname: `${cloneSource.hostname || ''} (Copy)`,
+        ip_address: '',
+        device_type: (cloneSource.device_type as string) || 'other',
+        location: (cloneSource.location as string) || '',
+        group_id: (cloneSource.group_id as string) || '',
+        ping_enabled: cloneSource.ping_enabled !== false,
+        ping_interval: (cloneSource.ping_interval as number) || 60,
+        description: (cloneSource.description as string) || '',
+        tags: Array.isArray(cloneSource.tags) ? (cloneSource.tags as string[]).join(', ') : '',
+      })
+    }
+  }, [cloneSource])
 
   const { data: groups } = useQuery({
     queryKey: ['device-groups'],
@@ -678,10 +703,12 @@ function ExportDevices() {
 // ─── Main Page ───
 export function AddDevicePage() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const isClone = !!searchParams.get('clone')
   const [tab, setTab] = useState<Tab>('single')
 
   const tabs: { key: Tab; label: string; icon: typeof Plus; desc: string }[] = [
-    { key: 'single', label: 'Add Device', icon: Plus, desc: 'Add a single device manually' },
+    { key: 'single', label: isClone ? 'Duplicate Device' : 'Add Device', icon: isClone ? Copy : Plus, desc: isClone ? 'Duplicate with modified values' : 'Add a single device manually' },
     { key: 'import', label: 'Import', icon: Upload, desc: 'Bulk import from CSV or JSON' },
     { key: 'export', label: 'Export', icon: Download, desc: 'Download device inventory' },
   ]

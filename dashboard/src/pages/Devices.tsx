@@ -30,6 +30,7 @@ import {
   Loader2,
   LayoutGrid,
   Plus,
+  Copy,
 } from 'lucide-react'
 
 // ---------------------------------------------------------------------------
@@ -607,6 +608,15 @@ export function DevicesPage() {
             <Trash2 className="h-3.5 w-3.5" />
             Delete
           </button>
+          {selected.size === 1 && (
+            <button
+              onClick={() => navigate(`/devices/new?clone=${Array.from(selected)[0]}`)}
+              className="flex items-center gap-1.5 rounded-lg bg-[var(--accent)]/10 px-3 py-1.5 text-sm font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent)]/20"
+            >
+              <Copy className="h-3.5 w-3.5" />
+              Duplicate
+            </button>
+          )}
           <button
             onClick={() => setSelected(new Set())}
             className="ml-auto text-xs text-[var(--text-muted)] transition-colors hover:text-[var(--text-secondary)]"

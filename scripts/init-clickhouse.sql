@@ -95,6 +95,76 @@ AS SELECT
 FROM zenplus.ping_metrics_5m
 GROUP BY device_id, toStartOfHour(timestamp);
 
+-- ─── Service check raw metrics (30-day retention) ───
+CREATE TABLE IF NOT EXISTS zenplus.service_metrics (
+    service_check_id UUID,
+    device_id        UUID,
+    timestamp        DateTime64(3, 'UTC'),
+    check_type       String,
+    is_up            UInt8,
+    response_ms      Float64,
+    status_code      Nullable(UInt16),
+    tls_days_remaining Nullable(Int32),
+    tls_valid        Nullable(UInt8),
+    content_matched  Nullable(UInt8),
+    error_message    Nullable(String),
+    poller_id        String
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (service_check_id, timestamp)
+TTL toDateTime(timestamp) + INTERVAL 30 DAY DELETE
+SETTINGS index_granularity = 8192;
+
+-- ─── Service check 5-minute rollup (90-day retention) ───
+CREATE TABLE IF NOT EXISTS zenplus.service_metrics_5m (
+    service_check_id UUID,
+    device_id        Nullable(UUID),
+    timestamp        DateTime64(3, 'UTC'),
+    check_type       LowCardinality(String),
+    avg_response_ms  Float64,
+    min_response_ms  Float64,
+    max_response_ms  Float64,
+    uptime_pct       Float32,
+    sample_count     UInt32
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (service_check_id, timestamp)
+TTL toDateTime(timestamp) + INTERVAL 90 DAY DELETE;
+
+-- ─── Materialized view: service_metrics → 5m rollup ───
+CREATE MATERIALIZED VIEW IF NOT EXISTS zenplus.service_metrics_5m_mv
+TO zenplus.service_metrics_5m
+AS SELECT
+    service_check_id,
+    any(device_id)                      AS device_id,
+    toStartOfFiveMinutes(timestamp)     AS ts,
+    any(check_type)                     AS check_type,
+    avg(response_ms)                    AS avg_response_ms,
+    min(response_ms)                    AS min_response_ms,
+    max(response_ms)                    AS max_response_ms,
+    avg(is_up)                          AS uptime_pct,
+    count()                             AS sample_count
+FROM zenplus.service_metrics
+GROUP BY service_check_id, ts;
+
+-- ─── Service status change log (1-year retention) ───
+CREATE TABLE IF NOT EXISTS zenplus.service_status_log (
+    service_check_id UUID,
+    device_id        UUID,
+    timestamp        DateTime64(3, 'UTC'),
+    check_type       String,
+    old_status       String,
+    new_status       String,
+    reason           String,
+    duration_sec     UInt64
+)
+ENGINE = MergeTree()
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (service_check_id, timestamp)
+TTL toDateTime(timestamp) + INTERVAL 365 DAY DELETE;
+
 -- ─── Device status change log (1-year retention) ───
 CREATE TABLE IF NOT EXISTS zenplus.device_status_log (
     device_id       UUID,

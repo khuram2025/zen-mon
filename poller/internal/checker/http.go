@@ -2,6 +2,7 @@ package checker
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,8 +32,12 @@ func (c *HTTPChecker) Check(ctx context.Context, sc *ServiceCheck, pollerID stri
 		PollerID:       pollerID,
 	}
 
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
 	client := &http.Client{
-		Timeout: sc.Timeout,
+		Timeout:   sc.Timeout,
+		Transport: transport,
 	}
 
 	if !sc.HTTPFollowRedirects {

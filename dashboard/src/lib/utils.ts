@@ -83,3 +83,21 @@ export function formatTimeFromTs(ts: number | string, timezone: string = 'UTC'):
     return new Date(ts).toLocaleTimeString()
   }
 }
+
+export function formatShortTime(date: string | null, timezone: string = 'UTC'): string {
+  if (!date) return ''
+  try {
+    return new Date(date).toLocaleTimeString('en-US', { timeZone: timezone, hour: '2-digit', minute: '2-digit', hour12: false })
+  } catch {
+    return new Date(date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+}
+
+export function formatShortDateTime(date: string | null, timezone: string = 'UTC'): string {
+  if (!date) return ''
+  try {
+    return new Date(date).toLocaleString('en-US', { timeZone: timezone, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
+  } catch {
+    return new Date(date).toLocaleString()
+  }
+}

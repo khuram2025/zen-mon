@@ -24,6 +24,7 @@ import {
   X,
   Filter,
   Plus,
+  Copy,
 } from 'lucide-react'
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -620,6 +621,16 @@ export function ServiceChecksPage() {
               >
                 Clear Selection
               </button>
+              {selectedIds.size === 1 && (
+                <button
+                  onClick={() => navigate(`/service-checks/new?clone=${Array.from(selectedIds)[0]}`)}
+                  className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors hover:bg-white/5"
+                  style={{ background: 'rgba(99,102,241,0.10)', color: '#818CF8' }}
+                >
+                  <Copy size={13} />
+                  Duplicate
+                </button>
+              )}
               <button
                 onClick={() => setShowDeleteDialog(true)}
                 className="flex items-center gap-1.5 rounded-lg bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-400 transition-colors hover:bg-red-500/20"

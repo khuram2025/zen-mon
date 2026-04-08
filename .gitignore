@@ -63,6 +63,13 @@ tmp/
 
 # ─── Compiled binaries ───
 bin/zenplus-poller
+poller/poller
+
+# ─── OTA Updater (runtime data, secrets) ───
+updater/backups/
+updater/config/
+updater/keys/*.key
+updater/logs/
 
 # ─── Local/server files ───
 int/

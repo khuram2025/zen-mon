@@ -14,6 +14,10 @@
 | 06 | [Task List](06-TASK-LIST.md) | Complete task breakdown for all phases with checkboxes |
 | 07 | [Go Poller Design](07-GO-POLLER-DESIGN.md) | Ping engine architecture, data types, scheduling, config |
 | 08 | [Deployment](08-DEPLOYMENT.md) | Docker Compose, directory structure, scaling strategy |
+| 09 | [Startup Guide](09-STARTUP-GUIDE.md) | How to start/stop the system, troubleshooting |
+| 10 | [OTA Update System](10-OTA-UPDATE-SYSTEM.md) | Over-the-air update agent, manifests, rollback |
+| 11 | [Server-Side Implementation](11-SERVER-SIDE-IMPLEMENTATION-GUIDE.md) | Update server API, release management |
+| 12 | [**Appliance Build Guide**](12-APPLIANCE-BASE-SYSTEM.md) | **Complete OVA appliance spec: Base OS + Application deployment** |
 
 ## Quick Start (Phase 1)
 

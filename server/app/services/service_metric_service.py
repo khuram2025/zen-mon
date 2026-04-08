@@ -1,8 +1,17 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from app.core.database import get_clickhouse_client
 from app.schemas.service_check import ServiceMetricPoint, ServiceMetricResponse
+
+
+def _ensure_utc(dt: datetime) -> datetime:
+    """Ensure a datetime is timezone-aware (UTC). ClickHouse returns naive datetimes."""
+    if dt is None:
+        return dt
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def get_service_metrics(
@@ -69,11 +78,9 @@ def get_service_metrics(
             is_up = float(raw_is_up) > 0.5 if raw_is_up is not None else None
 
         resp_ms = row[1]
-        if not is_up and granularity == "raw":
-            resp_ms = None
 
         points.append(ServiceMetricPoint(
-            timestamp=row[0],
+            timestamp=_ensure_utc(row[0]),
             response_ms=resp_ms,
             is_up=is_up,
             status_code=row[3],
@@ -126,7 +133,7 @@ def get_service_status_history(
     for row in result.result_rows:
         events.append({
             "service_check_id": row[0],
-            "timestamp": row[1],
+            "timestamp": _ensure_utc(row[1]),
             "old_status": row[2],
             "new_status": row[3],
             "reason": row[4],

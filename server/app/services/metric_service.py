@@ -1,8 +1,17 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from app.core.database import get_clickhouse_client
 from app.schemas.metric import MetricPoint, MetricResponse, StatusChangeEvent
+
+
+def _ensure_utc(dt: datetime) -> datetime:
+    """Ensure a datetime is timezone-aware (UTC). ClickHouse returns naive datetimes."""
+    if dt is None:
+        return dt
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def get_device_metrics(
@@ -114,7 +123,7 @@ def get_device_metrics(
             rtt = None
 
         points.append(MetricPoint(
-            timestamp=row[0],
+            timestamp=_ensure_utc(row[0]),
             rtt_ms=rtt,
             packet_loss=row[2],
             jitter_ms=row[3],
@@ -172,7 +181,7 @@ def get_status_history(
             old_status=row[2],
             new_status=row[3],
             reason=row[4],
-            timestamp=row[1],
+            timestamp=_ensure_utc(row[1]),
             duration_sec=row[5],
         ))
 

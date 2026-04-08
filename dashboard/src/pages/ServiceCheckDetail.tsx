@@ -8,9 +8,9 @@ import {
   ArrowUpCircle, ArrowDownCircle, History, Shield, Zap, WifiOff,
 } from 'lucide-react'
 import { useServiceCheck, useServiceCheckMetrics } from '@/hooks/useServiceChecks'
+import { useTimezone } from '@/hooks/useSettings'
 import { api } from '@/lib/api'
-import { formatRTT, timeAgo, cn } from '@/lib/utils'
-import dayjs from 'dayjs'
+import { formatRTT, timeAgo, cn, formatDateTime, formatTime, formatShortTime, formatShortDateTime } from '@/lib/utils'
 import type { ServiceMetricPoint } from '@/types'
 
 const typeIcons = { http: Globe, tcp: Plug, tls: ShieldCheck }
@@ -63,7 +63,7 @@ function ResponseStats({ points }: { points: ServiceMetricPoint[] }) {
 }
 
 // ─── Uptime Bar ───
-function UptimeBar({ points }: { points: ServiceMetricPoint[] }) {
+function UptimeBar({ points, timezone }: { points: ServiceMetricPoint[]; timezone: string }) {
   if (points.length === 0) return null
   const total = points.length
   const upCount = points.filter(p => p.is_up === true).length
@@ -81,17 +81,17 @@ function UptimeBar({ points }: { points: ServiceMetricPoint[] }) {
         {points.map((p, i) => (
           <div key={i} className="flex-1 min-w-[2px] hover:opacity-80 transition-opacity"
             style={{ backgroundColor: p.is_up ? '#22C55E' : '#EF4444' }}
-            title={`${dayjs(p.timestamp).format('HH:mm:ss')} — ${p.is_up ? 'UP' : 'DOWN'}${p.response_ms ? ` (${p.response_ms.toFixed(1)}ms)` : ''}`}
+            title={`${formatTime(p.timestamp, timezone)} — ${p.is_up ? 'UP' : 'DOWN'}${p.response_ms ? ` (${p.response_ms.toFixed(1)}ms)` : ''}`}
           />
         ))}
       </div>
       <div className="flex justify-between mt-1">
-        <span className="text-[10px] text-[var(--text-muted)]">{points.length > 0 ? dayjs(points[0].timestamp).format('HH:mm') : ''}</span>
+        <span className="text-[10px] text-[var(--text-muted)]">{points.length > 0 ? formatShortTime(points[0].timestamp, timezone) : ''}</span>
         <div className="flex items-center gap-3">
           <span className="flex items-center gap-1 text-[10px] text-[var(--text-muted)]"><span className="w-2 h-2 rounded-sm bg-[#22C55E]" />Up</span>
           <span className="flex items-center gap-1 text-[10px] text-[var(--text-muted)]"><span className="w-2 h-2 rounded-sm bg-[#EF4444]" />Down</span>
         </div>
-        <span className="text-[10px] text-[var(--text-muted)]">{points.length > 0 ? dayjs(points[points.length - 1].timestamp).format('HH:mm') : ''}</span>
+        <span className="text-[10px] text-[var(--text-muted)]">{points.length > 0 ? formatShortTime(points[points.length - 1].timestamp, timezone) : ''}</span>
       </div>
     </div>
   )
@@ -99,7 +99,7 @@ function UptimeBar({ points }: { points: ServiceMetricPoint[] }) {
 
 // ─── Incident Table ───
 interface StatusEvent { service_check_id: string; timestamp: string; old_status: string; new_status: string; reason: string; duration_sec: number }
-function IncidentTable({ events }: { events: StatusEvent[] }) {
+function IncidentTable({ events, timezone }: { events: StatusEvent[]; timezone: string }) {
   if (events.length === 0) return <div className="text-center py-8 text-[var(--text-muted)] text-sm">No status changes recorded</div>
   const fmtDur = (s: number) => { if (!s || s <= 0) return '-'; if (s < 60) return `${s}s`; if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`; return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` }
   return (
@@ -113,7 +113,7 @@ function IncidentTable({ events }: { events: StatusEvent[] }) {
         </tr></thead>
         <tbody>{events.map((e, i) => (
           <tr key={i} className="border-t border-[var(--bg-elevated)]/50 hover:bg-[var(--bg-tertiary)]/50">
-            <td className="px-3 py-2.5 font-mono text-[var(--text-secondary)]">{dayjs(e.timestamp).format('MMM D, HH:mm:ss')}</td>
+            <td className="px-3 py-2.5 font-mono text-[var(--text-secondary)]">{formatShortDateTime(e.timestamp, timezone)}</td>
             <td className="px-3 py-2.5"><div className="flex items-center gap-1.5">
               {e.new_status === 'down' ? <ArrowDownCircle className="w-3.5 h-3.5 text-red-400" /> : <ArrowUpCircle className="w-3.5 h-3.5 text-green-400" />}
               <span className="uppercase font-medium" style={{ color: statusColors[e.old_status] || '#6B7280' }}>{e.old_status}</span>
@@ -134,6 +134,7 @@ export function ServiceCheckDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const timezone = useTimezone()
   const { data: check, isLoading } = useServiceCheck(id || '')
   const [rangeIdx, setRangeIdx] = useState(2) // 24h
   const [showDelete, setShowDelete] = useState(false)
@@ -145,9 +146,9 @@ export function ServiceCheckDetailPage() {
   } | null>(null)
 
   const rangeHours = timeRanges[rangeIdx].hours
-  const now = useMemo(() => dayjs(), [rangeIdx]) // eslint-disable-line
+  const now = useMemo(() => new Date(), [rangeIdx]) // eslint-disable-line
   const metricsParams = useMemo(() => ({
-    from: now.subtract(rangeHours, 'hour').toISOString(),
+    from: new Date(now.getTime() - rangeHours * 3600 * 1000).toISOString(),
     to: now.toISOString(),
     granularity: rangeHours <= 6 ? 'raw' : 'auto',
   }), [rangeHours, now])
@@ -185,6 +186,12 @@ export function ServiceCheckDetailPage() {
         status: string; response_time_ms: number; error: string; details: Record<string, unknown>
       }>(`/service-checks/${id}/test`, {})
       setTestResult(res)
+      // Refresh service check status and metrics after test
+      queryClient.invalidateQueries({ queryKey: ['service-check', id] })
+      queryClient.invalidateQueries({ queryKey: ['service-check-metrics', id] })
+      queryClient.invalidateQueries({ queryKey: ['service-status-history', id] })
+      queryClient.invalidateQueries({ queryKey: ['service-checks'] })
+      queryClient.invalidateQueries({ queryKey: ['service-check-summary'] })
     } catch (e) {
       setTestResult({ status: 'down', response_time_ms: 0, error: e instanceof Error ? e.message : 'Test failed', details: {} })
     } finally {
@@ -217,8 +224,7 @@ export function ServiceCheckDetailPage() {
         formatter: (params: any[]) => {
           const ts = params[0]?.axisValue
           const idx = params[0]?.dataIndex
-          const d = dayjs(ts)
-          let html = `<div style="font-size:11px;color:#9BA1B0;margin-bottom:6px">${d.format('MMM D, HH:mm:ss')}</div>`
+          let html = `<div style="font-size:11px;color:#9BA1B0;margin-bottom:6px">${formatShortDateTime(ts, timezone)}</div>`
           const p = points[idx]
           if (p) {
             if (p.is_up) {
@@ -235,7 +241,7 @@ export function ServiceCheckDetailPage() {
       },
       xAxis: {
         type: 'category', data: timestamps, boundaryGap: false,
-        axisLabel: { color: '#5F6578', fontSize: 11, formatter: (v: string) => dayjs(v).format('HH:mm') },
+        axisLabel: { color: '#5F6578', fontSize: 11, formatter: (v: string) => formatShortTime(v, timezone) },
         axisLine: { lineStyle: { color: '#2D3140' } }, splitLine: { show: false },
       },
       yAxis: {
@@ -254,7 +260,7 @@ export function ServiceCheckDetailPage() {
         itemStyle: { color: '#6366F1' }, z: 2,
       }],
     }
-  }, [points])
+  }, [points, timezone])
 
   if (isLoading) return (
     <div className="flex items-center justify-center py-32">
@@ -346,7 +352,7 @@ export function ServiceCheckDetailPage() {
           <p className="text-lg font-semibold text-[var(--text-primary)]">
             {check.last_check_at && (Date.now() - new Date(check.last_check_at).getTime()) < 120000 ? 'Active Now' : check.last_check_at ? timeAgo(check.last_check_at) : 'Never'}
           </p>
-          <p className="text-[11px] text-[var(--text-muted)] mt-1">{check.last_check_at ? dayjs(check.last_check_at).format('MMM D, HH:mm:ss') : ''}</p>
+          <p className="text-[11px] text-[var(--text-muted)] mt-1">{check.last_check_at ? formatShortDateTime(check.last_check_at, timezone) : ''}</p>
         </div>
         {check.check_type === 'tls' && (
           <>
@@ -355,7 +361,7 @@ export function ServiceCheckDetailPage() {
                 <Shield className="w-4 h-4 text-[#F59E0B]" />
                 <span className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Certificate Expiry</span>
               </div>
-              <p className="text-lg font-semibold text-[var(--text-primary)]">{check.tls_expiry_date ? dayjs(check.tls_expiry_date).format('MMM D, YYYY') : '--'}</p>
+              <p className="text-lg font-semibold text-[var(--text-primary)]">{check.tls_expiry_date ? formatDateTime(check.tls_expiry_date, timezone) : '--'}</p>
               <p className="text-[11px] text-[var(--text-muted)] mt-1">{check.tls_issuer || ''}</p>
             </div>
             <div className="bg-[var(--bg-secondary)] rounded-xl border border-[var(--bg-elevated)] p-4">
@@ -406,7 +412,7 @@ export function ServiceCheckDetailPage() {
           {/* Uptime Bar */}
           {points.length > 0 && (
             <div className="bg-[var(--bg-secondary)] rounded-xl border border-[var(--bg-elevated)] p-5">
-              <UptimeBar points={points} />
+              <UptimeBar points={points} timezone={timezone} />
             </div>
           )}
 
@@ -417,7 +423,7 @@ export function ServiceCheckDetailPage() {
               <h3 className="text-sm font-semibold text-[var(--text-primary)]">Incident History</h3>
               <span className="text-[10px] text-[var(--text-muted)] bg-[var(--bg-tertiary)] px-2 py-0.5 rounded-full">{statusHistory.length} events</span>
             </div>
-            <IncidentTable events={statusHistory} />
+            <IncidentTable events={statusHistory} timezone={timezone} />
           </div>
         </div>
 
@@ -538,9 +544,9 @@ export function ServiceCheckDetailPage() {
           <div className="bg-[var(--bg-secondary)] rounded-xl border border-[var(--bg-elevated)] p-5">
             <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-4">Timeline</h3>
             <div className="space-y-3">
-              <InfoRow label="Last Check" value={check.last_check_at ? dayjs(check.last_check_at).format('MMM D, YYYY HH:mm:ss') : 'Never'} />
-              <InfoRow label="Created" value={dayjs(check.created_at).format('MMM D, YYYY HH:mm')} />
-              {check.updated_at && <InfoRow label="Updated" value={dayjs(check.updated_at).format('MMM D, YYYY HH:mm')} />}
+              <InfoRow label="Last Check" value={check.last_check_at ? formatDateTime(check.last_check_at, timezone) : 'Never'} />
+              <InfoRow label="Created" value={formatDateTime(check.created_at, timezone)} />
+              {check.updated_at && <InfoRow label="Updated" value={formatDateTime(check.updated_at, timezone)} />}
             </div>
           </div>
 

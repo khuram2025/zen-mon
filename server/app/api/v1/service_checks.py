@@ -314,4 +314,58 @@ async def test_service_check(
         result["status"] = "down"
         result["error"] = str(e)
 
+    # Update the service check status in PostgreSQL so the UI reflects the test result
+    from sqlalchemy import update as sql_update
+    from app.models.service_check import ServiceCheck as ServiceCheckModel
+    now_ts = datetime.utcnow()
+    update_values = {
+        "status": result["status"],
+        "last_check_at": now_ts,
+        "last_response_ms": result["response_time_ms"],
+        "last_error": result["error"] if result["error"] else None,
+    }
+    # Update TLS fields if available
+    if check.check_type == "tls" and result["details"].get("expires"):
+        update_values["tls_subject"] = str(result["details"].get("subject", {}).get("commonName", ""))
+        update_values["tls_issuer"] = str(result["details"].get("issuer", {}).get("organizationName", ""))
+
+    await db.execute(
+        sql_update(ServiceCheckModel)
+        .where(ServiceCheckModel.id == check_id)
+        .values(**update_values)
+    )
+    await db.commit()
+
+    # Write metric to ClickHouse for chart / timeline data
+    try:
+        from app.core.database import get_clickhouse_client
+        ch = get_clickhouse_client()
+        is_up_val = 1 if result["status"] == "up" else 0
+        status_code = result["details"].get("status_code")
+        ch.insert(
+            "service_metrics",
+            [[
+                str(check_id),
+                str(check.device_id) if check.device_id else None,
+                now_ts,
+                check.check_type,
+                is_up_val,
+                result["response_time_ms"],
+                status_code,
+                None,  # tls_days_remaining
+                None,  # tls_valid
+                None,  # content_matched
+                result["error"] if result["error"] else None,
+                "api-test",
+            ]],
+            column_names=[
+                "service_check_id", "device_id", "timestamp", "check_type",
+                "is_up", "response_ms", "status_code", "tls_days_remaining",
+                "tls_valid", "content_matched", "error_message", "poller_id",
+            ],
+        )
+        ch.close()
+    except Exception:
+        pass  # Don't fail the test response if CH write fails
+
     return result
