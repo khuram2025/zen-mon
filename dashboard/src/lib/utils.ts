@@ -1,103 +1,52 @@
-import { clsx, type ClassValue } from 'clsx'
+import { type ClassValue, clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
-import type { DeviceStatus } from '@/types'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
-export const statusColors: Record<DeviceStatus, string> = {
-  up: '#22C55E',
-  down: '#EF4444',
-  degraded: '#EAB308',
-  unknown: '#6B7280',
-  maintenance: '#3B82F6',
+export function formatBytes(bytes: number, decimals = 1): string {
+  if (bytes === 0 || !bytes) return '0 B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+  const i = Math.floor(Math.log(Math.abs(bytes)) / Math.log(k))
+  return `${(bytes / Math.pow(k, i)).toFixed(decimals)} ${sizes[i]}`
 }
 
-export const statusLabels: Record<DeviceStatus, string> = {
-  up: 'Online',
-  down: 'Offline',
-  degraded: 'Degraded',
-  unknown: 'Unknown',
-  maintenance: 'Maintenance',
+export function formatBps(bps: number): string {
+  if (!bps || bps === 0) return '0 bps'
+  const k = 1000
+  const units = ['bps', 'Kbps', 'Mbps', 'Gbps', 'Tbps']
+  const i = Math.min(Math.floor(Math.log(Math.abs(bps)) / Math.log(k)), units.length - 1)
+  return `${(bps / Math.pow(k, i)).toFixed(2)} ${units[i]}`
 }
 
-export const severityColors: Record<string, string> = {
-  critical: '#EF4444',
-  warning: '#EAB308',
-  info: '#3B82F6',
+export function formatDuration(seconds: number): string {
+  if (!seconds || seconds < 0) return '—'
+  const d = Math.floor(seconds / 86400)
+  const h = Math.floor((seconds % 86400) / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  if (d > 0) return `${d}d ${h}h`
+  if (h > 0) return `${h}h ${m}m`
+  if (m > 0) return `${m}m`
+  return `${Math.floor(seconds)}s`
 }
 
-export function formatRTT(ms: number | null): string {
-  if (ms === null || ms === undefined) return '--'
-  if (ms < 1) return `${(ms * 1000).toFixed(0)}us`
-  if (ms < 100) return `${ms.toFixed(1)}ms`
-  return `${ms.toFixed(0)}ms`
+export function relativeTime(iso: string | null | undefined): string {
+  if (!iso) return 'never'
+  const then = new Date(iso).getTime()
+  if (isNaN(then)) return '—'
+  const diff = (Date.now() - then) / 1000
+  if (diff < 60) return `${Math.floor(diff)}s ago`
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
 }
 
-export function formatUptime(pct: number): string {
-  return `${(pct * 100).toFixed(2)}%`
-}
-
-export function timeAgo(date: string | null): string {
-  if (!date) return 'Never'
-  const seconds = Math.floor((Date.now() - new Date(date).getTime()) / 1000)
-  if (seconds < 10) return 'Just now'
-  if (seconds < 60) return `${seconds}s ago`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
-  return `${Math.floor(seconds / 86400)}d ago`
-}
-
-
-export function formatDateTime(date: string | null, timezone: string = 'UTC'): string {
-  if (!date) return 'Never'
-  try {
-    return new Date(date).toLocaleString('en-US', { timeZone: timezone, year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
-  } catch {
-    return new Date(date).toLocaleString()
-  }
-}
-
-export function formatTime(date: string | null, timezone: string = 'UTC'): string {
-  if (!date) return ''
-  try {
-    return new Date(date).toLocaleTimeString('en-US', { timeZone: timezone, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
-  } catch {
-    return new Date(date).toLocaleTimeString()
-  }
-}
-
-export function formatDateTimeFromTs(ts: number | string, timezone: string = 'UTC'): string {
-  try {
-    return new Date(ts).toLocaleString('en-US', { timeZone: timezone, year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
-  } catch {
-    return new Date(ts).toLocaleString()
-  }
-}
-
-export function formatTimeFromTs(ts: number | string, timezone: string = 'UTC'): string {
-  try {
-    return new Date(ts).toLocaleTimeString('en-US', { timeZone: timezone, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true })
-  } catch {
-    return new Date(ts).toLocaleTimeString()
-  }
-}
-
-export function formatShortTime(date: string | null, timezone: string = 'UTC'): string {
-  if (!date) return ''
-  try {
-    return new Date(date).toLocaleTimeString('en-US', { timeZone: timezone, hour: '2-digit', minute: '2-digit', hour12: false })
-  } catch {
-    return new Date(date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  }
-}
-
-export function formatShortDateTime(date: string | null, timezone: string = 'UTC'): string {
-  if (!date) return ''
-  try {
-    return new Date(date).toLocaleString('en-US', { timeZone: timezone, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
-  } catch {
-    return new Date(date).toLocaleString()
-  }
+export function apiErrorMessage(e: any, fallback = 'Something went wrong'): string {
+  const d = e?.response?.data?.detail
+  if (typeof d === 'string') return d
+  if (Array.isArray(d)) return d.map((x: any) => x.msg || String(x)).join(', ')
+  if (d?.msg) return d.msg
+  return e?.message || fallback
 }

@@ -34,6 +34,7 @@ def _load_step_handlers():
         install_binary,
         install_config,
         install_systemd,
+        os_package,
         pip_install,
         run_hook,
         run_migration,

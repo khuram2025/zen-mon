@@ -1,5 +1,5 @@
 from uuid import UUID
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -214,6 +214,198 @@ async def get_device_metrics(
     return metric_service.get_device_metrics(device_id, from_time, to_time, granularity)
 
 
+@router.get("/{device_id}/interfaces")
+async def get_device_interfaces(
+    device_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """List SNMP-discovered interfaces for a device."""
+    from sqlalchemy import text
+    rows = (await db.execute(
+        text("""
+            SELECT id, if_index, if_name, if_descr, if_alias, if_type, if_speed,
+                   mac_address::text AS mac_address, admin_status, oper_status,
+                   monitored, first_seen, last_seen
+            FROM device_interfaces
+            WHERE device_id = :id
+            ORDER BY if_index
+        """),
+        {"id": device_id},
+    )).mappings().all()
+    return [dict(r) for r in rows]
+
+
+@router.get("/{device_id}/entities")
+async def get_device_entities(
+    device_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    from sqlalchemy import text
+    rows = (await db.execute(
+        text("""
+            SELECT id, ent_index, parent_index, class, name, serial_number,
+                   model_name, hw_revision, fw_revision, first_seen, last_seen
+            FROM device_entities WHERE device_id = :id ORDER BY ent_index
+        """),
+        {"id": device_id},
+    )).mappings().all()
+    return [dict(r) for r in rows]
+
+
+@router.get("/{device_id}/sensors")
+async def get_device_sensors(
+    device_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    from sqlalchemy import text
+    rows = (await db.execute(
+        text("""
+            SELECT id, sensor_index, sensor_type, description, unit, monitored,
+                   first_seen, last_seen
+            FROM device_sensors WHERE device_id = :id ORDER BY sensor_index
+        """),
+        {"id": device_id},
+    )).mappings().all()
+    return [dict(r) for r in rows]
+
+
+@router.get("/{device_id}/snmp-metrics")
+async def get_device_snmp_metrics(
+    device_id: UUID,
+    hours: int = Query(default=24, ge=1, le=720),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Scalar SNMP metrics (CPU, memory, temperature...) from ClickHouse.
+
+    Returns a dict keyed by metric_key with an array of {ts, value} points.
+    Uses 5m rollups for windows > 6h, raw otherwise.
+    """
+    from app.core.database import get_clickhouse_client
+    client = get_clickhouse_client()
+
+    table = "snmp_metrics" if hours <= 6 else "snmp_metrics_5m"
+    val_col = "value" if hours <= 6 else "avg_value"
+
+    try:
+        res = client.query(
+            f"""
+            SELECT metric_key,
+                   toUnixTimestamp64Milli(timestamp) AS ts_ms,
+                   {val_col} AS val,
+                   any(unit) AS unit
+            FROM zenplus.{table}
+            WHERE device_id = %(id)s
+              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+            GROUP BY metric_key, timestamp, val
+            ORDER BY metric_key, timestamp
+            """,
+            parameters={"id": str(device_id), "hours": hours},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"clickhouse query failed: {e}")
+
+    out: dict[str, dict] = {}
+    for r in res.result_rows:
+        key = r[0]
+        if key not in out:
+            out[key] = {"unit": r[3] or "", "points": []}
+        out[key]["points"].append({"ts": r[1], "value": float(r[2])})
+    return out
+
+
+@router.get("/{device_id}/snmp-if-metrics")
+async def get_device_snmp_if_metrics(
+    device_id: UUID,
+    hours: int = Query(default=1, ge=1, le=720),
+    if_index: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Per-interface bps/errors time series from ClickHouse."""
+    from app.core.database import get_clickhouse_client
+    client = get_clickhouse_client()
+
+    table = "snmp_if_metrics" if hours <= 6 else "snmp_if_metrics_5m"
+    in_col = "in_bps" if hours <= 6 else "avg_in_bps"
+    out_col = "out_bps" if hours <= 6 else "avg_out_bps"
+
+    where = "device_id = %(id)s AND timestamp >= now() - INTERVAL %(hours)s HOUR"
+    params: dict = {"id": str(device_id), "hours": hours}
+    if if_index is not None:
+        where += " AND if_index = %(if)s"
+        params["if"] = if_index
+
+    try:
+        res = client.query(
+            f"""
+            SELECT if_index,
+                   toUnixTimestamp64Milli(timestamp) AS ts_ms,
+                   {in_col} AS in_bps,
+                   {out_col} AS out_bps
+            FROM zenplus.{table}
+            WHERE {where}
+            ORDER BY if_index, timestamp
+            """,
+            parameters=params,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"clickhouse query failed: {e}")
+
+    out: dict[int, list] = {}
+    for r in res.result_rows:
+        idx = int(r[0])
+        out.setdefault(idx, []).append({
+            "ts": r[1],
+            "in_bps": float(r[2]),
+            "out_bps": float(r[3]),
+        })
+    return out
+
+
+@router.get("/{device_id}/traps")
+async def get_device_traps(
+    device_id: UUID,
+    limit: int = Query(default=100, ge=1, le=1000),
+    hours: int = Query(default=24, ge=1, le=720),
+    user: User = Depends(get_current_user),
+):
+    """Recent SNMP traps for this device, sourced from ClickHouse."""
+    from app.core.database import get_clickhouse_client
+    client = get_clickhouse_client()
+    try:
+        res = client.query(
+            """
+            SELECT toString(source_ip), trap_oid, trap_name, severity, message,
+                   bindings, toUnixTimestamp64Milli(timestamp)
+            FROM zenplus.snmp_traps
+            WHERE device_id = %(id)s
+              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+            ORDER BY timestamp DESC
+            LIMIT %(limit)s
+            """,
+            parameters={"id": str(device_id), "hours": hours, "limit": limit},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"clickhouse query failed: {e}")
+
+    return [
+        {
+            "source_ip": r[0],
+            "trap_oid": r[1],
+            "trap_name": r[2],
+            "severity": r[3],
+            "message": r[4],
+            "bindings": r[5],
+            "timestamp": datetime.fromtimestamp(r[6] / 1000, tz=timezone.utc).isoformat(),
+        }
+        for r in res.result_rows
+    ]
+
+
 @router.get("/{device_id}/status-history", response_model=list[StatusChangeEvent])
 async def get_status_history(
     device_id: UUID,
@@ -248,4 +440,24 @@ def _device_to_response(device) -> DeviceResponse:
         description=device.description,
         created_at=device.created_at,
         updated_at=device.updated_at,
+        # SNMP — passphrases never exposed; presence signalled by *_configured flags.
+        snmp_enabled=bool(device.snmp_enabled),
+        snmp_version=device.snmp_version,
+        snmp_port=device.snmp_port,
+        snmp_community=device.snmp_community,
+        snmp_v3_username=device.snmp_v3_username,
+        snmp_v3_context=device.snmp_v3_context,
+        snmp_auth_protocol=device.snmp_auth_protocol,
+        snmp_priv_protocol=device.snmp_priv_protocol,
+        snmp_timeout_ms=device.snmp_timeout_ms,
+        snmp_retries=device.snmp_retries,
+        snmp_max_repetitions=device.snmp_max_repetitions,
+        snmp_poll_interval=device.snmp_poll_interval,
+        sys_object_id=device.sys_object_id,
+        vendor=device.vendor,
+        model=device.model,
+        os_version=device.os_version,
+        profile_id=device.profile_id,
+        snmp_auth_configured=device.snmp_auth_passphrase is not None,
+        snmp_priv_configured=device.snmp_priv_passphrase is not None,
     )

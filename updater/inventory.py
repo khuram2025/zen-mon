@@ -13,12 +13,10 @@ VERSION_FILE = ZENPLUS_DIR / ".version"
 TRACKED_SERVICES = [
     "zenplus-api",
     "zenplus-poller",
-    "netmon-gunicorn",
-    "netmon-celery",
-    "netmon-celery-beat",
+    "zenplus-dashboard",
     "nginx",
     "redis-server",
-    "postgresql@14-main",
+    "postgresql",
 ]
 
 

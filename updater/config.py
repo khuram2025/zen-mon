@@ -1,12 +1,14 @@
 """Agent configuration loader."""
 
 import configparser
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 UPDATER_DIR = Path("/opt/zenplus/updater")
 DEFAULT_CONFIG_PATH = UPDATER_DIR / "config" / "agent.conf"
+SUBSCRIPTION_PATH = UPDATER_DIR / "config" / "subscription.json"
 
 
 @dataclass
@@ -161,3 +163,24 @@ def save_config(cfg: AgentConfig, path: str | None = None) -> None:
 
     # Secure the config file (contains api_key)
     os.chmod(config_path, 0o600)
+
+
+def save_subscription(data: dict | None) -> None:
+    """Persist subscription data from the OTA server to a local JSON file."""
+    if data is None:
+        return
+    SUBSCRIPTION_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(SUBSCRIPTION_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+    os.chmod(SUBSCRIPTION_PATH, 0o600)
+
+
+def load_subscription() -> dict | None:
+    """Load cached subscription data from the local JSON file."""
+    if not SUBSCRIPTION_PATH.exists():
+        return None
+    try:
+        with open(SUBSCRIPTION_PATH) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None

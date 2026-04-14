@@ -51,7 +51,9 @@ type HealthStatus struct {
 	PollerID          string `json:"poller_id"`
 	DeviceCount       int    `json:"device_count"`
 	ServiceCheckCount int    `json:"service_check_count"`
+	SNMPDeviceCount   int    `json:"snmp_device_count"`
 	ActivePings       int    `json:"active_pings"`
+	ActiveSNMP        int    `json:"active_snmp"`
 	Uptime            string `json:"uptime"`
 	LastCycleMs       int64  `json:"last_cycle_ms"`
 }

@@ -22,7 +22,7 @@ from pathlib import Path
 import httpx
 
 from . import __version__
-from .config import AgentConfig, load_config, save_config
+from .config import AgentConfig, load_config, save_config, save_subscription
 from .crypto import (
     SecurityError,
     sha256_file,
@@ -33,6 +33,7 @@ from .crypto import (
 )
 from .downloader import DownloadError, download_package
 from .health import HealthCheckError, check_http
+from . import history
 from .inventory import collect_inventory, get_current_version
 from .lockfile import LockError, UpdateLock
 
@@ -88,11 +89,18 @@ def _api_client(cfg: AgentConfig) -> httpx.Client:
     )
 
 
-def register(cfg: AgentConfig) -> AgentConfig:
+def register(cfg: AgentConfig, registration_token: str = "") -> AgentConfig:
     """Register this appliance with the central server.
 
     Called once during initial setup. Saves appliance_id and api_key.
+
+    Args:
+        cfg: Agent configuration.
+        registration_token: License key from the Zentryc subscription page.
     """
+    if not registration_token:
+        raise ValueError("registration_token (license key) is required")
+
     inventory = collect_inventory()
 
     with _api_client(cfg) as client:
@@ -103,6 +111,7 @@ def register(cfg: AgentConfig) -> AgentConfig:
                 "arch": inventory["arch"],
                 "os_version": inventory["os_version"],
                 "current_version": inventory["current_version"],
+                "registration_token": registration_token,
             },
         )
         resp.raise_for_status()
@@ -111,6 +120,17 @@ def register(cfg: AgentConfig) -> AgentConfig:
     cfg.appliance.id = data["appliance_id"]
     cfg.appliance.api_key = data["api_key"]
     save_config(cfg)
+
+    # Persist subscription data from registration response
+    if data.get("subscription"):
+        save_subscription(data["subscription"])
+        logger.info(
+            "Subscription: %s (plan=%s, slots=%s/%s)",
+            data["subscription"].get("name", ""),
+            data["subscription"].get("plan", ""),
+            data["subscription"].get("used_slots", "?"),
+            data["subscription"].get("max_appliances", "?"),
+        )
 
     logger.info("Registered appliance: id=%s", cfg.appliance.id)
     return cfg
@@ -132,6 +152,17 @@ def checkin(cfg: AgentConfig) -> dict | None:
         logger.error("Check-in failed: %s", e)
         return None
 
+    # Persist subscription data from check-in response
+    if data.get("subscription"):
+        save_subscription(data["subscription"])
+        sub = data["subscription"]
+        if not sub.get("is_active") or sub.get("is_expired"):
+            logger.warning(
+                "Subscription issue: active=%s, expired=%s, expires_at=%s",
+                sub.get("is_active"), sub.get("is_expired"),
+                sub.get("expires_at", ""),
+            )
+
     if data.get("next_action") == "update" and data.get("release"):
         release = data["release"]
         logger.info(
@@ -144,6 +175,26 @@ def checkin(cfg: AgentConfig) -> dict | None:
 
     logger.info("No updates available")
     return None
+
+
+def query_subscription(cfg: AgentConfig) -> dict | None:
+    """Query subscription info from the OTA server on demand.
+
+    Returns subscription dict or None on failure.
+    """
+    try:
+        with _api_client(cfg) as client:
+            resp = client.get("/api/v1/appliances/subscription")
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as e:
+        logger.error("Subscription query failed: %s", e)
+        return None
+
+    sub = data.get("subscription")
+    if sub:
+        save_subscription(sub)
+    return sub
 
 
 def check_for_update(cfg: AgentConfig) -> dict | None:
@@ -176,8 +227,29 @@ def report_status(
     to_version: str,
     error_message: str = "",
     log_data: str = "",
+    changelog: str = "",
+    severity: str = "normal",
 ) -> None:
-    """Report update status back to the server."""
+    """Report update status to both the local history file and the server.
+
+    The local history file powers the dashboard Updates tab. We write it
+    first (best effort) so the UI still shows state even if the server
+    report fails.
+    """
+    # 1. Local history — drives the Updates tab banners and history list
+    try:
+        history.add_record(
+            version=to_version,
+            from_version=from_version,
+            status=status,
+            error=error_message,
+            changelog=changelog,
+            severity=severity,
+        )
+    except Exception as e:
+        logger.warning("Could not persist local history: %s", e)
+
+    # 2. Remote OTA server
     try:
         with _api_client(cfg) as client:
             resp = client.post(
@@ -279,13 +351,18 @@ def run_update(cfg: AgentConfig, release: dict) -> bool:
     version = release["version"]
     release_id = release.get("id", release.get("update_id", ""))
     from_version = get_current_version()
+    changelog = release.get("changelog", "")
+    severity = release.get("severity", "normal")
 
     logger.info("=" * 60)
     logger.info("Starting update: %s → %s", from_version, version)
     logger.info("=" * 60)
 
     # Report: downloading
-    report_status(cfg, release_id, "downloading", from_version, version)
+    report_status(
+        cfg, release_id, "downloading", from_version, version,
+        changelog=changelog, severity=severity,
+    )
 
     try:
         extract_dir, manifest = download_and_extract(cfg, release)
@@ -293,12 +370,15 @@ def run_update(cfg: AgentConfig, release: dict) -> bool:
         logger.error("Download/verification failed: %s", e)
         report_status(
             cfg, release_id, "failed", from_version, version,
-            error_message=str(e),
+            error_message=str(e), changelog=changelog, severity=severity,
         )
         return False
 
     # Report: applying
-    report_status(cfg, release_id, "applying", from_version, version)
+    report_status(
+        cfg, release_id, "applying", from_version, version,
+        changelog=changelog, severity=severity,
+    )
 
     try:
         execute_manifest(manifest, extract_dir, cfg)
@@ -306,7 +386,7 @@ def run_update(cfg: AgentConfig, release: dict) -> bool:
         logger.error("Update failed: %s", e)
         report_status(
             cfg, release_id, "failed", from_version, version,
-            error_message=str(e),
+            error_message=str(e), changelog=changelog, severity=severity,
         )
         return False
 
@@ -317,7 +397,10 @@ def run_update(cfg: AgentConfig, release: dict) -> bool:
     )
 
     # Report: success
-    report_status(cfg, release_id, "success", from_version, version)
+    report_status(
+        cfg, release_id, "success", from_version, version,
+        changelog=changelog, severity=severity,
+    )
     logger.info("Update completed successfully: %s → %s", from_version, version)
 
     # Cleanup
@@ -399,8 +482,8 @@ def cli() -> None:
     )
     parser.add_argument(
         "--register",
-        action="store_true",
-        help="Register this appliance with the central server",
+        metavar="LICENSE_KEY",
+        help="Register this appliance with the central server using the given license key",
     )
     parser.add_argument(
         "--check",
@@ -419,7 +502,7 @@ def cli() -> None:
         cfg = load_config(args.config)
         setup_logging(cfg)
         try:
-            register(cfg)
+            register(cfg, registration_token=args.register)
             print(f"Registered successfully. Appliance ID: {cfg.appliance.id}")
         except Exception as e:
             print(f"Registration failed: {e}", file=sys.stderr)

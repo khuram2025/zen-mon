@@ -6,19 +6,19 @@ Documentation=https://zentryc.com/docs/updater
 
 [Service]
 Type=oneshot
-ExecStart=/opt/zenplus/venv/bin/python -m updater
+User=root
 WorkingDirectory=/opt/zenplus
 Environment=PYTHONPATH=/opt/zenplus
-
-# No sandboxing — agent needs full access for service restarts, migrations, etc.
+EnvironmentFile=-/opt/zenplus/.env
+ExecStart=/opt/zenplus/venv/bin/python -m updater
 
 # Logging
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=zenplus-updater
 
-# Timeout
-TimeoutStartSec=900
+# Timeout: allow long updates (download + apply + migrations)
+TimeoutStartSec=1800
 
 [Install]
 WantedBy=multi-user.target

@@ -3,8 +3,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete, text, cast, String
 from sqlalchemy.orm import selectinload
 
+from app.core import crypto
 from app.models.device import Device, DeviceGroup
 from app.schemas.device import DeviceCreate, DeviceUpdate, DeviceSummary, DeviceBulkImportItem, BulkImportResult
+
+# Fields written straight through from DeviceCreate/DeviceUpdate.
+# Passphrases are handled separately so they can be encrypted.
+_SNMP_PLAIN_FIELDS = (
+    "snmp_enabled",
+    "snmp_version",
+    "snmp_port",
+    "snmp_community",
+    "snmp_v3_username",
+    "snmp_v3_context",
+    "snmp_auth_protocol",
+    "snmp_priv_protocol",
+    "snmp_timeout_ms",
+    "snmp_retries",
+    "snmp_max_repetitions",
+    "snmp_poll_interval",
+    "profile_id",
+)
 
 
 async def get_devices(
@@ -94,6 +113,14 @@ async def create_device(db: AsyncSession, data: DeviceCreate, user_id: UUID | No
         description=data.description,
         created_by=user_id,
     )
+    for field in _SNMP_PLAIN_FIELDS:
+        value = getattr(data, field, None)
+        if value is not None:
+            setattr(device, field, value)
+    if data.snmp_auth_passphrase:
+        device.snmp_auth_passphrase = crypto.encrypt(data.snmp_auth_passphrase)
+    if data.snmp_priv_passphrase:
+        device.snmp_priv_passphrase = crypto.encrypt(data.snmp_priv_passphrase)
     db.add(device)
     await db.commit()
     await db.refresh(device)
@@ -106,6 +133,13 @@ async def update_device(db: AsyncSession, device_id: UUID, data: DeviceUpdate) -
         return None
 
     update_data = data.model_dump(exclude_unset=True)
+    # Passphrases are write-only: encrypt then remove from the plain setattr loop.
+    if "snmp_auth_passphrase" in update_data:
+        raw = update_data.pop("snmp_auth_passphrase")
+        device.snmp_auth_passphrase = crypto.encrypt(raw) if raw else None
+    if "snmp_priv_passphrase" in update_data:
+        raw = update_data.pop("snmp_priv_passphrase")
+        device.snmp_priv_passphrase = crypto.encrypt(raw) if raw else None
     for key, value in update_data.items():
         setattr(device, key, value)
 

@@ -1,14 +1,52 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  content: [
-    "./index.html",
-    "./src/**/*.{js,ts,jsx,tsx}",
-  ],
+  darkMode: 'class',
+  content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
+    container: { center: true, padding: '1rem' },
     extend: {
+      colors: {
+        bg: 'rgb(var(--bg) / <alpha-value>)',
+        surface: 'rgb(var(--surface) / <alpha-value>)',
+        surface2: 'rgb(var(--surface2) / <alpha-value>)',
+        surface3: 'rgb(var(--surface3) / <alpha-value>)',
+        border: 'rgb(var(--border) / <alpha-value>)',
+        'border-strong': 'rgb(var(--border-strong) / <alpha-value>)',
+        text: 'rgb(var(--text) / <alpha-value>)',
+        text2: 'rgb(var(--text2) / <alpha-value>)',
+        muted: 'rgb(var(--muted) / <alpha-value>)',
+        muted2: 'rgb(var(--muted2) / <alpha-value>)',
+        primary: 'rgb(var(--primary) / <alpha-value>)',
+        'primary-hover': 'rgb(var(--primary-hover) / <alpha-value>)',
+        success: 'rgb(var(--success) / <alpha-value>)',
+        warning: 'rgb(var(--warning) / <alpha-value>)',
+        danger: 'rgb(var(--danger) / <alpha-value>)',
+        info: 'rgb(var(--info) / <alpha-value>)',
+        accent: 'rgb(var(--accent) / <alpha-value>)',
+      },
       fontFamily: {
-        sans: ['Inter', 'sans-serif'],
-        mono: ['JetBrains Mono', 'monospace'],
+        sans: ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
+        mono: ['JetBrains Mono', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
+      },
+      fontSize: {
+        xs: ['0.75rem', { lineHeight: '1rem' }],
+        sm: ['0.8125rem', { lineHeight: '1.125rem' }],
+        base: ['0.875rem', { lineHeight: '1.25rem' }],
+        lg: ['1rem', { lineHeight: '1.5rem' }],
+        xl: ['1.125rem', { lineHeight: '1.625rem' }],
+        '2xl': ['1.375rem', { lineHeight: '1.75rem' }],
+        '3xl': ['1.75rem', { lineHeight: '2.125rem' }],
+      },
+      boxShadow: {
+        card: '0 1px 2px 0 rgb(0 0 0 / 0.04), 0 1px 3px 0 rgb(0 0 0 / 0.05)',
+        'card-dark': '0 1px 3px 0 rgb(0 0 0 / 0.3), 0 1px 2px -1px rgb(0 0 0 / 0.2)',
+        elevated: '0 4px 6px -1px rgb(0 0 0 / 0.08), 0 2px 4px -2px rgb(0 0 0 / 0.05)',
+        glow: '0 0 0 1px rgb(var(--primary) / 0.2), 0 0 20px rgb(var(--primary) / 0.15)',
+      },
+      spacing: {
+        '0.75': '0.1875rem',
+        '1.25': '0.3125rem',
+        '1.75': '0.4375rem',
       },
     },
   },

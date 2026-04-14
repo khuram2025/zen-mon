@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     API_PORT: int = 8000
 
     # PostgreSQL
-    DATABASE_URL: str = "postgresql+asyncpg://zenplus:zenplus_dev@localhost:5432/zenplus"
+    DATABASE_URL: str = "postgresql+asyncpg://zenplus:changeme@localhost:5432/zenplus"
 
     # ClickHouse
     CLICKHOUSE_HOST: str = "localhost"
@@ -18,18 +18,22 @@ class Settings(BaseSettings):
     CLICKHOUSE_HTTP_PORT: int = 8123      # HTTP protocol (Python clickhouse-connect)
     CLICKHOUSE_DB: str = "zenplus"
     CLICKHOUSE_USER: str = "default"
-    CLICKHOUSE_PASSWORD: str = "clickhouse_dev"
+    CLICKHOUSE_PASSWORD: str = "changeme"
 
     # Redis
-    REDIS_URL: str = "redis://:redis_dev@localhost:6379/0"
+    REDIS_URL: str = "redis://:changeme@localhost:6379/0"
 
     # JWT
-    JWT_SECRET: str = "dev-secret-change-in-production"
+    JWT_SECRET: str = "changeme"
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 1440  # 24 hours
 
-    # CORS
-    CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173", "http://10.12.50.80:3000", "http://10.12.50.80:5173", "*"]
+    # SNMP credential encryption
+    # 32-byte key, base64 or hex encoded. Rotated via scripts/rotate-snmp-key.sh.
+    SNMP_ENC_KEY: str = ""
+
+    # CORS — .env values override these defaults
+    CORS_ORIGINS: list[str] = ["*"]
 
     class Config:
         env_file = ".env"

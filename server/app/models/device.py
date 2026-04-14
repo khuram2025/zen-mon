@@ -1,8 +1,19 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Boolean, Integer, Float, Text, DateTime, ForeignKey
+from sqlalchemy import (
+    String,
+    Boolean,
+    Integer,
+    BigInteger,
+    Float,
+    Text,
+    DateTime,
+    ForeignKey,
+    LargeBinary,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.dialects.postgresql import UUID, INET, JSONB
+from sqlalchemy.dialects.postgresql import UUID, INET, JSONB, MACADDR
 
 from app.core.database import Base
 
@@ -36,6 +47,29 @@ class Device(Base):
     snmp_community: Mapped[str] = mapped_column(String(255), nullable=True)
     snmp_version: Mapped[str] = mapped_column(String(5), default="2c")
     snmp_port: Mapped[int] = mapped_column(Integer, default=161)
+
+    # SNMPv3 + advanced polling
+    snmp_v3_username: Mapped[str] = mapped_column(String(255), nullable=True)
+    snmp_v3_context: Mapped[str] = mapped_column(String(255), nullable=True)
+    snmp_auth_protocol: Mapped[str] = mapped_column(String(16), nullable=True)
+    snmp_auth_passphrase: Mapped[bytes] = mapped_column(LargeBinary, nullable=True)
+    snmp_priv_protocol: Mapped[str] = mapped_column(String(16), nullable=True)
+    snmp_priv_passphrase: Mapped[bytes] = mapped_column(LargeBinary, nullable=True)
+    snmp_timeout_ms: Mapped[int] = mapped_column(Integer, default=2000)
+    snmp_retries: Mapped[int] = mapped_column(Integer, default=2)
+    snmp_max_repetitions: Mapped[int] = mapped_column(Integer, default=25)
+    snmp_poll_interval: Mapped[int] = mapped_column(Integer, default=60)
+
+    # Discovery results
+    sys_object_id: Mapped[str] = mapped_column(String(255), nullable=True)
+    vendor: Mapped[str] = mapped_column(String(100), nullable=True)
+    model: Mapped[str] = mapped_column(String(255), nullable=True)
+    os_version: Mapped[str] = mapped_column(String(255), nullable=True)
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("device_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     # Current state
     status: Mapped[str] = mapped_column(String(20), default="unknown")

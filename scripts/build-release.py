@@ -126,11 +126,15 @@ def build_package(version: str, changelog: str, severity: str,
             shutil.copy2(src, code_dir / f)
             print(f"  + {f}")
 
-    # Also copy the updater module itself
+    # Also copy the updater module itself — but never its per-appliance state.
+    # `config/` holds agent.conf (api_key) and subscription.json (this appliance's
+    # subscription snapshot). `logs/` and `backups/` are runtime dirs.
+    # `keys/` is private key material. All are appliance-local and must not ship.
     updater_src = ZENPLUS_DIR / "updater"
     if updater_src.exists():
         shutil.copytree(updater_src, code_dir / "updater", ignore=shutil.ignore_patterns(
-            "__pycache__", "*.pyc", "logs", "backups", "*.key", "agent.conf",
+            "__pycache__", "*.pyc", "logs", "backups", "config", "keys",
+            "*.key", "*.pem", "agent.conf", "subscription.json", ".env",
         ))
         print(f"  + updater/")
 

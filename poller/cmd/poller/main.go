@@ -71,6 +71,9 @@ func main() {
 		pgStore,    // ServiceCheckLoader
 		chStore,    // ServiceMetricWriter
 		redisStore, // ServiceEventPublisher
+		pgStore,    // SNMPLoader
+		chStore,    // SNMPMetricWriter
+		pgStore,    // SNMPDeviceLookup
 		sugar,
 	)
 	if err != nil {

@@ -1,0 +1,688 @@
+#!/usr/bin/env python3
+"""ZenPlus Appliance CLI — restricted management shell.
+
+Cisco IOS-style CLI with tab completion and ? context help.
+"""
+
+import configparser
+import json
+import os
+import platform
+import re
+import readline
+import signal
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+VERSION_FILE = Path("/opt/zenplus/.version")
+HISTORY_FILE = Path.home() / ".zenplus_cli_history"
+MAX_HISTORY = 500
+
+# ── Branding ─────────────────────────────────────────────────────────────────
+
+BANNER = r"""
+  ______           ____  _
+ |___  /          |  _ \| |
+    / / ___ _ __  | |_) | |_   _ ___
+   / / / _ \ '_ \ |  __/| | | | / __|
+  / /_|  __/ | | || |   | | |_| \__ \
+ /_____\___|_| |_||_|   |_|\__,_|___/
+
+ ZenPlus Network Monitoring Appliance
+"""
+
+# ── Command Tree ─────────────────────────────────────────────────────────────
+# { "word": ("description", handler_or_subtree) }
+# Leaf  = ("description", callable)
+# Branch = ("description", dict_of_children)
+# <arg>  = ("description", callable)  — key starts with "<"
+
+COMMAND_TREE = {}  # built in _build_tree() after helpers are defined
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+C_CYAN = "\033[1;36m"
+C_GREEN = "\033[32m"
+C_RED = "\033[31m"
+C_YELLOW = "\033[33m"
+C_RESET = "\033[0m"
+
+
+def _get_version():
+    try:
+        return VERSION_FILE.read_text().strip().splitlines()[0]
+    except (OSError, IndexError):
+        return "unknown"
+
+
+def _get_uptime():
+    try:
+        with open("/proc/uptime") as f:
+            secs = int(float(f.read().split()[0]))
+        d, rem = divmod(secs, 86400)
+        h, rem = divmod(rem, 3600)
+        m, _ = divmod(rem, 60)
+        parts = []
+        if d: parts.append(f"{d}d")
+        if h: parts.append(f"{h}h")
+        parts.append(f"{m}m")
+        return " ".join(parts)
+    except OSError:
+        return "unknown"
+
+
+def _get_primary_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return "127.0.0.1"
+
+
+def _run(cmd_list, timeout=30):
+    try:
+        r = subprocess.run(cmd_list, capture_output=True, text=True, timeout=timeout)
+        return r.stdout + r.stderr
+    except subprocess.TimeoutExpired:
+        return "Error: command timed out"
+    except FileNotFoundError:
+        return f"Error: command not found: {cmd_list[0]}"
+
+
+def _run_live(cmd_list, timeout=60):
+    try:
+        proc = subprocess.Popen(cmd_list, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+            proc.wait(timeout=timeout)
+        except KeyboardInterrupt:
+            proc.terminate()
+            proc.wait(timeout=5)
+            print("\n--- interrupted ---")
+    except FileNotFoundError:
+        print(f"Error: command not found: {cmd_list[0]}")
+
+
+def _svc(name):
+    try:
+        r = subprocess.run(["systemctl", "is-active", name], capture_output=True, text=True, timeout=5)
+        return r.stdout.strip()
+    except Exception:
+        return "unknown"
+
+
+def _svc_line(label, status):
+    c = C_GREEN if status in ("active", "healthy", "enabled") else C_YELLOW if status == "inactive" else C_RED
+    print(f"  {label:<24s} [{c}{status}{C_RESET}]")
+
+
+def _validate_host(t):
+    return bool(t) and bool(re.match(r'^[a-zA-Z0-9._:-]+$', t)) and len(t) <= 253
+
+
+# ── Command Handlers ─────────────────────────────────────────────────────────
+
+def _cmd_show_version(args):
+    v = _get_version()
+    print(f"  ZenPlus Network Monitoring Appliance")
+    print(f"  Software Version : {v}")
+    print(f"  Hostname         : {socket.gethostname()}")
+    print(f"  Platform         : {platform.machine()}")
+    print(f"  OS               : {platform.platform()}")
+    print(f"  Python           : {platform.python_version()}")
+    print(f"  Uptime           : {_get_uptime()}")
+
+
+def _cmd_show_status(args):
+    print("  Service Health Overview")
+    print("  " + "-" * 44)
+    for svc_name, label in [("zenplus-api", "API Server"), ("zenplus-poller", "Ping Poller"),
+                             ("nginx", "Web Server"), ("postgresql", "PostgreSQL"), ("redis-server", "Redis")]:
+        _svc_line(label, _svc(svc_name))
+    ch = "unknown"
+    try:
+        r = subprocess.run(["docker", "inspect", "-f", "{{.State.Health.Status}}", "zenplus-clickhouse"],
+                           capture_output=True, text=True, timeout=5)
+        ch = r.stdout.strip() if r.returncode == 0 else "stopped"
+    except Exception:
+        pass
+    _svc_line("ClickHouse", ch)
+
+
+def _cmd_show_interfaces(args):
+    print(_run(["ip", "-c", "addr", "show"]))
+
+
+def _cmd_show_ip(args):
+    print(_run(["ip", "-c", "-br", "addr"]))
+
+
+def _cmd_show_routes(args):
+    print(_run(["ip", "-c", "route"]))
+
+
+def _cmd_show_dns(args):
+    print(_run(["resolvectl", "status"], timeout=10))
+
+
+def _cmd_show_ntp(args):
+    print(_run(["timedatectl", "show-timesync", "--no-pager"], timeout=10))
+    print(_run(["timedatectl", "status"], timeout=10))
+
+
+def _cmd_show_disk(args):
+    print(_run(["df", "-h"]))
+    print("  LVM Status:")
+    print(_run(["sudo", "lvs", "--noheadings", "-o", "lv_name,vg_name,lv_size"], timeout=10))
+
+
+def _cmd_show_memory(args):
+    print(_run(["free", "-h"]))
+
+
+def _cmd_show_cpu(args):
+    print(_run(["lscpu"]))
+
+
+def _cmd_show_uptime(args):
+    print(_run(["uptime"]))
+
+
+def _cmd_show_log(args):
+    n = 20
+    if args:
+        try: n = min(int(args[0]), 200)
+        except ValueError: pass
+    print(_run(["journalctl", "--no-pager", "-n", str(n), "-u", "zenplus-api", "-u", "zenplus-poller"]))
+
+
+def _cmd_show_update(args):
+    conf = Path("/opt/zenplus/updater/config/agent.conf")
+    sub_file = Path("/opt/zenplus/updater/config/subscription.json")
+    if conf.exists():
+        p = configparser.ConfigParser()
+        p.read(conf)
+        aid = p.get("appliance", "id", fallback="")
+        url = p.get("server", "url", fallback="")
+        print(f"  Server       : {url}")
+        print(f"  Appliance ID : {aid or '(not registered)'}")
+    else:
+        print("  Updater not configured.")
+    if sub_file.exists():
+        try:
+            d = json.loads(sub_file.read_text())
+            print(f"  Subscription : {d.get('name', '?')} ({d.get('plan', '?')})")
+            print(f"  Slots        : {d.get('used_slots', '?')}/{d.get('max_appliances', '?')}")
+            exp = d.get('expires_at')
+            print(f"  Expires      : {exp or 'Never'}")
+        except Exception:
+            pass
+    print(f"  Timer        : {_svc('zenplus-updater.timer')}")
+
+
+def _cmd_show_subscription(args):
+    _cmd_show_update(args)
+
+
+def _cmd_show_services(args):
+    print("  ZenPlus Services")
+    print("  " + "-" * 44)
+    for s in ["zenplus-api", "zenplus-poller", "nginx", "postgresql", "redis-server", "zenplus-updater.timer"]:
+        _svc_line(s, _svc(s))
+
+
+def _cmd_ping(args):
+    if not args:
+        print("% Usage: ping <host> [count]")
+        return
+    target = args[0]
+    if not _validate_host(target):
+        print("% Invalid host")
+        return
+    count = "5"
+    if len(args) > 1:
+        try: count = str(min(max(int(args[1]), 1), 100))
+        except ValueError: pass
+    _run_live(["ping", "-c", count, target])
+
+
+def _cmd_traceroute(args):
+    if not args:
+        print("% Usage: traceroute <host>")
+        return
+    if not _validate_host(args[0]):
+        print("% Invalid host")
+        return
+    _run_live(["traceroute", "-w", "3", args[0]], timeout=120)
+
+
+def _cmd_nslookup(args):
+    if not args:
+        print("% Usage: nslookup <hostname>")
+        return
+    if not _validate_host(args[0]):
+        print("% Invalid host")
+        return
+    print(_run(["nslookup", args[0]]))
+
+
+def _cmd_dig(args):
+    if not args:
+        print("% Usage: dig <hostname> [type]")
+        return
+    if not _validate_host(args[0]):
+        print("% Invalid host")
+        return
+    cmd = ["dig", args[0]]
+    if len(args) > 1 and re.match(r'^[A-Za-z]+$', args[1]):
+        cmd.append(args[1].upper())
+    print(_run(cmd))
+
+
+def _cmd_curl(args):
+    if not args:
+        print("% Usage: curl <url>")
+        return
+    url = args[0]
+    if not url.startswith(("http://", "https://")):
+        print("% URL must start with http:// or https://")
+        return
+    print(_run(["curl", "-sS", "-o", "/dev/null", "-w",
+                 "HTTP %{http_code} | %{time_total}s | %{size_download} bytes\n",
+                 "--max-time", "10", url]))
+
+
+def _cmd_reboot(args):
+    confirm = input("Are you sure you want to reboot? [y/N]: ").strip().lower()
+    if confirm == "y":
+        print("Rebooting...")
+        os.system("sudo reboot")
+    else:
+        print("Reboot cancelled.")
+
+
+def _cmd_shutdown(args):
+    confirm = input("Are you sure you want to shutdown? [y/N]: ").strip().lower()
+    if confirm == "y":
+        print("Shutting down...")
+        os.system("sudo shutdown -h now")
+    else:
+        print("Shutdown cancelled.")
+
+
+def _cmd_reload(args):
+    svc_map = {"api": "zenplus-api", "poller": "zenplus-poller", "nginx": "nginx"}
+    target = args[0] if args else "all"
+    if target == "all":
+        for svc in svc_map.values():
+            print(f"  Restarting {svc}...")
+            _run(["sudo", "systemctl", "restart", svc])
+        print("  Done.")
+    elif target in svc_map:
+        print(f"  Restarting {svc_map[target]}...")
+        _run(["sudo", "systemctl", "restart", svc_map[target]])
+        print("  Done.")
+    else:
+        print(f"% Unknown service: '{target}'. Options: api, poller, nginx, all")
+
+
+def _detect_iface():
+    try:
+        r = subprocess.run(["ip", "-o", "-4", "route", "show", "default"], capture_output=True, text=True, timeout=5)
+        return r.stdout.split()[4] if r.stdout else "ens34"
+    except Exception:
+        return "ens34"
+
+
+def _apply_networkd(iface, content):
+    """Apply systemd-networkd config via the privileged helper. Returns (ok, msg)."""
+    p = subprocess.run(
+        ["sudo", "-n", "/opt/zenplus/bin/zenplus-apply-network.sh", iface],
+        input=content, capture_output=True, text=True, timeout=30,
+    )
+    if p.returncode != 0:
+        return False, (p.stderr or p.stdout or "unknown error").strip()
+    return True, "applied"
+
+
+def _cmd_configure_ip_dhcp(args):
+    iface = _detect_iface()
+    confirm = input(f"Set {iface} to DHCP? [y/N]: ").strip().lower()
+    if confirm != "y":
+        print("Cancelled.")
+        return
+    cfg = (f"[Match]\nName={iface}\n\n"
+           f"[Network]\nDHCP=yes\nLinkLocalAddressing=no\nIPv6AcceptRA=no\n")
+    ok, msg = _apply_networkd(iface, cfg)
+    if ok:
+        print(f"  {iface} set to DHCP. Address may have changed; reconnect if needed.")
+    else:
+        print(f"% Failed to apply: {msg}")
+
+
+def _cmd_configure_ip_static(args):
+    if len(args) < 2:
+        print("% Usage: configure ip static <ip/mask> <gateway>")
+        return
+    ip_cidr, gateway = args[0], args[1]
+    if not re.match(r'^\d+\.\d+\.\d+\.\d+/\d+$', ip_cidr):
+        print("% Invalid IP/mask format. Example: 192.168.1.100/24")
+        return
+    if not re.match(r'^\d+\.\d+\.\d+\.\d+$', gateway):
+        print("% Invalid gateway format.")
+        return
+    iface = _detect_iface()
+    confirm = input(f"Set {iface} to {ip_cidr} gw {gateway}? [y/N]: ").strip().lower()
+    if confirm != "y":
+        print("Cancelled.")
+        return
+    cfg = (f"[Match]\nName={iface}\n\n"
+           f"[Network]\nAddress={ip_cidr}\nGateway={gateway}\n"
+           f"DNS=8.8.8.8\nDNS=1.1.1.1\nLinkLocalAddressing=no\nIPv6AcceptRA=no\n")
+    ok, msg = _apply_networkd(iface, cfg)
+    if ok:
+        print(f"  {iface} set to {ip_cidr} via {gateway}.")
+    else:
+        print(f"% Failed to apply: {msg}")
+
+
+def _cmd_configure_dns(args):
+    if not args:
+        print("% Usage: configure dns <server1> [server2]")
+        return
+    for s in args:
+        if not re.match(r'^\d+\.\d+\.\d+\.\d+$', s):
+            print(f"% Invalid DNS server: {s}")
+            return
+    print(_run(["sudo", "resolvectl", "dns", "1"] + list(args)))
+    print(f"  DNS set to: {' '.join(args)}")
+
+
+def _cmd_configure_hostname(args):
+    if not args:
+        print("% Usage: configure hostname <name>")
+        return
+    name = args[0]
+    if not re.match(r'^[a-zA-Z0-9-]+$', name) or len(name) > 63:
+        print("% Invalid hostname. Use alphanumeric and hyphens only (max 63 chars).")
+        return
+    _run(["sudo", "hostnamectl", "set-hostname", name])
+    print(f"  Hostname set to: {name}")
+
+
+def _cmd_configure_ntp(args):
+    if not args:
+        print("% Usage: configure ntp <server>")
+        return
+    if not _validate_host(args[0]):
+        print("% Invalid NTP server")
+        return
+    _run(["sudo", "timedatectl", "set-ntp", "true"])
+    print(f"  NTP configured. Server: {args[0]}")
+    print("  Note: Edit /etc/systemd/timesyncd.conf for custom NTP server.")
+
+
+def _cmd_clear(args):
+    os.system("clear")
+
+
+def _cmd_history(args):
+    n = readline.get_current_history_length()
+    start = max(1, n - 25)
+    for i in range(start, n + 1):
+        print(f"  {i:4d}  {readline.get_history_item(i)}")
+
+
+def _cmd_dashboard(args):
+    ip = _get_primary_ip()
+    print(f"\n  Dashboard URL: http://{ip}")
+    print(f"  Default user : admin\n")
+
+
+def _cmd_support(args):
+    print("  To access the support shell, SSH in as the 'zpsupport' user.")
+    print("  Contact ZenPlus support for credentials.")
+
+
+def _cmd_exit(args):
+    raise SystemExit(0)
+
+
+# ── Build the command tree ───────────────────────────────────────────────────
+
+def _build_tree():
+    global COMMAND_TREE
+    COMMAND_TREE = {
+        "show": ("Show system information", {
+            "version":      ("Software version and system info",  _cmd_show_version),
+            "status":       ("Service health overview",           _cmd_show_status),
+            "interfaces":   ("Network interface details",         _cmd_show_interfaces),
+            "ip":           ("IP address summary",                _cmd_show_ip),
+            "routes":       ("IP routing table",                  _cmd_show_routes),
+            "dns":          ("DNS resolver configuration",        _cmd_show_dns),
+            "ntp":          ("NTP synchronization status",        _cmd_show_ntp),
+            "disk":         ("Disk and storage usage",            _cmd_show_disk),
+            "memory":       ("Memory usage",                      _cmd_show_memory),
+            "cpu":          ("CPU information",                   _cmd_show_cpu),
+            "uptime":       ("System uptime and load",            _cmd_show_uptime),
+            "log":          ("System log  (show log [N])",        _cmd_show_log),
+            "update":       ("OTA update agent status",           _cmd_show_update),
+            "subscription": ("License and subscription info",     _cmd_show_subscription),
+            "services":     ("All ZenPlus service statuses",      _cmd_show_services),
+        }),
+        "ping":       ("Send ICMP echo  (ping <host> [count])",             _cmd_ping),
+        "traceroute": ("Trace route to host  (traceroute <host>)",          _cmd_traceroute),
+        "nslookup":   ("DNS lookup  (nslookup <host>)",                     _cmd_nslookup),
+        "dig":        ("DNS query  (dig <host> [type])",                    _cmd_dig),
+        "curl":       ("Test HTTP connectivity  (curl <url>)",              _cmd_curl),
+        "configure":  ("Configure appliance settings", {
+            "ip": ("IP address configuration", {
+                "dhcp":   ("Set interface to DHCP",                         _cmd_configure_ip_dhcp),
+                "static": ("Set static IP  (static <ip/mask> <gateway>)",   _cmd_configure_ip_static),
+            }),
+            "dns":      ("Set DNS servers  (dns <server1> [server2])",      _cmd_configure_dns),
+            "hostname": ("Set system hostname  (hostname <name>)",          _cmd_configure_hostname),
+            "ntp":      ("Set NTP server  (ntp <server>)",                  _cmd_configure_ntp),
+        }),
+        "reload":   ("Restart services  (reload [api|poller|nginx|all])", {
+            "api":    ("Restart ZenPlus API server",    lambda a: _cmd_reload(["api"])),
+            "poller": ("Restart ping poller",           lambda a: _cmd_reload(["poller"])),
+            "nginx":  ("Restart web server",            lambda a: _cmd_reload(["nginx"])),
+            "all":    ("Restart all ZenPlus services",  lambda a: _cmd_reload(["all"])),
+        }),
+        "reboot":    ("Reboot the appliance",                   _cmd_reboot),
+        "shutdown":  ("Shutdown the appliance",                  _cmd_shutdown),
+        "clear":     ("Clear the terminal screen",              _cmd_clear),
+        "history":   ("Show command history",                   _cmd_history),
+        "dashboard": ("Show dashboard access URL",              _cmd_dashboard),
+        "support":   ("Support shell access information",       _cmd_support),
+        "exit":      ("Exit the CLI",                           _cmd_exit),
+        "quit":      ("Exit the CLI",                           _cmd_exit),
+        "logout":    ("Exit the CLI",                           _cmd_exit),
+    }
+
+_build_tree()
+
+
+# ── Tree navigation helpers ──────────────────────────────────────────────────
+
+def _walk_tree(words):
+    """Walk command tree with word list. Returns (node, remaining_args, depth).
+
+    node is the deepest dict or callable reached.
+    """
+    node = COMMAND_TREE
+    consumed = 0
+    for w in words:
+        if not isinstance(node, dict):
+            break
+        if w in node:
+            desc, child = node[w]
+            if isinstance(child, dict):
+                node = child
+                consumed += 1
+            else:
+                # callable leaf
+                return child, words[consumed + 1:], consumed + 1
+        else:
+            break
+    return node, words[consumed:], consumed
+
+
+def _get_completions(node, prefix):
+    """Get matching keywords from a tree node for a prefix."""
+    if not isinstance(node, dict):
+        return []
+    return sorted(k for k in node if k.startswith(prefix))
+
+
+# ── ? help display ───────────────────────────────────────────────────────────
+
+def _show_help_for_node(node, prefix=""):
+    """Print Cisco-style ? help for a tree node."""
+    if not isinstance(node, dict):
+        print("  <cr>")
+        return
+    # If prefix given, filter
+    items = sorted(node.items())
+    if prefix:
+        items = [(k, v) for k, v in items if k.startswith(prefix)]
+    if not items:
+        print("% No matching commands")
+        return
+    max_key = max(len(k) for k, _ in items)
+    for key, (desc, _) in items:
+        print(f"  {key:<{max_key + 2}s} {desc}")
+
+
+# ── Tab completer ────────────────────────────────────────────────────────────
+
+def _completer(text, state):
+    """Readline tab completer — walks the command tree."""
+    buf = readline.get_line_buffer()
+    words = buf.split()
+
+    # If buffer ends with space, we're completing the NEXT word
+    completing_new = buf.endswith(" ") or not buf
+    if completing_new:
+        prefix = ""
+        path_words = words
+    else:
+        prefix = words[-1] if words else ""
+        path_words = words[:-1]
+
+    node, remaining, depth = _walk_tree(path_words)
+
+    if isinstance(node, dict):
+        matches = _get_completions(node, prefix)
+    else:
+        matches = []
+
+    # Add space after completion for full matches
+    matches = [m + " " for m in matches]
+
+    if state < len(matches):
+        return matches[state]
+    return None
+
+
+# ── Main loop ────────────────────────────────────────────────────────────────
+
+def main():
+    signal.signal(signal.SIGTSTP, signal.SIG_IGN)
+
+    # Readline setup
+    try:
+        readline.read_history_file(HISTORY_FILE)
+    except FileNotFoundError:
+        pass
+    readline.set_history_length(MAX_HISTORY)
+    readline.set_completer(_completer)
+    readline.set_completer_delims(" ")
+    readline.parse_and_bind("tab: complete")
+
+    # Banner
+    print(C_CYAN + BANNER + C_RESET)
+    print(f" Hostname : {socket.gethostname()}")
+    print(f" Version  : {_get_version()}")
+    print(f" Uptime   : {_get_uptime()}")
+    ip = _get_primary_ip()
+    print(f" Address  : {ip}")
+    print(f" Dashboard: http://{ip}")
+    print()
+    print(f" Type '?' for available commands.\n")
+
+    while True:
+        try:
+            line = input(f"{C_CYAN}zenplus>{C_RESET} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            continue
+
+        if not line:
+            continue
+
+        # ── Handle ? anywhere in the line ────────────────────────────
+        if "?" in line:
+            # "show ?"         → show subcommands of 'show'
+            # "show i?"        → show subcommands of 'show' starting with 'i'
+            # "?"              → show all top-level commands
+            # "configure ip ?" → show subcommands of 'configure ip'
+
+            before = line[:line.index("?")]
+            parts = before.split()
+
+            # Check if there's a partial word right before ?
+            partial = ""
+            if before and not before.endswith(" ") and parts:
+                partial = parts[-1]
+                path_words = parts[:-1]
+            else:
+                path_words = parts
+
+            node, remaining, depth = _walk_tree(path_words)
+
+            if isinstance(node, dict):
+                _show_help_for_node(node, partial)
+            elif callable(node) and not partial:
+                print("  <cr>")
+            else:
+                print("% No further completions")
+            continue
+
+        # ── Dispatch command ──────────────────────────────────────────
+        words = line.split()
+        node, remaining, depth = _walk_tree(words)
+
+        if callable(node):
+            try:
+                node(remaining)
+            except SystemExit:
+                break
+            except Exception as e:
+                print(f"% Error: {e}")
+        elif isinstance(node, dict):
+            if remaining:
+                print(f"% Unknown command: '{remaining[0]}'. Type '{' '.join(words[:depth])} ?' for options.")
+            else:
+                print(f"% Incomplete command. Type '{' '.join(words)} ?' for options.")
+        else:
+            print(f"% Unknown command: '{line}'")
+
+    # Save history
+    try:
+        readline.write_history_file(HISTORY_FILE)
+    except OSError:
+        pass
+    print("\nGoodbye.\n")
+
+
+if __name__ == "__main__":
+    main()
