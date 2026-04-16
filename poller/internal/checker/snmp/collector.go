@@ -62,8 +62,12 @@ func (c *Collector) Collect(ctx context.Context, d *Device) *Result {
 	}
 
 	// Host-Resources: CPU + memory on devices that implement it.
-	// (Failures here are normal on routers/switches that don't.)
-	scalars, _ := c.collectHostResources(ctx, client, d.ID, start)
+	// Falls back to vendor-specific MIBs (Cisco, Fortinet, PaloAlto, etc.)
+	sysOID := d.SysObjectID
+	if sys != nil && sys.SysObjectID != "" {
+		sysOID = sys.SysObjectID
+	}
+	scalars, _ := c.collectHostResources(ctx, client, d.ID, start, sysOID)
 	r.Scalars = append(r.Scalars, scalars...)
 
 	// Interfaces are the big one: IF-MIB table walk.
@@ -126,11 +130,13 @@ func (c *Collector) collectSystem(ctx context.Context, s *g.GoSNMP) (*SystemInfo
 }
 
 func (c *Collector) collectHostResources(
-	ctx context.Context, s *g.GoSNMP, deviceID uuid.UUID, ts time.Time,
+	ctx context.Context, s *g.GoSNMP, deviceID uuid.UUID, ts time.Time, sysObjectID string,
 ) ([]MetricSample, error) {
 	var out []MetricSample
+	hasCPU := false
+	hasMem := false
 
-	// CPU: walk hrProcessorLoad, average across cores.
+	// 1) Standard HOST-RESOURCES-MIB — CPU
 	cpuLoads, err := s.BulkWalkAll(OIDHrProcessorLoad)
 	if err == nil && len(cpuLoads) > 0 {
 		var sum, n float64
@@ -143,11 +149,11 @@ func (c *Collector) collectHostResources(
 				DeviceID: deviceID, Key: "cpu",
 				Value: sum / n, Unit: "percent", Timestamp: ts, PollerID: c.pollerID,
 			})
+			hasCPU = true
 		}
 	}
 
-	// Memory: walk hrStorageTable, find entries with type=hrStorageRAM,
-	// emit used/total/pct.
+	// 2) Standard HOST-RESOURCES-MIB — Memory
 	types, _ := s.BulkWalkAll(OIDHrStorageType)
 	units, _ := s.BulkWalkAll(OIDHrStorageAllocationU)
 	sizes, _ := s.BulkWalkAll(OIDHrStorageSize)
@@ -160,7 +166,6 @@ func (c *Collector) collectHostResources(
 
 	for idx, typeVar := range typeByIdx {
 		if asString(typeVar) != "."+OIDHrStorageRAM && !strings.HasSuffix(typeVar.Value.(string), OIDHrStorageRAM) && !strings.Contains(fmt.Sprint(typeVar.Value), OIDHrStorageRAM) {
-			// Not RAM; skip. (Best-effort match; different agents report this differently.)
 			continue
 		}
 		unit := int64(asInt(unitByIdx[idx]))
@@ -180,10 +185,168 @@ func (c *Collector) collectHostResources(
 			MetricSample{DeviceID: deviceID, Key: "memory_used_bytes", Value: usedBytes, Unit: "bytes", Timestamp: ts, PollerID: c.pollerID},
 			MetricSample{DeviceID: deviceID, Key: "memory", Value: pct, Unit: "percent", Timestamp: ts, PollerID: c.pollerID},
 		)
-		break // first RAM entry is enough
+		hasMem = true
+		break
+	}
+
+	// 3) Vendor-specific fallbacks when standard MIBs return nothing.
+	cleanOID := strings.TrimPrefix(sysObjectID, ".")
+	if !hasCPU || !hasMem {
+		vendorMetrics := c.collectVendorMetrics(s, deviceID, ts, cleanOID, hasCPU, hasMem)
+		out = append(out, vendorMetrics...)
 	}
 
 	return out, nil
+}
+
+// collectVendorMetrics tries vendor-specific OIDs for CPU and memory
+// based on the device's sysObjectID prefix.
+func (c *Collector) collectVendorMetrics(
+	s *g.GoSNMP, deviceID uuid.UUID, ts time.Time,
+	sysOID string, hasCPU, hasMem bool,
+) []MetricSample {
+	var out []MetricSample
+
+	// Detect vendor from sysObjectID prefix
+	isCisco := strings.HasPrefix(sysOID, "1.3.6.1.4.1.9.")
+	isForti := strings.HasPrefix(sysOID, "1.3.6.1.4.1.12356.")
+	isPAN := strings.HasPrefix(sysOID, "1.3.6.1.4.1.25461.")
+	isJuniper := strings.HasPrefix(sysOID, "1.3.6.1.4.1.2636.")
+	isAruba := strings.HasPrefix(sysOID, "1.3.6.1.4.1.14823.")
+
+	mk := func(key string, val float64, unit string) MetricSample {
+		return MetricSample{DeviceID: deviceID, Key: key, Value: val, Unit: unit, Timestamp: ts, PollerID: c.pollerID}
+	}
+
+	// ── Cisco ──
+	if isCisco {
+		if !hasCPU {
+			// Try CISCO-PROCESS-MIB first (cpmCPUTotal5minRev)
+			if v := getScalar(s, OIDCiscoCPU5min); v >= 0 {
+				out = append(out, mk("cpu", v, "percent"))
+			} else if v := getScalar(s, OIDCiscoCPU1min); v >= 0 {
+				out = append(out, mk("cpu", v, "percent"))
+			} else if v := getScalar(s, OIDCiscoCPUBusy); v >= 0 {
+				// OLD-CISCO-CPU-MIB fallback
+				out = append(out, mk("cpu", v, "percent"))
+			}
+		}
+		if !hasMem {
+			// CISCO-MEMORY-POOL-MIB — walk used+free, sum processor pools
+			usedVals, _ := s.BulkWalkAll(OIDCiscoMemPoolUsed)
+			freeVals, _ := s.BulkWalkAll(OIDCiscoMemPoolFree)
+			if len(usedVals) > 0 && len(freeVals) > 0 {
+				var totalUsed, totalFree float64
+				for _, v := range usedVals {
+					totalUsed += float64(asUint(v))
+				}
+				for _, v := range freeVals {
+					totalFree += float64(asUint(v))
+				}
+				total := totalUsed + totalFree
+				if total > 0 {
+					pct := totalUsed / total * 100.0
+					out = append(out,
+						mk("memory_total_bytes", total, "bytes"),
+						mk("memory_used_bytes", totalUsed, "bytes"),
+						mk("memory", pct, "percent"),
+					)
+				}
+			}
+		}
+	}
+
+	// ── Fortinet ──
+	if isForti {
+		if !hasCPU {
+			if v := getScalar(s, OIDFortiCPU); v >= 0 {
+				out = append(out, mk("cpu", v, "percent"))
+			}
+		}
+		if !hasMem {
+			if v := getScalar(s, OIDFortiMem); v >= 0 {
+				out = append(out, mk("memory", v, "percent"))
+			}
+		}
+		// Bonus: session count as extra metric
+		if v := getScalar(s, OIDFortiSesCount); v >= 0 {
+			out = append(out, mk("sessions", v, "count"))
+		}
+	}
+
+	// ── Palo Alto ──
+	if isPAN {
+		if !hasCPU {
+			if v := getScalar(s, OIDPanSysCPU); v >= 0 {
+				out = append(out, mk("cpu", v, "percent"))
+			} else if v := getScalar(s, OIDPanCPU); v >= 0 {
+				out = append(out, mk("cpu", v, "percent"))
+			}
+		}
+		if !hasMem {
+			if v := getScalar(s, OIDPanSysMem); v >= 0 {
+				out = append(out, mk("memory", v, "percent"))
+			}
+		}
+	}
+
+	// ── Juniper ──
+	if isJuniper {
+		if !hasCPU {
+			// Walk jnxOperatingCPU, average across routing engines
+			cpuVals, _ := s.BulkWalkAll(OIDJnxCPU)
+			if len(cpuVals) > 0 {
+				var sum float64
+				for _, v := range cpuVals {
+					sum += float64(asInt(v))
+				}
+				out = append(out, mk("cpu", sum/float64(len(cpuVals)), "percent"))
+			}
+		}
+		if !hasMem {
+			memVals, _ := s.BulkWalkAll(OIDJnxMem)
+			if len(memVals) > 0 {
+				var sum float64
+				for _, v := range memVals {
+					sum += float64(asInt(v))
+				}
+				out = append(out, mk("memory", sum/float64(len(memVals)), "percent"))
+			}
+		}
+	}
+
+	// ── Aruba / HPE ──
+	if isAruba {
+		if !hasCPU {
+			if v := getScalar(s, OIDArubaAPCPU); v >= 0 {
+				out = append(out, mk("cpu", v, "percent"))
+			}
+		}
+	}
+
+	return out
+}
+
+// getScalar does a single SNMP GET and returns the numeric value, or -1 on failure.
+func getScalar(s *g.GoSNMP, oid string) float64 {
+	res, err := s.Get([]string{oid})
+	if err != nil || len(res.Variables) == 0 {
+		return -1
+	}
+	v := res.Variables[0]
+	switch v.Type {
+	case g.NoSuchObject, g.NoSuchInstance, g.EndOfMibView:
+		return -1
+	}
+	val := float64(asInt(v))
+	if val == 0 {
+		// Could be genuine 0% or a non-numeric — check unsigned too
+		uval := float64(asUint(v))
+		if uval > 0 {
+			return uval
+		}
+	}
+	return val
 }
 
 func (c *Collector) collectInterfaces(ctx context.Context, s *g.GoSNMP) ([]Interface, error) {

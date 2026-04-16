@@ -226,19 +226,20 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 }
 
 // UpsertSystemInfo writes discovered system-group fields back to
-// devices (vendor/model/os_version/sys_object_id).
+// devices (vendor/model/os_version/sys_object_id/hostname from sysName).
 func (s *PostgresStore) UpsertSystemInfo(
 	ctx context.Context, deviceID uuid.UUID,
-	sysObjectID, vendor, model, osVersion string,
+	sysObjectID, vendor, model, osVersion, sysName string,
 ) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE devices
 		SET sys_object_id = COALESCE(NULLIF($1,''), sys_object_id),
 		    vendor        = COALESCE(NULLIF($2,''), vendor),
 		    model         = COALESCE(NULLIF($3,''), model),
-		    os_version    = COALESCE(NULLIF($4,''), os_version)
+		    os_version    = COALESCE(NULLIF($4,''), os_version),
+		    hostname      = COALESCE(NULLIF($6,''), hostname)
 		WHERE id = $5
-	`, sysObjectID, vendor, model, osVersion, deviceID)
+	`, sysObjectID, vendor, model, osVersion, deviceID, sysName)
 	return err
 }
 

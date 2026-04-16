@@ -44,6 +44,9 @@ from app.schemas.snmp import (
     DiscoveryJobResponse,
     DiscoveryResultResponse,
     MibUploadResponse,
+    ProfileCreate,
+    ProfileUpdate,
+    ProfileResponse,
 )
 
 router = APIRouter(prefix="/snmp", tags=["SNMP"])
@@ -635,20 +638,146 @@ async def delete_mib(
 # --------------------------------------------------------------------
 
 
-@router.get("/profiles")
+@router.get("/profiles", response_model=list[ProfileResponse])
 async def list_profiles(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """List seeded SNMP device profiles (Cisco, Fortinet, Linux, etc.)."""
+    """List all SNMP device profiles with device count."""
     rows = (await db.execute(
         text("""
-            SELECT id, name, vendor, version, builtin, description,
-                   match_rules, created_at, updated_at
-            FROM device_profiles ORDER BY name
+            SELECT p.id, p.name, p.vendor, p.version, p.builtin, p.description,
+                   p.match_rules, p.oid_groups, p.created_at, p.updated_at,
+                   COALESCE(dc.cnt, 0) AS device_count
+            FROM device_profiles p
+            LEFT JOIN (
+                SELECT profile_id, COUNT(*) AS cnt FROM devices
+                WHERE profile_id IS NOT NULL GROUP BY profile_id
+            ) dc ON dc.profile_id = p.id
+            ORDER BY p.name
         """)
     )).mappings().all()
-    return [dict(r) for r in rows]
+    return [ProfileResponse(**dict(r)) for r in rows]
+
+
+@router.get("/profiles/{profile_id}", response_model=ProfileResponse)
+async def get_profile(
+    profile_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    row = (await db.execute(
+        text("""
+            SELECT p.id, p.name, p.vendor, p.version, p.builtin, p.description,
+                   p.match_rules, p.oid_groups, p.created_at, p.updated_at,
+                   COALESCE(dc.cnt, 0) AS device_count
+            FROM device_profiles p
+            LEFT JOIN (
+                SELECT profile_id, COUNT(*) AS cnt FROM devices
+                WHERE profile_id IS NOT NULL GROUP BY profile_id
+            ) dc ON dc.profile_id = p.id
+            WHERE p.id = :id
+        """),
+        {"id": profile_id},
+    )).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return ProfileResponse(**dict(row))
+
+
+@router.post("/profiles", response_model=ProfileResponse, status_code=201)
+async def create_profile(
+    data: ProfileCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    import json
+    row = (await db.execute(
+        text("""
+            INSERT INTO device_profiles (name, vendor, description, match_rules, oid_groups, builtin)
+            VALUES (:name, :vendor, :desc, CAST(:match_rules AS jsonb), CAST(:oid_groups AS jsonb), FALSE)
+            RETURNING id, name, vendor, version, builtin, description,
+                      match_rules, oid_groups, created_at, updated_at
+        """),
+        {
+            "name": data.name,
+            "vendor": data.vendor,
+            "desc": data.description,
+            "match_rules": json.dumps(data.match_rules.model_dump()),
+            "oid_groups": json.dumps([g.model_dump() for g in data.oid_groups]),
+        },
+    )).mappings().first()
+    await db.commit()
+    return ProfileResponse(**dict(row), device_count=0)
+
+
+@router.put("/profiles/{profile_id}", response_model=ProfileResponse)
+async def update_profile(
+    profile_id: uuid.UUID,
+    data: ProfileUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    import json
+    existing = (await db.execute(
+        text("SELECT id, builtin FROM device_profiles WHERE id = :id"),
+        {"id": profile_id},
+    )).mappings().first()
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    sets = ["updated_at = NOW()"]
+    params: dict = {"id": profile_id}
+
+    if data.name is not None:
+        sets.append("name = :name")
+        params["name"] = data.name
+    if data.vendor is not None:
+        sets.append("vendor = :vendor")
+        params["vendor"] = data.vendor
+    if data.description is not None:
+        sets.append("description = :desc")
+        params["desc"] = data.description
+    if data.match_rules is not None:
+        sets.append("match_rules = CAST(:match_rules AS jsonb)")
+        params["match_rules"] = json.dumps(data.match_rules.model_dump())
+    if data.oid_groups is not None:
+        sets.append("oid_groups = CAST(:oid_groups AS jsonb)")
+        params["oid_groups"] = json.dumps([g.model_dump() for g in data.oid_groups])
+
+    await db.execute(
+        text(f"UPDATE device_profiles SET {', '.join(sets)} WHERE id = :id"),
+        params,
+    )
+    await db.commit()
+
+    return await get_profile(profile_id, db, user)
+
+
+@router.delete("/profiles/{profile_id}", status_code=204)
+async def delete_profile(
+    profile_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    existing = (await db.execute(
+        text("SELECT id, builtin FROM device_profiles WHERE id = :id"),
+        {"id": profile_id},
+    )).mappings().first()
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    if existing["builtin"]:
+        raise HTTPException(status_code=400, detail="Cannot delete built-in profiles")
+    # Unlink devices referencing this profile
+    await db.execute(
+        text("UPDATE devices SET profile_id = NULL WHERE profile_id = :id"),
+        {"id": profile_id},
+    )
+    await db.execute(
+        text("DELETE FROM device_profiles WHERE id = :id"),
+        {"id": profile_id},
+    )
+    await db.commit()
 
 
 @router.get("/traps")

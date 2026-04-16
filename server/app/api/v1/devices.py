@@ -366,6 +366,89 @@ async def get_device_snmp_if_metrics(
     return out
 
 
+@router.get("/{device_id}/interfaces/{if_index}/metrics")
+async def get_interface_detail_metrics(
+    device_id: UUID,
+    if_index: int,
+    hours: int = Query(default=6, ge=1, le=720),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Detailed per-interface metrics including traffic, errors, discards, packets."""
+    from app.core.database import get_clickhouse_client
+    client = get_clickhouse_client()
+
+    if hours <= 6:
+        table = "snmp_if_metrics"
+        sql = f"""
+            SELECT toUnixTimestamp64Milli(timestamp) AS ts_ms,
+                   in_bps, out_bps,
+                   in_errors, out_errors,
+                   in_discards, out_discards,
+                   in_ucast_pkts, out_ucast_pkts,
+                   in_octets, out_octets
+            FROM zenplus.{table}
+            WHERE device_id = %(id)s AND if_index = %(if)s
+              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+            ORDER BY timestamp
+        """
+    else:
+        table = "snmp_if_metrics_5m"
+        sql = f"""
+            SELECT toUnixTimestamp64Milli(timestamp) AS ts_ms,
+                   avg_in_bps AS in_bps, avg_out_bps AS out_bps,
+                   sum_in_errors AS in_errors, sum_out_errors AS out_errors,
+                   sum_in_discards AS in_discards, sum_out_discards AS out_discards,
+                   0 AS in_ucast_pkts, 0 AS out_ucast_pkts,
+                   0 AS in_octets, 0 AS out_octets
+            FROM zenplus.{table}
+            WHERE device_id = %(id)s AND if_index = %(if)s
+              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+            ORDER BY timestamp
+        """
+
+    params = {"id": str(device_id), "if": if_index, "hours": hours}
+
+    try:
+        res = client.query(sql, parameters=params)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"clickhouse query failed: {e}")
+
+    traffic = []
+    errors = []
+    for r in res.result_rows:
+        traffic.append({
+            "ts": r[0], "in_bps": float(r[1]), "out_bps": float(r[2]),
+        })
+        errors.append({
+            "ts": r[0],
+            "in_errors": int(r[3]), "out_errors": int(r[4]),
+            "in_discards": int(r[5]), "out_discards": int(r[6]),
+        })
+
+    # Summary stats
+    if traffic:
+        in_vals = [p["in_bps"] for p in traffic]
+        out_vals = [p["out_bps"] for p in traffic]
+        err_total = sum(e["in_errors"] + e["out_errors"] for e in errors)
+        disc_total = sum(e["in_discards"] + e["out_discards"] for e in errors)
+        summary = {
+            "in_avg_bps": sum(in_vals) / len(in_vals),
+            "in_max_bps": max(in_vals),
+            "in_current_bps": in_vals[-1],
+            "out_avg_bps": sum(out_vals) / len(out_vals),
+            "out_max_bps": max(out_vals),
+            "out_current_bps": out_vals[-1],
+            "total_errors": err_total,
+            "total_discards": disc_total,
+            "samples": len(traffic),
+        }
+    else:
+        summary = {}
+
+    return {"traffic": traffic, "errors": errors, "summary": summary}
+
+
 @router.get("/{device_id}/traps")
 async def get_device_traps(
     device_id: UUID,

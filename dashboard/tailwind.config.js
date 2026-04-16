@@ -23,6 +23,11 @@ export default {
         danger: 'rgb(var(--danger) / <alpha-value>)',
         info: 'rgb(var(--info) / <alpha-value>)',
         accent: 'rgb(var(--accent) / <alpha-value>)',
+        'sidebar-bg': 'rgb(var(--sidebar-bg) / <alpha-value>)',
+        'sidebar-text': 'rgb(var(--sidebar-text) / <alpha-value>)',
+        'sidebar-text-muted': 'rgb(var(--sidebar-text-muted) / <alpha-value>)',
+        'sidebar-border': 'rgb(var(--sidebar-border) / <alpha-value>)',
+        'sidebar-hover': 'rgb(var(--sidebar-hover) / <alpha-value>)',
       },
       fontFamily: {
         sans: ['Inter', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],

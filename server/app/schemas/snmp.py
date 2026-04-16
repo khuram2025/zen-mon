@@ -75,3 +75,54 @@ class MibUploadResponse(BaseModel):
     uploaded_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ---- Device Profiles CRUD ----
+
+class OidItem(BaseModel):
+    oid: str = Field(..., description="SNMP OID, e.g. 1.3.6.1.2.1.1.3.0")
+    name: str = Field(..., description="Human-friendly metric name")
+    type: str = Field(default="gauge", description="gauge | counter | string")
+    description: str = Field(default="")
+
+class OidGroup(BaseModel):
+    name: str = Field(..., description="Group name, e.g. System, CPU, Memory")
+    oids: list[OidItem] = Field(default_factory=list)
+
+class MatchRules(BaseModel):
+    sys_object_id_prefixes: list[str] = Field(default_factory=list)
+    sys_descr_regex: Optional[str] = None
+    default_vendor: Optional[str] = None
+    default_model: Optional[str] = None
+    extract_vendor: Optional[str] = None
+    extract_model: Optional[str] = None
+    extract_os_version: Optional[str] = None
+
+class ProfileCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    vendor: Optional[str] = Field(default=None, max_length=100)
+    description: Optional[str] = None
+    match_rules: MatchRules = Field(default_factory=MatchRules)
+    oid_groups: list[OidGroup] = Field(default_factory=list)
+
+class ProfileUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    vendor: Optional[str] = Field(default=None, max_length=100)
+    description: Optional[str] = None
+    match_rules: Optional[MatchRules] = None
+    oid_groups: Optional[list[OidGroup]] = None
+
+class ProfileResponse(BaseModel):
+    id: UUID
+    name: str
+    vendor: Optional[str]
+    version: int
+    builtin: bool
+    description: Optional[str]
+    match_rules: dict
+    oid_groups: list
+    created_at: datetime
+    updated_at: datetime
+    device_count: int = 0
+
+    model_config = {"from_attributes": True}

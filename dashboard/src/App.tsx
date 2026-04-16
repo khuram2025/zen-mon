@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useParams } from 'react-router-dom'
 import { useAuth } from '@/stores/auth'
 import { Layout } from '@/components/Layout'
 import { LoginPage } from '@/pages/LoginPage'
@@ -12,13 +12,36 @@ import { ServicesPage } from '@/pages/ServicesPage'
 import { DiscoveryPage } from '@/pages/DiscoveryPage'
 import { MibLibraryPage } from '@/pages/MibLibraryPage'
 import { ReportsPage } from '@/pages/ReportsPage'
-import { SettingsPage } from '@/pages/SettingsPage'
+import { UsersPage } from '@/pages/UsersPage'
+import { NotificationsPage } from '@/pages/NotificationsPage'
+import { GatewaysPage } from '@/pages/GatewaysPage'
+import { SnmpProfilesPage } from '@/pages/SnmpProfilesPage'
+import { SubscriptionPage } from '@/pages/SubscriptionPage'
+import { GeneralSettingsPage } from '@/pages/GeneralSettingsPage'
 import { NotFoundPage } from '@/pages/NotFoundPage'
 
 function Protected({ children }: { children: React.ReactNode }) {
   const token = useAuth((s) => s.token)
   if (!token) return <Navigate to="/login" replace />
   return <>{children}</>
+}
+
+/* Redirect old /settings/:tab to new routes */
+const tabRedirects: Record<string, string> = {
+  company: '/settings/general',
+  channels: '/notifications',
+  gateways: '/gateways',
+  users: '/users',
+  snmp: '/snmp-profiles',
+  subscription: '/subscription',
+  appearance: '/settings/general',
+  profile: '/settings/general',
+}
+
+function SettingsRedirect() {
+  const { tab } = useParams()
+  const target = tab ? tabRedirects[tab] || '/settings/general' : '/settings/general'
+  return <Navigate to={target} replace />
 }
 
 export default function App() {
@@ -48,8 +71,19 @@ export default function App() {
         <Route path="alerts" element={<AlertsPage />} />
         <Route path="alert-rules" element={<AlertRulesPage />} />
         <Route path="reports" element={<ReportsPage />} />
-        <Route path="settings" element={<SettingsPage />} />
-        <Route path="settings/:tab" element={<SettingsPage />} />
+
+        {/* Broken-out settings pages */}
+        <Route path="users" element={<UsersPage />} />
+        <Route path="notifications" element={<NotificationsPage />} />
+        <Route path="gateways" element={<GatewaysPage />} />
+        <Route path="snmp-profiles" element={<SnmpProfilesPage />} />
+        <Route path="subscription" element={<SubscriptionPage />} />
+        <Route path="settings/general" element={<GeneralSettingsPage />} />
+
+        {/* Backward-compat redirects */}
+        <Route path="settings" element={<SettingsRedirect />} />
+        <Route path="settings/:tab" element={<SettingsRedirect />} />
+
         <Route path="*" element={<NotFoundPage />} />
       </Route>
     </Routes>

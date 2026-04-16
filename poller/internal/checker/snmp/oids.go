@@ -1,8 +1,6 @@
 package snmp
 
-// Standard MIB OID constants. These cover ~90% of real-world gear.
-// Vendor-specific OIDs (CISCO-*, FORTINET-*, PAN-*) land in Phase 2
-// via JSON profile packs.
+// Standard MIB OID constants + vendor-specific CPU/memory OIDs.
 const (
 	// system group (RFC 1213)
 	OIDSysDescr    = "1.3.6.1.2.1.1.1.0"
@@ -62,6 +60,45 @@ const (
 	OIDEntPhysicalSerialNum  = "1.3.6.1.2.1.47.1.1.1.1.11"
 	OIDEntPhysicalMfgName    = "1.3.6.1.2.1.47.1.1.1.1.12"
 	OIDEntPhysicalModelName  = "1.3.6.1.2.1.47.1.1.1.1.13"
+
+	// ── Cisco MIBs ──
+	// CISCO-PROCESS-MIB — CPU (cpmCPUTotal5minRev, preferred over OLD-CISCO)
+	OIDCiscoCPU5min       = "1.3.6.1.4.1.9.9.109.1.1.1.1.8.1"  // cpmCPUTotal5minRev
+	OIDCiscoCPU1min       = "1.3.6.1.4.1.9.9.109.1.1.1.1.7.1"  // cpmCPUTotal1minRev
+	OIDCiscoCPU5sec       = "1.3.6.1.4.1.9.9.109.1.1.1.1.6.1"  // cpmCPUTotal5secRev
+	// OLD-CISCO-CPU-MIB fallback (IOS 11.x)
+	OIDCiscoCPUBusy       = "1.3.6.1.4.1.9.2.1.58.0"           // avgBusy5
+	// CISCO-MEMORY-POOL-MIB — Memory
+	OIDCiscoMemPoolUsed   = "1.3.6.1.4.1.9.9.48.1.1.1.5"       // ciscoMemoryPoolUsed (walk)
+	OIDCiscoMemPoolFree   = "1.3.6.1.4.1.9.9.48.1.1.1.6"       // ciscoMemoryPoolFree (walk)
+	// CISCO-ENHANCED-MEMPOOL-MIB (Nexus/newer IOS-XE)
+	OIDCiscoEnhMemUsed    = "1.3.6.1.4.1.9.9.221.1.1.1.1.18"   // cempMemPoolHCUsed
+	OIDCiscoEnhMemFree    = "1.3.6.1.4.1.9.9.221.1.1.1.1.20"   // cempMemPoolHCFree
+
+	// ── Fortinet MIBs ──
+	// FORTINET-FORTIGATE-MIB
+	OIDFortiCPU           = "1.3.6.1.4.1.12356.101.4.1.3.0"    // fgSysCpuUsage (%)
+	OIDFortiMem           = "1.3.6.1.4.1.12356.101.4.1.4.0"    // fgSysMemUsage (%)
+	OIDFortiSesCount      = "1.3.6.1.4.1.12356.101.4.1.8.0"    // fgSysSesCount
+	OIDFortiSesRate       = "1.3.6.1.4.1.12356.101.4.1.11.0"   // fgSysSesRate6
+
+	// ── Palo Alto MIBs ──
+	// PAN-COMMON-MIB
+	OIDPanCPU             = "1.3.6.1.4.1.25461.2.1.2.3.1.0"    // panSessionUtilization (proxy for CPU)
+	OIDPanGPCPU           = "1.3.6.1.4.1.25461.2.1.2.3.16.0"   // panGPGatewayUtilizationPct
+	// PAN-ENTITY-MIB (management plane)
+	OIDPanSysCPU          = "1.3.6.1.4.1.25461.2.1.2.1.1.0"    // panSysCPULinuxPercent
+	OIDPanSysMem          = "1.3.6.1.4.1.25461.2.1.2.1.2.0"    // panSysMemoryUtilization (KB total)
+
+	// ── Juniper MIBs ──
+	// JUNIPER-MIB
+	OIDJnxCPU             = "1.3.6.1.4.1.2636.3.1.13.1.8"      // jnxOperatingCPU (walk, per-slot)
+	OIDJnxMem             = "1.3.6.1.4.1.2636.3.1.13.1.11"     // jnxOperatingBuffer (walk, per-slot %)
+	OIDJnxTemp            = "1.3.6.1.4.1.2636.3.1.13.1.7"      // jnxOperatingTemp (walk, per-slot °C)
+
+	// ── Aruba / HPE MIBs ──
+	OIDArubaAPCPU         = "1.3.6.1.4.1.14823.2.2.1.2.1.13.0" // wlsxSwitchTotalCpuUtilization
+	OIDArubaAPMem         = "1.3.6.1.4.1.14823.2.2.1.2.1.15.0" // wlsxSwitchTotalMemoryUsed
 
 	// ENTITY-SENSOR-MIB (RFC 3433)
 	OIDEntPhySensorType        = "1.3.6.1.2.1.99.1.1.1.1"

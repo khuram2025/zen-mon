@@ -60,7 +60,7 @@ type ServiceEventPublisher interface {
 // and writes discovery output back to Postgres.
 type SNMPLoader interface {
 	LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, error)
-	UpsertSystemInfo(ctx context.Context, deviceID uuid.UUID, sysObjectID, vendor, model, osVersion string) error
+	UpsertSystemInfo(ctx context.Context, deviceID uuid.UUID, sysObjectID, vendor, model, osVersion, sysName string) error
 	UpsertInterfaces(ctx context.Context, deviceID uuid.UUID, ifs []snmp.Interface) error
 	UpsertEntities(ctx context.Context, deviceID uuid.UUID, ents []snmp.Entity) error
 	UpsertSensors(ctx context.Context, deviceID uuid.UUID, sensors []snmp.Sensor) error
@@ -801,7 +801,7 @@ func (e *Engine) handleSNMPResult(ctx context.Context, d *snmp.Device, r *snmp.R
 				}
 			}
 		}
-		if err := e.snmpLoader.UpsertSystemInfo(ctx, d.ID, r.System.SysObjectID, vendor, model, osVersion); err != nil {
+		if err := e.snmpLoader.UpsertSystemInfo(ctx, d.ID, r.System.SysObjectID, vendor, model, osVersion, r.System.SysName); err != nil {
 			e.logger.Warnf("UpsertSystemInfo %s: %v", d.Hostname, err)
 		}
 	}
