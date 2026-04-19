@@ -541,6 +541,7 @@ def _device_to_response(device) -> DeviceResponse:
         model=device.model,
         os_version=device.os_version,
         profile_id=device.profile_id,
+        snmp_credential_id=device.snmp_credential_id,
         snmp_auth_configured=device.snmp_auth_passphrase is not None,
         snmp_priv_configured=device.snmp_priv_passphrase is not None,
     )

@@ -6,8 +6,9 @@ from pydantic import BaseModel, Field
 
 class DiscoveryJobCreate(BaseModel):
     cidr: str = Field(..., description="CIDR range to sweep, e.g. 10.0.0.0/24")
+    credential_id: Optional[UUID] = Field(default=None, description="Saved SNMP credential to use")
     community: str = Field(default="public", description="SNMPv2c community for the probe")
-    snmp_version: str = Field(default="2c", pattern="^(1|2c)$", description="Only v1/v2c supported in discovery for now")
+    snmp_version: str = Field(default="2c", pattern="^(1|2c|3)$", description="SNMP version")
     snmp_port: int = Field(default=161, ge=1, le=65535)
     timeout_ms: int = Field(default=1500, ge=200, le=10000)
 

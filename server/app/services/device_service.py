@@ -7,6 +7,59 @@ from app.core import crypto
 from app.models.device import Device, DeviceGroup
 from app.schemas.device import DeviceCreate, DeviceUpdate, DeviceSummary, DeviceBulkImportItem, BulkImportResult
 
+
+async def _apply_credential(db: AsyncSession, device: Device, credential_id: UUID) -> None:
+    """Expand a saved SNMP credential into the device's own columns.
+
+    The poller reads SNMP auth directly from the devices table (v3 username,
+    protocols, encrypted passphrases). A credential_id column alone isn't
+    enough — we need to copy the credential's values onto the device so that
+    v3 polling actually has the secrets it needs.
+
+    Passphrases on snmp_credentials are stored as plaintext; we encrypt them
+    with the device-level scheme before writing to the device columns so the
+    poller can decrypt them the same way it handles manually-entered ones.
+    """
+    row = (await db.execute(
+        text("""
+            SELECT snmp_version, community, v3_username, v3_context,
+                   v3_auth_protocol, v3_auth_passphrase,
+                   v3_priv_protocol, v3_priv_passphrase,
+                   port, timeout_ms, retries
+            FROM snmp_credentials WHERE id = :id
+        """),
+        {"id": credential_id},
+    )).mappings().first()
+    if not row:
+        return
+
+    device.snmp_version = row["snmp_version"]
+    device.snmp_port = row["port"]
+    device.snmp_timeout_ms = row["timeout_ms"]
+    device.snmp_retries = row["retries"]
+
+    if row["snmp_version"] == "3":
+        device.snmp_community = None
+        device.snmp_v3_username = row["v3_username"]
+        device.snmp_v3_context = row["v3_context"]
+        device.snmp_auth_protocol = row["v3_auth_protocol"]
+        device.snmp_priv_protocol = row["v3_priv_protocol"]
+        device.snmp_auth_passphrase = (
+            crypto.encrypt(row["v3_auth_passphrase"]) if row["v3_auth_passphrase"] else None
+        )
+        device.snmp_priv_passphrase = (
+            crypto.encrypt(row["v3_priv_passphrase"]) if row["v3_priv_passphrase"] else None
+        )
+    else:
+        device.snmp_community = row["community"] or "public"
+        # Clear any v3-specific residue so the poller picks the right auth mode.
+        device.snmp_v3_username = None
+        device.snmp_v3_context = None
+        device.snmp_auth_protocol = None
+        device.snmp_priv_protocol = None
+        device.snmp_auth_passphrase = None
+        device.snmp_priv_passphrase = None
+
 # Fields written straight through from DeviceCreate/DeviceUpdate.
 # Passphrases are handled separately so they can be encrypted.
 _SNMP_PLAIN_FIELDS = (
@@ -23,6 +76,7 @@ _SNMP_PLAIN_FIELDS = (
     "snmp_max_repetitions",
     "snmp_poll_interval",
     "profile_id",
+    "snmp_credential_id",
 )
 
 
@@ -48,7 +102,7 @@ async def get_devices(
         query = query.where(Device.location.ilike(f"%{location}%"))
     if search:
         query = query.where(
-            Device.hostname.ilike(f"%{search}%") | Device.ip_address.cast(str).ilike(f"%{search}%")
+            Device.hostname.ilike(f"%{search}%") | cast(Device.ip_address, String).ilike(f"%{search}%")
         )
 
     # Count
@@ -121,6 +175,8 @@ async def create_device(db: AsyncSession, data: DeviceCreate, user_id: UUID | No
         device.snmp_auth_passphrase = crypto.encrypt(data.snmp_auth_passphrase)
     if data.snmp_priv_passphrase:
         device.snmp_priv_passphrase = crypto.encrypt(data.snmp_priv_passphrase)
+    if data.snmp_credential_id:
+        await _apply_credential(db, device, data.snmp_credential_id)
     db.add(device)
     await db.commit()
     await db.refresh(device)
@@ -140,8 +196,18 @@ async def update_device(db: AsyncSession, device_id: UUID, data: DeviceUpdate) -
     if "snmp_priv_passphrase" in update_data:
         raw = update_data.pop("snmp_priv_passphrase")
         device.snmp_priv_passphrase = crypto.encrypt(raw) if raw else None
+
+    # Pop credential_id so _apply_credential is the authoritative writer
+    # for credential-derived fields (version, port, community, v3 secrets).
+    credential_id = update_data.pop("snmp_credential_id", "__missing__")
+
     for key, value in update_data.items():
         setattr(device, key, value)
+
+    if credential_id != "__missing__":
+        device.snmp_credential_id = credential_id
+        if credential_id is not None:
+            await _apply_credential(db, device, credential_id)
 
     await db.commit()
     await db.refresh(device)

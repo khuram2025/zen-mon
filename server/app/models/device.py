@@ -70,6 +70,10 @@ class Device(Base):
         ForeignKey("device_profiles.id", ondelete="SET NULL"),
         nullable=True,
     )
+    snmp_credential_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+    )
 
     # Current state
     status: Mapped[str] = mapped_column(String(20), default="unknown")

@@ -75,13 +75,17 @@ async def _ping_once(ip: str, timeout_s: float = 1.0) -> bool:
 
 
 async def _snmpget(
-    ip: str, community: str, version: str, port: int, timeout_ms: int, oids: list[str]
+    ip: str, community: str, version: str, port: int, timeout_ms: int, oids: list[str],
+    v3_username: str | None = None, v3_security_level: str | None = None,
+    v3_auth_protocol: str | None = None, v3_auth_passphrase: str | None = None,
+    v3_priv_protocol: str | None = None, v3_priv_passphrase: str | None = None,
+    v3_context: str | None = None,
 ) -> Optional[dict[str, str]]:
     """Shell out to snmpget and parse ``OID = TYPE: value`` output.
 
     Returns {oid: value} or None if the probe failed. We use -Ov to
     strip the MIB name prefix and -Oq to get a quoted-value format
-    that's easy to parse.
+    that's easy to parse.  Supports v1, v2c, and v3.
     """
     if shutil.which("snmpget") is None:
         return None
@@ -89,14 +93,35 @@ async def _snmpget(
     args = [
         "snmpget",
         "-v", version,
-        "-c", community,
         "-r", "1",
         "-t", str(timeout_s),
         "-Oqv",   # quick + value-only per OID
         "-OU",    # no MIB name substitution
-        f"{ip}:{port}",
-        *oids,
     ]
+    if version == "3":
+        # SNMPv3 auth arguments
+        _SEC_MAP = {"noAuthNoPriv": "noAuthNoPriv", "authNoPriv": "authNoPriv", "authPriv": "authPriv"}
+        sec_level = _SEC_MAP.get(v3_security_level or "authPriv", "authPriv")
+        args += ["-l", sec_level]
+        if v3_username:
+            args += ["-u", v3_username]
+        if v3_context:
+            args += ["-n", v3_context]
+        if sec_level in ("authNoPriv", "authPriv"):
+            if v3_auth_protocol:
+                args += ["-a", v3_auth_protocol]
+            if v3_auth_passphrase:
+                args += ["-A", v3_auth_passphrase]
+        if sec_level == "authPriv":
+            if v3_priv_protocol:
+                # net-snmp uses AES for AES-128, 3DES for DES3, etc.
+                _PRIV_MAP = {"AES128": "AES", "AES192": "AES-192", "AES256": "AES-256"}
+                args += ["-x", _PRIV_MAP.get(v3_priv_protocol, v3_priv_protocol)]
+            if v3_priv_passphrase:
+                args += ["-X", v3_priv_passphrase]
+    else:
+        args += ["-c", community]
+    args += [f"{ip}:{port}", *oids]
     try:
         proc = await asyncio.create_subprocess_exec(
             *args,
@@ -106,16 +131,37 @@ async def _snmpget(
         out_b, _ = await proc.communicate()
         if proc.returncode != 0:
             return None
-        out = out_b.decode("utf-8", errors="replace").strip().splitlines()
-        if len(out) != len(oids):
+        raw = out_b.decode("utf-8", errors="replace").strip()
+        # Parse -Oqv output which may contain multi-line quoted strings.
+        # Each OID value is either a single unquoted line or a quoted
+        # block that starts with " and ends with " on a later line.
+        values: list[str] = []
+        lines = raw.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if line.startswith('"') and not line.endswith('"'):
+                # Multi-line quoted value — accumulate until closing quote
+                parts = [line]
+                i += 1
+                while i < len(lines):
+                    parts.append(lines[i])
+                    if lines[i].endswith('"'):
+                        i += 1
+                        break
+                    i += 1
+                joined = "\n".join(parts)
+                values.append(joined.strip('"'))
+            else:
+                val = line.strip()
+                if val.startswith('"') and val.endswith('"'):
+                    val = val[1:-1]
+                values.append(val)
+                i += 1
+        if len(values) != len(oids):
             return None
         result: dict[str, str] = {}
-        for oid, line in zip(oids, out):
-            # snmpget -Oqv returns just the value per line, already unquoted.
-            val = line.strip()
-            # Strip surrounding quotes if net-snmp added them.
-            if val.startswith('"') and val.endswith('"'):
-                val = val[1:-1]
+        for oid, val in zip(oids, values):
             result[oid] = val
         return result
     except Exception:
@@ -224,6 +270,13 @@ async def _probe_host(
     version: str,
     port: int,
     timeout_ms: int,
+    v3_username: str | None = None,
+    v3_security_level: str | None = None,
+    v3_auth_protocol: str | None = None,
+    v3_auth_passphrase: str | None = None,
+    v3_priv_protocol: str | None = None,
+    v3_priv_passphrase: str | None = None,
+    v3_context: str | None = None,
 ) -> dict:
     """Ping + SNMP probe a single host; returns a plain dict ready for insert."""
     out = {
@@ -244,6 +297,10 @@ async def _probe_host(
     snmp = await _snmpget(
         ip, community, version, port, timeout_ms,
         [SYS_OBJECT_OID, SYS_DESCR_OID, SYS_NAME_OID],
+        v3_username=v3_username, v3_security_level=v3_security_level,
+        v3_auth_protocol=v3_auth_protocol, v3_auth_passphrase=v3_auth_passphrase,
+        v3_priv_protocol=v3_priv_protocol, v3_priv_passphrase=v3_priv_passphrase,
+        v3_context=v3_context,
     )
     if snmp is None:
         out["error_message"] = "snmpget failed or timed out"
@@ -301,6 +358,13 @@ async def _run_discovery_job(job_id: uuid.UUID) -> None:
                 return await _probe_host(
                     ip, job["community"] or "public", job["snmp_version"],
                     job["snmp_port"], job["timeout_ms"],
+                    v3_username=job.get("v3_username"),
+                    v3_security_level=job.get("v3_security_level"),
+                    v3_auth_protocol=job.get("v3_auth_protocol"),
+                    v3_auth_passphrase=job.get("v3_auth_passphrase"),
+                    v3_priv_protocol=job.get("v3_priv_protocol"),
+                    v3_priv_passphrase=job.get("v3_priv_passphrase"),
+                    v3_context=job.get("v3_context"),
                 )
 
         tasks = [asyncio.create_task(worker(ip)) for ip in hosts]
@@ -384,18 +448,60 @@ async def create_discovery_job(
             detail=f"CIDR too large: {net.num_addresses} hosts (max {MAX_CIDR_HOSTS})",
         )
 
+    # Resolve credential: if credential_id is given, look it up and use its settings
+    community = data.community
+    snmp_version = data.snmp_version
+    snmp_port = data.snmp_port
+    timeout_ms = data.timeout_ms
+    v3_username = v3_context = v3_security_level = None
+    v3_auth_protocol = v3_auth_passphrase = None
+    v3_priv_protocol = v3_priv_passphrase = None
+
+    if data.credential_id:
+        cred = (await db.execute(
+            text("SELECT * FROM snmp_credentials WHERE id = :id"),
+            {"id": data.credential_id},
+        )).mappings().first()
+        if not cred:
+            raise HTTPException(status_code=404, detail="Credential not found")
+        community = cred["community"] or "public"
+        snmp_version = cred["snmp_version"]
+        snmp_port = cred.get("port", 161) or 161
+        timeout_ms = cred.get("timeout_ms", 2000) or 2000
+        if snmp_version == "3":
+            v3_username = cred.get("v3_username")
+            v3_context = cred.get("v3_context")
+            v3_security_level = cred.get("v3_security_level")
+            v3_auth_protocol = cred.get("v3_auth_protocol")
+            v3_auth_passphrase = cred.get("v3_auth_passphrase")
+            v3_priv_protocol = cred.get("v3_priv_protocol")
+            v3_priv_passphrase = cred.get("v3_priv_passphrase")
+
     row = (await db.execute(
         text("""
-            INSERT INTO discovery_jobs (cidr, community, snmp_version, snmp_port, timeout_ms, created_by)
-            VALUES (:cidr, :community, :version, :port, :timeout, :uid)
+            INSERT INTO discovery_jobs (
+                cidr, community, snmp_version, snmp_port, timeout_ms, created_by,
+                v3_username, v3_context, v3_security_level,
+                v3_auth_protocol, v3_auth_passphrase,
+                v3_priv_protocol, v3_priv_passphrase
+            )
+            VALUES (
+                :cidr, :community, :version, :port, :timeout, :uid,
+                :v3user, :v3ctx, :v3sec,
+                :v3auth, :v3authpw,
+                :v3priv, :v3privpw
+            )
             RETURNING id, cidr, community, snmp_version, snmp_port, timeout_ms, status,
                       total_hosts, scanned_hosts, responding_hosts, error_message,
                       started_at, completed_at, created_at
         """),
         {
-            "cidr": data.cidr, "community": data.community,
-            "version": data.snmp_version, "port": data.snmp_port,
-            "timeout": data.timeout_ms, "uid": user.id,
+            "cidr": data.cidr, "community": community,
+            "version": snmp_version, "port": snmp_port,
+            "timeout": timeout_ms, "uid": user.id,
+            "v3user": v3_username, "v3ctx": v3_context, "v3sec": v3_security_level,
+            "v3auth": v3_auth_protocol, "v3authpw": v3_auth_passphrase,
+            "v3priv": v3_priv_protocol, "v3privpw": v3_priv_passphrase,
         },
     )).mappings().first()
     await db.commit()

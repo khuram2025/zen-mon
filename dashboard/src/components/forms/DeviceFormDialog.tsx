@@ -153,7 +153,8 @@ export function DeviceFormDialog({
           }
         }
       } else {
-        // Manual inline credentials
+        // Manual inline credentials — drop any previously-linked credential
+        payload.snmp_credential_id = null
         payload.snmp_version = state.snmp_version
         payload.snmp_port = state.snmp_port
         payload.snmp_timeout_ms = state.snmp_timeout_ms

@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
-  Activity, ArrowDown, ArrowUp, Box, Clock, Cpu, HardDrive,
-  Loader2, Network, Pencil, Search, Server, Shield,
-  Thermometer, Trash2, Wifi, Zap, AlertTriangle, ChevronRight,
+  Activity, ArrowDown, ArrowUp, Box, CheckCircle2, Clock, Cpu, Fan, HardDrive,
+  Loader2, MapPin, Network, Pencil, Plug, RefreshCw, Router as RouterIcon,
+  Search, Server, Shield, SquareStack, Tag as TagIcon, Thermometer, Trash2,
+  Wifi, Zap, AlertTriangle, ChevronRight,
 } from 'lucide-react'
 import {
   Area, AreaChart, CartesianGrid, Line, LineChart, ResponsiveContainer,
@@ -57,45 +58,27 @@ export function DeviceDetailPage() {
 
   return (
     <div className="space-y-4">
-      {/* ════════ HEADER ════════ */}
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <Link to="/devices" className="mb-1 inline-flex items-center gap-1 text-[11px] text-muted hover:text-primary">
-            <ChevronRight className="h-3 w-3 rotate-180" /> All Devices
-          </Link>
-          <div className="flex items-center gap-3">
-            <div className={`h-3.5 w-3.5 rounded-full ${statusColor[device.status] || 'bg-muted'}`} style={{ boxShadow: `0 0 0 3px rgb(var(--bg)), 0 0 8px ${device.status === 'up' ? 'rgb(var(--success)/0.4)' : device.status === 'down' ? 'rgb(var(--danger)/0.4)' : 'transparent'}` }} />
-            <h1 className="text-xl font-bold tracking-tight">{device.hostname}</h1>
-            <code className="text-sm text-muted">{device.ip_address}</code>
-            <Badge variant={statusVariant[device.status] || 'outline'} className="capitalize">{device.status}</Badge>
-            {snmp && <Badge variant="info">SNMPv{device.snmp_version}</Badge>}
-            {device.ping_enabled && <Badge variant="outline">ICMP</Badge>}
-          </div>
-          <div className="mt-0.5 flex items-center gap-2 text-[11px] text-muted flex-wrap">
-            <span className="capitalize">{device.device_type}</span>
-            {device.vendor && <><span>·</span><span>{device.vendor} {device.model || ''}</span></>}
-            {device.location && <><span>·</span><span>{device.location}</span></>}
-            {device.group_name && <><span>·</span><span>{device.group_name}</span></>}
-          </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => setEditOpen(true)}><Pencil className="h-3.5 w-3.5" /> Edit</Button>
-          <Button variant="outline" size="sm" className="text-danger" onClick={() => setDelOpen(true)}><Trash2 className="h-3.5 w-3.5" /></Button>
-        </div>
-      </div>
+      <DeviceHero
+        device={device}
+        onEdit={() => setEditOpen(true)}
+        onDelete={() => setDelOpen(true)}
+        onRefresh={() => qc.invalidateQueries({ queryKey: ['device', id] })}
+      />
 
-      {/* ════════ TABS ════════ */}
+      <DeviceKpiStrip device={device} deviceId={id!} />
+
       <Tabs value={tab} onValueChange={setTab}>
         <TabsList className="flex flex-wrap h-auto">
-          <TabsTrigger value="summary">Summary</TabsTrigger>
+          <TabsTrigger value="summary">Overview</TabsTrigger>
           {snmp && <TabsTrigger value="interfaces">Interfaces</TabsTrigger>}
-          {snmp && <TabsTrigger value="traps">Traps & Events</TabsTrigger>}
+          {snmp && <TabsTrigger value="inventory">Inventory</TabsTrigger>}
+          {snmp && <TabsTrigger value="traps">Events</TabsTrigger>}
           <TabsTrigger value="config">Configuration</TabsTrigger>
         </TabsList>
 
-        {/* ════ SUMMARY TAB (Dashboard) ════ */}
         <TabsContent value="summary"><SummaryDashboard device={device} deviceId={id!} /></TabsContent>
         {snmp && <TabsContent value="interfaces"><InterfacesTab deviceId={id!} /></TabsContent>}
+        {snmp && <TabsContent value="inventory"><InventoryTab deviceId={id!} /></TabsContent>}
         {snmp && <TabsContent value="traps"><TrapsTab deviceId={id!} /></TabsContent>}
         <TabsContent value="config"><ConfigTab device={device} onEdit={() => setEditOpen(true)} /></TabsContent>
       </Tabs>
@@ -104,6 +87,284 @@ export function DeviceDetailPage() {
       <ConfirmDialog open={delOpen} onOpenChange={setDelOpen} title="Delete device"
         description={<>Permanently delete <b>{device.hostname}</b> and all its history?</>}
         confirmText="Delete" destructive loading={del.isPending} onConfirm={() => del.mutate()} />
+    </div>
+  )
+}
+
+/* ════════════════════════════════════════════════════════════
+   HERO — large device banner with status glow + pill metadata
+   ════════════════════════════════════════════════════════════ */
+
+const deviceIconFor = (t: string) => {
+  if (t === 'router') return <RouterIcon className="h-6 w-6" />
+  if (t === 'switch') return <Network className="h-6 w-6" />
+  if (t === 'firewall') return <Shield className="h-6 w-6" />
+  if (t === 'server') return <Server className="h-6 w-6" />
+  if (t === 'access_point') return <Wifi className="h-6 w-6" />
+  return <Box className="h-6 w-6" />
+}
+
+function DeviceHero({
+  device, onEdit, onDelete, onRefresh,
+}: {
+  device: any
+  onEdit: () => void
+  onDelete: () => void
+  onRefresh: () => void
+}) {
+  const status = device.status as string
+  const isUp = status === 'up'
+  const ring =
+    status === 'up'
+      ? 'ring-success/40 shadow-[0_0_24px_rgb(var(--success)/0.35)]'
+      : status === 'down'
+        ? 'ring-danger/40 shadow-[0_0_24px_rgb(var(--danger)/0.35)]'
+        : status === 'degraded'
+          ? 'ring-warning/40 shadow-[0_0_24px_rgb(var(--warning)/0.35)]'
+          : 'ring-border'
+
+  return (
+    <div className="relative overflow-hidden rounded-xl border border-border bg-gradient-to-br from-surface via-surface to-surface2/30 p-4 md:p-5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex min-w-0 items-start gap-4">
+          <div
+            className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-surface2/60 text-primary ring-2 ${ring}`}
+          >
+            {deviceIconFor(device.device_type)}
+          </div>
+          <div className="min-w-0">
+            <Link
+              to="/devices"
+              className="mb-1 inline-flex items-center gap-1 text-[11px] text-muted hover:text-primary"
+            >
+              <ChevronRight className="h-3 w-3 rotate-180" /> All Devices
+            </Link>
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="truncate text-2xl font-bold tracking-tight">{device.hostname}</h1>
+              <code className="rounded bg-surface2/60 px-1.5 py-0.5 font-mono text-xs text-muted">
+                {device.ip_address}
+              </code>
+              <span
+                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                  isUp
+                    ? 'bg-success/15 text-success'
+                    : status === 'down'
+                      ? 'bg-danger/15 text-danger'
+                      : status === 'degraded'
+                        ? 'bg-warning/15 text-warning'
+                        : 'bg-surface2 text-muted'
+                }`}
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    isUp ? 'animate-pulse bg-success' : status === 'down' ? 'bg-danger' : 'bg-muted'
+                  }`}
+                />
+                {status.toUpperCase()}
+              </span>
+              {device.snmp_enabled && (
+                <Badge variant="info" className="gap-1">
+                  <Shield className="h-3 w-3" /> SNMPv{device.snmp_version}
+                </Badge>
+              )}
+              {device.ping_enabled && (
+                <Badge variant="outline" className="gap-1">
+                  <Wifi className="h-3 w-3" /> ICMP
+                </Badge>
+              )}
+            </div>
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted">
+              <span className="inline-flex items-center gap-1 capitalize">
+                {deviceIconFor(device.device_type)}
+                <span>{device.device_type.replace('_', ' ')}</span>
+              </span>
+              {(device.vendor || device.model) && (
+                <span className="inline-flex items-center gap-1">
+                  <SquareStack className="h-3.5 w-3.5" />
+                  {[device.vendor, device.model].filter(Boolean).join(' ') || '—'}
+                </span>
+              )}
+              {device.group_name && (
+                <span className="inline-flex items-center gap-1">
+                  <TagIcon className="h-3.5 w-3.5" />
+                  {device.group_name}
+                </span>
+              )}
+              {device.location && (
+                <span className="inline-flex items-center gap-1">
+                  <MapPin className="h-3.5 w-3.5" />
+                  {device.location}
+                </span>
+              )}
+              <span className="inline-flex items-center gap-1">
+                <Clock className="h-3.5 w-3.5" />
+                seen {relativeTime(device.last_seen)}
+              </span>
+            </div>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button variant="outline" size="sm" onClick={onRefresh} title="Refresh">
+            <RefreshCw className="h-3.5 w-3.5" />
+          </Button>
+          <Button variant="outline" size="sm" onClick={onEdit}>
+            <Pencil className="h-3.5 w-3.5" /> Edit
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="text-danger hover:bg-danger/10"
+            onClick={onDelete}
+            title="Delete"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ════════════════════════════════════════════════════════════
+   KPI STRIP — six live tiles across the top
+   ════════════════════════════════════════════════════════════ */
+
+function DeviceKpiStrip({ device, deviceId }: { device: any; deviceId: string }) {
+  // 1h ping metrics drive RTT/loss/jitter tiles.
+  const { data: ping } = useQuery<{ points: any[] }>({
+    queryKey: ['device', deviceId, 'kpi-ping'],
+    queryFn: async () => {
+      const now = new Date()
+      const from = new Date(now.getTime() - 3600_000).toISOString()
+      return (await api.get(`/devices/${deviceId}/metrics?from=${from}&to=${now.toISOString()}`)).data
+    },
+    refetchInterval: 30_000,
+    enabled: device.ping_enabled,
+  })
+  const { data: ifs } = useQuery<any[]>({
+    queryKey: ['device', deviceId, 'kpi-ifs'],
+    queryFn: async () => (await api.get(`/devices/${deviceId}/interfaces`)).data,
+    refetchInterval: 30_000,
+    enabled: device.snmp_enabled,
+  })
+  const { data: entities } = useQuery<any[]>({
+    queryKey: ['device', deviceId, 'kpi-entities'],
+    queryFn: async () => (await api.get(`/devices/${deviceId}/entities`)).data,
+    enabled: device.snmp_enabled,
+  })
+
+  const pts = ping?.points || []
+  const lastPt = pts[pts.length - 1]
+  const rtts = pts.map((p) => p.rtt_ms).filter((v) => v != null)
+  const avgRtt = rtts.length ? rtts.reduce((a, b) => a + b, 0) / rtts.length : null
+  const avgLoss = pts.length ? (pts.reduce((a, p) => a + (p.packet_loss || 0), 0) / pts.length) : null
+  const avgJitter = pts.length ? (pts.reduce((a, p) => a + (p.jitter_ms || 0), 0) / pts.length) : null
+
+  const ifTotal = ifs?.length || 0
+  const ifUp = (ifs || []).filter((i) => i.oper_status === 'up').length
+
+  // Hardware health — count PSUs + Fans from the entity inventory.
+  const modules = (entities || []).filter(
+    (e) => e.class === 'module' && /fan|power|psu/i.test(e.name || ''),
+  )
+  const hwOk = modules.length
+  const chassisClass = (entities || []).find((e) => e.class === 'chassis')
+
+  const rttTone =
+    avgRtt == null ? 'muted' : avgRtt < 20 ? 'success' : avgRtt < 100 ? 'warning' : 'danger'
+
+  const tiles: KpiTile[] = [
+    {
+      icon: <Activity className="h-4 w-4" />,
+      label: 'Status',
+      value: device.status.toUpperCase(),
+      sub: `seen ${relativeTime(device.last_seen)}`,
+      tone:
+        device.status === 'up'
+          ? 'success'
+          : device.status === 'down'
+            ? 'danger'
+            : device.status === 'degraded'
+              ? 'warning'
+              : 'muted',
+    },
+    {
+      icon: <Zap className="h-4 w-4" />,
+      label: 'RTT (1h avg)',
+      value: avgRtt != null ? `${avgRtt.toFixed(2)} ms` : '—',
+      sub: lastPt?.rtt_ms != null ? `last ${lastPt.rtt_ms.toFixed(2)} ms` : 'no data',
+      tone: rttTone,
+    },
+    {
+      icon: <AlertTriangle className="h-4 w-4" />,
+      label: 'Packet loss (1h)',
+      value: avgLoss != null ? `${(avgLoss * 100).toFixed(1)}%` : '—',
+      sub: `${pts.length} samples`,
+      tone: avgLoss == null ? 'muted' : avgLoss > 0.01 ? 'danger' : 'success',
+    },
+    {
+      icon: <Activity className="h-4 w-4" />,
+      label: 'Jitter (1h)',
+      value: avgJitter != null ? `${avgJitter.toFixed(2)} ms` : '—',
+      sub: 'avg',
+      tone: avgJitter == null ? 'muted' : avgJitter < 1 ? 'success' : avgJitter < 5 ? 'warning' : 'danger',
+    },
+    {
+      icon: <Plug className="h-4 w-4" />,
+      label: 'Interfaces',
+      value: ifTotal > 0 ? `${ifUp}/${ifTotal}` : '—',
+      sub: ifTotal > 0 ? `${ifTotal - ifUp} down` : device.snmp_enabled ? 'discovering' : 'SNMP off',
+      tone: ifTotal === 0 ? 'muted' : ifUp === ifTotal ? 'success' : 'warning',
+    },
+    {
+      icon: <Fan className="h-4 w-4" />,
+      label: 'Hardware',
+      value: chassisClass ? (hwOk > 0 ? 'Healthy' : 'OK') : device.snmp_enabled ? '—' : 'SNMP off',
+      sub: chassisClass
+        ? `${chassisClass.model_name || chassisClass.name}${hwOk ? ` · ${hwOk} modules` : ''}`
+        : '',
+      tone: chassisClass ? 'success' : 'muted',
+    },
+  ]
+
+  return (
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+      {tiles.map((t, i) => <KpiCard key={i} tile={t} />)}
+    </div>
+  )
+}
+
+type KpiTile = {
+  icon: React.ReactNode
+  label: string
+  value: string
+  sub?: string
+  tone?: 'success' | 'warning' | 'danger' | 'muted'
+}
+
+function KpiCard({ tile }: { tile: KpiTile }) {
+  const toneClass =
+    tile.tone === 'success'
+      ? 'text-success'
+      : tile.tone === 'warning'
+        ? 'text-warning'
+        : tile.tone === 'danger'
+          ? 'text-danger'
+          : 'text-text'
+  return (
+    <div className="rounded-lg border border-border bg-surface p-3 transition-colors hover:border-border-strong">
+      <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
+        <span className={toneClass}>{tile.icon}</span>
+        {tile.label}
+      </div>
+      <div className={`mt-1 text-lg font-semibold tabular-nums ${toneClass}`}>
+        {tile.value}
+      </div>
+      {tile.sub && (
+        <div className="mt-0.5 truncate text-[11px] text-muted" title={tile.sub}>
+          {tile.sub}
+        </div>
+      )}
     </div>
   )
 }
@@ -1161,5 +1422,288 @@ function CfgCard({ title, icon, rows }: { title: string; icon: React.ReactNode; 
         ))}
       </CardContent>
     </Card>
+  )
+}
+
+/* ════════════════════════════════════════════════════════════
+   INVENTORY TAB — hardware entities (chassis → modules → ports)
+   ════════════════════════════════════════════════════════════ */
+
+type Entity = {
+  id: number
+  ent_index: number
+  parent_index: number
+  class: string
+  name: string
+  serial_number: string | null
+  model_name: string | null
+  hw_revision: string | null
+  fw_revision: string | null
+  first_seen: string
+  last_seen: string
+}
+
+const entityIcon = (cls: string, name?: string | null) => {
+  const n = (name || '').toLowerCase()
+  const c = (cls || '').toLowerCase()
+  if (c === 'chassis' || c === 'stack') return <Server className="h-4 w-4" />
+  if (c === 'module' && /fan/.test(n)) return <Fan className="h-4 w-4" />
+  if (c === 'module' && /(power|psu)/.test(n)) return <Zap className="h-4 w-4" />
+  if (c === 'module') return <HardDrive className="h-4 w-4" />
+  if (c === 'container') return <Box className="h-4 w-4" />
+  if (c === 'port') return <Plug className="h-4 w-4" />
+  if (c === 'sensor') return <Thermometer className="h-4 w-4" />
+  return <SquareStack className="h-4 w-4" />
+}
+
+function InventoryTab({ deviceId }: { deviceId: string }) {
+  const [search, setSearch] = useState('')
+  const [classFilter, setClassFilter] = useState<string>('')
+
+  const { data: entities, isLoading } = useQuery<Entity[]>({
+    queryKey: ['device', deviceId, 'inventory-entities'],
+    queryFn: async () => (await api.get(`/devices/${deviceId}/entities`)).data,
+    refetchInterval: 60_000,
+  })
+  const { data: sensors } = useQuery<any[]>({
+    queryKey: ['device', deviceId, 'inventory-sensors'],
+    queryFn: async () => (await api.get(`/devices/${deviceId}/sensors`)).data,
+    refetchInterval: 60_000,
+  })
+
+  const list = entities || []
+
+  const counts = useMemo(() => {
+    const byClass: Record<string, number> = {}
+    for (const e of list) byClass[e.class] = (byClass[e.class] || 0) + 1
+    const withSerial = list.filter((e) => e.serial_number && e.serial_number.trim()).length
+    return { byClass, total: list.length, withSerial }
+  }, [list])
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    return list.filter((e) => {
+      if (classFilter && e.class !== classFilter) return false
+      if (!q) return true
+      return (
+        e.name?.toLowerCase().includes(q) ||
+        e.model_name?.toLowerCase().includes(q) ||
+        e.serial_number?.toLowerCase().includes(q) ||
+        e.class?.toLowerCase().includes(q)
+      )
+    })
+  }, [list, search, classFilter])
+
+  // Group by class for a clean "inventory sheet" presentation.
+  const grouped = useMemo(() => {
+    const order = ['chassis', 'stack', 'module', 'container', 'port', 'sensor']
+    const buckets: Record<string, Entity[]> = {}
+    for (const e of filtered) {
+      const key = e.class || 'other'
+      buckets[key] = buckets[key] || []
+      buckets[key].push(e)
+    }
+    for (const k of Object.keys(buckets)) {
+      buckets[k].sort((a, b) => a.ent_index - b.ent_index)
+    }
+    const ordered: Array<[string, Entity[]]> = []
+    for (const k of order) if (buckets[k]) ordered.push([k, buckets[k]])
+    for (const [k, v] of Object.entries(buckets)) if (!order.includes(k)) ordered.push([k, v])
+    return ordered
+  }, [filtered])
+
+  const chassis = list.find((e) => e.class === 'chassis')
+
+  return (
+    <div className="space-y-4">
+      {/* Summary strip */}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
+        <InvStat icon={<Server className="h-4 w-4" />} label="Model" value={chassis?.model_name || '—'} />
+        <InvStat icon={<SquareStack className="h-4 w-4" />} label="Serial" value={chassis?.serial_number || '—'} mono />
+        <InvStat icon={<HardDrive className="h-4 w-4" />} label="HW rev" value={chassis?.hw_revision || '—'} />
+        <InvStat icon={<Box className="h-4 w-4" />} label="Components" value={String(counts.total)} />
+        <InvStat
+          icon={<Fan className="h-4 w-4" />}
+          label="Fans"
+          value={String((counts.byClass.module || 0) === 0 ? 0 : list.filter((e) => /fan/i.test(e.name)).length)}
+        />
+        <InvStat
+          icon={<Zap className="h-4 w-4" />}
+          label="PSUs"
+          value={String(list.filter((e) => /power|psu/i.test(e.name)).length)}
+        />
+      </div>
+
+      {/* Toolbar */}
+      <Card>
+        <CardContent className="space-y-3 pt-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative min-w-[220px] max-w-md flex-1">
+              <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+              <Input
+                placeholder="Filter by name, model, serial…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="pl-8"
+              />
+            </div>
+            <div className="flex gap-0.5 rounded-md bg-surface2 p-0.5">
+              {['', ...Object.keys(counts.byClass)].slice(0, 8).map((c) => (
+                <button
+                  key={c || 'all'}
+                  onClick={() => setClassFilter(c)}
+                  className={`rounded px-2.5 py-1 text-xs font-medium capitalize transition-colors ${
+                    classFilter === c
+                      ? 'bg-surface text-text shadow-sm'
+                      : 'text-muted hover:text-text'
+                  }`}
+                >
+                  {c === '' ? 'All' : c}{' '}
+                  {c && (
+                    <span className="ml-0.5 text-[10px] text-muted">({counts.byClass[c]})</span>
+                  )}
+                </button>
+              ))}
+            </div>
+            <span className="ml-auto text-xs text-muted">
+              {filtered.length} of {list.length} components · {counts.withSerial} with serial
+            </span>
+          </div>
+
+          {isLoading && (
+            <div className="py-10 text-center text-sm text-muted">
+              <Loader2 className="mx-auto h-5 w-5 animate-spin" />
+            </div>
+          )}
+
+          {!isLoading && list.length === 0 && (
+            <div className="flex flex-col items-center gap-2 py-12 text-center text-muted">
+              <Box className="h-8 w-8 opacity-50" />
+              <div className="text-sm font-medium text-text">No inventory discovered</div>
+              <div className="text-xs">Entities populate on the next SNMP poll when ENTITY-MIB is supported.</div>
+            </div>
+          )}
+
+          {grouped.length > 0 && (
+            <div className="space-y-5">
+              {grouped.map(([cls, items]) => (
+                <section key={cls}>
+                  <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+                    {entityIcon(cls)}
+                    <span>{cls}</span>
+                    <span className="text-muted/70">· {items.length}</span>
+                  </div>
+                  <div className="overflow-hidden rounded-md border border-border">
+                    <Table>
+                      <THead className="bg-surface2/50">
+                        <Tr>
+                          <Th className="w-10 text-right">#</Th>
+                          <Th>Name</Th>
+                          <Th>Model</Th>
+                          <Th>Serial</Th>
+                          <Th>HW rev</Th>
+                          <Th>FW rev</Th>
+                          <Th>First seen</Th>
+                          <Th>Last seen</Th>
+                        </Tr>
+                      </THead>
+                      <TBody>
+                        {items.map((e) => (
+                          <Tr key={e.id}>
+                            <Td className="text-right font-mono text-[11px] text-muted">
+                              {e.ent_index}
+                            </Td>
+                            <Td>
+                              <span className="inline-flex items-center gap-2">
+                                <span className="text-muted">{entityIcon(e.class, e.name)}</span>
+                                <span className="text-sm font-medium">{e.name}</span>
+                              </span>
+                            </Td>
+                            <Td className="text-sm">{e.model_name || <span className="text-muted">—</span>}</Td>
+                            <Td className="font-mono text-[11px]">
+                              {e.serial_number || <span className="text-muted">—</span>}
+                            </Td>
+                            <Td className="text-xs">{e.hw_revision || <span className="text-muted">—</span>}</Td>
+                            <Td className="text-xs">{e.fw_revision || <span className="text-muted">—</span>}</Td>
+                            <Td className="text-xs text-muted">{relativeTime(e.first_seen)}</Td>
+                            <Td className="text-xs text-muted">{relativeTime(e.last_seen)}</Td>
+                          </Tr>
+                        ))}
+                      </TBody>
+                    </Table>
+                  </div>
+                </section>
+              ))}
+            </div>
+          )}
+
+          {(sensors || []).length > 0 && (
+            <section>
+              <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+                <Thermometer className="h-3.5 w-3.5" />
+                Sensors
+                <span className="text-muted/70">· {sensors!.length}</span>
+              </div>
+              <div className="overflow-hidden rounded-md border border-border">
+                <Table>
+                  <THead className="bg-surface2/50">
+                    <Tr>
+                      <Th>Name</Th>
+                      <Th>Type</Th>
+                      <Th className="text-right">Value</Th>
+                      <Th>Status</Th>
+                    </Tr>
+                  </THead>
+                  <TBody>
+                    {sensors!.map((s: any, idx: number) => (
+                      <Tr key={idx}>
+                        <Td className="text-sm">{s.name || s.description || `Sensor ${idx}`}</Td>
+                        <Td className="text-xs text-muted">{s.type || '—'}</Td>
+                        <Td className="text-right font-mono text-xs">
+                          {s.value != null ? `${s.value}${s.unit ? ` ${s.unit}` : ''}` : '—'}
+                        </Td>
+                        <Td>
+                          <span className="inline-flex items-center gap-1 text-xs">
+                            <CheckCircle2 className="h-3 w-3 text-success" />
+                            {s.status || 'ok'}
+                          </span>
+                        </Td>
+                      </Tr>
+                    ))}
+                  </TBody>
+                </Table>
+              </div>
+            </section>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+function InvStat({
+  icon,
+  label,
+  value,
+  mono,
+}: {
+  icon: React.ReactNode
+  label: string
+  value: string
+  mono?: boolean
+}) {
+  return (
+    <div className="rounded-lg border border-border bg-surface p-3">
+      <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
+        {icon}
+        {label}
+      </div>
+      <div
+        className={`mt-1 truncate text-sm font-semibold ${mono ? 'font-mono' : ''}`}
+        title={value}
+      >
+        {value}
+      </div>
+    </div>
   )
 }

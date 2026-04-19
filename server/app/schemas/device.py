@@ -58,6 +58,7 @@ class DeviceCreate(BaseModel):
     snmp_max_repetitions: int = Field(default=25, ge=1, le=200)
     snmp_poll_interval: int = Field(default=60, ge=30, le=3600)
     profile_id: Optional[UUID] = None
+    snmp_credential_id: Optional[UUID] = None
 
 
 class DeviceUpdate(BaseModel):
@@ -87,6 +88,7 @@ class DeviceUpdate(BaseModel):
     snmp_max_repetitions: Optional[int] = Field(default=None, ge=1, le=200)
     snmp_poll_interval: Optional[int] = Field(default=None, ge=30, le=3600)
     profile_id: Optional[UUID] = None
+    snmp_credential_id: Optional[UUID] = None
 
 
 class DeviceResponse(BaseModel):
@@ -125,6 +127,7 @@ class DeviceResponse(BaseModel):
     model: Optional[str] = None
     os_version: Optional[str] = None
     profile_id: Optional[UUID] = None
+    snmp_credential_id: Optional[UUID] = None
     snmp_auth_configured: bool = False
     snmp_priv_configured: bool = False
 
