@@ -14,10 +14,14 @@ async def get_alerts(
     status: str | None = None,
     severity: str | None = None,
     device_id: UUID | None = None,
+    service_check_id: UUID | None = None,
     skip: int = 0,
     limit: int = 50,
 ) -> tuple[list[Alert], int]:
-    query = select(Alert).options(selectinload(Alert.device))
+    query = select(Alert).options(
+        selectinload(Alert.device),
+        selectinload(Alert.service_check),
+    )
 
     if status:
         query = query.where(Alert.status == status)
@@ -25,6 +29,8 @@ async def get_alerts(
         query = query.where(Alert.severity == severity)
     if device_id:
         query = query.where(Alert.device_id == device_id)
+    if service_check_id:
+        query = query.where(Alert.service_check_id == service_check_id)
 
     count_query = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_query)).scalar()

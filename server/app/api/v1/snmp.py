@@ -109,13 +109,22 @@ async def _snmpget(
             args += ["-n", v3_context]
         if sec_level in ("authNoPriv", "authPriv"):
             if v3_auth_protocol:
-                args += ["-a", v3_auth_protocol]
+                # net-snmp accepts MD5|SHA|SHA-224|SHA-256|SHA-384|SHA-512.
+                # Device config stores them without the dash (e.g. SHA256).
+                _AUTH_MAP = {
+                    "SHA224": "SHA-224", "SHA256": "SHA-256",
+                    "SHA384": "SHA-384", "SHA512": "SHA-512",
+                }
+                args += ["-a", _AUTH_MAP.get(v3_auth_protocol, v3_auth_protocol)]
             if v3_auth_passphrase:
                 args += ["-A", v3_auth_passphrase]
         if sec_level == "authPriv":
             if v3_priv_protocol:
-                # net-snmp uses AES for AES-128, 3DES for DES3, etc.
-                _PRIV_MAP = {"AES128": "AES", "AES192": "AES-192", "AES256": "AES-256"}
+                # net-snmp uses AES for AES-128, AES-192, AES-256; DES for 1DES.
+                _PRIV_MAP = {
+                    "AES128": "AES", "AES192": "AES-192", "AES256": "AES-256",
+                    "AES": "AES",
+                }
                 args += ["-x", _PRIV_MAP.get(v3_priv_protocol, v3_priv_protocol)]
             if v3_priv_passphrase:
                 args += ["-X", v3_priv_passphrase]

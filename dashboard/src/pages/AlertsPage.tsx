@@ -105,8 +105,21 @@ export function AlertsPage() {
                       </Badge>
                     </Td>
                     <Td>
-                      <div className="font-medium">{a.device_hostname || '—'}</div>
-                      {a.device_ip && <div className="font-mono text-xs text-muted">{a.device_ip}</div>}
+                      {a.device_hostname ? (
+                        <>
+                          <div className="font-medium">{a.device_hostname}</div>
+                          {a.device_ip && (
+                            <div className="font-mono text-xs text-muted">{a.device_ip}</div>
+                          )}
+                        </>
+                      ) : a.service_check_name ? (
+                        <>
+                          <div className="font-medium">{a.service_check_name}</div>
+                          <div className="text-xs text-muted">service check</div>
+                        </>
+                      ) : (
+                        <span className="text-muted">—</span>
+                      )}
                     </Td>
                     <Td className="max-w-[400px] truncate text-sm">{a.message || '—'}</Td>
                     <Td className="text-xs text-muted">{relativeTime(a.triggered_at)}</Td>

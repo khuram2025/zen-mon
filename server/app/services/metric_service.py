@@ -132,8 +132,6 @@ def get_device_metrics(
             is_up=is_up,
         ))
 
-    client.close()
-
     return MetricResponse(
         device_id=device_id,
         granularity=granularity,
@@ -185,5 +183,4 @@ def get_status_history(
             duration_sec=row[5],
         ))
 
-    client.close()
     return events

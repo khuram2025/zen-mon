@@ -7,12 +7,14 @@ from pydantic import BaseModel, Field
 class AlertRuleCreate(BaseModel):
     name: str = Field(..., max_length=255)
     description: Optional[str] = None
-    metric: str = Field(..., pattern="^(ping_status|rtt|packet_loss|jitter)$")
+    metric: str = Field(..., pattern="^(ping_status|rtt|packet_loss|jitter|service_status)$")
     operator: str = Field(..., pattern="^(eq|neq|gt|lt|gte|lte)$")
     threshold: float
     duration: int = 0
     device_id: Optional[UUID] = None
     group_id: Optional[UUID] = None
+    service_check_id: Optional[UUID] = None
+    service_check_group_id: Optional[UUID] = None
     severity: str = Field(default="warning", pattern="^(info|warning|critical)$")
     cooldown: int = Field(default=300, ge=60)
 
@@ -28,6 +30,8 @@ class AlertRuleResponse(BaseModel):
     duration: int
     device_id: Optional[UUID]
     group_id: Optional[UUID]
+    service_check_id: Optional[UUID] = None
+    service_check_group_id: Optional[UUID] = None
     severity: str
     cooldown: int
     created_at: datetime
@@ -38,9 +42,11 @@ class AlertRuleResponse(BaseModel):
 class AlertResponse(BaseModel):
     id: UUID
     rule_id: Optional[UUID]
-    device_id: UUID
+    device_id: Optional[UUID] = None
     device_hostname: Optional[str] = None
     device_ip: Optional[str] = None
+    service_check_id: Optional[UUID] = None
+    service_check_name: Optional[str] = None
     status: str
     severity: str
     message: str

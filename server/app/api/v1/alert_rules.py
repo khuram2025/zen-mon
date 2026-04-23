@@ -24,7 +24,7 @@ class AlertRuleCreate(BaseModel):
     description: Optional[str] = None
     enabled: bool = True
 
-    metric: str = Field(..., pattern="^(ping_status|rtt|packet_loss|jitter)$")
+    metric: str = Field(..., pattern="^(ping_status|rtt|packet_loss|jitter|service_status)$")
     operator: str = Field(..., pattern="^(>|<|>=|<=|==|!=)$")
     threshold: float
 
@@ -33,6 +33,8 @@ class AlertRuleCreate(BaseModel):
 
     device_id: Optional[UUID] = None
     group_id: Optional[UUID] = None
+    service_check_id: Optional[UUID] = None
+    service_check_group_id: Optional[UUID] = None
     device_type: Optional[str] = None
     location: Optional[str] = None
 
@@ -60,7 +62,7 @@ class AlertRuleUpdate(BaseModel):
     description: Optional[str] = None
     enabled: Optional[bool] = None
 
-    metric: Optional[str] = Field(None, pattern="^(ping_status|rtt|packet_loss|jitter)$")
+    metric: Optional[str] = Field(None, pattern="^(ping_status|rtt|packet_loss|jitter|service_status)$")
     operator: Optional[str] = Field(None, pattern="^(>|<|>=|<=|==|!=|eq|neq|gt|lt|gte|lte)$")
     threshold: Optional[float] = None
 
@@ -69,6 +71,8 @@ class AlertRuleUpdate(BaseModel):
 
     device_id: Optional[UUID] = None
     group_id: Optional[UUID] = None
+    service_check_id: Optional[UUID] = None
+    service_check_group_id: Optional[UUID] = None
     device_type: Optional[str] = None
     location: Optional[str] = None
 
@@ -98,7 +102,8 @@ class AlertRuleUpdate(BaseModel):
 # Columns to SELECT in list / get queries
 _RULE_COLUMNS = (
     "id, name, description, enabled, metric, operator, threshold, duration, "
-    "device_id, group_id, severity, notify_channels, cooldown, "
+    "device_id, group_id, service_check_id, service_check_group_id, "
+    "severity, notify_channels, cooldown, "
     "device_type, location, trigger_on, recovery_alert, "
     "min_duration, max_repeat, schedule_start, schedule_end, schedule_days, "
     "email_subject, email_body, sms_template, "
@@ -126,6 +131,8 @@ def _row_to_dict(row) -> dict:
         "duration": row.duration,
         "device_id": str(row.device_id) if row.device_id else None,
         "group_id": str(row.group_id) if row.group_id else None,
+        "service_check_id": str(row.service_check_id) if row.service_check_id else None,
+        "service_check_group_id": str(row.service_check_group_id) if row.service_check_group_id else None,
         "severity": row.severity,
         "notify_channels": row.notify_channels if row.notify_channels else [],
         "cooldown": row.cooldown,
@@ -183,6 +190,8 @@ async def create_alert_rule(
         "duration": data.min_duration,  # legacy column maps to min_duration
         "device_id": data.device_id,
         "group_id": data.group_id,
+        "service_check_id": data.service_check_id,
+        "service_check_group_id": data.service_check_group_id,
         "severity": data.severity,
         "notify_channels": json.dumps(data.notify_channels),
         "cooldown": data.cooldown,
@@ -210,7 +219,8 @@ async def create_alert_rule(
         text(
             "INSERT INTO alert_rules "
             "(name, description, enabled, metric, operator, threshold, duration, "
-            "device_id, group_id, severity, notify_channels, cooldown, "
+            "device_id, group_id, service_check_id, service_check_group_id, "
+            "severity, notify_channels, cooldown, "
             "device_type, location, trigger_on, recovery_alert, "
             "min_duration, max_repeat, schedule_start, schedule_end, schedule_days, "
             "email_subject, email_body, sms_template, "
@@ -218,7 +228,8 @@ async def create_alert_rule(
             "created_at, updated_at, created_by) "
             "VALUES "
             "(:name, :description, :enabled, :metric, :operator, :threshold, :duration, "
-            ":device_id, :group_id, :severity, CAST(:notify_channels AS jsonb), :cooldown, "
+            ":device_id, :group_id, :service_check_id, :service_check_group_id, "
+            ":severity, CAST(:notify_channels AS jsonb), :cooldown, "
             ":device_type, :location, :trigger_on, :recovery_alert, "
             ":min_duration, :max_repeat, CAST(:schedule_start AS time), CAST(:schedule_end AS time), "
             "CAST(:schedule_days AS jsonb), "

@@ -22,6 +22,8 @@ class AlertRule(Base):
 
     device_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("devices.id"), nullable=True)
     group_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("device_groups.id"), nullable=True)
+    service_check_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("service_checks.id", ondelete="CASCADE"), nullable=True)
+    service_check_group_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("service_check_groups.id", ondelete="SET NULL"), nullable=True)
 
     severity: Mapped[str] = mapped_column(String(20), default="warning")
     notify_channels: Mapped[dict] = mapped_column(JSONB, default=list)
@@ -37,7 +39,8 @@ class Alert(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     rule_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("alert_rules.id"), nullable=True)
-    device_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("devices.id"), nullable=False)
+    device_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("devices.id"), nullable=True)
+    service_check_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("service_checks.id", ondelete="CASCADE"), nullable=True)
 
     status: Mapped[str] = mapped_column(String(20), default="active")
     severity: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -52,3 +55,4 @@ class Alert(Base):
 
     # Relationships
     device: Mapped["Device"] = relationship("Device", lazy="selectin", foreign_keys=[device_id])
+    service_check = relationship("ServiceCheck", lazy="selectin", foreign_keys=[service_check_id])

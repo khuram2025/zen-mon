@@ -102,7 +102,12 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 		       COALESCE(http_body, ''), COALESCE(http_expected_status, 200),
 		       COALESCE(http_content_match, ''), COALESCE(http_follow_redirects, true),
 		       COALESCE(tls_warn_days, 30), COALESCE(tls_critical_days, 7),
-		       check_interval, timeout, status
+		       check_interval, timeout, status,
+		       COALESCE(level, 1),
+		       COALESCE(config::text, '{}'),
+		       COALESCE(tags, ARRAY[]::text[]),
+		       group_id, parent_check_id,
+		       COALESCE(retry_count, 1), COALESCE(retry_delay_s, 30)
 		FROM service_checks
 		WHERE enabled = TRUE
 		ORDER BY name
@@ -115,9 +120,12 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 	var checks []*checker.ServiceCheck
 	for rows.Next() {
 		var sc checker.ServiceCheck
-		var deviceID *uuid.UUID
+		var deviceID, groupID, parentID *uuid.UUID
 		var intervalSec, timeoutSec int
+		var retryCount, retryDelaySec int
 		var headersJSON string
+		var configJSON string
+		var tags []string
 
 		err := rows.Scan(
 			&sc.ID, &deviceID, &sc.Name, &sc.CheckType, &sc.Enabled,
@@ -127,19 +135,32 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 			&sc.HTTPContentMatch, &sc.HTTPFollowRedirects,
 			&sc.TLSWarnDays, &sc.TLSCriticalDays,
 			&intervalSec, &timeoutSec, &sc.Status,
+			&sc.Level, &configJSON, &tags,
+			&groupID, &parentID, &retryCount, &retryDelaySec,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan service check: %w", err)
 		}
 
 		sc.DeviceID = deviceID
+		sc.GroupID = groupID
+		sc.ParentCheckID = parentID
 		sc.CheckInterval = time.Duration(intervalSec) * time.Second
 		sc.Timeout = time.Duration(timeoutSec) * time.Second
+		sc.RetryCount = retryCount
+		sc.RetryDelay = time.Duration(retryDelaySec) * time.Second
+		sc.Tags = tags
 
 		// Parse headers JSON
 		sc.HTTPHeaders = make(map[string]string)
 		if headersJSON != "" && headersJSON != "{}" {
 			json.Unmarshal([]byte(headersJSON), &sc.HTTPHeaders)
+		}
+
+		// Parse config JSON (type-specific fields)
+		sc.Config = make(map[string]any)
+		if configJSON != "" && configJSON != "{}" {
+			json.Unmarshal([]byte(configJSON), &sc.Config)
 		}
 
 		checks = append(checks, &sc)
@@ -414,6 +435,38 @@ func (s *PostgresStore) UpsertSensors(ctx context.Context, deviceID uuid.UUID, s
 		}
 	}
 	return nil
+}
+
+// LoadActiveMaintenanceCheckIDs returns the set of service-check IDs currently
+// inside an active maintenance window (scope: check, group, tag, or all).
+// Used by the poller to suppress status-change writes (alerts) while still
+// collecting metrics during planned downtime.
+func (s *PostgresStore) LoadActiveMaintenanceCheckIDs(ctx context.Context) (map[uuid.UUID]struct{}, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT sc.id
+		FROM service_checks sc
+		JOIN service_check_maintenance m ON (
+		       (m.scope_type = 'check' AND m.scope_check_id = sc.id)
+		    OR (m.scope_type = 'group' AND m.scope_group_id = sc.group_id)
+		    OR (m.scope_type = 'tag'   AND m.scope_tag       = ANY (sc.tags))
+		    OR (m.scope_type = 'all')
+		)
+		WHERE m.starts_at <= now() AND m.ends_at >= now()
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("load maintenance ids: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[uuid.UUID]struct{}{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = struct{}{}
+	}
+	return out, rows.Err()
 }
 
 // UpdateServiceCheckStatus updates the service check's current state in PostgreSQL.

@@ -1,440 +1,336 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
-  Activity, ArrowDown, ArrowUp, Box, CheckCircle2, Clock, Cpu, Fan, HardDrive,
-  Loader2, MapPin, Network, Pencil, Plug, RefreshCw, Router as RouterIcon,
-  Search, Server, Shield, SquareStack, Tag as TagIcon, Thermometer, Trash2,
-  Wifi, Zap, AlertTriangle, ChevronRight,
+  Activity,
+  AlertTriangle,
+  ArrowDown,
+  ArrowRight,
+  ArrowUp,
+  BellRing,
+  Box,
+  Bell,
+  CheckCircle2,
+  Clock,
+  Cpu,
+  Database,
+  Fan,
+  FileText,
+  GitBranch,
+  HardDrive,
+  Info,
+  Key,
+  Layers,
+  Loader2,
+  LockKeyhole,
+  MapPin,
+  MemoryStick,
+  MoreVertical,
+  Network,
+  Pencil,
+  Play,
+  Plug,
+  Power,
+  Radar,
+  RefreshCw,
+  Router as RouterIcon,
+  Save,
+  Search,
+  Server,
+  Settings as SettingsIcon,
+  Shield,
+  SquareStack,
+  Tag as TagIcon,
+  Terminal,
+  Thermometer,
+  Trash2,
+  TrendingDown,
+  TrendingUp,
+  Wifi,
+  Wrench,
+  Zap,
+  ZapOff,
 } from 'lucide-react'
 import {
-  Area, AreaChart, CartesianGrid, Line, LineChart, ResponsiveContainer,
-  Tooltip, XAxis, YAxis,
+  Area,
+  AreaChart,
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
 } from 'recharts'
 import { api } from '@/lib/api'
-import { apiErrorMessage, formatBps, relativeTime } from '@/lib/utils'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
-import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/Tabs'
-import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
-import { Badge } from '@/components/ui/Badge'
+import { apiErrorMessage, formatBps, formatDuration, relativeTime } from '@/lib/utils'
+import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
-import { Input } from '@/components/ui/Input'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/Dialog'
 import { DeviceFormDialog } from '@/components/forms/DeviceFormDialog'
 import { toast } from '@/components/ui/Toast'
 
-/* ── Helpers ─────────────────────────────────────────────── */
-const statusColor: Record<string, string> = { up: 'bg-success', down: 'bg-danger', degraded: 'bg-warning', unknown: 'bg-muted', maintenance: 'bg-info' }
-const statusVariant: Record<string, any> = { up: 'success', down: 'danger', degraded: 'warning', unknown: 'outline', maintenance: 'info' }
+/* ── Shared helpers ────────────────────────────────────────── */
+
 const ttStyle = () => ({
-  contentStyle: { backgroundColor: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 6, color: 'rgb(var(--text))', fontSize: 11, padding: '5px 8px' },
+  contentStyle: {
+    backgroundColor: 'rgb(var(--surface))',
+    border: '1px solid rgb(var(--border))',
+    borderRadius: 6,
+    color: 'rgb(var(--text))',
+    fontSize: 11,
+    padding: '5px 8px',
+  },
   labelFormatter: (ts: any) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
 })
 
-/* ── Main Page ───────────────────────────────────────────── */
+type HealthKind = 'healthy' | 'warning' | 'critical' | 'offline'
+
+function healthOf(status: string): HealthKind {
+  if (status === 'up') return 'healthy'
+  if (status === 'degraded') return 'warning'
+  if (status === 'down') return 'critical'
+  return 'offline'
+}
+
+const typeIconMap: Record<string, React.ComponentType<{ className?: string }>> = {
+  router: RouterIcon,
+  switch: Network,
+  firewall: Shield,
+  server: Server,
+  access_point: Wifi,
+  storage: Database,
+  hypervisor: Server,
+  other: Box,
+}
+
+/* ════════════════════════════════════════════════════════════
+   Main page
+   ════════════════════════════════════════════════════════════ */
+
 export function DeviceDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const qc = useQueryClient()
   const [editOpen, setEditOpen] = useState(false)
   const [delOpen, setDelOpen] = useState(false)
-  const [tab, setTab] = useState('summary')
 
   const { data: device, isLoading } = useQuery<any>({
     queryKey: ['device', id],
     queryFn: async () => (await api.get(`/devices/${id}`)).data,
-    refetchInterval: 15_000, enabled: !!id,
+    refetchInterval: 15_000,
+    enabled: !!id,
   })
 
   const del = useMutation({
     mutationFn: async () => api.delete(`/devices/${id}`),
-    onSuccess: () => { toast.success('Device deleted'); qc.invalidateQueries({ queryKey: ['devices'] }); navigate('/devices') },
+    onSuccess: () => {
+      toast.success('Device deleted')
+      qc.invalidateQueries({ queryKey: ['devices'] })
+      navigate('/devices')
+    },
     onError: (e: any) => toast.error('Delete failed', apiErrorMessage(e)),
   })
 
-  if (isLoading || !device) return <div className="flex items-center justify-center py-20 text-muted"><Loader2 className="h-5 w-5 animate-spin" /></div>
-
-  const snmp = device.snmp_enabled
+  if (isLoading || !device) {
+    return (
+      <div className="flex items-center justify-center py-20 text-muted">
+        <Loader2 className="h-5 w-5 animate-spin" />
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-4">
-      <DeviceHero
+      <DeviceHeader
         device={device}
         onEdit={() => setEditOpen(true)}
         onDelete={() => setDelOpen(true)}
-        onRefresh={() => qc.invalidateQueries({ queryKey: ['device', id] })}
       />
 
-      <DeviceKpiStrip device={device} deviceId={id!} />
-
-      <Tabs value={tab} onValueChange={setTab}>
-        <TabsList className="flex flex-wrap h-auto">
-          <TabsTrigger value="summary">Overview</TabsTrigger>
-          {snmp && <TabsTrigger value="interfaces">Interfaces</TabsTrigger>}
-          {snmp && <TabsTrigger value="inventory">Inventory</TabsTrigger>}
-          {snmp && <TabsTrigger value="traps">Events</TabsTrigger>}
-          <TabsTrigger value="config">Configuration</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="summary"><SummaryDashboard device={device} deviceId={id!} /></TabsContent>
-        {snmp && <TabsContent value="interfaces"><InterfacesTab deviceId={id!} /></TabsContent>}
-        {snmp && <TabsContent value="inventory"><InventoryTab deviceId={id!} /></TabsContent>}
-        {snmp && <TabsContent value="traps"><TrapsTab deviceId={id!} /></TabsContent>}
-        <TabsContent value="config"><ConfigTab device={device} onEdit={() => setEditOpen(true)} /></TabsContent>
-      </Tabs>
+      <DashboardSection device={device} deviceId={id!} />
 
       <DeviceFormDialog open={editOpen} onOpenChange={setEditOpen} device={device} />
-      <ConfirmDialog open={delOpen} onOpenChange={setDelOpen} title="Delete device"
-        description={<>Permanently delete <b>{device.hostname}</b> and all its history?</>}
-        confirmText="Delete" destructive loading={del.isPending} onConfirm={() => del.mutate()} />
+      <ConfirmDialog
+        open={delOpen}
+        onOpenChange={setDelOpen}
+        title="Delete device"
+        description={
+          <>
+            Permanently delete <b>{device.hostname}</b> and all its history?
+          </>
+        }
+        confirmText="Delete"
+        destructive
+        loading={del.isPending}
+        onConfirm={() => del.mutate()}
+      />
     </div>
   )
 }
 
 /* ════════════════════════════════════════════════════════════
-   HERO — large device banner with status glow + pill metadata
+   Device header card (icon + name + chips + metadata rows + actions)
    ════════════════════════════════════════════════════════════ */
 
-const deviceIconFor = (t: string) => {
-  if (t === 'router') return <RouterIcon className="h-6 w-6" />
-  if (t === 'switch') return <Network className="h-6 w-6" />
-  if (t === 'firewall') return <Shield className="h-6 w-6" />
-  if (t === 'server') return <Server className="h-6 w-6" />
-  if (t === 'access_point') return <Wifi className="h-6 w-6" />
-  return <Box className="h-6 w-6" />
-}
+function DeviceHeader({
+  device, onEdit, onDelete,
+}: { device: any; onEdit: () => void; onDelete: () => void }) {
+  const health = healthOf(device.status)
+  const Icon = typeIconMap[device.device_type] || Box
 
-function DeviceHero({
-  device, onEdit, onDelete, onRefresh,
-}: {
-  device: any
-  onEdit: () => void
-  onDelete: () => void
-  onRefresh: () => void
-}) {
-  const status = device.status as string
-  const isUp = status === 'up'
-  const ring =
-    status === 'up'
-      ? 'ring-success/40 shadow-[0_0_24px_rgb(var(--success)/0.35)]'
-      : status === 'down'
-        ? 'ring-danger/40 shadow-[0_0_24px_rgb(var(--danger)/0.35)]'
-        : status === 'degraded'
-          ? 'ring-warning/40 shadow-[0_0_24px_rgb(var(--warning)/0.35)]'
-          : 'ring-border'
+  const kind = {
+    healthy: { pill: 'bg-success/15 text-success border-success/30', dot: 'bg-success', label: 'Healthy' },
+    warning: { pill: 'bg-warning/15 text-warning border-warning/30', dot: 'bg-warning', label: 'Warning' },
+    critical: { pill: 'bg-danger/15 text-danger border-danger/30', dot: 'bg-danger', label: 'Critical' },
+    offline: { pill: 'bg-surface2 text-muted border-border', dot: 'bg-muted', label: 'Offline' },
+  }[health]
 
-  return (
-    <div className="relative overflow-hidden rounded-xl border border-border bg-gradient-to-br from-surface via-surface to-surface2/30 p-4 md:p-5">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex min-w-0 items-start gap-4">
-          <div
-            className={`flex h-14 w-14 shrink-0 items-center justify-center rounded-xl bg-surface2/60 text-primary ring-2 ${ring}`}
-          >
-            {deviceIconFor(device.device_type)}
-          </div>
-          <div className="min-w-0">
-            <Link
-              to="/devices"
-              className="mb-1 inline-flex items-center gap-1 text-[11px] text-muted hover:text-primary"
-            >
-              <ChevronRight className="h-3 w-3 rotate-180" /> All Devices
-            </Link>
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="truncate text-2xl font-bold tracking-tight">{device.hostname}</h1>
-              <code className="rounded bg-surface2/60 px-1.5 py-0.5 font-mono text-xs text-muted">
-                {device.ip_address}
-              </code>
-              <span
-                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
-                  isUp
-                    ? 'bg-success/15 text-success'
-                    : status === 'down'
-                      ? 'bg-danger/15 text-danger'
-                      : status === 'degraded'
-                        ? 'bg-warning/15 text-warning'
-                        : 'bg-surface2 text-muted'
-                }`}
-              >
-                <span
-                  className={`h-1.5 w-1.5 rounded-full ${
-                    isUp ? 'animate-pulse bg-success' : status === 'down' ? 'bg-danger' : 'bg-muted'
-                  }`}
-                />
-                {status.toUpperCase()}
-              </span>
-              {device.snmp_enabled && (
-                <Badge variant="info" className="gap-1">
-                  <Shield className="h-3 w-3" /> SNMPv{device.snmp_version}
-                </Badge>
-              )}
-              {device.ping_enabled && (
-                <Badge variant="outline" className="gap-1">
-                  <Wifi className="h-3 w-3" /> ICMP
-                </Badge>
-              )}
-            </div>
-            <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted">
-              <span className="inline-flex items-center gap-1 capitalize">
-                {deviceIconFor(device.device_type)}
-                <span>{device.device_type.replace('_', ' ')}</span>
-              </span>
-              {(device.vendor || device.model) && (
-                <span className="inline-flex items-center gap-1">
-                  <SquareStack className="h-3.5 w-3.5" />
-                  {[device.vendor, device.model].filter(Boolean).join(' ') || '—'}
-                </span>
-              )}
-              {device.group_name && (
-                <span className="inline-flex items-center gap-1">
-                  <TagIcon className="h-3.5 w-3.5" />
-                  {device.group_name}
-                </span>
-              )}
-              {device.location && (
-                <span className="inline-flex items-center gap-1">
-                  <MapPin className="h-3.5 w-3.5" />
-                  {device.location}
-                </span>
-              )}
-              <span className="inline-flex items-center gap-1">
-                <Clock className="h-3.5 w-3.5" />
-                seen {relativeTime(device.last_seen)}
-              </span>
-            </div>
-          </div>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <Button variant="outline" size="sm" onClick={onRefresh} title="Refresh">
-            <RefreshCw className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="outline" size="sm" onClick={onEdit}>
-            <Pencil className="h-3.5 w-3.5" /> Edit
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="text-danger hover:bg-danger/10"
-            onClick={onDelete}
-            title="Delete"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
-        </div>
-      </div>
-    </div>
-  )
-}
+  /* Primary row (5 metadata fields) */
+  const primary: Array<{ label: string; value: string }> = [
+    { label: 'IP Address', value: device.ip_address || '—' },
+    { label: 'Type', value: titleCase((device.device_type || 'other').replace('_', ' ')) },
+    { label: 'Location', value: device.location || '—' },
+    { label: 'Vendor / Model', value: [device.vendor, device.model].filter(Boolean).join(' ') || '—' },
+    { label: 'OS / Version', value: device.os_version || '—' },
+  ]
 
-/* ════════════════════════════════════════════════════════════
-   KPI STRIP — six live tiles across the top
-   ════════════════════════════════════════════════════════════ */
-
-function DeviceKpiStrip({ device, deviceId }: { device: any; deviceId: string }) {
-  // 1h ping metrics drive RTT/loss/jitter tiles.
-  const { data: ping } = useQuery<{ points: any[] }>({
-    queryKey: ['device', deviceId, 'kpi-ping'],
-    queryFn: async () => {
-      const now = new Date()
-      const from = new Date(now.getTime() - 3600_000).toISOString()
-      return (await api.get(`/devices/${deviceId}/metrics?from=${from}&to=${now.toISOString()}`)).data
-    },
-    refetchInterval: 30_000,
-    enabled: device.ping_enabled,
-  })
-  const { data: ifs } = useQuery<any[]>({
-    queryKey: ['device', deviceId, 'kpi-ifs'],
-    queryFn: async () => (await api.get(`/devices/${deviceId}/interfaces`)).data,
-    refetchInterval: 30_000,
-    enabled: device.snmp_enabled,
-  })
-  const { data: entities } = useQuery<any[]>({
-    queryKey: ['device', deviceId, 'kpi-entities'],
-    queryFn: async () => (await api.get(`/devices/${deviceId}/entities`)).data,
-    enabled: device.snmp_enabled,
-  })
-
-  const pts = ping?.points || []
-  const lastPt = pts[pts.length - 1]
-  const rtts = pts.map((p) => p.rtt_ms).filter((v) => v != null)
-  const avgRtt = rtts.length ? rtts.reduce((a, b) => a + b, 0) / rtts.length : null
-  const avgLoss = pts.length ? (pts.reduce((a, p) => a + (p.packet_loss || 0), 0) / pts.length) : null
-  const avgJitter = pts.length ? (pts.reduce((a, p) => a + (p.jitter_ms || 0), 0) / pts.length) : null
-
-  const ifTotal = ifs?.length || 0
-  const ifUp = (ifs || []).filter((i) => i.oper_status === 'up').length
-
-  // Hardware health — count PSUs + Fans from the entity inventory.
-  const modules = (entities || []).filter(
-    (e) => e.class === 'module' && /fan|power|psu/i.test(e.name || ''),
-  )
-  const hwOk = modules.length
-  const chassisClass = (entities || []).find((e) => e.class === 'chassis')
-
-  const rttTone =
-    avgRtt == null ? 'muted' : avgRtt < 20 ? 'success' : avgRtt < 100 ? 'warning' : 'danger'
-
-  const tiles: KpiTile[] = [
-    {
-      icon: <Activity className="h-4 w-4" />,
-      label: 'Status',
-      value: device.status.toUpperCase(),
-      sub: `seen ${relativeTime(device.last_seen)}`,
-      tone:
-        device.status === 'up'
-          ? 'success'
-          : device.status === 'down'
-            ? 'danger'
-            : device.status === 'degraded'
-              ? 'warning'
-              : 'muted',
-    },
-    {
-      icon: <Zap className="h-4 w-4" />,
-      label: 'RTT (1h avg)',
-      value: avgRtt != null ? `${avgRtt.toFixed(2)} ms` : '—',
-      sub: lastPt?.rtt_ms != null ? `last ${lastPt.rtt_ms.toFixed(2)} ms` : 'no data',
-      tone: rttTone,
-    },
-    {
-      icon: <AlertTriangle className="h-4 w-4" />,
-      label: 'Packet loss (1h)',
-      value: avgLoss != null ? `${(avgLoss * 100).toFixed(1)}%` : '—',
-      sub: `${pts.length} samples`,
-      tone: avgLoss == null ? 'muted' : avgLoss > 0.01 ? 'danger' : 'success',
-    },
-    {
-      icon: <Activity className="h-4 w-4" />,
-      label: 'Jitter (1h)',
-      value: avgJitter != null ? `${avgJitter.toFixed(2)} ms` : '—',
-      sub: 'avg',
-      tone: avgJitter == null ? 'muted' : avgJitter < 1 ? 'success' : avgJitter < 5 ? 'warning' : 'danger',
-    },
-    {
-      icon: <Plug className="h-4 w-4" />,
-      label: 'Interfaces',
-      value: ifTotal > 0 ? `${ifUp}/${ifTotal}` : '—',
-      sub: ifTotal > 0 ? `${ifTotal - ifUp} down` : device.snmp_enabled ? 'discovering' : 'SNMP off',
-      tone: ifTotal === 0 ? 'muted' : ifUp === ifTotal ? 'success' : 'warning',
-    },
-    {
-      icon: <Fan className="h-4 w-4" />,
-      label: 'Hardware',
-      value: chassisClass ? (hwOk > 0 ? 'Healthy' : 'OK') : device.snmp_enabled ? '—' : 'SNMP off',
-      sub: chassisClass
-        ? `${chassisClass.model_name || chassisClass.name}${hwOk ? ` · ${hwOk} modules` : ''}`
-        : '',
-      tone: chassisClass ? 'success' : 'muted',
-    },
+  /* Secondary row */
+  const uptimeSec = readUptimeSeconds(device)
+  const secondary: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; value: string; color?: string }> = [
+    { icon: Clock, label: 'Uptime', value: uptimeSec != null ? formatDuration(uptimeSec) : '—', color: 'text-success' },
+    { icon: Activity, label: 'Last Seen', value: relativeTime(device.last_seen), color: 'text-muted' },
+    { icon: HardDrive, label: 'Serial Number', value: device.serial_number || '—', color: 'text-muted' },
+    { icon: GitBranch, label: 'Firmware Version', value: device.firmware_version || device.os_version || '—', color: 'text-muted' },
+    { icon: MapPin, label: device.group_name ? '' : 'Group', value: device.group_name || '—', color: 'text-muted' },
   ]
 
   return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-      {tiles.map((t, i) => <KpiCard key={i} tile={t} />)}
-    </div>
-  )
-}
+    <Card>
+      <CardContent className="p-4 md:p-5">
+        <div className="flex flex-wrap items-start gap-4">
+          {/* Left: identity + primary metadata */}
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-primary/30 bg-primary/10 text-primary">
+              <Icon className="h-6 w-6" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="truncate text-[22px] font-bold tracking-tight">{device.hostname}</h2>
+                <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${kind.pill}`}>
+                  <span className={`h-1.5 w-1.5 rounded-full ${kind.dot}`} />
+                  {kind.label}
+                </span>
+              </div>
 
-type KpiTile = {
-  icon: React.ReactNode
-  label: string
-  value: string
-  sub?: string
-  tone?: 'success' | 'warning' | 'danger' | 'muted'
-}
+              {/* Primary metadata row */}
+              <div className="mt-2 flex flex-wrap items-start gap-x-6 gap-y-1">
+                {primary.map((m) => (
+                  <div key={m.label} className="min-w-0">
+                    <div className="truncate text-sm font-medium text-text" title={m.value}>{m.value}</div>
+                    <div className="text-[10px] uppercase tracking-wider text-muted">{m.label}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
 
-function KpiCard({ tile }: { tile: KpiTile }) {
-  const toneClass =
-    tile.tone === 'success'
-      ? 'text-success'
-      : tile.tone === 'warning'
-        ? 'text-warning'
-        : tile.tone === 'danger'
-          ? 'text-danger'
-          : 'text-text'
-  return (
-    <div className="rounded-lg border border-border bg-surface p-3 transition-colors hover:border-border-strong">
-      <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
-        <span className={toneClass}>{tile.icon}</span>
-        {tile.label}
-      </div>
-      <div className={`mt-1 text-lg font-semibold tabular-nums ${toneClass}`}>
-        {tile.value}
-      </div>
-      {tile.sub && (
-        <div className="mt-0.5 truncate text-[11px] text-muted" title={tile.sub}>
-          {tile.sub}
+          {/* Right: actions + secondary metadata stacked below */}
+          <div className="flex flex-col items-end gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <Button variant="outline" size="default" className="h-9" onClick={onEdit}>
+                <Pencil className="h-4 w-4" />
+                Edit Device
+              </Button>
+              <Button variant="outline" size="default" className="h-9">
+                <Zap className="h-4 w-4" />
+                Run Diagnostics
+              </Button>
+              <Button size="default" className="h-9">
+                <Terminal className="h-4 w-4" />
+                Open Console
+              </Button>
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-9 w-9 text-muted hover:text-danger"
+                onClick={onDelete}
+                title="Delete device"
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </div>
+
+            {/* Secondary metadata — under the action buttons */}
+            <div className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1 text-[11px]">
+              {secondary.map((s, i) => (
+                <span key={i} className="inline-flex items-center gap-1.5">
+                  <s.icon className={`h-3 w-3 ${s.color || 'text-muted'}`} />
+                  {s.label && <span className="text-muted">{s.label}</span>}
+                  <span className="font-medium text-text">{s.value}</span>
+                </span>
+              ))}
+            </div>
+          </div>
         </div>
-      )}
-    </div>
+      </CardContent>
+    </Card>
   )
 }
 
 /* ════════════════════════════════════════════════════════════
-   SUMMARY DASHBOARD — Everything visible on one scroll
+   Dashboard grid
    ════════════════════════════════════════════════════════════ */
 
 const TIME_RANGES = [
-  { label: '1H', hours: 1 },
-  { label: '6H', hours: 6 },
-  { label: '12H', hours: 12 },
-  { label: '24H', hours: 24 },
-  { label: '7D', hours: 168 },
-] as const
+  { label: 'Last Hour', hours: 1 },
+  { label: 'Last 6 Hours', hours: 6 },
+  { label: 'Last 24 Hours', hours: 24 },
+  { label: 'Last 7 Days', hours: 168 },
+]
 
-function TimeRangeFilter({ value, onChange }: { value: number; onChange: (h: number) => void }) {
-  return (
-    <div className="flex items-center gap-1 rounded-lg bg-surface2/60 p-0.5">
-      {TIME_RANGES.map(({ label, hours }) => (
-        <button key={hours} onClick={() => onChange(hours)}
-          className={`rounded-md px-3 py-1.5 text-[11px] font-medium transition-all duration-200 ${
-            value === hours
-              ? 'bg-bg text-primary shadow-sm ring-1 ring-border/50'
-              : 'text-muted hover:text-text hover:bg-surface2'
-          }`}>
-          {label}
-        </button>
-      ))}
-    </div>
-  )
-}
+function DashboardSection({ device, deviceId }: { device: any; deviceId: string }) {
+  const snmp = !!device.snmp_enabled
+  const [hoursRange, setHoursRange] = useState(1)
+  const [showAllInterfaces, setShowAllInterfaces] = useState(false)
+  const [eventsOpen, setEventsOpen] = useState(false)
+  const [healthOpen, setHealthOpen] = useState(false)
+  const [inventoryOpen, setInventoryOpen] = useState(false)
 
-function SummaryDashboard({ device, deviceId }: { device: any; deviceId: string }) {
-  const snmp = device.snmp_enabled
-  const [hoursRange, setHoursRange] = useState(6)
-
-  // Ping metrics for RTT chart
-  const { data: pingData } = useQuery<{ points: { timestamp: string; rtt_ms: number; packet_loss: number; jitter_ms: number; min_rtt_ms: number; max_rtt_ms: number; is_up: boolean }[] }>({
+  const { data: pingData } = useQuery<{
+    points: { timestamp: string; rtt_ms: number; packet_loss: number; jitter_ms: number; is_up: boolean }[]
+  }>({
     queryKey: ['device', deviceId, 'ping-metrics', hoursRange],
     queryFn: async () => {
       const now = new Date()
       const from = new Date(now.getTime() - hoursRange * 3600_000).toISOString()
       return (await api.get(`/devices/${deviceId}/metrics?from=${from}&to=${now.toISOString()}`)).data
     },
-    refetchInterval: 30_000, enabled: device.ping_enabled,
+    refetchInterval: 30_000,
+    enabled: device.ping_enabled,
   })
 
-  // SNMP metrics (CPU, memory, temps)
   const { data: metrics } = useQuery<Record<string, { unit: string; points: { ts: number; value: number }[] }>>({
     queryKey: ['device', deviceId, 'snmp-metrics', hoursRange],
     queryFn: async () => (await api.get(`/devices/${deviceId}/snmp-metrics?hours=${hoursRange}`)).data,
-    refetchInterval: 30_000, enabled: snmp,
+    refetchInterval: 30_000,
+    enabled: snmp,
   })
 
-  // Interfaces for summary
   const { data: ifs } = useQuery<any[]>({
     queryKey: ['device', deviceId, 'interfaces'],
     queryFn: async () => (await api.get(`/devices/${deviceId}/interfaces`)).data,
-    refetchInterval: 30_000, enabled: snmp,
+    refetchInterval: 30_000,
+    enabled: snmp,
   })
-
-  // Interface metrics
   const { data: ifMetrics } = useQuery<Record<string, any[]>>({
-    queryKey: ['device', deviceId, 'if-metrics'],
-    queryFn: async () => (await api.get(`/devices/${deviceId}/snmp-if-metrics?hours=1`)).data,
-    refetchInterval: 30_000, enabled: snmp,
+    queryKey: ['device', deviceId, 'if-metrics', hoursRange],
+    queryFn: async () => (await api.get(`/devices/${deviceId}/snmp-if-metrics?hours=${Math.min(24, hoursRange)}`)).data,
+    refetchInterval: 30_000,
+    enabled: snmp,
   })
 
-  // Entities & sensors
   const { data: entities } = useQuery<any[]>({
     queryKey: ['device', deviceId, 'entities'],
     queryFn: async () => (await api.get(`/devices/${deviceId}/entities`)).data,
@@ -445,535 +341,1632 @@ function SummaryDashboard({ device, deviceId }: { device: any; deviceId: string 
     queryFn: async () => (await api.get(`/devices/${deviceId}/sensors`)).data,
     enabled: snmp,
   })
-
-  // Traps
   const { data: traps } = useQuery<any[]>({
     queryKey: ['device', deviceId, 'traps-summary'],
-    queryFn: async () => (await api.get(`/devices/${deviceId}/traps?hours=24&limit=5`)).data,
-    refetchInterval: 30_000, enabled: snmp,
+    queryFn: async () => (await api.get(`/devices/${deviceId}/traps?hours=24&limit=10`)).data,
+    refetchInterval: 30_000,
+    enabled: snmp,
   })
 
+  /* Derived series / KPIs */
   const cpu = metrics?.cpu
   const mem = metrics?.memory
   const cpuVal = cpu?.points?.length ? cpu.points[cpu.points.length - 1].value : null
   const memVal = mem?.points?.length ? mem.points[mem.points.length - 1].value : null
-  const temps = Object.entries(metrics || {}).filter(([k]) => k.startsWith('temperature'))
 
-  // Interface stats
-  const ifUp = (ifs || []).filter((i) => i.oper_status === 'up').length
-  const ifDown = (ifs || []).length - ifUp
-
-  // Top interfaces by traffic
-  const topIfs = (ifs || [])
-    .map((i) => {
-      const s = ifMetrics?.[i.if_index]
-      const last = s?.length ? s[s.length - 1] : null
-      return { ...i, inBps: last?.in_bps || 0, outBps: last?.out_bps || 0, totalBps: (last?.in_bps || 0) + (last?.out_bps || 0) }
-    })
-    .filter((i) => i.totalBps > 0)
-    .sort((a, b) => b.totalBps - a.totalBps)
-    .slice(0, 5)
-
-  const rangeLabel = hoursRange < 24 ? `Last ${hoursRange}h` : `Last ${hoursRange / 24}d`
-
-  // Precompute ping stats
   const pts = pingData?.points || []
   const rttPts = pts.map((p) => ({ ts: new Date(p.timestamp).getTime(), rtt: p.rtt_ms, loss: p.packet_loss, jitter: p.jitter_ms }))
   const lastRtt = rttPts.length ? rttPts[rttPts.length - 1].rtt : device.last_rtt_ms
-  const avgRtt = rttPts.length ? rttPts.reduce((s, p) => s + p.rtt, 0) / rttPts.length : null
-  const maxRtt = rttPts.length ? Math.max(...rttPts.map((p) => p.rtt)) : null
-  const minRtt = rttPts.length ? Math.min(...rttPts.map((p) => p.rtt)) : null
   const avgLoss = rttPts.length ? rttPts.reduce((s, p) => s + p.loss, 0) / rttPts.length : null
-  const maxLoss = rttPts.length ? Math.max(...rttPts.map((p) => p.loss)) : null
-  const avgJitter = rttPts.length ? rttPts.reduce((s, p) => s + p.jitter, 0) / rttPts.length : null
 
-  // Count gauge items to determine grid sizing
-  const gaugeItems: { label: string; value: number | null; unit: string; color: string; icon: React.ReactNode; data?: { ts: number; value: number }[] }[] = []
-  if (snmp && cpu) gaugeItems.push({ label: 'CPU Utilization', value: cpuVal, unit: '%', color: 'rgb(var(--info))', icon: <Cpu className="h-4 w-4" />, data: cpu.points })
-  if (snmp && mem) gaugeItems.push({ label: 'Memory Utilization', value: memVal, unit: '%', color: 'rgb(var(--warning))', icon: <HardDrive className="h-4 w-4" />, data: mem.points })
-  if (snmp) temps.slice(0, 2).forEach(([k, v]) => gaugeItems.push({ label: k.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()), value: v.points?.length ? v.points[v.points.length - 1].value : null, unit: '°C', color: 'rgb(var(--danger))', icon: <Thermometer className="h-4 w-4" />, data: v.points }))
+  /* Total bandwidth across interfaces (sum of last in+out bps) */
+  const bwSeries = useMemo(() => bandwidthSeries(ifMetrics || {}), [ifMetrics])
+  const lastBw = bwSeries.length ? bwSeries[bwSeries.length - 1].value : 0
+
+  const ifUp = (ifs || []).filter((i) => i.oper_status === 'up').length
+  const ifTotal = ifs?.length || 0
+
+  /* Interface utilization: highest active util, as % */
+  const ifUtilPct = useMemo(() => {
+    const s = ifs || []
+    let best = 0
+    s.forEach((i) => {
+      const m = ifMetrics?.[i.if_index]
+      if (!m?.length || !i.if_speed) return
+      const l = m[m.length - 1]
+      const total = (l.in_bps || 0) + (l.out_bps || 0)
+      const u = total / Number(i.if_speed) * 100
+      if (u > best) best = u
+    })
+    return Math.min(100, best)
+  }, [ifs, ifMetrics])
+
+  const uptimeSec = readUptimeSeconds(device, metrics)
+  const uptimeDaysCompact = uptimeSec != null ? formatDaysCompact(uptimeSec) : '—'
+
+  const cpuTrend = percentTrend(cpu?.points?.map((p) => p.value) || [])
+  const memTrend = percentTrend(mem?.points?.map((p) => p.value) || [])
+  const ifTrend = percentTrend(bwSeries.map((p) => p.value))
+  const latTrend = percentTrend(rttPts.map((p) => p.rtt))
+  const lossTrend = percentTrend(rttPts.map((p) => p.loss))
+
+  /* Merged performance chart — CPU + Memory only. Bandwidth has its own
+     "Throughput" tile in the Environmental / System Stats card. */
+  const perfSeries = useMemo(() => {
+    const byTs: Record<number, { ts: number; cpu?: number; mem?: number }> = {}
+    ;(cpu?.points || []).forEach((p) => { byTs[p.ts] = { ts: p.ts, cpu: p.value, ...(byTs[p.ts] || {}) } })
+    ;(mem?.points || []).forEach((p) => { byTs[p.ts] = { ts: p.ts, mem: p.value, ...(byTs[p.ts] || {}) } })
+    return Object.values(byTs).sort((a, b) => a.ts - b.ts)
+  }, [cpu, mem])
+
+  const cpuSeries = cpu?.points?.map((p) => p.value) || []
+  const memSeries = mem?.points?.map((p) => p.value) || []
+  const latSeries = rttPts.map((p) => p.rtt)
+  const lossSeries = rttPts.map((p) => p.loss)
+  const bwMbpsSeries = bwSeries.map((p) => p.value / 1_000_000)
+  const uptimeSpark = uptimeHistory(uptimeSec)
+
+  const perfStats = {
+    cpu: { avg: avg(cpuSeries), max: Math.max(0, ...cpuSeries) },
+    mem: { avg: avg(memSeries), max: Math.max(0, ...memSeries) },
+  }
+
+  const healthScore = computeHealthScore({
+    status: device.status, cpu: cpuVal, mem: memVal, loss: avgLoss, ifUp, ifTotal,
+  })
+
+  const recentAlerts = (traps || []).slice(0, 5).map((t: any) => ({
+    severity: normalizeSeverity(t.severity),
+    title: t.trap_name || t.message || 'SNMP trap',
+    ago: relativeTime(t.timestamp),
+  }))
 
   return (
-    <div className="space-y-5">
-      {/* ══════════ TIME RANGE BAR ══════════ */}
-      <div className="flex items-center justify-between rounded-lg border border-border/50 bg-surface2/20 px-4 py-2.5">
-        <div className="flex items-center gap-2.5">
-          <Clock className="h-4 w-4 text-primary" />
-          <span className="text-sm font-semibold">Performance Overview</span>
-          <span className="text-[11px] text-muted">— {rangeLabel}</span>
-        </div>
-        <TimeRangeFilter value={hoursRange} onChange={setHoursRange} />
+    <>
+      {/* ═══════════ KPI row (6 cards) ═══════════ */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+        <KpiTile
+          icon={<Cpu className="h-4 w-4" />}
+          label="CPU Usage"
+          value={cpuVal != null ? `${cpuVal.toFixed(0)}%` : '—'}
+          trend={cpuTrend}
+          trendUnit="%"
+          color="info"
+          series={cpuSeries.slice(-22)}
+        />
+        <KpiTile
+          icon={<MemoryStick className="h-4 w-4" />}
+          label="Memory Usage"
+          value={memVal != null ? `${memVal.toFixed(0)}%` : '—'}
+          trend={memTrend}
+          trendUnit="%"
+          color="accent"
+          series={memSeries.slice(-22)}
+        />
+        <KpiTile
+          icon={<Network className="h-4 w-4" />}
+          label="Interface Utilization"
+          value={ifTotal ? `${ifUtilPct.toFixed(0)}%` : '—'}
+          trend={ifTrend}
+          trendUnit="%"
+          color="success"
+          series={bwMbpsSeries.slice(-22)}
+        />
+        <KpiTile
+          icon={<Activity className="h-4 w-4" />}
+          label="Latency"
+          value={lastRtt != null ? `${Number(lastRtt).toFixed(0)} ms` : '—'}
+          trend={latTrend}
+          trendUnit="ms"
+          color="info"
+          invertTrend
+          series={latSeries.slice(-22)}
+        />
+        <KpiTile
+          icon={<ZapOff className="h-4 w-4" />}
+          label="Packet Loss"
+          value={avgLoss != null ? `${avgLoss.toFixed(1)}%` : '—'}
+          trend={lossTrend}
+          trendUnit="%"
+          color="danger"
+          invertTrend
+          series={lossSeries.slice(-22)}
+        />
+        <KpiTile
+          icon={<Clock className="h-4 w-4" />}
+          label="Uptime"
+          value={uptimeDaysCompact}
+          trend={null}
+          trendUnit="%"
+          color="warning"
+          series={uptimeSpark}
+        />
       </div>
 
-      {/* ══════════ ROW 1: NODE INFO (left) + POLLING & PORTS (right) ══════════ */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card>
-          <CardHeader className="pb-1"><CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted">Node Details</CardTitle></CardHeader>
-          <CardContent className="space-y-1.5 text-[13px]">
-            {([
-              ['Hostname', device.hostname],
-              ['IP Address', device.ip_address],
-              ['Device Type', device.device_type],
-              ['Vendor / Model', [device.vendor, device.model].filter(Boolean).join(' ') || '—'],
-              ['OS Version', device.os_version || '—'],
-              ['System OID', device.sys_object_id || '—'],
-              ['Location', device.location || '—'],
-              ['Group', device.group_name || '—'],
-              ['Last Seen', relativeTime(device.last_seen)],
-              ['Description', device.description || '—'],
-            ] as [string, string][]).map(([k, v]) => (
-              <div key={k} className="flex justify-between gap-3 border-b border-border/40 pb-1 last:border-0">
-                <span className="shrink-0 text-[11px] text-muted">{k}</span>
-                <span className={`text-right truncate font-medium ${k === 'System OID' ? 'font-mono text-[11px]' : ''}`}>{v}</span>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-1"><CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted">Polling & Availability</CardTitle></CardHeader>
-          <CardContent className="space-y-3">
-            <div>
-              <div className="flex items-baseline justify-between mb-1">
-                <span className="text-[11px] text-muted">Current Status</span>
-                <Badge variant={statusVariant[device.status] || 'outline'} className="capitalize text-xs">{device.status}</Badge>
-              </div>
-              <div className="h-2 w-full rounded-full bg-surface2 overflow-hidden">
-                <div className={`h-full rounded-full ${device.status === 'up' ? 'bg-success' : device.status === 'down' ? 'bg-danger' : 'bg-warning'}`} style={{ width: '100%' }} />
-              </div>
-            </div>
-            <div className="space-y-1.5 text-[13px]">
-              {([
-                ['Ping Monitoring', device.ping_enabled ? `Enabled · ${device.ping_interval}s interval` : 'Disabled'],
-                ['SNMP Polling', snmp ? `v${device.snmp_version} · Port ${device.snmp_port} · ${device.snmp_poll_interval}s interval` : 'Disabled'],
-                ['SNMP Timeout', snmp ? `${device.snmp_timeout_ms || 2000}ms · ${device.snmp_retries ?? 2} retries` : '—'],
-                ['Response Time', device.last_rtt_ms != null ? `${device.last_rtt_ms.toFixed(2)} ms` : '—'],
-              ] as [string, string][]).map(([k, v]) => (
-                <div key={k} className="flex justify-between gap-3 border-b border-border/40 pb-1 last:border-0">
-                  <span className="shrink-0 text-[11px] text-muted">{k}</span>
-                  <span className="text-right font-medium">{v}</span>
-                </div>
-              ))}
-            </div>
-            {snmp && ifs && ifs.length > 0 && (
-              <div className="rounded-md bg-surface2/50 px-3 py-2">
-                <div className="text-[11px] text-muted mb-1">Ethernet Ports</div>
-                <div className="flex items-center gap-3 text-sm">
-                  <span className="font-bold">{ifs.length}</span><span className="text-muted">total</span>
-                  <span className="text-success font-bold">{ifUp}</span><span className="text-muted">up</span>
-                  <span className="text-danger font-bold">{ifDown}</span><span className="text-muted">down</span>
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+      {/* ═══════════ Middle row (3 cols) ═══════════ */}
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,0.95fr)_minmax(0,0.8fr)]">
+        <PerformanceOverviewCard
+          series={perfSeries}
+          stats={perfStats}
+          hoursRange={hoursRange}
+          onHoursChange={setHoursRange}
+        />
+        <InterfaceStatusCard
+          ifs={ifs || []}
+          ifMetrics={ifMetrics || {}}
+          showAll={showAllInterfaces}
+          onToggleShowAll={() => setShowAllInterfaces((o) => !o)}
+        />
+        <HealthScoreCard
+          score={healthScore}
+          alerts={recentAlerts}
+          metrics={metrics || {}}
+          sensors={sensors || []}
+          memVal={memVal}
+          onViewDetails={() => setHealthOpen(true)}
+          onViewAllAlerts={() => setEventsOpen(true)}
+        />
       </div>
 
-      {/* ══════════ ROW 2: RESPONSE TIME & PACKET LOSS ══════════ */}
-      <Card>
-        <CardHeader className="pb-2 border-b border-border/30">
-          <div className="flex items-center justify-between">
-            <CardTitle className="flex items-center gap-2 text-sm font-semibold">
-              <Activity className="h-4 w-4 text-primary" />
-              Response Time & Packet Loss
-            </CardTitle>
-            <span className="rounded-md bg-surface2/60 px-2.5 py-1 text-[11px] text-muted">{rangeLabel}</span>
-          </div>
-        </CardHeader>
-        <CardContent className="pt-4">
-          {/* KPI Stats */}
-          <div className="grid grid-cols-3 gap-3 lg:grid-cols-6 mb-5">
-            {([
-              ['Current RTT', lastRtt, 'ms', 'text-primary'],
-              ['Avg RTT', avgRtt, 'ms', 'text-text'],
-              ['Min / Max', null, 'ms', 'text-text'],
-              ['Avg Jitter', avgJitter, 'ms', 'text-info'],
-              ['Avg Loss', avgLoss, '%', (avgLoss ?? 0) > 1 ? 'text-danger' : 'text-success'],
-              ['Max Loss', maxLoss, '%', (maxLoss ?? 0) > 5 ? 'text-danger' : (maxLoss ?? 0) > 0 ? 'text-warning' : 'text-success'],
-            ] as [string, number | null, string, string][]).map(([label, val, u, cls], idx) => (
-              <div key={label} className="rounded-lg border border-border/30 bg-surface2/30 px-3 py-2.5 text-center">
-                <div className="text-[10px] font-medium uppercase tracking-wider text-muted mb-1.5">{label}</div>
-                <div className={`text-lg font-bold leading-tight ${cls}`}>
-                  {idx === 2
-                    ? <>{minRtt != null ? minRtt.toFixed(1) : '—'}<span className="text-muted text-xs font-normal mx-0.5">/</span>{maxRtt != null ? maxRtt.toFixed(1) : '—'}</>
-                    : <>{val != null ? val.toFixed(2) : '—'}</>
-                  }
-                  <span className="ml-0.5 text-[10px] text-muted font-normal">{u}</span>
-                </div>
-              </div>
-            ))}
-          </div>
+      {/* ═══════════ Bottom row ═══════════ */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <InventoryConfigCard
+          device={device}
+          entities={entities || []}
+          onDetails={() => setInventoryOpen(true)}
+        />
+        <ActivityLogCard
+          traps={traps || []}
+          onViewAll={() => setEventsOpen(true)}
+        />
+        <EnvironmentalActionsCard
+          deviceId={deviceId}
+          snmpEnabled={snmp}
+          metrics={metrics || {}}
+          sensors={sensors || []}
+          lastBw={lastBw}
+        />
+      </div>
 
-          {/* Dual Charts — equal height, aligned */}
-          <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <span className="h-2.5 w-2.5 rounded-full bg-primary" />
-                <span className="text-xs font-medium">Response Time</span>
-              </div>
-              <div className="h-48 rounded-xl border border-border/20 bg-surface2/10 p-3">
-                {rttPts.length > 2 ? (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={rttPts}>
-                      <defs>
-                        <linearGradient id="rttGrad" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0%" stopColor="rgb(var(--primary))" stopOpacity={0.2} />
-                          <stop offset="100%" stopColor="rgb(var(--primary))" stopOpacity={0} />
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--border)/0.25)" vertical={false} />
-                      <XAxis dataKey="ts" tickFormatter={(ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
-                      <YAxis tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} width={40} domain={[0, 'auto']} axisLine={false} tickLine={false} tickFormatter={(v) => `${v} ms`} />
-                      <Tooltip {...ttStyle()} formatter={(v: any) => [`${Number(v).toFixed(2)} ms`, 'RTT']} />
-                      <Area type="monotone" dataKey="rtt" stroke="rgb(var(--primary))" fill="url(#rttGrad)" strokeWidth={2} dot={false} activeDot={{ r: 3, strokeWidth: 0 }} />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <div className="flex h-full items-center justify-center text-xs text-muted">
-                    {device.ping_enabled ? 'Collecting ping data...' : 'Ping monitoring disabled'}
-                  </div>
-                )}
-              </div>
-            </div>
+      <EventsDialog open={eventsOpen} onOpenChange={setEventsOpen} deviceId={deviceId} />
+      <InventoryDialog open={inventoryOpen} onOpenChange={setInventoryOpen} entities={entities || []} />
+      <HealthDetailsDialog
+        open={healthOpen}
+        onOpenChange={setHealthOpen}
+        device={device}
+        cpu={cpuVal}
+        mem={memVal}
+        loss={avgLoss}
+        ifUp={ifUp}
+        ifTotal={ifTotal}
+        score={healthScore}
+      />
+    </>
+  )
+}
 
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <span className="h-2.5 w-2.5 rounded-full bg-danger" />
-                <span className="text-xs font-medium">Packet Loss</span>
-              </div>
-              <div className="h-48 rounded-xl border border-border/20 bg-surface2/10 p-3">
-                {rttPts.length > 2 ? (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={rttPts}>
-                      <defs>
-                        <linearGradient id="lossGrad" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0%" stopColor="rgb(var(--danger))" stopOpacity={0.25} />
-                          <stop offset="100%" stopColor="rgb(var(--danger))" stopOpacity={0} />
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--border)/0.25)" vertical={false} />
-                      <XAxis dataKey="ts" tickFormatter={(ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
-                      <YAxis tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} width={40} domain={[0, (max: number) => Math.max(max, 1)]} axisLine={false} tickLine={false} tickFormatter={(v) => `${v} %`} />
-                      <Tooltip {...ttStyle()} formatter={(v: any) => [`${Number(v).toFixed(2)} %`, 'Loss']} />
-                      <Area type="monotone" dataKey="loss" stroke="rgb(var(--danger))" fill="url(#lossGrad)" strokeWidth={2} dot={false} activeDot={{ r: 3, strokeWidth: 0 }} />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                ) : (
-                  <div className="flex h-full items-center justify-center text-xs text-muted">
-                    {device.ping_enabled ? 'Collecting data...' : 'Ping monitoring disabled'}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+/* ════════════════════════════════════════════════════════════
+   KPI tile — circled icon + label + value + trend + sparkline
+   ════════════════════════════════════════════════════════════ */
 
-      {/* ══════════ ROW 3: CPU + MEMORY GAUGES (adaptive grid) ══════════ */}
-      {snmp && gaugeItems.length > 0 && (
-        <div className={`grid grid-cols-1 gap-4 ${gaugeItems.length === 1 ? 'md:grid-cols-1 max-w-sm' : gaugeItems.length === 2 ? 'md:grid-cols-2' : gaugeItems.length === 3 ? 'md:grid-cols-3' : 'md:grid-cols-2 lg:grid-cols-4'}`}>
-          {gaugeItems.map((g) => (
-            <GaugeCard key={g.label} {...g} />
-          ))}
-        </div>
-      )}
-      {snmp && gaugeItems.length === 0 && (cpu || mem || temps.length > 0) === false && (
-        <Card>
-          <CardContent className="py-5 text-center">
-            <div className="text-sm text-muted">No CPU/Memory metrics available</div>
-            <div className="text-[11px] text-muted mt-1">This device may require a vendor-specific SNMP profile. Standard HOST-RESOURCES-MIB data not detected.</div>
-          </CardContent>
-        </Card>
-      )}
+function KpiTile({
+  icon, label, value, trend, trendUnit, color, series, invertTrend,
+}: {
+  icon: React.ReactNode
+  label: string
+  value: string
+  trend: number | null
+  trendUnit: '%' | 'ms'
+  color: 'primary' | 'success' | 'warning' | 'danger' | 'info' | 'accent'
+  series?: number[]
+  invertTrend?: boolean
+}) {
+  const COLORS: Record<typeof color, { chip: string; stroke: string; from: string; to: string }> = {
+    primary: { chip: 'bg-primary/10 text-primary', stroke: 'rgb(var(--primary))', from: 'rgb(var(--primary) / 0.35)', to: 'rgb(var(--primary) / 0)' },
+    success: { chip: 'bg-success/10 text-success', stroke: 'rgb(var(--success))', from: 'rgb(var(--success) / 0.35)', to: 'rgb(var(--success) / 0)' },
+    warning: { chip: 'bg-warning/10 text-warning', stroke: 'rgb(var(--warning))', from: 'rgb(var(--warning) / 0.35)', to: 'rgb(var(--warning) / 0)' },
+    danger:  { chip: 'bg-danger/10 text-danger',   stroke: 'rgb(var(--danger))',  from: 'rgb(var(--danger) / 0.35)',  to: 'rgb(var(--danger) / 0)' },
+    info:    { chip: 'bg-info/10 text-info',       stroke: 'rgb(var(--info))',    from: 'rgb(var(--info) / 0.35)',    to: 'rgb(var(--info) / 0)' },
+    accent:  { chip: 'bg-accent/10 text-accent',   stroke: 'rgb(var(--accent))',  from: 'rgb(var(--accent) / 0.35)',  to: 'rgb(var(--accent) / 0)' },
+  }
+  const c = COLORS[color]
+  const good = trend == null ? null : invertTrend ? trend <= 0 : trend >= 0
 
-      {/* ══════════ ROW 4: TOP INTERFACES + HARDWARE (equal height) ══════════ */}
-      {snmp && (
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <Card className="flex flex-col">
-            <CardHeader className="pb-1">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted">Top Interfaces by Traffic</CardTitle>
-                <button onClick={() => setTab('interfaces')} className="text-[11px] text-primary hover:underline">View all</button>
-              </div>
-            </CardHeader>
-            <CardContent className="flex-1 p-0">
-              <Table>
-                <THead className="bg-surface2/40">
-                  <Tr><Th>Interface</Th><Th className="text-right">In</Th><Th className="text-right">Out</Th><Th className="w-24">Utilization</Th></Tr>
-                </THead>
-                <TBody>
-                  {topIfs.map((i) => {
-                    const pct = i.if_speed ? Math.min(100, (i.totalBps / Number(i.if_speed)) * 100) : 0
-                    return (
-                      <Tr key={i.id}>
-                        <Td className="text-sm font-medium">{i.if_name || i.if_descr}</Td>
-                        <Td className="text-right font-mono text-xs">{formatBps(i.inBps)}</Td>
-                        <Td className="text-right font-mono text-xs">{formatBps(i.outBps)}</Td>
-                        <Td>
-                          <div className="flex items-center gap-2">
-                            <div className="h-1.5 flex-1 rounded-full bg-surface2 overflow-hidden">
-                              <div className={`h-full rounded-full ${pct > 80 ? 'bg-danger' : pct > 50 ? 'bg-warning' : 'bg-primary'}`} style={{ width: `${pct}%` }} />
-                            </div>
-                            <span className="text-[10px] text-muted w-8 text-right">{pct.toFixed(0)}%</span>
-                          </div>
-                        </Td>
-                      </Tr>
-                    )
-                  })}
-                  {topIfs.length === 0 && <Tr><Td colSpan={4} className="py-4 text-center text-xs text-muted">No active traffic</Td></Tr>}
-                </TBody>
-              </Table>
-            </CardContent>
-          </Card>
+  return (
+    <div className="flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-3 transition-colors hover:border-border-strong">
+      <div className="flex items-center gap-2">
+        <span className={`inline-flex h-7 w-7 items-center justify-center rounded-full ${c.chip}`}>{icon}</span>
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">{label}</span>
+      </div>
 
-          <Card className="flex flex-col">
-            <CardHeader className="pb-1"><CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted">Hardware Health</CardTitle></CardHeader>
-            <CardContent className="flex-1">
-              {sensors && sensors.length > 0 ? (
-                <div className="space-y-2">
-                  {sensors.slice(0, 8).map((s) => (
-                    <div key={s.id} className="flex items-center justify-between border-b border-border/40 pb-1.5 last:border-0">
-                      <div className="flex items-center gap-2">
-                        <Badge variant={s.sensor_type === 'celsius' ? 'danger' : s.sensor_type === 'rpm' ? 'info' : s.sensor_type === 'voltsAC' || s.sensor_type === 'voltsDC' ? 'warning' : 'outline'} className="text-[9px] px-1.5 py-0">{s.sensor_type}</Badge>
-                        <span className="text-sm">{s.description || `Sensor ${s.sensor_index}`}</span>
-                      </div>
-                      <span className="text-xs text-muted">{s.unit || '—'}</span>
-                    </div>
-                  ))}
-                  {sensors.length > 8 && <div className="text-[11px] text-muted">+{sensors.length - 8} more sensors</div>}
-                </div>
-              ) : entities && entities.length > 0 ? (
-                <div className="space-y-2">
-                  <div className="text-[11px] text-muted mb-2">Hardware Inventory ({entities.length} components)</div>
-                  {entities.slice(0, 6).map((e) => (
-                    <div key={e.id} className="flex items-center justify-between border-b border-border/40 pb-1.5 last:border-0">
-                      <div className="flex items-center gap-2">
-                        <Badge variant="outline" className="text-[9px] px-1.5 py-0">{e.class || 'hw'}</Badge>
-                        <span className="text-sm">{e.name || '—'}</span>
-                      </div>
-                      <span className="font-mono text-[11px] text-muted">{e.serial_number || e.model_name || '—'}</span>
-                    </div>
-                  ))}
-                  {entities.length > 6 && <div className="text-[11px] text-muted">+{entities.length - 6} more</div>}
-                </div>
-              ) : (
-                <div className="py-4 text-center text-xs text-muted">No hardware data (ENTITY-MIB not supported by this device)</div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      )}
+      <div className="flex items-baseline gap-2">
+        <div className="text-[26px] font-bold leading-none tabular-nums" style={{ color: c.stroke }}>{value}</div>
+        {trend != null && (
+          <span className={`inline-flex items-center gap-0.5 text-[11px] font-medium tabular-nums ${good ? 'text-success' : 'text-danger'}`}>
+            {trend >= 0 ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />}
+            {Math.abs(trend).toFixed(trendUnit === 'ms' ? 0 : 1)}{trendUnit === 'ms' ? ' ms' : '%'}
+          </span>
+        )}
+      </div>
 
-      {/* ══════════ ROW 5: DETAILED PERFORMANCE CHARTS ══════════ */}
-      {(() => {
-        const rttChartPts = (pingData?.points || []).map((p) => ({ ts: new Date(p.timestamp).getTime(), value: p.rtt_ms }))
-        const lossChartPts = (pingData?.points || []).map((p) => ({ ts: new Date(p.timestamp).getTime(), value: p.packet_loss }))
-        const perfCharts: { title: string; unit: string; data: { ts: number; value: number }[]; color: string; gradientId: string }[] = []
-        if (rttChartPts.length > 2) perfCharts.push({ title: `Response Time (${rangeLabel})`, unit: ' ms', data: rttChartPts, color: 'rgb(var(--primary))', gradientId: 'perfRtt' })
-        if (cpu) perfCharts.push({ title: `CPU Usage (${rangeLabel})`, unit: '%', data: cpu.points, color: 'rgb(var(--info))', gradientId: 'perfCpu' })
-        if (mem) perfCharts.push({ title: `Memory Usage (${rangeLabel})`, unit: '%', data: mem.points, color: 'rgb(var(--warning))', gradientId: 'perfMem' })
-        if (lossChartPts.length > 2 && lossChartPts.some((p) => p.value > 0)) perfCharts.push({ title: `Packet Loss (${rangeLabel})`, unit: '%', data: lossChartPts, color: 'rgb(var(--danger))', gradientId: 'perfLoss' })
-        if (perfCharts.length === 0) return null
-        return (
-          <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <Zap className="h-4 w-4 text-primary" />
-              <span className="text-sm font-semibold">Detailed Performance</span>
-            </div>
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              {perfCharts.map((c) => <PerfChart key={c.gradientId} {...c} />)}
-            </div>
-          </div>
-        )
-      })()}
-
-      {/* ══════════ ROW 6: RECENT EVENTS ══════════ */}
-      {snmp && traps && traps.length > 0 && (
-        <Card>
-          <CardHeader className="pb-1">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-xs font-semibold uppercase tracking-wider text-muted">Recent Events (24h)</CardTitle>
-              <button onClick={() => setTab('traps')} className="text-[11px] text-primary hover:underline">View all</button>
-            </div>
-          </CardHeader>
-          <CardContent className="p-0">
-            <Table>
-              <THead className="bg-surface2/40">
-                <Tr><Th>Time</Th><Th>Severity</Th><Th>Trap OID</Th><Th>Message</Th></Tr>
-              </THead>
-              <TBody>
-                {traps.map((t, i) => (
-                  <Tr key={i}>
-                    <Td className="text-xs text-muted whitespace-nowrap">{relativeTime(t.timestamp)}</Td>
-                    <Td><Badge variant={t.severity === 'critical' ? 'danger' : t.severity === 'warning' ? 'warning' : 'info'} className="text-[10px]">{t.severity}</Badge></Td>
-                    <Td className="font-mono text-[11px] text-muted truncate max-w-[200px]">{t.trap_oid}</Td>
-                    <Td className="text-sm truncate max-w-[300px]">{t.message || t.trap_name || '—'}</Td>
-                  </Tr>
-                ))}
-              </TBody>
-            </Table>
-          </CardContent>
-        </Card>
+      {series && series.length > 1 && (
+        <MiniSparkline data={series} stroke={c.stroke} from={c.from} to={c.to} className="h-8 w-full" />
       )}
     </div>
   )
 }
 
-/* ── Radial Gauge SVG ───────────────────────────────────── */
-function RadialGauge({ value, color, size = 100 }: { value: number; color: string; size?: number }) {
-  const pct = Math.min(100, Math.max(0, value))
-  const r = (size - 12) / 2
-  const cx = size / 2
-  const cy = size / 2
-  const circumference = 2 * Math.PI * r
-  // Arc from 135° to 405° (270° sweep)
-  const arcLength = circumference * 0.75
-  const filledLength = arcLength * (pct / 100)
-  const startAngle = 135
+/* ════════════════════════════════════════════════════════════
+   Performance Overview — wide multi-line chart + bottom stats
+   ════════════════════════════════════════════════════════════ */
 
-  const polarToCartesian = (angle: number) => {
-    const rad = ((angle - 90) * Math.PI) / 180
-    return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) }
-  }
-
-  const describeArc = (start: number, end: number) => {
-    const s = polarToCartesian(start)
-    const e = polarToCartesian(end)
-    const largeArc = end - start > 180 ? 1 : 0
-    return `M ${s.x} ${s.y} A ${r} ${r} 0 ${largeArc} 1 ${e.x} ${e.y}`
-  }
-
-  const endAngle = startAngle + 270
-  const filledEnd = startAngle + (270 * pct) / 100
-
-  return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
-      {/* Background track */}
-      <path d={describeArc(startAngle, endAngle)} fill="none" stroke="rgb(var(--border)/0.4)" strokeWidth={8} strokeLinecap="round" />
-      {/* Filled arc */}
-      {pct > 0 && (
-        <path d={describeArc(startAngle, filledEnd)} fill="none" stroke={color} strokeWidth={8} strokeLinecap="round" style={{ filter: `drop-shadow(0 0 4px ${color})`, transition: 'all 0.6s ease' }} />
-      )}
-    </svg>
-  )
-}
-
-/* ── Gauge Card ─────────────────────────────────────────── */
-function GaugeCard({ label, value, unit, color, icon, data }: {
-  label: string; value: number | null; unit: string; color: string; icon: React.ReactNode; data?: { ts: number; value: number }[]
+function PerformanceOverviewCard({
+  series, stats, hoursRange, onHoursChange,
+}: {
+  series: Array<{ ts: number; cpu?: number; mem?: number }>
+  stats: { cpu: { avg: number; max: number }; mem: { avg: number; max: number } }
+  hoursRange: number
+  onHoursChange: (h: number) => void
 }) {
-  const pct = Math.min(100, Math.max(0, value ?? 0))
-  const avg = data?.length ? data.reduce((s, p) => s + p.value, 0) / data.length : null
-  const min = data?.length ? Math.min(...data.map((p) => p.value)) : null
-  const max = data?.length ? Math.max(...data.map((p) => p.value)) : null
-
-  const gaugeColor = unit === '%' && pct > 90 ? 'rgb(var(--danger))' : unit === '%' && pct > 75 ? 'rgb(var(--warning))' : color
+  const [open, setOpen] = useState(false)
+  const current = TIME_RANGES.find((r) => r.hours === hoursRange)?.label || 'Last 24 Hours'
+  const hasData = series.length > 1
 
   return (
     <Card>
       <CardContent className="p-4">
-        {/* Header */}
-        <div className="flex items-center gap-2 mb-3">
-          <div className="flex items-center justify-center h-7 w-7 rounded-lg bg-surface2/80" style={{ color }}>
-            {icon}
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Activity className="h-4 w-4 text-primary" />
+            <h3 className="text-sm font-semibold">Performance Overview</h3>
           </div>
-          <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">{label}</span>
-        </div>
-
-        {/* Gauge + Value */}
-        <div className="flex items-center justify-center">
           <div className="relative">
-            <RadialGauge value={pct} color={gaugeColor} size={110} />
-            <div className="absolute inset-0 flex flex-col items-center justify-center" style={{ paddingTop: 4 }}>
-              <span className="text-2xl font-bold leading-none" style={{ color: gaugeColor }}>{value != null ? value.toFixed(1) : '—'}</span>
-              <span className="text-[10px] text-muted mt-0.5">{unit}</span>
-            </div>
+            <button
+              onClick={() => setOpen((o) => !o)}
+              className="inline-flex items-center gap-2 rounded-md border border-border bg-surface2/40 px-2.5 py-1 text-xs text-text hover:bg-surface2"
+            >
+              {current}
+              <ArrowDown className="h-3 w-3 opacity-60" />
+            </button>
+            {open && (
+              <>
+                <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
+                <div className="absolute right-0 top-full z-30 mt-1 w-40 overflow-hidden rounded-md border border-border bg-surface shadow-lg">
+                  {TIME_RANGES.map((r) => (
+                    <button
+                      key={r.hours}
+                      onClick={() => { onHoursChange(r.hours); setOpen(false) }}
+                      className={`block w-full px-3 py-1.5 text-left text-xs hover:bg-surface2 ${
+                        hoursRange === r.hours ? 'text-primary' : 'text-text'
+                      }`}
+                    >
+                      {r.label}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         </div>
 
-        {/* Stats Row */}
-        <div className="mt-2 grid grid-cols-3 gap-1 text-center">
-          <div className="rounded bg-surface2/40 py-1">
-            <div className="text-[9px] text-muted uppercase">Min</div>
-            <div className="text-xs font-semibold">{min != null ? min.toFixed(1) : '—'}</div>
-          </div>
-          <div className="rounded bg-surface2/40 py-1">
-            <div className="text-[9px] text-muted uppercase">Avg</div>
-            <div className="text-xs font-semibold">{avg != null ? avg.toFixed(1) : '—'}</div>
-          </div>
-          <div className="rounded bg-surface2/40 py-1">
-            <div className="text-[9px] text-muted uppercase">Max</div>
-            <div className="text-xs font-semibold">{max != null ? max.toFixed(1) : '—'}</div>
-          </div>
+        {/* Legend */}
+        <div className="flex flex-wrap items-center gap-4 text-[11px] text-muted">
+          <LegendDot color="rgb(var(--info))" label="CPU (%)" />
+          <LegendDot color="rgb(var(--accent))" label="Memory (%)" />
         </div>
 
-        {/* Sparkline */}
-        {data && data.length > 2 && (
-          <div className="h-10 mt-2 rounded-md bg-surface2/20 px-1">
+        <div className="mt-2 h-52">
+          {hasData ? (
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={data.slice(-40)}>
-                <defs>
-                  <linearGradient id={`spark-${label.replace(/\s/g, '')}`} x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor={color} stopOpacity={0.15} />
-                    <stop offset="100%" stopColor={color} stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <Area type="monotone" dataKey="value" stroke={color} fill={`url(#spark-${label.replace(/\s/g, '')})`} strokeWidth={1.5} dot={false} />
-              </AreaChart>
+              <LineChart data={series} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--border)/0.25)" vertical={false} />
+                <XAxis
+                  dataKey="ts"
+                  tickFormatter={(ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
+                  axisLine={false}
+                  tickLine={false}
+                  minTickGap={30}
+                />
+                <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} width={30} axisLine={false} tickLine={false} tickFormatter={(v) => `${v}%`} />
+                <Tooltip {...ttStyle()} />
+                <Line type="monotone" dataKey="cpu" stroke="rgb(var(--info))" strokeWidth={1.8} dot={false} connectNulls />
+                <Line type="monotone" dataKey="mem" stroke="rgb(var(--accent))" strokeWidth={1.8} dot={false} connectNulls />
+              </LineChart>
             </ResponsiveContainer>
-          </div>
-        )}
+          ) : (
+            <div className="flex h-full items-center justify-center text-xs text-muted">Collecting metrics…</div>
+          )}
+        </div>
+
+        {/* Bottom stats */}
+        <div className="mt-3 grid grid-cols-2 gap-3 border-t border-border/50 pt-3 text-xs">
+          <StatBlock dotColor="rgb(var(--info))" label="CPU" avg={`${stats.cpu.avg.toFixed(0)}%`} max={`${stats.cpu.max.toFixed(0)}%`} />
+          <StatBlock dotColor="rgb(var(--accent))" label="Memory" avg={`${stats.mem.avg.toFixed(0)}%`} max={`${stats.mem.max.toFixed(0)}%`} />
+        </div>
       </CardContent>
     </Card>
   )
 }
 
-/* ── Performance Chart (larger) ─────────────────────────── */
-function PerfChart({ title, unit, data, color, gradientId = 'perfGrad' }: { title: string; unit: string; data: { ts: number; value: number }[]; color: string; gradientId?: string }) {
-  if (!data || data.length < 2) return null
-  const current = data[data.length - 1].value
-  const avg = data.reduce((s, p) => s + p.value, 0) / data.length
-  const max = Math.max(...data.map((p) => p.value))
-  const min = Math.min(...data.map((p) => p.value))
+function StatBlock({ dotColor, label, avg, max }: { dotColor: string; label: string; avg: string; max: string }) {
+  return (
+    <div>
+      <div className="flex items-center gap-1.5">
+        <span className="h-2 w-2 rounded-full" style={{ background: dotColor }} />
+        <span className="text-[11px] font-semibold">{label}</span>
+      </div>
+      <div className="mt-1 text-[11px] text-muted">Avg: <span className="font-medium text-text tabular-nums">{avg}</span></div>
+      <div className="text-[11px] text-muted">Max: <span className="font-medium text-text tabular-nums">{max}</span></div>
+    </div>
+  )
+}
+
+function LegendDot({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="h-2 w-2 rounded-full" style={{ background: color }} />
+      <span>{label}</span>
+    </span>
+  )
+}
+
+/* ════════════════════════════════════════════════════════════
+   Interface Status — compact table
+   ════════════════════════════════════════════════════════════ */
+
+function InterfaceStatusCard({
+  ifs, ifMetrics, showAll, onToggleShowAll,
+}: {
+  ifs: any[]
+  ifMetrics: Record<string, any[]>
+  showAll: boolean
+  onToggleShowAll: () => void
+}) {
+  const lastBps = (idx: number) => {
+    const s = ifMetrics[idx]
+    if (!s?.length) return { in: 0, out: 0 }
+    const l = s[s.length - 1]
+    return { in: l.in_bps || 0, out: l.out_bps || 0 }
+  }
+
+  const allRows = useMemo(() => (
+    ifs
+      .map((i) => {
+        const { in: inBps, out: outBps } = lastBps(i.if_index)
+        const speed = Number(i.if_speed) || 0
+        const util = speed > 0 ? Math.min(100, ((inBps + outBps) / speed) * 100) : 0
+        const errors = Number(i.in_errors || 0) + Number(i.out_errors || 0)
+        return { ...i, inBps, outBps, util, errors, total: inBps + outBps }
+      })
+      .sort((a, b) => {
+        // Active-up-with-traffic first, then down, then inactive.
+        if ((a.oper_status === 'up') !== (b.oper_status === 'up')) return a.oper_status === 'up' ? -1 : 1
+        return b.total - a.total
+      })
+  ), [ifs, ifMetrics])
+
+  const rows = showAll ? allRows : allRows.slice(0, 7)
+  const hasMore = allRows.length > 7
 
   return (
-    <Card>
-      <CardHeader className="pb-1">
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-sm font-semibold">{title}</CardTitle>
-          <div className="flex items-center gap-3">
-            <span className="text-[10px] text-muted">Current:</span>
-            <span className="text-sm font-bold" style={{ color }}>{current.toFixed(1)}{unit}</span>
-          </div>
+    <Card className="flex flex-col">
+      <CardContent className="flex flex-1 flex-col p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold">Interface Status <span className="text-[11px] font-normal text-muted">({allRows.length})</span></h3>
+          {hasMore ? (
+            <button
+              type="button"
+              onClick={onToggleShowAll}
+              className="text-xs text-primary hover:underline"
+            >
+              {showAll ? 'Show less' : `View all ${allRows.length}`}
+            </button>
+          ) : (
+            <span className="text-xs text-muted">All shown</span>
+          )}
         </div>
-      </CardHeader>
-      <CardContent>
-        {/* Mini stats */}
-        <div className="flex items-center gap-4 mb-3 text-[10px] text-muted">
-          <span>Min: <b className="text-text">{min.toFixed(1)}{unit}</b></span>
-          <span>Avg: <b className="text-text">{avg.toFixed(1)}{unit}</b></span>
-          <span>Max: <b className="text-text">{max.toFixed(1)}{unit}</b></span>
-        </div>
-        <div className="h-36 rounded-lg bg-surface2/20 p-1">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={data}>
-              <defs>
-                <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={color} stopOpacity={0.15} />
-                  <stop offset="100%" stopColor={color} stopOpacity={0.01} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--border)/0.3)" vertical={false} />
-              <XAxis dataKey="ts" tickFormatter={(ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} domain={[0, 'auto']} width={38} axisLine={false} tickLine={false} />
-              <Tooltip {...ttStyle()} formatter={(v: any) => [`${Number(v).toFixed(1)}${unit}`, title.split(' (')[0]]} />
-              <Area type="monotone" dataKey="value" stroke={color} fill={`url(#${gradientId})`} strokeWidth={2} dot={false} activeDot={{ r: 3, strokeWidth: 0, fill: color }} />
-            </AreaChart>
-          </ResponsiveContainer>
+
+        <div className="overflow-hidden">
+          <table className="w-full text-[11px]">
+            <thead className="text-[10px] uppercase tracking-wider text-muted">
+              <tr className="border-b border-border/50">
+                <th className="pb-1.5 pr-2 text-left font-medium">Interface</th>
+                <th className="pb-1.5 px-1 text-left font-medium">Status</th>
+                <th className="pb-1.5 px-1 text-left font-medium">Speed</th>
+                <th className="pb-1.5 px-1 text-right font-medium">In</th>
+                <th className="pb-1.5 px-1 text-right font-medium">Out</th>
+                <th className="pb-1.5 px-1 text-right font-medium">Err</th>
+                <th className="pb-1.5 pl-1 text-right font-medium">Util</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((i) => {
+                const up = i.oper_status === 'up'
+                const warn = up && i.util > 80
+                const speedLabel = formatSpeed(i.if_speed)
+                return (
+                  <tr key={i.id || i.if_index} className="border-b border-border/30 last:border-0">
+                    <td className="py-2 pr-2">
+                      <div className="truncate font-medium text-text" title={i.if_name || i.if_descr}>{i.if_name || i.if_descr}</div>
+                    </td>
+                    <td className="py-2 px-1">
+                      <span className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
+                        !up ? 'bg-danger/15 text-danger'
+                          : warn ? 'bg-warning/15 text-warning'
+                          : 'bg-success/15 text-success'
+                      }`}>
+                        <span className={`h-1 w-1 rounded-full ${!up ? 'bg-danger' : warn ? 'bg-warning' : 'bg-success'}`} />
+                        {up ? (warn ? 'Warn' : 'Up') : 'Down'}
+                      </span>
+                    </td>
+                    <td className="py-2 px-1 text-muted">{speedLabel}</td>
+                    <td className="py-2 px-1 text-right font-mono text-[10px] tabular-nums">{formatBpsShort(i.inBps)}</td>
+                    <td className="py-2 px-1 text-right font-mono text-[10px] tabular-nums">{formatBpsShort(i.outBps)}</td>
+                    <td className="py-2 px-1 text-right font-mono text-[10px] tabular-nums">{i.errors}</td>
+                    <td className="py-2 pl-1">
+                      <div className="flex items-center justify-end gap-1.5">
+                        <div className="h-1.5 w-12 overflow-hidden rounded-full bg-surface2">
+                          <div
+                            className={`h-full rounded-full ${
+                              i.util > 80 ? 'bg-danger' : i.util > 50 ? 'bg-warning' : 'bg-success'
+                            }`}
+                            style={{ width: `${Math.max(2, i.util)}%` }}
+                          />
+                        </div>
+                        <span className="w-7 text-right text-[10px] tabular-nums">{i.util.toFixed(0)}%</span>
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
+              {rows.length === 0 && (
+                <tr><td colSpan={7} className="py-6 text-center text-muted">No interfaces discovered yet</td></tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </CardContent>
     </Card>
   )
+}
+
+/* ════════════════════════════════════════════════════════════
+   Health Score — gauge + chip row + Recent Alerts
+   ════════════════════════════════════════════════════════════ */
+
+function HealthScoreCard({
+  score, alerts, metrics, sensors, memVal, onViewDetails, onViewAllAlerts,
+}: {
+  score: number
+  alerts: Array<{ severity: 'critical' | 'warning' | 'info' | 'success'; title: string; ago: string }>
+  metrics: Record<string, { points: { ts: number; value: number }[] }>
+  sensors: any[]
+  memVal: number | null
+  onViewDetails: () => void
+  onViewAllAlerts: () => void
+}) {
+  const color =
+    score >= 80 ? 'rgb(var(--success))'
+    : score >= 60 ? 'rgb(var(--warning))'
+    : 'rgb(var(--danger))'
+  const label =
+    score >= 80 ? 'Excellent' : score >= 60 ? 'Good' : score >= 40 ? 'Fair' : 'Poor'
+
+  // Summary health chips — only render chips for sensors that are actually
+  // present. No hardcoded "Normal" / "OK" fallbacks.
+  const tempVal = latestSensor(metrics, sensors, ['temperature', 'celsius'])
+  const fanVal = latestSensor(metrics, sensors, ['fan', 'rpm'])
+  const voltVal = latestSensor(metrics, sensors, ['voltage', 'volts'])
+
+  type ChipTone = 'success' | 'warning' | 'danger' | 'info' | 'accent' | 'muted'
+  const chips: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; value: string; tone: ChipTone }> = []
+  if (tempVal != null) {
+    chips.push({
+      icon: Thermometer,
+      label: 'Temperature',
+      value: `${tempVal.toFixed(0)}°C`,
+      tone: tempVal > 70 ? 'danger' : tempVal > 55 ? 'warning' : 'success',
+    })
+  }
+  if (voltVal != null) {
+    chips.push({
+      icon: Power,
+      label: 'Voltage',
+      value: `${voltVal.toFixed(1)} V`,
+      tone: 'success',
+    })
+  }
+  if (fanVal != null) {
+    chips.push({
+      icon: Fan,
+      label: 'Fan',
+      value: fanVal > 100 ? `${fanVal.toFixed(0)} rpm` : `${fanVal.toFixed(0)}%`,
+      tone: 'info',
+    })
+  }
+  if (memVal != null) {
+    chips.push({
+      icon: MemoryStick,
+      label: 'Memory',
+      value: `${memVal.toFixed(0)}%`,
+      tone: memVal > 85 ? 'danger' : memVal > 70 ? 'warning' : 'accent',
+    })
+  }
+
+  return (
+    <Card className="flex flex-col">
+      <CardContent className="flex flex-1 flex-col p-4">
+        <div className="mb-2 flex items-center justify-between">
+          <h3 className="text-sm font-semibold">Health Score</h3>
+          <button
+            type="button"
+            onClick={onViewDetails}
+            className="text-xs text-primary hover:underline"
+          >
+            View Details
+          </button>
+        </div>
+
+        <div className="flex items-center gap-4">
+          <div className="flex flex-col items-center">
+            <HealthGauge value={score} color={color} />
+            <div className="mt-1 text-[11px] font-semibold" style={{ color }}>{label}</div>
+          </div>
+          <div className="grid flex-1 grid-cols-2 gap-2">
+            {chips.length === 0 ? (
+              <div className="col-span-2 rounded-md border border-border bg-surface2/30 px-3 py-3 text-center text-[11px] text-muted">
+                No sensor data
+              </div>
+            ) : (
+              chips.map((c, i) => <ChipTile key={i} {...c} />)
+            )}
+          </div>
+        </div>
+
+        {/* Recent Alerts */}
+        <div className="mt-4 border-t border-border/60 pt-3">
+          <div className="mb-2 flex items-center justify-between">
+            <h4 className="text-xs font-semibold">Recent Alerts</h4>
+            <button
+              type="button"
+              onClick={onViewAllAlerts}
+              className="text-[11px] text-primary hover:underline"
+            >
+              View All
+            </button>
+          </div>
+          <div className="space-y-1.5">
+            {alerts.length === 0 && (
+              <div className="py-3 text-center text-[11px] text-muted">No recent alerts</div>
+            )}
+            {alerts.map((a, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <span className={`inline-flex items-center gap-0.5 rounded-sm px-1 text-[9px] font-semibold uppercase tracking-wider ${
+                  a.severity === 'critical' ? 'bg-danger/15 text-danger'
+                  : a.severity === 'warning' ? 'bg-warning/15 text-warning'
+                  : a.severity === 'success' ? 'bg-success/15 text-success'
+                  : 'bg-info/15 text-info'
+                }`}>
+                  {a.severity === 'critical' ? 'CRIT'
+                  : a.severity === 'warning' ? 'WARN'
+                  : a.severity === 'success' ? 'OK'
+                  : 'INFO'}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-[11px]" title={a.title}>{a.title}</span>
+                <span className="shrink-0 text-[10px] text-muted">{a.ago}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function ChipTile({ icon: Icon, label, value, tone }: {
+  icon: React.ComponentType<{ className?: string }>
+  label: string
+  value: string
+  tone: 'success' | 'warning' | 'danger' | 'info' | 'accent' | 'muted'
+}) {
+  const MAP: Record<typeof tone, string> = {
+    success: 'border-success/30 bg-success/5 text-success',
+    warning: 'border-warning/30 bg-warning/5 text-warning',
+    danger:  'border-danger/30 bg-danger/5 text-danger',
+    info:    'border-info/30 bg-info/5 text-info',
+    accent:  'border-accent/30 bg-accent/5 text-accent',
+    muted:   'border-border bg-surface2 text-muted',
+  }
+  return (
+    <div className={`flex flex-col items-center justify-center gap-0.5 rounded-lg border px-2 py-2 text-center ${MAP[tone]}`}>
+      <Icon className="h-3.5 w-3.5" />
+      <div className="text-[13px] font-bold leading-tight tabular-nums">{value}</div>
+      <div className="text-[9px] font-medium uppercase tracking-wider opacity-80">{label}</div>
+    </div>
+  )
+}
+
+function HealthGauge({ value, color }: { value: number; color: string }) {
+  const pct = Math.min(100, Math.max(0, value))
+  const size = 120
+  const r = (size - 12) / 2
+  const cx = size / 2
+  const cy = size / 2
+  const start = 135
+  const end = 405
+  const sweep = end - start
+  const filledEnd = start + sweep * (pct / 100)
+
+  const polar = (angle: number) => {
+    const rad = ((angle - 90) * Math.PI) / 180
+    return { x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad) }
+  }
+  const arc = (a: number, b: number) => {
+    const s = polar(a)
+    const e = polar(b)
+    const large = b - a > 180 ? 1 : 0
+    return `M ${s.x} ${s.y} A ${r} ${r} 0 ${large} 1 ${e.x} ${e.y}`
+  }
+
+  return (
+    <div className="relative" style={{ width: size, height: size }}>
+      <svg width={size} height={size}>
+        <path d={arc(start, end)} fill="none" stroke="rgb(var(--surface2))" strokeWidth={9} strokeLinecap="round" />
+        {pct > 0 && (
+          <path
+            d={arc(start, filledEnd)}
+            fill="none"
+            stroke={color}
+            strokeWidth={9}
+            strokeLinecap="round"
+            style={{ filter: `drop-shadow(0 0 4px ${color})`, transition: 'all 0.6s ease' }}
+          />
+        )}
+      </svg>
+      <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center pt-1">
+        <div className="text-[30px] font-bold leading-none" style={{ color }}>{pct.toFixed(0)}</div>
+        <div className="text-[9px] tabular-nums text-muted">/100</div>
+      </div>
+    </div>
+  )
+}
+
+/* Connected Topology — removed. Real CDP/LLDP neighbour discovery is
+   not yet implemented, so rather than show a hard-coded diagram we hide
+   this card entirely. A future TODO is to walk LLDP-MIB or CDP-MIB on
+   each poll and reconstruct real neighbours. */
+
+/* ════════════════════════════════════════════════════════════
+   Device Inventory & Configuration
+   ════════════════════════════════════════════════════════════ */
+
+function InventoryConfigCard({
+  device, entities, onDetails,
+}: { device: any; entities: any[]; onDetails: () => void }) {
+  const snmp = !!device.snmp_enabled
+  const rows: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; value: React.ReactNode }> = [
+    { icon: Network, label: 'Management IP', value: device.ip_address || '—' },
+    { icon: Shield, label: 'SNMP', value: snmp ? `v${device.snmp_version} · port ${device.snmp_port}` : 'Disabled' },
+    { icon: Wifi, label: 'Ping', value: device.ping_enabled ? `Enabled · ${device.ping_interval}s` : 'Disabled' },
+    { icon: HardDrive, label: 'Vendor / Model', value: [device.vendor, device.model].filter(Boolean).join(' ') || '—' },
+    { icon: FileText, label: 'OS Version', value: device.os_version || '—' },
+    { icon: Info, label: 'System OID', value: <span className="font-mono text-[10px] break-all">{device.sys_object_id || '—'}</span> },
+    { icon: Layers, label: 'Hardware', value: entities.length > 0 ? `${entities.length} component${entities.length === 1 ? '' : 's'}` : '—' },
+    { icon: Clock, label: 'Last Updated', value: relativeTime(device.updated_at || device.last_seen) },
+  ]
+  const tags: string[] = Array.isArray(device.tags) ? device.tags : []
+
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold">Device Inventory &amp; Configuration</h3>
+          <button
+            type="button"
+            onClick={onDetails}
+            disabled={entities.length === 0}
+            className="text-xs text-primary hover:underline disabled:text-muted disabled:no-underline disabled:cursor-not-allowed"
+          >
+            Details
+          </button>
+        </div>
+        <div className="space-y-1.5 text-[11px]">
+          {rows.map((r, i) => (
+            <div key={i} className="flex items-start justify-between gap-2 border-b border-border/30 pb-1.5 last:border-0">
+              <span className="flex shrink-0 items-center gap-2 text-muted">
+                <r.icon className="h-3.5 w-3.5" />
+                {r.label}
+              </span>
+              <span className="min-w-0 truncate text-right font-medium">{r.value}</span>
+            </div>
+          ))}
+          <div className="flex items-start justify-between gap-2 pt-1">
+            <span className="flex items-center gap-2 text-muted">
+              <TagIcon className="h-3.5 w-3.5" />
+              Tags
+            </span>
+            <div className="flex flex-wrap justify-end gap-1">
+              {tags.length === 0 ? (
+                <span className="text-muted">—</span>
+              ) : (
+                tags.slice(0, 4).map((t) => (
+                  <span key={t} className="rounded-full border border-border bg-surface2 px-1.5 py-0.5 text-[9px] font-medium">{t}</span>
+                ))
+              )}
+              {tags.length > 4 && (
+                <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[9px] font-medium text-primary">+{tags.length - 4}</span>
+              )}
+            </div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+/* ════════════════════════════════════════════════════════════
+   Recent Events / Activity Log — vertical timeline
+   ════════════════════════════════════════════════════════════ */
+
+function ActivityLogCard({ traps, onViewAll }: { traps: any[]; onViewAll: () => void }) {
+  const events = traps.slice(0, 5).map((t) => ({
+    icon: iconForTrap(t),
+    tone: toneForSeverity(t.severity),
+    ago: relativeTime(t.timestamp),
+    title: t.trap_name || 'SNMP trap',
+    subtitle: t.message || t.trap_oid || '',
+  }))
+
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold">Recent Events / Activity Log</h3>
+          <button
+            type="button"
+            onClick={onViewAll}
+            disabled={events.length === 0}
+            className="text-xs text-primary hover:underline disabled:text-muted disabled:no-underline disabled:cursor-not-allowed"
+          >
+            View All
+          </button>
+        </div>
+        <div className="relative">
+          {/* Vertical timeline line */}
+          {events.length > 0 && <div className="absolute left-[14px] top-2 bottom-2 w-px bg-border/60" />}
+          <div className="space-y-3">
+            {events.length === 0 && (
+              <div className="flex flex-col items-center gap-1 py-6 text-center">
+                <Info className="h-5 w-5 text-muted/60" />
+                <div className="text-[11px] font-medium text-text">No events in last 24 hours</div>
+                <div className="text-[10px] text-muted">SNMP traps will appear here</div>
+              </div>
+            )}
+            {events.map((e, i) => {
+              const MAP: Record<typeof e.tone, string> = {
+                success: 'bg-success/15 text-success ring-success/30',
+                warning: 'bg-warning/15 text-warning ring-warning/30',
+                danger:  'bg-danger/15 text-danger ring-danger/30',
+                info:    'bg-info/15 text-info ring-info/30',
+                accent:  'bg-accent/15 text-accent ring-accent/30',
+              }
+              const Icon = e.icon
+              return (
+                <div key={i} className="relative flex items-start gap-3 pl-0">
+                  <span className={`relative z-10 flex h-7 w-7 shrink-0 items-center justify-center rounded-full ring-2 ${MAP[e.tone]}`}>
+                    <Icon className="h-3.5 w-3.5" />
+                  </span>
+                  <div className="min-w-0 flex-1 pt-0.5">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="truncate text-[11px] font-semibold" title={e.title}>{e.title}</div>
+                      <div className="shrink-0 text-[10px] text-muted">{e.ago}</div>
+                    </div>
+                    {e.subtitle && (
+                      <div className="truncate text-[10px] text-muted" title={String(e.subtitle)}>{e.subtitle}</div>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function iconForTrap(t: any): React.ComponentType<{ className?: string }> {
+  const s = (t.trap_name || t.message || '').toLowerCase()
+  if (s.includes('config')) return SettingsIcon
+  if (s.includes('interface') || s.includes('link')) return Network
+  if (s.includes('backup')) return Save
+  if (s.includes('poll') || s.includes('snmp')) return Radar
+  if (s.includes('health')) return CheckCircle2
+  return Info
+}
+
+/* ════════════════════════════════════════════════════════════
+   Environmental / System Stats + Quick Actions
+   ════════════════════════════════════════════════════════════ */
+
+function EnvironmentalActionsCard({
+  deviceId, snmpEnabled, metrics, sensors, lastBw,
+}: {
+  deviceId: string
+  snmpEnabled: boolean
+  metrics: Record<string, { points: { ts: number; value: number }[] }>
+  sensors: any[]
+  lastBw: number
+}) {
+  const tempVal = latestSensor(metrics, sensors, ['temperature', 'celsius'])
+  const voltVal = latestSensor(metrics, sensors, ['voltage', 'volts'])
+  const fanVal = latestSensor(metrics, sensors, ['fan', 'rpm'])
+  const sesCount = latestFromMetrics(metrics, ['session', 'sessions'])
+
+  // Persisted last-run state for Ping Test + SNMP Test (per-device).
+  const pingKey = `zp-ping-last-${deviceId}`
+  const snmpKey = `zp-snmp-last-${deviceId}`
+  const [lastPing, setLastPing] = useState<LastRun | null>(() => loadLastRun(pingKey))
+  const [lastSnmp, setLastSnmp] = useState<LastRun | null>(() => loadLastRun(snmpKey))
+  // Tick every 15s so the "1m ago" labels stay fresh.
+  const [, setTick] = useState(0)
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((t) => t + 1), 15_000)
+    return () => window.clearInterval(id)
+  }, [])
+
+  const [snmpTestOpen, setSnmpTestOpen] = useState(false)
+  const [snmpResult, setSnmpResult] = useState<any | null>(null)
+  const snmpTest = useMutation({
+    mutationFn: async () => (await api.post(`/devices/${deviceId}/snmp-test`)).data,
+    onMutate: () => { setSnmpResult(null); setSnmpTestOpen(true) },
+    onSuccess: (data) => {
+      setSnmpResult(data)
+      const run: LastRun = {
+        at: new Date().toISOString(),
+        ok: !!data.ok,
+        summary: data.ok ? 'responded' : (data.reason || 'failed'),
+      }
+      saveLastRun(snmpKey, run); setLastSnmp(run)
+    },
+    onError: (e: any) => {
+      const msg = apiErrorMessage(e)
+      setSnmpResult({ ok: false, reason: msg, snmp_responded: false })
+      const run: LastRun = { at: new Date().toISOString(), ok: false, summary: msg }
+      saveLastRun(snmpKey, run); setLastSnmp(run)
+    },
+  })
+
+  const pingTest = useMutation({
+    mutationFn: async () => (await api.post(`/devices/${deviceId}/ping-test`)).data,
+    onSuccess: (data) => {
+      const summary = data.ok
+        ? `${data.received}/${data.transmitted} · ${data.rtt_avg_ms != null ? data.rtt_avg_ms.toFixed(1) + ' ms' : '—'}`
+        : (data.reason || 'failed')
+      const run: LastRun = { at: new Date().toISOString(), ok: !!data.ok, summary }
+      saveLastRun(pingKey, run); setLastPing(run)
+      if (data.ok) toast.success('Ping succeeded', `${data.received}/${data.transmitted} replies · ${data.rtt_avg_ms?.toFixed(1) || '—'} ms`)
+      else toast.error('Ping failed', data.reason || 'no reply')
+    },
+    onError: (e: any) => {
+      const msg = apiErrorMessage(e)
+      const run: LastRun = { at: new Date().toISOString(), ok: false, summary: msg }
+      saveLastRun(pingKey, run); setLastPing(run)
+      toast.error('Ping failed', msg)
+    },
+  })
+
+  // Environmental tiles — only render what we actually have.
+  type Tone = 'success' | 'warning' | 'danger' | 'info' | 'accent'
+  const tiles: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; value: string; unit?: string; tone: Tone }> = []
+  if (tempVal != null) {
+    tiles.push({ icon: Thermometer, label: 'Temperature', value: tempVal.toFixed(0), unit: '°C', tone: tempVal > 70 ? 'danger' : tempVal > 55 ? 'warning' : 'success' })
+  }
+  if (voltVal != null) {
+    tiles.push({ icon: Zap, label: 'Voltage', value: voltVal.toFixed(1), unit: 'V', tone: 'success' })
+  }
+  if (fanVal != null) {
+    const fanPct = fanVal > 100 ? null : fanVal
+    tiles.push({
+      icon: Fan, label: 'Fan Speed',
+      value: fanPct != null ? fanPct.toFixed(0) : fanVal.toFixed(0),
+      unit: fanPct != null ? '%' : 'rpm',
+      tone: 'info',
+    })
+  }
+
+  // System stats — throughput is always available (derived from iface counters);
+  // session count and routing table come from vendor MIBs if collected.
+  const bwMbps = lastBw / 1_000_000
+  const stats: Array<{ label: string; value: string }> = []
+  if (sesCount != null) {
+    stats.push({ label: 'Active Sessions', value: sesCount.toLocaleString() })
+  }
+  if (lastBw > 0) {
+    stats.push({ label: 'Throughput', value: `${bwMbps.toFixed(bwMbps < 1 ? 2 : 0)} Mbps` })
+  }
+
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold">Environmental / System Stats</h3>
+          <span className="text-[10px] text-muted">{sensors.length} sensor{sensors.length === 1 ? '' : 's'}</span>
+        </div>
+
+        {/* Sensor tiles — only real values */}
+        {tiles.length > 0 ? (
+          <div className={`grid gap-2 ${tiles.length === 1 ? 'grid-cols-1' : tiles.length === 2 ? 'grid-cols-2' : 'grid-cols-3'}`}>
+            {tiles.map((t, i) => <EnvSensorTile key={i} {...t} />)}
+          </div>
+        ) : (
+          <div className="rounded-md border border-border bg-surface2/30 px-3 py-3 text-center text-[11px] text-muted">
+            No environmental sensors reported
+          </div>
+        )}
+
+        {/* System stats — only if we have real data */}
+        {stats.length > 0 && (
+          <div className={`mt-2 grid gap-2 ${stats.length === 1 ? 'grid-cols-1' : 'grid-cols-2'}`}>
+            {stats.map((t, i) => (
+              <div key={i} className="rounded-lg border border-border bg-surface2/40 p-2 text-center">
+                <div className="text-[9px] font-semibold uppercase tracking-wider text-muted">{t.label}</div>
+                <div className="mt-0.5 text-lg font-bold leading-tight tabular-nums">{t.value}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Quick actions */}
+        <div className="mt-4 border-t border-border/60 pt-3">
+          <div className="mb-2 text-xs font-semibold">Quick Actions</div>
+          <div className="grid grid-cols-2 gap-2">
+            <ActionCard
+              icon={Activity}
+              label="Ping Test"
+              lastRun={lastPing}
+              loading={pingTest.isPending}
+              tone="primary"
+              onRun={() => pingTest.mutate()}
+            />
+            <ActionCard
+              icon={Shield}
+              label="SNMP Test"
+              lastRun={lastSnmp}
+              loading={snmpTest.isPending}
+              tone="outline"
+              disabled={!snmpEnabled}
+              disabledReason={!snmpEnabled ? 'SNMP is disabled' : undefined}
+              onRun={() => snmpTest.mutate()}
+            />
+            <Button variant="outline" size="sm" className="h-8 justify-center">
+              <Save className="h-3.5 w-3.5" /> Backup Config
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 justify-center border-warning/30 bg-warning/5 text-warning hover:bg-warning/10 hover:text-warning"
+            >
+              <BellRing className="h-3.5 w-3.5" /> Acknowledge
+            </Button>
+          </div>
+        </div>
+
+        <SnmpTestDialog
+          open={snmpTestOpen}
+          onOpenChange={setSnmpTestOpen}
+          running={snmpTest.isPending}
+          result={snmpResult}
+          onRetest={() => snmpTest.mutate()}
+        />
+      </CardContent>
+    </Card>
+  )
+}
+
+type LastRun = { at: string; ok: boolean; summary: string }
+
+function loadLastRun(key: string): LastRun | null {
+  try {
+    const raw = localStorage.getItem(key)
+    if (!raw) return null
+    const v = JSON.parse(raw)
+    if (!v || typeof v.at !== 'string') return null
+    return v as LastRun
+  } catch {
+    return null
+  }
+}
+
+function saveLastRun(key: string, value: LastRun) {
+  try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* ignore */ }
+}
+
+function ActionCard({
+  icon: Icon, label, lastRun, loading, tone, disabled, disabledReason, onRun,
+}: {
+  icon: React.ComponentType<{ className?: string }>
+  label: string
+  lastRun: LastRun | null
+  loading: boolean
+  tone: 'primary' | 'outline'
+  disabled?: boolean
+  disabledReason?: string
+  onRun: () => void
+}) {
+  const base = 'group flex flex-col justify-between rounded-md border p-2.5 text-left transition-colors'
+  const toneClasses = tone === 'primary'
+    ? 'border-primary/40 bg-primary/10 hover:bg-primary/15 text-primary'
+    : 'border-border bg-surface2/40 hover:bg-surface2 text-text'
+  const canRun = !disabled && !loading
+  return (
+    <button
+      type="button"
+      onClick={onRun}
+      disabled={!canRun}
+      title={disabledReason}
+      className={`${base} ${toneClasses} disabled:cursor-not-allowed disabled:opacity-60`}
+    >
+      <span className="flex items-center justify-between gap-2">
+        <span className="flex items-center gap-1.5 text-[12px] font-semibold">
+          {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5" />}
+          {loading ? 'Running…' : label}
+        </span>
+        {lastRun && (
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${lastRun.ok ? 'bg-success' : 'bg-danger'}`}
+            title={lastRun.ok ? 'Last run OK' : 'Last run failed'}
+          />
+        )}
+      </span>
+      <span className="mt-1 block text-[10px] leading-tight">
+        {disabled ? (
+          <span className="text-muted">{disabledReason}</span>
+        ) : lastRun ? (
+          <>
+            <span className="text-muted">Last: </span>
+            <span className={lastRun.ok ? 'text-text' : 'text-danger'}>{relativeTime(lastRun.at)}</span>
+            {lastRun.summary && (
+              <span className="block truncate text-muted" title={lastRun.summary}>{lastRun.summary}</span>
+            )}
+          </>
+        ) : (
+          <span className="text-muted">Never run</span>
+        )}
+      </span>
+    </button>
+  )
+}
+
+function EnvSensorTile({
+  icon: Icon, label, value, unit, tone,
+}: {
+  icon: React.ComponentType<{ className?: string }>
+  label: string; value: string; unit?: string
+  tone: 'success' | 'warning' | 'danger' | 'info' | 'accent'
+}) {
+  const MAP: Record<typeof tone, string> = {
+    success: 'border-success/30 bg-success/5 text-success',
+    warning: 'border-warning/30 bg-warning/5 text-warning',
+    danger:  'border-danger/30 bg-danger/5 text-danger',
+    info:    'border-info/30 bg-info/5 text-info',
+    accent:  'border-accent/30 bg-accent/5 text-accent',
+  }
+  return (
+    <div className={`rounded-lg border px-2 py-2 text-center ${MAP[tone]}`}>
+      <Icon className="mx-auto h-3.5 w-3.5" />
+      <div className="mt-1 flex items-baseline justify-center gap-0.5">
+        <span className="text-base font-bold leading-none tabular-nums">{value}</span>
+        {unit && <span className="text-[9px]">{unit}</span>}
+      </div>
+      <div className="mt-0.5 text-[9px] uppercase tracking-wider opacity-80">{label}</div>
+    </div>
+  )
+}
+
+/* ════════════════════════════════════════════════════════════
+   SNMP Test dialog
+   ════════════════════════════════════════════════════════════ */
+
+function SnmpTestDialog({
+  open, onOpenChange, running, result, onRetest,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  running: boolean
+  result: any | null
+  onRetest: () => void
+}) {
+  const ok = !!result?.ok
+  const responded = !!result?.snmp_responded
+  const reachable = result?.reachable
+  const uptime = result?.sys_uptime_seconds != null ? formatDuration(result.sys_uptime_seconds) : null
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Shield className="h-5 w-5 text-primary" />
+            SNMP Test
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          {running && !result && (
+            <div className="flex items-center gap-2 rounded-md border border-border bg-surface2/50 px-3 py-3 text-sm text-muted">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Probing device via SNMP…
+            </div>
+          )}
+
+          {result && (
+            <>
+              <div className={`flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-medium ${
+                ok
+                  ? 'border-success/30 bg-success/10 text-success'
+                  : 'border-danger/30 bg-danger/10 text-danger'
+              }`}>
+                {ok ? <CheckCircle2 className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
+                {ok
+                  ? 'SNMP responded — device is discoverable'
+                  : result.reason || 'SNMP probe failed'}
+              </div>
+
+              <div className="grid grid-cols-2 gap-x-4 gap-y-2 rounded-md border border-border bg-surface2/40 px-3 py-2.5 text-xs">
+                <Kv k="Reachable (ping)" v={reachable == null ? '—' : reachable ? 'Yes' : 'No'} tone={reachable ? 'success' : reachable === false ? 'danger' : 'muted'} />
+                <Kv k="SNMP responded" v={responded ? 'Yes' : 'No'} tone={responded ? 'success' : 'danger'} />
+                <Kv k="Probe duration" v={result.duration_ms != null ? `${result.duration_ms} ms` : '—'} />
+                {result.config && (
+                  <Kv k="Version · Port" v={`v${result.config.version} · ${result.config.port}`} />
+                )}
+              </div>
+
+              {responded && (
+                <div className="space-y-1.5 rounded-md border border-border bg-surface2/40 px-3 py-2.5 text-xs">
+                  <Kv k="sysName" v={result.sys_name || '—'} mono />
+                  <Kv k="sysDescr" v={result.sys_descr || '—'} mono wrap />
+                  <Kv k="sysObjectID" v={result.sys_object_id || '—'} mono />
+                  <Kv k="sysUpTime" v={uptime || result.sys_uptime_raw || '—'} />
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
+          <Button onClick={onRetest} disabled={running}>
+            {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Shield className="h-4 w-4" />}
+            Re-test
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function Kv({
+  k, v, mono, wrap, tone,
+}: { k: string; v: string; mono?: boolean; wrap?: boolean; tone?: 'success' | 'danger' | 'muted' }) {
+  const toneClass = tone === 'success' ? 'text-success' : tone === 'danger' ? 'text-danger' : tone === 'muted' ? 'text-muted' : 'text-text'
+  return (
+    <div className="flex min-w-0 items-baseline justify-between gap-3">
+      <span className="shrink-0 text-muted">{k}</span>
+      <span className={`${mono ? 'font-mono' : ''} ${wrap ? 'break-all' : 'truncate'} text-right font-medium ${toneClass}`} title={v}>{v}</span>
+    </div>
+  )
+}
+
+/* ════════════════════════════════════════════════════════════
+   Drill-down dialogs
+   ════════════════════════════════════════════════════════════ */
+
+function EventsDialog({
+  open, onOpenChange, deviceId,
+}: { open: boolean; onOpenChange: (o: boolean) => void; deviceId: string }) {
+  const [hours, setHours] = useState(24)
+  const { data, isLoading } = useQuery<any[]>({
+    queryKey: ['device', deviceId, 'events-full', hours],
+    queryFn: async () => (await api.get(`/devices/${deviceId}/traps?hours=${hours}&limit=200`)).data,
+    enabled: open,
+    refetchInterval: open ? 15_000 : false,
+  })
+  const events = data || []
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85vh] max-w-3xl overflow-hidden flex flex-col">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <AlertTriangle className="h-5 w-5 text-primary" />
+            Recent Events / Activity Log
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="flex items-center justify-between gap-2 border-b border-border pb-2">
+          <div className="text-xs text-muted">
+            {isLoading ? 'Loading…' : `${events.length} event${events.length === 1 ? '' : 's'}`}
+          </div>
+          <div className="flex gap-0.5 rounded-md bg-surface2 p-0.5">
+            {[1, 6, 24, 168].map((h) => (
+              <button
+                key={h}
+                onClick={() => setHours(h)}
+                className={`rounded px-2 py-1 text-[11px] font-medium ${
+                  hours === h ? 'bg-surface text-primary shadow-sm' : 'text-muted hover:text-text'
+                }`}
+              >
+                {h < 24 ? `${h}h` : `${h / 24}d`}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto">
+          {events.length === 0 ? (
+            <div className="flex flex-col items-center gap-1 py-10 text-center">
+              <Info className="h-6 w-6 text-muted/60" />
+              <div className="text-sm font-medium">No events in this period</div>
+              <div className="text-xs text-muted">SNMP traps received from this device will appear here.</div>
+            </div>
+          ) : (
+            <div className="divide-y divide-border">
+              {events.map((t, i) => (
+                <div key={i} className="flex items-start gap-3 py-2 text-xs">
+                  <span className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${
+                    t.severity === 'critical' ? 'bg-danger/15 text-danger'
+                    : t.severity === 'warning' ? 'bg-warning/15 text-warning'
+                    : 'bg-info/15 text-info'
+                  }`}>
+                    {t.severity || 'info'}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-medium" title={t.trap_name || t.message}>{t.trap_name || 'SNMP trap'}</div>
+                    <div className="truncate text-[10px] text-muted" title={t.message}>{t.message || t.trap_oid || ''}</div>
+                  </div>
+                  <div className="shrink-0 text-[10px] text-muted">{relativeTime(t.timestamp)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function InventoryDialog({
+  open, onOpenChange, entities,
+}: { open: boolean; onOpenChange: (o: boolean) => void; entities: any[] }) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85vh] max-w-2xl overflow-hidden flex flex-col">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Layers className="h-5 w-5 text-primary" />
+            Hardware Inventory
+          </DialogTitle>
+        </DialogHeader>
+        <div className="flex-1 overflow-y-auto">
+          {entities.length === 0 ? (
+            <div className="py-8 text-center text-xs text-muted">
+              No hardware inventory available for this device.
+            </div>
+          ) : (
+            <table className="w-full text-[11px]">
+              <thead className="sticky top-0 bg-surface text-[10px] uppercase tracking-wider text-muted">
+                <tr className="border-b border-border">
+                  <th className="py-1.5 px-2 text-left font-medium">Class</th>
+                  <th className="py-1.5 px-2 text-left font-medium">Name</th>
+                  <th className="py-1.5 px-2 text-left font-medium">Model</th>
+                  <th className="py-1.5 px-2 text-left font-medium">Serial</th>
+                  <th className="py-1.5 px-2 text-left font-medium">HW Rev</th>
+                  <th className="py-1.5 px-2 text-left font-medium">FW Rev</th>
+                </tr>
+              </thead>
+              <tbody>
+                {entities.map((e) => (
+                  <tr key={e.id || `${e.entity_index}-${e.name}`} className="border-b border-border/40 last:border-0">
+                    <td className="px-2 py-2">
+                      <span className="rounded bg-surface2 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-muted">
+                        {e.class || '—'}
+                      </span>
+                    </td>
+                    <td className="px-2 py-2 font-medium">{e.name || '—'}</td>
+                    <td className="px-2 py-2 text-muted">{e.model_name || '—'}</td>
+                    <td className="px-2 py-2 font-mono text-[10px] text-muted">{e.serial_number || '—'}</td>
+                    <td className="px-2 py-2 text-muted">{e.hw_revision || '—'}</td>
+                    <td className="px-2 py-2 text-muted">{e.fw_revision || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function HealthDetailsDialog({
+  open, onOpenChange, device, cpu, mem, loss, ifUp, ifTotal, score,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  device: any
+  cpu: number | null
+  mem: number | null
+  loss: number | null
+  ifUp: number
+  ifTotal: number
+  score: number
+}) {
+  const factors = [
+    {
+      label: 'Reachability',
+      value: device.status === 'up' ? 'Up' : device.status === 'degraded' ? 'Degraded' : 'Down',
+      impact: device.status === 'up' ? 'No penalty'
+        : device.status === 'degraded' ? '−12 points'
+        : '−80 points',
+      ok: device.status === 'up',
+    },
+    {
+      label: 'CPU',
+      value: cpu != null ? `${cpu.toFixed(0)}%` : 'not reporting',
+      impact: cpu != null && cpu > 70 ? `−${((cpu - 70) * 0.6).toFixed(0)} points` : 'No penalty',
+      ok: cpu == null || cpu <= 70,
+    },
+    {
+      label: 'Memory',
+      value: mem != null ? `${mem.toFixed(0)}%` : 'not reporting',
+      impact: mem != null && mem > 70 ? `−${((mem - 70) * 0.5).toFixed(0)} points` : 'No penalty',
+      ok: mem == null || mem <= 70,
+    },
+    {
+      label: 'Packet Loss',
+      value: loss != null ? `${loss.toFixed(2)}%` : 'not reporting',
+      impact: loss != null && loss > 0 ? `−${Math.min(30, loss * 3).toFixed(0)} points` : 'No penalty',
+      ok: loss == null || loss === 0,
+    },
+    {
+      label: 'Interfaces Up',
+      value: ifTotal > 0 ? `${ifUp} / ${ifTotal}` : 'none discovered',
+      impact: ifTotal > 0 && ifUp < ifTotal
+        ? `−${(((ifTotal - ifUp) / ifTotal) * 15).toFixed(0)} points`
+        : 'No penalty',
+      ok: ifTotal === 0 || ifUp === ifTotal,
+    },
+  ]
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <CheckCircle2 className="h-5 w-5 text-primary" />
+            Health Score Breakdown
+          </DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between rounded-md border border-border bg-surface2/40 px-3 py-2">
+            <span className="text-sm font-medium">Current score</span>
+            <span className={`text-2xl font-bold tabular-nums ${
+              score >= 80 ? 'text-success' : score >= 60 ? 'text-warning' : 'text-danger'
+            }`}>
+              {score}<span className="text-sm text-muted">/100</span>
+            </span>
+          </div>
+
+          <div className="space-y-2">
+            {factors.map((f, i) => (
+              <div key={i} className="flex items-start justify-between gap-3 border-b border-border/40 pb-2 last:border-0">
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold">{f.label}</div>
+                  <div className="text-[11px] text-muted">{f.value}</div>
+                </div>
+                <div className={`text-[11px] font-medium ${f.ok ? 'text-success' : 'text-danger'}`}>
+                  {f.impact}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <DialogFooter>
+          <Button onClick={() => onOpenChange(false)}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/* ════════════════════════════════════════════════════════════
+   Mini SVG sparkline
+   ════════════════════════════════════════════════════════════ */
+
+function MiniSparkline({
+  data, stroke, from, to, className,
+}: { data: number[]; stroke: string; from: string; to: string; className?: string }) {
+  if (data.length < 2) return <div className={className} />
+  const w = 100
+  const h = 32
+  const min = Math.min(...data)
+  const max = Math.max(...data)
+  const range = max - min || 1
+  const step = w / (data.length - 1)
+  const pts = data.map((v, i) => [i * step, h - ((v - min) / range) * (h - 4) - 2] as const)
+  const line = pts.map(([x, y], i) => (i === 0 ? `M${x.toFixed(2)},${y.toFixed(2)}` : `L${x.toFixed(2)},${y.toFixed(2)}`)).join(' ')
+  const area = `${line} L${w},${h} L0,${h} Z`
+  const id = `ms-${Math.random().toString(36).slice(2, 9)}`
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className={className} aria-hidden="true">
+      <defs>
+        <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={from} />
+          <stop offset="100%" stopColor={to} />
+        </linearGradient>
+      </defs>
+      <path d={area} fill={`url(#${id})`} />
+      <path d={line} fill="none" stroke={stroke} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+/* ════════════════════════════════════════════════════════════
+   Helpers
+   ════════════════════════════════════════════════════════════ */
+
+function titleCase(s: string) {
+  return s.replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+function avg(xs: number[]): number {
+  if (!xs.length) return 0
+  return xs.reduce((s, v) => s + v, 0) / xs.length
+}
+
+function percentTrend(series: number[]): number | null {
+  if (series.length < 4) return null
+  const half = Math.floor(series.length / 2)
+  const a = series.slice(0, half).reduce((s, v) => s + v, 0) / half
+  const b = series.slice(half).reduce((s, v) => s + v, 0) / (series.length - half)
+  if (a === 0) return b === 0 ? 0 : null
+  return ((b - a) / a) * 100
+}
+
+function formatBpsShort(bps: number): string {
+  if (!bps) return '—'
+  const k = 1000
+  const units = ['bps', 'K', 'M', 'G', 'T']
+  const i = Math.min(Math.floor(Math.log(Math.abs(bps)) / Math.log(k)), units.length - 1)
+  return `${(bps / Math.pow(k, i)).toFixed(1)} ${units[i] === 'bps' ? 'bps' : units[i] + 'bps'}`
+}
+
+function formatSpeed(speed: any): string {
+  const n = Number(speed) || 0
+  if (!n) return '—'
+  if (n >= 1e10) return `${(n / 1e9).toFixed(0)} Gbps`
+  if (n >= 1e9) return `${(n / 1e9).toFixed(0)} Gbps`
+  if (n >= 1e6) return `${(n / 1e6).toFixed(0)} Mbps`
+  if (n >= 1e3) return `${(n / 1e3).toFixed(0)} Kbps`
+  return `${n} bps`
+}
+
+function bandwidthSeries(ifMetrics: Record<string, any[]>): Array<{ ts: number; value: number }> {
+  const byTs: Record<number, number> = {}
+  Object.values(ifMetrics).forEach((arr) => {
+    arr.forEach((p) => {
+      const t = p.ts || new Date(p.timestamp).getTime()
+      byTs[t] = (byTs[t] || 0) + (p.in_bps || 0) + (p.out_bps || 0)
+    })
+  })
+  return Object.entries(byTs)
+    .map(([t, v]) => ({ ts: Number(t), value: v }))
+    .sort((a, b) => a.ts - b.ts)
+}
+
+function readUptimeSeconds(device: any, metrics?: Record<string, { points: { value: number }[] }>): number | null {
+  if (typeof device.uptime_seconds === 'number') return device.uptime_seconds
+  const u = metrics?.uptime || metrics?.sysUpTime || metrics?.sys_uptime
+  if (u?.points?.length) return u.points[u.points.length - 1].value
+  return null
+}
+
+function formatDaysCompact(s: number): string {
+  if (s < 3600) return `${Math.floor(s / 60)}m`
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+  const d = Math.floor(s / 86400)
+  const h = Math.floor((s % 86400) / 3600)
+  return `${d}d ${h}h`
+}
+
+function uptimeHistory(upSec: number | null): number[] {
+  // Steadily increasing sparkline, flat-ish — represents uptime climbing.
+  if (upSec == null) return []
+  const n = 22
+  const out: number[] = []
+  for (let i = 0; i < n; i++) {
+    out.push(upSec - (n - i) * 60)
+  }
+  return out.filter((v) => v >= 0)
+}
+
+function computeHealthScore({
+  status, cpu, mem, loss, ifUp, ifTotal,
+}: {
+  status: string
+  cpu: number | null
+  mem: number | null
+  loss: number | null
+  ifUp: number
+  ifTotal: number
+}): number {
+  if (status === 'down') return 20
+  let score = 100
+  if (cpu != null) score -= Math.max(0, cpu - 70) * 0.6
+  if (mem != null) score -= Math.max(0, mem - 70) * 0.5
+  if (loss != null) score -= Math.min(30, loss * 3)
+  if (ifTotal > 0) {
+    const downRatio = (ifTotal - ifUp) / ifTotal
+    score -= downRatio * 15
+  }
+  if (status === 'degraded') score -= 12
+  return Math.max(0, Math.min(100, Math.round(score)))
+}
+
+function normalizeSeverity(s: string): 'critical' | 'warning' | 'info' | 'success' {
+  if (s === 'critical') return 'critical'
+  if (s === 'warning') return 'warning'
+  if (s === 'success') return 'success'
+  return 'info'
+}
+
+function toneForSeverity(s: string): 'success' | 'warning' | 'danger' | 'info' | 'accent' {
+  if (s === 'critical') return 'danger'
+  if (s === 'warning') return 'warning'
+  if (s === 'success') return 'success'
+  return 'info'
+}
+
+function latestFromMetrics(
+  metrics: Record<string, { points: { value: number }[] }>,
+  keywords: string[],
+): number | null {
+  for (const [k, v] of Object.entries(metrics)) {
+    if (keywords.some((kw) => k.toLowerCase().includes(kw))) {
+      if (v.points?.length) return v.points[v.points.length - 1].value
+    }
+  }
+  return null
+}
+
+function latestSensor(
+  metrics: Record<string, { points: { value: number }[] }>,
+  sensors: any[],
+  keywords: string[],
+): number | null {
+  for (const [k, v] of Object.entries(metrics)) {
+    if (keywords.some((kw) => k.toLowerCase().includes(kw))) {
+      if (v.points?.length) return v.points[v.points.length - 1].value
+    }
+  }
+  for (const s of sensors) {
+    const d = (s.description || '').toLowerCase()
+    const t = (s.sensor_type || '').toLowerCase()
+    if (keywords.some((kw) => d.includes(kw) || t.includes(kw))) {
+      const raw = s.current_value ?? s.value
+      if (typeof raw === 'number') return raw
+    }
+  }
+  return null
 }
 
 /* ════════════════════════════════════════════════════════════

@@ -35,6 +35,22 @@ class StatusChangeEvent(BaseModel):
     packet_loss: float = 0
 
 
+class ServiceStatusChangeEvent(BaseModel):
+    service_check_id: str
+    check_name: str
+    check_type: str
+    old_status: str
+    new_status: str
+    device_id: Optional[str] = None
+    device_hostname: Optional[str] = None
+    group_id: Optional[str] = None
+    group_name: Optional[str] = None
+    tags: list[str] = []
+    response_ms: float = 0
+    error: Optional[str] = None
+    target: Optional[str] = None
+
+
 def _render(template: str, variables: dict) -> str:
     result = template
     for key, value in variables.items():
@@ -284,6 +300,170 @@ async def evaluate_status_change(
         "evaluated_rules": len(rules),
         "notifications_sent": notifications_sent,
         "device": event.hostname,
+        "old_status": event.old_status,
+        "new_status": event.new_status,
+    }
+
+
+@router.post("/evaluate-service")
+async def evaluate_service_status_change(
+    event: ServiceStatusChangeEvent,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Called by the Go poller when a service check status changes.
+    Evaluates alert rules scoped to this check (by id, service group, or tag
+    via metric='service_status') and fires notifications. Mirrors
+    /evaluate for devices; internal endpoint, no auth.
+    """
+    now = datetime.now(timezone.utc)
+    is_recovery = event.new_status == "up" and event.old_status in ("down", "degraded", "warning")
+    is_down = event.new_status in ("down", "degraded", "warning")
+
+    rules_result = await db.execute(
+        text("""
+            SELECT id, name, trigger_on, recovery_alert, severity,
+                   service_check_id, service_check_group_id, metric,
+                   notify_channels, cooldown,
+                   email_subject, email_body, sms_template,
+                   recovery_email_subject, recovery_email_body, recovery_sms_template
+            FROM alert_rules
+            WHERE enabled = true
+              AND (service_check_id IS NOT NULL OR service_check_group_id IS NOT NULL OR metric = 'service_status')
+        """)
+    )
+    rules = rules_result.fetchall()
+
+    target = event.target or event.check_name
+    variables = {
+        "hostname": event.device_hostname or event.check_name,
+        "check_name": event.check_name,
+        "check_type": event.check_type,
+        "target": target,
+        "ip_address": target,
+        "status": event.new_status.upper(),
+        "severity": "",
+        "rule_name": "",
+        "group": event.group_name or "",
+        "location": "",
+        "device_type": "",
+        "metric": "service_status",
+        "operator": "==",
+        "threshold": "0",
+        "timestamp": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "duration": "",
+        "rtt": f"{event.response_ms:.1f}ms",
+        "packet_loss": "",
+        "error": event.error or "",
+        "status_intro": "The following service alert has been resolved:"
+            if is_recovery else "A service alert has been triggered:",
+    }
+
+    notifications_sent = 0
+
+    for rule in rules:
+        trigger = rule.trigger_on or "any"
+        if trigger == "down" and not is_down:
+            continue
+        if trigger == "up" and event.new_status != "up":
+            continue
+        if trigger == "degraded" and event.new_status != "degraded":
+            continue
+
+        if is_recovery and not rule.recovery_alert:
+            continue
+
+        # Scope: service_check_id
+        if rule.service_check_id and str(rule.service_check_id) != event.service_check_id:
+            continue
+        # Scope: service_check_group_id
+        if rule.service_check_group_id and str(rule.service_check_group_id) != (event.group_id or ""):
+            continue
+
+        variables["severity"] = (rule.severity or "warning").upper()
+        variables["rule_name"] = rule.name or "Alert"
+
+        if is_recovery:
+            email_subject = _render(rule.recovery_email_subject or "[{severity}] RESOLVED: {rule_name}", variables)
+            email_body = _render(rule.recovery_email_body or rule.email_body or "Service {check_name} ({target}) recovered to {status}.", variables)
+            sms_body = _render(rule.recovery_sms_template or "[ZenPlus {severity}] {check_name} recovered: {status}. {rule_name}", variables)
+        else:
+            email_subject = _render(rule.email_subject or "[{severity}] {status}: {check_name}", variables)
+            email_body = _render(rule.email_body or "Service {check_name} ({target}) is {status}.\nError: {error}\nRule: {rule_name}", variables)
+            sms_body = _render(rule.sms_template or "[ZenPlus {severity}] {check_name} is {status}. {error} Rule: {rule_name}", variables)
+
+        await db.execute(
+            text("""
+                INSERT INTO alerts (device_id, service_check_id, rule_id, status, severity, message, triggered_at, metadata)
+                VALUES (:device_id, :service_check_id, :rule_id, 'active', :severity, :message, :triggered_at, CAST(:metadata AS jsonb))
+            """),
+            {
+                "device_id": event.device_id,
+                "service_check_id": event.service_check_id,
+                "rule_id": str(rule.id),
+                "severity": rule.severity or "warning",
+                "message": sms_body,
+                "triggered_at": now,
+                "metadata": json.dumps({
+                    "old_status": event.old_status,
+                    "new_status": event.new_status,
+                    "is_recovery": is_recovery,
+                    "check_type": event.check_type,
+                    "error": event.error,
+                }),
+            },
+        )
+
+        channel_ids = rule.notify_channels or []
+        for ch_id in channel_ids:
+            try:
+                ch_result = await db.execute(
+                    text("SELECT type, config, gateway_id, enabled FROM notification_channels WHERE id = :id"),
+                    {"id": ch_id},
+                )
+                ch = ch_result.first()
+                if not ch or not ch.enabled:
+                    continue
+
+                ch_config = ch.config or {}
+
+                if ch.type == "sms":
+                    phones = ch_config.get("phone_numbers", "")
+                    if not phones:
+                        continue
+                    gw_id = ch.gateway_id or ch_config.get("gateway_id")
+                    if gw_id:
+                        gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})
+                    else:
+                        gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'sms' AND is_default = true LIMIT 1"))
+                    gw_row = gw_res.first()
+                    if gw_row:
+                        await _send_sms(dict(gw_row.config), phones, sms_body)
+                        notifications_sent += 1
+
+                elif ch.type == "email":
+                    recipients = ch_config.get("recipients", "")
+                    if not recipients:
+                        continue
+                    gw_id = ch.gateway_id or ch_config.get("gateway_id")
+                    if gw_id:
+                        gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})
+                    else:
+                        gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'smtp' AND is_default = true LIMIT 1"))
+                    gw_row = gw_res.first()
+                    if gw_row:
+                        await _send_email(dict(gw_row.config), recipients, email_subject, email_body)
+                        notifications_sent += 1
+
+            except Exception as exc:
+                print(f"ERROR sending service notification to channel {ch_id}: {exc}")
+
+    await db.commit()
+
+    return {
+        "evaluated_rules": len(rules),
+        "notifications_sent": notifications_sent,
+        "check": event.check_name,
         "old_status": event.old_status,
         "new_status": event.new_status,
     }

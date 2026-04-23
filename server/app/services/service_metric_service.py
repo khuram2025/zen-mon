@@ -88,8 +88,6 @@ def get_service_metrics(
             error_message=row[5],
         ))
 
-    client.close()
-
     return ServiceMetricResponse(
         service_check_id=service_check_id,
         granularity=granularity,
@@ -140,5 +138,4 @@ def get_service_status_history(
             "duration_sec": row[5],
         })
 
-    client.close()
     return events

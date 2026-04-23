@@ -12,6 +12,8 @@ type Checker struct {
 	httpChecker *HTTPChecker
 	tcpChecker  *TCPChecker
 	tlsChecker  *TLSChecker
+	icmpChecker *ICMPChecker
+	dnsChecker  *DNSChecker
 	logger      *zap.SugaredLogger
 }
 
@@ -21,6 +23,8 @@ func NewChecker(logger *zap.SugaredLogger) *Checker {
 		httpChecker: NewHTTPChecker(logger),
 		tcpChecker:  NewTCPChecker(logger),
 		tlsChecker:  NewTLSChecker(logger),
+		icmpChecker: NewICMPChecker(logger),
+		dnsChecker:  NewDNSChecker(logger),
 		logger:      logger,
 	}
 }
@@ -34,6 +38,10 @@ func (c *Checker) CheckOne(ctx context.Context, sc *ServiceCheck, pollerID strin
 		return c.tcpChecker.Check(ctx, sc, pollerID)
 	case "tls":
 		return c.tlsChecker.Check(ctx, sc, pollerID)
+	case "icmp":
+		return c.icmpChecker.Check(ctx, sc, pollerID)
+	case "dns":
+		return c.dnsChecker.Check(ctx, sc, pollerID)
 	default:
 		return &ServiceCheckResult{
 			ServiceCheckID: sc.ID,

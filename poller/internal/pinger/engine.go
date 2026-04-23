@@ -41,6 +41,7 @@ type EventPublisher interface {
 type ServiceCheckLoader interface {
 	LoadServiceChecks(ctx context.Context) ([]*checker.ServiceCheck, error)
 	UpdateServiceCheckStatus(ctx context.Context, id uuid.UUID, status string, lastCheckAt time.Time, responseMs float64, lastError string, tlsExpiry *time.Time, tlsDaysRemaining *int, tlsIssuer string, tlsSubject string) error
+	LoadActiveMaintenanceCheckIDs(ctx context.Context) (map[uuid.UUID]struct{}, error)
 }
 
 // ServiceMetricWriter writes service check results.
@@ -487,6 +488,64 @@ func (e *Engine) evaluateAlerts(ctx context.Context, device *Device, oldStatus, 
 	e.logger.Infof("Alert evaluation: %s %s→%s, notifications sent: %v", device.Hostname, oldStatus, newStatus, sent)
 }
 
+// evaluateServiceAlerts fires the API-side alert engine when a service check
+// transitions status (and is not muted by a maintenance window — that's
+// already filtered upstream in processServiceStatusChange).
+func (e *Engine) evaluateServiceAlerts(ctx context.Context, sc *checker.ServiceCheck, oldStatus, newStatus string, result *checker.ServiceCheckResult) {
+	apiURL := "http://localhost:8000/api/v1/alert-engine/evaluate-service"
+
+	payload := map[string]interface{}{
+		"service_check_id": sc.ID.String(),
+		"check_name":       sc.Name,
+		"check_type":       sc.CheckType,
+		"old_status":       oldStatus,
+		"new_status":       newStatus,
+		"response_ms":      float64(result.ResponseTime.Microseconds()) / 1000.0,
+		"error":            result.Error,
+		"tags":             sc.Tags,
+	}
+	if sc.DeviceID != nil {
+		payload["device_id"] = sc.DeviceID.String()
+	}
+	if sc.GroupID != nil {
+		payload["group_id"] = sc.GroupID.String()
+	}
+	if sc.TargetURL != "" {
+		payload["target"] = sc.TargetURL
+	} else if sc.TargetHost != "" && sc.TargetPort > 0 {
+		payload["target"] = fmt.Sprintf("%s:%d", sc.TargetHost, sc.TargetPort)
+	} else {
+		payload["target"] = sc.TargetHost
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		e.logger.Errorf("Failed to marshal service alert payload: %v", err)
+		return
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(body))
+	if err != nil {
+		e.logger.Errorf("Failed to create service alert request: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		e.logger.Errorf("Failed to call service alert engine: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	var result2 map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result2)
+	sent := result2["notifications_sent"]
+	e.logger.Infof("Service alert evaluation: %s %s→%s, notifications sent: %v",
+		sc.Name, oldStatus, newStatus, sent)
+}
+
 // --- Service Check Logic ---
 
 func (e *Engine) syncServiceChecks(ctx context.Context) error {
@@ -519,12 +578,29 @@ func (e *Engine) syncServiceChecks(ctx context.Context) error {
 }
 
 func (e *Engine) runServiceCheckCycle(ctx context.Context) {
+	// Snapshot enabled checks + the current parent-status map under the
+	// read lock, then filter out children whose parent is currently DOWN
+	// (parent-dependency suppression — avoids alert storms when an upstream
+	// fails and all its dependents would otherwise page simultaneously).
 	e.mu.RLock()
+	parentStatus := map[uuid.UUID]string{}
+	for id, sc := range e.serviceChecks {
+		parentStatus[id] = sc.Status
+	}
+
 	checkList := make([]*checker.ServiceCheck, 0, len(e.serviceChecks))
+	skipped := 0
 	for _, sc := range e.serviceChecks {
-		if sc.Enabled {
-			checkList = append(checkList, sc)
+		if !sc.Enabled {
+			continue
 		}
+		if sc.ParentCheckID != nil {
+			if ps, ok := parentStatus[*sc.ParentCheckID]; ok && ps == "down" {
+				skipped++
+				continue
+			}
+		}
+		checkList = append(checkList, sc)
 	}
 	e.mu.RUnlock()
 
@@ -532,7 +608,16 @@ func (e *Engine) runServiceCheckCycle(ctx context.Context) {
 		return
 	}
 
-	e.logger.Infof("Starting service check cycle for %d checks", len(checkList))
+	// Load active maintenance windows once per cycle — used below to
+	// suppress status transitions for muted checks.
+	maintIDs, err := e.svcLoader.LoadActiveMaintenanceCheckIDs(ctx)
+	if err != nil {
+		e.logger.Warnf("Failed to load maintenance window ids: %v", err)
+		maintIDs = map[uuid.UUID]struct{}{}
+	}
+
+	e.logger.Infof("Starting service check cycle for %d checks (%d skipped via dependency, %d in maintenance)",
+		len(checkList), skipped, len(maintIDs))
 	start := time.Now()
 
 	maxWorkers := 50
@@ -545,7 +630,7 @@ func (e *Engine) runServiceCheckCycle(ctx context.Context) {
 	e.logger.Infof("Service check cycle complete: %d results in %dms", len(results), time.Since(start).Milliseconds())
 
 	for _, result := range results {
-		// Write to ClickHouse
+		// Write to ClickHouse (always — SLA stays accurate even in maintenance)
 		e.svcWriter.WriteServiceResult(result)
 
 		// Publish to Redis
@@ -553,12 +638,12 @@ func (e *Engine) runServiceCheckCycle(ctx context.Context) {
 			e.logger.Debugf("Failed to publish service metric: %v", err)
 		}
 
-		// Process status change
-		e.processServiceStatusChange(ctx, result)
+		// Process status change (with maintenance mute)
+		e.processServiceStatusChange(ctx, result, maintIDs)
 	}
 }
 
-func (e *Engine) processServiceStatusChange(ctx context.Context, result *checker.ServiceCheckResult) {
+func (e *Engine) processServiceStatusChange(ctx context.Context, result *checker.ServiceCheckResult, maintIDs map[uuid.UUID]struct{}) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -570,9 +655,15 @@ func (e *Engine) processServiceStatusChange(ctx context.Context, result *checker
 	oldStatus := sc.Status
 	var newStatus string
 
+	// Per-check retry threshold: use sc.RetryCount, fall back to engine default.
+	retryThreshold := sc.RetryCount
+	if retryThreshold < 1 {
+		retryThreshold = e.cfg.Poller.DownThreshold
+	}
+
 	if !result.IsUp {
 		sc.DownCount++
-		if sc.DownCount >= e.cfg.Poller.DownThreshold {
+		if sc.DownCount >= retryThreshold {
 			newStatus = "down"
 		} else {
 			// Not yet confirmed down — still update PG with latest result
@@ -612,6 +703,15 @@ func (e *Engine) processServiceStatusChange(ctx context.Context, result *checker
 
 	if newStatus != oldStatus {
 		sc.Status = newStatus
+
+		// Maintenance mute: still track the new in-memory status so the UI
+		// reflects reality, but don't log the transition (no alert firing,
+		// no status_log row) while a window is active.
+		if _, muted := maintIDs[sc.ID]; muted {
+			e.logger.Infof("Service status change suppressed (in maintenance): %s %s → %s",
+				sc.Name, oldStatus, newStatus)
+			return
+		}
 
 		reason := ""
 		switch {
@@ -653,6 +753,9 @@ func (e *Engine) processServiceStatusChange(ctx context.Context, result *checker
 				e.logger.Errorf("Failed to publish service status change: %v", err)
 			}
 		}()
+
+		// Fire alert engine (muted checks were already returned above).
+		go e.evaluateServiceAlerts(ctx, sc, oldStatus, newStatus, result)
 	}
 }
 
@@ -747,24 +850,50 @@ func (e *Engine) runSNMPCycle(ctx context.Context) {
 		go func(d *snmp.Device) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			// gosnmp ignores context, so run Collect in a nested
-			// goroutine and race it against devBudget. A runaway
-			// goroutine will still finish eventually (bounded by
-			// gosnmp Timeout * (1+Retries) * #collectors), but the
-			// cycle report will not wait for it.
-			done := make(chan *snmp.Result, 1)
-			go func() { done <- e.snmpCollector.Collect(ctx, d) }()
-			var res *snmp.Result
+			// Pre-allocate the Result so the collector can write into
+			// it progressively. If the per-device budget fires mid-poll
+			// we still have whatever was collected so far (at minimum
+			// the System info — enough to populate vendor/model/OS).
+			res := &snmp.Result{DeviceID: d.ID, Timestamp: time.Now().UTC()}
+
+			// Cancel the collector's context if budget expires so any
+			// in-flight walk stops as soon as it checks ctx.
+			collectCtx, cancel := context.WithTimeout(ctx, devBudget)
+			defer cancel()
+
+			done := make(chan struct{})
+			go func() {
+				e.snmpCollector.Collect(collectCtx, d, res)
+				close(done)
+			}()
+
 			select {
-			case res = <-done:
+			case <-done:
 			case <-time.After(devBudget):
-				res = &snmp.Result{DeviceID: d.ID, Err: fmt.Errorf("device budget %s exceeded", devBudget)}
+				res.Mu.Lock()
+				if res.Err == nil {
+					res.Err = fmt.Errorf("device budget %s exceeded", devBudget)
+				}
+				res.Mu.Unlock()
+				cancel()
 			case <-ctx.Done():
-				res = &snmp.Result{DeviceID: d.ID, Err: ctx.Err()}
+				res.Mu.Lock()
+				if res.Err == nil {
+					res.Err = ctx.Err()
+				}
+				res.Mu.Unlock()
+				cancel()
 			}
+
+			// Snapshot under lock so handleSNMPResult can safely read
+			// fields even if the collect goroutine is still running.
+			res.Mu.Lock()
+			resErr := res.Err
+			res.Mu.Unlock()
+
 			e.handleSNMPResult(ctx, d, res)
 			countMu.Lock()
-			if res.Err == nil {
+			if resErr == nil {
 				okCount++
 			} else {
 				errCount++
@@ -783,17 +912,33 @@ func (e *Engine) runSNMPCycle(ctx context.Context) {
 }
 
 func (e *Engine) handleSNMPResult(ctx context.Context, d *snmp.Device, r *snmp.Result) {
-	if r.Err != nil {
-		e.logger.Warnf("SNMP poll failed for %s (%s): %v", d.Hostname, d.IPAddress, r.Err)
-		return
+	// Snapshot fields under the result mutex so we don't race with a
+	// collector goroutine that's still running past the budget.
+	r.Mu.Lock()
+	rErr := r.Err
+	rSystem := r.System
+	rIfs := r.Interfaces
+	rEnts := r.Entities
+	rSens := r.Sensors
+	rScal := r.Scalars
+	rIfSamp := r.IfSamples
+	r.Mu.Unlock()
+
+	// IMPORTANT: even when the poll cycle errored (e.g. per-device budget
+	// exceeded, or interface walk failed), we still want to persist any
+	// partial results that were collected before the failure — otherwise a
+	// slow device's basic identity (sys_object_id / vendor / model / OS)
+	// never makes it to the UI. We only skip the heavy time-series writes.
+	if rErr != nil {
+		e.logger.Warnf("SNMP poll failed for %s (%s): %v", d.Hostname, d.IPAddress, rErr)
 	}
 
 	// 1) discovery writeback — system info, interfaces, entities, sensors
-	if r.System != nil {
+	if rSystem != nil {
 		// Classify based on sysObjectID + sysDescr.
 		vendor, model, osVersion := "", "", ""
-		if prof := e.snmpClassifier.Match(r.System.SysObjectID, r.System.SysDescr); prof != nil {
-			v, m, o := e.snmpClassifier.Extract(prof, r.System.SysDescr)
+		if prof := e.snmpClassifier.Match(rSystem.SysObjectID, rSystem.SysDescr); prof != nil {
+			v, m, o := e.snmpClassifier.Extract(prof, rSystem.SysDescr)
 			vendor, model, osVersion = v, m, o
 			if prof.ID != uuid.Nil {
 				if err := e.snmpLoader.AssignProfileIfUnset(ctx, d.ID, prof.ID); err != nil {
@@ -801,32 +946,35 @@ func (e *Engine) handleSNMPResult(ctx context.Context, d *snmp.Device, r *snmp.R
 				}
 			}
 		}
-		if err := e.snmpLoader.UpsertSystemInfo(ctx, d.ID, r.System.SysObjectID, vendor, model, osVersion, r.System.SysName); err != nil {
+		if err := e.snmpLoader.UpsertSystemInfo(ctx, d.ID, rSystem.SysObjectID, vendor, model, osVersion, rSystem.SysName); err != nil {
 			e.logger.Warnf("UpsertSystemInfo %s: %v", d.Hostname, err)
 		}
 	}
-	if len(r.Interfaces) > 0 {
-		if err := e.snmpLoader.UpsertInterfaces(ctx, d.ID, r.Interfaces); err != nil {
-			e.logger.Warnf("UpsertInterfaces %s (%d rows): %v", d.Hostname, len(r.Interfaces), err)
+	if len(rIfs) > 0 {
+		if err := e.snmpLoader.UpsertInterfaces(ctx, d.ID, rIfs); err != nil {
+			e.logger.Warnf("UpsertInterfaces %s (%d rows): %v", d.Hostname, len(rIfs), err)
 		}
 	}
-	if len(r.Entities) > 0 {
-		if err := e.snmpLoader.UpsertEntities(ctx, d.ID, r.Entities); err != nil {
-			e.logger.Warnf("UpsertEntities %s (%d rows): %v", d.Hostname, len(r.Entities), err)
+	if len(rEnts) > 0 {
+		if err := e.snmpLoader.UpsertEntities(ctx, d.ID, rEnts); err != nil {
+			e.logger.Warnf("UpsertEntities %s (%d rows): %v", d.Hostname, len(rEnts), err)
 		}
 	}
-	if len(r.Sensors) > 0 {
-		if err := e.snmpLoader.UpsertSensors(ctx, d.ID, r.Sensors); err != nil {
-			e.logger.Warnf("UpsertSensors %s (%d rows): %v", d.Hostname, len(r.Sensors), err)
+	if len(rSens) > 0 {
+		if err := e.snmpLoader.UpsertSensors(ctx, d.ID, rSens); err != nil {
+			e.logger.Warnf("UpsertSensors %s (%d rows): %v", d.Hostname, len(rSens), err)
 		}
 	}
 
-	// 2) ClickHouse time-series writes
-	for _, m := range r.Scalars {
-		e.snmpWriter.WriteSNMPMetric(m)
-	}
-	for _, m := range r.IfSamples {
-		e.snmpWriter.WriteSNMPIfMetric(m)
+	// 2) ClickHouse time-series writes — skip when the poll errored so we
+	// don't write a partial / inconsistent counter diff.
+	if rErr == nil {
+		for _, m := range rScal {
+			e.snmpWriter.WriteSNMPMetric(m)
+		}
+		for _, m := range rIfSamp {
+			e.snmpWriter.WriteSNMPIfMetric(m)
+		}
 	}
 }
 

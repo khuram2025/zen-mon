@@ -39,53 +39,92 @@ func NewCollector(pollerID string, sessions *SessionCache) *Collector {
 	}
 }
 
-// Collect runs all enabled collectors for a device. Any partial
-// success is returned — a single failing collector does not cause
-// the entire poll to be discarded.
-func (c *Collector) Collect(ctx context.Context, d *Device) *Result {
+// Collect runs all enabled collectors for a device and writes results
+// progressively into r so that partial output is preserved even if the
+// caller races this against a timeout. Any partial success is kept —
+// a single failing collector does not cause the entire poll to be
+// discarded.
+func (c *Collector) Collect(ctx context.Context, d *Device, r *Result) {
 	start := time.Now()
-	r := &Result{DeviceID: d.ID, Timestamp: start.UTC()}
 
 	client, err := c.sessions.Acquire(d)
 	if err != nil {
+		r.Mu.Lock()
 		r.Err = err
 		r.Duration = time.Since(start)
+		r.Mu.Unlock()
 		c.sessions.MarkFailure(d.ID)
-		return r
+		return
 	}
 
-	// System info is cheap and tells us sysUpTime + sysObjectID for
-	// classification. Always collect.
+	// Bail early if the caller cancelled before we even started.
+	if ctx.Err() != nil {
+		r.Mu.Lock()
+		r.Err = ctx.Err()
+		r.Duration = time.Since(start)
+		r.Mu.Unlock()
+		return
+	}
+
+	// 1) System info — fast (single GET with 6 OIDs). Always collect
+	// first so that even if every subsequent walk times out we've still
+	// persisted the device's identity (sysObjectID → vendor/model).
 	sys, sysErr := c.collectSystem(ctx, client)
 	if sysErr == nil {
+		r.Mu.Lock()
 		r.System = sys
+		r.Mu.Unlock()
 	}
 
-	// Host-Resources: CPU + memory on devices that implement it.
-	// Falls back to vendor-specific MIBs (Cisco, Fortinet, PaloAlto, etc.)
 	sysOID := d.SysObjectID
 	if sys != nil && sys.SysObjectID != "" {
 		sysOID = sys.SysObjectID
 	}
-	scalars, _ := c.collectHostResources(ctx, client, d.ID, start, sysOID)
-	r.Scalars = append(r.Scalars, scalars...)
 
-	// Interfaces are the big one: IF-MIB table walk.
-	ifs, ifErr := c.collectInterfaces(ctx, client)
-	if ifErr == nil {
-		r.Interfaces = ifs
-		r.IfSamples = c.diffInterfaces(d.ID, ifs, start)
+	// 2) Host-Resources: CPU + memory
+	if ctx.Err() == nil {
+		scalars, _ := c.collectHostResources(ctx, client, d.ID, start, sysOID)
+		r.Mu.Lock()
+		r.Scalars = append(r.Scalars, scalars...)
+		r.Mu.Unlock()
 	}
 
-	// Entities (inventory) — once per poll is fine; cheap walk.
-	ents, _ := c.collectEntities(ctx, client)
-	r.Entities = ents
+	// 3) Interfaces — the big one. Skip if we're already cancelled.
+	var ifErr error
+	if ctx.Err() == nil {
+		var ifs []Interface
+		ifs, ifErr = c.collectInterfaces(ctx, client)
+		if ifErr == nil {
+			samples := c.diffInterfaces(d.ID, ifs, start)
+			r.Mu.Lock()
+			r.Interfaces = ifs
+			r.IfSamples = samples
+			r.Mu.Unlock()
+		}
+	}
 
-	// Sensors — needs scale+precision+value, returned as MetricSample.
-	sensors, sensorScalars, _ := c.collectSensors(ctx, client, d.ID, start)
-	r.Sensors = sensors
-	r.Scalars = append(r.Scalars, sensorScalars...)
+	// 4) Entities — small walk, cheap.
+	if ctx.Err() == nil {
+		ents, _ := c.collectEntities(ctx, client)
+		if len(ents) > 0 {
+			r.Mu.Lock()
+			r.Entities = ents
+			r.Mu.Unlock()
+		}
+	}
 
+	// 5) Sensors — scale+precision+value, returned as MetricSample.
+	if ctx.Err() == nil {
+		sensors, sensorScalars, _ := c.collectSensors(ctx, client, d.ID, start)
+		if len(sensors) > 0 || len(sensorScalars) > 0 {
+			r.Mu.Lock()
+			r.Sensors = sensors
+			r.Scalars = append(r.Scalars, sensorScalars...)
+			r.Mu.Unlock()
+		}
+	}
+
+	r.Mu.Lock()
 	if sysErr != nil && ifErr != nil {
 		r.Err = fmt.Errorf("system+interfaces failed: sys=%v if=%v", sysErr, ifErr)
 		c.sessions.MarkFailure(d.ID)
@@ -93,7 +132,7 @@ func (c *Collector) Collect(ctx context.Context, d *Device) *Result {
 		c.sessions.MarkSuccess(d.ID)
 	}
 	r.Duration = time.Since(start)
-	return r
+	r.Mu.Unlock()
 }
 
 // --- individual collectors ---

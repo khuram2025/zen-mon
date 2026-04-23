@@ -1,26 +1,42 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import {
   Activity,
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
-  ArrowUpDown,
+  ArrowUpRight,
+  ArrowDownRight,
+  Boxes,
+  CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Columns3,
   Download,
+  Filter,
+  HardDrive,
+  Layers,
   MapPin,
+  MoreVertical,
   Pencil,
   Plus,
+  PlusCircle,
+  Radar,
   RefreshCw,
   Router,
   Search,
   Server,
   Shield,
-  SlidersHorizontal,
+  ShieldAlert,
+  Sparkles,
   Trash2,
+  Upload,
   Wifi,
   X,
+  XCircle,
+  Database,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, relativeTime } from '@/lib/utils'
@@ -29,7 +45,6 @@ import { Input } from '@/components/ui/Input'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
-import { StatusDot, deviceStatusKind } from '@/components/ui/StatusDot'
 import { SkeletonTable } from '@/components/ui/Skeleton'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import {
@@ -66,6 +81,7 @@ type Device = {
   status: string
   last_seen: string | null
   last_rtt_ms: number | null
+  created_at?: string | null
   ping_enabled: boolean
   snmp_enabled: boolean
   snmp_version?: string | null
@@ -103,6 +119,8 @@ type SortKey =
   | 'last_seen'
 type SortOrder = 'asc' | 'desc'
 
+type HealthKind = 'healthy' | 'warning' | 'critical' | 'offline'
+
 const DEVICE_TYPES = [
   'router',
   'switch',
@@ -115,41 +133,38 @@ const DEVICE_TYPES = [
   'other',
 ]
 
-// IDs of table columns that can be hidden. Hostname/IP/actions stay pinned.
 const HIDEABLE_COLUMNS = [
-  'protocol',
-  'vendor',
   'type',
-  'group',
-  'location',
-  'rtt',
+  'group_location',
+  'cpu',
+  'memory',
+  'uptime',
   'last_seen',
 ] as const
 type HideableCol = (typeof HIDEABLE_COLUMNS)[number]
 
 const DEFAULT_VISIBLE: Record<HideableCol, boolean> = {
-  protocol: true,
-  vendor: true,
   type: true,
-  group: true,
-  location: true,
-  rtt: true,
+  group_location: true,
+  cpu: true,
+  memory: true,
+  uptime: true,
   last_seen: true,
 }
 
 const COLUMN_LABELS: Record<HideableCol, string> = {
-  protocol: 'Protocol',
-  vendor: 'Vendor / Model',
   type: 'Type',
-  group: 'Group',
-  location: 'Location',
-  rtt: 'RTT',
+  group_location: 'Group / Location',
+  cpu: 'CPU',
+  memory: 'Memory',
+  uptime: 'Uptime',
   last_seen: 'Last seen',
 }
 
-// Persist column visibility + density across sessions.
-const PREFS_KEY = 'zp-devices-prefs-v1'
-type Prefs = { visible: Record<HideableCol, boolean>; density: 'compact' | 'comfortable' }
+const PAGE_SIZE_OPTIONS = [10, 25, 50, 100]
+
+const PREFS_KEY = 'zp-devices-prefs-v2'
+type Prefs = { visible: Record<HideableCol, boolean>; pageSize: number }
 function loadPrefs(): Prefs {
   try {
     const raw = localStorage.getItem(PREFS_KEY)
@@ -157,13 +172,13 @@ function loadPrefs(): Prefs {
       const p = JSON.parse(raw)
       return {
         visible: { ...DEFAULT_VISIBLE, ...(p.visible || {}) },
-        density: p.density === 'comfortable' ? 'comfortable' : 'compact',
+        pageSize: PAGE_SIZE_OPTIONS.includes(p.pageSize) ? p.pageSize : 10,
       }
     }
   } catch {
     /* ignore */
   }
-  return { visible: { ...DEFAULT_VISIBLE }, density: 'compact' }
+  return { visible: { ...DEFAULT_VISIBLE }, pageSize: 10 }
 }
 function savePrefs(p: Prefs) {
   try {
@@ -179,18 +194,17 @@ function savePrefs(p: Prefs) {
 
 export function DevicesPage() {
   const qc = useQueryClient()
+  const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
 
-  // All user-facing filter/sort state lives in the URL so that refreshes,
-  // back/forward nav, and shared links round-trip correctly.
   const search = params.get('q') || ''
   const statusFilter = params.get('status') || ''
   const typeFilter = params.get('type') || ''
-  const groupFilter = params.get('group') || ''
   const locationFilter = params.get('loc') || ''
-  const protocolFilter = params.get('proto') || '' // '', 'ping', 'snmp'
+  const groupFilter = params.get('group') || ''
   const sortKey = (params.get('sort') as SortKey) || 'hostname'
   const sortOrder = (params.get('order') as SortOrder) || 'asc'
+  const page = Math.max(1, Number(params.get('page') || '1') || 1)
 
   function patchParams(p: Record<string, string | null>) {
     const next = new URLSearchParams(params)
@@ -211,22 +225,16 @@ export function DevicesPage() {
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false)
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
   const [columnsOpen, setColumnsOpen] = useState(false)
+  const [filtersOpen, setFiltersOpen] = useState(false)
 
-  // -----------------------------------------------------------------------
-  // Data fetch — one call, then we filter/sort client-side for snappy UX.
-  // Backend still accepts search/status for wire-efficient responses when
-  // those are set.
-  // -----------------------------------------------------------------------
-
-  const { data, isLoading, isFetching, refetch, dataUpdatedAt } = useQuery<{
+  const { data, isLoading, isFetching, refetch } = useQuery<{
     data: Device[]
     meta: any
   }>({
-    queryKey: ['devices', 'list', { search, statusFilter }],
+    queryKey: ['devices', 'list', { search }],
     queryFn: async () => {
       const qs: string[] = ['limit=200']
       if (search) qs.push(`search=${encodeURIComponent(search)}`)
-      if (statusFilter) qs.push(`status=${encodeURIComponent(statusFilter)}`)
       return (await api.get(`/devices?${qs.join('&')}`)).data
     },
     refetchInterval: 15_000,
@@ -245,29 +253,85 @@ export function DevicesPage() {
     queryFn: async () => (await api.get('/devices/device-types')).data,
   })
 
+  // Real continuous uptime per device (seconds) — refreshed every 30s.
+  const { data: uptimeData } = useQuery<{ devices: Record<string, number> }>({
+    queryKey: ['devices', 'current-uptime'],
+    queryFn: async () => (await api.get('/devices/current-uptime')).data,
+    refetchInterval: 30_000,
+  })
+  const uptimeMap = uptimeData?.devices || {}
+
+  // Latest SNMP scalar metrics (cpu, memory, …) per device, from ClickHouse.
+  const { data: metricsData } = useQuery<{
+    devices: Record<string, Record<string, number | string>>
+  }>({
+    queryKey: ['devices', 'current-metrics'],
+    queryFn: async () => (await api.get('/devices/current-metrics')).data,
+    refetchInterval: 30_000,
+  })
+  const metricsMap = metricsData?.devices || {}
+
+  // Recent alerts for the activity feed.
+  const { data: recentAlerts } = useQuery<{
+    data: Array<{
+      id: string
+      severity: string
+      message?: string | null
+      summary?: string | null
+      title?: string | null
+      device_id?: string | null
+      device_hostname?: string | null
+      triggered_at?: string | null
+      created_at?: string | null
+      status?: string | null
+    }>
+  }>({
+    queryKey: ['devices', 'recent-alerts'],
+    queryFn: async () => (await api.get('/alerts?limit=6')).data,
+    refetchInterval: 30_000,
+  })
+
   const devices = data?.data || []
 
   // -----------------------------------------------------------------------
-  // Client-side filter + sort
+  // Per-row metrics — CPU/memory come from the live `current-metrics` map
+  // (latest SNMP scalar values in the last 15 min). Uptime is seconds since
+  // the most recent `up` transition from `current-uptime`.
   // -----------------------------------------------------------------------
 
+  const enriched = useMemo(() => {
+    return devices.map((d) => {
+      const health = healthOf(d)
+      const m = metricsMap[d.id] || {}
+      const cpu = typeof m.cpu === 'number' ? Math.round(m.cpu) : null
+      const mem = typeof m.memory === 'number' ? Math.round(m.memory) : null
+      const uptimeSec = uptimeMap[d.id]
+      const uptime = formatRealUptime(uptimeSec, health)
+      return { device: d, health, cpu, mem, uptime }
+    })
+  }, [devices, uptimeMap, metricsMap])
+
   const filtered = useMemo(() => {
-    return devices.filter((d) => {
+    return enriched.filter(({ device: d, health }) => {
       if (typeFilter && d.device_type !== typeFilter) return false
       if (groupFilter && d.group_id !== groupFilter) return false
       if (locationFilter && (d.location || '') !== locationFilter) return false
-      if (protocolFilter === 'snmp' && !d.snmp_enabled) return false
-      if (protocolFilter === 'ping' && d.snmp_enabled) return false
+      if (statusFilter) {
+        if (statusFilter === 'healthy' && health !== 'healthy') return false
+        if (statusFilter === 'warning' && health !== 'warning') return false
+        if (statusFilter === 'critical' && health !== 'critical') return false
+        if (statusFilter === 'offline' && health !== 'offline') return false
+      }
       return true
     })
-  }, [devices, typeFilter, groupFilter, locationFilter, protocolFilter])
+  }, [enriched, typeFilter, groupFilter, locationFilter, statusFilter])
 
   const sorted = useMemo(() => {
     const arr = [...filtered]
     const dir = sortOrder === 'asc' ? 1 : -1
     arr.sort((a, b) => {
-      const va = extractSortVal(a, sortKey)
-      const vb = extractSortVal(b, sortKey)
+      const va = extractSortVal(a.device, sortKey)
+      const vb = extractSortVal(b.device, sortKey)
       if (va === vb) return 0
       if (va == null) return 1
       if (vb == null) return -1
@@ -276,32 +340,52 @@ export function DevicesPage() {
     return arr
   }, [filtered, sortKey, sortOrder])
 
-  // Aggregate counts are derived from the full list (pre-filter) so users
-  // still see the total network picture even with an active filter.
-  const counts = useMemo(() => {
-    const total = devices.length
-    const up = devices.filter((d) => d.status === 'up').length
-    const down = devices.filter((d) => d.status === 'down').length
-    const degraded = devices.filter((d) => d.status === 'degraded').length
-    const snmp = devices.filter((d) => d.snmp_enabled).length
-    const rtts = devices.map((d) => d.last_rtt_ms).filter((v): v is number => v != null && v > 0)
-    const avgRtt = rtts.length ? rtts.reduce((a, b) => a + b, 0) / rtts.length : null
-    return { total, up, down, degraded, snmp, avgRtt }
-  }, [devices])
+  // Pagination
+  const totalPages = Math.max(1, Math.ceil(sorted.length / prefs.pageSize))
+  const currentPage = Math.min(page, totalPages)
+  const pageStart = (currentPage - 1) * prefs.pageSize
+  const pageRows = sorted.slice(pageStart, pageStart + prefs.pageSize)
+
+  useEffect(() => {
+    // Reset to page 1 when filters/size cause overflow.
+    if (page > totalPages) patchParams({ page: '1' })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [totalPages, page])
+
+  // -----------------------------------------------------------------------
+  // Aggregates for KPI row + sidebar (derived from full list, not filtered)
+  // -----------------------------------------------------------------------
+
+  const agg = useMemo(() => {
+    const counts = { healthy: 0, warning: 0, critical: 0, offline: 0 }
+    const byCategory: Record<string, number> = {
+      Server: 0, Network: 0, Security: 0, Wireless: 0, Other: 0,
+    }
+    const sevenDaysAgo = Date.now() - 7 * 86_400_000
+    let newThisWeek = 0
+    enriched.forEach(({ device, health }) => {
+      counts[health]++
+      byCategory[categoryOf(device.device_type)]++
+      const createdMs = device.created_at ? Date.parse(device.created_at) : NaN
+      if (!Number.isNaN(createdMs) && createdMs >= sevenDaysAgo) newThisWeek++
+    })
+    const total = enriched.length
+    return { total, ...counts, byCategory, newThisWeek }
+  }, [enriched])
 
   const activeFilterCount =
     (typeFilter ? 1 : 0) +
     (groupFilter ? 1 : 0) +
     (locationFilter ? 1 : 0) +
-    (protocolFilter ? 1 : 0)
+    (statusFilter ? 1 : 0)
 
   // -----------------------------------------------------------------------
-  // Selection housekeeping — drop ids that no longer match the view.
+  // Selection
   // -----------------------------------------------------------------------
 
   useEffect(() => {
     if (selected.size === 0) return
-    const alive = new Set(sorted.map((d) => d.id))
+    const alive = new Set(sorted.map((r) => r.device.id))
     let changed = false
     const next = new Set<string>()
     selected.forEach((id) => {
@@ -367,49 +451,43 @@ export function DevicesPage() {
   }
 
   function toggleAll() {
-    if (sorted.length === 0) return
-    if (sorted.every((d) => selected.has(d.id))) {
+    if (pageRows.length === 0) return
+    if (pageRows.every((r) => selected.has(r.device.id))) {
       const n = new Set(selected)
-      sorted.forEach((d) => n.delete(d.id))
+      pageRows.forEach((r) => n.delete(r.device.id))
       setSelected(n)
     } else {
       const n = new Set(selected)
-      sorted.forEach((d) => n.add(d.id))
+      pageRows.forEach((r) => n.add(r.device.id))
       setSelected(n)
     }
   }
 
   function onSortClick(key: SortKey) {
-    if (sortKey === key) {
-      patchParams({ order: sortOrder === 'asc' ? 'desc' : 'asc' })
-    } else {
-      patchParams({ sort: key, order: 'asc' })
-    }
+    if (sortKey === key) patchParams({ order: sortOrder === 'asc' ? 'desc' : 'asc' })
+    else patchParams({ sort: key, order: 'asc' })
   }
 
   function clearFilters() {
-    patchParams({ type: null, group: null, loc: null, proto: null, status: null })
+    patchParams({ type: null, group: null, loc: null, status: null })
   }
 
   function exportCsv() {
-    const visibleColsFirst: Array<[string, (d: Device) => string]> = [
-      ['hostname', (d) => d.hostname],
-      ['ip_address', (d) => d.ip_address],
-      ['device_type', (d) => d.device_type],
-      ['vendor', (d) => d.vendor || ''],
-      ['model', (d) => d.model || ''],
-      ['group', (d) => d.group_name || ''],
-      ['location', (d) => d.location || ''],
-      ['status', (d) => d.status],
-      ['snmp', (d) => (d.snmp_enabled ? 'yes' : 'no')],
-      ['last_rtt_ms', (d) => (d.last_rtt_ms != null ? d.last_rtt_ms.toFixed(2) : '')],
-      ['last_seen', (d) => d.last_seen || ''],
+    const cols: Array<[string, (row: (typeof sorted)[number]) => string]> = [
+      ['hostname', (r) => r.device.hostname],
+      ['ip_address', (r) => r.device.ip_address],
+      ['device_type', (r) => r.device.device_type],
+      ['group', (r) => r.device.group_name || ''],
+      ['location', (r) => r.device.location || ''],
+      ['status', (r) => r.health],
+      ['cpu_pct', (r) => r.cpu == null ? '' : String(r.cpu)],
+      ['memory_pct', (r) => r.mem == null ? '' : String(r.mem)],
+      ['uptime', (r) => r.uptime],
+      ['last_seen', (r) => r.device.last_seen || ''],
     ]
     const rows = [
-      visibleColsFirst.map(([h]) => h).join(','),
-      ...sorted.map((d) =>
-        visibleColsFirst.map(([, f]) => csvEscape(f(d))).join(','),
-      ),
+      cols.map(([h]) => h).join(','),
+      ...sorted.map((r) => cols.map(([, f]) => csvEscape(f(r))).join(',')),
     ]
     const blob = new Blob([rows.join('\n')], { type: 'text/csv;charset=utf-8' })
     const url = URL.createObjectURL(blob)
@@ -421,28 +499,30 @@ export function DevicesPage() {
     toast.success(`Exported ${sorted.length} device${sorted.length === 1 ? '' : 's'}`)
   }
 
-  // Keyboard shortcut: `/` focuses search when not already in an input.
   const searchRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return
-      const t = e.target as HTMLElement
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
-      e.preventDefault()
-      searchRef.current?.focus()
+      const cmd = e.metaKey || e.ctrlKey
+      if (cmd && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        searchRef.current?.focus()
+        return
+      }
+      if (e.key === '/' && !cmd && !e.altKey) {
+        const t = e.target as HTMLElement
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+        e.preventDefault()
+        searchRef.current?.focus()
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  const rowPadding = prefs.density === 'compact' ? 'py-1.5' : 'py-3'
   const allSelectedOnPage =
-    sorted.length > 0 && sorted.every((d) => selected.has(d.id))
+    pageRows.length > 0 && pageRows.every((r) => selected.has(r.device.id))
   const someSelectedOnPage =
-    sorted.some((d) => selected.has(d.id)) && !allSelectedOnPage
-
-  const visibleCount = filtered.length
-  const totalCount = devices.length
+    pageRows.some((r) => selected.has(r.device.id)) && !allSelectedOnPage
 
   // -----------------------------------------------------------------------
   // Render
@@ -450,514 +530,429 @@ export function DevicesPage() {
 
   return (
     <div className="space-y-4">
-      {/* Header */}
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
-            <Server className="h-6 w-6 text-primary" /> Devices
-          </h1>
-          <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted">
-            <span>{counts.total} monitored</span>
-            <span>·</span>
-            <span className="inline-flex items-center gap-1">
-              <Shield className="h-3 w-3" />
-              {counts.snmp} SNMP
-            </span>
-            {counts.avgRtt != null && (
-              <>
-                <span>·</span>
-                <span className="inline-flex items-center gap-1">
-                  <Activity className="h-3 w-3" />
-                  avg {counts.avgRtt.toFixed(1)}ms
-                </span>
-              </>
-            )}
-            <span>·</span>
-            <span className="inline-flex items-center gap-1">
-              <span
-                className={`h-1.5 w-1.5 rounded-full ${
-                  isFetching ? 'animate-pulse bg-primary' : 'bg-success'
-                }`}
+      {/* ───────────────────── Header bar ───────────────────── */}
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="min-w-0 flex-1">
+            <h1 className="text-[28px] font-bold leading-tight tracking-tight">Devices</h1>
+            <p className="mt-0.5 text-sm text-muted">
+              Monitor, search, and manage all network and server devices
+            </p>
+          </div>
+          <div className="w-full max-w-xl flex-shrink-0 md:w-[520px]">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+              <Input
+                ref={searchRef}
+                placeholder="Search devices, IPs, tags…"
+                value={search}
+                onChange={(e) => patchParams({ q: e.target.value || null, page: '1' })}
+                className="h-10 pl-10 pr-14 text-sm"
               />
-              updated {dataUpdatedAt ? relativeTime(new Date(dataUpdatedAt).toISOString()) : '—'}
-            </span>
-          </p>
+              <kbd className="pointer-events-none absolute right-2.5 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded border border-border bg-surface2 px-1.5 py-0.5 text-[10px] font-medium text-muted sm:inline-flex">
+                ⌘ K
+              </kbd>
+            </div>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            onClick={() => refetch()}
-            disabled={isFetching}
-            title="Refresh now"
-          >
+
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <FilterInline
+            label="Status"
+            value={statusFilter}
+            onChange={(v) => patchParams({ status: v || null, page: '1' })}
+            options={[
+              { value: 'healthy', label: 'Healthy' },
+              { value: 'warning', label: 'Warning' },
+              { value: 'critical', label: 'Critical' },
+              { value: 'offline', label: 'Offline' },
+            ]}
+          />
+          <FilterInline
+            label="Type"
+            value={typeFilter}
+            onChange={(v) => patchParams({ type: v || null, page: '1' })}
+            options={(deviceTypes || DEVICE_TYPES).map((t) => ({
+              value: t,
+              label: titleCase(t.replace('_', ' ')),
+            }))}
+          />
+          <FilterInline
+            label="Location"
+            value={locationFilter}
+            onChange={(v) => patchParams({ loc: v || null, page: '1' })}
+            options={(locations || []).map((l) => ({ value: l, label: l }))}
+          />
+          <Button variant="outline" size="default" className="h-10" onClick={exportCsv}>
+            <Download className="h-4 w-4" />
+            Export
+          </Button>
+          <Button size="default" className="h-10" onClick={() => { setEditing(null); setFormOpen(true) }}>
+            <Plus className="h-4 w-4" />
+            Add Device
+          </Button>
+          <Button variant="outline" size="default" className="h-10" onClick={() => refetch()} disabled={isFetching}>
             <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
             Refresh
           </Button>
-          <Button onClick={() => { setEditing(null); setFormOpen(true) }}>
-            <Plus className="h-4 w-4" />
-            Add device
-          </Button>
         </div>
       </div>
 
-      {/* Stat pills */}
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
-        <StatCard
-          label="Total"
-          value={counts.total}
-          icon={<Server className="h-3.5 w-3.5" />}
+      {/* ───────────────────── KPI row ───────────────────── */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
+        <KpiCard
+          label="Total Devices"
+          value={agg.total}
+          icon={<Boxes className="h-4 w-4" />}
+          color="primary"
           active={!statusFilter}
-          onClick={() => patchParams({ status: null })}
+          onClick={() => patchParams({ status: null, page: '1' })}
         />
-        <StatCard
+        <KpiCard
           label="Online"
-          value={counts.up}
-          tone="success"
-          icon={<span className="h-1.5 w-1.5 rounded-full bg-success" />}
-          active={statusFilter === 'up'}
-          onClick={() => patchParams({ status: statusFilter === 'up' ? null : 'up' })}
-        />
-        <StatCard
-          label="Offline"
-          value={counts.down}
-          tone={counts.down > 0 ? 'danger' : undefined}
-          icon={<span className="h-1.5 w-1.5 rounded-full bg-danger" />}
-          active={statusFilter === 'down'}
-          onClick={() => patchParams({ status: statusFilter === 'down' ? null : 'down' })}
-        />
-        <StatCard
-          label="Degraded"
-          value={counts.degraded}
-          tone={counts.degraded > 0 ? 'warning' : undefined}
-          icon={<span className="h-1.5 w-1.5 rounded-full bg-warning" />}
-          active={statusFilter === 'degraded'}
+          value={agg.healthy}
+          icon={<CheckCircle2 className="h-4 w-4" />}
+          color="success"
+          active={statusFilter === 'healthy'}
           onClick={() =>
-            patchParams({ status: statusFilter === 'degraded' ? null : 'degraded' })
+            patchParams({ status: statusFilter === 'healthy' ? null : 'healthy', page: '1' })
           }
         />
-        <StatCard
-          label="SNMP"
-          value={counts.snmp}
-          icon={<Shield className="h-3.5 w-3.5" />}
-          active={protocolFilter === 'snmp'}
-          onClick={() => patchParams({ proto: protocolFilter === 'snmp' ? null : 'snmp' })}
+        <KpiCard
+          label="Offline"
+          value={agg.offline}
+          icon={<XCircle className="h-4 w-4" />}
+          color="muted"
+          active={statusFilter === 'offline'}
+          onClick={() =>
+            patchParams({ status: statusFilter === 'offline' ? null : 'offline', page: '1' })
+          }
+        />
+        <KpiCard
+          label="Warning"
+          value={agg.warning}
+          icon={<AlertTriangle className="h-4 w-4" />}
+          color="warning"
+          active={statusFilter === 'warning'}
+          onClick={() =>
+            patchParams({ status: statusFilter === 'warning' ? null : 'warning', page: '1' })
+          }
+        />
+        <KpiCard
+          label="Critical"
+          value={agg.critical}
+          icon={<ShieldAlert className="h-4 w-4" />}
+          color="danger"
+          active={statusFilter === 'critical'}
+          onClick={() =>
+            patchParams({ status: statusFilter === 'critical' ? null : 'critical', page: '1' })
+          }
+        />
+        <KpiCard
+          label="New This Week"
+          value={agg.newThisWeek}
+          icon={<Sparkles className="h-4 w-4" />}
+          color="accent"
+          active={false}
         />
       </div>
 
-      <Card>
-        <CardContent className="space-y-3 pt-4">
-          {/* Toolbar */}
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="relative min-w-[240px] max-w-md flex-1">
-              <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-              <Input
-                ref={searchRef}
-                placeholder="Search hostname, IP, description…"
-                value={search}
-                onChange={(e) => patchParams({ q: e.target.value || null })}
-                className="pl-8 pr-16"
-              />
-              <kbd className="pointer-events-none absolute right-2 top-1/2 hidden -translate-y-1/2 rounded border border-border bg-surface2 px-1.5 py-0.5 text-[10px] font-medium text-muted sm:inline-block">
-                /
-              </kbd>
-            </div>
-
-            <FilterDropdown
-              label="Type"
-              icon={<Router className="h-3.5 w-3.5" />}
-              value={typeFilter}
-              onChange={(v) => patchParams({ type: v || null })}
-              options={(deviceTypes || DEVICE_TYPES).map((t) => ({
-                value: t,
-                label: titleCase(t.replace('_', ' ')),
-              }))}
-            />
-            <FilterDropdown
-              label="Group"
-              icon={<Tag className="h-3.5 w-3.5" />}
-              value={groupFilter}
-              onChange={(v) => patchParams({ group: v || null })}
-              options={(groups || []).map((g) => ({
-                value: g.id,
-                label: g.name,
-                color: g.color || undefined,
-              }))}
-            />
-            <FilterDropdown
-              label="Location"
-              icon={<MapPin className="h-3.5 w-3.5" />}
-              value={locationFilter}
-              onChange={(v) => patchParams({ loc: v || null })}
-              options={(locations || []).map((l) => ({ value: l, label: l }))}
-            />
-
-            {/* Protocol chip toggle */}
-            <div className="flex gap-0.5 rounded-md bg-surface2 p-0.5">
-              {[
-                { label: 'All', value: '' },
-                { label: 'PING', value: 'ping' },
-                { label: 'SNMP', value: 'snmp' },
-              ].map((p) => (
-                <button
-                  key={p.value}
-                  onClick={() => patchParams({ proto: p.value || null })}
-                  className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
-                    protocolFilter === p.value
-                      ? 'bg-surface text-text shadow-sm'
-                      : 'text-muted hover:text-text'
-                  }`}
+      {/* ───────────────────── Main grid ───────────────────── */}
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+        {/* ---------- Devices list ---------- */}
+        <Card>
+          <CardContent className="space-y-3 p-4">
+            {/* Sub-toolbar */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-semibold">Devices List</h2>
+                <span className="rounded-md bg-surface2 px-2 py-0.5 text-xs font-medium text-muted">
+                  {sorted.length.toLocaleString()}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8"
+                  onClick={() => setColumnsOpen(true)}
                 >
-                  {p.label}
-                </button>
-              ))}
+                  <Columns3 className="h-3.5 w-3.5" />
+                  Columns
+                  <ChevronDown className="h-3 w-3 opacity-60" />
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className={`h-8 w-8 p-0 ${activeFilterCount > 0 ? 'border-primary/40 text-primary' : ''}`}
+                  onClick={() => setFiltersOpen((o) => !o)}
+                  title="More filters"
+                >
+                  <Filter className="h-3.5 w-3.5" />
+                </Button>
+              </div>
             </div>
 
-            {activeFilterCount > 0 && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={clearFilters}
-                className="h-8 text-xs text-muted hover:text-text"
-              >
-                <X className="h-3.5 w-3.5" /> Clear ({activeFilterCount})
-              </Button>
+            {/* Inline extra filters */}
+            {filtersOpen && (
+              <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-surface2/40 p-2">
+                <FilterInline
+                  label="Group"
+                  value={groupFilter}
+                  onChange={(v) => patchParams({ group: v || null, page: '1' })}
+                  options={(groups || []).map((g) => ({ value: g.id, label: g.name }))}
+                />
+                {activeFilterCount > 0 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={clearFilters}
+                    className="h-8 text-xs text-muted hover:text-text"
+                  >
+                    <X className="h-3.5 w-3.5" /> Clear ({activeFilterCount})
+                  </Button>
+                )}
+              </div>
             )}
 
-            <div className="ml-auto flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={exportCsv}
-                disabled={sorted.length === 0}
-                title="Export visible rows as CSV"
-              >
-                <Download className="h-4 w-4" />
-                Export
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setColumnsOpen(true)}
-                title="Columns"
-              >
-                <Columns3 className="h-4 w-4" />
-                Columns
-              </Button>
-              <div className="flex gap-0.5 rounded-md bg-surface2 p-0.5">
-                {(['compact', 'comfortable'] as const).map((d) => (
+            {/* Bulk bar */}
+            {selected.size > 0 && (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-2">
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="font-semibold text-primary">{selected.size}</span>
+                  <span className="text-muted">selected</span>
                   <button
-                    key={d}
-                    onClick={() => setPrefs({ ...prefs, density: d })}
-                    className={`rounded px-2 py-1 text-[11px] font-medium capitalize transition-colors ${
-                      prefs.density === d
-                        ? 'bg-surface text-text shadow-sm'
-                        : 'text-muted hover:text-text'
-                    }`}
-                    title={`${d} row height`}
+                    type="button"
+                    onClick={() => setSelected(new Set())}
+                    className="text-xs text-muted underline-offset-2 hover:underline"
                   >
-                    {d}
+                    Clear
                   </button>
-                ))}
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={() => setBulkEditOpen(true)}>
+                    <Pencil className="h-3.5 w-3.5" /> Edit
+                  </Button>
+                  <Button variant="destructive" size="sm" onClick={() => setBulkDeleteOpen(true)}>
+                    <Trash2 className="h-3.5 w-3.5" /> Delete
+                  </Button>
+                </div>
               </div>
-            </div>
-          </div>
+            )}
 
-          {/* Bulk action bar */}
-          {selected.size > 0 && (
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-2">
-              <div className="flex items-center gap-2 text-sm">
-                <span className="font-semibold text-primary">{selected.size}</span>
-                <span className="text-muted">of {visibleCount} selected</span>
-                <button
-                  type="button"
-                  onClick={() => setSelected(new Set())}
-                  className="text-xs text-muted underline-offset-2 hover:underline"
-                >
-                  Clear
-                </button>
-              </div>
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" onClick={() => setBulkEditOpen(true)}>
-                  <Pencil className="h-3.5 w-3.5" />
-                  Edit
-                </Button>
-                <Button variant="destructive" size="sm" onClick={() => setBulkDeleteOpen(true)}>
-                  <Trash2 className="h-3.5 w-3.5" />
-                  Delete
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {/* Table */}
-          <div className="overflow-hidden rounded-md border border-border">
-            <Table>
-              <THead className="sticky top-0 z-10 bg-surface2/80 backdrop-blur">
-                <Tr>
-                  <Th className="w-8">
-                    <input
-                      type="checkbox"
-                      aria-label="Select all"
-                      checked={allSelectedOnPage}
-                      ref={(el) => {
-                        if (el) el.indeterminate = someSelectedOnPage
-                      }}
-                      onChange={toggleAll}
-                    />
-                  </Th>
-                  <SortableTh
-                    label=""
-                    srLabel="Status"
-                    col="status"
-                    current={sortKey}
-                    order={sortOrder}
-                    onClick={onSortClick}
-                    className="w-8"
-                  />
-                  <SortableTh
-                    label="Hostname"
-                    col="hostname"
-                    current={sortKey}
-                    order={sortOrder}
-                    onClick={onSortClick}
-                  />
-                  <SortableTh
-                    label="IP address"
-                    col="ip_address"
-                    current={sortKey}
-                    order={sortOrder}
-                    onClick={onSortClick}
-                  />
-                  {prefs.visible.protocol && <Th>Protocol</Th>}
-                  {prefs.visible.vendor && (
-                    <SortableTh
-                      label="Vendor / Model"
-                      col="vendor"
-                      current={sortKey}
-                      order={sortOrder}
-                      onClick={onSortClick}
-                    />
-                  )}
-                  {prefs.visible.type && (
-                    <SortableTh
-                      label="Type"
-                      col="device_type"
-                      current={sortKey}
-                      order={sortOrder}
-                      onClick={onSortClick}
-                    />
-                  )}
-                  {prefs.visible.group && (
-                    <SortableTh
-                      label="Group"
-                      col="group_name"
-                      current={sortKey}
-                      order={sortOrder}
-                      onClick={onSortClick}
-                    />
-                  )}
-                  {prefs.visible.location && (
-                    <SortableTh
-                      label="Location"
-                      col="location"
-                      current={sortKey}
-                      order={sortOrder}
-                      onClick={onSortClick}
-                    />
-                  )}
-                  {prefs.visible.rtt && (
-                    <SortableTh
-                      label="RTT"
-                      col="last_rtt_ms"
-                      current={sortKey}
-                      order={sortOrder}
-                      onClick={onSortClick}
-                      className="text-right"
-                    />
-                  )}
-                  {prefs.visible.last_seen && (
-                    <SortableTh
-                      label="Last seen"
-                      col="last_seen"
-                      current={sortKey}
-                      order={sortOrder}
-                      onClick={onSortClick}
-                    />
-                  )}
-                  <Th className="w-10"></Th>
-                </Tr>
-              </THead>
-              <TBody>
-                {isLoading && (
-                  <Tr>
-                    <Td colSpan={12}>
-                      <SkeletonTable rows={6} cols={8} />
-                    </Td>
+            {/* Table */}
+            <div className="overflow-hidden rounded-md border border-border">
+              <Table>
+                <THead className="bg-surface2/60">
+                  <Tr className="hover:bg-transparent">
+                    <Th className="w-8">
+                      <input
+                        type="checkbox"
+                        aria-label="Select all on page"
+                        checked={allSelectedOnPage}
+                        ref={(el) => {
+                          if (el) el.indeterminate = someSelectedOnPage
+                        }}
+                        onChange={toggleAll}
+                      />
+                    </Th>
+                    <SortableTh label="Device Name" col="hostname" current={sortKey} order={sortOrder} onClick={onSortClick} />
+                    <SortableTh label="IP Address" col="ip_address" current={sortKey} order={sortOrder} onClick={onSortClick} />
+                    {prefs.visible.type && (
+                      <SortableTh label="Type" col="device_type" current={sortKey} order={sortOrder} onClick={onSortClick} />
+                    )}
+                    {prefs.visible.group_location && (
+                      <SortableTh label="Group / Location" col="group_name" current={sortKey} order={sortOrder} onClick={onSortClick} />
+                    )}
+                    <SortableTh label="Status" col="status" current={sortKey} order={sortOrder} onClick={onSortClick} />
+                    {prefs.visible.cpu && <Th className="min-w-[140px]">CPU</Th>}
+                    {prefs.visible.memory && <Th className="min-w-[140px]">Memory</Th>}
+                    {prefs.visible.uptime && <Th>Uptime</Th>}
+                    {prefs.visible.last_seen && (
+                      <SortableTh label="Last Seen" col="last_seen" current={sortKey} order={sortOrder} onClick={onSortClick} />
+                    )}
+                    <Th className="w-12 text-right">Actions</Th>
                   </Tr>
-                )}
-                {!isLoading && sorted.length === 0 && (
-                  <Tr>
-                    <Td colSpan={12} className="py-10">
-                      <div className="flex flex-col items-center gap-2 text-center text-muted">
-                        <Server className="h-8 w-8 opacity-50" />
-                        <div className="text-sm font-medium text-text">No devices match</div>
-                        <div className="text-xs">
-                          {totalCount === 0 ? (
-                            <>
-                              Add one manually, or{' '}
-                              <Link to="/discovery" className="text-primary hover:underline">
-                                run a discovery sweep
-                              </Link>
-                              .
-                            </>
-                          ) : (
-                            <>
-                              Try{' '}
-                              <button
-                                type="button"
-                                onClick={clearFilters}
-                                className="text-primary hover:underline"
-                              >
-                                clearing filters
-                              </button>
-                              .
-                            </>
-                          )}
-                        </div>
-                      </div>
-                    </Td>
-                  </Tr>
-                )}
-                {sorted.map((d) => {
-                  const isSel = selected.has(d.id)
-                  const rtt = d.last_rtt_ms
-                  const rttTone =
-                    rtt == null ? 'muted' : rtt < 20 ? 'text' : rtt < 100 ? 'warning' : 'danger'
-                  return (
-                    <Tr
-                      key={d.id}
-                      className={`${isSel ? 'bg-primary/5' : ''} [&>td]:${rowPadding}`}
-                    >
-                      <Td>
-                        <input
-                          type="checkbox"
-                          aria-label={`Select ${d.hostname}`}
-                          checked={isSel}
-                          onChange={() => toggleRow(d.id)}
-                        />
+                </THead>
+                <TBody>
+                  {isLoading && (
+                    <Tr>
+                      <Td colSpan={12}>
+                        <SkeletonTable rows={6} cols={10} />
                       </Td>
-                      <Td>
-                        <StatusDot
-                          status={deviceStatusKind(d.status)}
-                          pulse={d.status === 'up'}
-                        />
-                      </Td>
-                      <Td>
-                        <Link
-                          to={`/devices/${d.id}`}
-                          className="font-medium text-text hover:text-primary hover:underline"
-                          title={d.hostname}
-                        >
-                          {d.hostname}
-                        </Link>
-                      </Td>
-                      <Td className="font-mono text-xs text-muted">{d.ip_address}</Td>
-                      {prefs.visible.protocol && (
-                        <Td>
-                          <ProtocolBadges device={d} />
-                        </Td>
-                      )}
-                      {prefs.visible.vendor && (
-                        <Td className="text-sm">
-                          {d.vendor || d.model ? (
-                            <div>
-                              <div className="font-medium leading-tight">{d.vendor || '—'}</div>
-                              {d.model && (
-                                <div className="text-[11px] text-muted">{d.model}</div>
-                              )}
-                            </div>
-                          ) : (
-                            <span className="text-muted">—</span>
-                          )}
-                        </Td>
-                      )}
-                      {prefs.visible.type && (
-                        <Td className="text-sm capitalize">
-                          {d.device_type.replace('_', ' ')}
-                        </Td>
-                      )}
-                      {prefs.visible.group && (
-                        <Td className="text-sm">
-                          {d.group_name ? (
-                            <span className="inline-flex items-center gap-1.5">
-                              <GroupDot
-                                color={groups?.find((g) => g.id === d.group_id)?.color}
-                              />
-                              {d.group_name}
-                            </span>
-                          ) : (
-                            <span className="text-muted">—</span>
-                          )}
-                        </Td>
-                      )}
-                      {prefs.visible.location && (
-                        <Td className="text-sm">{d.location || '—'}</Td>
-                      )}
-                      {prefs.visible.rtt && (
-                        <Td className={`text-right font-mono text-xs text-${rttTone}`}>
-                          {rtt != null ? `${rtt.toFixed(1)}ms` : '—'}
-                        </Td>
-                      )}
-                      {prefs.visible.last_seen && (
-                        <Td className="text-xs text-muted">{relativeTime(d.last_seen)}</Td>
-                      )}
-                      <Td>
-                        <div className="flex gap-0.5">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            onClick={() => { setEditing(d); setFormOpen(true) }}
-                            title="Edit"
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 text-muted hover:text-danger"
-                            onClick={() => setDeleting(d)}
-                            title="Delete"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
+                    </Tr>
+                  )}
+                  {!isLoading && pageRows.length === 0 && (
+                    <Tr>
+                      <Td colSpan={12} className="py-14">
+                        <div className="flex flex-col items-center gap-2 text-center text-muted">
+                          <Server className="h-8 w-8 opacity-50" />
+                          <div className="text-sm font-medium text-text">No devices match</div>
+                          <div className="text-xs">
+                            {agg.total === 0 ? (
+                              <>
+                                Add one manually, or{' '}
+                                <Link to="/discovery" className="text-primary hover:underline">
+                                  run a discovery sweep
+                                </Link>
+                                .
+                              </>
+                            ) : (
+                              <>
+                                Try{' '}
+                                <button type="button" onClick={clearFilters} className="text-primary hover:underline">
+                                  clearing filters
+                                </button>
+                                .
+                              </>
+                            )}
+                          </div>
                         </div>
                       </Td>
                     </Tr>
-                  )
-                })}
-              </TBody>
-            </Table>
-          </div>
+                  )}
+                  {pageRows.map(({ device: d, health, cpu, mem, uptime }) => {
+                    const isSel = selected.has(d.id)
+                    const typeInfo = TYPE_STYLE[normalizeType(d.device_type)] || TYPE_STYLE.other
+                    return (
+                      <Tr key={d.id} className={isSel ? 'bg-primary/5' : ''}>
+                        <Td className="py-2.5">
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${d.hostname}`}
+                            checked={isSel}
+                            onChange={() => toggleRow(d.id)}
+                          />
+                        </Td>
+                        <Td className="py-2.5">
+                          <div className="flex items-center gap-2.5">
+                            <span
+                              className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border ${typeInfo.badge}`}
+                            >
+                              <typeInfo.Icon className="h-4 w-4" />
+                            </span>
+                            <Link
+                              to={`/devices/${d.id}`}
+                              className="truncate font-medium text-text hover:text-primary hover:underline"
+                              title={d.hostname}
+                            >
+                              {d.hostname}
+                            </Link>
+                          </div>
+                        </Td>
+                        <Td className="font-mono text-xs text-muted">{d.ip_address}</Td>
+                        {prefs.visible.type && (
+                          <Td className="text-sm capitalize">
+                            {titleCase(d.device_type.replace('_', ' '))}
+                          </Td>
+                        )}
+                        {prefs.visible.group_location && (
+                          <Td className="text-sm">
+                            {d.group_name || d.location ? (
+                              <div className="leading-tight">
+                                <div>{d.group_name || '—'}</div>
+                                {d.location && (
+                                  <div className="text-[11px] text-muted">{d.location}</div>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-muted">—</span>
+                            )}
+                          </Td>
+                        )}
+                        <Td>
+                          <HealthPill kind={health} />
+                        </Td>
+                        {prefs.visible.cpu && (
+                          <Td>
+                            <MetricCell value={cpu} />
+                          </Td>
+                        )}
+                        {prefs.visible.memory && (
+                          <Td>
+                            <MetricCell value={mem} />
+                          </Td>
+                        )}
+                        {prefs.visible.uptime && (
+                          <Td className="whitespace-nowrap text-sm">{uptime}</Td>
+                        )}
+                        {prefs.visible.last_seen && (
+                          <Td className="whitespace-nowrap text-xs">
+                            <span className="inline-flex items-center gap-1.5">
+                              {relativeTime(d.last_seen) || '—'}
+                              <span
+                                className={`h-1.5 w-1.5 rounded-full ${
+                                  health === 'healthy' ? 'bg-success' :
+                                  health === 'warning' ? 'bg-warning' :
+                                  health === 'critical' ? 'bg-danger' : 'bg-muted'
+                                }`}
+                              />
+                            </span>
+                          </Td>
+                        )}
+                        <Td className="text-right">
+                          <RowMenu
+                            onEdit={() => { setEditing(d); setFormOpen(true) }}
+                            onDelete={() => setDeleting(d)}
+                            onView={() => navigate(`/devices/${d.id}`)}
+                          />
+                        </Td>
+                      </Tr>
+                    )
+                  })}
+                </TBody>
+              </Table>
+            </div>
 
-          {/* Footer */}
-          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted">
-            <span>
-              Showing <span className="font-medium text-text">{sorted.length}</span> of{' '}
-              <span className="font-medium text-text">{totalCount}</span>
-              {activeFilterCount > 0 && (
-                <>
-                  {' '}· {activeFilterCount} filter{activeFilterCount === 1 ? '' : 's'} applied
-                </>
-              )}
-            </span>
-            <span className="inline-flex items-center gap-2">
-              <SlidersHorizontal className="h-3 w-3" />
-              sort: {sortKey} {sortOrder === 'asc' ? '↑' : '↓'}
-            </span>
-          </div>
-        </CardContent>
-      </Card>
+            {/* Footer / pagination */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-xs text-muted">
+              <span>
+                Showing{' '}
+                <span className="font-medium text-text">
+                  {sorted.length === 0 ? 0 : pageStart + 1}–{Math.min(pageStart + prefs.pageSize, sorted.length)}
+                </span>{' '}
+                of <span className="font-medium text-text">{sorted.length.toLocaleString()}</span> devices
+              </span>
+              <div className="flex items-center gap-2">
+                <Pagination
+                  page={currentPage}
+                  totalPages={totalPages}
+                  onPage={(p) => patchParams({ page: String(p) })}
+                />
+                <PageSizeSelect
+                  value={prefs.pageSize}
+                  onChange={(n) => {
+                    setPrefs({ ...prefs, pageSize: n })
+                    patchParams({ page: '1' })
+                  }}
+                />
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* ---------- Right sidebar ---------- */}
+        <div className="space-y-4">
+          <DistributionCard byCategory={agg.byCategory} total={agg.total} />
+          <StatusBreakdownCard
+            healthy={agg.healthy}
+            warning={agg.warning}
+            critical={agg.critical}
+            offline={agg.offline}
+            onPickStatus={(s) => patchParams({ status: statusFilter === s ? null : s, page: '1' })}
+          />
+          <RecentActivityCard alerts={recentAlerts?.data || []} />
+          <QuickActionsCard
+            onAdd={() => { setEditing(null); setFormOpen(true) }}
+            onDiscover={() => navigate('/discovery')}
+            onImport={() => navigate('/discovery')}
+            onBulk={() => {
+              if (selected.size > 0) setBulkEditOpen(true)
+              else toast.error('No devices selected', 'Pick devices in the list first')
+            }}
+          />
+        </div>
+      </div>
 
       {/* Dialogs */}
       <DeviceFormDialog open={formOpen} onOpenChange={setFormOpen} device={editing} />
@@ -1016,196 +1011,136 @@ export function DevicesPage() {
   )
 }
 
-// -------------------------------------------------------------------------
-// Sub-components
-// -------------------------------------------------------------------------
+// =========================================================================
+// KPI Card
+// =========================================================================
 
-/** Health-aware PING + SNMP badges.
- *
- * PING:   green when `up`, red when `down`/`degraded`, amber when `unknown`,
- *         muted outline when ping is disabled.
- * SNMP:   green when discovery has succeeded (sys_object_id present),
- *         red when enabled but misconfigured (v3 without user/auth, or no
- *         credential + no sys_object_id), amber when waiting for first poll,
- *         muted outline when SNMP is disabled.
- */
-function ProtocolBadges({ device }: { device: Device }) {
-  // ---- PING ----
-  let pingTitle = 'Ping disabled'
-  let pingClass = 'border-border bg-surface2 text-muted opacity-60'
-  if (device.ping_enabled) {
-    if (device.status === 'up') {
-      pingTitle = 'Ping OK'
-      pingClass = 'border-success/30 bg-success/10 text-success'
-    } else if (device.status === 'down') {
-      pingTitle = 'Ping failing — device unreachable'
-      pingClass = 'border-danger/30 bg-danger/10 text-danger'
-    } else if (device.status === 'degraded') {
-      pingTitle = 'Ping degraded — packet loss or high RTT'
-      pingClass = 'border-danger/30 bg-danger/10 text-danger'
-    } else {
-      pingTitle = 'Ping unknown — no sample yet'
-      pingClass = 'border-warning/30 bg-warning/10 text-warning'
-    }
+function KpiCard({
+  label, value, trend, icon, color, active, onClick,
+}: {
+  label: string
+  value: number
+  trend?: number | null
+  icon: React.ReactNode
+  color: 'primary' | 'success' | 'warning' | 'danger' | 'accent' | 'muted'
+  active?: boolean
+  onClick?: () => void
+}) {
+  const COLOR_MAP: Record<typeof color, { icon: string; ring: string }> = {
+    primary: { icon: 'text-primary bg-primary/10', ring: 'ring-primary/30 border-primary/30' },
+    success: { icon: 'text-success bg-success/10', ring: 'ring-success/30 border-success/30' },
+    warning: { icon: 'text-warning bg-warning/10', ring: 'ring-warning/40 border-warning/40' },
+    danger:  { icon: 'text-danger bg-danger/10',   ring: 'ring-danger/30 border-danger/30' },
+    accent:  { icon: 'text-accent bg-accent/10',   ring: 'ring-accent/30 border-accent/30' },
+    muted:   { icon: 'text-muted bg-muted/10',     ring: 'ring-border-strong/40 border-border-strong' },
   }
+  const c = COLOR_MAP[color]
+  const hasTrend = trend != null && Number.isFinite(trend)
+  const trendUp = hasTrend ? (trend as number) >= 0 : false
 
-  // ---- SNMP ----
-  let snmpShown = true
-  let snmpTitle = 'SNMP disabled'
-  let snmpClass = 'border-border bg-surface2 text-muted opacity-60'
-  if (!device.snmp_enabled) {
-    snmpShown = false
-  } else {
-    const v3Missing =
-      device.snmp_version === '3' &&
-      !(device.snmp_v3_username && device.snmp_auth_configured)
-    const discovered = !!device.sys_object_id
-    if (v3Missing) {
-      snmpTitle = 'SNMPv3 not configured — missing username or auth'
-      snmpClass = 'border-danger/30 bg-danger/10 text-danger'
-    } else if (discovered) {
-      snmpTitle = 'SNMP responding'
-      snmpClass = 'border-success/30 bg-success/10 text-success'
-    } else {
-      snmpTitle = 'SNMP enabled but never responded — check credentials / reachability'
-      snmpClass = 'border-danger/30 bg-danger/10 text-danger'
-    }
-  }
-
+  const Wrapper: any = onClick ? 'button' : 'div'
   return (
-    <div className="flex items-center gap-1">
-      <span
-        title={pingTitle}
-        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${pingClass}`}
-      >
-        <Wifi className="h-3 w-3" />
-        PING
-      </span>
-      {snmpShown && (
-        <span
-          title={snmpTitle}
-          className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${snmpClass}`}
-        >
-          <Shield className="h-3 w-3" />
-          SNMP
+    <Wrapper
+      type={onClick ? 'button' : undefined}
+      onClick={onClick}
+      className={`group relative flex flex-col gap-2 overflow-hidden rounded-xl border p-4 text-left transition-all ${
+        active ? `${c.ring} ring-1 bg-surface` : 'border-border bg-surface hover:border-border-strong'
+      }`}
+    >
+      <div className="flex items-center justify-between">
+        <span className={`inline-flex h-7 w-7 items-center justify-center rounded-md ${c.icon}`}>
+          {icon}
         </span>
-      )}
+        {hasTrend && (
+          <span
+            className={`inline-flex items-center gap-0.5 text-[11px] font-medium ${
+              trendUp ? 'text-success' : 'text-danger'
+            }`}
+          >
+            {trendUp ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
+            {Math.abs(trend as number).toFixed(1)}%
+          </span>
+        )}
+      </div>
+      <div>
+        <div className="text-[11px] font-medium uppercase tracking-wider text-muted">{label}</div>
+        <div className="mt-0.5 text-2xl font-bold leading-tight tracking-tight tabular-nums">
+          {value.toLocaleString()}
+        </div>
+      </div>
+    </Wrapper>
+  )
+}
+
+// =========================================================================
+// Metric cell (CPU / Memory)
+// =========================================================================
+
+function MetricCell({ value }: { value: number | null }) {
+  if (value == null) {
+    return <span className="text-xs text-muted">—</span>
+  }
+  const tone =
+    value >= 80 ? 'danger' : value >= 60 ? 'warning' : 'success'
+  const barColor =
+    tone === 'danger' ? 'bg-danger' : tone === 'warning' ? 'bg-warning' : 'bg-success'
+  return (
+    <div className="flex items-center gap-2">
+      <div className="min-w-[32px] text-xs font-medium tabular-nums">{value}%</div>
+      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface2">
+        <div
+          className={`h-full rounded-full ${barColor}`}
+          style={{ width: `${value}%` }}
+        />
+      </div>
     </div>
   )
 }
 
-function StatCard({
-  label,
-  value,
-  tone,
-  icon,
-  active,
-  onClick,
-}: {
-  label: string
-  value: number
-  tone?: 'success' | 'warning' | 'danger'
-  icon?: React.ReactNode
-  active?: boolean
-  onClick?: () => void
-}) {
-  const color =
-    tone === 'success'
-      ? 'text-success'
-      : tone === 'warning'
-        ? 'text-warning'
-        : tone === 'danger'
-          ? 'text-danger'
-          : 'text-text'
+// =========================================================================
+// Health pill (Healthy / Warning / Critical / Offline)
+// =========================================================================
+
+function HealthPill({ kind }: { kind: HealthKind }) {
+  const map: Record<HealthKind, { label: string; className: string; dot: string }> = {
+    healthy:  { label: 'Healthy',  className: 'border-success/30 bg-success/10 text-success', dot: 'bg-success' },
+    warning:  { label: 'Warning',  className: 'border-warning/30 bg-warning/10 text-warning', dot: 'bg-warning' },
+    critical: { label: 'Critical', className: 'border-danger/30 bg-danger/10 text-danger',    dot: 'bg-danger' },
+    offline:  { label: 'Offline',  className: 'border-border bg-surface2 text-muted',         dot: 'bg-muted' },
+  }
+  const v = map[kind]
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`group flex items-center justify-between rounded-lg border p-3 text-left transition-colors ${
-        active
-          ? 'border-primary/50 bg-primary/5'
-          : 'border-border bg-surface hover:border-border-strong hover:bg-surface2/50'
-      }`}
-    >
-      <div>
-        <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-muted">
-          {icon}
-          {label}
-        </div>
-        <div className={`mt-0.5 text-2xl font-semibold tabular-nums ${color}`}>{value}</div>
-      </div>
-    </button>
+    <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium ${v.className}`}>
+      <span className={`h-1.5 w-1.5 rounded-full ${v.dot}`} />
+      {v.label}
+    </span>
   )
 }
 
-function SortableTh({
-  label,
-  srLabel,
-  col,
-  current,
-  order,
-  onClick,
-  className,
-}: {
-  label: string
-  srLabel?: string
-  col: SortKey
-  current: SortKey
-  order: SortOrder
-  onClick: (c: SortKey) => void
-  className?: string
-}) {
-  const isActive = current === col
-  return (
-    <Th className={className}>
-      <button
-        type="button"
-        onClick={() => onClick(col)}
-        className={`inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wider transition-colors ${
-          isActive ? 'text-text' : 'text-muted hover:text-text'
-        }`}
-      >
-        {label || <span className="sr-only">{srLabel}</span>}
-        {isActive ? (
-          order === 'asc' ? (
-            <ArrowUp className="h-3 w-3" />
-          ) : (
-            <ArrowDown className="h-3 w-3" />
-          )
-        ) : (
-          <ArrowUpDown className="h-3 w-3 opacity-40" />
-        )}
-      </button>
-    </Th>
-  )
-}
+// =========================================================================
+// Filter dropdown — "Label  All ▾"
+// =========================================================================
 
-function FilterDropdown({
-  label,
-  icon,
-  value,
-  onChange,
-  options,
+function FilterInline({
+  label, value, onChange, options,
 }: {
   label: string
-  icon?: React.ReactNode
   value: string
   onChange: (v: string) => void
-  options: Array<{ value: string; label: string; color?: string }>
+  options: Array<{ value: string; label: string }>
 }) {
-  const selected = options.find((o) => o.value === value)
+  const sel = options.find((o) => o.value === value)
   return (
-    <div className="min-w-[140px]">
+    <div className="w-[160px] flex-none">
       <Select value={value || '__all__'} onValueChange={(v) => onChange(v === '__all__' ? '' : v)}>
         <SelectTrigger
-          className={`h-8 text-xs ${value ? 'border-primary/40 bg-primary/5' : ''}`}
+          className={`h-10 gap-2 px-3 text-sm ${
+            value ? 'border-primary/40 bg-primary/5' : ''
+          }`}
         >
-          <span className="flex items-center gap-1.5 text-muted">
-            {icon}
-            <span className="text-text">
-              {label}
-              {selected && <span className="text-muted">: {selected.label}</span>}
-            </span>
+          <span className="flex items-center gap-2 truncate">
+            <span className="text-muted">{label}</span>
+            <span className="truncate font-medium">{sel?.label || 'All'}</span>
           </span>
         </SelectTrigger>
         <SelectContent>
@@ -1213,12 +1148,7 @@ function FilterDropdown({
             <span className="text-muted">All {label.toLowerCase()}</span>
           </SelectItem>
           {options.map((o) => (
-            <SelectItem key={o.value} value={o.value}>
-              <span className="flex items-center gap-2">
-                {o.color && <GroupDot color={o.color} />}
-                {o.label}
-              </span>
-            </SelectItem>
+            <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
           ))}
         </SelectContent>
       </Select>
@@ -1226,29 +1156,408 @@ function FilterDropdown({
   )
 }
 
-function GroupDot({ color }: { color?: string | null }) {
+// =========================================================================
+// Distribution donut
+// =========================================================================
+
+const CATEGORY_COLORS: Record<string, string> = {
+  Server: 'rgb(var(--primary))',
+  Network: 'rgb(var(--success))',
+  Security: 'rgb(var(--danger))',
+  Wireless: 'rgb(var(--accent))',
+  Other: 'rgb(var(--muted))',
+}
+
+function DistributionCard({ byCategory, total }: { byCategory: Record<string, number>; total: number }) {
+  const entries = (Object.keys(CATEGORY_COLORS) as (keyof typeof CATEGORY_COLORS)[]).map((k) => ({
+    key: k,
+    value: byCategory[k] || 0,
+    color: CATEGORY_COLORS[k],
+  }))
   return (
-    <span
-      className="h-2 w-2 shrink-0 rounded-full border border-black/20"
-      style={{ backgroundColor: color || 'var(--color-muted)' }}
-    />
+    <Card>
+      <CardContent className="p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold">Device Distribution by Type</h3>
+          <button className="text-xs text-primary hover:underline">View all</button>
+        </div>
+        <div className="flex items-center gap-4">
+          <Donut
+            segments={entries.filter((e) => e.value > 0)}
+            total={total}
+            size={120}
+            thickness={18}
+          />
+          <div className="flex-1 space-y-1.5">
+            {entries.map((e) => {
+              const pct = total > 0 ? (e.value / total) * 100 : 0
+              return (
+                <div key={e.key} className="flex items-center justify-between text-xs">
+                  <span className="flex items-center gap-1.5">
+                    <span className="h-2 w-2 rounded-full" style={{ backgroundColor: e.color }} />
+                    <span className="text-muted">{e.key}</span>
+                  </span>
+                  <span className="font-medium tabular-nums">
+                    {e.value} <span className="text-muted">({pct.toFixed(1)}%)</span>
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   )
 }
 
-function Tag({ className }: { className?: string }) {
-  // Minimal "tag" glyph as a hollow circle — used in the Group filter header.
+function Donut({
+  segments, total, size = 120, thickness = 18,
+}: {
+  segments: Array<{ key: string; value: number; color: string }>
+  total: number
+  size?: number
+  thickness?: number
+}) {
+  const r = (size - thickness) / 2
+  const c = 2 * Math.PI * r
+  let offset = 0
+  const sum = segments.reduce((a, s) => a + s.value, 0) || 1
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
-      <circle cx="12" cy="12" r="8" />
-    </svg>
+    <div className="relative" style={{ width: size, height: size }}>
+      <svg width={size} height={size} className="-rotate-90">
+        <circle
+          cx={size / 2} cy={size / 2} r={r}
+          fill="none" stroke="rgb(var(--surface2))" strokeWidth={thickness}
+        />
+        {segments.map((s) => {
+          const len = (s.value / sum) * c
+          const dash = `${len} ${c - len}`
+          const el = (
+            <circle
+              key={s.key}
+              cx={size / 2} cy={size / 2} r={r}
+              fill="none" stroke={s.color} strokeWidth={thickness}
+              strokeDasharray={dash}
+              strokeDashoffset={-offset}
+              strokeLinecap="butt"
+            />
+          )
+          offset += len
+          return el
+        })}
+      </svg>
+      <div className="absolute inset-0 flex flex-col items-center justify-center">
+        <div className="text-[18px] font-bold leading-none">{total.toLocaleString()}</div>
+        <div className="text-[10px] font-medium uppercase tracking-wider text-muted">Total</div>
+      </div>
+    </div>
   )
 }
+
+// =========================================================================
+// Devices by Status card (horizontal bars)
+// =========================================================================
+
+function StatusBreakdownCard({
+  healthy, warning, critical, offline, onPickStatus,
+}: {
+  healthy: number; warning: number; critical: number; offline: number
+  onPickStatus: (s: string) => void
+}) {
+  const items = [
+    { key: 'healthy',  label: 'Healthy',  value: healthy,  color: 'rgb(var(--success))' },
+    { key: 'warning',  label: 'Warning',  value: warning,  color: 'rgb(var(--warning))' },
+    { key: 'critical', label: 'Critical', value: critical, color: 'rgb(var(--danger))' },
+    { key: 'offline',  label: 'Offline',  value: offline,  color: 'rgb(var(--muted))' },
+  ]
+  const max = Math.max(1, ...items.map((i) => i.value))
+  const ticks = [0, Math.round(max / 4), Math.round(max / 2), Math.round((max * 3) / 4), max]
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold">Devices by Status</h3>
+          <button className="text-xs text-primary hover:underline">View all</button>
+        </div>
+        <div className="space-y-2">
+          {items.map((it) => {
+            const pct = (it.value / max) * 100
+            return (
+              <button
+                key={it.key}
+                onClick={() => onPickStatus(it.key)}
+                className="flex w-full items-center gap-2 rounded px-1 py-0.5 text-left transition-colors hover:bg-surface2/60"
+              >
+                <span className="w-16 text-xs text-muted">{it.label}</span>
+                <div className="h-3 flex-1 overflow-hidden rounded-sm bg-surface2">
+                  <div
+                    className="h-full rounded-sm"
+                    style={{ width: `${pct}%`, backgroundColor: it.color }}
+                  />
+                </div>
+                <span className="w-10 text-right text-xs font-medium tabular-nums">{it.value.toLocaleString()}</span>
+              </button>
+            )
+          })}
+        </div>
+        <div className="mt-2 flex justify-between text-[10px] text-muted">
+          {ticks.map((t, i) => (
+            <span key={i}>{t.toLocaleString()}</span>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+// =========================================================================
+// Recent activity
+// =========================================================================
+
+type RecentAlert = {
+  id: string
+  severity: string
+  message?: string | null
+  device_id?: string | null
+  device_hostname?: string | null
+  triggered_at?: string | null
+  status?: string | null
+}
+
+function RecentActivityCard({ alerts }: { alerts: RecentAlert[] }) {
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <h3 className="text-sm font-semibold">Recent Device Activity</h3>
+          <Link to="/alerts" className="text-xs text-primary hover:underline">View all</Link>
+        </div>
+        <div className="space-y-3">
+          {alerts.length === 0 && (
+            <div className="py-4 text-center text-xs text-muted">No recent activity.</div>
+          )}
+          {alerts.map((a) => {
+            const sev = (a.severity || '').toLowerCase()
+            const tone =
+              sev === 'critical' ? 'danger' :
+              sev === 'warning' ? 'warning' :
+              a.status === 'resolved' ? 'success' : 'primary'
+            const Icon =
+              tone === 'danger' ? AlertTriangle :
+              tone === 'warning' ? AlertTriangle :
+              tone === 'success' ? CheckCircle2 : Activity
+            const label = a.message || `${a.severity || 'alert'} on ${a.device_hostname || 'device'}`
+            const text = a.device_hostname
+              ? `${a.device_hostname}: ${label}`
+              : label
+            return (
+              <div key={a.id} className="flex items-start gap-2.5">
+                <span
+                  className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full ${
+                    tone === 'success' ? 'bg-success/15 text-success'
+                    : tone === 'warning' ? 'bg-warning/15 text-warning'
+                    : tone === 'danger' ? 'bg-danger/15 text-danger'
+                    : 'bg-primary/15 text-primary'
+                  }`}
+                >
+                  <Icon className="h-3 w-3" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  {a.device_id ? (
+                    <Link
+                      to={`/devices/${a.device_id}`}
+                      className="block truncate text-xs font-medium hover:underline"
+                    >
+                      {text}
+                    </Link>
+                  ) : (
+                    <div className="truncate text-xs font-medium">{text}</div>
+                  )}
+                  <div className="text-[10px] text-muted">
+                    {relativeTime(a.triggered_at || null) || '—'}
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+// =========================================================================
+// Quick actions card
+// =========================================================================
+
+function QuickActionsCard({
+  onAdd, onDiscover, onImport, onBulk,
+}: { onAdd: () => void; onDiscover: () => void; onImport: () => void; onBulk: () => void }) {
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <h3 className="mb-3 text-sm font-semibold">Quick Actions</h3>
+        <div className="grid grid-cols-2 gap-2">
+          <Button variant="outline" size="sm" className="h-10 justify-start" onClick={onAdd}>
+            <PlusCircle className="h-4 w-4 text-primary" />
+            Add Device
+          </Button>
+          <Button variant="outline" size="sm" className="h-10 justify-start" onClick={onDiscover}>
+            <Radar className="h-4 w-4 text-primary" />
+            Discover Network
+          </Button>
+          <Button variant="outline" size="sm" className="h-10 justify-start" onClick={onImport}>
+            <Upload className="h-4 w-4 text-primary" />
+            Import Devices
+          </Button>
+          <Button variant="outline" size="sm" className="h-10 justify-start" onClick={onBulk}>
+            <Layers className="h-4 w-4 text-primary" />
+            Bulk Actions
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+// =========================================================================
+// Row menu (3-dot)
+// =========================================================================
+
+function RowMenu({ onEdit, onDelete, onView }: { onEdit: () => void; onDelete: () => void; onView: () => void }) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    function onDocClick(e: MouseEvent) {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [open])
+  return (
+    <div ref={ref} className="relative inline-block">
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-7 w-7 text-muted hover:text-text"
+        onClick={() => setOpen((o) => !o)}
+        title="More"
+      >
+        <MoreVertical className="h-3.5 w-3.5" />
+      </Button>
+      {open && (
+        <div className="absolute right-0 z-20 mt-1 w-36 overflow-hidden rounded-md border border-border bg-surface shadow-lg">
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs hover:bg-surface2"
+            onClick={() => { setOpen(false); onView() }}
+          >
+            <Activity className="h-3.5 w-3.5" /> View details
+          </button>
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs hover:bg-surface2"
+            onClick={() => { setOpen(false); onEdit() }}
+          >
+            <Pencil className="h-3.5 w-3.5" /> Edit
+          </button>
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-danger hover:bg-danger/5"
+            onClick={() => { setOpen(false); onDelete() }}
+          >
+            <Trash2 className="h-3.5 w-3.5" /> Delete
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// =========================================================================
+// Pagination + page size
+// =========================================================================
+
+function Pagination({
+  page, totalPages, onPage,
+}: { page: number; totalPages: number; onPage: (p: number) => void }) {
+  const pages = buildPageList(page, totalPages)
+  return (
+    <div className="flex items-center gap-0.5">
+      <IconBtn onClick={() => onPage(Math.max(1, page - 1))} disabled={page <= 1}>
+        <ChevronLeft className="h-3.5 w-3.5" />
+      </IconBtn>
+      {pages.map((p, i) =>
+        p === '…' ? (
+          <span key={`dots-${i}`} className="px-2 text-xs text-muted">…</span>
+        ) : (
+          <button
+            key={p}
+            onClick={() => onPage(p as number)}
+            className={`h-8 min-w-[28px] rounded px-2 text-xs ${
+              p === page
+                ? 'bg-primary text-white'
+                : 'text-muted hover:bg-surface2 hover:text-text'
+            }`}
+          >
+            {p}
+          </button>
+        ),
+      )}
+      <IconBtn onClick={() => onPage(Math.min(totalPages, page + 1))} disabled={page >= totalPages}>
+        <ChevronRight className="h-3.5 w-3.5" />
+      </IconBtn>
+    </div>
+  )
+}
+function IconBtn({ children, onClick, disabled }: { children: React.ReactNode; onClick: () => void; disabled?: boolean }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className="flex h-8 w-8 items-center justify-center rounded text-muted hover:bg-surface2 hover:text-text disabled:opacity-40 disabled:hover:bg-transparent"
+    >
+      {children}
+    </button>
+  )
+}
+
+function buildPageList(page: number, total: number): Array<number | '…'> {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1)
+  const set = new Set<number>([1, total, page, page - 1, page + 1])
+  if (page <= 3) { set.add(2); set.add(3); set.add(4) }
+  if (page >= total - 2) { set.add(total - 1); set.add(total - 2); set.add(total - 3) }
+  const list = [...set].filter((n) => n >= 1 && n <= total).sort((a, b) => a - b)
+  const out: Array<number | '…'> = []
+  for (let i = 0; i < list.length; i++) {
+    out.push(list[i])
+    if (i < list.length - 1 && list[i + 1] - list[i] > 1) out.push('…')
+  }
+  return out
+}
+
+function PageSizeSelect({ value, onChange }: { value: number; onChange: (n: number) => void }) {
+  return (
+    <Select value={String(value)} onValueChange={(v) => onChange(Number(v))}>
+      <SelectTrigger className="h-8 w-[96px] text-xs">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {PAGE_SIZE_OPTIONS.map((n) => (
+          <SelectItem key={n} value={String(n)}>{n} / page</SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+}
+
+// =========================================================================
+// Columns dialog
+// =========================================================================
 
 function ColumnsDialog({
-  open,
-  onOpenChange,
-  visible,
-  onChange,
+  open, onOpenChange, visible, onChange,
 }: {
   open: boolean
   onOpenChange: (o: boolean) => void
@@ -1260,11 +1569,10 @@ function ColumnsDialog({
       <DialogContent className="max-w-sm">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Columns3 className="h-5 w-5 text-primary" />
-            Columns
+            <Columns3 className="h-5 w-5 text-primary" /> Columns
           </DialogTitle>
           <DialogDescription>
-            Toggle which columns appear in the table. Hostname, IP and actions stay pinned.
+            Toggle which columns appear in the table. Device Name, IP, Status and actions stay pinned.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
@@ -1283,12 +1591,7 @@ function ColumnsDialog({
           ))}
         </div>
         <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={() => onChange({ ...DEFAULT_VISIBLE })}
-          >
-            Reset
-          </Button>
+          <Button variant="outline" onClick={() => onChange({ ...DEFAULT_VISIBLE })}>Reset</Button>
           <Button onClick={() => onOpenChange(false)}>Done</Button>
         </DialogFooter>
       </DialogContent>
@@ -1296,16 +1599,12 @@ function ColumnsDialog({
   )
 }
 
-// -------------------------------------------------------------------------
-// Bulk edit dialog (unchanged from prior turn — Group + SNMP inclusive)
-// -------------------------------------------------------------------------
+// =========================================================================
+// Bulk Edit dialog
+// =========================================================================
 
 function BulkEditDialog({
-  open,
-  onOpenChange,
-  count,
-  loading,
-  onSubmit,
+  open, onOpenChange, count, loading, onSubmit,
 }: {
   open: boolean
   onOpenChange: (o: boolean) => void
@@ -1376,7 +1675,6 @@ function BulkEditDialog({
       if (snmpVersion !== '3') patch.snmp_community = snmpCommunity || 'public'
       if (snmpEnabled === '__keep__') patch.snmp_enabled = true
     }
-
     if (snmpPollInterval) {
       const n = Number(snmpPollInterval)
       if (!Number.isNaN(n)) patch.snmp_poll_interval = n
@@ -1419,16 +1717,9 @@ function BulkEditDialog({
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="__keep__">Keep existing</SelectItem>
-                    <SelectItem value="__clear__">
-                      <span className="text-muted">Remove from group</span>
-                    </SelectItem>
+                    <SelectItem value="__clear__"><span className="text-muted">Remove from group</span></SelectItem>
                     {(groups || []).map((g) => (
-                      <SelectItem key={g.id} value={g.id}>
-                        <span className="flex items-center gap-2">
-                          {g.color && <GroupDot color={g.color} />}
-                          {g.name}
-                        </span>
-                      </SelectItem>
+                      <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
@@ -1470,10 +1761,7 @@ function BulkEditDialog({
               </FormField>
               <FormField label="Ping interval (seconds)" hint="Blank = keep existing">
                 <Input
-                  type="number"
-                  min={10}
-                  max={3600}
-                  placeholder="e.g. 60"
+                  type="number" min={10} max={3600} placeholder="e.g. 60"
                   value={pingInterval}
                   onChange={(e) => setPingInterval(e.target.value)}
                 />
@@ -1507,22 +1795,15 @@ function BulkEditDialog({
             </div>
 
             {snmpMode === 'saved' && (
-              <FormField
-                label="Saved credential"
-                hint="Applies the credential's version, port, community/v3 to every selected device"
-              >
+              <FormField label="Saved credential" hint="Applies the credential's version, port, community/v3 to every selected device">
                 <Select value={credentialId} onValueChange={setCredentialId}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select credential…" />
-                  </SelectTrigger>
+                  <SelectTrigger><SelectValue placeholder="Select credential…" /></SelectTrigger>
                   <SelectContent>
                     {(credentials || []).map((c) => (
                       <SelectItem key={c.id} value={c.id}>
                         <span className="flex items-center gap-2">
                           {c.name}
-                          <span className="text-xs text-muted">
-                            v{c.snmp_version} · port {c.port}
-                          </span>
+                          <span className="text-xs text-muted">v{c.snmp_version} · port {c.port}</span>
                           {c.is_default && <Badge variant="info">default</Badge>}
                         </span>
                       </SelectItem>
@@ -1548,15 +1829,12 @@ function BulkEditDialog({
                   <Input
                     value={snmpCommunity}
                     onChange={(e) => setSnmpCommunity(e.target.value)}
-                    placeholder="public"
-                    disabled={snmpVersion === '3'}
+                    placeholder="public" disabled={snmpVersion === '3'}
                   />
                 </FormField>
                 <FormField label="Port">
                   <Input
-                    type="number"
-                    min={1}
-                    max={65535}
+                    type="number" min={1} max={65535}
                     value={snmpPort}
                     onChange={(e) => setSnmpPort(e.target.value)}
                   />
@@ -1566,10 +1844,7 @@ function BulkEditDialog({
 
             <FormField label="Poll interval (seconds)" hint="Blank = keep existing">
               <Input
-                type="number"
-                min={30}
-                max={3600}
-                placeholder="e.g. 60"
+                type="number" min={30} max={3600} placeholder="e.g. 60"
                 value={snmpPollInterval}
                 onChange={(e) => setSnmpPollInterval(e.target.value)}
               />
@@ -1589,57 +1864,123 @@ function BulkEditDialog({
     </Dialog>
   )
 }
-
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">
-      {children}
-    </div>
+    <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{children}</div>
   )
 }
 
-// -------------------------------------------------------------------------
+// =========================================================================
+// Sortable header
+// =========================================================================
+
+function SortableTh({
+  label, col, current, order, onClick, className,
+}: {
+  label: string
+  col: SortKey
+  current: SortKey
+  order: SortOrder
+  onClick: (c: SortKey) => void
+  className?: string
+}) {
+  const isActive = current === col
+  return (
+    <Th className={className}>
+      <button
+        type="button"
+        onClick={() => onClick(col)}
+        className={`inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wider transition-colors ${
+          isActive ? 'text-text' : 'text-muted hover:text-text'
+        }`}
+      >
+        {label}
+        {isActive ? (
+          order === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />
+        ) : null}
+      </button>
+    </Th>
+  )
+}
+
+// =========================================================================
 // Helpers
-// -------------------------------------------------------------------------
+// =========================================================================
+
+const TYPE_STYLE: Record<string, { Icon: React.ComponentType<{ className?: string }>; badge: string }> = {
+  router:        { Icon: Router,    badge: 'border-primary/20 bg-primary/10 text-primary' },
+  switch:        { Icon: Router,    badge: 'border-success/20 bg-success/10 text-success' },
+  firewall:      { Icon: Shield,    badge: 'border-danger/20 bg-danger/10 text-danger' },
+  server:        { Icon: Server,    badge: 'border-primary/20 bg-primary/10 text-primary' },
+  access_point:  { Icon: Wifi,      badge: 'border-accent/20 bg-accent/10 text-accent' },
+  printer:       { Icon: HardDrive, badge: 'border-muted/20 bg-muted/10 text-muted' },
+  storage:       { Icon: Database,  badge: 'border-accent/20 bg-accent/10 text-accent' },
+  ups:           { Icon: HardDrive, badge: 'border-warning/20 bg-warning/10 text-warning' },
+  hypervisor:    { Icon: Server,    badge: 'border-accent/20 bg-accent/10 text-accent' },
+  other:         { Icon: Server,    badge: 'border-border bg-surface2 text-muted' },
+}
+
+function normalizeType(t: string): string {
+  if (TYPE_STYLE[t]) return t
+  if (t.includes('switch')) return 'switch'
+  if (t.includes('router')) return 'router'
+  if (t.includes('firewall')) return 'firewall'
+  if (t.includes('server')) return 'server'
+  if (t.includes('access') || t.includes('ap')) return 'access_point'
+  return 'other'
+}
+
+function categoryOf(t: string): 'Server' | 'Network' | 'Security' | 'Wireless' | 'Other' {
+  const n = normalizeType(t)
+  if (n === 'server' || n === 'hypervisor' || n === 'storage') return 'Server'
+  if (n === 'router' || n === 'switch') return 'Network'
+  if (n === 'firewall') return 'Security'
+  if (n === 'access_point') return 'Wireless'
+  return 'Other'
+}
+
+function healthOf(d: Device): HealthKind {
+  if (d.status === 'up') return 'healthy'
+  if (d.status === 'degraded') return 'warning'
+  if (d.status === 'down') return 'critical'
+  return 'offline'
+}
 
 function extractSortVal(d: Device, k: SortKey): string | number | null {
   switch (k) {
-    case 'hostname':
-      return d.hostname.toLowerCase()
-    case 'ip_address':
-      // Sort IPs numerically by octet.
-      return ipToInt(d.ip_address)
-    case 'device_type':
-      return d.device_type
-    case 'vendor':
-      return (d.vendor || '').toLowerCase()
-    case 'location':
-      return (d.location || '').toLowerCase()
-    case 'group_name':
-      return (d.group_name || '').toLowerCase()
-    case 'status':
-      return d.status
-    case 'last_rtt_ms':
-      return d.last_rtt_ms ?? Infinity
-    case 'last_seen':
-      return d.last_seen || ''
-    default:
-      return null
+    case 'hostname':     return d.hostname.toLowerCase()
+    case 'ip_address':   return ipToInt(d.ip_address)
+    case 'device_type':  return d.device_type
+    case 'vendor':       return (d.vendor || '').toLowerCase()
+    case 'location':     return (d.location || '').toLowerCase()
+    case 'group_name':   return (d.group_name || '').toLowerCase()
+    case 'status':       return d.status
+    case 'last_rtt_ms':  return d.last_rtt_ms ?? Infinity
+    case 'last_seen':    return d.last_seen || ''
+    default:             return null
   }
 }
-
 function ipToInt(ip: string): number {
   const parts = ip.split('.').map(Number)
   if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) return Number.MAX_SAFE_INTEGER
   return (parts[0] << 24) + (parts[1] << 16) + (parts[2] << 8) + parts[3]
 }
-
 function csvEscape(v: string): string {
   if (v == null) return ''
   if (/[",\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`
   return v
 }
-
 function titleCase(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1)
+}
+
+function formatRealUptime(seconds: number | undefined, health: HealthKind): string {
+  if (health !== 'healthy' && health !== 'warning') return '—'
+  if (seconds == null || !isFinite(seconds) || seconds <= 0) return '—'
+  const d = Math.floor(seconds / 86400)
+  const h = Math.floor((seconds % 86400) / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  if (d > 0) return `${d}d ${h}h`
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m`
 }

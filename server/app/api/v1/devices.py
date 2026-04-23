@@ -13,8 +13,75 @@ from app.schemas.device import (
 )
 from app.schemas.metric import MetricResponse, StatusChangeEvent
 from app.services import device_service, metric_service
+from app.api.v1.snmp import (
+    _snmpget,
+    _ping_once,
+    SYS_DESCR_OID,
+    SYS_OBJECT_OID,
+    SYS_NAME_OID,
+)
+from app.core.crypto import decrypt
+from sqlalchemy import text
+import time
+import asyncio
 
 router = APIRouter(prefix="/devices", tags=["Devices"])
+
+SYS_UPTIME_OID = "1.3.6.1.2.1.1.3.0"
+
+
+async def _device_snmp_settings(db: AsyncSession, device) -> dict:
+    """Resolve effective SNMP settings for a device, including saved credential
+    overrides. Decrypts any v3 passphrases. Returns a dict ready for _snmpget."""
+    out = {
+        "version": device.snmp_version or "2c",
+        "port": device.snmp_port or 161,
+        "timeout_ms": device.snmp_timeout_ms or 2000,
+        "community": device.snmp_community,
+        "v3_username": device.snmp_v3_username,
+        "v3_context": device.snmp_v3_context,
+        "v3_auth_protocol": device.snmp_auth_protocol,
+        "v3_auth_passphrase": None,
+        "v3_priv_protocol": device.snmp_priv_protocol,
+        "v3_priv_passphrase": None,
+        "v3_security_level": None,
+    }
+    try:
+        if device.snmp_auth_passphrase:
+            out["v3_auth_passphrase"] = decrypt(device.snmp_auth_passphrase)
+        if device.snmp_priv_passphrase:
+            out["v3_priv_passphrase"] = decrypt(device.snmp_priv_passphrase)
+    except Exception:
+        pass
+
+    # If a saved credential is linked, its values take precedence.
+    if device.snmp_credential_id:
+        row = (await db.execute(
+            text("""SELECT snmp_version, community, port, timeout_ms,
+                           v3_username, v3_context, v3_security_level,
+                           v3_auth_protocol, v3_auth_passphrase,
+                           v3_priv_protocol, v3_priv_passphrase
+                    FROM snmp_credentials WHERE id = :id"""),
+            {"id": device.snmp_credential_id},
+        )).mappings().first()
+        if row:
+            out["version"] = row["snmp_version"] or out["version"]
+            out["port"] = row["port"] or out["port"]
+            out["timeout_ms"] = row["timeout_ms"] or out["timeout_ms"]
+            out["community"] = row["community"] or out["community"]
+            out["v3_username"] = row["v3_username"] or out["v3_username"]
+            out["v3_context"] = row["v3_context"] or out["v3_context"]
+            out["v3_security_level"] = row["v3_security_level"] or out["v3_security_level"]
+            out["v3_auth_protocol"] = row["v3_auth_protocol"] or out["v3_auth_protocol"]
+            out["v3_priv_protocol"] = row["v3_priv_protocol"] or out["v3_priv_protocol"]
+            try:
+                if row["v3_auth_passphrase"]:
+                    out["v3_auth_passphrase"] = decrypt(row["v3_auth_passphrase"])
+                if row["v3_priv_passphrase"]:
+                    out["v3_priv_passphrase"] = decrypt(row["v3_priv_passphrase"])
+            except Exception:
+                pass
+    return out
 
 
 @router.get("", response_model=dict)
@@ -93,6 +160,122 @@ async def dashboard_uptime_stats(
             continue
 
     return {"hours": hours, "from": from_time.isoformat(), "to": to_time.isoformat(), "devices": uptime_map}
+
+
+@router.get("/current-uptime")
+async def current_uptime(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Return the current continuous uptime (seconds) for each up device.
+
+    For each device whose most recent status log transition is to `up`, we
+    return `now - transition_timestamp`. Devices with no log fall back to
+    `created_at` (best guess for devices that have been up since creation).
+    """
+    from app.core.database import get_clickhouse_client
+    client = get_clickhouse_client()
+
+    # Latest transition row per device.
+    try:
+        res = client.query(
+            """
+            SELECT
+              device_id,
+              argMax(timestamp, timestamp) AS last_ts,
+              argMax(new_status, timestamp) AS last_status
+            FROM zenplus.device_status_log
+            GROUP BY device_id
+            """
+        )
+    except Exception:
+        res = None
+
+    now = datetime.now(timezone.utc)
+    uptime: dict[str, float] = {}
+    seen_ids: set[str] = set()
+    if res is not None:
+        for row in res.result_rows:
+            did = str(row[0])
+            seen_ids.add(did)
+            last_ts = row[1]
+            last_status = row[2]
+            if last_status != "up":
+                continue
+            # ClickHouse can return naive datetimes.
+            if last_ts.tzinfo is None:
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+            delta = (now - last_ts).total_seconds()
+            if delta > 0:
+                uptime[did] = delta
+
+    # Fallback: devices that are currently up but have no status log entry —
+    # use created_at as the uptime origin. Only applies to `up` devices.
+    rows = (await db.execute(text(
+        "SELECT id, created_at FROM devices WHERE status = 'up'"
+    ))).all()
+    for row in rows:
+        did = str(row[0])
+        if did in uptime:
+            continue
+        created_at = row[1]
+        if created_at is None:
+            continue
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        delta = (now - created_at).total_seconds()
+        if delta > 0:
+            uptime[did] = delta
+
+    return {"generated_at": now.isoformat(), "devices": uptime}
+
+
+@router.get("/current-metrics")
+async def current_metrics(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Latest scalar SNMP metric values per device (cpu, memory, ...).
+
+    Returns `{"devices": {device_id: {metric_key: value, ...}}}` where each
+    value is the most recent point from `zenplus.snmp_metrics` within the
+    last 15 minutes. Used by the devices list to show real CPU/memory
+    instead of synthesizing them on the client.
+    """
+    from app.core.database import get_clickhouse_client
+    client = get_clickhouse_client()
+
+    try:
+        res = client.query(
+            """
+            SELECT device_id, metric_key,
+                   argMax(value, timestamp) AS val,
+                   max(timestamp) AS ts
+            FROM zenplus.snmp_metrics
+            WHERE timestamp >= now() - INTERVAL 15 MINUTE
+            GROUP BY device_id, metric_key
+            """
+        )
+    except Exception:
+        return {"generated_at": datetime.now(timezone.utc).isoformat(), "devices": {}}
+
+    out: dict[str, dict] = {}
+    latest_ts: dict[str, datetime] = {}
+    for row in res.result_rows:
+        did = str(row[0])
+        key = row[1]
+        val = float(row[2])
+        ts = row[3]
+        bucket = out.setdefault(did, {})
+        bucket[key] = val
+        if did not in latest_ts or ts > latest_ts[did]:
+            latest_ts[did] = ts
+    for did, ts in latest_ts.items():
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        out[did]["_ts"] = ts.isoformat()
+
+    return {"generated_at": datetime.now(timezone.utc).isoformat(), "devices": out}
 
 
 @router.get("/groups", response_model=list[DeviceGroupResponse])
@@ -287,8 +470,16 @@ async def get_device_snmp_metrics(
     from app.core.database import get_clickhouse_client
     client = get_clickhouse_client()
 
-    table = "snmp_metrics" if hours <= 6 else "snmp_metrics_5m"
-    val_col = "value" if hours <= 6 else "avg_value"
+    # Pick a table based on window. The 5m + 1h rollups don't carry the
+    # `unit` column, so we only select it from the raw table.
+    if hours <= 6:
+        table, val_col, has_unit = "snmp_metrics", "value", True
+    elif hours <= 168:
+        table, val_col, has_unit = "snmp_metrics_5m", "avg_value", False
+    else:
+        table, val_col, has_unit = "snmp_metrics_1h", "avg_value", False
+
+    unit_expr = "any(unit) AS unit" if has_unit else "'' AS unit"
 
     try:
         res = client.query(
@@ -296,7 +487,7 @@ async def get_device_snmp_metrics(
             SELECT metric_key,
                    toUnixTimestamp64Milli(timestamp) AS ts_ms,
                    {val_col} AS val,
-                   any(unit) AS unit
+                   {unit_expr}
             FROM zenplus.{table}
             WHERE device_id = %(id)s
               AND timestamp >= now() - INTERVAL %(hours)s HOUR
@@ -503,6 +694,166 @@ async def get_status_history(
         raise HTTPException(status_code=404, detail="Device not found")
 
     return metric_service.get_status_history(device_id, from_time, to_time, limit)
+
+
+@router.post("/{device_id}/ping-test")
+async def test_device_ping(
+    device_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Run an on-demand ICMP probe (3 packets) and return whether the device
+    replied, along with an approximate round-trip time."""
+    import subprocess
+
+    device = await device_service.get_device(db, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    ip = str(device.ip_address)
+    started = time.monotonic()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ping", "-c", "3", "-W", "1", "-n", ip,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out_b, _ = await proc.communicate()
+        raw = out_b.decode("utf-8", errors="replace")
+        duration_ms = int((time.monotonic() - started) * 1000)
+
+        # Parse "3 packets transmitted, 3 received" and "rtt min/avg/max/mdev = 0.123/0.456/0.789/…"
+        import re as _re
+        received = 0
+        transmitted = 0
+        rtt_avg_ms = None
+        m = _re.search(r"(\d+)\s+packets transmitted,\s+(\d+)\s+received", raw)
+        if m:
+            transmitted = int(m.group(1))
+            received = int(m.group(2))
+        m = _re.search(r"rtt min/avg/max/[^\s=]*\s*=\s*[\d.]+/([\d.]+)/[\d.]+/", raw)
+        if m:
+            rtt_avg_ms = float(m.group(1))
+
+        ok = received > 0
+        loss_pct = ((transmitted - received) / transmitted * 100) if transmitted else 100
+        return {
+            "ok": ok,
+            "reachable": ok,
+            "transmitted": transmitted,
+            "received": received,
+            "loss_pct": round(loss_pct, 1),
+            "rtt_avg_ms": rtt_avg_ms,
+            "duration_ms": duration_ms,
+            "reason": None if ok else "Host did not reply to ICMP echo",
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "reachable": False,
+            "transmitted": 0,
+            "received": 0,
+            "loss_pct": 100,
+            "rtt_avg_ms": None,
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            "reason": f"ping failed: {e}",
+        }
+
+
+@router.post("/{device_id}/snmp-test")
+async def test_device_snmp(
+    device_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Run an on-demand SNMP probe against the device and return whether it
+    responded, plus the sysDescr/sysName/sysObjectID/sysUpTime values we got."""
+    device = await device_service.get_device(db, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    if not device.snmp_enabled:
+        return {
+            "ok": False,
+            "reason": "SNMP monitoring is disabled for this device",
+            "snmp_responded": False,
+            "reachable": None,
+            "duration_ms": 0,
+        }
+
+    cfg = await _device_snmp_settings(db, device)
+
+    ip = str(device.ip_address)
+    reachable = await _ping_once(ip, timeout_s=2.0)
+
+    # Give the manual probe more headroom than the configured timeout so we
+    # don't falsely report "timed out" on slow devices. Minimum 5s.
+    probe_timeout_ms = max(5000, cfg["timeout_ms"] * 3)
+
+    started = time.monotonic()
+    oids = [SYS_DESCR_OID, SYS_OBJECT_OID, SYS_NAME_OID, SYS_UPTIME_OID]
+    result = await _snmpget(
+        ip=ip,
+        community=cfg["community"] or "public",
+        version=cfg["version"],
+        port=cfg["port"],
+        timeout_ms=probe_timeout_ms,
+        oids=oids,
+        v3_username=cfg["v3_username"],
+        v3_security_level=cfg["v3_security_level"],
+        v3_auth_protocol=cfg["v3_auth_protocol"],
+        v3_auth_passphrase=cfg["v3_auth_passphrase"],
+        v3_priv_protocol=cfg["v3_priv_protocol"],
+        v3_priv_passphrase=cfg["v3_priv_passphrase"],
+        v3_context=cfg["v3_context"],
+    )
+    duration_ms = int((time.monotonic() - started) * 1000)
+
+    if result is None:
+        return {
+            "ok": False,
+            "snmp_responded": False,
+            "reachable": reachable,
+            "reason": (
+                "SNMP probe timed out — check credentials, community, version, or firewall"
+                if reachable else "Host is unreachable (ping failed)"
+            ),
+            "duration_ms": duration_ms,
+            "config": {
+                "version": cfg["version"],
+                "port": cfg["port"],
+                "timeout_ms": cfg["timeout_ms"],
+            },
+        }
+
+    # Parse uptime (timeticks: "(12345) 0:02:03.45")
+    uptime_raw = result.get(SYS_UPTIME_OID, "")
+    uptime_seconds = None
+    try:
+        if uptime_raw:
+            # Some net-snmp versions return bare timeticks like "12345"
+            digits = "".join(ch for ch in uptime_raw if ch.isdigit())
+            if digits:
+                uptime_seconds = int(digits) / 100
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "snmp_responded": True,
+        "reachable": reachable,
+        "duration_ms": duration_ms,
+        "sys_descr": result.get(SYS_DESCR_OID),
+        "sys_object_id": result.get(SYS_OBJECT_OID),
+        "sys_name": result.get(SYS_NAME_OID),
+        "sys_uptime_seconds": uptime_seconds,
+        "sys_uptime_raw": uptime_raw,
+        "config": {
+            "version": cfg["version"],
+            "port": cfg["port"],
+            "timeout_ms": cfg["timeout_ms"],
+        },
+    }
 
 
 def _device_to_response(device) -> DeviceResponse:

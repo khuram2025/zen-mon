@@ -2,6 +2,7 @@ package snmp
 
 import (
 	"net"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -124,8 +125,13 @@ type InterfaceSample struct {
 	PollerID     string
 }
 
-// Result bundles one device's full SNMP poll output.
+// Result bundles one device's full SNMP poll output. The collector
+// writes into this struct progressively so that partial results are
+// preserved if the outer cycle times out on a slow device — basic
+// identity (System, SysObjectID, vendor, model) can still be persisted
+// even when the full interface walk never finishes.
 type Result struct {
+	Mu         sync.Mutex
 	DeviceID   uuid.UUID
 	Timestamp  time.Time
 	Duration   time.Duration

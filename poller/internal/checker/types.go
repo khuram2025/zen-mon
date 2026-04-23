@@ -10,8 +10,13 @@ import (
 type ServiceCheck struct {
 	ID                  uuid.UUID
 	DeviceID            *uuid.UUID
+	GroupID             *uuid.UUID
+	ParentCheckID       *uuid.UUID
 	Name                string
-	CheckType           string // "http", "tcp", "tls"
+	CheckType           string // "http" | "tcp" | "tls" | "icmp" | "dns"
+	Level               int    // 1 = availability, 2 = health, 3 = transaction
+	Config              map[string]any // type-specific (e.g. DNS record_type, expected)
+	Tags                []string
 	Enabled             bool
 	TargetHost          string
 	TargetPort          int
@@ -26,6 +31,8 @@ type ServiceCheck struct {
 	TLSCriticalDays     int
 	CheckInterval       time.Duration
 	Timeout             time.Duration
+	RetryCount          int
+	RetryDelay          time.Duration
 	Status              string
 	DownCount           int // runtime state
 }

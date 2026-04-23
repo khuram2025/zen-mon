@@ -39,9 +39,11 @@ export interface DeviceGroup {
 export interface Alert {
   id: string
   rule_id: string | null
-  device_id: string
+  device_id: string | null
   device_hostname: string | null
   device_ip: string | null
+  service_check_id: string | null
+  service_check_name: string | null
   status: 'active' | 'acknowledged' | 'resolved'
   severity: 'info' | 'warning' | 'critical'
   message: string
@@ -133,15 +135,74 @@ export interface LoginResponse {
   user: User
 }
 
-export type ServiceCheckType = 'http' | 'tcp' | 'tls'
+export type ServiceCheckType = 'http' | 'tcp' | 'tls' | 'icmp' | 'dns'
 export type ServiceStatus = 'up' | 'down' | 'degraded' | 'warning' | 'unknown'
+export type ServiceLevel = 1 | 2 | 3
+
+export interface ServiceCheckGroup {
+  id: string
+  name: string
+  description: string | null
+  color: string | null
+  check_count: number
+  created_at: string
+  updated_at: string | null
+}
+
+export interface ServiceCheckTemplate {
+  id: string
+  name: string
+  description: string | null
+  check_type: ServiceCheckType
+  level: ServiceLevel
+  config: Record<string, unknown>
+  tags: string[]
+  default_interval: number
+  default_timeout: number
+  default_retry_count: number
+  default_retry_delay_s: number
+  target_url_template: string | null
+  target_port_default: number | null
+  http_method: string | null
+  http_expected_status: number | null
+  http_content_match: string | null
+  http_follow_redirects: boolean | null
+  tls_warn_days: number | null
+  tls_critical_days: number | null
+  created_at: string
+  updated_at: string | null
+}
+
+export interface ServiceMaintenanceWindow {
+  id: string
+  scope_type: 'check' | 'group' | 'tag' | 'all'
+  scope_check_id: string | null
+  scope_group_id: string | null
+  scope_tag: string | null
+  scope_label: string | null
+  starts_at: string
+  ends_at: string
+  reason: string | null
+  active: boolean
+  created_at: string
+}
 
 export interface ServiceCheck {
   id: string
   device_id: string | null
   device_hostname: string | null
+  group_id: string | null
+  group_name: string | null
+  parent_check_id?: string | null
+  parent_check_name?: string | null
   name: string
   check_type: ServiceCheckType
+  level: ServiceLevel
+  config: Record<string, unknown>
+  tags: string[]
+  retry_count?: number
+  retry_delay_s?: number
+  in_maintenance?: boolean
   enabled: boolean
   target_host: string
   target_port: number | null

@@ -16,12 +16,15 @@ async def list_alerts(
     status: str | None = None,
     severity: str | None = None,
     device_id: UUID | None = None,
+    service_check_id: UUID | None = None,
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    alerts, total = await alert_service.get_alerts(db, status, severity, device_id, skip, limit)
+    alerts, total = await alert_service.get_alerts(
+        db, status, severity, device_id, service_check_id, skip, limit,
+    )
     data = []
     for alert in alerts:
         resp = AlertResponse(
@@ -30,6 +33,8 @@ async def list_alerts(
             device_id=alert.device_id,
             device_hostname=alert.device.hostname if alert.device else None,
             device_ip=str(alert.device.ip_address) if alert.device else None,
+            service_check_id=alert.service_check_id,
+            service_check_name=alert.service_check.name if getattr(alert, "service_check", None) else None,
             status=alert.status,
             severity=alert.severity,
             message=alert.message,

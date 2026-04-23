@@ -9,6 +9,10 @@ import { DeviceDetailPage } from '@/pages/DeviceDetailPage'
 import { AlertsPage } from '@/pages/AlertsPage'
 import { AlertRulesPage } from '@/pages/AlertRulesPage'
 import { ServicesPage } from '@/pages/ServicesPage'
+import { ServiceCheckDetailPage } from '@/pages/ServiceCheckDetail'
+import { ServiceCheckGroupsPage } from '@/pages/ServiceCheckGroupsPage'
+import { ServiceMaintenancePage } from '@/pages/ServiceMaintenancePage'
+import { ServiceCheckTemplatesPage } from '@/pages/ServiceCheckTemplatesPage'
 import { DiscoveryPage } from '@/pages/DiscoveryPage'
 import { MibLibraryPage } from '@/pages/MibLibraryPage'
 import { ReportsPage } from '@/pages/ReportsPage'
@@ -66,6 +70,10 @@ export default function App() {
         <Route path="devices" element={<DevicesPage />} />
         <Route path="devices/:id" element={<DeviceDetailPage />} />
         <Route path="services" element={<ServicesPage />} />
+        <Route path="services/groups" element={<ServiceCheckGroupsPage />} />
+        <Route path="services/maintenance" element={<ServiceMaintenancePage />} />
+        <Route path="services/templates" element={<ServiceCheckTemplatesPage />} />
+        <Route path="services/:id" element={<ServiceCheckDetailPage />} />
         <Route path="discovery" element={<DiscoveryPage />} />
         <Route path="mibs" element={<MibLibraryPage />} />
         <Route path="alerts" element={<AlertsPage />} />
