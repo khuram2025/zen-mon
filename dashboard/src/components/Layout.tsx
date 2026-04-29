@@ -89,7 +89,7 @@ const sections: NavSection[] = [
 /* ------------------------------------------------------------------ */
 
 const routeLabels: Record<string, string> = {
-  '/': 'Dashboard',
+  '/': 'Monitoring Overview',
   '/devices': 'Devices',
   '/services': 'Services',
   '/discovery': 'Discovery',
@@ -102,6 +102,10 @@ const routeLabels: Record<string, string> = {
   '/users': 'Users',
   '/settings/general': 'General Settings',
   '/reports': 'Reports',
+  '/reports/executive': 'Executive',
+  '/reports/technical': 'Technical',
+  '/reports/business': 'Business',
+  '/reports/inventory': 'Inventory',
   '/subscription': 'Subscription',
 }
 
@@ -119,6 +123,10 @@ const routeSections: Record<string, string> = {
   '/users': 'Administration',
   '/settings/general': 'Administration',
   '/reports': 'Administration',
+  '/reports/executive': 'Reports',
+  '/reports/technical': 'Reports',
+  '/reports/business': 'Reports',
+  '/reports/inventory': 'Reports',
   '/subscription': 'Administration',
 }
 
