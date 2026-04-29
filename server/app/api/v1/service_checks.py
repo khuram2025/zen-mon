@@ -28,6 +28,37 @@ from app.schemas.service_check import (
 )
 from app.services import service_check_service, service_metric_service
 
+def _status_matches(code: int, patterns: str) -> bool:
+    """Match an HTTP status against a comma list of patterns: 200, 2xx, 200-299."""
+    for raw in patterns.split(","):
+        p = raw.strip().lower()
+        if not p:
+            continue
+        if "-" in p:
+            try:
+                lo, hi = (int(x) for x in p.split("-", 1))
+            except ValueError:
+                continue
+            if lo <= code <= hi:
+                return True
+        elif "x" in p:
+            prefix = p.rstrip("x")
+            try:
+                lo = int(prefix.ljust(3, "0"))
+                hi = int(prefix.ljust(3, "9"))
+            except ValueError:
+                continue
+            if lo <= code <= hi:
+                return True
+        else:
+            try:
+                if int(p) == code:
+                    return True
+            except ValueError:
+                continue
+    return False
+
+
 router = APIRouter(prefix="/service-checks", tags=["Service Checks"])
 groups_router = APIRouter(prefix="/service-check-groups", tags=["Service Check Groups"])
 maintenance_router = APIRouter(prefix="/service-check-maintenance", tags=["Service Check Maintenance"])
@@ -436,12 +467,24 @@ async def test_service_check(
             result["details"]["headers"] = dict(resp.headers)
             result["details"]["body_length"] = len(resp.content)
 
-            expected = check.http_expected_status or 200
-            if resp.status_code == expected:
-                result["status"] = "up"
+            patterns = (check.http_expected_statuses or "").strip()
+            if patterns:
+                if _status_matches(resp.status_code, patterns):
+                    result["status"] = "up"
+                else:
+                    result["status"] = "down"
+                    result["error"] = (
+                        f"expected status {patterns}, got {resp.status_code}"
+                    )
             else:
-                result["status"] = "down"
-                result["error"] = f"Expected HTTP {expected}, got {resp.status_code}"
+                expected = check.http_expected_status or 200
+                if resp.status_code == expected:
+                    result["status"] = "up"
+                else:
+                    result["status"] = "down"
+                    result["error"] = (
+                        f"expected status {expected}, got {resp.status_code}"
+                    )
 
             # Content match
             if check.http_content_match:

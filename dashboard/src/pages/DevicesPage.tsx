@@ -206,6 +206,19 @@ export function DevicesPage() {
   const sortOrder = (params.get('order') as SortOrder) || 'asc'
   const page = Math.max(1, Number(params.get('page') || '1') || 1)
 
+  // Time range that controls per-device Uptime % calculation. Default 24h.
+  const RANGE_PRESETS = [
+    { key: '1h', label: '1h', hours: 1 },
+    { key: '24h', label: '24h', hours: 24 },
+    { key: '7d', label: '7d', hours: 168 },
+    { key: '1M', label: '1M', hours: 720 },
+  ] as const
+  const rangeKey = params.get('range') || '24h'
+  const rangeHours =
+    RANGE_PRESETS.find((r) => r.key === rangeKey)?.hours || 24
+  const rangeLabel =
+    RANGE_PRESETS.find((r) => r.key === rangeKey)?.label || '24h'
+
   function patchParams(p: Record<string, string | null>) {
     const next = new URLSearchParams(params)
     for (const [k, v] of Object.entries(p)) {
@@ -261,6 +274,18 @@ export function DevicesPage() {
   })
   const uptimeMap = uptimeData?.devices || {}
 
+  // Uptime % per device over the selected time range (driven by ?range=).
+  const { data: uptimePctData } = useQuery<{
+    hours: number
+    devices: Record<string, number>
+  }>({
+    queryKey: ['devices', 'uptime-pct', rangeHours],
+    queryFn: async () =>
+      (await api.get(`/devices/dashboard/uptime-stats?hours=${rangeHours}`)).data,
+    refetchInterval: 30_000,
+  })
+  const uptimePctMap = uptimePctData?.devices || {}
+
   // Latest SNMP scalar metrics (cpu, memory, …) per device, from ClickHouse.
   const { data: metricsData } = useQuery<{
     devices: Record<string, Record<string, number | string>>
@@ -307,9 +332,10 @@ export function DevicesPage() {
       const mem = typeof m.memory === 'number' ? Math.round(m.memory) : null
       const uptimeSec = uptimeMap[d.id]
       const uptime = formatRealUptime(uptimeSec, health)
-      return { device: d, health, cpu, mem, uptime }
+      const uptimePct = uptimePctMap[d.id]
+      return { device: d, health, cpu, mem, uptime, uptimePct }
     })
-  }, [devices, uptimeMap, metricsMap])
+  }, [devices, uptimeMap, metricsMap, uptimePctMap])
 
   const filtered = useMemo(() => {
     return enriched.filter(({ device: d, health }) => {
@@ -557,6 +583,10 @@ export function DevicesPage() {
         </div>
 
         <div className="flex flex-wrap items-center justify-end gap-2">
+          <TimeRangePicker
+            value={rangeKey}
+            onChange={(k) => patchParams({ range: k === '24h' ? null : k })}
+          />
           <FilterInline
             label="Status"
             value={statusFilter}
@@ -767,7 +797,11 @@ export function DevicesPage() {
                     <SortableTh label="Status" col="status" current={sortKey} order={sortOrder} onClick={onSortClick} />
                     {prefs.visible.cpu && <Th className="min-w-[140px]">CPU</Th>}
                     {prefs.visible.memory && <Th className="min-w-[140px]">Memory</Th>}
-                    {prefs.visible.uptime && <Th>Uptime</Th>}
+                    {prefs.visible.uptime && (
+                      <Th className="whitespace-nowrap">
+                        Uptime <span className="font-normal text-muted">({rangeLabel})</span>
+                      </Th>
+                    )}
                     {prefs.visible.last_seen && (
                       <SortableTh label="Last Seen" col="last_seen" current={sortKey} order={sortOrder} onClick={onSortClick} />
                     )}
@@ -811,7 +845,7 @@ export function DevicesPage() {
                       </Td>
                     </Tr>
                   )}
-                  {pageRows.map(({ device: d, health, cpu, mem, uptime }) => {
+                  {pageRows.map(({ device: d, health, cpu, mem, uptime, uptimePct }) => {
                     const isSel = selected.has(d.id)
                     const typeInfo = TYPE_STYLE[normalizeType(d.device_type)] || TYPE_STYLE.other
                     return (
@@ -874,7 +908,9 @@ export function DevicesPage() {
                           </Td>
                         )}
                         {prefs.visible.uptime && (
-                          <Td className="whitespace-nowrap text-sm">{uptime}</Td>
+                          <Td className="whitespace-nowrap text-sm">
+                            <UptimePctCell pct={uptimePct} fallback={uptime} />
+                          </Td>
                         )}
                         {prefs.visible.last_seen && (
                           <Td className="whitespace-nowrap text-xs">
@@ -1867,6 +1903,90 @@ function BulkEditDialog({
 function SectionTitle({ children }: { children: React.ReactNode }) {
   return (
     <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{children}</div>
+  )
+}
+
+// =========================================================================
+// Time range picker — drives the per-device Uptime % column
+// =========================================================================
+
+function TimeRangePicker({
+  value,
+  onChange,
+}: {
+  value: string
+  onChange: (key: string) => void
+}) {
+  const presets = [
+    { key: '1h', label: '1h' },
+    { key: '24h', label: '24h' },
+    { key: '7d', label: '7d' },
+    { key: '1M', label: '1M' },
+  ]
+  return (
+    <div
+      className="inline-flex h-10 items-center gap-1 rounded-md border border-border bg-surface px-1"
+      role="tablist"
+      aria-label="Uptime time range"
+    >
+      <span className="px-1.5 text-[11px] font-medium uppercase tracking-wider text-muted">
+        Uptime
+      </span>
+      {presets.map((p) => {
+        const active = value === p.key
+        return (
+          <button
+            key={p.key}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => onChange(p.key)}
+            className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+              active
+                ? 'bg-primary/15 text-primary'
+                : 'text-muted hover:bg-surface2 hover:text-text'
+            }`}
+          >
+            {p.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+// =========================================================================
+// Uptime % cell — colored by SLA threshold
+// =========================================================================
+
+function UptimePctCell({ pct, fallback }: { pct: number | undefined; fallback: string }) {
+  if (typeof pct !== 'number' || !Number.isFinite(pct)) {
+    return <span className="text-muted">{fallback || '—'}</span>
+  }
+  const color =
+    pct >= 99.9 ? 'text-success'
+    : pct >= 99 ? 'text-text'
+    : pct >= 95 ? 'text-warning'
+    : 'text-danger'
+  // Bar visualises the gap from 100%; saturates at 100.
+  const barPct = Math.max(0, Math.min(100, pct))
+  return (
+    <div className="flex flex-col gap-1">
+      <span className={`font-mono text-sm font-semibold tabular-nums ${color}`}>
+        {pct.toFixed(2)}%
+      </span>
+      <div className="h-1 w-24 overflow-hidden rounded-full bg-surface2">
+        <div
+          className={`h-full rounded-full ${
+            pct >= 99.9 ? 'bg-success'
+            : pct >= 99 ? 'bg-primary'
+            : pct >= 95 ? 'bg-warning'
+            : 'bg-danger'
+          }`}
+          style={{ width: `${barPct}%` }}
+        />
+      </div>
+    </div>
   )
 }
 

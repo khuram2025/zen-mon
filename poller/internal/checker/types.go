@@ -21,12 +21,13 @@ type ServiceCheck struct {
 	TargetHost          string
 	TargetPort          int
 	TargetURL           string
-	HTTPMethod          string
-	HTTPHeaders         map[string]string
-	HTTPBody            string
-	HTTPExpectedStatus  int
-	HTTPContentMatch    string
-	HTTPFollowRedirects bool
+	HTTPMethod           string
+	HTTPHeaders          map[string]string
+	HTTPBody             string
+	HTTPExpectedStatus   int
+	HTTPExpectedStatuses string // comma-separated patterns: "200,2xx,200-299". Empty = use HTTPExpectedStatus.
+	HTTPContentMatch     string
+	HTTPFollowRedirects  bool
 	TLSWarnDays         int
 	TLSCriticalDays     int
 	CheckInterval       time.Duration

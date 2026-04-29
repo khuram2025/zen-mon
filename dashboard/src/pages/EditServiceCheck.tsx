@@ -4,6 +4,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Globe, Plug, ShieldCheck } from 'lucide-react'
 import { useServiceCheck } from '@/hooks/useServiceChecks'
 import { api } from '@/lib/api'
+import { ExpectedStatusInput } from '@/components/forms/ExpectedStatusInput'
 
 const typeIcons = { http: Globe, tcp: Plug, tls: ShieldCheck }
 const inputClass = 'bg-[var(--bg-tertiary)] text-[var(--text-primary)] px-3 py-2.5 rounded-lg border border-[var(--bg-elevated)] focus:border-[var(--accent)] focus:outline-none w-full text-sm'
@@ -21,7 +22,7 @@ export function EditServiceCheckPage() {
   const [checkInterval, setCheckInterval] = useState(60)
   const [timeout, setTimeout] = useState(10)
   const [httpMethod, setHttpMethod] = useState('GET')
-  const [httpExpectedStatus, setHttpExpectedStatus] = useState(200)
+  const [httpExpectedStatuses, setHttpExpectedStatuses] = useState('200')
   const [httpContentMatch, setHttpContentMatch] = useState('')
   const [httpFollowRedirects, setHttpFollowRedirects] = useState(true)
   const [tlsWarnDays, setTlsWarnDays] = useState(30)
@@ -39,7 +40,7 @@ export function EditServiceCheckPage() {
       setCheckInterval(check.check_interval)
       setTimeout(check.timeout)
       setHttpMethod(check.http_method || 'GET')
-      setHttpExpectedStatus(check.http_expected_status || 200)
+      setHttpExpectedStatuses(check.http_expected_statuses || String(check.http_expected_status || 200))
       setHttpContentMatch(check.http_content_match || '')
       setHttpFollowRedirects(check.http_follow_redirects)
       setTlsWarnDays(check.tls_warn_days)
@@ -81,7 +82,7 @@ export function EditServiceCheckPage() {
     if (check?.check_type === 'http') {
       data.target_url = targetUrl
       data.http_method = httpMethod
-      data.http_expected_status = httpExpectedStatus
+      data.http_expected_statuses = httpExpectedStatuses.trim() || null
       data.http_content_match = httpContentMatch || null
       data.http_follow_redirects = httpFollowRedirects
     }
@@ -155,7 +156,11 @@ export function EditServiceCheckPage() {
               </div>
               <div>
                 <label className="text-xs text-[var(--text-muted)] uppercase tracking-wider mb-1 block">Expected Status</label>
-                <input type="number" className={inputClass} value={httpExpectedStatus} onChange={e => setHttpExpectedStatus(Number(e.target.value))} />
+                <ExpectedStatusInput
+                  value={httpExpectedStatuses}
+                  onChange={setHttpExpectedStatuses}
+                  inputClass={inputClass}
+                />
               </div>
             </div>
             <div>

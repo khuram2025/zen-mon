@@ -51,6 +51,7 @@ def _to_response(sc: ServiceCheck, in_maintenance: bool = False, parent_name: st
         target_url=sc.target_url,
         http_method=sc.http_method or "GET",
         http_expected_status=sc.http_expected_status or 200,
+        http_expected_statuses=sc.http_expected_statuses,
         http_content_match=sc.http_content_match,
         http_follow_redirects=sc.http_follow_redirects if sc.http_follow_redirects is not None else True,
         tls_warn_days=sc.tls_warn_days or 30,
@@ -232,6 +233,7 @@ async def export_service_checks(db: AsyncSession) -> list[dict]:
             "target_url": sc.target_url,
             "http_method": sc.http_method,
             "http_expected_status": sc.http_expected_status,
+            "http_expected_statuses": sc.http_expected_statuses,
             "http_content_match": sc.http_content_match,
             "http_follow_redirects": sc.http_follow_redirects,
             "tls_warn_days": sc.tls_warn_days,
@@ -557,6 +559,7 @@ async def apply_template(
             kw["target_url"] = sub(t.target_url_template) or f"http://{hostname or ip_addr}/"
             kw["http_method"] = t.http_method or "GET"
             kw["http_expected_status"] = t.http_expected_status or 200
+            kw["http_expected_statuses"] = t.http_expected_statuses
             kw["http_content_match"] = t.http_content_match
             kw["http_follow_redirects"] = (
                 t.http_follow_redirects if t.http_follow_redirects is not None else True

@@ -6,6 +6,7 @@ from app.models.device_entity import DeviceEntity
 from app.models.device_sensor import DeviceSensor
 from app.models.alert import Alert, AlertRule
 from app.models.subscription import Subscription
+from app.models.sensor import Sensor, Site, SensorAssignment
 
 __all__ = [
     "User",
@@ -18,4 +19,7 @@ __all__ = [
     "Alert",
     "AlertRule",
     "Subscription",
+    "Sensor",
+    "Site",
+    "SensorAssignment",
 ]

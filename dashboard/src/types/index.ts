@@ -165,6 +165,7 @@ export interface ServiceCheckTemplate {
   target_port_default: number | null
   http_method: string | null
   http_expected_status: number | null
+  http_expected_statuses: string | null
   http_content_match: string | null
   http_follow_redirects: boolean | null
   tls_warn_days: number | null
@@ -209,6 +210,7 @@ export interface ServiceCheck {
   target_url: string | null
   http_method: string
   http_expected_status: number
+  http_expected_statuses: string | null
   http_content_match: string | null
   http_follow_redirects: boolean
   tls_warn_days: number

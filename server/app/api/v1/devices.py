@@ -516,13 +516,24 @@ async def get_device_snmp_if_metrics(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Per-interface bps/errors time series from ClickHouse."""
+    """Per-interface bps/errors time series from ClickHouse.
+
+    Always bucketed from the raw `snmp_if_metrics` table (30-day TTL). Bucket
+    width is chosen to keep response payloads reasonable while preserving
+    enough resolution for the chart.
+    """
     from app.core.database import get_clickhouse_client
     client = get_clickhouse_client()
 
-    table = "snmp_if_metrics" if hours <= 6 else "snmp_if_metrics_5m"
-    in_col = "in_bps" if hours <= 6 else "avg_in_bps"
-    out_col = "out_bps" if hours <= 6 else "avg_out_bps"
+    # Bucket width: raw for short windows, then progressively coarser.
+    if hours <= 6:
+        bucket_seconds = 0  # no bucketing — return raw points
+    elif hours <= 24:
+        bucket_seconds = 300       # 5 minutes
+    elif hours <= 24 * 7:
+        bucket_seconds = 1800      # 30 minutes
+    else:
+        bucket_seconds = 3600 * 2  # 2 hours
 
     where = "device_id = %(id)s AND timestamp >= now() - INTERVAL %(hours)s HOUR"
     params: dict = {"id": str(device_id), "hours": hours}
@@ -530,19 +541,32 @@ async def get_device_snmp_if_metrics(
         where += " AND if_index = %(if)s"
         params["if"] = if_index
 
-    try:
-        res = client.query(
-            f"""
+    if bucket_seconds == 0:
+        sql = f"""
             SELECT if_index,
                    toUnixTimestamp64Milli(timestamp) AS ts_ms,
-                   {in_col} AS in_bps,
-                   {out_col} AS out_bps
-            FROM zenplus.{table}
+                   in_bps,
+                   out_bps
+            FROM zenplus.snmp_if_metrics
             WHERE {where}
             ORDER BY if_index, timestamp
-            """,
-            parameters=params,
-        )
+        """
+    else:
+        sql = f"""
+            SELECT if_index,
+                   toUnixTimestamp(
+                     toStartOfInterval(timestamp, INTERVAL {bucket_seconds} SECOND)
+                   ) * 1000 AS ts_ms,
+                   avg(in_bps) AS in_bps,
+                   avg(out_bps) AS out_bps
+            FROM zenplus.snmp_if_metrics
+            WHERE {where}
+            GROUP BY if_index, ts_ms
+            ORDER BY if_index, ts_ms
+        """
+
+    try:
+        res = client.query(sql, parameters=params)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"clickhouse query failed: {e}")
 
@@ -569,33 +593,41 @@ async def get_interface_detail_metrics(
     from app.core.database import get_clickhouse_client
     client = get_clickhouse_client()
 
+    # Bucket from the raw 30-day-retention table; rollups are unreliable.
     if hours <= 6:
-        table = "snmp_if_metrics"
-        sql = f"""
+        sql = """
             SELECT toUnixTimestamp64Milli(timestamp) AS ts_ms,
                    in_bps, out_bps,
                    in_errors, out_errors,
                    in_discards, out_discards,
                    in_ucast_pkts, out_ucast_pkts,
                    in_octets, out_octets
-            FROM zenplus.{table}
+            FROM zenplus.snmp_if_metrics
             WHERE device_id = %(id)s AND if_index = %(if)s
               AND timestamp >= now() - INTERVAL %(hours)s HOUR
             ORDER BY timestamp
         """
     else:
-        table = "snmp_if_metrics_5m"
+        bucket_seconds = 300 if hours <= 24 else (1800 if hours <= 24 * 7 else 7200)
         sql = f"""
-            SELECT toUnixTimestamp64Milli(timestamp) AS ts_ms,
-                   avg_in_bps AS in_bps, avg_out_bps AS out_bps,
-                   sum_in_errors AS in_errors, sum_out_errors AS out_errors,
-                   sum_in_discards AS in_discards, sum_out_discards AS out_discards,
-                   0 AS in_ucast_pkts, 0 AS out_ucast_pkts,
-                   0 AS in_octets, 0 AS out_octets
-            FROM zenplus.{table}
+            SELECT toUnixTimestamp(
+                     toStartOfInterval(timestamp, INTERVAL {bucket_seconds} SECOND)
+                   ) * 1000 AS ts_ms,
+                   avg(in_bps) AS in_bps,
+                   avg(out_bps) AS out_bps,
+                   sum(in_errors) AS in_errors,
+                   sum(out_errors) AS out_errors,
+                   sum(in_discards) AS in_discards,
+                   sum(out_discards) AS out_discards,
+                   sum(in_ucast_pkts) AS in_ucast_pkts,
+                   sum(out_ucast_pkts) AS out_ucast_pkts,
+                   sum(in_octets) AS in_octets,
+                   sum(out_octets) AS out_octets
+            FROM zenplus.snmp_if_metrics
             WHERE device_id = %(id)s AND if_index = %(if)s
               AND timestamp >= now() - INTERVAL %(hours)s HOUR
-            ORDER BY timestamp
+            GROUP BY ts_ms
+            ORDER BY ts_ms
         """
 
     params = {"id": str(device_id), "if": if_index, "hours": hours}

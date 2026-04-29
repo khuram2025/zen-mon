@@ -678,9 +678,14 @@ def _fetch_device_status_log(start: datetime, end: datetime,
         {dev_filt}
         ORDER BY timestamp
     """
-    result = client.query(q, parameters={"start": start, "end": end})
-    cols = result.column_names
-    return [dict(zip(cols, row)) for row in result.result_rows]
+    try:
+        result = client.query(q, parameters={"start": start, "end": end})
+        cols = result.column_names
+        return [dict(zip(cols, row)) for row in result.result_rows]
+    except Exception:
+        # Table may not exist on older deployments — return empty list so
+        # report sections render an empty state instead of 500-ing.
+        return []
 
 
 def _fetch_service_status_log(start: datetime, end: datetime,
@@ -694,9 +699,12 @@ def _fetch_service_status_log(start: datetime, end: datetime,
         {svc_filt}
         ORDER BY timestamp
     """
-    result = client.query(q, parameters={"start": start, "end": end})
-    cols = result.column_names
-    return [dict(zip(cols, row)) for row in result.result_rows]
+    try:
+        result = client.query(q, parameters={"start": start, "end": end})
+        cols = result.column_names
+        return [dict(zip(cols, row)) for row in result.result_rows]
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------------------

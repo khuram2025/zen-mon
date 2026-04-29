@@ -35,6 +35,7 @@ import {
 import { FormField } from '@/components/ui/FormField'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { toast } from '@/components/ui/Toast'
+import { ExpectedStatusInput } from '@/components/forms/ExpectedStatusInput'
 import type { ServiceCheckTemplate } from '@/types'
 
 type FormState = {
@@ -50,7 +51,7 @@ type FormState = {
   target_url_template: string
   target_port_default: number | ''
   http_method: string
-  http_expected_status: number
+  http_expected_statuses: string
   http_content_match: string
   http_follow_redirects: boolean
   tls_warn_days: number
@@ -78,7 +79,7 @@ const emptyForm: FormState = {
   target_url_template: 'http://{{ip}}/',
   target_port_default: '',
   http_method: 'GET',
-  http_expected_status: 200,
+  http_expected_statuses: '200',
   http_content_match: '',
   http_follow_redirects: true,
   tls_warn_days: 30,
@@ -119,7 +120,7 @@ export function ServiceCheckTemplatesPage() {
       if (form.check_type === 'http') {
         body.target_url_template = form.target_url_template
         body.http_method = form.http_method
-        body.http_expected_status = form.http_expected_status
+        body.http_expected_statuses = form.http_expected_statuses.trim() || null
         body.http_content_match = form.http_content_match || null
         body.http_follow_redirects = form.http_follow_redirects
       } else if (form.check_type === 'tcp' || form.check_type === 'tls') {
@@ -178,7 +179,8 @@ export function ServiceCheckTemplatesPage() {
       target_url_template: t.target_url_template || '',
       target_port_default: t.target_port_default ?? '',
       http_method: t.http_method || 'GET',
-      http_expected_status: t.http_expected_status || 200,
+      http_expected_statuses:
+        (t as any).http_expected_statuses || String(t.http_expected_status || 200),
       http_content_match: t.http_content_match || '',
       http_follow_redirects: t.http_follow_redirects ?? true,
       tls_warn_days: t.tls_warn_days || 30,
@@ -407,14 +409,10 @@ export function ServiceCheckTemplatesPage() {
                     </Select>
                   </FormField>
                   <FormField label="Expected status">
-                    <Input
-                      type="number"
-                      min={100}
-                      max={599}
-                      value={form.http_expected_status}
-                      onChange={(e) =>
-                        setForm({ ...form, http_expected_status: Number(e.target.value) })
-                      }
+                    <ExpectedStatusInput
+                      compact
+                      value={form.http_expected_statuses}
+                      onChange={(v) => setForm({ ...form, http_expected_statuses: v })}
                     />
                   </FormField>
                   <div className="flex items-end justify-between rounded-md border border-border px-3 py-2">

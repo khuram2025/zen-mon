@@ -7,9 +7,27 @@ reports, reusing the data-fetching layer from report_service.
 
 import csv
 import io
+import ipaddress
+import uuid as _uuid
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Optional
+
+
+def _coerce_cell(v):
+    """Coerce non-primitive values (IPv4Address, UUID, Decimal, set) to forms openpyxl can serialize."""
+    if v is None:
+        return None
+    if isinstance(v, (ipaddress.IPv4Address, ipaddress.IPv6Address, _uuid.UUID)):
+        return str(v)
+    if isinstance(v, Decimal):
+        return float(v)
+    if isinstance(v, (set, frozenset, tuple)):
+        return ", ".join(str(x) for x in v)
+    if isinstance(v, (list, dict)):
+        return str(v)
+    return v
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, NamedStyle, PatternFill, Side
@@ -98,7 +116,7 @@ def _write_sheet(ws, headers: list[str], rows: list[list]) -> None:
     """Write headers + data rows, then apply styling."""
     ws.append(headers)
     for row in rows:
-        ws.append(row)
+        ws.append([_coerce_cell(c) for c in row])
     _apply_header_style(ws, len(headers))
     _apply_alternating_rows(ws)
     _auto_fit_columns(ws)

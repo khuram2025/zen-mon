@@ -70,6 +70,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/Dialog'
 import { DeviceFormDialog } from '@/components/forms/DeviceFormDialog'
 import { toast } from '@/components/ui/Toast'
+import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
 
 /* ── Shared helpers ────────────────────────────────────────── */
 
@@ -115,6 +116,7 @@ export function DeviceDetailPage() {
   const qc = useQueryClient()
   const [editOpen, setEditOpen] = useState(false)
   const [delOpen, setDelOpen] = useState(false)
+  const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
 
   const { data: device, isLoading } = useQuery<any>({
     queryKey: ['device', id],
@@ -147,9 +149,19 @@ export function DeviceDetailPage() {
         device={device}
         onEdit={() => setEditOpen(true)}
         onDelete={() => setDelOpen(true)}
+        rangePicker={(
+          <TimeRangePicker
+            rangeIdx={rangeIdx}
+            isCustom={isCustom}
+            customFrom={range.fromISO}
+            customTo={range.toISO}
+            onPreset={setPreset}
+            onCustom={setCustom}
+          />
+        )}
       />
 
-      <DashboardSection device={device} deviceId={id!} />
+      <DashboardSection device={device} deviceId={id!} range={range} />
 
       <DeviceFormDialog open={editOpen} onOpenChange={setEditOpen} device={device} />
       <ConfirmDialog
@@ -175,10 +187,21 @@ export function DeviceDetailPage() {
    ════════════════════════════════════════════════════════════ */
 
 function DeviceHeader({
-  device, onEdit, onDelete,
-}: { device: any; onEdit: () => void; onDelete: () => void }) {
+  device, onEdit, onDelete, rangePicker,
+}: { device: any; onEdit: () => void; onDelete: () => void; rangePicker?: React.ReactNode }) {
   const health = healthOf(device.status)
   const Icon = typeIconMap[device.device_type] || Box
+
+  // Fetch availability % over the active window so the Uptime pill always has
+  // a value when ping data exists (system boot duration is often null).
+  const { range } = useTimeRange()
+  const { data: uptimeStats } = useQuery<{ devices: Record<string, number> }>({
+    queryKey: ['uptime-stats', range.hours],
+    queryFn: async () =>
+      (await api.get(`/devices/dashboard/uptime-stats?hours=${Math.max(1, Math.round(range.hours))}`)).data,
+    staleTime: 30_000,
+  })
+  const availabilityPct = device?.id && uptimeStats?.devices ? uptimeStats.devices[device.id] : undefined
 
   const kind = {
     healthy: { pill: 'bg-success/15 text-success border-success/30', dot: 'bg-success', label: 'Healthy' },
@@ -198,8 +221,14 @@ function DeviceHeader({
 
   /* Secondary row */
   const uptimeSec = readUptimeSeconds(device)
+  const uptimeDisplay =
+    uptimeSec != null
+      ? formatDuration(uptimeSec)
+      : availabilityPct !== undefined
+        ? `${availabilityPct.toFixed(availabilityPct >= 99.95 ? 1 : 2)}% (${range.label.toLowerCase()})`
+        : '—'
   const secondary: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; value: string; color?: string }> = [
-    { icon: Clock, label: 'Uptime', value: uptimeSec != null ? formatDuration(uptimeSec) : '—', color: 'text-success' },
+    { icon: Clock, label: 'Uptime', value: uptimeDisplay, color: 'text-success' },
     { icon: Activity, label: 'Last Seen', value: relativeTime(device.last_seen), color: 'text-muted' },
     { icon: HardDrive, label: 'Serial Number', value: device.serial_number || '—', color: 'text-muted' },
     { icon: GitBranch, label: 'Firmware Version', value: device.firmware_version || device.os_version || '—', color: 'text-muted' },
@@ -239,6 +268,8 @@ function DeviceHeader({
           {/* Right: actions + secondary metadata stacked below */}
           <div className="flex flex-col items-end gap-2">
             <div className="flex flex-wrap items-center justify-end gap-2">
+              {rangePicker}
+              {rangePicker && <span className="hidden h-5 w-px bg-border sm:inline-block" />}
               <Button variant="outline" size="default" className="h-9" onClick={onEdit}>
                 <Pencil className="h-4 w-4" />
                 Edit Device
@@ -290,10 +321,15 @@ const TIME_RANGES = [
   { label: 'Last 7 Days', hours: 168 },
 ]
 
-function DashboardSection({ device, deviceId }: { device: any; deviceId: string }) {
+function DashboardSection({
+  device, deviceId, range,
+}: {
+  device: any
+  deviceId: string
+  range: { hours: number; fromISO: string; toISO: string; isCustom: boolean; label: string }
+}) {
   const snmp = !!device.snmp_enabled
-  const [hoursRange, setHoursRange] = useState(1)
-  const [showAllInterfaces, setShowAllInterfaces] = useState(false)
+  const hoursRange = range.hours
   const [eventsOpen, setEventsOpen] = useState(false)
   const [healthOpen, setHealthOpen] = useState(false)
   const [inventoryOpen, setInventoryOpen] = useState(false)
@@ -301,12 +337,11 @@ function DashboardSection({ device, deviceId }: { device: any; deviceId: string 
   const { data: pingData } = useQuery<{
     points: { timestamp: string; rtt_ms: number; packet_loss: number; jitter_ms: number; is_up: boolean }[]
   }>({
-    queryKey: ['device', deviceId, 'ping-metrics', hoursRange],
-    queryFn: async () => {
-      const now = new Date()
-      const from = new Date(now.getTime() - hoursRange * 3600_000).toISOString()
-      return (await api.get(`/devices/${deviceId}/metrics?from=${from}&to=${now.toISOString()}`)).data
-    },
+    queryKey: ['device', deviceId, 'ping-metrics', range.fromISO, range.toISO],
+    queryFn: async () =>
+      (await api.get(
+        `/devices/${deviceId}/metrics?from=${encodeURIComponent(range.fromISO)}&to=${encodeURIComponent(range.toISO)}`,
+      )).data,
     refetchInterval: 30_000,
     enabled: device.ping_enabled,
   })
@@ -383,6 +418,20 @@ function DashboardSection({ device, deviceId }: { device: any; deviceId: string 
 
   const uptimeSec = readUptimeSeconds(device, metrics)
   const uptimeDaysCompact = uptimeSec != null ? formatDaysCompact(uptimeSec) : '—'
+
+  // Availability % over the active time-filter window — pulled from ClickHouse
+  // ping aggregation. Re-fetches whenever range.hours changes.
+  const { data: uptimeStats } = useQuery<{ devices: Record<string, number> }>({
+    queryKey: ['uptime-stats', range.hours],
+    queryFn: async () =>
+      (await api.get(`/devices/dashboard/uptime-stats?hours=${Math.max(1, Math.round(range.hours))}`)).data,
+    staleTime: 30_000,
+  })
+  const availabilityPct = deviceId && uptimeStats?.devices ? uptimeStats.devices[deviceId] : undefined
+  const availabilityLabel =
+    availabilityPct === undefined
+      ? '—'
+      : `${availabilityPct.toFixed(availabilityPct >= 99.95 ? 1 : 2)}%`
 
   const cpuTrend = percentTrend(cpu?.points?.map((p) => p.value) || [])
   const memTrend = percentTrend(mem?.points?.map((p) => p.value) || [])
@@ -474,12 +523,21 @@ function DashboardSection({ device, deviceId }: { device: any; deviceId: string 
         />
         <KpiTile
           icon={<Clock className="h-4 w-4" />}
-          label="Uptime"
-          value={uptimeDaysCompact}
+          label={`Uptime (${range.label})`}
+          value={availabilityLabel}
           trend={null}
           trendUnit="%"
-          color="warning"
+          color={
+            availabilityPct === undefined
+              ? 'warning'
+              : availabilityPct >= 99.9
+                ? 'success'
+                : availabilityPct >= 95
+                  ? 'warning'
+                  : 'danger'
+          }
           series={uptimeSpark}
+          subtitle={uptimeSec != null ? `Up ${uptimeDaysCompact}` : undefined}
         />
       </div>
 
@@ -488,14 +546,12 @@ function DashboardSection({ device, deviceId }: { device: any; deviceId: string 
         <PerformanceOverviewCard
           series={perfSeries}
           stats={perfStats}
-          hoursRange={hoursRange}
-          onHoursChange={setHoursRange}
+          rangeLabel={range.label}
         />
         <InterfaceStatusCard
           ifs={ifs || []}
           ifMetrics={ifMetrics || {}}
-          showAll={showAllInterfaces}
-          onToggleShowAll={() => setShowAllInterfaces((o) => !o)}
+          deviceId={deviceId}
         />
         <HealthScoreCard
           score={healthScore}
@@ -550,7 +606,7 @@ function DashboardSection({ device, deviceId }: { device: any; deviceId: string 
    ════════════════════════════════════════════════════════════ */
 
 function KpiTile({
-  icon, label, value, trend, trendUnit, color, series, invertTrend,
+  icon, label, value, trend, trendUnit, color, series, invertTrend, subtitle,
 }: {
   icon: React.ReactNode
   label: string
@@ -560,6 +616,7 @@ function KpiTile({
   color: 'primary' | 'success' | 'warning' | 'danger' | 'info' | 'accent'
   series?: number[]
   invertTrend?: boolean
+  subtitle?: string
 }) {
   const COLORS: Record<typeof color, { chip: string; stroke: string; from: string; to: string }> = {
     primary: { chip: 'bg-primary/10 text-primary', stroke: 'rgb(var(--primary))', from: 'rgb(var(--primary) / 0.35)', to: 'rgb(var(--primary) / 0)' },
@@ -589,6 +646,10 @@ function KpiTile({
         )}
       </div>
 
+      {subtitle && (
+        <div className="text-[10px] font-medium text-muted">{subtitle}</div>
+      )}
+
       {series && series.length > 1 && (
         <MiniSparkline data={series} stroke={c.stroke} from={c.from} to={c.to} className="h-8 w-full" />
       )}
@@ -601,15 +662,12 @@ function KpiTile({
    ════════════════════════════════════════════════════════════ */
 
 function PerformanceOverviewCard({
-  series, stats, hoursRange, onHoursChange,
+  series, stats, rangeLabel,
 }: {
   series: Array<{ ts: number; cpu?: number; mem?: number }>
   stats: { cpu: { avg: number; max: number }; mem: { avg: number; max: number } }
-  hoursRange: number
-  onHoursChange: (h: number) => void
+  rangeLabel: string
 }) {
-  const [open, setOpen] = useState(false)
-  const current = TIME_RANGES.find((r) => r.hours === hoursRange)?.label || 'Last 24 Hours'
   const hasData = series.length > 1
 
   return (
@@ -620,33 +678,7 @@ function PerformanceOverviewCard({
             <Activity className="h-4 w-4 text-primary" />
             <h3 className="text-sm font-semibold">Performance Overview</h3>
           </div>
-          <div className="relative">
-            <button
-              onClick={() => setOpen((o) => !o)}
-              className="inline-flex items-center gap-2 rounded-md border border-border bg-surface2/40 px-2.5 py-1 text-xs text-text hover:bg-surface2"
-            >
-              {current}
-              <ArrowDown className="h-3 w-3 opacity-60" />
-            </button>
-            {open && (
-              <>
-                <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
-                <div className="absolute right-0 top-full z-30 mt-1 w-40 overflow-hidden rounded-md border border-border bg-surface shadow-lg">
-                  {TIME_RANGES.map((r) => (
-                    <button
-                      key={r.hours}
-                      onClick={() => { onHoursChange(r.hours); setOpen(false) }}
-                      className={`block w-full px-3 py-1.5 text-left text-xs hover:bg-surface2 ${
-                        hoursRange === r.hours ? 'text-primary' : 'text-text'
-                      }`}
-                    >
-                      {r.label}
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
+          <span className="text-[11px] font-medium text-muted">{rangeLabel}</span>
         </div>
 
         {/* Legend */}
@@ -716,12 +748,11 @@ function LegendDot({ color, label }: { color: string; label: string }) {
    ════════════════════════════════════════════════════════════ */
 
 function InterfaceStatusCard({
-  ifs, ifMetrics, showAll, onToggleShowAll,
+  ifs, ifMetrics, deviceId,
 }: {
   ifs: any[]
   ifMetrics: Record<string, any[]>
-  showAll: boolean
-  onToggleShowAll: () => void
+  deviceId: string
 }) {
   const lastBps = (idx: number) => {
     const s = ifMetrics[idx]
@@ -746,7 +777,7 @@ function InterfaceStatusCard({
       })
   ), [ifs, ifMetrics])
 
-  const rows = showAll ? allRows : allRows.slice(0, 7)
+  const rows = allRows.slice(0, 7)
   const hasMore = allRows.length > 7
 
   return (
@@ -755,15 +786,19 @@ function InterfaceStatusCard({
         <div className="mb-3 flex items-center justify-between">
           <h3 className="text-sm font-semibold">Interface Status <span className="text-[11px] font-normal text-muted">({allRows.length})</span></h3>
           {hasMore ? (
-            <button
-              type="button"
-              onClick={onToggleShowAll}
+            <Link
+              to={`/devices/${deviceId}/interfaces`}
               className="text-xs text-primary hover:underline"
             >
-              {showAll ? 'Show less' : `View all ${allRows.length}`}
-            </button>
+              View all {allRows.length}
+            </Link>
           ) : (
-            <span className="text-xs text-muted">All shown</span>
+            <Link
+              to={`/devices/${deviceId}/interfaces`}
+              className="text-xs text-primary hover:underline"
+            >
+              Open
+            </Link>
           )}
         </div>
 

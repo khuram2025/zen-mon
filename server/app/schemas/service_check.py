@@ -1,7 +1,33 @@
+import re
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+_STATUS_PATTERN_RE = re.compile(r"^\s*([1-5][0-9xX]{2}|[1-5][0-9]{2}-[1-5][0-9]{2})\s*$")
+
+
+def _validate_statuses(value: Optional[str]) -> Optional[str]:
+    """Validate a comma-separated list of status patterns.
+
+    Each item may be an exact code (200), a wildcard (2xx, 4xx) or
+    a range (200-299). Returns the cleaned, comma-joined string.
+    """
+    if value is None:
+        return None
+    parts = [p.strip() for p in value.split(",") if p.strip()]
+    if not parts:
+        return None
+    cleaned: list[str] = []
+    for p in parts:
+        if not _STATUS_PATTERN_RE.match(p):
+            raise ValueError(
+                f"Invalid status pattern: '{p}'. "
+                "Use exact codes (200), wildcards (2xx) or ranges (200-299)."
+            )
+        cleaned.append(p.lower())
+    return ",".join(cleaned)
 
 
 class ServiceCheckCreate(BaseModel):
@@ -23,6 +49,7 @@ class ServiceCheckCreate(BaseModel):
     http_headers: dict = Field(default_factory=dict)
     http_body: Optional[str] = None
     http_expected_status: int = Field(default=200, ge=100, le=599)
+    http_expected_statuses: Optional[str] = Field(default=None, max_length=255)
     http_content_match: Optional[str] = None
     http_follow_redirects: bool = True
     tls_warn_days: int = Field(default=30, ge=1, le=365)
@@ -30,6 +57,11 @@ class ServiceCheckCreate(BaseModel):
     check_interval: int = Field(default=60, ge=10, le=3600)
     timeout: int = Field(default=10, ge=1, le=60)
     description: Optional[str] = None
+
+    @field_validator("http_expected_statuses")
+    @classmethod
+    def _check_statuses(cls, v):
+        return _validate_statuses(v)
 
 
 class ServiceCheckUpdate(BaseModel):
@@ -49,6 +81,7 @@ class ServiceCheckUpdate(BaseModel):
     http_headers: Optional[dict] = None
     http_body: Optional[str] = None
     http_expected_status: Optional[int] = Field(default=None, ge=100, le=599)
+    http_expected_statuses: Optional[str] = Field(default=None, max_length=255)
     http_content_match: Optional[str] = None
     http_follow_redirects: Optional[bool] = None
     tls_warn_days: Optional[int] = Field(default=None, ge=1, le=365)
@@ -56,6 +89,11 @@ class ServiceCheckUpdate(BaseModel):
     check_interval: Optional[int] = Field(default=None, ge=10, le=3600)
     timeout: Optional[int] = Field(default=None, ge=1, le=60)
     description: Optional[str] = None
+
+    @field_validator("http_expected_statuses")
+    @classmethod
+    def _check_statuses(cls, v):
+        return _validate_statuses(v)
 
 
 class ServiceCheckResponse(BaseModel):
@@ -80,6 +118,7 @@ class ServiceCheckResponse(BaseModel):
     target_url: Optional[str] = None
     http_method: str
     http_expected_status: int
+    http_expected_statuses: Optional[str] = None
     http_content_match: Optional[str] = None
     http_follow_redirects: bool
     tls_warn_days: int
@@ -176,10 +215,16 @@ class ServiceCheckTemplateCreate(BaseModel):
     target_port_default: Optional[int] = Field(default=None, ge=1, le=65535)
     http_method: Optional[str] = Field(default=None, pattern="^(GET|POST|HEAD|PUT)$")
     http_expected_status: Optional[int] = Field(default=None, ge=100, le=599)
+    http_expected_statuses: Optional[str] = Field(default=None, max_length=255)
     http_content_match: Optional[str] = None
     http_follow_redirects: Optional[bool] = None
     tls_warn_days: Optional[int] = Field(default=None, ge=1, le=365)
     tls_critical_days: Optional[int] = Field(default=None, ge=1, le=365)
+
+    @field_validator("http_expected_statuses")
+    @classmethod
+    def _check_statuses(cls, v):
+        return _validate_statuses(v)
 
 
 class ServiceCheckTemplateUpdate(BaseModel):
@@ -196,10 +241,16 @@ class ServiceCheckTemplateUpdate(BaseModel):
     target_port_default: Optional[int] = Field(default=None, ge=1, le=65535)
     http_method: Optional[str] = Field(default=None, pattern="^(GET|POST|HEAD|PUT)$")
     http_expected_status: Optional[int] = Field(default=None, ge=100, le=599)
+    http_expected_statuses: Optional[str] = Field(default=None, max_length=255)
     http_content_match: Optional[str] = None
     http_follow_redirects: Optional[bool] = None
     tls_warn_days: Optional[int] = Field(default=None, ge=1, le=365)
     tls_critical_days: Optional[int] = Field(default=None, ge=1, le=365)
+
+    @field_validator("http_expected_statuses")
+    @classmethod
+    def _check_statuses(cls, v):
+        return _validate_statuses(v)
 
 
 class ServiceCheckTemplateResponse(BaseModel):
@@ -218,6 +269,7 @@ class ServiceCheckTemplateResponse(BaseModel):
     target_port_default: Optional[int] = None
     http_method: Optional[str] = None
     http_expected_status: Optional[int] = None
+    http_expected_statuses: Optional[str] = None
     http_content_match: Optional[str] = None
     http_follow_redirects: Optional[bool] = None
     tls_warn_days: Optional[int] = None

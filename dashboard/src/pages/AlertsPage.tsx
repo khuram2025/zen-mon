@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useSearchParams } from 'react-router-dom'
 import { AlertTriangle, Check, X } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, relativeTime } from '@/lib/utils'
@@ -11,7 +12,23 @@ import { toast } from '@/components/ui/Toast'
 
 export function AlertsPage() {
   const qc = useQueryClient()
-  const [status, setStatus] = useState<'active' | 'acknowledged' | 'resolved'>('active')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const urlStatus = searchParams.get('status')
+  const initialStatus: 'active' | 'acknowledged' | 'resolved' =
+    urlStatus === 'acknowledged' || urlStatus === 'resolved' ? urlStatus : 'active'
+  const [status, setStatus] = useState<'active' | 'acknowledged' | 'resolved'>(initialStatus)
+  const severity = searchParams.get('severity') // 'critical' | 'warning' | 'info' | null
+  const serviceCheckId = searchParams.get('service_check_id')
+
+  // Keep URL ↔ status tab in sync.
+  useEffect(() => {
+    if (urlStatus !== status) {
+      const next = new URLSearchParams(searchParams)
+      next.set('status', status)
+      setSearchParams(next, { replace: true })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status])
 
   const { data: stats } = useQuery<any>({
     queryKey: ['alerts', 'stats'],
@@ -20,13 +37,25 @@ export function AlertsPage() {
   })
 
   const { data: alerts } = useQuery<any[]>({
-    queryKey: ['alerts', status],
+    queryKey: ['alerts', status, severity, serviceCheckId],
     queryFn: async () => {
-      const r = (await api.get(`/alerts?status=${status}&limit=100`)).data
+      const params = new URLSearchParams()
+      params.set('status', status)
+      params.set('limit', '100')
+      if (severity) params.set('severity', severity)
+      if (serviceCheckId) params.set('service_check_id', serviceCheckId)
+      const r = (await api.get(`/alerts?${params.toString()}`)).data
       return Array.isArray(r) ? r : r?.data || []
     },
     refetchInterval: 15_000,
   })
+
+  const clearFilters = () => {
+    const next = new URLSearchParams()
+    next.set('status', status)
+    setSearchParams(next, { replace: true })
+  }
+  const hasFilter = !!(severity || serviceCheckId)
 
   const ack = useMutation({
     mutationFn: async (id: string) => api.post(`/alerts/${id}/acknowledge`),
@@ -65,18 +94,38 @@ export function AlertsPage() {
         <Stat label="Warning (24h)" value={stats?.warning ?? 0} tone={(stats?.warning ?? 0) > 0 ? 'warning' : undefined} />
       </div>
 
-      <div className="flex gap-0.5 rounded-md bg-surface2 p-0.5 w-fit">
-        {(['active', 'acknowledged', 'resolved'] as const).map((s) => (
-          <button
-            key={s}
-            onClick={() => setStatus(s)}
-            className={`rounded px-3 py-1.5 text-xs font-medium capitalize transition-colors ${
-              status === s ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text'
-            }`}
-          >
-            {s}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex gap-0.5 rounded-md bg-surface2 p-0.5 w-fit">
+          {(['active', 'acknowledged', 'resolved'] as const).map((s) => (
+            <button
+              key={s}
+              onClick={() => setStatus(s)}
+              className={`rounded px-3 py-1.5 text-xs font-medium capitalize transition-colors ${
+                status === s ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text'
+              }`}
+            >
+              {s}
+            </button>
+          ))}
+        </div>
+        {hasFilter && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            {severity && (
+              <Badge variant={severity === 'critical' ? 'danger' : severity === 'warning' ? 'warning' : 'info'}>
+                Severity: {severity}
+              </Badge>
+            )}
+            {serviceCheckId && (
+              <Badge variant="info">Scoped to one service check</Badge>
+            )}
+            <button
+              onClick={clearFilters}
+              className="text-xs text-muted underline hover:text-text"
+            >
+              Clear filters
+            </button>
+          </div>
+        )}
       </div>
 
       <Card>

@@ -44,6 +44,7 @@ class ServiceCheck(Base):
     http_headers: Mapped[dict] = mapped_column(JSONB, default=dict)
     http_body: Mapped[str] = mapped_column(Text, nullable=True)
     http_expected_status: Mapped[int] = mapped_column(Integer, default=200)
+    http_expected_statuses: Mapped[str] = mapped_column(Text, nullable=True)
     http_content_match: Mapped[str] = mapped_column(String(1024), nullable=True)
     http_follow_redirects: Mapped[bool] = mapped_column(Boolean, default=True)
 
@@ -93,6 +94,7 @@ class ServiceCheckTemplate(Base):
     target_port_default: Mapped[int] = mapped_column(Integer, nullable=True)
     http_method: Mapped[str] = mapped_column(String(10), nullable=True)
     http_expected_status: Mapped[int] = mapped_column(Integer, nullable=True)
+    http_expected_statuses: Mapped[str] = mapped_column(Text, nullable=True)
     http_content_match: Mapped[str] = mapped_column(String(1024), nullable=True)
     http_follow_redirects: Mapped[bool] = mapped_column(Boolean, nullable=True)
     tls_warn_days: Mapped[int] = mapped_column(Integer, nullable=True)

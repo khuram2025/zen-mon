@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useParams, useNavigate, Link } from 'react-router-dom'
+import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
@@ -78,10 +78,22 @@ const C = {
 }
 
 const TIME_RANGES = [
-  { label: 'Last 24 hrs', hours: 24 },
-  { label: '7d', hours: 168 },
-  { label: '30d', hours: 720 },
+  { key: '1h', label: '1h', hours: 1 },
+  { key: '24h', label: '24h', hours: 24 },
+  { key: '7d', label: '7d', hours: 168 },
+  { key: '1M', label: '1M', hours: 720 },
 ] as const
+
+function rangeIdxFromKey(k: string | null): number {
+  const i = TIME_RANGES.findIndex((r) => r.key === k)
+  return i >= 0 ? i : 0 // default 1h
+}
+
+function formatRangeLabel(hours: number): string {
+  if (hours < 24) return `${hours}h`
+  if (hours < 24 * 30) return `${Math.round(hours / 24)}d`
+  return `${Math.round(hours / (24 * 30))}M`
+}
 
 const statusMeta: Record<
   string,
@@ -132,7 +144,28 @@ export function ServiceCheckDetailPage() {
   const { id = '' } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const [rangeIdx, setRangeIdx] = useState(0)
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  // Range can be a preset key (1h/24h/7d/1M) or "custom" — if "custom" the
+  // window comes from explicit ?from=&to= ISO timestamps.
+  const rangeKey = searchParams.get('range')
+  const isCustom = rangeKey === 'custom' && !!searchParams.get('from') && !!searchParams.get('to')
+  const rangeIdx = rangeIdxFromKey(rangeKey)
+  const setPresetRange = (i: number) => {
+    const next = new URLSearchParams(searchParams)
+    next.set('range', TIME_RANGES[i].key)
+    next.delete('from')
+    next.delete('to')
+    setSearchParams(next, { replace: true })
+  }
+  const setCustomRange = (fromISO: string, toISO: string) => {
+    const next = new URLSearchParams(searchParams)
+    next.set('range', 'custom')
+    next.set('from', fromISO)
+    next.set('to', toISO)
+    setSearchParams(next, { replace: true })
+  }
+
   const [editOpen, setEditOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -151,14 +184,28 @@ export function ServiceCheckDetailPage() {
     refetchInterval: 15_000,
   })
 
-  const rangeHours = TIME_RANGES[rangeIdx].hours
+  const customFrom = searchParams.get('from')
+  const customTo = searchParams.get('to')
   const fromTo = useMemo(() => {
+    if (isCustom && customFrom && customTo) {
+      return { from: customFrom, to: customTo }
+    }
     const now = Date.now()
     return {
-      from: new Date(now - rangeHours * 3_600_000).toISOString(),
+      from: new Date(now - TIME_RANGES[rangeIdx].hours * 3_600_000).toISOString(),
       to: new Date(now).toISOString(),
     }
-  }, [rangeHours])
+  }, [isCustom, customFrom, customTo, rangeIdx])
+  const rangeHours = useMemo(() => {
+    if (isCustom) {
+      const span = (Date.parse(fromTo.to) - Date.parse(fromTo.from)) / 3_600_000
+      return Math.max(1, Math.round(span))
+    }
+    return TIME_RANGES[rangeIdx].hours
+  }, [isCustom, fromTo, rangeIdx])
+  const rangeLabel = isCustom
+    ? `${new Date(fromTo.from).toLocaleString()} → ${new Date(fromTo.to).toLocaleString()}`
+    : `Last ${formatRangeLabel(rangeHours)}`
 
   const { data: metrics } = useQuery<ServiceMetricResponse>({
     queryKey: ['service-check-metrics', id, rangeHours],
@@ -203,8 +250,8 @@ export function ServiceCheckDetailPage() {
     error_rate_pct: number | null
     uptime_streak_sec: number | null
   }>({
-    queryKey: ['service-sla', id],
-    queryFn: async () => (await api.get(`/service-checks/${id}/sla?hours=24`)).data,
+    queryKey: ['service-sla', id, rangeHours],
+    queryFn: async () => (await api.get(`/service-checks/${id}/sla?hours=${rangeHours}`)).data,
     enabled: !!id && !!check,
     refetchInterval: 30_000,
   })
@@ -285,7 +332,141 @@ export function ServiceCheckDetailPage() {
       qc.invalidateQueries({ queryKey: ['service-check', id] })
       qc.invalidateQueries({ queryKey: ['service-checks'] })
     },
+    onError: (e: any) => toast.error('Failed', apiErrorMessage(e)),
   })
+
+  const forceRevalidate = useMutation({
+    mutationFn: async () => {
+      // Run two consecutive probes to confirm the current status is not transient.
+      await api.post(`/service-checks/${id}/test`, {})
+      return (await api.post(`/service-checks/${id}/test`, {})).data
+    },
+    onSuccess: (d: any) => {
+      toast.success(
+        'Re-validation complete',
+        d?.status === 'up'
+          ? `Confirmed up · ${Math.round(d.response_time_ms || 0)} ms`
+          : `Confirmed ${d?.status || 'down'}: ${d?.error || ''}`,
+      )
+      qc.invalidateQueries({ queryKey: ['service-check', id] })
+      qc.invalidateQueries({ queryKey: ['service-check-metrics', id] })
+      qc.invalidateQueries({ queryKey: ['service-sla', id] })
+    },
+    onError: (e: any) => toast.error('Re-validation failed', apiErrorMessage(e)),
+  })
+
+  const [maintOpen, setMaintOpen] = useState(false)
+
+  const startMaintenance = useMutation({
+    mutationFn: async (durationHours: number) => {
+      const now = new Date()
+      const end = new Date(now.getTime() + durationHours * 3_600_000)
+      return (
+        await api.post('/service-check-maintenance', {
+          scope_type: 'check',
+          scope_check_id: id,
+          starts_at: now.toISOString(),
+          ends_at: end.toISOString(),
+          reason: `Manual ${durationHours}h window from Quick Actions`,
+        })
+      ).data
+    },
+    onSuccess: () => {
+      toast.success('Maintenance window started')
+      setMaintOpen(false)
+      qc.invalidateQueries({ queryKey: ['service-check', id] })
+      qc.invalidateQueries({ queryKey: ['service-checks'] })
+      qc.invalidateQueries({ queryKey: ['service-check-maintenance'] })
+    },
+    onError: (e: any) => toast.error('Failed to start maintenance', apiErrorMessage(e)),
+  })
+
+  const startMaintenanceCustom = useMutation({
+    mutationFn: async (args: { startsAtISO: string; endsAtISO: string }) => {
+      return (
+        await api.post('/service-check-maintenance', {
+          scope_type: 'check',
+          scope_check_id: id,
+          starts_at: args.startsAtISO,
+          ends_at: args.endsAtISO,
+          reason: 'Custom maintenance window from Quick Actions',
+        })
+      ).data
+    },
+    onSuccess: (_d, args) => {
+      const start = new Date(args.startsAtISO)
+      const isFuture = start.getTime() > Date.now() + 60_000
+      toast.success(
+        isFuture ? 'Maintenance window scheduled' : 'Maintenance window started',
+        `${start.toLocaleString()} → ${new Date(args.endsAtISO).toLocaleString()}`,
+      )
+      setMaintOpen(false)
+      qc.invalidateQueries({ queryKey: ['service-check', id] })
+      qc.invalidateQueries({ queryKey: ['service-checks'] })
+      qc.invalidateQueries({ queryKey: ['service-check-maintenance'] })
+    },
+    onError: (e: any) => toast.error('Failed to start maintenance', apiErrorMessage(e)),
+  })
+
+  const endMaintenance = useMutation({
+    mutationFn: async () => {
+      const list: any[] = (await api.get('/service-check-maintenance')).data || []
+      const now = Date.now()
+      const active = list.filter(
+        (m) =>
+          m.scope_type === 'check' &&
+          m.scope_check_id === id &&
+          Date.parse(m.starts_at) <= now &&
+          Date.parse(m.ends_at) >= now,
+      )
+      if (active.length === 0) throw new Error('No active maintenance window for this check')
+      // Delete every active window so the check fully exits maintenance, even if
+      // overlapping windows exist (multi-session quick-action use).
+      await Promise.all(active.map((m) => api.delete(`/service-check-maintenance/${m.id}`)))
+      return active.length
+    },
+    onSuccess: (n: number) => {
+      toast.success(n > 1 ? `Ended ${n} overlapping maintenance windows` : 'Maintenance window ended')
+      setMaintOpen(false)
+      qc.invalidateQueries({ queryKey: ['service-check', id] })
+      qc.invalidateQueries({ queryKey: ['service-checks'] })
+      qc.invalidateQueries({ queryKey: ['service-check-maintenance'] })
+    },
+    onError: (e: any) => toast.error('Failed to end maintenance', apiErrorMessage(e)),
+  })
+
+  const ackAllAlerts = useMutation({
+    mutationFn: async () => {
+      const active = alerts.filter((a: any) => a.status === 'active')
+      if (active.length === 0) throw new Error('No active alerts to acknowledge')
+      await Promise.all(active.map((a: any) => api.post(`/alerts/${a.id}/acknowledge`)))
+      return active.length
+    },
+    onSuccess: (n: number) => {
+      toast.success(`Acknowledged ${n} alert${n === 1 ? '' : 's'}`)
+      qc.invalidateQueries({ queryKey: ['service-alerts', id] })
+      qc.invalidateQueries({ queryKey: ['alerts'] })
+    },
+    onError: (e: any) => toast.info('Nothing to acknowledge', apiErrorMessage(e)),
+  })
+
+  const exportConfig = () => {
+    if (!check) return
+    const payload = {
+      ...check,
+      _exported_at: new Date().toISOString(),
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${check.name.replace(/\s+/g, '-').toLowerCase()}-config.json`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    toast.success('Config exported')
+  }
 
   if (isLoading) {
     return (
@@ -349,6 +530,15 @@ export function ServiceCheckDetailPage() {
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          <TimeRangePicker
+            rangeIdx={rangeIdx}
+            isCustom={isCustom}
+            customFrom={fromTo.from}
+            customTo={fromTo.to}
+            onPreset={setPresetRange}
+            onCustom={setCustomRange}
+          />
+          <span className="mx-1 hidden h-5 w-px bg-white/10 sm:inline-block" />
           <HeaderBtn
             icon={check.enabled ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
             label={check.enabled ? 'Pause Checks' : 'Resume Checks'}
@@ -364,14 +554,16 @@ export function ServiceCheckDetailPage() {
           />
           <HeaderBtn
             icon={<Check className="h-3.5 w-3.5" />}
-            label="Acknowledge"
-            onClick={() => {}}
+            label={activeAlerts.length > 0 ? `Acknowledge (${activeAlerts.length})` : 'Acknowledge'}
+            onClick={() => ackAllAlerts.mutate()}
+            loading={ackAllAlerts.isPending}
+            disabled={activeAlerts.length === 0}
             tone="primary"
           />
           <HeaderBtn
             icon={<FileText className="h-3.5 w-3.5" />}
             label="Open Logs"
-            onClick={() => {}}
+            onClick={() => navigate(`/services/${id}/incidents?filter=all`)}
             tone="neutral"
           />
         </div>
@@ -391,12 +583,39 @@ export function ServiceCheckDetailPage() {
         checkInterval={check.check_interval}
         lastCheckAt={check.last_check_at}
         secsToNext={secsToNext}
+        inMaintenance={!!check.in_maintenance}
+        enabled={check.enabled}
         probeInfo={
           check.check_type === 'http'
             ? `HTTP(S) · Status + Body`
             : check.check_type.toUpperCase()
         }
       />
+
+      {/* ── Maintenance banner ───────────────────────────────────────── */}
+      {check.in_maintenance && (
+        <MaintenanceBanner
+          onEnd={() => endMaintenance.mutate()}
+          ending={endMaintenance.isPending}
+        />
+      )}
+
+      {/* ── Paused banner ────────────────────────────────────────────── */}
+      {!check.enabled && !check.in_maintenance && (
+        <PausedBanner
+          onResume={() => togglePause.mutate()}
+          resuming={togglePause.isPending}
+        />
+      )}
+
+      {/* ── Failure reason banner ────────────────────────────────────── */}
+      {check.last_error && (check.status === 'down' || check.status === 'warning') && !check.in_maintenance && (
+        <FailureReasonBanner
+          status={check.status}
+          error={check.last_error}
+          lastCheckAt={check.last_check_at}
+        />
+      )}
 
       {/* ── Live Probe Strip ─────────────────────────────────────────── */}
       <Card>
@@ -405,6 +624,24 @@ export function ServiceCheckDetailPage() {
             <Activity className="h-3.5 w-3.5" style={{ color: C.cyan }} />
             <span className="text-xs font-semibold">Live Probe Strip</span>
             <span className="text-[11px] text-muted">(last 60 checks)</span>
+            {check.in_maintenance && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider"
+                style={{ background: `${C.violet}20`, color: C.violet }}
+              >
+                <Wrench className="h-2.5 w-2.5" />
+                Alerts suppressed
+              </span>
+            )}
+            {!check.enabled && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider"
+                style={{ background: `${C.warn}20`, color: C.warn }}
+              >
+                <Pause className="h-2.5 w-2.5" />
+                No new probes
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-3 text-[10px]">
             <Legend color={C.up} label="Up" />
@@ -413,12 +650,18 @@ export function ServiceCheckDetailPage() {
             <span className="text-muted">
               Next poll in{' '}
               <span className="font-mono text-text">
-                {secsToNext == null ? '—' : `${String(Math.floor(secsToNext / 60)).padStart(2, '0')}:${String(secsToNext % 60).padStart(2, '0')}`}
+                {!check.enabled
+                  ? '—'
+                  : secsToNext == null
+                    ? '—'
+                    : `${String(Math.floor(secsToNext / 60)).padStart(2, '0')}:${String(secsToNext % 60).padStart(2, '0')}`}
               </span>
             </span>
           </div>
         </div>
-        <ProbeStrip points={points.slice(-60)} />
+        <div style={{ opacity: check.in_maintenance || !check.enabled ? 0.55 : 1 }}>
+          <ProbeStrip points={points.slice(-60)} />
+        </div>
       </Card>
 
       {/* ── KPI row + health ring ───────────────────────────────────── */}
@@ -428,6 +671,7 @@ export function ServiceCheckDetailPage() {
             <Kpi
               label="Availability"
               value={pct(sla?.uptime_pct ?? null, 2)}
+              windowLabel={rangeLabel}
               tint={
                 sla?.uptime_pct == null
                   ? C.textDim
@@ -444,6 +688,7 @@ export function ServiceCheckDetailPage() {
             <Kpi
               label="Avg Response"
               value={formatMs(sla?.avg_response_ms ?? null)}
+              windowLabel={rangeLabel}
               tint={C.cyan}
               delta="—"
               deltaDirection="flat"
@@ -452,6 +697,7 @@ export function ServiceCheckDetailPage() {
             <Kpi
               label="P95 Latency"
               value={formatMs(sla?.p95_response_ms ?? null)}
+              windowLabel={rangeLabel}
               tint={C.violet}
               delta="—"
               deltaDirection="flat"
@@ -460,6 +706,7 @@ export function ServiceCheckDetailPage() {
             <Kpi
               label="Error Rate"
               value={pct(sla?.error_rate_pct ?? null, 3)}
+              windowLabel={rangeLabel}
               tint={sla?.error_rate_pct && sla.error_rate_pct > 1 ? C.down : C.up}
               delta={sla?.error_rate_pct == null ? '—' : sla.error_rate_pct > 0 ? `+${sla.error_rate_pct.toFixed(2)}%` : '0.00%'}
               deltaDirection={sla?.error_rate_pct == null ? 'flat' : sla.error_rate_pct > 0 ? 'up' : 'flat'}
@@ -469,6 +716,7 @@ export function ServiceCheckDetailPage() {
             <Kpi
               label="Active Incidents"
               value={String(activeAlerts.length)}
+              windowLabel="active now"
               tint={activeAlerts.length > 0 ? C.down : C.up}
               delta={`${activeAlerts.length > 0 ? '+' : ''}${activeAlerts.length}`}
               deltaDirection={activeAlerts.length > 0 ? 'up' : 'flat'}
@@ -477,6 +725,7 @@ export function ServiceCheckDetailPage() {
             <Kpi
               label="Uptime Streak"
               value={formatDur(sla?.uptime_streak_sec ?? null)}
+              windowLabel="current"
               tint={C.up}
               delta="no change"
               deltaDirection="flat"
@@ -508,12 +757,11 @@ export function ServiceCheckDetailPage() {
           <PerformanceChart
             points={points}
             statusHistory={statusHistory}
-            rangeIdx={rangeIdx}
-            setRangeIdx={setRangeIdx}
+            rangeLabel={rangeLabel}
           />
 
           {/* Incidents strip */}
-          <IncidentsStrip history={statusHistory} />
+          <IncidentsStrip history={statusHistory} fromTo={fromTo} rangeLabel={rangeLabel} checkId={id || ''} />
 
           {/* Uptime Calendar + Related */}
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
@@ -526,7 +774,7 @@ export function ServiceCheckDetailPage() {
           </div>
 
           {/* Recent activity table */}
-          <RecentActivityTable history={statusHistory} />
+          <RecentActivityTable history={statusHistory} fromTo={fromTo} rangeLabel={rangeLabel} />
         </div>
 
         {/* ── Right sidebar ───────────────────────────────────────── */}
@@ -538,9 +786,26 @@ export function ServiceCheckDetailPage() {
             <QuickActions
               onRunProbe={() => runNow.mutate()}
               onPauseAll={() => togglePause.mutate()}
+              onForceRevalidate={() => forceRevalidate.mutate()}
+              onMaintenance={() => {
+                // If currently in maintenance, end it directly (no dialog).
+                // Otherwise open the duration-picker dialog.
+                if (check.in_maintenance) endMaintenance.mutate()
+                else setMaintOpen(true)
+              }}
+              onAckAll={() => ackAllAlerts.mutate()}
+              onExport={exportConfig}
               enabled={check.enabled}
+              inMaintenance={!!check.in_maintenance}
+              activeAlertCount={activeAlerts.length}
+              busy={{
+                probe: runNow.isPending,
+                pause: togglePause.isPending,
+                revalidate: forceRevalidate.isPending,
+                ack: ackAllAlerts.isPending,
+              }}
             />
-            <AlertSummary counts={alertCounts} />
+            <AlertSummary counts={alertCounts} checkId={id || ''} />
           </div>
         </div>
       </div>
@@ -557,20 +822,155 @@ export function ServiceCheckDetailPage() {
         loading={del.isPending}
         onConfirm={() => del.mutate()}
       />
+      <MaintenanceDialog
+        open={maintOpen}
+        onOpenChange={setMaintOpen}
+        inMaintenance={!!check.in_maintenance}
+        onStart={(hours) => startMaintenance.mutate(hours)}
+        onStartCustom={(startsAtISO, endsAtISO) =>
+          startMaintenanceCustom.mutate({ startsAtISO, endsAtISO })
+        }
+        onEnd={() => endMaintenance.mutate()}
+        starting={startMaintenance.isPending || startMaintenanceCustom.isPending}
+        ending={endMaintenance.isPending}
+      />
     </div>
   )
 }
 
 /* ─── Sub-components ────────────────────────────────────────────────────── */
 
+function TimeRangePicker({
+  rangeIdx, isCustom, customFrom, customTo, onPreset, onCustom,
+}: {
+  rangeIdx: number
+  isCustom: boolean
+  customFrom: string
+  customTo: string
+  onPreset: (i: number) => void
+  onCustom: (fromISO: string, toISO: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  // Initialize datetime-local fields from the active window when the popover opens.
+  const toLocal = (iso: string) => {
+    const d = new Date(iso)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  }
+  const [fromInput, setFromInput] = useState(() => toLocal(customFrom))
+  const [toInput, setToInput] = useState(() => toLocal(customTo))
+  useEffect(() => {
+    if (open) {
+      setFromInput(toLocal(customFrom))
+      setToInput(toLocal(customTo))
+    }
+  }, [open, customFrom, customTo])
+
+  return (
+    <div className="relative">
+      <div
+        className="inline-flex items-center gap-0.5 rounded-md border p-0.5"
+        style={{ background: C.panel, borderColor: C.border }}
+        role="tablist"
+        aria-label="Time range"
+      >
+        <Clock className="ml-1 mr-0.5 h-3 w-3" style={{ color: C.textDim }} />
+        {TIME_RANGES.map((r, i) => {
+          const active = !isCustom && rangeIdx === i
+          return (
+            <button
+              key={r.key}
+              role="tab"
+              aria-selected={active}
+              onClick={() => { setOpen(false); onPreset(i) }}
+              className="rounded px-2 py-1 text-[11px] font-semibold transition-colors"
+              style={{
+                background: active ? C.primary : 'transparent',
+                color: active ? '#000' : C.textDim,
+              }}
+            >
+              {r.label}
+            </button>
+          )
+        })}
+        <button
+          role="tab"
+          aria-selected={isCustom}
+          onClick={() => setOpen((v) => !v)}
+          className="rounded px-2 py-1 text-[11px] font-semibold transition-colors"
+          style={{
+            background: isCustom ? C.primary : 'transparent',
+            color: isCustom ? '#000' : C.textDim,
+          }}
+        >
+          Custom
+        </button>
+      </div>
+
+      {open && (
+        <div
+          className="absolute right-0 top-full z-20 mt-1 w-72 rounded-md border p-3 shadow-lg"
+          style={{ background: C.panel, borderColor: C.border }}
+        >
+          <div className="space-y-2">
+            <label className="block">
+              <span className="text-[10px] uppercase tracking-wider" style={{ color: C.textMuted }}>From</span>
+              <input
+                type="datetime-local"
+                value={fromInput}
+                onChange={(e) => setFromInput(e.target.value)}
+                className="mt-1 w-full rounded border bg-transparent px-2 py-1 text-xs"
+                style={{ borderColor: C.border, color: C.text }}
+              />
+            </label>
+            <label className="block">
+              <span className="text-[10px] uppercase tracking-wider" style={{ color: C.textMuted }}>To</span>
+              <input
+                type="datetime-local"
+                value={toInput}
+                onChange={(e) => setToInput(e.target.value)}
+                className="mt-1 w-full rounded border bg-transparent px-2 py-1 text-xs"
+                style={{ borderColor: C.border, color: C.text }}
+              />
+            </label>
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                onClick={() => setOpen(false)}
+                className="rounded px-2 py-1 text-[11px]"
+                style={{ color: C.textDim }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  const fromISO = new Date(fromInput).toISOString()
+                  const toISO = new Date(toInput).toISOString()
+                  if (Date.parse(fromISO) >= Date.parse(toISO)) return
+                  onCustom(fromISO, toISO)
+                  setOpen(false)
+                }}
+                className="rounded px-2 py-1 text-[11px] font-semibold"
+                style={{ background: C.primary, color: '#000' }}
+              >
+                Apply
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function HeaderBtn({
-  icon, label, onClick, tone = 'neutral', loading,
+  icon, label, onClick, tone = 'neutral', loading, disabled,
 }: {
   icon: React.ReactNode
   label: string
   onClick?: () => void
   tone?: 'primary' | 'success' | 'warn' | 'danger' | 'neutral'
   loading?: boolean
+  disabled?: boolean
 }) {
   const color =
     tone === 'primary' ? C.primary
@@ -581,8 +981,8 @@ function HeaderBtn({
   return (
     <button
       onClick={onClick}
-      disabled={loading}
-      className="inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors disabled:opacity-50"
+      disabled={loading || disabled}
+      className="inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
       style={{
         background: C.panel,
         borderColor: C.border,
@@ -592,6 +992,144 @@ function HeaderBtn({
       {icon}
       {label}
     </button>
+  )
+}
+
+function FailureReasonBanner({
+  status,
+  error,
+  lastCheckAt,
+}: {
+  status: string
+  error: string
+  lastCheckAt: string | null
+}) {
+  const isDown = status === 'down'
+  const tint = isDown ? C.down : C.warn
+  const Icon = isDown ? XCircle : AlertTriangle
+  return (
+    <div
+      className="rounded-xl p-3"
+      style={{
+        background: `${tint}10`,
+        border: `1px solid ${tint}40`,
+      }}
+    >
+      <div className="flex items-start gap-3">
+        <div
+          className="flex h-8 w-8 flex-none items-center justify-center rounded-lg"
+          style={{ background: `${tint}20`, color: tint }}
+        >
+          <Icon className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: tint }}>
+              {isDown ? 'Service is down' : 'Service is degraded'}
+            </span>
+            {lastCheckAt && (
+              <span className="text-[11px] text-muted">
+                · last probe {relativeTime(lastCheckAt)}
+              </span>
+            )}
+          </div>
+          <p
+            className="mt-1 break-words font-mono text-[12.5px] leading-relaxed"
+            style={{ color: C.text }}
+          >
+            {error}
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function MaintenanceBanner({
+  onEnd,
+  ending,
+}: {
+  onEnd: () => void
+  ending: boolean
+}) {
+  const tint = C.violet
+  return (
+    <div
+      className="rounded-xl p-3"
+      style={{ background: `${tint}10`, border: `1px solid ${tint}40` }}
+    >
+      <div className="flex items-start gap-3">
+        <div
+          className="flex h-8 w-8 flex-none items-center justify-center rounded-lg"
+          style={{ background: `${tint}20`, color: tint }}
+        >
+          <Wrench className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: tint }}>
+              Service in maintenance
+            </span>
+            <span className="text-[11px] text-muted">· Alerts are suppressed for this service.</span>
+          </div>
+          <p className="mt-1 text-[12.5px] leading-relaxed" style={{ color: C.text }}>
+            Probes continue to run, but no notifications fire and incidents from this window are not counted toward SLA.
+          </p>
+        </div>
+        <button
+          onClick={onEnd}
+          disabled={ending}
+          className="flex-none rounded-md px-3 py-1.5 text-[11px] font-medium transition-opacity disabled:opacity-50"
+          style={{ background: tint, color: '#fff' }}
+        >
+          {ending ? 'Ending…' : 'End maintenance'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function PausedBanner({
+  onResume,
+  resuming,
+}: {
+  onResume: () => void
+  resuming: boolean
+}) {
+  const tint = C.warn
+  return (
+    <div
+      className="rounded-xl p-3"
+      style={{ background: `${tint}10`, border: `1px solid ${tint}40` }}
+    >
+      <div className="flex items-start gap-3">
+        <div
+          className="flex h-8 w-8 flex-none items-center justify-center rounded-lg"
+          style={{ background: `${tint}20`, color: tint }}
+        >
+          <Pause className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: tint }}>
+              Checks paused
+            </span>
+            <span className="text-[11px] text-muted">· No new probes are being scheduled.</span>
+          </div>
+          <p className="mt-1 text-[12.5px] leading-relaxed" style={{ color: C.text }}>
+            The poller will not run this check until it's resumed. Live probe data will not update.
+          </p>
+        </div>
+        <button
+          onClick={onResume}
+          disabled={resuming}
+          className="flex-none rounded-md px-3 py-1.5 text-[11px] font-medium transition-opacity disabled:opacity-50"
+          style={{ background: tint, color: '#0B111F' }}
+        >
+          {resuming ? 'Resuming…' : 'Resume checks'}
+        </button>
+      </div>
+    </div>
   )
 }
 
@@ -638,6 +1176,8 @@ function HeroCard(props: {
   lastCheckAt: string | null
   secsToNext: number | null
   probeInfo: string
+  inMaintenance: boolean
+  enabled: boolean
 }) {
   const sm = statusMeta[props.status] || statusMeta.unknown
   const t = typeMeta[props.type] || typeMeta.http
@@ -662,6 +1202,26 @@ function HeroCard(props: {
                 <span className="h-1.5 w-1.5 rounded-full" style={{ background: sm.color }} />
                 {sm.label}
               </span>
+              {props.inMaintenance && (
+                <span
+                  className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
+                  style={{ background: `${C.violet}20`, color: C.violet, border: `1px solid ${C.violet}40` }}
+                  title="This service is currently in maintenance — alerts are suppressed."
+                >
+                  <Wrench className="h-2.5 w-2.5" />
+                  Maintenance
+                </span>
+              )}
+              {!props.enabled && (
+                <span
+                  className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
+                  style={{ background: `${C.warn}20`, color: C.warn, border: `1px solid ${C.warn}40` }}
+                  title="Checks are paused — the poller is not scheduling probes."
+                >
+                  <Pause className="h-2.5 w-2.5" />
+                  Paused
+                </span>
+              )}
               {props.tags.some((x) => x.toLowerCase() === 'critical') && (
                 <span
                   className="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
@@ -750,7 +1310,7 @@ function ProbeStrip({ points }: { points: ServiceMetricPoint[] }) {
 }
 
 function Kpi({
-  label, value, tint, delta, deltaDirection, series, invertTrend,
+  label, value, tint, delta, deltaDirection, series, invertTrend, windowLabel,
 }: {
   label: string
   value: string
@@ -760,6 +1320,7 @@ function Kpi({
   series: { x: number; y: number }[]
   big?: boolean
   invertTrend?: boolean
+  windowLabel?: string
 }) {
   const ArrowIcon = deltaDirection === 'up' ? ArrowUp : deltaDirection === 'down' ? ArrowDown : ArrowUp
   const goodDir = invertTrend ? deltaDirection === 'down' : deltaDirection !== 'up'
@@ -782,7 +1343,7 @@ function Kpi({
       <div className="mt-0.5 flex items-center gap-1 text-[10px]" style={{ color: deltaColor }}>
         {deltaDirection !== 'flat' && <ArrowIcon className="h-3 w-3" />}
         <span>{delta}</span>
-        <span className="ml-1" style={{ color: C.textMuted }}>vs 24h ago</span>
+        <span className="ml-1 truncate" style={{ color: C.textMuted }} title={windowLabel}>{windowLabel || 'window'}</span>
       </div>
       <div className="mt-auto pt-2" style={{ minHeight: 52 }}>
         {series.length > 1 ? (
@@ -897,12 +1458,11 @@ function HealthScoreRing({
 }
 
 function PerformanceChart({
-  points, statusHistory: _statusHistory, rangeIdx, setRangeIdx,
+  points, statusHistory: _statusHistory, rangeLabel,
 }: {
   points: ServiceMetricPoint[]
   statusHistory: Array<{ timestamp: string; new_status: string; duration_sec?: number | null }>
-  rangeIdx: number
-  setRangeIdx: (i: number) => void
+  rangeLabel: string
 }) {
   // Merge raw response-time, rolling P95 and a per-bucket error-rate into a
   // single point stream — lets Recharts render all four series with shared x.
@@ -972,21 +1532,9 @@ function PerformanceChart({
             <Legend color={`${C.down}60`} label="Status Bands" />
           </div>
         </div>
-        <div className="flex items-center rounded-md p-0.5 text-[11px]" style={{ background: C.borderSoft }}>
-          {TIME_RANGES.map((r, i) => (
-            <button
-              key={r.label}
-              onClick={() => setRangeIdx(i)}
-              className="rounded px-2.5 py-1 font-medium"
-              style={{
-                background: rangeIdx === i ? C.primary : 'transparent',
-                color: rangeIdx === i ? '#000' : C.textDim,
-              }}
-            >
-              {r.label}
-            </button>
-          ))}
-        </div>
+        <span className="text-[11px] font-medium" style={{ color: C.textMuted }}>
+          {rangeLabel}
+        </span>
       </div>
       <div className="h-[240px] w-full">
         {!hasData ? (
@@ -1098,12 +1646,21 @@ function PerformanceChart({
 }
 
 function IncidentsStrip({
-  history,
+  history, fromTo, rangeLabel, checkId,
 }: {
   history: Array<{ timestamp: string; new_status: string; reason?: string | null; duration_sec?: number | null }>
+  fromTo: { from: string; to: string }
+  rangeLabel: string
+  checkId: string
 }) {
+  const fromMs = Date.parse(fromTo.from)
+  const toMs = Date.parse(fromTo.to)
   const recent = history
     .filter((h) => h.new_status !== 'up')
+    .filter((h) => {
+      const t = Date.parse(h.timestamp)
+      return t >= fromMs && t <= toMs
+    })
     .slice(0, 4)
   return (
     <div
@@ -1114,9 +1671,15 @@ function IncidentsStrip({
         <div className="flex items-center gap-2">
           <AlertCircle className="h-3.5 w-3.5" style={{ color: C.warn }} />
           <span className="text-xs font-semibold">Incidents Strip</span>
-          <span className="text-[10px]" style={{ color: C.textMuted }}>(Last 24h)</span>
+          <span className="text-[10px]" style={{ color: C.textMuted }}>({rangeLabel})</span>
         </div>
-        <button className="text-[10px] hover:underline" style={{ color: C.primary }}>View all</button>
+        <Link
+          to={checkId ? `/services/${checkId}/incidents` : '#'}
+          className="text-[10px] hover:underline"
+          style={{ color: C.primary }}
+        >
+          View all
+        </Link>
       </div>
       {recent.length === 0 ? (
         <div className="rounded-md p-3 text-center text-[11px]" style={{ color: C.textMuted, background: C.borderSoft }}>
@@ -1315,10 +1878,18 @@ function RelatedList({
 }
 
 function RecentActivityTable({
-  history,
+  history, fromTo, rangeLabel,
 }: {
   history: Array<{ timestamp: string; new_status: string; old_status: string | null; reason?: string | null; duration_sec?: number | null }>
+  fromTo: { from: string; to: string }
+  rangeLabel: string
 }) {
+  const fromMs = Date.parse(fromTo.from)
+  const toMs = Date.parse(fromTo.to)
+  const rows = history.filter((h) => {
+    const t = Date.parse(h.timestamp)
+    return t >= fromMs && t <= toMs
+  })
   return (
     <div
       className="rounded-xl p-3"
@@ -1326,11 +1897,11 @@ function RecentActivityTable({
     >
       <div className="mb-2 flex items-center justify-between">
         <span className="text-xs font-semibold">Recent Activity &amp; Status Changes</span>
-        <button className="text-[10px] hover:underline" style={{ color: C.primary }}>View full activity log</button>
+        <span className="text-[10px]" style={{ color: C.textMuted }}>{rangeLabel}</span>
       </div>
-      {history.length === 0 ? (
+      {rows.length === 0 ? (
         <div className="py-6 text-center text-[11px]" style={{ color: C.textMuted }}>
-          No recorded status changes yet.
+          No status changes in this window.
         </div>
       ) : (
         <div className="overflow-hidden rounded-md border" style={{ borderColor: C.border }}>
@@ -1344,7 +1915,7 @@ function RecentActivityTable({
               </tr>
             </thead>
             <tbody>
-              {history.slice(0, 10).map((h, i) => {
+              {rows.slice(0, 10).map((h, i) => {
                 const sm = statusMeta[h.new_status] || statusMeta.unknown
                 return (
                   <tr key={i} style={{ borderTop: `1px solid ${C.border}` }}>
@@ -1429,7 +2000,11 @@ function InlineConfig({
       <div className="space-y-1.5 text-[11px]">
         <CfgRow label="URL" value={check.target_url || check.target_host || '—'} mono onEdit={onEdit} />
         <CfgRow label="Method" value={check.http_method || '—'} onEdit={onEdit} />
-        <CfgRow label="Expected Status" value={String(check.http_expected_status || '—')} onEdit={onEdit} />
+        <CfgRow
+          label="Expected Status"
+          value={check.http_expected_statuses || String(check.http_expected_status || '—')}
+          onEdit={onEdit}
+        />
         <CfgRow label="Timeout" value={`${check.timeout}s`} onEdit={onEdit} />
         <CfgRow label="Check Interval" value={`${check.check_interval}s`} onEdit={onEdit} />
         <CfgRow
@@ -1477,15 +2052,60 @@ function CfgRow({ label, value, mono, onEdit }: { label: string; value: string; 
 }
 
 function QuickActions({
-  onRunProbe, onPauseAll, enabled,
-}: { onRunProbe: () => void; onPauseAll: () => void; enabled: boolean }) {
-  const items: Array<{ Icon: any; label: string; onClick?: () => void; tint: string }> = [
-    { Icon: Play, label: 'Run Probe Now', onClick: onRunProbe, tint: C.up },
-    { Icon: Pause, label: enabled ? 'Pause All Checks' : 'Resume All Checks', onClick: onPauseAll, tint: C.warn },
-    { Icon: RefreshCw, label: 'Force Re-validate', tint: C.cyan },
-    { Icon: Wrench, label: 'Maintenance Mode', tint: C.violet },
-    { Icon: Terminal, label: 'Clear Cache (Edge)', tint: C.pink },
-    { Icon: Download, label: 'Export Config', tint: C.textDim },
+  onRunProbe,
+  onPauseAll,
+  onForceRevalidate,
+  onMaintenance,
+  onAckAll,
+  onExport,
+  enabled,
+  inMaintenance,
+  activeAlertCount,
+  busy,
+}: {
+  onRunProbe: () => void
+  onPauseAll: () => void
+  onForceRevalidate: () => void
+  onMaintenance: () => void
+  onAckAll: () => void
+  onExport: () => void
+  enabled: boolean
+  inMaintenance: boolean
+  activeAlertCount: number
+  busy: { probe: boolean; pause: boolean; revalidate: boolean; ack: boolean }
+}) {
+  const items: Array<{
+    Icon: any
+    label: string
+    onClick: () => void
+    tint: string
+    loading?: boolean
+    disabled?: boolean
+  }> = [
+    { Icon: Play, label: 'Run Probe Now', onClick: onRunProbe, tint: C.up, loading: busy.probe },
+    {
+      Icon: Pause,
+      label: enabled ? 'Pause All Checks' : 'Resume All Checks',
+      onClick: onPauseAll,
+      tint: C.warn,
+      loading: busy.pause,
+    },
+    { Icon: RefreshCw, label: 'Force Re-validate', onClick: onForceRevalidate, tint: C.cyan, loading: busy.revalidate },
+    {
+      Icon: Wrench,
+      label: inMaintenance ? 'End Maintenance' : 'Maintenance Mode',
+      onClick: onMaintenance,
+      tint: C.violet,
+    },
+    {
+      Icon: Bell,
+      label: `Acknowledge Alerts${activeAlertCount > 0 ? ` (${activeAlertCount})` : ''}`,
+      onClick: onAckAll,
+      tint: C.pink,
+      loading: busy.ack,
+      disabled: activeAlertCount === 0,
+    },
+    { Icon: Download, label: 'Export Config', onClick: onExport, tint: C.textDim },
   ]
   return (
     <div className="rounded-xl p-3" style={{ background: C.panel, border: `1px solid ${C.border}` }}>
@@ -1493,23 +2113,233 @@ function QuickActions({
       <div className="space-y-1">
         {items.map((it, i) => {
           const Icon = it.Icon
+          const isDisabled = it.disabled || it.loading
           return (
             <button
               key={i}
               onClick={it.onClick}
-              className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-[10px] hover:bg-white/5"
+              disabled={isDisabled}
+              className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-[10px] transition-colors hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
               style={{ background: C.borderSoft, color: C.text }}
             >
               <span
                 className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded"
                 style={{ background: `${it.tint}20`, color: it.tint }}
               >
-                <Icon className="h-2.5 w-2.5" />
+                {it.loading ? (
+                  <RefreshCw className="h-2.5 w-2.5 animate-spin" />
+                ) : (
+                  <Icon className="h-2.5 w-2.5" />
+                )}
               </span>
               <span className="truncate">{it.label}</span>
             </button>
           )
         })}
+      </div>
+    </div>
+  )
+}
+
+function MaintenanceDialog({
+  open,
+  onOpenChange,
+  inMaintenance,
+  onStart,
+  onStartCustom,
+  onEnd,
+  starting,
+  ending,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  inMaintenance: boolean
+  onStart: (hours: number) => void
+  onStartCustom: (startsAtISO: string, endsAtISO: string) => void
+  onEnd: () => void
+  starting: boolean
+  ending: boolean
+}) {
+  // Always-on hooks — must run before any early return.
+  const [mode, setMode] = useState<'preset' | 'custom'>('preset')
+
+  // datetime-local default values: now, now+1h, in the user's local timezone.
+  const toLocalInput = (d: Date) => {
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+  }
+  const [startsAt, setStartsAt] = useState(() => toLocalInput(new Date()))
+  const [endsAt, setEndsAt] = useState(() => toLocalInput(new Date(Date.now() + 60 * 60_000)))
+  const [error, setError] = useState<string | null>(null)
+
+  // Reset to preset mode whenever the dialog reopens.
+  useEffect(() => {
+    if (open) {
+      setMode('preset')
+      setError(null)
+      setStartsAt(toLocalInput(new Date()))
+      setEndsAt(toLocalInput(new Date(Date.now() + 60 * 60_000)))
+    }
+  }, [open])
+
+  if (!open) return null
+
+  const presets = [
+    { label: '15 min', hours: 0.25 },
+    { label: '1 hour', hours: 1 },
+    { label: '4 hours', hours: 4 },
+    { label: '24 hours', hours: 24 },
+  ]
+
+  const submitCustom = () => {
+    setError(null)
+    const s = new Date(startsAt)
+    const e = new Date(endsAt)
+    if (Number.isNaN(s.getTime()) || Number.isNaN(e.getTime())) {
+      setError('Please enter both start and end times.')
+      return
+    }
+    if (e <= s) {
+      setError('End time must be after the start time.')
+      return
+    }
+    onStartCustom(s.toISOString(), e.toISOString())
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: 'rgba(0,0,0,0.6)' }}
+      onClick={() => onOpenChange(false)}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-md rounded-xl p-4 shadow-xl"
+        style={{ background: C.panel, border: `1px solid ${C.border}`, color: C.text }}
+      >
+        <div className="mb-1 flex items-center gap-2">
+          <Wrench className="h-4 w-4" style={{ color: C.violet }} />
+          <h3 className="text-sm font-semibold">
+            {inMaintenance ? 'Active Maintenance Window' : 'Start Maintenance Window'}
+          </h3>
+        </div>
+        <p className="mb-3 text-xs" style={{ color: C.textDim }}>
+          {inMaintenance
+            ? 'This service is currently in maintenance. Alerts are suppressed.'
+            : 'Suppress alerts for this service for a defined period.'}
+        </p>
+        {inMaintenance ? (
+          <div className="flex items-center justify-end gap-2">
+            <button
+              onClick={() => onOpenChange(false)}
+              className="rounded-md px-3 py-1.5 text-xs hover:bg-white/5"
+              style={{ background: C.borderSoft, color: C.text }}
+            >
+              Close
+            </button>
+            <button
+              onClick={onEnd}
+              disabled={ending}
+              className="rounded-md px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+              style={{ background: C.down, color: '#fff' }}
+            >
+              {ending ? 'Ending…' : 'End maintenance now'}
+            </button>
+          </div>
+        ) : (
+          <>
+            {/* Mode toggle: presets vs custom */}
+            <div className="mb-3 flex gap-0.5 rounded-md p-0.5" style={{ background: C.borderSoft }}>
+              {(['preset', 'custom'] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setMode(m)}
+                  className="flex-1 rounded px-2 py-1 text-[11px] font-medium capitalize transition-colors"
+                  style={
+                    mode === m
+                      ? { background: C.panel, color: C.text }
+                      : { color: C.textDim }
+                  }
+                >
+                  {m === 'preset' ? 'Quick presets' : 'Custom date & time'}
+                </button>
+              ))}
+            </div>
+
+            {mode === 'preset' ? (
+              <div className="grid grid-cols-2 gap-2">
+                {presets.map((p) => (
+                  <button
+                    key={p.hours}
+                    onClick={() => onStart(p.hours)}
+                    disabled={starting}
+                    className="flex items-center justify-center gap-1.5 rounded-md py-2 text-xs font-medium hover:bg-white/5 disabled:opacity-50"
+                    style={{ background: C.borderSoft, color: C.text, border: `1px solid ${C.border}` }}
+                  >
+                    <Clock className="h-3 w-3" style={{ color: C.violet }} />
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div>
+                  <label className="mb-1 block text-[10px] uppercase tracking-wider" style={{ color: C.textMuted }}>
+                    Starts at (your local time)
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={startsAt}
+                    onChange={(e) => setStartsAt(e.target.value)}
+                    className="w-full rounded-md px-2 py-1.5 text-xs"
+                    style={{ background: C.borderSoft, color: C.text, border: `1px solid ${C.border}` }}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[10px] uppercase tracking-wider" style={{ color: C.textMuted }}>
+                    Ends at (your local time)
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={endsAt}
+                    onChange={(e) => setEndsAt(e.target.value)}
+                    className="w-full rounded-md px-2 py-1.5 text-xs"
+                    style={{ background: C.borderSoft, color: C.text, border: `1px solid ${C.border}` }}
+                  />
+                </div>
+                {error && (
+                  <div
+                    className="rounded-md px-2 py-1.5 text-[11px]"
+                    style={{ background: `${C.down}15`, color: C.down, border: `1px solid ${C.down}40` }}
+                  >
+                    {error}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                onClick={() => onOpenChange(false)}
+                disabled={starting}
+                className="rounded-md px-3 py-1.5 text-xs hover:bg-white/5 disabled:opacity-50"
+                style={{ color: C.textDim }}
+              >
+                Cancel
+              </button>
+              {mode === 'custom' && (
+                <button
+                  onClick={submitCustom}
+                  disabled={starting}
+                  className="rounded-md px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+                  style={{ background: C.violet, color: '#fff' }}
+                >
+                  {starting ? 'Starting…' : 'Start maintenance'}
+                </button>
+              )}
+            </div>
+          </>
+        )}
       </div>
     </div>
   )
@@ -1588,31 +2418,55 @@ function CurrentChecksSummary({ points }: { points: ServiceMetricPoint[] }) {
   )
 }
 
-function AlertSummary({ counts }: { counts: { critical: number; warning: number; info: number } }) {
+function AlertSummary({
+  counts,
+  checkId,
+}: {
+  counts: { critical: number; warning: number; info: number }
+  checkId: string
+}) {
   const items = [
-    { label: 'Critical', value: counts.critical, color: C.down, Icon: AlertCircle },
-    { label: 'Warning', value: counts.warning, color: C.warn, Icon: AlertTriangle },
-    { label: 'Info', value: counts.info, color: C.primary, Icon: Info },
+    { label: 'Critical', severity: 'critical', value: counts.critical, color: C.down, Icon: AlertCircle },
+    { label: 'Warning', severity: 'warning', value: counts.warning, color: C.warn, Icon: AlertTriangle },
+    { label: 'Info', severity: 'info', value: counts.info, color: C.primary, Icon: Info },
   ]
+  const allHref = checkId ? `/alerts?service_check_id=${checkId}&status=active` : '/alerts'
   return (
     <div className="rounded-xl p-3" style={{ background: C.panel, border: `1px solid ${C.border}` }}>
       <div className="mb-2 flex items-center justify-between gap-1">
         <span className="text-xs font-semibold">Alert Summary</span>
-        <Link to="/alerts" className="text-[9px] hover:underline" style={{ color: C.primary }}>View all</Link>
+        <Link to={allHref} className="text-[9px] hover:underline" style={{ color: C.primary }}>View all</Link>
       </div>
       <div className="space-y-1">
         {items.map((a) => {
           const Icon = a.Icon
+          const href = checkId
+            ? `/alerts?service_check_id=${checkId}&severity=${a.severity}&status=active`
+            : `/alerts?severity=${a.severity}&status=active`
+          const inactive = a.value === 0
           return (
-            <div
+            <Link
               key={a.label}
-              className="flex items-center gap-1.5 rounded-md px-1.5 py-1 text-[10px]"
-              style={{ background: C.borderSoft }}
+              to={href}
+              className="flex items-center justify-between gap-1.5 rounded-md px-1.5 py-1 text-[10px] transition-colors hover:bg-white/10"
+              style={{
+                background: C.borderSoft,
+                opacity: inactive ? 0.7 : 1,
+                borderLeft: `2px solid ${a.color}`,
+              }}
+              title={`View ${a.value} ${a.label.toLowerCase()} alert${a.value === 1 ? '' : 's'} for this service`}
             >
-              <Icon className="h-3 w-3 flex-shrink-0" style={{ color: a.color }} />
-              <span className="font-mono" style={{ color: C.text }}>{a.value}</span>
-              <span style={{ color: C.textDim }}>{a.label}</span>
-            </div>
+              <span className="flex items-center gap-1.5">
+                <Icon className="h-3 w-3 flex-shrink-0" style={{ color: a.color }} />
+                <span style={{ color: C.textDim }}>{a.label}</span>
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="font-mono font-semibold" style={{ color: a.value > 0 ? a.color : C.text }}>
+                  {a.value}
+                </span>
+                <ChevronRight className="h-2.5 w-2.5" style={{ color: C.textMuted }} />
+              </span>
+            </Link>
           )
         })}
       </div>

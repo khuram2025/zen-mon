@@ -3,6 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Globe, Plug, ShieldCheck, ArrowLeft, Loader2 } from 'lucide-react';
 import { api } from '@/lib/api';
+import { ExpectedStatusInput } from '@/components/forms/ExpectedStatusInput';
 
 type CheckType = 'http' | 'tcp' | 'tls';
 type HttpMethod = 'GET' | 'POST' | 'HEAD' | 'PUT';
@@ -16,6 +17,7 @@ interface ServiceCheckPayload {
   target_url: string | null;
   http_method: HttpMethod;
   http_expected_status: number;
+  http_expected_statuses: string | null;
   http_content_match: string | null;
   http_follow_redirects: boolean;
   tls_warn_days: number;
@@ -73,7 +75,7 @@ export function AddServiceCheckPage() {
   // HTTP fields
   const [url, setUrl] = useState('');
   const [httpMethod, setHttpMethod] = useState<HttpMethod>('GET');
-  const [expectedStatus, setExpectedStatus] = useState(200);
+  const [expectedStatuses, setExpectedStatuses] = useState('200');
   const [contentMatch, setContentMatch] = useState('');
   const [followRedirects, setFollowRedirects] = useState(true);
 
@@ -109,7 +111,10 @@ export function AddServiceCheckPage() {
       if (cloneSource.check_type === 'http') {
         setUrl((cloneSource.target_url as string) || '');
         setHttpMethod((cloneSource.http_method as HttpMethod) || 'GET');
-        setExpectedStatus((cloneSource.http_expected_status as number) || 200);
+        setExpectedStatuses(
+          (cloneSource.http_expected_statuses as string) ||
+            String((cloneSource.http_expected_status as number) || 200),
+        );
         setContentMatch((cloneSource.http_content_match as string) || '');
         setFollowRedirects(cloneSource.http_follow_redirects !== false);
       }
@@ -196,7 +201,8 @@ export function AddServiceCheckPage() {
         target_port: targetPort,
         target_url: targetUrl,
         http_method: httpMethod,
-        http_expected_status: expectedStatus,
+        http_expected_status: 200,
+        http_expected_statuses: expectedStatuses.trim() || null,
         http_content_match: contentMatch.trim() || null,
         http_follow_redirects: followRedirects,
         tls_warn_days: warnDays,
@@ -211,7 +217,7 @@ export function AddServiceCheckPage() {
     },
     [
       name, checkType, url, tcpHost, tcpPort, tlsHost, tlsPort, deviceId,
-      httpMethod, expectedStatus, contentMatch, followRedirects,
+      httpMethod, expectedStatuses, contentMatch, followRedirects,
       warnDays, criticalDays, checkInterval, timeout, description, mutation,
     ],
   );
@@ -426,17 +432,13 @@ export function AddServiceCheckPage() {
 
                 {/* Expected Status */}
                 <div>
-                  <label htmlFor="expected_status" className="block text-sm text-[var(--text-secondary)] mb-1.5">
-                    Expected Status Code
+                  <label className="block text-sm text-[var(--text-secondary)] mb-1.5">
+                    Expected Status Codes
                   </label>
-                  <input
-                    id="expected_status"
-                    type="number"
-                    min={100}
-                    max={599}
-                    value={expectedStatus}
-                    onChange={(e) => setExpectedStatus(Number(e.target.value))}
-                    className={`${INPUT_CLASS} max-w-[120px]`}
+                  <ExpectedStatusInput
+                    value={expectedStatuses}
+                    onChange={setExpectedStatuses}
+                    inputClass={INPUT_CLASS}
                   />
                 </div>
 

@@ -23,6 +23,7 @@ import {
   SelectValue,
 } from '@/components/ui/Select'
 import { toast } from '@/components/ui/Toast'
+import { ExpectedStatusInput } from '@/components/forms/ExpectedStatusInput'
 
 type State = {
   name: string
@@ -37,7 +38,7 @@ type State = {
   target_port: number | ''
   target_url: string
   http_method: string
-  http_expected_status: number
+  http_expected_statuses: string
   http_content_match: string
   http_follow_redirects: boolean
   tls_warn_days: number
@@ -74,7 +75,7 @@ const empty: State = {
   target_port: '',
   target_url: 'https://example.com',
   http_method: 'GET',
-  http_expected_status: 200,
+  http_expected_statuses: '200',
   http_content_match: '',
   http_follow_redirects: true,
   tls_warn_days: 30,
@@ -131,7 +132,8 @@ export function ServiceCheckFormDialog({
         target_port: check.target_port ?? '',
         target_url: check.target_url || '',
         http_method: check.http_method || 'GET',
-        http_expected_status: check.http_expected_status || 200,
+        http_expected_statuses:
+          check.http_expected_statuses || String(check.http_expected_status || 200),
         http_content_match: check.http_content_match || '',
         http_follow_redirects: check.http_follow_redirects ?? true,
         tls_warn_days: check.tls_warn_days ?? 30,
@@ -198,7 +200,7 @@ export function ServiceCheckFormDialog({
     if (s.check_type === 'http') {
       base.target_url = s.target_url
       base.http_method = s.http_method
-      base.http_expected_status = s.http_expected_status
+      base.http_expected_statuses = s.http_expected_statuses.trim() || null
       base.http_content_match = s.http_content_match || null
       base.http_follow_redirects = s.http_follow_redirects
     } else if (s.check_type === 'tcp' || s.check_type === 'tls') {
@@ -293,12 +295,10 @@ export function ServiceCheckFormDialog({
                   </Select>
                 </FormField>
                 <FormField label="Expected status">
-                  <Input
-                    type="number"
-                    min={100}
-                    max={599}
-                    value={s.http_expected_status}
-                    onChange={(e) => setS({ ...s, http_expected_status: Number(e.target.value) })}
+                  <ExpectedStatusInput
+                    compact
+                    value={s.http_expected_statuses}
+                    onChange={(v) => setS({ ...s, http_expected_statuses: v })}
                   />
                 </FormField>
               </div>

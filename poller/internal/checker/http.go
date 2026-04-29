@@ -6,11 +6,47 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"go.uber.org/zap"
 )
+
+// statusMatches reports whether the given HTTP status code satisfies any of
+// the comma-separated patterns. Patterns may be exact ("200"), wildcards
+// ("2xx", "4xx") or inclusive ranges ("200-299").
+func statusMatches(code int, patterns string) bool {
+	for _, raw := range strings.Split(patterns, ",") {
+		p := strings.ToLower(strings.TrimSpace(raw))
+		if p == "" {
+			continue
+		}
+		if strings.Contains(p, "-") {
+			parts := strings.SplitN(p, "-", 2)
+			lo, err1 := strconv.Atoi(parts[0])
+			hi, err2 := strconv.Atoi(parts[1])
+			if err1 == nil && err2 == nil && code >= lo && code <= hi {
+				return true
+			}
+			continue
+		}
+		if strings.Contains(p, "x") {
+			prefix := strings.TrimRight(p, "x")
+			lo, err1 := strconv.Atoi(prefix + strings.Repeat("0", 3-len(prefix)))
+			hi, err2 := strconv.Atoi(prefix + strings.Repeat("9", 3-len(prefix)))
+			if err1 == nil && err2 == nil && code >= lo && code <= hi {
+				return true
+			}
+			continue
+		}
+		n, err := strconv.Atoi(p)
+		if err == nil && n == code {
+			return true
+		}
+	}
+	return false
+}
 
 // HTTPChecker performs HTTP/HTTPS health checks.
 type HTTPChecker struct {
@@ -81,16 +117,25 @@ func (c *HTTPChecker) Check(ctx context.Context, sc *ServiceCheck, pollerID stri
 
 	result.StatusCode = resp.StatusCode
 
-	// Check status code
-	expectedStatus := sc.HTTPExpectedStatus
-	if expectedStatus == 0 {
-		expectedStatus = 200
-	}
-
-	if resp.StatusCode != expectedStatus {
-		result.Error = fmt.Sprintf("expected status %d, got %d", expectedStatus, resp.StatusCode)
-		result.IsUp = false
-		return result
+	// Check status code: prefer the multi-pattern field when set, else fall
+	// back to the single int.
+	patterns := strings.TrimSpace(sc.HTTPExpectedStatuses)
+	if patterns != "" {
+		if !statusMatches(resp.StatusCode, patterns) {
+			result.Error = fmt.Sprintf("expected status %s, got %d", patterns, resp.StatusCode)
+			result.IsUp = false
+			return result
+		}
+	} else {
+		expectedStatus := sc.HTTPExpectedStatus
+		if expectedStatus == 0 {
+			expectedStatus = 200
+		}
+		if resp.StatusCode != expectedStatus {
+			result.Error = fmt.Sprintf("expected status %d, got %d", expectedStatus, resp.StatusCode)
+			result.IsUp = false
+			return result
+		}
 	}
 
 	// Check content match if configured

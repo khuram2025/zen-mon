@@ -11,6 +11,12 @@ from app.core.security import get_current_user
 from app.models.user import User
 from app.services.report_service import generate_report
 from app.services.export_service import generate_excel_report, generate_csv_report
+from app.services.report_data_service import (
+    build_executive,
+    build_technical,
+    build_business,
+    build_inventory,
+)
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
@@ -98,6 +104,68 @@ async def generate_report_endpoint(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Report generation failed: {str(e)}")
+
+
+@router.get("/data/executive")
+async def get_executive_data(
+    from_time: Optional[datetime] = Query(None, alias="from"),
+    to_time: Optional[datetime] = Query(None, alias="to"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """KPIs, availability trend, top issues, location summary, outage timeline."""
+    try:
+        return await build_executive(db, from_time, to_time)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Executive report data failed: {e}")
+
+
+@router.get("/data/technical")
+async def get_technical_data(
+    from_time: Optional[datetime] = Query(None, alias="from"),
+    to_time: Optional[datetime] = Query(None, alias="to"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Top-N worst devices, noisy alerts, bandwidth interfaces, alert volume."""
+    try:
+        return await build_technical(db, from_time, to_time)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Technical report data failed: {e}")
+
+
+@router.get("/data/business")
+async def get_business_data(
+    from_time: Optional[datetime] = Query(None, alias="from"),
+    to_time: Optional[datetime] = Query(None, alias="to"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Service availability, response time quantiles, TLS warnings, customer impact."""
+    try:
+        return await build_business(db, from_time, to_time)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Business report data failed: {e}")
+
+
+@router.get("/data/inventory")
+async def get_inventory_data(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Devices by type/vendor/location, interfaces totals, sensor fleet, recently added."""
+    try:
+        return await build_inventory(db)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Inventory report data failed: {e}")
 
 
 @router.get("/types")
