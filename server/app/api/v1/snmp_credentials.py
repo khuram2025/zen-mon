@@ -288,6 +288,38 @@ async def assign_credential(
     return {"assigned_devices": d_count, "assigned_groups": g_count}
 
 
+class CredentialSecrets(BaseModel):
+    community: Optional[str] = None
+    v3_auth_passphrase: Optional[str] = None
+    v3_priv_passphrase: Optional[str] = None
+
+
+@router.get("/{cred_id}/secrets", response_model=CredentialSecrets)
+async def get_credential_secrets(
+    cred_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Reveal the stored community/passphrases for an authenticated user.
+
+    Used by the edit dialog so admins can review what they previously saved.
+    Passphrases on snmp_credentials are stored as plaintext (see
+    device_service._apply_credential), so no decryption step is needed here.
+    """
+    row = (await db.execute(
+        text("SELECT community, v3_auth_passphrase, v3_priv_passphrase "
+             "FROM snmp_credentials WHERE id = :id"),
+        {"id": cred_id},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(404, "Credential not found")
+    return CredentialSecrets(
+        community=row.get("community"),
+        v3_auth_passphrase=row.get("v3_auth_passphrase"),
+        v3_priv_passphrase=row.get("v3_priv_passphrase"),
+    )
+
+
 @router.get("/{cred_id}/usage")
 async def credential_usage(
     cred_id: uuid.UUID,

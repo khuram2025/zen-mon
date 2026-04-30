@@ -74,21 +74,22 @@ async def _ping_once(ip: str, timeout_s: float = 1.0) -> bool:
         return False
 
 
-async def _snmpget(
+async def _snmpget_detail(
     ip: str, community: str, version: str, port: int, timeout_ms: int, oids: list[str],
     v3_username: str | None = None, v3_security_level: str | None = None,
     v3_auth_protocol: str | None = None, v3_auth_passphrase: str | None = None,
     v3_priv_protocol: str | None = None, v3_priv_passphrase: str | None = None,
     v3_context: str | None = None,
-) -> Optional[dict[str, str]]:
+) -> tuple[Optional[dict[str, str]], Optional[str]]:
     """Shell out to snmpget and parse ``OID = TYPE: value`` output.
 
-    Returns {oid: value} or None if the probe failed. We use -Ov to
-    strip the MIB name prefix and -Oq to get a quoted-value format
-    that's easy to parse.  Supports v1, v2c, and v3.
+    Returns ``(values_dict, None)`` on success or ``(None, error_string)``
+    on failure. The error string distinguishes "binary missing" from
+    "auth failure" from "timeout" so the caller can surface a real
+    diagnostic to the user.
     """
     if shutil.which("snmpget") is None:
-        return None
+        return None, "snmpget binary not installed in API server image"
     timeout_s = max(1, timeout_ms // 1000)
     args = [
         "snmpget",
@@ -137,9 +138,12 @@ async def _snmpget(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        out_b, _ = await proc.communicate()
+        out_b, err_b = await proc.communicate()
         if proc.returncode != 0:
-            return None
+            err = (err_b.decode("utf-8", errors="replace").strip()
+                   or out_b.decode("utf-8", errors="replace").strip()
+                   or f"snmpget exited with code {proc.returncode}")
+            return None, err
         raw = out_b.decode("utf-8", errors="replace").strip()
         # Parse -Oqv output which may contain multi-line quoted strings.
         # Each OID value is either a single unquoted line or a quoted
@@ -168,13 +172,31 @@ async def _snmpget(
                 values.append(val)
                 i += 1
         if len(values) != len(oids):
-            return None
+            return None, f"snmpget returned {len(values)} values, expected {len(oids)}"
         result: dict[str, str] = {}
         for oid, val in zip(oids, values):
             result[oid] = val
-        return result
-    except Exception:
-        return None
+        return result, None
+    except Exception as e:
+        return None, f"snmpget invocation failed: {e}"
+
+
+async def _snmpget(
+    ip: str, community: str, version: str, port: int, timeout_ms: int, oids: list[str],
+    v3_username: str | None = None, v3_security_level: str | None = None,
+    v3_auth_protocol: str | None = None, v3_auth_passphrase: str | None = None,
+    v3_priv_protocol: str | None = None, v3_priv_passphrase: str | None = None,
+    v3_context: str | None = None,
+) -> Optional[dict[str, str]]:
+    """Backwards-compatible wrapper around :func:`_snmpget_detail`."""
+    result, _err = await _snmpget_detail(
+        ip=ip, community=community, version=version, port=port, timeout_ms=timeout_ms,
+        oids=oids, v3_username=v3_username, v3_security_level=v3_security_level,
+        v3_auth_protocol=v3_auth_protocol, v3_auth_passphrase=v3_auth_passphrase,
+        v3_priv_protocol=v3_priv_protocol, v3_priv_passphrase=v3_priv_passphrase,
+        v3_context=v3_context,
+    )
+    return result
 
 
 SYS_OBJECT_OID = "1.3.6.1.2.1.1.2.0"

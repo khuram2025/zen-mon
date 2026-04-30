@@ -4,6 +4,8 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Eye,
+  EyeOff,
   Key,
   Loader2,
   Pencil,
@@ -359,6 +361,13 @@ function CredentialFormDialog({
   const [retries, setRetries] = useState(2)
   const [isDefault, setIsDefault] = useState(false)
 
+  // Reveal state for sensitive fields
+  const [showCommunity, setShowCommunity] = useState(false)
+  const [showAuthPw, setShowAuthPw] = useState(false)
+  const [showPrivPw, setShowPrivPw] = useState(false)
+  const [secretsFetched, setSecretsFetched] = useState(false)
+  const [revealing, setRevealing] = useState(false)
+
   useEffect(() => {
     if (!open) return
     if (credential) {
@@ -383,7 +392,32 @@ function CredentialFormDialog({
       setV3AuthProto('SHA256'); setV3AuthPw(''); setV3PrivProto('AES128'); setV3PrivPw('')
       setPort(161); setTimeout_(2000); setRetries(2); setIsDefault(false)
     }
+    // Reset reveal state for each open
+    setShowCommunity(false); setShowAuthPw(false); setShowPrivPw(false); setSecretsFetched(false)
   }, [open, credential])
+
+  // Lazy-fetch stored plaintext secrets when the user first asks to reveal one
+  // in edit mode. Populates the corresponding input(s) so the user can see and
+  // tweak what was previously saved.
+  const fetchSecrets = async () => {
+    if (!isEdit || !credential?.id || secretsFetched) return
+    try {
+      setRevealing(true)
+      const { data } = await api.get<{
+        community: string | null
+        v3_auth_passphrase: string | null
+        v3_priv_passphrase: string | null
+      }>(`/snmp-credentials/${credential.id}/secrets`)
+      if (data.community != null) setCommunity(data.community)
+      if (data.v3_auth_passphrase != null) setV3AuthPw(data.v3_auth_passphrase)
+      if (data.v3_priv_passphrase != null) setV3PrivPw(data.v3_priv_passphrase)
+      setSecretsFetched(true)
+    } catch (e: any) {
+      toast.error('Could not load secrets', apiErrorMessage(e))
+    } finally {
+      setRevealing(false)
+    }
+  }
 
   const save = useMutation({
     mutationFn: async () => {
@@ -453,13 +487,35 @@ function CredentialFormDialog({
           {/* v1/v2c: Community */}
           {(version === '1' || version === '2c') && (
             <FormField label="Community string" required>
-              <Input
-                required
-                type="password"
-                value={community}
-                onChange={(e) => setCommunity(e.target.value)}
-                placeholder="public"
-              />
+              <div className="relative">
+                <Input
+                  required
+                  type={showCommunity ? 'text' : 'password'}
+                  value={community}
+                  onChange={(e) => setCommunity(e.target.value)}
+                  placeholder="public"
+                  className="pr-9"
+                />
+                {isEdit && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!showCommunity) await fetchSecrets()
+                      setShowCommunity((s) => !s)
+                    }}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-text"
+                    aria-label={showCommunity ? 'Hide community' : 'Reveal community'}
+                    title={showCommunity ? 'Hide' : 'Reveal'}
+                    disabled={revealing}
+                  >
+                    {revealing && !secretsFetched
+                      ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      : showCommunity
+                        ? <EyeOff className="h-3.5 w-3.5" />
+                        : <Eye className="h-3.5 w-3.5" />}
+                  </button>
+                )}
+              </div>
             </FormField>
           )}
 
@@ -497,12 +553,34 @@ function CredentialFormDialog({
                       </Select>
                     </FormField>
                     <FormField label="Auth passphrase">
-                      <Input
-                        type="password"
-                        value={v3AuthPw}
-                        onChange={(e) => setV3AuthPw(e.target.value)}
-                        placeholder={isEdit && credential?.has_auth_passphrase ? '••••••••' : 'Min 8 chars'}
-                      />
+                      <div className="relative">
+                        <Input
+                          type={showAuthPw ? 'text' : 'password'}
+                          value={v3AuthPw}
+                          onChange={(e) => setV3AuthPw(e.target.value)}
+                          placeholder={isEdit && credential?.has_auth_passphrase ? '••••••••' : 'Min 8 chars'}
+                          className="pr-9"
+                        />
+                        {isEdit && credential?.has_auth_passphrase && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (!showAuthPw) await fetchSecrets()
+                              setShowAuthPw((s) => !s)
+                            }}
+                            className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-text"
+                            aria-label={showAuthPw ? 'Hide auth passphrase' : 'Reveal auth passphrase'}
+                            title={showAuthPw ? 'Hide' : 'Reveal'}
+                            disabled={revealing}
+                          >
+                            {revealing && !secretsFetched
+                              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              : showAuthPw
+                                ? <EyeOff className="h-3.5 w-3.5" />
+                                : <Eye className="h-3.5 w-3.5" />}
+                          </button>
+                        )}
+                      </div>
                     </FormField>
                   </div>
                 </>
@@ -521,12 +599,34 @@ function CredentialFormDialog({
                     </Select>
                   </FormField>
                   <FormField label="Privacy passphrase">
-                    <Input
-                      type="password"
-                      value={v3PrivPw}
-                      onChange={(e) => setV3PrivPw(e.target.value)}
-                      placeholder={isEdit && credential?.has_priv_passphrase ? '••••••••' : 'Min 8 chars'}
-                    />
+                    <div className="relative">
+                      <Input
+                        type={showPrivPw ? 'text' : 'password'}
+                        value={v3PrivPw}
+                        onChange={(e) => setV3PrivPw(e.target.value)}
+                        placeholder={isEdit && credential?.has_priv_passphrase ? '••••••••' : 'Min 8 chars'}
+                        className="pr-9"
+                      />
+                      {isEdit && credential?.has_priv_passphrase && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (!showPrivPw) await fetchSecrets()
+                            setShowPrivPw((s) => !s)
+                          }}
+                          className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-text"
+                          aria-label={showPrivPw ? 'Hide privacy passphrase' : 'Reveal privacy passphrase'}
+                          title={showPrivPw ? 'Hide' : 'Reveal'}
+                          disabled={revealing}
+                        >
+                          {revealing && !secretsFetched
+                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            : showPrivPw
+                              ? <EyeOff className="h-3.5 w-3.5" />
+                              : <Eye className="h-3.5 w-3.5" />}
+                        </button>
+                      )}
+                    </div>
                   </FormField>
                 </div>
               )}

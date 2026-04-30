@@ -15,6 +15,7 @@ from app.schemas.metric import MetricResponse, StatusChangeEvent
 from app.services import device_service, metric_service
 from app.api.v1.snmp import (
     _snmpget,
+    _snmpget_detail,
     _ping_once,
     SYS_DESCR_OID,
     SYS_OBJECT_OID,
@@ -824,7 +825,7 @@ async def test_device_snmp(
 
     started = time.monotonic()
     oids = [SYS_DESCR_OID, SYS_OBJECT_OID, SYS_NAME_OID, SYS_UPTIME_OID]
-    result = await _snmpget(
+    result, snmp_err = await _snmpget_detail(
         ip=ip,
         community=cfg["community"] or "public",
         version=cfg["version"],
@@ -842,14 +843,28 @@ async def test_device_snmp(
     duration_ms = int((time.monotonic() - started) * 1000)
 
     if result is None:
+        # Map net-snmp's stderr to a more actionable reason where we can.
+        err_lc = (snmp_err or "").lower()
+        if not reachable:
+            reason = "Host is unreachable (ping failed)"
+        elif "timeout" in err_lc and "no response" in err_lc:
+            reason = "SNMP timed out — packets reach the host but no reply (ACL, wrong community/v3 user, or SNMP service disabled)"
+        elif "authentication failure" in err_lc or "usm" in err_lc:
+            reason = "SNMPv3 authentication failed — wrong username/auth/priv protocol or passphrase"
+        elif "unknown" in err_lc and "protocol" in err_lc:
+            reason = f"net-snmp rejected the protocol — {snmp_err}"
+        elif "snmpget binary not installed" in err_lc:
+            reason = "snmpget is missing in the API server image — rebuild with net-snmp installed"
+        elif snmp_err:
+            reason = snmp_err
+        else:
+            reason = "SNMP probe failed for an unknown reason"
         return {
             "ok": False,
             "snmp_responded": False,
             "reachable": reachable,
-            "reason": (
-                "SNMP probe timed out — check credentials, community, version, or firewall"
-                if reachable else "Host is unreachable (ping failed)"
-            ),
+            "reason": reason,
+            "snmp_error": snmp_err,
             "duration_ms": duration_ms,
             "config": {
                 "version": cfg["version"],

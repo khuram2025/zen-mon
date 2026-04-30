@@ -11,6 +11,7 @@ import {
   Bell,
   Check,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   Clock,
   Copy,
@@ -37,6 +38,9 @@ import {
   XCircle,
   HelpCircle,
   Radar,
+  Settings as SettingsIcon,
+  RotateCcw,
+  TrendingUp,
 } from 'lucide-react'
 import {
   Area,
@@ -53,6 +57,10 @@ import {
 import { api } from '@/lib/api'
 import { apiErrorMessage, relativeTime } from '@/lib/utils'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/Dialog'
+import { Button } from '@/components/ui/Button'
+import { Input } from '@/components/ui/Input'
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/Tabs'
 import { toast } from '@/components/ui/Toast'
 import { ServiceCheckFormDialog } from '@/components/forms/ServiceCheckFormDialog'
 import type { ServiceCheck, ServiceMetricPoint, ServiceMetricResponse } from '@/types'
@@ -170,6 +178,8 @@ export function ServiceCheckDetailPage() {
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [copied, setCopied] = useState(false)
   const [nowTick, setNowTick] = useState(() => Date.now())
+  const [hsOpen, setHsOpen] = useState(false)
+  const [hsConfig, setHsConfig] = useState<HealthScoreConfig>(() => loadHealthScoreConfig())
 
   // Tick every second for the "Next poll in" countdown.
   useEffect(() => {
@@ -500,7 +510,7 @@ export function ServiceCheckDetailPage() {
     error_rate_pct: sla?.error_rate_pct ?? null,
     incident_count: sla?.incident_count ?? 0,
     p95_response_ms: sla?.p95_response_ms ?? null,
-  })
+  }, hsConfig)
   const lastCheckMs = check.last_check_at ? Date.parse(check.last_check_at) : null
   const intervalMs = (check.check_interval || 60) * 1000
   const nextPollMs = lastCheckMs ? lastCheckMs + intervalMs : null
@@ -741,12 +751,8 @@ export function ServiceCheckDetailPage() {
             score={healthScore.score}
             tint={healthScore.tint}
             label={healthScore.label}
-            factors={[
-              { label: 'Availability', value: Math.round(sla?.uptime_pct ?? 0) },
-              { label: 'Latency', value: clamp(100 - Math.min(100, (sla?.p95_response_ms ?? 0) / 10), 0, 100) },
-              { label: 'Errors', value: Math.round(100 - (sla?.error_rate_pct ?? 0) * 10) },
-              { label: 'Incidents', value: clamp(100 - activeAlerts.length * 15, 0, 100) },
-            ]}
+            factors={healthScore.factors}
+            onViewDetails={() => setHsOpen(true)}
           />
         </div>
       </div>
@@ -780,7 +786,6 @@ export function ServiceCheckDetailPage() {
         {/* ── Right sidebar ───────────────────────────────────────── */}
         <div className="lg:col-span-3 space-y-3">
           <RegionStatus />
-          <InlineConfig check={check} onEdit={() => setEditOpen(true)} />
           <CurrentChecksSummary points={points} />
           <div className="grid grid-cols-2 gap-3">
             <QuickActions
@@ -807,6 +812,7 @@ export function ServiceCheckDetailPage() {
             />
             <AlertSummary counts={alertCounts} checkId={id || ''} />
           </div>
+          <InlineConfig check={check} onEdit={() => setEditOpen(true)} />
         </div>
       </div>
 
@@ -833,6 +839,19 @@ export function ServiceCheckDetailPage() {
         onEnd={() => endMaintenance.mutate()}
         starting={startMaintenance.isPending || startMaintenanceCustom.isPending}
         ending={endMaintenance.isPending}
+      />
+      <HealthScoreDetailsDialog
+        open={hsOpen}
+        onOpenChange={setHsOpen}
+        score={healthScore.score}
+        tint={healthScore.tint}
+        label={healthScore.label}
+        factors={healthScore.factors}
+        config={hsConfig}
+        onConfigChange={(next) => {
+          setHsConfig(next)
+          saveHealthScoreConfig(next)
+        }}
       />
     </div>
   )
@@ -1376,12 +1395,13 @@ function Kpi({
 }
 
 function HealthScoreRing({
-  score, tint, label, factors,
+  score, tint, label, factors, onViewDetails,
 }: {
   score: number
   tint: string
   label: string
-  factors: { label: string; value: number }[]
+  factors: HealthFactor[]
+  onViewDetails?: () => void
 }) {
   const radius = 52
   const circ = 2 * Math.PI * radius
@@ -1395,7 +1415,14 @@ function HealthScoreRing({
         <span className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: C.textMuted }}>
           Health Score
         </span>
-        <button className="text-[10px] hover:underline" style={{ color: C.primary }}>View all details</button>
+        <button
+          type="button"
+          onClick={onViewDetails}
+          className="text-[10px] hover:underline"
+          style={{ color: C.primary }}
+        >
+          View all details
+        </button>
       </div>
       <div className="flex flex-1 items-center gap-3">
         <div className="relative h-[120px] w-[120px] flex-shrink-0">
@@ -1435,25 +1462,239 @@ function HealthScoreRing({
             <span>Impact</span>
           </div>
           {factors.map((f) => (
-            <div key={f.label} className="flex items-center gap-2">
+            <div key={f.key} className="flex items-center gap-2">
               <span className="w-20 truncate" style={{ color: C.textDim }}>{f.label}</span>
               <div className="h-1 flex-1 overflow-hidden rounded-full" style={{ background: C.borderSoft }}>
                 <div
                   className="h-full"
                   style={{
-                    width: `${f.value}%`,
-                    background: f.value > 90 ? C.up : f.value > 70 ? C.warn : C.down,
+                    width: `${f.subScore}%`,
+                    background: f.subScore > 90 ? C.up : f.subScore > 70 ? C.warn : C.down,
                   }}
                 />
               </div>
               <span className="w-8 text-right font-mono" style={{ color: C.text }}>
-                {Math.round(f.value)}
+                {f.subScore}
               </span>
             </div>
           ))}
         </div>
       </div>
     </div>
+  )
+}
+
+function HealthScoreDetailsDialog({
+  open, onOpenChange, score, tint, label, factors, config, onConfigChange,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  score: number
+  tint: string
+  label: string
+  factors: HealthFactor[]
+  config: HealthScoreConfig
+  onConfigChange: (next: HealthScoreConfig) => void
+}) {
+  const [tab, setTab] = useState<'breakdown' | 'configure'>('breakdown')
+  const [draft, setDraft] = useState<HealthScoreConfig>(config)
+
+  useEffect(() => {
+    if (open) {
+      setDraft(config)
+      setTab('breakdown')
+    }
+  }, [open, config])
+
+  const totalW = Math.max(1, draft.weights.availability + draft.weights.latency + draft.weights.errors + draft.weights.incidents)
+  const dirty = JSON.stringify(draft) !== JSON.stringify(config)
+
+  const setWeight = (k: keyof HealthScoreConfig['weights'], v: number) => {
+    const n = Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : 0
+    setDraft({ ...draft, weights: { ...draft.weights, [k]: n } })
+  }
+  const setThreshold = (k: keyof HealthScoreConfig['thresholds'], v: number) => {
+    const n = Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : 0
+    setDraft({ ...draft, thresholds: { ...draft.thresholds, [k]: n } })
+  }
+
+  const handleSave = () => {
+    onConfigChange(draft)
+    toast.success('Health Score criteria updated')
+    onOpenChange(false)
+  }
+  const handleReset = () => setDraft({ ...DEFAULT_HEALTH_SCORE_CONFIG })
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <TrendingUp className="h-5 w-5 text-primary" />
+            Health Score Details
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="flex items-center justify-between rounded-md border border-border bg-surface2/40 px-3 py-2">
+          <div>
+            <div className="text-xs text-muted">Current score</div>
+            <div className="text-[11px]" style={{ color: tint }}>{label}</div>
+          </div>
+          <div className="text-3xl font-bold tabular-nums" style={{ color: tint }}>
+            {score}<span className="text-sm text-muted">/100</span>
+          </div>
+        </div>
+
+        <Tabs value={tab} onValueChange={(v) => setTab(v as 'breakdown' | 'configure')}>
+          <TabsList className="grid w-full grid-cols-2">
+            <TabsTrigger value="breakdown">Breakdown</TabsTrigger>
+            <TabsTrigger value="configure">
+              <SettingsIcon className="mr-1.5 h-3.5 w-3.5" />
+              Configure
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="breakdown" className="space-y-2 pt-3">
+            <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-3 gap-y-1 text-[10px] uppercase tracking-wider text-muted">
+              <span>Factor</span>
+              <span className="text-right">Sub-score</span>
+              <span className="text-right">Weight</span>
+              <span className="text-right">Contribution</span>
+            </div>
+            {factors.map((f) => {
+              const tone = f.subScore > 90 ? 'text-success' : f.subScore > 70 ? 'text-warning' : 'text-danger'
+              return (
+                <div key={f.key} className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-x-3 gap-y-0.5 border-b border-border/40 py-2 last:border-0">
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold">{f.label}</div>
+                    <div className="text-[11px] text-muted">{f.raw}</div>
+                  </div>
+                  <span className={`text-right font-mono text-xs tabular-nums ${tone}`}>{f.subScore}</span>
+                  <span className="text-right font-mono text-xs tabular-nums text-muted">{f.weight}%</span>
+                  <span className="text-right font-mono text-xs tabular-nums">{f.contribution.toFixed(1)}</span>
+                </div>
+              )
+            })}
+            <div className="flex items-center justify-between pt-2 text-[11px] text-muted">
+              <span>Status thresholds</span>
+              <span className="font-mono">
+                Excellent ≥ {config.thresholds.excellent} · Good ≥ {config.thresholds.good} · Degraded ≥ {config.thresholds.degraded}
+              </span>
+            </div>
+          </TabsContent>
+
+          <TabsContent value="configure" className="space-y-4 pt-3">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-semibold">Factor weights</div>
+                <span className={`text-[11px] font-mono ${totalW === 100 ? 'text-muted' : 'text-warning'}`}>
+                  Total: {totalW}{totalW !== 100 ? ' (will be normalized)' : ''}
+                </span>
+              </div>
+              {(['availability', 'latency', 'errors', 'incidents'] as const).map((k) => (
+                <div key={k} className="grid grid-cols-[140px_1fr_70px] items-center gap-3">
+                  <label className="text-xs capitalize">{k}</label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={draft.weights[k]}
+                    onChange={(e) => setWeight(k, Number(e.target.value))}
+                    className="accent-primary"
+                  />
+                  <Input
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={draft.weights[k]}
+                    onChange={(e) => setWeight(k, Number(e.target.value))}
+                    className="h-8 text-xs"
+                  />
+                </div>
+              ))}
+            </div>
+
+            <div className="space-y-2">
+              <div className="text-xs font-semibold">Status thresholds (score ≥)</div>
+              {(['excellent', 'good', 'degraded'] as const).map((k) => (
+                <div key={k} className="grid grid-cols-[140px_1fr_70px] items-center gap-3">
+                  <label className="text-xs capitalize">{k}</label>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={draft.thresholds[k]}
+                    onChange={(e) => setThreshold(k, Number(e.target.value))}
+                    className="accent-primary"
+                  />
+                  <Input
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={draft.thresholds[k]}
+                    onChange={(e) => setThreshold(k, Number(e.target.value))}
+                    className="h-8 text-xs"
+                  />
+                </div>
+              ))}
+            </div>
+
+            <div className="space-y-2">
+              <div className="text-xs font-semibold">Penalty tuning</div>
+              <div className="grid grid-cols-[140px_1fr] items-center gap-3">
+                <label className="text-xs">Latency target (ms)</label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={draft.latencyTargetMs}
+                  onChange={(e) => setDraft({ ...draft, latencyTargetMs: Math.max(1, Number(e.target.value) || 1) })}
+                  className="h-8 text-xs"
+                />
+              </div>
+              <div className="grid grid-cols-[140px_1fr] items-center gap-3">
+                <label className="text-xs">Error scale</label>
+                <Input
+                  type="number"
+                  min={0}
+                  step={0.5}
+                  value={draft.errorScale}
+                  onChange={(e) => setDraft({ ...draft, errorScale: Math.max(0, Number(e.target.value) || 0) })}
+                  className="h-8 text-xs"
+                />
+              </div>
+              <div className="grid grid-cols-[140px_1fr] items-center gap-3">
+                <label className="text-xs">Incident penalty</label>
+                <Input
+                  type="number"
+                  min={0}
+                  step={1}
+                  value={draft.incidentScale}
+                  onChange={(e) => setDraft({ ...draft, incidentScale: Math.max(0, Number(e.target.value) || 0) })}
+                  className="h-8 text-xs"
+                />
+              </div>
+            </div>
+          </TabsContent>
+        </Tabs>
+
+        <DialogFooter className="flex items-center justify-between gap-2">
+          {tab === 'configure' ? (
+            <>
+              <Button variant="outline" size="sm" onClick={handleReset}>
+                <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                Reset to defaults
+              </Button>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>Cancel</Button>
+                <Button size="sm" onClick={handleSave} disabled={!dirty}>Save</Button>
+              </div>
+            </>
+          ) : (
+            <Button size="sm" onClick={() => onOpenChange(false)}>Close</Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -1985,10 +2226,21 @@ function RegionStatus() {
 function InlineConfig({
   check, onEdit,
 }: { check: ServiceCheck; onEdit: () => void }) {
+  const [open, setOpen] = useState(false)
   return (
     <div className="rounded-xl p-3" style={{ background: C.panel, border: `1px solid ${C.border}` }}>
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs font-semibold">Inline Configuration</span>
+      <div className="flex items-center justify-between">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="flex flex-1 items-center gap-1.5 text-left"
+          aria-expanded={open}
+        >
+          {open
+            ? <ChevronDown className="h-3.5 w-3.5" style={{ color: C.textMuted }} />
+            : <ChevronRight className="h-3.5 w-3.5" style={{ color: C.textMuted }} />}
+          <span className="text-xs font-semibold">Inline Configuration</span>
+        </button>
         <button
           onClick={onEdit}
           className="text-[10px] hover:underline"
@@ -1997,28 +2249,30 @@ function InlineConfig({
           Edit all
         </button>
       </div>
-      <div className="space-y-1.5 text-[11px]">
-        <CfgRow label="URL" value={check.target_url || check.target_host || '—'} mono onEdit={onEdit} />
-        <CfgRow label="Method" value={check.http_method || '—'} onEdit={onEdit} />
-        <CfgRow
-          label="Expected Status"
-          value={check.http_expected_statuses || String(check.http_expected_status || '—')}
-          onEdit={onEdit}
-        />
-        <CfgRow label="Timeout" value={`${check.timeout}s`} onEdit={onEdit} />
-        <CfgRow label="Check Interval" value={`${check.check_interval}s`} onEdit={onEdit} />
-        <CfgRow
-          label="Tags"
-          value={check.tags.length > 0 ? check.tags.join(', ') : '—'}
-          onEdit={onEdit}
-        />
-        <CfgRow label="Alert Policy" value={check.group_name || 'default'} onEdit={onEdit} />
-        <CfgRow
-          label="Maintenance Window"
-          value={check.in_maintenance ? 'Active' : 'None'}
-          onEdit={onEdit}
-        />
-      </div>
+      {open && (
+        <div className="mt-2 space-y-1.5 text-[11px]">
+          <CfgRow label="URL" value={check.target_url || check.target_host || '—'} mono onEdit={onEdit} />
+          <CfgRow label="Method" value={check.http_method || '—'} onEdit={onEdit} />
+          <CfgRow
+            label="Expected Status"
+            value={check.http_expected_statuses || String(check.http_expected_status || '—')}
+            onEdit={onEdit}
+          />
+          <CfgRow label="Timeout" value={`${check.timeout}s`} onEdit={onEdit} />
+          <CfgRow label="Check Interval" value={`${check.check_interval}s`} onEdit={onEdit} />
+          <CfgRow
+            label="Tags"
+            value={check.tags.length > 0 ? check.tags.join(', ') : '—'}
+            onEdit={onEdit}
+          />
+          <CfgRow label="Alert Policy" value={check.group_name || 'default'} onEdit={onEdit} />
+          <CfgRow
+            label="Maintenance Window"
+            value={check.in_maintenance ? 'Active' : 'None'}
+            onEdit={onEdit}
+          />
+        </div>
+      )}
     </div>
   )
 }
@@ -2476,21 +2730,123 @@ function AlertSummary({
 
 /* ─── Derivations ───────────────────────────────────────────────────────── */
 
+/* ─── Health score configuration ────────────────────────────────────────── */
+
+type HealthScoreConfig = {
+  weights: { availability: number; latency: number; errors: number; incidents: number }
+  thresholds: { excellent: number; good: number; degraded: number }
+  latencyTargetMs: number   // ms at which latency sub-score reaches 0
+  errorScale: number        // multiplier on error_rate_pct → penalty points
+  incidentScale: number     // penalty per active incident
+}
+
+const DEFAULT_HEALTH_SCORE_CONFIG: HealthScoreConfig = {
+  weights: { availability: 50, latency: 15, errors: 20, incidents: 15 },
+  thresholds: { excellent: 90, good: 70, degraded: 50 },
+  latencyTargetMs: 1000,
+  errorScale: 10,
+  incidentScale: 15,
+}
+
+const HEALTH_SCORE_CONFIG_KEY = 'zp-health-score-config-v1'
+
+function loadHealthScoreConfig(): HealthScoreConfig {
+  try {
+    const raw = localStorage.getItem(HEALTH_SCORE_CONFIG_KEY)
+    if (!raw) return { ...DEFAULT_HEALTH_SCORE_CONFIG }
+    const parsed = JSON.parse(raw)
+    return {
+      weights: { ...DEFAULT_HEALTH_SCORE_CONFIG.weights, ...(parsed.weights || {}) },
+      thresholds: { ...DEFAULT_HEALTH_SCORE_CONFIG.thresholds, ...(parsed.thresholds || {}) },
+      latencyTargetMs: parsed.latencyTargetMs ?? DEFAULT_HEALTH_SCORE_CONFIG.latencyTargetMs,
+      errorScale: parsed.errorScale ?? DEFAULT_HEALTH_SCORE_CONFIG.errorScale,
+      incidentScale: parsed.incidentScale ?? DEFAULT_HEALTH_SCORE_CONFIG.incidentScale,
+    }
+  } catch {
+    return { ...DEFAULT_HEALTH_SCORE_CONFIG }
+  }
+}
+
+function saveHealthScoreConfig(cfg: HealthScoreConfig) {
+  try { localStorage.setItem(HEALTH_SCORE_CONFIG_KEY, JSON.stringify(cfg)) } catch { /* ignore */ }
+}
+
+type HealthFactor = {
+  key: 'availability' | 'latency' | 'errors' | 'incidents'
+  label: string
+  raw: string          // human-readable measurement
+  subScore: number     // 0-100 normalized contribution
+  weight: number       // 0-100 share of total
+  contribution: number // weighted contribution to final score
+}
+
 function computeHealthScore(args: {
   uptime_pct: number | null
   error_rate_pct: number | null
   incident_count: number
   p95_response_ms: number | null
-}) {
+}, cfg: HealthScoreConfig = DEFAULT_HEALTH_SCORE_CONFIG) {
   const up = args.uptime_pct ?? 100
   const err = args.error_rate_pct ?? 0
   const inc = args.incident_count || 0
-  const latPenalty = args.p95_response_ms != null ? Math.min(20, args.p95_response_ms / 50) : 0
-  let score = Math.round(up - err * 2 - inc * 5 - latPenalty)
-  score = Math.max(0, Math.min(100, score))
-  const tint = score >= 90 ? C.up : score >= 70 ? C.warn : C.down
-  const label = score >= 90 ? 'Excellent' : score >= 70 ? 'Good' : score >= 50 ? 'Degraded' : 'Critical'
-  return { score, tint, label }
+  const p95 = args.p95_response_ms
+
+  const availabilitySub = clamp(up, 0, 100)
+  const latencySub = p95 == null
+    ? 100
+    : clamp(100 - (p95 / Math.max(1, cfg.latencyTargetMs)) * 100, 0, 100)
+  const errorsSub = clamp(100 - err * cfg.errorScale, 0, 100)
+  const incidentsSub = clamp(100 - inc * cfg.incidentScale, 0, 100)
+
+  const w = cfg.weights
+  const totalW = Math.max(1, w.availability + w.latency + w.errors + w.incidents)
+
+  const factors: HealthFactor[] = [
+    {
+      key: 'availability',
+      label: 'Availability',
+      raw: args.uptime_pct == null ? 'no data' : `${up.toFixed(2)}%`,
+      subScore: Math.round(availabilitySub),
+      weight: w.availability,
+      contribution: (availabilitySub * w.availability) / totalW,
+    },
+    {
+      key: 'latency',
+      label: 'Latency',
+      raw: p95 == null ? 'no data' : `${Math.round(p95)} ms p95`,
+      subScore: Math.round(latencySub),
+      weight: w.latency,
+      contribution: (latencySub * w.latency) / totalW,
+    },
+    {
+      key: 'errors',
+      label: 'Errors',
+      raw: args.error_rate_pct == null ? 'no data' : `${err.toFixed(2)}%`,
+      subScore: Math.round(errorsSub),
+      weight: w.errors,
+      contribution: (errorsSub * w.errors) / totalW,
+    },
+    {
+      key: 'incidents',
+      label: 'Incidents',
+      raw: `${inc} active`,
+      subScore: Math.round(incidentsSub),
+      weight: w.incidents,
+      contribution: (incidentsSub * w.incidents) / totalW,
+    },
+  ]
+
+  const rawScore = factors.reduce((s, f) => s + f.contribution, 0)
+  const score = Math.max(0, Math.min(100, Math.round(rawScore)))
+
+  const t = cfg.thresholds
+  const tint = score >= t.excellent ? C.up : score >= t.good ? C.warn : C.down
+  const label =
+    score >= t.excellent ? 'Excellent' :
+    score >= t.good ? 'Good' :
+    score >= t.degraded ? 'Degraded' : 'Critical'
+
+  return { score, tint, label, factors }
 }
 
 function buildUptimeSeries(
