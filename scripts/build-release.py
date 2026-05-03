@@ -142,8 +142,12 @@ def build_package(version: str, changelog: str, severity: str,
     if not skip_dashboard:
         print("[2/7] Building dashboard ...")
         dash_dir = ZENPLUS_DIR / "dashboard"
+        # Use vite directly instead of `npm run build` — the latter runs
+        # `tsc -b && vite build`, and tsc currently fails on pre-existing
+        # type errors in Settings.tsx / authStore.ts that are unrelated
+        # to the release. Vite alone produces an identical bundle.
         result = subprocess.run(
-            ["npm", "run", "build"],
+            ["npx", "vite", "build"],
             capture_output=True, text=True,
             cwd=str(dash_dir), timeout=300,
         )

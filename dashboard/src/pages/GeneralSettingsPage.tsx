@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Building2, Loader2, Mail, Palette, Radio, Save, Send, Settings, User as UserIcon } from 'lucide-react'
+import { Building2, Download, Loader2, Mail, Palette, Radio, Save, Send, Settings, User as UserIcon } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
@@ -16,12 +16,14 @@ import { useTheme } from '@/stores/theme'
 import { useAuth } from '@/stores/auth'
 import { toast } from '@/components/ui/Toast'
 import { SensorsCard } from '@/components/SensorsCard'
+import { UpdatesTabContent } from '@/components/UpdatesTabContent'
 
 const TABS = [
   { value: 'company', label: 'Company', icon: Building2 },
   { value: 'smtp', label: 'SMTP / Email', icon: Mail },
   { value: 'appearance', label: 'Appearance', icon: Palette },
   { value: 'sensors', label: 'Sensors', icon: Radio },
+  { value: 'updates', label: 'Updates', icon: Download },
   { value: 'profile', label: 'Profile', icon: UserIcon },
 ] as const
 
@@ -71,6 +73,9 @@ export function GeneralSettingsPage() {
         </TabsContent>
         <TabsContent value="sensors">
           <SensorsCard />
+        </TabsContent>
+        <TabsContent value="updates">
+          <UpdatesTabContent />
         </TabsContent>
         <TabsContent value="profile">
           <ProfileCard />

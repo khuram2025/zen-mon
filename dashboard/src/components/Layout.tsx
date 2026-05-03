@@ -28,6 +28,7 @@ import { useAuth } from '@/stores/auth'
 import { useTheme } from '@/stores/theme'
 import { Button } from '@/components/ui/Button'
 import { cn } from '@/lib/utils'
+import { UpdateNotificationBell } from '@/components/UpdateNotificationBell'
 
 /* ------------------------------------------------------------------ */
 /*  Navigation structure                                               */
@@ -321,6 +322,9 @@ export function Layout() {
           <Button variant="ghost" size="icon" className="h-7 w-7 text-muted hover:text-text" onClick={toggle}>
             {theme === 'dark' ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
           </Button>
+
+          {/* Update notification bell — deep-links to Settings → Updates */}
+          <UpdateNotificationBell />
 
           {/* User */}
           <div className="relative">

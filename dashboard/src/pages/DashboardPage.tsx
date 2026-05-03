@@ -496,7 +496,7 @@ export function DashboardPage() {
           label="Avg. Uptime"
           value={`${avgUptime.toFixed(2)}%`}
           delta={
-            exec?.kpis?.availability_delta_pct !== undefined
+            exec?.kpis?.availability_delta_pct != null
               ? `${exec.kpis.availability_delta_pct >= 0 ? '+' : ''}${exec.kpis.availability_delta_pct.toFixed(2)}%`
               : undefined
           }

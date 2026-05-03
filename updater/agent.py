@@ -69,13 +69,22 @@ def setup_logging(cfg: AgentConfig) -> None:
 
 
 def _api_headers(cfg: AgentConfig) -> dict:
-    """Build API request headers."""
-    return {
-        "Authorization": f"Bearer {cfg.appliance.api_key}",
-        "X-Appliance-ID": cfg.appliance.id,
+    """Build API request headers.
+
+    Auth headers are only included when credentials exist. The registration
+    endpoint runs *before* an api_key is issued, and httpx rejects an
+    "Authorization: Bearer " header (empty value) as malformed before the
+    request is even sent.
+    """
+    headers = {
         "User-Agent": f"zenplus-updater/{__version__}",
         "Content-Type": "application/json",
     }
+    if cfg.appliance.api_key:
+        headers["Authorization"] = f"Bearer {cfg.appliance.api_key}"
+    if cfg.appliance.id:
+        headers["X-Appliance-ID"] = cfg.appliance.id
+    return headers
 
 
 def _api_client(cfg: AgentConfig) -> httpx.Client:

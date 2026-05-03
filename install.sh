@@ -224,9 +224,13 @@ setup_databases() {
     # Update password in case it changed
     su - postgres -c "psql -c \"ALTER USER zenplus WITH PASSWORD '$DB_PASSWORD'\"" 2>/dev/null
 
-    # Run migrations
+    # Run Postgres migrations only — skip the ClickHouse-targeted ones,
+    # which use MergeTree syntax that psql can't parse.
     for migration in "$ZENPLUS_HOME"/scripts/init-postgres.sql "$ZENPLUS_HOME"/scripts/seed-devices.sql "$ZENPLUS_HOME"/scripts/migrate-*.sql; do
         [[ -f "$migration" ]] || continue
+        case "$(basename "$migration")" in
+            *clickhouse*) continue ;;
+        esac
         info "Running $(basename "$migration")..."
         su - postgres -c "psql -d zenplus -f '$migration'" 2>/dev/null || true
     done
@@ -267,11 +271,14 @@ print(CryptContext(schemes=['bcrypt'], deprecated='auto').hash('admin123'))
         sleep 2; retries=$((retries - 1))
     done
 
-    # Run ClickHouse migrations
-    for sql_file in scripts/init-clickhouse.sql scripts/fix-clickhouse.sql; do
+    # Run ClickHouse migrations — init/fix first, then any migrate-*-clickhouse.sql
+    # in lexical order. (Pre-1.2.2 builds skipped these, leaving fleets without
+    # snmp_if_metrics / services_v2 tables.)
+    for sql_file in scripts/init-clickhouse.sql scripts/fix-clickhouse.sql scripts/migrate-*-clickhouse.sql; do
         [[ -f "$sql_file" ]] || continue
-        docker cp "$sql_file" zenplus-clickhouse:/tmp/init.sql 2>/dev/null
-        docker exec zenplus-clickhouse clickhouse-client --password "$CH_PASSWORD" --multiquery --queries-file /tmp/init.sql 2>/dev/null || true
+        info "Running $(basename "$sql_file") on ClickHouse..."
+        docker cp "$sql_file" zenplus-clickhouse:/tmp/m.sql 2>/dev/null
+        docker exec zenplus-clickhouse clickhouse-client --password "$CH_PASSWORD" --multiquery --queries-file /tmp/m.sql 2>/dev/null || true
     done
 
     # Service metrics tables (ClickHouse)

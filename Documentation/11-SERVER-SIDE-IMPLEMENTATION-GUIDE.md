@@ -612,9 +612,11 @@ The release signing keypair has been generated. The keys are at:
 
 ```
 -----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAllOqQ4Iy8yEs5NS5byit3hT6Mj8ajOTYeD3MXzjYNjg=
+MCowBQYDK2VwAyEAhwZpk2+cPN57lhIbcsPAI3Xtx9MyfMPM5m3Ny81swF8=
 -----END PUBLIC KEY-----
 ```
+
+> **Authoritative key** (rotated 2026-05-03) — this is the production public key embedded on every shipped appliance at `/opt/zenplus/updater/keys/zentryc-release.pub`. SHA-256: `58a71bf2a5eb37af460616ce7c6eafdcf0d52d4d6a18932e788fd7a602b70e57`, 113 bytes canonical. The release-signing private key partner of the *current* key must live on the build host with at least one off-VM escrow copy at all times (no exceptions — see `13-SHIP-READY-MASTER-PLAN.md` §6 for key custody policy). All releases ≥ 1.2.1 are signed against this key; releases 1.0.0 through 1.2.0 are abandoned along with their corresponding fleet.
 
 **To sign a manifest during package build:**
 ```python

@@ -88,6 +88,39 @@ class RegisterRequest(BaseModel):
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
+def _extract_remote_error(resp) -> str:
+    """Pull a human-readable message out of a zentryc.com error response.
+
+    The server has two error shapes (see Documentation/14-REMOTE-SERVER-INTAKE.md A7):
+      • Business errors: {"error": "..."} / {"detail": "..."} / {"message": "..."}
+      • Validation 400s: DRF-style {"field": ["msg1", ...], ...}
+
+    Without this helper the second shape surfaces as raw JSON in the dashboard,
+    which is unreadable for the customer pasting a license key.
+    """
+    if not resp.headers.get("content-type", "").startswith("application/json"):
+        return (resp.text or "").strip() or f"HTTP {resp.status_code}"
+    try:
+        data = resp.json()
+    except ValueError:
+        return (resp.text or "").strip() or f"HTTP {resp.status_code}"
+    if isinstance(data, dict):
+        for key in ("error", "detail", "message"):
+            v = data.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        # DRF-style field-keyed errors
+        parts = []
+        for field, msgs in data.items():
+            if isinstance(msgs, list) and msgs:
+                parts.append(f"{field}: {'; '.join(str(m) for m in msgs)}")
+            elif isinstance(msgs, str) and msgs.strip():
+                parts.append(f"{field}: {msgs.strip()}")
+        if parts:
+            return " | ".join(parts)
+    return str(data) or f"HTTP {resp.status_code}"
+
+
 def _load_subscription() -> Optional[RemoteSubscription]:
     """Load cached subscription data written by the updater agent."""
     if not SUBSCRIPTION_PATH.exists():
@@ -462,9 +495,7 @@ async def register_appliance(body: RegisterRequest, user: User = Depends(get_cur
             )
 
         if resp.status_code != 200:
-            error_data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
-            error_msg = error_data.get("error") or error_data.get("detail") or resp.text
-            raise HTTPException(status_code=resp.status_code, detail=str(error_msg))
+            raise HTTPException(status_code=resp.status_code, detail=_extract_remote_error(resp))
 
         data = resp.json()
         appliance_id = data.get("appliance_id", "")
@@ -603,9 +634,7 @@ async def refresh_subscription(user: User = Depends(get_current_user)):
             return {"subscription": None, "message": "Appliance is not linked to any subscription"}
 
         if resp.status_code != 200:
-            error_data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
-            detail = error_data.get("error") or error_data.get("detail") or resp.text
-            raise HTTPException(status_code=resp.status_code, detail=str(detail))
+            raise HTTPException(status_code=resp.status_code, detail=_extract_remote_error(resp))
 
         data = resp.json()
         subscription = data.get("subscription")

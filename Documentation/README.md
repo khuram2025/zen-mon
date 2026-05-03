@@ -18,6 +18,9 @@
 | 10 | [OTA Update System](10-OTA-UPDATE-SYSTEM.md) | Over-the-air update agent, manifests, rollback |
 | 11 | [Server-Side Implementation](11-SERVER-SIDE-IMPLEMENTATION-GUIDE.md) | Update server API, release management |
 | 12 | [**Appliance Build Guide**](12-APPLIANCE-BASE-SYSTEM.md) | **Complete OVA appliance spec: Base OS + Application deployment** |
+| 13 | [**Ship-Ready Master Plan**](13-SHIP-READY-MASTER-PLAN.md) | **Audit + final design + remote-server handoff + pre-ship checklist** |
+| 14 | [Remote-Server Intake](14-REMOTE-SERVER-INTAKE.md) | Questions for the zentryc.com team to confirm the contract + run a smoke test |
+| 15 | [**Release Runbook**](15-RELEASE-RUNBOOK.md) | **The only doc you need open while cutting a release. Build → sign → push → verify.** |
 
 ## Quick Start (Phase 1)
 

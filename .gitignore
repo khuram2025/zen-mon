@@ -76,3 +76,10 @@ int/
 .cache/
 go/
 docker-compose.yml.bak
+
+# ─── Working artifacts (per-VM, never commit) ───
+.playwright-mcp/
+*.png
+Documentation/prv.txt
+Documentation/srv_response.txt
+Documentation/test.txt
