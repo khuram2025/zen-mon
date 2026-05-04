@@ -21,6 +21,7 @@
 | 13 | [**Ship-Ready Master Plan**](13-SHIP-READY-MASTER-PLAN.md) | **Audit + final design + remote-server handoff + pre-ship checklist** |
 | 14 | [Remote-Server Intake](14-REMOTE-SERVER-INTAKE.md) | Questions for the zentryc.com team to confirm the contract + run a smoke test |
 | 15 | [**Release Runbook**](15-RELEASE-RUNBOOK.md) | **The only doc you need open while cutting a release. Build → sign → push → verify.** |
+| 16 | [**Installer & Knowledge-Base Guide**](16-INSTALLER-PUBLIC-GUIDE.md) | **One-liner install spec for the remote-server team to publish on docs.zentryc.com. Prereqs, permissions, OTA wiring, troubleshooting.** |
 
 ## Quick Start (Phase 1)
 
