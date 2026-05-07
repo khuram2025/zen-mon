@@ -2,6 +2,7 @@
 
 import logging
 import os
+import shutil
 import subprocess
 
 from ..executor import step_handler
@@ -31,6 +32,24 @@ def run_migration(step: dict, extract_dir: str, cfg) -> None:
 
 def _run_postgres(sql: str, sql_path: str) -> None:
     """Execute SQL against PostgreSQL."""
+    runner = "/opt/zenplus/scripts/run-migrations.py"
+    scripts_dir = os.path.dirname(sql_path)
+    if os.path.exists(runner) and shutil.which("python3"):
+        result = subprocess.run(
+            [
+                "sudo", "-u", "postgres", "python3", runner,
+                "--scripts-dir", scripts_dir,
+                "--database", "zenplus",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"PostgreSQL migration failed: {result.stderr}")
+        logger.info("PostgreSQL migration runner output: %s", result.stdout.strip()[:500])
+        return
+
     result = subprocess.run(
         ["sudo", "-u", "postgres", "psql", "-d", "zenplus", "-f", sql_path],
         capture_output=True,

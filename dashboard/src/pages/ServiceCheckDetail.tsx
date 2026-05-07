@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -55,7 +55,7 @@ import {
   YAxis,
 } from 'recharts'
 import { api } from '@/lib/api'
-import { apiErrorMessage, relativeTime } from '@/lib/utils'
+import { apiErrorMessage, relativeTime, timeAxisTickFormatter, timeTooltipLabelFormatter } from '@/lib/utils'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
@@ -63,10 +63,15 @@ import { Input } from '@/components/ui/Input'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/Tabs'
 import { toast } from '@/components/ui/Toast'
 import { ServiceCheckFormDialog } from '@/components/forms/ServiceCheckFormDialog'
+import { useTheme } from '@/stores/theme'
 import type { ServiceCheck, ServiceMetricPoint, ServiceMetricResponse } from '@/types'
 
-/* ─── Theme palette (hardcoded for visual parity with reference) ───────── */
-const C = {
+/* ─── Theme palette ─────────────────────────────────────────────────────
+ * Two palettes — chrome (bg, panel, border, text) flips with the active
+ * theme, semantic + brand colors stay stable (so module-level
+ * statusMeta/typeMeta keep working).
+ * --------------------------------------------------------------------- */
+const C_DARK = {
   bg: '#0B111F',
   panel: '#0F172A',
   panelLift: '#121a2e',
@@ -84,6 +89,38 @@ const C = {
   pink: '#f472b6',
   primary: '#38bdf8',
 }
+
+type Palette = typeof C_DARK
+
+const C_LIGHT: Palette = {
+  bg: '#F8FAFC',
+  panel: '#FFFFFF',
+  panelLift: '#F1F5F9',
+  border: '#E2E8F0',
+  borderSoft: '#EEF2F7',
+  text: '#0F172A',
+  textDim: '#475569',
+  textMuted: '#64748B',
+  up: '#16A34A',
+  down: '#DC2626',
+  warn: '#D97706',
+  unknown: '#94A3B8',
+  cyan: '#0891B2',
+  violet: '#7C3AED',
+  pink: '#DB2777',
+  primary: '#2563EB',
+}
+
+const PaletteContext = createContext<Palette>(C_DARK)
+function useC(): Palette {
+  return useContext(PaletteContext)
+}
+
+// Module-level metas reference C_DARK semantic keys; both palettes share
+// the same shape so they're swappable, but `statusMeta` / `typeMeta`
+// values are only used for icons/labels — when a *color* is needed at
+// runtime, components re-resolve via `useC()`.
+const C = C_DARK
 
 const TIME_RANGES = [
   { key: '1h', label: '1h', hours: 1 },
@@ -149,6 +186,8 @@ function pct(n: number | null | undefined, digits = 2): string {
 /* ─── Page ──────────────────────────────────────────────────────────────── */
 
 export function ServiceCheckDetailPage() {
+  const { theme } = useTheme()
+  const C = theme === 'dark' ? C_DARK : C_LIGHT
   const { id = '' } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const qc = useQueryClient()
@@ -239,9 +278,11 @@ export function ServiceCheckDetailPage() {
       duration_sec?: number | null
     }>
   >({
-    queryKey: ['service-status-history', id],
+    queryKey: ['service-status-history', id, fromTo.from, fromTo.to],
     queryFn: async () =>
-      (await api.get(`/service-checks/${id}/status-history?limit=25`)).data,
+      (await api.get(
+        `/service-checks/${id}/status-history?from=${encodeURIComponent(fromTo.from)}&to=${encodeURIComponent(fromTo.to)}&limit=500`,
+      )).data,
     enabled: !!id && !!check,
     refetchInterval: 60_000,
   })
@@ -518,6 +559,7 @@ export function ServiceCheckDetailPage() {
   const env = pickEnv(check.tags || [])
 
   return (
+    <PaletteContext.Provider value={C}>
     <div
       className="space-y-4 p-0"
       style={{ background: C.bg, color: C.text }}
@@ -764,6 +806,7 @@ export function ServiceCheckDetailPage() {
             points={points}
             statusHistory={statusHistory}
             rangeLabel={rangeLabel}
+            rangeHours={rangeHours}
           />
 
           {/* Incidents strip */}
@@ -854,6 +897,7 @@ export function ServiceCheckDetailPage() {
         }}
       />
     </div>
+    </PaletteContext.Provider>
   )
 }
 
@@ -869,6 +913,7 @@ function TimeRangePicker({
   onPreset: (i: number) => void
   onCustom: (fromISO: string, toISO: string) => void
 }) {
+  const C = useC()
   const [open, setOpen] = useState(false)
   // Initialize datetime-local fields from the active window when the popover opens.
   const toLocal = (iso: string) => {
@@ -991,6 +1036,7 @@ function HeaderBtn({
   loading?: boolean
   disabled?: boolean
 }) {
+  const C = useC()
   const color =
     tone === 'primary' ? C.primary
     : tone === 'success' ? C.up
@@ -1023,6 +1069,7 @@ function FailureReasonBanner({
   error: string
   lastCheckAt: string | null
 }) {
+  const C = useC()
   const isDown = status === 'down'
   const tint = isDown ? C.down : C.warn
   const Icon = isDown ? XCircle : AlertTriangle
@@ -1071,6 +1118,7 @@ function MaintenanceBanner({
   onEnd: () => void
   ending: boolean
 }) {
+  const C = useC()
   const tint = C.violet
   return (
     <div
@@ -1115,6 +1163,7 @@ function PausedBanner({
   onResume: () => void
   resuming: boolean
 }) {
+  const C = useC()
   const tint = C.warn
   return (
     <div
@@ -1153,6 +1202,7 @@ function PausedBanner({
 }
 
 function Card({ children, className = '', ...rest }: React.HTMLAttributes<HTMLDivElement>) {
+  const C = useC()
   return (
     <div
       className={`rounded-xl p-3 ${className}`}
@@ -1198,6 +1248,7 @@ function HeroCard(props: {
   inMaintenance: boolean
   enabled: boolean
 }) {
+  const C = useC()
   const sm = statusMeta[props.status] || statusMeta.unknown
   const t = typeMeta[props.type] || typeMeta.http
   const TypeIcon = t.Icon
@@ -1291,6 +1342,7 @@ function HeroCard(props: {
 }
 
 function Meta({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  const C = useC()
   return (
     <div className="min-w-0">
       <div className="text-[10px] uppercase tracking-wider" style={{ color: C.textMuted }}>
@@ -1308,6 +1360,7 @@ function Meta({ label, value, mono }: { label: string; value: string; mono?: boo
 }
 
 function ProbeStrip({ points }: { points: ServiceMetricPoint[] }) {
+  const C = useC()
   if (points.length === 0) {
     return <div className="h-6 text-[11px] text-muted">No samples yet.</div>
   }
@@ -1341,6 +1394,7 @@ function Kpi({
   invertTrend?: boolean
   windowLabel?: string
 }) {
+  const C = useC()
   const ArrowIcon = deltaDirection === 'up' ? ArrowUp : deltaDirection === 'down' ? ArrowDown : ArrowUp
   const goodDir = invertTrend ? deltaDirection === 'down' : deltaDirection !== 'up'
   const deltaColor = deltaDirection === 'flat' ? C.textMuted : goodDir ? C.up : C.down
@@ -1403,6 +1457,7 @@ function HealthScoreRing({
   factors: HealthFactor[]
   onViewDetails?: () => void
 }) {
+  const C = useC()
   const radius = 52
   const circ = 2 * Math.PI * radius
   const offset = circ - (score / 100) * circ
@@ -1564,10 +1619,13 @@ function HealthScoreDetailsDialog({
             {factors.map((f) => {
               const tone = f.subScore > 90 ? 'text-success' : f.subScore > 70 ? 'text-warning' : 'text-danger'
               return (
-                <div key={f.key} className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-x-3 gap-y-0.5 border-b border-border/40 py-2 last:border-0">
+                <div key={f.key} className="grid grid-cols-[1fr_auto_auto_auto] items-start gap-x-3 gap-y-0.5 border-b border-border/40 py-2 last:border-0">
                   <div className="min-w-0">
                     <div className="text-xs font-semibold">{f.label}</div>
                     <div className="text-[11px] text-muted">{f.raw}</div>
+                    <div className="mt-0.5 font-mono text-[10px] text-muted/80" title="How this sub-score is derived">
+                      {f.formula}
+                    </div>
                   </div>
                   <span className={`text-right font-mono text-xs tabular-nums ${tone}`}>{f.subScore}</span>
                   <span className="text-right font-mono text-xs tabular-nums text-muted">{f.weight}%</span>
@@ -1615,7 +1673,14 @@ function HealthScoreDetailsDialog({
             </div>
 
             <div className="space-y-2">
-              <div className="text-xs font-semibold">Status thresholds (score ≥)</div>
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-semibold">Status thresholds (score ≥)</div>
+                {!(draft.thresholds.excellent > draft.thresholds.good && draft.thresholds.good > draft.thresholds.degraded) && (
+                  <span className="text-[11px] font-medium text-warning">
+                    Excellent &gt; Good &gt; Degraded must be ordered
+                  </span>
+                )}
+              </div>
               {(['excellent', 'good', 'degraded'] as const).map((k) => (
                 <div key={k} className="grid grid-cols-[140px_1fr_70px] items-center gap-3">
                   <label className="text-xs capitalize">{k}</label>
@@ -1651,6 +1716,9 @@ function HealthScoreDetailsDialog({
                   className="h-8 text-xs"
                 />
               </div>
+              <div className="text-[10px] leading-relaxed text-muted">
+                p95 ≤ target → 100. Above target, sub-score drops linearly and reaches 0 at 2× target.
+              </div>
               <div className="grid grid-cols-[140px_1fr] items-center gap-3">
                 <label className="text-xs">Error scale</label>
                 <Input
@@ -1662,6 +1730,9 @@ function HealthScoreDetailsDialog({
                   className="h-8 text-xs"
                 />
               </div>
+              <div className="text-[10px] leading-relaxed text-muted">
+                Penalty per 1% error rate. Default 10 → 1% drops the errors sub-score by 10 points.
+              </div>
               <div className="grid grid-cols-[140px_1fr] items-center gap-3">
                 <label className="text-xs">Incident penalty</label>
                 <Input
@@ -1672,6 +1743,9 @@ function HealthScoreDetailsDialog({
                   onChange={(e) => setDraft({ ...draft, incidentScale: Math.max(0, Number(e.target.value) || 0) })}
                   className="h-8 text-xs"
                 />
+              </div>
+              <div className="text-[10px] leading-relaxed text-muted">
+                Penalty per active incident. Default 15 → 7 incidents bring incidents sub-score to 0.
               </div>
             </div>
           </TabsContent>
@@ -1699,62 +1773,105 @@ function HealthScoreDetailsDialog({
 }
 
 function PerformanceChart({
-  points, statusHistory: _statusHistory, rangeLabel,
+  points, statusHistory, rangeLabel, rangeHours,
 }: {
   points: ServiceMetricPoint[]
   statusHistory: Array<{ timestamp: string; new_status: string; duration_sec?: number | null }>
   rangeLabel: string
+  rangeHours: number
 }) {
-  // Merge raw response-time, rolling P95 and a per-bucket error-rate into a
-  // single point stream — lets Recharts render all four series with shared x.
+  const C = useC()
+  // Pick a display bucket that yields ~150–300 plotted points regardless of
+  // the source resolution. This keeps the line readable on long ranges
+  // without losing meaningful detail on short ones.
+  const { p95Window, displayBucketMs, errBucketMs } = useMemo(() => {
+    if (rangeHours <= 6)
+      return { p95Window: 20, displayBucketMs: 0, errBucketMs: 5 * 60_000 }      // raw probes, 5m buckets
+    if (rangeHours <= 24)
+      return { p95Window: 12, displayBucketMs: 0, errBucketMs: 30 * 60_000 }     // 5m points, 30m buckets
+    if (rangeHours <= 24 * 7)
+      return { p95Window: 24, displayBucketMs: 30 * 60_000, errBucketMs: 2 * 3600_000 }
+    return { p95Window: 12, displayBucketMs: 3600_000, errBucketMs: 6 * 3600_000 }
+  }, [rangeHours])
+
+  // Build the plot series: rolling P95 over the source resolution, then
+  // optionally bucket the whole thing down to a coarser display granularity.
   const merged = useMemo(() => {
     const base = points.map((p) => ({
       ts: new Date(p.timestamp).getTime(),
       ms: p.is_up ? p.response_ms : null,
-      is_up: p.is_up,
     }))
-    const p95s = rollingPercentile(base.map((b) => ({ ts: b.ts, ms: b.ms })), 0.95, 20)
+    const p95s = rollingPercentile(base.map((b) => ({ ts: b.ts, ms: b.ms })), 0.95, p95Window)
 
-    // Error-rate in 5-min buckets
-    const BUCKET = 5 * 60_000
     const errBucket = new Map<number, { up: number; down: number }>()
     for (const p of points) {
-      const k = Math.floor(new Date(p.timestamp).getTime() / BUCKET) * BUCKET
+      const k = Math.floor(new Date(p.timestamp).getTime() / errBucketMs) * errBucketMs
       const b = errBucket.get(k) || { up: 0, down: 0 }
       if (p.is_up) b.up++
       else b.down++
       errBucket.set(k, b)
     }
 
-    return base.map((b, i) => {
-      const bkey = Math.floor(b.ts / BUCKET) * BUCKET
+    const enriched = base.map((b, i) => {
+      const bkey = Math.floor(b.ts / errBucketMs) * errBucketMs
       const bb = errBucket.get(bkey)
       const errRate = bb ? (bb.down / Math.max(1, bb.up + bb.down)) * 100 : 0
-      return {
-        ts: b.ts,
-        avg: b.ms,
-        p95: p95s[i]?.p95 ?? null,
-        err: errRate,
-      }
+      return { ts: b.ts, avg: b.ms ?? null, p95: p95s[i]?.p95 ?? null, err: errRate }
     })
-  }, [points])
 
+    if (displayBucketMs === 0 || enriched.length === 0) return enriched
+
+    // Bucket down to the display granularity. avg → mean, p95 → max,
+    // err → mean. Buckets with no avg samples render a gap (null).
+    type Bin = { ts: number; avgSum: number; avgN: number; p95Max: number | null; errSum: number; errN: number }
+    const bins = new Map<number, Bin>()
+    for (const e of enriched) {
+      const k = Math.floor(e.ts / displayBucketMs) * displayBucketMs
+      let bin = bins.get(k)
+      if (!bin) {
+        bin = { ts: k, avgSum: 0, avgN: 0, p95Max: null, errSum: 0, errN: 0 }
+        bins.set(k, bin)
+      }
+      if (e.avg != null && Number.isFinite(e.avg)) { bin.avgSum += e.avg; bin.avgN++ }
+      if (e.p95 != null && Number.isFinite(e.p95)) {
+        bin.p95Max = bin.p95Max == null ? e.p95 : Math.max(bin.p95Max, e.p95)
+      }
+      bin.errSum += e.err; bin.errN++
+    }
+    return Array.from(bins.values()).sort((a, b) => a.ts - b.ts).map((b) => ({
+      ts: b.ts,
+      avg: b.avgN > 0 ? b.avgSum / b.avgN : null,
+      p95: b.p95Max,
+      err: b.errN > 0 ? b.errSum / b.errN : 0,
+    }))
+  }, [points, p95Window, errBucketMs, displayBucketMs])
+
+  const tickFormatter = useMemo(() => timeAxisTickFormatter(rangeHours), [rangeHours])
+  const minTickGap = rangeHours <= 24 ? 60 : rangeHours <= 24 * 7 ? 80 : 50
+
+  // Incident bands come from real status transitions (not per-bucket is_up,
+  // which loses detail at 5m granularity). Each non-up transition opens a
+  // band that closes at the next "up" transition or at "now" if still open.
   const bands = useMemo(() => {
+    if (!statusHistory || statusHistory.length === 0) return []
+    // Endpoint returns DESC by timestamp; sort ascending to walk forward.
+    const sorted = [...statusHistory].sort(
+      (a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp),
+    )
     const out: { start: number; end: number }[] = []
     let open: number | null = null
-    for (const p of points) {
-      const t = new Date(p.timestamp).getTime()
-      if (!p.is_up && open == null) open = t
-      if (p.is_up && open != null) {
+    for (const ev of sorted) {
+      const t = Date.parse(ev.timestamp)
+      const down = ev.new_status !== 'up'
+      if (down && open == null) open = t
+      else if (!down && open != null) {
         out.push({ start: open, end: t })
         open = null
       }
     }
-    if (open != null && points.length > 0) {
-      out.push({ start: open, end: new Date(points[points.length - 1].timestamp).getTime() })
-    }
+    if (open != null) out.push({ start: open, end: Date.now() })
     return out
-  }, [points])
+  }, [statusHistory])
 
   const hasData = merged.length > 0
 
@@ -1805,12 +1922,10 @@ function PerformanceChart({
                 type="number"
                 domain={['dataMin', 'dataMax']}
                 scale="time"
-                tickFormatter={(ts) =>
-                  new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-                }
+                tickFormatter={tickFormatter}
                 tick={{ fontSize: 10, fill: C.textMuted }}
                 stroke={C.border}
-                minTickGap={60}
+                minTickGap={minTickGap}
               />
               <YAxis
                 yAxisId="ms"
@@ -1828,7 +1943,7 @@ function PerformanceChart({
               />
               <Tooltip
                 contentStyle={{ background: C.panelLift, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 11, color: C.text }}
-                labelFormatter={(ts: any) => new Date(ts).toLocaleString()}
+                labelFormatter={timeTooltipLabelFormatter}
                 formatter={(v: any, name: any) => {
                   if (v == null) return ['—', name]
                   if (name === 'Error Rate') return [`${Number(v).toFixed(2)}%`, name]
@@ -1863,7 +1978,9 @@ function PerformanceChart({
                 name="Avg Response"
                 stroke={C.cyan}
                 fill="url(#respG)"
-                strokeWidth={2}
+                strokeWidth={rangeHours > 24 ? 1.25 : 2}
+                strokeOpacity={rangeHours > 24 ? 0.7 : 1}
+                fillOpacity={rangeHours > 24 ? 0.5 : 1}
                 isAnimationActive={false}
                 connectNulls={false}
               />
@@ -1874,7 +1991,7 @@ function PerformanceChart({
                 name="P95"
                 stroke={C.pink}
                 fill="url(#p95G)"
-                strokeWidth={2}
+                strokeWidth={rangeHours > 24 ? 2.25 : 2}
                 isAnimationActive={false}
                 connectNulls={false}
               />
@@ -1894,6 +2011,7 @@ function IncidentsStrip({
   rangeLabel: string
   checkId: string
 }) {
+  const C = useC()
   const fromMs = Date.parse(fromTo.from)
   const toMs = Date.parse(fromTo.to)
   const recent = history
@@ -1961,6 +2079,7 @@ function UptimeCalendar({
 }: {
   hours: Array<{ ts: string; uptime_pct: number | null; sample_count: number }>
 }) {
+  const C = useC()
   // Build a 30d × 24h grid anchored to today's date.
   const DAYS = 30
   const now = new Date()
@@ -2040,6 +2159,7 @@ function RelatedServices({
   upstream: ServiceCheck[]
   downstream: ServiceCheck[]
 }) {
+  const C = useC()
   return (
     <div
       className="rounded-xl p-3"
@@ -2060,6 +2180,7 @@ function RelatedServices({
 function RelatedList({
   title, items, emptyLabel,
 }: { title: string; items: ServiceCheck[]; emptyLabel: string }) {
+  const C = useC()
   return (
     <div>
       <div className="mb-1 text-[10px] uppercase tracking-wider" style={{ color: C.textMuted }}>
@@ -2125,6 +2246,7 @@ function RecentActivityTable({
   fromTo: { from: string; to: string }
   rangeLabel: string
 }) {
+  const C = useC()
   const fromMs = Date.parse(fromTo.from)
   const toMs = Date.parse(fromTo.to)
   const rows = history.filter((h) => {
@@ -2187,6 +2309,7 @@ function RecentActivityTable({
 }
 
 function RegionStatus() {
+  const C = useC()
   const regions = [
     { name: 'us-east-1', status: 'up' },
     { name: 'eu-west-1', status: 'up' },
@@ -2226,6 +2349,7 @@ function RegionStatus() {
 function InlineConfig({
   check, onEdit,
 }: { check: ServiceCheck; onEdit: () => void }) {
+  const C = useC()
   const [open, setOpen] = useState(false)
   return (
     <div className="rounded-xl p-3" style={{ background: C.panel, border: `1px solid ${C.border}` }}>
@@ -2278,6 +2402,7 @@ function InlineConfig({
 }
 
 function CfgRow({ label, value, mono, onEdit }: { label: string; value: string; mono?: boolean; onEdit: () => void }) {
+  const C = useC()
   return (
     <div
       className="grid grid-cols-[1fr_auto] items-start gap-2 border-b pb-1.5"
@@ -2328,6 +2453,7 @@ function QuickActions({
   activeAlertCount: number
   busy: { probe: boolean; pause: boolean; revalidate: boolean; ack: boolean }
 }) {
+  const C = useC()
   const items: Array<{
     Icon: any
     label: string
@@ -2414,6 +2540,7 @@ function MaintenanceDialog({
   starting: boolean
   ending: boolean
 }) {
+  const C = useC()
   // Always-on hooks — must run before any early return.
   const [mode, setMode] = useState<'preset' | 'custom'>('preset')
 
@@ -2600,6 +2727,7 @@ function MaintenanceDialog({
 }
 
 function CurrentChecksSummary({ points }: { points: ServiceMetricPoint[] }) {
+  const C = useC()
   const recent = points.slice(-120)
   const total = recent.length || 0
   const passed = recent.filter((p) => p.is_up === true).length
@@ -2679,6 +2807,7 @@ function AlertSummary({
   counts: { critical: number; warning: number; info: number }
   checkId: string
 }) {
+  const C = useC()
   const items = [
     { label: 'Critical', severity: 'critical', value: counts.critical, color: C.down, Icon: AlertCircle },
     { label: 'Warning', severity: 'warning', value: counts.warning, color: C.warn, Icon: AlertTriangle },
@@ -2775,6 +2904,7 @@ type HealthFactor = {
   key: 'availability' | 'latency' | 'errors' | 'incidents'
   label: string
   raw: string          // human-readable measurement
+  formula: string      // how subScore was derived (shown in Breakdown UI)
   subScore: number     // 0-100 normalized contribution
   weight: number       // 0-100 share of total
   contribution: number // weighted contribution to final score
@@ -2792,9 +2922,14 @@ function computeHealthScore(args: {
   const p95 = args.p95_response_ms
 
   const availabilitySub = clamp(up, 0, 100)
+  // Latency: target is the SLO. p95 ≤ target → 100. Above target,
+  // sub-score drops linearly and reaches 0 at 2× target.
+  const target = Math.max(1, cfg.latencyTargetMs)
   const latencySub = p95 == null
     ? 100
-    : clamp(100 - (p95 / Math.max(1, cfg.latencyTargetMs)) * 100, 0, 100)
+    : p95 <= target
+      ? 100
+      : clamp(100 - ((p95 - target) / target) * 100, 0, 100)
   const errorsSub = clamp(100 - err * cfg.errorScale, 0, 100)
   const incidentsSub = clamp(100 - inc * cfg.incidentScale, 0, 100)
 
@@ -2806,6 +2941,9 @@ function computeHealthScore(args: {
       key: 'availability',
       label: 'Availability',
       raw: args.uptime_pct == null ? 'no data' : `${up.toFixed(2)}%`,
+      formula: args.uptime_pct == null
+        ? 'no samples in window — defaults to 100'
+        : `uptime % directly = ${availabilitySub.toFixed(1)}`,
       subScore: Math.round(availabilitySub),
       weight: w.availability,
       contribution: (availabilitySub * w.availability) / totalW,
@@ -2814,6 +2952,11 @@ function computeHealthScore(args: {
       key: 'latency',
       label: 'Latency',
       raw: p95 == null ? 'no data' : `${Math.round(p95)} ms p95`,
+      formula: p95 == null
+        ? 'no response samples — defaults to 100'
+        : p95 <= target
+          ? `${Math.round(p95)} ms ≤ ${cfg.latencyTargetMs} ms target → 100`
+          : `100 − ((${Math.round(p95)} − ${cfg.latencyTargetMs}) / ${cfg.latencyTargetMs}) × 100 = ${latencySub.toFixed(1)}`,
       subScore: Math.round(latencySub),
       weight: w.latency,
       contribution: (latencySub * w.latency) / totalW,
@@ -2822,6 +2965,9 @@ function computeHealthScore(args: {
       key: 'errors',
       label: 'Errors',
       raw: args.error_rate_pct == null ? 'no data' : `${err.toFixed(2)}%`,
+      formula: args.error_rate_pct == null
+        ? 'no error data — defaults to 100'
+        : `100 − ${err.toFixed(2)} × ${cfg.errorScale} = ${errorsSub.toFixed(1)}`,
       subScore: Math.round(errorsSub),
       weight: w.errors,
       contribution: (errorsSub * w.errors) / totalW,
@@ -2830,6 +2976,7 @@ function computeHealthScore(args: {
       key: 'incidents',
       label: 'Incidents',
       raw: `${inc} active`,
+      formula: `100 − ${inc} × ${cfg.incidentScale} = ${incidentsSub.toFixed(1)}`,
       subScore: Math.round(incidentsSub),
       weight: w.incidents,
       contribution: (incidentsSub * w.incidents) / totalW,

@@ -20,6 +20,7 @@ build/
 *.egg
 .venv/
 venv/
+venv
 env/
 .pytest_cache/
 .mypy_cache/
@@ -63,7 +64,25 @@ tmp/
 
 # ─── Compiled binaries ───
 bin/zenplus-poller
+bin/zenplus-poller.bak
+bin/zenplus-netflow-collector
+bin/zenplus-backup.sh
 poller/poller
+
+# ─── Credentials & secrets (NEVER commit) ───
+.credentials
+.bash_logout
+.bashrc
+.profile
+
+# ─── Build artifacts & local backups ───
+artifacts/
+backups/
+Documentation/keys/
+updater/keys/*.pub.old
+
+# ─── Sensor appliance build outputs (multi-GB OVA/qcow2/vmdk/img) ───
+sensor-appliance/out/
 
 # ─── OTA Updater (runtime data, secrets) ───
 updater/backups/

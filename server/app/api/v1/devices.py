@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
 from app.schemas.device import (
     DeviceCreate, DeviceUpdate, DeviceResponse, DeviceSummary, DeviceGroupResponse,
@@ -308,7 +308,7 @@ async def list_device_types(
 async def bulk_delete_devices(
     data: dict,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     ids = data.get("device_ids", [])
     if not ids:
@@ -321,7 +321,7 @@ async def bulk_delete_devices(
 async def create_device(
     data: DeviceCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     device = await device_service.create_device(db, data, user.id)
     return _device_to_response(device)
@@ -331,7 +331,7 @@ async def create_device(
 async def bulk_import_devices(
     data: BulkImportRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     return await device_service.bulk_import_devices(db, data.devices, user.id)
 
@@ -362,7 +362,7 @@ async def update_device(
     device_id: UUID,
     data: DeviceUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     device = await device_service.update_device(db, device_id, data)
     if not device:
@@ -374,7 +374,7 @@ async def update_device(
 async def delete_device(
     device_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     deleted = await device_service.delete_device(db, device_id)
     if not deleted:
@@ -459,7 +459,7 @@ async def get_device_sensors(
 @router.get("/{device_id}/snmp-metrics")
 async def get_device_snmp_metrics(
     device_id: UUID,
-    hours: int = Query(default=24, ge=1, le=720),
+    hours: int = Query(default=24, ge=1, le=2160),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -471,32 +471,53 @@ async def get_device_snmp_metrics(
     from app.core.database import get_clickhouse_client
     client = get_clickhouse_client()
 
-    # Pick a table based on window. The 5m + 1h rollups don't carry the
+    # Pick a table + bucket based on window. The 5m rollup doesn't carry the
     # `unit` column, so we only select it from the raw table.
+    # The 5m→1h MV is deferred (see migrate-004-snmp-clickhouse.sql), so the
+    # 1h table is empty — for windows > 7 days we down-bucket the 5m rollup
+    # on the fly to keep the chart payload sane (≤ 90 days × 24h = 2160 pts).
     if hours <= 6:
-        table, val_col, has_unit = "snmp_metrics", "value", True
-    elif hours <= 168:
-        table, val_col, has_unit = "snmp_metrics_5m", "avg_value", False
-    else:
-        table, val_col, has_unit = "snmp_metrics_1h", "avg_value", False
-
-    unit_expr = "any(unit) AS unit" if has_unit else "'' AS unit"
-
-    try:
-        res = client.query(
-            f"""
+        # Raw probes — exact timestamps; no further aggregation.
+        sql = """
             SELECT metric_key,
                    toUnixTimestamp64Milli(timestamp) AS ts_ms,
-                   {val_col} AS val,
-                   {unit_expr}
-            FROM zenplus.{table}
+                   value AS val,
+                   any(unit) AS unit
+            FROM zenplus.snmp_metrics
             WHERE device_id = %(id)s
               AND timestamp >= now() - INTERVAL %(hours)s HOUR
             GROUP BY metric_key, timestamp, val
             ORDER BY metric_key, timestamp
-            """,
-            parameters={"id": str(device_id), "hours": hours},
-        )
+        """
+    elif hours <= 168:
+        # 5m rollup, deduped (the MV inserts per source batch).
+        sql = """
+            SELECT metric_key,
+                   toUnixTimestamp64Milli(timestamp) AS ts_ms,
+                   avg(avg_value) AS val,
+                   '' AS unit
+            FROM zenplus.snmp_metrics_5m
+            WHERE device_id = %(id)s
+              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+            GROUP BY metric_key, timestamp
+            ORDER BY metric_key, timestamp
+        """
+    else:
+        # > 7 days: bucket to 1h on the fly so the chart isn't flooded.
+        sql = """
+            SELECT metric_key,
+                   toUnixTimestamp64Milli(toStartOfHour(timestamp)) AS ts_ms,
+                   avg(avg_value) AS val,
+                   '' AS unit
+            FROM zenplus.snmp_metrics_5m
+            WHERE device_id = %(id)s
+              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+            GROUP BY metric_key, ts_ms
+            ORDER BY metric_key, ts_ms
+        """
+
+    try:
+        res = client.query(sql, parameters={"id": str(device_id), "hours": hours})
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"clickhouse query failed: {e}")
 
@@ -733,7 +754,7 @@ async def get_status_history(
 async def test_device_ping(
     device_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     """Run an on-demand ICMP probe (3 packets) and return whether the device
     replied, along with an approximate round-trip time."""
@@ -797,7 +818,7 @@ async def test_device_ping(
 async def test_device_snmp(
     device_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     """Run an on-demand SNMP probe against the device and return whether it
     responded, plus the sysDescr/sysName/sysObjectID/sysUpTime values we got."""

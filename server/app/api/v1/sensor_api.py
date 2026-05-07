@@ -36,12 +36,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -60,6 +62,14 @@ from app.schemas.sensor import (
 
 router = APIRouter(prefix="/sensor", tags=["Sensor (runtime)"])
 logger = logging.getLogger("zenplus.sensor_api")
+
+SENSOR_ARTIFACT_DIR = Path(os.getenv("ZENPLUS_SENSOR_ARTIFACT_DIR", "/opt/zenplus/artifacts/sensors"))
+SENSOR_ARTIFACT_BASENAMES = {
+    "ova": "zenplus-sensor.ova",
+    "ovf": "zenplus-sensor.ovf",
+    "sha256": "SHA256SUMS",
+    "metadata": "BUILD-METADATA.json",
+}
 
 
 # ── Auth helper ──────────────────────────────────────────────────────
@@ -507,6 +517,109 @@ async def post_events(
     n = len(body.items or [])
     logger.info("sensor %s events: %d", sensor["id"], n)
     return {"accepted": n}
+
+
+# ── Sensor appliance downloads ───────────────────────────────────────
+
+def _artifact_path(kind: str) -> Path:
+    filename = SENSOR_ARTIFACT_BASENAMES.get(kind)
+    if not filename:
+        raise HTTPException(404, "Unknown sensor appliance artifact")
+    return SENSOR_ARTIFACT_DIR / filename
+
+
+def _artifact_info(kind: str, request: Request) -> dict:
+    path = _artifact_path(kind)
+    url = str(request.url_for("download_sensor_appliance_artifact", kind=kind))
+    available = path.exists() and path.is_file()
+    sha_file = SENSOR_ARTIFACT_DIR / "SHA256SUMS"
+    sha256 = None
+    if available and sha_file.exists():
+        try:
+            for line in sha_file.read_text().splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == path.name:
+                    sha256 = parts[0]
+                    break
+        except Exception:
+            sha256 = None
+    return {
+        "kind": kind,
+        "filename": path.name,
+        "available": available,
+        "url": url,
+        "size_bytes": path.stat().st_size if available else None,
+        "updated_at": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc) if available else None,
+        "sha256": sha256,
+    }
+
+
+def _appliance_metadata() -> dict[str, Any]:
+    path = _artifact_path("metadata")
+    if not path.exists() or not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except Exception as exc:
+        logger.warning("invalid sensor appliance metadata %s: %s", path, exc)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+@router.get("/appliance/manifest")
+async def sensor_appliance_manifest(request: Request):
+    """Return controller-hosted sensor appliance artifact metadata.
+
+    Build/publish scripts place artifacts under SENSOR_ARTIFACT_DIR. The
+    controller can expose links before artifacts exist so the dashboard flow is
+    stable while release engineering wires the OVA/OVF pipeline.
+    """
+    has_appliance = _artifact_path("ova").exists() or _artifact_path("ovf").exists()
+    metadata = _appliance_metadata()
+    is_bootable = metadata.get("type") == "bootable-ova"
+    status = "ready" if has_appliance and is_bootable else "preview" if has_appliance else "not_published"
+    note = None
+    if status == "preview":
+        note = (
+            "Preview artifacts are sufficient for controller download/onboarding tests. "
+            "Build and publish the real OVA before deploying a production sensor VM."
+        )
+    elif status == "ready":
+        note = "Bootable cloud-init-ready OVA is published and available for sensor deployment."
+    return {
+        "product": "ZenPlus Remote Sensor",
+        "status": status,
+        "note": note,
+        "metadata": metadata,
+        "artifact_dir": str(SENSOR_ARTIFACT_DIR),
+        "artifacts": [
+            _artifact_info("ova", request),
+            _artifact_info("ovf", request),
+            _artifact_info("sha256", request),
+        ],
+        "bootstrap": {
+            "method": "cloud-init NoCloud seed or first-boot wizard",
+            "required_values": ["server_url", "enrollment_token", "sensor_name"],
+        },
+    }
+
+
+@router.get("/appliance/{kind}", name="download_sensor_appliance_artifact")
+async def download_sensor_appliance_artifact(kind: str):
+    path = _artifact_path(kind)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(
+            404,
+            f"Sensor appliance artifact '{path.name}' is not published yet. "
+            "Run sensor-appliance/scripts/publish-artifacts.sh after building the OVA/OVF.",
+        )
+
+    media_types = {
+        "ova": "application/x-virtualbox-ova",
+        "ovf": "application/xml",
+        "sha256": "text/plain",
+    }
+    return FileResponse(path, media_type=media_types.get(kind, "application/octet-stream"), filename=path.name)
 
 
 # ── Tiny installer for the mock sensor (Phase 1 only) ────────────────

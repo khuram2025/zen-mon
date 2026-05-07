@@ -1,0 +1,24 @@
+[Unit]
+Description=ZenPlus Remote Sensor
+Documentation=https://docs.zentryc.com/zenplus/sensors
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zenplus-sensor
+Group=zenplus-sensor
+EnvironmentFile=/etc/zenplus-sensor/sensor.env
+ExecStart=/usr/local/bin/zenplus-sensor
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/zenplus-sensor /var/log/zenplus-sensor /etc/zenplus-sensor
+CapabilityBoundingSet=CAP_NET_RAW
+AmbientCapabilities=CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target

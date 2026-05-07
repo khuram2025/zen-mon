@@ -46,15 +46,43 @@ def get_service_metrics(
             ORDER BY timestamp
             LIMIT 5000
         """
-    else:
+    elif granularity == "1h":
+        # On-the-fly 1h aggregation from the 5m rollup. The 5m_mv MV is
+        # populated; there's no dedicated 1h table. 30 days = 720 buckets,
+        # so we comfortably fit under the 5000 row guard.
         table = "service_metrics_5m"
         query = f"""
-            SELECT timestamp, avg_response_ms AS response_ms, uptime_pct AS is_up,
+            SELECT toStartOfHour(timestamp) AS ts,
+                   avg(avg_response_ms) AS response_ms,
+                   avg(uptime_pct) AS is_up,
                    NULL AS status_code, NULL AS tls_days_remaining, NULL AS error_message
             FROM {table}
             WHERE service_check_id = %(check_id)s
               AND timestamp >= %(from_time)s
               AND timestamp <= %(to_time)s
+            GROUP BY ts
+            ORDER BY ts
+            LIMIT 5000
+        """
+    else:
+        # 5m: pre-aggregated rollup, used for ≤ 7 days (≤ 2016 buckets).
+        # The 5m_mv inserts one row per source INSERT batch, so the rollup
+        # table holds multiple rows per (check_id, ts) bucket (no dedup).
+        # GROUP BY timestamp here to collapse duplicates — the underlying
+        # values are sample-count weighted, but a sample-count-weighted
+        # average is correct even when re-averaged batch-wise here.
+        granularity = "5m"
+        table = "service_metrics_5m"
+        query = f"""
+            SELECT timestamp,
+                   avg(avg_response_ms) AS response_ms,
+                   avg(uptime_pct) AS is_up,
+                   NULL AS status_code, NULL AS tls_days_remaining, NULL AS error_message
+            FROM {table}
+            WHERE service_check_id = %(check_id)s
+              AND timestamp >= %(from_time)s
+              AND timestamp <= %(to_time)s
+            GROUP BY timestamp
             ORDER BY timestamp
             LIMIT 5000
         """

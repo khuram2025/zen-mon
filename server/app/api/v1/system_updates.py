@@ -11,9 +11,12 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import get_current_user
+from app.core.database import get_db
+from app.core.security import require_admin_user
 from app.models.user import User
+from app.services.audit_service import write_audit_log
 
 router = APIRouter(prefix="/system", tags=["System Updates"])
 
@@ -48,6 +51,12 @@ class UpdateHistoryRecord(BaseModel):
     completed_at: str = ""
 
 
+class NodeLicense(BaseModel):
+    total_node_cap: int = 0
+    used_node_count: int = 0
+    available_nodes: int = 0
+
+
 class RemoteSubscription(BaseModel):
     id: str = ""
     name: str = ""
@@ -60,6 +69,7 @@ class RemoteSubscription(BaseModel):
     is_expired: bool = False
     expires_at: Optional[str] = None
     days_remaining: Optional[int] = None
+    license: Optional[NodeLicense] = None
 
 
 class UpdateStatus(BaseModel):
@@ -140,6 +150,26 @@ def _save_subscription(data: dict) -> None:
         os.chmod(str(SUBSCRIPTION_PATH), 0o600)
     except OSError:
         pass
+
+
+async def _count_nodes() -> int:
+    """Local node count = devices + service_checks. One node per device or service.
+
+    Run inside a fresh session so the caller doesn't have to thread one in,
+    and silently degrade to 0 on DB failure — license sync should never block
+    on a transient query error.
+    """
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionLocal
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                text("SELECT (SELECT COUNT(*) FROM devices) "
+                     "+ (SELECT COUNT(*) FROM service_checks)")
+            )
+            return int(result.scalar_one() or 0)
+    except Exception:
+        return 0
 
 
 def _get_version_info() -> tuple[str, str]:
@@ -236,7 +266,7 @@ def _registration_is_valid() -> bool:
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.get("/update-status")
-async def get_update_status(user: User = Depends(get_current_user)):
+async def get_update_status(user: User = Depends(require_admin_user)):
     """Get full update agent status including history and errors."""
     config = _read_config()
     timer = _get_timer_info()
@@ -348,7 +378,11 @@ def _write_timer_override(check_interval_hours: int) -> tuple[bool, str]:
 
 
 @router.put("/update-config")
-async def update_config(body: UpdateConfig, user: User = Depends(get_current_user)):
+async def update_config(
+    body: UpdateConfig,
+    user: User = Depends(require_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Update the update agent configuration."""
     config = _read_config()
 
@@ -366,6 +400,15 @@ async def update_config(body: UpdateConfig, user: User = Depends(get_current_use
 
     ok, err = _write_timer_override(body.check_interval_hours)
     if not ok:
+        await write_audit_log(
+            db,
+            actor=user,
+            action="system.update_config",
+            resource_type="system_update",
+            resource_id="updater",
+            metadata={"status": "partial", "check_interval_hours": body.check_interval_hours},
+        )
+        await db.commit()
         # Non-fatal: config is saved, but the timer override couldn't be applied.
         # Surface the reason so support can fix the sudoers setup.
         return {
@@ -377,11 +420,23 @@ async def update_config(body: UpdateConfig, user: User = Depends(get_current_use
             ),
         }
 
+    await write_audit_log(
+        db,
+        actor=user,
+        action="system.update_config",
+        resource_type="system_update",
+        resource_id="updater",
+        metadata={"status": "ok", "check_interval_hours": body.check_interval_hours},
+    )
+    await db.commit()
     return {"status": "ok", "message": "Configuration updated"}
 
 
 @router.post("/check-update")
-async def trigger_check(user: User = Depends(get_current_user)):
+async def trigger_check(
+    user: User = Depends(require_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Trigger an on-demand update check via systemctl.
 
     Uses ``systemctl --no-block start`` so the API returns as soon as the
@@ -406,6 +461,15 @@ async def trigger_check(user: User = Depends(get_current_user)):
         return {"status": "ok", "message": "Update check queued"}
 
     if result.returncode == 0:
+        await write_audit_log(
+            db,
+            actor=user,
+            action="system.update_check",
+            resource_type="system_update",
+            resource_id="updater",
+            metadata={"status": "queued"},
+        )
+        await db.commit()
         return {"status": "ok", "message": "Update check queued"}
 
     # Classify the failure so the user sees the real reason.
@@ -430,7 +494,7 @@ async def trigger_check(user: User = Depends(get_current_user)):
 # ─── Registration ─────────────────────────────────────────────────────────────
 
 @router.get("/registration")
-async def get_registration(user: User = Depends(get_current_user)):
+async def get_registration(user: User = Depends(require_admin_user)):
     """Get current registration status."""
     config = _read_config()
     appliance_id = config.get("appliance", "id", fallback="")
@@ -446,7 +510,11 @@ async def get_registration(user: User = Depends(get_current_user)):
 
 
 @router.post("/register")
-async def register_appliance(body: RegisterRequest, user: User = Depends(get_current_user)):
+async def register_appliance(
+    body: RegisterRequest,
+    user: User = Depends(require_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Register this appliance with zentryc.com using a license key."""
     import httpx
     import os
@@ -519,6 +587,33 @@ async def register_appliance(body: RegisterRequest, user: User = Depends(get_cur
     if subscription:
         _save_subscription(subscription)
 
+    # Push current node count immediately so the remote license panel reflects
+    # this appliance's usage on the very first refresh, not just after the
+    # next periodic check-in.
+    try:
+        node_count = await _count_nodes()
+        async with httpx.AsyncClient(timeout=15, verify=True) as client:
+            ci = await client.post(
+                f"{server_url}/api/v1/appliances/checkin",
+                headers={
+                    "X-Appliance-ID": appliance_id,
+                    "Authorization": f"Bearer {api_key}",
+                },
+                json={
+                    "hostname": hostname,
+                    "arch": arch,
+                    "current_version": version,
+                    "node_count": node_count,
+                },
+            )
+            if ci.status_code == 200:
+                fresh = ci.json().get("subscription")
+                if fresh:
+                    _save_subscription(fresh)
+                    subscription = fresh
+    except Exception:
+        pass  # best-effort — registration already succeeded
+
     # Sync remote subscription into the local subscriptions DB table so the
     # Subscription tab reflects the real plan instead of hardcoded trial defaults.
     if subscription:
@@ -553,11 +648,23 @@ async def register_appliance(body: RegisterRequest, user: User = Depends(get_cur
     }
     if subscription:
         result["subscription"] = subscription
+    await write_audit_log(
+        db,
+        actor=user,
+        action="system.register_appliance",
+        resource_type="appliance",
+        resource_id=appliance_id,
+        metadata={"server_url": server_url, "has_subscription": bool(subscription)},
+    )
+    await db.commit()
     return result
 
 
 @router.post("/reset-registration")
-async def reset_registration(user: User = Depends(get_current_user)):
+async def reset_registration(
+    user: User = Depends(require_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Clear local registration so a new license key can be entered.
 
     Admin-only recovery path. This does NOT notify the remote OTA server —
@@ -585,6 +692,14 @@ async def reset_registration(user: User = Depends(get_current_user)):
     except OSError:
         pass
 
+    await write_audit_log(
+        db,
+        actor=user,
+        action="system.reset_registration",
+        resource_type="appliance",
+        resource_id="local",
+    )
+    await db.commit()
     return {
         "status": "ok",
         "message": (
@@ -595,7 +710,7 @@ async def reset_registration(user: User = Depends(get_current_user)):
 
 
 @router.get("/subscription")
-async def get_remote_subscription(user: User = Depends(get_current_user)):
+async def get_remote_subscription(user: User = Depends(require_admin_user)):
     """Get cached subscription info from the OTA server.
 
     This returns the subscription data received during the last
@@ -608,9 +723,22 @@ async def get_remote_subscription(user: User = Depends(get_current_user)):
 
 
 @router.post("/refresh-subscription")
-async def refresh_subscription(user: User = Depends(get_current_user)):
-    """Query the OTA server for fresh subscription data."""
+async def refresh_subscription(
+    user: User = Depends(require_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Push node count to zentryc.com via check-in and pull fresh subscription.
+
+    We deliberately use the check-in endpoint (not GET /appliances/subscription)
+    because the dashboard's Refresh button is the natural moment to report this
+    appliance's node usage upstream — node_count is required for the remote
+    license panel to show accurate used_node_count / available_nodes.
+
+    Any release advice in the response is ignored here; the periodic updater
+    timer is responsible for actually applying updates.
+    """
     import httpx
+    import platform
 
     config = _read_config()
     server_url = config.get("server", "url", fallback="https://zentryc.com")
@@ -620,13 +748,25 @@ async def refresh_subscription(user: User = Depends(get_current_user)):
     if not appliance_id or not api_key:
         raise HTTPException(status_code=400, detail="Appliance not registered")
 
+    version, _ = _get_version_info()
+    node_count = await _count_nodes()
+
+    machine = platform.machine().lower()
+    arch = "amd64" if machine in ("x86_64", "amd64") else "arm64" if machine in ("aarch64", "arm64") else machine
+
     try:
         async with httpx.AsyncClient(timeout=30, verify=True) as client:
-            resp = await client.get(
-                f"{server_url}/api/v1/appliances/subscription",
+            resp = await client.post(
+                f"{server_url}/api/v1/appliances/checkin",
                 headers={
                     "X-Appliance-ID": appliance_id,
                     "Authorization": f"Bearer {api_key}",
+                },
+                json={
+                    "hostname": platform.node(),
+                    "arch": arch,
+                    "current_version": version,
+                    "node_count": node_count,
                 },
             )
 
@@ -641,7 +781,16 @@ async def refresh_subscription(user: User = Depends(get_current_user)):
         if subscription:
             _save_subscription(subscription)
 
-        return {"subscription": subscription}
+        await write_audit_log(
+            db,
+            actor=user,
+            action="system.refresh_subscription",
+            resource_type="appliance",
+            resource_id=appliance_id,
+            metadata={"node_count": node_count, "has_subscription": bool(subscription)},
+        )
+        await db.commit()
+        return {"subscription": subscription, "node_count": node_count}
 
     except httpx.RequestError as e:
         raise HTTPException(status_code=502, detail=f"Cannot reach update server: {e}")
@@ -1125,7 +1274,7 @@ def _get_available_disks() -> list[dict]:
 
 
 @router.get("/storage")
-async def get_storage_status(user: User = Depends(get_current_user)):
+async def get_storage_status(user: User = Depends(require_admin_user)):
     """Get comprehensive storage status for the /data volume."""
     mount_info = _get_mount_info()
     fs_type = _get_filesystem_type()
@@ -1200,7 +1349,10 @@ EXPAND_SCRIPT = "/opt/zenplus/bin/expand-storage.sh"
 
 
 @router.post("/storage/rescan")
-async def rescan_disks(user: User = Depends(get_current_user)):
+async def rescan_disks(
+    user: User = Depends(require_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Rescan SCSI bus to detect newly attached or resized disks."""
     errors = []
     rescanned = []
@@ -1246,6 +1398,15 @@ async def rescan_disks(user: User = Depends(get_current_user)):
 
     # Return updated disk list
     available = _get_available_disks()
+    await write_audit_log(
+        db,
+        actor=user,
+        action="system.storage_rescan",
+        resource_type="storage",
+        resource_id="/data",
+        metadata={"rescanned_hosts": rescanned, "available_disks": len(available), "errors": errors},
+    )
+    await db.commit()
     return {
         "status": "ok",
         "message": f"Rescanned {len(rescanned)} SCSI hosts",
@@ -1256,7 +1417,11 @@ async def rescan_disks(user: User = Depends(get_current_user)):
 
 
 @router.post("/storage/add-disk")
-async def add_disk(body: AddDiskRequest, user: User = Depends(get_current_user)):
+async def add_disk(
+    body: AddDiskRequest,
+    user: User = Depends(require_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Add a new disk to the LVM volume group and expand /data."""
     disk = body.disk
 
@@ -1304,6 +1469,15 @@ async def add_disk(body: AddDiskRequest, user: User = Depends(get_current_user))
     # Get updated status
     mount_info = _get_mount_info()
 
+    await write_audit_log(
+        db,
+        actor=user,
+        action="system.storage_add_disk",
+        resource_type="storage",
+        resource_id=disk,
+        metadata={"new_total": mount_info["total_bytes"], "new_free": mount_info["free_bytes"]},
+    )
+    await db.commit()
     return {
         "status": "ok",
         "message": f"Disk {disk} added successfully. Storage expanded to {_human_size(mount_info['total_bytes'])}.",
@@ -1315,7 +1489,10 @@ async def add_disk(body: AddDiskRequest, user: User = Depends(get_current_user))
 
 
 @router.post("/storage/grow")
-async def grow_volume(user: User = Depends(get_current_user)):
+async def grow_volume(
+    user: User = Depends(require_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Grow the LV and filesystem after a VM disk resize or PV expansion."""
     # First try to resize any existing PVs (picks up VM disk growth)
     lvm_info = _get_lvm_info()
@@ -1353,6 +1530,15 @@ async def grow_volume(user: User = Depends(get_current_user)):
 
     mount_info = _get_mount_info()
 
+    await write_audit_log(
+        db,
+        actor=user,
+        action="system.storage_grow",
+        resource_type="storage",
+        resource_id="/data",
+        metadata={"new_total": mount_info["total_bytes"], "new_free": mount_info["free_bytes"]},
+    )
+    await db.commit()
     return {
         "status": "ok",
         "message": f"Volume expanded successfully to {_human_size(mount_info['total_bytes'])}.",

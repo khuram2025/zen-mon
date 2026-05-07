@@ -18,6 +18,7 @@ type Device struct {
 	LastSeen     time.Time
 	LastRTT      float64
 	DownCount    int
+	LastPingAt   time.Time
 }
 
 // PingResult holds the result of a ping check for a device.

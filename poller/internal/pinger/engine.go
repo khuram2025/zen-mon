@@ -98,12 +98,12 @@ type Engine struct {
 	checker      *checker.Checker
 
 	// SNMP
-	snmpLoader    SNMPLoader
-	snmpWriter    SNMPMetricWriter
-	snmpLookup    SNMPDeviceLookup
-	snmpCollector *snmp.Collector
-	snmpSessions  *snmp.SessionCache
-	snmpClassifier *snmp.Classifier
+	snmpLoader       SNMPLoader
+	snmpWriter       SNMPMetricWriter
+	snmpLookup       SNMPDeviceLookup
+	snmpCollector    *snmp.Collector
+	snmpSessions     *snmp.SessionCache
+	snmpClassifier   *snmp.Classifier
 	snmpTrapListener *snmp.TrapListener
 
 	logger *zap.SugaredLogger
@@ -112,6 +112,8 @@ type Engine struct {
 	devices       map[uuid.UUID]*Device
 	serviceChecks map[uuid.UUID]*checker.ServiceCheck
 	snmpDevices   map[uuid.UUID]*snmp.Device
+	lastPingAt    map[uuid.UUID]time.Time
+	lastServiceAt map[uuid.UUID]time.Time
 	startTime     time.Time
 	lastCycleMs   int64
 	activePings   int
@@ -161,11 +163,13 @@ func NewEngine(
 		snmpCollector:  collector,
 		snmpSessions:   sessions,
 		snmpClassifier: classifier,
-		logger:        logger,
-		devices:       make(map[uuid.UUID]*Device),
-		serviceChecks: make(map[uuid.UUID]*checker.ServiceCheck),
-		snmpDevices:   make(map[uuid.UUID]*snmp.Device),
-		startTime:     time.Now(),
+		logger:         logger,
+		devices:        make(map[uuid.UUID]*Device),
+		serviceChecks:  make(map[uuid.UUID]*checker.ServiceCheck),
+		snmpDevices:    make(map[uuid.UUID]*snmp.Device),
+		lastPingAt:     make(map[uuid.UUID]time.Time),
+		lastServiceAt:  make(map[uuid.UUID]time.Time),
+		startTime:      time.Now(),
 	}, nil
 }
 
@@ -213,10 +217,10 @@ func (e *Engine) Run(ctx context.Context) {
 	syncTicker := time.NewTicker(e.cfg.Poller.DeviceSyncInterval)
 	defer syncTicker.Stop()
 
-	pingTicker := time.NewTicker(60 * time.Second)
+	pingTicker := time.NewTicker(1 * time.Second)
 	defer pingTicker.Stop()
 
-	serviceCheckTicker := time.NewTicker(60 * time.Second)
+	serviceCheckTicker := time.NewTicker(1 * time.Second)
 	defer serviceCheckTicker.Stop()
 
 	// SNMP runs on its own ticker so that a slow table walk never
@@ -306,6 +310,7 @@ func (e *Engine) syncDevices(ctx context.Context) error {
 	for id := range e.devices {
 		if !seen[id] {
 			delete(e.devices, id)
+			delete(e.lastPingAt, id)
 		}
 	}
 
@@ -314,10 +319,13 @@ func (e *Engine) syncDevices(ctx context.Context) error {
 }
 
 func (e *Engine) runPingCycle(ctx context.Context) {
+	now := time.Now()
 	e.mu.RLock()
 	deviceList := make([]*Device, 0, len(e.devices))
 	for _, d := range e.devices {
-		if d.PingEnabled {
+		last := e.lastPingAt[d.ID]
+		interval := effectiveInterval(d.PingInterval, 60*time.Second)
+		if d.PingEnabled && due(now, last, interval) {
 			deviceList = append(deviceList, d)
 		}
 	}
@@ -332,6 +340,10 @@ func (e *Engine) runPingCycle(ctx context.Context) {
 
 	e.mu.Lock()
 	e.activePings = len(deviceList)
+	for _, d := range deviceList {
+		e.lastPingAt[d.ID] = now
+		d.LastPingAt = now
+	}
 	e.mu.Unlock()
 
 	maxWorkers := 100
@@ -570,6 +582,7 @@ func (e *Engine) syncServiceChecks(ctx context.Context) error {
 	for id := range e.serviceChecks {
 		if !seen[id] {
 			delete(e.serviceChecks, id)
+			delete(e.lastServiceAt, id)
 		}
 	}
 
@@ -582,6 +595,7 @@ func (e *Engine) runServiceCheckCycle(ctx context.Context) {
 	// read lock, then filter out children whose parent is currently DOWN
 	// (parent-dependency suppression — avoids alert storms when an upstream
 	// fails and all its dependents would otherwise page simultaneously).
+	now := time.Now()
 	e.mu.RLock()
 	parentStatus := map[uuid.UUID]string{}
 	for id, sc := range e.serviceChecks {
@@ -592,6 +606,11 @@ func (e *Engine) runServiceCheckCycle(ctx context.Context) {
 	skipped := 0
 	for _, sc := range e.serviceChecks {
 		if !sc.Enabled {
+			continue
+		}
+		last := e.lastServiceAt[sc.ID]
+		interval := effectiveInterval(sc.CheckInterval, 60*time.Second)
+		if !due(now, last, interval) {
 			continue
 		}
 		if sc.ParentCheckID != nil {
@@ -620,6 +639,13 @@ func (e *Engine) runServiceCheckCycle(ctx context.Context) {
 		len(checkList), skipped, len(maintIDs))
 	start := time.Now()
 
+	e.mu.Lock()
+	for _, sc := range checkList {
+		e.lastServiceAt[sc.ID] = now
+		sc.LastCheckAt = now
+	}
+	e.mu.Unlock()
+
 	maxWorkers := 50
 	if len(checkList) < maxWorkers {
 		maxWorkers = len(checkList)
@@ -641,6 +667,17 @@ func (e *Engine) runServiceCheckCycle(ctx context.Context) {
 		// Process status change (with maintenance mute)
 		e.processServiceStatusChange(ctx, result, maintIDs)
 	}
+}
+
+func effectiveInterval(configured time.Duration, fallback time.Duration) time.Duration {
+	if configured > 0 {
+		return configured
+	}
+	return fallback
+}
+
+func due(now time.Time, last time.Time, interval time.Duration) bool {
+	return last.IsZero() || now.Sub(last) >= interval
 }
 
 func (e *Engine) processServiceStatusChange(ctx context.Context, result *checker.ServiceCheckResult, maintIDs map[uuid.UUID]struct{}) {

@@ -7,6 +7,7 @@ from app.core.security import get_current_user
 from app.models.user import User
 from app.schemas.alert import AlertResponse, AlertStats
 from app.services import alert_service
+from app.services.audit_service import write_audit_log
 
 router = APIRouter(prefix="/alerts", tags=["Alerts"])
 
@@ -67,6 +68,15 @@ async def acknowledge_alert(
     alert = await alert_service.acknowledge_alert(db, alert_id, user.id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
+    await write_audit_log(
+        db,
+        actor=user,
+        action="alert.acknowledge",
+        resource_type="alert",
+        resource_id=str(alert.id),
+        metadata={"severity": alert.severity, "device_id": str(alert.device_id) if alert.device_id else None},
+    )
+    await db.commit()
     return AlertResponse(
         id=alert.id,
         rule_id=alert.rule_id,
@@ -89,6 +99,15 @@ async def resolve_alert(
     alert = await alert_service.resolve_alert(db, alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
+    await write_audit_log(
+        db,
+        actor=user,
+        action="alert.resolve",
+        resource_type="alert",
+        resource_id=str(alert.id),
+        metadata={"severity": alert.severity, "device_id": str(alert.device_id) if alert.device_id else None},
+    )
+    await db.commit()
     return AlertResponse(
         id=alert.id,
         rule_id=alert.rule_id,

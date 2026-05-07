@@ -14,7 +14,7 @@ import { cn } from '@/lib/utils'
 const navItems = [
   { path: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { path: '/devices', icon: Monitor, label: 'Devices' },
-  { path: '/service-checks', icon: ShieldCheck, label: 'Services' },
+  { path: '/services', icon: ShieldCheck, label: 'Services' },
   { path: '/discovery', icon: Radar, label: 'Discovery' },
   { path: '/alerts', icon: Bell, label: 'Alerts' },
   { path: '/reports', icon: FileBarChart, label: 'Reports' },

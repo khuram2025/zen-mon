@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
 from app.schemas.service_check import (
     ServiceCheckCreate,
@@ -77,7 +77,7 @@ async def list_service_check_templates(
 async def create_service_check_template(
     data: ServiceCheckTemplateCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator_user),
 ):
     return await service_check_service.create_template(db, data, current_user.id)
 
@@ -99,7 +99,7 @@ async def update_service_check_template(
     template_id: UUID,
     data: ServiceCheckTemplateUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator_user),
 ):
     t = await service_check_service.update_template(db, template_id, data)
     if not t:
@@ -111,7 +111,7 @@ async def update_service_check_template(
 async def delete_service_check_template(
     template_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator_user),
 ):
     ok = await service_check_service.delete_template(db, template_id)
     if not ok:
@@ -124,7 +124,7 @@ async def apply_service_check_template(
     template_id: UUID,
     data: ServiceCheckTemplateApply,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator_user),
 ):
     try:
         return await service_check_service.apply_template(db, template_id, data, current_user.id)
@@ -144,7 +144,7 @@ async def list_service_check_maintenance(
 async def create_service_check_maintenance(
     data: ServiceMaintenanceCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator_user),
 ):
     return await service_check_service.create_maintenance(db, data, current_user.id)
 
@@ -153,7 +153,7 @@ async def create_service_check_maintenance(
 async def delete_service_check_maintenance(
     maintenance_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator_user),
 ):
     ok = await service_check_service.delete_maintenance(db, maintenance_id)
     if not ok:
@@ -204,7 +204,7 @@ async def list_service_check_groups(
 async def create_service_check_group(
     data: ServiceCheckGroupCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator_user),
 ):
     return await service_check_service.create_group(db, data)
 
@@ -214,7 +214,7 @@ async def update_service_check_group(
     group_id: UUID,
     data: ServiceCheckGroupUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator_user),
 ):
     out = await service_check_service.update_group(db, group_id, data)
     if not out:
@@ -226,7 +226,7 @@ async def update_service_check_group(
 async def delete_service_check_group(
     group_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator_user),
 ):
     ok = await service_check_service.delete_group(db, group_id)
     if not ok:
@@ -304,7 +304,7 @@ async def service_check_uptime_stats(
 async def create_service_check(
     data: ServiceCheckCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator_user),
 ):
     return await service_check_service.create_service_check(db, data, current_user.id)
 
@@ -326,7 +326,7 @@ async def update_service_check(
     check_id: UUID,
     data: ServiceCheckUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator_user),
 ):
     sc = await service_check_service.update_service_check(db, check_id, data)
     if not sc:
@@ -338,7 +338,7 @@ async def update_service_check(
 async def delete_service_check(
     check_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator_user),
 ):
     deleted = await service_check_service.delete_service_check(db, check_id)
     if not deleted:
@@ -353,7 +353,7 @@ class BulkDeleteRequest(BaseModel):
 async def bulk_delete_service_checks(
     data: BulkDeleteRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator_user),
 ):
     count = await service_check_service.bulk_delete_service_checks(db, data.check_ids)
     return {"deleted": count}
@@ -426,7 +426,7 @@ async def get_service_check_sla(
 async def test_service_check(
     check_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_operator_user),
 ):
     """Run an on-demand test of a service check and return the result."""
     import socket

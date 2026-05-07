@@ -63,7 +63,7 @@ import {
   YAxis,
 } from 'recharts'
 import { api } from '@/lib/api'
-import { apiErrorMessage, formatBps, formatDuration, relativeTime } from '@/lib/utils'
+import { apiErrorMessage, formatBps, formatDuration, relativeTime, timeAxisTickFormatter, timeTooltipLabelFormatter } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -83,7 +83,7 @@ const ttStyle = () => ({
     fontSize: 11,
     padding: '5px 8px',
   },
-  labelFormatter: (ts: any) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+  labelFormatter: timeTooltipLabelFormatter,
 })
 
 type HealthKind = 'healthy' | 'warning' | 'critical' | 'offline'
@@ -376,9 +376,11 @@ function DashboardSection({
     queryFn: async () => (await api.get(`/devices/${deviceId}/sensors`)).data,
     enabled: snmp,
   })
+  // Cap to the traps endpoint's max (720h). Custom ranges may exceed it.
+  const trapHours = Math.min(720, Math.max(1, Math.round(hoursRange)))
   const { data: traps } = useQuery<any[]>({
-    queryKey: ['device', deviceId, 'traps-summary'],
-    queryFn: async () => (await api.get(`/devices/${deviceId}/traps?hours=24&limit=10`)).data,
+    queryKey: ['device', deviceId, 'traps-summary', trapHours],
+    queryFn: async () => (await api.get(`/devices/${deviceId}/traps?hours=${trapHours}&limit=20`)).data,
     refetchInterval: 30_000,
     enabled: snmp,
   })
@@ -547,6 +549,7 @@ function DashboardSection({
           series={perfSeries}
           stats={perfStats}
           rangeLabel={range.label}
+          rangeHours={range.hours}
         />
         <InterfaceStatusCard
           ifs={ifs || []}
@@ -573,6 +576,7 @@ function DashboardSection({
         />
         <ActivityLogCard
           traps={traps || []}
+          rangeLabel={range.label}
           onViewAll={() => setEventsOpen(true)}
         />
         <EnvironmentalActionsCard
@@ -584,7 +588,13 @@ function DashboardSection({
         />
       </div>
 
-      <EventsDialog open={eventsOpen} onOpenChange={setEventsOpen} deviceId={deviceId} />
+      <EventsDialog
+        open={eventsOpen}
+        onOpenChange={setEventsOpen}
+        deviceId={deviceId}
+        initialHours={trapHours}
+        rangeLabel={range.label}
+      />
       <InventoryDialog open={inventoryOpen} onOpenChange={setInventoryOpen} entities={entities || []} />
       <HealthDetailsDialog
         open={healthOpen}
@@ -662,13 +672,16 @@ function KpiTile({
    ════════════════════════════════════════════════════════════ */
 
 function PerformanceOverviewCard({
-  series, stats, rangeLabel,
+  series, stats, rangeLabel, rangeHours,
 }: {
   series: Array<{ ts: number; cpu?: number; mem?: number }>
   stats: { cpu: { avg: number; max: number }; mem: { avg: number; max: number } }
   rangeLabel: string
+  rangeHours: number
 }) {
   const hasData = series.length > 1
+  const tickFormatter = useMemo(() => timeAxisTickFormatter(rangeHours), [rangeHours])
+  const minTickGap = rangeHours <= 24 ? 30 : rangeHours <= 24 * 7 ? 60 : 50
 
   return (
     <Card>
@@ -694,11 +707,11 @@ function PerformanceOverviewCard({
                 <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--border)/0.25)" vertical={false} />
                 <XAxis
                   dataKey="ts"
-                  tickFormatter={(ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  tickFormatter={tickFormatter}
                   tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
                   axisLine={false}
                   tickLine={false}
-                  minTickGap={30}
+                  minTickGap={minTickGap}
                 />
                 <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} width={30} axisLine={false} tickLine={false} tickFormatter={(v) => `${v}%`} />
                 <Tooltip {...ttStyle()} />
@@ -1144,7 +1157,9 @@ function InventoryConfigCard({
    Recent Events / Activity Log — vertical timeline
    ════════════════════════════════════════════════════════════ */
 
-function ActivityLogCard({ traps, onViewAll }: { traps: any[]; onViewAll: () => void }) {
+function ActivityLogCard({
+  traps, rangeLabel, onViewAll,
+}: { traps: any[]; rangeLabel: string; onViewAll: () => void }) {
   const events = traps.slice(0, 5).map((t) => ({
     icon: iconForTrap(t),
     tone: toneForSeverity(t.severity),
@@ -1156,8 +1171,11 @@ function ActivityLogCard({ traps, onViewAll }: { traps: any[]; onViewAll: () => 
   return (
     <Card>
       <CardContent className="p-4">
-        <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-sm font-semibold">Recent Events / Activity Log</h3>
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-baseline gap-2">
+            <h3 className="text-sm font-semibold">Recent Events / Activity Log</h3>
+            <span className="truncate text-[11px] font-medium text-muted">{rangeLabel}</span>
+          </div>
           <button
             type="button"
             onClick={onViewAll}
@@ -1174,7 +1192,7 @@ function ActivityLogCard({ traps, onViewAll }: { traps: any[]; onViewAll: () => 
             {events.length === 0 && (
               <div className="flex flex-col items-center gap-1 py-6 text-center">
                 <Info className="h-5 w-5 text-muted/60" />
-                <div className="text-[11px] font-medium text-text">No events in last 24 hours</div>
+                <div className="text-[11px] font-medium text-text">No events in {rangeLabel.toLowerCase()}</div>
                 <div className="text-[10px] text-muted">SNMP traps will appear here</div>
               </div>
             )}
@@ -1599,9 +1617,19 @@ function Kv({
    ════════════════════════════════════════════════════════════ */
 
 function EventsDialog({
-  open, onOpenChange, deviceId,
-}: { open: boolean; onOpenChange: (o: boolean) => void; deviceId: string }) {
-  const [hours, setHours] = useState(24)
+  open, onOpenChange, deviceId, initialHours, rangeLabel,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  deviceId: string
+  initialHours?: number
+  rangeLabel?: string
+}) {
+  const [hours, setHours] = useState(initialHours ?? 24)
+  // When the page-level range changes, follow it on next dialog open.
+  useEffect(() => {
+    if (open && initialHours != null) setHours(initialHours)
+  }, [open, initialHours])
   const { data, isLoading } = useQuery<any[]>({
     queryKey: ['device', deviceId, 'events-full', hours],
     queryFn: async () => (await api.get(`/devices/${deviceId}/traps?hours=${hours}&limit=200`)).data,
@@ -1609,6 +1637,14 @@ function EventsDialog({
     refetchInterval: open ? 15_000 : false,
   })
   const events = data || []
+  // Build the range chips: include the standard set plus the active range
+  // from the page (so a 1M / custom range is selectable here too).
+  const rangeOptions = useMemo(() => {
+    const base = [1, 6, 24, 168, 720]
+    const set = new Set<number>(base)
+    if (initialHours != null) set.add(initialHours)
+    return Array.from(set).sort((a, b) => a - b)
+  }, [initialHours])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -1622,10 +1658,12 @@ function EventsDialog({
 
         <div className="flex items-center justify-between gap-2 border-b border-border pb-2">
           <div className="text-xs text-muted">
-            {isLoading ? 'Loading…' : `${events.length} event${events.length === 1 ? '' : 's'}`}
+            {isLoading
+              ? 'Loading…'
+              : `${events.length} event${events.length === 1 ? '' : 's'}${rangeLabel ? ` · ${rangeLabel}` : ''}`}
           </div>
           <div className="flex gap-0.5 rounded-md bg-surface2 p-0.5">
-            {[1, 6, 24, 168].map((h) => (
+            {rangeOptions.map((h) => (
               <button
                 key={h}
                 onClick={() => setHours(h)}
@@ -1633,7 +1671,7 @@ function EventsDialog({
                   hours === h ? 'bg-surface text-primary shadow-sm' : 'text-muted hover:text-text'
                 }`}
               >
-                {h < 24 ? `${h}h` : `${h / 24}d`}
+                {h < 24 ? `${h}h` : h % 24 === 0 ? `${h / 24}d` : `${h}h`}
               </button>
             ))}
           </div>
@@ -2276,7 +2314,7 @@ function InterfaceDetail({ deviceId, iface }: { deviceId: string; iface: any }) 
                     <ResponsiveContainer width="100%" height="100%">
                       <AreaChart data={traffic}>
                         <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--border)/0.5)" />
-                        <XAxis dataKey="ts" tickFormatter={(ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} />
+                        <XAxis dataKey="ts" tickFormatter={timeAxisTickFormatter(hours)} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} />
                         <YAxis tickFormatter={(v) => formatBps(v)} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} width={55} />
                         <Tooltip {...ttStyle()} formatter={(v: any, name: string) => [formatBps(Number(v)), name === 'in_bps' ? 'Inbound' : 'Outbound']} />
                         <Area type="monotone" dataKey="in_bps" name="in_bps" stroke="rgb(var(--success))" fill="rgb(var(--success))" fillOpacity={0.1} strokeWidth={1.5} dot={false} />
@@ -2303,7 +2341,7 @@ function InterfaceDetail({ deviceId, iface }: { deviceId: string; iface: any }) 
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={errors}>
                         <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--border)/0.5)" />
-                        <XAxis dataKey="ts" tickFormatter={(ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} />
+                        <XAxis dataKey="ts" tickFormatter={timeAxisTickFormatter(hours)} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} />
                         <YAxis tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} width={30} />
                         <Tooltip {...ttStyle()} />
                         <Line type="monotone" dataKey="in_errors" name="In Errors" stroke="rgb(var(--danger))" strokeWidth={1.5} dot={false} />

@@ -100,7 +100,6 @@ function fmtDate(d: string | null | undefined) {
 // ─── Main component ─────────────────────────────────────────────────────────
 export function UpdatesTabContent() {
   const queryClient = useQueryClient()
-  const [licenseKey, setLicenseKey] = useState('')
   const [showLog, setShowLog] = useState(false)
 
   // Status query — refetches more often when an update is in flight.
@@ -155,29 +154,6 @@ export function UpdatesTabContent() {
     onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
   })
 
-  const register = useMutation({
-    mutationFn: async () => {
-      const trimmed = licenseKey.trim()
-      if (!trimmed) throw new Error('License key is required')
-      return (await api.post<{ appliance_id: string }>('/system/register', { license_key: trimmed })).data
-    },
-    onSuccess: (data: any) => {
-      toast.success('Appliance registered', `ID: ${data?.appliance_id || ''}`)
-      setLicenseKey('')
-      queryClient.invalidateQueries({ queryKey: ['system-update-status'] })
-    },
-    onError: (e: any) => toast.error('Registration failed', apiErrorMessage(e)),
-  })
-
-  const refreshSub = useMutation({
-    mutationFn: async () => (await api.post('/system/refresh-subscription', {})).data,
-    onSuccess: () => {
-      toast.success('Subscription refreshed from zentryc.com')
-      queryClient.invalidateQueries({ queryKey: ['system-update-status'] })
-    },
-    onError: (e: any) => toast.error('Refresh failed', apiErrorMessage(e)),
-  })
-
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -195,41 +171,19 @@ export function UpdatesTabContent() {
   }
 
   const isRegistered = !!status?.appliance_id
-  const sub = status?.subscription
 
   return (
     <div className="space-y-5">
-      {/* Registration */}
+      {/* Registration prompt — defers full registration UI to the Licenses tab. */}
       {!isRegistered && (
-        <div className="rounded-xl border border-amber-500/30 bg-surface p-6">
-          <div className="mb-4 flex items-center gap-3">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-500/10">
-              <KeyRound className="h-4 w-4 text-amber-400" />
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold">Appliance Not Registered</h3>
-              <p className="text-xs text-muted">
-                Enter your license key to register this appliance with zentryc.com
-              </p>
-            </div>
-          </div>
-          <div className="flex gap-3">
-            <input
-              type="text"
-              className="flex-1 rounded-lg border border-border bg-surface2 px-4 py-2.5 font-mono text-sm focus:border-amber-400 focus:outline-none"
-              placeholder="Enter license key"
-              value={licenseKey}
-              onChange={(e) => setLicenseKey(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && register.mutate()}
-            />
-            <button
-              onClick={() => register.mutate()}
-              disabled={register.isPending || !licenseKey.trim()}
-              className="flex items-center gap-2 rounded-lg bg-amber-500 px-5 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
-            >
-              {register.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
-              Register
-            </button>
+        <div className="flex items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
+          <KeyRound className="h-5 w-5 flex-shrink-0 text-amber-400" />
+          <div className="flex-1">
+            <p className="text-sm font-medium text-amber-300">Appliance not registered</p>
+            <p className="text-xs text-muted">
+              Updates require a registered appliance. Enter your license key on the{' '}
+              <a href="?tab=licenses" className="text-primary hover:underline">Licenses</a> tab.
+            </p>
           </div>
         </div>
       )}
@@ -346,78 +300,6 @@ export function UpdatesTabContent() {
           </div>
         </div>
       </div>
-
-      {/* Subscription card */}
-      {isRegistered && (
-        <div className="rounded-xl border border-border bg-surface p-6">
-          <div className="mb-4 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-purple-500/10">
-                <KeyRound className="h-4 w-4 text-purple-400" />
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold">Subscription</h3>
-                <p className="text-xs text-muted">
-                  Latest snapshot from zentryc.com — refreshes on each check-in
-                </p>
-              </div>
-            </div>
-            <button
-              onClick={() => refreshSub.mutate()}
-              disabled={refreshSub.isPending}
-              className="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs hover:bg-surface2 disabled:opacity-50"
-            >
-              {refreshSub.isPending ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <RefreshCw className="h-3.5 w-3.5" />
-              )}
-              Refresh
-            </button>
-          </div>
-          {sub ? (
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-              <div className="rounded-lg bg-surface2 p-4">
-                <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Plan</p>
-                <p className="text-sm font-semibold">{sub.name || sub.plan || '—'}</p>
-                {sub.plan && <p className="text-[10px] text-muted">{sub.plan}</p>}
-              </div>
-              <div className="rounded-lg bg-surface2 p-4">
-                <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Slots</p>
-                <p className="text-sm font-semibold">
-                  {sub.used_slots}/{sub.max_appliances}
-                </p>
-                <p className="text-[10px] text-muted">{sub.available_slots} available</p>
-              </div>
-              <div className="rounded-lg bg-surface2 p-4">
-                <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Status</p>
-                <div className="flex items-center gap-2">
-                  <span
-                    className={cn(
-                      'h-2 w-2 rounded-full',
-                      sub.is_active && !sub.is_expired ? 'bg-emerald-400' : 'bg-red-400',
-                    )}
-                  />
-                  <p className="text-sm font-medium">
-                    {sub.is_expired ? 'Expired' : sub.is_active ? 'Active' : 'Inactive'}
-                  </p>
-                </div>
-              </div>
-              <div className="rounded-lg bg-surface2 p-4">
-                <p className="mb-1 text-[10px] uppercase tracking-wider text-muted">Expires</p>
-                <p className="text-sm font-medium">{sub.expires_at ? fmtDate(sub.expires_at) : 'Never'}</p>
-                {sub.days_remaining != null && (
-                  <p className="text-[10px] text-muted">{sub.days_remaining} days remaining</p>
-                )}
-              </div>
-            </div>
-          ) : (
-            <p className="text-sm text-muted">
-              No subscription data cached yet. Click <em>Refresh</em> to query zentryc.com.
-            </p>
-          )}
-        </div>
-      )}
 
       {/* History */}
       {status?.history && status.history.length > 0 && (

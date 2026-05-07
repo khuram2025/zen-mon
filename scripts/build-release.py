@@ -117,6 +117,7 @@ def build_package(version: str, changelog: str, severity: str,
             shutil.copytree(src, code_dir / d, ignore=shutil.ignore_patterns(
                 "__pycache__", "*.pyc", ".pytest_cache", "node_modules",
                 ".mypy_cache", ".ruff_cache", "*.egg-info",
+                "venv", ".venv", "dist", "build",
             ))
             print(f"  + {d}/")
 

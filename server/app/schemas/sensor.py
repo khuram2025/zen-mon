@@ -52,6 +52,16 @@ class SensorCreate(BaseModel):
     site_id: Optional[UUID] = None
     location: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
+    controller_url: Optional[str] = None
+    network_mode: Literal["dhcp", "static"] = "dhcp"
+    sensor_ip: Optional[str] = None
+    sensor_cidr: Optional[int] = Field(default=None, ge=1, le=32)
+    gateway: Optional[str] = None
+    dns_servers: List[str] = Field(default_factory=list)
+    proxy_url: Optional[str] = None
+    enable_console_user: bool = False
+    console_username: Optional[str] = Field(default=None, min_length=1, max_length=32)
+    console_password: Optional[str] = Field(default=None, min_length=8, max_length=128)
 
 
 class SensorUpdate(BaseModel):
@@ -98,6 +108,29 @@ class SensorTokenResponse(BaseModel):
     expires_at: datetime
     server_url: str
     install_command: str
+    manifest_url: Optional[str] = None
+    ova_url: Optional[str] = None
+    ovf_url: Optional[str] = None
+    bootstrap_cloud_init: Optional[str] = None
+    bootstrap_meta_data: Optional[str] = None
+    bootstrap_network_config: Optional[str] = None
+    bootstrap_iso_url: Optional[str] = None
+    configured_ova_url: Optional[str] = None
+
+
+class SensorDownloadsResponse(BaseModel):
+    sensor_id: str
+    sensor_name: str
+    manifest_url: Optional[str] = None
+    ova_url: Optional[str] = None
+    ovf_url: Optional[str] = None
+    configured_ova_url: Optional[str] = None
+    bootstrap_iso_url: Optional[str] = None
+    configured_ova_size_bytes: Optional[int] = None
+    bootstrap_iso_size_bytes: Optional[int] = None
+    artifact_token: Optional[str] = None
+    updated_at: Optional[datetime] = None
+    note: Optional[str] = None
 
 
 class SensorRotateKeyResponse(BaseModel):

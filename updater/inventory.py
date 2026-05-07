@@ -1,6 +1,7 @@
 """System inventory collector for appliance check-in."""
 
 import logging
+import os
 import platform
 import subprocess
 from pathlib import Path
@@ -105,6 +106,40 @@ def get_disk_usage() -> dict[str, int]:
     return {"total": total, "used": used, "free": free}
 
 
+def get_node_count() -> int:
+    """Local node count = devices + service_checks.
+
+    Reports 0 on any DB failure. The license panel on zentryc.com is purely
+    informational, so a transient query error must never abort the check-in.
+    DATABASE_URL is loaded from the same .env the API service uses; the
+    systemd unit imports it via EnvironmentFile.
+    """
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return 0
+    # SQLAlchemy-style "postgresql+asyncpg://" → asyncpg accepts "postgresql://"
+    asyncpg_url = db_url.replace("+asyncpg", "", 1)
+
+    async def _query() -> int:
+        import asyncpg
+        conn = await asyncpg.connect(asyncpg_url)
+        try:
+            row = await conn.fetchval(
+                "SELECT (SELECT COUNT(*) FROM devices) "
+                "+ (SELECT COUNT(*) FROM service_checks)"
+            )
+            return int(row or 0)
+        finally:
+            await conn.close()
+
+    try:
+        import asyncio
+        return asyncio.run(_query())
+    except Exception as e:
+        logger.warning("node_count query failed: %s", e)
+        return 0
+
+
 def collect_inventory() -> dict:
     """Collect full system inventory for check-in."""
     return {
@@ -116,4 +151,5 @@ def collect_inventory() -> dict:
         "uptime": get_uptime(),
         "services_status": get_services_status(),
         "disk": get_disk_usage(),
+        "node_count": get_node_count(),
     }

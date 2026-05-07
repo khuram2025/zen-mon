@@ -43,6 +43,38 @@ export function relativeTime(iso: string | null | undefined): string {
   return `${Math.floor(diff / 86400)}d ago`
 }
 
+/**
+ * Range-aware tick formatter for time-series charts.
+ * - ≤ 24h: HH:mm
+ * - ≤ 7d:  "Mon DD HH"
+ * - > 7d:  "Mon DD"
+ * Pass the active range in hours; pass `ts` (epoch ms) when calling.
+ */
+export function timeAxisTickFormatter(rangeHours: number): (ts: number) => string {
+  if (rangeHours <= 24) {
+    return (ts: number) =>
+      new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+  if (rangeHours <= 24 * 7) {
+    return (ts: number) => {
+      const d = new Date(ts)
+      return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
+        ' ' + d.toLocaleTimeString([], { hour: '2-digit' })
+    }
+  }
+  return (ts: number) =>
+    new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
+/** Tooltip label formatter — always shows day + time so hovered points
+ *  in multi-day ranges have full context. */
+export function timeTooltipLabelFormatter(ts: any): string {
+  return new Date(ts).toLocaleString([], {
+    month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  })
+}
+
 export function apiErrorMessage(e: any, fallback = 'Something went wrong'): string {
   const d = e?.response?.data?.detail
   if (typeof d === 'string') return d

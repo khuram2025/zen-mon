@@ -7,6 +7,7 @@ from app.models.device_sensor import DeviceSensor
 from app.models.alert import Alert, AlertRule
 from app.models.subscription import Subscription
 from app.models.sensor import Sensor, Site, SensorAssignment
+from app.models.netflow_saved_view import NetflowSavedView
 
 __all__ = [
     "User",
@@ -22,4 +23,5 @@ __all__ = [
     "Sensor",
     "Site",
     "SensorAssignment",
+    "NetflowSavedView",
 ]

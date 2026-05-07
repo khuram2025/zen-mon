@@ -41,7 +41,7 @@ def _safe_device_status_log(start: datetime, end: datetime) -> list[dict]:
     """
     try:
         from app.services.report_service import _fetch_device_status_log
-        return _safe_device_status_log(start, end)
+        return _fetch_device_status_log(start, end)
     except Exception:
         return []
 

@@ -8,8 +8,9 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user, hash_password
+from app.core.security import get_current_user, hash_password, require_admin_user
 from app.models.user import User
+from app.services.audit_service import write_audit_log
 
 router = APIRouter(prefix="/users", tags=["User Management"])
 
@@ -95,13 +96,6 @@ class RoleOut(BaseModel):
     user_count: int = 0
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def require_admin(current_user: User):
-    if current_user.role != "admin":
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
-
-
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/roles", response_model=list[RoleOut])
@@ -131,10 +125,9 @@ async def list_roles(
 @router.get("", response_model=list[UserOut])
 async def list_users(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin_user),
 ):
     """List all users. Requires admin role."""
-    require_admin(current_user)
     result = await db.execute(select(User).order_by(User.created_at.desc()))
     return [UserOut.model_validate(u) for u in result.scalars().all()]
 
@@ -143,11 +136,9 @@ async def list_users(
 async def create_user(
     data: UserCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin_user),
 ):
     """Create a new user. Requires admin role."""
-    require_admin(current_user)
-
     if data.role not in VALID_ROLES:
         raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of: {', '.join(VALID_ROLES)}")
 
@@ -167,6 +158,15 @@ async def create_user(
         is_active=data.is_active,
     )
     db.add(user)
+    await db.flush()
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="user.create",
+        resource_type="user",
+        resource_id=str(user.id),
+        metadata={"username": user.username, "role": user.role, "is_active": user.is_active},
+    )
     await db.commit()
     await db.refresh(user)
     return UserOut.model_validate(user)
@@ -176,9 +176,8 @@ async def create_user(
 async def get_user(
     user_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin_user),
 ):
-    require_admin(current_user)
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
@@ -191,11 +190,9 @@ async def update_user(
     user_id: UUID,
     data: UserUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin_user),
 ):
     """Update user details. Requires admin role."""
-    require_admin(current_user)
-
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
@@ -236,6 +233,14 @@ async def update_user(
         user.is_active = data.is_active
 
     user.updated_at = datetime.now(timezone.utc)
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="user.update",
+        resource_type="user",
+        resource_id=str(user.id),
+        metadata=data.model_dump(exclude_unset=True),
+    )
     await db.commit()
     await db.refresh(user)
     return UserOut.model_validate(user)
@@ -245,11 +250,9 @@ async def update_user(
 async def delete_user(
     user_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin_user),
 ):
     """Delete a user. Requires admin role. Cannot delete yourself or last admin."""
-    require_admin(current_user)
-
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
@@ -265,7 +268,17 @@ async def delete_user(
         if admin_count.scalar() <= 1:
             raise HTTPException(status_code=400, detail="Cannot delete the last admin user")
 
+    deleted_username = user.username
+    deleted_role = user.role
     await db.delete(user)
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="user.delete",
+        resource_type="user",
+        resource_id=str(user_id),
+        metadata={"username": deleted_username, "role": deleted_role},
+    )
     await db.commit()
 
 
@@ -274,11 +287,9 @@ async def reset_password(
     user_id: UUID,
     data: ResetPasswordRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin_user),
 ):
     """Reset a user's password. Requires admin role."""
-    require_admin(current_user)
-
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
@@ -286,6 +297,14 @@ async def reset_password(
 
     user.password_hash = hash_password(data.new_password)
     user.updated_at = datetime.now(timezone.utc)
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="user.password_reset",
+        resource_type="user",
+        resource_id=str(user.id),
+        metadata={"username": user.username},
+    )
     await db.commit()
     return {"message": "Password reset successfully"}
 
@@ -303,5 +322,13 @@ async def change_own_password(
 
     current_user.password_hash = hash_password(data.new_password)
     current_user.updated_at = datetime.now(timezone.utc)
+    await write_audit_log(
+        db,
+        actor=current_user,
+        action="user.password_change",
+        resource_type="user",
+        resource_id=str(current_user.id),
+        metadata={"username": current_user.username},
+    )
     await db.commit()
     return {"message": "Password changed successfully"}

@@ -22,8 +22,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import require_admin_user
 from app.models.user import User
+from app.services.audit_service import write_audit_log
 
 router = APIRouter(prefix="/snmp-credentials", tags=["SNMP Credentials"])
 
@@ -141,7 +142,7 @@ _LIST_SQL = """
 @router.get("", response_model=list[CredentialResponse])
 async def list_credentials(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     rows = (await db.execute(text(f"{_LIST_SQL} ORDER BY c.is_default DESC, c.name"))).mappings().all()
     return [_row_to_response(dict(r)) for r in rows]
@@ -151,7 +152,7 @@ async def list_credentials(
 async def get_credential(
     cred_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     row = (await db.execute(text(f"{_LIST_SQL} WHERE c.id = :id"), {"id": cred_id})).mappings().first()
     if not row:
@@ -163,7 +164,7 @@ async def get_credential(
 async def create_credential(
     data: CredentialCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     # If setting as default, clear any existing default
     if data.is_default:
@@ -197,6 +198,14 @@ async def create_credential(
             "is_default": data.is_default, "uid": user.id,
         },
     )).mappings().first()
+    await write_audit_log(
+        db,
+        actor=user,
+        action="snmp_credential.create",
+        resource_type="snmp_credential",
+        resource_id=str(row["id"]) if row else None,
+        metadata={"name": data.name, "snmp_version": data.snmp_version, "is_default": data.is_default},
+    )
     await db.commit()
     return _row_to_response(dict(row))
 
@@ -206,7 +215,7 @@ async def update_credential(
     cred_id: uuid.UUID,
     data: CredentialUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     existing = (await db.execute(text("SELECT id FROM snmp_credentials WHERE id = :id"), {"id": cred_id})).first()
     if not existing:
@@ -234,6 +243,15 @@ async def update_credential(
         await db.execute(text("UPDATE snmp_credentials SET is_default = FALSE WHERE is_default = TRUE AND id != :id"), {"id": cred_id})
 
     await db.execute(text(f"UPDATE snmp_credentials SET {', '.join(sets)} WHERE id = :id"), params)
+    audit_fields = sorted(k for k in update_data.keys() if "passphrase" not in k and k != "community")
+    await write_audit_log(
+        db,
+        actor=user,
+        action="snmp_credential.update",
+        resource_type="snmp_credential",
+        resource_id=str(cred_id),
+        metadata={"fields": audit_fields},
+    )
     await db.commit()
     return await get_credential(cred_id, db, user)
 
@@ -242,7 +260,7 @@ async def update_credential(
 async def delete_credential(
     cred_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     existing = (await db.execute(text("SELECT id FROM snmp_credentials WHERE id = :id"), {"id": cred_id})).first()
     if not existing:
@@ -251,6 +269,13 @@ async def delete_credential(
     await db.execute(text("UPDATE devices SET snmp_credential_id = NULL WHERE snmp_credential_id = :id"), {"id": cred_id})
     await db.execute(text("UPDATE device_groups SET snmp_credential_id = NULL WHERE snmp_credential_id = :id"), {"id": cred_id})
     await db.execute(text("DELETE FROM snmp_credentials WHERE id = :id"), {"id": cred_id})
+    await write_audit_log(
+        db,
+        actor=user,
+        action="snmp_credential.delete",
+        resource_type="snmp_credential",
+        resource_id=str(cred_id),
+    )
     await db.commit()
 
 
@@ -259,7 +284,7 @@ async def assign_credential(
     cred_id: uuid.UUID,
     data: AssignRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     existing = (await db.execute(text("SELECT id FROM snmp_credentials WHERE id = :id"), {"id": cred_id})).first()
     if not existing:
@@ -284,6 +309,14 @@ async def assign_credential(
         )
         g_count = res.rowcount
 
+    await write_audit_log(
+        db,
+        actor=user,
+        action="snmp_credential.assign",
+        resource_type="snmp_credential",
+        resource_id=str(cred_id),
+        metadata={"assigned_devices": d_count, "assigned_groups": g_count},
+    )
     await db.commit()
     return {"assigned_devices": d_count, "assigned_groups": g_count}
 
@@ -298,7 +331,7 @@ class CredentialSecrets(BaseModel):
 async def get_credential_secrets(
     cred_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     """Reveal the stored community/passphrases for an authenticated user.
 
@@ -313,6 +346,14 @@ async def get_credential_secrets(
     )).mappings().first()
     if not row:
         raise HTTPException(404, "Credential not found")
+    await write_audit_log(
+        db,
+        actor=user,
+        action="snmp_credential.secrets_view",
+        resource_type="snmp_credential",
+        resource_id=str(cred_id),
+    )
+    await db.commit()
     return CredentialSecrets(
         community=row.get("community"),
         v3_auth_passphrase=row.get("v3_auth_passphrase"),
@@ -324,7 +365,7 @@ async def get_credential_secrets(
 async def credential_usage(
     cred_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     """List devices and groups using this credential."""
     devices = (await db.execute(

@@ -28,12 +28,20 @@ Routes
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import re
 import secrets
+import shutil
+import subprocess
+import tempfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,6 +53,7 @@ from app.schemas.sensor import (
     SensorUpdate,
     SensorResponse,
     SensorTokenResponse,
+    SensorDownloadsResponse,
     SensorRotateKeyResponse,
     SiteCreate,
     SiteUpdate,
@@ -61,6 +70,7 @@ sites_router = APIRouter(prefix="/sites", tags=["Sites"])
 
 ENROLLMENT_TTL_HOURS = 24
 TOKEN_PREFIX = "zps_"      # zenplus sensor
+BOOTSTRAP_DIR = Path(os.getenv("ZENPLUS_SENSOR_BOOTSTRAP_DIR", "/opt/zenplus/artifacts/sensors/bootstrap"))
 
 
 def _hash_token(token: str) -> str:
@@ -101,6 +111,276 @@ def _install_command(server_url: str, token: str, name: str) -> str:
         f"| ZENPLUS_SERVER_URL='{server_url}' "
         f"ZENPLUS_ENROLLMENT_TOKEN='{token}' "
         f"ZENPLUS_SENSOR_NAME='{name}' bash"
+    )
+
+
+def _appliance_urls(server_url: str) -> dict[str, str]:
+    base = f"{server_url}/api/v1/sensor/appliance"
+    return {
+        "manifest_url": f"{base}/manifest",
+        "ova_url": f"{base}/ova",
+        "ovf_url": f"{base}/ovf",
+    }
+
+
+def _artifact_mtime(paths: list[Path]) -> Optional[datetime]:
+    existing = [p for p in paths if p.exists() and p.is_file()]
+    if not existing:
+        return None
+    return datetime.fromtimestamp(max(p.stat().st_mtime for p in existing), tz=timezone.utc)
+
+
+def _latest_sensor_artifact_dir(sensor_id: UUID) -> Optional[Path]:
+    root = BOOTSTRAP_DIR / str(sensor_id)
+    if not root.exists() or not root.is_dir():
+        return None
+
+    candidates: list[tuple[float, Path]] = []
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        artifacts = [
+            child / "zenplus-sensor-configured.ova",
+            child / "zenplus-sensor-seed.iso",
+        ]
+        existing = [p for p in artifacts if p.exists() and p.is_file()]
+        if existing:
+            candidates.append((max(p.stat().st_mtime for p in existing), child))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _sensor_env(server_url: str, token: str, name: str, proxy_url: Optional[str] = None) -> str:
+    lines = [
+        f"ZENPLUS_SERVER_URL={server_url}",
+        f"ZENPLUS_ENROLLMENT_TOKEN={token}",
+        f"ZENPLUS_SENSOR_NAME={name}",
+        "ZENPLUS_VERIFY_TLS=1",
+    ]
+    if proxy_url:
+        lines.extend([
+            f"HTTP_PROXY={proxy_url}",
+            f"HTTPS_PROXY={proxy_url}",
+            "NO_PROXY=localhost,127.0.0.1,::1",
+        ])
+    return "\n".join(lines)
+
+
+def _console_user_cloud_init(data: Optional[SensorCreate]) -> str:
+    if not data or not data.enable_console_user:
+        return ""
+    if not data.console_username or not data.console_password:
+        raise HTTPException(400, "Console user requires username and password")
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", data.console_username):
+        raise HTTPException(
+            400,
+            "Console username must start with a lowercase letter or underscore and contain only lowercase letters, numbers, underscore, or dash",
+        )
+    username = json.dumps(data.console_username)
+    password = json.dumps(data.console_password)
+    return f"""
+users:
+  - default
+  - name: {username}
+    gecos: ZenPlus Sensor Administrator
+    groups: [adm, sudo]
+    shell: /bin/bash
+    lock_passwd: false
+    plain_text_passwd: {password}
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+chpasswd:
+  expire: false
+"""
+
+
+def _bootstrap_cloud_init(
+    server_url: str,
+    token: str,
+    name: str,
+    proxy_url: Optional[str] = None,
+    create_data: Optional[SensorCreate] = None,
+) -> str:
+    """Cloud-init user-data for the production sensor appliance.
+
+    The enrollment token is plaintext and shown only once, so this payload is
+    returned only in create/regenerate responses. Operators can attach it as a
+    NoCloud seed ISO or paste it into the first-boot wizard.
+    """
+    env = "\n".join(f"      {line}" for line in _sensor_env(server_url, token, name, proxy_url).splitlines())
+    console_user = _console_user_cloud_init(create_data)
+    return f"""#cloud-config
+{console_user}ssh_pwauth: true
+write_files:
+  - path: /etc/zenplus-sensor/sensor.env
+    owner: root:zenplus-sensor
+    permissions: '0640'
+    content: |
+{env}
+runcmd:
+  - [ systemctl, enable, --now, zenplus-sensor.service ]
+"""
+
+
+def _bootstrap_meta_data(sensor_id: UUID, name: str) -> str:
+    return f"""instance-id: zenplus-sensor-{sensor_id}
+local-hostname: {name}
+"""
+
+
+def _bootstrap_network_config(data: SensorCreate) -> Optional[str]:
+    if data.network_mode == "dhcp":
+        return None
+    if not data.sensor_ip or not data.sensor_cidr or not data.gateway:
+        raise HTTPException(400, "Static network mode requires sensor_ip, sensor_cidr, and gateway")
+    dns = data.dns_servers or ["1.1.1.1", "8.8.8.8"]
+    dns_yaml = ", ".join(dns)
+    return f"""version: 2
+ethernets:
+  default:
+    match:
+      name: "e*"
+    dhcp4: false
+    dhcp6: false
+    addresses: [{data.sensor_ip}/{data.sensor_cidr}]
+    routes:
+      - to: default
+        via: {data.gateway}
+    nameservers:
+      addresses: [{dns_yaml}]
+"""
+
+
+def _write_bootstrap_iso(
+    sensor_id: UUID,
+    download_token: str,
+    user_data: str,
+    meta_data: str,
+    network_config: Optional[str],
+) -> Optional[str]:
+    cloud_localds = shutil.which("cloud-localds")
+    if not cloud_localds:
+        return None
+
+    dest_dir = BOOTSTRAP_DIR / str(sensor_id) / download_token
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    iso_path = dest_dir / "zenplus-sensor-seed.iso"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        user_data_path = tmp_path / "user-data"
+        meta_data_path = tmp_path / "meta-data"
+        network_path = tmp_path / "network-config"
+        user_data_path.write_text(user_data)
+        meta_data_path.write_text(meta_data)
+        cmd = [cloud_localds]
+        if network_config:
+            network_path.write_text(network_config)
+            cmd.extend(["-N", str(network_path)])
+        cmd.extend([str(iso_path), str(user_data_path), str(meta_data_path)])
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        except subprocess.CalledProcessError as exc:
+            raise HTTPException(500, f"Failed to generate sensor bootstrap ISO: {exc.stderr.strip()}")
+    return download_token
+
+
+def _write_configured_ova(
+    sensor_id: UUID,
+    download_token: str,
+    server_url: str,
+    enrollment_token: str,
+    sensor_name: str,
+    create_data: Optional[SensorCreate],
+) -> Optional[str]:
+    builder = "/usr/local/sbin/zenplus-build-configured-sensor-ova"
+    if not Path(builder).exists():
+        return None
+
+    dest_dir = BOOTSTRAP_DIR / str(sensor_id) / download_token
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    config_path = dest_dir / "configured-ova.json"
+    payload = {
+        "sensor_id": str(sensor_id),
+        "sensor_name": sensor_name,
+        "server_url": server_url,
+        "enrollment_token": enrollment_token,
+        "network_mode": create_data.network_mode if create_data else "dhcp",
+        "sensor_ip": create_data.sensor_ip if create_data else None,
+        "sensor_cidr": create_data.sensor_cidr if create_data else None,
+        "gateway": create_data.gateway if create_data else None,
+        "dns_servers": create_data.dns_servers if create_data else [],
+        "proxy_url": create_data.proxy_url if create_data else None,
+        "console_username": (
+            create_data.console_username
+            if create_data and create_data.enable_console_user and create_data.console_username
+            else "zenadmin"
+        ),
+        "console_password": (
+            create_data.console_password
+            if create_data and create_data.enable_console_user and create_data.console_password
+            else "Read@123"
+        ),
+    }
+    config_path.write_text(json.dumps(payload))
+    config_path.chmod(0o600)
+    try:
+        subprocess.run(
+            ["sudo", "-n", builder, "--config-json", str(config_path), "--out-dir", str(dest_dir)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=900,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(500, "Timed out generating configured sensor OVA")
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(500, f"Failed to generate configured sensor OVA: {exc.stderr.strip()}")
+    ova_path = dest_dir / "zenplus-sensor-configured.ova"
+    return download_token if ova_path.exists() else None
+
+
+def _token_response(
+    sensor_id: UUID,
+    token: str,
+    expires: datetime,
+    server: str,
+    name: str,
+    create_data: Optional[SensorCreate] = None,
+) -> SensorTokenResponse:
+    urls = _appliance_urls(server)
+    controller_url = (create_data.controller_url if create_data and create_data.controller_url else server)
+    proxy_url = create_data.proxy_url if create_data else None
+    user_data = _bootstrap_cloud_init(controller_url, token, name, proxy_url, create_data)
+    meta_data = _bootstrap_meta_data(sensor_id, name)
+    network_config = _bootstrap_network_config(create_data) if create_data else None
+    download_token = secrets.token_urlsafe(24)
+    bootstrap_token = _write_bootstrap_iso(sensor_id, download_token, user_data, meta_data, network_config)
+    configured_ova_token = _write_configured_ova(
+        sensor_id, download_token, controller_url, token, name, create_data
+    )
+    bootstrap_iso_url = (
+        f"{server}/api/v1/sensors/bootstrap/{sensor_id}/{bootstrap_token}/seed.iso"
+        if bootstrap_token else None
+    )
+    configured_ova_url = (
+        f"{server}/api/v1/sensors/bootstrap/{sensor_id}/{configured_ova_token}/configured.ova"
+        if configured_ova_token else None
+    )
+    return SensorTokenResponse(
+        sensor_id=str(sensor_id),
+        enrollment_token=token,
+        expires_at=expires,
+        server_url=controller_url,
+        install_command=_install_command(controller_url, token, name),
+        bootstrap_cloud_init=user_data,
+        bootstrap_meta_data=meta_data,
+        bootstrap_network_config=network_config,
+        bootstrap_iso_url=bootstrap_iso_url,
+        configured_ova_url=configured_ova_url,
+        **urls,
     )
 
 
@@ -274,6 +554,60 @@ async def get_sensor(
     return _row_to_sensor(dict(r))
 
 
+@router.get("/{sensor_id}/downloads", response_model=SensorDownloadsResponse)
+async def get_sensor_downloads(
+    sensor_id: UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    row = (await db.execute(
+        text("SELECT id, name FROM sensors WHERE id = :id"), {"id": sensor_id}
+    )).mappings().first()
+    if not row:
+        raise HTTPException(404, "Sensor not found")
+
+    server = _server_url(request)
+    urls = _appliance_urls(server)
+    artifact_dir = _latest_sensor_artifact_dir(sensor_id)
+    if not artifact_dir:
+        return SensorDownloadsResponse(
+            sensor_id=str(sensor_id),
+            sensor_name=row["name"],
+            note=(
+                "No configured OVA or seed ISO is stored for this sensor yet. "
+                "Use Base OVA, or regenerate the enrollment token to create fresh configured artifacts."
+            ),
+            **urls,
+        )
+
+    download_token = artifact_dir.name
+    configured_ova = artifact_dir / "zenplus-sensor-configured.ova"
+    seed_iso = artifact_dir / "zenplus-sensor-seed.iso"
+    updated_at = _artifact_mtime([configured_ova, seed_iso])
+    return SensorDownloadsResponse(
+        sensor_id=str(sensor_id),
+        sensor_name=row["name"],
+        configured_ova_url=(
+            f"{server}/api/v1/sensors/bootstrap/{sensor_id}/{download_token}/configured.ova"
+            if configured_ova.exists() and configured_ova.is_file() else None
+        ),
+        bootstrap_iso_url=(
+            f"{server}/api/v1/sensors/bootstrap/{sensor_id}/{download_token}/seed.iso"
+            if seed_iso.exists() and seed_iso.is_file() else None
+        ),
+        configured_ova_size_bytes=(
+            configured_ova.stat().st_size if configured_ova.exists() and configured_ova.is_file() else None
+        ),
+        bootstrap_iso_size_bytes=(
+            seed_iso.stat().st_size if seed_iso.exists() and seed_iso.is_file() else None
+        ),
+        artifact_token=download_token,
+        updated_at=updated_at,
+        **urls,
+    )
+
+
 # ── Sensors: create / update / delete ────────────────────────────────
 
 @router.post("", status_code=201)
@@ -291,6 +625,7 @@ async def create_sensor(
     """
     token, token_hash = _new_enrollment_token()
     expires = datetime.now(timezone.utc) + timedelta(hours=ENROLLMENT_TTL_HOURS)
+    _bootstrap_network_config(data)
 
     try:
         row = (await db.execute(
@@ -319,19 +654,35 @@ async def create_sensor(
     await db.commit()
 
     server = _server_url(request)
-    install_cmd = _install_command(server, token, data.name)
-
     sensor = await get_sensor(row["id"], db, user)
     return {
         "sensor": sensor,
-        "token": SensorTokenResponse(
-            sensor_id=str(row["id"]),
-            enrollment_token=token,
-            expires_at=expires,
-            server_url=server,
-            install_command=install_cmd,
-        ),
+        "token": _token_response(row["id"], token, expires, server, data.name, data),
     }
+
+
+@router.get("/bootstrap/{sensor_id}/{download_token}/seed.iso")
+async def download_sensor_bootstrap_iso(sensor_id: UUID, download_token: str):
+    if len(download_token) < 20 or "/" in download_token:
+        raise HTTPException(404, "Bootstrap ISO not found")
+    path = BOOTSTRAP_DIR / str(sensor_id) / download_token / "zenplus-sensor-seed.iso"
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "Bootstrap ISO not found or expired")
+    return FileResponse(path, media_type="application/x-iso9660-image", filename=f"zenplus-sensor-{sensor_id}-seed.iso")
+
+
+@router.get("/bootstrap/{sensor_id}/{download_token}/configured.ova")
+async def download_configured_sensor_ova(sensor_id: UUID, download_token: str):
+    if len(download_token) < 20 or "/" in download_token:
+        raise HTTPException(404, "Configured OVA not found")
+    path = BOOTSTRAP_DIR / str(sensor_id) / download_token / "zenplus-sensor-configured.ova"
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "Configured OVA not found or still generating")
+    return FileResponse(
+        path,
+        media_type="application/x-virtualbox-ova",
+        filename=f"zenplus-sensor-{sensor_id}-configured.ova",
+    )
 
 
 @router.put("/{sensor_id}", response_model=SensorResponse)
@@ -400,13 +751,7 @@ async def regenerate_token(
     await db.commit()
 
     server = _server_url(request)
-    return SensorTokenResponse(
-        sensor_id=str(sensor_id),
-        enrollment_token=token,
-        expires_at=expires,
-        server_url=server,
-        install_command=_install_command(server, token, existing["name"]),
-    )
+    return _token_response(sensor_id, token, expires, server, existing["name"])
 
 
 @router.post("/{sensor_id}/rotate-key", response_model=SensorRotateKeyResponse)

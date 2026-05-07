@@ -69,6 +69,18 @@
 - [x] **T1.7.4** Verify SSE real-time updates work across multiple browser tabs
 - [x] **T1.7.5** Fix any integration issues discovered during testing
 
+### Task 1.8: Phase 1 Stabilization & Professional Readiness
+- [x] **T1.8.1** Document market comparison, product gaps, target architecture, and Phase 1 stabilization plan
+- [x] **T1.8.2** Fix known UI/API correctness issues discovered during system assessment
+- [x] **T1.8.3** Honor configured poll intervals in the Go poller scheduler
+- [x] **T1.8.4** Add backend tests for auth, devices, service checks, reports, and alert rules
+- [x] **T1.8.5** Add Go tests for poller scheduling and status transitions
+- [x] **T1.8.6** Add dashboard route/build smoke tests
+- [x] **T1.8.7** Establish one authoritative migration runner with applied-migration tracking
+- [x] **T1.8.8** Add route-level RBAC checks for admin-only and operator mutation surfaces
+- [x] **T1.8.9** Add audit logs for users, settings, credentials, updates, and alert actions
+- [x] **T1.8.10** Replace mock remote sensor with a production sensor service design and implementation plan
+
 ---
 
 ## Phase 2: Advanced Monitoring & Alerting (Future)
@@ -106,10 +118,10 @@
 - [ ] **T3.1.4** Implement topology change detection & alerts
 
 ### Task 3.2: Bandwidth & Performance
-- [ ] **T3.2.1** Implement NetFlow/sFlow collector (Go)
+- [x] **T3.2.1** Implement NetFlow/sFlow collector (Go) *(NetFlow v5 end-to-end implemented; NetFlow v9/IPFIX/sFlow decoders next)*
 - [ ] **T3.2.2** Implement interface bandwidth monitoring via SNMP
-- [ ] **T3.2.3** Build bandwidth utilization dashboards
-- [ ] **T3.2.4** Implement Top-N reports (top talkers, top interfaces)
+- [x] **T3.2.3** Build bandwidth utilization dashboards *(NetFlow Traffic dashboard added at `/netflow`; interface dashboards already exist from SNMP work)*
+- [ ] **T3.2.4** Implement Top-N reports (top talkers, top interfaces) *(Top-N NetFlow dashboard live; scheduled/report integration next)*
 
 ### Task 3.3: SLA & Reporting
 - [ ] **T3.3.1** Implement SLA calculation engine

@@ -10,7 +10,7 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Activity, Copy, Loader2, Pause, Plus, RotateCw, Trash2, Plug, Pencil, Check, X,
+  Activity, Copy, Download, Loader2, Pause, Plus, RotateCw, Trash2, Plug, Pencil, Check, X,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, relativeTime } from '@/lib/utils'
@@ -25,6 +25,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { toast } from '@/components/ui/Toast'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
+import { Switch } from '@/components/ui/Switch'
 
 type Sensor = {
   id: string
@@ -58,6 +59,29 @@ type TokenInfo = {
   expires_at: string
   server_url: string
   install_command: string
+  manifest_url?: string | null
+  ova_url?: string | null
+  ovf_url?: string | null
+  bootstrap_cloud_init?: string | null
+  bootstrap_meta_data?: string | null
+  bootstrap_network_config?: string | null
+  bootstrap_iso_url?: string | null
+  configured_ova_url?: string | null
+}
+
+type SensorDownloads = {
+  sensor_id: string
+  sensor_name: string
+  manifest_url?: string | null
+  ova_url?: string | null
+  ovf_url?: string | null
+  configured_ova_url?: string | null
+  bootstrap_iso_url?: string | null
+  configured_ova_size_bytes?: number | null
+  bootstrap_iso_size_bytes?: number | null
+  artifact_token?: string | null
+  updated_at?: string | null
+  note?: string | null
 }
 
 type Site = { id: string; name: string; region: string | null; sensor_count: number }
@@ -72,6 +96,25 @@ type Assignment = {
   created_at: string
 }
 
+type ApplianceArtifact = {
+  kind: 'ova' | 'ovf' | 'sha256'
+  filename: string
+  available: boolean
+  url: string
+  size_bytes: number | null
+  updated_at: string | null
+  sha256?: string | null
+}
+
+type ApplianceManifest = {
+  product: string
+  status?: 'preview' | 'ready' | 'not_published'
+  note?: string
+  metadata?: Record<string, unknown>
+  artifact_dir: string
+  artifacts: ApplianceArtifact[]
+}
+
 const statusVariant: Record<Sensor['status'], 'success' | 'warning' | 'danger' | 'outline' | 'info'> = {
   online: 'success',
   pending: 'info',
@@ -79,6 +122,8 @@ const statusVariant: Record<Sensor['status'], 'success' | 'warning' | 'danger' |
   offline: 'danger',
   disabled: 'outline',
 }
+
+const NO_SITE_VALUE = '__none__'
 
 
 function copyToClipboard(s: string, label: string) {
@@ -92,11 +137,24 @@ function copyToClipboard(s: string, label: string) {
   )
 }
 
+function downloadText(filename: string, content: string) {
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 
 export function SensorsCard() {
   const qc = useQueryClient()
   const [addOpen, setAddOpen] = useState(false)
   const [tokenInfo, setTokenInfo] = useState<TokenInfo | null>(null)
+  const [downloads, setDownloads] = useState<SensorDownloads | null>(null)
   const [detail, setDetail] = useState<Sensor | null>(null)
   const [deleting, setDeleting] = useState<Sensor | null>(null)
 
@@ -111,6 +169,12 @@ export function SensorsCard() {
     queryFn: async () => (await api.get('/sites')).data,
   })
 
+  const { data: appliance, isLoading: applianceLoading } = useQuery<ApplianceManifest>({
+    queryKey: ['sensor-appliance-manifest'],
+    queryFn: async () => (await api.get('/sensor/appliance/manifest')).data,
+    refetchInterval: 30_000,
+  })
+
   const del = useMutation({
     mutationFn: async (id: string) => api.delete(`/sensors/${id}`),
     onSuccess: () => {
@@ -119,6 +183,12 @@ export function SensorsCard() {
       setDeleting(null)
     },
     onError: (e: any) => toast.error('Delete failed', apiErrorMessage(e)),
+  })
+
+  const loadDownloads = useMutation({
+    mutationFn: async (sensor: Sensor) => (await api.get(`/sensors/${sensor.id}/downloads`)).data,
+    onSuccess: (data: SensorDownloads) => setDownloads(data),
+    onError: (e: any) => toast.error('Download lookup failed', apiErrorMessage(e)),
   })
 
   return (
@@ -139,6 +209,8 @@ export function SensorsCard() {
         </Button>
       </CardHeader>
       <CardContent>
+        <ApplianceDownloadPanel manifest={appliance} loading={applianceLoading} />
+
         <Table>
           <THead className="bg-surface2/50">
             <Tr>
@@ -149,7 +221,7 @@ export function SensorsCard() {
               <Th>Last heartbeat</Th>
               <Th>Version</Th>
               <Th>Assignments</Th>
-              <Th className="w-32 text-right">Actions</Th>
+              <Th className="w-44 text-right">Actions</Th>
             </Tr>
           </THead>
           <TBody>
@@ -197,6 +269,20 @@ export function SensorsCard() {
                 <Td className="text-xs">{s.assignment_count}</Td>
                 <Td>
                   <div className="flex justify-end gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => loadDownloads.mutate(s)}
+                      disabled={loadDownloads.isPending}
+                      title="Download sensor appliance"
+                    >
+                      {loadDownloads.isPending ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Download className="h-3.5 w-3.5" />
+                      )}
+                      Download
+                    </Button>
                     <Button size="sm" variant="ghost" onClick={() => setDetail(s)}>
                       <Pencil className="h-3.5 w-3.5" />
                     </Button>
@@ -231,6 +317,11 @@ export function SensorsCard() {
         onClose={() => setTokenInfo(null)}
       />
 
+      <SensorDownloadsDialog
+        info={downloads}
+        onClose={() => setDownloads(null)}
+      />
+
       <SensorDetailDialog
         sensor={detail}
         onClose={() => setDetail(null)}
@@ -257,6 +348,87 @@ export function SensorsCard() {
   )
 }
 
+function formatSize(bytes: number | null): string {
+  if (!bytes) return '—'
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+function ApplianceDownloadPanel({ manifest, loading }: { manifest?: ApplianceManifest; loading: boolean }) {
+  const artifacts = manifest?.artifacts || []
+  const byKind = Object.fromEntries(artifacts.map((a) => [a.kind, a])) as Partial<Record<ApplianceArtifact['kind'], ApplianceArtifact>>
+  const availableCount = artifacts.filter((a) => a.available).length
+  const hasAppliance = !!byKind.ova?.available || !!byKind.ovf?.available
+  const isPreview = manifest?.status === 'preview'
+
+  return (
+    <div className="mb-4 rounded-lg border border-border bg-surface2/40 p-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <div className="flex items-center gap-2">
+            <Download className="h-4 w-4 text-primary" />
+            <div className="text-sm font-semibold">Sensor appliance download</div>
+            <Badge variant={hasAppliance ? (isPreview ? 'warning' : 'success') : 'warning'}>
+              {loading ? 'checking' : hasAppliance ? (isPreview ? 'preview' : 'ready') : 'not published'}
+            </Badge>
+          </div>
+          <p className="mt-1 text-xs text-muted">
+            OVA/OVF images are served by this controller. Create a sensor to get the one-time token and bootstrap file.
+          </p>
+          {manifest && (
+            <div className="mt-2 text-xs text-muted">
+              {availableCount}/{artifacts.length} artifacts available from <span className="font-mono">{manifest.artifact_dir}</span>
+            </div>
+          )}
+          {manifest?.note && (
+            <div className="mt-2 text-xs text-warning">{manifest.note}</div>
+          )}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {byKind.ova && (
+            <Button size="sm" variant="outline" asChild disabled={!byKind.ova.available}>
+              <a href={byKind.ova.available ? byKind.ova.url : undefined} aria-disabled={!byKind.ova.available}>
+                <Download className="h-3.5 w-3.5" /> OVA
+              </a>
+            </Button>
+          )}
+          {byKind.ovf && (
+            <Button size="sm" variant="outline" asChild disabled={!byKind.ovf.available}>
+              <a href={byKind.ovf.available ? byKind.ovf.url : undefined} aria-disabled={!byKind.ovf.available}>
+                <Download className="h-3.5 w-3.5" /> OVF
+              </a>
+            </Button>
+          )}
+          {byKind.sha256 && (
+            <Button size="sm" variant="ghost" asChild disabled={!byKind.sha256.available}>
+              <a href={byKind.sha256.available ? byKind.sha256.url : undefined} aria-disabled={!byKind.sha256.available}>
+                SHA256
+              </a>
+            </Button>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-2 md:grid-cols-3">
+        {(['ova', 'ovf', 'sha256'] as const).map((kind) => {
+          const item = byKind[kind]
+          return (
+            <div key={kind} className="rounded-md border border-border bg-surface px-3 py-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium uppercase tracking-wider text-muted">{kind}</span>
+                <Badge variant={item?.available ? 'success' : 'outline'}>{item?.available ? 'available' : 'missing'}</Badge>
+              </div>
+              <div className="mt-1 truncate font-mono text-xs">{item?.filename || `zenplus-sensor.${kind}`}</div>
+              <div className="mt-1 text-xs text-muted">{formatSize(item?.size_bytes ?? null)}</div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 /* ───────── Add Sensor dialog ───────── */
 
 function AddSensorDialog({
@@ -271,10 +443,22 @@ function AddSensorDialog({
   const [description, setDescription] = useState('')
   const [siteId, setSiteId] = useState<string>('')
   const [location, setLocation] = useState('')
+  const [controllerUrl, setControllerUrl] = useState('')
+  const [networkMode, setNetworkMode] = useState<'dhcp' | 'static'>('dhcp')
+  const [sensorIp, setSensorIp] = useState('')
+  const [sensorCidr, setSensorCidr] = useState('24')
+  const [gateway, setGateway] = useState('')
+  const [dnsServers, setDnsServers] = useState('')
+  const [proxyUrl, setProxyUrl] = useState('')
+  const [enableConsoleUser, setEnableConsoleUser] = useState(false)
+  const [consoleUsername, setConsoleUsername] = useState('zenadmin')
+  const [consolePassword, setConsolePassword] = useState('')
 
   useEffect(() => {
     if (!open) {
       setName(''); setDescription(''); setSiteId(''); setLocation('')
+      setControllerUrl(''); setNetworkMode('dhcp'); setSensorIp(''); setSensorCidr('24'); setGateway(''); setDnsServers(''); setProxyUrl('')
+      setEnableConsoleUser(false); setConsoleUsername('zenadmin'); setConsolePassword('')
     }
   }, [open])
 
@@ -282,6 +466,20 @@ function AddSensorDialog({
     mutationFn: async () => {
       const payload: any = { name, description: description || null, location: location || null }
       if (siteId) payload.site_id = siteId
+      if (controllerUrl) payload.controller_url = controllerUrl
+      payload.network_mode = networkMode
+      if (networkMode === 'static') {
+        payload.sensor_ip = sensorIp
+        payload.sensor_cidr = Number(sensorCidr)
+        payload.gateway = gateway
+        payload.dns_servers = dnsServers.split(',').map((s) => s.trim()).filter(Boolean)
+      }
+      if (proxyUrl) payload.proxy_url = proxyUrl
+      payload.enable_console_user = enableConsoleUser
+      if (enableConsoleUser) {
+        payload.console_username = consoleUsername
+        payload.console_password = consolePassword
+      }
       return (await api.post('/sensors', payload)).data
     },
     onSuccess: (res) => {
@@ -293,7 +491,7 @@ function AddSensorDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Add Sensor</DialogTitle>
         </DialogHeader>
@@ -305,10 +503,10 @@ function AddSensorDialog({
             <Input required value={name} onChange={(e) => setName(e.target.value)} autoFocus />
           </FormField>
           <FormField label="Site">
-            <Select value={siteId} onValueChange={setSiteId}>
+            <Select value={siteId || NO_SITE_VALUE} onValueChange={(v) => setSiteId(v === NO_SITE_VALUE ? '' : v)}>
               <SelectTrigger><SelectValue placeholder="(none)" /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="">(none)</SelectItem>
+                <SelectItem value={NO_SITE_VALUE}>(none)</SelectItem>
                 {sites.map((s) => (
                   <SelectItem key={s.id} value={s.id}>
                     {s.name}{s.region ? ` — ${s.region}` : ''}
@@ -320,6 +518,58 @@ function AddSensorDialog({
           <FormField label="Location" hint="Free-text, e.g. Karachi DC, Rack 12">
             <Input value={location} onChange={(e) => setLocation(e.target.value)} />
           </FormField>
+          <div className="grid gap-3 md:grid-cols-2">
+            <FormField label="Controller URL" hint="Leave blank to use this controller URL">
+              <Input value={controllerUrl} onChange={(e) => setControllerUrl(e.target.value)} placeholder="http://10.12.50.81" />
+            </FormField>
+            <FormField label="Proxy URL" hint="Optional outbound proxy for sensor HTTPS">
+              <Input value={proxyUrl} onChange={(e) => setProxyUrl(e.target.value)} placeholder="http://proxy.local:8080" />
+            </FormField>
+          </div>
+          <div className="rounded-md border border-border bg-surface2/40 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-medium">Local console user</div>
+                <div className="text-xs text-muted">Created on first boot from the Seed ISO for VM CLI access.</div>
+              </div>
+              <Switch checked={enableConsoleUser} onCheckedChange={setEnableConsoleUser} />
+            </div>
+            {enableConsoleUser && (
+              <div className="mt-3 grid gap-3 md:grid-cols-2">
+                <FormField label="Username" required hint="Lowercase letters, numbers, dash, underscore">
+                  <Input required value={consoleUsername} onChange={(e) => setConsoleUsername(e.target.value)} placeholder="zenadmin" />
+                </FormField>
+                <FormField label="Password" required hint="Minimum 8 characters">
+                  <Input required type="password" value={consolePassword} onChange={(e) => setConsolePassword(e.target.value)} />
+                </FormField>
+              </div>
+            )}
+          </div>
+          <FormField label="Sensor network">
+            <Select value={networkMode} onValueChange={(v) => setNetworkMode(v as 'dhcp' | 'static')}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="dhcp">DHCP</SelectItem>
+                <SelectItem value="static">Static IP</SelectItem>
+              </SelectContent>
+            </Select>
+          </FormField>
+          {networkMode === 'static' && (
+            <div className="grid gap-3 md:grid-cols-2">
+              <FormField label="Sensor IP" required>
+                <Input required value={sensorIp} onChange={(e) => setSensorIp(e.target.value)} placeholder="10.12.50.90" />
+              </FormField>
+              <FormField label="CIDR" required>
+                <Input required type="number" min={1} max={32} value={sensorCidr} onChange={(e) => setSensorCidr(e.target.value)} />
+              </FormField>
+              <FormField label="Gateway" required>
+                <Input required value={gateway} onChange={(e) => setGateway(e.target.value)} placeholder="10.12.50.1" />
+              </FormField>
+              <FormField label="DNS servers" hint="Comma separated">
+                <Input value={dnsServers} onChange={(e) => setDnsServers(e.target.value)} placeholder="10.12.50.1, 8.8.8.8" />
+              </FormField>
+            </div>
+          )}
           <FormField label="Description">
             <Textarea value={description} onChange={(e) => setDescription(e.target.value)} />
           </FormField>
@@ -327,7 +577,7 @@ function AddSensorDialog({
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
               Cancel
             </Button>
-            <Button type="submit" disabled={create.isPending || !name}>
+            <Button type="submit" disabled={create.isPending || !name || (networkMode === 'static' && (!sensorIp || !sensorCidr || !gateway)) || (enableConsoleUser && (!consoleUsername || consolePassword.length < 8))}>
               {create.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
               Create &amp; issue token
             </Button>
@@ -353,7 +603,7 @@ function TokenDialog({ info, onClose }: { info: TokenInfo | null; onClose: () =>
         {info && (
           <div className="space-y-4">
             <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
-              <strong>Token shown only once.</strong> Copy the install command below and run it on the sensor VM
+              <strong>Token shown only once.</strong> Download the seed ISO and attach it to the sensor VM
               before <span className="font-medium">{new Date(info.expires_at).toLocaleString()}</span>.
               You can re-issue a fresh token from the sensor's detail dialog if needed.
             </div>
@@ -384,7 +634,62 @@ function TokenDialog({ info, onClose }: { info: TokenInfo | null; onClose: () =>
 
             <div>
               <div className="mb-1 text-xs font-medium uppercase tracking-wider text-muted">
-                One-line install command (Phase 1: mock sensor)
+                Appliance downloads
+              </div>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                {info.manifest_url && (
+                  <a className="inline-flex items-center justify-center gap-2 rounded-md border border-border px-3 py-2 text-xs hover:bg-surface2" href={info.manifest_url} target="_blank" rel="noreferrer">
+                    <Download className="h-3.5 w-3.5" /> Manifest
+                  </a>
+                )}
+                {info.ova_url && (
+                  <a className="inline-flex items-center justify-center gap-2 rounded-md border border-border px-3 py-2 text-xs hover:bg-surface2" href={info.ova_url}>
+                    <Download className="h-3.5 w-3.5" /> Base OVA
+                  </a>
+                )}
+                {info.configured_ova_url && (
+                  <a className="inline-flex items-center justify-center gap-2 rounded-md border border-primary/50 bg-primary/10 px-3 py-2 text-xs text-primary hover:bg-primary/15" href={info.configured_ova_url}>
+                    <Download className="h-3.5 w-3.5" /> Configured OVA
+                  </a>
+                )}
+                {info.ovf_url && (
+                  <a className="inline-flex items-center justify-center gap-2 rounded-md border border-border px-3 py-2 text-xs hover:bg-surface2" href={info.ovf_url}>
+                    <Download className="h-3.5 w-3.5" /> OVF
+                  </a>
+                )}
+                {info.bootstrap_iso_url && (
+                  <a className="inline-flex items-center justify-center gap-2 rounded-md border border-border px-3 py-2 text-xs hover:bg-surface2" href={info.bootstrap_iso_url}>
+                    <Download className="h-3.5 w-3.5" /> Seed ISO
+                  </a>
+                )}
+              </div>
+              <p className="mt-1 text-xs text-muted">
+                Use Configured OVA when you want IP/controller settings baked into the VM. Use Base OVA plus Seed ISO for standard cloud-init deployment.
+              </p>
+            </div>
+
+            {info.bootstrap_cloud_init && (
+              <div>
+                <div className="mb-1 text-xs font-medium uppercase tracking-wider text-muted">
+                  Bootstrap cloud-init
+                </div>
+                <div className="rounded-md border border-border bg-surface2 p-3 font-mono text-xs leading-relaxed">
+                  <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all">{info.bootstrap_cloud_init}</pre>
+                </div>
+                <div className="mt-2 flex justify-end gap-2">
+                  <Button size="sm" variant="outline" onClick={() => copyToClipboard(info.bootstrap_cloud_init || '', 'Bootstrap')}>
+                    <Copy className="h-3.5 w-3.5" /> Copy
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => downloadText(`zenplus-sensor-${info.sensor_id}.yml`, info.bootstrap_cloud_init || '')}>
+                    <Download className="h-3.5 w-3.5" /> Download
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            <div>
+              <div className="mb-1 text-xs font-medium uppercase tracking-wider text-muted">
+                One-line install command (development harness)
               </div>
               <div className="rounded-md border border-border bg-surface2 p-3 font-mono text-xs leading-relaxed">
                 <pre className="whitespace-pre-wrap break-all">{info.install_command}</pre>
@@ -393,6 +698,93 @@ function TokenDialog({ info, onClose }: { info: TokenInfo | null; onClose: () =>
                 <Button size="sm" variant="outline" onClick={() => copyToClipboard(info.install_command, 'Command')}>
                   <Copy className="h-3.5 w-3.5" /> Copy command
                 </Button>
+              </div>
+            </div>
+          </div>
+        )}
+        <DialogFooter>
+          <Button onClick={onClose}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function SensorDownloadsDialog({ info, onClose }: { info: SensorDownloads | null; onClose: () => void }) {
+  const hasConfiguredArtifacts = !!info?.configured_ova_url || !!info?.bootstrap_iso_url
+
+  return (
+    <Dialog open={!!info} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Download className="h-4 w-4 text-primary" />
+            Download sensor appliance
+          </DialogTitle>
+        </DialogHeader>
+        {info && (
+          <div className="space-y-4">
+            <div className="rounded-md border border-border bg-surface2 px-3 py-2">
+              <div className="text-xs font-medium uppercase tracking-wider text-muted">Sensor</div>
+              <div className="mt-1 font-medium text-text">{info.sensor_name}</div>
+              {info.updated_at && (
+                <div className="mt-1 text-xs text-muted">
+                  Last generated {new Date(info.updated_at).toLocaleString()}
+                </div>
+              )}
+            </div>
+
+            {info.note && (
+              <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
+                {info.note}
+              </div>
+            )}
+
+            <div>
+              <div className="mb-2 text-xs font-medium uppercase tracking-wider text-muted">
+                Sensor-specific downloads
+              </div>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                {info.configured_ova_url && (
+                  <a className="inline-flex items-center justify-center gap-2 rounded-md border border-primary/50 bg-primary/10 px-3 py-2 text-xs text-primary hover:bg-primary/15" href={info.configured_ova_url}>
+                    <Download className="h-3.5 w-3.5" /> Configured OVA
+                    <span className="text-primary/70">{formatSize(info.configured_ova_size_bytes ?? null)}</span>
+                  </a>
+                )}
+                {info.bootstrap_iso_url && (
+                  <a className="inline-flex items-center justify-center gap-2 rounded-md border border-border px-3 py-2 text-xs hover:bg-surface2" href={info.bootstrap_iso_url}>
+                    <Download className="h-3.5 w-3.5" /> Seed ISO
+                    <span className="text-muted">{formatSize(info.bootstrap_iso_size_bytes ?? null)}</span>
+                  </a>
+                )}
+                {!hasConfiguredArtifacts && (
+                  <div className="rounded-md border border-border bg-surface2 px-3 py-4 text-center text-xs text-muted sm:col-span-2">
+                    No configured files are available for this sensor.
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-2 text-xs font-medium uppercase tracking-wider text-muted">
+                Generic appliance downloads
+              </div>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                {info.manifest_url && (
+                  <a className="inline-flex items-center justify-center gap-2 rounded-md border border-border px-3 py-2 text-xs hover:bg-surface2" href={info.manifest_url} target="_blank" rel="noreferrer">
+                    <Download className="h-3.5 w-3.5" /> Manifest
+                  </a>
+                )}
+                {info.ova_url && (
+                  <a className="inline-flex items-center justify-center gap-2 rounded-md border border-border px-3 py-2 text-xs hover:bg-surface2" href={info.ova_url}>
+                    <Download className="h-3.5 w-3.5" /> Base OVA
+                  </a>
+                )}
+                {info.ovf_url && (
+                  <a className="inline-flex items-center justify-center gap-2 rounded-md border border-border px-3 py-2 text-xs hover:bg-surface2" href={info.ovf_url}>
+                    <Download className="h-3.5 w-3.5" /> OVF
+                  </a>
+                )}
               </div>
             </div>
           </div>

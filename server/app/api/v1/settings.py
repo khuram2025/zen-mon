@@ -10,8 +10,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import require_admin_user
 from app.models.user import User
+from app.services.audit_service import write_audit_log
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 
@@ -141,7 +142,7 @@ class CompanySettings(BaseModel):
 @router.get("/company")
 async def get_company_settings(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     raw = await _get_system_setting(db, "company")
     if raw:
@@ -153,9 +154,17 @@ async def get_company_settings(
 async def update_company_settings(
     data: CompanySettings,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     await _upsert_system_setting(db, "company", data.model_dump())
+    await write_audit_log(
+        db,
+        actor=user,
+        action="settings.company.update",
+        resource_type="system_setting",
+        resource_id="company",
+    )
+    await db.commit()
     return {"message": "Company settings updated"}
 
 
@@ -163,7 +172,7 @@ async def update_company_settings(
 async def upload_company_logo(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     if file.content_type not in ("image/png", "image/jpeg", "image/svg+xml", "image/webp"):
         raise HTTPException(status_code=400, detail="Only PNG, JPEG, SVG, or WebP images are allowed")
@@ -178,6 +187,15 @@ async def upload_company_logo(
         "content_type": file.content_type,
         "filename": file.filename,
     })
+    await write_audit_log(
+        db,
+        actor=user,
+        action="settings.company_logo.upload",
+        resource_type="system_setting",
+        resource_id="company_logo",
+        metadata={"filename": file.filename, "content_type": file.content_type, "size": len(content)},
+    )
+    await db.commit()
     return {"message": "Logo uploaded successfully"}
 
 
@@ -238,7 +256,7 @@ def _row_to_gateway(row) -> dict:
 @router.get("/gateways", response_model=GatewaysResponse)
 async def get_gateways(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     smtp_raw = await _get_system_setting(db, "smtp")
     sms_raw = await _get_system_setting(db, "sms")
@@ -252,9 +270,18 @@ async def get_gateways(
 async def update_smtp_legacy(
     data: SmtpConfig,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     await _upsert_system_setting(db, "smtp", data.model_dump())
+    await write_audit_log(
+        db,
+        actor=user,
+        action="settings.gateway.smtp.update",
+        resource_type="system_setting",
+        resource_id="smtp",
+        metadata={"enabled": data.enabled, "host": data.host, "port": data.port},
+    )
+    await db.commit()
     return {"message": "SMTP settings updated"}
 
 
@@ -262,9 +289,18 @@ async def update_smtp_legacy(
 async def update_sms_legacy(
     data: SmsConfig,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     await _upsert_system_setting(db, "sms", data.model_dump())
+    await write_audit_log(
+        db,
+        actor=user,
+        action="settings.gateway.sms.update",
+        resource_type="system_setting",
+        resource_id="sms",
+        metadata={"enabled": data.enabled, "provider": data.provider},
+    )
+    await db.commit()
     return {"message": "SMS settings updated"}
 
 
@@ -272,7 +308,7 @@ async def update_sms_legacy(
 async def test_smtp_legacy(
     data: SmtpTestRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     smtp_raw = await _get_system_setting(db, "smtp")
     if not smtp_raw:
@@ -321,7 +357,7 @@ async def test_smtp_legacy(
 async def test_sms_legacy(
     data: SmsTestRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     import httpx
 
@@ -396,7 +432,7 @@ async def test_sms_legacy(
 @router.get("/gateways/list")
 async def list_gateways(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     result = await db.execute(
         text("SELECT id, name, type, config, is_default, enabled, created_at, updated_at FROM notification_gateways ORDER BY type, name")
@@ -408,7 +444,7 @@ async def list_gateways(
 async def create_gateway(
     data: dict,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     now = datetime.now(timezone.utc)
     result = await db.execute(
@@ -427,8 +463,16 @@ async def create_gateway(
             "updated_at": now,
         },
     )
-    await db.commit()
     row = result.first()
+    await write_audit_log(
+        db,
+        actor=user,
+        action="notification_gateway.create",
+        resource_type="notification_gateway",
+        resource_id=str(row.id) if row else None,
+        metadata={"name": data.get("name", ""), "type": data.get("type", "smtp")},
+    )
+    await db.commit()
     return _row_to_gateway(row)
 
 
@@ -437,7 +481,7 @@ async def update_gateway(
     gateway_id: UUID,
     data: dict,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     fields = {k: v for k, v in data.items() if k in ("name", "type", "config", "is_default", "enabled")}
     if not fields:
@@ -459,10 +503,19 @@ async def update_gateway(
              "RETURNING id, name, type, config, is_default, enabled, created_at, updated_at"),
         params,
     )
-    await db.commit()
     row = result.first()
     if not row:
+        await db.commit()
         raise HTTPException(status_code=404, detail="Gateway not found")
+    await write_audit_log(
+        db,
+        actor=user,
+        action="notification_gateway.update",
+        resource_type="notification_gateway",
+        resource_id=str(gateway_id),
+        metadata={"fields": sorted(fields.keys())},
+    )
+    await db.commit()
     return _row_to_gateway(row)
 
 
@@ -470,14 +523,22 @@ async def update_gateway(
 async def delete_gateway(
     gateway_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     result = await db.execute(
         text("DELETE FROM notification_gateways WHERE id = :id"), {"id": gateway_id}
     )
-    await db.commit()
     if result.rowcount == 0:
+        await db.commit()
         raise HTTPException(status_code=404, detail="Gateway not found")
+    await write_audit_log(
+        db,
+        actor=user,
+        action="notification_gateway.delete",
+        resource_type="notification_gateway",
+        resource_id=str(gateway_id),
+    )
+    await db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -487,7 +548,7 @@ async def delete_gateway(
 @router.get("/channels")
 async def list_channels(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     result = await db.execute(
         text("SELECT c.id, c.name, c.type, c.config, c.enabled, c.created_at, c.updated_at, "
@@ -504,7 +565,7 @@ async def list_channels(
 async def create_channel(
     data: ChannelCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     now = datetime.now(timezone.utc)
     gateway_id = data.config.get("gateway_id") if data.config else None
@@ -524,10 +585,19 @@ async def create_channel(
             "updated_at": now,
         },
     )
-    await db.commit()
     row = result.first()
     if not row:
+        await db.commit()
         raise HTTPException(status_code=500, detail="Failed to create channel")
+    await write_audit_log(
+        db,
+        actor=user,
+        action="notification_channel.create",
+        resource_type="notification_channel",
+        resource_id=str(row.id),
+        metadata={"name": data.name, "type": data.type, "enabled": data.enabled},
+    )
+    await db.commit()
     return _row_to_channel(row)
 
 
@@ -536,7 +606,7 @@ async def update_channel(
     channel_id: UUID,
     data: ChannelUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     # Build dynamic SET clause from provided fields
     fields = data.model_dump(exclude_unset=True)
@@ -565,10 +635,19 @@ async def update_channel(
         ),
         params,
     )
-    await db.commit()
     row = result.first()
     if not row:
+        await db.commit()
         raise HTTPException(status_code=404, detail="Channel not found")
+    await write_audit_log(
+        db,
+        actor=user,
+        action="notification_channel.update",
+        resource_type="notification_channel",
+        resource_id=str(channel_id),
+        metadata={"fields": sorted(fields.keys())},
+    )
+    await db.commit()
     return _row_to_channel(row)
 
 
@@ -576,23 +655,31 @@ async def update_channel(
 async def delete_channel(
     channel_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     result = await db.execute(
         text("DELETE FROM notification_channels WHERE id = :id RETURNING id"),
         {"id": channel_id},
     )
-    await db.commit()
     row = result.first()
     if not row:
+        await db.commit()
         raise HTTPException(status_code=404, detail="Channel not found")
+    await write_audit_log(
+        db,
+        actor=user,
+        action="notification_channel.delete",
+        resource_type="notification_channel",
+        resource_id=str(channel_id),
+    )
+    await db.commit()
 
 
 @router.post("/channels/{channel_id}/test")
 async def test_channel(
     channel_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin_user),
 ):
     import httpx
     import smtplib

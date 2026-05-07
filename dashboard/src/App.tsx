@@ -18,6 +18,11 @@ import { ServiceCheckTemplatesPage } from '@/pages/ServiceCheckTemplatesPage'
 import { DiscoveryPage } from '@/pages/DiscoveryPage'
 import { MibLibraryPage } from '@/pages/MibLibraryPage'
 import { ReportsPage } from '@/pages/ReportsPage'
+import { NetflowPage, NetflowDevicePage } from '@/pages/NetflowPage'
+import { NetflowForensicsPage } from '@/pages/NetflowForensics'
+import { NetflowSavedViewsPage } from '@/pages/NetflowSavedViews'
+import { NetflowCapacityPage } from '@/pages/NetflowCapacity'
+import { NetflowAnomaliesPage } from '@/pages/NetflowAnomalies'
 
 const ExecutiveReport = lazy(() => import('@/pages/reports/ExecutiveReport'))
 const TechnicalReport = lazy(() => import('@/pages/reports/TechnicalReport'))
@@ -88,6 +93,12 @@ export default function App() {
         <Route path="services/:id" element={<ServiceCheckDetailPage />} />
         <Route path="services/:id/incidents" element={<ServiceIncidentsPage />} />
         <Route path="discovery" element={<DiscoveryPage />} />
+        <Route path="netflow" element={<NetflowPage />} />
+        <Route path="netflow/forensics" element={<NetflowForensicsPage />} />
+        <Route path="netflow/saved-views" element={<NetflowSavedViewsPage />} />
+        <Route path="netflow/capacity" element={<NetflowCapacityPage />} />
+        <Route path="netflow/anomalies" element={<NetflowAnomaliesPage />} />
+        <Route path="netflow/devices/:ip" element={<NetflowDevicePage />} />
         <Route path="mibs" element={<MibLibraryPage />} />
         <Route path="alerts" element={<AlertsPage />} />
         <Route path="alert-rules" element={<AlertRulesPage />} />

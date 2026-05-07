@@ -21,12 +21,12 @@
   --info: 14 165 233;
   --accent: 168 85 247;
 
-  /* Sidebar — always dark for professional look */
-  --sidebar-bg: 15 23 42;
-  --sidebar-text: 203 213 225;
+  /* Sidebar — light variant; .dark overrides below for dark mode */
+  --sidebar-bg: 255 255 255;
+  --sidebar-text: 15 23 42;
   --sidebar-text-muted: 100 116 139;
-  --sidebar-border: 30 41 59;
-  --sidebar-hover: 30 41 59;
+  --sidebar-border: 226 232 240;
+  --sidebar-hover: 241 245 249;
 }
 
 .dark {

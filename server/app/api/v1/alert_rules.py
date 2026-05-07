@@ -9,7 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
 
 router = APIRouter(prefix="/alert-rules", tags=["Alert Rules"])
@@ -177,7 +177,7 @@ async def list_alert_rules(
 async def create_alert_rule(
     data: AlertRuleCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     now = datetime.now(timezone.utc)
     params: dict = {
@@ -268,7 +268,7 @@ async def update_alert_rule(
     rule_id: UUID,
     data: AlertRuleUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     fields = data.model_dump(exclude_unset=True)
     if not fields:
@@ -322,7 +322,7 @@ async def update_alert_rule(
 async def delete_alert_rule(
     rule_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     result = await db.execute(
         text("DELETE FROM alert_rules WHERE id = :id RETURNING id"),
@@ -338,7 +338,7 @@ async def delete_alert_rule(
 async def toggle_alert_rule(
     rule_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     result = await db.execute(
         text(
@@ -465,7 +465,7 @@ async def preview_alert_rule(
 async def simulate_alert_rule(
     rule_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     import httpx
     import smtplib

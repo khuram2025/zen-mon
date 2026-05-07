@@ -22,6 +22,9 @@
 | 14 | [Remote-Server Intake](14-REMOTE-SERVER-INTAKE.md) | Questions for the zentryc.com team to confirm the contract + run a smoke test |
 | 15 | [**Release Runbook**](15-RELEASE-RUNBOOK.md) | **The only doc you need open while cutting a release. Build → sign → push → verify.** |
 | 16 | [**Installer & Knowledge-Base Guide**](16-INSTALLER-PUBLIC-GUIDE.md) | **One-liner install spec for the remote-server team to publish on docs.zentryc.com. Prereqs, permissions, OTA wiring, troubleshooting.** |
+| 17 | [**Product Enhancement Assessment**](17-PRODUCT-ENHANCEMENT-ASSESSMENT.md) | **Market comparison, product gaps, target architecture, and Phase 1 stabilization plan.** |
+| 18 | [**Migration Runner**](18-MIGRATION-RUNNER.md) | **Tracked PostgreSQL migration runner, schema_migrations table, commands, and updater integration.** |
+| 19 | [**Production Remote Sensors**](19-PRODUCTION-REMOTE-SENSORS.md) | **Market assessment and OVA/OVF remote sensor appliance design.** |
 
 ## Quick Start (Phase 1)
 

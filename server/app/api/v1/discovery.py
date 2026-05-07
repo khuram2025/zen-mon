@@ -7,7 +7,7 @@ import time
 from typing import Optional
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException
-from app.core.security import get_current_user
+from app.core.security import require_operator_user
 from app.models.user import User
 
 router = APIRouter(prefix="/discovery", tags=["Discovery"])
@@ -129,7 +129,7 @@ async def scan_subnet(subnet_str: str, timeout: float, count: int) -> ScanResult
 @router.post("/scan", response_model=ScanResponse)
 async def run_scan(
     req: ScanRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     """Scan one or more subnets for live hosts via ICMP ping."""
     results = []
