@@ -125,8 +125,17 @@ redis-cli -a "$RD_PASS" --no-auth-warning ping 2>/dev/null | grep -q PONG \
 # --- ClickHouse ---
 cd /opt/zenplus && docker compose up -d
 for i in $(seq 1 60); do
-    docker exec zenplus-clickhouse clickhouse-client --query "SELECT 1" >/dev/null 2>&1 && break
+    docker exec zenplus-clickhouse clickhouse-client --password "$CH_PASS" --query "SELECT 1" >/dev/null 2>&1 && break
     sleep 2
+done
+docker exec zenplus-clickhouse clickhouse-client --password "$CH_PASS" --query "SELECT 1" >/dev/null 2>&1 \
+    || fail "clickhouse not ready after 120s"
+
+for sql_file in scripts/init-clickhouse.sql scripts/fix-clickhouse.sql scripts/migrate-*-clickhouse.sql; do
+    [ -f "$sql_file" ] || continue
+    echo "running ClickHouse migration: $(basename "$sql_file")"
+    docker cp "$sql_file" zenplus-clickhouse:/tmp/m.sql
+    docker exec zenplus-clickhouse clickhouse-client --password "$CH_PASS" --multiquery --queries-file /tmp/m.sql >/dev/null 2>&1 || true
 done
 
 # --- Reset subscription to fresh 30-day trial ---
@@ -137,7 +146,7 @@ done
 # agent.conf. We must therefore (a) delete the cached JSON, (b) clear
 # the appliance creds so the updater can't immediately re-fetch the
 # old remote state, and (c) only then reset the DB row.
-echo "[6/7] clearing OTA registration and resetting subscription..."
+echo "[6/8] clearing OTA registration and resetting subscription..."
 rm -f /opt/zenplus/updater/config/subscription.json
 
 AGENT_CONF=/opt/zenplus/updater/config/agent.conf
@@ -157,14 +166,57 @@ VALUES ('trial', 'active', now(), now() + INTERVAL '30 days',
         50, 20, 5, NULL, NULL);
 SQL
 
+echo "[7/8] generating first-login admin password..."
+ADMIN_TEMP_PASSWORD="$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 20)"
+ADMIN_HASH=$(/opt/zenplus/venv/bin/python3 - "$ADMIN_TEMP_PASSWORD" <<'PY'
+import sys
+from passlib.context import CryptContext
+
+password = sys.argv[1]
+print(CryptContext(schemes=["bcrypt"], deprecated="auto").hash(password))
+PY
+)
+sudo -u postgres psql -d zenplus -v ON_ERROR_STOP=1 -v admin_hash="$ADMIN_HASH" <<'SQL' >/dev/null
+UPDATE users
+SET password_hash = :'admin_hash',
+    last_login = NULL,
+    updated_at = NOW()
+WHERE username = 'admin';
+SQL
+
+install -d -m 0750 -o root -g root /var/lib/zenplus
+umask 077
+cat >/var/lib/zenplus/initial-admin-password <<EOF
+ZenPlus initial web login
+Username: admin
+Password: ${ADMIN_TEMP_PASSWORD}
+
+Change this password immediately after first login.
+EOF
+chmod 0600 /var/lib/zenplus/initial-admin-password
+
+{
+    echo
+    echo "============================================================"
+    echo " ZenPlus initial web login"
+    echo " URL:      https://$(hostname -I 2>/dev/null | awk '{print $1}')/"
+    echo " Username: admin"
+    echo " Password: ${ADMIN_TEMP_PASSWORD}"
+    echo " Change this password immediately after first login."
+    echo "============================================================"
+    echo
+} >/dev/tty1 2>/dev/null || true
+
 # --- Verify ---
-echo "[7/7] verifying..."
+echo "[8/8] verifying..."
 PGPASSWORD="$PG_PASS" psql -h localhost -U zenplus -d zenplus -tAc "SELECT 1" | grep -q 1 \
     || fail "postgres auth verification"
 redis-cli -a "$RD_PASS" --no-auth-warning ping 2>/dev/null | grep -q PONG \
     || fail "redis auth verification"
-docker exec zenplus-clickhouse clickhouse-client --query "SELECT 1" | grep -q 1 \
+docker exec zenplus-clickhouse clickhouse-client --password "$CH_PASS" --query "SELECT 1" | grep -q 1 \
     || fail "clickhouse verification"
+test -s /var/lib/zenplus/initial-admin-password \
+    || fail "initial admin password file missing"
 
 touch "$SENTINEL"
 chmod 644 "$SENTINEL"

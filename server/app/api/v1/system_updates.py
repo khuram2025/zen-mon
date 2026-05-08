@@ -830,7 +830,7 @@ async def system_health():
     except Exception:
         checks["redis"] = "error"
 
-    for svc in ["zenplus-api", "zenplus-poller", "netmon-gunicorn", "nginx"]:
+    for svc in ["zenplus-api", "zenplus-poller", "nginx"]:
         try:
             result = subprocess.run(
                 ["systemctl", "is-active", svc],
