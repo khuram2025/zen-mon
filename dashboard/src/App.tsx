@@ -18,6 +18,7 @@ import { ServiceCheckTemplatesPage } from '@/pages/ServiceCheckTemplatesPage'
 import { DiscoveryPage } from '@/pages/DiscoveryPage'
 import { MibLibraryPage } from '@/pages/MibLibraryPage'
 import { ReportsPage } from '@/pages/ReportsPage'
+import { SensorsPage } from '@/pages/SensorsPage'
 import { NetflowPage, NetflowDevicePage } from '@/pages/NetflowPage'
 import { NetflowForensicsPage } from '@/pages/NetflowForensics'
 import { NetflowSavedViewsPage } from '@/pages/NetflowSavedViews'
@@ -52,6 +53,7 @@ const tabRedirects: Record<string, string> = {
   channels: '/notifications',
   gateways: '/gateways',
   users: '/users',
+  sensors: '/sensors',
   snmp: '/snmp-profiles',
   subscription: '/subscription',
   appearance: '/settings/general',
@@ -100,6 +102,7 @@ export default function App() {
         <Route path="netflow/anomalies" element={<NetflowAnomaliesPage />} />
         <Route path="netflow/devices/:ip" element={<NetflowDevicePage />} />
         <Route path="mibs" element={<MibLibraryPage />} />
+        <Route path="sensors" element={<SensorsPage />} />
         <Route path="alerts" element={<AlertsPage />} />
         <Route path="alert-rules" element={<AlertRulesPage />} />
         <Route path="reports" element={<ReportsPage />}>

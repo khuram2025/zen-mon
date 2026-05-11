@@ -8,6 +8,7 @@ import {
   Activity,
   ShieldCheck,
   FileBarChart,
+  Plug,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -15,6 +16,7 @@ const navItems = [
   { path: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { path: '/devices', icon: Monitor, label: 'Devices' },
   { path: '/services', icon: ShieldCheck, label: 'Services' },
+  { path: '/sensors', icon: Plug, label: 'Sensors' },
   { path: '/discovery', icon: Radar, label: 'Discovery' },
   { path: '/alerts', icon: Bell, label: 'Alerts' },
   { path: '/reports', icon: FileBarChart, label: 'Reports' },

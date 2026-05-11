@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Building2, Download, KeyRound, Loader2, Mail, Palette, Save, Send, Settings, User as UserIcon } from 'lucide-react'
+import { Building2, Download, KeyRound, Loader2, Mail, Palette, Plug, Save, Send, Settings, User as UserIcon } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
@@ -17,6 +17,7 @@ import { useAuth } from '@/stores/auth'
 import { toast } from '@/components/ui/Toast'
 import { UpdatesTabContent } from '@/components/UpdatesTabContent'
 import { LicensesTabContent } from '@/components/LicensesTabContent'
+import { SensorsCard } from '@/components/SensorsCard'
 
 const TABS = [
   { value: 'company', label: 'Company', icon: Building2 },
@@ -24,6 +25,7 @@ const TABS = [
   { value: 'appearance', label: 'Appearance', icon: Palette },
   { value: 'licenses', label: 'Licenses', icon: KeyRound },
   { value: 'updates', label: 'Updates', icon: Download },
+  { value: 'sensors', label: 'Sensors', icon: Plug },
   { value: 'profile', label: 'Profile', icon: UserIcon },
 ] as const
 
@@ -48,7 +50,7 @@ export function GeneralSettingsPage() {
           <Settings className="h-5 w-5 text-primary" /> General Settings
         </h1>
         <p className="text-xs text-muted">
-          Company information, email, appearance, licenses, updates, and your profile
+          Company information, email, appearance, licenses, updates, sensors, and your profile
         </p>
       </div>
 
@@ -76,6 +78,9 @@ export function GeneralSettingsPage() {
         </TabsContent>
         <TabsContent value="updates">
           <UpdatesTabContent />
+        </TabsContent>
+        <TabsContent value="sensors">
+          <SensorsCard />
         </TabsContent>
         <TabsContent value="profile">
           <ProfileCard />
