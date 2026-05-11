@@ -23,7 +23,13 @@ import (
 	"go.uber.org/zap"
 )
 
-const version = "sensor-0.1.0"
+var (
+	version   = "sensor-0.1.0"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
+
+var errNotModified = errors.New("not modified")
 
 type state struct {
 	SensorID string `json:"sensor_id"`
@@ -105,6 +111,9 @@ func main() {
 		if err := saveState(cfg.statePath, st); err != nil {
 			logger.Fatalf("save state failed: %v", err)
 		}
+		if err := clearEnrollmentToken(cfg.envFile); err != nil {
+			logger.Warnf("could not clear enrollment token from env file: %v", err)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -121,6 +130,7 @@ type runtimeConfig struct {
 	verifyTLS       bool
 	stateDir        string
 	statePath       string
+	envFile         string
 	heartbeatEvery  time.Duration
 	configEvery     time.Duration
 	uploadEvery     time.Duration
@@ -149,6 +159,7 @@ func loadConfig() (*runtimeConfig, error) {
 		verifyTLS:       env("ZENPLUS_VERIFY_TLS", "1") != "0",
 		stateDir:        stateDir,
 		statePath:       filepath.Join(stateDir, "state.json"),
+		envFile:         env("ZENPLUS_SENSOR_ENV_FILE", "/etc/zenplus-sensor/sensor.env"),
 		heartbeatEvery:  secondsEnv("ZENPLUS_HEARTBEAT_INTERVAL_SECONDS", 30),
 		configEvery:     secondsEnv("ZENPLUS_CONFIG_POLL_INTERVAL_SECONDS", 60),
 		uploadEvery:     secondsEnv("ZENPLUS_UPLOAD_INTERVAL_SECONDS", 10),
@@ -204,12 +215,45 @@ func saveState(path string, st *state) error {
 	return os.WriteFile(path, data, 0600)
 }
 
+func clearEnrollmentToken(path string) error {
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(data), "\n")
+	changed := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "ZENPLUS_ENROLLMENT_TOKEN=") {
+			lines[i] = "ZENPLUS_ENROLLMENT_TOKEN=''"
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0660)
+}
+
+func sensorVersion() string {
+	if commit == "" || commit == "unknown" {
+		return version
+	}
+	return fmt.Sprintf("%s+%s", version, commit)
+}
+
 func (c *client) enroll(cfg *runtimeConfig) error {
 	body := map[string]any{
 		"enrollment_token": cfg.enrollmentToken,
 		"hostname":         cfg.hostname,
 		"os_info":          cfg.operatingSystem,
-		"version":          version,
+		"version":          sensorVersion(),
 	}
 	var out struct {
 		SensorID string `json:"sensor_id"`
@@ -225,7 +269,7 @@ func (c *client) enroll(cfg *runtimeConfig) error {
 
 func (c *client) heartbeat(ctx context.Context, cfg *runtimeConfig, queueDepth, dropped int) error {
 	body := map[string]any{
-		"version":             version,
+		"version":             sensorVersion(),
 		"uptime_seconds":      int(time.Since(cfg.startedAt).Seconds()),
 		"queue_depth":         queueDepth,
 		"queue_dropped_count": dropped,
@@ -239,7 +283,7 @@ func (c *client) getConfig(ctx context.Context) (*configResponse, bool, error) {
 	var out configResponse
 	err := c.doJSON(ctx, http.MethodGet, "/api/v1/sensor/config", nil, &out, c.state.ETag)
 	if err != nil {
-		if strings.Contains(err.Error(), "304") {
+		if errors.Is(err, errNotModified) {
 			return nil, false, nil
 		}
 		return nil, false, err
@@ -291,7 +335,7 @@ func (c *client) doJSON(ctx context.Context, method, path string, body any, out 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotModified {
-		return fmt.Errorf("304 not modified")
+		return errNotModified
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))

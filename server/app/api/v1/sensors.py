@@ -32,6 +32,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -103,14 +104,16 @@ def _server_url(request: Request) -> str:
 def _install_command(server_url: str, token: str, name: str) -> str:
     """A copy-pasteable one-liner the operator runs on the sensor VM.
 
-    For Phase 1 testing, this points at the mock-sensor script we ship in
-    /scripts. Once the real Go binary lands the only change is the URL.
+    The installer runs as root because it creates a service user, installs the
+    binary, writes systemd config, and starts the service.
     """
+    install_url = shlex.quote(f"{server_url}/api/v1/sensor/install.sh")
     return (
-        f"curl -sSL {server_url}/api/v1/sensor/install.sh "
-        f"| ZENPLUS_SERVER_URL='{server_url}' "
-        f"ZENPLUS_ENROLLMENT_TOKEN='{token}' "
-        f"ZENPLUS_SENSOR_NAME='{name}' bash"
+        f"curl -fsSL {install_url} | sudo env "
+        f"ZENPLUS_SERVER_URL={shlex.quote(server_url)} "
+        f"ZENPLUS_ENROLLMENT_TOKEN={shlex.quote(token)} "
+        f"ZENPLUS_SENSOR_NAME={shlex.quote(name)} "
+        "bash"
     )
 
 

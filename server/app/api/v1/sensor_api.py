@@ -17,7 +17,7 @@ Routes (all prefixed ``/sensor`` -> mounted under ``/api/v1``):
     POST  /sensor/results/service       batched service-check results
     POST  /sensor/results/snmp          batched SNMP results (best-effort)
     POST  /sensor/events                status transitions (no-op v1, logged)
-    GET   /sensor/install.sh            tiny installer for the mock sensor
+    GET   /sensor/install.sh            Ubuntu one-line sensor installer
 
 Auth model
 ----------
@@ -34,6 +34,7 @@ We hash the api_key with sha256 and compare against ``sensors.api_key_hash``.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -43,7 +44,7 @@ from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -69,6 +70,12 @@ SENSOR_ARTIFACT_BASENAMES = {
     "ovf": "zenplus-sensor.ovf",
     "sha256": "SHA256SUMS",
     "metadata": "BUILD-METADATA.json",
+}
+SENSOR_BINARY_NAME = "zenplus-sensor"
+SENSOR_BINARY_SHA_NAME = "zenplus-sensor.sha256"
+SUPPORTED_SENSOR_BINARY_PLATFORMS = {
+    "linux-amd64": ("linux", "amd64"),
+    "linux-arm64": ("linux", "arm64"),
 }
 
 
@@ -108,7 +115,7 @@ async def _authenticate(
     if not expected:
         raise HTTPException(401, "Sensor not enrolled")
 
-    if _sha256(bearer) != expected:
+    if not hmac.compare_digest(_sha256(bearer), str(expected)):
         raise HTTPException(401, "Invalid sensor api key")
 
     return dict(row)
@@ -127,6 +134,44 @@ def _client_ip(request: Request) -> Optional[str]:
     if fwd:
         return fwd.split(",")[0].strip()
     return request.client.host if request.client else None
+
+
+def _binary_dir(platform: str) -> Path:
+    if platform not in SUPPORTED_SENSOR_BINARY_PLATFORMS:
+        raise HTTPException(404, "Unsupported sensor binary platform")
+    return SENSOR_ARTIFACT_DIR / "bin" / platform
+
+
+def _binary_path(platform: str) -> Path:
+    return _binary_dir(platform) / SENSOR_BINARY_NAME
+
+
+def _binary_sha_path(platform: str) -> Path:
+    return _binary_dir(platform) / SENSOR_BINARY_SHA_NAME
+
+
+def _sha256_path(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _binary_sha_line(platform: str) -> str:
+    binary = _binary_path(platform)
+    if not binary.exists() or not binary.is_file():
+        raise HTTPException(
+            404,
+            f"Sensor binary for {platform} is not published yet. "
+            "Build the appliance release or run the installer build step first.",
+        )
+    sha_path = _binary_sha_path(platform)
+    if sha_path.exists() and sha_path.is_file():
+        text_value = sha_path.read_text().strip()
+        if text_value:
+            return text_value + "\n"
+    return f"{_sha256_path(binary)}  {SENSOR_BINARY_NAME}\n"
 
 
 # ── Enroll ───────────────────────────────────────────────────────────
@@ -251,13 +296,30 @@ async def _config_etag(sensor_id: UUID, db: AsyncSession) -> str:
     row = (await db.execute(text("SELECT updated_at FROM sensors WHERE id = :id"), {"id": sensor_id})).first()
     sensor_ts = row[0].isoformat() if row else ""
     rows = (await db.execute(
-        text("""SELECT a.target_type, a.target_id,
-                       COALESCE(d.updated_at, sc.updated_at) AS upd
+        text("""SELECT 'assignment' AS item_type, a.target_id, a.created_at AS upd
                 FROM sensor_assignments a
-                LEFT JOIN devices d         ON a.target_type='device' AND d.id = a.target_id
-                LEFT JOIN service_checks sc ON a.target_type='service_check' AND sc.id = a.target_id
                 WHERE a.sensor_id = :id
-                ORDER BY a.target_type, a.target_id"""),
+                UNION ALL
+                SELECT 'device' AS item_type, d.id AS target_id, d.updated_at AS upd
+                FROM devices d
+                WHERE d.default_sensor_id = :id
+                   OR d.id IN (
+                        SELECT a.target_id FROM sensor_assignments a
+                        WHERE a.sensor_id = :id AND a.target_type = 'device'
+                   )
+                   OR d.group_id IN (
+                        SELECT a.target_id FROM sensor_assignments a
+                        WHERE a.sensor_id = :id AND a.target_type = 'group'
+                   )
+                UNION ALL
+                SELECT 'service_check' AS item_type, sc.id AS target_id, sc.updated_at AS upd
+                FROM service_checks sc
+                WHERE sc.default_sensor_id = :id
+                   OR sc.id IN (
+                        SELECT a.target_id FROM sensor_assignments a
+                        WHERE a.sensor_id = :id AND a.target_type = 'service_check'
+                   )
+                ORDER BY item_type, target_id"""),
         {"id": sensor_id},
     )).all()
     parts = [sensor_ts]
@@ -278,15 +340,23 @@ async def get_config(
     sensor = await _authenticate(x_sensor_id, _strip_bearer(authorization), db)
     etag = await _config_etag(sensor["id"], db)
     if if_none_match and if_none_match.strip('"') == etag:
-        raise HTTPException(status_code=304, detail="Not Modified")
+        return Response(status_code=304)
 
     # Pull assigned devices.
     devices = (await db.execute(
-        text("""SELECT d.id, d.hostname, host(d.ip_address)::text AS ip_address,
+        text("""SELECT DISTINCT d.id, d.hostname, host(d.ip_address)::text AS ip_address,
                        d.ping_enabled, d.ping_interval, d.snmp_enabled
-                FROM sensor_assignments a
-                JOIN devices d ON d.id = a.target_id
-                WHERE a.sensor_id = :sid AND a.target_type = 'device'"""),
+                FROM devices d
+                WHERE d.default_sensor_id = :sid
+                   OR d.id IN (
+                        SELECT a.target_id FROM sensor_assignments a
+                        WHERE a.sensor_id = :sid AND a.target_type = 'device'
+                   )
+                   OR d.group_id IN (
+                        SELECT a.target_id FROM sensor_assignments a
+                        WHERE a.sensor_id = :sid AND a.target_type = 'group'
+                   )
+                ORDER BY d.hostname"""),
         {"sid": sensor["id"]},
     )).mappings().all()
 
@@ -300,11 +370,13 @@ async def get_config(
                        sc.tls_warn_days, sc.tls_critical_days,
                        sc.check_interval, sc.timeout, sc.retry_count, sc.enabled
                 FROM service_checks sc
-                WHERE sc.id IN (
+                WHERE sc.enabled = TRUE
+                  AND (sc.id IN (
                     SELECT a.target_id FROM sensor_assignments a
                     WHERE a.sensor_id = :sid AND a.target_type = 'service_check'
                 )
-                   OR sc.default_sensor_id = :sid"""),
+                   OR sc.default_sensor_id = :sid)
+                ORDER BY sc.name"""),
         {"sid": sensor["id"]},
     )).mappings().all()
 
@@ -344,6 +416,56 @@ async def get_config(
 
 # ── Results ingestion ───────────────────────────────────────────────
 
+async def _allowed_device_ids(sensor_id: UUID, device_ids: set[UUID], db: AsyncSession) -> set[str]:
+    if not device_ids:
+        return set()
+    rows = (await db.execute(
+        text("""SELECT d.id::text
+                FROM devices d
+                WHERE d.id = ANY(:ids)
+                  AND (
+                    d.default_sensor_id = :sid
+                    OR d.id IN (
+                        SELECT a.target_id FROM sensor_assignments a
+                        WHERE a.sensor_id = :sid AND a.target_type = 'device'
+                    )
+                    OR d.group_id IN (
+                        SELECT a.target_id FROM sensor_assignments a
+                        WHERE a.sensor_id = :sid AND a.target_type = 'group'
+                    )
+                  )"""),
+        {"sid": sensor_id, "ids": list(device_ids)},
+    )).all()
+    return {str(r[0]) for r in rows}
+
+
+async def _allowed_service_check_ids(sensor_id: UUID, check_ids: set[UUID], db: AsyncSession) -> set[str]:
+    if not check_ids:
+        return set()
+    rows = (await db.execute(
+        text("""SELECT sc.id::text
+                FROM service_checks sc
+                WHERE sc.id = ANY(:ids)
+                  AND (
+                    sc.default_sensor_id = :sid
+                    OR sc.id IN (
+                        SELECT a.target_id FROM sensor_assignments a
+                        WHERE a.sensor_id = :sid AND a.target_type = 'service_check'
+                    )
+                  )"""),
+        {"sid": sensor_id, "ids": list(check_ids)},
+    )).all()
+    return {str(r[0]) for r in rows}
+
+
+def _uuid_from_item(item: dict, key: str) -> UUID:
+    raw = item.get(key)
+    try:
+        return UUID(str(raw))
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"Invalid {key}")
+
+
 def _parse_dt(v: Any) -> datetime:
     if isinstance(v, datetime):
         return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
@@ -368,14 +490,22 @@ async def post_ping_results(
         return {"inserted": 0}
 
     rows: list[list] = []
-    affected_device_ids: set[str] = set()
     last_status: dict[str, dict] = {}
+    normalized_items: list[tuple[dict, UUID]] = []
 
     for it in body.items:
         if not isinstance(it, dict):
             it = it.model_dump() if hasattr(it, "model_dump") else dict(it)
-        device_id = str(it.get("device_id"))
-        affected_device_ids.add(device_id)
+        device_uuid = _uuid_from_item(it, "device_id")
+        normalized_items.append((it, device_uuid))
+
+    allowed = await _allowed_device_ids(sensor["id"], {device_uuid for _, device_uuid in normalized_items}, db)
+    rejected = [str(device_uuid) for _, device_uuid in normalized_items if str(device_uuid) not in allowed]
+    if rejected:
+        raise HTTPException(403, f"Sensor is not assigned to device(s): {', '.join(sorted(set(rejected)))}")
+
+    for it, device_uuid in normalized_items:
+        device_id = str(device_uuid)
         ts = _parse_dt(it.get("timestamp"))
         is_up = 1 if it.get("is_up") else 0
         rtt = float(it.get("rtt_ms") or 0.0)
@@ -434,11 +564,21 @@ async def post_service_results(
 
     rows: list[list] = []
     last_status: dict[str, dict] = {}
+    normalized_items: list[tuple[dict, UUID]] = []
 
     for it in body.items:
         if not isinstance(it, dict):
             it = it.model_dump() if hasattr(it, "model_dump") else dict(it)
-        sc_id = str(it.get("service_check_id"))
+        check_uuid = _uuid_from_item(it, "service_check_id")
+        normalized_items.append((it, check_uuid))
+
+    allowed = await _allowed_service_check_ids(sensor["id"], {check_uuid for _, check_uuid in normalized_items}, db)
+    rejected = [str(check_uuid) for _, check_uuid in normalized_items if str(check_uuid) not in allowed]
+    if rejected:
+        raise HTTPException(403, f"Sensor is not assigned to service check(s): {', '.join(sorted(set(rejected)))}")
+
+    for it, check_uuid in normalized_items:
+        sc_id = str(check_uuid)
         ts = _parse_dt(it.get("timestamp"))
         check_type = it.get("check_type") or "http"
         is_up = 1 if it.get("is_up") else 0
@@ -622,11 +762,51 @@ async def download_sensor_appliance_artifact(kind: str):
     return FileResponse(path, media_type=media_types.get(kind, "application/octet-stream"), filename=path.name)
 
 
-# ── Tiny installer for the mock sensor (Phase 1 only) ────────────────
+# ── Ubuntu sensor binary and one-line installer ─────────────────────
+
+@router.get("/bin/{platform}/manifest.json", name="sensor_binary_manifest")
+async def sensor_binary_manifest(platform: str, request: Request):
+    binary = _binary_path(platform)
+    available = binary.exists() and binary.is_file()
+    sha256 = None
+    if available:
+        sha256 = _binary_sha_line(platform).split()[0]
+    return {
+        "product": "ZenPlus Remote Sensor",
+        "platform": platform,
+        "available": available,
+        "filename": SENSOR_BINARY_NAME,
+        "url": str(request.url_for("download_sensor_binary", platform=platform)),
+        "sha256_url": str(request.url_for("download_sensor_binary_checksum", platform=platform)),
+        "size_bytes": binary.stat().st_size if available else None,
+        "updated_at": datetime.fromtimestamp(binary.stat().st_mtime, tz=timezone.utc) if available else None,
+        "sha256": sha256,
+    }
+
+
+@router.get("/bin/{platform}/zenplus-sensor", name="download_sensor_binary")
+async def download_sensor_binary(platform: str):
+    binary = _binary_path(platform)
+    if not binary.exists() or not binary.is_file():
+        raise HTTPException(
+            404,
+            f"Sensor binary for {platform} is not published yet. "
+            "Build the appliance release or run the installer build step first.",
+        )
+    return FileResponse(binary, media_type="application/octet-stream", filename=SENSOR_BINARY_NAME)
+
+
+@router.get(
+    "/bin/{platform}/zenplus-sensor.sha256",
+    response_class=PlainTextResponse,
+    name="download_sensor_binary_checksum",
+)
+async def download_sensor_binary_checksum(platform: str):
+    return _binary_sha_line(platform)
 
 INSTALL_SH = """\
 #!/usr/bin/env bash
-# ZenPlus mock sensor installer (Phase 1 / testing only).
+# ZenPlus remote sensor installer for Ubuntu.
 #
 # Required env:
 #   ZENPLUS_SERVER_URL=https://central
@@ -637,19 +817,115 @@ set -euo pipefail
 : "${ZENPLUS_ENROLLMENT_TOKEN:?set ZENPLUS_ENROLLMENT_TOKEN}"
 : "${ZENPLUS_SENSOR_NAME:?set ZENPLUS_SENSOR_NAME}"
 
-INSTALL_DIR="${ZENPLUS_INSTALL_DIR:-$HOME/zenplus-sensor}"
-mkdir -p "$INSTALL_DIR"
+if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+  echo "This installer must run as root. Use: curl ... | sudo env ... bash" >&2
+  exit 1
+fi
 
-echo "Fetching mock sensor script…"
-curl -sSL "$ZENPLUS_SERVER_URL/api/v1/sensor/mock_sensor.py" -o "$INSTALL_DIR/mock_sensor.py"
-chmod +x "$INSTALL_DIR/mock_sensor.py"
+for value in "$ZENPLUS_SERVER_URL" "$ZENPLUS_ENROLLMENT_TOKEN" "$ZENPLUS_SENSOR_NAME"; do
+  if [[ "$value" == *"'"* || "$value" == *$'\\n'* ]]; then
+    echo "Installer environment values must not contain single quotes or newlines." >&2
+    exit 1
+  fi
+done
+
+case "$(uname -m)" in
+  x86_64|amd64) PLATFORM="linux-amd64" ;;
+  aarch64|arm64) PLATFORM="linux-arm64" ;;
+  *) echo "Unsupported CPU architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+
+VERIFY_TLS="${ZENPLUS_VERIFY_TLS:-1}"
+INSTALL_BIN="${ZENPLUS_INSTALL_BIN:-/usr/local/bin/zenplus-sensor}"
+ENV_DIR="/etc/zenplus-sensor"
+ENV_FILE="$ENV_DIR/sensor.env"
+STATE_DIR="${ZENPLUS_SENSOR_STATE_DIR:-/var/lib/zenplus-sensor}"
+LOG_DIR="/var/log/zenplus-sensor"
+SERVICE_FILE="/etc/systemd/system/zenplus-sensor.service"
+TMP_DIR="$(mktemp -d)"
+cleanup() { rm -rf "$TMP_DIR"; }
+trap cleanup EXIT
+
+curl_args=(-fsSL)
+if [[ "$VERIFY_TLS" == "0" ]]; then
+  curl_args+=(-k)
+fi
+
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq curl ca-certificates iputils-ping libcap2-bin >/dev/null
+fi
+
+if ! getent group zenplus-sensor >/dev/null; then
+  groupadd --system zenplus-sensor
+fi
+if ! id zenplus-sensor >/dev/null 2>&1; then
+  useradd --system --home "$STATE_DIR" --shell /usr/sbin/nologin --gid zenplus-sensor zenplus-sensor
+fi
+
+install -d -m 0750 -o root -g zenplus-sensor "$ENV_DIR"
+install -d -m 0750 -o zenplus-sensor -g zenplus-sensor "$STATE_DIR" "$LOG_DIR"
+install -d -m 0755 -o root -g root "$(dirname "$INSTALL_BIN")"
+
+BIN_URL="$ZENPLUS_SERVER_URL/api/v1/sensor/bin/$PLATFORM/zenplus-sensor"
+SHA_URL="$ZENPLUS_SERVER_URL/api/v1/sensor/bin/$PLATFORM/zenplus-sensor.sha256"
+echo "Downloading ZenPlus sensor binary for $PLATFORM..."
+curl "${curl_args[@]}" "$BIN_URL" -o "$TMP_DIR/zenplus-sensor"
+curl "${curl_args[@]}" "$SHA_URL" -o "$TMP_DIR/zenplus-sensor.sha256"
+( cd "$TMP_DIR" && sha256sum -c zenplus-sensor.sha256 )
+
+install -m 0755 -o root -g root "$TMP_DIR/zenplus-sensor" "$INSTALL_BIN"
+setcap cap_net_raw+ep "$INSTALL_BIN" 2>/dev/null || true
+
+cat > "$ENV_FILE" <<ENVEOF
+ZENPLUS_SERVER_URL='$ZENPLUS_SERVER_URL'
+ZENPLUS_ENROLLMENT_TOKEN='$ZENPLUS_ENROLLMENT_TOKEN'
+ZENPLUS_SENSOR_NAME='$ZENPLUS_SENSOR_NAME'
+ZENPLUS_VERIFY_TLS='$VERIFY_TLS'
+ZENPLUS_SENSOR_STATE_DIR='$STATE_DIR'
+ZENPLUS_SENSOR_ENV_FILE='$ENV_FILE'
+ZENPLUS_HEARTBEAT_INTERVAL_SECONDS='30'
+ZENPLUS_CONFIG_POLL_INTERVAL_SECONDS='60'
+ZENPLUS_UPLOAD_INTERVAL_SECONDS='10'
+ZENPLUS_MAX_WORKERS='100'
+ENVEOF
+chown root:zenplus-sensor "$ENV_FILE"
+chmod 0660 "$ENV_FILE"
+
+cat > "$SERVICE_FILE" <<'SVCEOF'
+[Unit]
+Description=ZenPlus Remote Sensor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zenplus-sensor
+Group=zenplus-sensor
+EnvironmentFile=/etc/zenplus-sensor/sensor.env
+ExecStart=/usr/local/bin/zenplus-sensor
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/zenplus-sensor /var/log/zenplus-sensor /etc/zenplus-sensor
+CapabilityBoundingSet=CAP_NET_RAW
+AmbientCapabilities=CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+
+systemctl daemon-reload
+systemctl enable --now zenplus-sensor.service
+sleep 2
 
 echo
-echo "Run:"
-echo "  ZENPLUS_SERVER_URL='$ZENPLUS_SERVER_URL' \\\\"
-echo "  ZENPLUS_ENROLLMENT_TOKEN='$ZENPLUS_ENROLLMENT_TOKEN' \\\\"
-echo "  ZENPLUS_SENSOR_NAME='$ZENPLUS_SENSOR_NAME' \\\\"
-echo "  python3 $INSTALL_DIR/mock_sensor.py"
+echo "ZenPlus sensor installed."
+systemctl --no-pager --full status zenplus-sensor.service || true
 """
 
 

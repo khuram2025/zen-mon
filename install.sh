@@ -66,6 +66,7 @@ install_prerequisites() {
         gnupg lsb-release software-properties-common \
         python3 python3-pip python3-venv \
         build-essential jq openssl \
+        libcap2-bin \
         postgresql postgresql-client redis-server nginx \
         > /dev/null 2>&1
     log "Core packages installed"
@@ -315,6 +316,22 @@ build_components() {
     [[ -x "$ZENPLUS_HOME/bin/zenplus-poller" ]] || err "Go poller binary was not created"
     setcap cap_net_raw+ep "$ZENPLUS_HOME/bin/zenplus-poller" 2>/dev/null || true
     log "Go poller built"
+
+    # Remote sensor binary served by /api/v1/sensor/install.sh.
+    info "Building Go remote sensor..."
+    SENSOR_ARTIFACT_DIR="$ZENPLUS_HOME/artifacts/sensors/bin/linux-amd64"
+    mkdir -p "$SENSOR_ARTIFACT_DIR"
+    SENSOR_COMMIT=$(cd "$ZENPLUS_HOME" && git rev-parse --short HEAD 2>/dev/null || echo unknown)
+    SENSOR_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false \
+        -ldflags "-X main.version=sensor-0.1.0 -X main.commit=$SENSOR_COMMIT -X main.buildDate=$SENSOR_BUILD_DATE" \
+        -o "$SENSOR_ARTIFACT_DIR/zenplus-sensor" ./cmd/sensor || err "Go sensor build failed"
+    [[ -x "$SENSOR_ARTIFACT_DIR/zenplus-sensor" ]] || err "Go sensor binary was not created"
+    ( cd "$SENSOR_ARTIFACT_DIR" && sha256sum zenplus-sensor > zenplus-sensor.sha256 )
+    cat > "$SENSOR_ARTIFACT_DIR/manifest.json" <<EOF
+{"product":"ZenPlus Remote Sensor","platform":"linux-amd64","version":"sensor-0.1.0","commit":"$SENSOR_COMMIT","built_at":"$SENSOR_BUILD_DATE","binary":"zenplus-sensor","sha256_file":"zenplus-sensor.sha256"}
+EOF
+    log "Go remote sensor built"
 
     # Python venv
     info "Setting up Python environment..."
@@ -724,6 +741,19 @@ case "${1:-help}" in
         ( cd "$ZENPLUS_HOME/poller" && go mod tidy && CGO_ENABLED=0 go build -buildvcs=false -o "$ZENPLUS_HOME/bin/zenplus-poller" ./cmd/poller ) || { echo "Poller build failed"; exit 1; }
         [[ -x "$ZENPLUS_HOME/bin/zenplus-poller" ]] || { echo "Poller binary was not created"; exit 1; }
         setcap cap_net_raw+ep "$ZENPLUS_HOME/bin/zenplus-poller" 2>/dev/null || true
+        echo "  building remote sensor..."
+        SENSOR_ARTIFACT_DIR="$ZENPLUS_HOME/artifacts/sensors/bin/linux-amd64"
+        mkdir -p "$SENSOR_ARTIFACT_DIR"
+        SENSOR_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+        SENSOR_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        ( cd "$ZENPLUS_HOME/poller" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false \
+            -ldflags "-X main.version=sensor-0.1.0 -X main.commit=$SENSOR_COMMIT -X main.buildDate=$SENSOR_BUILD_DATE" \
+            -o "$SENSOR_ARTIFACT_DIR/zenplus-sensor" ./cmd/sensor ) || { echo "Sensor build failed"; exit 1; }
+        [[ -x "$SENSOR_ARTIFACT_DIR/zenplus-sensor" ]] || { echo "Sensor binary was not created"; exit 1; }
+        ( cd "$SENSOR_ARTIFACT_DIR" && sha256sum zenplus-sensor > zenplus-sensor.sha256 )
+        cat > "$SENSOR_ARTIFACT_DIR/manifest.json" <<EOF
+{"product":"ZenPlus Remote Sensor","platform":"linux-amd64","version":"sensor-0.1.0","commit":"$SENSOR_COMMIT","built_at":"$SENSOR_BUILD_DATE","binary":"zenplus-sensor","sha256_file":"zenplus-sensor.sha256"}
+EOF
         echo "  installing python deps..."
         "$ZENPLUS_HOME/venv/bin/pip" install -q -r "$ZENPLUS_HOME/server/requirements.txt"
         echo "  building dashboard..."

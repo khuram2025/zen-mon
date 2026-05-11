@@ -37,6 +37,7 @@ ZENPLUS_DIR = Path("/opt/zenplus")
 RELEASE_DIR = Path("/tmp/zenplus-releases")
 PRIVATE_KEY_PATH = ZENPLUS_DIR / "updater" / "keys" / "zentryc-release.key"
 SERVER_URL = "https://zentryc.com"
+GO_BIN = shutil.which("go") or "/usr/local/go/bin/go"
 
 # Directories to include in the code update
 CODE_DIRS = ["server", "poller", "scripts"]
@@ -164,28 +165,70 @@ def build_package(version: str, changelog: str, severity: str,
     else:
         print("[2/7] Skipping dashboard build (--skip-dashboard)")
 
-    # 3. Build Go binary
+    # 3. Build Go binaries
     if not skip_go:
-        print("[3/7] Building Go poller ...")
+        print("[3/7] Building Go poller and remote sensor ...")
         go_dir = build_dir / "go-binaries"
         go_dir.mkdir()
+        sensor_dir = build_dir / "sensor-artifacts" / "bin" / "linux-amd64"
+        sensor_dir.mkdir(parents=True)
         poller_src = ZENPLUS_DIR / "poller"
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, cwd=str(ZENPLUS_DIR),
+        ).stdout.strip() or "unknown"
+        build_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         if poller_src.exists() and (poller_src / "cmd" / "poller").exists():
             result = subprocess.run(
-                ["go", "build", "-o", str(go_dir / "zenplus-poller"), "./cmd/poller"],
+                [GO_BIN, "build", "-buildvcs=false", "-o", str(go_dir / "zenplus-poller"), "./cmd/poller"],
                 capture_output=True, text=True,
                 cwd=str(poller_src), timeout=300,
                 env={**os.environ, "GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "0"},
             )
             if result.returncode != 0:
-                print(f"  WARNING: Go build failed: {result.stderr}")
-                print("  Continuing without Go binary ...")
-                shutil.rmtree(go_dir)
+                print(f"  ERROR: Go poller build failed:\n{result.stderr}")
+                sys.exit(1)
             else:
                 print(f"  Built: zenplus-poller ({(go_dir / 'zenplus-poller').stat().st_size / 1024 / 1024:.1f} MB)")
         else:
-            print("  No Go poller source found, skipping")
-            shutil.rmtree(go_dir)
+            print("  ERROR: No Go poller source found")
+            sys.exit(1)
+
+        if poller_src.exists() and (poller_src / "cmd" / "sensor").exists():
+            ldflags = (
+                f"-X main.version=sensor-{version} "
+                f"-X main.commit={commit} "
+                f"-X main.buildDate={build_date}"
+            )
+            result = subprocess.run(
+                [
+                    GO_BIN, "build", "-buildvcs=false", "-ldflags", ldflags,
+                    "-o", str(sensor_dir / "zenplus-sensor"), "./cmd/sensor",
+                ],
+                capture_output=True, text=True,
+                cwd=str(poller_src), timeout=300,
+                env={**os.environ, "GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "0"},
+            )
+            if result.returncode != 0:
+                print(f"  ERROR: Go sensor build failed:\n{result.stderr}")
+                sys.exit(1)
+            sensor_binary = sensor_dir / "zenplus-sensor"
+            sensor_sha = sha256_file(str(sensor_binary))
+            (sensor_dir / "zenplus-sensor.sha256").write_text(f"{sensor_sha}  zenplus-sensor\n")
+            (sensor_dir / "manifest.json").write_text(json.dumps({
+                "product": "ZenPlus Remote Sensor",
+                "platform": "linux-amd64",
+                "version": f"sensor-{version}",
+                "commit": commit,
+                "built_at": build_date,
+                "binary": "zenplus-sensor",
+                "sha256_file": "zenplus-sensor.sha256",
+                "sha256": sensor_sha,
+            }, indent=2) + "\n")
+            print(f"  Built: zenplus-sensor ({sensor_binary.stat().st_size / 1024 / 1024:.1f} MB)")
+        else:
+            print("  ERROR: No Go sensor source found")
+            sys.exit(1)
     else:
         print("[3/7] Skipping Go build (--skip-go)")
 
@@ -236,6 +279,18 @@ def build_package(version: str, changelog: str, severity: str,
     if (build_dir / "go-binaries" / "zenplus-poller").exists():
         steps.append({"type": "install_binary", "source": "go-binaries/zenplus-poller",
                        "dest": "/opt/zenplus/bin/zenplus-poller"})
+
+    sensor_artifact_dir = build_dir / "sensor-artifacts" / "bin" / "linux-amd64"
+    if (sensor_artifact_dir / "zenplus-sensor").exists():
+        steps.append({"type": "install_binary",
+                      "source": "sensor-artifacts/bin/linux-amd64/zenplus-sensor",
+                      "dest": "/opt/zenplus/artifacts/sensors/bin/linux-amd64/zenplus-sensor"})
+        steps.append({"type": "install_config",
+                      "source": "sensor-artifacts/bin/linux-amd64/zenplus-sensor.sha256",
+                      "dest": "/opt/zenplus/artifacts/sensors/bin/linux-amd64/zenplus-sensor.sha256"})
+        steps.append({"type": "install_config",
+                      "source": "sensor-artifacts/bin/linux-amd64/manifest.json",
+                      "dest": "/opt/zenplus/artifacts/sensors/bin/linux-amd64/manifest.json"})
 
     # Restart services
     steps.append({"type": "start_services",

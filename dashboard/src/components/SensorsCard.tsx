@@ -689,7 +689,7 @@ function TokenDialog({ info, onClose }: { info: TokenInfo | null; onClose: () =>
 
             <div>
               <div className="mb-1 text-xs font-medium uppercase tracking-wider text-muted">
-                One-line install command (development harness)
+                One-line install command (Ubuntu sensor)
               </div>
               <div className="rounded-md border border-border bg-surface2 p-3 font-mono text-xs leading-relaxed">
                 <pre className="whitespace-pre-wrap break-all">{info.install_command}</pre>
