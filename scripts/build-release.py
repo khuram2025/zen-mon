@@ -34,9 +34,11 @@ from pathlib import Path
 from uuid import uuid4
 
 ZENPLUS_DIR = Path("/opt/zenplus")
-RELEASE_DIR = Path("/tmp/zenplus-releases")
-PRIVATE_KEY_PATH = ZENPLUS_DIR / "updater" / "keys" / "zentryc-release.key"
-SERVER_URL = "https://zentryc.com"
+RELEASE_DIR = Path(os.getenv("ZENPLUS_RELEASE_DIR", "/tmp/zenplus-releases"))
+PRIVATE_KEY_PATH = Path(
+    os.getenv("ZENPLUS_RELEASE_PRIVATE_KEY", str(ZENPLUS_DIR / "updater" / "keys" / "zentryc-release.key"))
+)
+SERVER_URL = os.getenv("ZENPLUS_RELEASE_SERVER_URL", "https://zentryc.com")
 GO_BIN = shutil.which("go") or "/usr/local/go/bin/go"
 
 # Directories to include in the code update
@@ -99,7 +101,7 @@ def get_admin_token() -> str:
 
 def build_package(version: str, changelog: str, severity: str,
                   min_version: str | None, skip_dashboard: bool,
-                  skip_go: bool) -> Path:
+                  skip_go: bool, include_migrations: bool) -> Path:
     """Build a .zup release package from the current codebase."""
 
     print(f"\n{'='*60}")
@@ -241,20 +243,26 @@ def build_package(version: str, changelog: str, severity: str,
     else:
         print("  No requirements.txt found")
 
-    # 5. Copy new migrations
+    # 5. Copy migrations only when explicitly requested. Older migrations in
+    # deployed appliances are not all safely re-runnable, so code-only releases
+    # should not package the historical migration set.
     print("[5/7] Checking for migrations ...")
     migrations_src = ZENPLUS_DIR / "scripts"
     migration_count = 0
     migrate_dir = build_dir / "migrations"
-    migrate_dir.mkdir()
-    if migrations_src.exists():
+    if include_migrations and migrations_src.exists():
+        migrate_dir.mkdir()
         for f in sorted(migrations_src.glob("migrate-*.sql")):
             shutil.copy2(f, migrate_dir / f.name)
             migration_count += 1
             print(f"  + {f.name}")
     if migration_count == 0:
-        shutil.rmtree(migrate_dir)
-        print("  No migrations found")
+        if migrate_dir.exists():
+            shutil.rmtree(migrate_dir)
+        if include_migrations:
+            print("  No migrations found")
+        else:
+            print("  Skipping migrations (use --include-migrations for schema releases)")
 
     # 6. Create manifest.json
     print("[6/7] Creating manifest ...")
@@ -563,6 +571,8 @@ Examples:
     build_p.add_argument("--min-version", default=None, help="Minimum version to upgrade from")
     build_p.add_argument("--skip-dashboard", action="store_true", help="Skip dashboard build")
     build_p.add_argument("--skip-go", action="store_true", help="Skip Go binary build")
+    build_p.add_argument("--include-migrations", action="store_true",
+                         help="Package scripts/migrate-*.sql files for schema releases")
 
     # Publish
     pub_p = sub.add_parser("publish", help="Build and publish to zentryc.com")
@@ -574,6 +584,8 @@ Examples:
     pub_p.add_argument("--file", "-f", default=None, help="Use existing .zup file instead of building")
     pub_p.add_argument("--skip-dashboard", action="store_true")
     pub_p.add_argument("--skip-go", action="store_true")
+    pub_p.add_argument("--include-migrations", action="store_true",
+                       help="Package scripts/migrate-*.sql files for schema releases")
     pub_p.add_argument("--rollout", default=None,
                        choices=["canary", "percentage", "full"],
                        help="Auto-create rollout after publishing")
@@ -594,7 +606,8 @@ Examples:
 
     if args.command == "build":
         build_package(args.version, args.changelog, args.severity,
-                      args.min_version, args.skip_dashboard, args.skip_go)
+                      args.min_version, args.skip_dashboard, args.skip_go,
+                      args.include_migrations)
 
     elif args.command == "publish":
         if args.file:
@@ -604,7 +617,8 @@ Examples:
                 sys.exit(1)
         else:
             zup_path = build_package(args.version, args.changelog, args.severity,
-                                     args.min_version, args.skip_dashboard, args.skip_go)
+                                     args.min_version, args.skip_dashboard, args.skip_go,
+                                     args.include_migrations)
         publish_package(zup_path, args.version, args.changelog,
                         args.severity, args.min_version)
 
