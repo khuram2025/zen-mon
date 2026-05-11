@@ -36,6 +36,12 @@ step()  { echo -e "\n${CYAN}${BOLD}━━━ $* ━━━${NC}\n"; }
 
 check_root() { [[ $EUID -ne 0 ]] && err "This script must be run as root (use sudo)"; }
 get_ip() { ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1; }
+mark_git_safe() {
+    git config --global --add safe.directory "$ZENPLUS_HOME" 2>/dev/null || true
+    if id "$ZENPLUS_USER" &>/dev/null; then
+        runuser -u "$ZENPLUS_USER" -- git config --global --add safe.directory "$ZENPLUS_HOME" 2>/dev/null || true
+    fi
+}
 
 show_banner() {
     echo -e "${CYAN}"
@@ -136,7 +142,7 @@ fetch_code() {
     if [[ -d "$ZENPLUS_HOME/.git" ]]; then
         info "Pulling latest changes..."
         cd "$ZENPLUS_HOME"
-        git config --global --add safe.directory "$ZENPLUS_HOME" 2>/dev/null || true
+        mark_git_safe
         git fetch origin && git reset --hard "origin/$ZENPLUS_BRANCH"
         log "Updated to $(git rev-parse --short HEAD)"
     else
@@ -156,6 +162,7 @@ fetch_code() {
         log "Cloned version $(cd "$ZENPLUS_HOME" && git rev-parse --short HEAD)"
     fi
     chown -R "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME"
+    mark_git_safe
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -245,7 +252,7 @@ from passlib.context import CryptContext
 print(CryptContext(schemes=['bcrypt'], deprecated='auto').hash('admin123'))
 " 2>/dev/null || echo "")
     if [[ -n "$ADMIN_HASH" ]]; then
-        su - postgres -c "psql -d zenplus -c \"UPDATE users SET password_hash = '$ADMIN_HASH' WHERE username = 'admin';\"" 2>/dev/null
+        runuser -u postgres -- psql -d zenplus -c "UPDATE users SET password_hash = '$ADMIN_HASH' WHERE username = 'admin';" >/dev/null 2>&1
         log "Admin password set (admin123)"
     fi
 
@@ -303,8 +310,9 @@ build_components() {
     info "Building Go poller..."
     cd "$ZENPLUS_HOME/poller"
     export PATH=/usr/local/go/bin:$PATH
-    go mod tidy 2>/dev/null
-    CGO_ENABLED=0 go build -o "$ZENPLUS_HOME/bin/zenplus-poller" ./cmd/poller
+    go mod tidy || err "Go dependency resolution failed"
+    CGO_ENABLED=0 go build -buildvcs=false -o "$ZENPLUS_HOME/bin/zenplus-poller" ./cmd/poller || err "Go poller build failed"
+    [[ -x "$ZENPLUS_HOME/bin/zenplus-poller" ]] || err "Go poller binary was not created"
     setcap cap_net_raw+ep "$ZENPLUS_HOME/bin/zenplus-poller" 2>/dev/null || true
     log "Go poller built"
 
@@ -713,7 +721,8 @@ case "${1:-help}" in
         echo "  $OLD -> $NEW"
         export PATH=/usr/local/go/bin:$PATH
         echo "  building poller..."
-        ( cd "$ZENPLUS_HOME/poller" && go mod tidy 2>/dev/null && CGO_ENABLED=0 go build -o "$ZENPLUS_HOME/bin/zenplus-poller" ./cmd/poller )
+        ( cd "$ZENPLUS_HOME/poller" && go mod tidy && CGO_ENABLED=0 go build -buildvcs=false -o "$ZENPLUS_HOME/bin/zenplus-poller" ./cmd/poller ) || { echo "Poller build failed"; exit 1; }
+        [[ -x "$ZENPLUS_HOME/bin/zenplus-poller" ]] || { echo "Poller binary was not created"; exit 1; }
         setcap cap_net_raw+ep "$ZENPLUS_HOME/bin/zenplus-poller" 2>/dev/null || true
         echo "  installing python deps..."
         "$ZENPLUS_HOME/venv/bin/pip" install -q -r "$ZENPLUS_HOME/server/requirements.txt"
