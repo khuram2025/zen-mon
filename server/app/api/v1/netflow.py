@@ -294,7 +294,7 @@ async def netflow_overview(
             uniqExact(exporter_ip) AS exporters,
             uniqExact(src_addr) AS src_hosts,
             uniqExact(dst_addr) AS dst_hosts,
-            max(timestamp) AS last_seen,
+            max(received_at) AS last_seen,
             sumIf(bytes, timestamp >= %(end)s - toIntervalSecond(%(rate_window)s)) * 8 / %(rate_window)s AS current_bps
         FROM zenplus.flow_records
         WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
@@ -556,7 +556,7 @@ async def netflow_device_status(
             countIf(packets = 0) AS empty_flows,
             countIf(bitAnd(toUInt8(tcp_flags), 4) = 4) AS rst_flows,
             uniqExact(exporter_ip) AS exporter_count,
-            max(timestamp) AS last_seen
+            max(received_at) AS last_seen
         FROM zenplus.flow_records
         WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
         """,
@@ -1394,7 +1394,7 @@ async def netflow_exporters(
             sum(bytes) AS bytes,
             sum(packets) AS packets,
             count() AS flows,
-            max(timestamp) AS last_seen
+            max(received_at) AS last_seen
         FROM zenplus.flow_records
         WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
         GROUP BY exporter_ip
