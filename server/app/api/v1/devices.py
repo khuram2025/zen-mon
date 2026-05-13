@@ -471,14 +471,11 @@ async def get_device_snmp_metrics(
     from app.core.database import get_clickhouse_client
     client = get_clickhouse_client()
 
-    # Pick a table + bucket based on window. The 5m rollup doesn't carry the
-    # `unit` column, so we only select it from the raw table.
-    # The 5m→1h MV is deferred (see migrate-004-snmp-clickhouse.sql), so the
-    # 1h table is empty — for windows > 7 days we down-bucket the 5m rollup
-    # on the fly to keep the chart payload sane (≤ 90 days × 24h = 2160 pts).
+    # Pick a table + bucket based on window. Some upgraded appliances have an
+    # empty 5m SNMP rollup even though raw samples exist, so larger windows
+    # fall back to on-the-fly raw aggregation when the rollup returns no rows.
     if hours <= 6:
-        # Raw probes — exact timestamps; no further aggregation.
-        sql = """
+        sql_candidates = ["""
             SELECT metric_key,
                    toUnixTimestamp64Milli(timestamp) AS ts_ms,
                    value AS val,
@@ -488,10 +485,9 @@ async def get_device_snmp_metrics(
               AND timestamp >= now() - INTERVAL %(hours)s HOUR
             GROUP BY metric_key, timestamp, val
             ORDER BY metric_key, timestamp
-        """
+        """]
     elif hours <= 168:
-        # 5m rollup, deduped (the MV inserts per source batch).
-        sql = """
+        sql_candidates = ["""
             SELECT metric_key,
                    toUnixTimestamp64Milli(timestamp) AS ts_ms,
                    avg(avg_value) AS val,
@@ -501,12 +497,21 @@ async def get_device_snmp_metrics(
               AND timestamp >= now() - INTERVAL %(hours)s HOUR
             GROUP BY metric_key, timestamp
             ORDER BY metric_key, timestamp
-        """
-    else:
-        # > 7 days: bucket to 1h on the fly so the chart isn't flooded.
-        sql = """
+        """, """
             SELECT metric_key,
-                   toUnixTimestamp64Milli(toStartOfHour(timestamp)) AS ts_ms,
+                   toUnixTimestamp(toStartOfInterval(timestamp, INTERVAL 300 SECOND)) * 1000 AS ts_ms,
+                   avg(value) AS val,
+                   any(unit) AS unit
+            FROM zenplus.snmp_metrics
+            WHERE device_id = %(id)s
+              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+            GROUP BY metric_key, ts_ms
+            ORDER BY metric_key, ts_ms
+        """]
+    else:
+        sql_candidates = ["""
+            SELECT metric_key,
+                   toUnixTimestamp(toStartOfHour(timestamp)) * 1000 AS ts_ms,
                    avg(avg_value) AS val,
                    '' AS unit
             FROM zenplus.snmp_metrics_5m
@@ -514,12 +519,33 @@ async def get_device_snmp_metrics(
               AND timestamp >= now() - INTERVAL %(hours)s HOUR
             GROUP BY metric_key, ts_ms
             ORDER BY metric_key, ts_ms
-        """
+        """, """
+            SELECT metric_key,
+                   toUnixTimestamp(toStartOfHour(timestamp)) * 1000 AS ts_ms,
+                   avg(value) AS val,
+                   any(unit) AS unit
+            FROM zenplus.snmp_metrics
+            WHERE device_id = %(id)s
+              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+            GROUP BY metric_key, ts_ms
+            ORDER BY metric_key, ts_ms
+        """]
 
-    try:
-        res = client.query(sql, parameters={"id": str(device_id), "hours": hours})
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"clickhouse query failed: {e}")
+    res = None
+    last_error = None
+    params = {"id": str(device_id), "hours": hours}
+    for sql in sql_candidates:
+        try:
+            candidate = client.query(sql, parameters=params)
+        except Exception as e:
+            last_error = e
+            continue
+        if candidate.result_rows or res is None:
+            res = candidate
+        if candidate.result_rows:
+            break
+    if res is None:
+        raise HTTPException(status_code=500, detail=f"clickhouse query failed: {last_error}")
 
     out: dict[str, dict] = {}
     for r in res.result_rows:

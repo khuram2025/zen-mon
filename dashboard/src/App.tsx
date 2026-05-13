@@ -19,7 +19,7 @@ import { DiscoveryPage } from '@/pages/DiscoveryPage'
 import { MibLibraryPage } from '@/pages/MibLibraryPage'
 import { ReportsPage } from '@/pages/ReportsPage'
 import { SensorsPage } from '@/pages/SensorsPage'
-import { NetflowPage, NetflowDevicePage } from '@/pages/NetflowPage'
+import { NetflowPage, NetflowDevicePage, NetflowSectionPage } from '@/pages/NetflowPage'
 import { NetflowForensicsPage } from '@/pages/NetflowForensics'
 import { NetflowSavedViewsPage } from '@/pages/NetflowSavedViews'
 import { NetflowCapacityPage } from '@/pages/NetflowCapacity'
@@ -101,6 +101,7 @@ export default function App() {
         <Route path="netflow/capacity" element={<NetflowCapacityPage />} />
         <Route path="netflow/anomalies" element={<NetflowAnomaliesPage />} />
         <Route path="netflow/devices/:ip" element={<NetflowDevicePage />} />
+        <Route path="netflow/:section" element={<NetflowSectionPage />} />
         <Route path="mibs" element={<MibLibraryPage />} />
         <Route path="sensors" element={<SensorsPage />} />
         <Route path="alerts" element={<AlertsPage />} />

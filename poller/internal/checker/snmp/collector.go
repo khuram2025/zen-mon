@@ -20,8 +20,8 @@ type Collector struct {
 	sessions *SessionCache
 	pollerID string
 
-	mu       sync.Mutex
-	prevIfs  map[uuid.UUID]map[uint32]ifSnapshot
+	mu      sync.Mutex
+	prevIfs map[uuid.UUID]map[uint32]ifSnapshot
 }
 
 type ifSnapshot struct {
@@ -73,6 +73,12 @@ func (c *Collector) Collect(ctx context.Context, d *Device, r *Result) {
 	if sysErr == nil {
 		r.Mu.Lock()
 		r.System = sys
+		if sys.SysUpTime > 0 {
+			r.Scalars = append(r.Scalars, MetricSample{
+				DeviceID: d.ID, Key: "uptime",
+				Value: sys.SysUpTime.Seconds(), Unit: "seconds", Timestamp: start, PollerID: c.pollerID,
+			})
+		}
 		r.Mu.Unlock()
 	}
 

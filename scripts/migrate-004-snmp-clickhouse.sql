@@ -40,13 +40,13 @@ TO zenplus.snmp_metrics_5m
 AS SELECT
     device_id,
     metric_key,
-    toStartOfFiveMinutes(timestamp) AS bucket,
+    toStartOfFiveMinutes(timestamp) AS timestamp,
     avg(value)   AS avg_value,
     min(value)   AS min_value,
     max(value)   AS max_value,
     count()      AS sample_count
 FROM zenplus.snmp_metrics
-GROUP BY device_id, metric_key, bucket;
+GROUP BY device_id, metric_key, timestamp;
 
 -- ─── 1-hour rollup (1-year retention) ───
 CREATE TABLE IF NOT EXISTS zenplus.snmp_metrics_1h (
@@ -119,7 +119,7 @@ TO zenplus.snmp_if_metrics_5m
 AS SELECT
     device_id,
     if_index,
-    toStartOfFiveMinutes(timestamp) AS bucket,
+    toStartOfFiveMinutes(timestamp) AS timestamp,
     avg(in_bps)         AS avg_in_bps,
     avg(out_bps)        AS avg_out_bps,
     max(in_bps)         AS max_in_bps,
@@ -130,7 +130,7 @@ AS SELECT
     sum(out_discards)   AS sum_out_discards,
     count()             AS sample_count
 FROM zenplus.snmp_if_metrics
-GROUP BY device_id, if_index, bucket;
+GROUP BY device_id, if_index, timestamp;
 
 -- ─── Interface 1-hour rollup (1-year retention) ───
 CREATE TABLE IF NOT EXISTS zenplus.snmp_if_metrics_1h (

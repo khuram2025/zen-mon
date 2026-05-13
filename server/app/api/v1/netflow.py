@@ -4,7 +4,7 @@ import ipaddress
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import String, cast, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_clickhouse_client, get_db
@@ -142,6 +142,27 @@ def _port_name(port: int, proto: int | None = None) -> str:
     if proto is not None and proto == 6:
         return f"TCP/{port}"
     return str(port)
+
+
+def _port_class(port: int) -> str:
+    if port == 0:
+        return "No transport port"
+    if 1 <= port <= 1023:
+        return "Well-known system port"
+    if 1024 <= port <= 49151:
+        return "Registered/user port"
+    return "Dynamic/private port"
+
+
+def _port_summary(port: int, proto: int | None = None, bytes_: int = 0, packets: int = 0, flows: int = 0) -> dict:
+    return {
+        "port": int(port),
+        "service": _port_name(int(port), proto),
+        "application": _application_for_port(int(port)),
+        "bytes": int(bytes_ or 0),
+        "packets": int(packets or 0),
+        "flows": int(flows or 0),
+    }
 
 
 def _query(sql: str, params: dict):
@@ -376,12 +397,49 @@ async def netflow_top_talkers(
     extra_sql, extra_params = _scope(**scope)
     res = _query(
         f"""
-        SELECT toString(addr) AS ip, sum(bytes) AS bytes, sum(packets) AS packets, count() AS flows
+        SELECT
+            toString(addr) AS ip,
+            sum(raw_bytes) AS bytes,
+            sum(raw_packets) AS packets,
+            count() AS flows,
+            sum(src_bytes) AS src_bytes,
+            sum(dst_bytes) AS dst_bytes,
+            sum(src_flows) AS src_flows,
+            sum(dst_flows) AS dst_flows,
+            min(timestamp) AS first_seen,
+            max(timestamp) AS last_seen,
+            groupUniqArray(8)(exporter) AS exporters,
+            groupUniqArray(8)(protocol) AS protocols,
+            groupUniqArray(8)(dst_port) AS ports
         FROM (
-            SELECT src_addr AS addr, bytes, packets FROM zenplus.flow_records
+            SELECT
+                src_addr AS addr,
+                bytes AS raw_bytes,
+                packets AS raw_packets,
+                bytes AS src_bytes,
+                0 AS dst_bytes,
+                1 AS src_flows,
+                0 AS dst_flows,
+                timestamp,
+                toString(exporter_ip) AS exporter,
+                protocol,
+                dst_port
+            FROM zenplus.flow_records
             WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
             UNION ALL
-            SELECT dst_addr AS addr, bytes, packets FROM zenplus.flow_records
+            SELECT
+                dst_addr AS addr,
+                bytes AS raw_bytes,
+                packets AS raw_packets,
+                0 AS src_bytes,
+                bytes AS dst_bytes,
+                0 AS src_flows,
+                1 AS dst_flows,
+                timestamp,
+                toString(exporter_ip) AS exporter,
+                protocol,
+                dst_port
+            FROM zenplus.flow_records
             WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
         )
         GROUP BY addr
@@ -390,38 +448,193 @@ async def netflow_top_talkers(
         """,
         {"start": start, "end": end, "limit": limit, **extra_params},
     )
-    return [{"ip": r[0], "bytes": int(r[1]), "packets": int(r[2]), "flows": int(r[3])} for r in res.result_rows]
+    return [
+        {
+            "ip": r[0],
+            "bytes": int(r[1] or 0),
+            "packets": int(r[2] or 0),
+            "flows": int(r[3] or 0),
+            "src_bytes": int(r[4] or 0),
+            "dst_bytes": int(r[5] or 0),
+            "src_flows": int(r[6] or 0),
+            "dst_flows": int(r[7] or 0),
+            "first_seen": _to_iso_utc(r[8]),
+            "last_seen": _to_iso_utc(r[9]),
+            "exporters": [{"ip": ip} for ip in (r[10] or [])],
+            "protocols": [{"protocol": int(p), "name": _protocol_name(p)} for p in (r[11] or [])],
+            "ports": [_port_summary(p) for p in (r[12] or []) if int(p) != 0],
+        }
+        for r in res.result_rows
+    ]
+
+
+@router.get("/top-endpoints")
+async def netflow_top_endpoints(
+    hours: int = Query(default=1, ge=1, le=720),
+    limit: int = Query(default=10, ge=1, le=100),
+    from_ts: str | None = Query(default=None, alias="from"),
+    to_ts: str | None = Query(default=None, alias="to"),
+    scope: dict = Depends(scope_params),
+    user: User = Depends(get_current_user),
+):
+    """Top endpoint IPs with source/destination contribution split."""
+    start, end = _resolve_window(hours, from_ts, to_ts)
+    extra_sql, extra_params = _scope(**scope)
+    res = _query(
+        f"""
+        SELECT
+            toString(addr) AS ip,
+            sum(bytes) AS bytes,
+            sum(packets) AS packets,
+            sum(flows) AS flows,
+            sum(src_bytes) AS src_bytes,
+            sum(dst_bytes) AS dst_bytes,
+            sum(src_flows) AS src_flows,
+            sum(dst_flows) AS dst_flows,
+            min(timestamp) AS first_seen,
+            max(timestamp) AS last_seen,
+            groupUniqArray(8)(exporter) AS exporters,
+            groupUniqArray(8)(protocol) AS protocols,
+            groupUniqArray(8)(dst_port) AS ports
+        FROM (
+            SELECT
+                src_addr AS addr,
+                bytes,
+                packets,
+                1 AS flows,
+                bytes AS src_bytes,
+                0 AS dst_bytes,
+                1 AS src_flows,
+                0 AS dst_flows,
+                timestamp,
+                toString(exporter_ip) AS exporter,
+                protocol,
+                dst_port
+            FROM zenplus.flow_records
+            WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+            UNION ALL
+            SELECT
+                dst_addr AS addr,
+                bytes,
+                packets,
+                1 AS flows,
+                0 AS src_bytes,
+                bytes AS dst_bytes,
+                0 AS src_flows,
+                1 AS dst_flows,
+                timestamp,
+                toString(exporter_ip) AS exporter,
+                protocol,
+                dst_port
+            FROM zenplus.flow_records
+            WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+        )
+        GROUP BY addr
+        ORDER BY bytes DESC
+        LIMIT %(limit)s
+        """,
+        {"start": start, "end": end, "limit": limit, **extra_params},
+    )
+    return [
+        {
+            "ip": r[0],
+            "bytes": int(r[1] or 0),
+            "packets": int(r[2] or 0),
+            "flows": int(r[3] or 0),
+            "src_bytes": int(r[4] or 0),
+            "dst_bytes": int(r[5] or 0),
+            "src_flows": int(r[6] or 0),
+            "dst_flows": int(r[7] or 0),
+            "first_seen": _to_iso_utc(r[8]),
+            "last_seen": _to_iso_utc(r[9]),
+            "exporters": [{"ip": ip} for ip in (r[10] or [])],
+            "protocols": [{"protocol": int(p), "name": _protocol_name(p)} for p in (r[11] or [])],
+            "ports": [_port_summary(p) for p in (r[12] or []) if int(p) != 0],
+        }
+        for r in res.result_rows
+    ]
 
 
 @router.get("/top-conversations")
 async def netflow_top_conversations(
-    hours: int = Query(default=24, ge=1, le=720),
+    hours: int = Query(default=1, ge=1, le=720),
     limit: int = Query(default=10, ge=1, le=50),
     from_ts: str | None = Query(default=None, alias="from"),
     to_ts: str | None = Query(default=None, alias="to"),
     scope: dict = Depends(scope_params),
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     start, end = _resolve_window(hours, from_ts, to_ts)
     extra_sql, extra_params = _scope(**scope)
     res = _query(
         f"""
         SELECT
-            toString(src_addr) AS src,
-            toString(dst_addr) AS dst,
+            src,
+            dst,
             protocol,
             dst_port,
-            sum(bytes) AS bytes,
-            sum(packets) AS packets,
-            count() AS flows
-        FROM zenplus.flow_records
-        WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
-        GROUP BY src_addr, dst_addr, protocol, dst_port
+            groupUniqArray(10)(src_port) AS src_ports,
+            sum(raw_bytes) AS bytes,
+            sum(raw_packets) AS packets,
+            count() AS flows,
+            groupUniqArray(10)(exporter) AS exporters,
+            groupUniqArray(10)(input_snmp) AS input_snmp,
+            groupUniqArray(10)(output_snmp) AS output_snmp,
+            min(timestamp) AS first_seen,
+            max(timestamp) AS last_seen,
+            max(received_at) AS received_at,
+            avg(toInt64(last_switched_ms) - toInt64(first_switched_ms)) AS avg_duration_ms,
+            groupBitOr(toUInt64(tcp_flags)) AS tcp_flags,
+            avg(raw_bytes) AS avg_bytes,
+            avg(raw_packets) AS avg_packets
+        FROM (
+            SELECT
+                toString(src_addr) AS src,
+                toString(dst_addr) AS dst,
+                protocol,
+                src_port,
+                dst_port,
+                bytes AS raw_bytes,
+                packets AS raw_packets,
+                toString(exporter_ip) AS exporter,
+                input_snmp,
+                output_snmp,
+                timestamp,
+                received_at,
+                last_switched_ms,
+                first_switched_ms,
+                tcp_flags
+            FROM zenplus.flow_records
+            WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+        )
+        GROUP BY src, dst, protocol, dst_port
         ORDER BY bytes DESC
         LIMIT %(limit)s
         """,
         {"start": start, "end": end, "limit": limit, **extra_params},
     )
+
+    exporter_ips = sorted({ip for row in res.result_rows for ip in (row[8] or [])})
+    exporter_names: dict[str, str] = {}
+    if exporter_ips:
+        devices_q = await db.execute(
+            select(Device.ip_address, Device.hostname).where(
+                cast(Device.ip_address, String).in_(exporter_ips + [f"{ip}/32" for ip in exporter_ips])
+            )
+        )
+        exporter_names = {
+            str(row.ip_address).split("/")[0]: row.hostname
+            for row in devices_q.all()
+        }
+
+    iface_keys = []
+    for row in res.result_rows:
+        exporters = row[8] or []
+        indexes = [int(v) for v in [*(row[9] or []), *(row[10] or [])] if int(v) != 0]
+        iface_keys.extend((ip, idx) for ip in exporters for idx in indexes)
+    iface_meta = await _resolve_interface_names(iface_keys, db)
+
     return [
         {
             "src": r[0],
@@ -430,9 +643,37 @@ async def netflow_top_conversations(
             "protocol_name": _protocol_name(r[2]),
             "dst_port": int(r[3]),
             "service": _port_name(r[3], r[2]),
-            "bytes": int(r[4]),
-            "packets": int(r[5]),
-            "flows": int(r[6]),
+            "application": _application_for_port(int(r[3])),
+            "port_class": _port_class(int(r[3])),
+            "src_ports": [int(v) for v in (r[4] or []) if int(v) != 0],
+            "bytes": int(r[5]),
+            "packets": int(r[6]),
+            "flows": int(r[7]),
+            "exporters": [
+                {"ip": ip, "hostname": exporter_names.get(ip)}
+                for ip in (r[8] or [])
+            ],
+            "input_snmp": [int(v) for v in (r[9] or []) if int(v) != 0],
+            "output_snmp": [int(v) for v in (r[10] or []) if int(v) != 0],
+            "input_interfaces": [
+                _interface_payload(ip, int(idx), iface_meta.get((ip, int(idx))))
+                for ip in (r[8] or [])
+                for idx in (r[9] or [])
+                if int(idx) != 0
+            ],
+            "output_interfaces": [
+                _interface_payload(ip, int(idx), iface_meta.get((ip, int(idx))))
+                for ip in (r[8] or [])
+                for idx in (r[10] or [])
+                if int(idx) != 0
+            ],
+            "first_seen": _to_iso_utc(r[11]),
+            "last_seen": _to_iso_utc(r[12]),
+            "received_at": _to_iso_utc(r[13]),
+            "avg_duration_ms": round(float(r[14] or 0), 1),
+            "tcp_flags": int(r[15] or 0),
+            "avg_bytes": float(r[16] or 0),
+            "avg_packets": float(r[17] or 0),
         }
         for r in res.result_rows
     ]
@@ -450,7 +691,9 @@ async def netflow_protocols(
     extra_sql, extra_params = _scope(**scope)
     res = _query(
         f"""
-        SELECT protocol, sum(bytes) AS bytes, sum(packets) AS packets, count() AS flows
+        SELECT protocol, sum(bytes) AS bytes, sum(packets) AS packets, count() AS flows,
+               min(timestamp) AS first_seen,
+               max(timestamp) AS last_seen
         FROM zenplus.flow_records
         WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
         GROUP BY protocol
@@ -459,8 +702,34 @@ async def netflow_protocols(
         """,
         {"start": start, "end": end, **extra_params},
     )
+    port_res = _query(
+        f"""
+        SELECT protocol, dst_port, sum(bytes) AS bytes, sum(packets) AS packets, count() AS flows
+        FROM zenplus.flow_records
+        WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+          AND dst_port != 0
+        GROUP BY protocol, dst_port
+        ORDER BY bytes DESC
+        LIMIT 200
+        """,
+        {"start": start, "end": end, **extra_params},
+    )
+    ports_by_protocol: dict[int, list[dict]] = {}
+    for proto, port, bytes_, packets, flows in port_res.result_rows:
+        bucket = ports_by_protocol.setdefault(int(proto), [])
+        if len(bucket) < 10:
+            bucket.append(_port_summary(port, int(proto), bytes_, packets, flows))
     return [
-        {"protocol": int(r[0]), "name": _protocol_name(r[0]), "bytes": int(r[1]), "packets": int(r[2]), "flows": int(r[3])}
+        {
+            "protocol": int(r[0]),
+            "name": _protocol_name(r[0]),
+            "bytes": int(r[1]),
+            "packets": int(r[2]),
+            "flows": int(r[3]),
+            "ports": ports_by_protocol.get(int(r[0]), []),
+            "first_seen": _to_iso_utc(r[4]),
+            "last_seen": _to_iso_utc(r[5]),
+        }
         for r in res.result_rows
     ]
 
@@ -527,10 +796,14 @@ async def netflow_applications(
     buckets: dict[str, dict] = {}
     for port, bytes_, packets, flows in res.result_rows:
         name = _application_for_port(int(port))
-        b = buckets.setdefault(name, {"name": name, "bytes": 0, "packets": 0, "flows": 0})
+        b = buckets.setdefault(name, {"name": name, "bytes": 0, "packets": 0, "flows": 0, "ports": []})
         b["bytes"] += int(bytes_ or 0)
         b["packets"] += int(packets or 0)
         b["flows"] += int(flows or 0)
+        if int(port) != 0:
+            b["ports"].append(_port_summary(port, None, bytes_, packets, flows))
+    for bucket in buckets.values():
+        bucket["ports"] = sorted(bucket["ports"], key=lambda p: p["bytes"], reverse=True)[:8]
     return sorted(buckets.values(), key=lambda r: r["bytes"], reverse=True)
 
 
@@ -641,7 +914,6 @@ async def netflow_heatmap(
 
 async def _resolve_interface_names(rows: list[tuple], db: AsyncSession) -> dict[tuple[str, int], dict]:
     """Build a {(exporter_ip, ifindex) -> {if_name, if_alias, if_speed}} map from device_interfaces."""
-    from sqlalchemy import cast, String
     keys = {(str(r[0]), int(r[1])) for r in rows}
     if not keys:
         return {}
@@ -661,6 +933,7 @@ async def _resolve_interface_names(rows: list[tuple], db: AsyncSession) -> dict[
             DeviceInterface.device_id,
             DeviceInterface.if_index,
             DeviceInterface.if_name,
+            DeviceInterface.if_descr,
             DeviceInterface.if_alias,
             DeviceInterface.if_speed,
         ).where(DeviceInterface.device_id.in_(device_ids))
@@ -669,6 +942,7 @@ async def _resolve_interface_names(rows: list[tuple], db: AsyncSession) -> dict[
     for row in ifs_q.all():
         by_device.setdefault(row.device_id, {})[row.if_index] = {
             "if_name": row.if_name,
+            "if_descr": row.if_descr,
             "if_alias": row.if_alias,
             "if_speed": int(row.if_speed) if row.if_speed else None,
         }
@@ -682,6 +956,24 @@ async def _resolve_interface_names(rows: list[tuple], db: AsyncSession) -> dict[
         if meta:
             out[(ip, idx)] = {**meta, "device_hostname": dev[1]}
     return out
+
+
+def _interface_display_name(meta: dict, ifindex: int) -> str:
+    return meta.get("if_name") or meta.get("if_descr") or meta.get("if_alias") or f"ifIndex {ifindex}"
+
+
+def _interface_payload(exporter_ip: str, ifindex: int, meta: dict | None = None) -> dict:
+    meta = meta or {}
+    return {
+        "exporter_ip": exporter_ip,
+        "ifindex": ifindex,
+        "if_name": meta.get("if_name"),
+        "if_descr": meta.get("if_descr"),
+        "if_alias": meta.get("if_alias"),
+        "if_speed": meta.get("if_speed"),
+        "device_hostname": meta.get("device_hostname"),
+        "display_name": _interface_display_name(meta, ifindex),
+    }
 
 
 @router.get("/interfaces")
@@ -742,9 +1034,11 @@ async def netflow_interfaces(
             "exporter_ip": r[0],
             "ifindex": int(r[1]),
             "if_name": meta.get("if_name"),
+            "if_descr": meta.get("if_descr"),
             "if_alias": meta.get("if_alias"),
             "if_speed": meta.get("if_speed"),
             "device_hostname": meta.get("device_hostname"),
+            "display_name": _interface_display_name(meta, int(r[1])),
             "in_bytes": int(r[2] or 0),
             "out_bytes": int(r[3] or 0),
             "bytes": int((r[2] or 0) + (r[3] or 0)),
@@ -944,6 +1238,7 @@ async def netflow_forensics(
     order: str = Query(default="desc", regex="^(asc|desc)$"),
     scope: dict = Depends(scope_params),
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Raw-flow forensic search. Returns un-aggregated records with full multi-field filtering."""
     start, end = _resolve_window(hours, from_ts, to_ts)
@@ -1000,6 +1295,14 @@ async def netflow_forensics(
         """,
         params,
     )
+    iface_keys = []
+    for r in res.result_rows:
+        exporter_ip = str(r[1])
+        if int(r[9] or 0) != 0:
+            iface_keys.append((exporter_ip, int(r[9])))
+        if int(r[10] or 0) != 0:
+            iface_keys.append((exporter_ip, int(r[10])))
+    iface_meta = await _resolve_interface_names(iface_keys, db)
     return [
         {
             "timestamp": _to_iso_utc(r[0]),
@@ -1014,6 +1317,8 @@ async def netflow_forensics(
             "dscp": int(r[8]) >> 2,
             "input_snmp": int(r[9]),
             "output_snmp": int(r[10]),
+            "input_interface": _interface_payload(r[1], int(r[9]), iface_meta.get((r[1], int(r[9])))) if int(r[9]) != 0 else None,
+            "output_interface": _interface_payload(r[1], int(r[10]), iface_meta.get((r[1], int(r[10])))) if int(r[10]) != 0 else None,
             "packets": int(r[11]),
             "bytes": int(r[12]),
             "duration_ms": int(r[13]),
@@ -1096,9 +1401,11 @@ async def netflow_capacity(
             "exporter_ip": r[0],
             "ifindex": int(r[1]),
             "if_name": meta.get("if_name"),
+            "if_descr": meta.get("if_descr"),
             "if_alias": meta.get("if_alias"),
             "if_speed": speed,
             "device_hostname": meta.get("device_hostname"),
+            "display_name": _interface_display_name(meta, int(r[1])),
             "p95_bps": p95,
             "avg_bps": avg,
             "max_bps": mx,

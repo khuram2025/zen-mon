@@ -14,6 +14,11 @@ def _ensure_utc(dt: datetime) -> datetime:
     return dt
 
 
+def _is_unknown_clickhouse_table(exc: Exception) -> bool:
+    msg = str(exc)
+    return "Unknown table" in msg or "Unknown table expression identifier" in msg or "UNKNOWN_TABLE" in msg
+
+
 def get_device_metrics(
     device_id: UUID,
     from_time: datetime | None = None,
@@ -71,24 +76,30 @@ def get_device_metrics(
         query = f"""
             SELECT
                 timestamp,
-                avg_rtt_ms AS rtt_ms,
-                avg_packet_loss AS packet_loss,
-                avg_jitter_ms AS jitter_ms,
-                min_rtt_ms,
-                max_rtt_ms,
-                uptime_pct AS is_up
+                if(sum(sample_count) = 0, 0, sum(avg_rtt_ms * sample_count) / sum(sample_count)) AS rtt_ms,
+                if(sum(sample_count) = 0, 0, sum(avg_packet_loss * sample_count) / sum(sample_count)) AS packet_loss,
+                if(sum(sample_count) = 0, 0, sum(avg_jitter_ms * sample_count) / sum(sample_count)) AS jitter_ms,
+                min(min_rtt_ms) AS min_rtt_ms,
+                max(max_rtt_ms) AS max_rtt_ms,
+                if(sum(sample_count) = 0, 0, sum(uptime_pct * sample_count) / sum(sample_count)) AS is_up
             FROM {table}
             WHERE device_id = %(device_id)s
               AND timestamp >= %(from_time)s
               AND timestamp <= %(to_time)s
+            GROUP BY timestamp
             ORDER BY timestamp
             LIMIT 5000
         """
 
-    result = client.query(query, parameters=params)
+    result = None
+    try:
+        result = client.query(query, parameters=params)
+    except Exception as exc:
+        if granularity == "raw" or not _is_unknown_clickhouse_table(exc):
+            raise
 
-    # Fallback: if rollup table is empty, aggregate from raw data
-    if not result.result_rows and granularity != "raw":
+    # Fallback: if rollup table is unavailable/empty, aggregate from raw data.
+    if (result is None or not result.result_rows) and granularity != "raw":
         interval = "5 MINUTE" if granularity == "5m" else "1 HOUR"
         query = f"""
             SELECT
@@ -154,23 +165,28 @@ def get_status_history(
 
     client = get_clickhouse_client()
 
-    result = client.query(
-        """
-        SELECT device_id, timestamp, old_status, new_status, reason, duration_sec
-        FROM device_status_log
-        WHERE device_id = %(device_id)s
-          AND timestamp >= %(from_time)s
-          AND timestamp <= %(to_time)s
-        ORDER BY timestamp DESC
-        LIMIT %(limit)s
-        """,
-        parameters={
-            "device_id": str(device_id),
-            "from_time": from_time.strftime("%Y-%m-%d %H:%M:%S"),
-            "to_time": to_time.strftime("%Y-%m-%d %H:%M:%S"),
-            "limit": limit,
-        },
-    )
+    try:
+        result = client.query(
+            """
+            SELECT device_id, timestamp, old_status, new_status, reason, duration_sec
+            FROM device_status_log
+            WHERE device_id = %(device_id)s
+              AND timestamp >= %(from_time)s
+              AND timestamp <= %(to_time)s
+            ORDER BY timestamp DESC
+            LIMIT %(limit)s
+            """,
+            parameters={
+                "device_id": str(device_id),
+                "from_time": from_time.strftime("%Y-%m-%d %H:%M:%S"),
+                "to_time": to_time.strftime("%Y-%m-%d %H:%M:%S"),
+                "limit": limit,
+            },
+        )
+    except Exception as exc:
+        if _is_unknown_clickhouse_table(exc):
+            return []
+        raise
 
     events = []
     for row in result.result_rows:

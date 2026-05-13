@@ -63,7 +63,7 @@ import {
   YAxis,
 } from 'recharts'
 import { api } from '@/lib/api'
-import { apiErrorMessage, formatBps, formatDuration, relativeTime, timeAxisTickFormatter, timeTooltipLabelFormatter } from '@/lib/utils'
+import { apiErrorMessage, formatBps, formatBytes, formatDuration, relativeTime, timeAxisTickFormatter, timeTooltipLabelFormatter } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -321,6 +321,41 @@ const TIME_RANGES = [
   { label: 'Last 7 Days', hours: 168 },
 ]
 
+type MetricSeriesMap = Record<string, { unit?: string; points: { ts: number; value: number }[] }>
+
+type StatusHistoryEvent = {
+  old_status: string
+  new_status: string
+  reason?: string
+  timestamp: string
+  duration_sec?: number | null
+}
+
+type ActivityEvent = {
+  id: string
+  timestamp: string
+  severity: 'critical' | 'warning' | 'info' | 'success'
+  icon: React.ComponentType<{ className?: string }>
+  title: string
+  subtitle?: string
+}
+
+type NetflowOverview = {
+  bytes: number
+  packets: number
+  flows: number
+  exporters: number
+  src_hosts: number
+  dst_hosts: number
+  last_seen: string | null
+  current_bps: number
+  top_protocol: { protocol: number; name: string; bytes: number } | null
+}
+
+type NetflowSeriesPoint = { ts: number; bps: number; bytes: number; packets: number; flows: number }
+type NetflowApplication = { name: string; bytes: number; packets: number; flows: number }
+type NetflowConversation = { src: string; dst: string; protocol_name: string; dst_port: number; service: string; bytes: number; packets: number; flows: number }
+
 function DashboardSection({
   device, deviceId, range,
 }: {
@@ -346,7 +381,7 @@ function DashboardSection({
     enabled: device.ping_enabled,
   })
 
-  const { data: metrics } = useQuery<Record<string, { unit: string; points: { ts: number; value: number }[] }>>({
+  const { data: metrics } = useQuery<MetricSeriesMap>({
     queryKey: ['device', deviceId, 'snmp-metrics', hoursRange],
     queryFn: async () => (await api.get(`/devices/${deviceId}/snmp-metrics?hours=${hoursRange}`)).data,
     refetchInterval: 30_000,
@@ -383,6 +418,52 @@ function DashboardSection({
     queryFn: async () => (await api.get(`/devices/${deviceId}/traps?hours=${trapHours}&limit=20`)).data,
     refetchInterval: 30_000,
     enabled: snmp,
+  })
+
+  const { data: statusHistory } = useQuery<StatusHistoryEvent[]>({
+    queryKey: ['device', deviceId, 'status-history', range.fromISO, range.toISO],
+    queryFn: async () =>
+      (await api.get(
+        `/devices/${deviceId}/status-history?from=${encodeURIComponent(range.fromISO)}&to=${encodeURIComponent(range.toISO)}&limit=100`,
+      )).data,
+    refetchInterval: 30_000,
+  })
+
+  const netflowExporter = normalizeIp(device.ip_address)
+  const netflowQS = useMemo(() => {
+    const params = new URLSearchParams({ hours: String(Math.max(1, Math.round(range.hours))) })
+    params.set('exporter', netflowExporter)
+    if (range.isCustom) {
+      params.set('from', range.fromISO)
+      params.set('to', range.toISO)
+    }
+    return params.toString()
+  }, [netflowExporter, range.hours, range.isCustom, range.fromISO, range.toISO])
+
+  const { data: netflowOverview } = useQuery<NetflowOverview>({
+    queryKey: ['device', deviceId, 'netflow-overview', netflowQS],
+    queryFn: async () => (await api.get(`/netflow/overview?${netflowQS}`)).data,
+    refetchInterval: range.isCustom ? false : 30_000,
+    enabled: !!netflowExporter,
+  })
+  const hasNetflow = (netflowOverview?.flows || 0) > 0
+  const { data: netflowSeries } = useQuery<NetflowSeriesPoint[]>({
+    queryKey: ['device', deviceId, 'netflow-timeseries', netflowQS],
+    queryFn: async () => (await api.get(`/netflow/timeseries?${netflowQS}`)).data,
+    refetchInterval: range.isCustom ? false : 30_000,
+    enabled: hasNetflow,
+  })
+  const { data: netflowApplications } = useQuery<NetflowApplication[]>({
+    queryKey: ['device', deviceId, 'netflow-applications', netflowQS],
+    queryFn: async () => (await api.get(`/netflow/applications?${netflowQS}`)).data,
+    refetchInterval: range.isCustom ? false : 60_000,
+    enabled: hasNetflow,
+  })
+  const { data: netflowConversations } = useQuery<NetflowConversation[]>({
+    queryKey: ['device', deviceId, 'netflow-conversations', netflowQS],
+    queryFn: async () => (await api.get(`/netflow/top-conversations?${netflowQS}&limit=5`)).data,
+    refetchInterval: range.isCustom ? false : 30_000,
+    enabled: hasNetflow,
   })
 
   /* Derived series / KPIs */
@@ -445,8 +526,8 @@ function DashboardSection({
      "Throughput" tile in the Environmental / System Stats card. */
   const perfSeries = useMemo(() => {
     const byTs: Record<number, { ts: number; cpu?: number; mem?: number }> = {}
-    ;(cpu?.points || []).forEach((p) => { byTs[p.ts] = { ts: p.ts, cpu: p.value, ...(byTs[p.ts] || {}) } })
-    ;(mem?.points || []).forEach((p) => { byTs[p.ts] = { ts: p.ts, mem: p.value, ...(byTs[p.ts] || {}) } })
+    ;(cpu?.points || []).forEach((p) => { byTs[p.ts] = { ...(byTs[p.ts] || {}), ts: p.ts, cpu: p.value } })
+    ;(mem?.points || []).forEach((p) => { byTs[p.ts] = { ...(byTs[p.ts] || {}), ts: p.ts, mem: p.value } })
     return Object.values(byTs).sort((a, b) => a.ts - b.ts)
   }, [cpu, mem])
 
@@ -471,6 +552,10 @@ function DashboardSection({
     title: t.trap_name || t.message || 'SNMP trap',
     ago: relativeTime(t.timestamp),
   }))
+  const activityEvents = useMemo(
+    () => buildActivityEvents(traps || [], statusHistory || [], metrics || {}, range.fromISO, range.toISO),
+    [traps, statusHistory, metrics, range.fromISO, range.toISO],
+  )
 
   return (
     <>
@@ -567,6 +652,18 @@ function DashboardSection({
         />
       </div>
 
+      {hasNetflow && (
+        <DeviceNetflowCard
+          exporterIp={netflowExporter}
+          overview={netflowOverview!}
+          series={netflowSeries || []}
+          applications={netflowApplications || []}
+          conversations={netflowConversations || []}
+          rangeLabel={range.label}
+          rangeHours={range.hours}
+        />
+      )}
+
       {/* ═══════════ Bottom row ═══════════ */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
         <InventoryConfigCard
@@ -575,7 +672,7 @@ function DashboardSection({
           onDetails={() => setInventoryOpen(true)}
         />
         <ActivityLogCard
-          traps={traps || []}
+          events={activityEvents}
           rangeLabel={range.label}
           onViewAll={() => setEventsOpen(true)}
         />
@@ -753,6 +850,142 @@ function LegendDot({ color, label }: { color: string; label: string }) {
       <span className="h-2 w-2 rounded-full" style={{ background: color }} />
       <span>{label}</span>
     </span>
+  )
+}
+
+/* ════════════════════════════════════════════════════════════
+   NetFlow — shown only when this device exports flow records
+   ════════════════════════════════════════════════════════════ */
+
+function DeviceNetflowCard({
+  exporterIp, overview, series, applications, conversations, rangeLabel, rangeHours,
+}: {
+  exporterIp: string
+  overview: NetflowOverview
+  series: NetflowSeriesPoint[]
+  applications: NetflowApplication[]
+  conversations: NetflowConversation[]
+  rangeLabel: string
+  rangeHours: number
+}) {
+  const tickFormatter = useMemo(() => timeAxisTickFormatter(rangeHours), [rangeHours])
+  const topApp = applications[0]
+  const topConversation = conversations[0]
+
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Network className="h-4 w-4 text-primary" />
+            <h3 className="text-sm font-semibold">NetFlow</h3>
+            <span className="rounded-full border border-border bg-surface2 px-2 py-0.5 font-mono text-[10px] text-muted">{exporterIp}</span>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-[11px] font-medium text-muted">{rangeLabel}</span>
+            <Link
+              to={`/netflow/devices/${encodeURIComponent(exporterIp)}`}
+              className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+            >
+              Open NetFlow
+              <ArrowRight className="h-3 w-3" />
+            </Link>
+          </div>
+        </div>
+
+        <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(280px,0.75fr)]">
+          <div className="min-w-0">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <NetflowStat label="Rate" value={formatBps(overview.current_bps)} />
+              <NetflowStat label="Volume" value={formatBytes(overview.bytes)} />
+              <NetflowStat label="Flows" value={overview.flows.toLocaleString()} />
+              <NetflowStat label="Last Seen" value={relativeTime(overview.last_seen)} />
+            </div>
+
+            <div className="mt-3 h-44">
+              {series.length > 1 ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={series} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                    <defs>
+                      <linearGradient id="deviceNetflowBps" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="rgb(var(--primary))" stopOpacity={0.35} />
+                        <stop offset="100%" stopColor="rgb(var(--primary))" stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--border)/0.25)" vertical={false} />
+                    <XAxis
+                      dataKey="ts"
+                      tickFormatter={tickFormatter}
+                      tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
+                      axisLine={false}
+                      tickLine={false}
+                      minTickGap={rangeHours <= 24 ? 30 : 55}
+                    />
+                    <YAxis
+                      tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
+                      width={54}
+                      axisLine={false}
+                      tickLine={false}
+                      tickFormatter={(v) => formatBps(Number(v)).replace(' ', '')}
+                    />
+                    <Tooltip
+                      {...ttStyle()}
+                      formatter={(value: any, name: string) => [
+                        name === 'bps' ? formatBps(Number(value)) : value,
+                        name === 'bps' ? 'Throughput' : name,
+                      ]}
+                    />
+                    <Area type="monotone" dataKey="bps" stroke="rgb(var(--primary))" strokeWidth={1.8} fill="url(#deviceNetflowBps)" dot={false} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex h-full items-center justify-center text-xs text-muted">Collecting flow series…</div>
+              )}
+            </div>
+          </div>
+
+          <div className="grid content-start gap-3 text-xs">
+            <div className="rounded-lg border border-border/60 bg-surface2/40 p-3">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Top Application</div>
+              <div className="mt-1 truncate text-sm font-semibold text-text">{topApp?.name || '—'}</div>
+              <div className="mt-1 text-muted">
+                {topApp ? `${formatBytes(topApp.bytes)} · ${topApp.flows.toLocaleString()} flows` : 'No application data'}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-border/60 bg-surface2/40 p-3">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Top Conversation</div>
+              {topConversation ? (
+                <>
+                  <div className="mt-1 truncate font-mono text-[11px] text-text" title={`${topConversation.src} → ${topConversation.dst}`}>
+                    {topConversation.src} → {topConversation.dst}
+                  </div>
+                  <div className="mt-1 text-muted">
+                    {topConversation.service} · {formatBytes(topConversation.bytes)} · {topConversation.flows.toLocaleString()} flows
+                  </div>
+                </>
+              ) : (
+                <div className="mt-1 text-muted">No conversations</div>
+              )}
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <NetflowStat label="Source Hosts" value={overview.src_hosts.toLocaleString()} compact />
+              <NetflowStat label="Dest Hosts" value={overview.dst_hosts.toLocaleString()} compact />
+            </div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function NetflowStat({ label, value, compact }: { label: string; value: string; compact?: boolean }) {
+  return (
+    <div className={`rounded-lg border border-border/60 bg-surface2/40 ${compact ? 'p-2' : 'p-3'}`}>
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
+      <div className={`${compact ? 'text-sm' : 'text-base'} mt-1 font-semibold tabular-nums text-text`}>{value}</div>
+    </div>
   )
 }
 
@@ -1158,14 +1391,15 @@ function InventoryConfigCard({
    ════════════════════════════════════════════════════════════ */
 
 function ActivityLogCard({
-  traps, rangeLabel, onViewAll,
-}: { traps: any[]; rangeLabel: string; onViewAll: () => void }) {
-  const events = traps.slice(0, 5).map((t) => ({
-    icon: iconForTrap(t),
-    tone: toneForSeverity(t.severity),
-    ago: relativeTime(t.timestamp),
-    title: t.trap_name || 'SNMP trap',
-    subtitle: t.message || t.trap_oid || '',
+  events: activityEvents, rangeLabel, onViewAll,
+}: { events: ActivityEvent[]; rangeLabel: string; onViewAll: () => void }) {
+  const events = activityEvents.slice(0, 5).map((e) => ({
+    icon: e.icon,
+    tone: toneForSeverity(e.severity),
+    ago: relativeTime(e.timestamp),
+    at: formatEventTimestamp(e.timestamp),
+    title: e.title,
+    subtitle: e.subtitle || '',
   }))
 
   return (
@@ -1193,7 +1427,7 @@ function ActivityLogCard({
               <div className="flex flex-col items-center gap-1 py-6 text-center">
                 <Info className="h-5 w-5 text-muted/60" />
                 <div className="text-[11px] font-medium text-text">No events in {rangeLabel.toLowerCase()}</div>
-                <div className="text-[10px] text-muted">SNMP traps will appear here</div>
+                <div className="text-[10px] text-muted">Status changes, reboots, and SNMP traps will appear here</div>
               </div>
             )}
             {events.map((e, i) => {
@@ -1215,6 +1449,7 @@ function ActivityLogCard({
                       <div className="truncate text-[11px] font-semibold" title={e.title}>{e.title}</div>
                       <div className="shrink-0 text-[10px] text-muted">{e.ago}</div>
                     </div>
+                    <div className="mt-0.5 font-mono text-[10px] text-text/80">{e.at}</div>
                     {e.subtitle && (
                       <div className="truncate text-[10px] text-muted" title={String(e.subtitle)}>{e.subtitle}</div>
                     )}
@@ -1229,6 +1464,19 @@ function ActivityLogCard({
   )
 }
 
+function formatEventTimestamp(value: string): string {
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return value || '—'
+  return date.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  })
+}
+
 function iconForTrap(t: any): React.ComponentType<{ className?: string }> {
   const s = (t.trap_name || t.message || '').toLowerCase()
   if (s.includes('config')) return SettingsIcon
@@ -1237,6 +1485,117 @@ function iconForTrap(t: any): React.ComponentType<{ className?: string }> {
   if (s.includes('poll') || s.includes('snmp')) return Radar
   if (s.includes('health')) return CheckCircle2
   return Info
+}
+
+function buildActivityEvents(
+  traps: any[],
+  statusHistory: StatusHistoryEvent[],
+  metrics: MetricSeriesMap,
+  fromISO: string,
+  toISO: string,
+): ActivityEvent[] {
+  const trapEvents = traps.map((t, i): ActivityEvent => ({
+    id: `trap-${t.timestamp || i}-${t.trap_oid || t.trap_name || i}`,
+    timestamp: t.timestamp,
+    severity: normalizeSeverity(t.severity),
+    icon: iconForTrap(t),
+    title: t.trap_name || 'SNMP trap',
+    subtitle: t.message || t.trap_oid || '',
+  }))
+
+  const statusEvents = statusHistory.map((e, i): ActivityEvent => {
+    const next = (e.new_status || '').toLowerCase()
+    const severity =
+      next === 'down' ? 'critical'
+      : next === 'degraded' ? 'warning'
+      : next === 'up' ? 'success'
+      : 'info'
+    const title =
+      next === 'down' ? 'Device went down'
+      : next === 'degraded' ? 'Device degraded'
+      : next === 'up' ? 'Device recovered'
+      : `Status changed to ${titleCase(next || 'unknown')}`
+    const previous = e.old_status ? `${titleCase(e.old_status)} → ${titleCase(e.new_status)}` : titleCase(e.new_status)
+    const durationSec = e.duration_sec && e.duration_sec > 0
+      ? e.duration_sec
+      : inferStatusDurationSec(e, statusHistory)
+    const duration = statusDurationLabel(e.old_status, e.new_status, durationSec)
+    return {
+      id: `status-${e.timestamp || i}-${e.old_status}-${e.new_status}`,
+      timestamp: e.timestamp,
+      severity,
+      icon: next === 'up' ? CheckCircle2 : next === 'down' ? AlertTriangle : Activity,
+      title,
+      subtitle: [previous, e.reason, duration].filter(Boolean).join(' · '),
+    }
+  })
+
+  const reboot = inferRebootEvent(metrics, fromISO, toISO)
+  return [...trapEvents, ...statusEvents, ...(reboot ? [reboot] : [])]
+    .filter((e) => Number.isFinite(Date.parse(e.timestamp)))
+    .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+}
+
+function inferStatusDurationSec(event: StatusHistoryEvent, history: StatusHistoryEvent[]): number | null {
+  const oldState = (event.old_status || '').toLowerCase()
+  const eventTs = Date.parse(event.timestamp)
+  if (!oldState || !Number.isFinite(eventTs)) return null
+
+  const ordered = [...history]
+    .filter((item) => Number.isFinite(Date.parse(item.timestamp)))
+    .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
+
+  const currentIndex = ordered.findIndex((item) =>
+    item.timestamp === event.timestamp &&
+    item.old_status === event.old_status &&
+    item.new_status === event.new_status
+  )
+  if (currentIndex <= 0) return null
+
+  for (let i = currentIndex - 1; i >= 0; i--) {
+    const previous = ordered[i]
+    if ((previous.new_status || '').toLowerCase() !== oldState) continue
+    const previousTs = Date.parse(previous.timestamp)
+    const seconds = Math.round((eventTs - previousTs) / 1000)
+    return seconds > 0 ? seconds : null
+  }
+  return null
+}
+
+function statusDurationLabel(oldStatus?: string, newStatus?: string, durationSec?: number | null): string {
+  if (!durationSec || durationSec <= 0) return ''
+  const oldState = (oldStatus || '').toLowerCase()
+  const nextState = (newStatus || '').toLowerCase()
+  const duration = formatDuration(durationSec)
+  if (oldState === 'down' && nextState === 'up') return `Down for ${duration}`
+  if (oldState === 'up' && nextState === 'down') return `Was up for ${duration} before outage`
+  if (oldState === 'degraded' && nextState === 'up') return `Degraded for ${duration}`
+  if (oldState === 'up' && nextState === 'degraded') return `Was healthy for ${duration}`
+  return `${titleCase(oldState || 'previous state')} lasted ${duration}`
+}
+
+function inferRebootEvent(metrics: MetricSeriesMap, fromISO: string, toISO: string): ActivityEvent | null {
+  const uptime = metrics.uptime || metrics.sysUpTime || metrics.sys_uptime
+  const points = uptime?.points || []
+  if (!points.length) return null
+
+  const latest = points.reduce((best, p) => (p.ts > best.ts ? p : best), points[0])
+  if (!latest || !Number.isFinite(latest.ts) || !Number.isFinite(latest.value) || latest.value <= 0) return null
+
+  const rebootTs = latest.ts - latest.value * 1000
+  const from = Date.parse(fromISO)
+  const to = Date.parse(toISO)
+  if (!Number.isFinite(rebootTs) || rebootTs < from || rebootTs > to) return null
+
+  const iso = new Date(rebootTs).toISOString()
+  return {
+    id: `reboot-${Math.round(rebootTs)}`,
+    timestamp: iso,
+    severity: 'warning',
+    icon: Power,
+    title: 'Device reboot detected',
+    subtitle: `SNMP sysUpTime reset; current uptime ${formatDuration(latest.value)}`,
+  }
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -1630,13 +1989,36 @@ function EventsDialog({
   useEffect(() => {
     if (open && initialHours != null) setHours(initialHours)
   }, [open, initialHours])
-  const { data, isLoading } = useQuery<any[]>({
-    queryKey: ['device', deviceId, 'events-full', hours],
-    queryFn: async () => (await api.get(`/devices/${deviceId}/traps?hours=${hours}&limit=200`)).data,
+  const trapHours = Math.min(720, Math.max(1, Math.round(hours)))
+  const metricHours = Math.min(2160, Math.max(1, Math.round(hours)))
+  const fromISO = useMemo(() => new Date(Date.now() - hours * 3_600_000).toISOString(), [hours])
+  const toISO = useMemo(() => new Date().toISOString(), [hours])
+  const { data: traps, isLoading: trapsLoading } = useQuery<any[]>({
+    queryKey: ['device', deviceId, 'events-full', 'traps', trapHours],
+    queryFn: async () => (await api.get(`/devices/${deviceId}/traps?hours=${trapHours}&limit=200`)).data,
     enabled: open,
     refetchInterval: open ? 15_000 : false,
   })
-  const events = data || []
+  const { data: statusHistory, isLoading: statusLoading } = useQuery<StatusHistoryEvent[]>({
+    queryKey: ['device', deviceId, 'events-full', 'status', fromISO, toISO],
+    queryFn: async () =>
+      (await api.get(
+        `/devices/${deviceId}/status-history?from=${encodeURIComponent(fromISO)}&to=${encodeURIComponent(toISO)}&limit=200`,
+      )).data,
+    enabled: open,
+    refetchInterval: open ? 15_000 : false,
+  })
+  const { data: metrics, isLoading: metricsLoading } = useQuery<MetricSeriesMap>({
+    queryKey: ['device', deviceId, 'events-full', 'metrics', metricHours],
+    queryFn: async () => (await api.get(`/devices/${deviceId}/snmp-metrics?hours=${metricHours}`)).data,
+    enabled: open,
+    refetchInterval: open ? 15_000 : false,
+  })
+  const isLoading = trapsLoading || statusLoading || metricsLoading
+  const events = useMemo(
+    () => buildActivityEvents(traps || [], statusHistory || [], metrics || {}, fromISO, toISO),
+    [traps, statusHistory, metrics, fromISO, toISO],
+  )
   // Build the range chips: include the standard set plus the active range
   // from the page (so a 1M / custom range is selectable here too).
   const rangeOptions = useMemo(() => {
@@ -1682,24 +2064,26 @@ function EventsDialog({
             <div className="flex flex-col items-center gap-1 py-10 text-center">
               <Info className="h-6 w-6 text-muted/60" />
               <div className="text-sm font-medium">No events in this period</div>
-              <div className="text-xs text-muted">SNMP traps received from this device will appear here.</div>
+              <div className="text-xs text-muted">Status changes, reboots, and SNMP traps will appear here.</div>
             </div>
           ) : (
             <div className="divide-y divide-border">
-              {events.map((t, i) => (
-                <div key={i} className="flex items-start gap-3 py-2 text-xs">
+              {events.map((event) => (
+                <div key={event.id} className="flex items-start gap-3 py-2 text-xs">
                   <span className={`inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${
-                    t.severity === 'critical' ? 'bg-danger/15 text-danger'
-                    : t.severity === 'warning' ? 'bg-warning/15 text-warning'
+                    event.severity === 'critical' ? 'bg-danger/15 text-danger'
+                    : event.severity === 'warning' ? 'bg-warning/15 text-warning'
+                    : event.severity === 'success' ? 'bg-success/15 text-success'
                     : 'bg-info/15 text-info'
                   }`}>
-                    {t.severity || 'info'}
+                    {event.severity || 'info'}
                   </span>
                   <div className="min-w-0 flex-1">
-                    <div className="truncate font-medium" title={t.trap_name || t.message}>{t.trap_name || 'SNMP trap'}</div>
-                    <div className="truncate text-[10px] text-muted" title={t.message}>{t.message || t.trap_oid || ''}</div>
+                    <div className="truncate font-medium" title={event.title}>{event.title}</div>
+                    <div className="font-mono text-[10px] text-text/80">{formatEventTimestamp(event.timestamp)}</div>
+                    <div className="truncate text-[10px] text-muted" title={event.subtitle}>{event.subtitle || ''}</div>
                   </div>
-                  <div className="shrink-0 text-[10px] text-muted">{relativeTime(t.timestamp)}</div>
+                  <div className="shrink-0 text-[10px] text-muted">{relativeTime(event.timestamp)}</div>
                 </div>
               ))}
             </div>
@@ -1899,6 +2283,10 @@ function MiniSparkline({
 
 function titleCase(s: string) {
   return s.replace(/\b\w/g, (c) => c.toUpperCase())
+}
+
+function normalizeIp(ip: string | null | undefined): string {
+  return String(ip || '').split('/')[0].trim()
 }
 
 function avg(xs: number[]): number {

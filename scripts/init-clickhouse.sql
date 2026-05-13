@@ -46,7 +46,7 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS zenplus.ping_metrics_5m_mv
 TO zenplus.ping_metrics_5m
 AS SELECT
     device_id,
-    toStartOfFiveMinutes(timestamp) AS timestamp,
+    bucket AS timestamp,
     avg(rtt_ms)          AS avg_rtt_ms,
     min(min_rtt_ms)      AS min_rtt_ms,
     max(max_rtt_ms)      AS max_rtt_ms,
@@ -55,8 +55,20 @@ AS SELECT
     avg(is_up)           AS uptime_pct,
     count()              AS sample_count,
     any(ip_address)      AS ip_address
-FROM zenplus.ping_metrics
-GROUP BY device_id, toStartOfFiveMinutes(timestamp);
+FROM (
+    SELECT
+        device_id,
+        toStartOfFiveMinutes(timestamp) AS bucket,
+        rtt_ms,
+        min_rtt_ms,
+        max_rtt_ms,
+        packet_loss,
+        jitter_ms,
+        is_up,
+        ip_address
+    FROM zenplus.ping_metrics
+)
+GROUP BY device_id, bucket;
 
 -- ─── 1-hour rollup (1-year retention) ───
 CREATE TABLE IF NOT EXISTS zenplus.ping_metrics_1h (
@@ -82,18 +94,31 @@ CREATE MATERIALIZED VIEW IF NOT EXISTS zenplus.ping_metrics_1h_mv
 TO zenplus.ping_metrics_1h
 AS SELECT
     device_id,
-    toStartOfHour(timestamp) AS timestamp,
-    avg(avg_rtt_ms)              AS avg_rtt_ms,
-    min(min_rtt_ms)              AS min_rtt_ms,
-    max(max_rtt_ms)              AS max_rtt_ms,
-    quantile(0.95)(avg_rtt_ms)   AS p95_rtt_ms,
-    avg(avg_packet_loss)         AS avg_packet_loss,
-    avg(avg_jitter_ms)           AS avg_jitter_ms,
-    avg(uptime_pct)              AS uptime_pct,
-    sum(sample_count)            AS sample_count,
-    any(ip_address)              AS ip_address
-FROM zenplus.ping_metrics_5m
-GROUP BY device_id, toStartOfHour(timestamp);
+    bucket AS timestamp,
+    avg(src_avg_rtt_ms)              AS avg_rtt_ms,
+    min(src_min_rtt_ms)              AS min_rtt_ms,
+    max(src_max_rtt_ms)              AS max_rtt_ms,
+    quantile(0.95)(src_avg_rtt_ms)   AS p95_rtt_ms,
+    avg(src_packet_loss)             AS avg_packet_loss,
+    avg(src_jitter_ms)               AS avg_jitter_ms,
+    avg(src_uptime_pct)              AS uptime_pct,
+    sum(src_sample_count)            AS sample_count,
+    any(src_ip_address)              AS ip_address
+FROM (
+    SELECT
+        device_id,
+        toStartOfHour(timestamp) AS bucket,
+        avg_rtt_ms AS src_avg_rtt_ms,
+        min_rtt_ms AS src_min_rtt_ms,
+        max_rtt_ms AS src_max_rtt_ms,
+        avg_packet_loss AS src_packet_loss,
+        avg_jitter_ms AS src_jitter_ms,
+        uptime_pct AS src_uptime_pct,
+        sample_count AS src_sample_count,
+        ip_address AS src_ip_address
+    FROM zenplus.ping_metrics_5m
+)
+GROUP BY device_id, bucket;
 
 -- ─── Service check raw metrics (30-day retention) ───
 CREATE TABLE IF NOT EXISTS zenplus.service_metrics (

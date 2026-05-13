@@ -11,7 +11,9 @@ type CapacityRow = {
   exporter_ip: string
   ifindex: number
   if_name: string | null
+  if_descr?: string | null
   if_alias: string | null
+  display_name?: string | null
   if_speed: number | null
   device_hostname: string | null
   p95_bps: number
@@ -118,12 +120,12 @@ export function NetflowCapacityPage() {
                   return (
                     <Tr key={`${r.exporter_ip}-${r.ifindex}`}>
                       <Td>
-                        <div className="text-sm font-semibold">{r.if_name || `if ${r.ifindex}`}</div>
+                        <div className="text-sm font-semibold">{interfaceLabel(r)}</div>
                         {r.if_alias && <div className="text-[10px] text-muted">{r.if_alias}</div>}
                       </Td>
                       <Td>
                         <div className="text-xs">{r.device_hostname || '—'}</div>
-                        <div className="font-mono text-[10px] text-muted">{r.exporter_ip} · ifIndex {r.ifindex}</div>
+                        <div className="font-mono text-[10px] text-muted">{r.exporter_ip} · index {r.ifindex}</div>
                       </Td>
                       <Td className="text-right text-xs">{r.if_speed ? formatBps(r.if_speed) : '—'}</Td>
                       <Td className="text-right text-xs">{formatBps(r.avg_bps)}</Td>
@@ -154,6 +156,10 @@ export function NetflowCapacityPage() {
       </Card>
     </div>
   )
+}
+
+function interfaceLabel(r: Pick<CapacityRow, 'display_name' | 'if_name' | 'if_descr' | 'if_alias' | 'ifindex'>): string {
+  return r.display_name || r.if_name || r.if_descr || r.if_alias || `ifIndex ${r.ifindex}`
 }
 
 function Summary({ label, value, tone }: { label: string; value: number; tone: 'rose' | 'amber' | 'emerald' | 'slate' }) {

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -40,7 +40,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { formatBps, formatBytes, relativeTime, timeAxisTickFormatter, timeTooltipLabelFormatter } from '@/lib/utils'
+import { apiErrorMessage, formatBps, formatBytes, relativeTime, timeAxisTickFormatter, timeTooltipLabelFormatter } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
 import { Table, TBody, THead, Td, Th, Tr } from '@/components/ui/Table'
@@ -60,7 +60,43 @@ type Overview = {
 
 type SeriesPoint = { ts: number; bps: number; bytes: number; packets: number; flows: number }
 type Talker = { ip: string; bytes: number; packets: number; flows: number }
-type Conversation = { src: string; dst: string; protocol_name: string; dst_port: number; service: string; bytes: number; packets: number; flows: number }
+type Endpoint = { ip: string; bytes: number; packets: number; flows: number; src_bytes: number; dst_bytes: number; src_flows: number; dst_flows: number }
+type NetflowInterfaceRef = {
+  exporter_ip: string
+  ifindex: number
+  if_name?: string | null
+  if_descr?: string | null
+  if_alias?: string | null
+  if_speed?: number | null
+  device_hostname?: string | null
+  display_name?: string | null
+}
+type Conversation = {
+  src: string
+  dst: string
+  protocol: number
+  protocol_name: string
+  dst_port: number
+  service: string
+  application?: string
+  port_class?: string
+  src_ports?: number[]
+  bytes: number
+  packets: number
+  flows: number
+  exporters?: { ip: string; hostname?: string | null }[]
+  input_snmp?: number[]
+  output_snmp?: number[]
+  input_interfaces?: NetflowInterfaceRef[]
+  output_interfaces?: NetflowInterfaceRef[]
+  first_seen?: string | null
+  last_seen?: string | null
+  received_at?: string | null
+  avg_duration_ms?: number
+  tcp_flags?: number
+  avg_bytes?: number
+  avg_packets?: number
+}
 type Protocol = { protocol: number; name: string; bytes: number; packets: number; flows: number }
 type Application = { name: string; bytes: number; packets: number; flows: number }
 type Exporter = { exporter_ip: string; bytes: number; packets: number; flows: number; last_seen: string }
@@ -70,9 +106,11 @@ type Interface = {
   exporter_ip: string
   ifindex: number
   if_name?: string | null
+  if_descr?: string | null
   if_alias?: string | null
   if_speed?: number | null
   device_hostname?: string | null
+  display_name?: string | null
   in_bytes: number
   out_bytes: number
   bytes: number
@@ -96,6 +134,116 @@ const CONV_COLORS = ['#22d3ee', '#34d399', '#facc15', '#a78bfa', '#fb7185', '#fb
 export function NetflowDevicePage() {
   const { ip = '' } = useParams<{ ip: string }>()
   return <NetflowPage exporter={ip} />
+}
+
+const NETFLOW_SECTION_META: Record<string, { title: string; description: string; endpoint: string; icon: React.ComponentType<{ className?: string }> }> = {
+  'top-talkers': {
+    title: 'Top Talkers',
+    description: 'Highest-volume IP addresses by total bytes in the selected window.',
+    endpoint: 'top-talkers',
+    icon: RadioTower,
+  },
+  conversations: {
+    title: 'Conversations',
+    description: 'Highest-volume source to destination pairs with protocol and service context.',
+    endpoint: 'top-conversations',
+    icon: ArrowDownUp,
+  },
+  'top-endpoints': {
+    title: 'Top Endpoints',
+    description: 'Endpoint IPs ranked by total source and destination traffic contribution.',
+    endpoint: 'top-endpoints',
+    icon: Smartphone,
+  },
+  applications: {
+    title: 'Top Applications',
+    description: 'Application buckets inferred from destination service ports.',
+    endpoint: 'applications',
+    icon: Layers,
+  },
+  protocols: {
+    title: 'Protocol Distribution',
+    description: 'Traffic split by IP protocol.',
+    endpoint: 'protocols',
+    icon: Database,
+  },
+}
+
+export function NetflowSectionPage() {
+  const { section = 'top-talkers' } = useParams<{ section: string }>()
+  const meta = NETFLOW_SECTION_META[section] || NETFLOW_SECTION_META['top-talkers']
+  const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
+  const [searchParams] = useSearchParams()
+
+  const qs = useMemo(() => {
+    const params = new URLSearchParams({ hours: String(range.hours), limit: '50' })
+    if (isCustom) {
+      params.set('from', range.fromISO)
+      params.set('to', range.toISO)
+    }
+    for (const key of ['exporter', 'iface', 'talker', 'protocol', 'dscp', 'app', 'netclass', 'tcpflag', 'hour', 'dow']) {
+      const value = searchParams.get(key)
+      if (value) params.set(key, value)
+    }
+    return params.toString()
+  }, [range.hours, range.fromISO, range.toISO, isCustom, searchParams])
+
+  const { data = [], isLoading, error } = useQuery<any[]>({
+    queryKey: ['netflow', 'section', section, qs],
+    queryFn: async () => (await api.get(`/netflow/${meta.endpoint}?${qs}`)).data,
+    refetchInterval: isCustom ? false : 15_000,
+  })
+
+  const Icon = meta.icon
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <div className="mb-1 flex items-center gap-1.5 text-[11px] text-muted">
+            <Link to="/netflow" className="inline-flex items-center gap-1 hover:text-text">
+              <ArrowLeft className="h-3 w-3" />
+              NetFlow
+            </Link>
+            <ChevronRight className="h-3 w-3" />
+            <span>{meta.title}</span>
+          </div>
+          <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
+            <Icon className="h-5 w-5 text-primary" />
+            {meta.title}
+          </h1>
+          <p className="text-xs text-muted">{meta.description}</p>
+        </div>
+        <TimeRangePicker
+          rangeIdx={rangeIdx}
+          isCustom={isCustom}
+          customFrom={range.fromISO}
+          customTo={range.toISO}
+          onPreset={setPreset}
+          onCustom={setCustom}
+        />
+      </div>
+
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <div>
+            <CardTitle>{meta.title}</CardTitle>
+            <p className="text-xs text-muted">{range.label} · {data.length.toLocaleString()} rows</p>
+          </div>
+          {isLoading && <Loader2 className="h-4 w-4 animate-spin text-muted" />}
+        </CardHeader>
+        <CardContent>
+          {error ? (
+            <div className="rounded-md border border-danger/40 bg-danger/10 p-4 text-sm text-danger">
+              Failed to load {meta.title.toLowerCase()}: {apiErrorMessage(error)}
+            </div>
+          ) : (
+            <NetflowSectionTable section={section} rows={data} searchParams={searchParams} />
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
 }
 
 export function NetflowPage({ exporter }: { exporter?: string } = {}) {
@@ -224,6 +372,11 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
     queryFn: async () => (await api.get(`/netflow/top-talkers?${rangeQS}&limit=6`)).data,
     refetchInterval: isCustom ? false : 15_000,
   })
+  const endpoints = useQuery<Endpoint[]>({
+    queryKey: ['netflow', 'endpoints', rangeKey],
+    queryFn: async () => (await api.get(`/netflow/top-endpoints?${rangeQS}&limit=6`)).data,
+    refetchInterval: isCustom ? false : 15_000,
+  })
   const conversations = useQuery<Conversation[]>({
     queryKey: ['netflow', 'conversations', rangeKey],
     queryFn: async () => (await api.get(`/netflow/top-conversations?${rangeQS}&limit=10`)).data,
@@ -302,7 +455,15 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
   const applicationData = applications.data || []
   const conversationData = conversations.data || []
   const talkerData = talkers.data || []
+  const endpointData = endpoints.data || []
   const exporterData = exporters.data || []
+
+  const sectionLink = (sectionName: string) => {
+    const params = new URLSearchParams(searchParams)
+    if (!params.get('range')) params.set('range', '1h')
+    if (exporter) params.set('exporter', exporter)
+    return `/netflow/${sectionName}?${params.toString()}`
+  }
 
   const filteredConversations = useMemo(() => {
     if (!search.trim()) return conversationData
@@ -326,6 +487,11 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
 
   // Build alerts from real signals (exporter staleness, traffic spikes, RST loss).
   const alerts = useMemo(() => buildAlerts(overview.data, exporterData, deviceStatus.data, applicationData), [overview.data, exporterData, deviceStatus.data, applicationData])
+  const activeIfaceLabel = useMemo(() => {
+    if (!isIfaceFiltered) return null
+    const match = (interfaces.data || []).find((it) => it.ifindex === iface)
+    return match ? interfaceLabel(match) : `ifIndex ${iface}`
+  }, [interfaces.data, iface, isIfaceFiltered])
 
   return (
     <div className="space-y-4">
@@ -356,7 +522,7 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
           {anyExtraFilter && (
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
               {isIfaceFiltered && (
-                <FilterChip icon={Cable} label="ifIndex" value={String(iface)} onClear={() => setIfaceFilter(null)} />
+                <FilterChip icon={Cable} label="Interface" value={activeIfaceLabel || String(iface)} onClear={() => setIfaceFilter(null)} />
               )}
               {filterTalker && <FilterChip label="Talker" value={filterTalker} onClear={() => setParam('talker', null)} mono />}
               {filterProtocol && <FilterChip label="Protocol" value={filterProtocol} onClear={() => setParam('protocol', null)} />}
@@ -521,7 +687,7 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
       </div>
 
       {/* Donuts row */}
-      <div className="grid grid-cols-1 items-stretch gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-1 items-stretch gap-4 md:grid-cols-2 xl:grid-cols-5">
         <DonutCard
           title="Top Talkers"
           subtitle="By bytes — click to filter"
@@ -530,6 +696,17 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
           labelMode="ip"
           activeName={filterTalker || null}
           onSelect={(name) => setParam('talker', filterTalker === name ? null : name)}
+          viewAllTo={sectionLink('top-talkers')}
+        />
+        <DonutCard
+          title="Top Endpoints"
+          subtitle="Src + dst contribution"
+          data={endpointData.map((e) => ({ name: e.ip, value: e.bytes }))}
+          colors={TALKER_COLORS}
+          labelMode="ip"
+          activeName={filterTalker || null}
+          onSelect={(name) => setParam('talker', filterTalker === name ? null : name)}
+          viewAllTo={sectionLink('top-endpoints')}
         />
         <DonutCard
           title="Top Applications"
@@ -538,6 +715,7 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
           colors={APP_COLORS}
           activeName={filterApp || null}
           onSelect={(name) => setParam('app', filterApp === name ? null : name)}
+          viewAllTo={sectionLink('applications')}
         />
         <DonutCard
           title="Protocol Distribution"
@@ -550,6 +728,7 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
             if (!p) return
             setParam('protocol', String(p.protocol) === filterProtocol ? null : String(p.protocol))
           }}
+          viewAllTo={sectionLink('protocols')}
         />
         <DonutCard
           title="Top Conversations"
@@ -557,6 +736,7 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
           data={conversationData.slice(0, 6).map((c) => ({ name: `${c.src} → ${c.dst}`, value: c.bytes }))}
           colors={CONV_COLORS}
           compactNames
+          viewAllTo={sectionLink('conversations')}
         />
       </div>
 
@@ -658,6 +838,649 @@ function KpiCard({
   )
 }
 
+function NetflowSectionTable({ section, rows, searchParams }: { section: string; rows: any[]; searchParams: URLSearchParams }) {
+  const [expandedRow, setExpandedRow] = useState<string | null>(null)
+  const withParams = (path: string, updates: Record<string, string | null>) => {
+    const params = new URLSearchParams(searchParams)
+    if (!params.get('range')) params.set('range', '1h')
+    for (const [key, value] of Object.entries(updates)) {
+      if (value == null) params.delete(key)
+      else params.set(key, value)
+    }
+    return `${path}?${params.toString()}`
+  }
+
+  if (rows.length === 0) {
+    return <EmptyState />
+  }
+
+  if (section === 'conversations') {
+    return (
+      <Table>
+        <THead>
+          <Tr>
+            <Th>Source</Th>
+            <Th>Destination</Th>
+            <Th>Application</Th>
+            <Th>Protocol</Th>
+            <Th className="text-right">Bytes</Th>
+            <Th className="text-right">Packets</Th>
+            <Th className="text-right">Flows</Th>
+            <Th></Th>
+          </Tr>
+        </THead>
+        <TBody>
+          {rows.map((row) => {
+            const rowId = `${row.src}-${row.dst}-${row.protocol}-${row.dst_port}`
+            const expanded = expandedRow === rowId
+            return (
+              <Fragment key={rowId}>
+                <Tr className={expanded ? 'bg-primary/5' : undefined}>
+                  <Td className="font-mono text-xs">{row.src}</Td>
+                  <Td className="font-mono text-xs">{row.dst}</Td>
+                  <Td>{row.service}</Td>
+                  <Td><Badge variant="outline">{row.protocol_name}</Badge></Td>
+                  <Td className="text-right">{formatBytes(row.bytes)}</Td>
+                  <Td className="text-right">{Number(row.packets || 0).toLocaleString()}</Td>
+                  <Td className="text-right">{Number(row.flows || 0).toLocaleString()}</Td>
+                  <Td className="text-right">
+                    <button
+                      type="button"
+                      className="text-xs font-medium text-primary hover:underline"
+                      onClick={() => setExpandedRow(expanded ? null : rowId)}
+                    >
+                      {expanded ? 'Hide' : 'Details'}
+                    </button>
+                  </Td>
+                </Tr>
+                {expanded && (
+                  <Tr className="hover:bg-transparent">
+                    <Td colSpan={8} className="bg-surface2/20 p-4">
+                      <ConversationDetailPanel
+                        row={row}
+                        forensicsTo={withParams('/netflow/forensics', { src: row.src, dst: row.dst, proto: String(row.protocol), dst_port: String(row.dst_port) })}
+                      />
+                    </Td>
+                  </Tr>
+                )}
+              </Fragment>
+            )
+          })}
+        </TBody>
+      </Table>
+    )
+  }
+
+  if (section === 'applications') {
+    return (
+      <Table>
+        <THead>
+          <Tr>
+            <Th>Application</Th>
+            <Th className="text-right">Bytes</Th>
+            <Th className="text-right">Packets</Th>
+            <Th className="text-right">Flows</Th>
+            <Th></Th>
+          </Tr>
+        </THead>
+        <TBody>
+          {rows.map((row) => {
+            const rowId = `app-${row.name}`
+            const expanded = expandedRow === rowId
+            return (
+              <Fragment key={rowId}>
+                <Tr className={expanded ? 'bg-primary/5' : undefined}>
+                  <Td className="font-medium">{row.name}</Td>
+                  <Td className="text-right">{formatBytes(row.bytes)}</Td>
+                  <Td className="text-right">{Number(row.packets || 0).toLocaleString()}</Td>
+                  <Td className="text-right">{Number(row.flows || 0).toLocaleString()}</Td>
+                  <Td className="text-right">
+                    <button type="button" className="text-xs font-medium text-primary hover:underline" onClick={() => setExpandedRow(expanded ? null : rowId)}>
+                      {expanded ? 'Hide' : 'Details'}
+                    </button>
+                  </Td>
+                </Tr>
+                {expanded && (
+                  <Tr className="hover:bg-transparent">
+                    <Td colSpan={5} className="bg-surface2/20 p-4">
+                      <ApplicationDetailPanel row={row} filterTo={withParams('/netflow', { app: row.name })} />
+                    </Td>
+                  </Tr>
+                )}
+              </Fragment>
+            )
+          })}
+        </TBody>
+      </Table>
+    )
+  }
+
+  if (section === 'protocols') {
+    return (
+      <Table>
+        <THead>
+          <Tr>
+            <Th>Protocol</Th>
+            <Th>Number</Th>
+            <Th className="text-right">Bytes</Th>
+            <Th className="text-right">Packets</Th>
+            <Th className="text-right">Flows</Th>
+            <Th></Th>
+          </Tr>
+        </THead>
+        <TBody>
+          {rows.map((row) => {
+            const rowId = `proto-${row.protocol}`
+            const expanded = expandedRow === rowId
+            return (
+              <Fragment key={rowId}>
+                <Tr className={expanded ? 'bg-primary/5' : undefined}>
+                  <Td className="font-medium">{row.name}</Td>
+                  <Td>{row.protocol}</Td>
+                  <Td className="text-right">{formatBytes(row.bytes)}</Td>
+                  <Td className="text-right">{Number(row.packets || 0).toLocaleString()}</Td>
+                  <Td className="text-right">{Number(row.flows || 0).toLocaleString()}</Td>
+                  <Td className="text-right">
+                    <button type="button" className="text-xs font-medium text-primary hover:underline" onClick={() => setExpandedRow(expanded ? null : rowId)}>
+                      {expanded ? 'Hide' : 'Details'}
+                    </button>
+                  </Td>
+                </Tr>
+                {expanded && (
+                  <Tr className="hover:bg-transparent">
+                    <Td colSpan={6} className="bg-surface2/20 p-4">
+                      <ProtocolDetailPanel row={row} filterTo={withParams('/netflow', { protocol: String(row.protocol) })} />
+                    </Td>
+                  </Tr>
+                )}
+              </Fragment>
+            )
+          })}
+        </TBody>
+      </Table>
+    )
+  }
+
+  const isEndpoints = section === 'top-endpoints'
+  return (
+    <Table>
+      <THead>
+        <Tr>
+          <Th>IP Address</Th>
+          <Th className="text-right">Bytes</Th>
+          <Th className="text-right">Packets</Th>
+          <Th className="text-right">Flows</Th>
+          {isEndpoints && <Th className="text-right">As Source</Th>}
+          {isEndpoints && <Th className="text-right">As Destination</Th>}
+          <Th></Th>
+        </Tr>
+      </THead>
+      <TBody>
+        {rows.map((row) => {
+          const rowId = `ip-${row.ip}`
+          const expanded = expandedRow === rowId
+          const colSpan = isEndpoints ? 7 : 5
+          return (
+            <Fragment key={rowId}>
+              <Tr className={expanded ? 'bg-primary/5' : undefined}>
+                <Td className="font-mono text-xs">{row.ip}</Td>
+                <Td className="text-right">{formatBytes(row.bytes)}</Td>
+                <Td className="text-right">{Number(row.packets || 0).toLocaleString()}</Td>
+                <Td className="text-right">{Number(row.flows || 0).toLocaleString()}</Td>
+                {isEndpoints && <Td className="text-right">{formatBytes(row.src_bytes || 0)} · {Number(row.src_flows || 0).toLocaleString()}</Td>}
+                {isEndpoints && <Td className="text-right">{formatBytes(row.dst_bytes || 0)} · {Number(row.dst_flows || 0).toLocaleString()}</Td>}
+                <Td className="text-right">
+                  <button type="button" className="text-xs font-medium text-primary hover:underline" onClick={() => setExpandedRow(expanded ? null : rowId)}>
+                    {expanded ? 'Hide' : 'Details'}
+                  </button>
+                </Td>
+              </Tr>
+              {expanded && (
+                <Tr className="hover:bg-transparent">
+                  <Td colSpan={colSpan} className="bg-surface2/20 p-4">
+                    <IpTrafficDetailPanel
+                      row={row}
+                      mode={isEndpoints ? 'endpoint' : 'talker'}
+                      filterTo={withParams('/netflow', { talker: row.ip })}
+                      forensicsTo={withParams('/netflow/forensics', { talker: row.ip })}
+                    />
+                  </Td>
+                </Tr>
+              )}
+            </Fragment>
+          )
+        })}
+      </TBody>
+    </Table>
+  )
+}
+
+function IpTrafficDetailPanel({ row, mode, filterTo, forensicsTo }: { row: any; mode: 'talker' | 'endpoint'; filterTo: string; forensicsTo: string }) {
+  const srcBytes = Number(row.src_bytes || 0)
+  const dstBytes = Number(row.dst_bytes || 0)
+  const totalBytes = Math.max(1, Number(row.bytes || 0))
+  const avgBytes = row.flows ? Number(row.bytes || 0) / Number(row.flows) : 0
+  const firstSeen = row.first_seen ? new Date(row.first_seen).toLocaleString() : '—'
+  const lastSeen = row.last_seen ? new Date(row.last_seen).toLocaleString() : '—'
+
+  return (
+    <div className="rounded-lg border border-border bg-surface p-4 shadow-sm">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-sm font-semibold text-text">{row.ip}</span>
+            <Badge variant="outline">{mode === 'endpoint' ? 'Endpoint' : 'Talker'}</Badge>
+          </div>
+          <div className="mt-1 text-[11px] text-muted">first seen {firstSeen} · last seen {lastSeen}</div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Link to={filterTo} className="inline-flex items-center justify-center rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted hover:text-text">
+            Filter dashboard
+          </Link>
+          <Link to={forensicsTo} className="inline-flex items-center justify-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/15">
+            Open raw flows
+            <ChevronRight className="h-3 w-3" />
+          </Link>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <DetailMetric label="Total Traffic" value={formatBytes(row.bytes || 0)} sub={`${Number(row.flows || 0).toLocaleString()} flows`} />
+        <DetailMetric label="Packets" value={Number(row.packets || 0).toLocaleString()} sub={`${avgBytes ? formatBytes(avgBytes) : '0 B'} avg / flow`} />
+        <DetailMetric label="As Source" value={formatBytes(srcBytes)} sub={`${Number(row.src_flows || 0).toLocaleString()} source flows`} />
+        <DetailMetric label="As Destination" value={formatBytes(dstBytes)} sub={`${Number(row.dst_flows || 0).toLocaleString()} destination flows`} />
+      </div>
+
+      <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(260px,0.8fr)]">
+        <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
+          <div className="mb-2 flex items-center justify-between text-[11px]">
+            <span className="font-semibold uppercase tracking-wider text-muted">Direction Split</span>
+            <span className="text-muted">{formatBytes(totalBytes)} total</span>
+          </div>
+          <TrafficShapeBar label="Source bytes" value={srcBytes} max={totalBytes} display={`${((srcBytes / totalBytes) * 100).toFixed(0)}%`} color="bg-cyan-400" />
+          <div className="mt-2">
+            <TrafficShapeBar label="Destination bytes" value={dstBytes} max={totalBytes} display={`${((dstBytes / totalBytes) * 100).toFixed(0)}%`} color="bg-violet-400" />
+          </div>
+        </div>
+        <DetailListPanel title="Observed Context">
+          <PillList label="Protocols" values={(row.protocols || []).map((p: any) => p.name || `Protocol ${p.protocol}`)} empty="No protocol detail" />
+          <PillList label="Ports" values={(row.ports || []).map((p: any) => p.service || String(p.port))} empty="No destination ports" />
+          <PillList label="Exporters" values={(row.exporters || []).map((e: any) => e.hostname || e.ip)} empty="No exporter detail" mono />
+        </DetailListPanel>
+      </div>
+    </div>
+  )
+}
+
+function ApplicationDetailPanel({ row, filterTo }: { row: any; filterTo: string }) {
+  const avgBytes = row.flows ? Number(row.bytes || 0) / Number(row.flows) : 0
+  return (
+    <div className="rounded-lg border border-border bg-surface p-4 shadow-sm">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Layers className="h-4 w-4 text-primary" />
+            <span className="text-sm font-semibold text-text">{row.name}</span>
+            <Badge variant="outline">Application bucket</Badge>
+          </div>
+          <div className="mt-1 text-[11px] text-muted">Application is inferred from destination service ports.</div>
+        </div>
+        <Link to={filterTo} className="inline-flex shrink-0 items-center justify-center rounded-md border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/15">
+          Filter dashboard
+        </Link>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
+        <DetailMetric label="Traffic" value={formatBytes(row.bytes || 0)} sub={`${Number(row.flows || 0).toLocaleString()} flows`} />
+        <DetailMetric label="Packets" value={Number(row.packets || 0).toLocaleString()} sub={`${avgBytes ? formatBytes(avgBytes) : '0 B'} avg / flow`} />
+        <DetailMetric label="Services" value={String((row.ports || []).length)} sub="top destination ports" />
+      </div>
+      <div className="mt-4">
+        <PortBreakdown ports={row.ports || []} totalBytes={Number(row.bytes || 0)} />
+      </div>
+    </div>
+  )
+}
+
+function ProtocolDetailPanel({ row, filterTo }: { row: any; filterTo: string }) {
+  const avgPackets = row.flows ? Number(row.packets || 0) / Number(row.flows) : 0
+  const firstSeen = row.first_seen ? new Date(row.first_seen).toLocaleString() : '—'
+  const lastSeen = row.last_seen ? new Date(row.last_seen).toLocaleString() : '—'
+  return (
+    <div className="rounded-lg border border-border bg-surface p-4 shadow-sm">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Network className="h-4 w-4 text-primary" />
+            <span className="text-sm font-semibold text-text">{row.name}</span>
+            <Badge variant="outline">IP protocol {row.protocol}</Badge>
+          </div>
+          <div className="mt-1 text-[11px] text-muted">first seen {firstSeen} · last seen {lastSeen}</div>
+        </div>
+        <Link to={filterTo} className="inline-flex shrink-0 items-center justify-center rounded-md border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/15">
+          Filter dashboard
+        </Link>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
+        <DetailMetric label="Traffic" value={formatBytes(row.bytes || 0)} sub={`${Number(row.flows || 0).toLocaleString()} flows`} />
+        <DetailMetric label="Packets" value={Number(row.packets || 0).toLocaleString()} sub={`${avgPackets.toFixed(1)} avg / flow`} />
+        <DetailMetric label="Ports Seen" value={String((row.ports || []).length)} sub={row.protocol === 6 || row.protocol === 17 ? 'destination services' : 'non TCP/UDP may have none'} />
+      </div>
+      <div className="mt-4">
+        <PortBreakdown ports={row.ports || []} totalBytes={Number(row.bytes || 0)} />
+      </div>
+    </div>
+  )
+}
+
+function ConversationDetailPanel({ row, forensicsTo }: { row: Conversation; forensicsTo: string }) {
+  const exporters = row.exporters || []
+  const firstSeen = row.first_seen ? new Date(row.first_seen).toLocaleString() : '—'
+  const lastSeen = row.last_seen ? new Date(row.last_seen).toLocaleString() : '—'
+  const avgBytes = row.avg_bytes || (row.flows ? row.bytes / row.flows : 0)
+  const avgPackets = row.avg_packets || (row.flows ? row.packets / row.flows : 0)
+  const tcpFlags = describeTcpFlags(row.tcp_flags || 0)
+  const application = row.application || inferApplication(row.dst_port)
+  const portClass = row.port_class || describePortClass(row.dst_port)
+  const sourcePorts = (row.src_ports || []).slice(0, 10)
+  const inputIfs = normalizeInterfaceRefs(row.input_interfaces, row.input_snmp).slice(0, 8)
+  const outputIfs = normalizeInterfaceRefs(row.output_interfaces, row.output_snmp).slice(0, 8)
+  const durationMs = Math.max(0, row.avg_duration_ms || 0)
+
+  return (
+    <div className="rounded-lg border border-border bg-surface p-4 shadow-sm">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-sm font-semibold text-text">{row.src}</span>
+            <ArrowDownUp className="h-4 w-4 text-primary" />
+            <span className="font-mono text-sm font-semibold text-text">{row.dst}</span>
+            <Badge variant="outline">{row.protocol_name}</Badge>
+            <Badge variant="outline">{row.service}</Badge>
+          </div>
+          <div className="mt-1 text-[11px] text-muted">
+            Port {row.dst_port} · first seen {firstSeen} · last seen {lastSeen}
+          </div>
+        </div>
+        <Link
+          to={forensicsTo}
+          className="inline-flex shrink-0 items-center justify-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/15"
+        >
+          Open raw flows
+          <ChevronRight className="h-3 w-3" />
+        </Link>
+      </div>
+
+      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <DetailMetric label="Total Traffic" value={formatBytes(row.bytes)} sub={`${row.flows.toLocaleString()} flows`} />
+        <DetailMetric label="Packets" value={row.packets.toLocaleString()} sub={`${avgPackets.toFixed(1)} avg / flow`} />
+        <DetailMetric label="Avg Flow Size" value={formatBytes(avgBytes)} sub={`${durationMs.toFixed(durationMs >= 100 ? 0 : 1)} ms avg duration`} />
+        <DetailMetric label="TCP Flags" value={tcpFlags.primary} sub={tcpFlags.detail} />
+      </div>
+
+      <div className="mt-4 grid gap-3 lg:grid-cols-3">
+        <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
+          <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+            <Layers className="h-3.5 w-3.5 text-primary" />
+            Application
+          </div>
+          <div className="text-base font-semibold text-text">{application}</div>
+          <div className="mt-1 text-[11px] text-muted">
+            {application === 'Other'
+              ? 'No known application bucket matched this destination port.'
+              : 'Inferred from the destination service port.'}
+          </div>
+        </div>
+
+        <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
+          <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+            <Cable className="h-3.5 w-3.5 text-primary" />
+            Ports Used
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <PortBadge label="Source" value={sourcePorts.length ? sourcePorts.join(', ') : 'Not reported'} />
+            <PortBadge label="Destination" value={`${row.dst_port}`} />
+          </div>
+          <div className="mt-2 text-[11px] text-muted">{portClass}</div>
+        </div>
+
+        <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
+          <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+            <Network className="h-3.5 w-3.5 text-primary" />
+            Protocol / Service
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            <Badge variant="outline">{row.protocol_name}</Badge>
+            <Badge variant="outline">{row.service}</Badge>
+            <Badge variant="outline">IP proto {row.protocol}</Badge>
+          </div>
+          <div className="mt-2 text-[11px] text-muted">
+            {row.protocol_name === 'TCP' || row.protocol_name === 'UDP'
+              ? `${row.protocol_name} conversation to destination port ${row.dst_port}.`
+              : `${row.protocol_name} traffic does not normally expose TCP/UDP application ports.`}
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.8fr)]">
+        <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
+          <div className="mb-2 flex items-center justify-between text-[11px]">
+            <span className="font-semibold uppercase tracking-wider text-muted">Traffic Shape</span>
+            <span className="text-muted">{formatBytes(row.bytes)} total</span>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-3">
+            <TrafficShapeBar label="Bytes / flow" value={avgBytes} max={Math.max(avgBytes, row.bytes / Math.max(1, row.flows))} display={formatBytes(avgBytes)} color="bg-cyan-400" />
+            <TrafficShapeBar label="Packets / flow" value={avgPackets} max={Math.max(1, avgPackets)} display={avgPackets.toFixed(1)} color="bg-violet-400" />
+            <TrafficShapeBar label="Duration" value={durationMs} max={Math.max(1, durationMs)} display={`${durationMs.toFixed(durationMs >= 100 ? 0 : 1)} ms`} color="bg-emerald-400" />
+          </div>
+        </div>
+
+        <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
+          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted">Exporting Device</div>
+          {exporters.length === 0 ? (
+            <div className="text-xs text-muted">Exporter not reported for this group.</div>
+          ) : (
+            <div className="space-y-1.5">
+              {exporters.map((exporter) => (
+                <Link
+                  key={exporter.ip}
+                  to={`/netflow/devices/${encodeURIComponent(exporter.ip)}`}
+                  className="flex items-center gap-2 rounded border border-border/70 bg-surface px-2 py-1.5 hover:border-primary/50 hover:bg-primary/5"
+                >
+                  <Router className="h-3.5 w-3.5 text-primary" />
+                  <span className="min-w-0 flex-1 truncate text-xs font-medium">{exporter.hostname || exporter.ip}</span>
+                  <span className="font-mono text-[10px] text-muted">{exporter.ip}</span>
+                </Link>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <InterfaceChipGroup title="Input Interfaces" values={inputIfs} empty="No input interface reported" />
+        <InterfaceChipGroup title="Output Interfaces" values={outputIfs} empty="No output interface reported" />
+      </div>
+    </div>
+  )
+}
+
+function DetailMetric({ label, value, sub }: { label: string; value: string; sub: string }) {
+  return (
+    <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
+      <div className="mt-1 text-lg font-semibold tabular-nums text-text">{value}</div>
+      <div className="mt-0.5 text-[11px] text-muted">{sub}</div>
+    </div>
+  )
+}
+
+function DetailListPanel({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
+      <div className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-muted">{title}</div>
+      <div className="space-y-3">{children}</div>
+    </div>
+  )
+}
+
+function PillList({ label, values, empty, mono = false }: { label: string; values: string[]; empty: string; mono?: boolean }) {
+  const clean = Array.from(new Set(values.filter(Boolean))).slice(0, 8)
+  return (
+    <div>
+      <div className="mb-1 text-[10px] uppercase tracking-wider text-muted">{label}</div>
+      {clean.length ? (
+        <div className="flex flex-wrap gap-1.5">
+          {clean.map((value) => (
+            <span key={value} className={`rounded border border-border bg-surface px-2 py-1 text-[11px] text-text ${mono ? 'font-mono' : ''}`}>
+              {value}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <div className="text-xs text-muted">{empty}</div>
+      )}
+    </div>
+  )
+}
+
+function PortBreakdown({ ports, totalBytes }: { ports: any[]; totalBytes: number }) {
+  const clean = ports.slice(0, 8)
+  if (!clean.length) {
+    return <div className="rounded-md border border-dashed border-border bg-surface2/30 p-5 text-center text-xs text-muted">No TCP/UDP destination port detail for this item.</div>
+  }
+  const max = Math.max(1, ...clean.map((p) => Number(p.bytes || 0)), totalBytes || 0)
+  return (
+    <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
+      <div className="mb-3 flex items-center justify-between text-[11px]">
+        <span className="font-semibold uppercase tracking-wider text-muted">Top Services / Ports</span>
+        <span className="text-muted">{formatBytes(totalBytes || clean.reduce((sum, p) => sum + Number(p.bytes || 0), 0))} total</span>
+      </div>
+      <div className="space-y-2">
+        {clean.map((port) => {
+          const bytes = Number(port.bytes || 0)
+          return (
+            <div key={`${port.port}-${port.service}`}>
+              <div className="flex items-center justify-between gap-2 text-[11px]">
+                <span className="flex min-w-0 items-center gap-1.5">
+                  <Badge variant="outline">{port.service || `Port ${port.port}`}</Badge>
+                  <span className="truncate text-muted">{port.application || describePortClass(Number(port.port || 0))}</span>
+                </span>
+                <span className="shrink-0 font-medium text-text">{formatBytes(bytes)} · {Number(port.flows || 0).toLocaleString()} flows</span>
+              </div>
+              <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface">
+                <div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(4, (bytes / max) * 100)}%` }} />
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function PortBadge({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded border border-border bg-surface px-2 py-1.5">
+      <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
+      <div className="mt-0.5 truncate font-mono text-xs font-semibold text-text">{value}</div>
+    </div>
+  )
+}
+
+function TrafficShapeBar({ label, value, max, display, color }: { label: string; value: number; max: number; display: string; color: string }) {
+  const width = Math.max(6, Math.min(100, (value / Math.max(1, max)) * 100))
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-2 text-[11px]">
+        <span className="text-muted">{label}</span>
+        <span className="font-medium text-text">{display}</span>
+      </div>
+      <div className="mt-1 h-2 overflow-hidden rounded-full bg-surface">
+        <div className={`h-full rounded-full ${color}`} style={{ width: `${width}%` }} />
+      </div>
+    </div>
+  )
+}
+
+function InterfaceChipGroup({ title, values, empty }: { title: string; values: NetflowInterfaceRef[]; empty: string }) {
+  return (
+    <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
+      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted">{title}</div>
+      {values.length ? (
+        <div className="flex flex-wrap gap-1.5">
+          {values.map((value) => (
+            <span key={`${value.exporter_ip}-${value.ifindex}`} className="rounded border border-border bg-surface px-2 py-1 text-[11px] text-text">
+              <span className="font-medium">{interfaceLabel(value)}</span>
+              <span className="ml-1 font-mono text-muted">#{value.ifindex}</span>
+            </span>
+          ))}
+        </div>
+      ) : (
+        <div className="text-xs text-muted">{empty}</div>
+      )}
+    </div>
+  )
+}
+
+function normalizeInterfaceRefs(resolved?: NetflowInterfaceRef[], indexes?: number[]): NetflowInterfaceRef[] {
+  if (resolved?.length) return dedupeInterfaceRefs(resolved)
+  return dedupeInterfaceRefs((indexes || []).filter(Boolean).map((ifindex) => ({ exporter_ip: '', ifindex })))
+}
+
+function dedupeInterfaceRefs(values: NetflowInterfaceRef[]): NetflowInterfaceRef[] {
+  const seen = new Set<string>()
+  const out: NetflowInterfaceRef[] = []
+  for (const value of values) {
+    const key = `${value.exporter_ip || 'unknown'}-${value.ifindex}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(value)
+  }
+  return out
+}
+
+function interfaceLabel(value: Pick<NetflowInterfaceRef, 'display_name' | 'if_name' | 'if_descr' | 'if_alias' | 'ifindex'>): string {
+  return value.display_name || value.if_name || value.if_descr || value.if_alias || `ifIndex ${value.ifindex}`
+}
+
+function describeTcpFlags(flags: number): { primary: string; detail: string } {
+  if (!flags) return { primary: 'None', detail: 'No TCP control flags' }
+  const names: [number, string][] = [
+    [1, 'FIN'],
+    [2, 'SYN'],
+    [4, 'RST'],
+    [8, 'PSH'],
+    [16, 'ACK'],
+    [32, 'URG'],
+  ]
+  const found = names.filter(([bit]) => (flags & bit) !== 0).map(([, name]) => name)
+  return {
+    primary: found.slice(0, 3).join(' + ') || 'TCP',
+    detail: found.length > 3 ? `${found.length} flags: ${found.join(', ')}` : found.join(', ') || `mask ${flags}`,
+  }
+}
+
+function inferApplication(port: number): string {
+  if ([80, 443, 8080, 8443].includes(port)) return 'Web (HTTP/HTTPS)'
+  if ([554, 1755, 1935, 5004, 5005, 8000, 8554, 5060, 5061].includes(port)) return 'Streaming Media'
+  if (port === 53) return 'DNS'
+  if ([25, 110, 143, 465, 587, 993, 995].includes(port)) return 'Email (SMTP/IMAP/POP)'
+  if ([20, 21, 69, 115, 445, 2049].includes(port)) return 'File Transfer (FTP/SMB)'
+  if ([22, 23, 3389, 5900, 5938].includes(port)) return 'Remote Access (SSH/RDP/Telnet)'
+  if ([1433, 1521, 3306, 5432, 6379, 9042, 27017].includes(port)) return 'Database'
+  if ([1719, 1720, 3478, 3479, 5060, 5061, 16384, 19302].includes(port)) return 'VoIP / Video Conf.'
+  if ([123, 161, 162, 514, 6343].includes(port)) return 'Network Mgmt'
+  if (port >= 1 && port <= 1023) return 'System Services'
+  return 'Other'
+}
+
+function describePortClass(port: number): string {
+  if (port === 0) return 'No TCP/UDP destination port was reported.'
+  if (port >= 1 && port <= 1023) return 'Well-known system port.'
+  if (port >= 1024 && port <= 49151) return 'Registered/user port. Application is inferred only if the port is in the known map.'
+  return 'Dynamic/private port, commonly used by clients or custom services.'
+}
+
 // ─────────────────────────────────────────────────────────────────
 // Donut card (Top Talkers / Apps / Protocols / Conversations)
 // ─────────────────────────────────────────────────────────────────
@@ -671,6 +1494,7 @@ function DonutCard({
   compactNames,
   onSelect,
   activeName,
+  viewAllTo,
 }: {
   title: string
   subtitle: string
@@ -680,13 +1504,21 @@ function DonutCard({
   compactNames?: boolean
   onSelect?: (name: string) => void
   activeName?: string | null
+  viewAllTo?: string
 }) {
   const total = data.reduce((acc, d) => acc + (d.value || 0), 0)
   return (
     <Card className="flex h-full flex-col">
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm">{title}</CardTitle>
-        <p className="text-[11px] text-muted">{subtitle}</p>
+      <CardHeader className="flex-row items-start justify-between gap-2 pb-2">
+        <div>
+          <CardTitle className="text-sm">{title}</CardTitle>
+          <p className="text-[11px] text-muted">{subtitle}</p>
+        </div>
+        {viewAllTo && (
+          <Link to={viewAllTo} className="shrink-0 text-[11px] font-medium text-primary hover:underline">
+            View all
+          </Link>
+        )}
       </CardHeader>
       <CardContent className="flex flex-1 flex-col pb-4">
         <div className="flex items-center gap-3">
@@ -1341,7 +2173,7 @@ function TopInterfacesCard({
                     </span>
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center justify-between gap-2">
-                        <span className="truncate text-xs font-semibold">{it.if_name || `if ${it.ifindex}`}</span>
+                        <span className="truncate text-xs font-semibold">{interfaceLabel(it)}</span>
                         <span className="shrink-0 text-[10px] font-medium text-muted">{formatBytes(it.bytes)}</span>
                       </div>
                       <div className="mt-1 h-1 overflow-hidden rounded-full bg-surface">
@@ -1376,8 +2208,8 @@ function TopInterfacesCard({
                       <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${active ? 'bg-primary text-black' : 'bg-primary/15 text-primary'}`}>
                         {idx + 1}
                       </span>
-                      <span className="truncate text-sm font-semibold" title={it.if_alias || ''}>
-                        {it.if_name || `if ${it.ifindex}`}
+                      <span className="truncate text-sm font-semibold" title={it.if_alias || it.if_descr || ''}>
+                        {interfaceLabel(it)}
                       </span>
                     </div>
                     <span className="shrink-0 text-[11px] font-medium text-muted">{formatBytes(it.bytes)}</span>
@@ -1387,7 +2219,7 @@ function TopInterfacesCard({
                   )}
                   {showExporter && (
                     <div className="mt-1 truncate font-mono text-[10px] text-muted">
-                      {it.device_hostname ? `${it.device_hostname} · ` : ''}{it.exporter_ip} · ifIndex {it.ifindex}
+                      {it.device_hostname ? `${it.device_hostname} · ` : ''}{it.exporter_ip} · index {it.ifindex}
                     </div>
                   )}
                   {it.if_speed && it.if_speed > 0 && (

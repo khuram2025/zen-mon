@@ -1,1 +1,148 @@
-sudo Password is Read@123
+  ZenPlus Appliance — Integration Spec
+
+  Endpoints
+
+  Base URL: https://zentryc.com/api/v1
+
+  ┌─────────────────────────────────┬──────────────────────────────┬─────────────────────────────────────────────────────────────────────────────────────────────┬────────────────────┐
+  │              Step               │        Method & Path         │                                           Purpose                                           │        Auth        │
+  ├─────────────────────────────────┼──────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ 1. Register                     │ POST /appliances/register    │ Trade the registration key for a permanent appliance_id + api_key. One-time, per appliance. │ None (key in body) │
+  ├─────────────────────────────────┼──────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ 2. Check-in / heartbeat         │ POST /appliances/checkin     │ Heartbeat + report usage + receive update notice. Every 4 hours.                            │ Bearer api_key     │
+  ├─────────────────────────────────┼──────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ 3. (Optional) Subscription info │ GET /appliances/subscription │ Read current node cap and remaining capacity at any time.                                   │ Bearer api_key     │
+  └─────────────────────────────────┴──────────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────┴────────────────────┘
+
+  All requests/responses are JSON. UTF-8.
+
+  Authentication (after registration)
+
+  Every authenticated request must send these two headers:
+
+  X-Appliance-ID: <appliance_id from step 1>
+  Authorization: Bearer <api_key from step 1>
+
+  The api_key is shown only once on the registration response — it is bcrypt-hashed at rest and is unrecoverable if lost. Store it in a permission-600 file owned by root (e.g.
+  /etc/zentryc/appliance.key). If lost, an admin must revoke and re-issue.
+
+  Step 1 — Register the appliance (one-time)
+
+  The customer receives a registration key (a 64-char hex token) from the ZenPlus admin. The appliance's first-boot provisioning script must:
+
+  POST https://zentryc.com/api/v1/appliances/register
+  Content-Type: application/json
+
+  {
+    "registration_token": "<the 64-char hex key>",
+    "hostname": "customer-edge-01",
+    "arch": "amd64",                    // amd64 | arm64
+    "os_version": "ubuntu-24.04",       // optional, free-form
+    "current_version": "1.0.0"          // optional, agent build version
+  }
+
+  200 OK response:
+
+  {
+    "appliance_id": "9f8c0e7a-…",
+    "api_key": "a1b2c3…(64 hex chars)",
+    "subscription": {
+      "id": "…",
+      "type": "ota",
+      "name": "Acme – Production",
+      "is_active": true,
+      "is_expired": false,
+      "expires_at": "2027-05-01T23:59:59+00:00",
+      "license": {
+        "total_node_cap": 100,
+        "used_node_count": 0,
+        "available_nodes": 100
+      }
+    }
+  }
+
+  Persist appliance_id and api_key immediately before the script can crash — the key is not retrievable.
+
+  Common 403 errors:
+  - Invalid registration token — typo or wrong key
+  - Registration token has already been used — keys are single-use
+  - Subscription has expired / is inactive
+  - Subscription has reached its appliance limit (rare for ZenPlus, max=9999, but possible)
+
+  Step 2 — Check in every 4 hours
+
+  Run this from a systemd timer (OnUnitActiveSec=4h, with RandomizedDelaySec=600 to avoid thundering-herd) or a cron job. Required field for ZenPlus: node_count.
+
+  POST https://zentryc.com/api/v1/appliances/checkin
+  X-Appliance-ID: <appliance_id>
+  Authorization: Bearer <api_key>
+  Content-Type: application/json
+
+  {
+    "hostname": "customer-edge-01",
+    "current_version": "1.2.3",
+    "agent_version": "1.2.3",
+    "arch": "amd64",
+    "os_version": "ubuntu-24.04",
+    "uptime": 482137,                    // seconds, optional
+    "node_count": 27,                    // REQUIRED for ZenPlus — current node count managed by this appliance
+    "services_status": {                 // optional — free-form dict
+      "zenplus-agent": "running",
+      "node-collector": "running"
+    },
+    "disk": {                            // optional
+      "/": { "used_pct": 41, "free_gb": 58 }
+    }
+  }
+
+  Response:
+
+  {
+    "next_action": "none" | "update",
+    "release": null | { "id": "...", "version": "1.3.0", "package_url": "...", "package_sha256": "...", "manifest_sig": "...", "size": 12345678 },
+    "subscription": {
+      "license": {
+        "total_node_cap": 100,
+        "used_node_count": 27,           // server-side aggregate across the whole subscription
+        "available_nodes": 73
+      },
+      "is_active": true,
+      "is_expired": false,
+      "expires_at": "..."
+    }
+  }
+
+  Field semantics:
+
+  ┌──────────────────────────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │                Field                 │                                                                    Meaning                                                                     │
+  ├──────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ node_count                           │ Integer ≥ 0. The current number of nodes this appliance is managing right now. Send the live count, not a delta.                               │
+  ├──────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ subscription.license.used_node_count │ Sum of node_count from all active appliances under the customer's subscription, not just yours. Use this if you want to display "73 of 100     │
+  │                                      │ nodes used" in the appliance UI.                                                                                                               │
+  ├──────────────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ next_action: "update"                │ A ZenPlus OTA update is available — download via release.package_url (use Authorization + X-Appliance-ID headers) and report progress to POST  │
+  │                                      │ /updates/report.                                                                                                                               │
+  └──────────────────────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  Cadence & retry rules
+
+  - Every 4 hours, on the hour ± random jitter up to 10 min. Don't run all customer fleets at :00:00.
+  - On network failure: retry with exponential backoff (1m, 5m, 15m, 60m), capped at 24 hours. After 24h of consecutive failures, surface a local alert.
+  - HTTP 401/403: treat the credentials as invalidated — stop retrying, log loudly, and surface a re-provisioning prompt.
+  - HTTP 5xx: backoff and retry. The next scheduled 4h check-in proceeds normally.
+  - Do not check in more often than every 5 minutes under any retry path. The server treats sub-5-min cadence as misbehaving.
+
+  Time
+
+  All timestamps from the server are RFC 3339 / ISO 8601 in UTC. Send your local clock as UTC too. NTP must be running on the appliance — a clock skew over 5 min may be rejected by future
+  hardening.
+
+  Reference checklist for first-boot provisioning
+
+  1. Operator pastes the registration key into a setup form (or provisioning config).
+  2. Agent calls POST /appliances/register, persists appliance_id + api_key atomically to /etc/zentryc/appliance.json (mode 0600, root:root).
+  3. Agent installs systemd timer zentryc-checkin.timer running OnUnitActiveSec=4h, OnBootSec=2min, RandomizedDelaySec=10min.
+  4. First check-in fires within 2 min of boot, includes node_count (even if 0).
+  5. Agent verifies subscription.is_active && !is_expired and surfaces a warning if not.

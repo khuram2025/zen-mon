@@ -120,6 +120,13 @@ type SortKey =
 type SortOrder = 'asc' | 'desc'
 
 type HealthKind = 'healthy' | 'warning' | 'critical' | 'offline'
+type AvailabilityRow = {
+  key: string
+  label: string
+  total: number
+  available: number
+  availability: number
+}
 
 const DEVICE_TYPES = [
   'router',
@@ -398,6 +405,24 @@ export function DevicesPage() {
     const total = enriched.length
     return { total, ...counts, byCategory, newThisWeek }
   }, [enriched])
+
+  const availabilityByLocation = useMemo(
+    () => buildAvailabilityRows(
+      enriched,
+      ({ device }) => device.location || 'Unassigned',
+      (label) => label,
+    ),
+    [enriched],
+  )
+
+  const availabilityByType = useMemo(
+    () => buildAvailabilityRows(
+      enriched,
+      ({ device }) => device.device_type || 'other',
+      (label) => titleCase(label.replace('_', ' ')),
+    ),
+    [enriched],
+  )
 
   const activeFilterCount =
     (typeFilter ? 1 : 0) +
@@ -970,6 +995,20 @@ export function DevicesPage() {
         {/* ---------- Right sidebar ---------- */}
         <div className="space-y-4">
           <DistributionCard byCategory={agg.byCategory} total={agg.total} />
+          <AvailabilityChartCard
+            title="Availability by Location"
+            subtitle={`${rangeLabel} average uptime by site`}
+            icon={MapPin}
+            rows={availabilityByLocation}
+            onPick={(location) => patchParams({ loc: location === 'Unassigned' ? null : location, page: '1' })}
+          />
+          <AvailabilityChartCard
+            title="Availability by Type"
+            subtitle={`${rangeLabel} average uptime by device type`}
+            icon={Layers}
+            rows={availabilityByType}
+            onPick={(type) => patchParams({ type: typeFilter === type ? null : type, page: '1' })}
+          />
           <StatusBreakdownCard
             healthy={agg.healthy}
             warning={agg.warning}
@@ -1241,6 +1280,73 @@ function DistributionCard({ byCategory, total }: { byCategory: Record<string, nu
             })}
           </div>
         </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function AvailabilityChartCard({
+  title,
+  subtitle,
+  icon: Icon,
+  rows,
+  onPick,
+}: {
+  title: string
+  subtitle: string
+  icon: React.ComponentType<{ className?: string }>
+  rows: AvailabilityRow[]
+  onPick: (key: string) => void
+}) {
+  const visible = rows.slice(0, 6)
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-2">
+            <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+              <Icon className="h-3.5 w-3.5" />
+            </span>
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold">{title}</h3>
+              <p className="truncate text-[11px] text-muted">{subtitle}</p>
+            </div>
+          </div>
+        </div>
+
+        {visible.length === 0 ? (
+          <div className="rounded-md border border-dashed border-border bg-surface2/30 p-5 text-center text-xs text-muted">
+            No devices to chart.
+          </div>
+        ) : (
+          <div className="space-y-2.5">
+            {visible.map((row) => {
+              const tone =
+                row.availability >= 99 ? 'bg-success' :
+                row.availability >= 95 ? 'bg-primary' :
+                row.availability >= 90 ? 'bg-warning' : 'bg-danger'
+              return (
+                <button
+                  key={row.key}
+                  type="button"
+                  onClick={() => onPick(row.key)}
+                  className="block w-full rounded px-1 py-0.5 text-left transition-colors hover:bg-surface2/60"
+                >
+                  <div className="mb-1 flex items-center justify-between gap-2 text-xs">
+                    <span className="truncate font-medium">{row.label}</span>
+                    <span className="shrink-0 tabular-nums">
+                      {row.availability.toFixed(1)}%
+                      <span className="ml-1 text-muted">({row.available}/{row.total})</span>
+                    </span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full bg-surface2">
+                    <div className={`h-full rounded-full ${tone}`} style={{ width: `${Math.max(2, Math.min(100, row.availability))}%` }} />
+                  </div>
+                </button>
+              )
+            })}
+          </div>
+        )}
       </CardContent>
     </Card>
   )
@@ -2090,6 +2196,39 @@ function csvEscape(v: string): string {
   if (/[",\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`
   return v
 }
+
+function buildAvailabilityRows(
+  rows: Array<{ device: Device; health: HealthKind; uptimePct?: number }>,
+  getKey: (row: { device: Device; health: HealthKind; uptimePct?: number }) => string,
+  labelOf: (key: string) => string,
+): AvailabilityRow[] {
+  const grouped = new Map<string, { total: number; available: number; score: number }>()
+  for (const row of rows) {
+    const key = getKey(row) || 'Unassigned'
+    const current = grouped.get(key) || { total: 0, available: 0, score: 0 }
+    const availability = typeof row.uptimePct === 'number'
+      ? row.uptimePct
+      : row.health === 'healthy'
+        ? 100
+        : row.health === 'warning'
+          ? 75
+          : 0
+    current.total += 1
+    current.available += availability > 0 ? 1 : 0
+    current.score += availability
+    grouped.set(key, current)
+  }
+  return Array.from(grouped.entries())
+    .map(([key, value]) => ({
+      key,
+      label: labelOf(key),
+      total: value.total,
+      available: value.available,
+      availability: value.total ? value.score / value.total : 0,
+    }))
+    .sort((a, b) => b.total - a.total || a.label.localeCompare(b.label))
+}
+
 function titleCase(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1)
 }

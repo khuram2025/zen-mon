@@ -22,10 +22,20 @@ type FlowRow = {
   dscp: number
   input_snmp: number
   output_snmp: number
+  input_interface?: InterfaceRef | null
+  output_interface?: InterfaceRef | null
   packets: number
   bytes: number
   duration_ms: number
   service: string
+}
+
+type InterfaceRef = {
+  ifindex: number
+  display_name?: string | null
+  if_name?: string | null
+  if_descr?: string | null
+  if_alias?: string | null
 }
 
 const PROTO_OPTIONS = [
@@ -79,9 +89,13 @@ export function NetflowForensicsPage() {
   const exportCsv = () => {
     const rows = flows.data || []
     if (rows.length === 0) return
-    const header = ['timestamp', 'exporter_ip', 'src', 'src_port', 'dst', 'dst_port', 'protocol', 'service', 'tcp_flags', 'dscp', 'input_snmp', 'output_snmp', 'bytes', 'packets', 'duration_ms']
+    const header = ['timestamp', 'exporter_ip', 'src', 'src_port', 'dst', 'dst_port', 'protocol', 'service', 'tcp_flags', 'dscp', 'input_interface', 'output_interface', 'input_snmp', 'output_snmp', 'bytes', 'packets', 'duration_ms']
     const esc = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`
-    const csv = [header.join(','), ...rows.map((r) => header.map((h) => esc((r as any)[h])).join(','))].join('\n')
+    const csv = [header.join(','), ...rows.map((r) => header.map((h) => {
+      if (h === 'input_interface') return esc(interfaceLabel(r.input_interface, r.input_snmp))
+      if (h === 'output_interface') return esc(interfaceLabel(r.output_interface, r.output_snmp))
+      return esc((r as any)[h])
+    }).join(','))].join('\n')
     const blob = new Blob([csv], { type: 'text/csv' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -234,7 +248,10 @@ export function NetflowForensicsPage() {
                     <Td><Badge variant="outline">{r.protocol_name}</Badge></Td>
                     <Td className="font-mono text-[10px]">{flagsString(r.tcp_flags)}</Td>
                     <Td className="text-[11px]">{r.dscp}</Td>
-                    <Td className="font-mono text-[10px]">{r.input_snmp} → {r.output_snmp}</Td>
+                    <Td className="text-[10px]">
+                      <div className="font-medium">{interfaceLabel(r.input_interface, r.input_snmp)}</div>
+                      <div className="text-muted">{interfaceLabel(r.output_interface, r.output_snmp)}</div>
+                    </Td>
                     <Td className="text-right font-mono text-[11px]">{formatBytes(r.bytes)}</Td>
                     <Td className="text-right text-[11px]">{r.packets.toLocaleString()}</Td>
                   </Tr>
@@ -246,6 +263,11 @@ export function NetflowForensicsPage() {
       </Card>
     </div>
   )
+}
+
+function interfaceLabel(iface: InterfaceRef | null | undefined, fallbackIndex: number): string {
+  if (!fallbackIndex) return '—'
+  return iface?.display_name || iface?.if_name || iface?.if_descr || iface?.if_alias || `ifIndex ${fallbackIndex}`
 }
 
 function flagsString(flags: number): string {
