@@ -54,5 +54,6 @@ class Alert(Base):
     extra_data: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
 
     # Relationships
+    rule: Mapped["AlertRule | None"] = relationship("AlertRule", lazy="selectin", foreign_keys=[rule_id])
     device: Mapped["Device"] = relationship("Device", lazy="selectin", foreign_keys=[device_id])
     service_check = relationship("ServiceCheck", lazy="selectin", foreign_keys=[service_check_id])

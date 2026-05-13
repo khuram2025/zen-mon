@@ -1,13 +1,17 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import {
   Activity,
+  AlertCircle,
   AlertTriangle,
   Bell,
   BellRing,
   ChevronRight,
+  CheckCircle2,
   CreditCard,
   FileText,
+  Info,
   LayoutDashboard,
   LogOut,
   Key,
@@ -28,8 +32,20 @@ import {
 import { useAuth } from '@/stores/auth'
 import { useTheme } from '@/stores/theme'
 import { Button } from '@/components/ui/Button'
-import { cn } from '@/lib/utils'
+import { api } from '@/lib/api'
+import { cn, relativeTime } from '@/lib/utils'
 import { UpdateNotificationBell } from '@/components/UpdateNotificationBell'
+
+type HeaderAlert = {
+  id: string
+  severity: 'critical' | 'warning' | 'info'
+  status: string
+  message: string
+  triggered_at: string
+  device_hostname?: string | null
+  device_ip?: string | null
+  service_check_name?: string | null
+}
 
 /* ------------------------------------------------------------------ */
 /*  Navigation structure                                               */
@@ -152,6 +168,114 @@ function Breadcrumbs() {
           <ChevronRight className="h-3 w-3 text-muted/40" />
           <span className="font-medium text-text">Detail</span>
         </>
+      )}
+    </div>
+  )
+}
+
+function HeaderAlertCenter() {
+  const navigate = useNavigate()
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  const { data: stats } = useQuery<any>({
+    queryKey: ['alerts', 'stats'],
+    queryFn: async () => (await api.get('/alerts/stats')).data,
+    refetchInterval: 15_000,
+  })
+
+  const { data: alerts = [] } = useQuery<HeaderAlert[]>({
+    queryKey: ['alerts', 'header-active'],
+    queryFn: async () => {
+      const r = (await api.get('/alerts?status=active&limit=6')).data
+      return r?.data || []
+    },
+    refetchInterval: 15_000,
+  })
+
+  useEffect(() => {
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [])
+
+  const active = Number(stats?.active || 0)
+  const critical = Number(stats?.critical || 0)
+  const warning = Number(stats?.warning || 0)
+  const BellIcon = critical > 0 ? AlertCircle : active > 0 ? AlertTriangle : Bell
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={`relative flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
+          critical > 0 ? 'bg-danger/10 text-danger hover:bg-danger/15'
+          : active > 0 ? 'bg-warning/10 text-warning hover:bg-warning/15'
+          : 'text-muted hover:bg-surface2 hover:text-text'
+        }`}
+        title={`${active} active alerts`}
+      >
+        <BellIcon className="h-3.5 w-3.5" />
+        {active > 0 && (
+          <span className="absolute -right-1 -top-1 min-w-[16px] rounded-full bg-danger px-1 text-center text-[9px] font-bold leading-4 text-white">
+            {active > 99 ? '99+' : active}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div className="absolute right-0 top-full z-50 mt-2 w-[380px] overflow-hidden rounded-lg border border-border bg-surface shadow-xl animate-fade-in">
+          <div className="border-b border-border p-3">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <div className="text-sm font-semibold">Alert Center</div>
+                <div className="text-[11px] text-muted">{active} active · {critical} critical · {warning} warning</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => { setOpen(false); navigate('/alerts') }}
+                className="text-xs font-medium text-primary hover:underline"
+              >
+                Open all
+              </button>
+            </div>
+          </div>
+          <div className="max-h-80 overflow-y-auto">
+            {alerts.length === 0 ? (
+              <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
+                <CheckCircle2 className="h-7 w-7 text-success" />
+                <div className="text-sm font-medium">No active alerts</div>
+                <div className="text-xs text-muted">New device, service, and system alerts will appear here.</div>
+              </div>
+            ) : (
+              alerts.map((alert) => {
+                const Icon = alert.severity === 'critical' ? AlertCircle : alert.severity === 'warning' ? AlertTriangle : Info
+                const tone = alert.severity === 'critical' ? 'text-danger bg-danger/10' : alert.severity === 'warning' ? 'text-warning bg-warning/10' : 'text-info bg-info/10'
+                return (
+                  <button
+                    key={alert.id}
+                    type="button"
+                    onClick={() => { setOpen(false); navigate(`/alerts/${alert.id}`) }}
+                    className="flex w-full items-start gap-3 border-b border-border/60 p-3 text-left transition-colors last:border-b-0 hover:bg-surface2/60"
+                  >
+                    <span className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${tone}`}>
+                      <Icon className="h-4 w-4" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium">{alert.message}</span>
+                      <span className="mt-0.5 block truncate text-[11px] text-muted">
+                        {alert.device_hostname || alert.device_ip || alert.service_check_name || 'System'} · {relativeTime(alert.triggered_at)}
+                      </span>
+                    </span>
+                  </button>
+                )
+              })
+            )}
+          </div>
+        </div>
       )}
     </div>
   )
@@ -326,6 +450,8 @@ export function Layout() {
           <Button variant="ghost" size="icon" className="h-7 w-7 text-muted hover:text-text" onClick={toggle}>
             {theme === 'dark' ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
           </Button>
+
+          <HeaderAlertCenter />
 
           {/* Update notification bell — deep-links to Settings → Updates */}
           <UpdateNotificationBell />

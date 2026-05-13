@@ -8,6 +8,7 @@ import { DevicesPage } from '@/pages/DevicesPage'
 import { DeviceDetailPage } from '@/pages/DeviceDetailPage'
 import { DeviceInterfacesPage } from '@/pages/DeviceInterfacesPage'
 import { AlertsPage } from '@/pages/AlertsPage'
+import { AlertDetailPage } from '@/pages/AlertDetailPage'
 import { AlertRulesPage } from '@/pages/AlertRulesPage'
 import { ServicesPage } from '@/pages/ServicesPage'
 import { ServiceCheckDetailPage } from '@/pages/ServiceCheckDetail'
@@ -105,6 +106,7 @@ export default function App() {
         <Route path="mibs" element={<MibLibraryPage />} />
         <Route path="sensors" element={<SensorsPage />} />
         <Route path="alerts" element={<AlertsPage />} />
+        <Route path="alerts/:id" element={<AlertDetailPage />} />
         <Route path="alert-rules" element={<AlertRulesPage />} />
         <Route path="reports" element={<ReportsPage />}>
           <Route index element={<Navigate to="executive" replace />} />

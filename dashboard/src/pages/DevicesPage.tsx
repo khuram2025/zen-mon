@@ -127,6 +127,14 @@ type AvailabilityRow = {
   available: number
   availability: number
 }
+type DeviceAlertCount = {
+  total: number
+  active: number
+  critical: number
+  warning: number
+  info: number
+  last_triggered_at: string | null
+}
 
 const DEVICE_TYPES = [
   'router',
@@ -292,6 +300,13 @@ export function DevicesPage() {
     refetchInterval: 30_000,
   })
   const uptimePctMap = uptimePctData?.devices || {}
+
+  const { data: alertCountData } = useQuery<{ devices: Record<string, DeviceAlertCount> }>({
+    queryKey: ['devices', 'alert-counts', rangeHours],
+    queryFn: async () => (await api.get(`/alerts/device-counts?hours=${rangeHours}`)).data,
+    refetchInterval: 30_000,
+  })
+  const alertCountMap = alertCountData?.devices || {}
 
   // Latest SNMP scalar metrics (cpu, memory, …) per device, from ClickHouse.
   const { data: metricsData } = useQuery<{
@@ -873,6 +888,8 @@ export function DevicesPage() {
                   {pageRows.map(({ device: d, health, cpu, mem, uptime, uptimePct }) => {
                     const isSel = selected.has(d.id)
                     const typeInfo = TYPE_STYLE[normalizeType(d.device_type)] || TYPE_STYLE.other
+                    const alertCount = alertCountMap[d.id]
+                    const alertTone = alertCount?.critical ? 'bg-danger text-white' : alertCount?.active ? 'bg-warning text-black' : 'bg-primary text-black'
                     return (
                       <Tr key={d.id} className={isSel ? 'bg-primary/5' : ''}>
                         <Td className="py-2.5">
@@ -886,9 +903,15 @@ export function DevicesPage() {
                         <Td className="py-2.5">
                           <div className="flex items-center gap-2.5">
                             <span
-                              className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border ${typeInfo.badge}`}
+                              className={`relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md border ${typeInfo.badge}`}
+                              title={alertCount ? `${alertCount.total} alert${alertCount.total === 1 ? '' : 's'} in ${rangeLabel}` : undefined}
                             >
                               <typeInfo.Icon className="h-4 w-4" />
+                              {(alertCount?.total || 0) > 0 && (
+                                <span className={`absolute -right-1.5 -top-1.5 min-w-[17px] rounded-full px-1 text-center text-[9px] font-bold leading-[17px] shadow-sm ring-2 ring-surface ${alertTone}`}>
+                                  {alertCount.total > 99 ? '99+' : alertCount.total}
+                                </span>
+                              )}
                             </span>
                             <Link
                               to={`/devices/${d.id}`}

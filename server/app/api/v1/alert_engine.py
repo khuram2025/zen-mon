@@ -175,6 +175,7 @@ async def evaluate_status_change(
     }
 
     notifications_sent = 0
+    resolved_alerts = 0
 
     for rule in rules:
         # Check trigger_on match
@@ -214,6 +215,32 @@ async def evaluate_status_change(
         variables["severity"] = (rule.severity or "warning").upper()
         variables["rule_name"] = rule.name or "Alert"
 
+        if is_recovery:
+            resolved = await db.execute(
+                text("""
+                    UPDATE alerts
+                    SET status = 'resolved',
+                        resolved_at = :resolved_at,
+                        metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:resolution_metadata AS jsonb)
+                    WHERE status IN ('active', 'acknowledged')
+                      AND device_id = :device_id
+                      AND rule_id = :rule_id
+                      AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
+                      AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded')
+                """),
+                {
+                    "resolved_at": now,
+                    "device_id": event.device_id,
+                    "rule_id": str(rule.id),
+                    "resolution_metadata": json.dumps({
+                        "resolved_by_recovery": True,
+                        "recovery_status": event.new_status,
+                        "recovery_at": now.isoformat(),
+                    }),
+                },
+            )
+            resolved_alerts += resolved.rowcount or 0
+
         # Build messages from templates
         if is_recovery:
             email_subject = _render(rule.recovery_email_subject or "[{severity}] RESOLVED: {rule_name}", variables)
@@ -227,15 +254,17 @@ async def evaluate_status_change(
         # Create alert record in DB
         await db.execute(
             text("""
-                INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, metadata)
-                VALUES (:device_id, :rule_id, 'active', :severity, :message, :triggered_at, CAST(:metadata AS jsonb))
+                INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata)
+                VALUES (:device_id, :rule_id, :status, :severity, :message, :triggered_at, :resolved_at, CAST(:metadata AS jsonb))
             """),
             {
                 "device_id": event.device_id,
                 "rule_id": str(rule.id),
+                "status": "resolved" if is_recovery else "active",
                 "severity": rule.severity or "warning",
                 "message": sms_body,
                 "triggered_at": now,
+                "resolved_at": now if is_recovery else None,
                 "metadata": json.dumps({"old_status": event.old_status, "new_status": event.new_status, "is_recovery": is_recovery}),
             },
         )
@@ -302,6 +331,7 @@ async def evaluate_status_change(
         "device": event.hostname,
         "old_status": event.old_status,
         "new_status": event.new_status,
+        "resolved_alerts": resolved_alerts,
     }
 
 
@@ -360,6 +390,7 @@ async def evaluate_service_status_change(
     }
 
     notifications_sent = 0
+    resolved_alerts = 0
 
     for rule in rules:
         trigger = rule.trigger_on or "any"
@@ -384,6 +415,32 @@ async def evaluate_service_status_change(
         variables["rule_name"] = rule.name or "Alert"
 
         if is_recovery:
+            resolved = await db.execute(
+                text("""
+                    UPDATE alerts
+                    SET status = 'resolved',
+                        resolved_at = :resolved_at,
+                        metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:resolution_metadata AS jsonb)
+                    WHERE status IN ('active', 'acknowledged')
+                      AND service_check_id = :service_check_id
+                      AND rule_id = :rule_id
+                      AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
+                      AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded', 'warning')
+                """),
+                {
+                    "resolved_at": now,
+                    "service_check_id": event.service_check_id,
+                    "rule_id": str(rule.id),
+                    "resolution_metadata": json.dumps({
+                        "resolved_by_recovery": True,
+                        "recovery_status": event.new_status,
+                        "recovery_at": now.isoformat(),
+                    }),
+                },
+            )
+            resolved_alerts += resolved.rowcount or 0
+
+        if is_recovery:
             email_subject = _render(rule.recovery_email_subject or "[{severity}] RESOLVED: {rule_name}", variables)
             email_body = _render(rule.recovery_email_body or rule.email_body or "Service {check_name} ({target}) recovered to {status}.", variables)
             sms_body = _render(rule.recovery_sms_template or "[ZenPlus {severity}] {check_name} recovered: {status}. {rule_name}", variables)
@@ -394,16 +451,18 @@ async def evaluate_service_status_change(
 
         await db.execute(
             text("""
-                INSERT INTO alerts (device_id, service_check_id, rule_id, status, severity, message, triggered_at, metadata)
-                VALUES (:device_id, :service_check_id, :rule_id, 'active', :severity, :message, :triggered_at, CAST(:metadata AS jsonb))
+                INSERT INTO alerts (device_id, service_check_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata)
+                VALUES (:device_id, :service_check_id, :rule_id, :status, :severity, :message, :triggered_at, :resolved_at, CAST(:metadata AS jsonb))
             """),
             {
                 "device_id": event.device_id,
                 "service_check_id": event.service_check_id,
                 "rule_id": str(rule.id),
+                "status": "resolved" if is_recovery else "active",
                 "severity": rule.severity or "warning",
                 "message": sms_body,
                 "triggered_at": now,
+                "resolved_at": now if is_recovery else None,
                 "metadata": json.dumps({
                     "old_status": event.old_status,
                     "new_status": event.new_status,
@@ -466,4 +525,5 @@ async def evaluate_service_status_change(
         "check": event.check_name,
         "old_status": event.old_status,
         "new_status": event.new_status,
+        "resolved_alerts": resolved_alerts,
     }
