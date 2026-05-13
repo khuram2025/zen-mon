@@ -124,6 +124,29 @@ def _json_dumps(obj) -> str:
     return json.dumps(obj)
 
 
+async def _sync_default_notification_gateway(
+    db: AsyncSession,
+    gateway_type: str,
+    name: str,
+    config: dict,
+) -> None:
+    await db.execute(
+        text(
+            "INSERT INTO notification_gateways (name, type, config, is_default, enabled, created_at, updated_at) "
+            "VALUES (:name, :type, CAST(:config AS jsonb), true, :enabled, NOW(), NOW()) "
+            "ON CONFLICT (type) WHERE is_default "
+            "DO UPDATE SET name = EXCLUDED.name, config = EXCLUDED.config, "
+            "enabled = EXCLUDED.enabled, updated_at = NOW()"
+        ),
+        {
+            "name": name,
+            "type": gateway_type,
+            "config": _json_dumps(config),
+            "enabled": bool(config.get("enabled")),
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # Company Settings
 # ---------------------------------------------------------------------------
@@ -273,6 +296,7 @@ async def update_smtp_legacy(
     user: User = Depends(require_admin_user),
 ):
     await _upsert_system_setting(db, "smtp", data.model_dump())
+    await _sync_default_notification_gateway(db, "smtp", "Default SMTP", data.model_dump())
     await write_audit_log(
         db,
         actor=user,
@@ -292,6 +316,7 @@ async def update_sms_legacy(
     user: User = Depends(require_admin_user),
 ):
     await _upsert_system_setting(db, "sms", data.model_dump())
+    await _sync_default_notification_gateway(db, "sms", "Default SMS", data.model_dump())
     await write_audit_log(
         db,
         actor=user,
@@ -568,7 +593,7 @@ async def create_channel(
     user: User = Depends(require_admin_user),
 ):
     now = datetime.now(timezone.utc)
-    gateway_id = data.config.get("gateway_id") if data.config else None
+    gateway_id = (data.config.get("gateway_id") or None) if data.config else None
     result = await db.execute(
         text(
             "INSERT INTO notification_channels (name, type, config, enabled, gateway_id, created_at, updated_at) "
@@ -620,6 +645,8 @@ async def update_channel(
         if key == "config":
             set_parts.append("config = CAST(:config AS jsonb)")
             params["config"] = _json_dumps(value)
+            set_parts.append("gateway_id = :gateway_id")
+            params["gateway_id"] = (value.get("gateway_id") or None) if isinstance(value, dict) else None
         else:
             set_parts.append(f"{key} = :{key}")
             params[key] = value
@@ -631,7 +658,7 @@ async def update_channel(
         text(
             f"UPDATE notification_channels SET {set_clause} "
             "WHERE id = :id "
-            "RETURNING id, name, type, config, enabled, created_at, updated_at"
+            "RETURNING id, name, type, config, enabled, gateway_id, created_at, updated_at"
         ),
         params,
     )

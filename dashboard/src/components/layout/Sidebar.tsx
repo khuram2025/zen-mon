@@ -9,6 +9,8 @@ import {
   ShieldCheck,
   FileBarChart,
   Plug,
+  GitBranch,
+  MapPinned,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -16,9 +18,12 @@ const navItems = [
   { path: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { path: '/devices', icon: Monitor, label: 'Devices' },
   { path: '/services', icon: ShieldCheck, label: 'Services' },
+  { path: '/maps/automated', icon: GitBranch, label: 'Auto Map' },
+  { path: '/maps/manual', icon: MapPinned, label: 'Manual Map' },
   { path: '/sensors', icon: Plug, label: 'Sensors' },
   { path: '/discovery', icon: Radar, label: 'Discovery' },
   { path: '/alerts', icon: Bell, label: 'Alerts' },
+  { path: '/channels', icon: Bell, label: 'Channels' },
   { path: '/reports', icon: FileBarChart, label: 'Reports' },
   { path: '/settings', icon: Settings, label: 'Settings' },
 ]

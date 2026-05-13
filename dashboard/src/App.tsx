@@ -18,6 +18,8 @@ import { ServiceMaintenancePage } from '@/pages/ServiceMaintenancePage'
 import { ServiceCheckTemplatesPage } from '@/pages/ServiceCheckTemplatesPage'
 import { DiscoveryPage } from '@/pages/DiscoveryPage'
 import { MibLibraryPage } from '@/pages/MibLibraryPage'
+import { TopologyPage } from '@/pages/TopologyPage'
+import { ManualMapsPage } from '@/pages/ManualMapsPage'
 import { ReportsPage } from '@/pages/ReportsPage'
 import { SensorsPage } from '@/pages/SensorsPage'
 import { NetflowPage, NetflowDevicePage, NetflowSectionPage } from '@/pages/NetflowPage'
@@ -35,7 +37,7 @@ function ReportTabFallback() {
   return <div className="py-10 text-center text-sm text-muted">Loading report…</div>
 }
 import { UsersPage } from '@/pages/UsersPage'
-import { NotificationsPage } from '@/pages/NotificationsPage'
+import { ChannelsPage } from '@/pages/ChannelsPage'
 import { GatewaysPage } from '@/pages/GatewaysPage'
 import { SnmpProfilesPage } from '@/pages/SnmpProfilesPage'
 import { SubscriptionPage } from '@/pages/SubscriptionPage'
@@ -51,7 +53,7 @@ function Protected({ children }: { children: React.ReactNode }) {
 /* Redirect old /settings/:tab to new routes */
 const tabRedirects: Record<string, string> = {
   company: '/settings/general',
-  channels: '/notifications',
+  channels: '/channels',
   gateways: '/gateways',
   users: '/users',
   sensors: '/sensors',
@@ -96,6 +98,10 @@ export default function App() {
         <Route path="services/:id" element={<ServiceCheckDetailPage />} />
         <Route path="services/:id/incidents" element={<ServiceIncidentsPage />} />
         <Route path="discovery" element={<DiscoveryPage />} />
+        <Route path="maps" element={<Navigate to="/maps/automated" replace />} />
+        <Route path="maps/automated" element={<TopologyPage />} />
+        <Route path="maps/manual" element={<ManualMapsPage />} />
+        <Route path="topology" element={<Navigate to="/maps/automated" replace />} />
         <Route path="netflow" element={<NetflowPage />} />
         <Route path="netflow/forensics" element={<NetflowForensicsPage />} />
         <Route path="netflow/saved-views" element={<NetflowSavedViewsPage />} />
@@ -118,7 +124,8 @@ export default function App() {
 
         {/* Broken-out settings pages */}
         <Route path="users" element={<UsersPage />} />
-        <Route path="notifications" element={<NotificationsPage />} />
+        <Route path="channels" element={<ChannelsPage />} />
+        <Route path="notifications" element={<Navigate to="/channels" replace />} />
         <Route path="gateways" element={<GatewaysPage />} />
         <Route path="snmp-profiles" element={<SnmpProfilesPage />} />
         <Route path="subscription" element={<SubscriptionPage />} />

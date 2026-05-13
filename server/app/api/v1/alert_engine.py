@@ -109,6 +109,31 @@ async def _send_email(gw_config: dict, recipients: str, subject: str, body: str)
     server.quit()
 
 
+async def _find_suppressing_dependency(db: AsyncSession, device_id: str):
+    """Return the first unhealthy upstream dependency that should suppress alerts."""
+    result = await db.execute(
+        text("""
+            SELECT td.id AS dependency_id,
+                   td.parent_device_id,
+                   p.hostname AS parent_hostname,
+                   p.status AS parent_status,
+                   td.dependency_type
+            FROM topology_dependencies td
+            JOIN devices p ON p.id = td.parent_device_id
+            WHERE td.child_device_id = :device_id
+              AND td.enabled = true
+              AND td.suppress_alerts = true
+              AND p.status IN ('down', 'degraded', 'unknown')
+            ORDER BY
+              CASE p.status WHEN 'down' THEN 1 WHEN 'degraded' THEN 2 ELSE 3 END,
+              td.updated_at DESC
+            LIMIT 1
+        """),
+        {"device_id": device_id},
+    )
+    return result.mappings().first()
+
+
 @router.post("/evaluate")
 async def evaluate_status_change(
     event: StatusChangeEvent,
@@ -176,6 +201,8 @@ async def evaluate_status_change(
 
     notifications_sent = 0
     resolved_alerts = 0
+    suppressed_alerts = 0
+    suppressing_dependency = await _find_suppressing_dependency(db, event.device_id) if is_down else None
 
     for rule in rules:
         # Check trigger_on match
@@ -214,6 +241,38 @@ async def evaluate_status_change(
         # Rule matches! Send notifications
         variables["severity"] = (rule.severity or "warning").upper()
         variables["rule_name"] = rule.name or "Alert"
+
+        if suppressing_dependency and not is_recovery:
+            await db.execute(
+                text("""
+                    INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata)
+                    VALUES (:device_id, :rule_id, 'resolved', :severity, :message, :triggered_at, :resolved_at, CAST(:metadata AS jsonb))
+                """),
+                {
+                    "device_id": event.device_id,
+                    "rule_id": str(rule.id),
+                    "severity": rule.severity or "warning",
+                    "message": (
+                        f"Suppressed downstream alert: {event.hostname} is {event.new_status}. "
+                        f"Upstream {suppressing_dependency['parent_hostname']} is "
+                        f"{suppressing_dependency['parent_status']}."
+                    ),
+                    "triggered_at": now,
+                    "resolved_at": now,
+                    "metadata": json.dumps({
+                        "old_status": event.old_status,
+                        "new_status": event.new_status,
+                        "suppressed_by_dependency": True,
+                        "dependency_id": str(suppressing_dependency["dependency_id"]),
+                        "parent_device_id": str(suppressing_dependency["parent_device_id"]),
+                        "parent_hostname": suppressing_dependency["parent_hostname"],
+                        "parent_status": suppressing_dependency["parent_status"],
+                        "dependency_type": suppressing_dependency["dependency_type"],
+                    }),
+                },
+            )
+            suppressed_alerts += 1
+            continue
 
         if is_recovery:
             resolved = await db.execute(
@@ -332,6 +391,7 @@ async def evaluate_status_change(
         "old_status": event.old_status,
         "new_status": event.new_status,
         "resolved_alerts": resolved_alerts,
+        "suppressed_alerts": suppressed_alerts,
     }
 
 
@@ -391,6 +451,8 @@ async def evaluate_service_status_change(
 
     notifications_sent = 0
     resolved_alerts = 0
+    suppressed_alerts = 0
+    suppressing_dependency = await _find_suppressing_dependency(db, event.device_id) if (is_down and event.device_id) else None
 
     for rule in rules:
         trigger = rule.trigger_on or "any"
@@ -413,6 +475,47 @@ async def evaluate_service_status_change(
 
         variables["severity"] = (rule.severity or "warning").upper()
         variables["rule_name"] = rule.name or "Alert"
+
+        if suppressing_dependency and not is_recovery:
+            await db.execute(
+                text("""
+                    INSERT INTO alerts (
+                        device_id, service_check_id, rule_id, status, severity,
+                        message, triggered_at, resolved_at, metadata
+                    )
+                    VALUES (
+                        :device_id, :service_check_id, :rule_id, 'resolved', :severity,
+                        :message, :triggered_at, :resolved_at, CAST(:metadata AS jsonb)
+                    )
+                """),
+                {
+                    "device_id": event.device_id,
+                    "service_check_id": event.service_check_id,
+                    "rule_id": str(rule.id),
+                    "severity": rule.severity or "warning",
+                    "message": (
+                        f"Suppressed downstream service alert: {event.check_name} is {event.new_status}. "
+                        f"Upstream {suppressing_dependency['parent_hostname']} is "
+                        f"{suppressing_dependency['parent_status']}."
+                    ),
+                    "triggered_at": now,
+                    "resolved_at": now,
+                    "metadata": json.dumps({
+                        "old_status": event.old_status,
+                        "new_status": event.new_status,
+                        "suppressed_by_dependency": True,
+                        "dependency_id": str(suppressing_dependency["dependency_id"]),
+                        "parent_device_id": str(suppressing_dependency["parent_device_id"]),
+                        "parent_hostname": suppressing_dependency["parent_hostname"],
+                        "parent_status": suppressing_dependency["parent_status"],
+                        "dependency_type": suppressing_dependency["dependency_type"],
+                        "check_type": event.check_type,
+                        "error": event.error,
+                    }),
+                },
+            )
+            suppressed_alerts += 1
+            continue
 
         if is_recovery:
             resolved = await db.execute(
@@ -526,4 +629,5 @@ async def evaluate_service_status_change(
         "old_status": event.old_status,
         "new_status": event.new_status,
         "resolved_alerts": resolved_alerts,
+        "suppressed_alerts": suppressed_alerts,
     }
