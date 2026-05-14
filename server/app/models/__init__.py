@@ -8,6 +8,17 @@ from app.models.alert import Alert, AlertRule
 from app.models.subscription import Subscription
 from app.models.sensor import Sensor, Site, SensorAssignment
 from app.models.netflow_saved_view import NetflowSavedView
+from app.models.discovery_v2 import (
+    DiscoveryProfile,
+    DiscoverySchedule,
+    DiscoveryRun,
+    DiscoveryResultV2,
+    DiscoveryRule,
+    DiscoveryIgnoredDevice,
+    DiscoveryImportBatch,
+    DiscoveryImportItem,
+    WindowsCredential,
+)
 
 __all__ = [
     "User",
@@ -24,4 +35,13 @@ __all__ = [
     "Site",
     "SensorAssignment",
     "NetflowSavedView",
+    "DiscoveryProfile",
+    "DiscoverySchedule",
+    "DiscoveryRun",
+    "DiscoveryResultV2",
+    "DiscoveryRule",
+    "DiscoveryIgnoredDevice",
+    "DiscoveryImportBatch",
+    "DiscoveryImportItem",
+    "WindowsCredential",
 ]

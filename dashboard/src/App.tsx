@@ -16,7 +16,16 @@ import { ServiceIncidentsPage } from '@/pages/ServiceIncidentsPage'
 import { ServiceCheckGroupsPage } from '@/pages/ServiceCheckGroupsPage'
 import { ServiceMaintenancePage } from '@/pages/ServiceMaintenancePage'
 import { ServiceCheckTemplatesPage } from '@/pages/ServiceCheckTemplatesPage'
-import { DiscoveryPage } from '@/pages/DiscoveryPage'
+import { DiscoveryLayout } from '@/pages/discovery/DiscoveryLayout'
+import { ProfilesPage as DiscoveryProfilesPage } from '@/pages/discovery/ProfilesPage'
+import { WizardPage as DiscoveryWizardPage } from '@/pages/discovery/WizardPage'
+import { RunPage as DiscoveryRunPage } from '@/pages/discovery/RunPage'
+import { ProfileDetailPage as DiscoveryProfileDetailPage } from '@/pages/discovery/ProfileDetailPage'
+import { ScheduledPage as DiscoveryScheduledPage } from '@/pages/discovery/ScheduledPage'
+import { ReportsPage as DiscoveryReportsPage } from '@/pages/discovery/ReportsPage'
+import { ImportsPage as DiscoveryImportsPage } from '@/pages/discovery/ImportsPage'
+import { IgnoredPage as DiscoveryIgnoredPage } from '@/pages/discovery/IgnoredPage'
+import { CredentialsPage as DiscoveryCredentialsPage } from '@/pages/discovery/CredentialsPage'
 import { MibLibraryPage } from '@/pages/MibLibraryPage'
 import { TopologyPage } from '@/pages/TopologyPage'
 import { ManualMapsPage } from '@/pages/ManualMapsPage'
@@ -40,6 +49,7 @@ import { UsersPage } from '@/pages/UsersPage'
 import { ChannelsPage } from '@/pages/ChannelsPage'
 import { GatewaysPage } from '@/pages/GatewaysPage'
 import { SnmpProfilesPage } from '@/pages/SnmpProfilesPage'
+import { WindowsCredentialsPage } from '@/pages/WindowsCredentialsPage'
 import { SubscriptionPage } from '@/pages/SubscriptionPage'
 import { GeneralSettingsPage } from '@/pages/GeneralSettingsPage'
 import { NotFoundPage } from '@/pages/NotFoundPage'
@@ -97,7 +107,18 @@ export default function App() {
         <Route path="services/templates" element={<ServiceCheckTemplatesPage />} />
         <Route path="services/:id" element={<ServiceCheckDetailPage />} />
         <Route path="services/:id/incidents" element={<ServiceIncidentsPage />} />
-        <Route path="discovery" element={<DiscoveryPage />} />
+        <Route path="discovery" element={<DiscoveryLayout />}>
+          <Route index element={<DiscoveryProfilesPage />} />
+          <Route path="new" element={<DiscoveryWizardPage />} />
+          <Route path="scheduled" element={<DiscoveryScheduledPage />} />
+          <Route path="reports" element={<DiscoveryReportsPage />} />
+          <Route path="imports" element={<DiscoveryImportsPage />} />
+          <Route path="ignored" element={<DiscoveryIgnoredPage />} />
+          <Route path="credentials" element={<DiscoveryCredentialsPage />} />
+          <Route path="profiles/:id" element={<DiscoveryProfileDetailPage />} />
+          <Route path="profiles/:id/edit" element={<DiscoveryWizardPage />} />
+          <Route path="runs/:id" element={<DiscoveryRunPage />} />
+        </Route>
         <Route path="maps" element={<Navigate to="/maps/automated" replace />} />
         <Route path="maps/automated" element={<TopologyPage />} />
         <Route path="maps/manual" element={<ManualMapsPage />} />
@@ -128,6 +149,7 @@ export default function App() {
         <Route path="notifications" element={<Navigate to="/channels" replace />} />
         <Route path="gateways" element={<GatewaysPage />} />
         <Route path="snmp-profiles" element={<SnmpProfilesPage />} />
+        <Route path="windows-credentials" element={<WindowsCredentialsPage />} />
         <Route path="subscription" element={<SubscriptionPage />} />
         <Route path="settings/general" element={<GeneralSettingsPage />} />
 
