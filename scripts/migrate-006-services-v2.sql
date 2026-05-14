@@ -110,6 +110,9 @@ CREATE INDEX IF NOT EXISTS idx_alert_rules_svc_check  ON alert_rules(service_che
 CREATE INDEX IF NOT EXISTS idx_alert_rules_svc_group  ON alert_rules(service_check_group_id);
 
 -- Allow 'service_status' metric; broaden operator CHECK to accept symbol aliases.
+-- Keep this list a superset of every metric added by other migrations
+-- (notably the SNMP metrics from migrate-004-snmp.sql) so this drop+add
+-- doesn't roll those back when run after migrate-004.
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'alert_rules_metric_check') THEN
@@ -117,7 +120,12 @@ BEGIN
   END IF;
 END $$;
 ALTER TABLE alert_rules ADD CONSTRAINT alert_rules_metric_check
-  CHECK (metric IN ('ping_status','rtt','packet_loss','jitter','service_status'));
+  CHECK (metric IN (
+    'ping_status','rtt','packet_loss','jitter','service_status',
+    'cpu','memory','uptime_reset','temperature','fan_state','psu_state',
+    'if_in_bps','if_out_bps','if_errors','if_discards','if_oper_status',
+    'session_count','vpn_tunnel_state','ha_state'
+  ));
 
 DO $$
 BEGIN
