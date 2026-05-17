@@ -249,7 +249,11 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 }
 
 // UpsertSystemInfo writes discovered system-group fields back to
-// devices (vendor/model/os_version/sys_object_id/hostname from sysName).
+// devices (vendor/model/os_version/sys_object_id). The hostname is
+// only overwritten when the device has opted in via
+// auto_rename_from_snmp — otherwise the operator's chosen name wins.
+// This avoids the surprise where adding SNMP to a device silently
+// renames it to whatever its agent reports as sysName.
 func (s *PostgresStore) UpsertSystemInfo(
 	ctx context.Context, deviceID uuid.UUID,
 	sysObjectID, vendor, model, osVersion, sysName string,
@@ -260,7 +264,11 @@ func (s *PostgresStore) UpsertSystemInfo(
 		    vendor        = COALESCE(NULLIF($2,''), vendor),
 		    model         = COALESCE(NULLIF($3,''), model),
 		    os_version    = COALESCE(NULLIF($4,''), os_version),
-		    hostname      = COALESCE(NULLIF($6,''), hostname)
+		    hostname      = CASE
+		                      WHEN auto_rename_from_snmp
+		                      THEN COALESCE(NULLIF($6,''), hostname)
+		                      ELSE hostname
+		                    END
 		WHERE id = $5
 	`, sysObjectID, vendor, model, osVersion, deviceID, sysName)
 	return err

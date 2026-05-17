@@ -6,6 +6,8 @@ from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service
 from app.api.v1 import settings as settings_api
 from app.api.v1 import sensors as sensors_admin_api
 from app.api.v1 import sensor_api
+from app.api.v1 import agents as agents_runtime_api
+from app.api.v1 import servers as servers_admin_api
 from app.api.websocket import realtime
 
 settings = get_settings()
@@ -54,6 +56,11 @@ def create_app() -> FastAPI:
     app.include_router(sensors_admin_api.router, prefix="/api/v1")
     app.include_router(sensors_admin_api.sites_router, prefix="/api/v1")
     app.include_router(sensor_api.router, prefix="/api/v1")
+    app.include_router(agents_runtime_api.router, prefix="/api/v1")
+    app.include_router(servers_admin_api.router, prefix="/api/v1")
+    app.include_router(servers_admin_api.policies_router, prefix="/api/v1")
+    app.include_router(servers_admin_api.fleet_router, prefix="/api/v1")
+    app.include_router(servers_admin_api.overview_router, prefix="/api/v1")
 
     @app.get("/api/v1/system/health")
     async def health_check():

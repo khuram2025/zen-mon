@@ -12,8 +12,10 @@ import {
   CreditCard,
   FileText,
   GitBranch,
+  HardDrive,
   Info,
   LayoutDashboard,
+  Layers,
   LogOut,
   Key,
   Mail,
@@ -73,16 +75,24 @@ const sections: NavSection[] = [
     label: 'Monitoring',
     items: [
       { to: '/devices', label: 'Devices', icon: Server },
+      { to: '/servers', label: 'Servers', icon: HardDrive },
       { to: '/services', label: 'Services', icon: Activity },
       { to: '/netflow', label: 'NetFlow', icon: Network },
       { to: '/discovery', label: 'Discovery', icon: Radar },
     ],
   },
   {
+    label: 'Server Fleet',
+    items: [
+      { to: '/agent-fleet', label: 'Agent Fleet', icon: Layers },
+      { to: '/agent-policies', label: 'Agent Policies', icon: SettingsIcon },
+    ],
+  },
+  {
     label: 'MAP',
     items: [
       { to: '/maps/automated', label: 'Automated Maps', icon: GitBranch },
-      { to: '/maps/manual', label: 'Manual Maps', icon: MapPinned },
+      { to: '/maps/manual', label: 'Map', icon: MapPinned },
     ],
   },
   {
@@ -119,6 +129,10 @@ const sections: NavSection[] = [
 const routeLabels: Record<string, string> = {
   '/': 'Monitoring Overview',
   '/devices': 'Devices',
+  '/servers': 'Servers',
+  '/servers/new': 'Add Server',
+  '/agent-fleet': 'Agent Fleet',
+  '/agent-policies': 'Agent Policies',
   '/services': 'Services',
   '/maps': 'Maps',
   '/maps/automated': 'Automated Maps',
@@ -146,6 +160,10 @@ const routeLabels: Record<string, string> = {
 const routeSections: Record<string, string> = {
   '/': 'Overview',
   '/devices': 'Monitoring',
+  '/servers': 'Monitoring',
+  '/servers/new': 'Monitoring',
+  '/agent-fleet': 'Server Fleet',
+  '/agent-policies': 'Server Fleet',
   '/services': 'Monitoring',
   '/maps': 'MAP',
   '/maps/automated': 'MAP',
