@@ -23,6 +23,7 @@ DB_PASSWORD=$(openssl rand -hex 16 2>/dev/null || echo "zenplus_$(date +%s)")
 CH_PASSWORD=$(openssl rand -hex 16 2>/dev/null || echo "clickhouse_$(date +%s)")
 REDIS_PASSWORD=$(openssl rand -hex 16 2>/dev/null || echo "redis_$(date +%s)")
 JWT_SECRET=$(openssl rand -hex 32 2>/dev/null || echo "jwt_$(date +%s)_secret")
+SNMP_ENC_KEY=$(openssl rand -hex 32 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || echo "")
 
 # Colors
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -179,6 +180,10 @@ configure_env() {
         CH_PASSWORD="${CLICKHOUSE_PASSWORD:-$CH_PASSWORD}"
         REDIS_PASSWORD="${REDIS_PASSWORD:-$REDIS_PASSWORD}"
         JWT_SECRET="${JWT_SECRET:-$JWT_SECRET}"
+        SNMP_ENC_KEY="${SNMP_ENC_KEY:-$SNMP_ENC_KEY}"
+    fi
+    if [[ -z "$SNMP_ENC_KEY" ]]; then
+        err "Could not generate SNMP_ENC_KEY; install openssl or python3 and rerun installer"
     fi
 
     cat > "$ENV_FILE" <<ENVEOF
@@ -187,6 +192,7 @@ POSTGRES_PASSWORD=$DB_PASSWORD
 CLICKHOUSE_PASSWORD=$CH_PASSWORD
 REDIS_PASSWORD=$REDIS_PASSWORD
 JWT_SECRET=$JWT_SECRET
+SNMP_ENC_KEY=$SNMP_ENC_KEY
 API_HOST=0.0.0.0
 API_PORT=8000
 POLLER_ID=poller-01
@@ -645,6 +651,22 @@ SUDOEOF
 }
 
 # ═══════════════════════════════════════════════════════════════
+# STEP 8b: Tech-support bundle generator
+#
+# Installs the systemd template, narrow sudoers grant, and runtime
+# directories that the Settings → Support tab uses to generate a
+# diagnostic .tar.gz. Idempotent — safe to re-run.
+# ═══════════════════════════════════════════════════════════════
+setup_support_bundles() {
+    step "Installing tech-support bundle generator"
+    if [[ -x "$ZENPLUS_HOME/scripts/setup-support.sh" ]]; then
+        bash "$ZENPLUS_HOME/scripts/setup-support.sh"
+    else
+        echo "  ! setup-support.sh missing — skipping"
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════
 # STEP 9: Create management CLI
 # ═══════════════════════════════════════════════════════════════
 create_cli() {
@@ -842,6 +864,7 @@ main() {
     setup_databases
     create_services
     setup_updater
+    setup_support_bundles
     create_cli
     finalize
 }

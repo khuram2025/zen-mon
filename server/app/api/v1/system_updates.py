@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.crypto import is_configured as snmp_crypto_is_configured
 from app.core.database import get_db
 from app.core.security import require_admin_user
 from app.models.user import User
@@ -839,6 +840,8 @@ async def system_health():
             checks[svc] = result.stdout.strip()
         except Exception:
             checks[svc] = "unknown"
+
+    checks["snmp_encryption"] = "ok" if snmp_crypto_is_configured() else "error"
 
     overall = "ok" if all(v in ("ok", "active") for v in checks.values()) else "degraded"
     version, _ = _get_version_info()
