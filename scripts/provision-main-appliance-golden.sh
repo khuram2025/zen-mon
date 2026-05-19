@@ -127,8 +127,8 @@ install_bootstrap_packages() {
   apt-get update -qq
   apt-get install -y -qq \
     ca-certificates curl git jq openssl sed gawk coreutils \
-    lsb-release software-properties-common ufw >/dev/null
-  record_check "system" "bootstrap packages installed" "PASS" "curl, git, jq, openssl, ufw"
+    lsb-release software-properties-common ufw snmp iputils-ping >/dev/null
+  record_check "system" "bootstrap packages installed" "PASS" "curl, git, jq, openssl, ufw, snmp, iputils-ping"
 }
 
 fetch_source() {

@@ -67,7 +67,7 @@ install_prerequisites() {
         gnupg lsb-release software-properties-common \
         python3 python3-pip python3-venv \
         build-essential jq openssl \
-        libcap2-bin \
+        libcap2-bin snmp iputils-ping \
         postgresql postgresql-client redis-server nginx \
         > /dev/null 2>&1
     log "Core packages installed"

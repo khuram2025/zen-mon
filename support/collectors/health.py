@@ -84,6 +84,8 @@ def _dep_health(ctx: CollectorContext, result: CollectorResult) -> dict:
         ),
         "nginx_running": _command(["systemctl", "is-active", "nginx"], timeout=5),
         "snmp_enc_key_set": {"value": bool(os.environ.get("SNMP_ENC_KEY"))},
+        "snmpget_available": _command(["snmpget", "--version"], timeout=5),
+        "snmpwalk_available": _command(["snmpwalk", "--version"], timeout=5),
     }
 
 
@@ -98,6 +100,12 @@ def _known_risk_checks(ctx: CollectorContext, result: CollectorResult) -> dict:
     checks["snmp_enc_key_set"] = {
         "ok": bool(os.environ.get("SNMP_ENC_KEY")),
         "detail": "SNMP_ENC_KEY env var must be set or SNMPv3 creds cannot be decrypted",
+    }
+    checks["net_snmp_tools_available"] = {
+        "ok": bool(shutil.which("snmpget")) and bool(shutil.which("snmpwalk")),
+        "detail": "snmpget/snmpwalk must be installed on the API runtime for SNMP Test, discovery, and topology probes",
+        "snmpget": shutil.which("snmpget"),
+        "snmpwalk": shutil.which("snmpwalk"),
     }
     checks["migrations_lock_matches_disk"] = _migrations_lock_check(ctx)
     checks["updater_registered"] = _updater_registered_check(ctx)

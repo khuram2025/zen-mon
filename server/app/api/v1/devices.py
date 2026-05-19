@@ -901,7 +901,7 @@ async def test_device_snmp(
         elif "unknown" in err_lc and "protocol" in err_lc:
             reason = f"net-snmp rejected the protocol — {snmp_err}"
         elif "snmpget binary not installed" in err_lc:
-            reason = "snmpget is missing in the API server image — rebuild with net-snmp installed"
+            reason = "snmpget is missing in the API runtime — install the net-snmp tools package and restart the API"
         elif snmp_err:
             reason = snmp_err
         else:

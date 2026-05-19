@@ -434,9 +434,21 @@ def build_package(version: str, changelog: str, severity: str,
     print("[6/7] Creating manifest ...")
     steps = []
 
+    # Heal the OS prerequisites every appliance needs but older installers
+    # missed. apt_install is idempotent — already-present packages are a
+    # no-op. Listed packages must stay in lockstep with install.sh's core
+    # apt-get install line so fresh installs and OTA upgrades converge.
+    steps.append({
+        "type": "apt_install",
+        "packages": ["snmp", "iputils-ping"],
+        "update_first": True,
+        "timeout": 300,
+    })
+
     # Stop services before update
     steps.append({"type": "stop_services", "services": ["zenplus-api", "zenplus-poller"]})
     steps.append({"type": "backup", "targets": ["code", "database"]})
+
     steps.append({"type": "apply_code", "method": "replace", "source": "code/"})
 
     # Run setup-support.sh so the support-bundle systemd template, sudoers

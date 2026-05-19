@@ -89,7 +89,7 @@ async def _snmpget_detail(
     diagnostic to the user.
     """
     if shutil.which("snmpget") is None:
-        return None, "snmpget binary not installed in API server image"
+        return None, "snmpget binary not installed in the API runtime"
     timeout_s = max(1, timeout_ms // 1000)
     args = [
         "snmpget",
@@ -966,4 +966,3 @@ async def list_traps(
             "timestamp": datetime.fromtimestamp(r[7] / 1000, tz=timezone.utc).isoformat(),
         })
     return rows
-
