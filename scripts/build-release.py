@@ -363,6 +363,23 @@ def build_package(version: str, changelog: str, severity: str,
             print("  ERROR: No Go poller source found")
             sys.exit(1)
 
+        if poller_src.exists() and (poller_src / "cmd" / "netflow-collector").exists():
+            result = subprocess.run(
+                [GO_BIN, "build", "-buildvcs=false", "-o",
+                 str(go_dir / "zenplus-netflow-collector"), "./cmd/netflow-collector"],
+                capture_output=True, text=True,
+                cwd=str(poller_src), timeout=300,
+                env={**os.environ, "GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "0"},
+            )
+            if result.returncode != 0:
+                print(f"  ERROR: Go netflow-collector build failed:\n{result.stderr}")
+                sys.exit(1)
+            print(f"  Built: zenplus-netflow-collector "
+                  f"({(go_dir / 'zenplus-netflow-collector').stat().st_size / 1024 / 1024:.1f} MB)")
+        else:
+            print("  ERROR: No Go netflow-collector source found")
+            sys.exit(1)
+
         if poller_src.exists() and (poller_src / "cmd" / "sensor").exists():
             ldflags = (
                 f"-X main.version=sensor-{version} "
@@ -434,6 +451,11 @@ def build_package(version: str, changelog: str, severity: str,
     print("[6/7] Creating manifest ...")
     steps = []
 
+    # Stop services before update
+    steps.append({"type": "stop_services",
+                  "services": ["zenplus-api", "zenplus-poller", "zenplus-netflow-collector"]})
+    steps.append({"type": "backup", "targets": ["code", "database"]})
+
     # Heal the OS prerequisites every appliance needs but older installers
     # missed. apt_install is idempotent — already-present packages are a
     # no-op. Listed packages must stay in lockstep with install.sh's core
@@ -444,10 +466,6 @@ def build_package(version: str, changelog: str, severity: str,
         "update_first": True,
         "timeout": 300,
     })
-
-    # Stop services before update
-    steps.append({"type": "stop_services", "services": ["zenplus-api", "zenplus-poller"]})
-    steps.append({"type": "backup", "targets": ["code", "database"]})
 
     steps.append({"type": "apply_code", "method": "replace", "source": "code/"})
 
@@ -481,6 +499,14 @@ def build_package(version: str, changelog: str, severity: str,
         steps.append({"type": "install_binary", "source": "go-binaries/zenplus-poller",
                        "dest": "/opt/zenplus/bin/zenplus-poller"})
 
+    if (build_dir / "go-binaries" / "zenplus-netflow-collector").exists():
+        steps.append({"type": "install_binary",
+                      "source": "go-binaries/zenplus-netflow-collector",
+                      "dest": "/opt/zenplus/bin/zenplus-netflow-collector"})
+        steps.append({"type": "install_systemd",
+                      "source": "code/poller/systemd/zenplus-netflow-collector.service",
+                      "enable": True})
+
     sensor_artifact_dir = build_dir / "sensor-artifacts" / "bin" / "linux-amd64"
     if (sensor_artifact_dir / "zenplus-sensor").exists():
         steps.append({"type": "install_binary",
@@ -495,8 +521,8 @@ def build_package(version: str, changelog: str, severity: str,
 
     # Restart services
     steps.append({"type": "start_services",
-                   "services": ["zenplus-api", "zenplus-poller", "netmon-gunicorn",
-                                "netmon-celery", "netmon-celery-beat", "nginx"]})
+                   "services": ["zenplus-api", "zenplus-poller", "zenplus-netflow-collector",
+                                "netmon-gunicorn", "netmon-celery", "netmon-celery-beat", "nginx"]})
     steps.append({"type": "health_check", "url": "http://localhost:8000/api/v1/system/health", "timeout": 30})
 
     manifest = {

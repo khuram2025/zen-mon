@@ -62,15 +62,27 @@ def _run_postgres(sql: str, sql_path: str) -> None:
 
 
 def _run_clickhouse(sql: str, sql_path: str) -> None:
-    """Execute SQL against ClickHouse."""
+    """Execute SQL against ClickHouse.
+
+    On appliances ClickHouse runs as the `zenplus-clickhouse` Docker container,
+    so there is no clickhouse-client on the host PATH. Use a host binary when
+    one exists, otherwise exec the client inside the container — matching how
+    install.sh applies ClickHouse schema. SQL is piped on stdin because the
+    host migration path is not visible inside the container.
+    """
+    password = os.environ.get("CLICKHOUSE_PASSWORD", "")
+    host_client = shutil.which("clickhouse-client")
+    if host_client:
+        cmd = [host_client, "--host", "127.0.0.1", "--port", "9000", "--multiquery"]
+    else:
+        cmd = ["docker", "exec", "-i", "zenplus-clickhouse",
+               "clickhouse-client", "--multiquery"]
+    if password:
+        cmd += ["--password", password]
+
     result = subprocess.run(
-        [
-            "clickhouse-client",
-            "--host", "127.0.0.1",
-            "--port", "9000",
-            "--multiquery",
-            "--queries-file", sql_path,
-        ],
+        cmd,
+        input=sql,
         capture_output=True,
         text=True,
         timeout=120,
