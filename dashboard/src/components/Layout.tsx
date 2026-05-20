@@ -93,7 +93,9 @@ const sections: NavSection[] = [
     label: 'MAP',
     items: [
       { to: '/maps/automated', label: 'Automated Maps', icon: GitBranch },
-      { to: '/maps/manual', label: 'Map', icon: MapPinned },
+      // Manual map ("/maps/manual") is temporarily hidden from the sidebar
+      // while the new Network Studio features stabilise. Route still exists
+      // so direct links keep working.
     ],
   },
   {
@@ -108,8 +110,7 @@ const sections: NavSection[] = [
     items: [
       { to: '/channels', label: 'Channels', icon: BellRing },
       { to: '/gateways', label: 'Gateways', icon: Mail },
-      { to: '/snmp-profiles', label: 'SNMP Credentials', icon: Key },
-      { to: '/windows-credentials', label: 'Windows Credentials', icon: ShieldCheck },
+      { to: '/credentials', label: 'Credentials', icon: Key },
       { to: '/mibs', label: 'MIB Library', icon: Upload },
     ],
   },
@@ -147,8 +148,9 @@ const routeLabels: Record<string, string> = {
   '/channels': 'Channels',
   '/notifications': 'Channels',
   '/gateways': 'Gateways',
-  '/snmp-profiles': 'SNMP Credentials',
-  '/windows-credentials': 'Windows Credentials',
+  '/credentials': 'Credentials',
+  '/snmp-profiles': 'Credentials',
+  '/windows-credentials': 'Credentials',
   '/mibs': 'MIB Library',
   '/users': 'Users',
   '/settings/general': 'General Settings',
@@ -179,6 +181,7 @@ const routeSections: Record<string, string> = {
   '/channels': 'Configuration',
   '/notifications': 'Configuration',
   '/gateways': 'Configuration',
+  '/credentials': 'Configuration',
   '/snmp-profiles': 'Configuration',
   '/windows-credentials': 'Configuration',
   '/mibs': 'Configuration',

@@ -4,8 +4,6 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
-  Eye,
-  EyeOff,
   Key,
   Loader2,
   Pencil,
@@ -24,6 +22,7 @@ import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
+import { PasswordInput } from '@/components/ui/PasswordInput'
 import { Textarea } from '@/components/ui/Textarea'
 import { FormField } from '@/components/ui/FormField'
 import { Switch } from '@/components/ui/Switch'
@@ -106,7 +105,7 @@ function SecuritySummary({ cred }: { cred: Credential }) {
 
 /* ── Main Page ───────────────────────────────────────────────── */
 
-export function SnmpProfilesPage() {
+export function SnmpProfilesPage({ hideHeader = false }: { hideHeader?: boolean } = {}) {
   const qc = useQueryClient()
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<Credential | null>(null)
@@ -130,20 +129,28 @@ export function SnmpProfilesPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
-            <Key className="h-5 w-5 text-primary" /> SNMP Credentials
-          </h1>
-          <p className="text-xs text-muted">
-            Manage reusable SNMP credentials for devices, groups, and discovery
-            {credentials ? ` · ${credentials.length} credential${credentials.length !== 1 ? 's' : ''}` : ''}
-          </p>
+      {hideHeader ? (
+        <div className="flex items-center justify-end">
+          <Button onClick={() => { setEditing(null); setFormOpen(true) }}>
+            <Plus className="h-4 w-4" /> Add Credential
+          </Button>
         </div>
-        <Button onClick={() => { setEditing(null); setFormOpen(true) }}>
-          <Plus className="h-4 w-4" /> Add Credential
-        </Button>
-      </div>
+      ) : (
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
+              <Key className="h-5 w-5 text-primary" /> SNMP Credentials
+            </h1>
+            <p className="text-xs text-muted">
+              Manage reusable SNMP credentials for devices, groups, and discovery
+              {credentials ? ` · ${credentials.length} credential${credentials.length !== 1 ? 's' : ''}` : ''}
+            </p>
+          </div>
+          <Button onClick={() => { setEditing(null); setFormOpen(true) }}>
+            <Plus className="h-4 w-4" /> Add Credential
+          </Button>
+        </div>
+      )}
 
       <Card>
         <CardContent className="p-0">
@@ -361,10 +368,9 @@ function CredentialFormDialog({
   const [retries, setRetries] = useState(2)
   const [isDefault, setIsDefault] = useState(false)
 
-  // Reveal state for sensitive fields
-  const [showCommunity, setShowCommunity] = useState(false)
-  const [showAuthPw, setShowAuthPw] = useState(false)
-  const [showPrivPw, setShowPrivPw] = useState(false)
+  // PasswordInput owns its own reveal state per-field. We only track the
+  // shared "currently fetching stored secrets" flag here so multiple
+  // reveal clicks during the lazy-fetch all share one spinner.
   const [secretsFetched, setSecretsFetched] = useState(false)
   const [revealing, setRevealing] = useState(false)
 
@@ -392,8 +398,8 @@ function CredentialFormDialog({
       setV3AuthProto('SHA256'); setV3AuthPw(''); setV3PrivProto('AES128'); setV3PrivPw('')
       setPort(161); setTimeout_(2000); setRetries(2); setIsDefault(false)
     }
-    // Reset reveal state for each open
-    setShowCommunity(false); setShowAuthPw(false); setShowPrivPw(false); setSecretsFetched(false)
+    // Reset stored-secret lazy-fetch state for each open
+    setSecretsFetched(false)
   }, [open, credential])
 
   // Lazy-fetch stored plaintext secrets when the user first asks to reveal one
@@ -487,35 +493,15 @@ function CredentialFormDialog({
           {/* v1/v2c: Community */}
           {(version === '1' || version === '2c') && (
             <FormField label="Community string" required>
-              <div className="relative">
-                <Input
-                  required
-                  type={showCommunity ? 'text' : 'password'}
-                  value={community}
-                  onChange={(e) => setCommunity(e.target.value)}
-                  placeholder="public"
-                  className="pr-9"
-                />
-                {isEdit && (
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      if (!showCommunity) await fetchSecrets()
-                      setShowCommunity((s) => !s)
-                    }}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-text"
-                    aria-label={showCommunity ? 'Hide community' : 'Reveal community'}
-                    title={showCommunity ? 'Hide' : 'Reveal'}
-                    disabled={revealing}
-                  >
-                    {revealing && !secretsFetched
-                      ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      : showCommunity
-                        ? <EyeOff className="h-3.5 w-3.5" />
-                        : <Eye className="h-3.5 w-3.5" />}
-                  </button>
-                )}
-              </div>
+              <PasswordInput
+                required
+                value={community}
+                onChange={(e) => setCommunity(e.target.value)}
+                placeholder="public"
+                hasStored={!!isEdit}
+                revealing={revealing}
+                onReveal={isEdit ? fetchSecrets : undefined}
+              />
             </FormField>
           )}
 
@@ -553,34 +539,14 @@ function CredentialFormDialog({
                       </Select>
                     </FormField>
                     <FormField label="Auth passphrase">
-                      <div className="relative">
-                        <Input
-                          type={showAuthPw ? 'text' : 'password'}
-                          value={v3AuthPw}
-                          onChange={(e) => setV3AuthPw(e.target.value)}
-                          placeholder={isEdit && credential?.has_auth_passphrase ? '••••••••' : 'Min 8 chars'}
-                          className="pr-9"
-                        />
-                        {isEdit && credential?.has_auth_passphrase && (
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              if (!showAuthPw) await fetchSecrets()
-                              setShowAuthPw((s) => !s)
-                            }}
-                            className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-text"
-                            aria-label={showAuthPw ? 'Hide auth passphrase' : 'Reveal auth passphrase'}
-                            title={showAuthPw ? 'Hide' : 'Reveal'}
-                            disabled={revealing}
-                          >
-                            {revealing && !secretsFetched
-                              ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                              : showAuthPw
-                                ? <EyeOff className="h-3.5 w-3.5" />
-                                : <Eye className="h-3.5 w-3.5" />}
-                          </button>
-                        )}
-                      </div>
+                      <PasswordInput
+                        value={v3AuthPw}
+                        onChange={(e) => setV3AuthPw(e.target.value)}
+                        placeholder="Min 8 chars"
+                        hasStored={!!isEdit && !!credential?.has_auth_passphrase}
+                        revealing={revealing}
+                        onReveal={isEdit && credential?.has_auth_passphrase ? fetchSecrets : undefined}
+                      />
                     </FormField>
                   </div>
                 </>
@@ -599,34 +565,14 @@ function CredentialFormDialog({
                     </Select>
                   </FormField>
                   <FormField label="Privacy passphrase">
-                    <div className="relative">
-                      <Input
-                        type={showPrivPw ? 'text' : 'password'}
-                        value={v3PrivPw}
-                        onChange={(e) => setV3PrivPw(e.target.value)}
-                        placeholder={isEdit && credential?.has_priv_passphrase ? '••••••••' : 'Min 8 chars'}
-                        className="pr-9"
-                      />
-                      {isEdit && credential?.has_priv_passphrase && (
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            if (!showPrivPw) await fetchSecrets()
-                            setShowPrivPw((s) => !s)
-                          }}
-                          className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-muted hover:text-text"
-                          aria-label={showPrivPw ? 'Hide privacy passphrase' : 'Reveal privacy passphrase'}
-                          title={showPrivPw ? 'Hide' : 'Reveal'}
-                          disabled={revealing}
-                        >
-                          {revealing && !secretsFetched
-                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            : showPrivPw
-                              ? <EyeOff className="h-3.5 w-3.5" />
-                              : <Eye className="h-3.5 w-3.5" />}
-                        </button>
-                      )}
-                    </div>
+                    <PasswordInput
+                      value={v3PrivPw}
+                      onChange={(e) => setV3PrivPw(e.target.value)}
+                      placeholder="Min 8 chars"
+                      hasStored={!!isEdit && !!credential?.has_priv_passphrase}
+                      revealing={revealing}
+                      onReveal={isEdit && credential?.has_priv_passphrase ? fetchSecrets : undefined}
+                    />
                   </FormField>
                 </div>
               )}

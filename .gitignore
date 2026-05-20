@@ -102,3 +102,7 @@ docker-compose.yml.bak
 Documentation/prv.txt
 Documentation/srv_response.txt
 Documentation/test.txt
+
+# ─── Generated tech support bundles ───
+support01/
+zenplus-support-*/

@@ -53,8 +53,7 @@ function ReportTabFallback() {
 import { UsersPage } from '@/pages/UsersPage'
 import { ChannelsPage } from '@/pages/ChannelsPage'
 import { GatewaysPage } from '@/pages/GatewaysPage'
-import { SnmpProfilesPage } from '@/pages/SnmpProfilesPage'
-import { WindowsCredentialsPage } from '@/pages/WindowsCredentialsPage'
+import { CredentialsPage } from '@/pages/CredentialsPage'
 import { SubscriptionPage } from '@/pages/SubscriptionPage'
 import { GeneralSettingsPage } from '@/pages/GeneralSettingsPage'
 import { NotFoundPage } from '@/pages/NotFoundPage'
@@ -72,7 +71,7 @@ const tabRedirects: Record<string, string> = {
   gateways: '/gateways',
   users: '/users',
   sensors: '/sensors',
-  snmp: '/snmp-profiles',
+  snmp: '/credentials?tab=snmp',
   subscription: '/subscription',
   appearance: '/settings/general',
   profile: '/settings/general',
@@ -158,8 +157,10 @@ export default function App() {
         <Route path="channels" element={<ChannelsPage />} />
         <Route path="notifications" element={<Navigate to="/channels" replace />} />
         <Route path="gateways" element={<GatewaysPage />} />
-        <Route path="snmp-profiles" element={<SnmpProfilesPage />} />
-        <Route path="windows-credentials" element={<WindowsCredentialsPage />} />
+        <Route path="credentials" element={<CredentialsPage />} />
+        {/* Backwards-compat redirects so cross-links / bookmarks still work */}
+        <Route path="snmp-profiles" element={<Navigate to="/credentials?tab=snmp" replace />} />
+        <Route path="windows-credentials" element={<Navigate to="/credentials?tab=windows" replace />} />
         <Route path="subscription" element={<SubscriptionPage />} />
         <Route path="settings/general" element={<GeneralSettingsPage />} />
 

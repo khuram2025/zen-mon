@@ -21,11 +21,15 @@ router = APIRouter(prefix="/maps", tags=["Manual Maps"])
 class MapCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
+    metadata: Optional[dict] = None
 
 
 class MapUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=255)
     description: Optional[str] = None
+    # Holds background image, theme preset, snap-to-grid toggle, default
+    # shape, and other per-map UI state. Stored verbatim as JSONB.
+    metadata: Optional[dict] = None
 
 
 class NodeCreate(BaseModel):
@@ -41,6 +45,10 @@ class NodeUpdate(BaseModel):
     icon: Optional[str] = Field(default=None, max_length=40)
     x_pct: Optional[float] = Field(default=None, ge=2, le=98)
     y_pct: Optional[float] = Field(default=None, ge=2, le=98)
+    # Free-form per-node metadata. Used today for `size_scale` (0.5-2.5) so
+    # admins can resize the rendered disc; future shape / colour tweaks go
+    # here as well without needing a migration.
+    metadata: Optional[dict] = None
 
 
 class LinkCreate(BaseModel):
@@ -57,13 +65,54 @@ class LinkUpdate(BaseModel):
     metadata: Optional[dict] = None
 
 
+# Annotation shapes are positioned/sized as percentages of the canvas so the
+# map scales cleanly with the viewport, the same way nodes do.
+SHAPE_KINDS = (
+    "rectangle", "circle", "text",
+    "line", "arrow", "diamond", "hexagon", "image", "sticky",
+)
+
+
+class ShapeCreate(BaseModel):
+    kind: str = Field(..., max_length=20)
+    x_pct: float = Field(default=50, ge=0, le=100)
+    y_pct: float = Field(default=50, ge=0, le=100)
+    w_pct: float = Field(default=14, ge=1, le=100)
+    h_pct: float = Field(default=8, ge=1, le=100)
+    text: Optional[str] = None
+    fill: Optional[str] = Field(default=None, max_length=40)
+    stroke: Optional[str] = Field(default=None, max_length=40)
+    z_index: int = 0
+    metadata: Optional[dict] = None
+
+
+class ShapeUpdate(BaseModel):
+    kind: Optional[str] = Field(default=None, max_length=20)
+    x_pct: Optional[float] = Field(default=None, ge=0, le=100)
+    y_pct: Optional[float] = Field(default=None, ge=0, le=100)
+    w_pct: Optional[float] = Field(default=None, ge=1, le=100)
+    h_pct: Optional[float] = Field(default=None, ge=1, le=100)
+    text: Optional[str] = None
+    fill: Optional[str] = Field(default=None, max_length=40)
+    stroke: Optional[str] = Field(default=None, max_length=40)
+    z_index: Optional[int] = None
+    metadata: Optional[dict] = None
+
+
 def _row_map(row) -> dict:
+    md = row["metadata"] if "metadata" in row.keys() else None
+    if isinstance(md, str):
+        try:
+            md = json.loads(md)
+        except Exception:
+            md = {}
     return {
         "id": str(row["id"]),
         "name": row["name"],
         "description": row["description"],
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+        "metadata": md or {},
     }
 
 
@@ -88,6 +137,23 @@ def _row_node(row) -> dict:
     }
 
 
+def _row_shape(row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "map_id": str(row["map_id"]),
+        "kind": row["kind"],
+        "x_pct": float(row["x_pct"]),
+        "y_pct": float(row["y_pct"]),
+        "w_pct": float(row["w_pct"]),
+        "h_pct": float(row["h_pct"]),
+        "text": row["text"],
+        "fill": row["fill"],
+        "stroke": row["stroke"],
+        "z_index": row["z_index"],
+        "metadata": row["metadata"] or {},
+    }
+
+
 def _row_link(row) -> dict:
     return {
         "id": str(row["id"]),
@@ -107,7 +173,7 @@ async def list_maps(
 ):
     rows = (await db.execute(
         text("""
-            SELECT m.id, m.name, m.description, m.created_at, m.updated_at,
+            SELECT m.id, m.name, m.description, m.metadata, m.created_at, m.updated_at,
                    COALESCE(n.node_count, 0) AS node_count,
                    COALESCE(l.link_count, 0) AS link_count,
                    COALESCE(s.down_count, 0) AS down_count,
@@ -167,11 +233,16 @@ async def create_map(
 ):
     row = (await db.execute(
         text("""
-            INSERT INTO manual_maps (name, description, created_by)
-            VALUES (:name, :description, :created_by)
-            RETURNING id, name, description, created_at, updated_at
+            INSERT INTO manual_maps (name, description, metadata, created_by)
+            VALUES (:name, :description, CAST(:metadata AS JSONB), :created_by)
+            RETURNING id, name, description, metadata, created_at, updated_at
         """),
-        {"name": data.name, "description": data.description, "created_by": user.id},
+        {
+            "name": data.name,
+            "description": data.description,
+            "metadata": json.dumps(data.metadata or {}),
+            "created_by": user.id,
+        },
     )).mappings().first()
     await db.commit()
     return _row_map(row)
@@ -185,7 +256,7 @@ async def get_map(
 ):
     map_row = (await db.execute(
         text("""
-            SELECT id, name, description, created_at, updated_at
+            SELECT id, name, description, metadata, created_at, updated_at
             FROM manual_maps
             WHERE id = :id
         """),
@@ -217,6 +288,17 @@ async def get_map(
         {"map_id": map_id},
     )).mappings().all()
 
+    shapes = (await db.execute(
+        text("""
+            SELECT id, map_id, kind, x_pct, y_pct, w_pct, h_pct, text, fill, stroke,
+                   z_index, metadata
+            FROM manual_map_shapes
+            WHERE map_id = :map_id
+            ORDER BY z_index, created_at
+        """),
+        {"map_id": map_id},
+    )).mappings().all()
+
     status_counts: dict[str, int] = {}
     for node in nodes:
         status_counts[node["status"]] = status_counts.get(node["status"], 0) + 1
@@ -226,11 +308,13 @@ async def get_map(
         "summary": {
             "nodes": len(nodes),
             "links": len(links),
+            "shapes": len(shapes),
             "status_counts": status_counts,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         },
         "nodes": [_row_node(row) for row in nodes],
         "links": [_row_link(row) for row in links],
+        "shapes": [_row_shape(row) for row in shapes],
     }
 
 
@@ -247,10 +331,14 @@ async def update_map(
     parts = ["updated_at = NOW()"]
     params = {"id": map_id}
     for key, value in fields.items():
-        parts.append(f"{key} = :{key}")
-        params[key] = value
+        if key == "metadata":
+            parts.append("metadata = CAST(:metadata AS JSONB)")
+            params["metadata"] = json.dumps(value or {})
+        else:
+            parts.append(f"{key} = :{key}")
+            params[key] = value
     row = (await db.execute(
-        text(f"UPDATE manual_maps SET {', '.join(parts)} WHERE id = :id RETURNING id, name, description, created_at, updated_at"),
+        text(f"UPDATE manual_maps SET {', '.join(parts)} WHERE id = :id RETURNING id, name, description, metadata, created_at, updated_at"),
         params,
     )).mappings().first()
     if not row:
@@ -319,8 +407,12 @@ async def update_node(
     parts = ["updated_at = NOW()"]
     params = {"map_id": map_id, "node_id": node_id}
     for key, value in fields.items():
-        parts.append(f"{key} = :{key}")
-        params[key] = value
+        if key == "metadata":
+            parts.append("metadata = CAST(:metadata AS JSONB)")
+            params["metadata"] = json.dumps(value or {})
+        else:
+            parts.append(f"{key} = :{key}")
+            params[key] = value
     row = (await db.execute(
         text(f"""
             UPDATE manual_map_nodes
@@ -734,3 +826,102 @@ async def links_live(
         }
     return {"data": final, "window_seconds": window,
             "generated_at": datetime.now(timezone.utc).isoformat()}
+
+
+# ─── Annotation shapes (rectangles, circles, text) ─────────────────────────
+#
+# Shapes are standalone canvas annotations not tied to any device. The frontend
+# uses them as zone callouts, group boxes, and free-floating text labels.
+
+@router.post("/{map_id}/shapes")
+async def create_shape(
+    map_id: uuid.UUID,
+    data: ShapeCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    if data.kind not in SHAPE_KINDS:
+        raise HTTPException(status_code=400, detail=f"kind must be one of {SHAPE_KINDS}")
+    map_exists = (await db.execute(
+        text("SELECT 1 FROM manual_maps WHERE id = :id"), {"id": map_id},
+    )).first()
+    if not map_exists:
+        raise HTTPException(status_code=404, detail="Map not found")
+    row = (await db.execute(
+        text("""
+            INSERT INTO manual_map_shapes (map_id, kind, x_pct, y_pct, w_pct, h_pct,
+                                           text, fill, stroke, z_index, metadata)
+            VALUES (:map_id, :kind, :x, :y, :w, :h, :text, :fill, :stroke, :z,
+                    CAST(:metadata AS JSONB))
+            RETURNING id, map_id, kind, x_pct, y_pct, w_pct, h_pct, text, fill, stroke,
+                      z_index, metadata
+        """),
+        {
+            "map_id": map_id, "kind": data.kind,
+            "x": data.x_pct, "y": data.y_pct, "w": data.w_pct, "h": data.h_pct,
+            "text": data.text, "fill": data.fill, "stroke": data.stroke,
+            "z": data.z_index, "metadata": json.dumps(data.metadata or {}),
+        },
+    )).mappings().first()
+    await db.execute(text("UPDATE manual_maps SET updated_at = NOW() WHERE id = :id"), {"id": map_id})
+    await db.commit()
+    return _row_shape(row)
+
+
+@router.put("/{map_id}/shapes/{shape_id}")
+async def update_shape(
+    map_id: uuid.UUID,
+    shape_id: uuid.UUID,
+    data: ShapeUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    fields = data.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    if "kind" in fields and fields["kind"] not in SHAPE_KINDS:
+        raise HTTPException(status_code=400, detail=f"kind must be one of {SHAPE_KINDS}")
+    parts = ["updated_at = NOW()"]
+    params = {"map_id": map_id, "shape_id": shape_id}
+    for key, value in fields.items():
+        if key == "metadata":
+            parts.append("metadata = CAST(:metadata AS JSONB)")
+            params["metadata"] = json.dumps(value or {})
+        else:
+            parts.append(f"{key} = :{key}")
+            params[key] = value
+    row = (await db.execute(
+        text(f"""
+            UPDATE manual_map_shapes
+            SET {', '.join(parts)}
+            WHERE id = :shape_id AND map_id = :map_id
+            RETURNING id, map_id, kind, x_pct, y_pct, w_pct, h_pct, text, fill, stroke,
+                      z_index, metadata
+        """),
+        params,
+    )).mappings().first()
+    if not row:
+        await db.commit()
+        raise HTTPException(status_code=404, detail="Shape not found")
+    await db.execute(text("UPDATE manual_maps SET updated_at = NOW() WHERE id = :id"), {"id": map_id})
+    await db.commit()
+    return _row_shape(row)
+
+
+@router.delete("/{map_id}/shapes/{shape_id}", status_code=204)
+async def delete_shape(
+    map_id: uuid.UUID,
+    shape_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    row = (await db.execute(
+        text("DELETE FROM manual_map_shapes WHERE id = :shape_id AND map_id = :map_id RETURNING id"),
+        {"shape_id": shape_id, "map_id": map_id},
+    )).first()
+    if not row:
+        await db.commit()
+        raise HTTPException(status_code=404, detail="Shape not found")
+    await db.execute(text("UPDATE manual_maps SET updated_at = NOW() WHERE id = :id"), {"id": map_id})
+    await db.commit()
+    return None

@@ -6,6 +6,7 @@ import {
 import { api } from '@/lib/api'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
+import { PasswordInput } from '@/components/ui/PasswordInput'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
@@ -46,7 +47,7 @@ const DEFAULT_FORM = {
   description: '',
 }
 
-export function WindowsCredentialsPage() {
+export function WindowsCredentialsPage({ hideHeader = false }: { hideHeader?: boolean } = {}) {
   const qc = useQueryClient()
   const [editing, setEditing] = useState<WinCred | null>(null)
   const [open, setOpen] = useState(false)
@@ -128,20 +129,28 @@ export function WindowsCredentialsPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
-            <ShieldCheck className="h-6 w-6 text-primary" /> Windows Credentials
-          </h1>
-          <p className="mt-1 text-xs text-muted">
-            WMI / WinRM credentials used by discovery to inventory Windows hosts.
-            Passwords are encrypted at rest.
-          </p>
+      {hideHeader ? (
+        <div className="flex items-center justify-end">
+          <Button onClick={openCreate}>
+            <Plus className="h-4 w-4" /> New credential
+          </Button>
         </div>
-        <Button onClick={openCreate}>
-          <Plus className="h-4 w-4" /> New credential
-        </Button>
-      </div>
+      ) : (
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
+              <ShieldCheck className="h-6 w-6 text-primary" /> Windows Credentials
+            </h1>
+            <p className="mt-1 text-xs text-muted">
+              WMI / WinRM credentials used by discovery to inventory Windows hosts.
+              Passwords are encrypted at rest.
+            </p>
+          </div>
+          <Button onClick={openCreate}>
+            <Plus className="h-4 w-4" /> New credential
+          </Button>
+        </div>
+      )}
 
       {isLoading ? (
         <Card><CardContent className="py-12 text-center text-sm text-muted">Loading…</CardContent></Card>
@@ -247,9 +256,9 @@ export function WindowsCredentialsPage() {
               </FormField>
             </div>
             <FormField label={editing ? 'Password (leave blank to keep)' : 'Password'} required={!editing}>
-              <Input type="password" value={form.password}
-                     onChange={(e) => setForm({ ...form, password: e.target.value })}
-                     placeholder="••••••••" required={!editing} autoComplete="off" />
+              <PasswordInput value={form.password}
+                             onChange={(e) => setForm({ ...form, password: e.target.value })}
+                             placeholder="••••••••" required={!editing} />
             </FormField>
             <div className="grid gap-3 md:grid-cols-3">
               <FormField label="Auth method">
