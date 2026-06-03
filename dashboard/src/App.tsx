@@ -11,6 +11,7 @@ import { AlertsPage } from '@/pages/AlertsPage'
 import { AlertDetailPage } from '@/pages/AlertDetailPage'
 import { AlertRulesPage } from '@/pages/AlertRulesPage'
 import { TrapsPage } from '@/pages/TrapsPage'
+import { NcmPage } from '@/pages/NcmPage'
 import { ServicesPage } from '@/pages/ServicesPage'
 import { ServiceCheckDetailPage } from '@/pages/ServiceCheckDetail'
 import { ServiceIncidentsPage } from '@/pages/ServiceIncidentsPage'
@@ -137,6 +138,7 @@ export default function App() {
         <Route path="alerts/:id" element={<AlertDetailPage />} />
         <Route path="alert-rules" element={<AlertRulesPage />} />
         <Route path="traps" element={<TrapsPage />} />
+        <Route path="ncm" element={<NcmPage />} />
         <Route path="reports" element={<ReportsPage />}>
           <Route index element={<Navigate to="executive" replace />} />
           <Route path="executive" element={<Suspense fallback={<ReportTabFallback />}><ExecutiveReport /></Suspense>} />
