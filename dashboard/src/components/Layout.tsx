@@ -12,6 +12,7 @@ import {
   CreditCard,
   FileText,
   GitBranch,
+  Inbox,
   Info,
   LayoutDashboard,
   LogOut,
@@ -91,6 +92,7 @@ const sections: NavSection[] = [
     items: [
       { to: '/alerts', label: 'Alerts', icon: AlertTriangle },
       { to: '/alert-rules', label: 'Alert Rules', icon: Bell },
+      { to: '/traps', label: 'Traps', icon: Inbox },
     ],
   },
   {
@@ -130,6 +132,7 @@ const routeLabels: Record<string, string> = {
   '/discovery': 'Discovery',
   '/alerts': 'Alerts',
   '/alert-rules': 'Alert Rules',
+  '/traps': 'Traps',
   '/channels': 'Channels',
   '/notifications': 'Channels',
   '/gateways': 'Gateways',
@@ -158,6 +161,7 @@ const routeSections: Record<string, string> = {
   '/discovery': 'Monitoring',
   '/alerts': 'Alerting',
   '/alert-rules': 'Alerting',
+  '/traps': 'Alerting',
   '/channels': 'Configuration',
   '/notifications': 'Configuration',
   '/gateways': 'Configuration',

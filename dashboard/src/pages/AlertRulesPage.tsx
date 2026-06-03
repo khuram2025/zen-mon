@@ -104,8 +104,24 @@ export function AlertRulesPage() {
                       <div className="font-medium">{r.name}</div>
                       {r.description && <div className="text-xs text-muted">{r.description}</div>}
                     </Td>
-                    <Td className="font-mono text-xs">{r.metric}</Td>
-                    <Td className="font-mono text-xs">{r.operator} {r.threshold}</Td>
+                    <Td className="font-mono text-xs">
+                      {r.metric === 'trap'
+                        ? 'trap'
+                        : Array.isArray(r.conditions) && r.conditions.length > 1
+                        ? `${r.conditions.length} conditions`
+                        : r.metric}
+                    </Td>
+                    <Td className="max-w-[22rem] truncate font-mono text-xs">
+                      {r.metric === 'trap'
+                        ? r.trap_oid
+                          ? `OID ${r.trap_oid}`
+                          : 'any trap'
+                        : Array.isArray(r.conditions) && r.conditions.length > 1
+                        ? r.conditions
+                            .map((c: any) => `${c.metric} ${c.operator} ${c.threshold}`)
+                            .join(`  ${r.condition_logic || 'AND'}  `)
+                        : `${r.operator} ${r.threshold}`}
+                    </Td>
                     <Td>
                       <Badge variant={r.severity === 'critical' ? 'danger' : r.severity === 'warning' ? 'warning' : 'info'}>
                         {r.severity}

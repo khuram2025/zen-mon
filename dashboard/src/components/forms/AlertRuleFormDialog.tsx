@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Loader2 } from 'lucide-react'
+import { Loader2, Plus, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
 import {
@@ -24,30 +24,31 @@ import {
 } from '@/components/ui/Select'
 import { toast } from '@/components/ui/Toast'
 
+type Cond = { metric: string; operator: string; threshold: number }
+
 type State = {
   name: string
   description: string
   enabled: boolean
-  metric: string
-  operator: string
-  threshold: number
+  conditions: Cond[]
+  condition_logic: 'AND' | 'OR'
   duration: number
   severity: 'info' | 'warning' | 'critical'
   cooldown: number
-  source: 'device' | 'service'
+  source: 'device' | 'service' | 'trap'
   device_id: string
   group_id: string
   service_check_id: string
   service_check_group_id: string
+  trap_oid: string
 }
 
 const empty: State = {
   name: '',
   description: '',
   enabled: true,
-  metric: 'ping_status',
-  operator: '==',
-  threshold: 0,
+  conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }],
+  condition_logic: 'AND',
   duration: 0,
   severity: 'warning',
   cooldown: 300,
@@ -56,6 +57,7 @@ const empty: State = {
   group_id: '',
   service_check_id: '',
   service_check_group_id: '',
+  trap_oid: '',
 }
 
 export function AlertRuleFormDialog({
@@ -105,9 +107,15 @@ export function AlertRuleFormDialog({
         name: rule.name || '',
         description: rule.description || '',
         enabled: rule.enabled ?? true,
-        metric: rule.metric || 'ping_status',
-        operator: rule.operator || '==',
-        threshold: rule.threshold ?? 0,
+        conditions:
+          Array.isArray(rule.conditions) && rule.conditions.length
+            ? rule.conditions.map((c: any) => ({
+                metric: c.metric,
+                operator: c.operator,
+                threshold: c.threshold ?? 0,
+              }))
+            : [{ metric: rule.metric || 'ping_status', operator: rule.operator || '==', threshold: rule.threshold ?? 0 }],
+        condition_logic: rule.condition_logic === 'OR' ? 'OR' : 'AND',
         duration: rule.duration ?? 0,
         severity: rule.severity || 'warning',
         cooldown: rule.cooldown ?? 300,
@@ -115,8 +123,11 @@ export function AlertRuleFormDialog({
         group_id: rule.group_id || '',
         service_check_id: rule.service_check_id || '',
         service_check_group_id: rule.service_check_group_id || '',
+        trap_oid: rule.trap_oid || '',
         source:
-          rule.service_check_id || rule.service_check_group_id || rule.metric === 'service_status'
+          rule.metric === 'trap'
+            ? 'trap'
+            : rule.service_check_id || rule.service_check_group_id || rule.metric === 'service_status'
             ? 'service'
             : 'device',
       })
@@ -138,23 +149,43 @@ export function AlertRuleFormDialog({
     onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
   })
 
+  const updateCond = (i: number, patch: Partial<Cond>) =>
+    setS((st) => ({ ...st, conditions: st.conditions.map((c, idx) => (idx === i ? { ...c, ...patch } : c)) }))
+  const addCond = () =>
+    setS((st) => ({ ...st, conditions: [...st.conditions, { metric: 'rtt', operator: '>', threshold: 0 }] }))
+  const removeCond = (i: number) =>
+    setS((st) => ({
+      ...st,
+      conditions: st.conditions.length > 1 ? st.conditions.filter((_, idx) => idx !== i) : st.conditions,
+    }))
+
   function submit(e: FormEvent) {
     e.preventDefault()
-    const serviceScoped = s.source === 'service'
+    const isService = s.source === 'service'
+    const isTrap = s.source === 'trap'
+    const isDevice = s.source === 'device'
+    const first = s.conditions[0]
+    // Device rules: send the full conditions array only when compound (>1);
+    // a single condition stays in the legacy flat columns (conditions = null).
+    const conditions = isDevice && s.conditions.length > 1 ? s.conditions : null
     save.mutate({
       name: s.name,
       description: s.description || null,
       enabled: s.enabled,
-      metric: serviceScoped ? 'service_status' : s.metric,
-      operator: s.operator,
-      threshold: s.threshold,
+      metric: isService ? 'service_status' : isTrap ? 'trap' : first.metric,
+      operator: isDevice ? first.operator : '==',
+      threshold: isDevice ? first.threshold : 0,
+      conditions,
+      condition_logic: s.condition_logic,
+      trap_oid: isTrap ? s.trap_oid.trim() || null : null,
       duration: s.duration,
       severity: s.severity,
       cooldown: s.cooldown,
-      device_id: serviceScoped ? null : s.device_id || null,
-      group_id: serviceScoped ? null : s.group_id || null,
-      service_check_id: serviceScoped ? s.service_check_id || null : null,
-      service_check_group_id: serviceScoped ? s.service_check_group_id || null : null,
+      // Device + trap rules can scope to a device/group; service rules can't.
+      device_id: isService ? null : s.device_id || null,
+      group_id: isService ? null : s.group_id || null,
+      service_check_id: isService ? s.service_check_id || null : null,
+      service_check_group_id: isService ? s.service_check_group_id || null : null,
       notify_channels: [],
     })
   }
@@ -183,45 +214,122 @@ export function AlertRuleFormDialog({
           </FormField>
 
           <div className="space-y-3 rounded-md border border-border p-3">
-            <div className="text-xs font-semibold uppercase tracking-wider text-muted">Condition</div>
-            <div className="grid grid-cols-3 gap-3">
-              <FormField label="Metric">
-                <Select value={s.metric} onValueChange={(v) => setS({ ...s, metric: v })}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="ping_status">Ping status (0/1)</SelectItem>
-                    <SelectItem value="rtt">Round-trip time (ms)</SelectItem>
-                    <SelectItem value="packet_loss">Packet loss (%)</SelectItem>
-                    <SelectItem value="jitter">Jitter (ms)</SelectItem>
-                  </SelectContent>
-                </Select>
-              </FormField>
-              <FormField label="Operator">
-                <Select value={s.operator} onValueChange={(v) => setS({ ...s, operator: v })}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value=">">greater than</SelectItem>
-                    <SelectItem value=">=">greater or equal</SelectItem>
-                    <SelectItem value="<">less than</SelectItem>
-                    <SelectItem value="<=">less or equal</SelectItem>
-                    <SelectItem value="==">equals</SelectItem>
-                    <SelectItem value="!=">not equal</SelectItem>
-                  </SelectContent>
-                </Select>
-              </FormField>
-              <FormField label="Threshold">
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted">
+                {s.source === 'trap'
+                  ? 'Trap match'
+                  : s.source === 'device' && s.conditions.length > 1
+                  ? 'Conditions'
+                  : 'Condition'}
+              </div>
+              {s.source === 'device' && s.conditions.length > 1 && (
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-muted">Match</span>
+                  <div className="flex rounded-md border border-border bg-surface2 p-0.5 text-xs">
+                    {(['AND', 'OR'] as const).map((l) => (
+                      <button
+                        key={l}
+                        type="button"
+                        onClick={() => setS({ ...s, condition_logic: l })}
+                        className={`rounded px-2.5 py-1 font-medium ${
+                          s.condition_logic === l ? 'bg-primary text-white' : 'text-muted hover:text-text'
+                        }`}
+                      >
+                        {l === 'AND' ? 'All (AND)' : 'Any (OR)'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {s.source === 'service' ? (
+              <div className="text-[11px] text-muted">
+                Service-check rules fire on status transitions (set via the scope below); metric
+                thresholds do not apply.
+              </div>
+            ) : s.source === 'trap' ? (
+              <FormField
+                label="Trap OID filter (optional)"
+                hint="Empty = any trap. Otherwise an exact OID or dotted-prefix, e.g. 1.3.6.1.6.3.1.1.5.3 (linkDown). Fires an alert when a matching SNMP trap is received."
+              >
                 <Input
-                  type="number"
-                  step="any"
-                  value={s.threshold}
-                  onChange={(e) => setS({ ...s, threshold: Number(e.target.value) })}
+                  value={s.trap_oid}
+                  onChange={(e) => setS({ ...s, trap_oid: e.target.value })}
+                  placeholder="1.3.6.1.6.3.1.1.5.3"
                 />
               </FormField>
-            </div>
+            ) : (
+              <div className="space-y-2">
+                {s.conditions.map((c, i) => (
+                  <div key={i} className="flex items-end gap-2">
+                    <div className="grid flex-1 grid-cols-3 gap-2">
+                      <FormField label={i === 0 ? 'Metric' : ' '}>
+                        <Select value={c.metric} onValueChange={(v) => updateCond(i, { metric: v })}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="ping_status">Ping status (0/1)</SelectItem>
+                            <SelectItem value="rtt">Round-trip time (ms)</SelectItem>
+                            <SelectItem value="packet_loss">Packet loss (%)</SelectItem>
+                            <SelectItem value="jitter">Jitter (ms)</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </FormField>
+                      <FormField label={i === 0 ? 'Operator' : ' '}>
+                        <Select value={c.operator} onValueChange={(v) => updateCond(i, { operator: v })}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value=">">greater than</SelectItem>
+                            <SelectItem value=">=">greater or equal</SelectItem>
+                            <SelectItem value="<">less than</SelectItem>
+                            <SelectItem value="<=">less or equal</SelectItem>
+                            <SelectItem value="==">equals</SelectItem>
+                            <SelectItem value="!=">not equal</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </FormField>
+                      <FormField label={i === 0 ? 'Threshold' : ' '}>
+                        <Input
+                          type="number"
+                          step="any"
+                          value={c.threshold}
+                          onChange={(e) => updateCond(i, { threshold: Number(e.target.value) })}
+                        />
+                      </FormField>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-9 w-9 text-muted hover:text-danger"
+                      disabled={s.conditions.length === 1}
+                      onClick={() => removeCond(i)}
+                      title="Remove condition"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+                <Button type="button" variant="outline" size="sm" onClick={addCond}>
+                  <Plus className="h-3.5 w-3.5" />
+                  Add condition
+                </Button>
+                {s.conditions.length > 1 && (
+                  <p className="text-[11px] text-muted">
+                    Rule fires when{' '}
+                    <span className="font-semibold text-text">
+                      {s.condition_logic === 'AND' ? 'all' : 'any'}
+                    </span>{' '}
+                    of the {s.conditions.length} conditions match.
+                  </p>
+                )}
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-3">
               <FormField label="Duration (s)" hint="Hold for N seconds before firing">
                 <Input
@@ -264,9 +372,18 @@ export function AlertRuleFormDialog({
                 >
                   Service check
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setS({ ...s, source: 'trap', service_check_id: '', service_check_group_id: '' })}
+                  className={`rounded px-2.5 py-1 font-medium ${
+                    s.source === 'trap' ? 'bg-primary text-white' : 'text-muted hover:text-text'
+                  }`}
+                >
+                  SNMP Trap
+                </button>
               </div>
             </div>
-            {s.source === 'device' ? (
+            {s.source !== 'service' ? (
               <div className="grid grid-cols-2 gap-3">
                 <FormField label="Device">
                   <Select
