@@ -1,4 +1,5 @@
 import { useMemo, useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   FileCode, RefreshCw, Save, Eye, X, KeyRound, Settings2, DownloadCloud, Download,
@@ -63,11 +64,12 @@ function Facet({ title, items, active, onPick }: { title: string; items: [string
 
 export function NcmPage() {
   const qc = useQueryClient()
+  const navigate = useNavigate()
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<Filter>(null)
   const [page, setPage] = useState(1)
-  const [detailFor, setDetailFor] = useState<any>(null)
   const [profilesOpen, setProfilesOpen] = useState(false)
+  const openDevice = (d: any) => navigate(`/ncm/${d.device_id}`)
 
   const { data: overview, isFetching, refetch } = useQuery<any>({
     queryKey: ['ncm', 'overview'], queryFn: async () => (await api.get('/ncm/overview')).data, refetchInterval: 30000,
@@ -79,7 +81,7 @@ export function NcmPage() {
   const platformList: any[] = platforms?.data || [{ value: 'autodetect', label: 'Auto-detect' }]
 
   const runScheduled = useMutation({
-    mutationFn: async () => (await api.post('/ncm/run-scheduled')).data,
+    mutationFn: async () => (await api.post('/ncm/run-scheduled', null, { timeout: 600000 })).data,
     onSuccess: (d: any) => { toast.success(`Scheduled run: ${d.backed_up} backed up, ${d.failed} failed (${d.due} due)`); qc.invalidateQueries({ queryKey: ['ncm'] }) },
     onError: (e: any) => toast.error('Run failed', apiErrorMessage(e)),
   })
@@ -179,7 +181,7 @@ export function NcmPage() {
                 </THead>
                 <TBody>
                   {pageRows.map((d) => (
-                    <Tr key={d.device_id} className="cursor-pointer" onClick={() => setDetailFor(d)}>
+                    <Tr key={d.device_id} className="cursor-pointer" onClick={() => openDevice(d)}>
                       <Td><div className="font-medium">{d.hostname}</div><div className="font-mono text-xs text-muted">{d.ip}</div></Td>
                       <Td className="text-xs text-muted">{d.device_type || '—'}{d.vendor ? ` · ${d.vendor}` : ''}</Td>
                       <Td className="text-xs text-muted">{d.location || '—'}</Td>
@@ -187,7 +189,7 @@ export function NcmPage() {
                       <Td><StatusBadge d={d} /></Td>
                       <Td onClick={(e) => e.stopPropagation()}>
                         <div className="flex justify-end">
-                          <Button variant="ghost" size="sm" onClick={() => setDetailFor(d)}><Settings2 className="h-3.5 w-3.5" /> Details</Button>
+                          <Button variant="ghost" size="sm" onClick={() => openDevice(d)}><Settings2 className="h-3.5 w-3.5" /> Details</Button>
                         </div>
                       </Td>
                     </Tr>
@@ -224,130 +226,8 @@ export function NcmPage() {
         </Card>
       </div>
 
-      {detailFor && (
-        <DeviceDetailDialog device={detailFor} credentials={credentials} platformList={platformList} onClose={() => setDetailFor(null)} />
-      )}
       <ProfilesDialog open={profilesOpen} onOpenChange={setProfilesOpen} credentials={credentials} />
     </div>
-  )
-}
-
-function DeviceDetailDialog({ device, credentials, platformList, onClose }: { device: any; credentials: any[]; platformList: any[]; onClose: () => void }) {
-  const qc = useQueryClient()
-  const id = device.device_id
-  const def = credentials.find((c) => c.is_default)
-  const [form, setForm] = useState({
-    credential_id: device.credential_id || def?.id || (credentials[0]?.id ?? ''),
-    platform: device.platform || 'autodetect',
-    enabled: device.enrolled ? true : true,
-    schedule_enabled: !!device.schedule_enabled,
-    schedule_interval_hours: device.schedule_interval_hours || 24,
-  })
-  const [viewVersion, setViewVersion] = useState<any>(null)
-
-  const { data: versions } = useQuery<any>({ queryKey: ['ncm', 'configs', id], queryFn: async () => (await api.get(`/devices/${id}/configs`)).data })
-  const vlist: any[] = versions?.data || []
-  const { data: diff } = useQuery<any>({
-    queryKey: ['ncm', 'diff', id, vlist[0]?.id, vlist[1]?.id],
-    queryFn: async () => (await api.get(`/devices/${id}/configs-diff?a=${vlist[1].id}&b=${vlist[0].id}`)).data,
-    enabled: vlist.length >= 2,
-  })
-  const { data: viewContent } = useQuery<any>({ queryKey: ['ncm', 'view', viewVersion?.id], queryFn: async () => (await api.get(`/devices/${id}/configs/${viewVersion.id}`)).data, enabled: !!viewVersion })
-
-  const inv = () => qc.invalidateQueries({ queryKey: ['ncm'] })
-  const saveEnroll = useMutation({ mutationFn: async () => (await api.put(`/devices/${id}/ncm`, form)).data, onSuccess: () => { toast.success('Backup settings saved'); inv() }, onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)) })
-  const unenroll = useMutation({ mutationFn: async () => api.delete(`/devices/${id}/ncm`), onSuccess: () => { toast.success('Removed from backup'); inv(); onClose() }, onError: (e: any) => toast.error('Failed', apiErrorMessage(e)) })
-  const fetchNow = useMutation({ mutationFn: async () => (await api.post(`/devices/${id}/config-fetch`)).data, onSuccess: (d: any) => { toast.success(d.is_change ? `Backed up via SSH (${d.platform})` : 'No change since last backup'); inv(); qc.invalidateQueries({ queryKey: ['ncm', 'configs', id] }) }, onError: (e: any) => toast.error('SSH backup failed', apiErrorMessage(e)) })
-
-  async function download(v: any) {
-    try {
-      const c = (await api.get(`/devices/${id}/configs/${v.id}`)).data
-      const blob = new Blob([c.content || ''], { type: 'text/plain' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `${device.hostname}-${v.captured_at.slice(0, 19).replace(/[:T]/g, '-')}.cfg`
-      a.click()
-      URL.revokeObjectURL(url)
-    } catch (e: any) { toast.error('Download failed', apiErrorMessage(e)) }
-  }
-
-  return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-3xl">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">{device.hostname}
-            <span className="font-mono text-xs font-normal text-muted">{device.ip}</span>
-            <StatusBadge d={device} />
-          </DialogTitle>
-        </DialogHeader>
-        <div className="text-xs text-muted">{[device.device_type, device.vendor, device.location].filter(Boolean).join(' · ') || '—'}</div>
-
-        <div className="grid gap-4 md:grid-cols-2">
-          {/* settings */}
-          <div className="space-y-2 rounded-md border border-border p-3">
-            <div className="text-xs font-semibold uppercase tracking-wider text-muted">Backup settings</div>
-            <FormField label="Connection profile">
-              <Select value={form.credential_id} onValueChange={(v) => setForm({ ...form, credential_id: v })}>
-                <SelectTrigger><SelectValue placeholder="Select a profile" /></SelectTrigger>
-                <SelectContent>{credentials.map((c) => <SelectItem key={c.id} value={c.id}>{c.name} ({c.username})</SelectItem>)}</SelectContent>
-              </Select>
-            </FormField>
-            <FormField label="Platform">
-              <Select value={form.platform} onValueChange={(v) => setForm({ ...form, platform: v })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>{platformList.map((p) => <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>)}</SelectContent>
-              </Select>
-            </FormField>
-            <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
-              <span className="text-xs font-medium uppercase tracking-wider text-muted">Scheduled backup</span>
-              <Switch checked={form.schedule_enabled} onCheckedChange={(v) => setForm({ ...form, schedule_enabled: v })} />
-            </div>
-            {form.schedule_enabled && (
-              <FormField label="Every (hours)" hint="Auto-backup runs hourly and fetches when due.">
-                <Input type="number" min={1} max={720} value={form.schedule_interval_hours} onChange={(e) => setForm({ ...form, schedule_interval_hours: Number(e.target.value) })} />
-              </FormField>
-            )}
-            {device.last_status === 'failed' && device.last_error && (
-              <div className="rounded border border-danger/30 bg-danger/10 p-2 text-[11px] text-danger">Last error: {device.last_error}</div>
-            )}
-            <div className="flex flex-wrap gap-2 pt-1">
-              <Button size="sm" disabled={!form.credential_id || saveEnroll.isPending} onClick={() => saveEnroll.mutate()}><Save className="h-3.5 w-3.5" /> Save</Button>
-              <Button size="sm" variant="outline" disabled={!device.enrolled || fetchNow.isPending} onClick={() => fetchNow.mutate()}><DownloadCloud className="h-3.5 w-3.5" /> Backup now</Button>
-              {device.enrolled && <Button size="sm" variant="ghost" className="text-danger" onClick={() => unenroll.mutate()}>Remove</Button>}
-            </div>
-          </div>
-
-          {/* versions */}
-          <div className="space-y-2 rounded-md border border-border p-3">
-            <div className="flex items-center justify-between">
-              <div className="text-xs font-semibold uppercase tracking-wider text-muted">Versions ({vlist.length})</div>
-              {diff && <div className="text-[11px] text-muted"><GitCompare className="mr-1 inline h-3 w-3" />latest +{diff.added} −{diff.removed}</div>}
-            </div>
-            <div className="max-h-64 space-y-1 overflow-auto">
-              {vlist.map((v) => (
-                <div key={v.id} className="flex items-center justify-between rounded border border-border px-2 py-1 text-xs">
-                  <div><div>{relativeTime(v.captured_at)}</div><div className="text-muted">{v.line_count} lines · {v.captured_by} · {v.hash}</div></div>
-                  <div className="flex gap-0.5">
-                    <Button variant="ghost" size="icon" className="h-7 w-7" title="View" onClick={() => setViewVersion(v)}><Eye className="h-3.5 w-3.5" /></Button>
-                    <Button variant="ghost" size="icon" className="h-7 w-7" title="Download" onClick={() => download(v)}><Download className="h-3.5 w-3.5" /></Button>
-                  </div>
-                </div>
-              ))}
-              {!vlist.length && <div className="text-xs text-muted">No backups yet. Configure a profile and use “Backup now”.</div>}
-            </div>
-          </div>
-        </div>
-      </DialogContent>
-
-      <Dialog open={!!viewVersion} onOpenChange={(o) => !o && setViewVersion(null)}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader><DialogTitle className="flex items-center justify-between">Config · {viewVersion && relativeTime(viewVersion.captured_at)}
-            {viewVersion && <Button size="sm" variant="outline" onClick={() => download(viewVersion)}><Download className="h-3.5 w-3.5" /> Download</Button>}</DialogTitle></DialogHeader>
-          <pre className="max-h-[60vh] overflow-auto rounded-md border border-border bg-surface2/40 p-2 text-[11px] font-mono">{viewContent?.content || 'Loading…'}</pre>
-        </DialogContent>
-      </Dialog>
-    </Dialog>
   )
 }
 

@@ -9,6 +9,8 @@ management under /ncm/...
 import asyncio
 import hashlib
 import difflib
+import re
+import time
 from uuid import UUID
 from datetime import datetime, timezone
 from typing import Optional
@@ -85,14 +87,103 @@ def _netmiko_fetch(host: str, platform: str, username: str, password: str,
                 conn.enable()
             except Exception:
                 pass
+        _disable_paging(conn, resolved)
+        try:
+            prompt = conn.find_prompt()
+        except Exception:
+            prompt = ""
         cmd = PLATFORM_COMMANDS.get(resolved, "show running-config")
-        output = conn.send_command(cmd, read_timeout=90)
-        return resolved, output
+        # Send via the raw channel (NOT send_command, which mishandles the
+        # pager) and walk any "--More--" with a space until the prompt returns.
+        output = _run_command(conn, cmd, prompt)
+        return resolved, _clean_cli(output)
     finally:
         try:
             conn.disconnect()
         except Exception:
             pass
+
+
+def _is_paged(text: str) -> bool:
+    low = (text or "").lower()
+    return "--more--" in low or "---(more" in low or "<--- more --->" in low
+
+
+def _disable_paging(conn, platform: str) -> None:
+    """Best-effort: turn off the device pager so the full config returns in one
+    read. Silently ignored when the account lacks permission (read-only)."""
+    try:
+        p = platform or ""
+        if p == "fortinet":
+            for c in ("config system console", "set output standard", "end"):
+                conn.send_command_timing(c, read_timeout=15)
+        elif p.startswith("cisco") or p == "arista_eos":
+            conn.send_command_timing("terminal length 0", read_timeout=15)
+        elif p == "paloalto_panos":
+            conn.send_command_timing("set cli pager off", read_timeout=15)
+        elif p == "hp_comware":
+            conn.send_command_timing("screen-length disable", read_timeout=15)
+        elif p == "huawei":
+            conn.send_command_timing("screen-length 0 temporary", read_timeout=15)
+        elif p == "juniper_junos":
+            conn.send_command_timing("set cli screen-length 0", read_timeout=15)
+    except Exception:
+        pass
+
+
+def _run_command(conn, cmd: str, prompt: str) -> str:
+    """Send a command over the raw channel and stream the full output, advancing
+    the device pager by sending a BURST of spaces whenever a '--More--' prompt is
+    seen (far faster than one page per round-trip). Terminates when the device
+    prompt returns or the channel stays silent. Works with or without paging."""
+    base = (prompt or "").strip()
+    try:
+        conn.clear_buffer()
+    except Exception:
+        pass
+    conn.write_channel(cmd + "\n")
+
+    out = ""
+    deadline = time.time() + 240
+    idle = 0
+    while time.time() < deadline:
+        time.sleep(0.2)
+        data = conn.read_channel()
+        if data:
+            out += data
+            idle = 0
+        else:
+            idle += 1
+
+        if _is_paged(out[-30:]):
+            conn.write_channel(" " * 20)     # advance up to 20 pages at once
+            time.sleep(0.1)
+            continue
+
+        if idle >= 5:                        # ~1s quiet, no pending pager
+            if base and base in out[-120:]:  # prompt returned -> done
+                break
+            if idle >= 30:                   # ~6s total silence -> stop
+                break
+
+    # Drop the echoed command line at the top, if present.
+    nl = out.find("\n")
+    if nl != -1 and cmd.split()[0] in out[:nl + 2]:
+        out = out[nl + 1:]
+    return out
+
+
+def _clean_cli(text: str) -> str:
+    """Strip pager artifacts, ANSI escapes and backspaces from CLI output."""
+    text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)       # ANSI escape seqs
+    text = text.replace("\x08", "")                          # backspaces
+    # FortiOS prints "--More--" then erases it with CR + spaces + CR.
+    text = re.sub(r"--More--[ \t]*\r?[ \t]*\r?", "", text, flags=re.I)
+    text = re.sub(r"---\(more[^)]*\)---[ \t]*\r?", "", text, flags=re.I)  # Cisco
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"[ \t]+\n", "\n", text)                    # trailing ws
+    text = re.sub(r"\n{3,}", "\n\n", text)                    # collapse blank runs
+    return text.strip("\n") + "\n"
 
 
 async def _save_config_version(db: AsyncSession, device_id, config_type: str,
