@@ -1,13 +1,16 @@
-"""Network Configuration Management (NCM) — E4 slice 1.
+"""Network Configuration Management (NCM).
 
-Versioned device configuration storage with content-hash de-duplication and a
-unified diff between any two versions. Capture is manual / API in this slice
-(SSH auto-fetch is a later slice). Per-device routes live under /devices/{id}/...
-and the fleet overview under /ncm/overview.
+Slice 1: versioned config storage (content-hash dedup) + unified diff.
+Slice 2 (professional): connection profiles (CLI credentials), per-device
+enrollment, and REAL SSH config retrieval via netmiko, plus a manual paste
+fallback. Per-device routes are under /devices/{id}/..., fleet + credential
+management under /ncm/...
 """
+import asyncio
 import hashlib
 import difflib
 from uuid import UUID
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,12 +20,276 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.security import get_current_user, require_operator_user
+from app.core import crypto
 from app.models.user import User
 
 router = APIRouter(prefix="/ncm", tags=["NCM"])
 device_router = APIRouter(prefix="/devices", tags=["NCM"])
 
+# netmiko device_type -> command used to dump the running config.
+PLATFORM_COMMANDS = {
+    "cisco_ios": "show running-config",
+    "cisco_xe": "show running-config",
+    "cisco_nxos": "show running-config",
+    "cisco_asa": "show running-config",
+    "arista_eos": "show running-config",
+    "juniper_junos": "show configuration | display set",
+    "paloalto_panos": "show config running",
+    "fortinet": "show full-configuration",
+    "hp_comware": "display current-configuration",
+    "huawei": "display current-configuration",
+    "linux": "cat /etc/os-release",
+}
 
+# Friendly labels offered in the UI; value is the netmiko device_type.
+SUPPORTED_PLATFORMS = [
+    {"value": "autodetect", "label": "Auto-detect"},
+    {"value": "cisco_ios", "label": "Cisco IOS / IOS-XE"},
+    {"value": "cisco_nxos", "label": "Cisco NX-OS"},
+    {"value": "cisco_asa", "label": "Cisco ASA"},
+    {"value": "arista_eos", "label": "Arista EOS"},
+    {"value": "juniper_junos", "label": "Juniper Junos"},
+    {"value": "paloalto_panos", "label": "Palo Alto PAN-OS"},
+    {"value": "fortinet", "label": "Fortinet FortiOS"},
+    {"value": "hp_comware", "label": "HPE Comware"},
+    {"value": "huawei", "label": "Huawei VRP"},
+]
+
+
+def _netmiko_fetch(host: str, platform: str, username: str, password: str,
+                   enable: str, port: int) -> tuple[str, str]:
+    """Blocking SSH fetch — run via asyncio.to_thread. Returns (platform, config)."""
+    from netmiko import ConnectHandler, SSHDetect
+
+    base = {
+        "host": host,
+        "username": username,
+        "password": password or "",
+        "port": port or 22,
+        "fast_cli": False,
+        "conn_timeout": 20,
+        "timeout": 60,
+    }
+    if enable:
+        base["secret"] = enable
+
+    resolved = platform
+    if platform in (None, "", "autodetect"):
+        guesser = SSHDetect(**{**base, "device_type": "autodetect"})
+        resolved = guesser.autodetect() or "cisco_ios"
+
+    conn = ConnectHandler(**{**base, "device_type": resolved})
+    try:
+        if enable:
+            try:
+                conn.enable()
+            except Exception:
+                pass
+        cmd = PLATFORM_COMMANDS.get(resolved, "show running-config")
+        output = conn.send_command(cmd, read_timeout=90)
+        return resolved, output
+    finally:
+        try:
+            conn.disconnect()
+        except Exception:
+            pass
+
+
+async def _save_config_version(db: AsyncSession, device_id, config_type: str,
+                               content: str, captured_by: str, source_note: Optional[str]):
+    content = content.replace("\r\n", "\n")
+    chash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    latest = (await db.execute(
+        text("""SELECT id, content_hash FROM device_configs
+                WHERE device_id = :d AND config_type = :t
+                ORDER BY captured_at DESC LIMIT 1"""),
+        {"d": device_id, "t": config_type},
+    )).first()
+    if latest and latest.content_hash == chash:
+        return {"is_change": False, "version_id": str(latest.id)}
+    row = (await db.execute(
+        text("""INSERT INTO device_configs
+                (device_id, config_type, content, content_hash, size_bytes, line_count, captured_by, source_note)
+                VALUES (:d, :t, :c, :h, :sz, :lc, :by, :note)
+                RETURNING id, captured_at"""),
+        {"d": device_id, "t": config_type, "c": content, "h": chash,
+         "sz": len(content.encode("utf-8")), "lc": content.count("\n") + 1,
+         "by": captured_by, "note": source_note},
+    )).first()
+    return {"is_change": True, "version_id": str(row.id), "captured_at": row.captured_at.isoformat()}
+
+
+# --------------------------------------------------------------------------- #
+# Connection profiles (CLI credentials)
+# --------------------------------------------------------------------------- #
+class CredentialIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    description: Optional[str] = None
+    protocol: str = Field(default="ssh", pattern="^(ssh|telnet)$")
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str = Field(..., min_length=1, max_length=120)
+    password: Optional[str] = None
+    enable_password: Optional[str] = None
+    is_default: bool = False
+
+
+@router.get("/platforms")
+async def list_platforms(user: User = Depends(get_current_user)):
+    return {"data": SUPPORTED_PLATFORMS}
+
+
+@router.get("/credentials")
+async def list_credentials(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    rows = (await db.execute(text("""
+        SELECT c.id, c.name, c.description, c.protocol, c.port, c.username, c.is_default,
+               (c.password_enc IS NOT NULL) AS has_password,
+               (c.enable_password_enc IS NOT NULL) AS has_enable,
+               (SELECT count(*) FROM device_ncm n WHERE n.credential_id = c.id) AS used_by
+        FROM ncm_credentials c ORDER BY c.is_default DESC, c.name
+    """))).fetchall()
+    return {"data": [{
+        "id": str(r.id), "name": r.name, "description": r.description,
+        "protocol": r.protocol, "port": r.port, "username": r.username,
+        "is_default": r.is_default, "has_password": r.has_password,
+        "has_enable": r.has_enable, "used_by": r.used_by,
+    } for r in rows]}
+
+
+@router.post("/credentials", status_code=201)
+async def create_credential(data: CredentialIn, db: AsyncSession = Depends(get_db),
+                            user: User = Depends(require_operator_user)):
+    row = (await db.execute(
+        text("""INSERT INTO ncm_credentials
+                (name, description, protocol, port, username, password_enc, enable_password_enc, is_default)
+                VALUES (:n, :d, :p, :port, :u, :pw, :en, :def)
+                RETURNING id"""),
+        {"n": data.name, "d": data.description, "p": data.protocol, "port": data.port,
+         "u": data.username, "pw": crypto.encrypt(data.password),
+         "en": crypto.encrypt(data.enable_password), "def": data.is_default},
+    )).first()
+    if data.is_default:
+        await db.execute(text("UPDATE ncm_credentials SET is_default = (id = :id)"), {"id": row.id})
+    await db.commit()
+    return {"id": str(row.id)}
+
+
+@router.put("/credentials/{cred_id}")
+async def update_credential(cred_id: UUID, data: CredentialIn, db: AsyncSession = Depends(get_db),
+                            user: User = Depends(require_operator_user)):
+    sets = ["name=:n", "description=:d", "protocol=:p", "port=:port", "username=:u",
+            "is_default=:def", "updated_at=NOW()"]
+    params = {"id": cred_id, "n": data.name, "d": data.description, "p": data.protocol,
+              "port": data.port, "u": data.username, "def": data.is_default}
+    # Only overwrite secrets when a new value is supplied.
+    if data.password is not None:
+        sets.append("password_enc=:pw"); params["pw"] = crypto.encrypt(data.password)
+    if data.enable_password is not None:
+        sets.append("enable_password_enc=:en"); params["en"] = crypto.encrypt(data.enable_password)
+    r = (await db.execute(text(f"UPDATE ncm_credentials SET {', '.join(sets)} WHERE id=:id RETURNING id"), params)).first()
+    if not r:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    if data.is_default:
+        await db.execute(text("UPDATE ncm_credentials SET is_default = (id = :id)"), {"id": cred_id})
+    await db.commit()
+    return {"id": str(cred_id)}
+
+
+@router.delete("/credentials/{cred_id}", status_code=204)
+async def delete_credential(cred_id: UUID, db: AsyncSession = Depends(get_db),
+                            user: User = Depends(require_operator_user)):
+    r = (await db.execute(text("DELETE FROM ncm_credentials WHERE id=:id RETURNING id"), {"id": cred_id})).first()
+    await db.commit()
+    if not r:
+        raise HTTPException(status_code=404, detail="Credential not found")
+
+
+# --------------------------------------------------------------------------- #
+# Device enrollment
+# --------------------------------------------------------------------------- #
+class NcmEnroll(BaseModel):
+    credential_id: Optional[UUID] = None
+    platform: str = Field(default="autodetect", max_length=40)
+    enabled: bool = True
+    schedule_enabled: bool = False
+
+
+@device_router.put("/{device_id}/ncm")
+async def enroll_device(device_id: UUID, data: NcmEnroll, db: AsyncSession = Depends(get_db),
+                        user: User = Depends(require_operator_user)):
+    dev = (await db.execute(text("SELECT id FROM devices WHERE id=:id"), {"id": device_id})).first()
+    if not dev:
+        raise HTTPException(status_code=404, detail="Device not found")
+    await db.execute(
+        text("""INSERT INTO device_ncm (device_id, credential_id, platform, enabled, schedule_enabled)
+                VALUES (:d, :c, :p, :e, :s)
+                ON CONFLICT (device_id) DO UPDATE
+                  SET credential_id=:c, platform=:p, enabled=:e, schedule_enabled=:s"""),
+        {"d": device_id, "c": data.credential_id, "p": data.platform,
+         "e": data.enabled, "s": data.schedule_enabled},
+    )
+    await db.commit()
+    return {"device_id": str(device_id), "enrolled": True}
+
+
+@device_router.delete("/{device_id}/ncm", status_code=204)
+async def unenroll_device(device_id: UUID, db: AsyncSession = Depends(get_db),
+                          user: User = Depends(require_operator_user)):
+    await db.execute(text("DELETE FROM device_ncm WHERE device_id=:d"), {"d": device_id})
+    await db.commit()
+
+
+@device_router.post("/{device_id}/config-fetch")
+async def fetch_config(device_id: UUID, db: AsyncSession = Depends(get_db),
+                       user: User = Depends(require_operator_user)):
+    """Real SSH config backup via netmiko using the device's enrolled credential."""
+    row = (await db.execute(
+        text("""SELECT host(d.ip_address) AS ip, n.platform, n.credential_id,
+                       c.username, c.password_enc, c.enable_password_enc, c.port
+                FROM devices d
+                LEFT JOIN device_ncm n ON n.device_id = d.id
+                LEFT JOIN ncm_credentials c ON c.id = n.credential_id
+                WHERE d.id = :id"""),
+        {"id": device_id},
+    )).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if not row.credential_id:
+        raise HTTPException(status_code=400, detail="Device is not enrolled with a connection profile")
+
+    password = crypto.decrypt(row.password_enc) if row.password_enc else ""
+    enable = crypto.decrypt(row.enable_password_enc) if row.enable_password_enc else ""
+    now = datetime.now(timezone.utc)
+
+    try:
+        platform, content = await asyncio.to_thread(
+            _netmiko_fetch, row.ip, row.platform or "autodetect",
+            row.username, password, enable, row.port or 22,
+        )
+    except Exception as e:
+        msg = str(e).splitlines()[0][:400] if str(e) else "connection failed"
+        await db.execute(
+            text("""UPDATE device_ncm SET last_status='failed', last_error=:e, last_attempt_at=:t
+                    WHERE device_id=:d"""),
+            {"e": msg, "t": now, "d": device_id},
+        )
+        await db.commit()
+        raise HTTPException(status_code=502, detail=f"Config fetch failed: {msg}")
+
+    result = await _save_config_version(db, device_id, "running", content, "ssh", f"ssh:{platform}")
+    await db.execute(
+        text("""UPDATE device_ncm
+                SET last_status='success', last_error=NULL, last_attempt_at=:t, last_success_at=:t,
+                    platform = CASE WHEN platform='autodetect' THEN :pf ELSE platform END
+                WHERE device_id=:d"""),
+        {"t": now, "pf": platform, "d": device_id},
+    )
+    await db.commit()
+    return {**result, "platform": platform}
+
+
+# --------------------------------------------------------------------------- #
+# Manual capture (paste) — slice 1
+# --------------------------------------------------------------------------- #
 class ConfigCapture(BaseModel):
     content: str = Field(..., min_length=1)
     config_type: str = Field(default="running", pattern="^(running|startup)$")
@@ -31,114 +298,57 @@ class ConfigCapture(BaseModel):
 
 
 @device_router.post("/{device_id}/config-backup", status_code=201)
-async def capture_config(
-    device_id: UUID,
-    data: ConfigCapture,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
-):
-    """Store a config snapshot. De-duplicates: an identical capture (same hash
-    as the latest of this type) does not create a new version."""
+async def capture_config(device_id: UUID, data: ConfigCapture, db: AsyncSession = Depends(get_db),
+                         user: User = Depends(require_operator_user)):
     dev = (await db.execute(text("SELECT id FROM devices WHERE id = :id"), {"id": device_id})).first()
     if not dev:
         raise HTTPException(status_code=404, detail="Device not found")
-
-    content = data.content.replace("\r\n", "\n")
-    chash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-    latest = (await db.execute(
-        text("""
-            SELECT id, content_hash FROM device_configs
-            WHERE device_id = :d AND config_type = :t
-            ORDER BY captured_at DESC LIMIT 1
-        """),
-        {"d": device_id, "t": data.config_type},
-    )).first()
-    if latest and latest.content_hash == chash:
-        return {"is_change": False, "version_id": str(latest.id),
-                "message": "No change since last backup"}
-
-    row = (await db.execute(
-        text("""
-            INSERT INTO device_configs
-                (device_id, config_type, content, content_hash, size_bytes, line_count, captured_by, source_note)
-            VALUES (:d, :t, :c, :h, :sz, :lc, :by, :note)
-            RETURNING id, captured_at
-        """),
-        {"d": device_id, "t": data.config_type, "c": content, "h": chash,
-         "sz": len(content.encode("utf-8")), "lc": content.count("\n") + 1,
-         "by": data.captured_by, "note": data.source_note},
-    )).first()
+    result = await _save_config_version(db, device_id, data.config_type, data.content,
+                                        data.captured_by, data.source_note)
     await db.commit()
-    return {"is_change": True, "version_id": str(row.id),
-            "captured_at": row.captured_at.isoformat(), "config_type": data.config_type}
+    if not result["is_change"]:
+        result["message"] = "No change since last backup"
+    return result
 
 
 @device_router.get("/{device_id}/configs")
-async def list_configs(
-    device_id: UUID,
-    limit: int = Query(default=50, ge=1, le=500),
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
+async def list_configs(device_id: UUID, limit: int = Query(default=50, ge=1, le=500),
+                       db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     rows = (await db.execute(
-        text("""
-            SELECT id, config_type, content_hash, size_bytes, line_count,
-                   captured_at, captured_by, source_note
-            FROM device_configs WHERE device_id = :d
-            ORDER BY captured_at DESC LIMIT :lim
-        """),
+        text("""SELECT id, config_type, content_hash, size_bytes, line_count,
+                       captured_at, captured_by, source_note
+                FROM device_configs WHERE device_id = :d
+                ORDER BY captured_at DESC LIMIT :lim"""),
         {"d": device_id, "lim": limit},
     )).fetchall()
-    return {
-        "data": [{
-            "id": str(r.id),
-            "config_type": r.config_type,
-            "hash": r.content_hash[:12],
-            "size_bytes": r.size_bytes,
-            "line_count": r.line_count,
-            "captured_at": r.captured_at.isoformat(),
-            "captured_by": r.captured_by,
-            "source_note": r.source_note,
-        } for r in rows],
-        "count": len(rows),
-    }
+    return {"data": [{
+        "id": str(r.id), "config_type": r.config_type, "hash": r.content_hash[:12],
+        "size_bytes": r.size_bytes, "line_count": r.line_count,
+        "captured_at": r.captured_at.isoformat(), "captured_by": r.captured_by,
+        "source_note": r.source_note,
+    } for r in rows], "count": len(rows)}
 
 
 @device_router.get("/{device_id}/configs/{version_id}")
-async def get_config(
-    device_id: UUID,
-    version_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
+async def get_config(device_id: UUID, version_id: UUID, db: AsyncSession = Depends(get_db),
+                     user: User = Depends(get_current_user)):
     r = (await db.execute(
-        text("""
-            SELECT id, config_type, content, size_bytes, line_count,
-                   captured_at, captured_by, source_note
-            FROM device_configs WHERE id = :v AND device_id = :d
-        """),
+        text("""SELECT id, config_type, content, size_bytes, line_count,
+                       captured_at, captured_by, source_note
+                FROM device_configs WHERE id = :v AND device_id = :d"""),
         {"v": version_id, "d": device_id},
     )).first()
     if not r:
         raise HTTPException(status_code=404, detail="Config version not found")
-    return {
-        "id": str(r.id), "config_type": r.config_type, "content": r.content,
-        "size_bytes": r.size_bytes, "line_count": r.line_count,
-        "captured_at": r.captured_at.isoformat(), "captured_by": r.captured_by,
-        "source_note": r.source_note,
-    }
+    return {"id": str(r.id), "config_type": r.config_type, "content": r.content,
+            "size_bytes": r.size_bytes, "line_count": r.line_count,
+            "captured_at": r.captured_at.isoformat(), "captured_by": r.captured_by,
+            "source_note": r.source_note}
 
 
 @device_router.get("/{device_id}/configs-diff")
-async def diff_configs(
-    device_id: UUID,
-    a: UUID,
-    b: UUID,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """Unified diff between two versions (a = older/base, b = newer)."""
+async def diff_configs(device_id: UUID, a: UUID, b: UUID, db: AsyncSession = Depends(get_db),
+                       user: User = Depends(get_current_user)):
     rows = (await db.execute(
         text("SELECT id, content, captured_at FROM device_configs WHERE device_id = :d AND id IN (:a, :b)"),
         {"d": device_id, "a": a, "b": b},
@@ -150,8 +360,7 @@ async def diff_configs(
     diff = list(difflib.unified_diff(
         ra.content.splitlines(), rb.content.splitlines(),
         fromfile=f"{str(a)[:8]} ({ra.captured_at.isoformat()})",
-        tofile=f"{str(b)[:8]} ({rb.captured_at.isoformat()})",
-        lineterm="",
+        tofile=f"{str(b)[:8]} ({rb.captured_at.isoformat()})", lineterm="",
     ))
     added = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++"))
     removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
@@ -159,36 +368,42 @@ async def diff_configs(
 
 
 @router.get("/overview")
-async def ncm_overview(
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
-    """Fleet-wide config-backup status: which devices have backups, how many
-    versions, and when they were last captured."""
-    rows = (await db.execute(
-        text("""
-            SELECT d.id, d.hostname, host(d.ip_address) AS ip, d.device_type, d.vendor,
-                   c.versions, c.last_capture, c.last_by
-            FROM devices d
-            LEFT JOIN (
-                SELECT device_id, count(*) AS versions, max(captured_at) AS last_capture,
-                       (array_agg(captured_by ORDER BY captured_at DESC))[1] AS last_by
-                FROM device_configs GROUP BY device_id
-            ) c ON c.device_id = d.id
-            ORDER BY (c.last_capture IS NULL), c.last_capture DESC NULLS LAST, d.hostname
-        """)
-    )).fetchall()
-
-    data = []
-    backed_up = 0
+async def ncm_overview(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    rows = (await db.execute(text("""
+        SELECT d.id, d.hostname, host(d.ip_address) AS ip, d.device_type, d.vendor,
+               n.credential_id, n.platform, n.enabled AS ncm_enabled, n.schedule_enabled,
+               n.last_status, n.last_error, n.last_attempt_at,
+               cr.name AS credential_name,
+               c.versions, c.last_capture, c.last_by
+        FROM devices d
+        LEFT JOIN device_ncm n ON n.device_id = d.id
+        LEFT JOIN ncm_credentials cr ON cr.id = n.credential_id
+        LEFT JOIN (
+            SELECT device_id, count(*) AS versions, max(captured_at) AS last_capture,
+                   (array_agg(captured_by ORDER BY captured_at DESC))[1] AS last_by
+            FROM device_configs GROUP BY device_id
+        ) c ON c.device_id = d.id
+        ORDER BY (n.device_id IS NULL), (c.last_capture IS NULL), c.last_capture DESC NULLS LAST, d.hostname
+    """))).fetchall()
+    data, backed_up, enrolled = [], 0, 0
     for r in rows:
         if r.versions:
             backed_up += 1
+        is_enrolled = r.platform is not None  # a device_ncm row exists for this device
+        if is_enrolled:
+            enrolled += 1
         data.append({
             "device_id": str(r.id), "hostname": r.hostname, "ip": r.ip,
             "device_type": r.device_type, "vendor": r.vendor,
+            "enrolled": is_enrolled,
+            "credential_id": str(r.credential_id) if r.credential_id else None,
+            "credential_name": r.credential_name,
+            "platform": r.platform,
+            "schedule_enabled": r.schedule_enabled,
+            "last_status": r.last_status,
+            "last_error": r.last_error,
             "versions": r.versions or 0,
             "last_capture": r.last_capture.isoformat() if r.last_capture else None,
             "last_by": r.last_by,
         })
-    return {"data": data, "total_devices": len(rows), "backed_up": backed_up}
+    return {"data": data, "total_devices": len(rows), "backed_up": backed_up, "enrolled": enrolled}
