@@ -211,6 +211,7 @@ class NcmEnroll(BaseModel):
     platform: str = Field(default="autodetect", max_length=40)
     enabled: bool = True
     schedule_enabled: bool = False
+    schedule_interval_hours: int = Field(default=24, ge=1, le=720)
 
 
 @device_router.put("/{device_id}/ncm")
@@ -220,12 +221,12 @@ async def enroll_device(device_id: UUID, data: NcmEnroll, db: AsyncSession = Dep
     if not dev:
         raise HTTPException(status_code=404, detail="Device not found")
     await db.execute(
-        text("""INSERT INTO device_ncm (device_id, credential_id, platform, enabled, schedule_enabled)
-                VALUES (:d, :c, :p, :e, :s)
+        text("""INSERT INTO device_ncm (device_id, credential_id, platform, enabled, schedule_enabled, schedule_interval_hours)
+                VALUES (:d, :c, :p, :e, :s, :h)
                 ON CONFLICT (device_id) DO UPDATE
-                  SET credential_id=:c, platform=:p, enabled=:e, schedule_enabled=:s"""),
+                  SET credential_id=:c, platform=:p, enabled=:e, schedule_enabled=:s, schedule_interval_hours=:h"""),
         {"d": device_id, "c": data.credential_id, "p": data.platform,
-         "e": data.enabled, "s": data.schedule_enabled},
+         "e": data.enabled, "s": data.schedule_enabled, "h": data.schedule_interval_hours},
     )
     await db.commit()
     return {"device_id": str(device_id), "enrolled": True}
@@ -238,10 +239,13 @@ async def unenroll_device(device_id: UUID, db: AsyncSession = Depends(get_db),
     await db.commit()
 
 
-@device_router.post("/{device_id}/config-fetch")
-async def fetch_config(device_id: UUID, db: AsyncSession = Depends(get_db),
-                       user: User = Depends(require_operator_user)):
-    """Real SSH config backup via netmiko using the device's enrolled credential."""
+class _FetchError(Exception):
+    pass
+
+
+async def _do_fetch(db: AsyncSession, device_id) -> dict:
+    """Core SSH-backup logic shared by the on-demand endpoint and the scheduler.
+    Raises _FetchError(message) on failure (status already recorded)."""
     row = (await db.execute(
         text("""SELECT host(d.ip_address) AS ip, n.platform, n.credential_id,
                        c.username, c.password_enc, c.enable_password_enc, c.port
@@ -252,9 +256,9 @@ async def fetch_config(device_id: UUID, db: AsyncSession = Depends(get_db),
         {"id": device_id},
     )).first()
     if not row:
-        raise HTTPException(status_code=404, detail="Device not found")
+        raise _FetchError("Device not found")
     if not row.credential_id:
-        raise HTTPException(status_code=400, detail="Device is not enrolled with a connection profile")
+        raise _FetchError("Device is not enrolled with a connection profile")
 
     password = crypto.decrypt(row.password_enc) if row.password_enc else ""
     enable = crypto.decrypt(row.enable_password_enc) if row.enable_password_enc else ""
@@ -273,7 +277,7 @@ async def fetch_config(device_id: UUID, db: AsyncSession = Depends(get_db),
             {"e": msg, "t": now, "d": device_id},
         )
         await db.commit()
-        raise HTTPException(status_code=502, detail=f"Config fetch failed: {msg}")
+        raise _FetchError(msg)
 
     result = await _save_config_version(db, device_id, "running", content, "ssh", f"ssh:{platform}")
     await db.execute(
@@ -285,6 +289,42 @@ async def fetch_config(device_id: UUID, db: AsyncSession = Depends(get_db),
     )
     await db.commit()
     return {**result, "platform": platform}
+
+
+@device_router.post("/{device_id}/config-fetch")
+async def fetch_config(device_id: UUID, db: AsyncSession = Depends(get_db),
+                       user: User = Depends(require_operator_user)):
+    """Real SSH config backup via netmiko using the device's enrolled credential."""
+    try:
+        return await _do_fetch(db, device_id)
+    except _FetchError as e:
+        msg = str(e)
+        if msg == "Device not found":
+            raise HTTPException(status_code=404, detail=msg)
+        if "not enrolled" in msg:
+            raise HTTPException(status_code=400, detail=msg)
+        raise HTTPException(status_code=502, detail=f"Config fetch failed: {msg}")
+
+
+@router.post("/run-scheduled")
+async def run_scheduled(db: AsyncSession = Depends(get_db)):
+    """Internal: back up every enrolled device whose schedule is due (no auth —
+    called by the localhost systemd timer). 'Due' = scheduled, enabled, with a
+    credential, and last_success_at older than its interval (or never)."""
+    due = (await db.execute(text("""
+        SELECT device_id FROM device_ncm
+        WHERE schedule_enabled = true AND enabled = true AND credential_id IS NOT NULL
+          AND (last_success_at IS NULL
+               OR last_success_at < NOW() - make_interval(hours => schedule_interval_hours))
+    """))).fetchall()
+    ok, failed = 0, 0
+    for r in due:
+        try:
+            await _do_fetch(db, r.device_id)
+            ok += 1
+        except Exception:
+            failed += 1
+    return {"due": len(due), "backed_up": ok, "failed": failed}
 
 
 # --------------------------------------------------------------------------- #
@@ -370,9 +410,9 @@ async def diff_configs(device_id: UUID, a: UUID, b: UUID, db: AsyncSession = Dep
 @router.get("/overview")
 async def ncm_overview(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     rows = (await db.execute(text("""
-        SELECT d.id, d.hostname, host(d.ip_address) AS ip, d.device_type, d.vendor,
+        SELECT d.id, d.hostname, host(d.ip_address) AS ip, d.device_type, d.vendor, d.location,
                n.credential_id, n.platform, n.enabled AS ncm_enabled, n.schedule_enabled,
-               n.last_status, n.last_error, n.last_attempt_at,
+               n.schedule_interval_hours, n.last_status, n.last_error, n.last_attempt_at, n.last_success_at,
                cr.name AS credential_name,
                c.versions, c.last_capture, c.last_by
         FROM devices d
@@ -395,13 +435,16 @@ async def ncm_overview(db: AsyncSession = Depends(get_db), user: User = Depends(
         data.append({
             "device_id": str(r.id), "hostname": r.hostname, "ip": r.ip,
             "device_type": r.device_type, "vendor": r.vendor,
+            "location": r.location,
             "enrolled": is_enrolled,
             "credential_id": str(r.credential_id) if r.credential_id else None,
             "credential_name": r.credential_name,
             "platform": r.platform,
             "schedule_enabled": r.schedule_enabled,
+            "schedule_interval_hours": r.schedule_interval_hours,
             "last_status": r.last_status,
             "last_error": r.last_error,
+            "last_success_at": r.last_success_at.isoformat() if r.last_success_at else None,
             "versions": r.versions or 0,
             "last_capture": r.last_capture.isoformat() if r.last_capture else None,
             "last_by": r.last_by,
