@@ -64,6 +64,7 @@ export function NcmDevicePage() {
     enabled: true,
     schedule_enabled: !!device?.schedule_enabled,
     schedule_interval_hours: device?.schedule_interval_hours || 24,
+    alert_on_change: device?.alert_on_change !== false,
   }
   const set = (patch: any) => setForm({ ...f, ...patch })
 
@@ -122,6 +123,10 @@ export function NcmDevicePage() {
             <Switch checked={f.schedule_enabled} onCheckedChange={(v) => set({ schedule_enabled: v })} />
           </div>
           {f.schedule_enabled && <FormField label="Every (hours)" hint="An hourly job backs up devices when due."><Input type="number" min={1} max={720} value={f.schedule_interval_hours} onChange={(e) => set({ schedule_interval_hours: Number(e.target.value) })} /></FormField>}
+          <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
+            <span className="text-xs font-medium uppercase tracking-wider text-muted">Alert on config change</span>
+            <Switch checked={f.alert_on_change} onCheckedChange={(v) => set({ alert_on_change: v })} />
+          </div>
           {device.last_status === 'failed' && device.last_error && <div className="rounded border border-danger/30 bg-danger/10 p-2 text-[11px] text-danger">Last error: {device.last_error}</div>}
           {device.last_success_at && <div className="text-[11px] text-muted">Last success: {relativeTime(device.last_success_at)}</div>}
           <div className="flex flex-wrap gap-2 pt-1">

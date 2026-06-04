@@ -9,6 +9,7 @@ management under /ncm/...
 import asyncio
 import hashlib
 import difflib
+import json
 import re
 import time
 from uuid import UUID
@@ -191,7 +192,7 @@ async def _save_config_version(db: AsyncSession, device_id, config_type: str,
     content = content.replace("\r\n", "\n")
     chash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     latest = (await db.execute(
-        text("""SELECT id, content_hash FROM device_configs
+        text("""SELECT id, content_hash, content FROM device_configs
                 WHERE device_id = :d AND config_type = :t
                 ORDER BY captured_at DESC LIMIT 1"""),
         {"d": device_id, "t": config_type},
@@ -207,7 +208,46 @@ async def _save_config_version(db: AsyncSession, device_id, config_type: str,
          "sz": len(content.encode("utf-8")), "lc": content.count("\n") + 1,
          "by": captured_by, "note": source_note},
     )).first()
+    # A new version that supersedes a prior one is a config CHANGE — raise an
+    # alert (gated by the device's alert_on_change toggle). The very first
+    # capture for a device is not a change, so it is skipped.
+    if latest is not None:
+        await _raise_change_alert(db, device_id, config_type, latest, str(row.id), content, captured_by)
     return {"is_change": True, "version_id": str(row.id), "captured_at": row.captured_at.isoformat()}
+
+
+async def _raise_change_alert(db: AsyncSession, device_id, config_type, prior,
+                              new_version_id: str, new_content: str, source: str):
+    """Insert a config-change alert into the Alert Center (alerts-only, no
+    channel dispatch). Only for enrolled devices with alert_on_change=true."""
+    en = (await db.execute(
+        text("SELECT alert_on_change FROM device_ncm WHERE device_id = :d"), {"d": device_id}
+    )).first()
+    if not (en and en.alert_on_change):
+        return
+    try:
+        diff = list(difflib.unified_diff(
+            (prior.content or "").splitlines(), new_content.splitlines(), lineterm=""))
+        added = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++"))
+        removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
+        hn = (await db.execute(
+            text("SELECT hostname FROM devices WHERE id = :d"), {"d": device_id})).scalar()
+        await db.execute(
+            text("""INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, metadata)
+                    VALUES (:d, NULL, 'active', 'warning', :msg, :t, CAST(:meta AS jsonb))"""),
+            {
+                "d": device_id,
+                "msg": f"Running-config changed on {hn or device_id} (+{added} / -{removed} lines)",
+                "t": datetime.now(timezone.utc),
+                "meta": json.dumps({
+                    "config_change": True, "config_type": config_type,
+                    "from_version": str(prior.id), "to_version": new_version_id,
+                    "added": added, "removed": removed, "source": source,
+                }),
+            },
+        )
+    except Exception as e:  # never let alerting break a backup
+        print(f"NCM config-change alert failed: {e}")
 
 
 # --------------------------------------------------------------------------- #
@@ -303,6 +343,7 @@ class NcmEnroll(BaseModel):
     enabled: bool = True
     schedule_enabled: bool = False
     schedule_interval_hours: int = Field(default=24, ge=1, le=720)
+    alert_on_change: bool = True
 
 
 @device_router.put("/{device_id}/ncm")
@@ -312,12 +353,13 @@ async def enroll_device(device_id: UUID, data: NcmEnroll, db: AsyncSession = Dep
     if not dev:
         raise HTTPException(status_code=404, detail="Device not found")
     await db.execute(
-        text("""INSERT INTO device_ncm (device_id, credential_id, platform, enabled, schedule_enabled, schedule_interval_hours)
-                VALUES (:d, :c, :p, :e, :s, :h)
+        text("""INSERT INTO device_ncm (device_id, credential_id, platform, enabled, schedule_enabled, schedule_interval_hours, alert_on_change)
+                VALUES (:d, :c, :p, :e, :s, :h, :ac)
                 ON CONFLICT (device_id) DO UPDATE
-                  SET credential_id=:c, platform=:p, enabled=:e, schedule_enabled=:s, schedule_interval_hours=:h"""),
+                  SET credential_id=:c, platform=:p, enabled=:e, schedule_enabled=:s, schedule_interval_hours=:h, alert_on_change=:ac"""),
         {"d": device_id, "c": data.credential_id, "p": data.platform,
-         "e": data.enabled, "s": data.schedule_enabled, "h": data.schedule_interval_hours},
+         "e": data.enabled, "s": data.schedule_enabled, "h": data.schedule_interval_hours,
+         "ac": data.alert_on_change},
     )
     await db.commit()
     return {"device_id": str(device_id), "enrolled": True}
@@ -503,7 +545,8 @@ async def ncm_overview(db: AsyncSession = Depends(get_db), user: User = Depends(
     rows = (await db.execute(text("""
         SELECT d.id, d.hostname, host(d.ip_address) AS ip, d.device_type, d.vendor, d.location,
                n.credential_id, n.platform, n.enabled AS ncm_enabled, n.schedule_enabled,
-               n.schedule_interval_hours, n.last_status, n.last_error, n.last_attempt_at, n.last_success_at,
+               n.schedule_interval_hours, n.alert_on_change,
+               n.last_status, n.last_error, n.last_attempt_at, n.last_success_at,
                cr.name AS credential_name,
                c.versions, c.last_capture, c.last_by
         FROM devices d
@@ -533,6 +576,7 @@ async def ncm_overview(db: AsyncSession = Depends(get_db), user: User = Depends(
             "platform": r.platform,
             "schedule_enabled": r.schedule_enabled,
             "schedule_interval_hours": r.schedule_interval_hours,
+            "alert_on_change": r.alert_on_change,
             "last_status": r.last_status,
             "last_error": r.last_error,
             "last_success_at": r.last_success_at.isoformat() if r.last_success_at else None,
