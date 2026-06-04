@@ -187,24 +187,54 @@ def _clean_cli(text: str) -> str:
     return text.strip("\n") + "\n"
 
 
+# Volatile fields that change on every `show` even when the config is unchanged.
+# Devices re-encrypt secrets and rotate serials/timestamps per display, so they
+# must be masked before hashing/diffing or every backup looks like a change.
+_VOLATILE_PATTERNS = [
+    # PEM private-key/certificate bodies — re-encrypted/re-emitted each show.
+    (re.compile(r"-----BEGIN [^\n]+-----.*?-----END [^\n]+-----", re.S), "<pem masked>"),
+    (re.compile(r"^#conf_file_ver=.*$", re.M), "#conf_file_ver=<masked>"),     # FortiOS
+    (re.compile(r"\bENC\s+[A-Za-z0-9+/=]{12,}"), "ENC <masked>"),              # FortiOS secrets
+    (re.compile(r'(\bpassword\s+)(7|8|9)\s+\S+', re.I), r"\1<masked>"),         # Cisco type-7/8/9
+    (re.compile(r'(secret\s+)(5|8|9)\s+\S+', re.I), r"\1<masked>"),             # Cisco enable secret
+    (re.compile(r"^! Last configuration change.*$", re.M), ""),                 # Cisco
+    (re.compile(r"^! NVRAM config last updated.*$", re.M), ""),                 # Cisco
+    (re.compile(r"^ntp clock-period \d+$", re.M), ""),                          # Cisco
+    (re.compile(r"^Building configuration.*$", re.M), ""),                      # Cisco header
+    (re.compile(r"^Current configuration : \d+ bytes$", re.M), ""),            # Cisco header
+]
+
+
+def _normalize_config(content: str) -> str:
+    """Mask volatile per-display fields so dedup/diff reflect real changes."""
+    out = content
+    for pat, repl in _VOLATILE_PATTERNS:
+        out = pat.sub(repl, out)
+    return re.sub(r"\n{2,}", "\n", out).strip()
+
+
 async def _save_config_version(db: AsyncSession, device_id, config_type: str,
                                content: str, captured_by: str, source_note: Optional[str]):
     content = content.replace("\r\n", "\n")
     chash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    nhash = hashlib.sha256(_normalize_config(content).encode("utf-8")).hexdigest()
     latest = (await db.execute(
-        text("""SELECT id, content_hash, content FROM device_configs
+        text("""SELECT id, content_hash, norm_hash, content FROM device_configs
                 WHERE device_id = :d AND config_type = :t
                 ORDER BY captured_at DESC LIMIT 1"""),
         {"d": device_id, "t": config_type},
     )).first()
-    if latest and latest.content_hash == chash:
+    # No real change if the normalized config matches (mask out re-encrypted
+    # secrets / rotating serials). Fall back to raw hash for pre-norm_hash rows.
+    if latest and ((latest.norm_hash and latest.norm_hash == nhash)
+                   or (not latest.norm_hash and latest.content_hash == chash)):
         return {"is_change": False, "version_id": str(latest.id)}
     row = (await db.execute(
         text("""INSERT INTO device_configs
-                (device_id, config_type, content, content_hash, size_bytes, line_count, captured_by, source_note)
-                VALUES (:d, :t, :c, :h, :sz, :lc, :by, :note)
+                (device_id, config_type, content, content_hash, norm_hash, size_bytes, line_count, captured_by, source_note)
+                VALUES (:d, :t, :c, :h, :nh, :sz, :lc, :by, :note)
                 RETURNING id, captured_at"""),
-        {"d": device_id, "t": config_type, "c": content, "h": chash,
+        {"d": device_id, "t": config_type, "c": content, "h": chash, "nh": nhash,
          "sz": len(content.encode("utf-8")), "lc": content.count("\n") + 1,
          "by": captured_by, "note": source_note},
     )).first()
@@ -226,8 +256,11 @@ async def _raise_change_alert(db: AsyncSession, device_id, config_type, prior,
     if not (en and en.alert_on_change):
         return
     try:
+        # Diff on NORMALIZED configs so re-encrypted secrets / rotating serials
+        # don't show up as changes.
         diff = list(difflib.unified_diff(
-            (prior.content or "").splitlines(), new_content.splitlines(), lineterm=""))
+            _normalize_config(prior.content or "").splitlines(),
+            _normalize_config(new_content).splitlines(), lineterm=""))
         added = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++"))
         removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
         hn = (await db.execute(
@@ -531,7 +564,7 @@ async def diff_configs(device_id: UUID, a: UUID, b: UUID, db: AsyncSession = Dep
         raise HTTPException(status_code=404, detail="One or both versions not found")
     ra, rb = by_id[str(a)], by_id[str(b)]
     diff = list(difflib.unified_diff(
-        ra.content.splitlines(), rb.content.splitlines(),
+        _normalize_config(ra.content).splitlines(), _normalize_config(rb.content).splitlines(),
         fromfile=f"{str(a)[:8]} ({ra.captured_at.isoformat()})",
         tofile=f"{str(b)[:8]} ({rb.captured_at.isoformat()})", lineterm="",
     ))
