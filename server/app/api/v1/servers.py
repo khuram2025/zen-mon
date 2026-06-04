@@ -1,0 +1,1099 @@
+"""Admin servers / agent-fleet / agent-policies API.
+
+Dashboard-facing CRUD for monitored servers, the agents installed on them,
+the policies that drive collection, and the install-token flow.
+
+All routes require an authenticated dashboard user (JWT bearer).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import secrets
+import shlex
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_db
+from app.core.security import get_current_user
+from app.models.user import User
+from app.schemas.agent import (
+    AgentBulkAction,
+    AgentPolicyCreate,
+    AgentPolicyResponse,
+    AgentPolicyUpdate,
+    AgentResponse,
+    InstallTokenCreate,
+    InstallTokenResponse,
+    MetricPoint,
+    MetricSeries,
+    ServerCreate,
+    ServerMetricsResponse,
+    ServerResponse,
+    ServerUpdate,
+)
+from app.services.host_metric_service import query_server_metrics, query_top_pressure
+
+router = APIRouter(prefix="/servers", tags=["Servers"])
+policies_router = APIRouter(prefix="/agent-policies", tags=["Agent Policies"])
+fleet_router = APIRouter(prefix="/agent-fleet", tags=["Agent Fleet"])
+overview_router = APIRouter(prefix="/server-monitoring", tags=["Server Monitoring"])
+
+logger = logging.getLogger("zenplus.servers")
+
+TOKEN_PREFIX = "zpa_enr_"
+DEFAULT_TOKEN_TTL_HOURS = 24
+
+
+# ── Helpers ─────────────────────────────────────────────────────────
+
+def _sha256(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _new_enrollment_token() -> tuple[str, str, str]:
+    raw = TOKEN_PREFIX + secrets.token_urlsafe(24)
+    return raw, _sha256(raw), raw[:12]
+
+
+def _server_url(request: Request) -> str:
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}"
+
+
+def _server_row_to_response(row: dict) -> ServerResponse:
+    tags = row.get("tags") or []
+    if isinstance(tags, str):
+        try:
+            tags = json.loads(tags)
+        except Exception:
+            tags = []
+    return ServerResponse(
+        id=str(row["id"]),
+        display_name=row["display_name"],
+        hostname=row.get("hostname"),
+        fqdn=row.get("fqdn"),
+        primary_ip=str(row["primary_ip"]) if row.get("primary_ip") else None,
+        site_id=str(row["site_id"]) if row.get("site_id") else None,
+        site_name=row.get("site_name"),
+        device_id=str(row["device_id"]) if row.get("device_id") else None,
+        os_type=row.get("os_type") or "unknown",
+        os_name=row.get("os_name"),
+        os_version=row.get("os_version"),
+        kernel_or_build=row.get("kernel_or_build"),
+        architecture=row.get("architecture"),
+        collection_mode=row.get("collection_mode") or "agent",
+        status=row.get("status") or "unknown",
+        environment=row.get("environment"),
+        owner=row.get("owner"),
+        tags=list(tags) if isinstance(tags, (list, tuple)) else [],
+        last_seen=row.get("last_seen"),
+        description=row.get("description"),
+        agent_id=str(row["agent_id"]) if row.get("agent_id") else None,
+        agent_status=row.get("agent_status"),
+        agent_version=row.get("agent_version"),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _policy_row(row: dict) -> AgentPolicyResponse:
+    def _arr(field: str) -> list:
+        v = row.get(field)
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            try:
+                return list(json.loads(v))
+            except Exception:
+                return []
+        return []
+
+    def _obj(field: str) -> dict:
+        v = row.get(field)
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            try:
+                return dict(json.loads(v))
+            except Exception:
+                return {}
+        return {}
+
+    return AgentPolicyResponse(
+        id=str(row["id"]),
+        name=row["name"],
+        description=row.get("description"),
+        platform=row["platform"],
+        metric_interval_s=row["metric_interval_s"],
+        upload_interval_s=row["upload_interval_s"],
+        process_top_n=row["process_top_n"],
+        service_watchlist=_arr("service_watchlist"),
+        process_watchlist=_arr("process_watchlist"),
+        event_log_filters=_arr("event_log_filters"),
+        disk_ignore=_arr("disk_ignore"),
+        network_ignore=_arr("network_ignore"),
+        cardinality_limits=_obj("cardinality_limits"),
+        update_ring=row["update_ring"],
+        feature_flags=_obj("feature_flags"),
+        config_version=row["config_version"],
+        is_builtin=bool(row["is_builtin"]),
+        agent_count=row.get("agent_count") or 0,
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+# ── Servers CRUD ────────────────────────────────────────────────────
+
+@router.get("")
+async def list_servers(
+    site_id: Optional[UUID] = None,
+    os_type: Optional[str] = None,
+    collection_mode: Optional[str] = None,
+    status: Optional[str] = None,
+    q: Optional[str] = None,
+    sort: str = "display_name",
+    order: str = "asc",
+    page: int = 1,
+    page_size: int = 50,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    page = max(1, page)
+    page_size = max(1, min(200, page_size))
+    offset = (page - 1) * page_size
+
+    sort_map = {
+        "display_name": "s.display_name",
+        "hostname": "s.hostname",
+        "status": "s.status",
+        "os_type": "s.os_type",
+        "last_seen": "s.last_seen",
+        "created_at": "s.created_at",
+    }
+    sort_col = sort_map.get(sort, "s.display_name")
+    sort_dir = "DESC" if order.lower() == "desc" else "ASC"
+
+    where = ["1=1"]
+    params: dict[str, Any] = {"limit": page_size, "offset": offset}
+    if site_id:
+        where.append("s.site_id = :site"); params["site"] = site_id
+    if os_type:
+        where.append("s.os_type = :os"); params["os"] = os_type
+    if collection_mode:
+        where.append("s.collection_mode = :cm"); params["cm"] = collection_mode
+    if status:
+        where.append("s.status = :st"); params["st"] = status
+    if q:
+        where.append("(s.display_name ILIKE :q OR s.hostname ILIKE :q OR s.fqdn ILIKE :q OR host(s.primary_ip)::text ILIKE :q OR s.owner ILIKE :q)")
+        params["q"] = f"%{q}%"
+
+    where_sql = " AND ".join(where)
+    sql_total = f"SELECT COUNT(*) FROM servers s WHERE {where_sql}"
+    total_row = (await db.execute(text(sql_total), params)).first()
+    total = total_row[0] if total_row else 0
+
+    sql = f"""
+        SELECT s.*, st.name AS site_name,
+               a.id AS agent_id, a.status AS agent_status, a.version AS agent_version
+        FROM servers s
+        LEFT JOIN sites st ON st.id = s.site_id
+        LEFT JOIN LATERAL (
+            SELECT id, status, version FROM agents
+            WHERE server_id = s.id
+            ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 1
+        ) a ON TRUE
+        WHERE {where_sql}
+        ORDER BY {sort_col} {sort_dir} NULLS LAST
+        LIMIT :limit OFFSET :offset
+    """
+    rows = (await db.execute(text(sql), params)).mappings().all()
+
+    return {
+        "items": [_server_row_to_response(dict(r)) for r in rows],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@router.post("", response_model=ServerResponse)
+async def create_server(
+    data: ServerCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    row = (await db.execute(
+        text("""INSERT INTO servers (display_name, hostname, fqdn, primary_ip, site_id, device_id,
+                                      os_type, collection_mode, environment, owner, description,
+                                      tags, created_by)
+                VALUES (:dn, :hn, :fqdn, :ip, :site, :dev,
+                        :os, :cm, :env, :own, :desc,
+                        COALESCE(:tags, '[]'::jsonb), :cb)
+                RETURNING *"""),
+        {
+            "dn": data.display_name, "hn": data.hostname, "fqdn": data.fqdn,
+            "ip": data.primary_ip, "site": data.site_id, "dev": data.device_id,
+            "os": data.os_type, "cm": data.collection_mode,
+            "env": data.environment, "own": data.owner, "desc": data.description,
+            "tags": json.dumps(data.tags or []), "cb": user.id,
+        },
+    )).mappings().first()
+    await db.commit()
+    return _server_row_to_response(dict(row))
+
+
+@router.get("/{server_id}", response_model=ServerResponse)
+async def get_server(
+    server_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    row = (await db.execute(
+        text("""SELECT s.*, st.name AS site_name,
+                       a.id AS agent_id, a.status AS agent_status, a.version AS agent_version
+                FROM servers s
+                LEFT JOIN sites st ON st.id = s.site_id
+                LEFT JOIN LATERAL (
+                    SELECT id, status, version FROM agents
+                    WHERE server_id = s.id
+                    ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 1
+                ) a ON TRUE
+                WHERE s.id = :id"""),
+        {"id": server_id},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(404, "Server not found")
+    return _server_row_to_response(dict(row))
+
+
+@router.patch("/{server_id}", response_model=ServerResponse)
+async def update_server(
+    server_id: UUID,
+    data: ServerUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    sets = []
+    params: dict[str, Any] = {"id": server_id}
+    for field in ["display_name", "hostname", "fqdn", "primary_ip", "site_id", "device_id",
+                  "os_type", "collection_mode", "status", "environment", "owner", "description"]:
+        v = getattr(data, field)
+        if v is not None:
+            sets.append(f"{field} = :{field}")
+            params[field] = v
+    if data.tags is not None:
+        sets.append("tags = :tags")
+        params["tags"] = json.dumps(data.tags)
+    if not sets:
+        return await get_server(server_id, db, user)
+    sql = f"UPDATE servers SET {', '.join(sets)}, updated_at = NOW() WHERE id = :id RETURNING *"
+    row = (await db.execute(text(sql), params)).mappings().first()
+    if not row:
+        raise HTTPException(404, "Server not found")
+    await db.commit()
+    return await get_server(server_id, db, user)
+
+
+@router.delete("/{server_id}")
+async def delete_server(
+    server_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    res = await db.execute(text("DELETE FROM servers WHERE id = :id"), {"id": server_id})
+    await db.commit()
+    if res.rowcount == 0:
+        raise HTTPException(404, "Server not found")
+    return {"ok": True}
+
+
+@router.post("/{server_id}/decommission", response_model=ServerResponse)
+async def decommission_server(
+    server_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    await db.execute(
+        text("UPDATE servers SET status = 'disabled', updated_at = NOW() WHERE id = :id"),
+        {"id": server_id},
+    )
+    await db.execute(
+        text("UPDATE agents SET status = 'disabled', updated_at = NOW() WHERE server_id = :id"),
+        {"id": server_id},
+    )
+    await db.commit()
+    return await get_server(server_id, db, user)
+
+
+# ── Server detail companions ────────────────────────────────────────
+
+@router.get("/{server_id}/metrics", response_model=ServerMetricsResponse)
+async def server_metrics(
+    server_id: UUID,
+    metrics: str = Query("cpu_total_pct,memory_used_pct,network_rx_bps,network_tx_bps"),
+    from_: Optional[datetime] = Query(None, alias="from"),
+    to: Optional[datetime] = None,
+    interval_s: int = 60,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not to:
+        to = datetime.now(timezone.utc)
+    if not from_:
+        from_ = to - timedelta(hours=6)
+    metric_list = [m.strip() for m in metrics.split(",") if m.strip()]
+    series = query_server_metrics(str(server_id), from_, to, metric_list)
+    return ServerMetricsResponse(
+        server_id=str(server_id),
+        **{"from": from_},
+        to=to,
+        interval_s=interval_s,
+        series=series,
+    )
+
+
+@router.get("/{server_id}/processes")
+async def server_processes(
+    server_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    rows = (await db.execute(
+        text("""SELECT pid, name, cmdline, user_name, cpu_pct, memory_bytes, started_at, updated_at
+                FROM server_process_inventory
+                WHERE server_id = :id
+                ORDER BY cpu_pct DESC NULLS LAST LIMIT 200"""),
+        {"id": server_id},
+    )).mappings().all()
+    return {"items": [dict(r) for r in rows]}
+
+
+@router.get("/{server_id}/services")
+async def server_services(
+    server_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    rows = (await db.execute(
+        text("""SELECT service_name, display_name, start_mode, state, pid, description, updated_at
+                FROM server_service_inventory
+                WHERE server_id = :id
+                ORDER BY service_name"""),
+        {"id": server_id},
+    )).mappings().all()
+    return {"items": [dict(r) for r in rows]}
+
+
+@router.get("/{server_id}/filesystems")
+async def server_filesystems(
+    server_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    rows = (await db.execute(
+        text("""SELECT mount, fs_type, device, total_bytes, used_bytes, free_bytes, used_pct, updated_at
+                FROM server_filesystem_inventory
+                WHERE server_id = :id
+                ORDER BY mount"""),
+        {"id": server_id},
+    )).mappings().all()
+    return {"items": [dict(r) for r in rows]}
+
+
+@router.get("/{server_id}/network")
+async def server_network(
+    server_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    rows = (await db.execute(
+        text("""SELECT if_name, mac_address, ip_addresses, speed_mbps, is_up, mtu, updated_at
+                FROM server_network_interface_inventory
+                WHERE server_id = :id
+                ORDER BY if_name"""),
+        {"id": server_id},
+    )).mappings().all()
+    return {"items": [dict(r) for r in rows]}
+
+
+@router.get("/{server_id}/events")
+async def server_events(
+    server_id: UUID,
+    limit: int = 200,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Return Event Log summary aggregated from ClickHouse."""
+    from app.core.database import get_clickhouse_client
+    client = get_clickhouse_client()
+    try:
+        res = client.query(
+            """SELECT timestamp, log_name, level, event_count
+               FROM zenplus.host_event_log_summary
+               WHERE server_id = %(sid)s
+                 AND timestamp >= now() - INTERVAL 24 HOUR
+               ORDER BY timestamp DESC LIMIT %(lim)s""",
+            parameters={"sid": str(server_id), "lim": limit},
+        ).result_rows
+        items = [{"timestamp": r[0], "log_name": r[1], "level": r[2], "count": int(r[3])} for r in res]
+    except Exception as exc:
+        logger.warning("event log query failed: %s", exc)
+        items = []
+    return {"items": items}
+
+
+@router.get("/{server_id}/software")
+async def server_software(
+    server_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    rows = (await db.execute(
+        text("""SELECT package_name, version, vendor, install_date, updated_at
+                FROM server_software_inventory
+                WHERE server_id = :id
+                ORDER BY lower(package_name)
+                LIMIT 1000"""),
+        {"id": server_id},
+    )).mappings().all()
+    return {"items": [dict(r) for r in rows]}
+
+
+@router.get("/{server_id}/agent")
+async def server_agent(
+    server_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    row = (await db.execute(
+        text("""SELECT a.*, p.name AS policy_name, st.name AS site_name
+                FROM agents a
+                LEFT JOIN agent_policies p ON p.id = a.policy_id
+                LEFT JOIN sites st ON st.id = a.site_id
+                WHERE a.server_id = :sid
+                ORDER BY a.last_heartbeat_at DESC NULLS LAST LIMIT 1"""),
+        {"sid": server_id},
+    )).mappings().first()
+    if not row:
+        return None
+    return _agent_response(dict(row))
+
+
+def _agent_response(row: dict) -> AgentResponse:
+    tags = row.get("tags") or []
+    if isinstance(tags, str):
+        try:
+            tags = json.loads(tags)
+        except Exception:
+            tags = []
+    return AgentResponse(
+        id=str(row["id"]),
+        server_id=str(row["server_id"]) if row.get("server_id") else None,
+        server_name=row.get("server_name"),
+        site_id=str(row["site_id"]) if row.get("site_id") else None,
+        site_name=row.get("site_name"),
+        agent_uid=row["agent_uid"],
+        hostname=row.get("hostname"),
+        platform=row["platform"],
+        version=row.get("version"),
+        status=row["status"],
+        api_key_prefix=row.get("api_key_prefix"),
+        last_heartbeat_at=row.get("last_heartbeat_at"),
+        last_metric_at=row.get("last_metric_at"),
+        last_config_hash=row.get("last_config_hash"),
+        queue_depth=row.get("queue_depth") or 0,
+        spool_bytes=row.get("spool_bytes") or 0,
+        update_ring=row["update_ring"],
+        desired_version=row.get("desired_version"),
+        current_version=row.get("current_version"),
+        certificate_expires_at=row.get("certificate_expires_at"),
+        last_ip=str(row["last_ip"]) if row.get("last_ip") else None,
+        policy_id=str(row["policy_id"]) if row.get("policy_id") else None,
+        policy_name=row.get("policy_name"),
+        config_apply_error=row.get("config_apply_error"),
+        tags=list(tags) if isinstance(tags, (list, tuple)) else [],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+# ── Install token flow ──────────────────────────────────────────────
+
+@router.post("/{server_id}/install-token", response_model=InstallTokenResponse)
+async def server_install_token(
+    server_id: UUID,
+    request: Request,
+    data: Optional[InstallTokenCreate] = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    server_row = (await db.execute(
+        text("SELECT site_id, hostname FROM servers WHERE id = :id"),
+        {"id": server_id},
+    )).first()
+    if not server_row:
+        raise HTTPException(404, "Server not found")
+
+    raw, hashed, prefix = _new_enrollment_token()
+    ttl_hours = (data.ttl_hours if data else DEFAULT_TOKEN_TTL_HOURS)
+    expires = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
+
+    site_id = (data.site_id if data else None) or server_row[0]
+    policy_id = (data.policy_id if data else None)
+    platform = (data.platform if data else "windows")
+    max_uses = (data.max_uses if data else 1)
+    tags_json = json.dumps((data.tags if data else []) or [])
+
+    row = (await db.execute(
+        text("""INSERT INTO agent_enrollment_tokens
+                  (token_hash, token_prefix, platform, site_id, policy_id, server_id,
+                   hostname_hint, tags, expires_at, max_uses, created_by)
+                VALUES (:h, :p, :pl, :site, :pol, :sid, :hint, :tags, :exp, :mu, :cb)
+                RETURNING id, expires_at"""),
+        {
+            "h": hashed, "p": prefix, "pl": platform,
+            "site": site_id, "pol": policy_id, "sid": server_id,
+            "hint": (data.hostname_hint if data else server_row[1]),
+            "tags": tags_json, "exp": expires, "mu": max_uses, "cb": user.id,
+        },
+    )).first()
+    await db.commit()
+
+    server_url = _server_url(request)
+    msi_url = await _msi_download_url(platform, db, server_url)
+    install_cmd = _msi_install_command(server_url, raw, platform)
+
+    return InstallTokenResponse(
+        token_id=str(row[0]),
+        enrollment_token=raw,
+        token_prefix=prefix,
+        expires_at=row[1],
+        max_uses=max_uses,
+        server_url=server_url,
+        platform=platform,
+        site_id=str(site_id) if site_id else None,
+        policy_id=str(policy_id) if policy_id else None,
+        install_command=install_cmd,
+        msi_download_url=msi_url,
+    )
+
+
+@router.post("/install-token", response_model=InstallTokenResponse)
+async def standalone_install_token(
+    request: Request,
+    data: InstallTokenCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Generate an install token not bound to an existing server.
+
+    The enrolling agent's hostname becomes the new server's display name.
+    """
+    raw, hashed, prefix = _new_enrollment_token()
+    expires = datetime.now(timezone.utc) + timedelta(hours=data.ttl_hours)
+    tags_json = json.dumps(data.tags or [])
+
+    row = (await db.execute(
+        text("""INSERT INTO agent_enrollment_tokens
+                  (token_hash, token_prefix, platform, site_id, policy_id,
+                   hostname_hint, tags, expires_at, max_uses, created_by)
+                VALUES (:h, :p, :pl, :site, :pol, :hint, :tags, :exp, :mu, :cb)
+                RETURNING id, expires_at"""),
+        {
+            "h": hashed, "p": prefix, "pl": data.platform,
+            "site": data.site_id, "pol": data.policy_id,
+            "hint": data.hostname_hint, "tags": tags_json,
+            "exp": expires, "mu": data.max_uses, "cb": user.id,
+        },
+    )).first()
+    await db.commit()
+
+    server_url = _server_url(request)
+    msi_url = await _msi_download_url(data.platform, db, server_url)
+    install_cmd = _msi_install_command(server_url, raw, data.platform)
+
+    return InstallTokenResponse(
+        token_id=str(row[0]),
+        enrollment_token=raw,
+        token_prefix=prefix,
+        expires_at=row[1],
+        max_uses=data.max_uses,
+        server_url=server_url,
+        platform=data.platform,
+        site_id=str(data.site_id) if data.site_id else None,
+        policy_id=str(data.policy_id) if data.policy_id else None,
+        install_command=install_cmd,
+        msi_download_url=msi_url,
+    )
+
+
+async def _msi_download_url(platform: str, db: AsyncSession, server_url: str) -> Optional[str]:
+    row = (await db.execute(
+        text("""SELECT download_path FROM agent_packages
+                WHERE platform = :p AND is_latest = TRUE
+                ORDER BY released_at DESC LIMIT 1"""),
+        {"p": platform},
+    )).first()
+    if not row:
+        return None
+    path = row[0]
+    if path.startswith("http"):
+        return path
+    return f"{server_url}{path}"
+
+
+def _msi_install_command(server_url: str, token: str, platform: str) -> str:
+    if platform == "windows":
+        # msiexec silent install with public properties.
+        msi_url = shlex.quote(f"{server_url}/api/v1/agents/packages/windows/latest")
+        return (
+            f"msiexec /i {msi_url} /quiet /norestart "
+            f"CONTROLLER_URL=\"{server_url}\" "
+            f"ENROLLMENT_TOKEN=\"{token}\" "
+            f"VERIFY_TLS=1"
+        )
+    elif platform == "linux":
+        install_url = shlex.quote(f"{server_url}/api/v1/agents/install.sh")
+        return (
+            f"curl -fsSL {install_url} | sudo env "
+            f"ZENPLUS_CONTROLLER_URL={shlex.quote(server_url)} "
+            f"ZENPLUS_ENROLLMENT_TOKEN={shlex.quote(token)} "
+            "bash"
+        )
+    return f"# install command for platform={platform} not yet defined"
+
+
+# ── Agent policies CRUD ─────────────────────────────────────────────
+
+@policies_router.get("")
+async def list_policies(
+    platform: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    params: dict[str, Any] = {}
+    where = "1=1"
+    if platform:
+        where = "p.platform = :p"
+        params["p"] = platform
+    rows = (await db.execute(
+        text(f"""SELECT p.*, COALESCE(a.cnt, 0) AS agent_count
+                 FROM agent_policies p
+                 LEFT JOIN (
+                     SELECT policy_id, COUNT(*) AS cnt FROM agents
+                     WHERE policy_id IS NOT NULL GROUP BY policy_id
+                 ) a ON a.policy_id = p.id
+                 WHERE {where}
+                 ORDER BY p.is_builtin DESC, p.name"""),
+        params,
+    )).mappings().all()
+    return {"items": [_policy_row(dict(r)) for r in rows]}
+
+
+@policies_router.post("", response_model=AgentPolicyResponse)
+async def create_policy(
+    data: AgentPolicyCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    row = (await db.execute(
+        text("""INSERT INTO agent_policies
+                  (name, description, platform, metric_interval_s, upload_interval_s, process_top_n,
+                   service_watchlist, process_watchlist, event_log_filters,
+                   disk_ignore, network_ignore, cardinality_limits,
+                   update_ring, feature_flags, created_by)
+                VALUES (:n, :d, :pl, :mi, :ui, :ptn,
+                        :sw, :pw, :elf,
+                        :di, :ni, :cl,
+                        :ur, :ff, :cb)
+                RETURNING *"""),
+        {
+            "n": data.name, "d": data.description, "pl": data.platform,
+            "mi": data.metric_interval_s, "ui": data.upload_interval_s,
+            "ptn": data.process_top_n,
+            "sw": json.dumps(data.service_watchlist),
+            "pw": json.dumps(data.process_watchlist),
+            "elf": json.dumps(data.event_log_filters),
+            "di": json.dumps(data.disk_ignore),
+            "ni": json.dumps(data.network_ignore),
+            "cl": json.dumps(data.cardinality_limits),
+            "ur": data.update_ring, "ff": json.dumps(data.feature_flags),
+            "cb": user.id,
+        },
+    )).mappings().first()
+    await db.commit()
+    return _policy_row(dict(row))
+
+
+@policies_router.get("/{policy_id}", response_model=AgentPolicyResponse)
+async def get_policy(
+    policy_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    row = (await db.execute(
+        text("""SELECT p.*, COALESCE(a.cnt, 0) AS agent_count
+                FROM agent_policies p
+                LEFT JOIN (
+                    SELECT policy_id, COUNT(*) AS cnt FROM agents
+                    WHERE policy_id IS NOT NULL GROUP BY policy_id
+                ) a ON a.policy_id = p.id
+                WHERE p.id = :id"""),
+        {"id": policy_id},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(404, "Policy not found")
+    return _policy_row(dict(row))
+
+
+@policies_router.patch("/{policy_id}", response_model=AgentPolicyResponse)
+async def update_policy(
+    policy_id: UUID,
+    data: AgentPolicyUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    sets = []
+    params: dict[str, Any] = {"id": policy_id}
+    plain_fields = ["name", "description", "platform", "metric_interval_s",
+                    "upload_interval_s", "process_top_n", "update_ring"]
+    json_fields = ["service_watchlist", "process_watchlist", "event_log_filters",
+                   "disk_ignore", "network_ignore", "cardinality_limits", "feature_flags"]
+    for field in plain_fields:
+        v = getattr(data, field)
+        if v is not None:
+            sets.append(f"{field} = :{field}")
+            params[field] = v
+    for field in json_fields:
+        v = getattr(data, field)
+        if v is not None:
+            sets.append(f"{field} = :{field}")
+            params[field] = json.dumps(v)
+    if not sets:
+        return await get_policy(policy_id, db, user)
+    sets.append("config_version = config_version + 1")
+    sql = f"UPDATE agent_policies SET {', '.join(sets)}, updated_at = NOW() WHERE id = :id RETURNING *"
+    row = (await db.execute(text(sql), params)).mappings().first()
+    if not row:
+        raise HTTPException(404, "Policy not found")
+    await db.commit()
+    return await get_policy(policy_id, db, user)
+
+
+@policies_router.delete("/{policy_id}")
+async def delete_policy(
+    policy_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    row = (await db.execute(
+        text("SELECT is_builtin FROM agent_policies WHERE id = :id"),
+        {"id": policy_id},
+    )).first()
+    if not row:
+        raise HTTPException(404, "Policy not found")
+    if row[0]:
+        raise HTTPException(400, "Cannot delete a built-in policy")
+    await db.execute(
+        text("UPDATE agents SET policy_id = NULL WHERE policy_id = :id"),
+        {"id": policy_id},
+    )
+    await db.execute(text("DELETE FROM agent_policies WHERE id = :id"), {"id": policy_id})
+    await db.commit()
+    return {"ok": True}
+
+
+# ── Agent fleet ─────────────────────────────────────────────────────
+
+@fleet_router.get("")
+async def list_fleet(
+    status: Optional[str] = None,
+    platform: Optional[str] = None,
+    site_id: Optional[UUID] = None,
+    policy_id: Optional[UUID] = None,
+    update_ring: Optional[str] = None,
+    q: Optional[str] = None,
+    sort: str = "last_heartbeat_at",
+    order: str = "desc",
+    page: int = 1,
+    page_size: int = 50,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    page = max(1, page); page_size = max(1, min(500, page_size))
+    offset = (page - 1) * page_size
+
+    sort_map = {
+        "hostname": "a.hostname",
+        "status": "a.status",
+        "version": "a.version",
+        "last_heartbeat_at": "a.last_heartbeat_at",
+        "queue_depth": "a.queue_depth",
+        "spool_bytes": "a.spool_bytes",
+        "update_ring": "a.update_ring",
+        "platform": "a.platform",
+    }
+    sort_col = sort_map.get(sort, "a.last_heartbeat_at")
+    sort_dir = "DESC" if order.lower() == "desc" else "ASC"
+
+    where = ["1=1"]
+    params: dict[str, Any] = {"limit": page_size, "offset": offset}
+    if status:
+        where.append("a.status = :st"); params["st"] = status
+    if platform:
+        where.append("a.platform = :pl"); params["pl"] = platform
+    if site_id:
+        where.append("a.site_id = :site"); params["site"] = site_id
+    if policy_id:
+        where.append("a.policy_id = :pol"); params["pol"] = policy_id
+    if update_ring:
+        where.append("a.update_ring = :ur"); params["ur"] = update_ring
+    if q:
+        where.append("(a.hostname ILIKE :q OR a.agent_uid ILIKE :q OR a.version ILIKE :q)")
+        params["q"] = f"%{q}%"
+
+    where_sql = " AND ".join(where)
+    total = (await db.execute(text(f"SELECT COUNT(*) FROM agents a WHERE {where_sql}"), params)).first()[0]
+
+    rows = (await db.execute(
+        text(f"""SELECT a.*, p.name AS policy_name, st.name AS site_name,
+                        s.display_name AS server_name
+                 FROM agents a
+                 LEFT JOIN agent_policies p ON p.id = a.policy_id
+                 LEFT JOIN sites st ON st.id = a.site_id
+                 LEFT JOIN servers s ON s.id = a.server_id
+                 WHERE {where_sql}
+                 ORDER BY {sort_col} {sort_dir} NULLS LAST
+                 LIMIT :limit OFFSET :offset"""),
+        params,
+    )).mappings().all()
+    return {
+        "items": [_agent_response(dict(r)) for r in rows],
+        "total": total, "page": page, "page_size": page_size,
+    }
+
+
+@fleet_router.get("/{agent_id}", response_model=AgentResponse)
+async def get_agent(
+    agent_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    row = (await db.execute(
+        text("""SELECT a.*, p.name AS policy_name, st.name AS site_name,
+                       s.display_name AS server_name
+                FROM agents a
+                LEFT JOIN agent_policies p ON p.id = a.policy_id
+                LEFT JOIN sites st ON st.id = a.site_id
+                LEFT JOIN servers s ON s.id = a.server_id
+                WHERE a.id = :id"""),
+        {"id": agent_id},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(404, "Agent not found")
+    return _agent_response(dict(row))
+
+
+@fleet_router.post("/{agent_id}/rotate-certificate")
+async def rotate_certificate(
+    agent_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    await db.execute(
+        text("""INSERT INTO agent_commands (agent_id, command, requested_by)
+                VALUES (:aid, 'rotate_certificate', :u)"""),
+        {"aid": agent_id, "u": user.id},
+    )
+    await db.commit()
+    return {"ok": True}
+
+
+@fleet_router.post("/{agent_id}/request-diagnostics")
+async def request_diagnostics(
+    agent_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    row = (await db.execute(
+        text("""INSERT INTO agent_commands (agent_id, command, requested_by)
+                VALUES (:aid, 'upload_diagnostics', :u) RETURNING id"""),
+        {"aid": agent_id, "u": user.id},
+    )).first()
+    await db.execute(
+        text("""INSERT INTO agent_diagnostics (agent_id, requested_by, status)
+                VALUES (:aid, :u, 'requested')"""),
+        {"aid": agent_id, "u": user.id},
+    )
+    await db.commit()
+    return {"ok": True, "command_id": str(row[0])}
+
+
+@fleet_router.post("/{agent_id}/set-update-ring")
+async def set_update_ring(
+    agent_id: UUID,
+    ring: str = Query(..., regex="^(canary|beta|stable|pinned)$"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    await db.execute(
+        text("UPDATE agents SET update_ring = :r, updated_at = NOW() WHERE id = :id"),
+        {"r": ring, "id": agent_id},
+    )
+    await db.commit()
+    return {"ok": True}
+
+
+@fleet_router.post("/bulk")
+async def fleet_bulk_action(
+    data: AgentBulkAction,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not data.agent_ids:
+        return {"ok": True, "affected": 0}
+    ids = list(data.agent_ids)
+    if data.action == "change_policy":
+        if not data.policy_id:
+            raise HTTPException(400, "policy_id required")
+        await db.execute(
+            text("UPDATE agents SET policy_id = :p, updated_at = NOW() WHERE id = ANY(:ids)"),
+            {"p": data.policy_id, "ids": ids},
+        )
+    elif data.action == "change_update_ring":
+        if not data.update_ring:
+            raise HTTPException(400, "update_ring required")
+        await db.execute(
+            text("UPDATE agents SET update_ring = :r, updated_at = NOW() WHERE id = ANY(:ids)"),
+            {"r": data.update_ring, "ids": ids},
+        )
+    elif data.action == "trigger_upgrade":
+        await db.execute(
+            text("""UPDATE agents SET desired_version = COALESCE(:v, desired_version), updated_at = NOW()
+                    WHERE id = ANY(:ids)"""),
+            {"v": data.target_version, "ids": ids},
+        )
+        for aid in ids:
+            await db.execute(
+                text("""INSERT INTO agent_commands (agent_id, command, params, requested_by)
+                        VALUES (:aid, 'upgrade_agent', :p, :u)"""),
+                {"aid": aid, "p": json.dumps({"version": data.target_version}), "u": user.id},
+            )
+    elif data.action == "request_diagnostics":
+        for aid in ids:
+            await db.execute(
+                text("""INSERT INTO agent_commands (agent_id, command, requested_by)
+                        VALUES (:aid, 'upload_diagnostics', :u)"""),
+                {"aid": aid, "u": user.id},
+            )
+            await db.execute(
+                text("""INSERT INTO agent_diagnostics (agent_id, requested_by, status)
+                        VALUES (:aid, :u, 'requested')"""),
+                {"aid": aid, "u": user.id},
+            )
+    elif data.action == "rotate_certificate":
+        for aid in ids:
+            await db.execute(
+                text("""INSERT INTO agent_commands (agent_id, command, requested_by)
+                        VALUES (:aid, 'rotate_certificate', :u)"""),
+                {"aid": aid, "u": user.id},
+            )
+    elif data.action == "disable":
+        await db.execute(
+            text("UPDATE agents SET status = 'disabled', updated_at = NOW() WHERE id = ANY(:ids)"),
+            {"ids": ids},
+        )
+    elif data.action == "enable":
+        await db.execute(
+            text("""UPDATE agents SET status = 'enrolling', updated_at = NOW()
+                    WHERE id = ANY(:ids) AND status = 'disabled'"""),
+            {"ids": ids},
+        )
+    else:
+        raise HTTPException(400, "Unknown action")
+    await db.commit()
+    return {"ok": True, "affected": len(ids)}
+
+
+# ── Server monitoring overview KPIs ─────────────────────────────────
+
+@overview_router.get("/overview")
+async def overview(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    counts = (await db.execute(
+        text("""SELECT status, COUNT(*) FROM servers GROUP BY status""")
+    )).all()
+    status_counts = {r[0]: r[1] for r in counts}
+    total_row = (await db.execute(text("SELECT COUNT(*) FROM servers"))).first()
+    total = total_row[0] if total_row else 0
+
+    os_counts_rows = (await db.execute(
+        text("SELECT os_type, COUNT(*) FROM servers GROUP BY os_type")
+    )).all()
+    os_counts = {r[0]: r[1] for r in os_counts_rows}
+
+    agent_counts_rows = (await db.execute(
+        text("SELECT status, COUNT(*) FROM agents GROUP BY status")
+    )).all()
+    agent_counts = {r[0]: r[1] for r in agent_counts_rows}
+
+    sites_rows = (await db.execute(
+        text("""SELECT s.id, s.name, COUNT(srv.id) AS cnt
+                FROM sites s
+                LEFT JOIN servers srv ON srv.site_id = s.id
+                GROUP BY s.id, s.name
+                ORDER BY cnt DESC LIMIT 10""")
+    )).all()
+    sites = [{"id": str(r[0]), "name": r[1], "server_count": r[2]} for r in sites_rows]
+
+    top_cpu = query_top_pressure("cpu", 5)
+    top_memory = query_top_pressure("memory", 5)
+    top_disk = query_top_pressure("disk", 5)
+    top_network = query_top_pressure("network", 5)
+
+    # Enrich with display names
+    async def _hydrate(items: list[dict]) -> list[dict]:
+        if not items:
+            return []
+        ids = [it["server_id"] for it in items]
+        rows = (await db.execute(
+            text("SELECT id, display_name, hostname FROM servers WHERE id = ANY(:ids)"),
+            {"ids": ids},
+        )).mappings().all()
+        by_id = {str(r["id"]): r for r in rows}
+        out = []
+        for it in items:
+            r = by_id.get(it["server_id"])
+            if r:
+                out.append({
+                    **it,
+                    "display_name": r["display_name"],
+                    "hostname": r.get("hostname"),
+                })
+            else:
+                out.append(it)
+        return out
+
+    return {
+        "total": total,
+        "status_counts": status_counts,
+        "os_counts": os_counts,
+        "agent_counts": agent_counts,
+        "sites": sites,
+        "top_cpu": await _hydrate(top_cpu),
+        "top_memory": await _hydrate(top_memory),
+        "top_disk": await _hydrate(top_disk),
+        "top_network": await _hydrate(top_network),
+    }

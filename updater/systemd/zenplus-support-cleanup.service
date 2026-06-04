@@ -1,0 +1,14 @@
+[Unit]
+Description=ZenPlus Support Bundle Cleanup
+Documentation=https://zentryc.com/docs/support-bundles
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/zenplus
+Environment=PYTHONPATH=/opt/zenplus
+ExecStart=/opt/zenplus/venv/bin/python -m support.cleanup
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zenplus-support-cleanup

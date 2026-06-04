@@ -2,10 +2,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
-from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, discovery, discovery_v2, users, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, topology, manual_maps
+from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, discovery, discovery_v2, users, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, topology, manual_maps, support, traps, ncm
 from app.api.v1 import settings as settings_api
 from app.api.v1 import sensors as sensors_admin_api
 from app.api.v1 import sensor_api
+from app.api.v1 import agents as agents_runtime_api
+from app.api.v1 import servers as servers_admin_api
 from app.api.websocket import realtime
 
 settings = get_settings()
@@ -35,6 +37,9 @@ def create_app() -> FastAPI:
     app.include_router(settings_api.router, prefix="/api/v1")
     app.include_router(alert_rules.router, prefix="/api/v1")
     app.include_router(alert_engine.router, prefix="/api/v1")
+    app.include_router(traps.router, prefix="/api/v1")
+    app.include_router(ncm.router, prefix="/api/v1")
+    app.include_router(ncm.device_router, prefix="/api/v1")
     app.include_router(service_checks.router, prefix="/api/v1")
     app.include_router(service_checks.groups_router, prefix="/api/v1")
     app.include_router(service_checks.maintenance_router, prefix="/api/v1")
@@ -46,6 +51,7 @@ def create_app() -> FastAPI:
     app.include_router(users.router, prefix="/api/v1")
     app.include_router(subscription.router, prefix="/api/v1")
     app.include_router(system_updates.router, prefix="/api/v1")
+    app.include_router(support.router, prefix="/api/v1")
     app.include_router(snmp.router, prefix="/api/v1")
     app.include_router(snmp_credentials.router, prefix="/api/v1")
     app.include_router(windows_credentials.router, prefix="/api/v1")
@@ -56,6 +62,11 @@ def create_app() -> FastAPI:
     app.include_router(sensors_admin_api.router, prefix="/api/v1")
     app.include_router(sensors_admin_api.sites_router, prefix="/api/v1")
     app.include_router(sensor_api.router, prefix="/api/v1")
+    app.include_router(agents_runtime_api.router, prefix="/api/v1")
+    app.include_router(servers_admin_api.router, prefix="/api/v1")
+    app.include_router(servers_admin_api.policies_router, prefix="/api/v1")
+    app.include_router(servers_admin_api.fleet_router, prefix="/api/v1")
+    app.include_router(servers_admin_api.overview_router, prefix="/api/v1")
 
     @app.get("/api/v1/system/health")
     async def health_check():

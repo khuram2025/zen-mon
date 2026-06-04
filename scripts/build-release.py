@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-ZENPLUS_DIR = Path("/opt/zenplus")
+ZENPLUS_DIR = Path(os.getenv("ZENPLUS_DIR", "/opt/zenplus"))
 RELEASE_DIR = Path(os.getenv("ZENPLUS_RELEASE_DIR", "/tmp/zenplus-releases"))
 PRIVATE_KEY_PATH = Path(
     os.getenv("ZENPLUS_RELEASE_PRIVATE_KEY", str(ZENPLUS_DIR / "updater" / "keys" / "zentryc-release.key"))
@@ -42,9 +42,31 @@ SERVER_URL = os.getenv("ZENPLUS_RELEASE_SERVER_URL", "https://zentryc.com")
 GO_BIN = shutil.which("go") or "/usr/local/go/bin/go"
 
 # Directories to include in the code update
-CODE_DIRS = ["server", "poller", "scripts"]
+CODE_DIRS = ["server", "poller", "scripts", "support"]
 # Files to include at root level
 CODE_FILES = [".version", "docker-compose.yml"]
+CODE_IGNORE = [
+    "__pycache__", "*.pyc", ".pytest_cache", "node_modules",
+    ".mypy_cache", ".ruff_cache", "*.egg-info",
+    "venv", ".venv", "dist", "build",
+    # Support-bundle runtime dirs — created by setup-support.sh on the
+    # appliance, never part of a release. They're owned by zenplus/root and
+    # unreadable by the build user, which crashes shutil.copytree.
+    "requests", "jobs", "bundles",
+]
+SCRIPT_CODE_IGNORE = [
+    *CODE_IGNORE,
+    "migrate-*.sql",
+    "init-postgres.sql",
+    "seed-devices.sql",
+    "init-clickhouse.sql",
+    "fix-clickhouse.sql",
+    "migrations.lock",
+]
+
+# Lockfile recording the SHA256 of every migrate-*.sql that has ever shipped.
+# Migrations are append-only once released — see lint_migrations() below.
+MIGRATIONS_LOCK = ZENPLUS_DIR / "scripts" / "migrations.lock"
 
 # ─── Crypto ───────────────────────────────────────────────────────────────────
 
@@ -62,6 +84,144 @@ def sha256_file(path: str) -> str:
         for chunk in iter(lambda: f.read(8192), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+# ─── Migration lint ───────────────────────────────────────────────────────────
+
+def _load_migrations_lock(lock_path: Path) -> dict[str, str]:
+    if not lock_path.exists():
+        return {}
+    locked: dict[str, str] = {}
+    for line in lock_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 1)
+        if len(parts) == 2:
+            digest, name = parts
+            locked[name.strip()] = digest.strip()
+    return locked
+
+
+def _write_migrations_lock(lock_path: Path, entries: dict[str, str]) -> None:
+    lines = [f"{entries[name]}  {name}" for name in sorted(entries)]
+    lock_path.write_text("\n".join(lines) + "\n")
+
+
+def lint_migrations(
+    update_lock: bool = False,
+    *,
+    scripts_dir: Path | None = None,
+    lock_path: Path | None = None,
+) -> None:
+    """Fail the build if any shipped migrate-*.sql has been edited.
+
+    Migration files are append-only once they appear in a release: appliances
+    record each file's SHA256 in schema_migrations when they apply it, and
+    run-migrations.py refuses to proceed if the file on disk hashes differently
+    on a later update. Catching the edit at build time prevents that fire.
+
+    Unknown migrations (new files not yet in the lockfile) are accepted only
+    when --update-lock is passed, so adding to the lock is an explicit,
+    git-reviewable step.
+    """
+    scripts_dir = scripts_dir or (ZENPLUS_DIR / "scripts")
+    lock_path = lock_path or MIGRATIONS_LOCK
+    locked = _load_migrations_lock(lock_path)
+    on_disk = {
+        f.name: sha256_file(str(f))
+        for f in sorted(scripts_dir.glob("migrate-*.sql"))
+    }
+
+    drift: list[tuple[str, str, str]] = []
+    new_files: list[str] = []
+    for name, digest in on_disk.items():
+        if name in locked:
+            if locked[name] != digest:
+                drift.append((name, locked[name], digest))
+        else:
+            new_files.append(name)
+
+    if drift:
+        print("\nERROR: migrate-*.sql checksum drift detected.")
+        print("Migrations are append-only after they ship in a release. Add a new")
+        print("migrate-NNN-fix.sql instead of editing an already-released file —")
+        print("otherwise appliances that applied the old contents will fail the")
+        print("next update with a checksum-mismatch error from run-migrations.py.")
+        print(f"Lockfile: {lock_path}")
+        for name, old, new_digest in drift:
+            print(f"  {name}")
+            print(f"    locked:  {old}")
+            print(f"    on disk: {new_digest}")
+        sys.exit(1)
+
+    if new_files and not update_lock:
+        print("\nERROR: new migrate-*.sql files are not recorded in the lockfile.")
+        print("Run to record them, then commit the updated lockfile alongside the")
+        print("new migration files:")
+        print("  python scripts/build-release.py lint-migrations --update-lock")
+        for name in new_files:
+            print(f"  + {name}  {on_disk[name]}")
+        sys.exit(1)
+
+    if new_files:
+        merged = {**locked, **{n: on_disk[n] for n in new_files}}
+        _write_migrations_lock(lock_path, merged)
+        print(f"  Recorded {len(new_files)} new migration(s) in {lock_path}:")
+        for name in new_files:
+            print(f"    + {name}  {on_disk[name]}")
+
+
+def _migration_engine(path: Path) -> str:
+    name = path.name.lower()
+    if "clickhouse" in name or name.startswith("ch-"):
+        return "clickhouse"
+    return "postgres"
+
+
+def _select_migrations(
+    scripts_dir: Path,
+    include_migrations: bool,
+    requested_migrations: list[str] | None,
+) -> list[Path]:
+    """Return the explicit migration files to package for this release.
+
+    Historical migrations are not safe to bundle opportunistically: appliances
+    store the checksum they applied and will reject a same-named file with
+    different bytes. Requiring a release-specific list keeps old migration
+    drift from blocking unrelated appliance updates.
+    """
+    requested_migrations = requested_migrations or []
+    if include_migrations and not requested_migrations:
+        print("\nERROR: --include-migrations now requires one or more --migration FILE values.")
+        print("Package only the migrations introduced by this release, for example:")
+        print("  --migration migrate-017-discovery-v2.sql")
+        print("  --migration migrate-018-discovery-windows-creds.sql")
+        sys.exit(1)
+
+    if not requested_migrations:
+        return []
+
+    selected: list[Path] = []
+    seen: set[str] = set()
+    for item in requested_migrations:
+        name = Path(item).name
+        if name in seen:
+            print(f"\nERROR: duplicate migration requested: {name}")
+            sys.exit(1)
+        seen.add(name)
+
+        if not name.startswith("migrate-") or not name.endswith(".sql"):
+            print(f"\nERROR: migration must be a scripts/migrate-*.sql file: {item}")
+            sys.exit(1)
+
+        candidate = scripts_dir / name
+        if not candidate.exists():
+            print(f"\nERROR: migration file not found: {candidate}")
+            sys.exit(1)
+        selected.append(candidate)
+
+    return sorted(selected, key=lambda p: p.name)
 
 
 # ─── Admin Auth ───────────────────────────────────────────────────────────────
@@ -101,12 +261,22 @@ def get_admin_token() -> str:
 
 def build_package(version: str, changelog: str, severity: str,
                   min_version: str | None, skip_dashboard: bool,
-                  skip_go: bool, include_migrations: bool) -> Path:
+                  skip_go: bool, include_migrations: bool,
+                  migration_files: list[str] | None = None) -> Path:
     """Build a .zup release package from the current codebase."""
 
     print(f"\n{'='*60}")
     print(f"  Building ZenPlus v{version}")
     print(f"{'='*60}\n")
+
+    print("[0/7] Linting migrations against lockfile ...")
+    lint_migrations()
+    migrations_src = ZENPLUS_DIR / "scripts"
+    selected_migrations = _select_migrations(
+        migrations_src,
+        include_migrations,
+        migration_files,
+    )
 
     build_dir = Path(tempfile.mkdtemp(prefix=f"zenplus-build-{version}-"))
     RELEASE_DIR.mkdir(parents=True, exist_ok=True)
@@ -117,11 +287,8 @@ def build_package(version: str, changelog: str, severity: str,
     for d in CODE_DIRS:
         src = ZENPLUS_DIR / d
         if src.exists():
-            shutil.copytree(src, code_dir / d, ignore=shutil.ignore_patterns(
-                "__pycache__", "*.pyc", ".pytest_cache", "node_modules",
-                ".mypy_cache", ".ruff_cache", "*.egg-info",
-                "venv", ".venv", "dist", "build",
-            ))
+            ignore = SCRIPT_CODE_IGNORE if d == "scripts" else CODE_IGNORE
+            shutil.copytree(src, code_dir / d, ignore=shutil.ignore_patterns(*ignore))
             print(f"  + {d}/")
 
     for f in CODE_FILES:
@@ -196,6 +363,24 @@ def build_package(version: str, changelog: str, severity: str,
             print("  ERROR: No Go poller source found")
             sys.exit(1)
 
+        # NetFlow collector (BUG-12: previously never built/shipped, so the
+        # collector fix could not reach appliances via OTA — only its source
+        # was copied while the running binary stayed stale).
+        if poller_src.exists() and (poller_src / "cmd" / "netflow-collector").exists():
+            result = subprocess.run(
+                [GO_BIN, "build", "-buildvcs=false", "-o", str(go_dir / "zenplus-netflow-collector"), "./cmd/netflow-collector"],
+                capture_output=True, text=True,
+                cwd=str(poller_src), timeout=300,
+                env={**os.environ, "GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "0"},
+            )
+            if result.returncode != 0:
+                print(f"  ERROR: Go netflow-collector build failed:\n{result.stderr}")
+                sys.exit(1)
+            print(f"  Built: zenplus-netflow-collector ({(go_dir / 'zenplus-netflow-collector').stat().st_size / 1024 / 1024:.1f} MB)")
+        else:
+            print("  ERROR: No Go netflow-collector source found")
+            sys.exit(1)
+
         if poller_src.exists() and (poller_src / "cmd" / "sensor").exists():
             ldflags = (
                 f"-X main.version=sensor-{version} "
@@ -247,12 +432,11 @@ def build_package(version: str, changelog: str, severity: str,
     # deployed appliances are not all safely re-runnable, so code-only releases
     # should not package the historical migration set.
     print("[5/7] Checking for migrations ...")
-    migrations_src = ZENPLUS_DIR / "scripts"
     migration_count = 0
     migrate_dir = build_dir / "migrations"
-    if include_migrations and migrations_src.exists():
+    if selected_migrations:
         migrate_dir.mkdir()
-        for f in sorted(migrations_src.glob("migrate-*.sql")):
+        for f in selected_migrations:
             shutil.copy2(f, migrate_dir / f.name)
             migration_count += 1
             print(f"  + {f.name}")
@@ -269,17 +453,54 @@ def build_package(version: str, changelog: str, severity: str,
     steps = []
 
     # Stop services before update
-    steps.append({"type": "stop_services", "services": ["zenplus-api", "zenplus-poller"]})
+    steps.append({"type": "stop_services", "services": ["zenplus-api", "zenplus-poller", "zenplus-netflow-collector"]})
     steps.append({"type": "backup", "targets": ["code", "database"]})
+
+    # Heal the OS prerequisites every appliance needs but older installers
+    # missed. apt_install is idempotent — already-present packages are a
+    # no-op. Listed packages must stay in lockstep with install.sh's core
+    # apt-get install line so fresh installs and OTA upgrades converge.
+    steps.append({
+        "type": "apt_install",
+        "packages": ["snmp", "iputils-ping"],
+        "update_first": True,
+        "timeout": 300,
+    })
+
     steps.append({"type": "apply_code", "method": "replace", "source": "code/"})
+
+    # Run setup-support.sh so the support-bundle systemd template, sudoers
+    # grant, and runtime dirs are present on appliances that were installed
+    # before the Support tab existed. The script is idempotent — safe to
+    # re-run on every OTA — and lives inside the bundle we just applied.
+    if (Path(build_dir) / "code" / "scripts" / "setup-support.sh").exists():
+        steps.append({
+            "type": "run_hook",
+            "script": "code/scripts/setup-support.sh",
+            "timeout": 120,
+        })
+
+    # Best-effort GeoIP provisioning (Phase 2b). fetch-geoip.py always exits 0
+    # and skips when the current month's DB is already present, so a download
+    # failure (no route to db-ip.com) never fails or delays the OTA update.
+    if (Path(build_dir) / "code" / "scripts" / "fetch-geoip.py").exists():
+        steps.append({
+            "type": "run_hook",
+            "script": "code/scripts/fetch-geoip.py",
+            "timeout": 180,
+        })
 
     if (build_dir / "requirements.txt").exists():
         steps.append({"type": "pip_install", "requirements": "requirements.txt"})
 
     if (build_dir / "migrations").exists():
         for f in sorted((build_dir / "migrations").iterdir()):
-            engine = "clickhouse" if f.name.startswith("ch-") else "postgres"
+            engine = _migration_engine(f)
             steps.append({"type": "run_migration", "engine": engine, "file": f"migrations/{f.name}"})
+        for f in sorted((build_dir / "migrations").iterdir()):
+            steps.append({"type": "install_config",
+                          "source": f"migrations/{f.name}",
+                          "dest": f"/opt/zenplus/scripts/{f.name}"})
 
     if (build_dir / "dashboard-dist.tar.gz").exists():
         steps.append({"type": "build_dashboard", "prebuilt": True, "source": "dashboard-dist.tar.gz"})
@@ -287,6 +508,15 @@ def build_package(version: str, changelog: str, severity: str,
     if (build_dir / "go-binaries" / "zenplus-poller").exists():
         steps.append({"type": "install_binary", "source": "go-binaries/zenplus-poller",
                        "dest": "/opt/zenplus/bin/zenplus-poller"})
+
+    # NetFlow collector binary + unit (BUG-12). install_systemd is idempotent and
+    # adds the unit on appliances that never had it; service_control skips it when
+    # absent, so stop/start of the collector is safe fleet-wide.
+    if (build_dir / "go-binaries" / "zenplus-netflow-collector").exists():
+        steps.append({"type": "install_binary", "source": "go-binaries/zenplus-netflow-collector",
+                       "dest": "/opt/zenplus/bin/zenplus-netflow-collector"})
+        steps.append({"type": "install_systemd",
+                       "source": "code/poller/systemd/zenplus-netflow-collector.service"})
 
     sensor_artifact_dir = build_dir / "sensor-artifacts" / "bin" / "linux-amd64"
     if (sensor_artifact_dir / "zenplus-sensor").exists():
@@ -302,8 +532,8 @@ def build_package(version: str, changelog: str, severity: str,
 
     # Restart services
     steps.append({"type": "start_services",
-                   "services": ["zenplus-api", "zenplus-poller", "netmon-gunicorn",
-                                "netmon-celery", "netmon-celery-beat", "nginx"]})
+                   "services": ["zenplus-api", "zenplus-poller", "zenplus-netflow-collector",
+                                "netmon-gunicorn", "netmon-celery", "netmon-celery-beat", "nginx"]})
     steps.append({"type": "health_check", "url": "http://localhost:8000/api/v1/system/health", "timeout": 30})
 
     manifest = {
@@ -379,6 +609,7 @@ def build_package(version: str, changelog: str, severity: str,
         "package_sha256": pkg_hash,
         "package_size": pkg_size,
         "built_at": datetime.now(timezone.utc).isoformat(),
+        "migrations": [p.name for p in selected_migrations],
     }
     meta_path = RELEASE_DIR / f"update-{version}.meta.json"
     meta_path.write_text(json.dumps(meta, indent=2))
@@ -546,6 +777,11 @@ Examples:
   # Build a release:
   python scripts/build-release.py build --version 1.1.0 --changelog "Bug fixes"
 
+  # Build a schema release with explicit migrations only:
+  python scripts/build-release.py build --version 1.2.12 \
+    --migration migrate-017-discovery-v2.sql \
+    --migration migrate-018-discovery-windows-creds.sql
+
   # Build and publish in one step:
   python scripts/build-release.py publish --version 1.1.0 --changelog "New features"
 
@@ -572,7 +808,9 @@ Examples:
     build_p.add_argument("--skip-dashboard", action="store_true", help="Skip dashboard build")
     build_p.add_argument("--skip-go", action="store_true", help="Skip Go binary build")
     build_p.add_argument("--include-migrations", action="store_true",
-                         help="Package scripts/migrate-*.sql files for schema releases")
+                         help="Require explicit --migration values for schema releases")
+    build_p.add_argument("--migration", action="append", default=[],
+                         help="Package one scripts/migrate-*.sql file; repeat for multiple files")
 
     # Publish
     pub_p = sub.add_parser("publish", help="Build and publish to zentryc.com")
@@ -585,12 +823,20 @@ Examples:
     pub_p.add_argument("--skip-dashboard", action="store_true")
     pub_p.add_argument("--skip-go", action="store_true")
     pub_p.add_argument("--include-migrations", action="store_true",
-                       help="Package scripts/migrate-*.sql files for schema releases")
+                       help="Require explicit --migration values for schema releases")
+    pub_p.add_argument("--migration", action="append", default=[],
+                       help="Package one scripts/migrate-*.sql file; repeat for multiple files")
     pub_p.add_argument("--rollout", default=None,
                        choices=["canary", "percentage", "full"],
                        help="Auto-create rollout after publishing")
     pub_p.add_argument("--rollout-pct", type=int, default=100, help="Rollout percentage (default 100)")
     pub_p.add_argument("--rollout-group", default=None, help="Target rollout group")
+
+    # Lint migrations
+    lint_p = sub.add_parser("lint-migrations",
+                            help="Verify migrate-*.sql checksums against the lockfile")
+    lint_p.add_argument("--update-lock", action="store_true",
+                        help="Record new migration files in the lockfile (commit the result)")
 
     # List
     sub.add_parser("list", help="List releases on zentryc.com")
@@ -607,7 +853,7 @@ Examples:
     if args.command == "build":
         build_package(args.version, args.changelog, args.severity,
                       args.min_version, args.skip_dashboard, args.skip_go,
-                      args.include_migrations)
+                      args.include_migrations, args.migration)
 
     elif args.command == "publish":
         if args.file:
@@ -618,12 +864,16 @@ Examples:
         else:
             zup_path = build_package(args.version, args.changelog, args.severity,
                                      args.min_version, args.skip_dashboard, args.skip_go,
-                                     args.include_migrations)
+                                     args.include_migrations, args.migration)
         publish_package(zup_path, args.version, args.changelog,
                         args.severity, args.min_version)
 
         if args.rollout:
             create_rollout(args.version, args.rollout, args.rollout_group, args.rollout_pct)
+
+    elif args.command == "lint-migrations":
+        lint_migrations(update_lock=args.update_lock)
+        print("  Migrations OK.")
 
     elif args.command == "list":
         list_releases()

@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import require_admin_user
+from app.core.security import get_current_user, require_admin_user
 from app.models.user import User
 from app.services.audit_service import write_audit_log
 
@@ -160,6 +160,41 @@ class CompanySettings(BaseModel):
     timezone: str = "UTC"
     date_format: str = "YYYY-MM-DD"
     time_format: str = "24h"
+
+
+class GrafanaSettings(BaseModel):
+    enabled: bool = False
+    base_url: str = ""
+    dashboard_template: str = ""  # e.g. "/d/abc123?var-host={hostname}&var-device_id={device_id}"
+
+
+@router.get("/integrations/grafana")
+async def get_grafana_settings(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Operator-readable so the manual-map page can decide whether to show
+    'Open in Grafana' affordances. Editing remains admin-only below."""
+    raw = await _get_system_setting(db, "integrations.grafana")
+    return GrafanaSettings(**(raw or {})).model_dump()
+
+
+@router.put("/integrations/grafana")
+async def update_grafana_settings(
+    data: GrafanaSettings,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_admin_user),
+):
+    await _upsert_system_setting(db, "integrations.grafana", data.model_dump())
+    await write_audit_log(
+        db,
+        actor=user,
+        action="settings.integrations.grafana.update",
+        resource_type="system_setting",
+        resource_id="integrations.grafana",
+    )
+    await db.commit()
+    return {"message": "Grafana settings updated"}
 
 
 @router.get("/company")

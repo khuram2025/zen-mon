@@ -398,6 +398,65 @@ async def get_device_metrics(
     return metric_service.get_device_metrics(device_id, from_time, to_time, granularity)
 
 
+@router.get("/{device_id}/ping-series")
+async def get_device_ping_series(
+    device_id: UUID,
+    minutes: int = Query(default=60, ge=5, le=1440),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Per-device ping time-series for the manual-map inspector sparkline.
+
+    Returns ~60 evenly-bucketed samples over the requested window.
+    Uses 5-minute rollup for windows > 6 h, raw otherwise.
+    """
+    device = await device_service.get_device(db, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    from app.core.database import get_clickhouse_client
+    client = get_clickhouse_client()
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(minutes=minutes)
+
+    bucket_seconds = max(30, (minutes * 60) // 60)
+    table = "ping_metrics" if minutes <= 360 else "ping_metrics_5m"
+    try:
+        res = client.query(
+            f"""
+            SELECT toStartOfInterval(timestamp, INTERVAL %(bs)s SECOND) AS ts,
+                   avg(rtt_ms)      AS rtt_ms,
+                   avg(packet_loss) AS packet_loss,
+                   max(is_up)       AS is_up
+            FROM zenplus.{table}
+            WHERE device_id = %(id)s
+              AND timestamp BETWEEN %(start)s AND %(end)s
+            GROUP BY ts ORDER BY ts
+            """,
+            parameters={"id": str(device_id), "bs": bucket_seconds, "start": start, "end": end},
+        )
+        points = [
+            {
+                "ts": r[0].isoformat() if r[0] else None,
+                "rtt_ms": round(float(r[1] or 0.0), 2),
+                "packet_loss": round(float(r[2] or 0.0), 3),
+                "is_up": bool(r[3]) if r[3] is not None else None,
+            }
+            for r in res.result_rows
+        ]
+    except Exception:
+        points = []
+
+    return {
+        "device_id": str(device_id),
+        "minutes": minutes,
+        "from": start.isoformat(),
+        "to": end.isoformat(),
+        "bucket_seconds": bucket_seconds,
+        "points": points,
+    }
+
+
 @router.get("/{device_id}/interfaces")
 async def get_device_interfaces(
     device_id: UUID,

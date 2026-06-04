@@ -1,0 +1,27 @@
+[Unit]
+StartLimitIntervalSec=0
+Description=ZenPlus NetFlow Collector
+After=network-online.target zenplus-api.service
+Wants=network-online.target zenplus-api.service
+
+[Service]
+Type=simple
+User=zenplus
+Group=zenplus
+WorkingDirectory=/opt/zenplus/poller
+EnvironmentFile=/opt/zenplus/.env
+Environment=NETFLOW_COLLECTOR_ID=netflow-01
+Environment=NETFLOW_LISTEN=:2055
+Environment=NETFLOW_HEALTH_LISTEN=:8091
+ExecStart=/opt/zenplus/bin/zenplus-netflow-collector
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zenplus-netflow
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

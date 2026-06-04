@@ -35,6 +35,15 @@ class StatusChangeEvent(BaseModel):
     packet_loss: float = 0
 
 
+class TrapEvent(BaseModel):
+    device_id: Optional[str] = None
+    source_ip: str
+    trap_oid: str
+    trap_name: Optional[str] = None
+    severity: str = "info"
+    message: Optional[str] = None
+
+
 class ServiceStatusChangeEvent(BaseModel):
     service_check_id: str
     check_name: str
@@ -109,6 +118,159 @@ async def _send_email(gw_config: dict, recipients: str, subject: str, body: str)
     server.quit()
 
 
+def _severity_color(severity: str) -> int:
+    s = (severity or "warning").lower()
+    return 0xDC2626 if s == "critical" else 0xF59E0B if s == "warning" else 0x2563EB
+
+
+async def _send_webhook(ch_config: dict, ctx: dict) -> None:
+    """Generic JSON webhook. Posts the alert ctx + optional templated body.
+
+    `ctx` carries: hostname, ip_address, status (UP/DOWN/DEGRADED), severity,
+    message, triggered_at, map_id (optional), rule_id, is_recovery.
+    """
+    url = ch_config.get("url") or ch_config.get("webhook_url")
+    if not url:
+        return
+    headers = {"Content-Type": "application/json"}
+    headers.update(dict(ch_config.get("headers") or {}))
+    if ch_config.get("auth_bearer"):
+        headers["Authorization"] = f"Bearer {ch_config['auth_bearer']}"
+    body = ch_config.get("body_template")
+    payload: dict | str = ctx
+    if isinstance(body, str) and body.strip():
+        payload = _render(body, ctx)
+    async with httpx.AsyncClient(timeout=10.0, verify=ch_config.get("tls_verify", True)) as client:
+        if isinstance(payload, str):
+            await client.post(url, content=payload, headers=headers)
+        else:
+            await client.post(url, json=payload, headers=headers)
+
+
+async def _send_slack(ch_config: dict, ctx: dict) -> None:
+    """Slack incoming-webhook compatible payload."""
+    url = ch_config.get("url") or ch_config.get("webhook_url")
+    if not url:
+        return
+    is_recovery = bool(ctx.get("is_recovery"))
+    emoji = ":large_green_circle:" if is_recovery else (":red_circle:" if ctx.get("severity") == "critical" else ":warning:")
+    title = f"{emoji} {ctx['hostname']} is {ctx['status']}"
+    payload = {
+        "text": title,
+        "attachments": [{
+            "color": "good" if is_recovery else ("danger" if ctx.get("severity") == "critical" else "warning"),
+            "title": title,
+            "fields": [
+                {"title": "Host",       "value": ctx["hostname"],            "short": True},
+                {"title": "IP",         "value": ctx.get("ip_address", "—"), "short": True},
+                {"title": "Severity",   "value": ctx.get("severity", "—"),   "short": True},
+                {"title": "Triggered",  "value": ctx.get("triggered_at", "—"), "short": True},
+                {"title": "Message",    "value": ctx.get("message", ""),     "short": False},
+            ],
+            "footer": "ZenPlus",
+            "ts": int(datetime.now(timezone.utc).timestamp()),
+        }],
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await client.post(url, json=payload)
+
+
+async def _send_teams(ch_config: dict, ctx: dict) -> None:
+    """Microsoft Teams incoming-webhook Adaptive Card."""
+    url = ch_config.get("url") or ch_config.get("webhook_url")
+    if not url:
+        return
+    is_recovery = bool(ctx.get("is_recovery"))
+    severity = ctx.get("severity", "warning")
+    color = "good" if is_recovery else ("attention" if severity == "critical" else "warning")
+    card = {
+        "type": "message",
+        "attachments": [{
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {
+                "type": "AdaptiveCard",
+                "version": "1.4",
+                "body": [
+                    {"type": "TextBlock", "size": "Large", "weight": "Bolder",
+                     "text": f"{ctx['hostname']} is {ctx['status']}",
+                     "color": color},
+                    {"type": "FactSet", "facts": [
+                        {"title": "IP",        "value": ctx.get("ip_address", "—")},
+                        {"title": "Severity",  "value": severity},
+                        {"title": "Triggered", "value": ctx.get("triggered_at", "—")},
+                        {"title": "Message",   "value": ctx.get("message", "")},
+                    ]},
+                ],
+            },
+        }],
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await client.post(url, json=card)
+
+
+async def _send_discord(ch_config: dict, ctx: dict) -> None:
+    """Discord-compatible webhook with an embed."""
+    url = ch_config.get("url") or ch_config.get("webhook_url")
+    if not url:
+        return
+    is_recovery = bool(ctx.get("is_recovery"))
+    color = 0x16A34A if is_recovery else _severity_color(ctx.get("severity", "warning"))
+    payload = {
+        "username": ch_config.get("username", "ZenPlus"),
+        "embeds": [{
+            "title":  f"{ctx['hostname']} is {ctx['status']}",
+            "color":  color,
+            "fields": [
+                {"name": "IP",        "value": ctx.get("ip_address", "—"), "inline": True},
+                {"name": "Severity",  "value": ctx.get("severity", "—"),   "inline": True},
+                {"name": "Triggered", "value": ctx.get("triggered_at", "—"), "inline": False},
+                {"name": "Message",   "value": ctx.get("message", "")[:1000] or "—", "inline": False},
+            ],
+            "timestamp": ctx.get("triggered_at"),
+            "footer": {"text": "ZenPlus"},
+        }],
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await client.post(url, json=payload)
+
+
+async def _send_pagerduty(ch_config: dict, ctx: dict) -> None:
+    """PagerDuty Events API v2 — trigger / resolve based on is_recovery."""
+    routing_key = ch_config.get("routing_key") or ch_config.get("integration_key")
+    if not routing_key:
+        return
+    is_recovery = bool(ctx.get("is_recovery"))
+    dedup_key = f"zenplus:{ctx.get('rule_id', 'unknown')}:{ctx.get('device_id', 'unknown')}"
+    payload = {
+        "routing_key": routing_key,
+        "event_action": "resolve" if is_recovery else "trigger",
+        "dedup_key": dedup_key,
+        "payload": {
+            "summary":   f"{ctx['hostname']} is {ctx['status']} — {ctx.get('message', '')}".strip(),
+            "source":    ctx.get("ip_address") or ctx.get("hostname"),
+            "severity":  {"critical": "critical", "warning": "warning", "info": "info"}.get(
+                ctx.get("severity", "warning"), "warning",
+            ),
+            "custom_details": {k: v for k, v in ctx.items() if k not in ("severity",)},
+        },
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await client.post("https://events.pagerduty.com/v2/enqueue", json=payload)
+
+
+async def _dispatch_channel(ch_type: str, ch_config: dict, ctx: dict) -> bool:
+    """Single dispatch point. Returns True if a notification was attempted."""
+    try:
+        if ch_type == "webhook":   await _send_webhook(ch_config, ctx);   return True
+        if ch_type == "slack":     await _send_slack(ch_config, ctx);     return True
+        if ch_type == "teams":     await _send_teams(ch_config, ctx);     return True
+        if ch_type == "discord":   await _send_discord(ch_config, ctx);   return True
+        if ch_type == "pagerduty": await _send_pagerduty(ch_config, ctx); return True
+    except Exception as exc:
+        print(f"ERROR dispatch {ch_type}: {exc}")
+    return False
+
+
 async def _find_suppressing_dependency(db: AsyncSession, device_id: str):
     """Return the first unhealthy upstream dependency that should suppress alerts."""
     result = await db.execute(
@@ -132,6 +294,59 @@ async def _find_suppressing_dependency(db: AsyncSession, device_id: str):
         {"device_id": device_id},
     )
     return result.mappings().first()
+
+
+def _cmp(value: float, operator: str, threshold: float) -> bool:
+    """Compare a metric value against a threshold using the rule operator."""
+    op = (operator or "").strip()
+    if op in (">", "gt"):
+        return value > threshold
+    if op in (">=", "gte"):
+        return value >= threshold
+    if op in ("<", "lt"):
+        return value < threshold
+    if op in ("<=", "lte"):
+        return value <= threshold
+    if op in ("==", "eq"):
+        return value == threshold
+    if op in ("!=", "neq"):
+        return value != threshold
+    return False
+
+
+def _eval_one(metric: str, operator: str, threshold, values: dict) -> bool:
+    v = values.get(metric)
+    if v is None or threshold is None:
+        return False
+    try:
+        return _cmp(float(v), operator, float(threshold))
+    except (TypeError, ValueError):
+        return False
+
+
+def _conditions_match(rule, values: dict) -> bool:
+    """
+    E1: evaluate a rule's metric condition(s) against live metric values.
+
+    - A non-empty ``conditions`` array is evaluated element-wise and combined by
+      ``condition_logic`` (AND/OR).
+    - Otherwise the legacy flat metric/operator/threshold is the single
+      condition. Pure status rules (metric is ping_status/service_status, or
+      absent) are NOT metric-gated and always return True, preserving the
+      existing status-transition behaviour.
+    """
+    conds = getattr(rule, "conditions", None)
+    if conds:
+        results = [
+            _eval_one(c.get("metric"), c.get("operator"), c.get("threshold"), values)
+            for c in conds
+        ]
+        logic = (getattr(rule, "condition_logic", "AND") or "AND").upper()
+        return any(results) if logic == "OR" else all(results)
+    metric = getattr(rule, "metric", None)
+    if metric in ("ping_status", "service_status", None):
+        return True
+    return _eval_one(metric, getattr(rule, "operator", None), getattr(rule, "threshold", None), values)
 
 
 @router.post("/evaluate")
@@ -171,6 +386,7 @@ async def evaluate_status_change(
             SELECT id, name, trigger_on, recovery_alert, severity,
                    device_id, group_id, device_type, location,
                    notify_channels, cooldown,
+                   metric, operator, threshold, conditions, condition_logic,
                    email_subject, email_body, sms_template,
                    recovery_email_subject, recovery_email_body, recovery_sms_template
             FROM alert_rules
@@ -204,6 +420,14 @@ async def evaluate_status_change(
     suppressed_alerts = 0
     suppressing_dependency = await _find_suppressing_dependency(db, event.device_id) if is_down else None
 
+    # E1: live metric values for condition evaluation. packet_loss arrives from
+    # the poller as a fraction (0..1); rule thresholds are in percent, so scale.
+    metric_values = {
+        "ping_status": 1.0 if event.new_status == "up" else 0.0,
+        "rtt": float(event.rtt_ms or 0.0),
+        "packet_loss": float(event.packet_loss or 0.0) * 100.0,
+    }
+
     for rule in rules:
         # Check trigger_on match
         trigger = rule.trigger_on or "any"
@@ -236,6 +460,11 @@ async def evaluate_status_change(
 
         # Check scope - location
         if rule.location and location and rule.location.lower() not in location.lower():
+            continue
+
+        # E1: metric-threshold gating. Recovery events are never gated (so they
+        # can still resolve open alerts); pure status rules always pass.
+        if not is_recovery and not _conditions_match(rule, metric_values):
             continue
 
         # Rule matches! Send notifications
@@ -378,11 +607,67 @@ async def evaluate_status_change(
                         await _send_email(dict(gw_row.config), recipients, email_subject, email_body)
                         notifications_sent += 1
 
+                elif ch.type in ("webhook", "slack", "teams", "discord", "pagerduty"):
+                    # Shared context for every outbound provider.
+                    ctx = {
+                        "hostname":     event.hostname,
+                        "ip_address":   event.ip_address,
+                        "status":       (event.new_status or "").upper(),
+                        "severity":     rule.severity or "warning",
+                        "message":      sms_body,
+                        "triggered_at": now.isoformat(),
+                        "is_recovery":  is_recovery,
+                        "device_id":    event.device_id,
+                        "rule_id":      str(rule.id),
+                        "rule_name":    rule.name,
+                    }
+                    if await _dispatch_channel(ch.type, ch_config, ctx):
+                        notifications_sent += 1
+
             except Exception as exc:
                 # Log but don't fail the whole evaluation
                 print(f"ERROR sending notification to channel {ch_id}: {exc}")
 
     await db.commit()
+
+    # Per-map webhook fan-out: if the device sits on any manual map with a
+    # webhook configured, POST a compact transition event. We do this OUT
+    # of the rule loop so it fires even when no alert rule matched — the
+    # map owner asked to be told about *every* flip on their canvas.
+    if event.old_status != event.new_status:
+        try:
+            map_hooks = (await db.execute(
+                text("""
+                    SELECT m.id, m.name, m.webhook_url
+                    FROM manual_maps m
+                    JOIN manual_map_nodes mn ON mn.map_id = m.id
+                    WHERE mn.device_id = :did
+                      AND m.webhook_enabled = TRUE
+                      AND m.webhook_url IS NOT NULL
+                      AND m.webhook_url <> ''
+                """),
+                {"did": event.device_id},
+            )).all()
+            for row in map_hooks:
+                payload = {
+                    "event":       "device_status_change",
+                    "map_id":      str(row.id),
+                    "map_name":    row.name,
+                    "device_id":   event.device_id,
+                    "hostname":    event.hostname,
+                    "ip_address":  event.ip_address,
+                    "old_status":  event.old_status,
+                    "new_status":  event.new_status,
+                    "is_recovery": is_recovery,
+                    "timestamp":   now.isoformat(),
+                }
+                try:
+                    async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+                        await client.post(row.webhook_url, json=payload)
+                except Exception as exc:
+                    print(f"ERROR map webhook {row.id}: {exc}")
+        except Exception as exc:
+            print(f"ERROR map webhook fan-out: {exc}")
 
     return {
         "evaluated_rules": len(rules),
@@ -630,4 +915,87 @@ async def evaluate_service_status_change(
         "new_status": event.new_status,
         "resolved_alerts": resolved_alerts,
         "suppressed_alerts": suppressed_alerts,
+    }
+
+
+def _trap_oid_matches(rule_filter: Optional[str], trap_oid: str) -> bool:
+    """Empty/NULL filter matches any trap; otherwise exact or dotted-prefix match."""
+    flt = (rule_filter or "").strip().lstrip(".")
+    if not flt:
+        return True
+    oid = (trap_oid or "").strip().lstrip(".")
+    return oid == flt or oid.startswith(flt + ".")
+
+
+@router.post("/evaluate-trap")
+async def evaluate_trap(
+    event: TrapEvent,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Called by the Go poller's trap listener for every received SNMP trap.
+    Fires metric='trap' alert rules whose optional OID filter and device/group
+    scope match. ALERTS-ONLY: this writes alert rows (visible in the Alerts UI)
+    and deliberately does NOT dispatch to notification channels yet.
+    """
+    now = datetime.now(timezone.utc)
+
+    did = event.device_id or None
+    if did in ("", "00000000-0000-0000-0000-000000000000"):
+        did = None
+
+    group_id = None
+    if did:
+        dev = (await db.execute(
+            text("SELECT group_id FROM devices WHERE id = :id"), {"id": did}
+        )).first()
+        group_id = str(dev.group_id) if dev and dev.group_id else None
+
+    rules = (await db.execute(
+        text("""
+            SELECT id, name, severity, device_id, group_id, trap_oid
+            FROM alert_rules
+            WHERE enabled = true AND metric = 'trap'
+        """)
+    )).fetchall()
+
+    alerts_created = 0
+    for rule in rules:
+        if rule.device_id and (not did or str(rule.device_id) != did):
+            continue
+        if rule.group_id and (not group_id or str(rule.group_id) != group_id):
+            continue
+        if not _trap_oid_matches(rule.trap_oid, event.trap_oid):
+            continue
+
+        label = event.trap_name or event.trap_oid
+        message = event.message or f"SNMP trap {label} from {event.source_ip}"
+        await db.execute(
+            text("""
+                INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, metadata)
+                VALUES (:device_id, :rule_id, 'active', :severity, :message, :triggered_at, CAST(:metadata AS jsonb))
+            """),
+            {
+                "device_id": did,
+                "rule_id": str(rule.id),
+                "severity": rule.severity or event.severity or "warning",
+                "message": message,
+                "triggered_at": now,
+                "metadata": json.dumps({
+                    "trap": True,
+                    "trap_oid": event.trap_oid,
+                    "trap_name": event.trap_name,
+                    "source_ip": event.source_ip,
+                    "trap_severity": event.severity,
+                }),
+            },
+        )
+        alerts_created += 1
+
+    await db.commit()
+    return {
+        "matched_rules": len(rules),
+        "alerts_created": alerts_created,
+        "trap_oid": event.trap_oid,
+        "channels": "skipped (alerts-only)",
     }

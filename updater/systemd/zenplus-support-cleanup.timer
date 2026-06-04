@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily ZenPlus support-bundle retention sweep
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target
