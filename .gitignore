@@ -102,3 +102,7 @@ docker-compose.yml.bak
 Documentation/prv.txt
 Documentation/srv_response.txt
 Documentation/test.txt
+
+# ─── OTA updater per-migration backups & binary backups ───
+*.pre-update
+bin/*.bak
