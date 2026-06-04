@@ -47,6 +47,7 @@ export function NcmDevicePage() {
   const [view, setView] = useState<'none' | 'config' | 'diff'>('none')
   const [selected, setSelected] = useState<any>(null)
   const [cmp, setCmp] = useState<{ older: any; newer: any } | null>(null)
+  const [lastRun, setLastRun] = useState<{ ok: boolean; change: boolean; msg: string } | null>(null)
 
   const { data: overview } = useQuery<any>({ queryKey: ['ncm', 'overview'], queryFn: async () => (await api.get('/ncm/overview')).data, refetchInterval: 30000 })
   const device = (overview?.data || []).find((d: any) => d.device_id === deviceId)
@@ -81,7 +82,16 @@ export function NcmDevicePage() {
   const inv = () => qc.invalidateQueries({ queryKey: ['ncm'] })
   const saveEnroll = useMutation({ mutationFn: async () => (await api.put(`/devices/${deviceId}/ncm`, f)).data, onSuccess: () => { toast.success('Backup settings saved'); inv() }, onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)) })
   const unenroll = useMutation({ mutationFn: async () => api.delete(`/devices/${deviceId}/ncm`), onSuccess: () => { toast.success('Removed from backup'); inv() }, onError: (e: any) => toast.error('Failed', apiErrorMessage(e)) })
-  const fetchNow = useMutation({ mutationFn: async () => (await api.post(`/devices/${deviceId}/config-fetch`, null, { timeout: 240000 })).data, onSuccess: (d: any) => { toast.success(d.is_change ? `Backed up via SSH (${d.platform})` : 'No change since last backup'); inv(); qc.invalidateQueries({ queryKey: ['ncm', 'configs', deviceId] }) }, onError: (e: any) => toast.error('SSH backup failed', apiErrorMessage(e)) })
+  const fetchNow = useMutation({
+    mutationFn: async () => (await api.post(`/devices/${deviceId}/config-fetch`, null, { timeout: 240000 })).data,
+    onSuccess: (d: any) => {
+      const msg = d.is_change ? `New version stored — config changed (${d.platform})` : 'Snapshot stored — no change from previous version'
+      setLastRun({ ok: true, change: !!d.is_change, msg })
+      toast.success(d.is_change ? `Backed up via SSH — changed (${d.platform})` : 'Backed up via SSH — no change')
+      inv(); qc.invalidateQueries({ queryKey: ['ncm', 'configs', deviceId] })
+    },
+    onError: (e: any) => { setLastRun({ ok: false, change: false, msg: apiErrorMessage(e) }); toast.error('SSH backup failed', apiErrorMessage(e)) },
+  })
 
   async function download(v: any) {
     try {
@@ -109,11 +119,20 @@ export function NcmDevicePage() {
           </h1>
           <p className="text-xs text-muted">{[device.ip, device.device_type, device.vendor, device.location].filter(Boolean).join(' · ')}</p>
         </div>
-        <Button variant="outline" disabled={!device.enrolled || fetchNow.isPending} onClick={() => fetchNow.mutate()}>
+        <div className="flex flex-col items-end gap-1">
+          <Button variant="outline" disabled={!device.enrolled || fetchNow.isPending} onClick={() => fetchNow.mutate()}>
+            {fetchNow.isPending
+              ? <><Loader2 className="h-4 w-4 animate-spin" /> Backing up…</>
+              : <><DownloadCloud className="h-4 w-4" /> Backup now (SSH)</>}
+          </Button>
           {fetchNow.isPending
-            ? <><Loader2 className="h-4 w-4 animate-spin" /> Backing up…</>
-            : <><DownloadCloud className="h-4 w-4" /> Backup now (SSH)</>}
-        </Button>
+            ? <div className="text-[11px] text-muted">Pulling running-config over SSH — large configs take ~30–60s</div>
+            : lastRun
+              ? <div className={`text-[11px] ${lastRun.ok ? (lastRun.change ? 'text-emerald-600' : 'text-muted') : 'text-rose-600'}`}>
+                  {lastRun.ok ? (lastRun.change ? '✓ ' : '✓ ') : '✕ '}{lastRun.msg}
+                </div>
+              : null}
+        </div>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[340px_1fr]">
@@ -176,7 +195,7 @@ export function NcmDevicePage() {
             <Switch checked={f.alert_on_change} onCheckedChange={(v) => set({ alert_on_change: v })} />
           </div>
           {device.last_status === 'failed' && device.last_error && <div className="rounded border border-danger/30 bg-danger/10 p-2 text-[11px] text-danger">Last error: {device.last_error}</div>}
-          {device.last_success_at && <div className="text-[11px] text-muted">Last success: {relativeTime(device.last_success_at)}</div>}
+          {device.last_success_at && <div className="text-[11px] text-muted">Last checked: {relativeTime(device.last_success_at)}{device.last_capture && device.last_capture !== device.last_success_at ? ` · last change ${relativeTime(device.last_capture)}` : ''}</div>}
           <div className="flex flex-wrap gap-2 pt-1">
             <Button size="sm" disabled={!f.credential_id || saveEnroll.isPending} onClick={() => saveEnroll.mutate()}><Save className="h-3.5 w-3.5" /> Save</Button>
             {device.enrolled && <Button size="sm" variant="ghost" className="text-danger" onClick={() => unenroll.mutate()}>Remove</Button>}
@@ -192,7 +211,17 @@ export function NcmDevicePage() {
           <div className="max-h-72 space-y-1 overflow-auto">
             {vlist.map((v, i) => (
               <div key={v.id} className={`flex items-center justify-between rounded border px-2 py-1 text-xs ${selected?.id === v.id ? 'border-primary/50 bg-primary/5' : 'border-border'}`}>
-                <div><div>{relativeTime(v.captured_at)}</div><div className="text-muted">{v.line_count} lines · {v.size_bytes} B · {v.captured_by} · {v.hash}</div></div>
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    {relativeTime(v.captured_at)}
+                    {i === vlist.length - 1
+                      ? <span className="rounded-sm bg-muted/15 px-1 py-px text-[10px] font-medium text-muted">Baseline</span>
+                      : v.is_change
+                        ? <span className="rounded-sm bg-amber-500/15 px-1 py-px text-[10px] font-medium text-amber-600">Changed</span>
+                        : <span className="rounded-sm bg-emerald-500/15 px-1 py-px text-[10px] font-medium text-emerald-600">No change</span>}
+                  </div>
+                  <div className="text-muted">{v.line_count} lines · {v.size_bytes} B · {v.captured_by} · {v.hash}</div>
+                </div>
                 <div className="flex gap-0.5">
                   {i < vlist.length - 1 && (
                     <Button variant="ghost" size="icon" className="h-7 w-7" title="Compare to previous version" onClick={() => setCmp({ older: vlist[i + 1], newer: v })}><GitCompare className="h-3.5 w-3.5" /></Button>

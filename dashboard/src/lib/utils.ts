@@ -34,9 +34,17 @@ export function formatDuration(seconds: number): string {
 
 export function relativeTime(iso: string | null | undefined): string {
   if (!iso) return 'never'
-  const then = new Date(iso).getTime()
+  // Backend timestamps are always UTC. Most carry an explicit offset (Z / +00:00),
+  // but guard against any naive value (no T/Z/offset) being parsed as browser-local
+  // time — which would skew "x ago" by the viewer's timezone. Treat naive as UTC.
+  let s = iso
+  const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(s)
+  if (!hasTz) s = s.replace(' ', 'T') + 'Z'
+  const then = new Date(s).getTime()
   if (isNaN(then)) return '—'
   const diff = (Date.now() - then) / 1000
+  if (diff < 0) return 'just now'          // clock skew: don't show "future"
+  if (diff < 10) return 'just now'
   if (diff < 60) return `${Math.floor(diff)}s ago`
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`

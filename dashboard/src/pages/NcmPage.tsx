@@ -19,7 +19,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/Dialog'
 import { toast } from '@/components/ui/Toast'
 
-const PAGE_SIZE = 10
+const PAGE_SIZES = [10, 25, 50, 100]
 type Filter = { key: 'status' | 'type' | 'location' | 'vendor'; value: string } | null
 
 function statusKey(d: any): 'backed_up' | 'failed' | 'pending' | 'unconfigured' {
@@ -68,7 +68,11 @@ export function NcmPage() {
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<Filter>(null)
   const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(50)
+  const [customSize, setCustomSize] = useState('')
   const [profilesOpen, setProfilesOpen] = useState(false)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [assignOpen, setAssignOpen] = useState(false)
   const openDevice = (d: any) => navigate(`/ncm/${d.device_id}`)
 
   const { data: overview, isFetching, refetch } = useQuery<any>({
@@ -115,12 +119,40 @@ export function NcmPage() {
     })
   }, [devices, search, filter])
 
-  useEffect(() => { setPage(1) }, [search, filter])
-  const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
-  const pageRows = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  useEffect(() => { setPage(1) }, [search, filter, pageSize])
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize))
+  const pageRows = filtered.slice((page - 1) * pageSize, page * pageSize)
   const coverage = overview ? Math.round((overview.backed_up / Math.max(1, overview.total_devices)) * 100) : 0
   const pick = (key: Filter extends null ? never : NonNullable<Filter>['key'], value: string) =>
     setFilter((f) => (f && f.key === key && f.value === value ? null : { key, value }))
+
+  // ---- bulk selection ----
+  const toggleOne = (id: string) => setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+  const pageIds = pageRows.map((d) => d.device_id)
+  const allPageSelected = pageIds.length > 0 && pageIds.every((id) => selected.has(id))
+  const togglePage = () => setSelected((s) => {
+    const n = new Set(s)
+    if (allPageSelected) pageIds.forEach((id) => n.delete(id)); else pageIds.forEach((id) => n.add(id))
+    return n
+  })
+  const selectedDevices = useMemo(() => devices.filter((d) => selected.has(d.device_id)), [devices, selected])
+  const clearSelection = () => setSelected(new Set())
+
+  const bulkBackup = useMutation({
+    mutationFn: async () => {
+      const ids = selectedDevices.filter((d) => d.enrolled).map((d) => d.device_id)
+      const results = await Promise.allSettled(
+        ids.map((id) => api.post(`/devices/${id}/config-fetch`, null, { timeout: 240000 })),
+      )
+      const ok = results.filter((r) => r.status === 'fulfilled').length
+      return { ok, failed: results.length - ok, skipped: selectedDevices.length - ids.length }
+    },
+    onSuccess: (r) => {
+      toast.success(`Bulk backup: ${r.ok} ok, ${r.failed} failed${r.skipped ? `, ${r.skipped} skipped (no profile)` : ''}`)
+      qc.invalidateQueries({ queryKey: ['ncm'] })
+    },
+    onError: (e: any) => toast.error('Bulk backup failed', apiErrorMessage(e)),
+  })
 
   return (
     <div className="space-y-4">
@@ -170,18 +202,55 @@ export function NcmPage() {
                 </button>
               )}
               <span className="text-xs text-muted">{filtered.length} device{filtered.length === 1 ? '' : 's'}</span>
+              <div className="ml-auto flex items-center gap-1.5">
+                <span className="text-xs text-muted">Show</span>
+                <Select
+                  value={PAGE_SIZES.includes(pageSize) ? String(pageSize) : 'custom'}
+                  onValueChange={(v) => { if (v === 'custom') { setCustomSize(String(pageSize)) } else { setPageSize(Number(v)); setCustomSize('') } }}>
+                  <SelectTrigger className="h-8 w-[92px]"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {PAGE_SIZES.map((n) => <SelectItem key={n} value={String(n)}>{n} / page</SelectItem>)}
+                    <SelectItem value="custom">Custom…</SelectItem>
+                  </SelectContent>
+                </Select>
+                {!PAGE_SIZES.includes(pageSize) || customSize ? (
+                  <Input className="h-8 w-[72px]" type="number" min={1} max={1000} placeholder="rows"
+                    value={customSize} onChange={(e) => setCustomSize(e.target.value)}
+                    onBlur={() => { const n = Math.max(1, Math.min(1000, Number(customSize) || 50)); setPageSize(n); setCustomSize(String(n)) }}
+                    onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }} />
+                ) : null}
+              </div>
             </div>
+
+            {selected.size > 0 && (
+              <div className="flex flex-wrap items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
+                <span className="font-medium text-primary">{selected.size} selected</span>
+                <Button variant="outline" size="sm" disabled={!credentials.length} onClick={() => setAssignOpen(true)}>
+                  <KeyRound className="h-3.5 w-3.5" /> Assign profile
+                </Button>
+                <Button variant="outline" size="sm" disabled={bulkBackup.isPending || !selectedDevices.some((d) => d.enrolled)} onClick={() => bulkBackup.mutate()}>
+                  <DownloadCloud className={`h-3.5 w-3.5 ${bulkBackup.isPending ? 'animate-pulse' : ''}`} /> {bulkBackup.isPending ? 'Backing up…' : 'Run backup now'}
+                </Button>
+                <button onClick={clearSelection} className="ml-auto flex items-center gap-1 text-muted hover:text-text">Clear <X className="h-3 w-3" /></button>
+              </div>
+            )}
 
             <div className="overflow-hidden rounded-md border border-border">
               <Table>
                 <THead className="bg-surface2/50">
                   <Tr>
+                    <Th className="w-8">
+                      <input type="checkbox" className="h-3.5 w-3.5 cursor-pointer accent-primary" checked={allPageSelected} onChange={togglePage} title="Select page" />
+                    </Th>
                     <Th>Device</Th><Th>Type / Vendor</Th><Th>Location</Th><Th>Backup profile</Th><Th>Status</Th><Th className="text-right">Actions</Th>
                   </Tr>
                 </THead>
                 <TBody>
                   {pageRows.map((d) => (
-                    <Tr key={d.device_id} className="cursor-pointer" onClick={() => openDevice(d)}>
+                    <Tr key={d.device_id} className={`cursor-pointer ${selected.has(d.device_id) ? 'bg-primary/5' : ''}`} onClick={() => openDevice(d)}>
+                      <Td onClick={(e) => e.stopPropagation()}>
+                        <input type="checkbox" className="h-3.5 w-3.5 cursor-pointer accent-primary" checked={selected.has(d.device_id)} onChange={() => toggleOne(d.device_id)} />
+                      </Td>
                       <Td><div className="font-medium">{d.hostname}</div><div className="font-mono text-xs text-muted">{d.ip}</div></Td>
                       <Td className="text-xs text-muted">{d.device_type || '—'}{d.vendor ? ` · ${d.vendor}` : ''}</Td>
                       <Td className="text-xs text-muted">{d.location || '—'}</Td>
@@ -194,21 +263,24 @@ export function NcmPage() {
                       </Td>
                     </Tr>
                   ))}
-                  {!pageRows.length && <Tr><Td colSpan={6} className="py-10 text-center text-muted">No matching devices.</Td></Tr>}
+                  {!pageRows.length && <Tr><Td colSpan={7} className="py-10 text-center text-muted">No matching devices.</Td></Tr>}
                 </TBody>
               </Table>
             </div>
 
-            {pageCount > 1 && (
+            {filtered.length > 0 && (
               <div className="flex items-center justify-between text-xs text-muted">
-                <span>Page {page} of {pageCount}</span>
-                <div className="flex items-center gap-1">
-                  <Button variant="outline" size="icon" className="h-7 w-7" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}><ChevronLeft className="h-4 w-4" /></Button>
-                  {Array.from({ length: pageCount }).slice(0, 7).map((_, i) => (
-                    <Button key={i} variant={page === i + 1 ? 'default' : 'outline'} size="icon" className="h-7 w-7" onClick={() => setPage(i + 1)}>{i + 1}</Button>
-                  ))}
-                  <Button variant="outline" size="icon" className="h-7 w-7" disabled={page >= pageCount} onClick={() => setPage((p) => p + 1)}><ChevronRight className="h-4 w-4" /></Button>
-                </div>
+                <span>{(page - 1) * pageSize + 1}–{Math.min(page * pageSize, filtered.length)} of {filtered.length}</span>
+                {pageCount > 1 && (
+                  <div className="flex items-center gap-1">
+                    <Button variant="outline" size="icon" className="h-7 w-7" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}><ChevronLeft className="h-4 w-4" /></Button>
+                    {Array.from({ length: pageCount }).slice(0, 7).map((_, i) => (
+                      <Button key={i} variant={page === i + 1 ? 'default' : 'outline'} size="icon" className="h-7 w-7" onClick={() => setPage(i + 1)}>{i + 1}</Button>
+                    ))}
+                    {pageCount > 7 && <span className="px-1">…{pageCount}</span>}
+                    <Button variant="outline" size="icon" className="h-7 w-7" disabled={page >= pageCount} onClick={() => setPage((p) => p + 1)}><ChevronRight className="h-4 w-4" /></Button>
+                  </div>
+                )}
               </div>
             )}
           </CardContent>
@@ -227,7 +299,65 @@ export function NcmPage() {
       </div>
 
       <ProfilesDialog open={profilesOpen} onOpenChange={setProfilesOpen} credentials={credentials} />
+      <AssignProfileDialog
+        open={assignOpen} onOpenChange={setAssignOpen}
+        credentials={credentials} platforms={platformList}
+        devices={selectedDevices}
+        onDone={() => { clearSelection(); qc.invalidateQueries({ queryKey: ['ncm'] }) }}
+      />
     </div>
+  )
+}
+
+function AssignProfileDialog({ open, onOpenChange, credentials, platforms, devices, onDone }:
+  { open: boolean; onOpenChange: (o: boolean) => void; credentials: any[]; platforms: any[]; devices: any[]; onDone: () => void }) {
+  const [credId, setCredId] = useState('')
+  const [platform, setPlatform] = useState('__keep__')
+
+  useEffect(() => { if (open) { setCredId(credentials.find((c) => c.is_default)?.id || credentials[0]?.id || ''); setPlatform('__keep__') } }, [open, credentials])
+
+  const assign = useMutation({
+    mutationFn: async () => (await api.post('/ncm/bulk-assign', {
+      device_ids: devices.map((d) => d.device_id),
+      credential_id: credId,
+      platform: platform === '__keep__' ? null : platform,
+    })).data,
+    onSuccess: (r: any) => { toast.success(`Assigned profile to ${r.assigned} device${r.assigned === 1 ? '' : 's'}`); onOpenChange(false); onDone() },
+    onError: (e: any) => toast.error('Assign failed', apiErrorMessage(e)),
+  })
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader><DialogTitle>Assign connection profile</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          <p className="text-xs text-muted">Apply a CLI/SSH profile to <span className="font-medium text-text">{devices.length}</span> selected device{devices.length === 1 ? '' : 's'} and enable backup. Existing schedules are preserved.</p>
+          <FormField label="Connection profile">
+            <Select value={credId} onValueChange={setCredId}>
+              <SelectTrigger><SelectValue placeholder="Choose a profile" /></SelectTrigger>
+              <SelectContent>
+                {credentials.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}{c.is_default ? ' (default)' : ''}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </FormField>
+          <FormField label="Platform">
+            <Select value={platform} onValueChange={setPlatform}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__keep__">Keep current / auto-detect</SelectItem>
+                {platforms.map((p) => <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          </FormField>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button disabled={!credId || assign.isPending} onClick={() => assign.mutate()}>
+            <KeyRound className="h-3.5 w-3.5" /> {assign.isPending ? 'Assigning…' : `Assign to ${devices.length}`}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

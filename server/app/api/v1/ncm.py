@@ -224,24 +224,32 @@ async def _save_config_version(db: AsyncSession, device_id, config_type: str,
                 ORDER BY captured_at DESC LIMIT 1"""),
         {"d": device_id, "t": config_type},
     )).first()
-    # No real change if the normalized config matches (mask out re-encrypted
-    # secrets / rotating serials). Fall back to raw hash for pre-norm_hash rows.
-    if latest and ((latest.norm_hash and latest.norm_hash == nhash)
-                   or (not latest.norm_hash and latest.content_hash == chash)):
-        return {"is_change": False, "version_id": str(latest.id)}
+    # Determine whether this snapshot differs from the previous one. Compare on
+    # the NORMALIZED config (mask out re-encrypted secrets / rotating serials);
+    # fall back to the raw hash for pre-norm_hash rows. The first-ever capture is
+    # treated as a change.
+    if latest is None:
+        is_change = True
+    elif latest.norm_hash:
+        is_change = latest.norm_hash != nhash
+    else:
+        is_change = latest.content_hash != chash
+    # Always STORE the snapshot (even when unchanged) so the version list shows a
+    # full backup history; the is_change flag lets the UI tag each as
+    # "Changed" / "No change".
     row = (await db.execute(
         text("""INSERT INTO device_configs
-                (device_id, config_type, content, content_hash, norm_hash, size_bytes, line_count, captured_by, source_note)
-                VALUES (:d, :t, :c, :h, :nh, :sz, :lc, :by, :note)
+                (device_id, config_type, content, content_hash, norm_hash, size_bytes, line_count, captured_by, source_note, is_change)
+                VALUES (:d, :t, :c, :h, :nh, :sz, :lc, :by, :note, :ic)
                 RETURNING id, captured_at"""),
         {"d": device_id, "t": config_type, "c": content, "h": chash, "nh": nhash,
          "sz": len(content.encode("utf-8")), "lc": content.count("\n") + 1,
-         "by": captured_by, "note": source_note},
+         "by": captured_by, "note": source_note, "ic": is_change},
     )).first()
-    # A new version that supersedes a prior one is a config CHANGE — raise an
-    # alert (gated by the device's alert_on_change toggle). The very first
-    # capture for a device is not a change, so it is skipped.
-    if latest is not None:
+    # A new version that actually differs from a prior one is a config CHANGE —
+    # raise an alert (gated by the device's alert_on_change toggle). Unchanged
+    # snapshots and the very first capture do not alert.
+    if latest is not None and is_change:
         await _raise_change_alert(db, device_id, config_type, latest, str(row.id), content, captured_by)
     # Retention: keep only the N newest versions (default 5); prune older ones.
     keep = (await db.execute(
@@ -253,7 +261,7 @@ async def _save_config_version(db: AsyncSession, device_id, config_type: str,
                     ORDER BY captured_at DESC LIMIT :n)"""),
         {"d": device_id, "t": config_type, "n": keep},
     )
-    return {"is_change": True, "version_id": str(row.id), "captured_at": row.captured_at.isoformat()}
+    return {"is_change": is_change, "version_id": str(row.id), "captured_at": row.captured_at.isoformat()}
 
 
 async def _raise_change_alert(db: AsyncSession, device_id, config_type, prior,
@@ -431,6 +439,42 @@ async def unenroll_device(device_id: UUID, db: AsyncSession = Depends(get_db),
     await db.commit()
 
 
+class BulkAssign(BaseModel):
+    device_ids: list[UUID] = Field(min_length=1, max_length=500)
+    credential_id: UUID
+    platform: Optional[str] = Field(default=None, max_length=40)
+
+
+@router.post("/bulk-assign")
+async def bulk_assign_profile(data: BulkAssign, db: AsyncSession = Depends(get_db),
+                              user: User = Depends(require_operator_user)):
+    """Assign a connection profile to many devices at once and enable backup.
+    Enrolls devices that are not yet configured (with defaults) and updates the
+    credential (and optionally the platform) on those already enrolled, without
+    disturbing their existing schedule / retention settings."""
+    cred = (await db.execute(
+        text("SELECT id FROM ncm_credentials WHERE id=:c"), {"c": data.credential_id})).first()
+    if not cred:
+        raise HTTPException(status_code=404, detail="Connection profile not found")
+    assigned = 0
+    for did in data.device_ids:
+        dev = (await db.execute(text("SELECT id FROM devices WHERE id=:id"), {"id": did})).first()
+        if not dev:
+            continue
+        await db.execute(
+            text("""INSERT INTO device_ncm (device_id, credential_id, platform, enabled)
+                    VALUES (:d, :c, COALESCE(:p, 'autodetect'), true)
+                    ON CONFLICT (device_id) DO UPDATE
+                      SET credential_id = :c,
+                          platform = COALESCE(:p, device_ncm.platform),
+                          enabled = true"""),
+            {"d": did, "c": data.credential_id, "p": data.platform},
+        )
+        assigned += 1
+    await db.commit()
+    return {"assigned": assigned, "requested": len(data.device_ids)}
+
+
 class _FetchError(Exception):
     pass
 
@@ -561,7 +605,7 @@ async def list_configs(device_id: UUID, limit: int = Query(default=50, ge=1, le=
                        db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     rows = (await db.execute(
         text("""SELECT id, config_type, content_hash, size_bytes, line_count,
-                       captured_at, captured_by, source_note
+                       captured_at, captured_by, source_note, is_change
                 FROM device_configs WHERE device_id = :d
                 ORDER BY captured_at DESC LIMIT :lim"""),
         {"d": device_id, "lim": limit},
@@ -570,7 +614,7 @@ async def list_configs(device_id: UUID, limit: int = Query(default=50, ge=1, le=
         "id": str(r.id), "config_type": r.config_type, "hash": r.content_hash[:12],
         "size_bytes": r.size_bytes, "line_count": r.line_count,
         "captured_at": r.captured_at.isoformat(), "captured_by": r.captured_by,
-        "source_note": r.source_note,
+        "source_note": r.source_note, "is_change": r.is_change,
     } for r in rows], "count": len(rows)}
 
 
