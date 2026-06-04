@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Save, DownloadCloud, Download, Eye, GitCompare, FileCode, Clock } from 'lucide-react'
+import { ArrowLeft, Save, DownloadCloud, Download, Eye, GitCompare, FileCode, Clock, Loader2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { relativeTime, apiErrorMessage } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
@@ -11,7 +11,10 @@ import { Input } from '@/components/ui/Input'
 import { Switch } from '@/components/ui/Switch'
 import { FormField } from '@/components/ui/FormField'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
 import { toast } from '@/components/ui/Toast'
+
+const WEEKDAYS = [['Sun', 0], ['Mon', 1], ['Tue', 2], ['Wed', 3], ['Thu', 4], ['Fri', 5], ['Sat', 6]] as const
 
 function statusKey(d: any) {
   if (!d?.enrolled) return 'unconfigured'
@@ -43,6 +46,7 @@ export function NcmDevicePage() {
   const qc = useQueryClient()
   const [view, setView] = useState<'none' | 'config' | 'diff'>('none')
   const [selected, setSelected] = useState<any>(null)
+  const [cmp, setCmp] = useState<{ older: any; newer: any } | null>(null)
 
   const { data: overview } = useQuery<any>({ queryKey: ['ncm', 'overview'], queryFn: async () => (await api.get('/ncm/overview')).data, refetchInterval: 30000 })
   const device = (overview?.data || []).find((d: any) => d.device_id === deviceId)
@@ -55,6 +59,7 @@ export function NcmDevicePage() {
   const vlist: any[] = versions?.data || []
   const { data: diff } = useQuery<any>({ queryKey: ['ncm', 'diff', deviceId, vlist[0]?.id, vlist[1]?.id], queryFn: async () => (await api.get(`/devices/${deviceId}/configs-diff?a=${vlist[1].id}&b=${vlist[0].id}`)).data, enabled: vlist.length >= 2 })
   const { data: viewContent } = useQuery<any>({ queryKey: ['ncm', 'view', selected?.id], queryFn: async () => (await api.get(`/devices/${deviceId}/configs/${selected.id}`)).data, enabled: !!selected })
+  const { data: cmpDiff } = useQuery<any>({ queryKey: ['ncm', 'cmp', deviceId, cmp?.older?.id, cmp?.newer?.id], queryFn: async () => (await api.get(`/devices/${deviceId}/configs-diff?a=${cmp!.older.id}&b=${cmp!.newer.id}`)).data, enabled: !!cmp })
 
   const def = credentials.find((c) => c.is_default)
   const [form, setForm] = useState<any>(null)
@@ -63,10 +68,15 @@ export function NcmDevicePage() {
     platform: device?.platform || 'autodetect',
     enabled: true,
     schedule_enabled: !!device?.schedule_enabled,
+    schedule_type: device?.schedule_type || 'interval',
     schedule_interval_hours: device?.schedule_interval_hours || 24,
+    schedule_time: device?.schedule_time || '02:00',
+    schedule_days: device?.schedule_days || [1, 2, 3, 4, 5],
+    keep_versions: device?.keep_versions || 5,
     alert_on_change: device?.alert_on_change !== false,
   }
   const set = (patch: any) => setForm({ ...f, ...patch })
+  const toggleDay = (d: number) => set({ schedule_days: f.schedule_days.includes(d) ? f.schedule_days.filter((x: number) => x !== d) : [...f.schedule_days, d].sort() })
 
   const inv = () => qc.invalidateQueries({ queryKey: ['ncm'] })
   const saveEnroll = useMutation({ mutationFn: async () => (await api.put(`/devices/${deviceId}/ncm`, f)).data, onSuccess: () => { toast.success('Backup settings saved'); inv() }, onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)) })
@@ -99,7 +109,11 @@ export function NcmDevicePage() {
           </h1>
           <p className="text-xs text-muted">{[device.ip, device.device_type, device.vendor, device.location].filter(Boolean).join(' · ')}</p>
         </div>
-        <Button variant="outline" disabled={!device.enrolled || fetchNow.isPending} onClick={() => fetchNow.mutate()}><DownloadCloud className="h-4 w-4" /> Backup now (SSH)</Button>
+        <Button variant="outline" disabled={!device.enrolled || fetchNow.isPending} onClick={() => fetchNow.mutate()}>
+          {fetchNow.isPending
+            ? <><Loader2 className="h-4 w-4 animate-spin" /> Backing up…</>
+            : <><DownloadCloud className="h-4 w-4" /> Backup now (SSH)</>}
+        </Button>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[340px_1fr]">
@@ -122,7 +136,41 @@ export function NcmDevicePage() {
             <span className="flex items-center gap-1 text-xs font-medium uppercase tracking-wider text-muted"><Clock className="h-3.5 w-3.5" /> Scheduled backup</span>
             <Switch checked={f.schedule_enabled} onCheckedChange={(v) => set({ schedule_enabled: v })} />
           </div>
-          {f.schedule_enabled && <FormField label="Every (hours)" hint="An hourly job backs up devices when due."><Input type="number" min={1} max={720} value={f.schedule_interval_hours} onChange={(e) => set({ schedule_interval_hours: Number(e.target.value) })} /></FormField>}
+          {f.schedule_enabled && (
+            <div className="space-y-2 rounded-md border border-border p-2">
+              <FormField label="Frequency">
+                <Select value={f.schedule_type} onValueChange={(v) => set({ schedule_type: v })}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="interval">Every N hours</SelectItem>
+                    <SelectItem value="daily">Daily at a time</SelectItem>
+                    <SelectItem value="weekly">Weekly on days</SelectItem>
+                  </SelectContent>
+                </Select>
+              </FormField>
+              {f.schedule_type === 'interval' && (
+                <FormField label="Every (hours)"><Input type="number" min={1} max={720} value={f.schedule_interval_hours} onChange={(e) => set({ schedule_interval_hours: Number(e.target.value) })} /></FormField>
+              )}
+              {(f.schedule_type === 'daily' || f.schedule_type === 'weekly') && (
+                <FormField label="At (server time, 24h)"><Input type="time" value={f.schedule_time} onChange={(e) => set({ schedule_time: e.target.value })} /></FormField>
+              )}
+              {f.schedule_type === 'weekly' && (
+                <div>
+                  <div className="mb-1 text-xs text-muted">On days</div>
+                  <div className="flex flex-wrap gap-1">
+                    {WEEKDAYS.map(([lbl, d]) => (
+                      <button key={d} type="button" onClick={() => toggleDay(d as number)}
+                        className={`rounded px-2 py-1 text-xs font-medium ${f.schedule_days.includes(d) ? 'bg-primary text-white' : 'border border-border text-muted hover:text-text'}`}>{lbl}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <p className="text-[11px] text-muted">A job runs hourly and backs up devices when their schedule is due.</p>
+            </div>
+          )}
+          <FormField label="Keep versions" hint="Older versions beyond this are auto-deleted from the server.">
+            <Input type="number" min={1} max={100} value={f.keep_versions} onChange={(e) => set({ keep_versions: Number(e.target.value) })} />
+          </FormField>
           <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
             <span className="text-xs font-medium uppercase tracking-wider text-muted">Alert on config change</span>
             <Switch checked={f.alert_on_change} onCheckedChange={(v) => set({ alert_on_change: v })} />
@@ -142,10 +190,13 @@ export function NcmDevicePage() {
             {vlist.length >= 2 && <Button size="sm" variant="outline" onClick={() => { setView(view === 'diff' ? 'none' : 'diff'); setSelected(null) }}><GitCompare className="h-3.5 w-3.5" /> Diff latest{diff ? ` (+${diff.added} −${diff.removed})` : ''}</Button>}
           </div>
           <div className="max-h-72 space-y-1 overflow-auto">
-            {vlist.map((v) => (
+            {vlist.map((v, i) => (
               <div key={v.id} className={`flex items-center justify-between rounded border px-2 py-1 text-xs ${selected?.id === v.id ? 'border-primary/50 bg-primary/5' : 'border-border'}`}>
                 <div><div>{relativeTime(v.captured_at)}</div><div className="text-muted">{v.line_count} lines · {v.size_bytes} B · {v.captured_by} · {v.hash}</div></div>
                 <div className="flex gap-0.5">
+                  {i < vlist.length - 1 && (
+                    <Button variant="ghost" size="icon" className="h-7 w-7" title="Compare to previous version" onClick={() => setCmp({ older: vlist[i + 1], newer: v })}><GitCompare className="h-3.5 w-3.5" /></Button>
+                  )}
                   <Button variant="ghost" size="icon" className="h-7 w-7" title="View" onClick={() => { setSelected(v); setView('config') }}><Eye className="h-3.5 w-3.5" /></Button>
                   <Button variant="ghost" size="icon" className="h-7 w-7" title="Download" onClick={() => download(v)}><Download className="h-3.5 w-3.5" /></Button>
                 </div>
@@ -171,6 +222,26 @@ export function NcmDevicePage() {
           <DiffView diff={diff?.diff || ''} />
         </CardContent></Card>
       )}
+
+      {/* per-version comparison popup */}
+      <Dialog open={!!cmp} onOpenChange={(o) => !o && setCmp(null)}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <GitCompare className="h-4 w-4" /> Config changes
+              {cmpDiff ? <span className="text-xs font-normal text-muted">(+{cmpDiff.added} −{cmpDiff.removed})</span> : null}
+            </DialogTitle>
+          </DialogHeader>
+          {cmp && (
+            <div className="text-[11px] text-muted">
+              {relativeTime(cmp.older.captured_at)} ({cmp.older.hash}) → {relativeTime(cmp.newer.captured_at)} ({cmp.newer.hash})
+            </div>
+          )}
+          {cmpDiff && cmpDiff.identical
+            ? <div className="text-xs text-muted">No differences (after masking volatile fields).</div>
+            : <DiffView diff={cmpDiff?.diff || 'Loading…'} />}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

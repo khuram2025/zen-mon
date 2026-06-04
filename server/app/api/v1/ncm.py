@@ -243,6 +243,16 @@ async def _save_config_version(db: AsyncSession, device_id, config_type: str,
     # capture for a device is not a change, so it is skipped.
     if latest is not None:
         await _raise_change_alert(db, device_id, config_type, latest, str(row.id), content, captured_by)
+    # Retention: keep only the N newest versions (default 5); prune older ones.
+    keep = (await db.execute(
+        text("SELECT keep_versions FROM device_ncm WHERE device_id = :d"), {"d": device_id})).scalar() or 5
+    await db.execute(
+        text("""DELETE FROM device_configs
+                WHERE device_id = :d AND config_type = :t AND id NOT IN (
+                    SELECT id FROM device_configs WHERE device_id = :d AND config_type = :t
+                    ORDER BY captured_at DESC LIMIT :n)"""),
+        {"d": device_id, "t": config_type, "n": keep},
+    )
     return {"is_change": True, "version_id": str(row.id), "captured_at": row.captured_at.isoformat()}
 
 
@@ -375,7 +385,11 @@ class NcmEnroll(BaseModel):
     platform: str = Field(default="autodetect", max_length=40)
     enabled: bool = True
     schedule_enabled: bool = False
+    schedule_type: str = Field(default="interval", pattern="^(interval|daily|weekly)$")
     schedule_interval_hours: int = Field(default=24, ge=1, le=720)
+    schedule_time: Optional[str] = None          # "HH:MM" for daily/weekly
+    schedule_days: Optional[list[int]] = None     # weekly: 0=Sun..6=Sat
+    keep_versions: int = Field(default=5, ge=1, le=100)
     alert_on_change: bool = True
 
 
@@ -385,14 +399,21 @@ async def enroll_device(device_id: UUID, data: NcmEnroll, db: AsyncSession = Dep
     dev = (await db.execute(text("SELECT id FROM devices WHERE id=:id"), {"id": device_id})).first()
     if not dev:
         raise HTTPException(status_code=404, detail="Device not found")
+    days = data.schedule_days if data.schedule_type == "weekly" else None
+    sched_time = data.schedule_time if data.schedule_type in ("daily", "weekly") else None
     await db.execute(
-        text("""INSERT INTO device_ncm (device_id, credential_id, platform, enabled, schedule_enabled, schedule_interval_hours, alert_on_change)
-                VALUES (:d, :c, :p, :e, :s, :h, :ac)
+        text("""INSERT INTO device_ncm
+                  (device_id, credential_id, platform, enabled, schedule_enabled, schedule_type,
+                   schedule_interval_hours, schedule_time, schedule_days, keep_versions, alert_on_change)
+                VALUES (:d, :c, :p, :e, :s, :st, :h, CAST(:tm AS time), :days, :kv, :ac)
                 ON CONFLICT (device_id) DO UPDATE
-                  SET credential_id=:c, platform=:p, enabled=:e, schedule_enabled=:s, schedule_interval_hours=:h, alert_on_change=:ac"""),
+                  SET credential_id=:c, platform=:p, enabled=:e, schedule_enabled=:s, schedule_type=:st,
+                      schedule_interval_hours=:h, schedule_time=CAST(:tm AS time), schedule_days=:days,
+                      keep_versions=:kv, alert_on_change=:ac"""),
         {"d": device_id, "c": data.credential_id, "p": data.platform,
-         "e": data.enabled, "s": data.schedule_enabled, "h": data.schedule_interval_hours,
-         "ac": data.alert_on_change},
+         "e": data.enabled, "s": data.schedule_enabled, "st": data.schedule_type,
+         "h": data.schedule_interval_hours, "tm": sched_time, "days": days,
+         "kv": data.keep_versions, "ac": data.alert_on_change},
     )
     await db.commit()
     return {"device_id": str(device_id), "enrolled": True}
@@ -480,8 +501,21 @@ async def run_scheduled(db: AsyncSession = Depends(get_db)):
     due = (await db.execute(text("""
         SELECT device_id FROM device_ncm
         WHERE schedule_enabled = true AND enabled = true AND credential_id IS NOT NULL
-          AND (last_success_at IS NULL
-               OR last_success_at < NOW() - make_interval(hours => schedule_interval_hours))
+          AND (
+            -- every N hours
+            (schedule_type = 'interval'
+               AND (last_success_at IS NULL
+                    OR last_success_at < NOW() - make_interval(hours => schedule_interval_hours)))
+            -- daily at a time (server local time), once per day
+            OR (schedule_type = 'daily' AND schedule_time IS NOT NULL
+               AND LOCALTIME >= schedule_time
+               AND (last_success_at IS NULL OR last_success_at::date < CURRENT_DATE))
+            -- weekly on chosen days at a time, once per day
+            OR (schedule_type = 'weekly' AND schedule_time IS NOT NULL AND schedule_days IS NOT NULL
+               AND EXTRACT(DOW FROM NOW())::int = ANY(schedule_days)
+               AND LOCALTIME >= schedule_time
+               AND (last_success_at IS NULL OR last_success_at::date < CURRENT_DATE))
+          )
     """))).fetchall()
     ok, failed = 0, 0
     for r in due:
@@ -578,7 +612,8 @@ async def ncm_overview(db: AsyncSession = Depends(get_db), user: User = Depends(
     rows = (await db.execute(text("""
         SELECT d.id, d.hostname, host(d.ip_address) AS ip, d.device_type, d.vendor, d.location,
                n.credential_id, n.platform, n.enabled AS ncm_enabled, n.schedule_enabled,
-               n.schedule_interval_hours, n.alert_on_change,
+               n.schedule_interval_hours, n.schedule_type, n.schedule_time, n.schedule_days,
+               n.keep_versions, n.alert_on_change,
                n.last_status, n.last_error, n.last_attempt_at, n.last_success_at,
                cr.name AS credential_name,
                c.versions, c.last_capture, c.last_by
@@ -609,6 +644,10 @@ async def ncm_overview(db: AsyncSession = Depends(get_db), user: User = Depends(
             "platform": r.platform,
             "schedule_enabled": r.schedule_enabled,
             "schedule_interval_hours": r.schedule_interval_hours,
+            "schedule_type": r.schedule_type,
+            "schedule_time": r.schedule_time.strftime("%H:%M") if r.schedule_time else None,
+            "schedule_days": list(r.schedule_days) if r.schedule_days else None,
+            "keep_versions": r.keep_versions,
             "alert_on_change": r.alert_on_change,
             "last_status": r.last_status,
             "last_error": r.last_error,
