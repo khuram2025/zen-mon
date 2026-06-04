@@ -19,7 +19,9 @@ import {
   Layers,
   Loader2,
   Maximize2,
+  Minimize2,
   Minus,
+  Monitor,
   MousePointer2,
   Pencil,
   Plus,
@@ -28,6 +30,7 @@ import {
   Save,
   Search,
   Spline,
+  Sparkles,
   Trash2,
 } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -122,6 +125,18 @@ type ManualMapLink = {
   label?: string | null
   link_type: string
   metadata?: LinkMetadata | null
+}
+
+type SuggestedLink = {
+  source_node_id: string
+  target_node_id: string
+  source_hostname: string
+  target_hostname: string
+  src_interface: string | null
+  dst_interface: string | null
+  protocol: string | null
+  confidence: number | null
+  physical_links: number
 }
 
 type ManualMapDetail = ManualMapListItem & {
@@ -452,6 +467,8 @@ export function ManualMapsPage() {
   const [newMap, setNewMap] = useState({ name: '', description: '' })
   const [paletteSearch, setPaletteSearch] = useState('')
   const [paletteStatus, setPaletteStatus] = useState<'all' | NodeStatus>('all')
+  const [noc, setNoc] = useState(false)          // NOC fullscreen / video-wall mode
+  const [rotate, setRotate] = useState(false)    // auto-rotate through maps in NOC mode
 
   // Canvas state
   const [view, setView] = useState({ x: 0, y: 0, zoom: 1 })
@@ -505,6 +522,16 @@ export function ManualMapsPage() {
     refetchInterval: mode === 'live' ? 10_000 : 30_000,
   })
   const liveById = liveLinksQuery.data?.data || {}
+
+  // LLDP/CDP link assistance — discovered adjacencies among placed devices
+  // that aren't manually linked yet. Surfaced as "ghost" links + one-click add.
+  const suggestedLinksQuery = useQuery<{ data: SuggestedLink[]; count: number }>({
+    queryKey: ['manual-map-suggested', selectedMapId],
+    enabled: !!selectedMapId && mode === 'design',
+    queryFn: async () => (await api.get(`/maps/${selectedMapId}/suggested-links`)).data,
+    refetchInterval: 20_000,
+  })
+  const suggestedLinks = mode === 'design' ? (suggestedLinksQuery.data?.data || []) : []
 
   const detail = mapQuery.data || null
   const nodes = detail?.nodes || []
@@ -570,6 +597,30 @@ export function ManualMapsPage() {
   useEffect(() => {
     if (selectedLinkId && !links.some((l) => l.id === selectedLinkId)) setSelectedLinkId(null)
   }, [links, selectedLinkId])
+
+  // NOC mode forces live (weathermap), hides the app sidebar for a clean wall
+  // display, and is exited with Esc.
+  useEffect(() => {
+    if (!noc) { setRotate(false); return }
+    setMode('live')
+    const aside = document.querySelector('aside') as HTMLElement | null
+    const prev = aside?.style.display ?? ''
+    if (aside) aside.style.display = 'none'
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') setNoc(false) }
+    window.addEventListener('keydown', h)
+    return () => { window.removeEventListener('keydown', h); if (aside) aside.style.display = prev }
+  }, [noc])
+
+  // Multi-map rotation/carousel: cycle through maps while NOC + rotate are on.
+  useEffect(() => {
+    if (!noc || !rotate || maps.length < 2) return
+    const id = setInterval(() => {
+      const idx = maps.findIndex((m) => m.id === selectedMapId)
+      const next = maps[(idx + 1) % maps.length]
+      if (next) selectMap(next.id)
+    }, 15_000)
+    return () => clearInterval(id)
+  }, [noc, rotate, maps, selectedMapId])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -694,6 +745,40 @@ export function ManualMapsPage() {
       invalidateMap(selectedMapId)
     },
     onError: (e: any) => toast.error('Link failed', apiErrorMessage(e)),
+  })
+
+  // LLDP/CDP link assistance — add a single discovered link, or all at once.
+  const invalidateSuggested = () =>
+    qc.invalidateQueries({ queryKey: ['manual-map-suggested', selectedMapId] })
+
+  const addDiscoveredLink = useMutation({
+    mutationFn: async (s: SuggestedLink) => {
+      if (!selectedMapId) throw new Error('No map selected')
+      return (await api.post(`/maps/${selectedMapId}/links`, {
+        source_node_id: s.source_node_id,
+        target_node_id: s.target_node_id,
+        link_type: 'ethernet',
+        label: (s.protocol || 'lldp').toUpperCase(),
+        metadata: {
+          kind: 'ethernet', discovered: true, protocol: s.protocol,
+          src_interface: s.src_interface, dst_interface: s.dst_interface,
+        },
+      })).data
+    },
+    onSuccess: () => { toast.success('Discovered link added'); invalidateMap(selectedMapId); invalidateSuggested() },
+    onError: (e: any) => toast.error('Add failed', apiErrorMessage(e)),
+  })
+
+  const autoConnect = useMutation({
+    mutationFn: async () => {
+      if (!selectedMapId) throw new Error('No map selected')
+      return (await api.post(`/maps/${selectedMapId}/auto-connect`)).data
+    },
+    onSuccess: (r: any) => {
+      toast.success(`Connected ${r.created} discovered link${r.created === 1 ? '' : 's'}`)
+      invalidateMap(selectedMapId); invalidateSuggested()
+    },
+    onError: (e: any) => toast.error('Auto-connect failed', apiErrorMessage(e)),
   })
 
   const updateLink = useMutation({
@@ -956,8 +1041,12 @@ export function ManualMapsPage() {
   const showCanvasCursor = mode === 'live' ? 'cursor-grab' : panFrom ? 'cursor-grabbing' : inConnectFlow ? 'cursor-crosshair' : 'cursor-default'
 
   return (
-    <div className="-m-5 flex h-[calc(100vh-2.75rem)] flex-col overflow-hidden bg-surface2/30">
+    <div className={cn(
+      'flex flex-col overflow-hidden bg-surface2/30',
+      noc ? 'fixed inset-0 z-[60] h-screen' : '-m-5 h-[calc(100vh-2.75rem)]',
+    )}>
       {/* ── Top bar ───────────────────────────────────────── */}
+      {!noc && (
       <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border bg-surface px-3">
         <div className="flex items-center gap-2">
           <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary/15 text-primary">
@@ -1024,11 +1113,51 @@ export function ManualMapsPage() {
             <GitBranch className="h-4 w-4" />
           </Link>
         </Button>
+        <Button variant="ghost" size="icon" onClick={() => setNoc(true)} disabled={!selectedMapId} title="NOC fullscreen (video wall)">
+          <Monitor className="h-4 w-4" />
+        </Button>
       </div>
+      )}
+
+      {/* ── Slim NOC bar (video-wall mode) ───────────────── */}
+      {noc && (
+        <div className="flex h-11 shrink-0 items-center gap-3 border-b border-border bg-surface px-4">
+          <span className="text-sm font-semibold text-text">{currentMap?.name || 'Map'}</span>
+          <span className="text-xs text-muted">{nodes.length} devices · {links.length} links</span>
+          <div className="flex items-center gap-1.5">
+            <StatusChip label="Up" count={statusTotals.up || 0} tone="success" />
+            <StatusChip label="Degraded" count={degradedCount} tone="warning" />
+            <StatusChip label="Down" count={downCount} tone="danger" />
+          </div>
+          <div className="flex-1" />
+          {maps.length > 1 && (
+            <>
+              <button
+                type="button"
+                onClick={() => setRotate((r) => !r)}
+                className={cn('flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition-colors',
+                  rotate ? 'border-success/40 bg-success/15 text-success' : 'border-border text-muted hover:text-text')}
+                title="Auto-rotate through maps every 15s"
+              >
+                <Radio className={cn('h-3.5 w-3.5', rotate && 'animate-pulse-soft')} /> {rotate ? 'Rotating' : 'Rotate maps'}
+              </button>
+              <Button variant="ghost" size="icon" title="Previous map" onClick={() => {
+                const i = maps.findIndex((m) => m.id === selectedMapId); const p = maps[(i - 1 + maps.length) % maps.length]; if (p) selectMap(p.id)
+              }}><ChevronLeft className="h-4 w-4" /></Button>
+              <Button variant="ghost" size="icon" title="Next map" onClick={() => {
+                const i = maps.findIndex((m) => m.id === selectedMapId); const n = maps[(i + 1) % maps.length]; if (n) selectMap(n.id)
+              }}><ChevronRight className="h-4 w-4" /></Button>
+            </>
+          )}
+          <div className="mx-1 h-6 w-px bg-border/60" />
+          <Button variant="ghost" size="icon" onClick={() => setNoc(false)} title="Exit NOC mode (Esc)"><Minimize2 className="h-4 w-4" /></Button>
+        </div>
+      )}
 
       {/* ── Main: 3-col grid ─────────────────────────────── */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left palette */}
+        {/* Left palette (hidden in NOC mode) */}
+        {!noc && (
         <PaletteRail
           open={paletteOpen}
           toggle={() => setPaletteOpen((v) => !v)}
@@ -1041,6 +1170,7 @@ export function ManualMapsPage() {
           loading={devicesQuery.isLoading}
           disabled={!selectedMapId || mode === 'live'}
         />
+        )}
 
         {/* Canvas */}
         <div className="relative flex-1 overflow-hidden">
@@ -1084,6 +1214,20 @@ export function ManualMapsPage() {
               <div className="pointer-events-none absolute right-3 top-3 rounded-md border border-info/40 bg-info/10 px-3 py-1.5 text-[11px] text-info">
                 {connectFrom ? 'Click a target node to create the link · Esc to cancel' : 'Drag from one node to another to link them'}
               </div>
+            )}
+
+            {/* LLDP/CDP link assistance — auto-connect all discovered links */}
+            {mode === 'design' && suggestedLinks.length > 0 && (
+              <button
+                type="button"
+                onClick={() => autoConnect.mutate()}
+                disabled={autoConnect.isPending}
+                className="pointer-events-auto absolute left-3 top-16 flex items-center gap-1.5 rounded-lg border border-teal-400/40 bg-teal-500/15 px-2.5 py-1.5 text-[11px] font-medium text-teal-200 shadow-md backdrop-blur transition-colors hover:bg-teal-500/25 disabled:opacity-60"
+                title="Draw all real LLDP/CDP links between devices placed on this map"
+              >
+                {autoConnect.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                Auto-connect {suggestedLinks.length} discovered link{suggestedLinks.length === 1 ? '' : 's'}
+              </button>
             )}
           </div>
 
@@ -1215,6 +1359,30 @@ export function ManualMapsPage() {
                         />
                       )}
                     </g>
+                  )
+                })}
+
+                {/* Discovered (LLDP/CDP) link suggestions — faint dashed "ghost"
+                    links between placed devices that have a real adjacency but
+                    no manual link yet. Click the chip (HTML layer below) to add. */}
+                {suggestedLinks.map((s) => {
+                  const source = nodeMap.get(s.source_node_id)
+                  const target = nodeMap.get(s.target_node_id)
+                  if (!source || !target) return null
+                  const a = positionFor(source)
+                  const b = positionFor(target)
+                  const p = edgePath(defaultShape, a.x_pct, a.y_pct, b.x_pct, b.y_pct)
+                  return (
+                    <path
+                      key={`ghost-${s.source_node_id}-${s.target_node_id}`}
+                      d={p.d}
+                      fill="none"
+                      vectorEffect="non-scaling-stroke"
+                      strokeWidth={2}
+                      strokeDasharray="1 2.5"
+                      strokeLinecap="round"
+                      className="stroke-teal-400 opacity-60 nm-flow-slow"
+                    />
                   )
                 })}
 
@@ -1364,6 +1532,31 @@ export function ManualMapsPage() {
                 )
               })}
 
+              {/* Discovered-link "+ Add" chips — one per suggestion, at mid-link.
+                  Click to instantiate the real LLDP/CDP link (interface-bound). */}
+              {suggestedLinks.map((s) => {
+                const source = nodeMap.get(s.source_node_id)
+                const target = nodeMap.get(s.target_node_id)
+                if (!source || !target) return null
+                const a = positionFor(source)
+                const b = positionFor(target)
+                const p = edgePath(defaultShape, a.x_pct, a.y_pct, b.x_pct, b.y_pct)
+                if (view.zoom < 0.55) return null
+                return (
+                  <button
+                    key={`sugg-${s.source_node_id}-${s.target_node_id}`}
+                    type="button"
+                    className="absolute z-20 flex -translate-x-1/2 -translate-y-1/2 items-center gap-1 rounded-full border border-teal-400/50 bg-teal-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-teal-200 shadow-sm backdrop-blur transition-colors hover:border-teal-300 hover:bg-teal-500/40"
+                    style={{ left: `${p.mid.x}%`, top: `${p.mid.y}%` }}
+                    title={`Discovered ${(s.protocol || '').toUpperCase()} link · ${s.src_interface || '?'} ⇄ ${s.dst_interface || '?'}${s.physical_links > 1 ? ` · ${s.physical_links} physical` : ''}\nClick to add`}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => { e.stopPropagation(); addDiscoveredLink.mutate(s) }}
+                  >
+                    <Plus className="h-2.5 w-2.5" /> {(s.protocol || 'link').toUpperCase()}
+                  </button>
+                )
+              })}
+
               {/* Nodes */}
               {nodes.map((node) => (
                 <NodeCard
@@ -1434,6 +1627,7 @@ export function ManualMapsPage() {
         </div>
 
         {/* Right inspector */}
+        {!noc && (
         <InspectorRail
           open={inspectorOpen}
           toggle={() => setInspectorOpen((v) => !v)}
@@ -1456,6 +1650,7 @@ export function ManualMapsPage() {
           onDeleteMap={() => setDeleteMapOpen(true)}
           mode={mode}
         />
+        )}
       </div>
 
       {/* ── Link Wizard (after click-to-connect target) ─────── */}

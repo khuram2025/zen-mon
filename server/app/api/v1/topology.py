@@ -6,7 +6,7 @@ import re
 import shutil
 import uuid
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,7 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import decrypt
-from app.core.database import AsyncSessionLocal, get_db
+from app.core.database import AsyncSessionLocal, get_clickhouse_client, get_db
 from app.core.security import require_operator_user
 from app.models.user import User
 
@@ -75,12 +75,23 @@ def _clean_snmp_value(value: str) -> str:
     return value.strip()
 
 
+# Per-row SNMP sentinels that net-snmp prints into STDOUT when a column has no
+# value for a given row. These are NOT neighbors — skip them so they don't get
+# ingested as bogus remote hostnames / inflate the link count.
+_SNMP_NONVALUES = (
+    "No Such Instance", "No Such Object", "No more variables",
+    "End of MIB", "= NULL",
+)
+
+
 def _parse_walk(output: str, oid_prefix: str) -> dict[str, str]:
     out: dict[str, str] = {}
     prefix = "." + oid_prefix.lstrip(".")
     for line in output.splitlines():
         line = line.strip()
         if not line or " = " not in line:
+            continue
+        if any(s in line for s in _SNMP_NONVALUES):
             continue
         oid, value = line.split(" = ", 1)
         oid = oid.strip()
@@ -90,7 +101,9 @@ def _parse_walk(output: str, oid_prefix: str) -> dict[str, str]:
             suffix = oid[len(prefix):].lstrip(".")
         else:
             continue
-        out[suffix] = _clean_snmp_value(value)
+        cleaned = _clean_snmp_value(value)
+        if cleaned:
+            out[suffix] = cleaned
     return out
 
 
@@ -133,7 +146,17 @@ def _decrypt_maybe(value) -> Optional[str]:
     try:
         return decrypt(value)
     except Exception:
-        return None
+        # snmp_credentials store passphrases/communities in PLAINTEXT (the write
+        # path never calls encrypt()). decrypt() raises on a plaintext value, so
+        # fall back to the raw string instead of dropping it to None — otherwise
+        # SNMP v3 -A/-X args go missing and every walk fails with "USM generic
+        # error" (0 topology links). Stays correct if a value is ever encrypted.
+        if isinstance(value, (bytes, memoryview)):
+            try:
+                return bytes(value).decode("utf-8")
+            except Exception:
+                return None
+        return str(value)
 
 
 def _effective_snmp(row: dict) -> dict:
@@ -390,7 +413,7 @@ async def _discover_device(db: AsyncSession, device: dict, all_devices: list[dic
                 "local_if_name": local_if_name,
                 "remote_device_id": remote_id,
                 "remote_chassis_id": rem_chassis.get(suffix),
-                "remote_port_id": remote_port.get(suffix),
+                "remote_port_id": rem_port.get(suffix),
                 "remote_hostname": remote_name,
                 "remote_if_name": remote_port_id,
                 "protocol": "lldp",
@@ -576,6 +599,81 @@ async def get_topology_map(
             for row in dependencies
         ],
     }
+
+
+@router.get("/links-live")
+async def topology_links_live(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Live utilization for every resolved topology link, from SNMP interface
+    counters (snmp_if_metrics in ClickHouse). Topology links already carry the
+    local device + ifIndex, so this is a direct key join — no name matching.
+
+    Response: {"data": {<link_id>: {in_bps, out_bps, util_pct, oper_status, speed}}}
+    """
+    rows = (await db.execute(
+        text("""
+            SELECT id, local_device_id, local_if_index
+            FROM topology_links
+            WHERE remote_device_id IS NOT NULL AND local_if_index IS NOT NULL
+        """),
+    )).mappings().all()
+    if not rows:
+        return {"data": {}, "generated_at": datetime.now(timezone.utc).isoformat()}
+
+    # Interface speeds (bps) for util% — keyed by (device_id, if_index).
+    pairs = {(str(r["local_device_id"]), int(r["local_if_index"])) for r in rows}
+    device_ids = sorted({d for d, _ in pairs})
+    speed_rows = (await db.execute(
+        text("""SELECT device_id, if_index, if_speed FROM device_interfaces
+                WHERE device_id = ANY(:ids)"""),
+        {"ids": device_ids},
+    )).mappings().all()
+    speed_by = {(str(s["device_id"]), int(s["if_index"])): (s["if_speed"] or 0) for s in speed_rows}
+
+    # Latest in/out bps per (device, ifIndex) over a short window.
+    live: dict[tuple[str, int], dict] = {}
+    try:
+        client = get_clickhouse_client()
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+        res = client.query(
+            """
+            SELECT toString(device_id) AS device_id, if_index,
+                   argMax(in_bps, timestamp)  AS in_bps,
+                   argMax(out_bps, timestamp) AS out_bps,
+                   argMax(oper_status, timestamp) AS oper_status
+            FROM zenplus.snmp_if_metrics
+            WHERE timestamp > %(cutoff)s
+              AND toString(device_id) IN %(ids)s
+            GROUP BY device_id, if_index
+            """,
+            parameters={"cutoff": cutoff, "ids": device_ids},
+        )
+        for row in res.result_rows:
+            did, idx, in_bps, out_bps, oper = row
+            live[(str(did), int(idx))] = {
+                "in_bps": float(in_bps or 0), "out_bps": float(out_bps or 0),
+                "oper_status": int(oper or 0),
+            }
+    except Exception:
+        live = {}
+
+    out: dict[str, dict] = {}
+    for r in rows:
+        key = (str(r["local_device_id"]), int(r["local_if_index"]))
+        m = live.get(key)
+        if not m:
+            continue
+        speed = speed_by.get(key, 0)
+        bps = max(m["in_bps"], m["out_bps"])
+        util = (bps / speed * 100.0) if speed else None
+        out[str(r["id"])] = {
+            "in_bps": m["in_bps"], "out_bps": m["out_bps"],
+            "util_pct": round(util, 1) if util is not None else None,
+            "oper_status": m["oper_status"], "speed": speed,
+        }
+    return {"data": out, "generated_at": datetime.now(timezone.utc).isoformat()}
 
 
 @router.post("/discover")
@@ -766,3 +864,95 @@ async def delete_dependency(
         await db.commit()
         raise HTTPException(status_code=404, detail="Dependency not found")
     await db.commit()
+
+
+# --------------------------------------------------------------------------- #
+# Manual links — let operators draw a connection between two devices that the
+# LLDP/CDP crawl didn't observe (or to annotate logical links). Stored in
+# topology_links with protocol='manual'; only manual links are editable here so
+# discovered topology can't be clobbered.
+# --------------------------------------------------------------------------- #
+class ManualLinkIn(BaseModel):
+    source_device_id: uuid.UUID
+    target_device_id: uuid.UUID
+    shape: str = Field(default="curve", pattern="^(curve|straight|orthogonal)$")
+    label: Optional[str] = Field(default=None, max_length=120)
+
+
+class ManualLinkPatch(BaseModel):
+    shape: Optional[str] = Field(default=None, pattern="^(curve|straight|orthogonal)$")
+    label: Optional[str] = Field(default=None, max_length=120)
+
+
+@router.post("/links", status_code=201)
+async def create_manual_link(data: ManualLinkIn, db: AsyncSession = Depends(get_db),
+                             user: User = Depends(require_operator_user)):
+    if data.source_device_id == data.target_device_id:
+        raise HTTPException(status_code=400, detail="Source and target must differ")
+    found = (await db.execute(
+        text("SELECT id FROM devices WHERE id = ANY(:ids)"),
+        {"ids": [data.source_device_id, data.target_device_id]},
+    )).all()
+    if len(found) != 2:
+        raise HTTPException(status_code=400, detail="Both devices must exist")
+    # One manual link per ordered pair — update its shape if it already exists.
+    existing = (await db.execute(
+        text("""SELECT id FROM topology_links
+                WHERE protocol='manual' AND local_device_id=:s AND remote_device_id=:t LIMIT 1"""),
+        {"s": data.source_device_id, "t": data.target_device_id},
+    )).first()
+    md = json.dumps({"shape": data.shape, "manual": True, "label": data.label})
+    if existing:
+        await db.execute(
+            text("UPDATE topology_links SET metadata=CAST(:md AS jsonb), updated_at=NOW() WHERE id=:id"),
+            {"md": md, "id": existing.id},
+        )
+        await db.commit()
+        return {"id": str(existing.id), "updated": True}
+    row = (await db.execute(
+        text("""
+            INSERT INTO topology_links (
+                local_device_id, remote_device_id, protocol, confidence, source,
+                metadata, first_seen_at, last_seen_at, updated_at
+            ) VALUES (:s, :t, 'manual', 100, 'manual', CAST(:md AS jsonb), NOW(), NOW(), NOW())
+            RETURNING id
+        """),
+        {"s": data.source_device_id, "t": data.target_device_id, "md": md},
+    )).first()
+    await db.commit()
+    return {"id": str(row.id), "updated": False}
+
+
+@router.put("/links/{link_id}")
+async def update_manual_link(link_id: uuid.UUID, data: ManualLinkPatch,
+                             db: AsyncSession = Depends(get_db),
+                             user: User = Depends(require_operator_user)):
+    row = (await db.execute(
+        text("SELECT metadata FROM topology_links WHERE id=:id AND protocol='manual'"),
+        {"id": link_id},
+    )).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Manual link not found")
+    md = dict(row.metadata or {})
+    if data.shape is not None:
+        md["shape"] = data.shape
+    if data.label is not None:
+        md["label"] = data.label
+    await db.execute(
+        text("UPDATE topology_links SET metadata=CAST(:md AS jsonb), updated_at=NOW() WHERE id=:id"),
+        {"md": json.dumps(md), "id": link_id},
+    )
+    await db.commit()
+    return {"id": str(link_id)}
+
+
+@router.delete("/links/{link_id}", status_code=204)
+async def delete_manual_link(link_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                             user: User = Depends(require_operator_user)):
+    row = (await db.execute(
+        text("DELETE FROM topology_links WHERE id=:id AND protocol='manual' RETURNING id"),
+        {"id": link_id},
+    )).first()
+    await db.commit()
+    if not row:
+        raise HTTPException(status_code=404, detail="Manual link not found (only manual links can be deleted)")
