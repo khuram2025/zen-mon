@@ -400,15 +400,20 @@ async def enroll_device(device_id: UUID, data: NcmEnroll, db: AsyncSession = Dep
     if not dev:
         raise HTTPException(status_code=404, detail="Device not found")
     days = data.schedule_days if data.schedule_type == "weekly" else None
-    sched_time = data.schedule_time if data.schedule_type in ("daily", "weekly") else None
+    sched_time = None
+    if data.schedule_type in ("daily", "weekly") and data.schedule_time:
+        try:
+            sched_time = datetime.strptime(data.schedule_time.strip(), "%H:%M").time()
+        except ValueError:
+            sched_time = None
     await db.execute(
         text("""INSERT INTO device_ncm
                   (device_id, credential_id, platform, enabled, schedule_enabled, schedule_type,
                    schedule_interval_hours, schedule_time, schedule_days, keep_versions, alert_on_change)
-                VALUES (:d, :c, :p, :e, :s, :st, :h, CAST(:tm AS time), :days, :kv, :ac)
+                VALUES (:d, :c, :p, :e, :s, :st, :h, :tm, :days, :kv, :ac)
                 ON CONFLICT (device_id) DO UPDATE
                   SET credential_id=:c, platform=:p, enabled=:e, schedule_enabled=:s, schedule_type=:st,
-                      schedule_interval_hours=:h, schedule_time=CAST(:tm AS time), schedule_days=:days,
+                      schedule_interval_hours=:h, schedule_time=:tm, schedule_days=:days,
                       keep_versions=:kv, alert_on_change=:ac"""),
         {"d": device_id, "c": data.credential_id, "p": data.platform,
          "e": data.enabled, "s": data.schedule_enabled, "st": data.schedule_type,
