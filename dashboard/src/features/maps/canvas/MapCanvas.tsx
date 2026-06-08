@@ -66,12 +66,31 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
   // All deletions are explicit + confirmed. Nothing deletes without this.
   const [pendingDelete, setPendingDelete] = useState<{ title: string; description: string; run: () => void } | null>(null)
 
-  const { bulkMove, deleteNode, deleteLink, updateLink } = useMapMutations(mapId)
+  const { bulkMove, deleteNode, deleteLink, updateLink, updateNode } = useMapMutations(mapId)
   const nodeById = useMemo(() => new Map(detail.nodes.map((n) => [n.id, n])), [detail.nodes])
 
-  // Mirror of edges so callbacks can read the latest link metadata.
+  // Mirrors so callbacks can read the latest local metadata.
   const edgesRef = useRef<Edge[]>([])
   useEffect(() => { edgesRef.current = edges }, [edges])
+  const nodesRef = useRef<Node[]>([])
+  useEffect(() => { nodesRef.current = nodes }, [nodes])
+
+  /* ── Node metadata (movable label offset) — ref-stable like the edge ones ── */
+  const patchNodeMetaRef = useRef<(nodeId: string, patch: Record<string, unknown>, commit: boolean) => void>(() => {})
+  patchNodeMetaRef.current = (nodeId, patch, commit) => {
+    setNodes((nds) => nds.map((n) => {
+      if (n.id !== nodeId) return n
+      const nd = (n.data as any).node
+      return { ...n, data: { ...n.data, node: { ...nd, metadata: { ...(nd.metadata || {}), ...patch } } } }
+    }))
+    if (commit) {
+      const cur = (nodesRef.current.find((n) => n.id === nodeId)?.data as any)?.node
+      updateNode.mutate({ id: nodeId, patch: { metadata: { ...(cur?.metadata || {}), ...patch } } }, { onError: () => toast.error('Failed to save label') })
+    }
+  }
+  const setNodeLabelOffset = useCallback((nodeId: string, dx: number, dy: number, commit: boolean) => {
+    patchNodeMetaRef.current(nodeId, { label_offset: { dx, dy } }, commit)
+  }, [])
 
   /* ── Link shape / waypoint editing ───────────────────────────────
    * These are kept REF-stable so they can live in the edge-data closure
@@ -110,13 +129,17 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
           id: n.id,
           type: 'device',
           position: discCenterToNodeXY(c.x, c.y),
-          data: { node: n, live: liveMode },
+          data: {
+            node: n,
+            live: liveMode,
+            onLabelMove: (dx: number, dy: number, commit: boolean) => setNodeLabelOffset(n.id, dx, dy, commit),
+          },
           draggable: !liveMode,
           selected: selectedIds.current.has(n.id),
         } satisfies Node
       }),
     )
-  }, [detail.nodes, liveMode, setNodes])
+  }, [detail.nodes, liveMode, setNodes, setNodeLabelOffset])
 
   useEffect(() => {
     setEdges(

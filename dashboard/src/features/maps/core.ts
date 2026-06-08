@@ -25,6 +25,12 @@ export type ManualMapListItem = {
   status_counts: Record<string, number>
 }
 
+export type NodeMetadata = {
+  label_offset?: { dx: number; dy: number }
+  size_scale?: number
+  [k: string]: unknown
+}
+
 export type ManualMapNode = {
   id: string
   map_id: string
@@ -41,6 +47,7 @@ export type ManualMapNode = {
   vendor?: string | null
   model?: string | null
   last_seen?: string | null
+  metadata?: NodeMetadata | null
 }
 
 export type LinkKind = 'ethernet' | 'fiber' | 'wireless' | 'vpn' | 'trunk' | 'serial' | 'manual'
