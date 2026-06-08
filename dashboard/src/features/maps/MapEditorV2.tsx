@@ -8,6 +8,10 @@ import { useLiveLinks, useManualMap, useManualMaps } from './useMapData'
 
 type Mode = 'design' | 'live'
 
+// Stable empty reference so a disabled live query doesn't hand the canvas a new
+// object every render (which would refire the edge-rebuild effect).
+const EMPTY_LIVE: Record<string, never> = {}
+
 export function MapEditorV2() {
   const [params, setParams] = useSearchParams()
   const [mode, setMode] = useState<Mode>('design')
@@ -32,7 +36,7 @@ export function MapEditorV2() {
   const mapQuery = useManualMap(selectedMapId)
   const detail = mapQuery.data
   const liveLinksQuery = useLiveLinks(selectedMapId, mode === 'live')
-  const liveData = liveLinksQuery.data?.data || {}
+  const liveData = liveLinksQuery.data?.data || EMPTY_LIVE
 
   const counts = useMemo(() => ({ nodes: detail?.nodes.length || 0, links: detail?.links.length || 0 }), [detail])
 

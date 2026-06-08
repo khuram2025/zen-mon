@@ -18,12 +18,13 @@ import {
   AlignStartVertical,
   Grid3x3,
   Magnet,
-  Maximize2,
+  Spline,
   Trash2,
   Wand2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { toast } from '@/components/ui/Toast'
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import {
   discCenterToNodeXY,
   nodeXYToDiscCenter,
@@ -62,9 +63,41 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
   const [gridOn, setGridOn] = useState(true)
   const [menu, setMenu] = useState<ContextMenuState>(null)
   const [selCount, setSelCount] = useState(0)
+  // All deletions are explicit + confirmed. Nothing deletes without this.
+  const [pendingDelete, setPendingDelete] = useState<{ title: string; description: string; run: () => void } | null>(null)
 
-  const { bulkMove, deleteNode, deleteLink } = useMapMutations(mapId)
+  const { bulkMove, deleteNode, deleteLink, updateLink } = useMapMutations(mapId)
   const nodeById = useMemo(() => new Map(detail.nodes.map((n) => [n.id, n])), [detail.nodes])
+
+  // Mirror of edges so callbacks can read the latest link metadata.
+  const edgesRef = useRef<Edge[]>([])
+  useEffect(() => { edgesRef.current = edges }, [edges])
+
+  /* ── Link shape / waypoint editing ───────────────────────────────
+   * These are kept REF-stable so they can live in the edge-data closure
+   * without making the edge-rebuild effect refire each render (which would
+   * wipe selection + uncommitted bends). */
+  const patchLinkMetaRef = useRef<(linkId: string, patch: Record<string, unknown>, commit: boolean) => void>(() => {})
+  patchLinkMetaRef.current = (linkId, patch, commit) => {
+    setEdges((eds) => eds.map((e) => {
+      if (e.id !== linkId) return e
+      const link = (e.data as any).link
+      return { ...e, data: { ...e.data, link: { ...link, metadata: { ...(link.metadata || {}), ...patch } } } }
+    }))
+    if (commit) {
+      const cur = (edgesRef.current.find((e) => e.id === linkId)?.data as any)?.link
+      const meta = { ...(cur?.metadata || {}), ...patch }
+      updateLink.mutate({ id: linkId, patch: { metadata: meta } }, { onError: () => toast.error('Failed to save link') })
+    }
+  }
+
+  const setEdgeWaypoints = useCallback((linkId: string, wpsPx: { x: number; y: number }[], commit: boolean) => {
+    patchLinkMetaRef.current(linkId, { waypoints: wpsPx.map((p) => pxToPct(p.x, p.y)) }, commit)
+  }, [])
+
+  const setEdgeShape = useCallback((linkId: string, shape: 'curve' | 'straight' | 'orthogonal') => {
+    patchLinkMetaRef.current(linkId, { shape }, true)
+  }, [])
 
   // Preserve selection across server-driven rebuilds.
   const selectedIds = useRef<Set<string>>(new Set())
@@ -99,11 +132,19 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
             sourceHandle: 'c',
             targetHandle: 'c',
             type: 'network',
-            data: { link: l, sourceStatus: s.status, targetStatus: t.status, live: liveData[l.id], liveMode, showThroughput },
+            data: {
+              link: l,
+              sourceStatus: s.status,
+              targetStatus: t.status,
+              live: liveData[l.id],
+              liveMode,
+              showThroughput,
+              setWaypoints: (wpsPx: { x: number; y: number }[], commit: boolean) => setEdgeWaypoints(l.id, wpsPx, commit),
+            },
           } satisfies Edge
         }),
     )
-  }, [detail.links, liveData, liveMode, showThroughput, nodeById, setEdges])
+  }, [detail.links, liveData, liveMode, showThroughput, nodeById, setEdges, setEdgeWaypoints])
 
   /* ── Persistence ─────────────────────────────────────────────── */
   const persistPositions = useCallback((items: { id: string; x: number; y: number }[]) => {
@@ -120,16 +161,9 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
     persistPositions(items)
   }, [persistPositions])
 
-  const onNodesDelete = useCallback((deleted: Node[]) => {
-    deleted.forEach((n) => deleteNode.mutate(n.id))
-    deleted.forEach((n) => selectedIds.current.delete(n.id))
-    if (deleted.length) toast.success(`Removed ${deleted.length} node${deleted.length > 1 ? 's' : ''}`)
-  }, [deleteNode])
-
-  const onEdgesDelete = useCallback((deleted: Edge[]) => {
-    deleted.forEach((e) => deleteLink.mutate(e.id))
-    if (deleted.length) toast.success(`Removed ${deleted.length} link${deleted.length > 1 ? 's' : ''}`)
-  }, [deleteLink])
+  // NOTE: we intentionally do NOT wire RF's onNodesDelete/onEdgesDelete to the
+  // backend, and deleteKeyCode is disabled — every deletion goes through an
+  // explicit ConfirmDialog so nothing can ever be removed implicitly.
 
   /* ── Alignment / auto-align ──────────────────────────────────── */
   const applyAlign = useCallback((op: AlignOp) => {
@@ -203,25 +237,57 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
       items.push({ type: 'header', label: dev?.hostname || 'Node' })
       if (dev?.device_id) items.push({ type: 'item', label: 'Open device', onClick: () => window.open(`/devices/${dev.device_id}`, '_blank') })
       items.push({ type: 'divider' })
-      items.push({ type: 'item', label: 'Remove from map', icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => { deleteNode.mutate(node.id); setNodes((nds) => nds.filter((n) => n.id !== node.id)) } })
+      items.push({ type: 'item', label: 'Remove from map', icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => setPendingDelete({
+        title: 'Remove node?',
+        description: `Remove "${dev?.hostname || 'this node'}" from this map? The device itself is not affected.`,
+        run: () => { deleteNode.mutate(node.id); setNodes((nds) => nds.filter((n) => n.id !== node.id)) },
+      }) })
     }
     setMenu({ x: e.clientX, y: e.clientY, items })
   }, [setNodes, applyAlign, deleteNode])
 
   const onEdgeContextMenu = useCallback((e: React.MouseEvent, edge: Edge) => {
     e.preventDefault()
+    const link = (edge.data as any).link
+    const shape = link?.metadata?.shape || 'curve'
+    const shapeItem = (label: string, val: 'curve' | 'straight' | 'orthogonal'): MenuItem =>
+      ({ type: 'item', label: `${shape === val ? '✓ ' : '   '}${label}`, onClick: () => setEdgeShape(edge.id, val) })
     const items: MenuItem[] = [
-      { type: 'header', label: 'Link' },
-      { type: 'item', label: 'Delete link', icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => { deleteLink.mutate(edge.id); setEdges((eds) => eds.filter((x) => x.id !== edge.id)) } },
+      { type: 'header', label: 'Link shape' },
+      shapeItem('Curved', 'curve'),
+      shapeItem('Straight', 'straight'),
+      shapeItem('Orthogonal', 'orthogonal'),
+      { type: 'divider' },
+      { type: 'item', label: 'Reset bends', icon: <Spline className="h-4 w-4" />, onClick: () => setEdgeWaypoints(edge.id, [], true) },
+      { type: 'divider' },
+      { type: 'item', label: 'Delete link', icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => setPendingDelete({
+        title: 'Delete link?',
+        description: 'This removes the connection between the two nodes.',
+        run: () => { deleteLink.mutate(edge.id); setEdges((eds) => eds.filter((x) => x.id !== edge.id)) },
+      }) },
     ]
     setMenu({ x: e.clientX, y: e.clientY, items })
-  }, [deleteLink, setEdges])
+  }, [setEdgeShape, setEdgeWaypoints, deleteLink, setEdges])
+
+  // Explicit edge selection (RF's built-in click-select is unreliable for our
+  // fully-custom edge); selecting an edge reveals its bend handles.
+  const onEdgeClick = useCallback((_e: React.MouseEvent, edge: Edge) => {
+    setEdges((eds) => eds.map((x) => (x.selected === (x.id === edge.id) ? x : { ...x, selected: x.id === edge.id })))
+    setNodes((nds) => nds.some((n) => n.selected) ? nds.map((n) => (n.selected ? { ...n, selected: false } : n)) : nds)
+  }, [setEdges, setNodes])
 
   const deleteSelected = useCallback(() => {
     const sel = nodes.filter((n) => n.selected)
-    sel.forEach((n) => deleteNode.mutate(n.id))
-    setNodes((nds) => nds.filter((n) => !n.selected))
-    if (sel.length) toast.success(`Removed ${sel.length} node${sel.length > 1 ? 's' : ''}`)
+    if (!sel.length) return
+    setPendingDelete({
+      title: `Remove ${sel.length} node${sel.length > 1 ? 's' : ''}?`,
+      description: `This removes ${sel.length === 1 ? 'it' : 'them'} from this map (the device itself is not affected).`,
+      run: () => {
+        sel.forEach((n) => { deleteNode.mutate(n.id); selectedIds.current.delete(n.id) })
+        setNodes((nds) => nds.filter((n) => !n.selected))
+        toast.success(`Removed ${sel.length} node${sel.length > 1 ? 's' : ''}`)
+      },
+    })
   }, [nodes, deleteNode, setNodes])
 
   return (
@@ -232,13 +298,12 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeDragStop={onNodeDragStop}
-        onNodesDelete={onNodesDelete}
-        onEdgesDelete={onEdgesDelete}
         onSelectionChange={onSelectionChange}
         onPaneContextMenu={onPaneContextMenu}
         onNodeContextMenu={onNodeContextMenu}
         onEdgeContextMenu={onEdgeContextMenu}
-        onPaneClick={closeMenu}
+        onEdgeClick={onEdgeClick}
+        onPaneClick={() => { closeMenu(); setEdges((eds) => eds.some((e) => e.selected) ? eds.map((e) => ({ ...e, selected: false })) : eds) }}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         colorMode="dark"
@@ -248,7 +313,7 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
         maxZoom={2.5}
         snapToGrid={snapOn}
         snapGrid={[GRID, GRID]}
-        deleteKeyCode={liveMode ? null : ['Delete', 'Backspace']}
+        deleteKeyCode={null}
         multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
         selectionKeyCode="Shift"
         nodesDraggable={!liveMode}
@@ -287,6 +352,16 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
       </ReactFlow>
 
       <ContextMenu state={menu} onClose={closeMenu} />
+
+      <ConfirmDialog
+        open={!!pendingDelete}
+        onOpenChange={(o) => { if (!o) setPendingDelete(null) }}
+        title={pendingDelete?.title || ''}
+        description={pendingDelete?.description}
+        confirmText="Remove"
+        destructive
+        onConfirm={() => { pendingDelete?.run(); setPendingDelete(null) }}
+      />
     </div>
   )
 }

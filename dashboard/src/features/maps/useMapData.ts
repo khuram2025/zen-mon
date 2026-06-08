@@ -83,5 +83,18 @@ export function useMapMutations(mapId: string | null) {
     onSuccess: invalidate,
   })
 
-  return { move, bulkMove, deleteNode, deleteLink }
+  /** Patch a node (label, icon, metadata such as label offset). */
+  const updateNode = useMutation({
+    mutationFn: async ({ id, patch }: { id: string; patch: Record<string, unknown> }) =>
+      (await api.put(`/maps/${mapId}/nodes/${id}`, patch)).data,
+  })
+
+  /** Patch a link (label, metadata: shape/waypoints/style). Optimistic — no
+   *  refetch, so live waypoint edits aren't clobbered mid-drag. */
+  const updateLink = useMutation({
+    mutationFn: async ({ id, patch }: { id: string; patch: Record<string, unknown> }) =>
+      (await api.put(`/maps/${mapId}/links/${id}`, patch)).data,
+  })
+
+  return { move, bulkMove, deleteNode, deleteLink, updateNode, updateLink }
 }

@@ -312,8 +312,18 @@ function pointAtT(segments: Segment[], t: number): Pt {
   return { x: last.bx, y: last.by }
 }
 
-function buildOrthogonal(ax: number, ay: number, bx: number, by: number, waypoints: Pt[]): EdgePathResult {
-  const verts: Pt[] = [{ x: ax, y: ay }, ...waypoints, { x: bx, y: by }]
+function segsFrom(poly: Pt[]): Segment[] {
+  const out: Segment[] = []
+  for (let i = 0; i < poly.length - 1; i++) {
+    const a = poly[i]
+    const b = poly[i + 1]
+    out.push({ ax: a.x, ay: a.y, bx: b.x, by: b.y, horizontal: Math.abs(a.y - b.y) < 0.01 })
+  }
+  return out
+}
+
+// Expand user vertices into a right-angle polyline (orthogonal routing).
+function orthoPoly(verts: Pt[]): Pt[] {
   const poly: Pt[] = [verts[0]]
   for (let i = 1; i < verts.length; i++) {
     const prev = verts[i - 1]
@@ -323,45 +333,70 @@ function buildOrthogonal(ax: number, ay: number, bx: number, by: number, waypoin
     }
     poly.push(cur)
   }
-  const d = poly.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
-  const segments: Segment[] = []
-  for (let i = 0; i < poly.length - 1; i++) {
-    const a = poly[i]
-    const b = poly[i + 1]
-    segments.push({ ax: a.x, ay: a.y, bx: b.x, by: b.y, horizontal: Math.abs(a.y - b.y) < 0.01 })
-  }
-  return { d, segments, vertices: poly, mid: pointAtT(segments, 0.5), near: pointAtT(segments, 0.16), far: pointAtT(segments, 0.84) }
+  return poly
 }
 
-/** Build an SVG path + annotation anchors for any supported link shape. Inputs
- *  and waypoints are plain {x,y} in the SAME coordinate space (logical px). */
+// Smooth curve passing through interior points (quadratic-through-midpoints).
+function smoothPath(pts: Pt[]): string {
+  if (pts.length < 3) return `M ${pts[0].x} ${pts[0].y} L ${pts[1].x} ${pts[1].y}`
+  let d = `M ${pts[0].x} ${pts[0].y} L ${(pts[0].x + pts[1].x) / 2} ${(pts[0].y + pts[1].y) / 2}`
+  for (let i = 1; i < pts.length - 1; i++) {
+    const mx = (pts[i].x + pts[i + 1].x) / 2
+    const my = (pts[i].y + pts[i + 1].y) / 2
+    d += ` Q ${pts[i].x} ${pts[i].y} ${mx} ${my}`
+  }
+  const last = pts[pts.length - 1]
+  d += ` L ${last.x} ${last.y}`
+  return d
+}
+
+/** Build an SVG path + annotation anchors for any supported link shape. Every
+ *  shape now routes through the user waypoints, so links can be bent into any
+ *  shape. `vertices` is the user point list [source, ...waypoints, target] —
+ *  the editor renders drag handles on the interior ones. Inputs and waypoints
+ *  are plain {x,y} in the SAME coordinate space (logical px). */
 export function edgePath(
   shape: LinkShape,
   ax: number, ay: number, bx: number, by: number,
   waypoints: Pt[] = [],
 ): EdgePathResult {
-  if (shape === 'straight') {
-    const mx = (ax + bx) / 2
-    const my = (ay + by) / 2
+  const verts: Pt[] = [{ x: ax, y: ay }, ...waypoints, { x: bx, y: by }]
+
+  // Curve with no waypoints keeps the pretty perpendicular-offset arc.
+  if (shape === 'curve' && waypoints.length === 0) {
+    const c = linkCurve(ax, ay, bx, by)
     return {
-      d: `M ${ax} ${ay} L ${bx} ${by}`,
-      mid: { x: mx, y: my },
-      near: { x: ax + (bx - ax) * 0.14, y: ay + (by - ay) * 0.14 },
-      far: { x: ax + (bx - ax) * 0.86, y: ay + (by - ay) * 0.86 },
+      d: c.d,
+      vertices: verts,
+      mid: pointOnQuadratic(ax, ay, c.cx, c.cy, bx, by, 0.5),
+      near: pointOnQuadratic(ax, ay, c.cx, c.cy, bx, by, 0.14),
+      far: pointOnQuadratic(ax, ay, c.cx, c.cy, bx, by, 0.86),
       segments: [{ ax, ay, bx, by, horizontal: Math.abs(ay - by) < 0.01 }],
-      vertices: [{ x: ax, y: ay }, { x: bx, y: by }],
     }
   }
-  if (shape === 'orthogonal') {
-    return buildOrthogonal(ax, ay, bx, by, waypoints)
-  }
-  const c = linkCurve(ax, ay, bx, by)
+
+  // Render polyline differs per shape, but anchors sample the routed polyline.
+  const routed = shape === 'orthogonal' ? orthoPoly(verts) : verts
+  const segments = segsFrom(routed)
+  let d: string
+  if (shape === 'curve') d = smoothPath(verts)
+  else d = routed.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ')
+
   return {
-    d: c.d,
-    mid: pointOnQuadratic(ax, ay, c.cx, c.cy, bx, by, 0.5),
-    near: pointOnQuadratic(ax, ay, c.cx, c.cy, bx, by, 0.14),
-    far: pointOnQuadratic(ax, ay, c.cx, c.cy, bx, by, 0.86),
-    segments: [{ ax, ay, bx, by, horizontal: Math.abs(ay - by) < 0.01 }],
-    vertices: [{ x: ax, y: ay }, { x: bx, y: by }],
+    d,
+    vertices: verts,
+    segments,
+    mid: pointAtT(segments, 0.5),
+    near: pointAtT(segments, 0.16),
+    far: pointAtT(segments, 0.84),
   }
+}
+
+/** Midpoints of each user segment — candidate spots to insert a new waypoint. */
+export function segmentMidpoints(verts: Pt[]): { x: number; y: number; index: number }[] {
+  const out: { x: number; y: number; index: number }[] = []
+  for (let i = 0; i < verts.length - 1; i++) {
+    out.push({ x: (verts[i].x + verts[i + 1].x) / 2, y: (verts[i].y + verts[i + 1].y) / 2, index: i })
+  }
+  return out
 }
