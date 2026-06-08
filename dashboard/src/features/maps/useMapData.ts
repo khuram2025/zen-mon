@@ -83,6 +83,18 @@ export function useMapMutations(mapId: string | null) {
     onSuccess: invalidate,
   })
 
+  /** Create a link between two nodes (structural → invalidates so it renders). */
+  const addLink = useMutation({
+    mutationFn: async (payload: {
+      source_node_id: string
+      target_node_id: string
+      label?: string | null
+      link_type?: string
+      metadata?: Record<string, unknown>
+    }) => (await api.post(`/maps/${mapId}/links`, payload)).data,
+    onSuccess: invalidate,
+  })
+
   /** Patch a node (label, icon, metadata such as label offset). */
   const updateNode = useMutation({
     mutationFn: async ({ id, patch }: { id: string; patch: Record<string, unknown> }) =>
@@ -96,5 +108,5 @@ export function useMapMutations(mapId: string | null) {
       (await api.put(`/maps/${mapId}/links/${id}`, patch)).data,
   })
 
-  return { move, bulkMove, deleteNode, deleteLink, updateNode, updateLink }
+  return { move, bulkMove, deleteNode, deleteLink, updateNode, updateLink, addLink }
 }

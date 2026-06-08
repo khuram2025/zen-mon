@@ -2,12 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Background,
   BackgroundVariant,
+  ConnectionMode,
   Controls,
   MiniMap,
   Panel,
   ReactFlow,
   useEdgesState,
   useNodesState,
+  type Connection,
   type Edge,
   type Node,
 } from '@xyflow/react'
@@ -16,8 +18,10 @@ import {
   AlignHorizontalJustifyCenter,
   AlignStartHorizontal,
   AlignStartVertical,
+  Cable,
   Grid3x3,
   Magnet,
+  MousePointer2,
   Spline,
   Trash2,
   Wand2,
@@ -33,12 +37,15 @@ import {
   statusKey,
   type LiveLinkData,
   type ManualMapDetail,
+  type ManualMapNode,
 } from '../core'
 import { useMapMutations } from '../useMapData'
 import { DeviceNode } from './DeviceNode'
 import { NetworkEdge } from './NetworkEdge'
 import { ContextMenu, type ContextMenuState, type MenuItem } from './ContextMenu'
 import { computeAlign, snap, type AlignOp } from './align'
+import { MapModeContext } from './MapModeContext'
+import { LinkDialog, type NewLink } from './LinkDialog'
 
 const nodeTypes = { device: DeviceNode }
 const edgeTypes = { network: NetworkEdge }
@@ -63,10 +70,13 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
   const [gridOn, setGridOn] = useState(true)
   const [menu, setMenu] = useState<ContextMenuState>(null)
   const [selCount, setSelCount] = useState(0)
+  const [tool, setTool] = useState<'select' | 'connect'>('select')
   // All deletions are explicit + confirmed. Nothing deletes without this.
   const [pendingDelete, setPendingDelete] = useState<{ title: string; description: string; run: () => void } | null>(null)
+  const [pendingLink, setPendingLink] = useState<{ source: ManualMapNode; target: ManualMapNode } | null>(null)
 
-  const { bulkMove, deleteNode, deleteLink, updateLink, updateNode } = useMapMutations(mapId)
+  const connectMode = tool === 'connect' && !liveMode
+  const { bulkMove, deleteNode, deleteLink, updateLink, updateNode, addLink } = useMapMutations(mapId)
   const nodeById = useMemo(() => new Map(detail.nodes.map((n) => [n.id, n])), [detail.nodes])
 
   // Mirrors so callbacks can read the latest local metadata.
@@ -179,6 +189,24 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
     bulkMove.mutate(payload, { onError: () => toast.error('Failed to save layout') })
   }, [bulkMove])
 
+  // Drag-to-connect → open the new-link dialog.
+  const onConnect = useCallback((c: Connection) => {
+    if (!c.source || !c.target || c.source === c.target) return
+    const s = nodeById.get(c.source)
+    const t = nodeById.get(c.target)
+    if (s && t) setPendingLink({ source: s, target: t })
+  }, [nodeById])
+
+  const createLink = useCallback((link: NewLink) => {
+    addLink.mutate(link, {
+      onSuccess: () => { setPendingLink(null); toast.success('Link created') },
+      onError: (e: any) => {
+        // Keep the dialog open so the user can adjust; surface a clear message.
+        toast.error(e?.response?.status === 409 ? 'A link between these two devices already exists.' : 'Failed to create link')
+      },
+    })
+  }, [addLink])
+
   const onNodeDragStop = useCallback((_e: unknown, node: Node, dragged: Node[]) => {
     const items = (dragged && dragged.length ? dragged : [node]).map((n) => ({ id: n.id, x: n.position.x, y: n.position.y }))
     persistPositions(items)
@@ -221,6 +249,10 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
         e.preventDefault()
         setNodes((nds) => nds.map((n) => ({ ...n, selected: true })))
+      } else if (!e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'v') {
+        setTool('select')
+      } else if (!e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'c') {
+        setTool('connect')
       }
     }
     el.addEventListener('keydown', onKey)
@@ -314,13 +346,16 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
   }, [nodes, deleteNode, setNodes])
 
   return (
-    <div ref={wrapperRef} tabIndex={0} className="h-full w-full outline-none">
+    <MapModeContext.Provider value={{ connectMode }}>
+    <div ref={wrapperRef} tabIndex={0} className={cn('h-full w-full outline-none', connectMode && 'cursor-crosshair')}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeDragStop={onNodeDragStop}
+        onConnect={onConnect}
+        connectionMode={ConnectionMode.Loose}
         onSelectionChange={onSelectionChange}
         onPaneContextMenu={onPaneContextMenu}
         onNodeContextMenu={onNodeContextMenu}
@@ -339,9 +374,9 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
         deleteKeyCode={null}
         multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
         selectionKeyCode="Shift"
-        nodesDraggable={!liveMode}
-        nodesConnectable={false}
-        elementsSelectable={!liveMode}
+        nodesDraggable={!liveMode && tool === 'select'}
+        nodesConnectable={connectMode}
+        elementsSelectable={!liveMode && tool === 'select'}
         proOptions={{ hideAttribution: true }}
       >
         {gridOn && <Background variant={BackgroundVariant.Dots} gap={26} size={1} color="rgba(148,163,184,0.18)" />}
@@ -359,6 +394,9 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
         {!liveMode && (
           <Panel position="top-left">
             <div className="flex items-center gap-1 rounded-lg border border-border bg-surface/90 p-1 shadow-lg backdrop-blur">
+              <ToolBtn active={tool === 'select'} onClick={() => setTool('select')} title="Select (V)"><MousePointer2 className="h-4 w-4" /></ToolBtn>
+              <ToolBtn active={tool === 'connect'} onClick={() => setTool('connect')} title="Connect / draw cable (C)"><Cable className="h-4 w-4" /></ToolBtn>
+              <div className="mx-0.5 h-5 w-px bg-border" />
               <ToolBtn active={snapOn} onClick={() => setSnapOn((v) => !v)} title="Snap to grid"><Magnet className="h-4 w-4" /></ToolBtn>
               <ToolBtn active={gridOn} onClick={() => setGridOn((v) => !v)} title="Show grid"><Grid3x3 className="h-4 w-4" /></ToolBtn>
               <ToolBtn onClick={autoAlign} title="Auto-align all to grid"><Wand2 className="h-4 w-4" /></ToolBtn>
@@ -385,7 +423,18 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
         destructive
         onConfirm={() => { pendingDelete?.run(); setPendingDelete(null) }}
       />
+
+      {pendingLink && (
+        <LinkDialog
+          source={pendingLink.source}
+          target={pendingLink.target}
+          saving={addLink.isPending}
+          onCancel={() => setPendingLink(null)}
+          onCreate={createLink}
+        />
+      )}
     </div>
+    </MapModeContext.Provider>
   )
 }
 

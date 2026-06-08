@@ -3,6 +3,7 @@ import { Handle, Position, useStore, type NodeProps } from '@xyflow/react'
 import { cn } from '@/lib/utils'
 import { NetworkIcon } from '@/components/network-icons'
 import { DISC, DISC_CX, DISC_CY, NODE_W, STATUS_COLOR, iconForNode, statusKey, type ManualMapNode } from '../core'
+import { useMapMode } from './MapModeContext'
 
 export type DeviceNodeData = {
   node: ManualMapNode
@@ -20,6 +21,7 @@ const LABEL_Y = DISC + 8
  * maps stay readable; a faint leader line connects it back to the disc. */
 function DeviceNodeImpl({ data, selected }: NodeProps) {
   const { node, live, onLabelMove } = data as DeviceNodeData
+  const { connectMode } = useMapMode()
   const zoom = useStore((s) => s.transform[2])
   const iconKey = iconForNode(node)
   const sk = statusKey(node.status)
@@ -49,15 +51,25 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
     window.addEventListener('pointerup', up)
   }
 
-  const handleStyle = {
-    left: DISC_CX, top: DISC_CY, width: 1, height: 1, minWidth: 1, minHeight: 1,
-    background: 'transparent', border: 'none', transform: 'translate(-50%, -50%)', opacity: 0,
-  } as const
+  // In connect mode the handles grow to cover the whole disc so a link can be
+  // dragged from/to anywhere on the device; otherwise they're a 1px anchor.
+  const handleStyle = connectMode
+    ? { left: DISC_CX, top: DISC_CY, width: DISC, height: DISC, borderRadius: '50%', background: 'transparent', border: 'none', transform: 'translate(-50%, -50%)', opacity: 0, cursor: 'crosshair', zIndex: 5 } as const
+    : { left: DISC_CX, top: DISC_CY, width: 1, height: 1, minWidth: 1, minHeight: 1, background: 'transparent', border: 'none', transform: 'translate(-50%, -50%)', opacity: 0 } as const
 
   return (
     <div className="group relative" style={{ width: NODE_W, height: DISC }} title={`${node.hostname} · ${node.ip_address}`}>
-      <Handle type="target" position={Position.Top} id="c" style={handleStyle} isConnectable={false} />
-      <Handle type="source" position={Position.Top} id="c" style={handleStyle} isConnectable={false} />
+      <Handle type="target" position={Position.Top} id="c" style={handleStyle} isConnectable={connectMode} />
+      <Handle type="source" position={Position.Top} id="c" style={handleStyle} isConnectable={connectMode} />
+
+      {/* Connect-mode affordance ring */}
+      {connectMode && !live && (
+        <span
+          aria-hidden
+          className="pointer-events-none absolute rounded-full ring-2 ring-primary/0 transition group-hover:ring-primary/70"
+          style={{ left: DISC_CX, top: DISC_CY, width: DISC + 8, height: DISC + 8, transform: 'translate(-50%, -50%)' }}
+        />
+      )}
 
       {/* Leader line from disc to a moved label */}
       {moved && (
