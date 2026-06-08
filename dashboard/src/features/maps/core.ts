@@ -400,3 +400,36 @@ export function segmentMidpoints(verts: Pt[]): { x: number; y: number; index: nu
   }
   return out
 }
+
+// Device disc radius (the 64px icon disc; +2px ring) used to anchor links on
+// the node's outer circle instead of its centre, so many cables fan out.
+export const DISC_RADIUS = DISC / 2 + 2
+
+/** Point on a circle of radius r around `center`, in the direction of `toward`. */
+export function anchorOnCircle(center: Pt, toward: Pt, r = DISC_RADIUS): Pt {
+  const dx = toward.x - center.x
+  const dy = toward.y - center.y
+  const d = Math.hypot(dx, dy) || 1
+  return { x: center.x + (dx / d) * r, y: center.y + (dy / d) * r }
+}
+
+function distToSegment(p: Pt, a: Pt, b: Pt): number {
+  const dx = b.x - a.x
+  const dy = b.y - a.y
+  const len2 = dx * dx + dy * dy || 1
+  let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2
+  t = Math.max(0, Math.min(1, t))
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
+}
+
+/** Index of the segment in `vertices` nearest to point `p` — i.e. the waypoint
+ *  insertion index when the user grabs the link at `p` to bend it. */
+export function nearestSegmentIndex(vertices: Pt[], p: Pt): number {
+  let best = 0
+  let bestD = Infinity
+  for (let i = 0; i < vertices.length - 1; i++) {
+    const d = distToSegment(p, vertices[i], vertices[i + 1])
+    if (d < bestD) { bestD = d; best = i }
+  }
+  return best
+}
