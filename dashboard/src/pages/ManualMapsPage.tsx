@@ -60,6 +60,11 @@ type ManualMapListItem = {
   status_counts: Record<string, number>
 }
 
+type NodeMetadata = {
+  label_offset?: { dx: number; dy: number }
+  size_scale?: number
+}
+
 type ManualMapNode = {
   id: string
   map_id: string
@@ -76,6 +81,7 @@ type ManualMapNode = {
   vendor?: string | null
   model?: string | null
   last_seen?: string | null
+  metadata?: NodeMetadata | null
 }
 
 type LinkKind = 'ethernet' | 'fiber' | 'wireless' | 'vpn' | 'trunk' | 'serial' | 'manual'
@@ -84,14 +90,43 @@ type LinkShape = 'curve' | 'straight' | 'orthogonal'
 
 type Waypoint = { x_pct: number; y_pct: number }
 
+/** Per-side port label overrides (stored in link metadata). */
+type IfaceLabelStyle = {
+  /** Distance from device along the cable, canvas %. */
+  dist?: number | null
+  /** Nudge along cable direction (+ = toward far end), canvas %. */
+  along?: number | null
+  /** Nudge perpendicular to cable (+ = right of cable direction), canvas %. */
+  perp?: number | null
+  /** Rotation in degrees; null = auto-align to cable. */
+  angle?: number | null
+  /** Label font size in SVG viewBox units (default 0.95). */
+  fontSize?: number | null
+  textColor?: string | null
+  bgColor?: string | null
+  borderColor?: string | null
+}
+
 type LinkMetadata = {
   src_interface?: string | null
   dst_interface?: string | null
   speed?: LinkSpeed | null
   kind?: LinkKind | null
   shape?: LinkShape | null
-  waypoints?: Waypoint[] | null   // user-placed bend points (orthogonal only)
+  waypoints?: Waypoint[] | null
   notes?: string | null
+  src_label?: IfaceLabelStyle | null
+  dst_label?: IfaceLabelStyle | null
+}
+
+const IFACE_LABEL_FONT_DEFAULT = 0.95
+
+function hasIfaceLabelStyle(style?: IfaceLabelStyle | null): boolean {
+  if (!style) return false
+  return (
+    style.dist != null || style.along != null || style.perp != null || style.angle != null
+    || style.fontSize != null || !!style.textColor || !!style.bgColor || !!style.borderColor
+  )
 }
 
 type LiveInterface = {
@@ -115,6 +150,278 @@ type LiveLinkData = {
   target: LiveInterface
   window_seconds: number
   generated_at: string
+}
+
+type DeviceInterface = {
+  if_index: number
+  if_name: string | null
+  if_descr: string | null
+  if_alias: string | null
+  if_type?: number | null
+  if_speed?: number | null
+  admin_status?: string | null
+  oper_status?: string | null
+  monitored?: boolean | null
+}
+
+const IFACE_OTHER = '__other__'
+const SPEED_OTHER = '__other__'
+
+function ifaceLabel(i: DeviceInterface) {
+  return i.if_name || i.if_descr || `ifIndex ${i.if_index}`
+}
+
+function findIface(list: DeviceInterface[] | undefined, name: string): DeviceInterface | null {
+  if (!list || !name) return null
+  return list.find((i) => ifaceLabel(i) === name) || null
+}
+
+function detectLinkKindFromIface(iface: DeviceInterface | null, name: string): LinkKind {
+  const n = name.toLowerCase()
+  const t = iface?.if_type
+
+  if (/wlan|wifi|wireless|802\.11|radio/.test(n)) return 'wireless'
+  if (/tunnel|ipsec|gre|wg-|vpn|vti|st0|ipip/.test(n)) return 'vpn'
+  if (/port-channel|portchannel|po\d|lag|bond|ae\d|802\.1q|trunk|bundle/.test(n)) return 'trunk'
+  if (/serial|console|tty|ppp|async|vty/.test(n)) return 'serial'
+  if (/sfp|xfp|qsfp|fiber|fibre|optic|optical|ten[- ]?gig|tengig|xe-|et-\d/.test(n)) return 'fiber'
+
+  if (t === 71) return 'wireless'
+  if (t === 131 || t === 169 || t === 142) return 'vpn'
+  if (t === 161) return 'trunk'
+  if (t === 135 || t === 136) return 'trunk'
+  if (t === 23 || t === 32) return 'serial'
+  if (t === 250 || t === 219) return 'fiber'
+
+  return 'ethernet'
+}
+
+function inferLinkKind(
+  srcIf: DeviceInterface | null,
+  dstIf: DeviceInterface | null,
+  srcName: string,
+  dstName: string,
+): LinkKind {
+  const kinds = [
+    detectLinkKindFromIface(srcIf, srcName),
+    detectLinkKindFromIface(dstIf, dstName),
+  ]
+  const priority: LinkKind[] = ['fiber', 'wireless', 'vpn', 'trunk', 'serial', 'ethernet']
+  for (const k of priority) {
+    if (kinds.includes(k)) return k
+  }
+  return 'ethernet'
+}
+
+function inferSpeedFromBps(bps: number | null | undefined): { preset: LinkSpeed | ''; custom: string } {
+  if (!bps || bps <= 0) return { preset: '', custom: '' }
+
+  const tiers: { bps: number; label: LinkSpeed }[] = [
+    { bps: 100_000_000_000, label: '100G' },
+    { bps: 40_000_000_000, label: '40G' },
+    { bps: 25_000_000_000, label: '25G' },
+    { bps: 10_000_000_000, label: '10G' },
+    { bps: 2_500_000_000, label: '2.5G' },
+    { bps: 1_000_000_000, label: '1G' },
+    { bps: 100_000_000, label: '100M' },
+    { bps: 10_000_000, label: '10M' },
+  ]
+
+  let best: { label: LinkSpeed; diff: number } | null = null
+  for (const tier of tiers) {
+    const diff = Math.abs(bps - tier.bps)
+    if (!best || diff < best.diff) best = { label: tier.label, diff }
+    if (diff / tier.bps <= 0.12) return { preset: tier.label, custom: '' }
+  }
+  if (best && best.diff / bps <= 0.12) return { preset: best.label, custom: '' }
+  return { preset: SPEED_OTHER, custom: formatBps(bps) }
+}
+
+function inferLinkProps(
+  srcIf: DeviceInterface | null,
+  dstIf: DeviceInterface | null,
+  srcName: string,
+  dstName: string,
+) {
+  const kind = inferLinkKind(srcIf, dstIf, srcName, dstName)
+  const speeds = [srcIf?.if_speed, dstIf?.if_speed].filter((v): v is number => !!v && v > 0)
+  const bps = speeds.length ? Math.min(...speeds) : null
+  const { preset, custom } = inferSpeedFromBps(bps)
+  return { kind, speedPreset: preset, speedCustom: custom }
+}
+
+function resolveSpeedValue(preset: LinkSpeed | '', custom: string): LinkSpeed | '' {
+  if (preset === SPEED_OTHER) return custom.trim() || ''
+  return preset
+}
+
+function parseStoredSpeed(speed: LinkSpeed | null | undefined): { preset: LinkSpeed | ''; custom: string } {
+  if (!speed) return { preset: '', custom: '' }
+  if (LINK_SPEEDS.includes(speed as LinkSpeed)) return { preset: speed, custom: '' }
+  return { preset: SPEED_OTHER, custom: speed }
+}
+
+function sortInterfaces(list: DeviceInterface[]) {
+  return [...list].sort((a, b) => {
+    const aUp = a.oper_status === 'up' ? 0 : 1
+    const bUp = b.oper_status === 'up' ? 0 : 1
+    if (aUp !== bUp) return aUp - bUp
+    return ifaceLabel(a).localeCompare(ifaceLabel(b))
+  })
+}
+
+function useDeviceInterfaces(deviceId: string | undefined) {
+  return useQuery<DeviceInterface[]>({
+    queryKey: ['device-interfaces', deviceId],
+    enabled: !!deviceId,
+    queryFn: async () => sortInterfaces((await api.get(`/devices/${deviceId}/interfaces`)).data),
+    staleTime: 60_000,
+  })
+}
+
+function DeviceInterfaceSelect({
+  deviceId,
+  hostname,
+  value,
+  disabled,
+  onChange,
+  autoFocus,
+}: {
+  deviceId: string
+  hostname: string
+  value: string
+  disabled?: boolean
+  onChange: (value: string) => void
+  autoFocus?: boolean
+}) {
+  const q = useDeviceInterfaces(deviceId)
+  const ifaces = q.data || []
+  const listed = value ? ifaces.some((i) => ifaceLabel(i) === value) : false
+  const [mode, setMode] = useState<'none' | 'snmp' | 'custom'>(() => {
+    if (!value) return 'none'
+    return listed ? 'snmp' : 'custom'
+  })
+  const [custom, setCustom] = useState(listed ? '' : value)
+
+  useEffect(() => {
+    if (!value) {
+      setMode('none')
+      setCustom('')
+      return
+    }
+    if (ifaces.some((i) => ifaceLabel(i) === value)) {
+      setMode('snmp')
+      return
+    }
+    setMode('custom')
+    setCustom(value)
+  }, [value, ifaces])
+
+  const selectValue = mode === 'custom' ? IFACE_OTHER : value
+
+  return (
+    <FormField label={`${hostname} interface`} hint={q.isLoading ? 'Loading SNMP interfaces…' : `${ifaces.length} interfaces`}>
+      <select
+        autoFocus={autoFocus && mode !== 'custom'}
+        value={selectValue}
+        disabled={disabled || q.isLoading}
+        onChange={(e) => {
+          const v = e.target.value
+          if (v === IFACE_OTHER) {
+            setMode('custom')
+            onChange(custom)
+            return
+          }
+          if (!v) {
+            setMode('none')
+            setCustom('')
+            onChange('')
+            return
+          }
+          setMode('snmp')
+          onChange(v)
+        }}
+        className="h-9 w-full rounded-md border border-border bg-surface px-2 text-xs text-text outline-none focus:border-primary/60 disabled:opacity-50"
+      >
+        <option value="">{q.isLoading ? 'Loading interfaces…' : '— select interface —'}</option>
+        {ifaces.map((i) => {
+          const name = ifaceLabel(i)
+          const alias = i.if_alias ? ` · ${i.if_alias}` : ''
+          const status = i.oper_status && i.oper_status !== 'up' ? ` · ${i.oper_status}` : ''
+          return (
+            <option key={i.if_index} value={name}>
+              {name}{alias}{status}
+            </option>
+          )
+        })}
+        <option value={IFACE_OTHER}>Other (custom…)</option>
+      </select>
+      {mode === 'custom' && (
+        <Input
+          autoFocus={autoFocus}
+          value={custom}
+          disabled={disabled}
+          placeholder="Custom label — map-only, no SNMP match"
+          className="mt-1.5 h-8 text-xs"
+          onChange={(e) => {
+            setCustom(e.target.value)
+            onChange(e.target.value)
+          }}
+        />
+      )}
+    </FormField>
+  )
+}
+
+function LinkSpeedSelect({
+  preset,
+  custom,
+  autoDetected,
+  disabled,
+  onChange,
+}: {
+  preset: LinkSpeed | ''
+  custom: string
+  autoDetected?: boolean
+  disabled?: boolean
+  onChange: (preset: LinkSpeed | '', custom: string) => void
+}) {
+  const selectVal = preset === SPEED_OTHER || (preset && !LINK_SPEEDS.includes(preset as LinkSpeed))
+    ? SPEED_OTHER
+    : preset
+
+  return (
+    <FormField
+      label="Speed"
+      hint={autoDetected ? 'Auto-detected from interface speed' : undefined}
+    >
+      <select
+        value={selectVal}
+        disabled={disabled}
+        onChange={(e) => {
+          const v = e.target.value as LinkSpeed | ''
+          if (v === SPEED_OTHER) onChange(SPEED_OTHER, custom)
+          else onChange(v, '')
+        }}
+        className="h-9 w-full rounded-md border border-border bg-surface px-2 text-xs text-text outline-none focus:border-primary/60 disabled:opacity-50"
+      >
+        <option value="">— none —</option>
+        {LINK_SPEEDS.map((s) => (
+          <option key={s} value={s}>{s}</option>
+        ))}
+        <option value={SPEED_OTHER}>Other…</option>
+      </select>
+      {selectVal === SPEED_OTHER && (
+        <Input
+          value={custom}
+          disabled={disabled}
+          placeholder="e.g. 400G, 1 Tbps, unknown"
+          className="mt-1.5 h-8 text-xs font-mono"
+          onChange={(e) => onChange(SPEED_OTHER, e.target.value)}
+        />
+      )}
+    </FormField>
+  )
 }
 
 type ManualMapLink = {
@@ -190,6 +497,10 @@ const TYPE_TO_ICON: Record<string, IconKey> = {
 }
 
 const STATUS_ORDER: NodeStatus[] = ['down', 'degraded', 'maintenance', 'unknown', 'up']
+
+// Default label anchor: centred just below the device icon box.
+const NODE_LABEL_TOP = 38
+const NODE_ICON_H = 56 // px — keep leader-line math in sync with h-14
 
 // Link kinds — each gets a distinct visual treatment on the canvas.
 const LINK_KINDS: { value: LinkKind; label: string; hint: string }[] = [
@@ -363,6 +674,43 @@ function _buildOrthogonal(ax: number, ay: number, bx: number, by: number, waypoi
   }
 }
 
+function linkPerpUnit(ax: number, ay: number, bx: number, by: number) {
+  const dx = bx - ax
+  const dy = by - ay
+  const len = Math.hypot(dx, dy) || 1
+  return { nx: -dy / len, ny: dx / len }
+}
+
+function applyParallelOffset(
+  ax: number, ay: number, bx: number, by: number,
+  waypoints: Waypoint[],
+  parallelOffset: number,
+  perpRef?: { ax: number; ay: number; bx: number; by: number },
+) {
+  if (!parallelOffset) return { ax, ay, bx, by, waypoints }
+  const ref = perpRef || { ax, ay, bx, by }
+  const { nx, ny } = linkPerpUnit(ref.ax, ref.ay, ref.bx, ref.by)
+  return {
+    ax: ax + nx * parallelOffset,
+    ay: ay + ny * parallelOffset,
+    bx: bx + nx * parallelOffset,
+    by: by + ny * parallelOffset,
+    waypoints: waypoints.map((w) => ({
+      x_pct: w.x_pct + nx * parallelOffset,
+      y_pct: w.y_pct + ny * parallelOffset,
+    })),
+  }
+}
+
+function canonicalPerpRef(
+  sourceId: string,
+  targetId: string,
+  ax: number, ay: number, bx: number, by: number,
+) {
+  if (sourceId < targetId) return { ax, ay, bx, by }
+  return { ax: bx, ay: by, bx: ax, by: ay }
+}
+
 // Build an SVG path + annotation anchors (near-source, mid, near-target)
 // for any of the supported link shapes. Output is shape-agnostic so the
 // rendering pipeline can swap shape without other code changes.
@@ -370,7 +718,16 @@ function edgePath(
   shape: LinkShape,
   ax: number, ay: number, bx: number, by: number,
   waypoints: Waypoint[] = [],
+  parallelOffset = 0,
+  perpRef?: { ax: number; ay: number; bx: number; by: number },
 ): EdgePathResult {
+  const shifted = applyParallelOffset(ax, ay, bx, by, waypoints, parallelOffset, perpRef)
+  ax = shifted.ax
+  ay = shifted.ay
+  bx = shifted.bx
+  by = shifted.by
+  waypoints = shifted.waypoints
+
   if (shape === 'straight') {
     const mx = (ax + bx) / 2
     const my = (ay + by) / 2
@@ -387,7 +744,6 @@ function edgePath(
   if (shape === 'orthogonal') {
     return _buildOrthogonal(ax, ay, bx, by, waypoints)
   }
-  // Default: curve
   const c = linkPath(ax, ay, bx, by)
   const mid = pointOnQuadratic(ax, ay, c.cx, c.cy, bx, by, 0.5)
   const near = pointOnQuadratic(ax, ay, c.cx, c.cy, bx, by, 0.14)
@@ -398,6 +754,225 @@ function edgePath(
     segments: [{ ax, ay, bx, by, horizontal: Math.abs(ay - by) < 0.01 }],
     vertices: [{ x: ax, y: ay }, { x: bx, y: by }],
   }
+}
+
+type PathPoint = { x: number; y: number }
+type IfaceAnchor = { x: number; y: number; angle: number; textAnchor: 'start' | 'end' }
+
+const IFACE_LABEL_BASE_OFFSET = 4.2   // canvas % along cable — small gap past device edge
+const IFACE_LABEL_STAGGER = 1.6       // extra distance per link sharing a node
+
+function samplePolyline(vertices: PathPoint[], steps: number): PathPoint[] {
+  if (vertices.length < 2) return vertices.slice()
+  const edgeLens = vertices.slice(1).map((v, i) => Math.hypot(v.x - vertices[i].x, v.y - vertices[i].y))
+  const total = edgeLens.reduce((s, l) => s + l, 0) || 1
+  const pts: PathPoint[] = []
+  for (let i = 0; i <= steps; i++) {
+    const target = (i / steps) * total
+    let acc = 0
+    for (let j = 0; j < edgeLens.length; j++) {
+      if (acc + edgeLens[j] >= target || j === edgeLens.length - 1) {
+        const local = edgeLens[j] > 0 ? (target - acc) / edgeLens[j] : 0
+        const a = vertices[j]
+        const b = vertices[j + 1]
+        pts.push({ x: a.x + (b.x - a.x) * local, y: a.y + (b.y - a.y) * local })
+        break
+      }
+      acc += edgeLens[j]
+    }
+  }
+  return pts
+}
+
+function buildPathSamples(
+  shape: LinkShape,
+  ax: number, ay: number, bx: number, by: number,
+  waypoints: Waypoint[],
+  steps = 48,
+  parallelOffset = 0,
+  perpRef?: { ax: number; ay: number; bx: number; by: number },
+): { points: PathPoint[]; total: number } {
+  const shifted = applyParallelOffset(ax, ay, bx, by, waypoints, parallelOffset, perpRef)
+  ax = shifted.ax
+  ay = shifted.ay
+  bx = shifted.bx
+  by = shifted.by
+  waypoints = shifted.waypoints
+
+  let points: PathPoint[]
+  if (shape === 'curve') {
+    const c = linkPath(ax, ay, bx, by)
+    points = []
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps
+      points.push(pointOnQuadratic(ax, ay, c.cx, c.cy, bx, by, t))
+    }
+  } else if (shape === 'straight') {
+    points = []
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps
+      points.push({ x: ax + (bx - ax) * t, y: ay + (by - ay) * t })
+    }
+  } else {
+    points = samplePolyline(_buildOrthogonal(ax, ay, bx, by, waypoints).vertices, steps)
+  }
+  let total = 0
+  for (let i = 1; i < points.length; i++) {
+    total += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y)
+  }
+  return { points, total: total || 1 }
+}
+
+function cableLabelAngle(dx: number, dy: number, fromEnd: boolean): { angle: number; textAnchor: 'start' | 'end' } {
+  let angle = Math.atan2(dy, dx) * (180 / Math.PI)
+  if (fromEnd) angle += 180
+  let textAnchor: 'start' | 'end' = 'start'
+  while (angle > 180) angle -= 360
+  while (angle <= -180) angle += 360
+  if (angle > 90 || angle < -90) {
+    angle += 180
+    textAnchor = 'end'
+  }
+  return { angle, textAnchor }
+}
+
+function anchorAtPathDistance(
+  points: PathPoint[],
+  dist: number,
+  fromEnd: boolean,
+): IfaceAnchor {
+  const cum: number[] = [0]
+  for (let i = 1; i < points.length; i++) {
+    cum.push(cum[i - 1] + Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y))
+  }
+  const total = cum[cum.length - 1] || 1
+  const target = fromEnd ? Math.max(0, total - dist) : Math.min(total, dist)
+
+  let seg = 1
+  while (seg < cum.length && cum[seg] < target) seg++
+  const i0 = seg - 1
+  const segLen = cum[seg] - cum[i0] || 1
+  const local = (target - cum[i0]) / segLen
+  const p0 = points[i0]
+  const p1 = points[Math.min(seg, points.length - 1)]
+  const x = p0.x + (p1.x - p0.x) * local
+  const y = p0.y + (p1.y - p0.y) * local
+
+  let bestIdx = 0
+  let bestD = Infinity
+  for (let i = 0; i < points.length; i++) {
+    const d = Math.hypot(points[i].x - x, points[i].y - y)
+    if (d < bestD) { bestD = d; bestIdx = i }
+  }
+  const prev = Math.max(0, bestIdx - 1)
+  const next = Math.min(points.length - 1, bestIdx + 1)
+  const { angle, textAnchor } = cableLabelAngle(
+    points[next].x - points[prev].x,
+    points[next].y - points[prev].y,
+    fromEnd,
+  )
+  return { x, y, angle, textAnchor }
+}
+
+function linkPairKey(a: string, b: string) {
+  return a < b ? `${a}|${b}` : `${b}|${a}`
+}
+
+const PARALLEL_LINK_GAP = 2.2   // canvas % between parallel cables on the same node pair
+
+function computeLinkParallelOffsets(links: ManualMapLink[]): Map<string, number> {
+  const groups = new Map<string, ManualMapLink[]>()
+  for (const link of links) {
+    const key = linkPairKey(link.source_node_id, link.target_node_id)
+    const g = groups.get(key) || []
+    g.push(link)
+    groups.set(key, g)
+  }
+  const out = new Map<string, number>()
+  for (const g of groups.values()) {
+    if (g.length < 2) continue
+    g.sort((a, b) => a.id.localeCompare(b.id))
+    g.forEach((link, i) => {
+      out.set(link.id, (i - (g.length - 1) / 2) * PARALLEL_LINK_GAP)
+    })
+  }
+  return out
+}
+
+function computeLinkIfaceLabelPositions(
+  links: ManualMapLink[],
+  positionOf: (nodeId: string) => { x_pct: number; y_pct: number } | null,
+  waypointsOf: (link: ManualMapLink) => Waypoint[],
+  parallelOffsets: Map<string, number>,
+): Map<string, { src?: IfaceAnchor; dst?: IfaceAnchor }> {
+  type EndRef = { linkId: string; side: 'src' | 'dst'; link: ManualMapLink }
+  const pathByLink = new Map<string, { points: PathPoint[]; total: number }>()
+  const endsByNode = new Map<string, EndRef[]>()
+  const linkById = new Map(links.map((l) => [l.id, l]))
+
+  for (const link of links) {
+    const source = positionOf(link.source_node_id)
+    const target = positionOf(link.target_node_id)
+    if (!source || !target) continue
+
+    const shape = linkShape(link)
+    const perpRef = canonicalPerpRef(
+      link.source_node_id, link.target_node_id,
+      source.x_pct, source.y_pct, target.x_pct, target.y_pct,
+    )
+    const samples = buildPathSamples(
+      shape, source.x_pct, source.y_pct, target.x_pct, target.y_pct,
+      waypointsOf(link), 48, parallelOffsets.get(link.id) || 0, perpRef,
+    )
+    pathByLink.set(link.id, samples)
+
+    const srcEnds = endsByNode.get(link.source_node_id) || []
+    srcEnds.push({ linkId: link.id, side: 'src', link })
+    endsByNode.set(link.source_node_id, srcEnds)
+
+    const dstEnds = endsByNode.get(link.target_node_id) || []
+    dstEnds.push({ linkId: link.id, side: 'dst', link })
+    endsByNode.set(link.target_node_id, dstEnds)
+  }
+
+  const out = new Map<string, { src?: IfaceAnchor; dst?: IfaceAnchor }>()
+
+  for (const ends of endsByNode.values()) {
+    ends.sort((a, b) => {
+      const la = linkById.get(a.linkId)
+      const lb = linkById.get(b.linkId)
+      if (!la || !lb) return 0
+      const sa = positionOf(la.source_node_id)
+      const ta = positionOf(la.target_node_id)
+      const sb = positionOf(lb.source_node_id)
+      const tb = positionOf(lb.target_node_id)
+      if (!sa || !ta || !sb || !tb) return 0
+      const angA = Math.atan2(ta.y_pct - sa.y_pct, ta.x_pct - sa.x_pct)
+      const angB = Math.atan2(tb.y_pct - sb.y_pct, tb.x_pct - sb.x_pct)
+      return angA - angB
+    })
+    ends.forEach((end, idx) => {
+      const path = pathByLink.get(end.linkId)
+      if (!path) return
+
+      const labelStyle = end.side === 'src'
+        ? end.link.metadata?.src_label
+        : end.link.metadata?.dst_label
+
+      const rawDist = IFACE_LABEL_BASE_OFFSET + idx * IFACE_LABEL_STAGGER
+      const dist = labelStyle?.dist != null
+        ? Math.max(1, Math.min(labelStyle.dist, path.total * 0.45))
+        : Math.max(3, Math.min(rawDist, path.total * 0.32))
+      const anchor = anchorAtPathDistance(path.points, dist, end.side === 'dst')
+
+      const entry = out.get(end.linkId) || {}
+      if (end.side === 'src') entry.src = anchor
+      else entry.dst = anchor
+      out.set(end.linkId, entry)
+    })
+  }
+
+  return out
 }
 
 function linkWaypoints(link: ManualMapLink): Waypoint[] {
@@ -486,6 +1061,7 @@ export function ManualMapsPage() {
   // Live, in-flight waypoint edits per link. Mirrors `draftPositions` for nodes:
   // we don't hit the network on every pointer-move; we commit on pointer-up.
   const [draftWaypoints, setDraftWaypoints] = useState<Record<string, Waypoint[]>>({})
+  const [draftLabelOffsets, setDraftLabelOffsets] = useState<Record<string, { dx: number; dy: number }>>({})
   const [draggingWaypoint, setDraggingWaypoint] = useState<{ linkId: string; index: number } | null>(null)
   const canvasRef = useRef<HTMLDivElement>(null)
 
@@ -696,7 +1272,7 @@ export function ManualMapsPage() {
   })
 
   const updateNode = useMutation({
-    mutationFn: async ({ id, patch }: { id: string; patch: Partial<Pick<ManualMapNode, 'label' | 'icon' | 'x_pct' | 'y_pct'>> }) => {
+    mutationFn: async ({ id, patch }: { id: string; patch: Partial<Pick<ManualMapNode, 'label' | 'icon' | 'x_pct' | 'y_pct'>> & { metadata?: NodeMetadata } }) => {
       if (!selectedMapId) throw new Error('No map selected')
       return (await api.put(`/maps/${selectedMapId}/nodes/${id}`, patch)).data
     },
@@ -836,11 +1412,47 @@ export function ManualMapsPage() {
     return draftPositions[node.id] || { x_pct: node.x_pct, y_pct: node.y_pct }
   }
 
+  function labelOffsetFor(node: ManualMapNode) {
+    return draftLabelOffsets[node.id] || node.metadata?.label_offset || { dx: 0, dy: 0 }
+  }
+
+  function setNodeLabelOffset(nodeId: string, dx: number, dy: number, commit: boolean) {
+    setDraftLabelOffsets((prev) => ({ ...prev, [nodeId]: { dx, dy } }))
+    if (!commit) return
+    const node = nodeMap.get(nodeId)
+    if (!node) return
+    updateNode.mutate({
+      id: nodeId,
+      patch: { metadata: { ...(node.metadata || {}), label_offset: { dx, dy } } },
+    })
+    setDraftLabelOffsets((prev) => {
+      const next = { ...prev }
+      delete next[nodeId]
+      return next
+    })
+  }
+
   // Get the effective waypoints for a link — in-flight drag state takes
   // precedence over the persisted metadata.
   function waypointsFor(link: ManualMapLink): Waypoint[] {
     return draftWaypoints[link.id] || linkWaypoints(link)
   }
+
+  const linkParallelOffsets = useMemo(() => computeLinkParallelOffsets(links), [links])
+
+  const linkIfaceAnchors = useMemo(
+    () => computeLinkIfaceLabelPositions(
+      links,
+      (nodeId) => {
+        const node = nodeMap.get(nodeId)
+        if (!node) return null
+        return draftPositions[nodeId] || { x_pct: node.x_pct, y_pct: node.y_pct }
+      },
+      (link) => draftWaypoints[link.id] || linkWaypoints(link),
+      linkParallelOffsets,
+    ),
+    [links, nodeMap, draftPositions, draftWaypoints, linkParallelOffsets],
+  )
 
   function persistWaypoints(link: ManualMapLink, next: Waypoint[]) {
     const md = link.metadata || {}
@@ -995,17 +1607,7 @@ export function ManualMapsPage() {
       setConnectFrom(null)
       return
     }
-    // dedup against existing
-    const exists = links.some((l) =>
-      (l.source_node_id === connectFrom && l.target_node_id === target.id) ||
-      (l.source_node_id === target.id && l.target_node_id === connectFrom),
-    )
-    if (exists) {
-      toast.info('Already linked', 'A link already exists between these nodes.')
-    } else {
-      // Open the link wizard so the user can specify interfaces, speed, kind.
-      setLinkWizard({ source: connectFrom, target: target.id })
-    }
+    setLinkWizard({ source: connectFrom, target: target.id })
     setConnectFrom(null)
     setConnectCursor(null)
   }
@@ -1299,7 +1901,11 @@ export function ManualMapsPage() {
                   const shape = linkShape(link)
                   const kindStyle = LINK_KIND_STYLE[kind] || {}
                   const wps = waypointsFor(link)
-                  const path = edgePath(shape, a.x_pct, a.y_pct, b.x_pct, b.y_pct, wps)
+                  const perpRef = canonicalPerpRef(
+                    link.source_node_id, link.target_node_id,
+                    a.x_pct, a.y_pct, b.x_pct, b.y_pct,
+                  )
+                  const path = edgePath(shape, a.x_pct, a.y_pct, b.x_pct, b.y_pct, wps, linkParallelOffsets.get(link.id) || 0, perpRef)
                   const animate = mode === 'live' && (health === 'up' || health === 'degraded')
                   const isSelected = selectedLinkId === link.id
                   const baseWidth = (kindStyle.widthMul || 1) * 3
@@ -1478,9 +2084,26 @@ export function ManualMapsPage() {
                     </g>
                   )
                 })()}
+
+                {/* Interface port labels — SVG-native, rotated on the cable */}
+                {view.zoom >= 0.7 && links.map((link) => {
+                  const md = link.metadata || {}
+                  const anchors = linkIfaceAnchors.get(link.id)
+                  if (!anchors) return null
+                  return (
+                    <g key={`iface-${link.id}`} pointerEvents="none">
+                      {md.src_interface && anchors.src && (
+                        <IfaceCableLabel label={md.src_interface} anchor={anchors.src} style={md.src_label} />
+                      )}
+                      {md.dst_interface && anchors.dst && (
+                        <IfaceCableLabel label={md.dst_interface} anchor={anchors.dst} style={md.dst_label} />
+                      )}
+                    </g>
+                  )
+                })}
               </svg>
 
-              {/* Link annotations — interface labels at endpoints + speed/throughput badge mid-link */}
+              {/* Link annotations — speed/throughput badge mid-link (HTML) */}
               {links.map((link) => {
                 const source = nodeMap.get(link.source_node_id)
                 const target = nodeMap.get(link.target_node_id)
@@ -1489,10 +2112,13 @@ export function ManualMapsPage() {
                 const b = positionFor(target)
                 const shape = linkShape(link)
                 const wps = waypointsFor(link)
-                const path = edgePath(shape, a.x_pct, a.y_pct, b.x_pct, b.y_pct, wps)
+                const perpRef = canonicalPerpRef(
+                  link.source_node_id, link.target_node_id,
+                  a.x_pct, a.y_pct, b.x_pct, b.y_pct,
+                )
+                const path = edgePath(shape, a.x_pct, a.y_pct, b.x_pct, b.y_pct, wps, linkParallelOffsets.get(link.id) || 0, perpRef)
                 const md = link.metadata || {}
                 const live = liveById[link.id]
-                // Live takes precedence over configured speed if both src+dst have throughput data.
                 const bps = live ? Math.max(
                   (live.source.in_bps || 0) + (live.source.out_bps || 0),
                   (live.target.in_bps || 0) + (live.target.out_bps || 0),
@@ -1502,32 +2128,19 @@ export function ManualMapsPage() {
                 const midText = showThroughput
                   ? `${formatBps(bps)}${utilPct != null && utilPct > 0 ? ` · ${utilPct.toFixed(0)}%` : ''}`
                   : (md.speed || link.label || '')
-                const showLabels = view.zoom >= 0.7
-                if (!showLabels && !midText) return null
+                if (view.zoom < 0.7 || !midText) return null
                 return (
                   <div key={`anno-${link.id}`} className="pointer-events-none">
-                    {md.src_interface && (
-                      <LinkChip x={path.near.x} y={path.near.y} variant="iface">
-                        {md.src_interface}
-                      </LinkChip>
-                    )}
-                    {midText && (
-                      <LinkChip
-                        x={path.mid.x}
-                        y={path.mid.y}
-                        variant={showThroughput ? 'live' : 'speed'}
-                        tone={showThroughput && utilPct != null
-                          ? (utilPct >= 85 ? 'danger' : utilPct >= 60 ? 'warning' : 'success')
-                          : undefined}
-                      >
-                        {midText}
-                      </LinkChip>
-                    )}
-                    {md.dst_interface && (
-                      <LinkChip x={path.far.x} y={path.far.y} variant="iface">
-                        {md.dst_interface}
-                      </LinkChip>
-                    )}
+                    <LinkChip
+                      x={path.mid.x}
+                      y={path.mid.y}
+                      variant={showThroughput ? 'live' : 'speed'}
+                      tone={showThroughput && utilPct != null
+                        ? (utilPct >= 85 ? 'danger' : utilPct >= 60 ? 'warning' : 'success')
+                        : undefined}
+                    >
+                      {midText}
+                    </LinkChip>
                   </div>
                 )
               })}
@@ -1563,6 +2176,8 @@ export function ManualMapsPage() {
                   key={node.id}
                   node={node}
                   position={positionFor(node)}
+                  labelOffset={labelOffsetFor(node)}
+                  zoom={view.zoom}
                   selected={selectedNodeId === node.id}
                   live={mode === 'live'}
                   connectMode={inConnectFlow}
@@ -1581,7 +2196,7 @@ export function ManualMapsPage() {
                       setSelectedLinkId(null)
                     }
                   }}
-                  onConnectHandle={(e) => startConnect(node, e)}
+                  onLabelOffsetChange={(dx, dy, commit) => setNodeLabelOffset(node.id, dx, dy, commit)}
                 />
               ))}
             </div>
@@ -1874,101 +2489,164 @@ function CanvasCenter({ children }: { children: ReactNode }) {
 function NodeCard({
   node,
   position,
+  labelOffset,
+  zoom,
   selected,
   live,
   connectMode,
   isConnectSource,
   onPointerDown,
   onClick,
-  onConnectHandle,
+  onLabelOffsetChange,
 }: {
   node: ManualMapNode
   position: { x_pct: number; y_pct: number }
+  labelOffset: { dx: number; dy: number }
+  zoom: number
   selected: boolean
   live: boolean
   connectMode: boolean
   isConnectSource: boolean
   onPointerDown: (e: ReactPointerEvent<HTMLButtonElement>) => void
   onClick: () => void
-  onConnectHandle: (e: ReactPointerEvent) => void
+  onLabelOffsetChange: (dx: number, dy: number, commit: boolean) => void
 }) {
   const iconKey = iconForNode(node)
   const sk = statusKey(node.status)
   const color = STATUS_COLOR[sk]
   const pulsing = live && (sk === 'down' || sk === 'degraded')
   const dim = connectMode && !isConnectSource
+  const moved = Math.hypot(labelOffset.dx, labelOffset.dy) > 4
+  const labelEditable = !live
+
+  const startLabelDrag = (e: ReactPointerEvent) => {
+    if (!labelEditable) return
+    e.stopPropagation()
+    e.preventDefault()
+    const sx = e.clientX
+    const sy = e.clientY
+    const base = { ...labelOffset }
+    const move = (ev: PointerEvent) => {
+      onLabelOffsetChange(
+        base.dx + (ev.clientX - sx) / zoom,
+        base.dy + (ev.clientY - sy) / zoom,
+        false,
+      )
+    }
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      onLabelOffsetChange(
+        base.dx + (ev.clientX - sx) / zoom,
+        base.dy + (ev.clientY - sy) / zoom,
+        true,
+      )
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+
+  const labelTop = NODE_LABEL_TOP + labelOffset.dy
+  const labelLeft = labelOffset.dx
 
   return (
-    <button
-      type="button"
-      onPointerDown={onPointerDown}
-      onClick={onClick}
-      title={`${node.hostname} · ${node.ip_address}`}
+    <div
       className={cn(
-        'group absolute z-20 flex w-32 flex-col items-center -translate-x-1/2 -translate-y-1/2 transition-opacity',
+        'group absolute z-20 -translate-x-1/2 -translate-y-1/2 transition-opacity',
         dim && 'opacity-60',
       )}
       style={{ left: `${position.x_pct}%`, top: `${position.y_pct}%` }}
     >
-      {/* Icon disc */}
-      <div className="relative">
-        {/* Pulse halo for problems in live mode */}
-        {pulsing && (
-          <span
-            aria-hidden
-            className={cn(
-              'absolute inset-0 rounded-full',
-              sk === 'down' ? 'bg-danger/40' : 'bg-warning/40',
-              'nm-ping',
-            )}
-          />
-        )}
-        <div
-          className={cn(
-            'relative flex h-16 w-16 items-center justify-center rounded-full border-2 shadow-md transition',
-            'bg-surface',
-            color.ring,
-            selected && 'ring-2 ring-primary ring-offset-2 ring-offset-surface',
-          )}
+      {moved && (
+        <svg
+          className="pointer-events-none absolute overflow-visible"
+          style={{ left: '50%', top: NODE_ICON_H / 2, transform: 'translateX(-50%)' }}
+          width={1}
+          height={1}
         >
-          {/* status dot */}
-          <span
-            aria-hidden
-            className={cn(
-              'absolute -right-0.5 -top-0.5 h-3.5 w-3.5 rounded-full border-2 border-surface',
-              color.dot,
-              live && 'animate-pulse-soft',
-            )}
+          <line
+            x1={0}
+            y1={0}
+            x2={labelLeft}
+            y2={labelTop - NODE_ICON_H / 2}
+            className="stroke-border"
+            strokeWidth={1}
+            strokeDasharray="3 3"
           />
-          <NetworkIcon name={iconKey} className="h-9 w-9" />
-        </div>
-        {/* Connect handle — purely visual. Clicks pass through to the
-            parent button (which handles start/finish based on tool +
-            connectFrom). Visible on hover or in connect mode. */}
-        {!live && (
-          <span
-            aria-hidden
+        </svg>
+      )}
+
+      <button
+        type="button"
+        onPointerDown={onPointerDown}
+        onClick={onClick}
+        title={`${node.hostname} · ${node.ip_address}`}
+        className="relative flex flex-col items-center"
+      >
+        <div className="relative">
+          {pulsing && (
+            <span
+              aria-hidden
+              className={cn(
+                'absolute inset-0 rounded-lg',
+                sk === 'down' ? 'bg-danger/40' : 'bg-warning/40',
+                'nm-ping',
+              )}
+            />
+          )}
+          <div
             className={cn(
-              'pointer-events-none absolute -bottom-1 left-1/2 z-30 flex h-5 w-5 -translate-x-1/2 items-center justify-center rounded-full border border-primary/60 bg-surface text-primary shadow-sm transition',
-              (selected || isConnectSource || connectMode) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
-              isConnectSource && 'ring-2 ring-primary/60',
+              'relative flex h-14 w-[3.75rem] items-center justify-center rounded-lg border-2 shadow-md transition',
+              'bg-surface',
+              color.ring,
+              selected && 'ring-2 ring-primary ring-offset-2 ring-offset-surface',
             )}
           >
-            <Cable className="h-2.5 w-2.5" />
-          </span>
-        )}
-      </div>
-      {/* Label */}
+            <span
+              aria-hidden
+              className={cn(
+                'absolute -right-0.5 -top-0.5 h-3.5 w-3.5 rounded-full border-2 border-surface',
+                color.dot,
+                live && 'animate-pulse-soft',
+              )}
+            />
+            <NetworkIcon name={iconKey} className="h-8 w-8" />
+          </div>
+          {!live && (
+            <span
+              aria-hidden
+              className={cn(
+                'pointer-events-none absolute -bottom-1 left-1/2 z-30 flex h-5 w-5 -translate-x-1/2 items-center justify-center rounded-full border border-primary/60 bg-surface text-primary shadow-sm transition',
+                (selected || isConnectSource || connectMode) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
+                isConnectSource && 'ring-2 ring-primary/60',
+              )}
+            >
+              <Cable className="h-2.5 w-2.5" />
+            </span>
+          )}
+        </div>
+      </button>
+
       <div
+        role="presentation"
+        onPointerDown={startLabelDrag}
+        title={labelEditable ? 'Drag to reposition label' : undefined}
         className={cn(
-          'mt-1.5 max-w-[8rem] rounded-md border px-2 py-0.5 text-center text-[11px] font-semibold leading-tight shadow-sm backdrop-blur',
+          'absolute max-w-[8rem] rounded-md border px-2 py-0.5 text-center text-[11px] font-semibold leading-tight shadow-sm backdrop-blur',
           'bg-surface/90 border-border',
+          labelEditable && 'cursor-move hover:border-primary/60',
+          selected && 'border-primary/50',
         )}
+        style={{
+          left: `calc(50% + ${labelLeft}px)`,
+          top: `${labelTop}px`,
+          transform: 'translateX(-50%)',
+        }}
       >
         <div className="truncate text-text">{node.label || node.hostname}</div>
         <div className="truncate text-[10px] font-normal text-muted">{node.ip_address}</div>
       </div>
-    </button>
+    </div>
   )
 }
 
@@ -2300,7 +2978,7 @@ function DeviceInspector({
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
-        <div className={cn('flex h-12 w-12 items-center justify-center rounded-full border-2', color.ring, 'bg-surface')}>
+        <div className={cn('flex h-12 w-[3.25rem] items-center justify-center rounded-lg border-2', color.ring, 'bg-surface')}>
           <NetworkIcon name={currentIcon} className="h-7 w-7" />
         </div>
         <div className="min-w-0 flex-1">
@@ -2321,6 +2999,9 @@ function DeviceInspector({
           }}
           disabled={mode === 'live'}
         />
+        {mode === 'design' && (
+          <p className="mt-1 text-[10px] text-muted">Drag the name badge on the canvas to reposition it independently of the device icon.</p>
+        )}
       </FormField>
 
       <div>
@@ -2622,22 +3303,235 @@ function LiveInterfaceCard({ label, iface }: { label: string; iface: LiveInterfa
   )
 }
 
-/* ── Link annotation chip ────────────────────────────────────── */
-// Anchored at canvas percent (x,y). Pointer-events-none so it doesn't
-// steal clicks from the underlying path.
+/* ── Interface label on cable (SVG) ──────────────────────────── */
+
+function IfaceCableLabel({
+  label,
+  anchor,
+  style,
+}: {
+  label: string
+  anchor: IfaceAnchor
+  style?: IfaceLabelStyle | null
+}) {
+  const pad = 0.32
+  const charW = 0.68
+  const fontSize = style?.fontSize ?? IFACE_LABEL_FONT_DEFAULT
+  const angle = style?.angle != null ? style.angle : anchor.angle
+  const along = style?.along ?? 0
+  const perp = style?.perp ?? 0
+  const w = label.length * charW + pad * 2
+  const h = 1.85 * (fontSize / IFACE_LABEL_FONT_DEFAULT)
+  const textAnchor = style?.angle != null ? 'middle' as const : anchor.textAnchor
+  const xOff = textAnchor === 'start' ? 0 : textAnchor === 'end' ? -w : -w / 2
+  const textX = textAnchor === 'start' ? xOff + pad : textAnchor === 'end' ? xOff + w - pad : 0
+
+  const rectFill = style?.bgColor || undefined
+  const rectStroke = style?.borderColor || undefined
+  const textFill = style?.textColor || undefined
+
+  return (
+    <g transform={`translate(${anchor.x}, ${anchor.y}) rotate(${angle})`}>
+      <g transform={`translate(${along}, ${perp})`}>
+        <rect
+          x={xOff}
+          y={-h / 2}
+          width={w}
+          height={h}
+          rx={0.38}
+          fill={rectFill}
+          stroke={rectStroke}
+          className={cn(!rectFill && 'fill-surface/95', !rectStroke && 'stroke-border')}
+          strokeWidth={0.12}
+          vectorEffect="non-scaling-stroke"
+        />
+        <text
+          x={textX}
+          y={0}
+          textAnchor={textAnchor}
+          dominantBaseline="central"
+          fill={textFill || undefined}
+          className={cn('font-mono font-semibold', !textFill && 'fill-text2')}
+          style={{ fontSize: `${fontSize}px` }}
+        >
+          {label}
+        </text>
+      </g>
+    </g>
+  )
+}
+
+function IfaceLabelStyleEditor({
+  title,
+  style,
+  disabled,
+  onChange,
+  onReset,
+}: {
+  title: string
+  style?: IfaceLabelStyle | null
+  disabled?: boolean
+  onChange: (next: IfaceLabelStyle) => void
+  onReset: () => void
+}) {
+  const s: IfaceLabelStyle = style || {}
+  const num = (v: string) => (v === '' ? null : Number(v))
+
+  const patch = (next: Partial<IfaceLabelStyle>) => onChange({ ...s, ...next })
+  const nudge = (along: number, perp: number) => {
+    patch({
+      along: (s.along ?? 0) + along,
+      perp: (s.perp ?? 0) + perp,
+    })
+  }
+
+  return (
+    <div className="rounded-lg border border-border bg-surface2/30 p-2.5">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">{title}</span>
+        {hasIfaceLabelStyle(style) && !disabled && (
+          <button
+            type="button"
+            onClick={onReset}
+            className="text-[9px] font-medium text-primary hover:underline"
+          >
+            Reset
+          </button>
+        )}
+      </div>
+
+      <div className="mb-2 flex flex-wrap gap-1">
+        {([
+          { label: '←', title: 'Left (perp −)', along: 0, perp: -0.5 },
+          { label: '→', title: 'Right (perp +)', along: 0, perp: 0.5 },
+          { label: '↑', title: 'Toward device (along −)', along: -0.5, perp: 0 },
+          { label: '↓', title: 'Along cable (along +)', along: 0.5, perp: 0 },
+        ] as const).map((btn) => (
+          <button
+            key={btn.label}
+            type="button"
+            disabled={disabled}
+            title={btn.title}
+            onClick={() => nudge(btn.along, btn.perp)}
+            className="h-7 w-7 rounded border border-border bg-surface text-xs font-semibold hover:border-primary/50 hover:bg-primary/10 disabled:opacity-50"
+          >
+            {btn.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 text-xs">
+        <FormField label="Distance" hint="From device, %">
+          <Input
+            type="number"
+            step={0.1}
+            min={0}
+            disabled={disabled}
+            value={s.dist ?? ''}
+            placeholder="Auto"
+            className="h-8 font-mono text-xs"
+            onChange={(e) => patch({ dist: num(e.target.value) })}
+          />
+        </FormField>
+        <FormField label="Font size" hint="SVG units">
+          <Input
+            type="number"
+            step={0.05}
+            min={0.5}
+            max={2}
+            disabled={disabled}
+            value={s.fontSize ?? ''}
+            placeholder={String(IFACE_LABEL_FONT_DEFAULT)}
+            className="h-8 font-mono text-xs"
+            onChange={(e) => patch({ fontSize: num(e.target.value) })}
+          />
+        </FormField>
+        <FormField label="Along cable" hint="+ toward far end">
+          <Input
+            type="number"
+            step={0.1}
+            disabled={disabled}
+            value={s.along ?? ''}
+            placeholder="0"
+            className="h-8 font-mono text-xs"
+            onChange={(e) => patch({ along: num(e.target.value) })}
+          />
+        </FormField>
+        <FormField label="Perpendicular" hint="+ right of cable">
+          <Input
+            type="number"
+            step={0.1}
+            disabled={disabled}
+            value={s.perp ?? ''}
+            placeholder="0"
+            className="h-8 font-mono text-xs"
+            onChange={(e) => patch({ perp: num(e.target.value) })}
+          />
+        </FormField>
+        <FormField label="Angle °" hint="Empty = auto">
+          <Input
+            type="number"
+            step={1}
+            min={-180}
+            max={180}
+            disabled={disabled}
+            value={s.angle ?? ''}
+            placeholder="Auto"
+            className="h-8 font-mono text-xs"
+            onChange={(e) => patch({ angle: num(e.target.value) })}
+          />
+        </FormField>
+      </div>
+
+      <div className="mt-2 grid grid-cols-3 gap-2">
+        <label className="flex flex-col gap-1 text-[10px]">
+          <span className="text-muted">Text</span>
+          <input
+            type="color"
+            disabled={disabled}
+            value={s.textColor || '#94a3b8'}
+            onChange={(e) => patch({ textColor: e.target.value })}
+            className="h-8 w-full cursor-pointer rounded border border-border bg-surface disabled:opacity-50"
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-[10px]">
+          <span className="text-muted">Background</span>
+          <input
+            type="color"
+            disabled={disabled}
+            value={s.bgColor || '#1e293b'}
+            onChange={(e) => patch({ bgColor: e.target.value })}
+            className="h-8 w-full cursor-pointer rounded border border-border bg-surface disabled:opacity-50"
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-[10px]">
+          <span className="text-muted">Border</span>
+          <input
+            type="color"
+            disabled={disabled}
+            value={s.borderColor || '#334155'}
+            onChange={(e) => patch({ borderColor: e.target.value })}
+            className="h-8 w-full cursor-pointer rounded border border-border bg-surface disabled:opacity-50"
+          />
+        </label>
+      </div>
+    </div>
+  )
+}
+
+/* ── Link annotation chip (HTML — speed / throughput mid-link) ── */
+
 function LinkChip({
   x, y, variant, children, tone,
 }: {
   x: number
   y: number
-  variant: 'iface' | 'speed' | 'live'
+  variant: 'speed' | 'live'
   children: ReactNode
   tone?: 'success' | 'warning' | 'danger'
 }) {
   let cls: string
-  if (variant === 'iface') {
-    cls = 'bg-surface/95 text-text2 border-border'
-  } else if (variant === 'speed') {
+  if (variant === 'speed') {
     cls = 'bg-primary/15 text-primary border-primary/30'
   } else {
     cls =
@@ -2645,6 +3539,7 @@ function LinkChip({
       tone === 'warning' ? 'bg-warning/15 text-warning border-warning/40' :
       'bg-success/15 text-success border-success/40'
   }
+
   return (
     <div
       className="pointer-events-none absolute z-[15]"
@@ -2655,7 +3550,7 @@ function LinkChip({
       }}
     >
       <div className={cn(
-        'rounded border px-1 py-px font-mono text-[9px] font-semibold leading-none tracking-tight shadow-sm backdrop-blur',
+        'whitespace-nowrap rounded border px-1 py-px font-mono text-[9px] font-semibold leading-none tracking-tight shadow-sm backdrop-blur',
         cls,
       )}>
         {children}
@@ -2689,10 +3584,53 @@ function LinkInspector({
   const health = source && target ? linkHealth(source.status, target.status) : 'unknown'
   const color = STATUS_COLOR[health]
   const ro = mode === 'live'
+  const srcQ = useDeviceInterfaces(source?.device_id)
+  const dstQ = useDeviceInterfaces(target?.device_id)
+  const [kindTouched, setKindTouched] = useState(false)
+  const [speedTouched, setSpeedTouched] = useState(false)
+  const speedParts = parseStoredSpeed(md.speed)
+  const [speedPreset, setSpeedPreset] = useState<LinkSpeed | ''>(speedParts.preset)
+  const [speedCustom, setSpeedCustom] = useState(speedParts.custom)
+
+  useEffect(() => {
+    const next = parseStoredSpeed(md.speed)
+    setSpeedPreset(next.preset)
+    setSpeedCustom(next.custom)
+    setKindTouched(false)
+    setSpeedTouched(false)
+  }, [link.id])
 
   const patchMeta = (next: Partial<LinkMetadata>) => {
     onChange({ metadata: { ...md, ...next } })
   }
+
+  const applyInferred = useCallback((srcName: string, dstName: string) => {
+    const next = inferLinkProps(
+      findIface(srcQ.data, srcName),
+      findIface(dstQ.data, dstName),
+      srcName,
+      dstName,
+    )
+    if (!kindTouched && (srcName || dstName)) {
+      onChange({ link_type: next.kind, metadata: { ...md, kind: next.kind } })
+    }
+    if (!speedTouched && (srcName || dstName)) {
+      const speed = resolveSpeedValue(next.speedPreset, next.speedCustom)
+      setSpeedPreset(next.speedPreset)
+      setSpeedCustom(next.speedCustom)
+      patchMeta({ speed: speed || null })
+    }
+  }, [srcQ.data, dstQ.data, kindTouched, speedTouched, md, onChange])
+
+  const inferred = useMemo(() => inferLinkProps(
+    findIface(srcQ.data, md.src_interface || ''),
+    findIface(dstQ.data, md.dst_interface || ''),
+    md.src_interface || '',
+    md.dst_interface || '',
+  ), [srcQ.data, dstQ.data, md.src_interface, md.dst_interface])
+
+  const kindAuto = !kindTouched && !!(md.src_interface || md.dst_interface)
+  const speedAuto = !speedTouched && !!(md.src_interface || md.dst_interface)
 
   return (
     <div className="space-y-4">
@@ -2765,44 +3703,77 @@ function LinkInspector({
         )}
       </div>
 
-      <FormField label="Source interface" hint={source?.hostname || ''}>
-        <Input
-          value={md.src_interface || ''}
-          placeholder="e.g. Gi0/1, eth0, Te1/0/24"
-          disabled={ro}
-          onChange={(e) => patchMeta({ src_interface: e.target.value })}
-          onBlur={(e) => patchMeta({ src_interface: e.target.value.trim() || null })}
-        />
-      </FormField>
+      <DeviceInterfaceSelect
+        deviceId={source?.device_id || ''}
+        hostname={source?.hostname || 'Source'}
+        value={md.src_interface || ''}
+        disabled={ro || !source}
+        onChange={(v) => {
+          patchMeta({ src_interface: v || null })
+          applyInferred(v, md.dst_interface || '')
+        }}
+      />
 
-      <FormField label="Destination interface" hint={target?.hostname || ''}>
-        <Input
-          value={md.dst_interface || ''}
-          placeholder="e.g. eth0, ens33, Gi0/24"
-          disabled={ro}
-          onChange={(e) => patchMeta({ dst_interface: e.target.value })}
-          onBlur={(e) => patchMeta({ dst_interface: e.target.value.trim() || null })}
-        />
-      </FormField>
+      <DeviceInterfaceSelect
+        deviceId={target?.device_id || ''}
+        hostname={target?.hostname || 'Target'}
+        value={md.dst_interface || ''}
+        disabled={ro || !target}
+        onChange={(v) => {
+          patchMeta({ dst_interface: v || null })
+          applyInferred(md.src_interface || '', v)
+        }}
+      />
+
+      {(md.src_interface || md.dst_interface) && (
+        <div className="space-y-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Port label style</div>
+          {md.src_interface && (
+            <IfaceLabelStyleEditor
+              title={`${source?.hostname || 'Source'} label`}
+              style={md.src_label}
+              disabled={ro}
+              onChange={(next) => patchMeta({ src_label: hasIfaceLabelStyle(next) ? next : null })}
+              onReset={() => patchMeta({ src_label: null })}
+            />
+          )}
+          {md.dst_interface && (
+            <IfaceLabelStyleEditor
+              title={`${target?.hostname || 'Target'} label`}
+              style={md.dst_label}
+              disabled={ro}
+              onChange={(next) => patchMeta({ dst_label: hasIfaceLabelStyle(next) ? next : null })}
+              onReset={() => patchMeta({ dst_label: null })}
+            />
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-2">
-        <FormField label="Speed">
-          <select
-            value={md.speed || ''}
-            disabled={ro}
-            onChange={(e) => patchMeta({ speed: e.target.value || null })}
-            className="h-8 w-full rounded-md border border-border bg-surface px-2 text-xs disabled:opacity-50"
-          >
-            <option value="">—</option>
-            {LINK_SPEEDS.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </FormField>
-        <FormField label="Kind">
+        <LinkSpeedSelect
+          preset={speedPreset}
+          custom={speedCustom}
+          autoDetected={speedAuto}
+          disabled={ro}
+          onChange={(preset, custom) => {
+            setSpeedTouched(true)
+            setSpeedPreset(preset)
+            setSpeedCustom(custom)
+            patchMeta({ speed: resolveSpeedValue(preset, custom) || null })
+          }}
+        />
+        <FormField
+          label="Kind"
+          hint={kindAuto ? `Auto: ${LINK_KINDS.find((k) => k.value === inferred.kind)?.label || inferred.kind}` : undefined}
+        >
           <select
             value={kind}
             disabled={ro}
-            onChange={(e) => onChange({ link_type: e.target.value, metadata: { ...md, kind: e.target.value as LinkKind } })}
-            className="h-8 w-full rounded-md border border-border bg-surface px-2 text-xs disabled:opacity-50"
+            onChange={(e) => {
+              setKindTouched(true)
+              onChange({ link_type: e.target.value, metadata: { ...md, kind: e.target.value as LinkKind } })
+            }}
+            className="h-9 w-full rounded-md border border-border bg-surface px-2 text-xs disabled:opacity-50"
           >
             {LINK_KINDS.map((k) => <option key={k.value} value={k.value}>{k.label}</option>)}
           </select>
@@ -2850,11 +3821,38 @@ function LinkWizard({
   onSubmit: (kind: LinkKind, metadata: LinkMetadata) => void
   pending: boolean
 }) {
+  const srcQ = useDeviceInterfaces(source.device_id)
+  const dstQ = useDeviceInterfaces(target.device_id)
   const [kind, setKind] = useState<LinkKind>('ethernet')
+  const [kindTouched, setKindTouched] = useState(false)
   const [shape, setShape] = useState<LinkShape>(defaultShape)
   const [src, setSrc] = useState('')
   const [dst, setDst] = useState('')
-  const [speed, setSpeed] = useState<LinkSpeed | ''>('1G')
+  const [speedPreset, setSpeedPreset] = useState<LinkSpeed | ''>('')
+  const [speedCustom, setSpeedCustom] = useState('')
+  const [speedTouched, setSpeedTouched] = useState(false)
+
+  const inferred = useMemo(() => inferLinkProps(
+    findIface(srcQ.data, src),
+    findIface(dstQ.data, dst),
+    src,
+    dst,
+  ), [srcQ.data, dstQ.data, src, dst])
+
+  useEffect(() => {
+    if (!kindTouched && (src || dst)) setKind(inferred.kind)
+  }, [inferred.kind, kindTouched, src, dst])
+
+  useEffect(() => {
+    if (!speedTouched && (src || dst)) {
+      setSpeedPreset(inferred.speedPreset)
+      setSpeedCustom(inferred.speedCustom)
+    }
+  }, [inferred.speedPreset, inferred.speedCustom, speedTouched, src, dst])
+
+  const kindAuto = !kindTouched && !!(src || dst)
+  const speedAuto = !speedTouched && !!(src || dst)
+
   return (
     <Dialog open onOpenChange={(o) => !o && onCancel()}>
       <DialogContent>
@@ -2870,7 +3868,7 @@ function LinkWizard({
               shape,
               src_interface: src.trim() || null,
               dst_interface: dst.trim() || null,
-              speed: speed || null,
+              speed: resolveSpeedValue(speedPreset, speedCustom) || null,
             })
           }}
         >
@@ -2885,14 +3883,37 @@ function LinkWizard({
             </div>
           </div>
 
+          <div className="grid grid-cols-2 gap-3">
+            <DeviceInterfaceSelect
+              deviceId={source.device_id}
+              hostname={source.hostname}
+              value={src}
+              autoFocus
+              onChange={setSrc}
+            />
+            <DeviceInterfaceSelect
+              deviceId={target.device_id}
+              hostname={target.hostname}
+              value={dst}
+              onChange={setDst}
+            />
+          </div>
+
           <div>
-            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Link kind</div>
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Link kind</span>
+              {kindAuto && (
+                <span className="text-[9px] font-medium text-primary">
+                  Auto · {LINK_KINDS.find((k) => k.value === inferred.kind)?.label}
+                </span>
+              )}
+            </div>
             <div className="grid grid-cols-3 gap-1.5">
               {LINK_KINDS.map((k) => (
                 <button
                   key={k.value}
                   type="button"
-                  onClick={() => setKind(k.value)}
+                  onClick={() => { setKindTouched(true); setKind(k.value) }}
                   title={k.hint}
                   className={cn(
                     'rounded-md border px-2 py-1.5 text-left transition',
@@ -2908,40 +3929,16 @@ function LinkWizard({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <FormField label={`${source.hostname} interface`}>
-              <Input value={src} onChange={(e) => setSrc(e.target.value)} placeholder="Gi0/1" autoFocus />
-            </FormField>
-            <FormField label={`${target.hostname} interface`}>
-              <Input value={dst} onChange={(e) => setDst(e.target.value)} placeholder="eth0" />
-            </FormField>
-          </div>
-
-          <FormField label="Speed">
-            <div className="flex flex-wrap gap-1">
-              <button
-                type="button"
-                onClick={() => setSpeed('')}
-                className={cn(
-                  'rounded border px-2 py-0.5 text-[10px] font-medium transition',
-                  !speed ? 'border-primary/55 bg-primary/10 text-primary' : 'border-border bg-surface hover:border-border-strong',
-                )}
-              >—</button>
-              {LINK_SPEEDS.map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => setSpeed(s)}
-                  className={cn(
-                    'rounded border px-2 py-0.5 text-[10px] font-mono font-semibold transition',
-                    speed === s
-                      ? 'border-primary/55 bg-primary/10 text-primary'
-                      : 'border-border bg-surface hover:border-border-strong',
-                  )}
-                >{s}</button>
-              ))}
-            </div>
-          </FormField>
+          <LinkSpeedSelect
+            preset={speedPreset}
+            custom={speedCustom}
+            autoDetected={speedAuto}
+            onChange={(preset, custom) => {
+              setSpeedTouched(true)
+              setSpeedPreset(preset)
+              setSpeedCustom(custom)
+            }}
+          />
 
           <FormField label="Shape">
             <div className="grid grid-cols-3 gap-1.5">
