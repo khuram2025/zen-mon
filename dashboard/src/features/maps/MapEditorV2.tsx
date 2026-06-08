@@ -3,10 +3,8 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { ReactFlowProvider } from '@xyflow/react'
 import { Activity, Loader2, Pencil, Radio, Rows3 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { toast } from '@/components/ui/Toast'
-import { apiErrorMessage } from '@/lib/utils'
 import { MapCanvas } from './canvas/MapCanvas'
-import { useLiveLinks, useManualMap, useManualMaps, useNodeMutations } from './useMapData'
+import { useLiveLinks, useManualMap, useManualMaps } from './useMapData'
 
 type Mode = 'design' | 'live'
 
@@ -36,13 +34,7 @@ export function MapEditorV2() {
   const liveLinksQuery = useLiveLinks(selectedMapId, mode === 'live')
   const liveData = liveLinksQuery.data?.data || {}
 
-  const { move } = useNodeMutations(selectedMapId)
-
   const counts = useMemo(() => ({ nodes: detail?.nodes.length || 0, links: detail?.links.length || 0 }), [detail])
-
-  function persistPosition(id: string, x_pct: number, y_pct: number) {
-    move.mutate({ id, x_pct, y_pct }, { onError: (e) => toast.error(apiErrorMessage(e)) })
-  }
 
   return (
     <div className="-m-5 flex h-[calc(100vh-2.75rem)] flex-col bg-bg">
@@ -121,11 +113,11 @@ export function MapEditorV2() {
         ) : detail ? (
           <ReactFlowProvider>
             <MapCanvas
+              mapId={selectedMapId}
               detail={detail}
               liveData={liveData}
               liveMode={mode === 'live'}
               showThroughput={showThroughput}
-              onPersistPosition={persistPosition}
             />
           </ReactFlowProvider>
         ) : null}

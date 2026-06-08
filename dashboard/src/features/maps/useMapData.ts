@@ -50,9 +50,9 @@ export function useSuggestedLinks(mapId: string | null, enabled: boolean) {
   })
 }
 
-/** Persist a node's new position (percent coords) — keeps x_pct/y_pct
- *  authoritative so the v1 editor keeps working unchanged. */
-export function useNodeMutations(mapId: string | null) {
+/** Node/link mutations for the v2 editor. Positions stay in percent coords so
+ *  x_pct/y_pct remain authoritative and the v1 editor keeps working. */
+export function useMapMutations(mapId: string | null) {
   const qc = useQueryClient()
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ['manual-map', mapId] })
@@ -61,8 +61,27 @@ export function useNodeMutations(mapId: string | null) {
   const move = useMutation({
     mutationFn: async ({ id, x_pct, y_pct }: { id: string; x_pct: number; y_pct: number }) =>
       (await api.put(`/maps/${mapId}/nodes/${id}`, { x_pct, y_pct })).data,
+  })
+
+  /** Persist many node positions at once (group move / align / snap).
+   *  Intentionally does NOT invalidate — local React Flow state is already
+   *  correct, so we avoid a refetch that would rebuild nodes and drop the
+   *  current selection. */
+  const bulkMove = useMutation({
+    mutationFn: async (items: { id: string; x_pct: number; y_pct: number }[]) => {
+      await Promise.all(items.map((it) => api.put(`/maps/${mapId}/nodes/${it.id}`, { x_pct: it.x_pct, y_pct: it.y_pct })))
+    },
+  })
+
+  const deleteNode = useMutation({
+    mutationFn: async (id: string) => api.delete(`/maps/${mapId}/nodes/${id}`),
     onSuccess: invalidate,
   })
 
-  return { move }
+  const deleteLink = useMutation({
+    mutationFn: async (id: string) => api.delete(`/maps/${mapId}/links/${id}`),
+    onSuccess: invalidate,
+  })
+
+  return { move, bulkMove, deleteNode, deleteLink }
 }
