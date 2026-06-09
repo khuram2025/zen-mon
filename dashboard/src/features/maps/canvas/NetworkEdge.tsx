@@ -36,6 +36,29 @@ export type NetworkEdgeData = {
   setIfacePos?: (which: 'src' | 'dst', pos: { dx?: number; dy?: number; rot?: number }, commit: boolean) => void
 }
 
+/** Collapse near-duplicate and collinear bend points so repeated orthogonal
+ *  segment drags don't accumulate redundant waypoints. */
+function simplifyOrtho(pts: Pt[], eps = 1.5): Pt[] {
+  const dedup: Pt[] = []
+  for (const p of pts) {
+    const l = dedup[dedup.length - 1]
+    if (!l || Math.abs(l.x - p.x) > eps || Math.abs(l.y - p.y) > eps) dedup.push(p)
+  }
+  const out: Pt[] = []
+  for (let i = 0; i < dedup.length; i++) {
+    const prev = out[out.length - 1]
+    const cur = dedup[i]
+    const next = dedup[i + 1]
+    if (prev && next) {
+      const colH = Math.abs(prev.y - cur.y) <= eps && Math.abs(cur.y - next.y) <= eps
+      const colV = Math.abs(prev.x - cur.x) <= eps && Math.abs(cur.x - next.x) <= eps
+      if (colH || colV) continue // cur lies on the straight run prev→next
+    }
+    out.push(cur)
+  }
+  return out
+}
+
 /** Centre + shape info for an endpoint — devices are discs, annotations are
  *  boxes (anchor on the rectangle border instead of a circle). */
 function endpointGeom(n: ReturnType<typeof useInternalNode>) {
@@ -131,14 +154,19 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
     let moved = false
     const apply = (ev: PointerEvent, commit: boolean) => {
       const fp = rf.screenToFlowPosition({ x: ev.clientX, y: ev.clientY })
-      const nrv = rv.map((p) => ({ ...p }))
-      if (horizontal) { nrv[k].y = fp.y; nrv[k + 1].y = fp.y } else { nrv[k].x = fp.x; nrv[k + 1].x = fp.x }
-      // Interior corners become waypoints; if we moved an end that sits on a
-      // node anchor, keep that offset point as a waypoint so the stub bends.
-      let wpts = nrv.slice(1, last)
-      if (k === 0) wpts = [nrv[0], ...wpts]
-      if (k + 1 === last) wpts = [...wpts, nrv[last]]
-      setWaypoints!(wpts, commit)
+      const v = horizontal ? fp.y : fp.x // new perpendicular coordinate of the segment
+      // An anchor end stays pinned to the node — instead of moving it, add an
+      // elbow that joins the moved segment back to the anchor's fixed axis.
+      const elbow = (anchor: Pt): Pt => (horizontal ? { x: anchor.x, y: v } : { x: v, y: anchor.y })
+      const wpts: Pt[] = []
+      if (k === 0) wpts.push(elbow(rv[0]))
+      for (let i = 1; i <= last - 1; i++) {
+        const p = { ...rv[i] }
+        if (i === k || i === k + 1) { if (horizontal) p.y = v; else p.x = v }
+        wpts.push(p)
+      }
+      if (k + 1 === last) wpts.push(elbow(rv[last]))
+      setWaypoints!(simplifyOrtho(wpts), commit)
     }
     const move = (ev: PointerEvent) => {
       if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 3) return // ignore jitter / clicks
