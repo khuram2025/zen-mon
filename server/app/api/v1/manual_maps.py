@@ -870,6 +870,7 @@ async def links_live(
     # name and collect (exporter_ip, ifindex) pairs we need traffic for.
     out: dict[str, dict] = {}
     flow_keys: set[tuple[str, int]] = set()
+    snmp_keys: set[tuple[str, int]] = set()  # (device_id, if_index) for SNMP throughput
     for lr in link_rows:
         md = lr["metadata"] or {}
         if isinstance(md, str):
@@ -888,8 +889,10 @@ async def links_live(
             if not matched:
                 return _empty_iface()
             payload = _iface_payload(matched)
-            if payload["if_index"] is not None and side_node["ip"]:
-                flow_keys.add((str(side_node["ip"]), int(payload["if_index"])))
+            if payload["if_index"] is not None:
+                if side_node["ip"]:
+                    flow_keys.add((str(side_node["ip"]), int(payload["if_index"])))
+                snmp_keys.add((str(side_node["device_id"]), int(payload["if_index"])))
             return payload
 
         out[str(lr["id"])] = {
@@ -955,6 +958,40 @@ async def links_live(
             # interface status still useful, just no throughput.
             flow_map = {}
 
+    # SNMP interface counters — the universal throughput source. NetFlow only
+    # exists for flow-exporting devices (firewalls/routers); SNMP polls every
+    # monitored interface, so this lights up switch↔switch links too. Keyed by
+    # (device_id, if_index); we take the most recent sample's pre-computed bps.
+    snmp_map: dict[tuple[str, int], dict] = {}
+    if snmp_keys:
+        start = datetime.now(timezone.utc) - timedelta(seconds=_LIVE_WINDOW_SECONDS)
+        did_list = sorted({d for d, _ in snmp_keys})
+        sidx_list = sorted({i for _, i in snmp_keys})
+        try:
+            client = get_clickhouse_client()
+            res = client.query(
+                """
+                SELECT toString(device_id) AS device_id, if_index,
+                       argMax(in_bps, timestamp)  AS in_bps,
+                       argMax(out_bps, timestamp) AS out_bps,
+                       argMax(in_ucast_pkts, timestamp)  AS in_pkts,
+                       argMax(out_ucast_pkts, timestamp) AS out_pkts
+                FROM zenplus.snmp_if_metrics
+                WHERE timestamp >= %(start)s
+                  AND toString(device_id) IN %(dids)s
+                  AND if_index IN %(idxs)s
+                GROUP BY device_id, if_index
+                """,
+                parameters={"start": start, "dids": did_list, "idxs": sidx_list},
+            )
+            for r in res.result_rows:
+                snmp_map[(str(r[0]), int(r[1]))] = {
+                    "in_bps": float(r[2] or 0), "out_bps": float(r[3] or 0),
+                    "in_packets": int(r[4] or 0), "out_packets": int(r[5] or 0),
+                }
+        except Exception:
+            snmp_map = {}
+
     # Stitch throughput back into the result and drop internal fields.
     window = _LIVE_WINDOW_SECONDS
     final: dict[str, dict] = {}
@@ -965,14 +1002,25 @@ async def links_live(
             if not side.get("matched") or not node:
                 continue
             f = flow_map.get((str(node["ip"]), int(side["if_index"])))
-            if not f:
-                continue
-            in_bps = (f["in_bytes"] * 8) / window
-            out_bps = (f["out_bytes"] * 8) / window
-            side["in_bps"] = round(in_bps, 1)
-            side["out_bps"] = round(out_bps, 1)
-            side["in_packets"] = f["in_packets"]
-            side["out_packets"] = f["out_packets"]
+            if f:
+                # NetFlow: bytes over the window → bits/sec.
+                in_bps = (f["in_bytes"] * 8) / window
+                out_bps = (f["out_bytes"] * 8) / window
+                side["in_bps"] = round(in_bps, 1)
+                side["out_bps"] = round(out_bps, 1)
+                side["in_packets"] = f["in_packets"]
+                side["out_packets"] = f["out_packets"]
+            else:
+                # Fall back to SNMP interface counters (pre-computed bps).
+                s = snmp_map.get((str(node["device_id"]), int(side["if_index"])))
+                if not s:
+                    continue
+                in_bps = s["in_bps"]
+                out_bps = s["out_bps"]
+                side["in_bps"] = round(in_bps, 1)
+                side["out_bps"] = round(out_bps, 1)
+                side["in_packets"] = s["in_packets"]
+                side["out_packets"] = s["out_packets"]
             if side.get("if_speed"):
                 # Peak direction divided by line speed.
                 util = max(in_bps, out_bps) / float(side["if_speed"]) * 100
