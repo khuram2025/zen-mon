@@ -413,6 +413,30 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
     if (dev.length) persistPositions(dev)
   }, [setNodes, persistPositions, updateShape])
 
+  // When nodes move, carry the bends of links BETWEEN two moved nodes along by
+  // the same delta — otherwise waypoints (stored as absolute canvas %) stay put
+  // and the cable distorts. `deltas` maps node id → px shift.
+  const shiftConnectedWaypoints = useCallback((deltas: Map<string, { dx: number; dy: number }>) => {
+    const updates: { id: string; meta: Record<string, unknown> }[] = []
+    edgesRef.current.forEach((e) => {
+      if ((e.data as any).annotation) return
+      const ds = deltas.get(e.source)
+      if (!ds || !deltas.get(e.target)) return // both endpoints must have moved
+      const link = (e.data as any).link
+      const wps = link?.metadata?.waypoints
+      if (!Array.isArray(wps) || !wps.length) return
+      const ddx = (ds.dx / LOGICAL_W) * 100, ddy = (ds.dy / LOGICAL_H) * 100
+      const nw = wps.map((w: any) => ({ x_pct: Math.max(0, Math.min(100, w.x_pct + ddx)), y_pct: Math.max(0, Math.min(100, w.y_pct + ddy)) }))
+      updates.push({ id: e.id, meta: { ...(link.metadata || {}), waypoints: nw } })
+    })
+    if (!updates.length) return
+    setEdges((eds) => eds.map((e) => {
+      const u = updates.find((x) => x.id === e.id)
+      return u ? { ...e, data: { ...e.data, link: { ...(e.data as any).link, metadata: u.meta } } } : e
+    }))
+    updates.forEach((u) => updateLink.mutate({ id: u.id, patch: { metadata: u.meta } }))
+  }, [setEdges, updateLink])
+
   // Replace a device node's editable fields (label/icon/metadata) locally + persist.
   const applyNodeFields = useCallback((id: string, fields: Record<string, unknown>) => {
     setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, node: { ...(n.data as any).node, ...fields } } } : n)))
@@ -548,10 +572,14 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
     const next = moved.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y }))
     applyPositions(next)
     const prev = dragPrevRef.current
+    // Carry along the bends of cables between two moved nodes.
+    const deltas = new Map<string, { dx: number; dy: number }>()
+    next.forEach((nx) => { const p = prev.find((q) => q.id === nx.id); if (p) deltas.set(nx.id, { dx: nx.x - p.x, dy: nx.y - p.y }) })
+    shiftConnectedWaypoints(deltas)
     if (prev.length && prev.some((p, i) => p.x !== next[i]?.x || p.y !== next[i]?.y)) {
       pushHistory({ undo: () => applyPositions(prev), redo: () => applyPositions(next) })
     }
-  }, [applyPositions, pushHistory])
+  }, [applyPositions, shiftConnectedWaypoints, pushHistory])
 
   // Quick-connect: auto-draw CDP/LLDP links among the placed devices.
   const quickConnect = useCallback(() => {
@@ -773,8 +801,13 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
     applyPositions(moves)
     const prev = groupPrevRef.current
     groupPrevRef.current = null
-    if (prev) pushHistory({ undo: () => applyPositions(prev), redo: () => applyPositions(moves) })
-  }, [setNodes, applyPositions, pushHistory])
+    if (prev) {
+      const deltas = new Map<string, { dx: number; dy: number }>()
+      moves.forEach((m) => { const p = prev.find((q) => q.id === m.id); if (p) deltas.set(m.id, { dx: m.x - p.x, dy: m.y - p.y }) })
+      shiftConnectedWaypoints(deltas)
+      pushHistory({ undo: () => applyPositions(prev), redo: () => applyPositions(moves) })
+    }
+  }, [setNodes, applyPositions, shiftConnectedWaypoints, pushHistory])
 
   const deleteSelected = useCallback(() => {
     const sel = nodesRef.current.filter((n) => n.selected)
