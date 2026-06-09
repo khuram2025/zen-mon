@@ -25,9 +25,20 @@ export type ManualMapListItem = {
   status_counts: Record<string, number>
 }
 
+export type NodeLabelStyle = {
+  color?: string
+  fontFamily?: string
+  fontSize?: number
+  bold?: boolean
+  italic?: boolean
+}
+
 export type NodeMetadata = {
   label_offset?: { dx: number; dy: number }
   size_scale?: number
+  label_style?: NodeLabelStyle
+  /** Outer frame shape of the device tile. */
+  frame?: 'circle' | 'rounded'
   [k: string]: unknown
 }
 
@@ -56,6 +67,10 @@ export type LinkShape = 'curve' | 'straight' | 'orthogonal'
 
 export type Waypoint = { x_pct: number; y_pct: number }
 
+/** Per-endpoint port-label placement: offset (logical px) from the cable anchor
+ *  + rotation (deg). Lets admins drag/rotate the interface chips off the line. */
+export type IfaceLabelPos = { dx?: number; dy?: number; rot?: number }
+
 export type LinkMetadata = {
   src_interface?: string | null
   dst_interface?: string | null
@@ -64,6 +79,8 @@ export type LinkMetadata = {
   shape?: LinkShape | null
   waypoints?: Waypoint[] | null
   notes?: string | null
+  /** Manual placement for the source/target interface chips. */
+  iface_pos?: { src?: IfaceLabelPos; dst?: IfaceLabelPos } | null
 }
 
 export type LiveInterface = {
@@ -111,6 +128,52 @@ export type SuggestedLink = {
   physical_links: number
 }
 
+/* ── Annotation shapes (standalone canvas objects, not tied to a device) ──────
+ * Stored in manual_map_shapes. We reuse kind='image' for both uploaded images
+ * (metadata.src) and built-in network/system/cloud icons (metadata.icon). */
+export type ShapeKind = 'rectangle' | 'circle' | 'text' | 'line' | 'arrow' | 'diamond' | 'hexagon' | 'image' | 'sticky'
+
+export type ShapeStyle = {
+  icon?: IconKey            // built-in icon (when kind='image' and no src)
+  src?: string              // image URL or data URL (when kind='image')
+  color?: string            // text / foreground colour
+  fontFamily?: string
+  fontSize?: number         // logical px
+  bold?: boolean
+  italic?: boolean
+  align?: 'left' | 'center' | 'right'
+  rounded?: boolean
+}
+
+export type MapShape = {
+  id: string
+  map_id: string
+  kind: ShapeKind
+  x_pct: number
+  y_pct: number
+  w_pct: number
+  h_pct: number
+  text?: string | null
+  fill?: string | null
+  stroke?: string | null
+  z_index: number
+  metadata: ShapeStyle
+}
+
+/* A cable that touches at least one annotation (icon/image/shape). Stored in
+ * the map's metadata (annotation_links) since the links table only accepts
+ * device endpoints. Endpoints reference either a device node id or a shape id. */
+export type AnnotationLink = {
+  id: string
+  source: string
+  target: string
+  source_type: 'node' | 'shape'
+  target_type: 'node' | 'shape'
+  label?: string | null
+  link_type?: string
+  metadata?: LinkMetadata
+}
+
 export type ManualMapDetail = ManualMapListItem & {
   summary: {
     nodes: number
@@ -120,6 +183,7 @@ export type ManualMapDetail = ManualMapListItem & {
   }
   nodes: ManualMapNode[]
   links: ManualMapLink[]
+  shapes?: MapShape[]
 }
 
 export type Device = {
@@ -164,6 +228,26 @@ export function pxToPct(x: number, y: number): Waypoint {
   return {
     x_pct: clamp((x / LOGICAL_W) * 100, 0, 100),
     y_pct: clamp((y / LOGICAL_H) * 100, 0, 100),
+  }
+}
+
+/** Shape rect (x_pct/y_pct = top-left, w/h_pct = size) → logical px rect. */
+export function shapeToPx(s: { x_pct: number; y_pct: number; w_pct: number; h_pct: number }) {
+  return {
+    x: (s.x_pct / 100) * LOGICAL_W,
+    y: (s.y_pct / 100) * LOGICAL_H,
+    w: (s.w_pct / 100) * LOGICAL_W,
+    h: (s.h_pct / 100) * LOGICAL_H,
+  }
+}
+
+/** Logical px rect → clamped shape percent rect. */
+export function pxToShape(x: number, y: number, w: number, h: number) {
+  return {
+    x_pct: clamp((x / LOGICAL_W) * 100, 0, 100),
+    y_pct: clamp((y / LOGICAL_H) * 100, 0, 100),
+    w_pct: clamp((w / LOGICAL_W) * 100, 1, 100),
+    h_pct: clamp((h / LOGICAL_H) * 100, 1, 100),
   }
 }
 
@@ -418,6 +502,18 @@ export function anchorOnCircle(center: Pt, toward: Pt, r = DISC_RADIUS): Pt {
   const dy = toward.y - center.y
   const d = Math.hypot(dx, dy) || 1
   return { x: center.x + (dx / d) * r, y: center.y + (dy / d) * r }
+}
+
+/** Where a ray from a rectangle's centre toward `toward` exits the rect border.
+ *  Used to anchor cables on icon/image/shape annotations (which are boxes). */
+export function anchorOnRect(center: Pt, toward: Pt, halfW: number, halfH: number): Pt {
+  const dx = toward.x - center.x
+  const dy = toward.y - center.y
+  if (!dx && !dy) return { x: center.x + halfW, y: center.y }
+  const sx = halfW / (Math.abs(dx) || 1e-6)
+  const sy = halfH / (Math.abs(dy) || 1e-6)
+  const s = Math.min(sx, sy)
+  return { x: center.x + dx * s, y: center.y + dy * s }
 }
 
 function distToSegment(p: Pt, a: Pt, b: Pt): number {

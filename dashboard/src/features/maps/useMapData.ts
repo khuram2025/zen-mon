@@ -83,6 +83,13 @@ export function useMapMutations(mapId: string | null) {
     onSuccess: invalidate,
   })
 
+  /** Place a device on the map (structural → invalidates so it renders). */
+  const addNode = useMutation({
+    mutationFn: async (payload: { device_id: string; x_pct: number; y_pct: number; icon?: string }) =>
+      (await api.post(`/maps/${mapId}/nodes`, { icon: 'auto', ...payload })).data,
+    onSuccess: invalidate,
+  })
+
   /** Create a link between two nodes (structural → invalidates so it renders). */
   const addLink = useMutation({
     mutationFn: async (payload: {
@@ -108,5 +115,37 @@ export function useMapMutations(mapId: string | null) {
       (await api.put(`/maps/${mapId}/links/${id}`, patch)).data,
   })
 
-  return { move, bulkMove, deleteNode, deleteLink, updateNode, updateLink, addLink }
+  /* ── Annotation shapes (icons / images / text / boxes) ─────────────── */
+  const addShape = useMutation({
+    mutationFn: async (payload: Record<string, unknown>) =>
+      (await api.post(`/maps/${mapId}/shapes`, payload)).data,
+    onSuccess: invalidate,
+  })
+
+  // Optimistic — no refetch, so live drag/resize/edit isn't clobbered mid-gesture.
+  const updateShape = useMutation({
+    mutationFn: async ({ id, patch }: { id: string; patch: Record<string, unknown> }) =>
+      (await api.put(`/maps/${mapId}/shapes/${id}`, patch)).data,
+  })
+
+  const deleteShape = useMutation({
+    mutationFn: async (id: string) => api.delete(`/maps/${mapId}/shapes/${id}`),
+    onSuccess: invalidate,
+  })
+
+  /** Auto-create links for every discovered CDP/LLDP adjacency among placed
+   *  devices that isn't linked yet (server-side, dedup-safe). */
+  const autoConnect = useMutation({
+    mutationFn: async () => (await api.post(`/maps/${mapId}/auto-connect`)).data as { created: number; suggested: number },
+    onSuccess: invalidate,
+  })
+
+  // Annotation links (cables touching an icon/image) live in the map's metadata,
+  // not the device-only links table. Optimistic — no refetch.
+  const saveMapMeta = useMutation({
+    mutationFn: async (metadata: Record<string, unknown>) =>
+      (await api.put(`/maps/${mapId}`, { metadata })).data,
+  })
+
+  return { move, bulkMove, deleteNode, deleteLink, updateNode, updateLink, addLink, addNode, addShape, updateShape, deleteShape, saveMapMeta, autoConnect }
 }

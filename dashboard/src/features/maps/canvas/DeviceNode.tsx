@@ -29,8 +29,13 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
   const pulsing = live && (sk === 'down' || sk === 'degraded')
 
   const off = node.metadata?.label_offset || { dx: 0, dy: 0 }
+  const scale = node.metadata?.size_scale || 1
+  const ls = node.metadata?.label_style || {}
+  const discSize = DISC * scale
+  // Outer frame: a full circle (default) or a rounded-corner square.
+  const frameRadius = node.metadata?.frame === 'rounded' ? Math.round(discSize * 0.22) : discSize / 2
   const lx = LABEL_X + off.dx
-  const ly = LABEL_Y + off.dy
+  const ly = (DISC_CY + discSize / 2 + 8) + off.dy
   const moved = Math.hypot(off.dx, off.dy) > 6
   const editable = !live && !!onLabelMove
 
@@ -74,30 +79,39 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
       {/* Leader line from disc to a moved label */}
       {moved && (
         <svg className="pointer-events-none absolute overflow-visible" style={{ left: 0, top: 0 }} width={1} height={1}>
-          <line x1={DISC_CX} y1={DISC} x2={lx} y2={ly} className="stroke-border" strokeWidth={1} strokeDasharray="2 2" />
+          <line x1={DISC_CX} y1={DISC_CY + discSize / 2} x2={lx} y2={ly} className="stroke-border" strokeWidth={1} strokeDasharray="2 2" />
         </svg>
       )}
 
       {/* Icon disc (this is the draggable node body) */}
       <div className="absolute" style={{ left: DISC_CX, top: DISC_CY, transform: 'translate(-50%, -50%)' }}>
-        {pulsing && <span aria-hidden className={cn('absolute inset-0 rounded-full', sk === 'down' ? 'bg-danger/40' : 'bg-warning/40', 'nm-ping')} />}
-        <div className={cn('relative flex h-16 w-16 items-center justify-center rounded-full border-2 bg-surface shadow-md transition', color.ring, selected && 'ring-2 ring-primary ring-offset-2 ring-offset-surface')}>
+        {pulsing && <span aria-hidden className={cn('absolute inset-0', sk === 'down' ? 'bg-danger/40' : 'bg-warning/40', 'nm-ping')} style={{ borderRadius: frameRadius }} />}
+        <div
+          className={cn('relative flex items-center justify-center border-2 bg-surface shadow-md transition', color.ring, selected && 'ring-2 ring-primary ring-offset-2 ring-offset-surface')}
+          style={{ width: discSize, height: discSize, borderRadius: frameRadius }}
+        >
           <span aria-hidden className={cn('absolute -right-0.5 -top-0.5 h-3.5 w-3.5 rounded-full border-2 border-surface', color.dot, live && 'animate-pulse-soft')} />
-          <NetworkIcon name={iconKey} className="h-9 w-9" />
+          <NetworkIcon name={iconKey} style={{ width: discSize * 0.56, height: discSize * 0.56 }} />
         </div>
       </div>
 
-      {/* Movable label */}
+      {/* Movable, styleable label */}
       <div
         onPointerDown={startLabelDrag}
         className={cn(
-          'nodrag absolute max-w-[8rem] rounded-md border border-border bg-surface/90 px-2 py-0.5 text-center text-[11px] font-semibold leading-tight shadow-sm backdrop-blur',
+          'nodrag absolute max-w-[10rem] rounded-md border border-border bg-surface/90 px-2 py-0.5 text-center leading-tight shadow-sm backdrop-blur',
           editable && 'cursor-move hover:border-primary/60',
         )}
-        style={{ left: lx, top: ly, transform: 'translateX(-50%)' }}
+        style={{
+          left: lx, top: ly, transform: 'translateX(-50%)',
+          fontFamily: ls.fontFamily || undefined,
+          fontSize: ls.fontSize ? `${ls.fontSize}px` : '11px',
+          fontWeight: ls.bold === false ? 400 : 600,
+          fontStyle: ls.italic ? 'italic' : 'normal',
+        }}
       >
-        <div className="truncate text-text">{node.label || node.hostname}</div>
-        <div className="truncate text-[10px] font-normal text-muted">{node.ip_address}</div>
+        <div className="truncate" style={{ color: ls.color || 'rgb(var(--text))' }}>{node.label || node.hostname}</div>
+        <div className="truncate font-normal text-muted" style={{ fontSize: ls.fontSize ? `${Math.max(9, ls.fontSize - 1)}px` : '10px' }}>{node.ip_address}</div>
       </div>
     </div>
   )

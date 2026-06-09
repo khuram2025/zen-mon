@@ -7,8 +7,11 @@ import {
   MiniMap,
   Panel,
   ReactFlow,
+  SelectionMode,
   useEdgesState,
   useNodesState,
+  useReactFlow,
+  useStore,
   type Connection,
   type Edge,
   type Node,
@@ -22,32 +25,49 @@ import {
   Grid3x3,
   Magnet,
   MousePointer2,
+  Pencil,
+  Redo2,
   Spline,
   Trash2,
+  Undo2,
   Wand2,
+  Zap,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { toast } from '@/components/ui/Toast'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { useTheme } from '@/stores/theme'
 import {
+  LOGICAL_H,
+  LOGICAL_W,
   discCenterToNodeXY,
   nodeXYToDiscCenter,
   pctToPx,
   pxToPct,
+  pxToShape,
+  shapeToPx,
   statusKey,
+  type AnnotationLink,
   type LiveLinkData,
   type ManualMapDetail,
+  type ManualMapLink,
   type ManualMapNode,
+  type MapShape,
 } from '../core'
 import { useMapMutations } from '../useMapData'
 import { DeviceNode } from './DeviceNode'
+import { ShapeNode } from './ShapeNode'
 import { NetworkEdge } from './NetworkEdge'
 import { ContextMenu, type ContextMenuState, type MenuItem } from './ContextMenu'
 import { computeAlign, snap, type AlignOp } from './align'
 import { MapModeContext } from './MapModeContext'
 import { LinkDialog, type NewLink } from './LinkDialog'
+import { DEVICE_DND_TYPE } from './DevicePalette'
+import { LinkEditDialog, NodeEditDialog } from './EditDialogs'
+import { InsertMenu, ShapeInspector, type ShapeSpec } from './Annotations'
+import { GroupResizer } from './GroupResizer'
 
-const nodeTypes = { device: DeviceNode }
+const nodeTypes = { device: DeviceNode, shape: ShapeNode }
 const edgeTypes = { network: NetworkEdge }
 const GRID = 40 // logical px
 
@@ -71,19 +91,60 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
   const [menu, setMenu] = useState<ContextMenuState>(null)
   const [selCount, setSelCount] = useState(0)
   const [tool, setTool] = useState<'select' | 'connect'>('select')
+  const [panKey, setPanKey] = useState(false) // Space held → temporarily pan with left-drag
   // All deletions are explicit + confirmed. Nothing deletes without this.
   const [pendingDelete, setPendingDelete] = useState<{ title: string; description: string; run: () => void } | null>(null)
   const [pendingLink, setPendingLink] = useState<{ source: ManualMapNode; target: ManualMapNode } | null>(null)
+  const [editNode, setEditNode] = useState<ManualMapNode | null>(null)
+  const [editLink, setEditLink] = useState<ManualMapLink | null>(null)
+  const [dropActive, setDropActive] = useState(false)
+  const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null)
+  const [annLinks, setAnnLinks] = useState<AnnotationLink[]>([])
+  const annLinksRef = useRef<AnnotationLink[]>([])
+  useEffect(() => { annLinksRef.current = annLinks }, [annLinks])
 
   const connectMode = tool === 'connect' && !liveMode
-  const { bulkMove, deleteNode, deleteLink, updateLink, updateNode, addLink } = useMapMutations(mapId)
+  const theme = useTheme((s) => s.theme)
+  const { bulkMove, deleteNode, deleteLink, updateLink, updateNode, addLink, addNode, addShape, updateShape, deleteShape, saveMapMeta, autoConnect } = useMapMutations(mapId)
+  const { screenToFlowPosition } = useReactFlow()
+  const rfTransform = useStore((s) => s.transform)
   const nodeById = useMemo(() => new Map(detail.nodes.map((n) => [n.id, n])), [detail.nodes])
+  const selectedShape = useMemo<MapShape | null>(
+    () => (selectedShapeId ? ((nodes.find((n) => n.id === selectedShapeId)?.data as any)?.shape ?? null) : null),
+    [selectedShapeId, nodes],
+  )
 
   // Mirrors so callbacks can read the latest local metadata.
   const edgesRef = useRef<Edge[]>([])
   useEffect(() => { edgesRef.current = edges }, [edges])
   const nodesRef = useRef<Node[]>([])
   useEffect(() => { nodesRef.current = nodes }, [nodes])
+  // Lets the (stable) keyboard listener call the latest deleteSelected.
+  const deleteSelectedRef = useRef<() => void>(() => {})
+
+  /* ── Undo / redo (reversible edits: moves, device/shape/link edits) ──────
+   * Each entry is an inverse-command pair. Apply helpers (defined later) are
+   * referenced via ref so this can sit above them without ordering issues. */
+  type HistEntry = { undo: () => void; redo: () => void }
+  const undoStack = useRef<HistEntry[]>([])
+  const redoStack = useRef<HistEntry[]>([])
+  const pushHistory = useCallback((entry: HistEntry) => {
+    undoStack.current.push(entry)
+    if (undoStack.current.length > 100) undoStack.current.shift()
+    redoStack.current = []
+  }, [])
+  const undo = useCallback(() => {
+    const e = undoStack.current.pop()
+    if (!e) { toast.info('Nothing to undo'); return }
+    e.undo(); redoStack.current.push(e); toast.success('Undone')
+  }, [])
+  const redo = useCallback(() => {
+    const e = redoStack.current.pop()
+    if (!e) { toast.info('Nothing to redo'); return }
+    e.redo(); undoStack.current.push(e); toast.success('Redone')
+  }, [])
+  // New map / refetch clears history (ids/positions may have changed server-side).
+  useEffect(() => { undoStack.current = []; redoStack.current = [] }, [mapId])
 
   /* ── Node metadata (movable label offset) — ref-stable like the edge ones ── */
   const patchNodeMetaRef = useRef<(nodeId: string, patch: Record<string, unknown>, commit: boolean) => void>(() => {})
@@ -114,9 +175,13 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
       return { ...e, data: { ...e.data, link: { ...link, metadata: { ...(link.metadata || {}), ...patch } } } }
     }))
     if (commit) {
-      const cur = (edgesRef.current.find((e) => e.id === linkId)?.data as any)?.link
+      const ed = edgesRef.current.find((e) => e.id === linkId)
+      const cur = (ed?.data as any)?.link
+      const priorMeta = { ...(cur?.metadata || {}) }
       const meta = { ...(cur?.metadata || {}), ...patch }
-      updateLink.mutate({ id: linkId, patch: { metadata: meta } }, { onError: () => toast.error('Failed to save link') })
+      if ((ed?.data as any)?.annotation) persistAnnLinks(annArrayFromEdges(linkId, meta))
+      else updateLink.mutate({ id: linkId, patch: { metadata: meta } }, { onError: () => toast.error('Failed to save link') })
+      pushHistory({ undo: () => applyLinkMetaFull(linkId, priorMeta), redo: () => applyLinkMetaFull(linkId, meta) })
     }
   }
 
@@ -125,59 +190,197 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
   }, [])
 
   const setEdgeShape = useCallback((linkId: string, shape: 'curve' | 'straight' | 'orthogonal') => {
-    patchLinkMetaRef.current(linkId, { shape }, true)
+    // "Straight" means a direct line, so drop any existing bends — otherwise the
+    // line would still route through old waypoints and look curved/kinked.
+    // (You can still add fresh bends afterwards.)
+    patchLinkMetaRef.current(linkId, shape === 'straight' ? { shape, waypoints: [] } : { shape }, true)
   }, [])
+
+  // Move/rotate a port (interface) label. `which` is the source or target chip.
+  const setIfacePos = useCallback((linkId: string, which: 'src' | 'dst', pos: { dx?: number; dy?: number; rot?: number }, commit: boolean) => {
+    const cur = (edgesRef.current.find((e) => e.id === linkId)?.data as any)?.link?.metadata?.iface_pos || {}
+    patchLinkMetaRef.current(linkId, { iface_pos: { ...cur, [which]: { ...(cur[which] || {}), ...pos } } }, commit)
+  }, [])
+
+  const resetIfaceLabels = useCallback((linkId: string) => {
+    patchLinkMetaRef.current(linkId, { iface_pos: {} }, true)
+  }, [])
+
+  /* ── Annotation shape editing (ref-stable, like the others) ──────────────
+   * Patches the local shape node immediately and (on commit) persists. */
+  const patchShapeRef = useRef<(shapeId: string, patch: Record<string, unknown>, commit: boolean) => void>(() => {})
+  patchShapeRef.current = (shapeId, patch, commit) => {
+    const before = commit ? ((nodesRef.current.find((n) => n.id === shapeId && n.type === 'shape')?.data as any)?.shape as MapShape | undefined) : undefined
+    setNodes((nds) => nds.map((n) => {
+      if (n.id !== shapeId || n.type !== 'shape') return n
+      const sh = (n.data as any).shape as MapShape
+      const meta = patch.metadata ? { ...(sh.metadata || {}), ...(patch.metadata as object) } : sh.metadata
+      return { ...n, data: { ...n.data, shape: { ...sh, ...patch, metadata: meta } } }
+    }))
+    if (commit) {
+      updateShape.mutate({ id: shapeId, patch }, { onError: () => toast.error('Failed to save annotation') })
+      if (before) {
+        const priorFields = { text: before.text ?? null, fill: before.fill ?? null, stroke: before.stroke ?? null, metadata: before.metadata || {} }
+        const nextFields = { ...priorFields, ...patch, metadata: patch.metadata ? { ...(before.metadata || {}), ...(patch.metadata as object) } : (before.metadata || {}) }
+        pushHistory({ undo: () => applyShapeFields(shapeId, priorFields), redo: () => applyShapeFields(shapeId, nextFields) })
+      }
+    }
+  }
+  const setShape = useCallback((shapeId: string, patch: Record<string, unknown>, commit: boolean) => {
+    patchShapeRef.current(shapeId, patch, commit)
+  }, [])
+
+  // Load annotation links (cables touching icons/images) from the map metadata.
+  useEffect(() => {
+    const al = ((detail.metadata as any)?.annotation_links as AnnotationLink[]) || []
+    setAnnLinks(al)
+  }, [detail.metadata])
+
+  /** Persist the annotation_links array into the map metadata (no refetch). */
+  const persistAnnLinks = useCallback((arr: AnnotationLink[]) => {
+    saveMapMeta.mutate({ ...((detail.metadata as any) || {}), annotation_links: arr }, { onError: () => toast.error('Failed to save link') })
+  }, [saveMapMeta, detail.metadata])
+
+  // Rebuild the array from current edge state (captures live shape/bend edits),
+  // optionally overriding one edge's metadata to beat the edgesRef lag.
+  const annArrayFromEdges = useCallback((overrideId?: string, overrideMeta?: Record<string, unknown>): AnnotationLink[] => {
+    return edgesRef.current.filter((e) => (e.data as any)?.annotation).map((e) => {
+      const dd = e.data as any
+      return {
+        id: e.id, source: e.source, target: e.target,
+        source_type: dd.sourceType, target_type: dd.targetType,
+        label: dd.link?.label ?? null, link_type: dd.link?.link_type || 'manual',
+        metadata: e.id === overrideId ? (overrideMeta as any) : (dd.link?.metadata || {}),
+      }
+    })
+  }, [])
+
+  const bumpShapeZ = useCallback((shapeId: string, dir: 'front' | 'back') => {
+    const zs = nodesRef.current.filter((n) => n.type === 'shape').map((n) => (n.data as any).shape.z_index || 0)
+    const z = dir === 'front' ? Math.max(0, ...zs) + 1 : Math.min(0, ...zs) - 1
+    patchShapeRef.current(shapeId, { z_index: z }, true)
+    setNodes((nds) => nds.map((n) => (n.id === shapeId ? { ...n, zIndex: z } : n)))
+  }, [setNodes])
 
   // Preserve selection across server-driven rebuilds.
   const selectedIds = useRef<Set<string>>(new Set())
 
   useEffect(() => {
-    setNodes(
-      detail.nodes.map((n) => {
-        const c = pctToPx(n)
-        return {
-          id: n.id,
-          type: 'device',
-          position: discCenterToNodeXY(c.x, c.y),
-          data: {
-            node: n,
-            live: liveMode,
-            onLabelMove: (dx: number, dy: number, commit: boolean) => setNodeLabelOffset(n.id, dx, dy, commit),
-          },
-          draggable: !liveMode,
-          selected: selectedIds.current.has(n.id),
-        } satisfies Node
-      }),
-    )
-  }, [detail.nodes, liveMode, setNodes, setNodeLabelOffset])
+    const deviceNodes: Node[] = detail.nodes.map((n) => {
+      const c = pctToPx(n)
+      return {
+        id: n.id,
+        type: 'device',
+        position: discCenterToNodeXY(c.x, c.y),
+        data: {
+          node: n,
+          live: liveMode,
+          onLabelMove: (dx: number, dy: number, commit: boolean) => setNodeLabelOffset(n.id, dx, dy, commit),
+        },
+        draggable: !liveMode,
+        selected: selectedIds.current.has(n.id),
+      }
+    })
+    // Annotation shapes render UNDER the devices (lower zIndex) unless their own
+    // z_index pushes them up; devices/links stay clickable on top by default.
+    const shapeNodes: Node[] = (detail.shapes || []).map((s) => {
+      const r = shapeToPx(s)
+      return {
+        id: s.id,
+        type: 'shape',
+        position: { x: r.x, y: r.y },
+        width: Math.round(r.w),
+        height: Math.round(r.h),
+        style: { width: Math.round(r.w), height: Math.round(r.h) },
+        data: {
+          shape: s,
+          live: liveMode,
+          onEditText: (text: string) => setShape(s.id, { text }, true),
+          onResizeEnd: (rect: { x: number; y: number; width: number; height: number }) =>
+            setShape(s.id, pxToShape(rect.x, rect.y, rect.width, rect.height), true),
+        },
+        draggable: !liveMode,
+        selected: selectedIds.current.has(s.id),
+        zIndex: s.z_index || 0,
+      }
+    })
+    setNodes([...shapeNodes, ...deviceNodes])
+  }, [detail.nodes, detail.shapes, liveMode, setNodes, setNodeLabelOffset, setShape])
 
   useEffect(() => {
-    setEdges(
-      detail.links
-        .filter((l) => nodeById.has(l.source_node_id) && nodeById.has(l.target_node_id))
-        .map((l) => {
-          const s = nodeById.get(l.source_node_id)!
-          const t = nodeById.get(l.target_node_id)!
-          return {
-            id: l.id,
-            source: l.source_node_id,
-            target: l.target_node_id,
-            sourceHandle: 'c',
-            targetHandle: 'c',
-            type: 'network',
-            data: {
-              link: l,
-              sourceStatus: s.status,
-              targetStatus: t.status,
-              live: liveData[l.id],
-              liveMode,
-              showThroughput,
-              setWaypoints: (wpsPx: { x: number; y: number }[], commit: boolean) => setEdgeWaypoints(l.id, wpsPx, commit),
-            },
-          } satisfies Edge
-        }),
-    )
-  }, [detail.links, liveData, liveMode, showThroughput, nodeById, setEdges, setEdgeWaypoints])
+    const visible = detail.links.filter((l) => nodeById.has(l.source_node_id) && nodeById.has(l.target_node_id))
+
+    // Spread multiple links between the SAME device pair so they don't overlap:
+    // each gets a perpendicular offset centred on the direct line.
+    const PARALLEL_GAP = 18 // logical px between adjacent parallel cables
+    const groups = new Map<string, string[]>()
+    for (const l of visible) {
+      const key = [l.source_node_id, l.target_node_id].sort().join('|')
+      const arr = groups.get(key) || []
+      arr.push(l.id)
+      groups.set(key, arr)
+    }
+    const offsetById = new Map<string, number>()
+    for (const ids of groups.values()) {
+      const n = ids.length
+      ids.forEach((id, i) => offsetById.set(id, (i - (n - 1) / 2) * PARALLEL_GAP))
+    }
+
+    const deviceEdges: Edge[] = visible.map((l) => {
+      const s = nodeById.get(l.source_node_id)!
+      const t = nodeById.get(l.target_node_id)!
+      return {
+        id: l.id,
+        source: l.source_node_id,
+        target: l.target_node_id,
+        sourceHandle: 'c',
+        targetHandle: 'c',
+        type: 'network',
+        data: {
+          link: l,
+          sourceStatus: s.status,
+          targetStatus: t.status,
+          live: liveData[l.id],
+          liveMode,
+          showThroughput,
+          parallelOffset: offsetById.get(l.id) || 0,
+          setWaypoints: (wpsPx: { x: number; y: number }[], commit: boolean) => setEdgeWaypoints(l.id, wpsPx, commit),
+          setIfacePos: (which: 'src' | 'dst', pos: { dx?: number; dy?: number; rot?: number }, commit: boolean) => setIfacePos(l.id, which, pos, commit),
+        },
+      }
+    })
+
+    // Annotation cables (touch an icon/image). Shape endpoints have no status →
+    // treat as 'up' so the cable looks healthy; a device endpoint keeps its real
+    // status so a down device still colours the link red.
+    const statusFor = (id: string, kind: 'node' | 'shape') => (kind === 'node' ? (nodeById.get(id)?.status || 'unknown') : 'up')
+    const shapeIds = new Set((detail.shapes || []).map((s) => s.id))
+    const annEdges: Edge[] = annLinks
+      .filter((al) => (nodeById.has(al.source) || shapeIds.has(al.source)) && (nodeById.has(al.target) || shapeIds.has(al.target)))
+      .map((al) => ({
+        id: al.id,
+        source: al.source,
+        target: al.target,
+        sourceHandle: 'c',
+        targetHandle: 'c',
+        type: 'network',
+        data: {
+          link: { id: al.id, source_node_id: al.source, target_node_id: al.target, label: al.label ?? null, link_type: al.link_type || 'manual', metadata: al.metadata || {} },
+          sourceStatus: statusFor(al.source, al.source_type),
+          targetStatus: statusFor(al.target, al.target_type),
+          live: undefined,
+          liveMode,
+          showThroughput,
+          annotation: true,
+          sourceType: al.source_type,
+          targetType: al.target_type,
+          parallelOffset: 0,
+          setWaypoints: (wpsPx: { x: number; y: number }[], commit: boolean) => setEdgeWaypoints(al.id, wpsPx, commit),
+        },
+      }))
+
+    setEdges([...deviceEdges, ...annEdges])
+  }, [detail.links, detail.shapes, annLinks, liveData, liveMode, showThroughput, nodeById, setEdges, setEdgeWaypoints, setIfacePos])
 
   /* ── Persistence ─────────────────────────────────────────────── */
   const persistPositions = useCallback((items: { id: string; x: number; y: number }[]) => {
@@ -189,13 +392,85 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
     bulkMove.mutate(payload, { onError: () => toast.error('Failed to save layout') })
   }, [bulkMove])
 
-  // Drag-to-connect → open the new-link dialog.
+  /* ── Apply helpers (also used by undo/redo to re-apply a captured state) ── */
+  // Restore node/shape positions (logical px top-left) locally + persist.
+  const applyPositions = useCallback((moves: { id: string; x: number; y: number }[]) => {
+    setNodes((nds) => nds.map((n) => {
+      const m = moves.find((x) => x.id === n.id)
+      return m ? { ...n, position: { x: m.x, y: m.y } } : n
+    }))
+    const byId = new Map(nodesRef.current.map((n) => [n.id, n]))
+    const dev: { id: string; x: number; y: number }[] = []
+    moves.forEach((m) => {
+      const n = byId.get(m.id)
+      if (!n) return
+      if (n.type === 'shape') {
+        const r = shapeToPx((n.data as any).shape)
+        const p = pxToShape(m.x, m.y, r.w, r.h)
+        updateShape.mutate({ id: m.id, patch: { x_pct: p.x_pct, y_pct: p.y_pct } })
+      } else dev.push({ id: m.id, x: m.x, y: m.y })
+    })
+    if (dev.length) persistPositions(dev)
+  }, [setNodes, persistPositions, updateShape])
+
+  // Replace a device node's editable fields (label/icon/metadata) locally + persist.
+  const applyNodeFields = useCallback((id: string, fields: Record<string, unknown>) => {
+    setNodes((nds) => nds.map((n) => (n.id === id ? { ...n, data: { ...n.data, node: { ...(n.data as any).node, ...fields } } } : n)))
+    updateNode.mutate({ id, patch: fields }, { onError: () => toast.error('Failed to save device') })
+  }, [setNodes, updateNode])
+
+  // Replace a shape's editable fields locally + persist.
+  const applyShapeFields = useCallback((id: string, fields: Record<string, unknown>) => {
+    setNodes((nds) => nds.map((n) => {
+      if (n.id !== id || n.type !== 'shape') return n
+      const sh = { ...(n.data as any).shape, ...fields }
+      const r = shapeToPx(sh)
+      return { ...n, data: { ...n.data, shape: sh }, position: { x: r.x, y: r.y }, width: Math.round(r.w), height: Math.round(r.h), style: { width: Math.round(r.w), height: Math.round(r.h) } }
+    }))
+    updateShape.mutate({ id, patch: fields }, { onError: () => toast.error('Failed to save annotation') })
+  }, [setNodes, updateShape])
+
+  // Replace a link's metadata (device or annotation) locally + persist.
+  const applyLinkMetaFull = useCallback((id: string, metaFull: Record<string, unknown>) => {
+    let annotation = false
+    setEdges((eds) => eds.map((e) => {
+      if (e.id !== id) return e
+      if ((e.data as any).annotation) annotation = true
+      return { ...e, data: { ...e.data, link: { ...(e.data as any).link, metadata: metaFull } } }
+    }))
+    if (annotation) persistAnnLinks(annArrayFromEdges(id, metaFull))
+    else updateLink.mutate({ id, patch: { metadata: metaFull } }, { onError: () => toast.error('Failed to save link') })
+  }, [setEdges, updateLink, persistAnnLinks, annArrayFromEdges])
+
+  // Drag-to-connect. Device↔device opens the interface dialog (real link).
+  // If either end is an icon/image annotation, create an annotation cable
+  // directly (no interfaces) and persist it into the map metadata.
   const onConnect = useCallback((c: Connection) => {
     if (!c.source || !c.target || c.source === c.target) return
     const s = nodeById.get(c.source)
     const t = nodeById.get(c.target)
-    if (s && t) setPendingLink({ source: s, target: t })
-  }, [nodeById])
+    if (s && t) { setPendingLink({ source: s, target: t }); return }
+    const al: AnnotationLink = {
+      // crypto.randomUUID needs a secure context (https/localhost); the app is
+      // served over plain http, so use a timestamp+random id instead.
+      id: `al-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+      source: c.source, target: c.target,
+      source_type: nodeById.has(c.source) ? 'node' : 'shape',
+      target_type: nodeById.has(c.target) ? 'node' : 'shape',
+      label: null, link_type: 'manual',
+      metadata: { kind: 'ethernet', shape: 'straight' },
+    }
+    const next = [...annLinksRef.current, al]
+    setAnnLinks(next)
+    persistAnnLinks(next)
+    toast.success('Link created')
+  }, [nodeById, persistAnnLinks])
+
+  const deleteAnnotationLink = useCallback((id: string) => {
+    const next = annLinksRef.current.filter((a) => a.id !== id)
+    setAnnLinks(next)
+    persistAnnLinks(next)
+  }, [persistAnnLinks])
 
   const createLink = useCallback((link: NewLink) => {
     addLink.mutate(link, {
@@ -207,10 +482,101 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
     })
   }, [addLink])
 
+  /* ── Drop a device from the palette → place it as a node ─────────
+   * screenToFlowPosition gives the flow-space point under the cursor, which is
+   * exactly where we want the disc centre → convert straight to percent. */
+  const onCanvasDragOver = useCallback((e: React.DragEvent) => {
+    if (liveMode || !e.dataTransfer.types.includes(DEVICE_DND_TYPE)) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+    if (!dropActive) setDropActive(true)
+  }, [liveMode, dropActive])
+
+  const onCanvasDrop = useCallback((e: React.DragEvent) => {
+    setDropActive(false)
+    if (liveMode) return
+    const deviceId = e.dataTransfer.getData(DEVICE_DND_TYPE)
+    if (!deviceId) return
+    e.preventDefault()
+    if (detail.nodes.some((n) => n.device_id === deviceId)) {
+      toast.info('Already on this map')
+      return
+    }
+    const center = screenToFlowPosition({ x: e.clientX, y: e.clientY })
+    const p = pxToPct(center.x, center.y)
+    addNode.mutate(
+      { device_id: deviceId, x_pct: p.x_pct, y_pct: p.y_pct },
+      { onSuccess: () => toast.success('Device placed'), onError: () => toast.error('Failed to place device') },
+    )
+  }, [liveMode, detail.nodes, screenToFlowPosition, addNode])
+
+  /* ── Edit (label/icon for nodes, label/type/shape/interfaces for links) ──
+   * updateNode/updateLink don't refetch, so we patch local RF state too. */
+  const saveNode = useCallback((id: string, patch: { label: string | null; icon: string; metadata?: Record<string, unknown> }) => {
+    const before = (nodesRef.current.find((n) => n.id === id)?.data as any)?.node
+    if (before) {
+      const prior = { label: before.label ?? null, icon: before.icon, metadata: before.metadata || {} }
+      pushHistory({ undo: () => applyNodeFields(id, prior), redo: () => applyNodeFields(id, patch) })
+    }
+    setNodes((nds) => nds.map((n) => (n.id === id
+      ? { ...n, data: { ...n.data, node: { ...(n.data as any).node, ...patch } } }
+      : n)))
+    updateNode.mutate({ id, patch }, {
+      onSuccess: () => { setEditNode(null); toast.success('Device updated') },
+      onError: () => toast.error('Failed to save device'),
+    })
+  }, [setNodes, updateNode])
+
+  const saveLink = useCallback((id: string, patch: { label: string | null; link_type: string; metadata: Record<string, unknown> }) => {
+    setEdges((eds) => eds.map((e) => (e.id === id
+      ? { ...e, data: { ...e.data, link: { ...(e.data as any).link, ...patch } } }
+      : e)))
+    updateLink.mutate({ id, patch }, {
+      onSuccess: () => { setEditLink(null); toast.success('Link updated') },
+      onError: () => toast.error('Failed to save link'),
+    })
+  }, [setEdges, updateLink])
+
+  // Capture pre-drag positions so the move can be undone.
+  const dragPrevRef = useRef<{ id: string; x: number; y: number }[]>([])
+  const onNodeDragStart = useCallback((_e: unknown, node: Node, dragged: Node[]) => {
+    const moving = dragged && dragged.length ? dragged : [node]
+    dragPrevRef.current = moving.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y }))
+  }, [])
   const onNodeDragStop = useCallback((_e: unknown, node: Node, dragged: Node[]) => {
-    const items = (dragged && dragged.length ? dragged : [node]).map((n) => ({ id: n.id, x: n.position.x, y: n.position.y }))
-    persistPositions(items)
-  }, [persistPositions])
+    const moved = dragged && dragged.length ? dragged : [node]
+    const next = moved.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y }))
+    applyPositions(next)
+    const prev = dragPrevRef.current
+    if (prev.length && prev.some((p, i) => p.x !== next[i]?.x || p.y !== next[i]?.y)) {
+      pushHistory({ undo: () => applyPositions(prev), redo: () => applyPositions(next) })
+    }
+  }, [applyPositions, pushHistory])
+
+  // Quick-connect: auto-draw CDP/LLDP links among the placed devices.
+  const quickConnect = useCallback(() => {
+    if (autoConnect.isPending) return
+    autoConnect.mutate(undefined, {
+      onSuccess: (r) => toast.success(r.created > 0 ? `Connected ${r.created} link${r.created > 1 ? 's' : ''} from CDP/LLDP` : 'No new discovered links found'),
+      onError: () => toast.error('Quick connect failed'),
+    })
+  }, [autoConnect])
+
+  /* ── Insert an annotation shape at the current viewport centre ───────── */
+  const addShapeAt = useCallback((spec: ShapeSpec) => {
+    const rect = wrapperRef.current?.getBoundingClientRect()
+    const cx = rect ? rect.left + rect.width / 2 : 400
+    const cy = rect ? rect.top + rect.height / 2 : 300
+    const c = screenToFlowPosition({ x: cx, y: cy })
+    const w_pct = spec.w_pct ?? 12, h_pct = spec.h_pct ?? 8
+    const wPx = (w_pct / 100) * LOGICAL_W, hPx = (h_pct / 100) * LOGICAL_H
+    const pct = pxToShape(c.x - wPx / 2, c.y - hPx / 2, wPx, hPx)
+    addShape.mutate({
+      kind: spec.kind, x_pct: pct.x_pct, y_pct: pct.y_pct, w_pct, h_pct,
+      text: spec.text ?? null, fill: spec.fill ?? null, stroke: spec.stroke ?? null,
+      metadata: spec.metadata ?? {},
+    }, { onSuccess: () => toast.success('Annotation added'), onError: () => toast.error('Failed to add annotation') })
+  }, [screenToFlowPosition, addShape])
 
   // NOTE: we intentionally do NOT wire RF's onNodesDelete/onEdgesDelete to the
   // backend, and deleteKeyCode is disabled — every deletion goes through an
@@ -218,37 +584,58 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
 
   /* ── Alignment / auto-align ──────────────────────────────────── */
   const applyAlign = useCallback((op: AlignOp) => {
-    const sel = nodes.filter((n) => n.selected)
+    const sel = nodes.filter((n) => n.selected && n.type !== 'shape')
     if (sel.length < 2) return
+    const prev = sel.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y }))
     const moves = computeAlign(sel, op)
-    setNodes((nds) => nds.map((n) => (moves.has(n.id) ? { ...n, position: moves.get(n.id)! } : n)))
-    persistPositions(sel.map((n) => ({ id: n.id, ...(moves.get(n.id) || n.position) })))
-  }, [nodes, setNodes, persistPositions])
+    const next = sel.map((n) => ({ id: n.id, ...(moves.get(n.id) || n.position) }))
+    applyPositions(next)
+    pushHistory({ undo: () => applyPositions(prev), redo: () => applyPositions(next) })
+  }, [nodes, applyPositions, pushHistory])
 
   const autoAlign = useCallback(() => {
-    const all = nodes
+    const all = nodes.filter((n) => n.type !== 'shape')
     if (!all.length) return
-    setNodes((nds) => nds.map((n) => ({ ...n, position: { x: snap(n.position.x, GRID), y: snap(n.position.y, GRID) } })))
-    persistPositions(all.map((n) => ({ id: n.id, x: snap(n.position.x, GRID), y: snap(n.position.y, GRID) })))
+    const prev = all.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y }))
+    const next = all.map((n) => ({ id: n.id, x: snap(n.position.x, GRID), y: snap(n.position.y, GRID) }))
+    applyPositions(next)
+    pushHistory({ undo: () => applyPositions(prev), redo: () => applyPositions(next) })
     toast.success('Aligned all to grid')
-  }, [nodes, setNodes, persistPositions])
+  }, [nodes, applyPositions, pushHistory])
 
   /* ── Selection tracking + keyboard ───────────────────────────── */
   const onSelectionChange = useCallback(({ nodes: sel }: { nodes: Node[] }) => {
     selectedIds.current = new Set(sel.map((n) => n.id))
     setSelCount(sel.length)
+    // Show the style inspector only when exactly one annotation shape is selected.
+    const shapeSel = sel.filter((n) => n.type === 'shape')
+    setSelectedShapeId(sel.length === 1 && shapeSel.length === 1 ? shapeSel[0].id : null)
   }, [])
 
   const wrapperRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     const el = wrapperRef.current
     if (!el) return
+    const onKeyUp = (e: KeyboardEvent) => { if (e.code === 'Space') setPanKey(false) }
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+      if (e.code === 'Space') {
+        e.preventDefault()
+        setPanKey(true)
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault()
+        if (e.shiftKey) redo(); else undo()
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault()
+        redo()
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
         e.preventDefault()
         setNodes((nds) => nds.map((n) => ({ ...n, selected: true })))
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && !liveMode) {
+        // Confirm-gated (deleteSelected opens a ConfirmDialog) — never implicit.
+        e.preventDefault()
+        deleteSelectedRef.current()
       } else if (!e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'v') {
         setTool('select')
       } else if (!e.ctrlKey && !e.metaKey && e.key.toLowerCase() === 'c') {
@@ -256,21 +643,29 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
       }
     }
     el.addEventListener('keydown', onKey)
-    return () => el.removeEventListener('keydown', onKey)
-  }, [setNodes])
+    el.addEventListener('keyup', onKeyUp)
+    return () => { el.removeEventListener('keydown', onKey); el.removeEventListener('keyup', onKeyUp) }
+  }, [setNodes, liveMode, undo, redo])
 
   /* ── Context menus ───────────────────────────────────────────── */
   const closeMenu = useCallback(() => setMenu(null), [])
 
   const onPaneContextMenu = useCallback((e: MouseEvent | React.MouseEvent) => {
     e.preventDefault()
-    const items: MenuItem[] = [
-      { type: 'header', label: 'Canvas' },
-      { type: 'item', label: 'Select all', icon: <AlignStartVertical className="h-4 w-4" />, onClick: () => setNodes((nds) => nds.map((n) => ({ ...n, selected: true }))) },
-      { type: 'item', label: 'Auto-align to grid', icon: <Wand2 className="h-4 w-4" />, onClick: autoAlign },
-    ]
+    const sel = nodesRef.current.filter((n) => n.selected).length
+    const items: MenuItem[] = [{ type: 'header', label: sel > 0 ? `${sel} selected` : 'Canvas' }]
+    if (sel > 0) {
+      items.push({ type: 'item', label: `Delete selected (${sel})`, icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => deleteSelected() })
+      if (sel >= 2) {
+        items.push({ type: 'item', label: 'Align left', icon: <AlignStartVertical className="h-4 w-4" />, onClick: () => applyAlign('left') })
+        items.push({ type: 'item', label: 'Align top', icon: <AlignStartHorizontal className="h-4 w-4" />, onClick: () => applyAlign('top') })
+      }
+      items.push({ type: 'divider' })
+    }
+    items.push({ type: 'item', label: 'Select all', icon: <AlignStartVertical className="h-4 w-4" />, onClick: () => setNodes((nds) => nds.map((n) => ({ ...n, selected: true }))) })
+    items.push({ type: 'item', label: 'Auto-align to grid', icon: <Wand2 className="h-4 w-4" />, onClick: autoAlign })
     setMenu({ x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY, items })
-  }, [setNodes, autoAlign])
+  }, [setNodes, autoAlign, applyAlign])
 
   const onNodeContextMenu = useCallback((e: React.MouseEvent, node: Node) => {
     e.preventDefault()
@@ -288,8 +683,19 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
       items.push({ type: 'item', label: 'Distribute horizontally', onClick: () => applyAlign('distribute-h') })
       items.push({ type: 'divider' })
       items.push({ type: 'item', label: 'Delete selected', icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => deleteSelected() })
+    } else if (node.type === 'shape') {
+      items.push({ type: 'header', label: 'Annotation' })
+      items.push({ type: 'item', label: 'Bring to front', onClick: () => bumpShapeZ(node.id, 'front') })
+      items.push({ type: 'item', label: 'Send to back', onClick: () => bumpShapeZ(node.id, 'back') })
+      items.push({ type: 'divider' })
+      items.push({ type: 'item', label: 'Delete', icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => setPendingDelete({
+        title: 'Delete annotation?',
+        description: 'This removes the annotation from the map.',
+        run: () => { deleteShape.mutate(node.id); selectedIds.current.delete(node.id); setNodes((nds) => nds.filter((n) => n.id !== node.id)) },
+      }) })
     } else {
       items.push({ type: 'header', label: dev?.hostname || 'Node' })
+      items.push({ type: 'item', label: 'Edit label & icon…', icon: <Pencil className="h-4 w-4" />, onClick: () => setEditNode(dev) })
       if (dev?.device_id) items.push({ type: 'item', label: 'Open device', onClick: () => window.open(`/devices/${dev.device_id}`, '_blank') })
       items.push({ type: 'divider' })
       items.push({ type: 'item', label: 'Remove from map', icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => setPendingDelete({
@@ -299,72 +705,127 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
       }) })
     }
     setMenu({ x: e.clientX, y: e.clientY, items })
-  }, [setNodes, applyAlign, deleteNode])
+  }, [setNodes, applyAlign, deleteNode, deleteShape, bumpShapeZ])
 
   const onEdgeContextMenu = useCallback((e: React.MouseEvent, edge: Edge) => {
     e.preventDefault()
-    const link = (edge.data as any).link
+    const dd = edge.data as any
+    const link = dd.link
+    const isAnnotation = !!dd.annotation
     const shape = link?.metadata?.shape || 'curve'
     const shapeItem = (label: string, val: 'curve' | 'straight' | 'orthogonal'): MenuItem =>
       ({ type: 'item', label: `${shape === val ? '✓ ' : '   '}${label}`, onClick: () => setEdgeShape(edge.id, val) })
     const items: MenuItem[] = [
-      { type: 'header', label: 'Link shape' },
+      { type: 'header', label: link?.label || (isAnnotation ? 'Connection' : 'Link') },
+      { type: 'item', label: 'Edit link…', icon: <Pencil className="h-4 w-4" />, onClick: () => setEditLink(link) },
+      { type: 'divider' },
+      { type: 'header', label: 'Shape' },
       shapeItem('Curved', 'curve'),
       shapeItem('Straight', 'straight'),
       shapeItem('Orthogonal', 'orthogonal'),
       { type: 'divider' },
       { type: 'item', label: 'Reset bends', icon: <Spline className="h-4 w-4" />, onClick: () => setEdgeWaypoints(edge.id, [], true) },
+      { type: 'item', label: 'Reset port labels', onClick: () => resetIfaceLabels(edge.id) },
       { type: 'divider' },
-      { type: 'item', label: 'Delete link', icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => setPendingDelete({
-        title: 'Delete link?',
-        description: 'This removes the connection between the two nodes.',
-        run: () => { deleteLink.mutate(edge.id); setEdges((eds) => eds.filter((x) => x.id !== edge.id)) },
+      { type: 'item', label: isAnnotation ? 'Delete connection' : 'Delete link', icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => setPendingDelete({
+        title: isAnnotation ? 'Delete connection?' : 'Delete link?',
+        description: 'This removes the connection between the two items.',
+        run: () => { if (isAnnotation) deleteAnnotationLink(edge.id); else { deleteLink.mutate(edge.id); setEdges((eds) => eds.filter((x) => x.id !== edge.id)) } },
       }) },
     ]
-    setMenu({ x: e.clientX, y: e.clientY, items })
-  }, [setEdgeShape, setEdgeWaypoints, deleteLink, setEdges])
+    const shown = isAnnotation ? items.filter((it) => it.type !== 'item' || (it.label !== 'Edit link…' && it.label !== 'Reset port labels')) : items
+    setMenu({ x: e.clientX, y: e.clientY, items: shown })
+  }, [setEdgeShape, setEdgeWaypoints, resetIfaceLabels, deleteLink, deleteAnnotationLink, setEdges])
 
   // Explicit edge selection (RF's built-in click-select is unreliable for our
   // fully-custom edge); selecting an edge reveals its bend handles.
+  // Double-click a device tile to open its editor (label text, colour, font,
+  // size, icon, container size). Shapes handle their own double-click (text).
+  const onNodeDoubleClick = useCallback((_e: React.MouseEvent, node: Node) => {
+    if (node.type === 'device' && !liveMode) setEditNode((node.data as any).node)
+  }, [liveMode])
+
   const onEdgeClick = useCallback((_e: React.MouseEvent, edge: Edge) => {
     setEdges((eds) => eds.map((x) => (x.selected === (x.id === edge.id) ? x : { ...x, selected: x.id === edge.id })))
     setNodes((nds) => nds.some((n) => n.selected) ? nds.map((n) => (n.selected ? { ...n, selected: false } : n)) : nds)
   }, [setEdges, setNodes])
 
+  /* ── Group resize (scale spacing of the marquee selection) ───────────── */
+  const groupItems = useMemo(
+    () => nodes.filter((n) => n.selected).map((n) => ({
+      id: n.id, x: n.position.x, y: n.position.y,
+      w: typeof n.width === 'number' ? n.width : 128,
+      h: typeof n.height === 'number' ? n.height : 64,
+    })),
+    [nodes],
+  )
+  const groupPrevRef = useRef<{ id: string; x: number; y: number }[] | null>(null)
+  const applyGroup = useCallback((moves: { id: string; x: number; y: number }[], commit: boolean) => {
+    // Snapshot starting positions on the first frame of the gesture (for undo).
+    if (!groupPrevRef.current) {
+      groupPrevRef.current = nodesRef.current.filter((n) => moves.some((m) => m.id === n.id)).map((n) => ({ id: n.id, x: n.position.x, y: n.position.y }))
+    }
+    setNodes((nds) => nds.map((n) => {
+      const m = moves.find((x) => x.id === n.id)
+      return m ? { ...n, position: { x: m.x, y: m.y } } : n
+    }))
+    if (!commit) return
+    applyPositions(moves)
+    const prev = groupPrevRef.current
+    groupPrevRef.current = null
+    if (prev) pushHistory({ undo: () => applyPositions(prev), redo: () => applyPositions(moves) })
+  }, [setNodes, applyPositions, pushHistory])
+
   const deleteSelected = useCallback(() => {
-    const sel = nodes.filter((n) => n.selected)
+    const sel = nodesRef.current.filter((n) => n.selected)
     if (!sel.length) return
+    const shapes = sel.filter((n) => n.type === 'shape')
+    const devices = sel.filter((n) => n.type !== 'shape')
     setPendingDelete({
-      title: `Remove ${sel.length} node${sel.length > 1 ? 's' : ''}?`,
-      description: `This removes ${sel.length === 1 ? 'it' : 'them'} from this map (the device itself is not affected).`,
+      title: `Remove ${sel.length} item${sel.length > 1 ? 's' : ''}?`,
+      description: `This removes ${sel.length === 1 ? 'it' : 'them'} from this map. Devices themselves are not affected.`,
       run: () => {
-        sel.forEach((n) => { deleteNode.mutate(n.id); selectedIds.current.delete(n.id) })
+        devices.forEach((n) => { deleteNode.mutate(n.id); selectedIds.current.delete(n.id) })
+        shapes.forEach((n) => { deleteShape.mutate(n.id); selectedIds.current.delete(n.id) })
         setNodes((nds) => nds.filter((n) => !n.selected))
-        toast.success(`Removed ${sel.length} node${sel.length > 1 ? 's' : ''}`)
+        toast.success(`Removed ${sel.length} item${sel.length > 1 ? 's' : ''}`)
       },
     })
-  }, [nodes, deleteNode, setNodes])
+  }, [deleteNode, deleteShape, setNodes])
+  deleteSelectedRef.current = deleteSelected
 
   return (
     <MapModeContext.Provider value={{ connectMode }}>
-    <div ref={wrapperRef} tabIndex={0} className={cn('h-full w-full outline-none', connectMode && 'cursor-crosshair')}>
+    <div
+      ref={wrapperRef}
+      tabIndex={0}
+      onDragOver={onCanvasDragOver}
+      onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as HTMLElement | null)) setDropActive(false) }}
+      onDrop={onCanvasDrop}
+      className={cn('relative h-full w-full outline-none', connectMode && 'cursor-crosshair', panKey && 'cursor-grab')}
+    >
+      {dropActive && (
+        <div className="pointer-events-none absolute inset-2 z-20 rounded-lg border-2 border-dashed border-primary/70 bg-primary/5" />
+      )}
       <ReactFlow
         nodes={nodes}
         edges={edges}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
+        onNodeDragStart={onNodeDragStart}
         onNodeDragStop={onNodeDragStop}
         onConnect={onConnect}
         connectionMode={ConnectionMode.Loose}
         onSelectionChange={onSelectionChange}
         onPaneContextMenu={onPaneContextMenu}
         onNodeContextMenu={onNodeContextMenu}
+        onNodeDoubleClick={onNodeDoubleClick}
         onEdgeContextMenu={onEdgeContextMenu}
         onEdgeClick={onEdgeClick}
         onPaneClick={() => { closeMenu(); setEdges((eds) => eds.some((e) => e.selected) ? eds.map((e) => ({ ...e, selected: false })) : eds) }}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
-        colorMode="dark"
+        colorMode={theme}
         fitView
         fitViewOptions={{ padding: 0.2 }}
         minZoom={0.15}
@@ -373,20 +834,27 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
         snapGrid={[GRID, GRID]}
         deleteKeyCode={null}
         multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
-        selectionKeyCode="Shift"
+        selectionKeyCode={null}
+        selectionMode={SelectionMode.Partial}
+        // In Select mode a plain left-drag on empty canvas draws a marquee to
+        // box-select; hold Space (or use middle-mouse / the minimap) to pan.
+        // Right button is deliberately NOT a pan trigger so right-click menus
+        // keep working. Connect mode pans normally so it doesn't fight cabling.
+        selectionOnDrag={!liveMode && tool === 'select' && !panKey}
+        panOnDrag={(!liveMode && tool === 'select' && !panKey) ? [1] : true}
         nodesDraggable={!liveMode && tool === 'select'}
         nodesConnectable={connectMode}
         elementsSelectable={!liveMode && tool === 'select'}
         proOptions={{ hideAttribution: true }}
       >
-        {gridOn && <Background variant={BackgroundVariant.Dots} gap={26} size={1} color="rgba(148,163,184,0.18)" />}
+        {gridOn && <Background variant={BackgroundVariant.Dots} gap={26} size={1} color={theme === 'dark' ? 'rgba(148,163,184,0.18)' : 'rgba(71,85,105,0.22)'} />}
         <Controls showInteractive={false} />
         <MiniMap
           pannable
           zoomable
           nodeColor={(n) => STATUS_HEX[statusKey((n.data as any)?.node?.status)] || STATUS_HEX.unknown}
           nodeStrokeWidth={2}
-          maskColor="rgba(2,6,23,0.6)"
+          maskColor={theme === 'dark' ? 'rgba(2,6,23,0.6)' : 'rgba(226,232,240,0.6)'}
           className="!bg-surface"
         />
 
@@ -394,8 +862,14 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
         {!liveMode && (
           <Panel position="top-left">
             <div className="flex items-center gap-1 rounded-lg border border-border bg-surface/90 p-1 shadow-lg backdrop-blur">
-              <ToolBtn active={tool === 'select'} onClick={() => setTool('select')} title="Select (V)"><MousePointer2 className="h-4 w-4" /></ToolBtn>
+              <ToolBtn active={tool === 'select'} onClick={() => setTool('select')} title="Select / box-select (V) · hold Space to pan"><MousePointer2 className="h-4 w-4" /></ToolBtn>
               <ToolBtn active={tool === 'connect'} onClick={() => setTool('connect')} title="Connect / draw cable (C)"><Cable className="h-4 w-4" /></ToolBtn>
+              <ToolBtn onClick={quickConnect} disabled={autoConnect.isPending} title="Quick connect — auto-draw CDP/LLDP links between placed devices"><Zap className="h-4 w-4" /></ToolBtn>
+              <div className="mx-0.5 h-5 w-px bg-border" />
+              <ToolBtn onClick={undo} title="Undo (Ctrl+Z)"><Undo2 className="h-4 w-4" /></ToolBtn>
+              <ToolBtn onClick={redo} title="Redo (Ctrl+Shift+Z)"><Redo2 className="h-4 w-4" /></ToolBtn>
+              <div className="mx-0.5 h-5 w-px bg-border" />
+              <InsertMenu onAdd={addShapeAt} />
               <div className="mx-0.5 h-5 w-px bg-border" />
               <ToolBtn active={snapOn} onClick={() => setSnapOn((v) => !v)} title="Snap to grid"><Magnet className="h-4 w-4" /></ToolBtn>
               <ToolBtn active={gridOn} onClick={() => setGridOn((v) => !v)} title="Show grid"><Grid3x3 className="h-4 w-4" /></ToolBtn>
@@ -410,7 +884,27 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
             </div>
           </Panel>
         )}
+
+        {/* Annotation style inspector (single shape selected) */}
+        {!liveMode && selectedShape && (
+          <Panel position="top-right">
+            <ShapeInspector
+              shape={selectedShape}
+              onChange={(patch, commit) => setShape(selectedShape.id, patch, commit)}
+              onZ={(dir) => bumpShapeZ(selectedShape.id, dir)}
+              onDelete={() => setPendingDelete({
+                title: 'Delete annotation?',
+                description: 'This removes the annotation from the map.',
+                run: () => { deleteShape.mutate(selectedShape.id); selectedIds.current.delete(selectedShape.id); setNodes((nds) => nds.filter((n) => n.id !== selectedShape.id)); setSelectedShapeId(null) },
+              })}
+            />
+          </Panel>
+        )}
       </ReactFlow>
+
+      {!liveMode && tool === 'select' && (
+        <GroupResizer items={groupItems} transform={rfTransform} screenToFlow={screenToFlowPosition} onApply={applyGroup} />
+      )}
 
       <ContextMenu state={menu} onClose={closeMenu} />
 
@@ -431,6 +925,26 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
           saving={addLink.isPending}
           onCancel={() => setPendingLink(null)}
           onCreate={createLink}
+        />
+      )}
+
+      {editNode && (
+        <NodeEditDialog
+          node={editNode}
+          saving={updateNode.isPending}
+          onCancel={() => setEditNode(null)}
+          onSave={(patch) => saveNode(editNode.id, patch)}
+        />
+      )}
+
+      {editLink && (
+        <LinkEditDialog
+          link={editLink}
+          source={nodeById.get(editLink.source_node_id)}
+          target={nodeById.get(editLink.target_node_id)}
+          saving={updateLink.isPending}
+          onCancel={() => setEditLink(null)}
+          onSave={(patch) => saveLink(editLink.id, patch)}
         />
       )}
     </div>
