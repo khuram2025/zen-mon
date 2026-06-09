@@ -127,6 +127,8 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
     const a = rv[k], b = rv[k + 1]
     const horizontal = Math.abs(a.y - b.y) <= Math.abs(a.x - b.x)
     const last = rv.length - 1
+    const sx = e.clientX, sy = e.clientY
+    let moved = false
     const apply = (ev: PointerEvent, commit: boolean) => {
       const fp = rf.screenToFlowPosition({ x: ev.clientX, y: ev.clientY })
       const nrv = rv.map((p) => ({ ...p }))
@@ -138,11 +140,15 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
       if (k + 1 === last) wpts = [...wpts, nrv[last]]
       setWaypoints!(wpts, commit)
     }
-    const move = (ev: PointerEvent) => apply(ev, false)
+    const move = (ev: PointerEvent) => {
+      if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 3) return // ignore jitter / clicks
+      moved = true
+      apply(ev, false)
+    }
     const up = (ev: PointerEvent) => {
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
-      apply(ev, true)
+      if (moved) apply(ev, true) // a plain click leaves the route untouched
     }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
@@ -160,6 +166,18 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
     const base = [...wps.slice(0, idx), fp, ...wps.slice(idx)]
     setWaypoints!(base, false)
     dragBend(base, idx)
+  }
+
+  // Double-click the cable → drop a free bend point you can drag anywhere.
+  // This is the explicit "add a bend" action; works for every shape and is
+  // the way to bend an orthogonal cable (single-drag moves a whole segment).
+  const onPathDoubleClick = (e: React.MouseEvent) => {
+    if (!editable) return
+    e.stopPropagation()
+    e.preventDefault()
+    const fp = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY })
+    const idx = nearestSegmentIndex(path.vertices, fp)
+    setWaypoints!([...wps.slice(0, idx), fp, ...wps.slice(idx)], true)
   }
 
   const startWpDrag = (i: number) => (e: React.PointerEvent) => {
@@ -189,7 +207,10 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
         className={cn('react-flow__edge-interaction', editable && 'cursor-grab')}
         style={editable ? { pointerEvents: 'stroke' } : undefined}
         onPointerDown={onPathPointerDown}
-      />
+        onDoubleClick={onPathDoubleClick}
+      >
+        {editable && <title>{shape === 'orthogonal' ? 'Drag to move segment · double-click to add a bend' : 'Drag to bend · double-click to add a point'}</title>}
+      </path>
       {(kindStyle.accent || selected) && (
         <path d={path.d} fill="none" stroke={selected ? 'rgb(var(--primary))' : (kindStyle.accent as string)} strokeOpacity={selected ? 0.6 : 0.45} strokeWidth={selected ? baseWidth + 3 : baseWidth + 1.5} vectorEffect="non-scaling-stroke" style={{ pointerEvents: 'none' }} />
       )}
