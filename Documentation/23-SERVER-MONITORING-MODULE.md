@@ -190,7 +190,35 @@ WMI/SSH collectors (E7), host-metric conditions in the multi-condition alert-rul
 uptime/patch inventory, then app-level checks (IIS/AD/SQL) once the agent ships
 role detection.
 
-## 5. Known limitations / follow-ups
+## 5. Discovery integration (SolarWinds-style scan → import → monitor)
+
+Network discovery (`/discovery`) feeds the Servers module directly (since 2026-06-10):
+
+* **Scan** — a discovery profile takes subnets (CIDR), IP ranges, single IPs, or pasted
+  lists, plus credentials: SNMP profiles and **Windows credentials** (WinRM; the wizard's
+  Windows-credential selection now actually persists — it was silently dropped before).
+  Probes: ICMP, TCP fingerprint (incl. 3389/5985/445), SSH banner, HTTP(S), SNMP system
+  info, and WinRM `Get-CimInstance` (hostname/OS/version/arch/vendor/model/serial/domain).
+* **Classify** — results carry `device_type`/`os`/`os_version`/ports; Windows/Linux hosts
+  are recognized via OS probes or port heuristics (3389/5985/445 → windows, 22 → linux).
+* **Import** — the import drawer has an **"Import as"** selector:
+  * `Auto-route` (default): server-class hosts → `servers` (+ a linked ping/SNMP device
+    when "enable monitoring" is on); network gear → `devices`.
+  * `Network devices only` (legacy behavior) / `Servers only` / `Both`.
+  Server rows are created with mapped `os_type`, `collection_mode`
+  (WinRM-validated → `agentless_winrm`, SNMP → `snmp`, port 22 → `ssh`), environment,
+  tags, and a `device_id` link when a device exists for the same IP.
+  Dedup: servers match by primary IP or case-insensitive hostname — re-importing or a
+  later agent enrollment on the same hostname updates the same record, never duplicates.
+* **Schedules now run themselves** — a background scheduler loop (60 s) fires due
+  discovery schedules; previously they only ran via the manual "Run scheduler now"
+  button. Runs stranded by an API restart are auto-marked failed on startup.
+
+Bulk onboarding paths: discovery import (hundreds per run, 4096-IP scan cap),
+multi-use enrollment tokens (`max_uses` ≤ 100 per token) for agent rollouts, and
+`POST /servers/bulk` for tagging/lifecycle at scale.
+
+## 6. Known limitations / follow-ups
 
 * Health thresholds are global defaults — move to per-policy overrides when needed.
 * Baseline evaluation runs inline on CRUD; fine at ≤ hundreds of servers, queue it beyond.

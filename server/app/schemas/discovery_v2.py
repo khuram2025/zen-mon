@@ -246,6 +246,12 @@ class ImportRequest(BaseModel):
     location: Optional[str] = None
     ping_interval: int = Field(default=60, ge=10, le=3600)
     conflict_strategy: Literal["skip", "update", "import_as_new"] = "skip"
+    # Routing: "device" (network monitoring, legacy default), "server"
+    # (server-monitoring inventory), "both", or "auto" — server-class results
+    # (Windows/Linux hosts) become servers (+ a linked device when monitoring
+    # is enabled), network gear becomes devices.
+    import_as: Literal["auto", "device", "server", "both"] = "device"
+    environment: Optional[str] = None  # servers.environment for server imports
 
 
 class ImportResponse(BaseModel):
@@ -255,6 +261,8 @@ class ImportResponse(BaseModel):
     failed: int
     skipped: int
     conflicts: int
+    devices_created: int = 0
+    servers_created: int = 0
     items: list[dict[str, Any]]
 
 

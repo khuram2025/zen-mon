@@ -6,8 +6,9 @@ actions are audit logged.
 
 from __future__ import annotations
 
+import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -27,6 +28,7 @@ from app.models.discovery_v2 import (
     DiscoverySchedule,
 )
 from app.models.user import User
+from app.services.discovery_scheduler import compute_next_run, run_scheduler_tick
 from app.schemas.discovery_v2 import (
     DiscoveryProfileCreate,
     DiscoveryProfileResponse,
@@ -76,36 +78,9 @@ def _summary_for_schedule(s: DiscoverySchedule | None) -> Optional[str]:
     return freq.capitalize()
 
 
-def _compute_next_run(s: DiscoverySchedule, *, after: datetime | None = None) -> datetime | None:
-    """Cheap, dependency-free next-run calculator."""
-    now = after or datetime.now(timezone.utc)
-    if not s.enabled or (s.end_date and s.end_date < now):
-        return None
-    start = s.start_date or now
-    if s.schedule_type == "once_now":
-        return now
-    if s.schedule_type == "once_future":
-        return start if start > now else None
-    if s.schedule_type == "recurring":
-        if s.interval_minutes and s.interval_minutes > 0:
-            delta = timedelta(minutes=s.interval_minutes)
-        elif s.frequency == "hourly":
-            delta = timedelta(hours=1)
-        elif s.frequency == "daily":
-            delta = timedelta(days=1)
-        elif s.frequency == "weekly":
-            delta = timedelta(weeks=1)
-        elif s.frequency == "monthly":
-            delta = timedelta(days=30)
-        else:
-            delta = timedelta(hours=1)
-        nxt = start
-        while nxt <= now:
-            nxt = nxt + delta
-        return nxt
-    if s.schedule_type == "cron":
-        return s.next_run_at
-    return None
+# Next-run calculation + tick logic live in the scheduler service so the
+# background loop (main.py) and this API share one implementation.
+_compute_next_run = compute_next_run
 
 
 async def _load_profile_response(
@@ -132,6 +107,7 @@ async def _load_profile_response(
         protocols=profile.protocols or ["icmp"],
         custom_ports=profile.custom_ports or [],
         snmp_credential_ids=profile.snmp_credential_ids or [],
+        windows_credential_ids=profile.windows_credential_ids or [],
         detect_lldp=profile.detect_lldp,
         detect_mac=profile.detect_mac,
         detect_vendor=profile.detect_vendor,
@@ -202,6 +178,7 @@ async def create_profile(
         protocols=payload.protocols,
         custom_ports=payload.custom_ports,
         snmp_credential_ids=[str(c) for c in payload.snmp_credential_ids],
+        windows_credential_ids=[str(c) for c in payload.windows_credential_ids],
         detect_lldp=payload.detect_lldp,
         detect_mac=payload.detect_mac,
         detect_vendor=payload.detect_vendor,
@@ -281,7 +258,7 @@ async def update_profile(
         raise HTTPException(404, "Profile not found")
     fields = payload.model_dump(exclude_unset=True)
     for k, v in fields.items():
-        if k == "snmp_credential_ids" and v is not None:
+        if k in ("snmp_credential_ids", "windows_credential_ids") and v is not None:
             v = [str(x) for x in v]
         setattr(p, k, v)
     p.updated_by = user.id
@@ -326,6 +303,7 @@ async def clone_profile(
         protocols=list(src.protocols or []),
         custom_ports=list(src.custom_ports or []),
         snmp_credential_ids=list(src.snmp_credential_ids or []),
+        windows_credential_ids=list(src.windows_credential_ids or []),
         detect_lldp=src.detect_lldp,
         detect_mac=src.detect_mac,
         detect_vendor=src.detect_vendor,
@@ -703,6 +681,119 @@ async def list_results(
 # ───────────────────────────────────────────────────────────────────
 # Import
 # ───────────────────────────────────────────────────────────────────
+_SERVER_OS_HINTS = ("windows", "linux", "ubuntu", "debian", "centos", "rhel",
+                    "red hat", "suse", "fedora", "esxi", "macos")
+
+
+def _is_server_result(result: DiscoveryResultV2) -> bool:
+    """Server-class host (vs network gear) — drives auto routing."""
+    if (result.device_type or "").lower() == "server":
+        return True
+    os_l = (result.os or "").lower()
+    return any(h in os_l for h in _SERVER_OS_HINTS)
+
+
+def _server_os_type(result: DiscoveryResultV2) -> str:
+    os_l = (result.os or "").lower()
+    if "windows" in os_l:
+        return "windows"
+    if any(h in os_l for h in ("linux", "ubuntu", "debian", "centos", "rhel", "red hat", "suse", "fedora")):
+        return "linux"
+    if "macos" in os_l or "mac os" in os_l:
+        return "macos"
+    if "bsd" in os_l:
+        return "bsd"
+    if "esxi" in os_l:
+        return "other"
+    # No OS probe result — fall back to port heuristics.
+    ports = _result_ports(result)
+    if ports & {3389, 5985, 5986, 445}:
+        return "windows"
+    if 22 in ports:
+        return "linux"
+    return "unknown"
+
+
+def _result_ports(result: DiscoveryResultV2) -> set[int]:
+    out: set[int] = set()
+    for p in result.open_ports or []:
+        try:
+            out.add(int(p))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _server_collection_mode(result: DiscoveryResultV2) -> str:
+    """Best agentless mode the scan proved (or hinted) for this host."""
+    if result.windows_credential_used:
+        return "agentless_winrm"
+    if result.credential_used:
+        return "snmp"
+    ports = _result_ports(result)
+    if 5985 in ports or 5986 in ports:
+        return "agentless_winrm"
+    if 22 in ports:
+        return "ssh"
+    if 161 in ports:
+        return "snmp"
+    return "none"
+
+
+def _route_result(result: DiscoveryResultV2, payload: ImportRequest) -> tuple[bool, bool]:
+    """(create_device, create_server) for one result under the chosen mode."""
+    if payload.import_as == "device":
+        return True, False
+    if payload.import_as == "server":
+        return False, True
+    if payload.import_as == "both":
+        return True, True
+    # auto: server-class hosts become servers (+ a device for ping/SNMP
+    # monitoring when enabled); everything else stays a network device.
+    if _is_server_result(result):
+        return payload.enable_monitoring, True
+    return True, False
+
+
+async def _create_server_from_result(
+    db: AsyncSession,
+    result: DiscoveryResultV2,
+    payload: ImportRequest,
+    user: User,
+    device_id: uuid.UUID | None,
+) -> uuid.UUID:
+    display_name = (result.hostname or result.sys_name or result.fqdn
+                    or str(result.ip_address))
+    hw = " ".join(b for b in (result.vendor, result.model) if b)
+    description = f"Imported from network discovery{f' — {hw}' if hw else ''}"
+    row = (await db.execute(
+        text("""INSERT INTO servers
+                    (display_name, hostname, fqdn, primary_ip, device_id,
+                     os_type, os_name, os_version, collection_mode,
+                     environment, description, tags, status, created_by)
+                VALUES (:dn, :hn, :fqdn, :ip, :dev,
+                        :ost, :osn, :osv, :cm,
+                        :env, :desc, CAST(:tags AS jsonb), 'unknown', :cb)
+                RETURNING id"""),
+        {
+            "dn": display_name[:255],
+            "hn": (result.hostname or result.sys_name or None),
+            "fqdn": result.fqdn,
+            "ip": str(result.ip_address),
+            "dev": device_id,
+            "ost": _server_os_type(result),
+            "osn": result.os,
+            "osv": result.os_version,
+            "cm": _server_collection_mode(result),
+            "env": payload.environment,
+            "desc": description,
+            "tags": json.dumps(payload.tags or result.suggested_tags or []),
+            "cb": user.id,
+        },
+    )).first()
+    return row[0]
+
+
 @router.post("/runs/{run_id}/import", response_model=ImportResponse)
 async def import_results(
     run_id: uuid.UUID,
@@ -733,6 +824,8 @@ async def import_results(
     failed = 0
     skipped = 0
     conflicts = 0
+    devices_created = 0
+    servers_created = 0
     item_reports: list[dict] = []
 
     for rid in payload.result_ids:
@@ -754,70 +847,126 @@ async def import_results(
                                  "reason": "already imported"})
             continue
 
-        existing = (
+        want_device, want_server = _route_result(result, payload)
+        report: dict = {"result_id": rid, "ip": str(result.ip_address)}
+        conflict_types: list[str] = []
+        created_device_id: uuid.UUID | None = None
+        created_server_id: uuid.UUID | None = None
+        linked_device_id: uuid.UUID | None = None
+        error: str | None = None
+
+        # Device leg (network monitoring)
+        existing_dev = (
             await db.execute(
                 text("SELECT id FROM devices WHERE ip_address = :ip"),
                 {"ip": str(result.ip_address)},
             )
         ).first()
+        if existing_dev:
+            linked_device_id = existing_dev[0]
+        if want_device:
+            if existing_dev and payload.conflict_strategy == "skip":
+                conflict_types.append("ip_exists")
+            else:
+                try:
+                    hostname = result.hostname or result.sys_name or str(result.ip_address)
+                    device = Device(
+                        hostname=hostname,
+                        ip_address=str(result.ip_address),
+                        device_type=result.device_type or "other",
+                        location=payload.location,
+                        group_id=payload.group_id or result.suggested_group_id,
+                        tags=payload.tags or result.suggested_tags or [],
+                        ping_enabled=payload.enable_monitoring,
+                        ping_interval=payload.ping_interval,
+                        snmp_enabled=False,
+                        snmp_credential_id=payload.snmp_credential_id,
+                        sys_object_id=result.sys_object_id,
+                        vendor=result.vendor,
+                        model=result.model,
+                        os_version=result.os_version,
+                        profile_id=payload.template_id or result.matched_template_id,
+                        status="unknown",
+                        created_by=user.id,
+                    )
+                    db.add(device)
+                    await db.flush()
+                    created_device_id = device.id
+                    linked_device_id = device.id
+                    devices_created += 1
+                except Exception as e:
+                    error = f"device: {e}"
 
-        if existing and payload.conflict_strategy == "skip":
-            item = DiscoveryImportItem(batch_id=batch.id, result_id=rid, status="conflict",
-                                       device_id=existing[0],
-                                       conflict_type="ip_exists")
-            db.add(item)
-            conflicts += 1
-            item_reports.append({"result_id": rid, "status": "conflict",
-                                 "ip": str(result.ip_address)})
-            continue
+        # Server leg (server-monitoring inventory)
+        if want_server and error is None:
+            hn = result.hostname or result.sys_name
+            existing_srv = (
+                await db.execute(
+                    text("""SELECT id FROM servers
+                            WHERE primary_ip = :ip
+                               OR (hostname IS NOT NULL AND CAST(:hn AS text) IS NOT NULL
+                                   AND lower(hostname) = lower(CAST(:hn AS text)))
+                            LIMIT 1"""),
+                    {"ip": str(result.ip_address), "hn": hn},
+                )
+            ).first()
+            if existing_srv and payload.conflict_strategy == "skip":
+                conflict_types.append("server_exists")
+            else:
+                try:
+                    created_server_id = await _create_server_from_result(
+                        db, result, payload, user, linked_device_id,
+                    )
+                    servers_created += 1
+                except Exception as e:
+                    error = f"server: {e}"
 
-        try:
-            hostname = result.hostname or result.sys_name or str(result.ip_address)
-            device = Device(
-                hostname=hostname,
-                ip_address=str(result.ip_address),
-                device_type=result.device_type or "other",
-                location=payload.location,
-                group_id=payload.group_id or result.suggested_group_id,
-                tags=payload.tags or result.suggested_tags or [],
-                ping_enabled=payload.enable_monitoring,
-                ping_interval=payload.ping_interval,
-                snmp_enabled=False,
-                snmp_credential_id=payload.snmp_credential_id,
-                sys_object_id=result.sys_object_id,
-                vendor=result.vendor,
-                model=result.model,
-                os_version=result.os_version,
-                profile_id=payload.template_id or result.matched_template_id,
-                status="unknown",
-                created_by=user.id,
-            )
-            db.add(device)
-            await db.flush()
-
+        # Record what was created even on partial failure so retries don't duplicate.
+        now = datetime.now(timezone.utc)
+        if created_device_id or created_server_id:
             result.imported = True
-            result.imported_at = datetime.now(timezone.utc)
-            result.imported_device_id = device.id
+            result.imported_at = now
+            if created_device_id:
+                result.imported_device_id = created_device_id
+            if created_server_id:
+                result.imported_server_id = created_server_id
             result.status = "imported"
 
+        if error is not None:
+            item = DiscoveryImportItem(batch_id=batch.id, result_id=rid, status="failed",
+                                       device_id=created_device_id,
+                                       server_id=created_server_id,
+                                       error_message=error)
+            db.add(item)
+            failed += 1
+            report.update(status="failed", error=error)
+        elif created_device_id or created_server_id:
             item = DiscoveryImportItem(
                 batch_id=batch.id,
                 result_id=rid,
                 status="imported",
-                device_id=device.id,
-                processed_at=datetime.now(timezone.utc),
+                device_id=created_device_id,
+                server_id=created_server_id,
+                conflict_type=",".join(conflict_types)[:40] or None,
+                processed_at=now,
             )
             db.add(item)
             successful += 1
-            item_reports.append({"result_id": rid, "status": "imported",
-                                 "device_id": str(device.id),
-                                 "ip": str(result.ip_address)})
-        except Exception as e:
-            item = DiscoveryImportItem(batch_id=batch.id, result_id=rid, status="failed",
-                                       error_message=str(e))
+            report["status"] = "imported"
+            if created_device_id:
+                report["device_id"] = str(created_device_id)
+            if created_server_id:
+                report["server_id"] = str(created_server_id)
+            if conflict_types:
+                report["partial_conflicts"] = conflict_types
+        else:
+            item = DiscoveryImportItem(batch_id=batch.id, result_id=rid, status="conflict",
+                                       device_id=linked_device_id,
+                                       conflict_type=",".join(conflict_types)[:40] or "exists")
             db.add(item)
-            failed += 1
-            item_reports.append({"result_id": rid, "status": "failed", "error": str(e)})
+            conflicts += 1
+            report.update(status="conflict", conflicts=conflict_types or ["exists"])
+        item_reports.append(report)
 
     batch.successful_items = successful
     batch.failed_items = failed
@@ -832,7 +981,8 @@ async def import_results(
         metadata={
             "run_id": str(run_id), "total": len(payload.result_ids),
             "successful": successful, "failed": failed, "skipped": skipped,
-            "conflicts": conflicts,
+            "conflicts": conflicts, "import_as": payload.import_as,
+            "devices_created": devices_created, "servers_created": servers_created,
         },
     )
     await db.commit()
@@ -844,6 +994,8 @@ async def import_results(
         failed=failed,
         skipped=skipped,
         conflicts=conflicts,
+        devices_created=devices_created,
+        servers_created=servers_created,
         items=item_reports,
     )
 
@@ -996,45 +1148,5 @@ async def scheduler_tick(
     db: AsyncSession = Depends(get_db),
     _user: User = Depends(get_current_user),
 ):
-    now = datetime.now(timezone.utc)
-    rows = (
-        await db.execute(
-            select(DiscoverySchedule).where(
-                DiscoverySchedule.enabled == True,  # noqa: E712
-                DiscoverySchedule.next_run_at != None,  # noqa: E711
-                DiscoverySchedule.next_run_at <= now,
-            )
-        )
-    ).scalars().all()
-    triggered: list[str] = []
-    for s in rows:
-        in_flight = (
-            await db.execute(
-                select(DiscoveryRun).where(
-                    DiscoveryRun.profile_id == s.profile_id,
-                    DiscoveryRun.status.in_(("queued", "running")),
-                )
-            )
-        ).scalar_one_or_none()
-        if in_flight:
-            continue
-        run = DiscoveryRun(
-            profile_id=s.profile_id,
-            schedule_id=s.id,
-            trigger_type="scheduled",
-            status="queued",
-            phase="preparing",
-        )
-        db.add(run)
-        await db.flush()
-        s.last_run_at = now
-        s.last_run_id = run.id
-        if s.schedule_type in ("once_now", "once_future"):
-            s.enabled = False
-            s.next_run_at = None
-        else:
-            s.next_run_at = _compute_next_run(s, after=now + timedelta(seconds=1))
-        triggered.append(str(run.id))
-        start_run_task(run.id)
-    await db.commit()
-    return {"triggered": triggered, "checked": len(rows)}
+    """Manual tick — the background loop runs the same logic every minute."""
+    return await run_scheduler_tick(db)

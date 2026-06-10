@@ -31,6 +31,7 @@ export type DiscoveryProtocol =
   | 'snmp'
   | 'ssh'
   | 'wmi'
+  | 'winrm'
   | 'http'
   | 'https'
   | 'tcp'
@@ -201,6 +202,8 @@ export interface ImportBatch {
   completed_at: string | null
 }
 
+export type ImportTarget = 'auto' | 'device' | 'server' | 'both'
+
 export interface ImportResponse {
   batch_id: string
   total: number
@@ -208,10 +211,13 @@ export interface ImportResponse {
   failed: number
   skipped: number
   conflicts: number
+  devices_created: number
+  servers_created: number
   items: Array<{
     result_id: number
     status: string
     device_id?: string
+    server_id?: string
     ip?: string
     error?: string
     reason?: string

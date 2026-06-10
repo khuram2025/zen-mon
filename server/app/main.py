@@ -80,12 +80,16 @@ def create_app() -> FastAPI:
         # Agent/server staleness sweep (online → stale → offline + alerts).
         from app.services.server_health_service import health_sweeper_loop
         app.state.health_sweeper = asyncio.create_task(health_sweeper_loop())
+        # Discovery: recover restart-stranded runs, then fire due schedules.
+        from app.services.discovery_scheduler import discovery_scheduler_loop
+        app.state.discovery_scheduler = asyncio.create_task(discovery_scheduler_loop())
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        task = getattr(app.state, "health_sweeper", None)
-        if task:
-            task.cancel()
+        for attr in ("health_sweeper", "discovery_scheduler"):
+            task = getattr(app.state, attr, None)
+            if task:
+                task.cancel()
 
     return app
 

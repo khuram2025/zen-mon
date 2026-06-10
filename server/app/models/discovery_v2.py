@@ -210,6 +210,11 @@ class DiscoveryResultV2(Base):
     imported_device_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("devices.id", ondelete="SET NULL"), nullable=True
     )
+    # FK to servers(id) exists at the DB level (migrate-031); no ORM ForeignKey
+    # because the servers table has no SQLAlchemy model (raw-SQL module).
+    imported_server_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
     ignored: Mapped[bool] = mapped_column(Boolean, default=False)
     ignored_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -315,6 +320,10 @@ class DiscoveryImportItem(Base):
     status: Mapped[str] = mapped_column(String(20), default="pending")
     device_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("devices.id", ondelete="SET NULL"), nullable=True
+    )
+    # DB-level FK to servers(id) via migrate-031; no ORM ForeignKey (see above).
+    server_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
     )
     conflict_type: Mapped[str | None] = mapped_column(String(40), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

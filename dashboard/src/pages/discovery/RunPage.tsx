@@ -723,6 +723,8 @@ function ImportDrawer({
   const [enableMonitoring, setEnableMonitoring] = useState(true)
   const [pingInterval, setPingInterval] = useState(60)
   const [location, setLocation] = useState('')
+  const [environment, setEnvironment] = useState('')
+  const [importAs, setImportAs] = useState<'auto' | 'device' | 'server' | 'both'>('auto')
   const [conflictStrategy, setConflictStrategy] = useState<'skip' | 'update' | 'import_as_new'>(
     'skip',
   )
@@ -737,6 +739,25 @@ function ImportDrawer({
   const conflicts = selectedRows.filter((r) => r.matched_device_id || r.conflict_type).length
   const newOnes = selectedRows.length - conflicts
 
+  // Mirrors the backend's auto-routing predicate (server-class host?)
+  const isServerClass = (r: DiscoveryResult) => {
+    if ((r.device_type || '').toLowerCase() === 'server') return true
+    const os = (r.os || '').toLowerCase()
+    return ['windows', 'linux', 'ubuntu', 'debian', 'centos', 'rhel', 'esxi', 'macos']
+      .some((h) => os.includes(h))
+  }
+  const serverClassCount = selectedRows.filter(isServerClass).length
+  const toServers =
+    importAs === 'server' || importAs === 'both'
+      ? selectedRows.length
+      : importAs === 'auto' ? serverClassCount : 0
+  const toDevices =
+    importAs === 'device' || importAs === 'both'
+      ? selectedRows.length
+      : importAs === 'auto'
+        ? selectedRows.length - serverClassCount + (enableMonitoring ? serverClassCount : 0)
+        : 0
+
   const importMutation = useMutation({
     mutationFn: () =>
       discoveryApi.importResults(runId, {
@@ -749,14 +770,20 @@ function ImportDrawer({
         enable_monitoring: enableMonitoring,
         ping_interval: pingInterval,
         location: location || null,
+        environment: environment || null,
+        import_as: importAs,
         conflict_strategy: conflictStrategy,
       }),
     onSuccess: (resp) => {
       qc.invalidateQueries({ queryKey: ['discovery', 'run', runId, 'results'] })
       qc.invalidateQueries({ queryKey: ['discovery', 'profiles'] })
       qc.invalidateQueries({ queryKey: ['devices'] })
+      qc.invalidateQueries({ queryKey: ['servers'] })
+      const parts = []
+      if (resp.devices_created) parts.push(`${resp.devices_created} device${resp.devices_created === 1 ? '' : 's'}`)
+      if (resp.servers_created) parts.push(`${resp.servers_created} server${resp.servers_created === 1 ? '' : 's'}`)
       toast.success(
-        `${resp.successful} device${resp.successful === 1 ? '' : 's'} imported`,
+        parts.length ? `Imported ${parts.join(' + ')}` : `${resp.successful} result(s) imported`,
         resp.conflicts ? `${resp.conflicts} skipped due to conflicts` : 'Monitoring will begin shortly',
       )
       onImported()
@@ -770,16 +797,34 @@ function ImportDrawer({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Upload className="h-5 w-5 text-primary" />
-            Import {selectedRows.length} device{selectedRows.length === 1 ? '' : 's'}
+            Import {selectedRows.length} result{selectedRows.length === 1 ? '' : 's'}
           </DialogTitle>
         </DialogHeader>
         <div className="space-y-4">
           {/* Summary tiles */}
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-5 gap-2">
             <Tile label="Total" value={selectedRows.length} />
             <Tile label="New" value={newOnes} tone="info" />
             <Tile label="Conflicts" value={conflicts} tone={conflicts ? 'warning' : 'default'} />
+            <Tile label="→ Servers" value={toServers} tone={toServers ? 'info' : 'default'} />
+            <Tile label="→ Devices" value={toDevices} tone={toDevices ? 'info' : 'default'} />
           </div>
+
+          <FormField label="Import as">
+            <Select value={importAs} onValueChange={(v) => setImportAs(v as any)}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">
+                  Auto-route — Windows/Linux hosts → Servers, network gear → Devices
+                </SelectItem>
+                <SelectItem value="device">Network devices only</SelectItem>
+                <SelectItem value="server">Servers only (server monitoring)</SelectItem>
+                <SelectItem value="both">Both — server inventory + monitored device</SelectItem>
+              </SelectContent>
+            </Select>
+          </FormField>
 
           {conflicts > 0 && (
             <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2.5 text-xs text-warning">
@@ -820,6 +865,15 @@ function ImportDrawer({
                 onChange={(e) => setLocation(e.target.value)}
               />
             </FormField>
+            {importAs !== 'device' && (
+              <FormField label="Environment (servers)">
+                <Input
+                  placeholder="production"
+                  value={environment}
+                  onChange={(e) => setEnvironment(e.target.value)}
+                />
+              </FormField>
+            )}
             <FormField label="Tags (comma-separated)">
               <Input value={tagsInput} onChange={(e) => setTagsInput(e.target.value)} />
             </FormField>
@@ -861,7 +915,7 @@ function ImportDrawer({
 
           <div className="max-h-40 overflow-y-auto rounded-md border border-border bg-surface2/30 p-2">
             <div className="mb-1 text-[10px] uppercase tracking-wider text-muted">
-              Devices to import
+              Hosts to import
             </div>
             <div className="flex flex-wrap gap-1">
               {selectedRows.map((r) => (
