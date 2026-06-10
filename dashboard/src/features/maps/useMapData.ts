@@ -8,6 +8,7 @@ import type {
   LiveLinkData,
   ManualMapDetail,
   ManualMapListItem,
+  NodeLiveData,
   SuggestedLink,
 } from './core'
 
@@ -18,10 +19,14 @@ export function useManualMaps() {
   })
 }
 
-export function useManualMap(mapId: string | null) {
+export function useManualMap(mapId: string | null, live = false) {
   return useQuery<ManualMapDetail>({
     queryKey: ['manual-map', mapId],
     enabled: !!mapId,
+    // In live (NOC) mode refresh the map itself too, so node status changes
+    // and topology edits land on the wall without a manual reload. Design
+    // mode never auto-refetches — it would clobber in-progress edits.
+    refetchInterval: live ? 30_000 : false,
     queryFn: async () => (await api.get(`/maps/${mapId}`)).data,
   })
 }
@@ -39,6 +44,24 @@ export function useLiveLinks(mapId: string | null, enabled: boolean) {
     enabled: !!mapId && enabled,
     refetchInterval: enabled ? 15_000 : false,
     queryFn: async () => (await api.get(`/maps/${mapId}/links-live`)).data,
+  })
+}
+
+/** Per-device live health (status, cpu/mem, alerts) for the NOC overlay.
+ *  Fails soft: an older backend without the endpoint just yields no overlay. */
+export function useNodesLive(mapId: string | null, enabled: boolean) {
+  return useQuery<{ data: Record<string, NodeLiveData> }>({
+    queryKey: ['manual-map-nodes-live', mapId],
+    enabled: !!mapId && enabled,
+    refetchInterval: enabled ? 15_000 : false,
+    retry: false,
+    queryFn: async () => {
+      try {
+        return (await api.get(`/maps/${mapId}/nodes-live`)).data
+      } catch {
+        return { data: {} }
+      }
+    },
   })
 }
 

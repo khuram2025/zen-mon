@@ -8,7 +8,7 @@ import { api } from '@/lib/api'
 import { toast } from '@/components/ui/Toast'
 import { MapCanvas } from './canvas/MapCanvas'
 import { DevicePalette } from './canvas/DevicePalette'
-import { useLiveLinks, useManualMap, useManualMaps } from './useMapData'
+import { useLiveLinks, useManualMap, useManualMaps, useNodesLive } from './useMapData'
 import type { ManualMapDetail } from './core'
 
 type Mode = 'design' | 'live'
@@ -40,10 +40,12 @@ export function MapEditorV2() {
     }
   }, [urlMapId, maps, params, setParams])
 
-  const mapQuery = useManualMap(selectedMapId)
+  const mapQuery = useManualMap(selectedMapId, mode === 'live')
   const detail = mapQuery.data
   const liveLinksQuery = useLiveLinks(selectedMapId, mode === 'live')
   const liveData = liveLinksQuery.data?.data || EMPTY_LIVE
+  const nodesLiveQuery = useNodesLive(selectedMapId, mode === 'live')
+  const nodesLive = nodesLiveQuery.data?.data || EMPTY_LIVE
 
   const counts = useMemo(() => ({ nodes: detail?.nodes.length || 0, links: detail?.links.length || 0 }), [detail])
 
@@ -186,6 +188,8 @@ export function MapEditorV2() {
                 mapId={selectedMapId}
                 detail={detail}
                 liveData={liveData}
+                nodesLive={nodesLive}
+                liveUpdatedAt={Math.max(liveLinksQuery.dataUpdatedAt, nodesLiveQuery.dataUpdatedAt)}
                 liveMode={mode === 'live'}
                 showThroughput={showThroughput}
               />

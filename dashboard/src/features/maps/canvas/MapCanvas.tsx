@@ -53,6 +53,7 @@ import {
   type ManualMapLink,
   type ManualMapNode,
   type MapShape,
+  type NodeLiveData,
 } from '../core'
 import { useMapMutations } from '../useMapData'
 import { DeviceNode } from './DeviceNode'
@@ -66,6 +67,7 @@ import { DEVICE_DND_TYPE } from './DevicePalette'
 import { LinkEditDialog, NodeEditDialog } from './EditDialogs'
 import { InsertMenu, ShapeInspector, type ShapeSpec } from './Annotations'
 import { GroupResizer } from './GroupResizer'
+import { MapLegend, NocStatusBar } from './NocOverlays'
 
 const nodeTypes = { device: DeviceNode, shape: ShapeNode }
 const edgeTypes = { network: NetworkEdge }
@@ -79,11 +81,13 @@ export type MapCanvasProps = {
   mapId: string
   detail: ManualMapDetail
   liveData: Record<string, LiveLinkData>
+  nodesLive: Record<string, NodeLiveData>
+  liveUpdatedAt: number
   liveMode: boolean
   showThroughput: boolean
 }
 
-export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }: MapCanvasProps) {
+export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, liveMode, showThroughput }: MapCanvasProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([])
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
   const [snapOn, setSnapOn] = useState(false)
@@ -275,10 +279,14 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
         data: {
           node: n,
           live: liveMode,
+          nodeLive: liveMode ? nodesLive[n.id] : undefined,
           onLabelMove: (dx: number, dy: number, commit: boolean) => setNodeLabelOffset(n.id, dx, dy, commit),
         },
         draggable: !liveMode,
         selected: selectedIds.current.has(n.id),
+        // RF turns pointer events off for non-interactive nodes; live mode
+        // still needs hover for the health card.
+        style: liveMode ? { pointerEvents: 'all' as const } : undefined,
       }
     })
     // Annotation shapes render UNDER the devices (lower zIndex) unless their own
@@ -305,7 +313,7 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
       }
     })
     setNodes([...shapeNodes, ...deviceNodes])
-  }, [detail.nodes, detail.shapes, liveMode, setNodes, setNodeLabelOffset, setShape])
+  }, [detail.nodes, detail.shapes, liveMode, nodesLive, setNodes, setNodeLabelOffset, setShape])
 
   useEffect(() => {
     const visible = detail.links.filter((l) => nodeById.has(l.source_node_id) && nodeById.has(l.target_node_id))
@@ -338,8 +346,9 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
         type: 'network',
         data: {
           link: l,
-          sourceStatus: s.status,
-          targetStatus: t.status,
+          // The 15s live status feed wins over the map snapshot when present.
+          sourceStatus: (liveMode && nodesLive[l.source_node_id]?.status) || s.status,
+          targetStatus: (liveMode && nodesLive[l.target_node_id]?.status) || t.status,
           live: liveData[l.id],
           liveMode,
           showThroughput,
@@ -380,7 +389,7 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
       }))
 
     setEdges([...deviceEdges, ...annEdges])
-  }, [detail.links, detail.shapes, annLinks, liveData, liveMode, showThroughput, nodeById, setEdges, setEdgeWaypoints, setIfacePos])
+  }, [detail.links, detail.shapes, annLinks, liveData, liveMode, nodesLive, showThroughput, nodeById, setEdges, setEdgeWaypoints, setIfacePos])
 
   /* ── Persistence ─────────────────────────────────────────────── */
   const persistPositions = useCallback((items: { id: string; x: number; y: number }[]) => {
@@ -890,6 +899,18 @@ export function MapCanvas({ mapId, detail, liveData, liveMode, showThroughput }:
           maskColor={theme === 'dark' ? 'rgba(2,6,23,0.6)' : 'rgba(226,232,240,0.6)'}
           className="!bg-surface"
         />
+
+        {/* NOC overlays (live mode): fleet summary bar + reading legend */}
+        {liveMode && (
+          <Panel position="top-center">
+            <NocStatusBar detail={detail} nodesLive={nodesLive} liveData={liveData} updatedAt={liveUpdatedAt || Date.now()} />
+          </Panel>
+        )}
+        {liveMode && (
+          <Panel position="bottom-center">
+            <MapLegend />
+          </Panel>
+        )}
 
         {/* Floating EVE-style toolbar */}
         {!liveMode && (

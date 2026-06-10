@@ -106,6 +106,19 @@ export type LiveLinkData = {
   generated_at: string
 }
 
+/** Per-device live health (from GET /maps/{id}/nodes-live). */
+export type NodeLiveData = {
+  device_id: string
+  status: NodeStatus
+  last_seen?: string | null
+  rtt_ms?: number | null
+  cpu_pct?: number | null
+  mem_pct?: number | null
+  uptime_seconds?: number | null
+  temperature_c?: number | null
+  alerts: { active: number; critical: number; warning: number }
+}
+
 export type ManualMapLink = {
   id: string
   map_id: string
@@ -175,6 +188,8 @@ export type AnnotationLink = {
 }
 
 export type ManualMapDetail = ManualMapListItem & {
+  /** Per-map UI state: background, theme, annotation_links, snap settings. */
+  metadata?: Record<string, unknown> | null
   summary: {
     nodes: number
     links: number
@@ -523,6 +538,75 @@ function distToSegment(p: Pt, a: Pt, b: Pt): number {
   let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2
   t = Math.max(0, Math.min(1, t))
   return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy))
+}
+
+/* ── Live traffic helpers (NOC view) ─────────────────────────────────────── */
+
+/** Hex colour for a utilisation percentage — used for strokes, particles and
+ *  chips where Tailwind classes can't reach (SVG attrs, gradients). */
+export function utilHex(pct: number | null | undefined): string {
+  if (pct == null) return '#64748b'
+  if (pct >= 85) return '#ef4444'
+  if (pct >= 60) return '#f59e0b'
+  if (pct >= 30) return '#a3e635'
+  return '#22c55e'
+}
+
+export type LinkFlow = {
+  /** bps flowing source → target (max of src out / dst in). */
+  fwd: number
+  /** bps flowing target → source. */
+  rev: number
+  total: number
+  utilPct: number | null
+  /** Either matched interface is operationally down. */
+  ifaceDown: boolean
+  srcDown: boolean
+  dstDown: boolean
+}
+
+/** Direction-aware traffic summary for a link's live data. */
+export function linkFlow(live: LiveLinkData | undefined): LinkFlow | null {
+  if (!live) return null
+  const s = live.source, t = live.target
+  const fwd = Math.max(s.out_bps || 0, t.in_bps || 0)
+  const rev = Math.max(s.in_bps || 0, t.out_bps || 0)
+  const utilPct = s.util_pct != null || t.util_pct != null
+    ? Math.max(s.util_pct || 0, t.util_pct || 0)
+    : null
+  const srcDown = s.matched && s.oper_status != null && s.oper_status !== 'up'
+  const dstDown = t.matched && t.oper_status != null && t.oper_status !== 'up'
+  return { fwd, rev, total: fwd + rev, utilPct, ifaceDown: srcDown || dstDown, srcDown, dstDown }
+}
+
+/** Particle stream spec for an animated cable: how many dots and how fast.
+ *  Density grows with absolute traffic, speed with line utilisation, so a
+ *  saturated 1G link races while an idle 100G link drifts. */
+export function particleSpec(bps: number, utilPct: number | null): { count: number; dur: number } {
+  if (bps < 1000) return { count: 0, dur: 0 }
+  // 1 Kbps → 1 dot, ~1 Mbps → 2, ~100 Mbps → 3, ≥10 Gbps → 5
+  const count = Math.max(1, Math.min(5, Math.floor((Math.log10(bps) - 1) / 2) + 1))
+  const u = utilPct ?? Math.min(100, (Math.log10(bps) - 3) * 12)
+  const dur = Math.max(1.1, 5.5 - (Math.max(0, u) / 100) * 4.4) // 5.5s idle → 1.1s saturated
+  return { count, dur }
+}
+
+export function formatUptime(seconds: number | null | undefined): string {
+  if (!seconds || seconds <= 0) return '—'
+  const d = Math.floor(seconds / 86400)
+  const h = Math.floor((seconds % 86400) / 3600)
+  if (d > 0) return `${d}d ${h}h`
+  const m = Math.floor((seconds % 3600) / 60)
+  return h > 0 ? `${h}h ${m}m` : `${m}m`
+}
+
+export function formatAgo(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000)
+  if (s < 60) return `${Math.round(s)}s ago`
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
+  return `${Math.floor(s / 86400)}d ago`
 }
 
 /** Index of the segment in `vertices` nearest to point `p` — i.e. the waypoint

@@ -1,4 +1,4 @@
-import { memo, useRef } from 'react'
+import { memo, useRef, useState } from 'react'
 import { EdgeLabelRenderer, useInternalNode, useReactFlow, useStore, type EdgeProps } from '@xyflow/react'
 import { cn } from '@/lib/utils'
 import {
@@ -10,14 +10,18 @@ import {
   anchorOnRect,
   edgePath,
   formatBps,
+  linkFlow,
   linkHealth,
   linkKindOf,
   linkShapeOf,
   linkWaypoints,
   nearestSegmentIndex,
   pctToPx,
+  utilHex,
   utilizationColor,
+  particleSpec,
   type LiveLinkData,
+  type LiveInterface,
   type ManualMapLink,
   type NodeStatus,
   type Pt,
@@ -72,11 +76,39 @@ function endpointGeom(n: ReturnType<typeof useInternalNode>) {
   return { center: { x: p.x + DISC_CX, y: p.y + DISC_CY }, rect: false as const, halfW: 0, halfH: 0 }
 }
 
+/* One animated particle stream along the cable. `reverse` runs target→source.
+ * SMIL animateMotion runs on the compositor — zero React re-renders per frame,
+ * so dozens of busy links stay cheap. Negative begin offsets pre-fill the
+ * stream so dots are spread along the cable from the first frame. */
+function ParticleStream({ pathId, count, dur, color, r, reverse }: {
+  pathId: string; count: number; dur: number; color: string; r: number; reverse?: boolean
+}) {
+  return (
+    <g style={{ pointerEvents: 'none' }}>
+      {Array.from({ length: count }, (_, i) => (
+        <circle key={i} r={r} fill={color} opacity={0.9}>
+          <animateMotion
+            dur={`${dur}s`}
+            begin={`${-(i * dur) / count}s`}
+            repeatCount="indefinite"
+            calcMode="linear"
+            keyPoints={reverse ? '1;0' : '0;1'}
+            keyTimes="0;1"
+          >
+            <mpath href={`#${pathId}`} />
+          </animateMotion>
+        </circle>
+      ))}
+    </g>
+  )
+}
+
 function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, data, selected }: EdgeProps) {
   const d = data as NetworkEdgeData
   const { link, sourceStatus, targetStatus, live, liveMode, showThroughput, parallelOffset = 0, setWaypoints, setIfacePos } = d
   const rf = useReactFlow()
   const zoom = useStore((s) => s.transform[2])
+  const [hover, setHover] = useState(false)
 
   // Floating endpoints: anchor each link on the node's outer circle, pointing
   // toward its first/last bend (or the other node). Many cables fan out.
@@ -101,21 +133,30 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
 
   const shape = linkShapeOf(link)
   const path = edgePath(shape, srcAnchor.x, srcAnchor.y, tgtAnchor.x, tgtAnchor.y, wps)
+  const pathId = `nme-${link.id}`
 
   const health = linkHealth(sourceStatus, targetStatus)
   const color = STATUS_COLOR[health].line
   const kind = linkKindOf(link)
   const kindStyle = LINK_KIND_STYLE[kind] || {}
-  const animate = liveMode && (health === 'up' || health === 'degraded')
   const baseWidth = (kindStyle.widthMul || 1) * 3
-  const flowWidth = (kindStyle.widthMul || 1) * 1.5
 
-  const utilPct = live ? Math.max(live.source.util_pct || 0, live.target.util_pct || 0) : null
-  const utilStroke = live && utilPct != null ? utilizationColor(utilPct) : null
+  const flow = liveMode ? linkFlow(live) : null
+  const utilPct = flow?.utilPct ?? null
+  const utilStroke = flow ? utilizationColor(utilPct) : null
+  // A matched-but-down interface overrides everything: the cable is in fault.
+  const faulted = !!flow?.ifaceDown || health === 'down'
+  const idle = !!flow && !faulted && flow.total < 1000
 
   const srcIf = link.metadata?.src_interface || live?.source.if_name
   const dstIf = link.metadata?.dst_interface || live?.target.if_name
-  const bps = live ? Math.max(live.source.in_bps || 0, live.source.out_bps || 0, live.target.in_bps || 0, live.target.out_bps || 0) : 0
+
+  // Particle streams: forward (src→tgt) rides source-out, reverse rides source-in.
+  const fwdSpec = flow && !faulted ? particleSpec(flow.fwd, utilPct) : { count: 0, dur: 0 }
+  const revSpec = flow && !faulted ? particleSpec(flow.rev, utilPct) : { count: 0, dur: 0 }
+  const particleColor = utilHex(utilPct)
+  const particleR = 3.2 / Math.max(0.55, Math.min(1.4, zoom))
+  const hot = utilPct != null && utilPct >= 60
 
   const editable = !!selected && !liveMode && !!setWaypoints
   // Port labels can be dragged (and rotated when the link is selected) in design mode.
@@ -225,27 +266,63 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
 
   return (
     <>
-      {/* Wide invisible hit area — selects when unselected, grabs-to-bend when selected. */}
+      {/* Wide invisible hit area — selects when unselected, grabs-to-bend when
+          selected, and reveals the live inspection card on hover. */}
       <path
         d={path.d}
         fill="none"
         stroke="transparent"
-        strokeWidth={16}
+        strokeWidth={18}
         vectorEffect="non-scaling-stroke"
         className={cn('react-flow__edge-interaction', editable && 'cursor-grab')}
-        style={editable ? { pointerEvents: 'stroke' } : undefined}
+        style={editable || liveMode ? { pointerEvents: 'stroke' } : undefined}
         onPointerDown={onPathPointerDown}
         onDoubleClick={onPathDoubleClick}
+        onPointerEnter={liveMode ? () => setHover(true) : undefined}
+        onPointerLeave={liveMode ? () => setHover(false) : undefined}
       >
         {editable && <title>{shape === 'orthogonal' ? 'Drag to move segment · double-click to add a bend' : 'Drag to bend · double-click to add a point'}</title>}
       </path>
+
+      {/* Selection / kind accent halo */}
       {(kindStyle.accent || selected) && (
         <path d={path.d} fill="none" stroke={selected ? 'rgb(var(--primary))' : (kindStyle.accent as string)} strokeOpacity={selected ? 0.6 : 0.45} strokeWidth={selected ? baseWidth + 3 : baseWidth + 1.5} vectorEffect="non-scaling-stroke" style={{ pointerEvents: 'none' }} />
       )}
-      <path d={path.d} fill="none" vectorEffect="non-scaling-stroke" strokeWidth={baseWidth} strokeDasharray={kindStyle.dash} className={cn(utilStroke || color, 'opacity-70')} style={{ pointerEvents: 'none' }} />
-      {animate && (
-        <path d={path.d} fill="none" vectorEffect="non-scaling-stroke" strokeWidth={flowWidth} className={cn(utilStroke || color, utilPct != null && utilPct >= 60 ? 'nm-flow' : 'nm-flow-slow')} style={{ pointerEvents: 'none' }} />
+
+      {/* Hot-link glow underlay — saturated cables radiate */}
+      {hot && !faulted && (
+        <path d={path.d} fill="none" stroke={particleColor} strokeOpacity={0.32} strokeWidth={baseWidth + 6} vectorEffect="non-scaling-stroke" className="nm-hot" style={{ pointerEvents: 'none' }} />
       )}
+
+      {/* Base cable. In live mode the colour IS the utilisation; a faulted
+          interface renders the cable red-dashed regardless of traffic. */}
+      <path
+        id={pathId}
+        d={path.d}
+        fill="none"
+        vectorEffect="non-scaling-stroke"
+        strokeWidth={faulted ? baseWidth : hover && liveMode ? baseWidth + 1 : baseWidth}
+        strokeDasharray={faulted && liveMode ? '7 5' : kindStyle.dash}
+        strokeLinecap="round"
+        className={cn(
+          faulted && liveMode ? 'stroke-danger' : utilStroke || color,
+          idle ? 'opacity-35' : 'opacity-80',
+          'transition-opacity',
+        )}
+        style={{ pointerEvents: 'none' }}
+      />
+
+      {/* Directional traffic particles (live mode) */}
+      {liveMode && fwdSpec.count > 0 && (
+        <ParticleStream pathId={pathId} count={fwdSpec.count} dur={fwdSpec.dur} color={particleColor} r={particleR} />
+      )}
+      {liveMode && revSpec.count > 0 && (
+        <ParticleStream pathId={pathId} count={revSpec.count} dur={revSpec.dur} color={particleColor} r={particleR * 0.78} reverse />
+      )}
+
+      {/* Faulted endpoint markers — a red ✕ on the side whose interface is down */}
+      {liveMode && flow?.srcDown && <FaultMark x={path.near.x} y={path.near.y} zoom={zoom} />}
+      {liveMode && flow?.dstDown && <FaultMark x={path.far.x} y={path.far.y} zoom={zoom} />}
 
       {/* Existing bend handles (drag to move, right-click/dbl-click to remove). */}
       {editable && (
@@ -269,29 +346,123 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
       <EdgeLabelRenderer>
         {srcIf && (
           <IfaceChip x={path.near.x} y={path.near.y} value={srcIf} pos={ipos.src} editable={editChip} showRotate={editChip && !!selected} zoom={zoom}
+            down={liveMode && !!flow?.srcDown}
             onMove={(p, commit) => setIfacePos!('src', p, commit)} onRotate={(rot, commit) => setIfacePos!('src', { rot }, commit)} />
         )}
         {dstIf && (
           <IfaceChip x={path.far.x} y={path.far.y} value={dstIf} pos={ipos.dst} editable={editChip} showRotate={editChip && !!selected} zoom={zoom}
+            down={liveMode && !!flow?.dstDown}
             onMove={(p, commit) => setIfacePos!('dst', p, commit)} onRotate={(rot, commit) => setIfacePos!('dst', { rot }, commit)} />
         )}
-        {showThroughput && live && bps > 0 && (
-          <EdgeChip x={path.mid.x} y={path.mid.y} variant="live" tone={utilPct != null && utilPct >= 85 ? 'danger' : utilPct != null && utilPct >= 60 ? 'warning' : 'success'}>
-            {formatBps(bps)}{utilPct != null && utilPct > 0 ? ` · ${utilPct.toFixed(0)}%` : ''}
-          </EdgeChip>
+        {showThroughput && liveMode && flow && (flow.total > 0 || faulted) && (
+          <TrafficChip x={path.mid.x} y={path.mid.y} flow={flow} faulted={faulted} />
+        )}
+        {liveMode && hover && live && (
+          <LinkHoverCard x={path.mid.x} y={path.mid.y} link={link} live={live} flow={flow} />
         )}
       </EdgeLabelRenderer>
     </>
   )
 }
 
+/* Red ✕ marker for an operationally-down interface end. */
+function FaultMark({ x, y, zoom }: { x: number; y: number; zoom: number }) {
+  const s = 7 / Math.max(0.55, Math.min(1.4, zoom))
+  return (
+    <g transform={`translate(${x}, ${y})`} style={{ pointerEvents: 'none' }} className="nm-fault">
+      <circle r={s * 1.5} className="fill-danger/20 stroke-danger" strokeWidth={s * 0.22} />
+      <path d={`M ${-s * 0.6} ${-s * 0.6} L ${s * 0.6} ${s * 0.6} M ${s * 0.6} ${-s * 0.6} L ${-s * 0.6} ${s * 0.6}`} className="stroke-danger" strokeWidth={s * 0.3} strokeLinecap="round" />
+    </g>
+  )
+}
+
+/* Directional throughput pill: ▲ fwd ▼ rev with a utilisation bar underneath.
+ * This is the at-a-glance "weathermap" reading for NOC walls. */
+function TrafficChip({ x, y, flow, faulted }: { x: number; y: number; flow: ReturnType<typeof linkFlow>; faulted: boolean }) {
+  if (!flow) return null
+  const u = flow.utilPct
+  const tone = faulted ? 'danger' : u != null && u >= 85 ? 'danger' : u != null && u >= 60 ? 'warning' : 'success'
+  const cls = tone === 'danger' ? 'border-danger/50 text-danger' : tone === 'warning' ? 'border-warning/50 text-warning' : 'border-success/40 text-success'
+  return (
+    <div className="nodrag nopan pointer-events-none absolute" style={{ transform: `translate(-50%, -50%) translate(${x}px, ${y}px)` }}>
+      <div className={cn('overflow-hidden rounded-md border bg-surface/95 shadow-md backdrop-blur', cls)}>
+        <div className="flex items-center gap-1.5 px-1.5 py-0.5 font-mono text-[9.5px] font-semibold leading-none tracking-tight">
+          {faulted ? (
+            <span>LINK DOWN</span>
+          ) : (
+            <>
+              <span className="flex items-center gap-0.5"><span className="text-[8px]">▲</span>{formatBps(flow.fwd)}</span>
+              <span className="flex items-center gap-0.5 opacity-80"><span className="text-[8px]">▼</span>{formatBps(flow.rev)}</span>
+              {u != null && u > 0 && <span className="opacity-90">{u >= 10 ? u.toFixed(0) : u.toFixed(1)}%</span>}
+            </>
+          )}
+        </div>
+        {!faulted && u != null && (
+          <div className="h-[3px] w-full bg-surface2">
+            <div className="h-full transition-all duration-700" style={{ width: `${Math.max(2, Math.min(100, u))}%`, background: utilHex(u) }} />
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/* Full link inspection card shown while hovering a cable in live mode. */
+function LinkHoverCard({ x, y, link, live, flow }: { x: number; y: number; link: ManualMapLink; live: LiveLinkData; flow: ReturnType<typeof linkFlow> }) {
+  return (
+    <div className="nodrag nopan pointer-events-none absolute z-50" style={{ transform: `translate(-50%, -110%) translate(${x}px, ${y - 14}px)` }}>
+      <div className="w-64 rounded-lg border border-border bg-surface/95 p-2.5 shadow-xl backdrop-blur animate-fade-in">
+        <div className="mb-1.5 flex items-center justify-between gap-2">
+          <span className="truncate text-[11px] font-semibold text-text">{link.label || 'Link'}</span>
+          <span className="rounded bg-surface2 px-1 py-px font-mono text-[9px] uppercase text-muted">{link.metadata?.kind || link.link_type}{link.metadata?.speed ? ` · ${link.metadata.speed}` : ''}</span>
+        </div>
+        {flow && flow.utilPct != null && (
+          <div className="mb-2 flex items-center gap-2">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface2">
+              <div className="h-full rounded-full" style={{ width: `${Math.max(2, Math.min(100, flow.utilPct))}%`, background: utilHex(flow.utilPct) }} />
+            </div>
+            <span className="font-mono text-[10px] font-semibold" style={{ color: utilHex(flow.utilPct) }}>{flow.utilPct.toFixed(1)}%</span>
+          </div>
+        )}
+        <div className="grid grid-cols-2 gap-2">
+          <HoverIface title="A-END" iface={live.source} />
+          <HoverIface title="B-END" iface={live.target} />
+        </div>
+        <div className="mt-1.5 text-right text-[9px] text-muted">window {Math.round(live.window_seconds / 60)}m</div>
+      </div>
+    </div>
+  )
+}
+
+function HoverIface({ title, iface }: { title: string; iface: LiveInterface }) {
+  const down = iface.matched && iface.oper_status != null && iface.oper_status !== 'up'
+  return (
+    <div className="rounded-md border border-border/70 bg-surface2/50 p-1.5">
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-[8.5px] font-bold tracking-wider text-muted">{title}</span>
+        <span className={cn('rounded px-1 py-px text-[8.5px] font-bold uppercase leading-none', down ? 'bg-danger/15 text-danger' : iface.matched ? 'bg-success/15 text-success' : 'bg-surface3 text-muted')}>
+          {iface.matched ? (iface.oper_status || '?') : 'n/a'}
+        </span>
+      </div>
+      <div className="truncate font-mono text-[10px] font-semibold text-text">{iface.if_name || '—'}</div>
+      {iface.if_alias ? <div className="truncate text-[8.5px] italic text-muted" title={iface.if_alias}>{iface.if_alias}</div> : null}
+      <div className="mt-1 space-y-px font-mono text-[9px] leading-tight text-text2">
+        <div>in&nbsp;&nbsp;{formatBps(iface.in_bps)}</div>
+        <div>out&nbsp;{formatBps(iface.out_bps)}</div>
+        {iface.if_speed ? <div className="text-muted">spd {formatBps(iface.if_speed)}</div> : null}
+      </div>
+    </div>
+  )
+}
+
 /* Port (interface) label that the admin can drag along/around the cable and
  * rotate. Position = cable anchor (x,y) + persisted offset; a rotate grip
  * appears above it when the link is selected. */
-function IfaceChip({ x, y, value, pos, editable, showRotate, zoom, onMove, onRotate }: {
+function IfaceChip({ x, y, value, pos, editable, showRotate, zoom, down, onMove, onRotate }: {
   x: number; y: number; value: string
   pos?: { dx?: number; dy?: number; rot?: number }
   editable: boolean; showRotate: boolean; zoom: number
+  down?: boolean
   onMove: (p: { dx: number; dy: number }, commit: boolean) => void
   onRotate: (rot: number, commit: boolean) => void
 }) {
@@ -332,7 +503,11 @@ function IfaceChip({ x, y, value, pos, editable, showRotate, zoom, onMove, onRot
     >
       <div
         onPointerDown={startMove}
-        className={cn('relative rounded border border-border bg-surface/95 px-1 py-px font-mono text-[9px] font-semibold leading-none tracking-tight text-text2 shadow-sm backdrop-blur', editable && 'cursor-move hover:border-primary/60')}
+        className={cn(
+          'relative rounded border px-1 py-px font-mono text-[9px] font-semibold leading-none tracking-tight shadow-sm backdrop-blur',
+          down ? 'border-danger/60 bg-danger/15 text-danger' : 'border-border bg-surface/95 text-text2',
+          editable && 'cursor-move hover:border-primary/60',
+        )}
       >
         {value}
         {showRotate && (
@@ -342,24 +517,6 @@ function IfaceChip({ x, y, value, pos, editable, showRotate, zoom, onMove, onRot
             className="absolute -top-3 left-1/2 h-2.5 w-2.5 -translate-x-1/2 cursor-grab rounded-full border border-surface bg-primary shadow"
           />
         )}
-      </div>
-    </div>
-  )
-}
-
-function EdgeChip({ x, y, variant, tone, children }: {
-  x: number; y: number; variant: 'iface' | 'live'; tone?: 'success' | 'warning' | 'danger'; children: React.ReactNode
-}) {
-  const cls =
-    variant === 'iface'
-      ? 'bg-surface/95 text-text2 border-border'
-      : tone === 'danger' ? 'bg-danger/15 text-danger border-danger/40'
-        : tone === 'warning' ? 'bg-warning/15 text-warning border-warning/40'
-          : 'bg-success/15 text-success border-success/40'
-  return (
-    <div className="nodrag nopan pointer-events-none absolute" style={{ transform: `translate(-50%, -50%) translate(${x}px, ${y}px)` }}>
-      <div className={cn('rounded border px-1 py-px font-mono text-[9px] font-semibold leading-none tracking-tight shadow-sm backdrop-blur', cls)}>
-        {children}
       </div>
     </div>
   )

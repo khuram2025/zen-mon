@@ -149,3 +149,20 @@ body {
   50% { filter: drop-shadow(0 0 4px currentColor); }
 }
 .nm-glow { animation: nm-glow 2.4s ease-in-out infinite; }
+
+/* Hot-link halo: a saturated cable breathes so it draws the eye on a wall. */
+@keyframes nm-hot {
+  0%, 100% { stroke-opacity: 0.18; }
+  50% { stroke-opacity: 0.42; }
+}
+.nm-hot { animation: nm-hot 1.8s ease-in-out infinite; }
+
+/* Down-interface ✕ marker blinks gently. */
+@keyframes nm-fault {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+.nm-fault { animation: nm-fault 1.4s ease-in-out infinite; }
+
+/* Hovered device rises above its neighbours so the health card isn't clipped. */
+.react-flow__node:hover { z-index: 1000 !important; }

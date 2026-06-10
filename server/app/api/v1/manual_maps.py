@@ -717,7 +717,12 @@ async def auto_connect_discovered(
 # show real throughput and utilization next to each link.
 # ─────────────────────────────────────────────────────────────────
 
-_LIVE_WINDOW_SECONDS = 300  # 5-minute rolling window
+_LIVE_WINDOW_SECONDS = 300  # 5-minute rolling window (NetFlow rate window)
+# SNMP interface counters arrive in poller bursts every ~8 minutes, so accept
+# the latest sample up to 15 minutes back — otherwise links go blank between
+# polls. The query takes only the newest sample (argMax), so a wider lookback
+# changes staleness tolerance, not the computed rate.
+_SNMP_LOOKBACK_SECONDS = 900
 
 # Normalize Cisco-style abbreviations so "Gi0/1" matches
 # "GigabitEthernet0/1", "Te1/0/24" matches "TenGigabitEthernet1/0/24",
@@ -964,7 +969,7 @@ async def links_live(
     # (device_id, if_index); we take the most recent sample's pre-computed bps.
     snmp_map: dict[tuple[str, int], dict] = {}
     if snmp_keys:
-        start = datetime.now(timezone.utc) - timedelta(seconds=_LIVE_WINDOW_SECONDS)
+        start = datetime.now(timezone.utc) - timedelta(seconds=_SNMP_LOOKBACK_SECONDS)
         did_list = sorted({d for d, _ in snmp_keys})
         sidx_list = sorted({i for _, i in snmp_keys})
         try:
@@ -1033,6 +1038,102 @@ async def links_live(
         }
     return {"data": final, "window_seconds": window,
             "generated_at": datetime.now(timezone.utc).isoformat()}
+
+
+@router.get("/{map_id}/nodes-live")
+async def nodes_live(
+    map_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Live per-device health for every node on the map.
+
+    Response: {"data": {<node_id>: {status, last_seen, rtt_ms, cpu_pct,
+    mem_pct, uptime_seconds, temperature_c, alerts: {active, critical,
+    warning}}}}
+
+    Status/RTT come from the devices table, CPU/memory/uptime/temperature from
+    the latest ClickHouse snmp_metrics samples (15-minute lookback), and alert
+    counts from currently-active alerts. One call drives the NOC overlay.
+    """
+    node_rows = (await db.execute(
+        text("""
+            SELECT mn.id AS node_id, mn.device_id, d.status, d.last_seen, d.last_rtt_ms
+            FROM manual_map_nodes mn
+            JOIN devices d ON d.id = mn.device_id
+            WHERE mn.map_id = :map_id
+        """),
+        {"map_id": map_id},
+    )).mappings().all()
+    if not node_rows:
+        return {"data": {}, "generated_at": datetime.now(timezone.utc).isoformat()}
+
+    device_ids = [str(r["device_id"]) for r in node_rows]
+
+    # Active alert counts per device (severity split).
+    alert_rows = (await db.execute(
+        text("""
+            SELECT device_id,
+                   COUNT(*) AS active,
+                   COUNT(*) FILTER (WHERE severity = 'critical') AS critical,
+                   COUNT(*) FILTER (WHERE severity = 'warning') AS warning
+            FROM alerts
+            WHERE status = 'active' AND device_id = ANY(:ids)
+            GROUP BY device_id
+        """),
+        {"ids": device_ids},
+    )).mappings().all()
+    alerts_by_device = {
+        str(r["device_id"]): {"active": int(r["active"]), "critical": int(r["critical"]), "warning": int(r["warning"])}
+        for r in alert_rows
+    }
+
+    # Latest scalar health metrics from ClickHouse (cpu %, memory %, uptime s,
+    # hottest temperature sensor). Missing/old samples simply yield nulls.
+    metrics_by_device: dict[str, dict] = {}
+    try:
+        client = get_clickhouse_client()
+        res = client.query(
+            """
+            SELECT device_id, metric_key, argMax(value, timestamp) AS val
+            FROM zenplus.snmp_metrics
+            WHERE timestamp >= now() - INTERVAL 15 MINUTE
+              AND device_id IN %(ids)s
+              AND (metric_key IN ('cpu', 'memory', 'uptime') OR metric_key LIKE 'temperature%%')
+            GROUP BY device_id, metric_key
+            """,
+            parameters={"ids": device_ids},
+        )
+        for did, key, val in res.result_rows:
+            bucket = metrics_by_device.setdefault(str(did), {})
+            v = float(val)
+            if key == "cpu":
+                bucket["cpu_pct"] = round(v, 1)
+            elif key == "memory":
+                bucket["mem_pct"] = round(v, 1)
+            elif key == "uptime":
+                bucket["uptime_seconds"] = round(v)
+            elif key.startswith("temperature"):
+                bucket["temperature_c"] = max(bucket.get("temperature_c") or -1e9, round(v, 1))
+    except Exception:
+        pass  # ClickHouse down → status/alerts still render
+
+    data: dict[str, dict] = {}
+    for r in node_rows:
+        did = str(r["device_id"])
+        m = metrics_by_device.get(did, {})
+        data[str(r["node_id"])] = {
+            "device_id": did,
+            "status": r["status"],
+            "last_seen": r["last_seen"].isoformat() if r["last_seen"] else None,
+            "rtt_ms": float(r["last_rtt_ms"]) if r["last_rtt_ms"] is not None else None,
+            "cpu_pct": m.get("cpu_pct"),
+            "mem_pct": m.get("mem_pct"),
+            "uptime_seconds": m.get("uptime_seconds"),
+            "temperature_c": m.get("temperature_c"),
+            "alerts": alerts_by_device.get(did, {"active": 0, "critical": 0, "warning": 0}),
+        }
+    return {"data": data, "generated_at": datetime.now(timezone.utc).isoformat()}
 
 
 # ─── Annotation shapes (rectangles, circles, text) ─────────────────────────
