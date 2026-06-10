@@ -35,6 +35,11 @@ import { ManualMapsPage } from '@/pages/ManualMapsPage'
 import { ReportsPage } from '@/pages/ReportsPage'
 import { SensorsPage } from '@/pages/SensorsPage'
 import { NetflowPage, NetflowDevicePage, NetflowSectionPage } from '@/pages/NetflowPage'
+import { ServersPage } from '@/pages/servers/ServersPage'
+import { ServerDetailPage } from '@/pages/servers/ServerDetailPage'
+import { AgentFleetPage } from '@/pages/servers/AgentFleetPage'
+import { AgentPoliciesPage } from '@/pages/servers/AgentPoliciesPage'
+import { BaselinesPage } from '@/pages/servers/BaselinesPage'
 import { NetflowForensicsPage } from '@/pages/NetflowForensics'
 import { NetflowSavedViewsPage } from '@/pages/NetflowSavedViews'
 import { NetflowCapacityPage } from '@/pages/NetflowCapacity'
@@ -104,6 +109,11 @@ export default function App() {
         <Route path="devices" element={<DevicesPage />} />
         <Route path="devices/:id" element={<DeviceDetailPage />} />
         <Route path="devices/:id/interfaces" element={<DeviceInterfacesPage />} />
+        <Route path="servers" element={<ServersPage />} />
+        <Route path="servers/:id" element={<ServerDetailPage />} />
+        <Route path="server-agents" element={<AgentFleetPage />} />
+        <Route path="agent-policies" element={<AgentPoliciesPage />} />
+        <Route path="server-baselines" element={<BaselinesPage />} />
         <Route path="services" element={<ServicesPage />} />
         <Route path="services/groups" element={<ServiceCheckGroupsPage />} />
         <Route path="services/maintenance" element={<ServiceMaintenancePage />} />

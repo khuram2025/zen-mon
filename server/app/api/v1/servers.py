@@ -30,21 +30,31 @@ from app.schemas.agent import (
     AgentPolicyResponse,
     AgentPolicyUpdate,
     AgentResponse,
+    BaselineCreate,
+    BaselineResponse,
+    BaselineRuleResponse,
+    BaselineUpdate,
     InstallTokenCreate,
     InstallTokenResponse,
     MetricPoint,
     MetricSeries,
+    ServerBulkAction,
     ServerCreate,
     ServerMetricsResponse,
     ServerResponse,
     ServerUpdate,
 )
-from app.services.host_metric_service import query_server_metrics, query_top_pressure
+from app.services.host_metric_service import (
+    query_fleet_latest_metrics,
+    query_server_metrics,
+    query_top_pressure,
+)
 
 router = APIRouter(prefix="/servers", tags=["Servers"])
 policies_router = APIRouter(prefix="/agent-policies", tags=["Agent Policies"])
 fleet_router = APIRouter(prefix="/agent-fleet", tags=["Agent Fleet"])
 overview_router = APIRouter(prefix="/server-monitoring", tags=["Server Monitoring"])
+baselines_router = APIRouter(prefix="/server-baselines", tags=["Software Baselines"])
 
 logger = logging.getLogger("zenplus.servers")
 
@@ -69,13 +79,20 @@ def _server_url(request: Request) -> str:
     return f"{proto}://{host}"
 
 
-def _server_row_to_response(row: dict) -> ServerResponse:
-    tags = row.get("tags") or []
-    if isinstance(tags, str):
+def _json_list(v: Any) -> list:
+    if isinstance(v, (list, tuple)):
+        return list(v)
+    if isinstance(v, str):
         try:
-            tags = json.loads(tags)
+            parsed = json.loads(v)
+            return list(parsed) if isinstance(parsed, list) else []
         except Exception:
-            tags = []
+            return []
+    return []
+
+
+def _server_row_to_response(row: dict) -> ServerResponse:
+    tags = _json_list(row.get("tags"))
     return ServerResponse(
         id=str(row["id"]),
         display_name=row["display_name"],
@@ -97,9 +114,11 @@ def _server_row_to_response(row: dict) -> ServerResponse:
         tags=list(tags) if isinstance(tags, (list, tuple)) else [],
         last_seen=row.get("last_seen"),
         description=row.get("description"),
+        status_reasons=[str(r) for r in _json_list(row.get("status_reasons"))],
         agent_id=str(row["agent_id"]) if row.get("agent_id") else None,
         agent_status=row.get("agent_status"),
         agent_version=row.get("agent_version"),
+        agent_last_heartbeat_at=row.get("agent_last_heartbeat_at"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -160,6 +179,8 @@ async def list_servers(
     os_type: Optional[str] = None,
     collection_mode: Optional[str] = None,
     status: Optional[str] = None,
+    environment: Optional[str] = None,
+    tag: Optional[str] = None,
     q: Optional[str] = None,
     sort: str = "display_name",
     order: str = "asc",
@@ -177,6 +198,7 @@ async def list_servers(
         "hostname": "s.hostname",
         "status": "s.status",
         "os_type": "s.os_type",
+        "environment": "s.environment",
         "last_seen": "s.last_seen",
         "created_at": "s.created_at",
     }
@@ -193,8 +215,16 @@ async def list_servers(
         where.append("s.collection_mode = :cm"); params["cm"] = collection_mode
     if status:
         where.append("s.status = :st"); params["st"] = status
+    if environment:
+        where.append("s.environment = :env"); params["env"] = environment
+    if tag:
+        # Repeatable filter: ?tag=prod (servers whose tags contain "prod")
+        where.append("s.tags @> CAST(:tag_json AS jsonb)")
+        params["tag_json"] = json.dumps([tag])
     if q:
-        where.append("(s.display_name ILIKE :q OR s.hostname ILIKE :q OR s.fqdn ILIKE :q OR host(s.primary_ip)::text ILIKE :q OR s.owner ILIKE :q)")
+        where.append("""(s.display_name ILIKE :q OR s.hostname ILIKE :q OR s.fqdn ILIKE :q
+                         OR host(s.primary_ip)::text ILIKE :q OR s.owner ILIKE :q
+                         OR s.tags::text ILIKE :q)""")
         params["q"] = f"%{q}%"
 
     where_sql = " AND ".join(where)
@@ -204,11 +234,12 @@ async def list_servers(
 
     sql = f"""
         SELECT s.*, st.name AS site_name,
-               a.id AS agent_id, a.status AS agent_status, a.version AS agent_version
+               a.id AS agent_id, a.status AS agent_status, a.version AS agent_version,
+               a.last_heartbeat_at AS agent_last_heartbeat_at
         FROM servers s
         LEFT JOIN sites st ON st.id = s.site_id
         LEFT JOIN LATERAL (
-            SELECT id, status, version FROM agents
+            SELECT id, status, version, last_heartbeat_at FROM agents
             WHERE server_id = s.id
             ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 1
         ) a ON TRUE
@@ -224,6 +255,119 @@ async def list_servers(
         "page": page,
         "page_size": page_size,
     }
+
+
+@router.get("/facets")
+async def server_facets(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Distinct filter values + counts for the inventory list sidebar."""
+    async def _group(col: str) -> list[dict]:
+        rows = (await db.execute(text(
+            f"""SELECT {col} AS value, COUNT(*) AS count FROM servers
+                WHERE {col} IS NOT NULL AND {col}::text != ''
+                GROUP BY {col} ORDER BY count DESC, value"""
+        ))).all()
+        return [{"value": r[0], "count": int(r[1])} for r in rows]
+
+    tags = (await db.execute(text(
+        """SELECT t.tag AS value, COUNT(*) AS count
+           FROM servers s, jsonb_array_elements_text(s.tags) AS t(tag)
+           GROUP BY t.tag ORDER BY count DESC, value LIMIT 100"""
+    ))).all()
+
+    sites = (await db.execute(text(
+        """SELECT st.id, st.name, COUNT(*) AS count
+           FROM servers s JOIN sites st ON st.id = s.site_id
+           GROUP BY st.id, st.name ORDER BY count DESC"""
+    ))).all()
+
+    return {
+        "status": await _group("status"),
+        "os_type": await _group("os_type"),
+        "collection_mode": await _group("collection_mode"),
+        "environment": await _group("environment"),
+        "tags": [{"value": r[0], "count": int(r[1])} for r in tags],
+        "sites": [{"id": str(r[0]), "name": r[1], "count": int(r[2])} for r in sites],
+    }
+
+
+@router.get("/latest-metrics")
+async def servers_latest_metrics(
+    window_minutes: int = Query(10, ge=1, le=120),
+    user: User = Depends(get_current_user),
+):
+    """Current cpu/mem/disk/net per server (keyed by server id) for the list view."""
+    return {"servers": query_fleet_latest_metrics(window_minutes)}
+
+
+@router.post("/bulk")
+async def bulk_server_action(
+    data: ServerBulkAction,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    if not data.server_ids:
+        raise HTTPException(400, "server_ids required")
+    ids = [str(s) for s in data.server_ids]
+    affected = 0
+
+    if data.action in ("add_tags", "remove_tags"):
+        if not data.tags:
+            raise HTTPException(400, "tags required for tag actions")
+        rows = (await db.execute(
+            text("SELECT id, tags FROM servers WHERE id = ANY(CAST(:ids AS uuid[]))"),
+            {"ids": ids},
+        )).all()
+        for sid, tags in rows:
+            current = _json_list(tags)
+            if data.action == "add_tags":
+                merged = current + [t for t in data.tags if t not in current]
+            else:
+                merged = [t for t in current if t not in data.tags]
+            if merged != current:
+                await db.execute(
+                    text("UPDATE servers SET tags = CAST(:tags AS jsonb), updated_at = NOW() WHERE id = :id"),
+                    {"tags": json.dumps(merged), "id": sid},
+                )
+                affected += 1
+    elif data.action == "set_environment":
+        res = await db.execute(
+            text("UPDATE servers SET environment = :env, updated_at = NOW() WHERE id = ANY(CAST(:ids AS uuid[]))"),
+            {"env": data.environment, "ids": ids},
+        )
+        affected = res.rowcount or 0
+    elif data.action == "decommission":
+        res = await db.execute(
+            text("UPDATE servers SET status = 'disabled', updated_at = NOW() WHERE id = ANY(CAST(:ids AS uuid[]))"),
+            {"ids": ids},
+        )
+        await db.execute(
+            text("UPDATE agents SET status = 'disabled', updated_at = NOW() WHERE server_id = ANY(CAST(:ids AS uuid[]))"),
+            {"ids": ids},
+        )
+        affected = res.rowcount or 0
+    elif data.action == "delete":
+        res = await db.execute(
+            text("DELETE FROM servers WHERE id = ANY(CAST(:ids AS uuid[]))"),
+            {"ids": ids},
+        )
+        affected = res.rowcount or 0
+
+    await db.commit()
+
+    # Tag changes can move servers in/out of tag-scoped baselines.
+    if data.action in ("add_tags", "remove_tags"):
+        from app.services.baseline_service import evaluate_server
+        for sid in data.server_ids:
+            try:
+                await evaluate_server(db, str(sid), commit=False)
+            except Exception:
+                logger.exception("baseline re-eval failed for %s", sid)
+        await db.commit()
+
+    return {"ok": True, "affected": affected}
 
 
 @router.post("", response_model=ServerResponse)
@@ -465,6 +609,69 @@ async def server_software(
                 ORDER BY lower(package_name)
                 LIMIT 1000"""),
         {"id": server_id},
+    )).mappings().all()
+    return {"items": [dict(r) for r in rows]}
+
+
+@router.get("/{server_id}/compliance")
+async def server_compliance(
+    server_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Baseline evaluation results for one server, violations first."""
+    rows = (await db.execute(
+        text("""SELECT res.rule_id, res.baseline_id, res.status, res.found_package,
+                       res.found_version, res.expected, res.severity,
+                       res.first_failed_at, res.evaluated_at,
+                       b.name AS baseline_name,
+                       br.rule_type, br.package_match, br.match_type, br.min_version, br.notes
+                FROM server_baseline_results res
+                JOIN software_baselines b ON b.id = res.baseline_id
+                JOIN software_baseline_rules br ON br.id = res.rule_id
+                WHERE res.server_id = :sid
+                ORDER BY (res.status = 'compliant'), b.name, br.package_match"""),
+        {"sid": server_id},
+    )).mappings().all()
+    items = [dict(r) for r in rows]
+    summary = {"total": len(items), "compliant": 0, "missing": 0, "outdated": 0, "prohibited": 0}
+    for it in items:
+        summary[it["status"]] = summary.get(it["status"], 0) + 1
+    return {"items": items, "summary": summary}
+
+
+@router.post("/{server_id}/evaluate-baselines")
+async def server_evaluate_baselines(
+    server_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    from app.services.baseline_service import evaluate_server
+    summary = await evaluate_server(db, str(server_id))
+    return {"ok": True, **summary}
+
+
+@router.get("/{server_id}/commands")
+async def server_commands(
+    server_id: UUID,
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Command history across this server's agents (for the Agent tab)."""
+    rows = (await db.execute(
+        text("""SELECT c.id, c.command, c.params, c.status, c.created_at, c.sent_at,
+                       c.completed_at, c.expires_at,
+                       r.success, r.error_message,
+                       u.username AS requested_by_name
+                FROM agent_commands c
+                JOIN agents a ON a.id = c.agent_id
+                LEFT JOIN agent_command_results r ON r.command_id = c.id
+                LEFT JOIN users u ON u.id = c.requested_by
+                WHERE a.server_id = :sid
+                ORDER BY c.created_at DESC
+                LIMIT :lim"""),
+        {"sid": server_id, "lim": limit},
     )).mappings().all()
     return {"items": [dict(r) for r in rows]}
 
@@ -1097,3 +1304,242 @@ async def overview(
         "top_disk": await _hydrate(top_disk),
         "top_network": await _hydrate(top_network),
     }
+
+
+# ── Software baselines (compliance) ──────────────────────────────────
+
+def _baseline_rule_row(row: dict) -> BaselineRuleResponse:
+    return BaselineRuleResponse(
+        id=str(row["id"]),
+        baseline_id=str(row["baseline_id"]),
+        rule_type=row["rule_type"],
+        package_match=row["package_match"],
+        match_type=row["match_type"],
+        min_version=row.get("min_version"),
+        severity=row["severity"],
+        notes=row.get("notes"),
+        created_at=row["created_at"],
+    )
+
+
+def _baseline_row(row: dict, rules: list[dict] | None = None) -> BaselineResponse:
+    return BaselineResponse(
+        id=str(row["id"]),
+        name=row["name"],
+        description=row.get("description"),
+        enabled=bool(row["enabled"]),
+        os_type=row.get("os_type"),
+        site_id=str(row["site_id"]) if row.get("site_id") else None,
+        site_name=row.get("site_name"),
+        match_tags=[str(t) for t in _json_list(row.get("match_tags"))],
+        alerting=bool(row.get("alerting", True)),
+        rule_count=row.get("rule_count") or 0,
+        servers_evaluated=row.get("servers_evaluated") or 0,
+        servers_compliant=row.get("servers_compliant") or 0,
+        violations=row.get("violations") or 0,
+        rules=[_baseline_rule_row(r) for r in (rules or [])],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+_BASELINE_STATS_SQL = """
+    SELECT b.*, st.name AS site_name,
+           (SELECT COUNT(*) FROM software_baseline_rules r WHERE r.baseline_id = b.id) AS rule_count,
+           (SELECT COUNT(DISTINCT res.server_id) FROM server_baseline_results res
+             WHERE res.baseline_id = b.id) AS servers_evaluated,
+           (SELECT COUNT(DISTINCT res.server_id) FROM server_baseline_results res
+             WHERE res.baseline_id = b.id
+               AND res.server_id NOT IN (
+                   SELECT server_id FROM server_baseline_results
+                   WHERE baseline_id = b.id AND status != 'compliant')) AS servers_compliant,
+           (SELECT COUNT(*) FROM server_baseline_results res
+             WHERE res.baseline_id = b.id AND res.status != 'compliant') AS violations
+    FROM software_baselines b
+    LEFT JOIN sites st ON st.id = b.site_id
+"""
+
+
+async def _load_baseline(db: AsyncSession, baseline_id: UUID) -> BaselineResponse:
+    row = (await db.execute(
+        text(_BASELINE_STATS_SQL + " WHERE b.id = :id"), {"id": baseline_id},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(404, "Baseline not found")
+    rules = (await db.execute(
+        text("SELECT * FROM software_baseline_rules WHERE baseline_id = :id ORDER BY package_match"),
+        {"id": baseline_id},
+    )).mappings().all()
+    return _baseline_row(dict(row), [dict(r) for r in rules])
+
+
+@baselines_router.get("")
+async def list_baselines(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    rows = (await db.execute(text(_BASELINE_STATS_SQL + " ORDER BY b.name"))).mappings().all()
+    items = []
+    for row in rows:
+        rules = (await db.execute(
+            text("SELECT * FROM software_baseline_rules WHERE baseline_id = :id ORDER BY package_match"),
+            {"id": row["id"]},
+        )).mappings().all()
+        items.append(_baseline_row(dict(row), [dict(r) for r in rules]))
+    return {"items": items}
+
+
+async def _insert_rules(db: AsyncSession, baseline_id: str, rules) -> None:
+    for r in rules:
+        await db.execute(
+            text("""INSERT INTO software_baseline_rules
+                        (baseline_id, rule_type, package_match, match_type, min_version, severity, notes)
+                    VALUES (:bid, :rt, :pm, :mt, :mv, :sev, :notes)"""),
+            {"bid": baseline_id, "rt": r.rule_type, "pm": r.package_match,
+             "mt": r.match_type, "mv": r.min_version, "sev": r.severity, "notes": r.notes},
+        )
+
+
+@baselines_router.post("", response_model=BaselineResponse)
+async def create_baseline(
+    data: BaselineCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    dup = (await db.execute(
+        text("SELECT 1 FROM software_baselines WHERE name = :n"), {"n": data.name},
+    )).first()
+    if dup:
+        raise HTTPException(409, "A baseline with this name already exists")
+
+    row = (await db.execute(
+        text("""INSERT INTO software_baselines
+                    (name, description, enabled, os_type, site_id, match_tags, alerting, created_by)
+                VALUES (:n, :d, :en, :os, :site, CAST(:tags AS jsonb), :al, :cb)
+                RETURNING id"""),
+        {"n": data.name, "d": data.description, "en": data.enabled, "os": data.os_type,
+         "site": data.site_id, "tags": json.dumps(data.match_tags or []),
+         "al": data.alerting, "cb": user.id},
+    )).first()
+    baseline_id = str(row[0])
+    await _insert_rules(db, baseline_id, data.rules)
+    await db.commit()
+
+    from app.services.baseline_service import evaluate_baseline
+    await evaluate_baseline(db, baseline_id)
+    return await _load_baseline(db, UUID(baseline_id))
+
+
+@baselines_router.get("/{baseline_id}", response_model=BaselineResponse)
+async def get_baseline(
+    baseline_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    return await _load_baseline(db, baseline_id)
+
+
+@baselines_router.patch("/{baseline_id}", response_model=BaselineResponse)
+async def update_baseline(
+    baseline_id: UUID,
+    data: BaselineUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    sets, params = [], {"id": baseline_id}
+    for field in ("name", "description", "enabled", "alerting"):
+        v = getattr(data, field)
+        if v is not None:
+            sets.append(f"{field} = :{field}")
+            params[field] = v
+    if data.os_type is not None or data.clear_os_type:
+        sets.append("os_type = :os_type")
+        params["os_type"] = None if data.clear_os_type else data.os_type
+    if data.site_id is not None or data.clear_site:
+        sets.append("site_id = :site_id")
+        params["site_id"] = None if data.clear_site else data.site_id
+    if data.match_tags is not None:
+        sets.append("match_tags = CAST(:match_tags AS jsonb)")
+        params["match_tags"] = json.dumps(data.match_tags)
+
+    if sets:
+        res = await db.execute(
+            text(f"UPDATE software_baselines SET {', '.join(sets)}, updated_at = NOW() WHERE id = :id"),
+            params,
+        )
+        if res.rowcount == 0:
+            raise HTTPException(404, "Baseline not found")
+
+    if data.rules is not None:
+        # Replace-all: cascade clears old results; alerts resolve on re-eval.
+        await db.execute(
+            text("DELETE FROM software_baseline_rules WHERE baseline_id = :id"),
+            {"id": baseline_id},
+        )
+        await _insert_rules(db, str(baseline_id), data.rules)
+    await db.commit()
+
+    from app.services.baseline_service import evaluate_baseline
+    await evaluate_baseline(db, str(baseline_id))
+    return await _load_baseline(db, baseline_id)
+
+
+@baselines_router.delete("/{baseline_id}")
+async def delete_baseline(
+    baseline_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    res = await db.execute(
+        text("DELETE FROM software_baselines WHERE id = :id"), {"id": baseline_id},
+    )
+    if res.rowcount == 0:
+        raise HTTPException(404, "Baseline not found")
+    # Close any alerts this baseline raised.
+    await db.execute(
+        text("""UPDATE alerts SET status = 'resolved', resolved_at = NOW()
+                WHERE status = 'active' AND metadata->>'baseline_id' = :bid"""),
+        {"bid": str(baseline_id)},
+    )
+    await db.commit()
+    return {"ok": True}
+
+
+@baselines_router.post("/{baseline_id}/evaluate")
+async def evaluate_baseline_now(
+    baseline_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    from app.services.baseline_service import evaluate_baseline
+    n = await evaluate_baseline(db, str(baseline_id))
+    return {"ok": True, "servers_evaluated": n}
+
+
+@baselines_router.get("/{baseline_id}/results")
+async def baseline_results(
+    baseline_id: UUID,
+    status: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Per-server outcomes for one baseline, violations first."""
+    where = "res.baseline_id = :bid"
+    params: dict[str, Any] = {"bid": baseline_id}
+    if status:
+        where += " AND res.status = :st"
+        params["st"] = status
+    rows = (await db.execute(
+        text(f"""SELECT res.server_id, res.rule_id, res.status, res.found_package,
+                        res.found_version, res.expected, res.severity,
+                        res.first_failed_at, res.evaluated_at,
+                        s.display_name AS server_name, s.hostname, s.os_type,
+                        br.rule_type, br.package_match, br.match_type, br.min_version
+                 FROM server_baseline_results res
+                 JOIN servers s ON s.id = res.server_id
+                 JOIN software_baseline_rules br ON br.id = res.rule_id
+                 WHERE {where}
+                 ORDER BY (res.status = 'compliant'), s.display_name, br.package_match"""),
+        params,
+    )).mappings().all()
+    return {"items": [dict(r) for r in rows]}

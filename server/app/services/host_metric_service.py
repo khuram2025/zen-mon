@@ -519,9 +519,12 @@ async def ingest_host_metric_batch(
             logger.exception("Process inventory upsert failed")
 
     # Inventory snapshot (either from sample kind or top-level field).
+    software_updated = False
     if batch.inventory:
         try:
             await _upsert_inventory(server_id, batch.inventory, db)
+            software_updated = software_updated or bool(
+                batch.inventory.get("software") or batch.inventory.get("applications"))
         except Exception as exc:
             errors.append(f"inventory: {exc}")
             logger.exception("Inventory upsert failed")
@@ -529,8 +532,28 @@ async def ingest_host_metric_batch(
     for row in by_kind.get("inventory", []):
         try:
             await _upsert_inventory(server_id, row, db)
+            software_updated = software_updated or bool(
+                row.get("software") or row.get("applications"))
         except Exception as exc:
             errors.append(f"inventory: {exc}")
+
+    # Health: derive server status + reasons from the fresh telemetry.
+    try:
+        from app.services.server_health_service import compute_server_health, store_server_health
+        status, reasons = await compute_server_health(db, server_id, by_kind)
+        await store_server_health(db, server_id, status, reasons)
+    except Exception as exc:
+        errors.append(f"health: {exc}")
+        logger.exception("Health computation failed")
+
+    # Compliance: a fresh software list may change baseline outcomes.
+    if software_updated:
+        try:
+            from app.services.baseline_service import evaluate_server
+            await evaluate_server(db, server_id, commit=False)
+        except Exception as exc:
+            errors.append(f"baseline: {exc}")
+            logger.exception("Baseline evaluation failed")
 
     return accepted, rejected, errors
 
@@ -679,6 +702,44 @@ def query_server_metrics(
             logger.warning("metric query failed for %s: %s", metric, exc)
             out.append(MetricSeries(metric=metric, unit=None, label=None, points=[]))
 
+    return out
+
+
+def query_fleet_latest_metrics(window_minutes: int = 10) -> dict[str, dict]:
+    """Current cpu/mem/disk/net per server for the inventory list.
+
+    One aggregate per server over the last ``window_minutes`` — cheap enough
+    to refresh on every list poll (the raw tables are (server_id, ts)-ordered).
+    """
+    client = get_clickhouse_client()
+    since = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    out: dict[str, dict] = {}
+
+    def _merge(rows, key):
+        for r in rows:
+            sid = str(r[0])
+            out.setdefault(sid, {})[key] = float(r[1] or 0)
+
+    try:
+        _merge(client.query(
+            """SELECT server_id, avg(cpu_total_pct) FROM zenplus.host_cpu_metrics
+               WHERE timestamp >= %(s)s GROUP BY server_id""",
+            parameters={"s": since}).result_rows, "cpu_pct")
+        _merge(client.query(
+            """SELECT server_id, avg(used_pct) FROM zenplus.host_memory_metrics
+               WHERE timestamp >= %(s)s GROUP BY server_id""",
+            parameters={"s": since}).result_rows, "memory_pct")
+        _merge(client.query(
+            """SELECT server_id, max(used_pct) FROM zenplus.host_filesystem_metrics
+               WHERE timestamp >= %(s)s GROUP BY server_id""",
+            parameters={"s": since}).result_rows, "disk_max_pct")
+        _merge(client.query(
+            """SELECT server_id, sum(rx_bytes_ps + tx_bytes_ps) / uniqExact(timestamp)
+               FROM zenplus.host_network_metrics
+               WHERE timestamp >= %(s)s GROUP BY server_id""",
+            parameters={"s": since}).result_rows, "net_bps")
+    except Exception as exc:
+        logger.warning("fleet latest metrics query failed: %s", exc)
     return out
 
 

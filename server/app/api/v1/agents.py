@@ -375,6 +375,10 @@ async def heartbeat(
                     WHERE id = :id"""),
             {"id": agent["server_id"]},
         )
+        # Recovery: close any open agent-offline alert for this server.
+        if agent.get("status") in ("stale", "offline"):
+            from app.services.server_health_service import resolve_server_alerts
+            await resolve_server_alerts(db, str(agent["server_id"]), "agent_offline")
     await db.commit()
 
     # Check for queued commands

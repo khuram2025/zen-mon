@@ -80,11 +80,20 @@ class ServerResponse(BaseModel):
     tags: List[str] = Field(default_factory=list)
     last_seen: Optional[datetime]
     description: Optional[str]
+    status_reasons: List[str] = Field(default_factory=list)
     agent_id: Optional[str] = None
     agent_status: Optional[str] = None
     agent_version: Optional[str] = None
+    agent_last_heartbeat_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
+
+
+class ServerBulkAction(BaseModel):
+    server_ids: List[UUID] = Field(default_factory=list)
+    action: Literal["add_tags", "remove_tags", "set_environment", "decommission", "delete"]
+    tags: List[str] = Field(default_factory=list)
+    environment: Optional[str] = None
 
 
 # ── Agent policies ───────────────────────────────────────────────────
@@ -345,6 +354,71 @@ class AgentCommandResult(BaseModel):
     success: bool
     output: Dict[str, Any] = Field(default_factory=dict)
     error_message: Optional[str] = None
+
+
+# ── Software baselines (compliance) ──────────────────────────────────
+
+BaselineRuleType = Literal["required", "prohibited"]
+BaselineMatchType = Literal["exact", "contains", "regex"]
+AlertSeverity = Literal["info", "warning", "critical"]
+
+
+class BaselineRuleCreate(BaseModel):
+    rule_type: BaselineRuleType = "required"
+    package_match: str = Field(..., min_length=1, max_length=255)
+    match_type: BaselineMatchType = "contains"
+    min_version: Optional[str] = Field(default=None, max_length=128)
+    severity: AlertSeverity = "warning"
+    notes: Optional[str] = None
+
+
+class BaselineRuleResponse(BaselineRuleCreate):
+    id: str
+    baseline_id: str
+    created_at: datetime
+
+
+class BaselineCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
+    enabled: bool = True
+    os_type: Optional[Literal["windows", "linux", "macos", "bsd", "other"]] = None
+    site_id: Optional[UUID] = None
+    match_tags: List[str] = Field(default_factory=list)
+    alerting: bool = True
+    rules: List[BaselineRuleCreate] = Field(default_factory=list)
+
+
+class BaselineUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    enabled: Optional[bool] = None
+    os_type: Optional[Literal["windows", "linux", "macos", "bsd", "other"]] = None
+    clear_os_type: bool = False
+    site_id: Optional[UUID] = None
+    clear_site: bool = False
+    match_tags: Optional[List[str]] = None
+    alerting: Optional[bool] = None
+    rules: Optional[List[BaselineRuleCreate]] = None  # replace-all when provided
+
+
+class BaselineResponse(BaseModel):
+    id: str
+    name: str
+    description: Optional[str]
+    enabled: bool
+    os_type: Optional[str]
+    site_id: Optional[str]
+    site_name: Optional[str] = None
+    match_tags: List[str] = Field(default_factory=list)
+    alerting: bool
+    rule_count: int = 0
+    servers_evaluated: int = 0
+    servers_compliant: int = 0
+    violations: int = 0
+    rules: List[BaselineRuleResponse] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
 
 
 # ── Time-series response shape for charts ────────────────────────────
