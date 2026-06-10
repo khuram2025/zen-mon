@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import {
-  ChevronDown, Circle, Diamond, Image as ImageIcon, Minus, Shapes,
+  Activity, ChevronDown, Circle, Diamond, Image as ImageIcon, Minus, Shapes,
   Square, Sticker, Trash2, Type as TypeIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -59,6 +59,8 @@ export function InsertMenu({ onAdd }: { onAdd: (spec: ShapeSpec) => void }) {
             <MenuRow icon={<Circle className="h-4 w-4" />} label="Ellipse" onClick={() => pick({ kind: 'circle', w_pct: 10, h_pct: 10 })} />
             <MenuRow icon={<Diamond className="h-4 w-4" />} label="Diamond" onClick={() => pick({ kind: 'diamond', w_pct: 10, h_pct: 10 })} />
             <MenuRow icon={<Minus className="h-4 w-4" />} label="Line" onClick={() => pick({ kind: 'line', w_pct: 14, h_pct: 2 })} />
+            <div className="my-1 h-px bg-border" />
+            <MenuRow icon={<Activity className="h-4 w-4" />} label="Top conversations (live)" onClick={() => pick({ kind: 'rectangle', w_pct: 13, h_pct: 14, fill: null, stroke: null, metadata: { widget: 'conversations', limit: 5, hours: 1 } })} />
           </div>
         </>
       )}
@@ -147,24 +149,56 @@ export function ImageDialog({ onCancel, onPick }: { onCancel: () => void; onPick
 }
 
 /* ── Style inspector (shown when a shape is selected) ────────────────────── */
-export function ShapeInspector({ shape, onChange, onDelete, onZ }: {
+export function ShapeInspector({ shape, devices, onChange, onDelete, onZ }: {
   shape: MapShape
+  /** Devices on this map — used to bind live widgets to one exporter. */
+  devices?: Array<{ hostname: string; ip: string }>
   onChange: (patch: Record<string, unknown>, commit: boolean) => void
   onDelete: () => void
   onZ: (dir: 'front' | 'back') => void
 }) {
   const m = shape.metadata || {}
-  const isText = shape.kind === 'text' || shape.kind === 'sticky'
-  const isImage = shape.kind === 'image'
+  const isWidget = m.widget === 'conversations'
+  const isText = !isWidget && (shape.kind === 'text' || shape.kind === 'sticky')
+  const isImage = !isWidget && shape.kind === 'image'
   const isIcon = isImage && !!m.icon
   const setMeta = (patch: Partial<ShapeStyle>, commit = true) => onChange({ metadata: { ...m, ...patch } }, commit)
 
   return (
     <div className="flex w-60 flex-col gap-3 rounded-lg border border-border bg-surface/95 p-3 text-xs shadow-xl backdrop-blur">
       <div className="flex items-center justify-between">
-        <span className="font-semibold capitalize text-text">{isIcon ? 'Icon' : shape.kind} options</span>
+        <span className="font-semibold capitalize text-text">{isWidget ? 'Live conversations' : isIcon ? 'Icon' : shape.kind} options</span>
         <button type="button" onClick={onDelete} className="rounded p-1 text-muted hover:bg-danger/10 hover:text-danger" title="Delete (Del)"><Trash2 className="h-4 w-4" /></button>
       </div>
+
+      {isWidget && (
+        <>
+          <Field label="Show top">
+            <select value={m.limit || 5} onChange={(e) => setMeta({ limit: Number(e.target.value) })}
+              className="rounded border border-border bg-surface px-2 py-1 text-text outline-none focus:border-primary/60">
+              {[5, 10].map((n) => <option key={n} value={n}>{n} conversations</option>)}
+            </select>
+          </Field>
+          <Field label="Window">
+            <select value={m.hours || 1} onChange={(e) => setMeta({ hours: Number(e.target.value) })}
+              className="rounded border border-border bg-surface px-2 py-1 text-text outline-none focus:border-primary/60">
+              <option value={1}>Last 1h</option>
+              <option value={6}>Last 6h</option>
+              <option value={24}>Last 24h</option>
+            </select>
+          </Field>
+          <Field label="Device">
+            <select value={m.exporter || ''} onChange={(e) => setMeta({ exporter: e.target.value || null })}
+              className="max-w-[8.5rem] rounded border border-border bg-surface px-2 py-1 text-text outline-none focus:border-primary/60">
+              <option value="">All exporters</option>
+              {(devices || []).map((d) => <option key={d.ip} value={d.ip}>{d.hostname}</option>)}
+            </select>
+          </Field>
+          <p className="text-[10px] leading-snug text-muted">
+            Live NetFlow data — refreshes every 30s. Bind to a device to show only conversations seen by that exporter.
+          </p>
+        </>
+      )}
 
       {isText && (
         <>
@@ -193,6 +227,17 @@ export function ShapeInspector({ shape, onChange, onDelete, onZ }: {
           <Field label="Background">
             <ColorInput value={shape.fill || '#00000000'} onChange={(c, commit) => onChange({ fill: c }, commit)} allowClear onClear={() => onChange({ fill: null }, true)} />
           </Field>
+          <Field label="Border">
+            <ColorInput value={shape.stroke || '#3b82f6'} onChange={(c, commit) => onChange({ stroke: c }, commit)} allowClear onClear={() => onChange({ stroke: null }, true)} />
+          </Field>
+          {shape.kind === 'text' && (
+            <Field label="Corners">
+              <div className="flex gap-1">
+                <Toggle on={m.rounded !== false} onClick={() => setMeta({ rounded: true })}>◖</Toggle>
+                <Toggle on={m.rounded === false} onClick={() => setMeta({ rounded: false })}>◻</Toggle>
+              </div>
+            </Field>
+          )}
         </>
       )}
 

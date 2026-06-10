@@ -156,6 +156,11 @@ export type ShapeStyle = {
   italic?: boolean
   align?: 'left' | 'center' | 'right'
   rounded?: boolean
+  /* Live data widgets (rendered by ShapeNode instead of a plain shape). */
+  widget?: 'conversations'
+  limit?: number            // top-N rows for widgets
+  hours?: number            // lookback window for widgets
+  exporter?: string | null  // bind widget to one exporter/device IP
 }
 
 export type MapShape = {

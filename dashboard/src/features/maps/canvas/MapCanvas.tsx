@@ -26,6 +26,7 @@ import {
   AlignStartVertical,
   AlignVerticalDistributeCenter,
   Cable,
+  CopyPlus,
   Grid3x3,
   Magnet,
   MousePointer2,
@@ -109,7 +110,7 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
   const [pendingDelete, setPendingDelete] = useState<{ title: string; description: string; run: () => void } | null>(null)
   const [pendingLink, setPendingLink] = useState<{ source: ManualMapNode; target: ManualMapNode } | null>(null)
   const [editNode, setEditNode] = useState<ManualMapNode | null>(null)
-  const [editLink, setEditLink] = useState<ManualMapLink | null>(null)
+  const [editLink, setEditLink] = useState<{ link: ManualMapLink; annotation: boolean } | null>(null)
   const [dropActive, setDropActive] = useState(false)
   const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null)
   const [annLinks, setAnnLinks] = useState<AnnotationLink[]>([])
@@ -134,6 +135,7 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
   useEffect(() => { nodesRef.current = nodes }, [nodes])
   // Lets the (stable) keyboard listener call the latest deleteSelected.
   const deleteSelectedRef = useRef<() => void>(() => {})
+  const duplicateSelectedRef = useRef<() => void>(() => {})
 
   /* ── Undo / redo (reversible edits: moves, device/shape/link edits) ──────
    * Each entry is an inverse-command pair. Apply helpers (defined later) are
@@ -283,15 +285,18 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
   }, [saveMapMeta, detail.metadata])
 
   // Rebuild the array from current edge state (captures live shape/bend edits),
-  // optionally overriding one edge's metadata to beat the edgesRef lag.
-  const annArrayFromEdges = useCallback((overrideId?: string, overrideMeta?: Record<string, unknown>): AnnotationLink[] => {
+  // optionally overriding one edge's metadata (or full fields) to beat the
+  // edgesRef lag right after a local setEdges.
+  const annArrayFromEdges = useCallback((overrideId?: string, overrideMeta?: Record<string, unknown>, overrideFields?: { label?: string | null; link_type?: string }): AnnotationLink[] => {
     return edgesRef.current.filter((e) => (e.data as any)?.annotation).map((e) => {
       const dd = e.data as any
+      const isOv = e.id === overrideId
       return {
         id: e.id, source: e.source, target: e.target,
         source_type: dd.sourceType, target_type: dd.targetType,
-        label: dd.link?.label ?? null, link_type: dd.link?.link_type || 'manual',
-        metadata: e.id === overrideId ? (overrideMeta as any) : (dd.link?.metadata || {}),
+        label: isOv && overrideFields ? (overrideFields.label ?? null) : (dd.link?.label ?? null),
+        link_type: (isOv && overrideFields?.link_type) || dd.link?.link_type || 'manual',
+        metadata: isOv && overrideMeta ? (overrideMeta as any) : (dd.link?.metadata || {}),
       }
     })
   }, [])
@@ -414,7 +419,9 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
           link: { id: al.id, source_node_id: al.source, target_node_id: al.target, label: al.label ?? null, link_type: al.link_type || 'manual', metadata: al.metadata || {} },
           sourceStatus: statusFor(al.source, al.source_type),
           targetStatus: statusFor(al.target, al.target_type),
-          live: undefined,
+          // Annotation cables with a device end + bound interface get live
+          // throughput exactly like device↔device links.
+          live: liveData[al.id],
           liveMode,
           showThroughput,
           annotation: true,
@@ -422,6 +429,7 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
           targetType: al.target_type,
           parallelOffset: 0,
           setWaypoints: (wpsPx: { x: number; y: number }[], commit: boolean) => setEdgeWaypoints(al.id, wpsPx, commit),
+          setIfacePos: (which: 'src' | 'dst', pos: { dx?: number; dy?: number; rot?: number }, commit: boolean) => setIfacePos(al.id, which, pos, commit),
         },
       }))
 
@@ -552,6 +560,55 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
     })
   }, [addLink])
 
+  /* ── Duplicate (shapes, text, icons, images, cables) ─────────────────────
+   * Shapes copy server-side with a small offset; cables copy with their full
+   * styling/bends. Devices are unique per map, so they get an info toast. */
+  const newAnnId = () => `al-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+
+  const duplicateShape = useCallback((shapeId: string, silent = false) => {
+    const sh = (nodesRef.current.find((n) => n.id === shapeId && n.type === 'shape')?.data as any)?.shape as MapShape | undefined
+    if (!sh) return
+    addShape.mutate({
+      kind: sh.kind, x_pct: Math.min(96, sh.x_pct + 1.2), y_pct: Math.min(96, sh.y_pct + 2),
+      w_pct: sh.w_pct, h_pct: sh.h_pct, text: sh.text ?? null, fill: sh.fill ?? null, stroke: sh.stroke ?? null,
+      z_index: sh.z_index || 0, metadata: sh.metadata || {},
+    }, {
+      onSuccess: () => { if (!silent) toast.success('Duplicated') },
+      onError: () => toast.error('Failed to duplicate'),
+    })
+  }, [addShape])
+
+  const duplicateEdge = useCallback((edge: Edge) => {
+    const dd = edge.data as any
+    const link = dd?.link
+    if (!link) return
+    if (dd.annotation) {
+      const src = annLinksRef.current.find((a) => a.id === edge.id)
+      if (!src) return
+      const next = [...annLinksRef.current, { ...src, id: newAnnId() }]
+      setAnnLinks(next)
+      persistAnnLinks(next)
+      toast.success('Connection duplicated')
+      return
+    }
+    addLink.mutate({
+      source_node_id: link.source_node_id, target_node_id: link.target_node_id,
+      label: link.label ?? null, link_type: link.link_type || 'manual', metadata: { ...(link.metadata || {}) },
+    }, {
+      onSuccess: () => toast.success('Link duplicated'),
+      onError: (e: any) => toast.error(e?.response?.status === 409 ? 'Only one link is allowed between this device pair' : 'Failed to duplicate link'),
+    })
+  }, [addLink, persistAnnLinks])
+
+  const duplicateSelected = useCallback(() => {
+    const sel = nodesRef.current.filter((n) => n.selected)
+    if (!sel.length) { toast.info('Nothing selected to duplicate'); return }
+    const shapes = sel.filter((n) => n.type === 'shape')
+    shapes.forEach((n, i) => duplicateShape(n.id, i < shapes.length - 1))
+    if (sel.length > shapes.length) toast.info('Devices can appear only once per map')
+  }, [duplicateShape])
+  duplicateSelectedRef.current = duplicateSelected
+
   /* ── Drop a device from the palette → place it as a node ─────────
    * screenToFlowPosition gives the flow-space point under the cursor, which is
    * exactly where we want the disc centre → convert straight to percent. */
@@ -597,15 +654,23 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
     })
   }, [setNodes, updateNode])
 
-  const saveLink = useCallback((id: string, patch: { label: string | null; link_type: string; metadata: Record<string, unknown> }) => {
+  const saveLink = useCallback((id: string, patch: { label: string | null; link_type: string; metadata: Record<string, unknown> }, annotation: boolean) => {
     setEdges((eds) => eds.map((e) => (e.id === id
       ? { ...e, data: { ...e.data, link: { ...(e.data as any).link, ...patch } } }
       : e)))
+    if (annotation) {
+      // Annotation cables live in the map metadata, not the links table.
+      persistAnnLinks(annArrayFromEdges(id, patch.metadata, { label: patch.label, link_type: patch.link_type }))
+      setAnnLinks((arr) => arr.map((a) => (a.id === id ? { ...a, label: patch.label, link_type: patch.link_type, metadata: patch.metadata as any } : a)))
+      setEditLink(null)
+      toast.success('Link updated')
+      return
+    }
     updateLink.mutate({ id, patch }, {
       onSuccess: () => { setEditLink(null); toast.success('Link updated') },
       onError: () => toast.error('Failed to save link'),
     })
-  }, [setEdges, updateLink])
+  }, [setEdges, updateLink, persistAnnLinks, annArrayFromEdges])
 
   // Capture pre-drag positions so the move can be undone.
   const dragPrevRef = useRef<{ id: string; x: number; y: number }[]>([])
@@ -725,8 +790,10 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
     if (!el) return
     const onKeyUp = (e: KeyboardEvent) => { if (e.code === 'Space') setPanKey(false) }
     const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement)?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
+      const el = e.target as HTMLElement
+      // Never hijack keys while typing — including contentEditable text shapes
+      // (Space used to trigger pan mode and eat the character).
+      if (el?.tagName === 'INPUT' || el?.tagName === 'TEXTAREA' || el?.tagName === 'SELECT' || el?.isContentEditable) return
       if (e.code === 'Space') {
         e.preventDefault()
         setPanKey(true)
@@ -736,6 +803,9 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
         e.preventDefault()
         redo()
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
+        e.preventDefault()
+        if (!liveMode) duplicateSelectedRef.current()
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
         e.preventDefault()
         setNodes((nds) => nds.map((n) => ({ ...n, selected: true })))
@@ -797,6 +867,7 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
       items.push({ type: 'item', label: 'Delete selected', icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => deleteSelected() })
     } else if (node.type === 'shape') {
       items.push({ type: 'header', label: 'Annotation' })
+      items.push({ type: 'item', label: 'Duplicate', icon: <CopyPlus className="h-4 w-4" />, onClick: () => duplicateShape(node.id) })
       items.push({ type: 'item', label: 'Bring to front', onClick: () => bumpShapeZ(node.id, 'front') })
       items.push({ type: 'item', label: 'Send to back', onClick: () => bumpShapeZ(node.id, 'back') })
       items.push({ type: 'divider' })
@@ -817,7 +888,7 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
       }) })
     }
     setMenu({ x: e.clientX, y: e.clientY, items })
-  }, [setNodes, applyAlign, deleteNode, deleteShape, bumpShapeZ, matchSizes, resetLabels])
+  }, [setNodes, applyAlign, deleteNode, deleteShape, bumpShapeZ, matchSizes, resetLabels, duplicateShape])
 
   const onEdgeContextMenu = useCallback((e: React.MouseEvent, edge: Edge) => {
     e.preventDefault()
@@ -829,7 +900,8 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
       ({ type: 'item', label: `${shape === val ? '✓ ' : '   '}${label}`, onClick: () => setEdgeShape(edge.id, val) })
     const items: MenuItem[] = [
       { type: 'header', label: link?.label || (isAnnotation ? 'Connection' : 'Link') },
-      { type: 'item', label: 'Edit link…', icon: <Pencil className="h-4 w-4" />, onClick: () => setEditLink(link) },
+      { type: 'item', label: 'Edit link…', icon: <Pencil className="h-4 w-4" />, onClick: () => setEditLink({ link, annotation: isAnnotation }) },
+      { type: 'item', label: 'Duplicate', icon: <CopyPlus className="h-4 w-4" />, onClick: () => duplicateEdge(edge) },
       { type: 'divider' },
       { type: 'header', label: 'Shape' },
       shapeItem('Curved', 'curve'),
@@ -845,9 +917,8 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
         run: () => { if (isAnnotation) deleteAnnotationLink(edge.id); else { deleteLink.mutate(edge.id); setEdges((eds) => eds.filter((x) => x.id !== edge.id)) } },
       }) },
     ]
-    const shown = isAnnotation ? items.filter((it) => it.type !== 'item' || (it.label !== 'Edit link…' && it.label !== 'Reset port labels')) : items
-    setMenu({ x: e.clientX, y: e.clientY, items: shown })
-  }, [setEdgeShape, setEdgeWaypoints, resetIfaceLabels, deleteLink, deleteAnnotationLink, setEdges])
+    setMenu({ x: e.clientX, y: e.clientY, items })
+  }, [setEdgeShape, setEdgeWaypoints, resetIfaceLabels, deleteLink, deleteAnnotationLink, setEdges, duplicateEdge])
 
   // Explicit edge selection (RF's built-in click-select is unreliable for our
   // fully-custom edge); selecting an edge reveals its bend handles.
@@ -1057,6 +1128,7 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
           <Panel position="top-right">
             <ShapeInspector
               shape={selectedShape}
+              devices={detail.nodes.map((n) => ({ hostname: n.label || n.hostname, ip: n.ip_address }))}
               onChange={(patch, commit) => setShape(selectedShape.id, patch, commit)}
               onZ={(dir) => bumpShapeZ(selectedShape.id, dir)}
               onDelete={() => setPendingDelete({
@@ -1106,12 +1178,12 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
 
       {editLink && (
         <LinkEditDialog
-          link={editLink}
-          source={nodeById.get(editLink.source_node_id)}
-          target={nodeById.get(editLink.target_node_id)}
+          link={editLink.link}
+          source={nodeById.get(editLink.link.source_node_id)}
+          target={nodeById.get(editLink.link.target_node_id)}
           saving={updateLink.isPending}
           onCancel={() => setEditLink(null)}
-          onSave={(patch) => saveLink(editLink.id, patch)}
+          onSave={(patch) => saveLink(editLink.link.id, patch, editLink.annotation)}
         />
       )}
     </div>

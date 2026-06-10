@@ -824,8 +824,8 @@ async def links_live(
     the discovered fields plus a NetFlow-derived `in_bps`, `out_bps`,
     `util_pct` over the last 5 minutes.
     """
-    map_exists = (await db.execute(text("SELECT id FROM manual_maps WHERE id = :id"), {"id": map_id})).first()
-    if not map_exists:
+    map_row = (await db.execute(text("SELECT id, metadata FROM manual_maps WHERE id = :id"), {"id": map_id})).mappings().first()
+    if not map_row:
         raise HTTPException(404, "Map not found")
 
     # Nodes (device + IP, used to find the right device_interfaces rows
@@ -843,13 +843,32 @@ async def links_live(
     node_info = {str(r["node_id"]): {"device_id": r["device_id"], "ip": r["ip_address"]} for r in node_rows}
 
     # Links
-    link_rows = (await db.execute(
+    link_rows = [dict(r) for r in (await db.execute(
         text("""
             SELECT id, source_node_id, target_node_id, metadata
             FROM manual_map_links WHERE map_id = :map_id
         """),
         {"map_id": map_id},
-    )).mappings().all()
+    )).mappings().all()]
+
+    # Annotation links (device ↔ shape cables stored in the map metadata) can
+    # bind their device end to a real interface too — process them through the
+    # same pipeline so they light up with live throughput.
+    map_meta = map_row["metadata"] or {}
+    if isinstance(map_meta, str):
+        try:
+            map_meta = json.loads(map_meta)
+        except Exception:
+            map_meta = {}
+    for al in (map_meta.get("annotation_links") or []):
+        if not isinstance(al, dict) or not al.get("id"):
+            continue
+        link_rows.append({
+            "id": al["id"],
+            "source_node_id": al.get("source"),
+            "target_node_id": al.get("target"),
+            "metadata": al.get("metadata") or {},
+        })
 
     if not link_rows:
         return {"data": {}, "window_seconds": _LIVE_WINDOW_SECONDS,

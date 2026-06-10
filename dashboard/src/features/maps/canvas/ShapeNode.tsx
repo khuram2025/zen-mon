@@ -4,6 +4,7 @@ import { cn } from '@/lib/utils'
 import { NetworkIcon } from '@/components/network-icons'
 import type { MapShape } from '../core'
 import { useMapMode } from './MapModeContext'
+import { ConversationsWidget } from './ConversationsWidget'
 
 export type ShapeNodeData = {
   shape: MapShape
@@ -67,7 +68,13 @@ function ShapeNodeImpl({ data, selected }: NodeProps) {
   const common = { background: fill, border: `2px solid ${stroke}` } as React.CSSProperties
 
   let content: React.ReactNode
-  if (shape.kind === 'image' && m.icon) {
+  if (m.widget === 'conversations') {
+    content = (
+      <div className={cn('h-full w-full', selected && 'rounded-lg ring-2 ring-primary/70')}>
+        <ConversationsWidget shape={shape} />
+      </div>
+    )
+  } else if (shape.kind === 'image' && m.icon) {
     content = (
       <div
         className={cn('flex h-full w-full items-center justify-center', selected && 'rounded ring-2 ring-primary/70')}
@@ -91,12 +98,13 @@ function ShapeNodeImpl({ data, selected }: NodeProps) {
         title={editable ? 'Double-click to edit' : undefined}
         className={cn(
           'flex h-full w-full overflow-hidden',
-          shape.kind === 'sticky' ? 'items-start rounded-sm p-2 shadow-md' : 'items-center rounded',
+          shape.kind === 'sticky' ? 'items-start rounded-sm p-2 shadow-md' : 'items-center px-1.5 py-1',
           selected && 'ring-2 ring-primary/70',
         )}
         style={{
           background: shape.fill || (shape.kind === 'sticky' ? '#fde68a' : 'transparent'),
-          border: shape.stroke ? `1px solid ${shape.stroke}` : undefined,
+          border: shape.stroke ? `2px solid ${shape.stroke}` : undefined,
+          borderRadius: shape.kind === 'sticky' ? 2 : m.rounded === false ? 2 : 10,
         }}
       >
         <div
@@ -135,12 +143,10 @@ function ShapeNodeImpl({ data, selected }: NodeProps) {
   return (
     <>
       {Resizer}
-      {!live && (
-        <>
-          <Handle type="target" position={Position.Top} id="c" style={handleStyle} isConnectable={connectMode} />
-          <Handle type="source" position={Position.Top} id="c" style={handleStyle} isConnectable={connectMode} />
-        </>
-      )}
+      {/* Handles render in BOTH modes — live annotation cables (device ↔ shape)
+          need them to anchor; isConnectable still gates interaction. */}
+      <Handle type="target" position={Position.Top} id="c" style={handleStyle} isConnectable={connectMode && !live} />
+      <Handle type="source" position={Position.Top} id="c" style={handleStyle} isConnectable={connectMode && !live} />
       {connectMode && !live && (
         <span aria-hidden className="pointer-events-none absolute inset-0 rounded-md ring-2 ring-primary/0 transition group-hover:ring-primary/70" />
       )}
