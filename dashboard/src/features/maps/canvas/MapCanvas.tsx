@@ -8,6 +8,7 @@ import {
   Panel,
   ReactFlow,
   SelectionMode,
+  ViewportPortal,
   useEdgesState,
   useNodesState,
   useReactFlow,
@@ -15,18 +16,23 @@ import {
   type Connection,
   type Edge,
   type Node,
+  type NodeChange,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import {
+  AlignHorizontalDistributeCenter,
   AlignHorizontalJustifyCenter,
   AlignStartHorizontal,
   AlignStartVertical,
+  AlignVerticalDistributeCenter,
   Cable,
   Grid3x3,
   Magnet,
   MousePointer2,
   Pencil,
   Redo2,
+  Ruler,
+  Sparkles,
   Spline,
   Trash2,
   Undo2,
@@ -68,6 +74,7 @@ import { LinkEditDialog, NodeEditDialog } from './EditDialogs'
 import { InsertMenu, ShapeInspector, type ShapeSpec } from './Annotations'
 import { GroupResizer } from './GroupResizer'
 import { MapLegend, NocStatusBar } from './NocOverlays'
+import { NO_SNAP, computeSmartSnap, nodeToGuideBox, tidyLayout, type SmartSnapResult } from './smartGuides'
 
 const nodeTypes = { device: DeviceNode, shape: ShapeNode }
 const edgeTypes = { network: NetworkEdge }
@@ -92,6 +99,8 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
   const [snapOn, setSnapOn] = useState(false)
   const [gridOn, setGridOn] = useState(true)
+  const [smartOn, setSmartOn] = useState(true) // magnetic alignment guides
+  const [guides, setGuides] = useState<SmartSnapResult>(NO_SNAP)
   const [menu, setMenu] = useState<ContextMenuState>(null)
   const [selCount, setSelCount] = useState(0)
   const [tool, setTool] = useState<'select' | 'connect'>('select')
@@ -149,6 +158,34 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
   }, [])
   // New map / refetch clears history (ids/positions may have changed server-side).
   useEffect(() => { undoStack.current = []; redoStack.current = [] }, [mapId])
+
+  /* ── Smart alignment guides ──────────────────────────────────────────────
+   * Intercept single-node drags and magnetically snap to other nodes'
+   * centres/edges and to equal row/column spacing, rendering pink guide
+   * lines while snapped. Grid snap (snapOn) takes precedence when enabled. */
+  const onNodesChangeSmart = useCallback((changes: NodeChange[]) => {
+    if (!liveMode && smartOn && !snapOn) {
+      // Snap every RF-driven position change — including the final one on
+      // drop (dragging=false), which carries the raw pointer position and
+      // would otherwise discard the magnetic correction.
+      const dragging = changes.filter((c): c is Extract<NodeChange, { type: 'position' }> => c.type === 'position' && !!c.position)
+      if (dragging.length === 1) {
+        const ch = dragging[0]
+        const dragNode = nodesRef.current.find((n) => n.id === ch.id)
+        if (dragNode) {
+          const tol = 7 / Math.max(0.3, rfTransform[2])
+          const dragBox = { ...nodeToGuideBox(dragNode), x: ch.position!.x, y: ch.position!.y }
+          const others = nodesRef.current.filter((n) => n.id !== ch.id && !n.selected).map(nodeToGuideBox)
+          const res = computeSmartSnap(dragBox, others, tol)
+          ch.position = { x: ch.position!.x + res.dx, y: ch.position!.y + res.dy }
+          setGuides(res)
+        }
+      } else if (changes.some((c) => c.type === 'position')) {
+        setGuides(NO_SNAP) // group drags don't guide (too noisy)
+      }
+    }
+    onNodesChange(changes)
+  }, [liveMode, smartOn, snapOn, rfTransform, onNodesChange])
 
   /* ── Node metadata (movable label offset) — ref-stable like the edge ones ── */
   const patchNodeMetaRef = useRef<(nodeId: string, patch: Record<string, unknown>, commit: boolean) => void>(() => {})
@@ -577,7 +614,10 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
     dragPrevRef.current = moving.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y }))
   }, [])
   const onNodeDragStop = useCallback((_e: unknown, node: Node, dragged: Node[]) => {
-    const moved = dragged && dragged.length ? dragged : [node]
+    setGuides(NO_SNAP)
+    // Read final positions from the store, not the event args — the event
+    // carries the raw pointer-derived position, losing the magnetic snap.
+    const moved = (dragged && dragged.length ? dragged : [node]).map((n) => nodesRef.current.find((x) => x.id === n.id) || n)
     const next = moved.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y }))
     applyPositions(next)
     const prev = dragPrevRef.current
@@ -640,6 +680,36 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
     toast.success('Aligned all to grid')
   }, [nodes, applyPositions, pushHistory])
 
+  // One-click tidy: straighten near-aligned rows/columns and even out their
+  // spacing — turns a roughly-placed sketch into a clean diagram (undoable).
+  const tidyUp = useCallback(() => {
+    const moves = tidyLayout(nodesRef.current)
+    if (!moves.size) { toast.info('Layout is already tidy'); return }
+    const prev = nodesRef.current.filter((n) => moves.has(n.id)).map((n) => ({ id: n.id, x: n.position.x, y: n.position.y }))
+    const next = [...moves].map(([id, p]) => ({ id, ...p }))
+    applyPositions(next)
+    const deltas = new Map<string, { dx: number; dy: number }>()
+    next.forEach((m) => { const p = prev.find((q) => q.id === m.id); if (p) deltas.set(m.id, { dx: m.x - p.x, dy: m.y - p.y }) })
+    shiftConnectedWaypoints(deltas)
+    pushHistory({ undo: () => applyPositions(prev), redo: () => applyPositions(next) })
+    toast.success(`Tidied ${next.length} node${next.length > 1 ? 's' : ''}`)
+  }, [applyPositions, shiftConnectedWaypoints, pushHistory])
+
+  // Copy one node's disc size to every selected device.
+  const matchSizes = useCallback((refNode: ManualMapNode) => {
+    const scale = refNode.metadata?.size_scale || 1
+    const ids = nodesRef.current.filter((n) => n.selected && n.type === 'device' && n.id !== refNode.id).map((n) => n.id)
+    ids.forEach((id) => patchNodeMetaRef.current(id, { size_scale: scale }, true))
+    if (ids.length) toast.success(`Matched ${ids.length} device size${ids.length > 1 ? 's' : ''}`)
+  }, [])
+
+  // Snap every selected device's label back under its disc.
+  const resetLabels = useCallback(() => {
+    const ids = nodesRef.current.filter((n) => n.selected && n.type === 'device').map((n) => n.id)
+    ids.forEach((id) => patchNodeMetaRef.current(id, { label_offset: { dx: 0, dy: 0 } }, true))
+    if (ids.length) toast.success('Label positions reset')
+  }, [])
+
   /* ── Selection tracking + keyboard ───────────────────────────── */
   const onSelectionChange = useCallback(({ nodes: sel }: { nodes: Node[] }) => {
     selectedIds.current = new Set(sel.map((n) => n.id))
@@ -701,8 +771,9 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
     }
     items.push({ type: 'item', label: 'Select all', icon: <AlignStartVertical className="h-4 w-4" />, onClick: () => setNodes((nds) => nds.map((n) => ({ ...n, selected: true }))) })
     items.push({ type: 'item', label: 'Auto-align to grid', icon: <Wand2 className="h-4 w-4" />, onClick: autoAlign })
+    items.push({ type: 'item', label: 'Tidy layout', icon: <Sparkles className="h-4 w-4" />, onClick: tidyUp })
     setMenu({ x: (e as MouseEvent).clientX, y: (e as MouseEvent).clientY, items })
-  }, [setNodes, autoAlign, applyAlign])
+  }, [setNodes, autoAlign, applyAlign, tidyUp])
 
   const onNodeContextMenu = useCallback((e: React.MouseEvent, node: Node) => {
     e.preventDefault()
@@ -717,7 +788,11 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
       items.push({ type: 'item', label: 'Align left', icon: <AlignStartVertical className="h-4 w-4" />, onClick: () => applyAlign('left') })
       items.push({ type: 'item', label: 'Align top', icon: <AlignStartHorizontal className="h-4 w-4" />, onClick: () => applyAlign('top') })
       items.push({ type: 'item', label: 'Center horizontally', icon: <AlignHorizontalJustifyCenter className="h-4 w-4" />, onClick: () => applyAlign('center-h') })
-      items.push({ type: 'item', label: 'Distribute horizontally', onClick: () => applyAlign('distribute-h') })
+      items.push({ type: 'item', label: 'Distribute horizontally', icon: <AlignHorizontalDistributeCenter className="h-4 w-4" />, onClick: () => applyAlign('distribute-h') })
+      items.push({ type: 'item', label: 'Distribute vertically', icon: <AlignVerticalDistributeCenter className="h-4 w-4" />, onClick: () => applyAlign('distribute-v') })
+      items.push({ type: 'divider' })
+      if (dev) items.push({ type: 'item', label: 'Match sizes to this device', icon: <Sparkles className="h-4 w-4" />, onClick: () => matchSizes(dev) })
+      items.push({ type: 'item', label: 'Reset label positions', onClick: () => resetLabels() })
       items.push({ type: 'divider' })
       items.push({ type: 'item', label: 'Delete selected', icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => deleteSelected() })
     } else if (node.type === 'shape') {
@@ -742,7 +817,7 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
       }) })
     }
     setMenu({ x: e.clientX, y: e.clientY, items })
-  }, [setNodes, applyAlign, deleteNode, deleteShape, bumpShapeZ])
+  }, [setNodes, applyAlign, deleteNode, deleteShape, bumpShapeZ, matchSizes, resetLabels])
 
   const onEdgeContextMenu = useCallback((e: React.MouseEvent, edge: Edge) => {
     e.preventDefault()
@@ -852,7 +927,7 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
       <ReactFlow
         nodes={nodes}
         edges={edges}
-        onNodesChange={onNodesChange}
+        onNodesChange={onNodesChangeSmart}
         onEdgesChange={onEdgesChange}
         onNodeDragStart={onNodeDragStart}
         onNodeDragStop={onNodeDragStop}
@@ -890,6 +965,40 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
         proOptions={{ hideAttribution: true }}
       >
         {gridOn && <Background variant={BackgroundVariant.Dots} gap={26} size={1} color={theme === 'dark' ? 'rgba(148,163,184,0.18)' : 'rgba(71,85,105,0.22)'} />}
+
+        {/* Magnetic guide lines + equal-spacing hints (drawn in flow space) */}
+        {(guides.v.length > 0 || guides.h.length > 0 || guides.gaps.length > 0) && (
+          <ViewportPortal>
+            <svg className="pointer-events-none absolute overflow-visible" style={{ left: 0, top: 0, zIndex: 1200 }} width={1} height={1}>
+              {guides.v.map((g, i) => (
+                <line key={`v${i}`} x1={g.coord} y1={g.from} x2={g.coord} y2={g.to} stroke="#ec4899" strokeWidth={1.4 / rfTransform[2]} strokeDasharray={`${5 / rfTransform[2]} ${4 / rfTransform[2]}`} />
+              ))}
+              {guides.h.map((g, i) => (
+                <line key={`h${i}`} x1={g.from} y1={g.coord} x2={g.to} y2={g.coord} stroke="#ec4899" strokeWidth={1.4 / rfTransform[2]} strokeDasharray={`${5 / rfTransform[2]} ${4 / rfTransform[2]}`} />
+              ))}
+              {guides.gaps.map((g, i) => {
+                const tick = 7 / rfTransform[2]
+                const horiz = Math.abs(g.y2 - g.y1) < 0.01
+                return (
+                  <g key={`g${i}`} stroke="#f59e0b" strokeWidth={1.6 / rfTransform[2]}>
+                    <line x1={g.x1} y1={g.y1} x2={g.x2} y2={g.y2} />
+                    {horiz ? (
+                      <>
+                        <line x1={g.x1} y1={g.y1 - tick} x2={g.x1} y2={g.y1 + tick} />
+                        <line x1={g.x2} y1={g.y2 - tick} x2={g.x2} y2={g.y2 + tick} />
+                      </>
+                    ) : (
+                      <>
+                        <line x1={g.x1 - tick} y1={g.y1} x2={g.x1 + tick} y2={g.y1} />
+                        <line x1={g.x2 - tick} y1={g.y2} x2={g.x2 + tick} y2={g.y2} />
+                      </>
+                    )}
+                  </g>
+                )
+              })}
+            </svg>
+          </ViewportPortal>
+        )}
         <Controls showInteractive={false} />
         <MiniMap
           pannable
@@ -925,13 +1034,17 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
               <div className="mx-0.5 h-5 w-px bg-border" />
               <InsertMenu onAdd={addShapeAt} />
               <div className="mx-0.5 h-5 w-px bg-border" />
+              <ToolBtn active={smartOn} onClick={() => setSmartOn((v) => !v)} title="Smart guides — magnetic alignment & spacing while dragging"><Ruler className="h-4 w-4" /></ToolBtn>
               <ToolBtn active={snapOn} onClick={() => setSnapOn((v) => !v)} title="Snap to grid"><Magnet className="h-4 w-4" /></ToolBtn>
               <ToolBtn active={gridOn} onClick={() => setGridOn((v) => !v)} title="Show grid"><Grid3x3 className="h-4 w-4" /></ToolBtn>
               <ToolBtn onClick={autoAlign} title="Auto-align all to grid"><Wand2 className="h-4 w-4" /></ToolBtn>
+              <ToolBtn onClick={tidyUp} title="Tidy layout — straighten rows/columns & even out spacing"><Sparkles className="h-4 w-4" /></ToolBtn>
               <div className="mx-0.5 h-5 w-px bg-border" />
               <ToolBtn disabled={selCount < 2} onClick={() => applyAlign('left')} title="Align left"><AlignStartVertical className="h-4 w-4" /></ToolBtn>
               <ToolBtn disabled={selCount < 2} onClick={() => applyAlign('top')} title="Align top"><AlignStartHorizontal className="h-4 w-4" /></ToolBtn>
               <ToolBtn disabled={selCount < 2} onClick={() => applyAlign('center-h')} title="Center horizontally"><AlignHorizontalJustifyCenter className="h-4 w-4" /></ToolBtn>
+              <ToolBtn disabled={selCount < 3} onClick={() => applyAlign('distribute-h')} title="Distribute horizontally (equal spacing)"><AlignHorizontalDistributeCenter className="h-4 w-4" /></ToolBtn>
+              <ToolBtn disabled={selCount < 3} onClick={() => applyAlign('distribute-v')} title="Distribute vertically (equal spacing)"><AlignVerticalDistributeCenter className="h-4 w-4" /></ToolBtn>
               <div className="mx-0.5 h-5 w-px bg-border" />
               <ToolBtn disabled={selCount < 1} danger onClick={deleteSelected} title="Delete selected"><Trash2 className="h-4 w-4" /></ToolBtn>
               {selCount > 0 && <span className="px-1.5 text-[11px] font-semibold text-muted">{selCount} sel</span>}
