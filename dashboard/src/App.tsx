@@ -49,11 +49,6 @@ const ExecutiveReport = lazy(() => import('@/pages/reports/ExecutiveReport'))
 const TechnicalReport = lazy(() => import('@/pages/reports/TechnicalReport'))
 const BusinessReport = lazy(() => import('@/pages/reports/BusinessReport'))
 const InventoryReport = lazy(() => import('@/pages/reports/InventoryReport'))
-const ServersPage = lazy(() => import('@/pages/ServersPage'))
-const AddServer = lazy(() => import('@/pages/AddServer'))
-const ServerDetail = lazy(() => import('@/pages/ServerDetail'))
-const AgentFleetPage = lazy(() => import('@/pages/AgentFleetPage'))
-const AgentPoliciesPage = lazy(() => import('@/pages/AgentPoliciesPage'))
 
 function ReportTabFallback() {
   return <div className="py-10 text-center text-sm text-muted">Loading report…</div>
@@ -149,11 +144,6 @@ export default function App() {
         <Route path="netflow/:section" element={<NetflowSectionPage />} />
         <Route path="mibs" element={<MibLibraryPage />} />
         <Route path="sensors" element={<SensorsPage />} />
-        <Route path="servers" element={<Suspense fallback={<ReportTabFallback />}><ServersPage /></Suspense>} />
-        <Route path="servers/new" element={<Suspense fallback={<ReportTabFallback />}><AddServer /></Suspense>} />
-        <Route path="servers/:id" element={<Suspense fallback={<ReportTabFallback />}><ServerDetail /></Suspense>} />
-        <Route path="agent-fleet" element={<Suspense fallback={<ReportTabFallback />}><AgentFleetPage /></Suspense>} />
-        <Route path="agent-policies" element={<Suspense fallback={<ReportTabFallback />}><AgentPoliciesPage /></Suspense>} />
         <Route path="alerts" element={<AlertsPage />} />
         <Route path="alerts/:id" element={<AlertDetailPage />} />
         <Route path="alert-rules" element={<AlertRulesPage />} />
