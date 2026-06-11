@@ -16,6 +16,17 @@ type Mode = 'design' | 'live'
 // Stable empty reference so a disabled live query doesn't hand the canvas a new
 // object every render (which would refire the edge-rebuild effect).
 const EMPTY_LIVE: Record<string, never> = {}
+const LAST_MANUAL_MAP_KEY = 'zp-manual-map-id'
+
+function newestCreatedMapId(maps: { id: string; created_at?: string | null; updated_at?: string | null }[]): string | null {
+  if (maps.length === 0) return null
+  const sorted = [...maps].sort((a, b) => {
+    const at = Date.parse(a.created_at || a.updated_at || '') || 0
+    const bt = Date.parse(b.created_at || b.updated_at || '') || 0
+    return bt - at
+  })
+  return sorted[0]?.id || maps[0].id
+}
 
 export function MapEditorV2() {
   const [params, setParams] = useSearchParams()
@@ -29,16 +40,34 @@ export function MapEditorV2() {
   const maps = mapsQuery.data?.data || []
 
   const urlMapId = params.get('map')
-  const selectedMapId = urlMapId || maps[0]?.id || null
+  const selectedMapId = useMemo(() => {
+    if (maps.length === 0) return null
+    const validIds = new Set(maps.map((m) => m.id))
+    if (urlMapId && validIds.has(urlMapId)) return urlMapId
+    try {
+      const last = localStorage.getItem(LAST_MANUAL_MAP_KEY)
+      if (last && validIds.has(last)) return last
+    } catch {
+      // Ignore private-mode/storage failures; URL selection still works.
+    }
+    return newestCreatedMapId(maps)
+  }, [maps, urlMapId])
 
-  // Keep ?map in the URL once we know the default, so deep links work.
+  // Keep ?map in the URL once we know the default, so deep links and sidebar
+  // navigation reopen the same manual map.
   useEffect(() => {
-    if (!urlMapId && maps[0]?.id) {
+    if (!selectedMapId) return
+    try {
+      localStorage.setItem(LAST_MANUAL_MAP_KEY, selectedMapId)
+    } catch {
+      // Best-effort preference only.
+    }
+    if (urlMapId !== selectedMapId) {
       const next = new URLSearchParams(params)
-      next.set('map', maps[0].id)
+      next.set('map', selectedMapId)
       setParams(next, { replace: true })
     }
-  }, [urlMapId, maps, params, setParams])
+  }, [urlMapId, selectedMapId, params, setParams])
 
   const mapQuery = useManualMap(selectedMapId, mode === 'live')
   const detail = mapQuery.data

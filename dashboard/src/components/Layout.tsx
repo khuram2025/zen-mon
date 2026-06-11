@@ -99,10 +99,8 @@ const sections: NavSection[] = [
   {
     label: 'MAP',
     items: [
+      { to: '/maps/manual', label: 'Manual Maps', icon: MapPinned },
       { to: '/maps/automated', label: 'Automated Maps', icon: GitBranch },
-      // Manual map ("/maps/manual") is temporarily hidden from the sidebar
-      // while the new Network Studio features stabilise. Route still exists
-      // so direct links keep working.
     ],
   },
   {
