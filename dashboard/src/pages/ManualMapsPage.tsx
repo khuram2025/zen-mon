@@ -15,7 +15,6 @@ import {
   Cable,
   ChevronLeft,
   ChevronRight,
-  GitBranch,
   Layers,
   Loader2,
   Maximize2,
@@ -1709,11 +1708,6 @@ export function ManualMapsPage() {
 
         <Button variant="ghost" size="icon" onClick={() => invalidateMap(selectedMapId)} disabled={mapQuery.isFetching} title="Refresh">
           {mapQuery.isFetching ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-        </Button>
-        <Button variant="ghost" size="icon" asChild title="Switch to automated topology">
-          <Link to="/maps/automated">
-            <GitBranch className="h-4 w-4" />
-          </Link>
         </Button>
         <Button variant="ghost" size="icon" onClick={() => setNoc(true)} disabled={!selectedMapId} title="NOC fullscreen (video wall)">
           <Monitor className="h-4 w-4" />

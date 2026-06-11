@@ -30,7 +30,6 @@ import { ImportsPage as DiscoveryImportsPage } from '@/pages/discovery/ImportsPa
 import { IgnoredPage as DiscoveryIgnoredPage } from '@/pages/discovery/IgnoredPage'
 import { CredentialsPage as DiscoveryCredentialsPage } from '@/pages/discovery/CredentialsPage'
 import { MibLibraryPage } from '@/pages/MibLibraryPage'
-import { TopologyPage } from '@/pages/TopologyPage'
 import { ManualMapsEntry } from '@/pages/ManualMapsEntry'
 import { ReportsPage } from '@/pages/ReportsPage'
 import { SensorsPage } from '@/pages/SensorsPage'
@@ -131,10 +130,8 @@ export default function App() {
           <Route path="profiles/:id/edit" element={<DiscoveryWizardPage />} />
           <Route path="runs/:id" element={<DiscoveryRunPage />} />
         </Route>
-        <Route path="maps" element={<Navigate to="/maps/automated" replace />} />
-        <Route path="maps/automated" element={<TopologyPage />} />
+        <Route path="maps" element={<Navigate to="/maps/manual" replace />} />
         <Route path="maps/manual" element={<ManualMapsEntry />} />
-        <Route path="topology" element={<Navigate to="/maps/automated" replace />} />
         <Route path="netflow" element={<NetflowPage />} />
         <Route path="netflow/forensics" element={<NetflowForensicsPage />} />
         <Route path="netflow/saved-views" element={<NetflowSavedViewsPage />} />
