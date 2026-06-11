@@ -12,24 +12,17 @@ import {
 import { Link, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  ArrowRight,
   Cable,
   ChevronLeft,
   ChevronRight,
-  Circle,
-  Copy,
-  Download,
   GitBranch,
-  Hexagon,
-  Image as ImageIcon,
   Layers,
   Loader2,
-  Lock,
   Maximize2,
+  Minimize2,
   Minus,
-  Minus as LineIcon,
+  Monitor,
   MousePointer2,
-  Palette,
   Pencil,
   Plus,
   Radio,
@@ -37,12 +30,8 @@ import {
   Save,
   Search,
   Spline,
-  Square,
-  StickyNote,
+  Sparkles,
   Trash2,
-  Triangle,
-  Type,
-  Unlock,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
@@ -71,26 +60,9 @@ type ManualMapListItem = {
   status_counts: Record<string, number>
 }
 
-// All NodeMetadata fields except size_scale are visual sugar — they reshape
-// or recolor the rendered node without touching the underlying device data.
-type NodeShapeVariant = 'disc' | 'square' | 'rounded' | 'hex' | 'diamond' | 'cloud'
-type NodeLabelPos = 'bottom' | 'top' | 'right' | 'left' | 'hidden'
-
 type NodeMetadata = {
-  // 1.0 renders the historical 64×64 px disc. Clamp to NODE_SCALE_RANGE
-  // so a runaway value can't make a node fill the whole canvas.
+  label_offset?: { dx: number; dy: number }
   size_scale?: number
-  // Optional CSS color (hex or rgba). When set, overrides the status ring
-  // and icon tint — used to colour-code by site, role, or team.
-  color?: string | null
-  // Frame shape around the icon. Defaults to 'disc' for back-compat.
-  shape_variant?: NodeShapeVariant | null
-  // Where the hostname/IP label sits relative to the icon.
-  label_pos?: NodeLabelPos | null
-  // Optional secondary line under the main label (eg. role, location, tag).
-  sub_label?: string | null
-  // True locks the node in place — drag/resize/delete suppressed in design mode.
-  locked?: boolean | null
 }
 
 type ManualMapNode = {
@@ -112,27 +84,28 @@ type ManualMapNode = {
   metadata?: NodeMetadata | null
 }
 
-const NODE_SCALE_MIN = 0.6
-const NODE_SCALE_MAX = 2.5
-const NODE_SCALE_DEFAULT = 1.0
-const NODE_BASE_PX = 64  // historical disc size
-
-function clampScale(s: number): number {
-  if (!isFinite(s)) return NODE_SCALE_DEFAULT
-  return Math.max(NODE_SCALE_MIN, Math.min(NODE_SCALE_MAX, s))
-}
-
-function nodeScale(node: ManualMapNode): number {
-  return clampScale(node.metadata?.size_scale ?? NODE_SCALE_DEFAULT)
-}
-
 type LinkKind = 'ethernet' | 'fiber' | 'wireless' | 'vpn' | 'trunk' | 'serial' | 'manual'
 type LinkSpeed = '10M' | '100M' | '1G' | '2.5G' | '10G' | '25G' | '40G' | '100G' | string
 type LinkShape = 'curve' | 'straight' | 'orthogonal'
 
 type Waypoint = { x_pct: number; y_pct: number }
 
-type LinkArrow = 'none' | 'forward' | 'backward' | 'both'
+/** Per-side port label overrides (stored in link metadata). */
+type IfaceLabelStyle = {
+  /** Distance from device along the cable, canvas %. */
+  dist?: number | null
+  /** Nudge along cable direction (+ = toward far end), canvas %. */
+  along?: number | null
+  /** Nudge perpendicular to cable (+ = right of cable direction), canvas %. */
+  perp?: number | null
+  /** Rotation in degrees; null = auto-align to cable. */
+  angle?: number | null
+  /** Label font size in SVG viewBox units (default 0.95). */
+  fontSize?: number | null
+  textColor?: string | null
+  bgColor?: string | null
+  borderColor?: string | null
+}
 
 type LinkMetadata = {
   src_interface?: string | null
@@ -140,15 +113,20 @@ type LinkMetadata = {
   speed?: LinkSpeed | null
   kind?: LinkKind | null
   shape?: LinkShape | null
-  waypoints?: Waypoint[] | null   // user-placed bend points (orthogonal only)
+  waypoints?: Waypoint[] | null
   notes?: string | null
-  // Visual overrides. When unset, the renderer falls back to defaults derived
-  // from kind + endpoint health (the historical behaviour).
-  color?: string | null            // CSS color — overrides health colour
-  arrow?: LinkArrow | null         // direction marker(s)
-  thickness?: number | null        // multiplier, 0.5 – 3.0
-  animate?: boolean | null         // explicit on/off; null = auto by mode
-  opacity?: number | null          // 0.1 – 1.0
+  src_label?: IfaceLabelStyle | null
+  dst_label?: IfaceLabelStyle | null
+}
+
+const IFACE_LABEL_FONT_DEFAULT = 0.95
+
+function hasIfaceLabelStyle(style?: IfaceLabelStyle | null): boolean {
+  if (!style) return false
+  return (
+    style.dist != null || style.along != null || style.perp != null || style.angle != null
+    || style.fontSize != null || !!style.textColor || !!style.bgColor || !!style.borderColor
+  )
 }
 
 type LiveInterface = {
@@ -174,6 +152,278 @@ type LiveLinkData = {
   generated_at: string
 }
 
+type DeviceInterface = {
+  if_index: number
+  if_name: string | null
+  if_descr: string | null
+  if_alias: string | null
+  if_type?: number | null
+  if_speed?: number | null
+  admin_status?: string | null
+  oper_status?: string | null
+  monitored?: boolean | null
+}
+
+const IFACE_OTHER = '__other__'
+const SPEED_OTHER = '__other__'
+
+function ifaceLabel(i: DeviceInterface) {
+  return i.if_name || i.if_descr || `ifIndex ${i.if_index}`
+}
+
+function findIface(list: DeviceInterface[] | undefined, name: string): DeviceInterface | null {
+  if (!list || !name) return null
+  return list.find((i) => ifaceLabel(i) === name) || null
+}
+
+function detectLinkKindFromIface(iface: DeviceInterface | null, name: string): LinkKind {
+  const n = name.toLowerCase()
+  const t = iface?.if_type
+
+  if (/wlan|wifi|wireless|802\.11|radio/.test(n)) return 'wireless'
+  if (/tunnel|ipsec|gre|wg-|vpn|vti|st0|ipip/.test(n)) return 'vpn'
+  if (/port-channel|portchannel|po\d|lag|bond|ae\d|802\.1q|trunk|bundle/.test(n)) return 'trunk'
+  if (/serial|console|tty|ppp|async|vty/.test(n)) return 'serial'
+  if (/sfp|xfp|qsfp|fiber|fibre|optic|optical|ten[- ]?gig|tengig|xe-|et-\d/.test(n)) return 'fiber'
+
+  if (t === 71) return 'wireless'
+  if (t === 131 || t === 169 || t === 142) return 'vpn'
+  if (t === 161) return 'trunk'
+  if (t === 135 || t === 136) return 'trunk'
+  if (t === 23 || t === 32) return 'serial'
+  if (t === 250 || t === 219) return 'fiber'
+
+  return 'ethernet'
+}
+
+function inferLinkKind(
+  srcIf: DeviceInterface | null,
+  dstIf: DeviceInterface | null,
+  srcName: string,
+  dstName: string,
+): LinkKind {
+  const kinds = [
+    detectLinkKindFromIface(srcIf, srcName),
+    detectLinkKindFromIface(dstIf, dstName),
+  ]
+  const priority: LinkKind[] = ['fiber', 'wireless', 'vpn', 'trunk', 'serial', 'ethernet']
+  for (const k of priority) {
+    if (kinds.includes(k)) return k
+  }
+  return 'ethernet'
+}
+
+function inferSpeedFromBps(bps: number | null | undefined): { preset: LinkSpeed | ''; custom: string } {
+  if (!bps || bps <= 0) return { preset: '', custom: '' }
+
+  const tiers: { bps: number; label: LinkSpeed }[] = [
+    { bps: 100_000_000_000, label: '100G' },
+    { bps: 40_000_000_000, label: '40G' },
+    { bps: 25_000_000_000, label: '25G' },
+    { bps: 10_000_000_000, label: '10G' },
+    { bps: 2_500_000_000, label: '2.5G' },
+    { bps: 1_000_000_000, label: '1G' },
+    { bps: 100_000_000, label: '100M' },
+    { bps: 10_000_000, label: '10M' },
+  ]
+
+  let best: { label: LinkSpeed; diff: number } | null = null
+  for (const tier of tiers) {
+    const diff = Math.abs(bps - tier.bps)
+    if (!best || diff < best.diff) best = { label: tier.label, diff }
+    if (diff / tier.bps <= 0.12) return { preset: tier.label, custom: '' }
+  }
+  if (best && best.diff / bps <= 0.12) return { preset: best.label, custom: '' }
+  return { preset: SPEED_OTHER, custom: formatBps(bps) }
+}
+
+function inferLinkProps(
+  srcIf: DeviceInterface | null,
+  dstIf: DeviceInterface | null,
+  srcName: string,
+  dstName: string,
+) {
+  const kind = inferLinkKind(srcIf, dstIf, srcName, dstName)
+  const speeds = [srcIf?.if_speed, dstIf?.if_speed].filter((v): v is number => !!v && v > 0)
+  const bps = speeds.length ? Math.min(...speeds) : null
+  const { preset, custom } = inferSpeedFromBps(bps)
+  return { kind, speedPreset: preset, speedCustom: custom }
+}
+
+function resolveSpeedValue(preset: LinkSpeed | '', custom: string): LinkSpeed | '' {
+  if (preset === SPEED_OTHER) return custom.trim() || ''
+  return preset
+}
+
+function parseStoredSpeed(speed: LinkSpeed | null | undefined): { preset: LinkSpeed | ''; custom: string } {
+  if (!speed) return { preset: '', custom: '' }
+  if (LINK_SPEEDS.includes(speed as LinkSpeed)) return { preset: speed, custom: '' }
+  return { preset: SPEED_OTHER, custom: speed }
+}
+
+function sortInterfaces(list: DeviceInterface[]) {
+  return [...list].sort((a, b) => {
+    const aUp = a.oper_status === 'up' ? 0 : 1
+    const bUp = b.oper_status === 'up' ? 0 : 1
+    if (aUp !== bUp) return aUp - bUp
+    return ifaceLabel(a).localeCompare(ifaceLabel(b))
+  })
+}
+
+function useDeviceInterfaces(deviceId: string | undefined) {
+  return useQuery<DeviceInterface[]>({
+    queryKey: ['device-interfaces', deviceId],
+    enabled: !!deviceId,
+    queryFn: async () => sortInterfaces((await api.get(`/devices/${deviceId}/interfaces`)).data),
+    staleTime: 60_000,
+  })
+}
+
+function DeviceInterfaceSelect({
+  deviceId,
+  hostname,
+  value,
+  disabled,
+  onChange,
+  autoFocus,
+}: {
+  deviceId: string
+  hostname: string
+  value: string
+  disabled?: boolean
+  onChange: (value: string) => void
+  autoFocus?: boolean
+}) {
+  const q = useDeviceInterfaces(deviceId)
+  const ifaces = q.data || []
+  const listed = value ? ifaces.some((i) => ifaceLabel(i) === value) : false
+  const [mode, setMode] = useState<'none' | 'snmp' | 'custom'>(() => {
+    if (!value) return 'none'
+    return listed ? 'snmp' : 'custom'
+  })
+  const [custom, setCustom] = useState(listed ? '' : value)
+
+  useEffect(() => {
+    if (!value) {
+      setMode('none')
+      setCustom('')
+      return
+    }
+    if (ifaces.some((i) => ifaceLabel(i) === value)) {
+      setMode('snmp')
+      return
+    }
+    setMode('custom')
+    setCustom(value)
+  }, [value, ifaces])
+
+  const selectValue = mode === 'custom' ? IFACE_OTHER : value
+
+  return (
+    <FormField label={`${hostname} interface`} hint={q.isLoading ? 'Loading SNMP interfaces…' : `${ifaces.length} interfaces`}>
+      <select
+        autoFocus={autoFocus && mode !== 'custom'}
+        value={selectValue}
+        disabled={disabled || q.isLoading}
+        onChange={(e) => {
+          const v = e.target.value
+          if (v === IFACE_OTHER) {
+            setMode('custom')
+            onChange(custom)
+            return
+          }
+          if (!v) {
+            setMode('none')
+            setCustom('')
+            onChange('')
+            return
+          }
+          setMode('snmp')
+          onChange(v)
+        }}
+        className="h-9 w-full rounded-md border border-border bg-surface px-2 text-xs text-text outline-none focus:border-primary/60 disabled:opacity-50"
+      >
+        <option value="">{q.isLoading ? 'Loading interfaces…' : '— select interface —'}</option>
+        {ifaces.map((i) => {
+          const name = ifaceLabel(i)
+          const alias = i.if_alias ? ` · ${i.if_alias}` : ''
+          const status = i.oper_status && i.oper_status !== 'up' ? ` · ${i.oper_status}` : ''
+          return (
+            <option key={i.if_index} value={name}>
+              {name}{alias}{status}
+            </option>
+          )
+        })}
+        <option value={IFACE_OTHER}>Other (custom…)</option>
+      </select>
+      {mode === 'custom' && (
+        <Input
+          autoFocus={autoFocus}
+          value={custom}
+          disabled={disabled}
+          placeholder="Custom label — map-only, no SNMP match"
+          className="mt-1.5 h-8 text-xs"
+          onChange={(e) => {
+            setCustom(e.target.value)
+            onChange(e.target.value)
+          }}
+        />
+      )}
+    </FormField>
+  )
+}
+
+function LinkSpeedSelect({
+  preset,
+  custom,
+  autoDetected,
+  disabled,
+  onChange,
+}: {
+  preset: LinkSpeed | ''
+  custom: string
+  autoDetected?: boolean
+  disabled?: boolean
+  onChange: (preset: LinkSpeed | '', custom: string) => void
+}) {
+  const selectVal = preset === SPEED_OTHER || (preset && !LINK_SPEEDS.includes(preset as LinkSpeed))
+    ? SPEED_OTHER
+    : preset
+
+  return (
+    <FormField
+      label="Speed"
+      hint={autoDetected ? 'Auto-detected from interface speed' : undefined}
+    >
+      <select
+        value={selectVal}
+        disabled={disabled}
+        onChange={(e) => {
+          const v = e.target.value as LinkSpeed | ''
+          if (v === SPEED_OTHER) onChange(SPEED_OTHER, custom)
+          else onChange(v, '')
+        }}
+        className="h-9 w-full rounded-md border border-border bg-surface px-2 text-xs text-text outline-none focus:border-primary/60 disabled:opacity-50"
+      >
+        <option value="">— none —</option>
+        {LINK_SPEEDS.map((s) => (
+          <option key={s} value={s}>{s}</option>
+        ))}
+        <option value={SPEED_OTHER}>Other…</option>
+      </select>
+      {selectVal === SPEED_OTHER && (
+        <Input
+          value={custom}
+          disabled={disabled}
+          placeholder="e.g. 400G, 1 Tbps, unknown"
+          className="mt-1.5 h-8 text-xs font-mono"
+          onChange={(e) => onChange(SPEED_OTHER, e.target.value)}
+        />
+      )}
+    </FormField>
+  )
+}
+
 type ManualMapLink = {
   id: string
   map_id: string
@@ -184,129 +434,27 @@ type ManualMapLink = {
   metadata?: LinkMetadata | null
 }
 
-type ShapeKind =
-  | 'rectangle' | 'circle' | 'text'
-  | 'line' | 'arrow' | 'diamond' | 'hexagon' | 'sticky'
-
-type ShapeMetadata = {
-  font_size?: number | null         // px-equivalent (1..6 viewBox units)
-  font_weight?: 'normal' | 'semibold' | 'bold' | null
-  font_color?: string | null
-  rotation?: number | null          // degrees, applied around shape center
-  opacity?: number | null           // 0.1..1.0
-  stroke_width?: number | null      // viewBox units, default 0.35
-  stroke_dash?: string | null       // SVG dasharray, e.g. "2 1"
-}
-
-type ManualMapShape = {
-  id: string
-  map_id: string
-  kind: ShapeKind
-  x_pct: number   // center
-  y_pct: number   // center
-  w_pct: number
-  h_pct: number
-  text?: string | null
-  fill?: string | null
-  stroke?: string | null
-  z_index: number
-  metadata?: ShapeMetadata | null
-}
-
-type ShapeRect = { x_pct: number; y_pct: number; w_pct: number; h_pct: number }
-
-// MapMetadata is the per-map UI state we want to persist across browsers:
-// background image, theme, and snap settings live here.
-type MapTheme = 'default' | 'dark' | 'blueprint' | 'light' | 'graph'
-
-type MapBackground = {
-  url?: string | null              // image URL (http(s) or data:image/*;base64,…)
-  opacity?: number | null          // 0..1, default 0.35
-  fit?: 'cover' | 'contain' | 'stretch' | null
-}
-
-type MapMetadata = {
-  theme?: MapTheme | null
-  background?: MapBackground | null
-  snap_enabled?: boolean | null
-  snap_size?: number | null        // grid spacing in percent (1..10)
-  default_link_shape?: LinkShape | null
+type SuggestedLink = {
+  source_node_id: string
+  target_node_id: string
+  source_hostname: string
+  target_hostname: string
+  src_interface: string | null
+  dst_interface: string | null
+  protocol: string | null
+  confidence: number | null
+  physical_links: number
 }
 
 type ManualMapDetail = ManualMapListItem & {
   summary: {
     nodes: number
     links: number
-    shapes?: number
     status_counts: Record<string, number>
     generated_at: string
   }
-  metadata?: MapMetadata | null
   nodes: ManualMapNode[]
   links: ManualMapLink[]
-  shapes?: ManualMapShape[]
-}
-
-const SHAPE_DEFAULTS: Record<ShapeKind, { w: number; h: number; text: string; fill: string; stroke: string }> = {
-  rectangle: { w: 22, h: 14, text: 'Zone',     fill: 'rgba(59,130,246,0.10)', stroke: '#3b82f6' },
-  circle:    { w: 16, h: 16, text: '',         fill: 'rgba(168,85,247,0.10)', stroke: '#a855f7' },
-  text:      { w: 14, h: 5,  text: 'Label',    fill: 'transparent',          stroke: 'transparent' },
-  line:      { w: 22, h: 0.5, text: '',        fill: 'transparent',          stroke: '#64748b' },
-  arrow:     { w: 22, h: 0.5, text: '',        fill: 'transparent',          stroke: '#0ea5e9' },
-  diamond:   { w: 18, h: 14,  text: 'Decision', fill: 'rgba(244,114,182,0.10)', stroke: '#ec4899' },
-  hexagon:   { w: 18, h: 16,  text: 'Region',  fill: 'rgba(16,185,129,0.10)', stroke: '#10b981' },
-  sticky:    { w: 14, h: 9,   text: 'Note',    fill: '#fef3c7',              stroke: '#f59e0b' },
-}
-
-// Curated swatch palette — 12 well-spaced hues chosen to read on both light
-// and dark backgrounds. The first entry ('') means "use default" and is
-// rendered as a slash through the chip.
-const COLOR_SWATCHES: { value: string; label: string }[] = [
-  { value: '',         label: 'Default' },
-  { value: '#ef4444',  label: 'Red' },
-  { value: '#f97316',  label: 'Orange' },
-  { value: '#f59e0b',  label: 'Amber' },
-  { value: '#84cc16',  label: 'Lime' },
-  { value: '#10b981',  label: 'Emerald' },
-  { value: '#14b8a6',  label: 'Teal' },
-  { value: '#06b6d4',  label: 'Cyan' },
-  { value: '#3b82f6',  label: 'Blue' },
-  { value: '#6366f1',  label: 'Indigo' },
-  { value: '#8b5cf6',  label: 'Violet' },
-  { value: '#ec4899',  label: 'Pink' },
-  { value: '#64748b',  label: 'Slate' },
-]
-
-const NODE_SHAPE_VARIANTS: { value: NodeShapeVariant; label: string }[] = [
-  { value: 'disc',    label: 'Disc' },
-  { value: 'square',  label: 'Square' },
-  { value: 'rounded', label: 'Rounded' },
-  { value: 'hex',     label: 'Hex' },
-  { value: 'diamond', label: 'Diamond' },
-  { value: 'cloud',   label: 'Cloud' },
-]
-
-const MAP_THEMES: { value: MapTheme; label: string; hint: string }[] = [
-  { value: 'default',   label: 'Default',   hint: 'Soft grid on surface' },
-  { value: 'dark',      label: 'Dark',      hint: 'Inky backdrop · high contrast' },
-  { value: 'light',     label: 'Light',     hint: 'Pure white · presentation mode' },
-  { value: 'blueprint', label: 'Blueprint', hint: 'Engineering schematic' },
-  { value: 'graph',     label: 'Graph',     hint: 'Subtle bold grid' },
-]
-
-const THEME_STYLES: Record<MapTheme, { bg: string; gridFine: string; gridMajor: string; text: string }> = {
-  default:   { bg: 'transparent',            gridFine: 'rgba(148,163,184,0.10)', gridMajor: 'rgba(148,163,184,0.18)', text: 'inherit' },
-  dark:      { bg: 'rgb(9 13 22)',           gridFine: 'rgba(148,163,184,0.07)', gridMajor: 'rgba(148,163,184,0.14)', text: 'rgb(228 231 240)' },
-  light:     { bg: 'rgb(252 252 253)',       gridFine: 'rgba(15,23,42,0.06)',    gridMajor: 'rgba(15,23,42,0.10)',    text: 'rgb(15 23 42)' },
-  blueprint: { bg: 'rgb(15 50 110)',         gridFine: 'rgba(186,230,253,0.18)', gridMajor: 'rgba(186,230,253,0.30)', text: 'rgb(224 242 254)' },
-  graph:     { bg: 'rgb(250 245 235)',       gridFine: 'rgba(45,55,72,0.10)',    gridMajor: 'rgba(45,55,72,0.22)',    text: 'rgb(45 55 72)' },
-}
-
-// Snap helper — used both during drag and on pointer-up so the in-flight
-// preview already matches where the node will land.
-function snapPct(v: number, step: number, enabled: boolean): number {
-  if (!enabled || step <= 0) return v
-  return Math.round(v / step) * step
 }
 
 type Device = {
@@ -349,6 +497,10 @@ const TYPE_TO_ICON: Record<string, IconKey> = {
 }
 
 const STATUS_ORDER: NodeStatus[] = ['down', 'degraded', 'maintenance', 'unknown', 'up']
+
+// Default label anchor: centred just below the device icon box.
+const NODE_LABEL_TOP = 38
+const NODE_ICON_H = 56 // px — keep leader-line math in sync with h-14
 
 // Link kinds — each gets a distinct visual treatment on the canvas.
 const LINK_KINDS: { value: LinkKind; label: string; hint: string }[] = [
@@ -522,6 +674,43 @@ function _buildOrthogonal(ax: number, ay: number, bx: number, by: number, waypoi
   }
 }
 
+function linkPerpUnit(ax: number, ay: number, bx: number, by: number) {
+  const dx = bx - ax
+  const dy = by - ay
+  const len = Math.hypot(dx, dy) || 1
+  return { nx: -dy / len, ny: dx / len }
+}
+
+function applyParallelOffset(
+  ax: number, ay: number, bx: number, by: number,
+  waypoints: Waypoint[],
+  parallelOffset: number,
+  perpRef?: { ax: number; ay: number; bx: number; by: number },
+) {
+  if (!parallelOffset) return { ax, ay, bx, by, waypoints }
+  const ref = perpRef || { ax, ay, bx, by }
+  const { nx, ny } = linkPerpUnit(ref.ax, ref.ay, ref.bx, ref.by)
+  return {
+    ax: ax + nx * parallelOffset,
+    ay: ay + ny * parallelOffset,
+    bx: bx + nx * parallelOffset,
+    by: by + ny * parallelOffset,
+    waypoints: waypoints.map((w) => ({
+      x_pct: w.x_pct + nx * parallelOffset,
+      y_pct: w.y_pct + ny * parallelOffset,
+    })),
+  }
+}
+
+function canonicalPerpRef(
+  sourceId: string,
+  targetId: string,
+  ax: number, ay: number, bx: number, by: number,
+) {
+  if (sourceId < targetId) return { ax, ay, bx, by }
+  return { ax: bx, ay: by, bx: ax, by: ay }
+}
+
 // Build an SVG path + annotation anchors (near-source, mid, near-target)
 // for any of the supported link shapes. Output is shape-agnostic so the
 // rendering pipeline can swap shape without other code changes.
@@ -529,7 +718,16 @@ function edgePath(
   shape: LinkShape,
   ax: number, ay: number, bx: number, by: number,
   waypoints: Waypoint[] = [],
+  parallelOffset = 0,
+  perpRef?: { ax: number; ay: number; bx: number; by: number },
 ): EdgePathResult {
+  const shifted = applyParallelOffset(ax, ay, bx, by, waypoints, parallelOffset, perpRef)
+  ax = shifted.ax
+  ay = shifted.ay
+  bx = shifted.bx
+  by = shifted.by
+  waypoints = shifted.waypoints
+
   if (shape === 'straight') {
     const mx = (ax + bx) / 2
     const my = (ay + by) / 2
@@ -546,7 +744,6 @@ function edgePath(
   if (shape === 'orthogonal') {
     return _buildOrthogonal(ax, ay, bx, by, waypoints)
   }
-  // Default: curve
   const c = linkPath(ax, ay, bx, by)
   const mid = pointOnQuadratic(ax, ay, c.cx, c.cy, bx, by, 0.5)
   const near = pointOnQuadratic(ax, ay, c.cx, c.cy, bx, by, 0.14)
@@ -557,6 +754,225 @@ function edgePath(
     segments: [{ ax, ay, bx, by, horizontal: Math.abs(ay - by) < 0.01 }],
     vertices: [{ x: ax, y: ay }, { x: bx, y: by }],
   }
+}
+
+type PathPoint = { x: number; y: number }
+type IfaceAnchor = { x: number; y: number; angle: number; textAnchor: 'start' | 'end' }
+
+const IFACE_LABEL_BASE_OFFSET = 4.2   // canvas % along cable — small gap past device edge
+const IFACE_LABEL_STAGGER = 1.6       // extra distance per link sharing a node
+
+function samplePolyline(vertices: PathPoint[], steps: number): PathPoint[] {
+  if (vertices.length < 2) return vertices.slice()
+  const edgeLens = vertices.slice(1).map((v, i) => Math.hypot(v.x - vertices[i].x, v.y - vertices[i].y))
+  const total = edgeLens.reduce((s, l) => s + l, 0) || 1
+  const pts: PathPoint[] = []
+  for (let i = 0; i <= steps; i++) {
+    const target = (i / steps) * total
+    let acc = 0
+    for (let j = 0; j < edgeLens.length; j++) {
+      if (acc + edgeLens[j] >= target || j === edgeLens.length - 1) {
+        const local = edgeLens[j] > 0 ? (target - acc) / edgeLens[j] : 0
+        const a = vertices[j]
+        const b = vertices[j + 1]
+        pts.push({ x: a.x + (b.x - a.x) * local, y: a.y + (b.y - a.y) * local })
+        break
+      }
+      acc += edgeLens[j]
+    }
+  }
+  return pts
+}
+
+function buildPathSamples(
+  shape: LinkShape,
+  ax: number, ay: number, bx: number, by: number,
+  waypoints: Waypoint[],
+  steps = 48,
+  parallelOffset = 0,
+  perpRef?: { ax: number; ay: number; bx: number; by: number },
+): { points: PathPoint[]; total: number } {
+  const shifted = applyParallelOffset(ax, ay, bx, by, waypoints, parallelOffset, perpRef)
+  ax = shifted.ax
+  ay = shifted.ay
+  bx = shifted.bx
+  by = shifted.by
+  waypoints = shifted.waypoints
+
+  let points: PathPoint[]
+  if (shape === 'curve') {
+    const c = linkPath(ax, ay, bx, by)
+    points = []
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps
+      points.push(pointOnQuadratic(ax, ay, c.cx, c.cy, bx, by, t))
+    }
+  } else if (shape === 'straight') {
+    points = []
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps
+      points.push({ x: ax + (bx - ax) * t, y: ay + (by - ay) * t })
+    }
+  } else {
+    points = samplePolyline(_buildOrthogonal(ax, ay, bx, by, waypoints).vertices, steps)
+  }
+  let total = 0
+  for (let i = 1; i < points.length; i++) {
+    total += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y)
+  }
+  return { points, total: total || 1 }
+}
+
+function cableLabelAngle(dx: number, dy: number, fromEnd: boolean): { angle: number; textAnchor: 'start' | 'end' } {
+  let angle = Math.atan2(dy, dx) * (180 / Math.PI)
+  if (fromEnd) angle += 180
+  let textAnchor: 'start' | 'end' = 'start'
+  while (angle > 180) angle -= 360
+  while (angle <= -180) angle += 360
+  if (angle > 90 || angle < -90) {
+    angle += 180
+    textAnchor = 'end'
+  }
+  return { angle, textAnchor }
+}
+
+function anchorAtPathDistance(
+  points: PathPoint[],
+  dist: number,
+  fromEnd: boolean,
+): IfaceAnchor {
+  const cum: number[] = [0]
+  for (let i = 1; i < points.length; i++) {
+    cum.push(cum[i - 1] + Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y))
+  }
+  const total = cum[cum.length - 1] || 1
+  const target = fromEnd ? Math.max(0, total - dist) : Math.min(total, dist)
+
+  let seg = 1
+  while (seg < cum.length && cum[seg] < target) seg++
+  const i0 = seg - 1
+  const segLen = cum[seg] - cum[i0] || 1
+  const local = (target - cum[i0]) / segLen
+  const p0 = points[i0]
+  const p1 = points[Math.min(seg, points.length - 1)]
+  const x = p0.x + (p1.x - p0.x) * local
+  const y = p0.y + (p1.y - p0.y) * local
+
+  let bestIdx = 0
+  let bestD = Infinity
+  for (let i = 0; i < points.length; i++) {
+    const d = Math.hypot(points[i].x - x, points[i].y - y)
+    if (d < bestD) { bestD = d; bestIdx = i }
+  }
+  const prev = Math.max(0, bestIdx - 1)
+  const next = Math.min(points.length - 1, bestIdx + 1)
+  const { angle, textAnchor } = cableLabelAngle(
+    points[next].x - points[prev].x,
+    points[next].y - points[prev].y,
+    fromEnd,
+  )
+  return { x, y, angle, textAnchor }
+}
+
+function linkPairKey(a: string, b: string) {
+  return a < b ? `${a}|${b}` : `${b}|${a}`
+}
+
+const PARALLEL_LINK_GAP = 2.2   // canvas % between parallel cables on the same node pair
+
+function computeLinkParallelOffsets(links: ManualMapLink[]): Map<string, number> {
+  const groups = new Map<string, ManualMapLink[]>()
+  for (const link of links) {
+    const key = linkPairKey(link.source_node_id, link.target_node_id)
+    const g = groups.get(key) || []
+    g.push(link)
+    groups.set(key, g)
+  }
+  const out = new Map<string, number>()
+  for (const g of groups.values()) {
+    if (g.length < 2) continue
+    g.sort((a, b) => a.id.localeCompare(b.id))
+    g.forEach((link, i) => {
+      out.set(link.id, (i - (g.length - 1) / 2) * PARALLEL_LINK_GAP)
+    })
+  }
+  return out
+}
+
+function computeLinkIfaceLabelPositions(
+  links: ManualMapLink[],
+  positionOf: (nodeId: string) => { x_pct: number; y_pct: number } | null,
+  waypointsOf: (link: ManualMapLink) => Waypoint[],
+  parallelOffsets: Map<string, number>,
+): Map<string, { src?: IfaceAnchor; dst?: IfaceAnchor }> {
+  type EndRef = { linkId: string; side: 'src' | 'dst'; link: ManualMapLink }
+  const pathByLink = new Map<string, { points: PathPoint[]; total: number }>()
+  const endsByNode = new Map<string, EndRef[]>()
+  const linkById = new Map(links.map((l) => [l.id, l]))
+
+  for (const link of links) {
+    const source = positionOf(link.source_node_id)
+    const target = positionOf(link.target_node_id)
+    if (!source || !target) continue
+
+    const shape = linkShape(link)
+    const perpRef = canonicalPerpRef(
+      link.source_node_id, link.target_node_id,
+      source.x_pct, source.y_pct, target.x_pct, target.y_pct,
+    )
+    const samples = buildPathSamples(
+      shape, source.x_pct, source.y_pct, target.x_pct, target.y_pct,
+      waypointsOf(link), 48, parallelOffsets.get(link.id) || 0, perpRef,
+    )
+    pathByLink.set(link.id, samples)
+
+    const srcEnds = endsByNode.get(link.source_node_id) || []
+    srcEnds.push({ linkId: link.id, side: 'src', link })
+    endsByNode.set(link.source_node_id, srcEnds)
+
+    const dstEnds = endsByNode.get(link.target_node_id) || []
+    dstEnds.push({ linkId: link.id, side: 'dst', link })
+    endsByNode.set(link.target_node_id, dstEnds)
+  }
+
+  const out = new Map<string, { src?: IfaceAnchor; dst?: IfaceAnchor }>()
+
+  for (const ends of endsByNode.values()) {
+    ends.sort((a, b) => {
+      const la = linkById.get(a.linkId)
+      const lb = linkById.get(b.linkId)
+      if (!la || !lb) return 0
+      const sa = positionOf(la.source_node_id)
+      const ta = positionOf(la.target_node_id)
+      const sb = positionOf(lb.source_node_id)
+      const tb = positionOf(lb.target_node_id)
+      if (!sa || !ta || !sb || !tb) return 0
+      const angA = Math.atan2(ta.y_pct - sa.y_pct, ta.x_pct - sa.x_pct)
+      const angB = Math.atan2(tb.y_pct - sb.y_pct, tb.x_pct - sb.x_pct)
+      return angA - angB
+    })
+    ends.forEach((end, idx) => {
+      const path = pathByLink.get(end.linkId)
+      if (!path) return
+
+      const labelStyle = end.side === 'src'
+        ? end.link.metadata?.src_label
+        : end.link.metadata?.dst_label
+
+      const rawDist = IFACE_LABEL_BASE_OFFSET + idx * IFACE_LABEL_STAGGER
+      const dist = labelStyle?.dist != null
+        ? Math.max(1, Math.min(labelStyle.dist, path.total * 0.45))
+        : Math.max(3, Math.min(rawDist, path.total * 0.32))
+      const anchor = anchorAtPathDistance(path.points, dist, end.side === 'dst')
+
+      const entry = out.get(end.linkId) || {}
+      if (end.side === 'src') entry.src = anchor
+      else entry.dst = anchor
+      out.set(end.linkId, entry)
+    })
+  }
+
+  return out
 }
 
 function linkWaypoints(link: ManualMapLink): Waypoint[] {
@@ -609,59 +1025,6 @@ function iconForNode(node: { icon?: string; device_type?: string }): IconKey {
   return TYPE_TO_ICON[node.device_type || 'other'] || 'other'
 }
 
-// Return the user-supplied node color or null if none. Validates lightly so
-// a bogus string can't leak into inline styles.
-function nodeColor(node: ManualMapNode): string | null {
-  const c = (node.metadata?.color || '').trim()
-  if (!c) return null
-  // Allow #abc, #aabbcc, #aabbccdd, rgb(...), rgba(...). Reject anything else.
-  if (/^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(c)) return c
-  if (/^rgba?\([\d.\s,/%]+\)$/i.test(c)) return c
-  return null
-}
-
-function nodeShapeVariant(node: ManualMapNode): NodeShapeVariant {
-  const v = node.metadata?.shape_variant
-  if (v && ['disc','square','rounded','hex','diamond','cloud'].includes(v)) return v
-  return 'disc'
-}
-
-function nodeLabelPos(node: ManualMapNode): NodeLabelPos {
-  const v = node.metadata?.label_pos
-  if (v && ['bottom','top','right','left','hidden'].includes(v)) return v
-  return 'bottom'
-}
-
-function isNodeLocked(node: ManualMapNode): boolean {
-  return Boolean(node.metadata?.locked)
-}
-
-function linkColor(link: ManualMapLink): string | null {
-  const c = (link.metadata?.color || '').trim()
-  if (!c) return null
-  if (/^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(c)) return c
-  if (/^rgba?\([\d.\s,/%]+\)$/i.test(c)) return c
-  return null
-}
-
-function linkArrow(link: ManualMapLink): LinkArrow {
-  const a = link.metadata?.arrow
-  if (a === 'forward' || a === 'backward' || a === 'both' || a === 'none') return a
-  return 'none'
-}
-
-function linkThickness(link: ManualMapLink): number {
-  const t = link.metadata?.thickness
-  if (typeof t === 'number' && isFinite(t)) return Math.max(0.4, Math.min(t, 3.5))
-  return 1
-}
-
-function linkOpacity(link: ManualMapLink): number {
-  const o = link.metadata?.opacity
-  if (typeof o === 'number' && isFinite(o)) return Math.max(0.1, Math.min(o, 1))
-  return 0.7
-}
-
 /* ── Page ─────────────────────────────────────────────────────── */
 
 export function ManualMapsPage() {
@@ -671,11 +1034,7 @@ export function ManualMapsPage() {
 
   // UI state
   const [mode, setMode] = useState<'design' | 'live'>('design')
-  const [tool, setTool] = useState<
-    'select' | 'connect' |
-    'shape-rectangle' | 'shape-circle' | 'shape-text' |
-    'shape-line' | 'shape-arrow' | 'shape-diamond' | 'shape-hexagon' | 'shape-sticky'
-  >('select')
+  const [tool, setTool] = useState<'select' | 'connect'>('select')
   const [paletteOpen, setPaletteOpen] = useState(true)
   const [inspectorOpen, setInspectorOpen] = useState(true)
   const [createOpen, setCreateOpen] = useState(false)
@@ -683,12 +1042,8 @@ export function ManualMapsPage() {
   const [newMap, setNewMap] = useState({ name: '', description: '' })
   const [paletteSearch, setPaletteSearch] = useState('')
   const [paletteStatus, setPaletteStatus] = useState<'all' | NodeStatus>('all')
-  // Multi-selection. While `selectedNodeId` is the "primary" node (the one
-  // whose properties show in the inspector), `multiSelectedNodeIds`
-  // contains every node currently in the selection set — including the
-  // primary. Shift-click toggles a node in the set; clicking empty canvas
-  // clears it. Drag/delete operations target the whole set.
-  const [multiSelectedNodeIds, setMultiSelectedNodeIds] = useState<Set<string>>(new Set())
+  const [noc, setNoc] = useState(false)          // NOC fullscreen / video-wall mode
+  const [rotate, setRotate] = useState(false)    // auto-rotate through maps in NOC mode
 
   // Canvas state
   const [view, setView] = useState({ x: 0, y: 0, zoom: 1 })
@@ -697,12 +1052,6 @@ export function ManualMapsPage() {
   const [labelDraft, setLabelDraft] = useState('')
   const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null)
   const [draftPositions, setDraftPositions] = useState<Record<string, { x_pct: number; y_pct: number }>>({})
-  // Node resize via corner-handle drag. We track the in-flight scale as a
-  // draft and only PATCH on pointer-up — same approach as draftPositions.
-  const [draggingResize, setDraggingResize] = useState<
-    { id: string; startClientX: number; startClientY: number; startScale: number } | null
-  >(null)
-  const [draftScales, setDraftScales] = useState<Record<string, number>>({})
   const [connectFrom, setConnectFrom] = useState<string | null>(null)
   const [connectCursor, setConnectCursor] = useState<{ x_pct: number; y_pct: number } | null>(null)
   const [linkWizard, setLinkWizard] = useState<{ source: string; target: string } | null>(null)
@@ -712,16 +1061,8 @@ export function ManualMapsPage() {
   // Live, in-flight waypoint edits per link. Mirrors `draftPositions` for nodes:
   // we don't hit the network on every pointer-move; we commit on pointer-up.
   const [draftWaypoints, setDraftWaypoints] = useState<Record<string, Waypoint[]>>({})
+  const [draftLabelOffsets, setDraftLabelOffsets] = useState<Record<string, { dx: number; dy: number }>>({})
   const [draggingWaypoint, setDraggingWaypoint] = useState<{ linkId: string; index: number } | null>(null)
-  // Shape (rectangle/circle/text annotation) editing state. Same draft pattern:
-  // mid-drag rects live here; backend PATCH only happens on pointer-up.
-  const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null)
-  const [draftShapes, setDraftShapes] = useState<Record<string, ShapeRect>>({})
-  const [draggingShape, setDraggingShape] = useState<
-    | { id: string; mode: 'move'; startClientX: number; startClientY: number; startRect: ShapeRect }
-    | { id: string; mode: 'resize'; startClientX: number; startClientY: number; startRect: ShapeRect }
-    | null
-  >(null)
   const canvasRef = useRef<HTMLDivElement>(null)
 
   /* ── Data ───────────────────────────────────────────────────── */
@@ -758,16 +1099,19 @@ export function ManualMapsPage() {
   })
   const liveById = liveLinksQuery.data?.data || {}
 
+  // LLDP/CDP link assistance — discovered adjacencies among placed devices
+  // that aren't manually linked yet. Surfaced as "ghost" links + one-click add.
+  const suggestedLinksQuery = useQuery<{ data: SuggestedLink[]; count: number }>({
+    queryKey: ['manual-map-suggested', selectedMapId],
+    enabled: !!selectedMapId && mode === 'design',
+    queryFn: async () => (await api.get(`/maps/${selectedMapId}/suggested-links`)).data,
+    refetchInterval: 20_000,
+  })
+  const suggestedLinks = mode === 'design' ? (suggestedLinksQuery.data?.data || []) : []
+
   const detail = mapQuery.data || null
   const nodes = detail?.nodes || []
   const links = detail?.links || []
-  const mapMeta: MapMetadata = (detail?.metadata as MapMetadata | null) || {}
-  const theme: MapTheme = (mapMeta.theme || 'default') as MapTheme
-  const themeStyle = THEME_STYLES[theme] || THEME_STYLES.default
-  const snapEnabled = Boolean(mapMeta.snap_enabled)
-  const snapSize = clamp(mapMeta.snap_size || 2, 0.5, 10)
-  const mapBackground = mapMeta.background || null
-
   const nodeMap = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes])
   const selectedNode = selectedNodeId ? nodeMap.get(selectedNodeId) || null : null
   const currentMap = selectedMapId ? maps.find((map) => map.id === selectedMapId) || detail : null
@@ -830,6 +1174,30 @@ export function ManualMapsPage() {
     if (selectedLinkId && !links.some((l) => l.id === selectedLinkId)) setSelectedLinkId(null)
   }, [links, selectedLinkId])
 
+  // NOC mode forces live (weathermap), hides the app sidebar for a clean wall
+  // display, and is exited with Esc.
+  useEffect(() => {
+    if (!noc) { setRotate(false); return }
+    setMode('live')
+    const aside = document.querySelector('aside') as HTMLElement | null
+    const prev = aside?.style.display ?? ''
+    if (aside) aside.style.display = 'none'
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') setNoc(false) }
+    window.addEventListener('keydown', h)
+    return () => { window.removeEventListener('keydown', h); if (aside) aside.style.display = prev }
+  }, [noc])
+
+  // Multi-map rotation/carousel: cycle through maps while NOC + rotate are on.
+  useEffect(() => {
+    if (!noc || !rotate || maps.length < 2) return
+    const id = setInterval(() => {
+      const idx = maps.findIndex((m) => m.id === selectedMapId)
+      const next = maps[(idx + 1) % maps.length]
+      if (next) selectMap(next.id)
+    }, 15_000)
+    return () => clearInterval(id)
+  }, [noc, rotate, maps, selectedMapId])
+
   // Keyboard shortcuts
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -843,27 +1211,8 @@ export function ManualMapsPage() {
       }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (mode === 'design') {
-          if (selectedShapeId) deleteShape.mutate(selectedShapeId)
-          else if (selectedLinkId) deleteLink.mutate(selectedLinkId)
-          else if (multiSelectedNodeIds.size > 1) {
-            // Bulk delete — each PATCH is independent.
-            for (const id of multiSelectedNodeIds) {
-              if (!isNodeLocked(nodeMap.get(id) || ({} as ManualMapNode))) deleteNode.mutate(id)
-            }
-            setMultiSelectedNodeIds(new Set())
-          }
-          else if (selectedNode && !isNodeLocked(selectedNode)) deleteNode.mutate(selectedNode.id)
-        }
-      }
-      if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) {
-        e.preventDefault()
-        if (mode === 'design' && selectedNode) {
-          // Duplicate: place a copy 4% to the right of the original, same icon
-          // and metadata. The user can pick a different device after.
-          // Since each manual_map_node row is tied to a single device, we
-          // can't literally clone — instead, we just nudge the user to add
-          // another device from the palette. So for now, toast and skip.
-          toast.info('Duplicate', 'Each map node is tied to one device — drop another device from the palette to duplicate.')
+          if (selectedLinkId) deleteLink.mutate(selectedLinkId)
+          else if (selectedNode) deleteNode.mutate(selectedNode.id)
         }
       }
       if (e.key === 'c' || e.key === 'C') setTool('connect')
@@ -874,7 +1223,7 @@ export function ManualMapsPage() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedNode, selectedLinkId, selectedShapeId, multiSelectedNodeIds, mode, nodeMap])
+  }, [selectedNode, selectedLinkId, mode])
 
   /* ── Mutations ────────────────────────────────────────────── */
 
@@ -923,12 +1272,7 @@ export function ManualMapsPage() {
   })
 
   const updateNode = useMutation({
-    mutationFn: async ({ id, patch }: {
-      id: string
-      patch: Partial<Pick<ManualMapNode, 'label' | 'icon' | 'x_pct' | 'y_pct'>> & {
-        metadata?: NodeMetadata | null
-      }
-    }) => {
+    mutationFn: async ({ id, patch }: { id: string; patch: Partial<Pick<ManualMapNode, 'label' | 'icon' | 'x_pct' | 'y_pct'>> & { metadata?: NodeMetadata } }) => {
       if (!selectedMapId) throw new Error('No map selected')
       return (await api.put(`/maps/${selectedMapId}/nodes/${id}`, patch)).data
     },
@@ -979,6 +1323,40 @@ export function ManualMapsPage() {
     onError: (e: any) => toast.error('Link failed', apiErrorMessage(e)),
   })
 
+  // LLDP/CDP link assistance — add a single discovered link, or all at once.
+  const invalidateSuggested = () =>
+    qc.invalidateQueries({ queryKey: ['manual-map-suggested', selectedMapId] })
+
+  const addDiscoveredLink = useMutation({
+    mutationFn: async (s: SuggestedLink) => {
+      if (!selectedMapId) throw new Error('No map selected')
+      return (await api.post(`/maps/${selectedMapId}/links`, {
+        source_node_id: s.source_node_id,
+        target_node_id: s.target_node_id,
+        link_type: 'ethernet',
+        label: (s.protocol || 'lldp').toUpperCase(),
+        metadata: {
+          kind: 'ethernet', discovered: true, protocol: s.protocol,
+          src_interface: s.src_interface, dst_interface: s.dst_interface,
+        },
+      })).data
+    },
+    onSuccess: () => { toast.success('Discovered link added'); invalidateMap(selectedMapId); invalidateSuggested() },
+    onError: (e: any) => toast.error('Add failed', apiErrorMessage(e)),
+  })
+
+  const autoConnect = useMutation({
+    mutationFn: async () => {
+      if (!selectedMapId) throw new Error('No map selected')
+      return (await api.post(`/maps/${selectedMapId}/auto-connect`)).data
+    },
+    onSuccess: (r: any) => {
+      toast.success(`Connected ${r.created} discovered link${r.created === 1 ? '' : 's'}`)
+      invalidateMap(selectedMapId); invalidateSuggested()
+    },
+    onError: (e: any) => toast.error('Auto-connect failed', apiErrorMessage(e)),
+  })
+
   const updateLink = useMutation({
     mutationFn: async ({ id, patch }: { id: string; patch: Partial<Pick<ManualMapLink, 'label' | 'link_type'>> & { metadata?: LinkMetadata } }) => {
       if (!selectedMapId) throw new Error('No map selected')
@@ -999,91 +1377,6 @@ export function ManualMapsPage() {
     },
     onError: (e: any) => toast.error('Remove failed', apiErrorMessage(e)),
   })
-
-  /* ── Shape mutations + helpers ─────────────────────────────── */
-
-  const createShape = useMutation({
-    mutationFn: async (data: Partial<ManualMapShape> & { kind: ShapeKind; x_pct: number; y_pct: number }) => {
-      if (!selectedMapId) throw new Error('No map selected')
-      return (await api.post<ManualMapShape>(`/maps/${selectedMapId}/shapes`, data)).data
-    },
-    onSuccess: (s) => {
-      setSelectedShapeId(s.id)
-      setSelectedNodeId(null)
-      setSelectedLinkId(null)
-      setTool('select')
-      invalidateMap(selectedMapId)
-    },
-    onError: (e: any) => toast.error('Add shape failed', apiErrorMessage(e)),
-  })
-
-  const updateShape = useMutation({
-    mutationFn: async ({ id, patch }: { id: string; patch: Partial<ManualMapShape> }) => {
-      if (!selectedMapId) throw new Error('No map selected')
-      return (await api.put<ManualMapShape>(`/maps/${selectedMapId}/shapes/${id}`, patch)).data
-    },
-    onSuccess: (_, vars) => {
-      setDraftShapes((prev) => { const out = { ...prev }; delete out[vars.id]; return out })
-      invalidateMap(selectedMapId)
-    },
-    onError: (e: any) => toast.error('Update failed', apiErrorMessage(e)),
-  })
-
-  const deleteShape = useMutation({
-    mutationFn: async (id: string) => {
-      if (!selectedMapId) throw new Error('No map selected')
-      await api.delete(`/maps/${selectedMapId}/shapes/${id}`)
-    },
-    onSuccess: () => { setSelectedShapeId(null); invalidateMap(selectedMapId) },
-    onError: (e: any) => toast.error('Remove failed', apiErrorMessage(e)),
-  })
-
-  const shapes = (detail?.shapes ?? []) as ManualMapShape[]
-  const shapeMap = useMemo(() => new Map(shapes.map((s) => [s.id, s])), [shapes])
-
-  function effectiveShapeRect(s: ManualMapShape): ShapeRect {
-    return draftShapes[s.id] ?? { x_pct: s.x_pct, y_pct: s.y_pct, w_pct: s.w_pct, h_pct: s.h_pct }
-  }
-
-  function beginShapeMove(e: ReactPointerEvent, s: ManualMapShape) {
-    if (mode === 'live') return
-    e.stopPropagation()
-    setSelectedShapeId(s.id)
-    setSelectedNodeId(null)
-    setSelectedLinkId(null)
-    setDraggingShape({
-      id: s.id, mode: 'move',
-      startClientX: e.clientX, startClientY: e.clientY,
-      startRect: effectiveShapeRect(s),
-    })
-    ;(e.currentTarget as Element & { setPointerCapture?: (id: number) => void }).setPointerCapture?.(e.pointerId)
-  }
-
-  function beginShapeResize(e: ReactPointerEvent, s: ManualMapShape) {
-    if (mode === 'live') return
-    e.stopPropagation()
-    setSelectedShapeId(s.id)
-    setDraggingShape({
-      id: s.id, mode: 'resize',
-      startClientX: e.clientX, startClientY: e.clientY,
-      startRect: effectiveShapeRect(s),
-    })
-    ;(e.currentTarget as Element & { setPointerCapture?: (id: number) => void }).setPointerCapture?.(e.pointerId)
-  }
-
-  const updateMap = useMutation({
-    mutationFn: async (patch: Partial<{ name: string; description: string | null; metadata: MapMetadata }>) => {
-      if (!selectedMapId) throw new Error('No map selected')
-      return (await api.put(`/maps/${selectedMapId}`, patch)).data
-    },
-    onSuccess: () => invalidateMap(selectedMapId),
-    onError: (e: any) => toast.error('Update failed', apiErrorMessage(e)),
-  })
-
-  const patchMapMeta = useCallback((next: Partial<MapMetadata>) => {
-    const merged: MapMetadata = { ...mapMeta, ...next }
-    updateMap.mutate({ metadata: merged })
-  }, [mapMeta, updateMap])
 
   const deleteMap = useMutation({
     mutationFn: async () => {
@@ -1119,11 +1412,47 @@ export function ManualMapsPage() {
     return draftPositions[node.id] || { x_pct: node.x_pct, y_pct: node.y_pct }
   }
 
+  function labelOffsetFor(node: ManualMapNode) {
+    return draftLabelOffsets[node.id] || node.metadata?.label_offset || { dx: 0, dy: 0 }
+  }
+
+  function setNodeLabelOffset(nodeId: string, dx: number, dy: number, commit: boolean) {
+    setDraftLabelOffsets((prev) => ({ ...prev, [nodeId]: { dx, dy } }))
+    if (!commit) return
+    const node = nodeMap.get(nodeId)
+    if (!node) return
+    updateNode.mutate({
+      id: nodeId,
+      patch: { metadata: { ...(node.metadata || {}), label_offset: { dx, dy } } },
+    })
+    setDraftLabelOffsets((prev) => {
+      const next = { ...prev }
+      delete next[nodeId]
+      return next
+    })
+  }
+
   // Get the effective waypoints for a link — in-flight drag state takes
   // precedence over the persisted metadata.
   function waypointsFor(link: ManualMapLink): Waypoint[] {
     return draftWaypoints[link.id] || linkWaypoints(link)
   }
+
+  const linkParallelOffsets = useMemo(() => computeLinkParallelOffsets(links), [links])
+
+  const linkIfaceAnchors = useMemo(
+    () => computeLinkIfaceLabelPositions(
+      links,
+      (nodeId) => {
+        const node = nodeMap.get(nodeId)
+        if (!node) return null
+        return draftPositions[nodeId] || { x_pct: node.x_pct, y_pct: node.y_pct }
+      },
+      (link) => draftWaypoints[link.id] || linkWaypoints(link),
+      linkParallelOffsets,
+    ),
+    [links, nodeMap, draftPositions, draftWaypoints, linkParallelOffsets],
+  )
 
   function persistWaypoints(link: ManualMapLink, next: Waypoint[]) {
     const md = link.metadata || {}
@@ -1137,7 +1466,6 @@ export function ManualMapsPage() {
 
   function beginNodeDrag(e: ReactPointerEvent<HTMLButtonElement>, node: ManualMapNode) {
     if (mode === 'live' || tool === 'connect') return
-    if (isNodeLocked(node)) return
     e.stopPropagation()
     setSelectedNodeId(node.id)
     setSelectedLinkId(null)
@@ -1145,110 +1473,10 @@ export function ManualMapsPage() {
     e.currentTarget.setPointerCapture(e.pointerId)
   }
 
-  // Effective node scale: draft (mid-drag) takes precedence over the
-  // persisted metadata.size_scale.
-  function effectiveScale(node: ManualMapNode): number {
-    return clampScale(draftScales[node.id] ?? nodeScale(node))
-  }
-
-  function beginNodeResize(e: ReactPointerEvent, node: ManualMapNode) {
-    if (mode === 'live') return
-    e.stopPropagation()
-    setSelectedNodeId(node.id)
-    setSelectedLinkId(null)
-    setDraggingResize({
-      id: node.id,
-      startClientX: e.clientX,
-      startClientY: e.clientY,
-      startScale: effectiveScale(node),
-    })
-    ;(e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId)
-  }
-
-  function bumpNodeScale(node: ManualMapNode, delta: number) {
-    const next = clampScale(effectiveScale(node) + delta)
-    const md = node.metadata || {}
-    updateNode.mutate({ id: node.id, patch: { metadata: { ...md, size_scale: next } } })
-  }
-
   function moveCanvas(e: ReactPointerEvent) {
-    // Shape drag (move or resize). We compute the new rect from start values
-    // plus the cursor delta so the in-flight visual matches the pointer
-    // pixel-for-pixel.
-    if (draggingShape) {
-      const rect = canvasRef.current?.getBoundingClientRect()
-      if (rect) {
-        const dxPct = ((e.clientX - draggingShape.startClientX) / rect.width) * 100 / view.zoom
-        const dyPct = ((e.clientY - draggingShape.startClientY) / rect.height) * 100 / view.zoom
-        const sr = draggingShape.startRect
-        if (draggingShape.mode === 'move') {
-          setDraftShapes((prev) => ({
-            ...prev,
-            [draggingShape.id]: {
-              x_pct: clamp(sr.x_pct + dxPct, 0, 100),
-              y_pct: clamp(sr.y_pct + dyPct, 0, 100),
-              w_pct: sr.w_pct,
-              h_pct: sr.h_pct,
-            },
-          }))
-        } else {
-          setDraftShapes((prev) => ({
-            ...prev,
-            [draggingShape.id]: {
-              x_pct: sr.x_pct,
-              y_pct: sr.y_pct,
-              w_pct: clamp(sr.w_pct + dxPct, 2, 100),
-              h_pct: clamp(sr.h_pct + dyPct, 2, 100),
-            },
-          }))
-        }
-      }
-      return
-    }
-    if (draggingResize) {
-      // Convert pointer drag distance to a scale delta. The diagonal
-      // (dx+dy)/2 keeps the handle "going outward" feel even if the user
-      // pulls mostly vertically or mostly horizontally. 60 px of drag
-      // changes scale by ~1.0 — gives a sensible feel at default zoom.
-      const dx = e.clientX - draggingResize.startClientX
-      const dy = e.clientY - draggingResize.startClientY
-      const delta = (dx + dy) / 120
-      const next = clampScale(draggingResize.startScale + delta)
-      setDraftScales((prev) => ({ ...prev, [draggingResize.id]: next }))
-      return
-    }
     if (draggingNodeId) {
       const p = clientToCanvasPct(e.clientX, e.clientY)
-      if (!p) return
-      // Apply optional grid snap. We snap the leader (the dragged node); the
-      // delta for the rest of the multi-selection is the same so the cluster
-      // moves together.
-      const snapped = {
-        x_pct: snapPct(p.x_pct, snapSize, snapEnabled),
-        y_pct: snapPct(p.y_pct, snapSize, snapEnabled),
-      }
-      const original = nodeMap.get(draggingNodeId)
-      const groupIds = multiSelectedNodeIds.has(draggingNodeId)
-        ? Array.from(multiSelectedNodeIds)
-        : [draggingNodeId]
-      if (!original || groupIds.length === 1) {
-        setDraftPositions((prev) => ({ ...prev, [draggingNodeId]: snapped }))
-      } else {
-        const dx = snapped.x_pct - original.x_pct
-        const dy = snapped.y_pct - original.y_pct
-        setDraftPositions((prev) => {
-          const next = { ...prev }
-          for (const id of groupIds) {
-            const n = nodeMap.get(id)
-            if (!n) continue
-            next[id] = {
-              x_pct: clamp(n.x_pct + dx, 2, 98),
-              y_pct: clamp(n.y_pct + dy, 2, 98),
-            }
-          }
-          return next
-        })
-      }
+      if (p) setDraftPositions((prev) => ({ ...prev, [draggingNodeId]: p }))
       return
     }
     if (draggingWaypoint) {
@@ -1277,59 +1505,12 @@ export function ManualMapsPage() {
   }
 
   function endCanvasPointer() {
-    if (draggingShape) {
-      const next = draftShapes[draggingShape.id]
-      const original = shapeMap.get(draggingShape.id)
-      setDraggingShape(null)
-      if (next && original) {
-        const same = (
-          Math.abs(next.x_pct - original.x_pct) < 0.1 &&
-          Math.abs(next.y_pct - original.y_pct) < 0.1 &&
-          Math.abs(next.w_pct - original.w_pct) < 0.1 &&
-          Math.abs(next.h_pct - original.h_pct) < 0.1
-        )
-        if (!same) {
-          updateShape.mutate({ id: draggingShape.id, patch: next })
-        } else {
-          // Drop the draft if it's a no-op so the rendered geometry doesn't
-          // get stuck waiting for an unnecessary refetch.
-          setDraftShapes((prev) => { const out = { ...prev }; delete out[draggingShape.id]; return out })
-        }
-      }
-    }
-    if (draggingResize) {
-      const next = draftScales[draggingResize.id]
-      const original = nodeMap.get(draggingResize.id)
-      setDraggingResize(null)
-      if (next != null && original && Math.abs(next - draggingResize.startScale) > 0.02) {
-        const md = original.metadata || {}
-        updateNode.mutate({
-          id: draggingResize.id,
-          patch: { metadata: { ...md, size_scale: next } },
-        })
-      }
-      // Drop the draft so the persisted value re-takes effect on refetch.
-      setDraftScales((prev) => {
-        const out = { ...prev }
-        delete out[draggingResize.id]
-        return out
-      })
-    }
     if (draggingNodeId) {
-      // Commit every dirty draft position. With multi-select, that may include
-      // siblings of the dragged node, not just the leader. Each PATCH is
-      // independent so a failure on one node doesn't block the others.
-      const draftIds = Object.keys(draftPositions)
+      const next = draftPositions[draggingNodeId]
+      const original = nodeMap.get(draggingNodeId)
       setDraggingNodeId(null)
-      for (const id of draftIds) {
-        const next = draftPositions[id]
-        const original = nodeMap.get(id)
-        if (next && original && (Math.abs(next.x_pct - original.x_pct) > 0.2 || Math.abs(next.y_pct - original.y_pct) > 0.2)) {
-          updateNode.mutate({ id, patch: next })
-        } else {
-          // Drop the no-op draft so it doesn't linger across refetches.
-          setDraftPositions((prev) => { const out = { ...prev }; delete out[id]; return out })
-        }
+      if (next && original && (Math.abs(next.x_pct - original.x_pct) > 0.2 || Math.abs(next.y_pct - original.y_pct) > 0.2)) {
+        updateNode.mutate({ id: draggingNodeId, patch: next })
       }
     }
     if (draggingWaypoint) {
@@ -1360,41 +1541,9 @@ export function ManualMapsPage() {
       return
     }
     if (e.target !== e.currentTarget) return
-    // If a shape tool is active, an empty-canvas click drops a new shape at
-    // that point. We only fire on a fresh-down (not while dragging) and only
-    // on the canvas surface — not on top of an existing element.
-    const shapeToolToKind: Record<string, ShapeKind> = {
-      'shape-rectangle': 'rectangle',
-      'shape-circle': 'circle',
-      'shape-text': 'text',
-      'shape-line': 'line',
-      'shape-arrow': 'arrow',
-      'shape-diamond': 'diamond',
-      'shape-hexagon': 'hexagon',
-      'shape-sticky': 'sticky',
-    }
-    if (shapeToolToKind[tool]) {
-      const kind = shapeToolToKind[tool]
-      const p = clientToCanvasPct(e.clientX, e.clientY)
-      if (!p) return
-      const d = SHAPE_DEFAULTS[kind]
-      createShape.mutate({
-        kind,
-        x_pct: clamp(p.x_pct, d.w / 2, 100 - d.w / 2),
-        y_pct: clamp(p.y_pct, Math.max(d.h, 1) / 2, 100 - Math.max(d.h, 1) / 2),
-        w_pct: d.w,
-        h_pct: Math.max(d.h, 1.2),
-        text: d.text,
-        fill: d.fill,
-        stroke: d.stroke,
-      })
-      return
-    }
     setSelectedNodeId(null)
     setSelectedLinkId(null)
-    setSelectedShapeId(null)
-    setMultiSelectedNodeIds(new Set())
-    if (e.button === 1 || e.altKey) {
+    if (e.button === 1 || e.shiftKey || e.altKey) {
       setPanFrom({ x: e.clientX, y: e.clientY, vx: view.x, vy: view.y })
       ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
     }
@@ -1458,17 +1607,7 @@ export function ManualMapsPage() {
       setConnectFrom(null)
       return
     }
-    // dedup against existing
-    const exists = links.some((l) =>
-      (l.source_node_id === connectFrom && l.target_node_id === target.id) ||
-      (l.source_node_id === target.id && l.target_node_id === connectFrom),
-    )
-    if (exists) {
-      toast.info('Already linked', 'A link already exists between these nodes.')
-    } else {
-      // Open the link wizard so the user can specify interfaces, speed, kind.
-      setLinkWizard({ source: connectFrom, target: target.id })
-    }
+    setLinkWizard({ source: connectFrom, target: target.id })
     setConnectFrom(null)
     setConnectCursor(null)
   }
@@ -1477,61 +1616,6 @@ export function ManualMapsPage() {
     setConnectFrom(null)
     setConnectCursor(null)
   }
-
-  /* ── Export ────────────────────────────────────────────────
-     Serializes the canvas SVG and downloads it. Native browsers can
-     render the result directly; tools like Figma / Inkscape import it.
-     The serializer scans the live SVG inside the canvas wrapper rather
-     than re-rendering off-screen, so what you see is what you export
-     (selection chrome aside — that gets stripped via a clone).
-  */
-  function exportSvg() {
-    const root = canvasRef.current?.querySelector('svg') as SVGSVGElement | null
-    if (!root) {
-      toast.error('Nothing to export', 'The canvas has no rendered SVG yet.')
-      return
-    }
-    const clone = root.cloneNode(true) as SVGSVGElement
-    // Drop selection-only artifacts (dashed halos, resize handles, waypoint dots).
-    clone.querySelectorAll('[data-export-strip]').forEach((el) => el.remove())
-    // Inline xmlns so the file is standalone.
-    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
-    clone.setAttribute('width', '1600')
-    clone.setAttribute('height', '900')
-    const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(clone)
-    const blob = new Blob([xml], { type: 'image/svg+xml' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${(currentMap?.name || 'network-map').replace(/[^a-z0-9_-]+/gi, '_')}.svg`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
-    toast.success('Exported', 'Map saved as SVG.')
-  }
-
-  /* ── Alignment guides during drag ─────────────────────────
-     When a single node is being moved, find any other node that shares
-     (within 0.6%) its X or Y. We surface up to a couple of guide lines
-     so the user can see they're aligning. The list is recomputed on
-     every render while dragging — cheap because nodes are typically <100.
-  */
-  const alignmentGuides = useMemo<{ x: number[]; y: number[] }>(() => {
-    if (!draggingNodeId) return { x: [], y: [] }
-    const leader = draftPositions[draggingNodeId]
-    if (!leader) return { x: [], y: [] }
-    const xs: number[] = []
-    const ys: number[] = []
-    for (const n of nodes) {
-      if (n.id === draggingNodeId) continue
-      if (multiSelectedNodeIds.has(n.id)) continue
-      const px = positionFor(n)
-      if (Math.abs(px.x_pct - leader.x_pct) < 0.6) xs.push(px.x_pct)
-      if (Math.abs(px.y_pct - leader.y_pct) < 0.6) ys.push(px.y_pct)
-    }
-    return { x: xs.slice(0, 3), y: ys.slice(0, 3) }
-  }, [draggingNodeId, draftPositions, nodes, multiSelectedNodeIds])
 
   /* ── Inspector save label ────────────────────────────────── */
 
@@ -1559,8 +1643,12 @@ export function ManualMapsPage() {
   const showCanvasCursor = mode === 'live' ? 'cursor-grab' : panFrom ? 'cursor-grabbing' : inConnectFlow ? 'cursor-crosshair' : 'cursor-default'
 
   return (
-    <div className="-m-5 flex h-[calc(100vh-2.75rem)] flex-col overflow-hidden bg-surface2/30">
+    <div className={cn(
+      'flex flex-col overflow-hidden bg-surface2/30',
+      noc ? 'fixed inset-0 z-[60] h-screen' : '-m-5 h-[calc(100vh-2.75rem)]',
+    )}>
       {/* ── Top bar ───────────────────────────────────────── */}
+      {!noc && (
       <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border bg-surface px-3">
         <div className="flex items-center gap-2">
           <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary/15 text-primary">
@@ -1627,11 +1715,51 @@ export function ManualMapsPage() {
             <GitBranch className="h-4 w-4" />
           </Link>
         </Button>
+        <Button variant="ghost" size="icon" onClick={() => setNoc(true)} disabled={!selectedMapId} title="NOC fullscreen (video wall)">
+          <Monitor className="h-4 w-4" />
+        </Button>
       </div>
+      )}
+
+      {/* ── Slim NOC bar (video-wall mode) ───────────────── */}
+      {noc && (
+        <div className="flex h-11 shrink-0 items-center gap-3 border-b border-border bg-surface px-4">
+          <span className="text-sm font-semibold text-text">{currentMap?.name || 'Map'}</span>
+          <span className="text-xs text-muted">{nodes.length} devices · {links.length} links</span>
+          <div className="flex items-center gap-1.5">
+            <StatusChip label="Up" count={statusTotals.up || 0} tone="success" />
+            <StatusChip label="Degraded" count={degradedCount} tone="warning" />
+            <StatusChip label="Down" count={downCount} tone="danger" />
+          </div>
+          <div className="flex-1" />
+          {maps.length > 1 && (
+            <>
+              <button
+                type="button"
+                onClick={() => setRotate((r) => !r)}
+                className={cn('flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition-colors',
+                  rotate ? 'border-success/40 bg-success/15 text-success' : 'border-border text-muted hover:text-text')}
+                title="Auto-rotate through maps every 15s"
+              >
+                <Radio className={cn('h-3.5 w-3.5', rotate && 'animate-pulse-soft')} /> {rotate ? 'Rotating' : 'Rotate maps'}
+              </button>
+              <Button variant="ghost" size="icon" title="Previous map" onClick={() => {
+                const i = maps.findIndex((m) => m.id === selectedMapId); const p = maps[(i - 1 + maps.length) % maps.length]; if (p) selectMap(p.id)
+              }}><ChevronLeft className="h-4 w-4" /></Button>
+              <Button variant="ghost" size="icon" title="Next map" onClick={() => {
+                const i = maps.findIndex((m) => m.id === selectedMapId); const n = maps[(i + 1) % maps.length]; if (n) selectMap(n.id)
+              }}><ChevronRight className="h-4 w-4" /></Button>
+            </>
+          )}
+          <div className="mx-1 h-6 w-px bg-border/60" />
+          <Button variant="ghost" size="icon" onClick={() => setNoc(false)} title="Exit NOC mode (Esc)"><Minimize2 className="h-4 w-4" /></Button>
+        </div>
+      )}
 
       {/* ── Main: 3-col grid ─────────────────────────────── */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left palette */}
+        {/* Left palette (hidden in NOC mode) */}
+        {!noc && (
         <PaletteRail
           open={paletteOpen}
           toggle={() => setPaletteOpen((v) => !v)}
@@ -1644,6 +1772,7 @@ export function ManualMapsPage() {
           loading={devicesQuery.isLoading}
           disabled={!selectedMapId || mode === 'live'}
         />
+        )}
 
         {/* Canvas */}
         <div className="relative flex-1 overflow-hidden">
@@ -1663,77 +1792,6 @@ export function ManualMapsPage() {
                 disabled={mode === 'live' || nodes.length < 2}
                 icon={<Cable className="h-3.5 w-3.5" />}
                 label="Connect (C)"
-              />
-              <div className="mx-0.5 h-5 w-px bg-border/60" />
-              <ToolBtn
-                active={tool === 'shape-rectangle'}
-                onClick={() => setTool(tool === 'shape-rectangle' ? 'select' : 'shape-rectangle')}
-                disabled={mode === 'live'}
-                icon={<Square className="h-3.5 w-3.5" />}
-                label="Rectangle"
-              />
-              <ToolBtn
-                active={tool === 'shape-circle'}
-                onClick={() => setTool(tool === 'shape-circle' ? 'select' : 'shape-circle')}
-                disabled={mode === 'live'}
-                icon={<Circle className="h-3.5 w-3.5" />}
-                label="Circle"
-              />
-              <ToolBtn
-                active={tool === 'shape-diamond'}
-                onClick={() => setTool(tool === 'shape-diamond' ? 'select' : 'shape-diamond')}
-                disabled={mode === 'live'}
-                icon={<svg viewBox="0 0 14 14" className="h-3.5 w-3.5"><path d="M7 1 L13 7 L7 13 L1 7 Z" stroke="currentColor" strokeWidth="1.4" fill="none" /></svg>}
-                label="Diamond"
-              />
-              <ToolBtn
-                active={tool === 'shape-hexagon'}
-                onClick={() => setTool(tool === 'shape-hexagon' ? 'select' : 'shape-hexagon')}
-                disabled={mode === 'live'}
-                icon={<Hexagon className="h-3.5 w-3.5" />}
-                label="Hexagon"
-              />
-              <ToolBtn
-                active={tool === 'shape-line'}
-                onClick={() => setTool(tool === 'shape-line' ? 'select' : 'shape-line')}
-                disabled={mode === 'live'}
-                icon={<LineIcon className="h-3.5 w-3.5" />}
-                label="Line"
-              />
-              <ToolBtn
-                active={tool === 'shape-arrow'}
-                onClick={() => setTool(tool === 'shape-arrow' ? 'select' : 'shape-arrow')}
-                disabled={mode === 'live'}
-                icon={<ArrowRight className="h-3.5 w-3.5" />}
-                label="Arrow"
-              />
-              <ToolBtn
-                active={tool === 'shape-text'}
-                onClick={() => setTool(tool === 'shape-text' ? 'select' : 'shape-text')}
-                disabled={mode === 'live'}
-                icon={<Type className="h-3.5 w-3.5" />}
-                label="Text"
-              />
-              <ToolBtn
-                active={tool === 'shape-sticky'}
-                onClick={() => setTool(tool === 'shape-sticky' ? 'select' : 'shape-sticky')}
-                disabled={mode === 'live'}
-                icon={<StickyNote className="h-3.5 w-3.5" />}
-                label="Sticky note"
-              />
-              <div className="mx-0.5 h-5 w-px bg-border/60" />
-              <ToolBtn
-                active={snapEnabled}
-                onClick={() => patchMapMeta({ snap_enabled: !snapEnabled })}
-                disabled={mode === 'live' || !selectedMapId}
-                icon={<svg viewBox="0 0 14 14" className="h-3.5 w-3.5"><path d="M2 2h2M6 2h2M10 2h2M2 6h2M10 6h2M2 10h2M6 10h2M10 10h2M5 5h4v4h-4z" stroke="currentColor" strokeWidth="1" fill="none" /></svg>}
-                label={`Snap to grid${snapEnabled ? ' · ON' : ' · OFF'}`}
-              />
-              <ToolBtn
-                onClick={() => exportSvg()}
-                disabled={!selectedMapId || nodes.length === 0}
-                icon={<Download className="h-3.5 w-3.5" />}
-                label="Export SVG"
               />
               <div className="mx-0.5 h-5 w-px bg-border/60" />
               <ToolBtn onClick={() => setView({ x: 0, y: 0, zoom: 1 })} icon={<Maximize2 className="h-3.5 w-3.5" />} label="Fit (0)" />
@@ -1759,6 +1817,20 @@ export function ManualMapsPage() {
                 {connectFrom ? 'Click a target node to create the link · Esc to cancel' : 'Drag from one node to another to link them'}
               </div>
             )}
+
+            {/* LLDP/CDP link assistance — auto-connect all discovered links */}
+            {mode === 'design' && suggestedLinks.length > 0 && (
+              <button
+                type="button"
+                onClick={() => autoConnect.mutate()}
+                disabled={autoConnect.isPending}
+                className="pointer-events-auto absolute left-3 top-16 flex items-center gap-1.5 rounded-lg border border-teal-400/40 bg-teal-500/15 px-2.5 py-1.5 text-[11px] font-medium text-teal-200 shadow-md backdrop-blur transition-colors hover:bg-teal-500/25 disabled:opacity-60"
+                title="Draw all real LLDP/CDP links between devices placed on this map"
+              >
+                {autoConnect.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                Auto-connect {suggestedLinks.length} discovered link{suggestedLinks.length === 1 ? '' : 's'}
+              </button>
+            )}
           </div>
 
           {/* Canvas grid + nodes */}
@@ -1769,7 +1841,6 @@ export function ManualMapsPage() {
               'absolute inset-0 select-none overflow-hidden touch-none',
               showCanvasCursor,
             )}
-            style={{ background: themeStyle.bg }}
             onPointerDown={onCanvasPointerDown}
             onPointerMove={moveCanvas}
             onPointerUp={endCanvasPointer}
@@ -1780,26 +1851,9 @@ export function ManualMapsPage() {
             onDrop={onCanvasDrop}
             onContextMenu={(e) => { if (connectFrom) { e.preventDefault(); cancelConnect() } }}
           >
-            {/* User-supplied background image — sits behind everything. Falls back
-                gracefully if the URL is bad (broken-image icon, but nothing else
-                breaks). */}
-            {mapBackground?.url && (
-              <div
-                className="pointer-events-none absolute inset-0"
-                style={{
-                  backgroundImage: `url("${mapBackground.url.replace(/"/g, '\\"')}")`,
-                  backgroundSize: mapBackground.fit === 'contain' ? 'contain' : mapBackground.fit === 'stretch' ? '100% 100%' : 'cover',
-                  backgroundPosition: 'center',
-                  backgroundRepeat: 'no-repeat',
-                  opacity: mapBackground.opacity != null ? mapBackground.opacity : 0.35,
-                }}
-              />
-            )}
-            {/* Grid background — only on default theme keeps the soft glow accent. */}
-            {theme === 'default' && (
-              <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_20%_30%,rgba(59,130,246,0.08),transparent_40%),radial-gradient(circle_at_80%_70%,rgba(168,85,247,0.05),transparent_45%)]" />
-            )}
-            <GridBackground view={view} fine={themeStyle.gridFine} major={themeStyle.gridMajor} />
+            {/* Grid background — dual-layer (fine + major) */}
+            <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_30%,rgba(59,130,246,0.08),transparent_40%),radial-gradient(circle_at_80%_70%,rgba(168,85,247,0.05),transparent_45%)]" />
+            <GridBackground view={view} />
 
             {/* Drop hint */}
             {dragOverCanvas && (
@@ -1816,171 +1870,6 @@ export function ManualMapsPage() {
             >
               {/* Links SVG — two layers: paths (in scene), then labels (HTML, also in scene) */}
               <svg className="absolute inset-0 h-full w-full overflow-visible" viewBox="0 0 100 100" preserveAspectRatio="none" role="img">
-                {/* Shapes (annotations) — rendered first so they sit behind
-                    links and nodes. Each kind has its own primitive but they
-                    all share the same hit area, selection halo, and resize
-                    handle behaviour. */}
-                {shapes.map((s) => {
-                  const rect = effectiveShapeRect(s)
-                  const isSelected = selectedShapeId === s.id && mode === 'design'
-                  const x = rect.x_pct - rect.w_pct / 2
-                  const y = rect.y_pct - rect.h_pct / 2
-                  const cx = rect.x_pct
-                  const cy = rect.y_pct
-                  const sm: ShapeMetadata = (s.metadata as ShapeMetadata | null) || {}
-                  const rotation = sm.rotation || 0
-                  const opacity = sm.opacity != null ? Math.max(0.1, Math.min(sm.opacity, 1)) : 1
-                  const strokeW = sm.stroke_width != null ? sm.stroke_width : (s.kind === 'line' || s.kind === 'arrow' ? 0.5 : 0.35)
-                  const dash = sm.stroke_dash || undefined
-                  const stroke = s.stroke || (s.kind === 'text' ? 'transparent' : '#3b82f6')
-                  const fill = s.fill || (s.kind === 'text' ? 'transparent' : 'rgba(59,130,246,0.10)')
-                  const hitProps = mode === 'design' ? {
-                    onPointerDown: (e: ReactPointerEvent) => beginShapeMove(e, s),
-                    onClick: (e: React.MouseEvent) => {
-                      e.stopPropagation()
-                      setSelectedShapeId(s.id); setSelectedNodeId(null); setSelectedLinkId(null)
-                      setMultiSelectedNodeIds(new Set())
-                    },
-                    style: { cursor: 'move' } as const,
-                  } : {}
-                  const transform = rotation ? `rotate(${rotation} ${cx} ${cy})` : undefined
-                  const renderTextLabel = (forceText = false) => (s.text || forceText) && (
-                    <foreignObject x={x} y={y} width={rect.w_pct} height={rect.h_pct} pointerEvents="none">
-                      <div
-                        className="flex h-full w-full items-center justify-center text-center leading-tight"
-                        style={{
-                          fontSize: `${sm.font_size != null ? Math.max(0.8, Math.min(sm.font_size, 8)) : Math.max(1.2, Math.min(rect.h_pct * 0.35, 3.5))}px`,
-                          fontWeight: sm.font_weight === 'bold' ? 700 : sm.font_weight === 'semibold' ? 600 : 500,
-                          color: sm.font_color || (s.kind === 'sticky' ? '#7c2d12' : undefined),
-                        }}
-                      >
-                        {s.text || (s.kind === 'text' ? 'Label' : '')}
-                      </div>
-                    </foreignObject>
-                  )
-
-                  return (
-                    <g key={`shape-${s.id}`} transform={transform} opacity={opacity}>
-                      {s.kind === 'rectangle' && (
-                        <rect
-                          x={x} y={y} width={rect.w_pct} height={rect.h_pct}
-                          rx={1.2} ry={1.2}
-                          fill={fill} stroke={stroke}
-                          strokeWidth={isSelected ? Math.max(strokeW, 0.55) : strokeW}
-                          strokeDasharray={dash}
-                          vectorEffect="non-scaling-stroke"
-                          {...hitProps}
-                        />
-                      )}
-                      {s.kind === 'sticky' && (
-                        <g {...hitProps}>
-                          <rect
-                            x={x} y={y} width={rect.w_pct} height={rect.h_pct}
-                            rx={0.4} ry={0.4}
-                            fill={fill} stroke={stroke}
-                            strokeWidth={isSelected ? Math.max(strokeW, 0.55) : strokeW}
-                            strokeDasharray={dash}
-                            vectorEffect="non-scaling-stroke"
-                          />
-                          {/* Corner fold to suggest a peeled note */}
-                          <path
-                            d={`M ${x + rect.w_pct - 1.6} ${y + rect.h_pct} L ${x + rect.w_pct} ${y + rect.h_pct} L ${x + rect.w_pct} ${y + rect.h_pct - 1.6} Z`}
-                            fill="rgba(0,0,0,0.10)"
-                            stroke={stroke}
-                            strokeWidth={strokeW}
-                            vectorEffect="non-scaling-stroke"
-                          />
-                        </g>
-                      )}
-                      {s.kind === 'circle' && (
-                        <ellipse
-                          cx={cx} cy={cy}
-                          rx={rect.w_pct / 2} ry={rect.h_pct / 2}
-                          fill={fill} stroke={stroke}
-                          strokeWidth={isSelected ? Math.max(strokeW, 0.55) : strokeW}
-                          strokeDasharray={dash}
-                          vectorEffect="non-scaling-stroke"
-                          {...hitProps}
-                        />
-                      )}
-                      {s.kind === 'diamond' && (
-                        <polygon
-                          points={`${cx} ${y} ${x + rect.w_pct} ${cy} ${cx} ${y + rect.h_pct} ${x} ${cy}`}
-                          fill={fill} stroke={stroke}
-                          strokeWidth={isSelected ? Math.max(strokeW, 0.55) : strokeW}
-                          strokeDasharray={dash}
-                          vectorEffect="non-scaling-stroke"
-                          {...hitProps}
-                        />
-                      )}
-                      {s.kind === 'hexagon' && (() => {
-                        const w = rect.w_pct
-                        const h = rect.h_pct
-                        const inset = w * 0.25
-                        const pts = [
-                          [x + inset, y],
-                          [x + w - inset, y],
-                          [x + w, cy],
-                          [x + w - inset, y + h],
-                          [x + inset, y + h],
-                          [x, cy],
-                        ].map((p) => p.join(' ')).join(' ')
-                        return (
-                          <polygon
-                            points={pts}
-                            fill={fill} stroke={stroke}
-                            strokeWidth={isSelected ? Math.max(strokeW, 0.55) : strokeW}
-                            strokeDasharray={dash}
-                            vectorEffect="non-scaling-stroke"
-                            {...hitProps}
-                          />
-                        )
-                      })()}
-                      {(s.kind === 'line' || s.kind === 'arrow') && (
-                        <g {...hitProps}>
-                          <line
-                            x1={x} y1={cy} x2={x + rect.w_pct} y2={cy}
-                            stroke={stroke}
-                            strokeWidth={isSelected ? Math.max(strokeW, 0.55) : strokeW}
-                            strokeDasharray={dash}
-                            strokeLinecap="round"
-                            vectorEffect="non-scaling-stroke"
-                            markerEnd={s.kind === 'arrow' ? `url(#nm-shape-arrow)` : undefined}
-                          />
-                          {/* Wider invisible hit area for thin lines. */}
-                          <line
-                            x1={x} y1={cy} x2={x + rect.w_pct} y2={cy}
-                            stroke="transparent" strokeWidth={Math.max(strokeW * 4, 2)}
-                            vectorEffect="non-scaling-stroke"
-                          />
-                        </g>
-                      )}
-                      {(s.kind === 'rectangle' || s.kind === 'circle' || s.kind === 'diamond' || s.kind === 'hexagon' || s.kind === 'sticky' || s.kind === 'text') && renderTextLabel(s.kind === 'text')}
-                      {/* Selection halo + resize handle */}
-                      {isSelected && (
-                        <>
-                          <rect
-                            x={x - 0.4} y={y - 0.4}
-                            width={rect.w_pct + 0.8} height={Math.max(rect.h_pct + 0.8, 1.2)}
-                            fill="none" stroke="rgb(var(--primary))" strokeWidth={0.4}
-                            strokeDasharray="0.8 0.6"
-                            vectorEffect="non-scaling-stroke"
-                            pointerEvents="none"
-                          />
-                          <rect
-                            x={x + rect.w_pct - 1.4} y={y + Math.max(rect.h_pct, 1.2) - 1.4}
-                            width={1.8} height={1.8} rx={0.4}
-                            fill="rgb(var(--primary))" stroke="white"
-                            strokeWidth={0.3}
-                            vectorEffect="non-scaling-stroke"
-                            style={{ cursor: 'nwse-resize' }}
-                            onPointerDown={(e) => beginShapeResize(e, s)}
-                          />
-                        </>
-                      )}
-                    </g>
-                  )
-                })}
                 <defs>
                   {/* Arrowheads for fiber/wireless direction */}
                   {(Object.keys(STATUS_COLOR) as Array<keyof typeof STATUS_COLOR>).map((k) => (
@@ -1997,22 +1886,9 @@ export function ManualMapsPage() {
                       <path d="M0 0 L10 5 L0 10 z" className={cn(STATUS_COLOR[k].line, 'opacity-80')} fill="currentColor" />
                     </marker>
                   ))}
-                  {/* Generic arrow markers — used by link arrow style and the
-                      arrow shape annotation. Forward / backward variants flip
-                      orient so SVG handles direction at render time. */}
-                  <marker id="nm-shape-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-                    <path d="M0 0 L10 5 L0 10 z" fill="currentColor" />
-                  </marker>
-                  <marker id="nm-link-arrow-fwd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="4" markerHeight="4" orient="auto">
-                    <path d="M0 0 L10 5 L0 10 z" fill="currentColor" />
-                  </marker>
-                  <marker id="nm-link-arrow-bwd" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="4" markerHeight="4" orient="auto-start-reverse">
-                    <path d="M0 0 L10 5 L0 10 z" fill="currentColor" />
-                  </marker>
                 </defs>
 
-                {/* Existing links — rendered with the per-link shape (curve/straight/orthogonal).
-                    Visual layers, bottom-up: hit area → accent halo → base stroke → animated flow. */}
+                {/* Existing links — rendered with the per-link shape (curve/straight/orthogonal). */}
                 {links.map((link) => {
                   const source = nodeMap.get(link.source_node_id)
                   const target = nodeMap.get(link.target_node_id)
@@ -2025,46 +1901,36 @@ export function ManualMapsPage() {
                   const shape = linkShape(link)
                   const kindStyle = LINK_KIND_STYLE[kind] || {}
                   const wps = waypointsFor(link)
-                  const path = edgePath(shape, a.x_pct, a.y_pct, b.x_pct, b.y_pct, wps)
+                  const perpRef = canonicalPerpRef(
+                    link.source_node_id, link.target_node_id,
+                    a.x_pct, a.y_pct, b.x_pct, b.y_pct,
+                  )
+                  const path = edgePath(shape, a.x_pct, a.y_pct, b.x_pct, b.y_pct, wps, linkParallelOffsets.get(link.id) || 0, perpRef)
+                  const animate = mode === 'live' && (health === 'up' || health === 'degraded')
                   const isSelected = selectedLinkId === link.id
-                  const thickness = linkThickness(link)
-                  const baseWidth = (kindStyle.widthMul || 1) * 3 * thickness
-                  const flowWidth = (kindStyle.widthMul || 1) * 1.5 * thickness
-                  const opacity = linkOpacity(link)
-                  const custom = linkColor(link)
-                  const arrow = linkArrow(link)
-                  const animateOverride = link.metadata?.animate
+                  const baseWidth = (kindStyle.widthMul || 1) * 3
+                  const flowWidth = (kindStyle.widthMul || 1) * 1.5
+
+                  // If live data is loaded for this link and util_pct is known,
+                  // override the base color with a utilization color and speed
+                  // up the flow animation proportionally.
                   const live = liveById[link.id]
                   const utilPct = live ? Math.max(live.source.util_pct || 0, live.target.util_pct || 0) : null
                   const utilStroke = live && utilPct != null ? utilizationColor(utilPct) : null
-                  const animate = animateOverride === false
-                    ? false
-                    : animateOverride === true
-                      ? true
-                      : mode === 'live' && (health === 'up' || health === 'degraded')
-
-                  // When the user supplies a custom color we apply it inline via `stroke`
-                  // and skip the status class. The arrow markers inherit `currentColor`,
-                  // so set `color` too.
-                  const inlineStroke = custom || undefined
-                  const baseClass = custom ? undefined : (utilStroke || color)
-                  const markerFwd = (arrow === 'forward' || arrow === 'both') ? 'url(#nm-link-arrow-fwd)' : undefined
-                  const markerBwd = (arrow === 'backward' || arrow === 'both') ? 'url(#nm-link-arrow-bwd)' : undefined
 
                   return (
                     <g
                       key={link.id}
                       className="cursor-pointer"
-                      style={{ color: inlineStroke }}
                       onClick={(e) => {
                         e.stopPropagation()
                         setSelectedLinkId(link.id)
                         setSelectedNodeId(null)
-                        setSelectedShapeId(null)
-                        setMultiSelectedNodeIds(new Set())
                       }}
                     >
+                      {/* Wide invisible hit area for clicking */}
                       <path d={path.d} fill="none" stroke="transparent" strokeWidth={8} vectorEffect="non-scaling-stroke" />
+                      {/* Accent halo (fiber/vpn coloured glow + selection highlight) */}
                       {(kindStyle.accent || isSelected) && (
                         <path
                           d={path.d}
@@ -2075,27 +1941,25 @@ export function ManualMapsPage() {
                           vectorEffect="non-scaling-stroke"
                         />
                       )}
+                      {/* Base stroke (utilization color overrides status color when live data exists) */}
                       <path
                         d={path.d}
                         fill="none"
-                        stroke={inlineStroke}
                         vectorEffect="non-scaling-stroke"
                         strokeWidth={baseWidth}
                         strokeDasharray={kindStyle.dash}
-                        opacity={opacity}
-                        className={baseClass || undefined}
-                        markerStart={markerBwd}
-                        markerEnd={markerFwd}
+                        className={cn(utilStroke || color, 'opacity-70')}
                       />
+                      {/* Animated flow inner stroke for live + healthy/degraded links */}
                       {animate && (
                         <path
                           d={path.d}
                           fill="none"
-                          stroke={inlineStroke}
                           vectorEffect="non-scaling-stroke"
                           strokeWidth={flowWidth}
                           className={cn(
-                            baseClass || undefined,
+                            utilStroke || color,
+                            // Faster flow when more loaded
                             utilPct != null && utilPct >= 60 ? 'nm-flow' : 'nm-flow-slow',
                           )}
                         />
@@ -2104,25 +1968,29 @@ export function ManualMapsPage() {
                   )
                 })}
 
-                {/* Alignment guides — shown only while dragging. Faint vertical
-                    and horizontal hairlines through any other node that shares
-                    the leader's X or Y. */}
-                {draggingNodeId && (
-                  <g data-export-strip>
-                    {alignmentGuides.x.map((xv, i) => (
-                      <line key={`gx-${i}`} x1={xv} y1={0} x2={xv} y2={100}
-                        stroke="rgb(var(--primary))" strokeOpacity={0.45}
-                        strokeWidth={0.3} strokeDasharray="0.6 0.6"
-                        vectorEffect="non-scaling-stroke" pointerEvents="none" />
-                    ))}
-                    {alignmentGuides.y.map((yv, i) => (
-                      <line key={`gy-${i}`} x1={0} y1={yv} x2={100} y2={yv}
-                        stroke="rgb(var(--primary))" strokeOpacity={0.45}
-                        strokeWidth={0.3} strokeDasharray="0.6 0.6"
-                        vectorEffect="non-scaling-stroke" pointerEvents="none" />
-                    ))}
-                  </g>
-                )}
+                {/* Discovered (LLDP/CDP) link suggestions — faint dashed "ghost"
+                    links between placed devices that have a real adjacency but
+                    no manual link yet. Click the chip (HTML layer below) to add. */}
+                {suggestedLinks.map((s) => {
+                  const source = nodeMap.get(s.source_node_id)
+                  const target = nodeMap.get(s.target_node_id)
+                  if (!source || !target) return null
+                  const a = positionFor(source)
+                  const b = positionFor(target)
+                  const p = edgePath(defaultShape, a.x_pct, a.y_pct, b.x_pct, b.y_pct)
+                  return (
+                    <path
+                      key={`ghost-${s.source_node_id}-${s.target_node_id}`}
+                      d={p.d}
+                      fill="none"
+                      vectorEffect="non-scaling-stroke"
+                      strokeWidth={2}
+                      strokeDasharray="1 2.5"
+                      strokeLinecap="round"
+                      className="stroke-teal-400 opacity-60 nm-flow-slow"
+                    />
+                  )
+                })}
 
                 {/* In-flight connect line — uses the default shape so the
                     user sees what the new link will look like before they
@@ -2145,7 +2013,6 @@ export function ManualMapsPage() {
                 {/* Waypoint editing layer — only for the selected
                     orthogonal link. Drag a filled dot to move a bend,
                     click a hollow dot in a segment to add a new bend. */}
-                <g data-export-strip>
                 {mode === 'design' && selectedLinkId && (() => {
                   const sel = links.find((l) => l.id === selectedLinkId)
                   if (!sel || linkShape(sel) !== 'orthogonal') return null
@@ -2167,9 +2034,9 @@ export function ManualMapsPage() {
                             key={`add-${i}`}
                             cx={mx}
                             cy={my}
-                            r={1.1}
-                            className="cursor-pointer fill-surface stroke-primary hover:fill-primary/30"
-                            strokeWidth={0.4}
+                            r={0.7}
+                            className="cursor-pointer fill-surface stroke-primary"
+                            strokeWidth={0.25}
                             vectorEffect="non-scaling-stroke"
                             onClick={(e) => {
                               e.stopPropagation()
@@ -2195,9 +2062,9 @@ export function ManualMapsPage() {
                           key={`wp-${i}`}
                           cx={w.x_pct}
                           cy={w.y_pct}
-                          r={1.7}
-                          className="cursor-move fill-primary stroke-surface hover:r-2"
-                          strokeWidth={0.55}
+                          r={1.1}
+                          className="cursor-move fill-primary stroke-surface"
+                          strokeWidth={0.4}
                           vectorEffect="non-scaling-stroke"
                           onPointerDown={(e) => {
                             e.stopPropagation()
@@ -2217,10 +2084,26 @@ export function ManualMapsPage() {
                     </g>
                   )
                 })()}
-                </g>
+
+                {/* Interface port labels — SVG-native, rotated on the cable */}
+                {view.zoom >= 0.7 && links.map((link) => {
+                  const md = link.metadata || {}
+                  const anchors = linkIfaceAnchors.get(link.id)
+                  if (!anchors) return null
+                  return (
+                    <g key={`iface-${link.id}`} pointerEvents="none">
+                      {md.src_interface && anchors.src && (
+                        <IfaceCableLabel label={md.src_interface} anchor={anchors.src} style={md.src_label} />
+                      )}
+                      {md.dst_interface && anchors.dst && (
+                        <IfaceCableLabel label={md.dst_interface} anchor={anchors.dst} style={md.dst_label} />
+                      )}
+                    </g>
+                  )
+                })}
               </svg>
 
-              {/* Link annotations — interface labels at endpoints + speed/throughput badge mid-link */}
+              {/* Link annotations — speed/throughput badge mid-link (HTML) */}
               {links.map((link) => {
                 const source = nodeMap.get(link.source_node_id)
                 const target = nodeMap.get(link.target_node_id)
@@ -2229,10 +2112,13 @@ export function ManualMapsPage() {
                 const b = positionFor(target)
                 const shape = linkShape(link)
                 const wps = waypointsFor(link)
-                const path = edgePath(shape, a.x_pct, a.y_pct, b.x_pct, b.y_pct, wps)
+                const perpRef = canonicalPerpRef(
+                  link.source_node_id, link.target_node_id,
+                  a.x_pct, a.y_pct, b.x_pct, b.y_pct,
+                )
+                const path = edgePath(shape, a.x_pct, a.y_pct, b.x_pct, b.y_pct, wps, linkParallelOffsets.get(link.id) || 0, perpRef)
                 const md = link.metadata || {}
                 const live = liveById[link.id]
-                // Live takes precedence over configured speed if both src+dst have throughput data.
                 const bps = live ? Math.max(
                   (live.source.in_bps || 0) + (live.source.out_bps || 0),
                   (live.target.in_bps || 0) + (live.target.out_bps || 0),
@@ -2242,33 +2128,45 @@ export function ManualMapsPage() {
                 const midText = showThroughput
                   ? `${formatBps(bps)}${utilPct != null && utilPct > 0 ? ` · ${utilPct.toFixed(0)}%` : ''}`
                   : (md.speed || link.label || '')
-                const showLabels = view.zoom >= 0.7
-                if (!showLabels && !midText) return null
+                if (view.zoom < 0.7 || !midText) return null
                 return (
                   <div key={`anno-${link.id}`} className="pointer-events-none">
-                    {md.src_interface && (
-                      <LinkChip x={path.near.x} y={path.near.y} variant="iface">
-                        {md.src_interface}
-                      </LinkChip>
-                    )}
-                    {midText && (
-                      <LinkChip
-                        x={path.mid.x}
-                        y={path.mid.y}
-                        variant={showThroughput ? 'live' : 'speed'}
-                        tone={showThroughput && utilPct != null
-                          ? (utilPct >= 85 ? 'danger' : utilPct >= 60 ? 'warning' : 'success')
-                          : undefined}
-                      >
-                        {midText}
-                      </LinkChip>
-                    )}
-                    {md.dst_interface && (
-                      <LinkChip x={path.far.x} y={path.far.y} variant="iface">
-                        {md.dst_interface}
-                      </LinkChip>
-                    )}
+                    <LinkChip
+                      x={path.mid.x}
+                      y={path.mid.y}
+                      variant={showThroughput ? 'live' : 'speed'}
+                      tone={showThroughput && utilPct != null
+                        ? (utilPct >= 85 ? 'danger' : utilPct >= 60 ? 'warning' : 'success')
+                        : undefined}
+                    >
+                      {midText}
+                    </LinkChip>
                   </div>
+                )
+              })}
+
+              {/* Discovered-link "+ Add" chips — one per suggestion, at mid-link.
+                  Click to instantiate the real LLDP/CDP link (interface-bound). */}
+              {suggestedLinks.map((s) => {
+                const source = nodeMap.get(s.source_node_id)
+                const target = nodeMap.get(s.target_node_id)
+                if (!source || !target) return null
+                const a = positionFor(source)
+                const b = positionFor(target)
+                const p = edgePath(defaultShape, a.x_pct, a.y_pct, b.x_pct, b.y_pct)
+                if (view.zoom < 0.55) return null
+                return (
+                  <button
+                    key={`sugg-${s.source_node_id}-${s.target_node_id}`}
+                    type="button"
+                    className="absolute z-20 flex -translate-x-1/2 -translate-y-1/2 items-center gap-1 rounded-full border border-teal-400/50 bg-teal-500/20 px-1.5 py-0.5 text-[9px] font-semibold text-teal-200 shadow-sm backdrop-blur transition-colors hover:border-teal-300 hover:bg-teal-500/40"
+                    style={{ left: `${p.mid.x}%`, top: `${p.mid.y}%` }}
+                    title={`Discovered ${(s.protocol || '').toUpperCase()} link · ${s.src_interface || '?'} ⇄ ${s.dst_interface || '?'}${s.physical_links > 1 ? ` · ${s.physical_links} physical` : ''}\nClick to add`}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => { e.stopPropagation(); addDiscoveredLink.mutate(s) }}
+                  >
+                    <Plus className="h-2.5 w-2.5" /> {(s.protocol || 'link').toUpperCase()}
+                  </button>
                 )
               })}
 
@@ -2278,16 +2176,14 @@ export function ManualMapsPage() {
                   key={node.id}
                   node={node}
                   position={positionFor(node)}
+                  labelOffset={labelOffsetFor(node)}
+                  zoom={view.zoom}
                   selected={selectedNodeId === node.id}
-                  multiSelected={multiSelectedNodeIds.has(node.id)}
                   live={mode === 'live'}
                   connectMode={inConnectFlow}
                   isConnectSource={connectFrom === node.id}
-                  scale={effectiveScale(node)}
-                  themeText={themeStyle.text}
                   onPointerDown={(e) => beginNodeDrag(e, node)}
-                  onResizeStart={(e) => beginNodeResize(e, node)}
-                  onClick={(e) => {
+                  onClick={() => {
                     if (connectFrom) {
                       finishConnect(node)
                     } else if (tool === 'connect') {
@@ -2295,26 +2191,12 @@ export function ManualMapsPage() {
                       setSelectedNodeId(node.id)
                       setSelectedLinkId(null)
                       setConnectFrom(node.id)
-                    } else if (e.shiftKey) {
-                      // Shift-click toggles the node into the multi-selection
-                      // set; the most-recently-toggled node becomes primary.
-                      setMultiSelectedNodeIds((prev) => {
-                        const next = new Set(prev)
-                        if (next.has(node.id)) next.delete(node.id)
-                        else next.add(node.id)
-                        return next
-                      })
-                      setSelectedNodeId(node.id)
-                      setSelectedLinkId(null)
-                      setSelectedShapeId(null)
                     } else {
                       setSelectedNodeId(node.id)
                       setSelectedLinkId(null)
-                      setSelectedShapeId(null)
-                      setMultiSelectedNodeIds(new Set([node.id]))
                     }
                   }}
-                  onConnectHandle={(e) => startConnect(node, e)}
+                  onLabelOffsetChange={(dx, dy, commit) => setNodeLabelOffset(node.id, dx, dy, commit)}
                 />
               ))}
             </div>
@@ -2360,28 +2242,22 @@ export function ManualMapsPage() {
         </div>
 
         {/* Right inspector */}
+        {!noc && (
         <InspectorRail
           open={inspectorOpen}
           toggle={() => setInspectorOpen((v) => !v)}
           selectedNode={selectedNode}
           selectedLink={selectedLinkId ? links.find((l) => l.id === selectedLinkId) || null : null}
-          selectedShape={selectedShapeId ? shapeMap.get(selectedShapeId) || null : null}
           selectedLinkLive={selectedLinkId ? liveById[selectedLinkId] || null : null}
           nodeMap={nodeMap}
           labelDraft={labelDraft}
           setLabelDraft={setLabelDraft}
           onSaveLabel={saveLabel}
           onChangeIcon={(icon) => selectedNode && updateNode.mutate({ id: selectedNode.id, patch: { icon } })}
-          onChangeNodeMetadata={(metadata) => selectedNode && updateNode.mutate({ id: selectedNode.id, patch: { metadata } })}
           onDeleteNode={() => selectedNode && deleteNode.mutate(selectedNode.id)}
           onUpdateLink={(id, patch) => updateLink.mutate({ id, patch })}
           onDeleteLink={(id) => deleteLink.mutate(id)}
-          onUpdateShape={(id, patch) => updateShape.mutate({ id, patch })}
-          onDeleteShape={(id) => deleteShape.mutate(id)}
           onDeselectLink={() => setSelectedLinkId(null)}
-          onDeselectShape={() => setSelectedShapeId(null)}
-          onPatchMapMeta={patchMapMeta}
-          mapMeta={mapMeta}
           currentMap={currentMap}
           totals={statusTotals}
           links={links}
@@ -2389,6 +2265,7 @@ export function ManualMapsPage() {
           onDeleteMap={() => setDeleteMapOpen(true)}
           mode={mode}
         />
+        )}
       </div>
 
       {/* ── Link Wizard (after click-to-connect target) ─────── */}
@@ -2578,27 +2455,19 @@ function ToolBtn({
   )
 }
 
-function GridBackground({
-  view,
-  fine = 'rgba(148,163,184,0.10)',
-  major = 'rgba(148,163,184,0.18)',
-}: {
-  view: { x: number; y: number; zoom: number }
-  fine?: string
-  major?: string
-}) {
-  const fineSize = 24 * view.zoom
-  const majorSize = fineSize * 4
+function GridBackground({ view }: { view: { x: number; y: number; zoom: number } }) {
+  const fine = 24 * view.zoom
+  const major = fine * 4
   return (
     <div
-      className="pointer-events-none absolute inset-0 opacity-90"
+      className="absolute inset-0 opacity-60 dark:opacity-50"
       style={{
         backgroundImage:
-          `linear-gradient(to right, ${fine} 1px, transparent 1px),` +
-          `linear-gradient(to bottom, ${fine} 1px, transparent 1px),` +
-          `linear-gradient(to right, ${major} 1px, transparent 1px),` +
-          `linear-gradient(to bottom, ${major} 1px, transparent 1px)`,
-        backgroundSize: `${fineSize}px ${fineSize}px, ${fineSize}px ${fineSize}px, ${majorSize}px ${majorSize}px, ${majorSize}px ${majorSize}px`,
+          `linear-gradient(to right, rgba(148,163,184,0.10) 1px, transparent 1px),` +
+          `linear-gradient(to bottom, rgba(148,163,184,0.10) 1px, transparent 1px),` +
+          `linear-gradient(to right, rgba(148,163,184,0.18) 1px, transparent 1px),` +
+          `linear-gradient(to bottom, rgba(148,163,184,0.18) 1px, transparent 1px)`,
+        backgroundSize: `${fine}px ${fine}px, ${fine}px ${fine}px, ${major}px ${major}px, ${major}px ${major}px`,
         backgroundPosition: `${view.x}px ${view.y}px, ${view.x}px ${view.y}px, ${view.x}px ${view.y}px, ${view.x}px ${view.y}px`,
       }}
     />
@@ -2616,191 +2485,168 @@ function CanvasCenter({ children }: { children: ReactNode }) {
 }
 
 /* ── Node card ────────────────────────────────────────────────── */
-// Renders the icon "disc" with the user-chosen shape, color override, label
-// position, and lock badge. The pure-CSS clip-path approach keeps a single
-// DOM element no matter the variant — the only thing that changes is the
-// shape and (occasionally) border-radius. Drawback: the focus ring follows
-// the bounding box, not the clipped shape. Tradeoff is worth it because
-// per-shape SVG would explode the markup.
-
-function nodeShapeStyle(variant: NodeShapeVariant): {
-  borderRadius?: string
-  clipPath?: string
-} {
-  switch (variant) {
-    case 'disc':    return { borderRadius: '50%' }
-    case 'square':  return { borderRadius: '6%' }
-    case 'rounded': return { borderRadius: '22%' }
-    case 'hex':     return { clipPath: 'polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%)' }
-    case 'diamond': return { clipPath: 'polygon(50% 0, 100% 50%, 50% 100%, 0 50%)' }
-    case 'cloud':   return { clipPath: 'polygon(15% 30%, 0 60%, 15% 90%, 50% 100%, 85% 90%, 100% 60%, 85% 30%, 65% 15%, 35% 15%)' }
-    default:        return { borderRadius: '50%' }
-  }
-}
 
 function NodeCard({
   node,
   position,
+  labelOffset,
+  zoom,
   selected,
-  multiSelected,
   live,
   connectMode,
   isConnectSource,
-  scale,
-  themeText,
   onPointerDown,
   onClick,
-  onConnectHandle,
-  onResizeStart,
+  onLabelOffsetChange,
 }: {
   node: ManualMapNode
   position: { x_pct: number; y_pct: number }
+  labelOffset: { dx: number; dy: number }
+  zoom: number
   selected: boolean
-  multiSelected: boolean
   live: boolean
   connectMode: boolean
   isConnectSource: boolean
-  scale: number
-  themeText: string
   onPointerDown: (e: ReactPointerEvent<HTMLButtonElement>) => void
-  onClick: (e: React.MouseEvent) => void
-  onConnectHandle: (e: ReactPointerEvent) => void
-  onResizeStart?: (e: ReactPointerEvent) => void
+  onClick: () => void
+  onLabelOffsetChange: (dx: number, dy: number, commit: boolean) => void
 }) {
   const iconKey = iconForNode(node)
   const sk = statusKey(node.status)
-  const statusCol = STATUS_COLOR[sk]
-  const customCol = nodeColor(node)
-  const variant = nodeShapeVariant(node)
-  const labelPos = nodeLabelPos(node)
-  const locked = isNodeLocked(node)
-  const pulsing = live && (sk === 'down' || sk === 'degraded') && variant === 'disc'
+  const color = STATUS_COLOR[sk]
+  const pulsing = live && (sk === 'down' || sk === 'degraded')
   const dim = connectMode && !isConnectSource
+  const moved = Math.hypot(labelOffset.dx, labelOffset.dy) > 4
+  const labelEditable = !live
 
-  const discSize = Math.round(NODE_BASE_PX * scale)
-  const iconSize = Math.round(36 * scale)
-  const statusDot = Math.round(14 * scale)
-  const shapeStyle = nodeShapeStyle(variant)
+  const startLabelDrag = (e: ReactPointerEvent) => {
+    if (!labelEditable) return
+    e.stopPropagation()
+    e.preventDefault()
+    const sx = e.clientX
+    const sy = e.clientY
+    const base = { ...labelOffset }
+    const move = (ev: PointerEvent) => {
+      onLabelOffsetChange(
+        base.dx + (ev.clientX - sx) / zoom,
+        base.dy + (ev.clientY - sy) / zoom,
+        false,
+      )
+    }
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      onLabelOffsetChange(
+        base.dx + (ev.clientX - sx) / zoom,
+        base.dy + (ev.clientY - sy) / zoom,
+        true,
+      )
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
 
-  // When a custom color is set, we put it on the border via inline style.
-  // The status-class ring still applies (mostly for the icon tint).
-  const customBorder = customCol ? { borderColor: customCol, color: customCol } : undefined
-
-  const isLabelStacked = labelPos === 'top' || labelPos === 'bottom'
-  const labelBox = labelPos === 'hidden' ? null : (
-    <div
-      className={cn(
-        'rounded-md border px-2 py-0.5 text-center text-[11px] font-semibold leading-tight shadow-sm backdrop-blur',
-        'bg-surface/90 border-border',
-        labelPos === 'top' && 'mb-1.5',
-        labelPos === 'bottom' && 'mt-1.5',
-        (labelPos === 'left' || labelPos === 'right') && 'mx-1.5',
-      )}
-      style={{ color: themeText !== 'inherit' ? themeText : undefined }}
-    >
-      <div className="truncate text-text">{node.label || node.hostname}</div>
-      <div className="truncate text-[10px] font-normal text-muted">{node.ip_address}</div>
-      {node.metadata?.sub_label && (
-        <div className="mt-0.5 truncate text-[9px] font-medium uppercase tracking-wider text-primary/80">
-          {node.metadata.sub_label}
-        </div>
-      )}
-    </div>
-  )
+  const labelTop = NODE_LABEL_TOP + labelOffset.dy
+  const labelLeft = labelOffset.dx
 
   return (
-    <button
-      type="button"
-      onPointerDown={onPointerDown}
-      onClick={onClick}
-      title={`${node.hostname} · ${node.ip_address}${locked ? ' · locked' : ''}`}
-      data-node-id={node.id}
+    <div
       className={cn(
         'group absolute z-20 -translate-x-1/2 -translate-y-1/2 transition-opacity',
-        isLabelStacked ? 'flex flex-col items-center' : 'flex items-center',
         dim && 'opacity-60',
       )}
-      style={{
-        left: `${position.x_pct}%`,
-        top: `${position.y_pct}%`,
-        // Container width depends on whether labels stack or sit beside.
-        minWidth: isLabelStacked ? Math.max(discSize, 128) : undefined,
-      }}
+      style={{ left: `${position.x_pct}%`, top: `${position.y_pct}%` }}
     >
-      {labelPos === 'top' && labelBox}
-      {labelPos === 'left' && labelBox}
-      {/* Icon container */}
-      <div className="relative" style={{ width: discSize, height: discSize }}>
-        {/* Pulse halo for problems in live mode — only on round shapes. */}
-        {pulsing && (
-          <span
-            aria-hidden
-            className={cn(
-              'absolute inset-0 rounded-full',
-              sk === 'down' ? 'bg-danger/40' : 'bg-warning/40',
-              'nm-ping',
-            )}
-          />
-        )}
-        <div
-          className={cn(
-            'relative flex h-full w-full items-center justify-center border-2 shadow-md transition',
-            'bg-surface',
-            !customCol && statusCol.ring,
-            selected && 'ring-2 ring-primary ring-offset-2 ring-offset-surface',
-            multiSelected && !selected && 'ring-2 ring-primary/55 ring-offset-1 ring-offset-surface',
-          )}
-          style={{ ...shapeStyle, ...customBorder }}
+      {moved && (
+        <svg
+          className="pointer-events-none absolute overflow-visible"
+          style={{ left: '50%', top: NODE_ICON_H / 2, transform: 'translateX(-50%)' }}
+          width={1}
+          height={1}
         >
-          {/* status dot */}
-          <span
-            aria-hidden
-            className={cn(
-              'absolute -right-0.5 -top-0.5 rounded-full border-2 border-surface',
-              statusCol.dot,
-              live && 'animate-pulse-soft',
-            )}
-            style={{ width: statusDot, height: statusDot }}
+          <line
+            x1={0}
+            y1={0}
+            x2={labelLeft}
+            y2={labelTop - NODE_ICON_H / 2}
+            className="stroke-border"
+            strokeWidth={1}
+            strokeDasharray="3 3"
           />
-          <NetworkIcon name={iconKey} style={{ width: iconSize, height: iconSize }} />
-          {locked && (
+        </svg>
+      )}
+
+      <button
+        type="button"
+        onPointerDown={onPointerDown}
+        onClick={onClick}
+        title={`${node.hostname} · ${node.ip_address}`}
+        className="relative flex flex-col items-center"
+      >
+        <div className="relative">
+          {pulsing && (
             <span
               aria-hidden
-              className="absolute -bottom-0.5 -left-0.5 flex h-4 w-4 items-center justify-center rounded-full border border-border bg-surface text-muted shadow-sm"
-              title="Locked"
+              className={cn(
+                'absolute inset-0 rounded-lg',
+                sk === 'down' ? 'bg-danger/40' : 'bg-warning/40',
+                'nm-ping',
+              )}
+            />
+          )}
+          <div
+            className={cn(
+              'relative flex h-14 w-[3.75rem] items-center justify-center rounded-lg border-2 shadow-md transition',
+              'bg-surface',
+              color.ring,
+              selected && 'ring-2 ring-primary ring-offset-2 ring-offset-surface',
+            )}
+          >
+            <span
+              aria-hidden
+              className={cn(
+                'absolute -right-0.5 -top-0.5 h-3.5 w-3.5 rounded-full border-2 border-surface',
+                color.dot,
+                live && 'animate-pulse-soft',
+              )}
+            />
+            <NetworkIcon name={iconKey} className="h-8 w-8" />
+          </div>
+          {!live && (
+            <span
+              aria-hidden
+              className={cn(
+                'pointer-events-none absolute -bottom-1 left-1/2 z-30 flex h-5 w-5 -translate-x-1/2 items-center justify-center rounded-full border border-primary/60 bg-surface text-primary shadow-sm transition',
+                (selected || isConnectSource || connectMode) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
+                isConnectSource && 'ring-2 ring-primary/60',
+              )}
             >
-              <Lock className="h-2.5 w-2.5" />
+              <Cable className="h-2.5 w-2.5" />
             </span>
           )}
         </div>
-        {/* Resize handle */}
-        {selected && !live && onResizeStart && !locked && (
-          <span
-            onPointerDown={(e) => { e.stopPropagation(); onResizeStart(e) }}
-            className="absolute -bottom-1 -right-1 z-40 flex h-4 w-4 cursor-nwse-resize items-center justify-center rounded-sm border border-primary/70 bg-surface text-primary shadow-sm hover:bg-primary/10"
-            title="Drag to resize"
-          >
-            <svg viewBox="0 0 10 10" className="h-2.5 w-2.5">
-              <path d="M1 9 L9 1 M5 9 L9 5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-            </svg>
-          </span>
+      </button>
+
+      <div
+        role="presentation"
+        onPointerDown={startLabelDrag}
+        title={labelEditable ? 'Drag to reposition label' : undefined}
+        className={cn(
+          'absolute max-w-[8rem] rounded-md border px-2 py-0.5 text-center text-[11px] font-semibold leading-tight shadow-sm backdrop-blur',
+          'bg-surface/90 border-border',
+          labelEditable && 'cursor-move hover:border-primary/60',
+          selected && 'border-primary/50',
         )}
-        {!live && (
-          <span
-            aria-hidden
-            className={cn(
-              'pointer-events-none absolute -bottom-1 left-1/2 z-30 flex h-5 w-5 -translate-x-1/2 items-center justify-center rounded-full border border-primary/60 bg-surface text-primary shadow-sm transition',
-              (selected || isConnectSource || connectMode) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
-              isConnectSource && 'ring-2 ring-primary/60',
-            )}
-          >
-            <Cable className="h-2.5 w-2.5" />
-          </span>
-        )}
+        style={{
+          left: `calc(50% + ${labelLeft}px)`,
+          top: `${labelTop}px`,
+          transform: 'translateX(-50%)',
+        }}
+      >
+        <div className="truncate text-text">{node.label || node.hostname}</div>
+        <div className="truncate text-[10px] font-normal text-muted">{node.ip_address}</div>
       </div>
-      {labelPos === 'bottom' && labelBox}
-      {labelPos === 'right' && labelBox}
-    </button>
+    </div>
   )
 }
 
@@ -2986,23 +2832,16 @@ function InspectorRail({
   toggle,
   selectedNode,
   selectedLink,
-  selectedShape,
   selectedLinkLive,
   nodeMap,
   labelDraft,
   setLabelDraft,
   onSaveLabel,
   onChangeIcon,
-  onChangeNodeMetadata,
   onDeleteNode,
   onUpdateLink,
   onDeleteLink,
-  onUpdateShape,
-  onDeleteShape,
   onDeselectLink,
-  onDeselectShape,
-  onPatchMapMeta,
-  mapMeta,
   currentMap,
   totals,
   links,
@@ -3014,23 +2853,16 @@ function InspectorRail({
   toggle: () => void
   selectedNode: ManualMapNode | null
   selectedLink: ManualMapLink | null
-  selectedShape: ManualMapShape | null
   selectedLinkLive: LiveLinkData | null
   nodeMap: Map<string, ManualMapNode>
   labelDraft: string
   setLabelDraft: (v: string) => void
   onSaveLabel: () => void
   onChangeIcon: (icon: string) => void
-  onChangeNodeMetadata: (metadata: NodeMetadata) => void
   onDeleteNode: () => void
   onUpdateLink: (id: string, patch: Partial<Pick<ManualMapLink, 'label' | 'link_type'>> & { metadata?: LinkMetadata }) => void
   onDeleteLink: (id: string) => void
-  onUpdateShape: (id: string, patch: Partial<ManualMapShape>) => void
-  onDeleteShape: (id: string) => void
   onDeselectLink: () => void
-  onDeselectShape: () => void
-  onPatchMapMeta: (next: Partial<MapMetadata>) => void
-  mapMeta: MapMetadata
   currentMap: ManualMapListItem | ManualMapDetail | null
   totals: Record<string, number>
   links: ManualMapLink[]
@@ -3042,9 +2874,7 @@ function InspectorRail({
     ? { title: 'Device', subtitle: selectedNode.hostname }
     : selectedLink
       ? { title: 'Link', subtitle: `${nodeMap.get(selectedLink.source_node_id)?.hostname || '?'} ↔ ${nodeMap.get(selectedLink.target_node_id)?.hostname || '?'}` }
-      : selectedShape
-        ? { title: 'Annotation', subtitle: selectedShape.kind }
-        : { title: 'Map Summary', subtitle: currentMap?.name || '—' }
+      : { title: 'Map Summary', subtitle: currentMap?.name || '—' }
   return (
     <aside
       className={cn(
@@ -3076,14 +2906,6 @@ function InspectorRail({
                 title="Clear link selection"
               >Clear</button>
             )}
-            {selectedShape && (
-              <button
-                type="button"
-                onClick={onDeselectShape}
-                className="rounded px-1.5 py-0.5 text-[10px] text-muted hover:bg-surface2 hover:text-text"
-                title="Clear annotation selection"
-              >Clear</button>
-            )}
             <button
               type="button"
               onClick={toggle}
@@ -3102,7 +2924,6 @@ function InspectorRail({
                 setLabelDraft={setLabelDraft}
                 onSaveLabel={onSaveLabel}
                 onChangeIcon={onChangeIcon}
-                onChangeMetadata={onChangeNodeMetadata}
                 onDeleteNode={onDeleteNode}
                 mode={mode}
               />
@@ -3116,21 +2937,12 @@ function InspectorRail({
                 onDelete={() => onDeleteLink(selectedLink.id)}
                 mode={mode}
               />
-            ) : selectedShape ? (
-              <ShapeInspector
-                shape={selectedShape}
-                onChange={(patch) => onUpdateShape(selectedShape.id, patch)}
-                onDelete={() => onDeleteShape(selectedShape.id)}
-                mode={mode}
-              />
             ) : (
               <MapInspector
                 currentMap={currentMap}
                 totals={totals}
                 links={links}
                 nodes={nodes}
-                mapMeta={mapMeta}
-                onPatchMapMeta={onPatchMapMeta}
                 onDeleteLink={onDeleteLink}
                 onDeleteMap={onDeleteMap}
                 mode={mode}
@@ -3143,64 +2955,12 @@ function InspectorRail({
   )
 }
 
-function ColorSwatchRow({
-  value,
-  onChange,
-  disabled,
-  allowDefault = true,
-}: {
-  value: string | null | undefined
-  onChange: (next: string | null) => void
-  disabled?: boolean
-  allowDefault?: boolean
-}) {
-  const swatches = allowDefault ? COLOR_SWATCHES : COLOR_SWATCHES.filter((c) => c.value !== '')
-  const current = value || ''
-  return (
-    <div className="flex flex-wrap items-center gap-1">
-      {swatches.map((c) => {
-        const isActive = current === c.value || (c.value === '' && !current)
-        return (
-          <button
-            key={c.value || 'default'}
-            type="button"
-            disabled={disabled}
-            onClick={() => onChange(c.value || null)}
-            title={c.label}
-            className={cn(
-              'relative h-5 w-5 shrink-0 rounded-full border transition',
-              isActive ? 'ring-2 ring-primary ring-offset-1 ring-offset-surface' : 'border-border hover:border-border-strong',
-              disabled && 'cursor-not-allowed opacity-50',
-            )}
-            style={{ background: c.value || 'transparent' }}
-          >
-            {c.value === '' && (
-              <svg viewBox="0 0 10 10" className="absolute inset-0 h-full w-full text-muted">
-                <line x1="1" y1="9" x2="9" y2="1" stroke="currentColor" strokeWidth="1.2" />
-              </svg>
-            )}
-          </button>
-        )
-      })}
-      <input
-        type="color"
-        value={(current && /^#[0-9a-f]{6}$/i.test(current)) ? current : '#3b82f6'}
-        onChange={(e) => onChange(e.target.value)}
-        disabled={disabled}
-        title="Custom color"
-        className="h-5 w-5 cursor-pointer rounded border border-border bg-transparent disabled:cursor-not-allowed disabled:opacity-50"
-      />
-    </div>
-  )
-}
-
 function DeviceInspector({
   node,
   labelDraft,
   setLabelDraft,
   onSaveLabel,
   onChangeIcon,
-  onChangeMetadata,
   onDeleteNode,
   mode,
 }: {
@@ -3209,26 +2969,16 @@ function DeviceInspector({
   setLabelDraft: (v: string) => void
   onSaveLabel: () => void
   onChangeIcon: (icon: string) => void
-  onChangeMetadata: (next: NodeMetadata) => void
   onDeleteNode: () => void
   mode: 'design' | 'live'
 }) {
   const sk = statusKey(node.status)
   const color = STATUS_COLOR[sk]
   const currentIcon = iconForNode(node)
-  const customCol = nodeColor(node)
-  const variant = nodeShapeVariant(node)
-  const labelPos = nodeLabelPos(node)
-  const locked = isNodeLocked(node)
-  const md = node.metadata || {}
-  const ro = mode === 'live'
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
-        <div
-          className={cn('flex h-12 w-12 items-center justify-center border-2 bg-surface', !customCol && color.ring)}
-          style={{ ...nodeShapeStyle(variant), borderColor: customCol || undefined, color: customCol || undefined }}
-        >
+        <div className={cn('flex h-12 w-[3.25rem] items-center justify-center rounded-lg border-2', color.ring, 'bg-surface')}>
           <NetworkIcon name={currentIcon} className="h-7 w-7" />
         </div>
         <div className="min-w-0 flex-1">
@@ -3249,6 +2999,9 @@ function DeviceInspector({
           }}
           disabled={mode === 'live'}
         />
+        {mode === 'design' && (
+          <p className="mt-1 text-[10px] text-muted">Drag the name badge on the canvas to reposition it independently of the device icon.</p>
+        )}
       </FormField>
 
       <div>
@@ -3291,87 +3044,6 @@ function DeviceInspector({
       </div>
 
       <div>
-        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Color</div>
-        <ColorSwatchRow
-          value={md.color}
-          disabled={ro}
-          onChange={(next) => onChangeMetadata({ ...md, color: next })}
-        />
-      </div>
-
-      <div>
-        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Shape</div>
-        <div className="grid grid-cols-6 gap-1">
-          {NODE_SHAPE_VARIANTS.map((v) => (
-            <button
-              key={v.value}
-              type="button"
-              disabled={ro}
-              onClick={() => onChangeMetadata({ ...md, shape_variant: v.value })}
-              title={v.label}
-              className={cn(
-                'flex aspect-square items-center justify-center rounded-md border text-text2 transition',
-                variant === v.value ? 'border-primary/55 bg-primary/10 text-primary' : 'border-border bg-surface hover:border-border-strong',
-                ro && 'cursor-not-allowed opacity-50',
-              )}
-            >
-              <span
-                aria-hidden
-                className="h-4 w-4 border-[1.5px] border-current"
-                style={nodeShapeStyle(v.value)}
-              />
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div>
-        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Label position</div>
-        <div className="grid grid-cols-5 gap-1 text-[10px]">
-          {(['top','left','bottom','right','hidden'] as NodeLabelPos[]).map((p) => (
-            <button
-              key={p}
-              type="button"
-              disabled={ro}
-              onClick={() => onChangeMetadata({ ...md, label_pos: p })}
-              className={cn(
-                'rounded-md border px-1 py-1 text-center capitalize transition',
-                labelPos === p ? 'border-primary/55 bg-primary/10 text-primary' : 'border-border bg-surface hover:border-border-strong',
-                ro && 'cursor-not-allowed opacity-50',
-              )}
-            >{p}</button>
-          ))}
-        </div>
-      </div>
-
-      <FormField label="Sub-label">
-        <Input
-          value={md.sub_label || ''}
-          placeholder="Optional — role, location, tag"
-          disabled={ro}
-          onChange={(e) => onChangeMetadata({ ...md, sub_label: e.target.value })}
-          onBlur={(e) => onChangeMetadata({ ...md, sub_label: e.target.value.trim() || null })}
-        />
-      </FormField>
-
-      <div className="flex items-center justify-between rounded-md border border-border bg-surface2/40 px-2.5 py-1.5">
-        <div className="flex items-center gap-2 text-xs">
-          {locked ? <Lock className="h-3.5 w-3.5 text-warning" /> : <Unlock className="h-3.5 w-3.5 text-muted" />}
-          <span className="font-medium">Lock position</span>
-        </div>
-        <button
-          type="button"
-          disabled={ro}
-          onClick={() => onChangeMetadata({ ...md, locked: !locked })}
-          className={cn(
-            'rounded-md px-2 py-0.5 text-[10px] font-semibold transition',
-            locked ? 'bg-warning/15 text-warning' : 'bg-surface2 text-muted hover:text-text',
-            ro && 'cursor-not-allowed opacity-50',
-          )}
-        >{locked ? 'Locked' : 'Unlocked'}</button>
-      </div>
-
-      <div>
         <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Properties</div>
         <div className="grid grid-cols-2 gap-1.5 text-xs">
           <InfoTile label="IP" value={node.ip_address} />
@@ -3402,8 +3074,6 @@ function MapInspector({
   totals,
   links,
   nodes,
-  mapMeta,
-  onPatchMapMeta,
   onDeleteLink,
   onDeleteMap,
   mode,
@@ -3412,16 +3082,11 @@ function MapInspector({
   totals: Record<string, number>
   links: ManualMapLink[]
   nodes: ManualMapNode[]
-  mapMeta: MapMetadata
-  onPatchMapMeta: (next: Partial<MapMetadata>) => void
   onDeleteLink: (id: string) => void
   onDeleteMap: () => void
   mode: 'design' | 'live'
 }) {
   const nodeMap = new Map(nodes.map((n) => [n.id, n]))
-  const theme = (mapMeta.theme || 'default') as MapTheme
-  const bg = mapMeta.background || {}
-  const ro = mode === 'live'
   return (
     <div className="space-y-4">
       {currentMap && (currentMap as any).description && (
@@ -3429,118 +3094,6 @@ function MapInspector({
           {(currentMap as any).description}
         </div>
       )}
-
-      {/* Theme picker */}
-      <div>
-        <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
-          <Palette className="h-3 w-3" /> Canvas theme
-        </div>
-        <div className="grid grid-cols-2 gap-1.5">
-          {MAP_THEMES.map((t) => (
-            <button
-              key={t.value}
-              type="button"
-              disabled={ro || !currentMap}
-              onClick={() => onPatchMapMeta({ theme: t.value })}
-              title={t.hint}
-              className={cn(
-                'flex items-center gap-2 rounded-md border px-2 py-1.5 text-left transition',
-                theme === t.value ? 'border-primary/55 bg-primary/10 text-primary' : 'border-border bg-surface hover:border-border-strong',
-                (ro || !currentMap) && 'cursor-not-allowed opacity-50',
-              )}
-            >
-              <span
-                className="h-6 w-6 rounded border border-border"
-                style={{ background: THEME_STYLES[t.value].bg }}
-              />
-              <div className="min-w-0 flex-1">
-                <div className="text-xs font-semibold">{t.label}</div>
-                <div className="truncate text-[9px] text-muted">{t.hint}</div>
-              </div>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Background image */}
-      <div>
-        <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
-          <ImageIcon className="h-3 w-3" /> Background image
-        </div>
-        <Input
-          placeholder="Image URL (https:// or data:image/…)"
-          value={bg.url || ''}
-          disabled={ro || !currentMap}
-          onChange={(e) => onPatchMapMeta({ background: { ...bg, url: e.target.value } })}
-          onBlur={(e) => onPatchMapMeta({ background: { ...bg, url: e.target.value.trim() || null } })}
-        />
-        <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-muted">
-          <span>Fit</span>
-          <div className="flex gap-1">
-            {(['cover','contain','stretch'] as const).map((f) => (
-              <button
-                key={f}
-                type="button"
-                disabled={ro || !currentMap}
-                onClick={() => onPatchMapMeta({ background: { ...bg, fit: f } })}
-                className={cn(
-                  'rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide transition',
-                  (bg.fit || 'cover') === f ? 'border-primary/55 bg-primary/10 text-primary' : 'border-border bg-surface text-muted hover:text-text',
-                  (ro || !currentMap) && 'cursor-not-allowed opacity-50',
-                )}
-              >{f}</button>
-            ))}
-          </div>
-        </div>
-        <div className="mt-2 flex items-center gap-2 text-[10px] text-muted">
-          <span className="w-12">Opacity</span>
-          <input
-            type="range"
-            min={0.05}
-            max={1}
-            step={0.05}
-            value={bg.opacity != null ? bg.opacity : 0.35}
-            disabled={ro || !currentMap}
-            onChange={(e) => onPatchMapMeta({ background: { ...bg, opacity: parseFloat(e.target.value) } })}
-            className="flex-1"
-          />
-          <span className="w-9 text-right tabular-nums">{Math.round((bg.opacity != null ? bg.opacity : 0.35) * 100)}%</span>
-        </div>
-        {bg.url && (
-          <button
-            type="button"
-            disabled={ro}
-            onClick={() => onPatchMapMeta({ background: { url: null, opacity: bg.opacity, fit: bg.fit } })}
-            className="mt-1 w-full rounded border border-dashed border-border px-2 py-1 text-[10px] text-muted hover:bg-surface2 hover:text-text"
-          >Remove background</button>
-        )}
-      </div>
-
-      {/* Snap to grid */}
-      <div className="flex items-center justify-between rounded-md border border-border bg-surface2/40 px-2.5 py-1.5">
-        <div className="text-xs font-medium">Snap to grid</div>
-        <div className="flex items-center gap-2">
-          <input
-            type="number"
-            min={0.5}
-            max={10}
-            step={0.5}
-            value={mapMeta.snap_size || 2}
-            disabled={ro || !mapMeta.snap_enabled || !currentMap}
-            onChange={(e) => onPatchMapMeta({ snap_size: parseFloat(e.target.value) || 2 })}
-            className="h-6 w-12 rounded border border-border bg-surface px-1 text-[10px] tabular-nums"
-          />
-          <button
-            type="button"
-            disabled={ro || !currentMap}
-            onClick={() => onPatchMapMeta({ snap_enabled: !mapMeta.snap_enabled })}
-            className={cn(
-              'rounded-md px-2 py-0.5 text-[10px] font-semibold transition',
-              mapMeta.snap_enabled ? 'bg-success/15 text-success' : 'bg-surface2 text-muted hover:text-text',
-            )}
-          >{mapMeta.snap_enabled ? 'ON' : 'OFF'}</button>
-        </div>
-      </div>
 
       <div>
         <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Status breakdown</div>
@@ -3750,22 +3303,235 @@ function LiveInterfaceCard({ label, iface }: { label: string; iface: LiveInterfa
   )
 }
 
-/* ── Link annotation chip ────────────────────────────────────── */
-// Anchored at canvas percent (x,y). Pointer-events-none so it doesn't
-// steal clicks from the underlying path.
+/* ── Interface label on cable (SVG) ──────────────────────────── */
+
+function IfaceCableLabel({
+  label,
+  anchor,
+  style,
+}: {
+  label: string
+  anchor: IfaceAnchor
+  style?: IfaceLabelStyle | null
+}) {
+  const pad = 0.32
+  const charW = 0.68
+  const fontSize = style?.fontSize ?? IFACE_LABEL_FONT_DEFAULT
+  const angle = style?.angle != null ? style.angle : anchor.angle
+  const along = style?.along ?? 0
+  const perp = style?.perp ?? 0
+  const w = label.length * charW + pad * 2
+  const h = 1.85 * (fontSize / IFACE_LABEL_FONT_DEFAULT)
+  const textAnchor = style?.angle != null ? 'middle' as const : anchor.textAnchor
+  const xOff = textAnchor === 'start' ? 0 : textAnchor === 'end' ? -w : -w / 2
+  const textX = textAnchor === 'start' ? xOff + pad : textAnchor === 'end' ? xOff + w - pad : 0
+
+  const rectFill = style?.bgColor || undefined
+  const rectStroke = style?.borderColor || undefined
+  const textFill = style?.textColor || undefined
+
+  return (
+    <g transform={`translate(${anchor.x}, ${anchor.y}) rotate(${angle})`}>
+      <g transform={`translate(${along}, ${perp})`}>
+        <rect
+          x={xOff}
+          y={-h / 2}
+          width={w}
+          height={h}
+          rx={0.38}
+          fill={rectFill}
+          stroke={rectStroke}
+          className={cn(!rectFill && 'fill-surface/95', !rectStroke && 'stroke-border')}
+          strokeWidth={0.12}
+          vectorEffect="non-scaling-stroke"
+        />
+        <text
+          x={textX}
+          y={0}
+          textAnchor={textAnchor}
+          dominantBaseline="central"
+          fill={textFill || undefined}
+          className={cn('font-mono font-semibold', !textFill && 'fill-text2')}
+          style={{ fontSize: `${fontSize}px` }}
+        >
+          {label}
+        </text>
+      </g>
+    </g>
+  )
+}
+
+function IfaceLabelStyleEditor({
+  title,
+  style,
+  disabled,
+  onChange,
+  onReset,
+}: {
+  title: string
+  style?: IfaceLabelStyle | null
+  disabled?: boolean
+  onChange: (next: IfaceLabelStyle) => void
+  onReset: () => void
+}) {
+  const s: IfaceLabelStyle = style || {}
+  const num = (v: string) => (v === '' ? null : Number(v))
+
+  const patch = (next: Partial<IfaceLabelStyle>) => onChange({ ...s, ...next })
+  const nudge = (along: number, perp: number) => {
+    patch({
+      along: (s.along ?? 0) + along,
+      perp: (s.perp ?? 0) + perp,
+    })
+  }
+
+  return (
+    <div className="rounded-lg border border-border bg-surface2/30 p-2.5">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">{title}</span>
+        {hasIfaceLabelStyle(style) && !disabled && (
+          <button
+            type="button"
+            onClick={onReset}
+            className="text-[9px] font-medium text-primary hover:underline"
+          >
+            Reset
+          </button>
+        )}
+      </div>
+
+      <div className="mb-2 flex flex-wrap gap-1">
+        {([
+          { label: '←', title: 'Left (perp −)', along: 0, perp: -0.5 },
+          { label: '→', title: 'Right (perp +)', along: 0, perp: 0.5 },
+          { label: '↑', title: 'Toward device (along −)', along: -0.5, perp: 0 },
+          { label: '↓', title: 'Along cable (along +)', along: 0.5, perp: 0 },
+        ] as const).map((btn) => (
+          <button
+            key={btn.label}
+            type="button"
+            disabled={disabled}
+            title={btn.title}
+            onClick={() => nudge(btn.along, btn.perp)}
+            className="h-7 w-7 rounded border border-border bg-surface text-xs font-semibold hover:border-primary/50 hover:bg-primary/10 disabled:opacity-50"
+          >
+            {btn.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 text-xs">
+        <FormField label="Distance" hint="From device, %">
+          <Input
+            type="number"
+            step={0.1}
+            min={0}
+            disabled={disabled}
+            value={s.dist ?? ''}
+            placeholder="Auto"
+            className="h-8 font-mono text-xs"
+            onChange={(e) => patch({ dist: num(e.target.value) })}
+          />
+        </FormField>
+        <FormField label="Font size" hint="SVG units">
+          <Input
+            type="number"
+            step={0.05}
+            min={0.5}
+            max={2}
+            disabled={disabled}
+            value={s.fontSize ?? ''}
+            placeholder={String(IFACE_LABEL_FONT_DEFAULT)}
+            className="h-8 font-mono text-xs"
+            onChange={(e) => patch({ fontSize: num(e.target.value) })}
+          />
+        </FormField>
+        <FormField label="Along cable" hint="+ toward far end">
+          <Input
+            type="number"
+            step={0.1}
+            disabled={disabled}
+            value={s.along ?? ''}
+            placeholder="0"
+            className="h-8 font-mono text-xs"
+            onChange={(e) => patch({ along: num(e.target.value) })}
+          />
+        </FormField>
+        <FormField label="Perpendicular" hint="+ right of cable">
+          <Input
+            type="number"
+            step={0.1}
+            disabled={disabled}
+            value={s.perp ?? ''}
+            placeholder="0"
+            className="h-8 font-mono text-xs"
+            onChange={(e) => patch({ perp: num(e.target.value) })}
+          />
+        </FormField>
+        <FormField label="Angle °" hint="Empty = auto">
+          <Input
+            type="number"
+            step={1}
+            min={-180}
+            max={180}
+            disabled={disabled}
+            value={s.angle ?? ''}
+            placeholder="Auto"
+            className="h-8 font-mono text-xs"
+            onChange={(e) => patch({ angle: num(e.target.value) })}
+          />
+        </FormField>
+      </div>
+
+      <div className="mt-2 grid grid-cols-3 gap-2">
+        <label className="flex flex-col gap-1 text-[10px]">
+          <span className="text-muted">Text</span>
+          <input
+            type="color"
+            disabled={disabled}
+            value={s.textColor || '#94a3b8'}
+            onChange={(e) => patch({ textColor: e.target.value })}
+            className="h-8 w-full cursor-pointer rounded border border-border bg-surface disabled:opacity-50"
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-[10px]">
+          <span className="text-muted">Background</span>
+          <input
+            type="color"
+            disabled={disabled}
+            value={s.bgColor || '#1e293b'}
+            onChange={(e) => patch({ bgColor: e.target.value })}
+            className="h-8 w-full cursor-pointer rounded border border-border bg-surface disabled:opacity-50"
+          />
+        </label>
+        <label className="flex flex-col gap-1 text-[10px]">
+          <span className="text-muted">Border</span>
+          <input
+            type="color"
+            disabled={disabled}
+            value={s.borderColor || '#334155'}
+            onChange={(e) => patch({ borderColor: e.target.value })}
+            className="h-8 w-full cursor-pointer rounded border border-border bg-surface disabled:opacity-50"
+          />
+        </label>
+      </div>
+    </div>
+  )
+}
+
+/* ── Link annotation chip (HTML — speed / throughput mid-link) ── */
+
 function LinkChip({
   x, y, variant, children, tone,
 }: {
   x: number
   y: number
-  variant: 'iface' | 'speed' | 'live'
+  variant: 'speed' | 'live'
   children: ReactNode
   tone?: 'success' | 'warning' | 'danger'
 }) {
   let cls: string
-  if (variant === 'iface') {
-    cls = 'bg-surface/95 text-text2 border-border'
-  } else if (variant === 'speed') {
+  if (variant === 'speed') {
     cls = 'bg-primary/15 text-primary border-primary/30'
   } else {
     cls =
@@ -3773,6 +3539,7 @@ function LinkChip({
       tone === 'warning' ? 'bg-warning/15 text-warning border-warning/40' :
       'bg-success/15 text-success border-success/40'
   }
+
   return (
     <div
       className="pointer-events-none absolute z-[15]"
@@ -3783,7 +3550,7 @@ function LinkChip({
       }}
     >
       <div className={cn(
-        'rounded border px-1 py-px font-mono text-[9px] font-semibold leading-none tracking-tight shadow-sm backdrop-blur',
+        'whitespace-nowrap rounded border px-1 py-px font-mono text-[9px] font-semibold leading-none tracking-tight shadow-sm backdrop-blur',
         cls,
       )}>
         {children}
@@ -3817,10 +3584,53 @@ function LinkInspector({
   const health = source && target ? linkHealth(source.status, target.status) : 'unknown'
   const color = STATUS_COLOR[health]
   const ro = mode === 'live'
+  const srcQ = useDeviceInterfaces(source?.device_id)
+  const dstQ = useDeviceInterfaces(target?.device_id)
+  const [kindTouched, setKindTouched] = useState(false)
+  const [speedTouched, setSpeedTouched] = useState(false)
+  const speedParts = parseStoredSpeed(md.speed)
+  const [speedPreset, setSpeedPreset] = useState<LinkSpeed | ''>(speedParts.preset)
+  const [speedCustom, setSpeedCustom] = useState(speedParts.custom)
+
+  useEffect(() => {
+    const next = parseStoredSpeed(md.speed)
+    setSpeedPreset(next.preset)
+    setSpeedCustom(next.custom)
+    setKindTouched(false)
+    setSpeedTouched(false)
+  }, [link.id])
 
   const patchMeta = (next: Partial<LinkMetadata>) => {
     onChange({ metadata: { ...md, ...next } })
   }
+
+  const applyInferred = useCallback((srcName: string, dstName: string) => {
+    const next = inferLinkProps(
+      findIface(srcQ.data, srcName),
+      findIface(dstQ.data, dstName),
+      srcName,
+      dstName,
+    )
+    if (!kindTouched && (srcName || dstName)) {
+      onChange({ link_type: next.kind, metadata: { ...md, kind: next.kind } })
+    }
+    if (!speedTouched && (srcName || dstName)) {
+      const speed = resolveSpeedValue(next.speedPreset, next.speedCustom)
+      setSpeedPreset(next.speedPreset)
+      setSpeedCustom(next.speedCustom)
+      patchMeta({ speed: speed || null })
+    }
+  }, [srcQ.data, dstQ.data, kindTouched, speedTouched, md, onChange])
+
+  const inferred = useMemo(() => inferLinkProps(
+    findIface(srcQ.data, md.src_interface || ''),
+    findIface(dstQ.data, md.dst_interface || ''),
+    md.src_interface || '',
+    md.dst_interface || '',
+  ), [srcQ.data, dstQ.data, md.src_interface, md.dst_interface])
+
+  const kindAuto = !kindTouched && !!(md.src_interface || md.dst_interface)
+  const speedAuto = !speedTouched && !!(md.src_interface || md.dst_interface)
 
   return (
     <div className="space-y-4">
@@ -3893,107 +3703,80 @@ function LinkInspector({
         )}
       </div>
 
-      <FormField label="Source interface" hint={source?.hostname || ''}>
-        <Input
-          value={md.src_interface || ''}
-          placeholder="e.g. Gi0/1, eth0, Te1/0/24"
-          disabled={ro}
-          onChange={(e) => patchMeta({ src_interface: e.target.value })}
-          onBlur={(e) => patchMeta({ src_interface: e.target.value.trim() || null })}
-        />
-      </FormField>
+      <DeviceInterfaceSelect
+        deviceId={source?.device_id || ''}
+        hostname={source?.hostname || 'Source'}
+        value={md.src_interface || ''}
+        disabled={ro || !source}
+        onChange={(v) => {
+          patchMeta({ src_interface: v || null })
+          applyInferred(v, md.dst_interface || '')
+        }}
+      />
 
-      <FormField label="Destination interface" hint={target?.hostname || ''}>
-        <Input
-          value={md.dst_interface || ''}
-          placeholder="e.g. eth0, ens33, Gi0/24"
-          disabled={ro}
-          onChange={(e) => patchMeta({ dst_interface: e.target.value })}
-          onBlur={(e) => patchMeta({ dst_interface: e.target.value.trim() || null })}
-        />
-      </FormField>
+      <DeviceInterfaceSelect
+        deviceId={target?.device_id || ''}
+        hostname={target?.hostname || 'Target'}
+        value={md.dst_interface || ''}
+        disabled={ro || !target}
+        onChange={(v) => {
+          patchMeta({ dst_interface: v || null })
+          applyInferred(md.src_interface || '', v)
+        }}
+      />
+
+      {(md.src_interface || md.dst_interface) && (
+        <div className="space-y-2">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Port label style</div>
+          {md.src_interface && (
+            <IfaceLabelStyleEditor
+              title={`${source?.hostname || 'Source'} label`}
+              style={md.src_label}
+              disabled={ro}
+              onChange={(next) => patchMeta({ src_label: hasIfaceLabelStyle(next) ? next : null })}
+              onReset={() => patchMeta({ src_label: null })}
+            />
+          )}
+          {md.dst_interface && (
+            <IfaceLabelStyleEditor
+              title={`${target?.hostname || 'Target'} label`}
+              style={md.dst_label}
+              disabled={ro}
+              onChange={(next) => patchMeta({ dst_label: hasIfaceLabelStyle(next) ? next : null })}
+              onReset={() => patchMeta({ dst_label: null })}
+            />
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-2">
-        <FormField label="Speed">
-          <select
-            value={md.speed || ''}
-            disabled={ro}
-            onChange={(e) => patchMeta({ speed: e.target.value || null })}
-            className="h-8 w-full rounded-md border border-border bg-surface px-2 text-xs disabled:opacity-50"
-          >
-            <option value="">—</option>
-            {LINK_SPEEDS.map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </FormField>
-        <FormField label="Kind">
+        <LinkSpeedSelect
+          preset={speedPreset}
+          custom={speedCustom}
+          autoDetected={speedAuto}
+          disabled={ro}
+          onChange={(preset, custom) => {
+            setSpeedTouched(true)
+            setSpeedPreset(preset)
+            setSpeedCustom(custom)
+            patchMeta({ speed: resolveSpeedValue(preset, custom) || null })
+          }}
+        />
+        <FormField
+          label="Kind"
+          hint={kindAuto ? `Auto: ${LINK_KINDS.find((k) => k.value === inferred.kind)?.label || inferred.kind}` : undefined}
+        >
           <select
             value={kind}
             disabled={ro}
-            onChange={(e) => onChange({ link_type: e.target.value, metadata: { ...md, kind: e.target.value as LinkKind } })}
-            className="h-8 w-full rounded-md border border-border bg-surface px-2 text-xs disabled:opacity-50"
+            onChange={(e) => {
+              setKindTouched(true)
+              onChange({ link_type: e.target.value, metadata: { ...md, kind: e.target.value as LinkKind } })
+            }}
+            className="h-9 w-full rounded-md border border-border bg-surface px-2 text-xs disabled:opacity-50"
           >
             {LINK_KINDS.map((k) => <option key={k.value} value={k.value}>{k.label}</option>)}
           </select>
-        </FormField>
-      </div>
-
-      <div>
-        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Color override</div>
-        <ColorSwatchRow
-          value={md.color}
-          disabled={ro}
-          onChange={(next) => patchMeta({ color: next })}
-        />
-      </div>
-
-      <div className="grid grid-cols-2 gap-2">
-        <FormField label="Arrow style">
-          <select
-            value={md.arrow || 'none'}
-            disabled={ro}
-            onChange={(e) => patchMeta({ arrow: e.target.value as LinkArrow })}
-            className="h-8 w-full rounded-md border border-border bg-surface px-2 text-xs disabled:opacity-50"
-          >
-            <option value="none">None</option>
-            <option value="forward">A → B</option>
-            <option value="backward">A ← B</option>
-            <option value="both">A ↔ B</option>
-          </select>
-        </FormField>
-        <FormField label="Animate flow">
-          <select
-            value={md.animate == null ? 'auto' : md.animate ? 'on' : 'off'}
-            disabled={ro}
-            onChange={(e) => patchMeta({ animate: e.target.value === 'auto' ? null : e.target.value === 'on' })}
-            className="h-8 w-full rounded-md border border-border bg-surface px-2 text-xs disabled:opacity-50"
-          >
-            <option value="auto">Auto (live mode)</option>
-            <option value="on">Always</option>
-            <option value="off">Never</option>
-          </select>
-        </FormField>
-      </div>
-
-      <div className="grid grid-cols-2 gap-2">
-        <FormField label="Thickness">
-          <input
-            type="range" min={0.4} max={3.5} step={0.1}
-            value={md.thickness ?? 1}
-            disabled={ro}
-            onChange={(e) => patchMeta({ thickness: parseFloat(e.target.value) })}
-            className="w-full"
-          />
-          <div className="text-[10px] text-muted">{(md.thickness ?? 1).toFixed(1)}×</div>
-        </FormField>
-        <FormField label="Opacity">
-          <input
-            type="range" min={0.1} max={1} step={0.05}
-            value={md.opacity ?? 0.7}
-            disabled={ro}
-            onChange={(e) => patchMeta({ opacity: parseFloat(e.target.value) })}
-            className="w-full"
-          />
-          <div className="text-[10px] text-muted">{Math.round((md.opacity ?? 0.7) * 100)}%</div>
         </FormField>
       </div>
 
@@ -4021,185 +3804,6 @@ function LinkInspector({
   )
 }
 
-/* ── Shape (annotation) inspector ─────────────────────────────── */
-
-function ShapeInspector({
-  shape,
-  onChange,
-  onDelete,
-  mode,
-}: {
-  shape: ManualMapShape
-  onChange: (patch: Partial<ManualMapShape>) => void
-  onDelete: () => void
-  mode: 'design' | 'live'
-}) {
-  const md: ShapeMetadata = (shape.metadata as ShapeMetadata | null) || {}
-  const ro = mode === 'live'
-  const isTextual = shape.kind === 'text' || shape.kind === 'rectangle' || shape.kind === 'circle' ||
-    shape.kind === 'diamond' || shape.kind === 'hexagon' || shape.kind === 'sticky'
-  const isLine = shape.kind === 'line' || shape.kind === 'arrow'
-
-  const patchMeta = (next: Partial<ShapeMetadata>) =>
-    onChange({ metadata: { ...md, ...next } })
-
-  return (
-    <div className="space-y-4">
-      <div className="rounded-lg border border-border bg-surface2/40 p-3">
-        <div className="mb-1 flex items-center justify-between gap-2">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Annotation</span>
-          <Badge variant="outline">{shape.kind}</Badge>
-        </div>
-        <div className="text-[10px] text-muted">
-          Position {shape.x_pct.toFixed(1)} · {shape.y_pct.toFixed(1)} · Size {shape.w_pct.toFixed(1)} × {shape.h_pct.toFixed(1)}
-        </div>
-      </div>
-
-      {isTextual && (
-        <FormField label="Text">
-          <Textarea
-            rows={2}
-            value={shape.text || ''}
-            disabled={ro}
-            onChange={(e) => onChange({ text: e.target.value })}
-            onBlur={(e) => onChange({ text: e.target.value.trim() || null })}
-          />
-        </FormField>
-      )}
-
-      <div>
-        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Fill color</div>
-        <ColorSwatchRow
-          value={shape.fill}
-          disabled={ro || isLine}
-          onChange={(next) => onChange({ fill: next })}
-        />
-      </div>
-
-      <div>
-        <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Stroke color</div>
-        <ColorSwatchRow
-          value={shape.stroke}
-          disabled={ro}
-          onChange={(next) => onChange({ stroke: next })}
-        />
-      </div>
-
-      <div className="grid grid-cols-2 gap-2">
-        <FormField label="Stroke width">
-          <input
-            type="range" min={0.1} max={2.0} step={0.1}
-            value={md.stroke_width ?? (isLine ? 0.5 : 0.35)}
-            disabled={ro}
-            onChange={(e) => patchMeta({ stroke_width: parseFloat(e.target.value) })}
-            className="w-full"
-          />
-          <div className="text-[10px] text-muted">{(md.stroke_width ?? (isLine ? 0.5 : 0.35)).toFixed(2)}</div>
-        </FormField>
-        <FormField label="Opacity">
-          <input
-            type="range" min={0.1} max={1} step={0.05}
-            value={md.opacity ?? 1}
-            disabled={ro}
-            onChange={(e) => patchMeta({ opacity: parseFloat(e.target.value) })}
-            className="w-full"
-          />
-          <div className="text-[10px] text-muted">{Math.round((md.opacity ?? 1) * 100)}%</div>
-        </FormField>
-      </div>
-
-      <div className="grid grid-cols-2 gap-2">
-        <FormField label="Dashed">
-          <select
-            value={md.stroke_dash || ''}
-            disabled={ro}
-            onChange={(e) => patchMeta({ stroke_dash: e.target.value || null })}
-            className="h-8 w-full rounded-md border border-border bg-surface px-2 text-xs disabled:opacity-50"
-          >
-            <option value="">Solid</option>
-            <option value="2 1">Dashed</option>
-            <option value="1 1">Dotted</option>
-            <option value="4 2">Long dash</option>
-            <option value="6 2 1 2">Dash-dot</option>
-          </select>
-        </FormField>
-        <FormField label="Rotation">
-          <input
-            type="range" min={-180} max={180} step={5}
-            value={md.rotation ?? 0}
-            disabled={ro}
-            onChange={(e) => patchMeta({ rotation: parseInt(e.target.value, 10) })}
-            className="w-full"
-          />
-          <div className="text-[10px] text-muted">{(md.rotation ?? 0)}°</div>
-        </FormField>
-      </div>
-
-      {isTextual && (
-        <>
-          <div className="grid grid-cols-2 gap-2">
-            <FormField label="Font size">
-              <input
-                type="range" min={0.8} max={8} step={0.1}
-                value={md.font_size ?? Math.max(1.2, Math.min(shape.h_pct * 0.35, 3.5))}
-                disabled={ro}
-                onChange={(e) => patchMeta({ font_size: parseFloat(e.target.value) })}
-                className="w-full"
-              />
-              <div className="text-[10px] text-muted">{(md.font_size ?? 2).toFixed(1)}</div>
-            </FormField>
-            <FormField label="Weight">
-              <select
-                value={md.font_weight || 'normal'}
-                disabled={ro}
-                onChange={(e) => patchMeta({ font_weight: e.target.value as ShapeMetadata['font_weight'] })}
-                className="h-8 w-full rounded-md border border-border bg-surface px-2 text-xs disabled:opacity-50"
-              >
-                <option value="normal">Normal</option>
-                <option value="semibold">Semibold</option>
-                <option value="bold">Bold</option>
-              </select>
-            </FormField>
-          </div>
-          <div>
-            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Text color</div>
-            <ColorSwatchRow
-              value={md.font_color}
-              disabled={ro}
-              onChange={(next) => patchMeta({ font_color: next })}
-            />
-          </div>
-        </>
-      )}
-
-      <div className="grid grid-cols-2 gap-2">
-        <button
-          type="button"
-          disabled={ro}
-          onClick={() => onChange({ z_index: shape.z_index + 1 })}
-          className="rounded-md border border-border bg-surface px-2 py-1.5 text-[11px] font-medium hover:bg-surface2/50 disabled:opacity-50"
-        >Bring forward</button>
-        <button
-          type="button"
-          disabled={ro}
-          onClick={() => onChange({ z_index: Math.max(0, shape.z_index - 1) })}
-          className="rounded-md border border-border bg-surface px-2 py-1.5 text-[11px] font-medium hover:bg-surface2/50 disabled:opacity-50"
-        >Send back</button>
-      </div>
-
-      {mode === 'design' && (
-        <button
-          type="button"
-          onClick={onDelete}
-          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-danger/30 bg-danger/5 px-2 py-1.5 text-[11px] font-medium text-danger transition hover:bg-danger/10"
-        >
-          <Trash2 className="h-3.5 w-3.5" /> Delete annotation
-        </button>
-      )}
-    </div>
-  )
-}
-
 /* ── Link wizard popover (after click-to-connect target) ────────── */
 
 function LinkWizard({
@@ -4217,11 +3821,38 @@ function LinkWizard({
   onSubmit: (kind: LinkKind, metadata: LinkMetadata) => void
   pending: boolean
 }) {
+  const srcQ = useDeviceInterfaces(source.device_id)
+  const dstQ = useDeviceInterfaces(target.device_id)
   const [kind, setKind] = useState<LinkKind>('ethernet')
+  const [kindTouched, setKindTouched] = useState(false)
   const [shape, setShape] = useState<LinkShape>(defaultShape)
   const [src, setSrc] = useState('')
   const [dst, setDst] = useState('')
-  const [speed, setSpeed] = useState<LinkSpeed | ''>('1G')
+  const [speedPreset, setSpeedPreset] = useState<LinkSpeed | ''>('')
+  const [speedCustom, setSpeedCustom] = useState('')
+  const [speedTouched, setSpeedTouched] = useState(false)
+
+  const inferred = useMemo(() => inferLinkProps(
+    findIface(srcQ.data, src),
+    findIface(dstQ.data, dst),
+    src,
+    dst,
+  ), [srcQ.data, dstQ.data, src, dst])
+
+  useEffect(() => {
+    if (!kindTouched && (src || dst)) setKind(inferred.kind)
+  }, [inferred.kind, kindTouched, src, dst])
+
+  useEffect(() => {
+    if (!speedTouched && (src || dst)) {
+      setSpeedPreset(inferred.speedPreset)
+      setSpeedCustom(inferred.speedCustom)
+    }
+  }, [inferred.speedPreset, inferred.speedCustom, speedTouched, src, dst])
+
+  const kindAuto = !kindTouched && !!(src || dst)
+  const speedAuto = !speedTouched && !!(src || dst)
+
   return (
     <Dialog open onOpenChange={(o) => !o && onCancel()}>
       <DialogContent>
@@ -4237,7 +3868,7 @@ function LinkWizard({
               shape,
               src_interface: src.trim() || null,
               dst_interface: dst.trim() || null,
-              speed: speed || null,
+              speed: resolveSpeedValue(speedPreset, speedCustom) || null,
             })
           }}
         >
@@ -4252,14 +3883,37 @@ function LinkWizard({
             </div>
           </div>
 
+          <div className="grid grid-cols-2 gap-3">
+            <DeviceInterfaceSelect
+              deviceId={source.device_id}
+              hostname={source.hostname}
+              value={src}
+              autoFocus
+              onChange={setSrc}
+            />
+            <DeviceInterfaceSelect
+              deviceId={target.device_id}
+              hostname={target.hostname}
+              value={dst}
+              onChange={setDst}
+            />
+          </div>
+
           <div>
-            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Link kind</div>
+            <div className="mb-1 flex items-center justify-between">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Link kind</span>
+              {kindAuto && (
+                <span className="text-[9px] font-medium text-primary">
+                  Auto · {LINK_KINDS.find((k) => k.value === inferred.kind)?.label}
+                </span>
+              )}
+            </div>
             <div className="grid grid-cols-3 gap-1.5">
               {LINK_KINDS.map((k) => (
                 <button
                   key={k.value}
                   type="button"
-                  onClick={() => setKind(k.value)}
+                  onClick={() => { setKindTouched(true); setKind(k.value) }}
                   title={k.hint}
                   className={cn(
                     'rounded-md border px-2 py-1.5 text-left transition',
@@ -4275,40 +3929,16 @@ function LinkWizard({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <FormField label={`${source.hostname} interface`}>
-              <Input value={src} onChange={(e) => setSrc(e.target.value)} placeholder="Gi0/1" autoFocus />
-            </FormField>
-            <FormField label={`${target.hostname} interface`}>
-              <Input value={dst} onChange={(e) => setDst(e.target.value)} placeholder="eth0" />
-            </FormField>
-          </div>
-
-          <FormField label="Speed">
-            <div className="flex flex-wrap gap-1">
-              <button
-                type="button"
-                onClick={() => setSpeed('')}
-                className={cn(
-                  'rounded border px-2 py-0.5 text-[10px] font-medium transition',
-                  !speed ? 'border-primary/55 bg-primary/10 text-primary' : 'border-border bg-surface hover:border-border-strong',
-                )}
-              >—</button>
-              {LINK_SPEEDS.map((s) => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => setSpeed(s)}
-                  className={cn(
-                    'rounded border px-2 py-0.5 text-[10px] font-mono font-semibold transition',
-                    speed === s
-                      ? 'border-primary/55 bg-primary/10 text-primary'
-                      : 'border-border bg-surface hover:border-border-strong',
-                  )}
-                >{s}</button>
-              ))}
-            </div>
-          </FormField>
+          <LinkSpeedSelect
+            preset={speedPreset}
+            custom={speedCustom}
+            autoDetected={speedAuto}
+            onChange={(preset, custom) => {
+              setSpeedTouched(true)
+              setSpeedPreset(preset)
+              setSpeedCustom(custom)
+            }}
+          />
 
           <FormField label="Shape">
             <div className="grid grid-cols-3 gap-1.5">

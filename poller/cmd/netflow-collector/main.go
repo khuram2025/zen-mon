@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -17,13 +19,23 @@ import (
 )
 
 type collectorConfig struct {
-	ID            string
-	Listen        string
-	HealthListen  string
-	ClickHouseDSN clickhouse.Options
-	BatchSize     int
-	FlushInterval time.Duration
+	ID               string
+	Listen           string
+	HealthListen     string
+	ClickHouseDSN    clickhouse.Options
+	BatchSize        int
+	FlushInterval    time.Duration
+	AllowedExporters map[string]bool // empty = allow all (BUG-07)
+	BackpressureWait time.Duration   // how long to wait on a full queue before dropping (BUG-20)
 }
+
+// maxPlausibleFlowBytes / maxPlausibleFlowPackets bound a single flow record.
+// Anything above is treated as a decode/corruption artefact (BUG-01 defence in
+// depth) — dropped before insert, counted, and never written to ClickHouse.
+const (
+	maxPlausibleFlowBytes   = uint64(1_000_000_000_000) // 1 TB in one flow record
+	maxPlausibleFlowPackets = uint64(10_000_000_000)    // 10 B packets in one flow record
+)
 
 func main() {
 	cfg := loadConfig()
@@ -44,10 +56,11 @@ func main() {
 	}
 
 	c := &collector{
-		cfg:         cfg,
-		conn:        conn,
-		records:     make(chan netflow.Record, cfg.BatchSize*4),
-		v9Templates: netflow.NewV9TemplateCache(),
+		cfg:            cfg,
+		conn:           conn,
+		records:        make(chan netflow.Record, cfg.BatchSize*4),
+		v9Templates:    netflow.NewV9TemplateCache(),
+		ipfixTemplates: netflow.NewV9TemplateCache(),
 	}
 	go c.runHealth(ctx)
 	go c.runWriter(ctx)
@@ -58,10 +71,34 @@ func main() {
 }
 
 type collector struct {
-	cfg         collectorConfig
-	conn        driver.Conn
-	records     chan netflow.Record
-	v9Templates *netflow.V9TemplateCache
+	cfg            collectorConfig
+	conn           driver.Conn
+	records        chan netflow.Record
+	v9Templates    *netflow.V9TemplateCache
+	ipfixTemplates *netflow.V9TemplateCache
+
+	ingested               atomic.Uint64
+	droppedImplausible     atomic.Uint64
+	droppedQueueFull       atomic.Uint64
+	droppedUnknownExporter atomic.Uint64
+	parseErrors            atomic.Uint64
+}
+
+// sane reports whether a decoded flow record has plausible counters. Implausible
+// records (the signature of a v9 decode/corruption bug) are dropped and counted.
+// Checked on the RAW decoded counters, before any sampling multiplication.
+func (c *collector) sane(r netflow.Record) bool {
+	return r.Bytes <= maxPlausibleFlowBytes && r.Packets <= maxPlausibleFlowPackets
+}
+
+// allowed reports whether flows from this exporter IP should be accepted. An
+// empty allowlist accepts everything (backward compatible); a configured
+// allowlist drops + counts packets from any other source (BUG-07).
+func (c *collector) allowed(ip net.IP) bool {
+	if len(c.cfg.AllowedExporters) == 0 {
+		return true
+	}
+	return c.cfg.AllowedExporters[ip.String()]
 }
 
 func (c *collector) runUDP(ctx context.Context) error {
@@ -91,19 +128,58 @@ func (c *collector) runUDP(ctx context.Context) error {
 			fmt.Printf("WARN: udp read failed: %v\n", err)
 			continue
 		}
+		if !c.allowed(remote.IP) {
+			c.droppedUnknownExporter.Add(1)
+			continue
+		}
 		receivedAt := time.Now().UTC()
 		records, err := c.parsePacket(buf[:n], remote.IP, receivedAt)
 		if err != nil {
+			c.parseErrors.Add(1)
 			fmt.Printf("WARN: dropped flow packet from %s: %v\n", remote.IP, err)
 			continue
 		}
 		for _, record := range records {
-			select {
-			case c.records <- record:
-			default:
-				fmt.Println("WARN: netflow record queue full, dropping record")
+			if !c.sane(record) {
+				c.droppedImplausible.Add(1)
+				fmt.Printf("WARN: dropping implausible flow from %s (bytes=%d packets=%d) — possible decode/corruption\n", remote.IP, record.Bytes, record.Packets)
+				continue
+			}
+			// BUG-05: scale to estimated traffic on sampled exporters. The
+			// real 1-in-N factor is kept in SamplingInterval so raw = bytes/N.
+			if record.SamplingInterval > 1 {
+				record.Bytes *= uint64(record.SamplingInterval)
+				record.Packets *= uint64(record.SamplingInterval)
+			}
+			if !c.enqueue(ctx, record) {
+				return nil
 			}
 		}
+	}
+}
+
+// enqueue applies bounded backpressure (BUG-20): try the fast non-blocking path,
+// and only if the queue is full wait up to BackpressureWait before dropping +
+// counting. Returns false if the context was cancelled (shutdown).
+func (c *collector) enqueue(ctx context.Context, record netflow.Record) bool {
+	select {
+	case c.records <- record:
+		c.ingested.Add(1)
+		return true
+	default:
+	}
+	timer := time.NewTimer(c.cfg.BackpressureWait)
+	defer timer.Stop()
+	select {
+	case c.records <- record:
+		c.ingested.Add(1)
+		return true
+	case <-timer.C:
+		c.droppedQueueFull.Add(1)
+		fmt.Println("WARN: netflow record queue full, dropping record after backpressure wait")
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -129,6 +205,21 @@ func (c *collector) parsePacket(data []byte, exporter net.IP, receivedAt time.Ti
 		}
 		if stats.DataSetsWaiting > 0 && stats.RecordsDecoded == 0 {
 			fmt.Printf("INFO: netflow v9 data from %s waiting for template\n", exporter)
+		}
+		if stats.SamplersLearned > 0 {
+			fmt.Printf("INFO: netflow v9 sampler learned from %s\n", exporter)
+		}
+		return records, nil
+	case 10:
+		records, stats, err := netflow.ParseIPFIX(data, exporter, c.cfg.ID, receivedAt, c.ipfixTemplates)
+		if err != nil {
+			return nil, err
+		}
+		if stats.TemplatesUpdated > 0 || stats.OptionsTemplatesUpdated > 0 {
+			fmt.Printf("INFO: ipfix templates updated from %s: %d (+%d options)\n", exporter, stats.TemplatesUpdated, stats.OptionsTemplatesUpdated)
+		}
+		if stats.DataSetsWaiting > 0 && stats.RecordsDecoded == 0 {
+			fmt.Printf("INFO: ipfix data from %s waiting for template\n", exporter)
 		}
 		return records, nil
 	default:
@@ -277,7 +368,13 @@ func (c *collector) runHealth(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok","service":"zenplus-netflow-collector"}`))
+		fmt.Fprintf(w, `{"status":"ok","service":"zenplus-netflow-collector",`+
+			`"records_ingested":%d,"records_dropped_implausible":%d,`+
+			`"records_dropped_queue_full":%d,"records_dropped_unknown_exporter":%d,`+
+			`"parse_errors":%d,"queue_len":%d,"queue_cap":%d}`,
+			c.ingested.Load(), c.droppedImplausible.Load(),
+			c.droppedQueueFull.Load(), c.droppedUnknownExporter.Load(),
+			c.parseErrors.Load(), len(c.records), cap(c.records))
 	})
 	srv := &http.Server{Addr: c.cfg.HealthListen, Handler: mux, ReadHeaderTimeout: 3 * time.Second}
 	go func() {
@@ -296,8 +393,10 @@ func loadConfig() collectorConfig {
 		ID:            env("NETFLOW_COLLECTOR_ID", "netflow-01"),
 		Listen:        env("NETFLOW_LISTEN", ":2055"),
 		HealthListen:  env("NETFLOW_HEALTH_LISTEN", ":8091"),
-		BatchSize:     envInt("NETFLOW_BATCH_SIZE", 1000),
-		FlushInterval: time.Duration(envInt("NETFLOW_FLUSH_SECONDS", 5)) * time.Second,
+		BatchSize:        envInt("NETFLOW_BATCH_SIZE", 1000),
+		FlushInterval:    time.Duration(envInt("NETFLOW_FLUSH_SECONDS", 5)) * time.Second,
+		AllowedExporters: parseExporterAllowlist(env("NETFLOW_ALLOWED_EXPORTERS", "")),
+		BackpressureWait: time.Duration(envInt("NETFLOW_BACKPRESSURE_MS", 250)) * time.Millisecond,
 		ClickHouseDSN: clickhouse.Options{
 			Addr: []string{fmt.Sprintf("%s:%d", env("CLICKHOUSE_HOST", "localhost"), envInt("CLICKHOUSE_PORT", 9000))},
 			Auth: clickhouse.Auth{
@@ -309,6 +408,18 @@ func loadConfig() collectorConfig {
 			Compression: &clickhouse.Compression{Method: clickhouse.CompressionLZ4},
 		},
 	}
+}
+
+// parseExporterAllowlist turns a comma/space-separated list of exporter IPs into
+// a set. Empty input yields an empty map, which means "allow all" (BUG-07).
+func parseExporterAllowlist(s string) map[string]bool {
+	out := make(map[string]bool)
+	for _, part := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\n' }) {
+		if ip := net.ParseIP(strings.TrimSpace(part)); ip != nil {
+			out[ip.String()] = true
+		}
+	}
+	return out
 }
 
 func env(key, fallback string) string {

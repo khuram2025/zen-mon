@@ -363,10 +363,12 @@ def build_package(version: str, changelog: str, severity: str,
             print("  ERROR: No Go poller source found")
             sys.exit(1)
 
+        # NetFlow collector (BUG-12: previously never built/shipped, so the
+        # collector fix could not reach appliances via OTA — only its source
+        # was copied while the running binary stayed stale).
         if poller_src.exists() and (poller_src / "cmd" / "netflow-collector").exists():
             result = subprocess.run(
-                [GO_BIN, "build", "-buildvcs=false", "-o",
-                 str(go_dir / "zenplus-netflow-collector"), "./cmd/netflow-collector"],
+                [GO_BIN, "build", "-buildvcs=false", "-o", str(go_dir / "zenplus-netflow-collector"), "./cmd/netflow-collector"],
                 capture_output=True, text=True,
                 cwd=str(poller_src), timeout=300,
                 env={**os.environ, "GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "0"},
@@ -374,8 +376,7 @@ def build_package(version: str, changelog: str, severity: str,
             if result.returncode != 0:
                 print(f"  ERROR: Go netflow-collector build failed:\n{result.stderr}")
                 sys.exit(1)
-            print(f"  Built: zenplus-netflow-collector "
-                  f"({(go_dir / 'zenplus-netflow-collector').stat().st_size / 1024 / 1024:.1f} MB)")
+            print(f"  Built: zenplus-netflow-collector ({(go_dir / 'zenplus-netflow-collector').stat().st_size / 1024 / 1024:.1f} MB)")
         else:
             print("  ERROR: No Go netflow-collector source found")
             sys.exit(1)
@@ -452,8 +453,7 @@ def build_package(version: str, changelog: str, severity: str,
     steps = []
 
     # Stop services before update
-    steps.append({"type": "stop_services",
-                  "services": ["zenplus-api", "zenplus-poller", "zenplus-netflow-collector"]})
+    steps.append({"type": "stop_services", "services": ["zenplus-api", "zenplus-poller", "zenplus-netflow-collector"]})
     steps.append({"type": "backup", "targets": ["code", "database"]})
 
     # Heal the OS prerequisites every appliance needs but older installers
@@ -480,6 +480,17 @@ def build_package(version: str, changelog: str, severity: str,
             "timeout": 120,
         })
 
+    # Best-effort GeoIP provisioning (Phase 2b). fetch-geoip.py always exits 0
+    # and skips when the current month's DB is already present, so a download
+    # failure (no route to db-ip.com) never fails or delays the OTA update.
+    if (Path(build_dir) / "code" / "scripts" / "fetch-geoip.py").exists():
+        steps.append({
+            "type": "run_hook",
+            "script": "code/scripts/fetch-geoip.py",
+            "timeout": 180,
+        })
+
+
     if (build_dir / "requirements.txt").exists():
         steps.append({"type": "pip_install", "requirements": "requirements.txt"})
 
@@ -499,13 +510,15 @@ def build_package(version: str, changelog: str, severity: str,
         steps.append({"type": "install_binary", "source": "go-binaries/zenplus-poller",
                        "dest": "/opt/zenplus/bin/zenplus-poller"})
 
+    # NetFlow collector binary + unit (BUG-12). install_systemd is idempotent and
+    # adds the unit on appliances that never had it; service_control skips it when
+    # absent, so stop/start of the collector is safe fleet-wide.
     if (build_dir / "go-binaries" / "zenplus-netflow-collector").exists():
-        steps.append({"type": "install_binary",
-                      "source": "go-binaries/zenplus-netflow-collector",
-                      "dest": "/opt/zenplus/bin/zenplus-netflow-collector"})
+        steps.append({"type": "install_binary", "source": "go-binaries/zenplus-netflow-collector",
+                       "dest": "/opt/zenplus/bin/zenplus-netflow-collector"})
         steps.append({"type": "install_systemd",
-                      "source": "code/poller/systemd/zenplus-netflow-collector.service",
-                      "enable": True})
+                       "source": "code/poller/systemd/zenplus-netflow-collector.service",
+                       "enable": True})
 
     sensor_artifact_dir = build_dir / "sensor-artifacts" / "bin" / "linux-amd64"
     if (sensor_artifact_dir / "zenplus-sensor").exists():

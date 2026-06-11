@@ -10,6 +10,9 @@ import { DeviceInterfacesPage } from '@/pages/DeviceInterfacesPage'
 import { AlertsPage } from '@/pages/AlertsPage'
 import { AlertDetailPage } from '@/pages/AlertDetailPage'
 import { AlertRulesPage } from '@/pages/AlertRulesPage'
+import { TrapsPage } from '@/pages/TrapsPage'
+import { NcmPage } from '@/pages/NcmPage'
+import { NcmDevicePage } from '@/pages/NcmDevicePage'
 import { ServicesPage } from '@/pages/ServicesPage'
 import { ServiceCheckDetailPage } from '@/pages/ServiceCheckDetail'
 import { ServiceIncidentsPage } from '@/pages/ServiceIncidentsPage'
@@ -28,7 +31,7 @@ import { IgnoredPage as DiscoveryIgnoredPage } from '@/pages/discovery/IgnoredPa
 import { CredentialsPage as DiscoveryCredentialsPage } from '@/pages/discovery/CredentialsPage'
 import { MibLibraryPage } from '@/pages/MibLibraryPage'
 import { TopologyPage } from '@/pages/TopologyPage'
-import { ManualMapsPage } from '@/pages/ManualMapsPage'
+import { ManualMapsEntry } from '@/pages/ManualMapsEntry'
 import { ReportsPage } from '@/pages/ReportsPage'
 import { SensorsPage } from '@/pages/SensorsPage'
 import { NetflowPage, NetflowDevicePage, NetflowSectionPage } from '@/pages/NetflowPage'
@@ -125,7 +128,7 @@ export default function App() {
         </Route>
         <Route path="maps" element={<Navigate to="/maps/automated" replace />} />
         <Route path="maps/automated" element={<TopologyPage />} />
-        <Route path="maps/manual" element={<ManualMapsPage />} />
+        <Route path="maps/manual" element={<ManualMapsEntry />} />
         <Route path="topology" element={<Navigate to="/maps/automated" replace />} />
         <Route path="netflow" element={<NetflowPage />} />
         <Route path="netflow/forensics" element={<NetflowForensicsPage />} />
@@ -144,6 +147,9 @@ export default function App() {
         <Route path="alerts" element={<AlertsPage />} />
         <Route path="alerts/:id" element={<AlertDetailPage />} />
         <Route path="alert-rules" element={<AlertRulesPage />} />
+        <Route path="traps" element={<TrapsPage />} />
+        <Route path="ncm" element={<NcmPage />} />
+        <Route path="ncm/:deviceId" element={<NcmDevicePage />} />
         <Route path="reports" element={<ReportsPage />}>
           <Route index element={<Navigate to="executive" replace />} />
           <Route path="executive" element={<Suspense fallback={<ReportTabFallback />}><ExecutiveReport /></Suspense>} />

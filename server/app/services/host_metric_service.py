@@ -52,6 +52,25 @@ def _i(v: Any, default: int = 0) -> int:
         return default
 
 
+def _dt_or_none(v: Any) -> Optional[datetime]:
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    if not isinstance(v, str):
+        return None
+    v = v.strip()
+    if not v:
+        return None
+    if len(v) == 8 and v.isdigit():
+        try:
+            return datetime.strptime(v, "%Y%m%d").replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+    try:
+        return datetime.fromisoformat(v.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
 def _arr_f(v: Any) -> list:
     if isinstance(v, (list, tuple)):
         return [_f(x) for x in v]
@@ -283,6 +302,36 @@ def _insert_agent_health(client, agent_id: str, server_id: str, rows: list[dict]
 
 # ── Inventory upsert (Postgres) ──────────────────────────────────────
 
+async def _upsert_process_inventory(server_id: str, rows: list[dict], db: AsyncSession) -> None:
+    for p in rows:
+        pid = _i(p.get("pid"))
+        name = str(p.get("process_name") or p.get("name") or "")[:255]
+        if pid <= 0 or not name:
+            continue
+        await db.execute(text(
+            """INSERT INTO server_process_inventory
+                   (server_id, pid, name, cmdline, user_name, cpu_pct, memory_bytes, started_at, updated_at)
+               VALUES (:sid, :pid, :name, :cmd, :user, :cpu, :mem, :started, NOW())
+               ON CONFLICT (server_id, pid) DO UPDATE SET
+                   name = EXCLUDED.name,
+                   cmdline = COALESCE(EXCLUDED.cmdline, server_process_inventory.cmdline),
+                   user_name = EXCLUDED.user_name,
+                   cpu_pct = EXCLUDED.cpu_pct,
+                   memory_bytes = EXCLUDED.memory_bytes,
+                   started_at = COALESCE(EXCLUDED.started_at, server_process_inventory.started_at),
+                   updated_at = NOW()"""
+        ), {
+            "sid": server_id,
+            "pid": pid,
+            "name": name,
+            "cmd": p.get("cmdline"),
+            "user": (p.get("user_name") or "")[:255] or None,
+            "cpu": _f(p.get("cpu_pct")),
+            "mem": _i(p.get("memory_bytes")),
+            "started": _dt_or_none(p.get("started_at")),
+        })
+
+
 async def _upsert_inventory(server_id: str, inv: Dict[str, Any], db: AsyncSession) -> None:
     services = inv.get("services") or []
     if isinstance(services, list) and services:
@@ -358,6 +407,31 @@ async def _upsert_inventory(server_id: str, inv: Dict[str, Any], db: AsyncSessio
                 "spd": _i(nic.get("speed_mbps")) or None,
                 "up": bool(nic.get("is_up", True)),
                 "mtu": _i(nic.get("mtu")) or None,
+            })
+
+    software = inv.get("software") or inv.get("applications") or []
+    if isinstance(software, list):
+        for app in software:
+            if not isinstance(app, dict):
+                continue
+            name = str(app.get("package_name") or app.get("name") or app.get("display_name") or "").strip()
+            if not name:
+                continue
+            await db.execute(text(
+                """INSERT INTO server_software_inventory
+                       (server_id, package_name, version, vendor, install_date, updated_at)
+                   VALUES (:sid, :name, :ver, :vendor, :install_date, NOW())
+                   ON CONFLICT (server_id, package_name) DO UPDATE SET
+                       version = EXCLUDED.version,
+                       vendor = EXCLUDED.vendor,
+                       install_date = COALESCE(EXCLUDED.install_date, server_software_inventory.install_date),
+                       updated_at = NOW()"""
+            ), {
+                "sid": server_id,
+                "name": name[:255],
+                "ver": str(app.get("version") or app.get("display_version") or "")[:128] or None,
+                "vendor": str(app.get("vendor") or app.get("publisher") or "")[:255] or None,
+                "install_date": _dt_or_none(app.get("install_date")),
             })
 
     # OS info
@@ -436,6 +510,13 @@ async def ingest_host_metric_batch(
             rejected += len(rows)
             errors.append(f"{kind}: {exc}")
             logger.exception("ClickHouse insert failed for kind=%s", kind)
+
+    if by_kind.get("process"):
+        try:
+            await _upsert_process_inventory(server_id, by_kind["process"], db)
+        except Exception as exc:
+            errors.append(f"process_inventory: {exc}")
+            logger.exception("Process inventory upsert failed")
 
     # Inventory snapshot (either from sample kind or top-level field).
     if batch.inventory:

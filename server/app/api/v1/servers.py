@@ -452,6 +452,23 @@ async def server_events(
     return {"items": items}
 
 
+@router.get("/{server_id}/software")
+async def server_software(
+    server_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    rows = (await db.execute(
+        text("""SELECT package_name, version, vendor, install_date, updated_at
+                FROM server_software_inventory
+                WHERE server_id = :id
+                ORDER BY lower(package_name)
+                LIMIT 1000"""),
+        {"id": server_id},
+    )).mappings().all()
+    return {"items": [dict(r) for r in rows]}
+
+
 @router.get("/{server_id}/agent")
 async def server_agent(
     server_id: UUID,

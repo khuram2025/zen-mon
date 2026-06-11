@@ -1,0 +1,10 @@
+[Unit]
+Description=Run ZenPlus NCM scheduled config backups hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

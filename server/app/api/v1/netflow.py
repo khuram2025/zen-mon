@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import concurrent.futures
 import ipaddress
+import json
+import os
+import socket
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -9,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_clickhouse_client, get_db
 from app.core.security import get_current_user
+from app.services import geoip
 from app.models.device import Device
 from app.models.device_interface import DeviceInterface
 from app.models.netflow_saved_view import NetflowSavedView
@@ -61,11 +68,20 @@ def _to_iso_utc(value) -> str | None:
 
 PROTO_LABELS = {
     1: "ICMP",
+    2: "IGMP",
     6: "TCP",
     17: "UDP",
+    41: "IPv6",
     47: "GRE",
     50: "ESP",
+    51: "AH",
+    58: "ICMPv6",
+    88: "EIGRP",
     89: "OSPF",
+    103: "PIM",
+    112: "VRRP",
+    115: "L2TP",
+    132: "SCTP",
 }
 
 COMMON_PORTS = {
@@ -74,41 +90,158 @@ COMMON_PORTS = {
     22: "SSH",
     23: "Telnet",
     25: "SMTP",
+    37: "Time",
+    42: "WINS",
+    43: "WHOIS",
+    49: "TACACS",
     53: "DNS",
+    67: "DHCP",
+    68: "DHCP",
+    69: "TFTP",
+    79: "Finger",
     80: "HTTP",
+    88: "Kerberos",
+    102: "MS-RPC/ISO-TSAP",
     110: "POP3",
+    111: "RPCbind",
+    113: "Ident",
+    119: "NNTP",
     123: "NTP",
+    135: "MS-RPC",
+    137: "NetBIOS-NS",
+    138: "NetBIOS-DGM",
+    139: "NetBIOS-SSN",
     143: "IMAP",
     161: "SNMP",
+    162: "SNMP Trap",
+    179: "BGP",
+    194: "IRC",
+    201: "AppleTalk",
     389: "LDAP",
     443: "HTTPS",
     445: "SMB",
     465: "SMTPS",
     500: "IKE",
+    514: "Syslog",
+    515: "LPD",
+    520: "RIP",
+    523: "DB2",
+    540: "UUCP",
+    546: "DHCPv6",
+    547: "DHCPv6",
+    554: "RTSP",
     587: "SMTP Submission",
+    593: "MS-RPC HTTP",
+    623: "IPMI",
+    636: "LDAPS",
+    646: "LDP",
+    873: "rsync",
+    902: "VMware",
+    989: "FTPS Data",
+    990: "FTPS",
     993: "IMAPS",
     995: "POP3S",
+    1080: "SOCKS",
+    1194: "OpenVPN",
+    1352: "Lotus Notes",
     1433: "MSSQL",
+    1434: "MSSQL Monitor",
+    1521: "Oracle DB",
+    1645: "RADIUS",
+    1646: "RADIUS",
+    1701: "L2TP",
+    1719: "H.323",
+    1720: "H.323",
+    1723: "PPTP",
+    1755: "MMS",
+    1812: "RADIUS",
+    1813: "RADIUS Acct",
+    1883: "MQTT",
+    1900: "SSDP/UPnP",
+    1935: "RTMP",
+    2049: "NFS",
+    2055: "NetFlow",
+    2082: "cPanel",
+    2083: "cPanel SSL",
+    2181: "ZooKeeper",
+    2375: "Docker",
+    2376: "Docker TLS",
+    2379: "etcd",
+    3000: "Grafana/Dev",
+    3128: "Squid Proxy",
+    3260: "iSCSI",
+    3268: "Global Catalog",
+    3269: "Global Catalog SSL",
     3306: "MySQL",
     3389: "RDP",
+    3478: "STUN/TURN",
+    3690: "SVN",
+    4369: "EPMD",
+    4500: "IPsec NAT-T",
+    4789: "VXLAN",
+    5004: "RTP",
+    5005: "RTP",
+    5060: "SIP",
+    5061: "SIP TLS",
+    5222: "XMPP",
+    5269: "XMPP Server",
+    5353: "mDNS",
     5432: "PostgreSQL",
+    5601: "Kibana",
+    5666: "NRPE",
+    5672: "AMQP",
+    5900: "VNC",
+    5938: "TeamViewer",
+    5985: "WinRM",
+    5986: "WinRM SSL",
+    6343: "sFlow",
     6379: "Redis",
+    6443: "Kubernetes API",
+    6514: "Syslog TLS",
+    6660: "IRC",
+    7001: "WebLogic",
+    8000: "HTTP Alt",
+    8006: "Proxmox",
     8080: "HTTP Alt",
+    8086: "InfluxDB",
+    8123: "ClickHouse HTTP",
     8443: "HTTPS Alt",
+    8554: "RTSP Alt",
+    8883: "MQTT TLS",
+    9000: "ClickHouse/PHP-FPM",
+    9042: "Cassandra",
+    9090: "Prometheus",
+    9092: "Kafka",
+    9100: "Node Exporter",
+    9200: "Elasticsearch",
+    9300: "Elasticsearch",
+    9418: "Git",
+    10050: "Zabbix Agent",
+    11211: "Memcached",
+    15672: "RabbitMQ Mgmt",
+    16384: "RTP",
+    19302: "STUN",
+    27017: "MongoDB",
+    50000: "SAP",
 }
 
 
 # Maps ports to higher-level "applications" for the dashboard donut.
 APPLICATION_BUCKETS = [
-    ("Web (HTTP/HTTPS)", {80, 443, 8080, 8443}),
-    ("Streaming Media", {554, 1755, 1935, 5004, 5005, 8000, 8554, 5060, 5061}),
-    ("DNS", {53}),
+    ("Web (HTTP/HTTPS)", {80, 443, 8000, 8080, 8443, 3000, 8006}),
+    ("Streaming Media", {554, 1755, 1935, 5004, 5005, 8554}),
+    ("DNS", {53, 5353}),
     ("Email (SMTP/IMAP/POP)", {25, 110, 143, 465, 587, 993, 995}),
-    ("File Transfer (FTP/SMB)", {20, 21, 69, 115, 445, 2049}),
-    ("Remote Access (SSH/RDP/Telnet)", {22, 23, 3389, 5900, 5938}),
-    ("Database", {1433, 1521, 3306, 5432, 6379, 9042, 27017}),
+    ("File Transfer (FTP/SMB/NFS)", {20, 21, 69, 115, 445, 989, 990, 2049, 873}),
+    ("Remote Access (SSH/RDP/VNC)", {22, 23, 3389, 5900, 5938, 5985, 5986}),
+    ("Database", {1433, 1434, 1521, 3306, 5432, 6379, 9042, 27017, 11211, 9200, 9300, 8123, 9000}),
     ("VoIP / Video Conf.", {1719, 1720, 3478, 3479, 5060, 5061, 16384, 19302}),
-    ("Network Mgmt", {123, 161, 162, 514, 6343}),
+    ("Messaging / Queue", {1883, 5222, 5269, 5672, 8883, 9092, 15672, 4369}),
+    ("Directory / Auth", {88, 389, 636, 49, 1645, 1646, 1812, 1813, 3268, 3269}),
+    ("VPN / Tunneling", {500, 1194, 1701, 1723, 4500, 4789}),
+    ("Container / Orchestration", {2375, 2376, 2379, 6443, 10250, 2181}),
+    ("Observability", {9090, 9100, 5601, 8086, 10050, 5666, 6514}),
+    ("Network Mgmt", {123, 161, 162, 514, 6343, 2055, 179, 520}),
 ]
 
 
@@ -165,6 +298,134 @@ def _port_summary(port: int, proto: int | None = None, bytes_: int = 0, packets:
     }
 
 
+# ── Reverse-DNS enrichment (Phase 2) ──────────────────────────────────────────
+# Best-effort PTR lookups for the small set of IPs shown in top-N views. TTL
+# cached; bounded by an overall deadline so a slow resolver never stalls the API.
+# Opt-in per request (?resolve=1) because it adds latency and outbound DNS.
+_RDNS_TTL = 3600.0
+_rdns_cache: dict[str, tuple[float, str | None]] = {}
+_rdns_lock = threading.Lock()
+
+
+def _rdns_one(ip: str) -> str | None:
+    try:
+        return socket.gethostbyaddr(ip)[0]
+    except (OSError, socket.herror, socket.gaierror):
+        return None
+
+
+def _resolve_hostnames(ips: list[str], deadline: float = 2.0) -> dict[str, str | None]:
+    now = time.monotonic()
+    out: dict[str, str | None] = {}
+    todo: list[str] = []
+    with _rdns_lock:
+        for ip in dict.fromkeys(ips):  # de-dup, preserve order
+            ent = _rdns_cache.get(ip)
+            if ent and ent[0] > now:
+                out[ip] = ent[1]
+            else:
+                todo.append(ip)
+    if todo:
+        results: dict[str, str | None] = {ip: None for ip in todo}
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(todo)))
+        futs = {ex.submit(_rdns_one, ip): ip for ip in todo}
+        try:
+            for fut in concurrent.futures.as_completed(futs, timeout=deadline):
+                results[futs[fut]] = fut.result()
+        except concurrent.futures.TimeoutError:
+            pass  # slow lookups finish in the background and populate the cache
+        ex.shutdown(wait=False, cancel_futures=True)
+        exp = time.monotonic() + _RDNS_TTL
+        with _rdns_lock:
+            for ip, host in results.items():
+                _rdns_cache[ip] = (exp, host)
+                out[ip] = host
+    return out
+
+
+# ── User-defined IP groups / sites (Phase 2) ──────────────────────────────────
+# Appliance-local config (NOT shipped in releases) mapping named groups to CIDRs:
+#   [{"name": "Datacenter A", "cidrs": ["10.0.0.0/16", "10.1.0.0/16"]}, ...]
+_IP_GROUPS_PATH = os.getenv("NETFLOW_IP_GROUPS_FILE", "/opt/zenplus/data/netflow-ip-groups.json")
+_ip_groups_cache: dict = {"mtime": None, "groups": []}
+_ip_groups_lock = threading.Lock()
+
+
+def _load_ip_groups() -> list[tuple[str, list]]:
+    """Returns [(name, [ip_network, ...])], reloaded when the JSON file changes."""
+    try:
+        mtime = os.stat(_IP_GROUPS_PATH).st_mtime
+    except OSError:
+        return []
+    with _ip_groups_lock:
+        if _ip_groups_cache["mtime"] == mtime:
+            return _ip_groups_cache["groups"]
+        try:
+            raw = json.loads(open(_IP_GROUPS_PATH).read())
+        except (OSError, ValueError):
+            return _ip_groups_cache["groups"]
+        groups: list[tuple[str, list]] = []
+        for g in raw if isinstance(raw, list) else []:
+            name = str(g.get("name", "")).strip()
+            nets = []
+            for c in g.get("cidrs", []):
+                try:
+                    nets.append(ipaddress.ip_network(str(c), strict=False))
+                except ValueError:
+                    continue
+            if name and nets:
+                groups.append((name, nets))
+        _ip_groups_cache["mtime"] = mtime
+        _ip_groups_cache["groups"] = groups
+        return groups
+
+
+def _classify_ip(ip: str) -> str | None:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    for name, nets in _load_ip_groups():
+        if any(addr in n for n in nets):
+            return name
+    return None
+
+
+def _group_predicate(name: str) -> str | None:
+    """ClickHouse predicate: a flow touches this group on src OR dst. Returns
+    None if the group is unknown. CIDRs are validated, so inlining is safe."""
+    nets = next((nets for gname, nets in _load_ip_groups() if gname == name), None)
+    if not nets:
+        return None
+    terms = []
+    for n in nets:
+        c = str(n)
+        terms.append(f"isIPAddressInRange(toString(src_addr), '{c}')")
+        terms.append(f"isIPAddressInRange(toString(dst_addr), '{c}')")
+    return "(" + " OR ".join(terms) + ")"
+
+
+def _enrich_hosts(rows: list[dict], resolve: bool) -> list[dict]:
+    """Attach `group` (IP-group membership), GeoIP `country`/`asn` (no-op without a
+    DB), and — when resolve is set — reverse-DNS `hostname` to each per-IP row."""
+    for row in rows:
+        ip = str(row.get("ip", ""))
+        row["group"] = _classify_ip(ip)
+        g = geoip.enrich(ip)
+        row["country"] = g["country"]
+        row["country_name"] = g["country_name"]
+        row["asn"] = g["asn"]
+        row["as_name"] = g["as_name"]
+    if resolve:
+        hosts = _resolve_hostnames([str(row["ip"]) for row in rows if row.get("ip")])
+        for row in rows:
+            row["hostname"] = hosts.get(str(row.get("ip")))
+    else:
+        for row in rows:
+            row["hostname"] = None
+    return rows
+
+
 def _query(sql: str, params: dict):
     try:
         return _client().query(sql, parameters=params)
@@ -209,6 +470,7 @@ def scope_params(
     tcp_flag: str | None = Query(default=None, alias="tcpflag"),
     hour: int | None = Query(default=None),
     dow: int | None = Query(default=None),
+    group: str | None = Query(default=None),
 ) -> dict:
     """FastAPI dependency: collects every drill-down filter into a single dict the endpoint can splat into _scope()."""
     return {
@@ -222,6 +484,7 @@ def scope_params(
         "tcp_flag": tcp_flag,
         "hour": hour,
         "dow": dow,
+        "group": group,
     }
 
 
@@ -236,9 +499,20 @@ def _scope(
     tcp_flag: str | None = None,
     hour: int | None = None,
     dow: int | None = None,
+    group: str | None = None,
 ) -> tuple[str, dict]:
     """Build a combined WHERE-clause fragment for every supported drill-down dimension."""
-    parts: list[str] = []
+    # Defence in depth (BUG-01): a single corrupt/garbage flow with an
+    # astronomically large byte count must never dominate an aggregate. The
+    # collector now prevents and drops such rows at ingest, but we also bound
+    # them out of every API aggregate that uses this shared scope. 1e12 bytes
+    # (~1 TB) is far above any plausible single flow within a poll window.
+    # Qualified as flow_records.bytes so it resolves to the column, never to a
+    # "sum(bytes) AS bytes" SELECT alias (which would raise ILLEGAL_AGGREGATION).
+    # Stored bytes are sampling-adjusted (collector multiplies by the 1-in-N
+    # rate), so the guard divides by sampling_interval to test the unsampled-
+    # equivalent value — legitimate sampled flows are kept, corruption is not.
+    parts: list[str] = ["flow_records.bytes / greatest(flow_records.sampling_interval, 1) <= 1000000000000"]
     params: dict = {}
     if exporter:
         parts.append("exporter_ip = %(exporter)s"); params["exporter"] = exporter
@@ -290,6 +564,10 @@ def _scope(
         parts.append("toHour(timestamp) = %(hour_eq)s"); params["hour_eq"] = int(hour)
     if dow is not None:
         parts.append("toDayOfWeek(timestamp) = %(dow_eq)s"); params["dow_eq"] = int(dow)
+    if group:
+        pred = _group_predicate(group)
+        if pred:
+            parts.append(pred)
 
     return ((" AND " + " AND ".join(parts)) if parts else "", params)
 
@@ -390,6 +668,7 @@ async def netflow_top_talkers(
     limit: int = Query(default=10, ge=1, le=50),
     from_ts: str | None = Query(default=None, alias="from"),
     to_ts: str | None = Query(default=None, alias="to"),
+    resolve: int = Query(default=0, description="1 = reverse-DNS resolve endpoint IPs"),
     scope: dict = Depends(scope_params),
     user: User = Depends(get_current_user),
 ):
@@ -448,7 +727,7 @@ async def netflow_top_talkers(
         """,
         {"start": start, "end": end, "limit": limit, **extra_params},
     )
-    return [
+    rows = [
         {
             "ip": r[0],
             "bytes": int(r[1] or 0),
@@ -466,6 +745,7 @@ async def netflow_top_talkers(
         }
         for r in res.result_rows
     ]
+    return _enrich_hosts(rows, bool(resolve))
 
 
 @router.get("/top-endpoints")
@@ -474,6 +754,7 @@ async def netflow_top_endpoints(
     limit: int = Query(default=10, ge=1, le=100),
     from_ts: str | None = Query(default=None, alias="from"),
     to_ts: str | None = Query(default=None, alias="to"),
+    resolve: int = Query(default=0, description="1 = reverse-DNS resolve endpoint IPs"),
     scope: dict = Depends(scope_params),
     user: User = Depends(get_current_user),
 ):
@@ -535,7 +816,7 @@ async def netflow_top_endpoints(
         """,
         {"start": start, "end": end, "limit": limit, **extra_params},
     )
-    return [
+    rows = [
         {
             "ip": r[0],
             "bytes": int(r[1] or 0),
@@ -553,6 +834,7 @@ async def netflow_top_endpoints(
         }
         for r in res.result_rows
     ]
+    return _enrich_hosts(rows, bool(resolve))
 
 
 @router.get("/top-conversations")
@@ -867,6 +1149,18 @@ async def netflow_device_status(
     uptime_pct = round(min(100, (int(slots_seen or 0) / slots_total) * 100), 1)
 
     return {
+        # BUG-04: these are flow-derived HEURISTICS, not real device telemetry:
+        #   flow_duration_ms    = avg(last_switched - first_switched) per flow
+        #   rst_ratio_pct       = TCP-RST flows / total flows (not packet loss)
+        #   flow_continuity_pct = fraction of 5-min slots that carried any flow
+        # Real latency / loss / uptime require ICMP/SNMP correlation (ZenPlus
+        # already collects ping RTT — join on the exporter device).
+        "flow_derived": True,
+        "flow_duration_ms": latency_ms,
+        "rst_ratio_pct": loss_pct,
+        "flow_continuity_pct": uptime_pct,
+        # Deprecated aliases kept for backward compatibility only; the UI must
+        # not present these as real latency / packet-loss / uptime.
         "latency_ms": latency_ms,
         "packet_loss_pct": loss_pct,
         "uptime_pct": uptime_pct,
@@ -1624,6 +1918,105 @@ class SavedViewOut(BaseModel):
     pinned: bool
     created_at: str
     updated_at: str
+
+
+@router.get("/countries")
+async def netflow_countries(
+    hours: int = Query(default=24, ge=1, le=720),
+    limit: int = Query(default=600, ge=1, le=2000),
+    from_ts: str | None = Query(default=None, alias="from"),
+    to_ts: str | None = Query(default=None, alias="to"),
+    scope: dict = Depends(scope_params),
+    user: User = Depends(get_current_user),
+):
+    """Traffic by country (Phase 2b GeoIP). Aggregates the top-`limit` endpoint
+    IPs by volume and groups them by country, so it reflects the bulk of traffic
+    (the long tail beyond `limit` is omitted). Bytes are counted per endpoint
+    side (src + dst), so totals are per-endpoint like top-talkers. Returns [] if
+    no GeoIP database is provisioned (see scripts/fetch-geoip.py)."""
+    if not geoip.available():
+        return []
+    start, end = _resolve_window(hours, from_ts, to_ts)
+    extra_sql, extra_params = _scope(**scope)
+    res = _query(
+        f"""
+        SELECT toString(addr) AS ip, sum(bytes) AS bytes, sum(packets) AS packets, count() AS flows
+        FROM (
+            SELECT src_addr AS addr, bytes, packets FROM zenplus.flow_records
+            WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+            UNION ALL
+            SELECT dst_addr AS addr, bytes, packets FROM zenplus.flow_records
+            WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+        )
+        GROUP BY addr ORDER BY bytes DESC LIMIT %(limit)s
+        """,
+        {"start": start, "end": end, "limit": limit, **extra_params},
+    )
+    agg: dict[str, dict] = {}
+    for ip, b, p, f in res.result_rows:
+        cc, name = geoip.country_of(str(ip))
+        key = cc or "—"
+        e = agg.setdefault(key, {
+            "country": cc,
+            "country_name": name or ("Private / Unknown" if not cc else None),
+            "bytes": 0, "packets": 0, "flows": 0,
+        })
+        e["bytes"] += int(b or 0)
+        e["packets"] += int(p or 0)
+        e["flows"] += int(f or 0)
+    return sorted(agg.values(), key=lambda x: x["bytes"], reverse=True)
+
+
+@router.get("/ip-groups")
+async def netflow_ip_groups(
+    hours: int = Query(default=24, ge=1, le=720),
+    from_ts: str | None = Query(default=None, alias="from"),
+    to_ts: str | None = Query(default=None, alias="to"),
+    scope: dict = Depends(scope_params),
+    user: User = Depends(get_current_user),
+):
+    """Traffic by user-defined IP group / site (Phase 2). A flow is attributed to
+    a group when its source OR destination is in the group's CIDRs, so totals can
+    exceed the network total (like top-talkers). Returns [] when no groups are
+    configured in /opt/zenplus/data/netflow-ip-groups.json."""
+    groups = _load_ip_groups()
+    if not groups:
+        return []
+    start, end = _resolve_window(hours, from_ts, to_ts)
+    extra_sql, extra_params = _scope(**scope)
+    selected: list[tuple[str, list]] = []
+    cols: list[str] = []
+    for name, nets in groups:
+        pred = _group_predicate(name)
+        if not pred:
+            continue
+        idx = len(selected)
+        cols.append(f"sumIf(bytes, {pred}) AS g{idx}_bytes")
+        cols.append(f"sumIf(packets, {pred}) AS g{idx}_packets")
+        cols.append(f"countIf({pred}) AS g{idx}_flows")
+        selected.append((name, nets))
+    if not cols:
+        return []
+    row = _query(
+        f"""
+        SELECT {", ".join(cols)}
+        FROM zenplus.flow_records
+        WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+        """,
+        {"start": start, "end": end, **extra_params},
+    ).result_rows[0]
+    out = []
+    for idx, (name, nets) in enumerate(selected):
+        base = idx * 3
+        out.append({
+            "group": name,
+            "bytes": int(row[base] or 0),
+            "packets": int(row[base + 1] or 0),
+            "flows": int(row[base + 2] or 0),
+            "cidrs": [str(n) for n in nets],
+        })
+    out.sort(key=lambda x: x["bytes"], reverse=True)
+    return out
 
 
 @router.get("/saved-views", response_model=list[SavedViewOut])

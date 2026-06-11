@@ -1,0 +1,174 @@
+/* React Query data layer for the v2 map editor. Talks to the exact same
+ * /maps endpoints as v1 so both editors share one backend + cache. */
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { api } from '@/lib/api'
+import type {
+  Device,
+  LiveLinkData,
+  ManualMapDetail,
+  ManualMapListItem,
+  NodeLiveData,
+  SuggestedLink,
+} from './core'
+
+export function useManualMaps() {
+  return useQuery<{ data: ManualMapListItem[] }>({
+    queryKey: ['manual-maps'],
+    queryFn: async () => (await api.get('/maps')).data,
+  })
+}
+
+export function useManualMap(mapId: string | null, live = false) {
+  return useQuery<ManualMapDetail>({
+    queryKey: ['manual-map', mapId],
+    enabled: !!mapId,
+    // In live (NOC) mode refresh the map itself too, so node status changes
+    // and topology edits land on the wall without a manual reload. Design
+    // mode never auto-refetches — it would clobber in-progress edits.
+    refetchInterval: live ? 30_000 : false,
+    queryFn: async () => (await api.get(`/maps/${mapId}`)).data,
+  })
+}
+
+export function useDevices() {
+  return useQuery<{ data: Device[] }>({
+    queryKey: ['devices', 'manual-map-picker'],
+    queryFn: async () => (await api.get('/devices?limit=200')).data,
+  })
+}
+
+export function useLiveLinks(mapId: string | null, enabled: boolean) {
+  return useQuery<{ data: Record<string, LiveLinkData> }>({
+    queryKey: ['manual-map-live', mapId],
+    enabled: !!mapId && enabled,
+    refetchInterval: enabled ? 15_000 : false,
+    queryFn: async () => (await api.get(`/maps/${mapId}/links-live`)).data,
+  })
+}
+
+/** Per-device live health (status, cpu/mem, alerts) for the NOC overlay.
+ *  Fails soft: an older backend without the endpoint just yields no overlay. */
+export function useNodesLive(mapId: string | null, enabled: boolean) {
+  return useQuery<{ data: Record<string, NodeLiveData> }>({
+    queryKey: ['manual-map-nodes-live', mapId],
+    enabled: !!mapId && enabled,
+    refetchInterval: enabled ? 15_000 : false,
+    retry: false,
+    queryFn: async () => {
+      try {
+        return (await api.get(`/maps/${mapId}/nodes-live`)).data
+      } catch {
+        return { data: {} }
+      }
+    },
+  })
+}
+
+export function useSuggestedLinks(mapId: string | null, enabled: boolean) {
+  return useQuery<{ data: SuggestedLink[]; count: number }>({
+    queryKey: ['manual-map-suggested', mapId],
+    enabled: !!mapId && enabled,
+    queryFn: async () => (await api.get(`/maps/${mapId}/suggested-links`)).data,
+  })
+}
+
+/** Node/link mutations for the v2 editor. Positions stay in percent coords so
+ *  x_pct/y_pct remain authoritative and the v1 editor keeps working. */
+export function useMapMutations(mapId: string | null) {
+  const qc = useQueryClient()
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ['manual-map', mapId] })
+  }
+
+  const move = useMutation({
+    mutationFn: async ({ id, x_pct, y_pct }: { id: string; x_pct: number; y_pct: number }) =>
+      (await api.put(`/maps/${mapId}/nodes/${id}`, { x_pct, y_pct })).data,
+  })
+
+  /** Persist many node positions at once (group move / align / snap).
+   *  Intentionally does NOT invalidate — local React Flow state is already
+   *  correct, so we avoid a refetch that would rebuild nodes and drop the
+   *  current selection. */
+  const bulkMove = useMutation({
+    mutationFn: async (items: { id: string; x_pct: number; y_pct: number }[]) => {
+      await Promise.all(items.map((it) => api.put(`/maps/${mapId}/nodes/${it.id}`, { x_pct: it.x_pct, y_pct: it.y_pct })))
+    },
+  })
+
+  const deleteNode = useMutation({
+    mutationFn: async (id: string) => api.delete(`/maps/${mapId}/nodes/${id}`),
+    onSuccess: invalidate,
+  })
+
+  const deleteLink = useMutation({
+    mutationFn: async (id: string) => api.delete(`/maps/${mapId}/links/${id}`),
+    onSuccess: invalidate,
+  })
+
+  /** Place a device on the map (structural → invalidates so it renders). */
+  const addNode = useMutation({
+    mutationFn: async (payload: { device_id: string; x_pct: number; y_pct: number; icon?: string }) =>
+      (await api.post(`/maps/${mapId}/nodes`, { icon: 'auto', ...payload })).data,
+    onSuccess: invalidate,
+  })
+
+  /** Create a link between two nodes (structural → invalidates so it renders). */
+  const addLink = useMutation({
+    mutationFn: async (payload: {
+      source_node_id: string
+      target_node_id: string
+      label?: string | null
+      link_type?: string
+      metadata?: Record<string, unknown>
+    }) => (await api.post(`/maps/${mapId}/links`, payload)).data,
+    onSuccess: invalidate,
+  })
+
+  /** Patch a node (label, icon, metadata such as label offset). */
+  const updateNode = useMutation({
+    mutationFn: async ({ id, patch }: { id: string; patch: Record<string, unknown> }) =>
+      (await api.put(`/maps/${mapId}/nodes/${id}`, patch)).data,
+  })
+
+  /** Patch a link (label, metadata: shape/waypoints/style). Optimistic — no
+   *  refetch, so live waypoint edits aren't clobbered mid-drag. */
+  const updateLink = useMutation({
+    mutationFn: async ({ id, patch }: { id: string; patch: Record<string, unknown> }) =>
+      (await api.put(`/maps/${mapId}/links/${id}`, patch)).data,
+  })
+
+  /* ── Annotation shapes (icons / images / text / boxes) ─────────────── */
+  const addShape = useMutation({
+    mutationFn: async (payload: Record<string, unknown>) =>
+      (await api.post(`/maps/${mapId}/shapes`, payload)).data,
+    onSuccess: invalidate,
+  })
+
+  // Optimistic — no refetch, so live drag/resize/edit isn't clobbered mid-gesture.
+  const updateShape = useMutation({
+    mutationFn: async ({ id, patch }: { id: string; patch: Record<string, unknown> }) =>
+      (await api.put(`/maps/${mapId}/shapes/${id}`, patch)).data,
+  })
+
+  const deleteShape = useMutation({
+    mutationFn: async (id: string) => api.delete(`/maps/${mapId}/shapes/${id}`),
+    onSuccess: invalidate,
+  })
+
+  /** Auto-create links for every discovered CDP/LLDP adjacency among placed
+   *  devices that isn't linked yet (server-side, dedup-safe). */
+  const autoConnect = useMutation({
+    mutationFn: async () => (await api.post(`/maps/${mapId}/auto-connect`)).data as { created: number; suggested: number },
+    onSuccess: invalidate,
+  })
+
+  // Annotation links (cables touching an icon/image) live in the map's metadata,
+  // not the device-only links table. Optimistic — no refetch.
+  const saveMapMeta = useMutation({
+    mutationFn: async (metadata: Record<string, unknown>) =>
+      (await api.put(`/maps/${mapId}`, { metadata })).data,
+  })
+
+  return { move, bulkMove, deleteNode, deleteLink, updateNode, updateLink, addLink, addNode, addShape, updateShape, deleteShape, saveMapMeta, autoConnect }
+}

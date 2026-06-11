@@ -165,12 +165,15 @@ BEGIN
 END $$;
 
 -- Extend alert_rules.metric enum to include SNMP metrics.
--- Old CHECK is replaced with an expanded list.
+-- The CHECK list is a superset of every metric introduced by earlier
+-- migrations (notably 'service_status' from migrate-006-services-v2.sql),
+-- so the drop+add never violates existing rows regardless of which
+-- migration runs first on a given appliance.
 ALTER TABLE alert_rules
     DROP CONSTRAINT IF EXISTS alert_rules_metric_check;
 ALTER TABLE alert_rules
     ADD CONSTRAINT alert_rules_metric_check CHECK (metric IN (
-        'ping_status','rtt','packet_loss','jitter',
+        'ping_status','rtt','packet_loss','jitter','service_status',
         'cpu','memory','uptime_reset','temperature','fan_state','psu_state',
         'if_in_bps','if_out_bps','if_errors','if_discards','if_oper_status',
         'session_count','vpn_tunnel_state','ha_state'

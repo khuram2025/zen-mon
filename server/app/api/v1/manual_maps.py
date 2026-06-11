@@ -550,6 +550,165 @@ async def delete_link(
 
 
 # ─────────────────────────────────────────────────────────────────
+# LLDP/CDP link assistance
+#
+# Cross-reference the devices currently placed on the map against the
+# discovered topology (topology_links). When two placed devices have a
+# real LLDP/CDP adjacency but no manual link yet, surface it as a
+# "suggested" link the operator can add with one click — pre-bound to
+# the correct interface pair so it inherits live weathermap stats.
+# ─────────────────────────────────────────────────────────────────
+
+def _speed_to_link_type(speed: Optional[int]) -> str:
+    """Map an interface speed (bps) to a sensible default link styling."""
+    if not speed:
+        return "ethernet"
+    if speed >= 10_000_000_000:
+        return "fiber"        # 10G+ → fiber styling
+    return "ethernet"
+
+
+async def _compute_suggested_links(db: AsyncSession, map_id: uuid.UUID) -> list[dict]:
+    """Discovered adjacencies among placed devices that aren't linked yet.
+
+    Deduped to one suggestion per unordered device pair, preferring the
+    edge that carries both interface names and the highest confidence.
+    """
+    placed = (await db.execute(
+        text("""
+            SELECT mn.id AS node_id, mn.device_id, d.hostname
+            FROM manual_map_nodes mn JOIN devices d ON d.id = mn.device_id
+            WHERE mn.map_id = :map_id
+        """),
+        {"map_id": map_id},
+    )).mappings().all()
+    if len(placed) < 2:
+        return []
+    node_by_device = {str(p["device_id"]): p for p in placed}
+    device_ids = list(node_by_device.keys())
+
+    # Node pairs that already have a manual link (either direction).
+    existing = (await db.execute(
+        text("""
+            SELECT source_node_id, target_node_id FROM manual_map_links WHERE map_id = :map_id
+        """),
+        {"map_id": map_id},
+    )).all()
+    linked_pairs = {frozenset((str(a), str(b))) for a, b in existing}
+
+    # Discovered edges where BOTH ends are placed on this map.
+    edges = (await db.execute(
+        text("""
+            SELECT local_device_id, remote_device_id, local_if_name,
+                   remote_if_name, remote_port_id, protocol, confidence
+            FROM topology_links
+            WHERE remote_device_id IS NOT NULL
+              AND local_device_id  = ANY(:ids)
+              AND remote_device_id = ANY(:ids)
+        """),
+        {"ids": device_ids},
+    )).mappings().all()
+
+    # The clean port-id (e.g. "Twe1/0/10") is a better interface name than the
+    # verbose LLDP port-DESCRIPTION ("*** To_… ***") for both display and
+    # weathermap matching, so prefer it.
+    def _remote_iface(e) -> Optional[str]:
+        return e["remote_port_id"] or e["remote_if_name"]
+
+    # Group by unordered device pair; pick the best representative edge —
+    # prefer one carrying both interface names, then highest confidence.
+    best: dict[frozenset, dict] = {}
+    counts: dict[frozenset, int] = {}
+    for e in edges:
+        a, b = str(e["local_device_id"]), str(e["remote_device_id"])
+        if a == b:
+            continue
+        key = frozenset((a, b))
+        counts[key] = counts.get(key, 0) + 1
+        score = (1 if (e["local_if_name"] and _remote_iface(e)) else 0, e["confidence"] or 0)
+        cur = best.get(key)
+        if cur is None or score > cur["_score"]:
+            best[key] = {**dict(e), "_score": score, "_a": a, "_b": b}
+
+    suggestions = []
+    for key, e in best.items():
+        src = node_by_device.get(e["_a"])
+        dst = node_by_device.get(e["_b"])
+        if not src or not dst:
+            continue
+        if frozenset((str(src["node_id"]), str(dst["node_id"]))) in linked_pairs:
+            continue
+        suggestions.append({
+            "source_node_id": str(src["node_id"]),
+            "target_node_id": str(dst["node_id"]),
+            "source_hostname": src["hostname"],
+            "target_hostname": dst["hostname"],
+            "src_interface": e["local_if_name"],
+            "dst_interface": _remote_iface(e),
+            "protocol": e["protocol"],
+            "confidence": e["confidence"],
+            "physical_links": counts[key],
+        })
+    suggestions.sort(key=lambda s: (-(s["confidence"] or 0), s["source_hostname"] or ""))
+    return suggestions
+
+
+@router.get("/{map_id}/suggested-links")
+async def suggested_links(
+    map_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    map_exists = (await db.execute(text("SELECT id FROM manual_maps WHERE id = :id"), {"id": map_id})).first()
+    if not map_exists:
+        raise HTTPException(404, "Map not found")
+    data = await _compute_suggested_links(db, map_id)
+    return {"data": data, "count": len(data)}
+
+
+@router.post("/{map_id}/auto-connect")
+async def auto_connect_discovered(
+    map_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Create manual links for every discovered adjacency among placed
+    devices that isn't linked yet. Each link is bound to its interface
+    pair so it lights up the live weathermap immediately."""
+    map_exists = (await db.execute(text("SELECT id FROM manual_maps WHERE id = :id"), {"id": map_id})).first()
+    if not map_exists:
+        raise HTTPException(404, "Map not found")
+    suggestions = await _compute_suggested_links(db, map_id)
+    created = 0
+    for s in suggestions:
+        md = {
+            "src_interface": s["src_interface"],
+            "dst_interface": s["dst_interface"],
+            "discovered": True,
+            "protocol": s["protocol"],
+        }
+        try:
+            # Savepoint per insert: a single bad/duplicate row doesn't poison
+            # the whole batch.
+            async with db.begin_nested():
+                await db.execute(
+                    text("""
+                        INSERT INTO manual_map_links (map_id, source_node_id, target_node_id, label, link_type, metadata)
+                        VALUES (:map_id, :src, :dst, :label, :lt, CAST(:md AS JSONB))
+                    """),
+                    {"map_id": map_id, "src": s["source_node_id"], "dst": s["target_node_id"],
+                     "label": (s["protocol"] or "lldp").upper(), "lt": "ethernet", "md": json.dumps(md)},
+                )
+            created += 1
+        except Exception:
+            continue
+    if created:
+        await db.execute(text("UPDATE manual_maps SET updated_at = NOW() WHERE id = :id"), {"id": map_id})
+    await db.commit()
+    return {"created": created, "suggested": len(suggestions)}
+
+
+# ─────────────────────────────────────────────────────────────────
 # Live link statistics
 #
 # Match the user-typed src_interface / dst_interface strings on each
@@ -558,7 +717,12 @@ async def delete_link(
 # show real throughput and utilization next to each link.
 # ─────────────────────────────────────────────────────────────────
 
-_LIVE_WINDOW_SECONDS = 300  # 5-minute rolling window
+_LIVE_WINDOW_SECONDS = 300  # 5-minute rolling window (NetFlow rate window)
+# SNMP interface counters arrive in poller bursts every ~8 minutes, so accept
+# the latest sample up to 15 minutes back — otherwise links go blank between
+# polls. The query takes only the newest sample (argMax), so a wider lookback
+# changes staleness tolerance, not the computed rate.
+_SNMP_LOOKBACK_SECONDS = 900
 
 # Normalize Cisco-style abbreviations so "Gi0/1" matches
 # "GigabitEthernet0/1", "Te1/0/24" matches "TenGigabitEthernet1/0/24",
@@ -660,8 +824,8 @@ async def links_live(
     the discovered fields plus a NetFlow-derived `in_bps`, `out_bps`,
     `util_pct` over the last 5 minutes.
     """
-    map_exists = (await db.execute(text("SELECT id FROM manual_maps WHERE id = :id"), {"id": map_id})).first()
-    if not map_exists:
+    map_row = (await db.execute(text("SELECT id, metadata FROM manual_maps WHERE id = :id"), {"id": map_id})).mappings().first()
+    if not map_row:
         raise HTTPException(404, "Map not found")
 
     # Nodes (device + IP, used to find the right device_interfaces rows
@@ -679,13 +843,32 @@ async def links_live(
     node_info = {str(r["node_id"]): {"device_id": r["device_id"], "ip": r["ip_address"]} for r in node_rows}
 
     # Links
-    link_rows = (await db.execute(
+    link_rows = [dict(r) for r in (await db.execute(
         text("""
             SELECT id, source_node_id, target_node_id, metadata
             FROM manual_map_links WHERE map_id = :map_id
         """),
         {"map_id": map_id},
-    )).mappings().all()
+    )).mappings().all()]
+
+    # Annotation links (device ↔ shape cables stored in the map metadata) can
+    # bind their device end to a real interface too — process them through the
+    # same pipeline so they light up with live throughput.
+    map_meta = map_row["metadata"] or {}
+    if isinstance(map_meta, str):
+        try:
+            map_meta = json.loads(map_meta)
+        except Exception:
+            map_meta = {}
+    for al in (map_meta.get("annotation_links") or []):
+        if not isinstance(al, dict) or not al.get("id"):
+            continue
+        link_rows.append({
+            "id": al["id"],
+            "source_node_id": al.get("source"),
+            "target_node_id": al.get("target"),
+            "metadata": al.get("metadata") or {},
+        })
 
     if not link_rows:
         return {"data": {}, "window_seconds": _LIVE_WINDOW_SECONDS,
@@ -711,6 +894,7 @@ async def links_live(
     # name and collect (exporter_ip, ifindex) pairs we need traffic for.
     out: dict[str, dict] = {}
     flow_keys: set[tuple[str, int]] = set()
+    snmp_keys: set[tuple[str, int]] = set()  # (device_id, if_index) for SNMP throughput
     for lr in link_rows:
         md = lr["metadata"] or {}
         if isinstance(md, str):
@@ -729,8 +913,10 @@ async def links_live(
             if not matched:
                 return _empty_iface()
             payload = _iface_payload(matched)
-            if payload["if_index"] is not None and side_node["ip"]:
-                flow_keys.add((str(side_node["ip"]), int(payload["if_index"])))
+            if payload["if_index"] is not None:
+                if side_node["ip"]:
+                    flow_keys.add((str(side_node["ip"]), int(payload["if_index"])))
+                snmp_keys.add((str(side_node["device_id"]), int(payload["if_index"])))
             return payload
 
         out[str(lr["id"])] = {
@@ -796,6 +982,40 @@ async def links_live(
             # interface status still useful, just no throughput.
             flow_map = {}
 
+    # SNMP interface counters — the universal throughput source. NetFlow only
+    # exists for flow-exporting devices (firewalls/routers); SNMP polls every
+    # monitored interface, so this lights up switch↔switch links too. Keyed by
+    # (device_id, if_index); we take the most recent sample's pre-computed bps.
+    snmp_map: dict[tuple[str, int], dict] = {}
+    if snmp_keys:
+        start = datetime.now(timezone.utc) - timedelta(seconds=_SNMP_LOOKBACK_SECONDS)
+        did_list = sorted({d for d, _ in snmp_keys})
+        sidx_list = sorted({i for _, i in snmp_keys})
+        try:
+            client = get_clickhouse_client()
+            res = client.query(
+                """
+                SELECT toString(device_id) AS device_id, if_index,
+                       argMax(in_bps, timestamp)  AS in_bps,
+                       argMax(out_bps, timestamp) AS out_bps,
+                       argMax(in_ucast_pkts, timestamp)  AS in_pkts,
+                       argMax(out_ucast_pkts, timestamp) AS out_pkts
+                FROM zenplus.snmp_if_metrics
+                WHERE timestamp >= %(start)s
+                  AND toString(device_id) IN %(dids)s
+                  AND if_index IN %(idxs)s
+                GROUP BY device_id, if_index
+                """,
+                parameters={"start": start, "dids": did_list, "idxs": sidx_list},
+            )
+            for r in res.result_rows:
+                snmp_map[(str(r[0]), int(r[1]))] = {
+                    "in_bps": float(r[2] or 0), "out_bps": float(r[3] or 0),
+                    "in_packets": int(r[4] or 0), "out_packets": int(r[5] or 0),
+                }
+        except Exception:
+            snmp_map = {}
+
     # Stitch throughput back into the result and drop internal fields.
     window = _LIVE_WINDOW_SECONDS
     final: dict[str, dict] = {}
@@ -806,14 +1026,25 @@ async def links_live(
             if not side.get("matched") or not node:
                 continue
             f = flow_map.get((str(node["ip"]), int(side["if_index"])))
-            if not f:
-                continue
-            in_bps = (f["in_bytes"] * 8) / window
-            out_bps = (f["out_bytes"] * 8) / window
-            side["in_bps"] = round(in_bps, 1)
-            side["out_bps"] = round(out_bps, 1)
-            side["in_packets"] = f["in_packets"]
-            side["out_packets"] = f["out_packets"]
+            if f:
+                # NetFlow: bytes over the window → bits/sec.
+                in_bps = (f["in_bytes"] * 8) / window
+                out_bps = (f["out_bytes"] * 8) / window
+                side["in_bps"] = round(in_bps, 1)
+                side["out_bps"] = round(out_bps, 1)
+                side["in_packets"] = f["in_packets"]
+                side["out_packets"] = f["out_packets"]
+            else:
+                # Fall back to SNMP interface counters (pre-computed bps).
+                s = snmp_map.get((str(node["device_id"]), int(side["if_index"])))
+                if not s:
+                    continue
+                in_bps = s["in_bps"]
+                out_bps = s["out_bps"]
+                side["in_bps"] = round(in_bps, 1)
+                side["out_bps"] = round(out_bps, 1)
+                side["in_packets"] = s["in_packets"]
+                side["out_packets"] = s["out_packets"]
             if side.get("if_speed"):
                 # Peak direction divided by line speed.
                 util = max(in_bps, out_bps) / float(side["if_speed"]) * 100
@@ -826,6 +1057,102 @@ async def links_live(
         }
     return {"data": final, "window_seconds": window,
             "generated_at": datetime.now(timezone.utc).isoformat()}
+
+
+@router.get("/{map_id}/nodes-live")
+async def nodes_live(
+    map_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Live per-device health for every node on the map.
+
+    Response: {"data": {<node_id>: {status, last_seen, rtt_ms, cpu_pct,
+    mem_pct, uptime_seconds, temperature_c, alerts: {active, critical,
+    warning}}}}
+
+    Status/RTT come from the devices table, CPU/memory/uptime/temperature from
+    the latest ClickHouse snmp_metrics samples (15-minute lookback), and alert
+    counts from currently-active alerts. One call drives the NOC overlay.
+    """
+    node_rows = (await db.execute(
+        text("""
+            SELECT mn.id AS node_id, mn.device_id, d.status, d.last_seen, d.last_rtt_ms
+            FROM manual_map_nodes mn
+            JOIN devices d ON d.id = mn.device_id
+            WHERE mn.map_id = :map_id
+        """),
+        {"map_id": map_id},
+    )).mappings().all()
+    if not node_rows:
+        return {"data": {}, "generated_at": datetime.now(timezone.utc).isoformat()}
+
+    device_ids = [str(r["device_id"]) for r in node_rows]
+
+    # Active alert counts per device (severity split).
+    alert_rows = (await db.execute(
+        text("""
+            SELECT device_id,
+                   COUNT(*) AS active,
+                   COUNT(*) FILTER (WHERE severity = 'critical') AS critical,
+                   COUNT(*) FILTER (WHERE severity = 'warning') AS warning
+            FROM alerts
+            WHERE status = 'active' AND device_id = ANY(:ids)
+            GROUP BY device_id
+        """),
+        {"ids": device_ids},
+    )).mappings().all()
+    alerts_by_device = {
+        str(r["device_id"]): {"active": int(r["active"]), "critical": int(r["critical"]), "warning": int(r["warning"])}
+        for r in alert_rows
+    }
+
+    # Latest scalar health metrics from ClickHouse (cpu %, memory %, uptime s,
+    # hottest temperature sensor). Missing/old samples simply yield nulls.
+    metrics_by_device: dict[str, dict] = {}
+    try:
+        client = get_clickhouse_client()
+        res = client.query(
+            """
+            SELECT device_id, metric_key, argMax(value, timestamp) AS val
+            FROM zenplus.snmp_metrics
+            WHERE timestamp >= now() - INTERVAL 15 MINUTE
+              AND device_id IN %(ids)s
+              AND (metric_key IN ('cpu', 'memory', 'uptime') OR metric_key LIKE 'temperature%%')
+            GROUP BY device_id, metric_key
+            """,
+            parameters={"ids": device_ids},
+        )
+        for did, key, val in res.result_rows:
+            bucket = metrics_by_device.setdefault(str(did), {})
+            v = float(val)
+            if key == "cpu":
+                bucket["cpu_pct"] = round(v, 1)
+            elif key == "memory":
+                bucket["mem_pct"] = round(v, 1)
+            elif key == "uptime":
+                bucket["uptime_seconds"] = round(v)
+            elif key.startswith("temperature"):
+                bucket["temperature_c"] = max(bucket.get("temperature_c") or -1e9, round(v, 1))
+    except Exception:
+        pass  # ClickHouse down → status/alerts still render
+
+    data: dict[str, dict] = {}
+    for r in node_rows:
+        did = str(r["device_id"])
+        m = metrics_by_device.get(did, {})
+        data[str(r["node_id"])] = {
+            "device_id": did,
+            "status": r["status"],
+            "last_seen": r["last_seen"].isoformat() if r["last_seen"] else None,
+            "rtt_ms": float(r["last_rtt_ms"]) if r["last_rtt_ms"] is not None else None,
+            "cpu_pct": m.get("cpu_pct"),
+            "mem_pct": m.get("mem_pct"),
+            "uptime_seconds": m.get("uptime_seconds"),
+            "temperature_c": m.get("temperature_c"),
+            "alerts": alerts_by_device.get(did, {"active": 0, "critical": 0, "warning": 0}),
+        }
+    return {"data": data, "generated_at": datetime.now(timezone.utc).isoformat()}
 
 
 # ─── Annotation shapes (rectangles, circles, text) ─────────────────────────

@@ -106,3 +106,7 @@ Documentation/test.txt
 # ─── Generated tech support bundles ───
 support01/
 zenplus-support-*/
+
+# ─── OTA updater per-migration backups & binary backups ───
+*.pre-update
+bin/*.bak

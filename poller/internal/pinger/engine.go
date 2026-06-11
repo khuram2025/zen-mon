@@ -196,7 +196,7 @@ func (e *Engine) Run(ctx context.Context) {
 		trapBind = "0.0.0.0:162"
 	}
 	e.snmpTrapListener = snmp.NewTrapListener(
-		e.cfg.Poller.ID, trapBind, e.snmpWriter, e.snmpLookup, e.logger,
+		e.cfg.Poller.ID, trapBind, &trapAlertSink{inner: e.snmpWriter, engine: e}, e.snmpLookup, e.logger,
 	)
 	if err := e.snmpTrapListener.Start(ctx); err != nil {
 		e.logger.Warnf("SNMP trap listener not started: %v", err)
@@ -498,6 +498,64 @@ func (e *Engine) evaluateAlerts(ctx context.Context, device *Device, oldStatus, 
 
 	sent := result2["notifications_sent"]
 	e.logger.Infof("Alert evaluation: %s %s→%s, notifications sent: %v", device.Hostname, oldStatus, newStatus, sent)
+}
+
+// trapAlertSink wraps the metrics-store trap sink so that every received trap
+// is ALSO handed to the API alert engine for trap-rule evaluation, without
+// disturbing the existing ClickHouse persistence path.
+type trapAlertSink struct {
+	inner  snmp.TrapSink
+	engine *Engine
+}
+
+func (s *trapAlertSink) WriteTrap(t snmp.TrapRecord) {
+	if s.inner != nil {
+		s.inner.WriteTrap(t)
+	}
+	if s.engine != nil {
+		go s.engine.evaluateTrapAlert(t)
+	}
+}
+
+// evaluateTrapAlert posts a received SNMP trap to the API alert engine, which
+// fires any matching metric='trap' alert rules (alerts-only — no channel
+// dispatch). Best-effort: failures are logged and ignored so trap persistence
+// is never blocked.
+func (e *Engine) evaluateTrapAlert(t snmp.TrapRecord) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	deviceID := ""
+	if t.DeviceID != nil {
+		deviceID = t.DeviceID.String()
+	}
+	payload := map[string]interface{}{
+		"device_id": deviceID,
+		"source_ip": t.SourceIP.String(),
+		"trap_oid":  t.TrapOID,
+		"trap_name": t.TrapName,
+		"severity":  t.Severity,
+		"message":   t.Message,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		"http://localhost:8000/api/v1/alert-engine/evaluate-trap", bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		e.logger.Warnf("trap alert eval failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	var r map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&r)
+	e.logger.Infof("trap alert eval: oid=%s alerts_created=%v", t.TrapOID, r["alerts_created"])
 }
 
 // evaluateServiceAlerts fires the API-side alert engine when a service check
