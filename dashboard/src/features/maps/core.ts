@@ -79,6 +79,8 @@ export type LinkMetadata = {
   shape?: LinkShape | null
   waypoints?: Waypoint[] | null
   notes?: string | null
+  /** Cable thickness multiplier (1 = default). */
+  width_scale?: number | null
   /** Manual placement for the source/target interface chips. */
   iface_pos?: { src?: IfaceLabelPos; dst?: IfaceLabelPos } | null
 }
@@ -433,6 +435,158 @@ function segsFrom(poly: Pt[]): Segment[] {
   return out
 }
 
+/** When an orthogonal link has no explicit waypoints, `orthoPoly` inserts this
+ *  single bend so the cable stays axis-aligned. Exposed so the editor can show
+ *  a draggable handle even before the user has added waypoints. */
+export function orthoImplicitCorner(src: Pt, tgt: Pt): Pt | null {
+  if (Math.abs(src.x - tgt.x) <= 0.01 || Math.abs(src.y - tgt.y) <= 0.01) return null
+  return { x: tgt.x, y: src.y }
+}
+
+/** Waypoints used for orthogonal editing — materialises the implicit corner so
+ *  the turning point can be dragged on both axes. */
+export function orthoEffectiveWaypoints(src: Pt, tgt: Pt, waypoints: Pt[]): Pt[] {
+  if (waypoints.length > 0) return waypoints
+  const c = orthoImplicitCorner(src, tgt)
+  return c ? [c] : []
+}
+
+/** Interior right-angle corners on the rendered cable. */
+export function orthoRoutedInterior(src: Pt, tgt: Pt, waypoints: Pt[], eps = 1.5): Pt[] {
+  if (Math.abs(src.x - tgt.x) <= eps || Math.abs(src.y - tgt.y) <= eps) return []
+  const routed = orthoPoly([src, ...waypoints, tgt])
+  if (routed.length <= 2) return []
+  const out: Pt[] = []
+  for (let i = 1; i < routed.length - 1; i++) {
+    const p = routed[i]
+    if (!out.some((q) => Math.abs(q.x - p.x) <= eps && Math.abs(q.y - p.y) <= eps)) out.push(p)
+  }
+  return out
+}
+
+/** Draggable handles — skip auto elbows glued to the device/shape border. */
+export function orthoEditableHandles(
+  src: Pt,
+  tgt: Pt,
+  waypoints: Pt[],
+  rimEps = 28,
+): Pt[] {
+  if (waypoints.length > 0) return waypoints.slice()
+  const interior = orthoRoutedInterior(src, tgt, waypoints)
+  const meaningful = interior.filter((p) =>
+    Math.hypot(p.x - src.x, p.y - src.y) > rimEps &&
+    Math.hypot(p.x - tgt.x, p.y - tgt.y) > rimEps,
+  )
+  if (meaningful.length > 0) return meaningful
+  if (interior.length > 0) return [interior[Math.floor((interior.length - 1) / 2)]]
+  const c = orthoImplicitCorner(src, tgt)
+  return c ? [c] : []
+}
+
+function polylineEqual(a: Pt[], b: Pt[], eps = 1.5): boolean {
+  if (a.length !== b.length) return false
+  return a.every((p, i) => Math.abs(p.x - b[i].x) <= eps && Math.abs(p.y - b[i].y) <= eps)
+}
+
+/** Collapse near-duplicate and collinear bend points. */
+export function simplifyOrthoWaypoints(pts: Pt[], eps = 1.5): Pt[] {
+  const dedup: Pt[] = []
+  for (const p of pts) {
+    const l = dedup[dedup.length - 1]
+    if (!l || Math.abs(l.x - p.x) > eps || Math.abs(l.y - p.y) > eps) dedup.push(p)
+  }
+  const out: Pt[] = []
+  for (let i = 0; i < dedup.length; i++) {
+    const prev = out[out.length - 1]
+    const cur = dedup[i]
+    const next = dedup[i + 1]
+    if (prev && next) {
+      const colH = Math.abs(prev.y - cur.y) <= eps && Math.abs(cur.y - next.y) <= eps
+      const colV = Math.abs(prev.x - cur.x) <= eps && Math.abs(cur.x - next.x) <= eps
+      if (colH || colV) continue
+    }
+    out.push(cur)
+  }
+  return out
+}
+
+/** Clear interface labels / bends on sides whose endpoint changed after a
+ *  reconnect drag in the editor. */
+export function reconcileLinkMetadataOnReconnect(
+  meta: LinkMetadata,
+  oldSourceId: string,
+  oldTargetId: string,
+  newSourceId: string,
+  newTargetId: string,
+  newSourceType: 'node' | 'shape',
+  newTargetType: 'node' | 'shape',
+): LinkMetadata {
+  const next: LinkMetadata = { ...meta }
+  const ip = { ...(next.iface_pos || {}) }
+  let endpointsChanged = false
+  if (oldSourceId !== newSourceId) {
+    next.src_interface = newSourceType === 'node' ? null : null
+    delete ip.src
+    endpointsChanged = true
+  }
+  if (oldTargetId !== newTargetId) {
+    next.dst_interface = newTargetType === 'node' ? null : null
+    delete ip.dst
+    endpointsChanged = true
+  }
+  if (endpointsChanged) next.waypoints = []
+  next.iface_pos = Object.keys(ip).length ? ip : null
+  return next
+}
+
+/** Drop bends that no longer change the routed cable — e.g. after dragging a
+ *  handle onto a straight segment the path collapses and stored waypoints clear. */
+export function pruneOrthoWaypoints(src: Pt, tgt: Pt, waypoints: Pt[], eps = 1.5): Pt[] {
+  let w = simplifyOrthoWaypoints(waypoints, eps)
+  if (w.length === 0) return []
+
+  // Compare SIMPLIFIED routes so pass-through points sitting on a straight
+  // run (invisible — no corner) count as redundant and get dropped too.
+  const route = (pts: Pt[]) => simplifyOrthoWaypoints(orthoPoly([src, ...pts, tgt]), eps)
+  const canonical = route(w)
+  if (canonical.length <= 2) return []
+  if (polylineEqual(canonical, route([]), eps)) return []
+
+  let changed = true
+  while (changed && w.length > 0) {
+    changed = false
+    for (let i = 0; i < w.length; i++) {
+      const trial = w.filter((_, j) => j !== i)
+      if (polylineEqual(route(trial), canonical, eps)) {
+        w = trial
+        changed = true
+        break
+      }
+    }
+  }
+  return simplifyOrthoWaypoints(w, eps)
+}
+
+/** Straight/curved links: drop any bend that sits on the line between its
+ *  neighbours — dragging a dot back onto the cable removes it (draw.io). */
+export function pruneStraightWaypoints(src: Pt, tgt: Pt, waypoints: Pt[], eps = 1.5): Pt[] {
+  const out = simplifyOrthoWaypoints(waypoints, Math.min(eps, 1.5)).slice()
+  let changed = true
+  while (changed) {
+    changed = false
+    for (let i = 0; i < out.length; i++) {
+      const prev = i === 0 ? src : out[i - 1]
+      const next = i === out.length - 1 ? tgt : out[i + 1]
+      if (distToSegment(out[i], prev, next) <= eps) {
+        out.splice(i, 1)
+        changed = true
+        break
+      }
+    }
+  }
+  return out
+}
+
 // Expand user vertices into a right-angle polyline (orthogonal routing).
 function orthoPoly(verts: Pt[]): Pt[] {
   const poly: Pt[] = [verts[0]]
@@ -500,6 +654,79 @@ export function edgePath(
     mid: pointAtT(segments, 0.5),
     near: pointAtT(segments, 0.16),
     far: pointAtT(segments, 0.84),
+  }
+}
+
+/* ── Orthogonal routing, draw.io style ────────────────────────────────────
+ * The cable is routed CENTre-to-centre through the user waypoints with right
+ * angles, then clipped where it crosses each endpoint's border. That way the
+ * cable always leaves a device/shape axis-aligned (no diagonal stubs), and
+ * dragging a segment or corner re-anchors the ends smoothly along the border. */
+
+export type EndGeom = {
+  center: Pt
+  rect: boolean
+  halfW: number
+  halfH: number
+  /** Disc radius for circular (device) endpoints. */
+  r?: number
+}
+
+function insideEndGeom(p: Pt, g: EndGeom): boolean {
+  if (g.rect) return Math.abs(p.x - g.center.x) <= g.halfW && Math.abs(p.y - g.center.y) <= g.halfH
+  return Math.hypot(p.x - g.center.x, p.y - g.center.y) <= (g.r ?? DISC_RADIUS)
+}
+
+/** Border crossing on the segment inside→outside (bisection — works for any shape). */
+function borderCross(inside: Pt, outside: Pt, g: EndGeom): Pt {
+  let a = inside
+  let b = outside
+  for (let i = 0; i < 24; i++) {
+    const m = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+    if (insideEndGeom(m, g)) a = m
+    else b = m
+  }
+  return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+}
+
+function clipStart(pts: Pt[], g: EndGeom): Pt[] {
+  if (!insideEndGeom(pts[0], g)) return pts
+  let k = 0
+  while (k + 1 < pts.length && insideEndGeom(pts[k + 1], g)) k++
+  if (k + 1 >= pts.length) return pts // fully inside the shape — give up
+  return [borderCross(pts[k], pts[k + 1], g), ...pts.slice(k + 1)]
+}
+
+/** Trim a polyline so it starts/ends on the endpoint shapes' borders. */
+export function clipRouteEnds(poly: Pt[], sg: EndGeom | null, tg: EndGeom | null): Pt[] {
+  let pts = poly.slice()
+  if (sg) pts = clipStart(pts, sg)
+  if (tg) pts = clipStart(pts.slice().reverse(), tg).reverse()
+  return pts
+}
+
+/** Full orthogonal edge: centre-routed through waypoints, border-clipped.
+ *  `clipped` is the final polyline — its interior points are the visual
+ *  corners the editor exposes as drag handles. */
+export function routeOrthoEdge(
+  srcCenter: Pt,
+  tgtCenter: Pt,
+  waypoints: Pt[],
+  sg: EndGeom | null,
+  tg: EndGeom | null,
+): EdgePathResult & { clipped: Pt[] } {
+  const routed = orthoPoly([srcCenter, ...waypoints, tgtCenter])
+  const clipped = simplifyOrthoWaypoints(clipRouteEnds(routed, sg, tg), 0.25)
+  const safe = clipped.length >= 2 ? clipped : [srcCenter, tgtCenter]
+  const segments = segsFrom(safe)
+  return {
+    d: safe.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' '),
+    vertices: safe,
+    segments,
+    mid: pointAtT(segments, 0.5),
+    near: pointAtT(segments, 0.16),
+    far: pointAtT(segments, 0.84),
+    clipped: safe,
   }
 }
 

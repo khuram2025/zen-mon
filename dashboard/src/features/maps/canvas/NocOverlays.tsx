@@ -7,10 +7,25 @@ import {
   linkFlow,
   statusKey,
   utilHex,
+  type AnnotationLink,
   type LiveLinkData,
   type ManualMapDetail,
   type NodeLiveData,
 } from '../core'
+
+function annotationLinksOf(detail: ManualMapDetail): AnnotationLink[] {
+  const raw = detail.metadata?.annotation_links
+  return Array.isArray(raw) ? (raw as AnnotationLink[]) : []
+}
+
+function endpointLabel(detail: ManualMapDetail, id: string, kind: 'node' | 'shape'): string {
+  if (kind === 'node') {
+    const n = detail.nodes.find((node) => node.id === id)
+    return (n?.label || n?.hostname || '?').slice(0, 18)
+  }
+  const s = (detail.shapes || []).find((shape) => shape.id === id)
+  return (s?.text || s?.kind || '?').slice(0, 18)
+}
 
 const STATUS_DOT: Record<string, string> = {
   up: 'bg-success', down: 'bg-danger', degraded: 'bg-warning', maintenance: 'bg-info', unknown: 'bg-muted',
@@ -44,27 +59,42 @@ export function NocStatusBar({ detail, nodesLive, liveData, updatedAt }: {
     let totalBps = 0
     let hot: { bps: number; util: number | null; label: string } | null = null
     const nodeById = new Map(detail.nodes.map((n) => [n.id, n]))
-    for (const l of detail.links) {
-      const f = linkFlow(liveData[l.id])
-      if (!f) continue
+    const annLinks = annotationLinksOf(detail)
+    const linkCount = detail.links.length + annLinks.length
+
+    const considerLink = (id: string, label: string) => {
+      const f = linkFlow(liveData[id])
+      if (!f) return
       totalBps += f.total
       if (!hot || f.total > hot.bps) {
-        const s = nodeById.get(l.source_node_id)
-        const t = nodeById.get(l.target_node_id)
-        hot = {
-          bps: f.total,
-          util: f.utilPct,
-          label: `${(s?.label || s?.hostname || '?').slice(0, 18)} ⇄ ${(t?.label || t?.hostname || '?').slice(0, 18)}`,
-        }
+        hot = { bps: f.total, util: f.utilPct, label }
       }
     }
+
+    for (const l of detail.links) {
+      const s = nodeById.get(l.source_node_id)
+      const t = nodeById.get(l.target_node_id)
+      considerLink(
+        l.id,
+        `${(s?.label || s?.hostname || '?').slice(0, 18)} ⇄ ${(t?.label || t?.hostname || '?').slice(0, 18)}`,
+      )
+    }
+    for (const al of annLinks) {
+      considerLink(
+        al.id,
+        `${endpointLabel(detail, al.source, al.source_type)} ⇄ ${endpointLabel(detail, al.target, al.target_type)}`,
+      )
+    }
+
     let alerts = 0, critical = 0
     for (const nl of Object.values(nodesLive)) {
       alerts += nl.alerts?.active || 0
       critical += nl.alerts?.critical || 0
     }
-    const faulted = detail.links.reduce((acc, l) => acc + (linkFlow(liveData[l.id])?.ifaceDown ? 1 : 0), 0)
-    return { counts, totalBps, hot: hot && hot.bps > 0 ? hot : null, alerts, critical, faulted }
+    const faulted =
+      detail.links.reduce((acc, l) => acc + (linkFlow(liveData[l.id])?.ifaceDown ? 1 : 0), 0) +
+      annLinks.reduce((acc, al) => acc + (linkFlow(liveData[al.id])?.ifaceDown ? 1 : 0), 0)
+    return { counts, totalBps, hot: hot && hot.bps > 0 ? hot : null, alerts, critical, faulted, linkCount }
   }, [detail, nodesLive, liveData])
 
   const age = Math.max(0, Math.round((now - updatedAt) / 1000))
@@ -107,7 +137,7 @@ export function NocStatusBar({ detail, nodesLive, liveData, updatedAt }: {
       <div className="flex flex-col justify-center gap-0.5">
         <div className="flex items-center gap-1 text-[8.5px] font-bold uppercase tracking-wider text-muted"><Activity className="h-2.5 w-2.5" /> Traffic</div>
         <div className="font-mono text-[15px] font-bold leading-tight text-text">{formatBps(stats.totalBps)}</div>
-        <div className="text-[8.5px] leading-none text-muted">{detail.links.length} links{stats.faulted > 0 ? <span className="text-danger"> · {stats.faulted} down</span> : ''}</div>
+        <div className="text-[8.5px] leading-none text-muted">{stats.linkCount} links{stats.faulted > 0 ? <span className="text-danger"> · {stats.faulted} down</span> : ''}</div>
       </div>
 
       {/* Busiest link */}

@@ -15,6 +15,7 @@ import {
   type ManualMapLink,
   type ManualMapNode,
 } from '../core'
+import { useDevices } from '../useMapData'
 
 type DeviceInterface = { if_index: number; if_name: string | null; if_descr: string | null; if_alias: string | null }
 
@@ -51,7 +52,7 @@ const NODE_FONT_LABEL: Record<string, string> = { 'Inter, system-ui, sans-serif'
 export function NodeEditDialog({ node, onCancel, onSave, saving }: {
   node: ManualMapNode
   onCancel: () => void
-  onSave: (patch: { label: string | null; icon: string; metadata: Record<string, unknown> }) => void
+  onSave: (patch: { label: string | null; icon: string; metadata: Record<string, unknown>; device_id?: string }) => void
   saving: boolean
 }) {
   const md = node.metadata || {}
@@ -64,11 +65,26 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
   const [bold, setBold] = useState(ls0.bold !== false)
   const [scale, setScale] = useState(md.size_scale || 1)
   const [frame, setFrame] = useState<'circle' | 'rounded'>(md.frame === 'rounded' ? 'rounded' : 'circle')
+  const [deviceId, setDeviceId] = useState(node.device_id)
+  const devices = useDevices()
+  const deviceList = (devices.data?.data || []).slice().sort((a, b) => a.hostname.localeCompare(b.hostname))
+  const selectedDev = deviceList.find((d) => d.id === deviceId)
+  const profileChanged = deviceId !== node.device_id
+
+  // On a profile swap, a "label" that merely mirrors the old hostname is not a
+  // real override — clear it so the node shows the new device's hostname.
+  const effectiveLabel = () => {
+    const t = label.trim()
+    if (!t) return null
+    if (profileChanged && t === node.hostname) return null
+    return t
+  }
 
   const save = () => onSave({
-    label: label.trim() || null,
+    label: effectiveLabel(),
     icon,
     metadata: { ...md, size_scale: scale, frame, label_style: { color, fontFamily: font, fontSize, bold } },
+    ...(profileChanged ? { device_id: deviceId } : {}),
   })
 
   return (
@@ -79,13 +95,30 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
         <div className="flex items-center gap-2 rounded-lg border border-border bg-surface2/40 p-2 text-xs">
           <NetworkIcon name={iconForNode({ ...node, icon })} className="h-6 w-6" />
           <div className="min-w-0">
-            <div className="truncate font-semibold text-text">{node.hostname}</div>
-            <div className="truncate text-[10px] text-muted">{node.ip_address} · {node.device_type}</div>
+            <div className="truncate font-semibold text-text">{selectedDev?.hostname || node.hostname}</div>
+            <div className="truncate text-[10px] text-muted">{selectedDev?.ip_address || node.ip_address} · {selectedDev?.device_type || node.device_type}</div>
           </div>
         </div>
 
+        <Field label="Device profile — swap which device this node represents">
+          <select className={inputCls} value={deviceId} onChange={(e) => setDeviceId(e.target.value)} disabled={devices.isLoading}>
+            {!deviceList.some((d) => d.id === node.device_id) && (
+              <option value={node.device_id}>{node.hostname}</option>
+            )}
+            {deviceList.map((d) => (
+              <option key={d.id} value={d.id}>{d.hostname} · {d.ip_address}</option>
+            ))}
+          </select>
+        </Field>
+        {profileChanged && (
+          <div className="rounded-md border border-warning/40 bg-warning/10 px-2 py-1.5 text-[11px] text-warning">
+            Links to this node are kept. Their interface labels still reference the old device —
+            edit each link to re-map its interfaces to {selectedDev?.hostname || 'the new device'}.
+          </div>
+        )}
+
         <Field label="Display label (blank = hostname)">
-          <input className={inputCls} value={label} onChange={(e) => setLabel(e.target.value)} placeholder={node.hostname} autoFocus />
+          <input className={inputCls} value={label} onChange={(e) => setLabel(e.target.value)} placeholder={selectedDev?.hostname || node.hostname} autoFocus />
         </Field>
 
         <div className="grid grid-cols-3 gap-3">
@@ -161,10 +194,12 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
 }
 
 /* ── Edit an existing link (label, type, shape, interfaces) ──────── */
-export function LinkEditDialog({ link, source, target, onCancel, onSave, saving }: {
+export function LinkEditDialog({ link, source, target, sourceLabel, targetLabel, onCancel, onSave, saving }: {
   link: ManualMapLink
   source: ManualMapNode | undefined
   target: ManualMapNode | undefined
+  sourceLabel?: string
+  targetLabel?: string
   onCancel: () => void
   onSave: (patch: { label: string | null; link_type: string; metadata: Record<string, unknown> }) => void
   saving: boolean
@@ -175,6 +210,7 @@ export function LinkEditDialog({ link, source, target, onCancel, onSave, saving 
   const [shape, setShape] = useState<LinkShape>(linkShapeOf(link))
   const [srcIf, setSrcIf] = useState((meta as any).src_interface || '')
   const [dstIf, setDstIf] = useState((meta as any).dst_interface || '')
+  const [widthScale, setWidthScale] = useState(Number((meta as any).width_scale) || 1)
 
   const srcIfaces = useInterfaces(source?.device_id)
   const dstIfaces = useInterfaces(target?.device_id)
@@ -184,7 +220,7 @@ export function LinkEditDialog({ link, source, target, onCancel, onSave, saving 
   const submit = () => onSave({
     label: label.trim() || null,
     link_type: kind,
-    metadata: { ...meta, kind, shape, src_interface: srcIf || null, dst_interface: dstIf || null },
+    metadata: { ...meta, kind, shape, width_scale: widthScale, src_interface: srcIf || null, dst_interface: dstIf || null },
   })
 
   return (
@@ -193,14 +229,22 @@ export function LinkEditDialog({ link, source, target, onCancel, onSave, saving 
         <DialogHeader><DialogTitle>Edit link</DialogTitle></DialogHeader>
 
         <div className="flex items-center justify-between gap-2 rounded-lg border border-border bg-surface2/40 p-2 text-xs">
-          <span className="truncate font-semibold text-text">{source?.label || source?.hostname || 'source'}</span>
+          <span className="truncate font-semibold text-text">{source?.label || source?.hostname || sourceLabel || 'source'}</span>
           <span className="text-muted">—</span>
-          <span className="truncate font-semibold text-text">{target?.label || target?.hostname || 'target'}</span>
+          <span className="truncate font-semibold text-text">{target?.label || target?.hostname || targetLabel || 'target'}</span>
         </div>
 
         <div className="grid grid-cols-2 gap-3">
-          <IfaceSelect label={`${source?.hostname || 'Source'} interface`} loading={srcIfaces.isLoading} ifaces={srcIfaces.data} value={srcIf} onChange={setSrcIf} />
-          <IfaceSelect label={`${target?.hostname || 'Target'} interface`} loading={dstIfaces.isLoading} ifaces={dstIfaces.data} value={dstIf} onChange={setDstIf} />
+          {source ? (
+            <IfaceSelect label={`${source.hostname} interface`} loading={srcIfaces.isLoading} ifaces={srcIfaces.data} value={srcIf} onChange={setSrcIf} />
+          ) : (
+            <Field label="Source interface"><div className="rounded-md border border-border bg-surface2/40 px-2 py-1.5 text-xs text-muted">Annotation end</div></Field>
+          )}
+          {target ? (
+            <IfaceSelect label={`${target.hostname} interface`} loading={dstIfaces.isLoading} ifaces={dstIfaces.data} value={dstIf} onChange={setDstIf} />
+          ) : (
+            <Field label="Target interface"><div className="rounded-md border border-border bg-surface2/40 px-2 py-1.5 text-xs text-muted">Annotation end</div></Field>
+          )}
         </div>
 
         <div className="grid grid-cols-2 gap-3">
@@ -215,6 +259,17 @@ export function LinkEditDialog({ link, source, target, onCancel, onSave, saving 
             </select>
           </Field>
         </div>
+
+        <Field label="Line width">
+          <div className="flex items-center gap-2">
+            <input
+              type="range" min={0.4} max={4} step={0.2} value={widthScale}
+              onChange={(e) => setWidthScale(Number(e.target.value))}
+              className="flex-1 accent-primary"
+            />
+            <span className="w-12 text-right text-xs tabular-nums text-muted">{Math.round(widthScale * 100)}%</span>
+          </div>
+        </Field>
 
         <Field label="Label (optional)">
           <input className={inputCls} value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. uplink" />

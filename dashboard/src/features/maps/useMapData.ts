@@ -106,10 +106,17 @@ export function useMapMutations(mapId: string | null) {
     onSuccess: invalidate,
   })
 
-  /** Place a device on the map (structural → invalidates so it renders). */
+  /** Place a device on the map (structural → invalidates so it renders).
+   *  label/metadata are passed through so duplicates keep their styling. */
   const addNode = useMutation({
-    mutationFn: async (payload: { device_id: string; x_pct: number; y_pct: number; icon?: string }) =>
-      (await api.post(`/maps/${mapId}/nodes`, { icon: 'auto', ...payload })).data,
+    mutationFn: async (payload: {
+      device_id: string
+      x_pct: number
+      y_pct: number
+      icon?: string
+      label?: string | null
+      metadata?: Record<string, unknown>
+    }) => (await api.post(`/maps/${mapId}/nodes`, { icon: 'auto', ...payload })).data as { id: string },
     onSuccess: invalidate,
   })
 
@@ -170,5 +177,5 @@ export function useMapMutations(mapId: string | null) {
       (await api.put(`/maps/${mapId}`, { metadata })).data,
   })
 
-  return { move, bulkMove, deleteNode, deleteLink, updateNode, updateLink, addLink, addNode, addShape, updateShape, deleteShape, saveMapMeta, autoConnect }
+  return { move, bulkMove, deleteNode, deleteLink, updateNode, updateLink, addLink, addNode, addShape, updateShape, deleteShape, saveMapMeta, autoConnect, invalidate }
 }
