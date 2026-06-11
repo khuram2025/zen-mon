@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -67,10 +69,27 @@ def create_app() -> FastAPI:
     app.include_router(servers_admin_api.policies_router, prefix="/api/v1")
     app.include_router(servers_admin_api.fleet_router, prefix="/api/v1")
     app.include_router(servers_admin_api.overview_router, prefix="/api/v1")
+    app.include_router(servers_admin_api.baselines_router, prefix="/api/v1")
 
     @app.get("/api/v1/system/health")
     async def health_check():
         return {"status": "ok", "service": "zenplus-api"}
+
+    @app.on_event("startup")
+    async def _start_background_tasks():
+        # Agent/server staleness sweep (online → stale → offline + alerts).
+        from app.services.server_health_service import health_sweeper_loop
+        app.state.health_sweeper = asyncio.create_task(health_sweeper_loop())
+        # Discovery: recover restart-stranded runs, then fire due schedules.
+        from app.services.discovery_scheduler import discovery_scheduler_loop
+        app.state.discovery_scheduler = asyncio.create_task(discovery_scheduler_loop())
+
+    @app.on_event("shutdown")
+    async def _stop_background_tasks():
+        for attr in ("health_sweeper", "discovery_scheduler"):
+            task = getattr(app.state, attr, None)
+            if task:
+                task.cancel()
 
     return app
 

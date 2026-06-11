@@ -100,6 +100,7 @@ const PROTOCOL_LABELS: Record<DiscoveryProtocol, string> = {
   snmp: 'SNMP',
   ssh: 'SSH',
   wmi: 'WMI',
+  winrm: 'WinRM',
   http: 'HTTP',
   https: 'HTTPS',
   tcp: 'TCP',
