@@ -47,7 +47,10 @@ export function MapEditorV2() {
   const nodesLiveQuery = useNodesLive(selectedMapId, mode === 'live')
   const nodesLive = nodesLiveQuery.data?.data || EMPTY_LIVE
 
-  const counts = useMemo(() => ({ nodes: detail?.nodes.length || 0, links: detail?.links.length || 0 }), [detail])
+  const counts = useMemo(() => {
+    const ann = Array.isArray(detail?.metadata?.annotation_links) ? detail!.metadata!.annotation_links!.length : 0
+    return { nodes: detail?.nodes.length || 0, links: (detail?.links.length || 0) + ann }
+  }, [detail])
 
   const goToMap = (id: string) => {
     const next = new URLSearchParams(params)

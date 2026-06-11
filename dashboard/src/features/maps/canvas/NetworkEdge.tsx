@@ -2,6 +2,7 @@ import { memo, useRef, useState } from 'react'
 import { EdgeLabelRenderer, useInternalNode, useReactFlow, useStore, type EdgeProps } from '@xyflow/react'
 import { cn } from '@/lib/utils'
 import {
+  DISC,
   DISC_CX,
   DISC_CY,
   LINK_KIND_STYLE,
@@ -17,9 +18,14 @@ import {
   linkWaypoints,
   nearestSegmentIndex,
   pctToPx,
+  pruneOrthoWaypoints,
+  pruneStraightWaypoints,
+  routeOrthoEdge,
   utilHex,
   utilizationColor,
   particleSpec,
+  type EdgePathResult,
+  type EndGeom,
   type LiveLinkData,
   type LiveInterface,
   type ManualMapLink,
@@ -38,42 +44,22 @@ export type NetworkEdgeData = {
   parallelOffset?: number
   setWaypoints?: (wpsPx: Pt[], commit: boolean) => void
   setIfacePos?: (which: 'src' | 'dst', pos: { dx?: number; dy?: number; rot?: number }, commit: boolean) => void
+  /** Drop a detached cable end at pt — MapCanvas hit-tests and reconnects. */
+  reconnectEnd?: (which: 'src' | 'dst', pt: Pt) => void
 }
 
-/** Collapse near-duplicate and collinear bend points so repeated orthogonal
- *  segment drags don't accumulate redundant waypoints. */
-function simplifyOrtho(pts: Pt[], eps = 1.5): Pt[] {
-  const dedup: Pt[] = []
-  for (const p of pts) {
-    const l = dedup[dedup.length - 1]
-    if (!l || Math.abs(l.x - p.x) > eps || Math.abs(l.y - p.y) > eps) dedup.push(p)
-  }
-  const out: Pt[] = []
-  for (let i = 0; i < dedup.length; i++) {
-    const prev = out[out.length - 1]
-    const cur = dedup[i]
-    const next = dedup[i + 1]
-    if (prev && next) {
-      const colH = Math.abs(prev.y - cur.y) <= eps && Math.abs(cur.y - next.y) <= eps
-      const colV = Math.abs(prev.x - cur.x) <= eps && Math.abs(cur.x - next.x) <= eps
-      if (colH || colV) continue // cur lies on the straight run prev→next
-    }
-    out.push(cur)
-  }
-  return out
-}
-
-/** Centre + shape info for an endpoint — devices are discs, annotations are
- *  boxes (anchor on the rectangle border instead of a circle). */
-function endpointGeom(n: ReturnType<typeof useInternalNode>) {
+/** Centre + shape info for an endpoint — devices are discs (radius follows the
+ *  user's size scale), annotations are boxes (anchor on the rectangle border). */
+function endpointGeom(n: ReturnType<typeof useInternalNode>): EndGeom | null {
   if (!n) return null
   const p = n.internals.positionAbsolute
   if (n.type === 'shape') {
     const w = n.measured?.width ?? (typeof n.width === 'number' ? n.width : 80)
     const h = n.measured?.height ?? (typeof n.height === 'number' ? n.height : 60)
-    return { center: { x: p.x + w / 2, y: p.y + h / 2 }, rect: true as const, halfW: w / 2, halfH: h / 2 }
+    return { center: { x: p.x + w / 2, y: p.y + h / 2 }, rect: true, halfW: w / 2, halfH: h / 2 }
   }
-  return { center: { x: p.x + DISC_CX, y: p.y + DISC_CY }, rect: false as const, halfW: 0, halfH: 0 }
+  const scale = ((n.data as any)?.node?.metadata?.size_scale as number) || 1
+  return { center: { x: p.x + DISC_CX, y: p.y + DISC_CY }, rect: false, halfW: 0, halfH: 0, r: (DISC * scale) / 2 + 2 }
 }
 
 /* One animated particle stream along the cable. `reverse` runs target→source.
@@ -105,10 +91,14 @@ function ParticleStream({ pathId, count, dur, color, r, reverse }: {
 
 function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, data, selected }: EdgeProps) {
   const d = data as NetworkEdgeData
-  const { link, sourceStatus, targetStatus, live, liveMode, showThroughput, parallelOffset = 0, setWaypoints, setIfacePos } = d
+  const { link, sourceStatus, targetStatus, live, liveMode, showThroughput, parallelOffset = 0, setWaypoints, setIfacePos, reconnectEnd } = d
   const rf = useReactFlow()
   const zoom = useStore((s) => s.transform[2])
   const [hover, setHover] = useState(false)
+  /** While dragging a bend, freeze anchor positions so the port doesn't chase the cursor. */
+  const [anchorFreeze, setAnchorFreeze] = useState<{ sa: Pt; ta: Pt } | null>(null)
+  /** While dragging a cable end off its device/shape, the detached tip follows the cursor. */
+  const [endDrag, setEndDrag] = useState<{ which: 'src' | 'dst'; pt: Pt } | null>(null)
 
   // Floating endpoints: anchor each link on the node's outer circle, pointing
   // toward its first/last bend (or the other node). Many cables fan out.
@@ -119,27 +109,53 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
   const sc = sg?.center ?? { x: sourceX, y: sourceY }
   const tc = tg?.center ?? { x: targetX, y: targetY }
 
-  const wps = linkWaypoints(link).map((w) => pctToPx(w))
+  const storedWps = linkWaypoints(link).map((w) => pctToPx(w))
   // Perpendicular shift so multiple cables between the same two devices run as
   // parallel lines with a visible gap instead of stacking on one line.
   const dx = tc.x - sc.x, dy = tc.y - sc.y
   const dlen = Math.hypot(dx, dy) || 1
   const perp = { x: -dy / dlen, y: dx / dlen }
   const shift = (p: Pt): Pt => (parallelOffset ? { x: p.x + perp.x * parallelOffset, y: p.y + perp.y * parallelOffset } : p)
-  const srcToward = wps[0] ?? tc
-  const tgtToward = wps[wps.length - 1] ?? sc
-  const srcAnchor = shift(sg?.rect ? anchorOnRect(sc, srcToward, sg.halfW, sg.halfH) : anchorOnCircle(sc, srcToward))
-  const tgtAnchor = shift(tg?.rect ? anchorOnRect(tc, tgtToward, tg.halfW, tg.halfH) : anchorOnCircle(tc, tgtToward))
-
   const shape = linkShapeOf(link)
-  const path = edgePath(shape, srcAnchor.x, srcAnchor.y, tgtAnchor.x, tgtAnchor.y, wps)
+  const isOrtho = shape === 'orthogonal'
+
+  let path: EdgePathResult
+  /** Final rendered polyline (ortho only) — its interior points are the visual corners. */
+  let clipped: Pt[] = []
+  let srcAnchor: Pt
+  let tgtAnchor: Pt
+  if (isOrtho) {
+    // draw.io-style: route centre-to-centre through the waypoints with right
+    // angles, then clip at the shape borders — the cable always exits a
+    // device/shape axis-aligned, and the anchor glides along the border.
+    const srcPt = endDrag?.which === 'src' ? endDrag.pt : shift(sc)
+    const tgtPt = endDrag?.which === 'dst' ? endDrag.pt : shift(tc)
+    const res = routeOrthoEdge(
+      srcPt, tgtPt, storedWps,
+      endDrag?.which === 'src' ? null : sg,
+      endDrag?.which === 'dst' ? null : tg,
+    )
+    path = res
+    clipped = res.clipped
+    srcAnchor = clipped[0]
+    tgtAnchor = clipped[clipped.length - 1]
+  } else {
+    const srcToward = storedWps[0] ?? (endDrag?.which === 'dst' ? endDrag.pt : tc)
+    const tgtToward = storedWps[storedWps.length - 1] ?? (endDrag?.which === 'src' ? endDrag.pt : sc)
+    const liveSrcAnchor = shift(sg?.rect ? anchorOnRect(sc, srcToward, sg.halfW, sg.halfH) : anchorOnCircle(sc, srcToward, sg?.r))
+    const liveTgtAnchor = shift(tg?.rect ? anchorOnRect(tc, tgtToward, tg.halfW, tg.halfH) : anchorOnCircle(tc, tgtToward, tg?.r))
+    srcAnchor = endDrag?.which === 'src' ? endDrag.pt : (anchorFreeze?.sa ?? liveSrcAnchor)
+    tgtAnchor = endDrag?.which === 'dst' ? endDrag.pt : (anchorFreeze?.ta ?? liveTgtAnchor)
+    path = edgePath(shape, srcAnchor.x, srcAnchor.y, tgtAnchor.x, tgtAnchor.y, storedWps)
+  }
   const pathId = `nme-${link.id}`
 
   const health = linkHealth(sourceStatus, targetStatus)
   const color = STATUS_COLOR[health].line
   const kind = linkKindOf(link)
   const kindStyle = LINK_KIND_STYLE[kind] || {}
-  const baseWidth = (kindStyle.widthMul || 1) * 3
+  const widthScale = Math.max(0.4, Math.min(4, Number(link.metadata?.width_scale) || 1))
+  const baseWidth = (kindStyle.widthMul || 1) * 3 * widthScale
 
   const flow = liveMode ? linkFlow(live) : null
   const utilPct = flow?.utilPct ?? null
@@ -163,106 +179,188 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
   const editChip = !liveMode && !!setIfacePos
   const ipos = link.metadata?.iface_pos || {}
 
-  // Drag a bend: shared by existing-waypoint handles and grab-anywhere. `base`
-  // is the waypoint list snapshot, `idx` the index being moved.
-  const dragBend = (base: Pt[], idx: number) => {
-    const move = (ev: PointerEvent) => {
-      const fp = rf.screenToFlowPosition({ x: ev.clientX, y: ev.clientY })
-      setWaypoints!(base.map((w, i) => (i === idx ? fp : w)), false)
+  // On commit, drop bends that no longer affect the route (e.g. dragged onto a
+  // straight segment). Orthogonal pruning compares centre-routed polylines, so
+  // it matches exactly what is rendered. Tolerances are in screen px (scaled
+  // to flow units) so "drop the dot on the line to remove it" works by hand.
+  const commitWps = (pts: Pt[], commit: boolean) => {
+    if (!commit) {
+      setWaypoints!(pts, false)
+      return
     }
+    if (isOrtho) setWaypoints!(pruneOrthoWaypoints(shift(sc), shift(tc), pts, 5 / zoom), true)
+    else setWaypoints!(pruneStraightWaypoints(srcAnchor, tgtAnchor, pts, 9 / zoom), true)
+  }
+
+  const handleHit = 16 / Math.max(0.55, Math.min(1.4, zoom))
+
+  /** Shared pointer-drag runner: `apply` gets the flow position every frame
+   *  and once more with commit=true on release. */
+  const runDrag = (apply: (fp: Pt, commit: boolean) => void, onDone?: () => void) => {
+    const move = (ev: PointerEvent) => apply(rf.screenToFlowPosition({ x: ev.clientX, y: ev.clientY }), false)
     const up = (ev: PointerEvent) => {
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerup', up)
-      const fp = rf.screenToFlowPosition({ x: ev.clientX, y: ev.clientY })
-      setWaypoints!(base.map((w, i) => (i === idx ? fp : w)), true)
+      apply(rf.screenToFlowPosition({ x: ev.clientX, y: ev.clientY }), true)
+      onDone?.()
     }
     window.addEventListener('pointermove', move)
     window.addEventListener('pointerup', up)
   }
 
-  // Drag a whole orthogonal segment perpendicular (move left/right or up/down),
-  // keeping right angles — instead of kinking a bend at the grab point.
-  const dragOrthoSegment = (e: React.PointerEvent) => {
-    // Routed vertices (corners included): first anchor + each segment end.
-    const rv: Pt[] = [{ x: path.segments[0].ax, y: path.segments[0].ay }, ...path.segments.map((s) => ({ x: s.bx, y: s.by }))]
-    if (rv.length < 2) return
-    const fp0 = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY })
-    const k = nearestSegmentIndex(rv, fp0) // segment between rv[k] and rv[k+1]
-    const a = rv[k], b = rv[k + 1]
-    const horizontal = Math.abs(a.y - b.y) <= Math.abs(a.x - b.x)
-    const last = rv.length - 1
-    const sx = e.clientX, sy = e.clientY
-    let moved = false
-    const apply = (ev: PointerEvent, commit: boolean) => {
-      const fp = rf.screenToFlowPosition({ x: ev.clientX, y: ev.clientY })
-      const v = horizontal ? fp.y : fp.x // new perpendicular coordinate of the segment
-      // An anchor end stays pinned to the node — instead of moving it, add an
-      // elbow that joins the moved segment back to the anchor's fixed axis.
-      const elbow = (anchor: Pt): Pt => (horizontal ? { x: anchor.x, y: v } : { x: v, y: anchor.y })
-      const wpts: Pt[] = []
-      if (k === 0) wpts.push(elbow(rv[0]))
-      for (let i = 1; i <= last - 1; i++) {
-        const p = { ...rv[i] }
-        if (i === k || i === k + 1) { if (horizontal) p.y = v; else p.x = v }
-        wpts.push(p)
-      }
-      if (k + 1 === last) wpts.push(elbow(rv[last]))
-      setWaypoints!(simplifyOrtho(wpts), commit)
-    }
-    const move = (ev: PointerEvent) => {
-      if (!moved && Math.hypot(ev.clientX - sx, ev.clientY - sy) < 3) return // ignore jitter / clicks
-      moved = true
-      apply(ev, false)
-    }
-    const up = (ev: PointerEvent) => {
-      window.removeEventListener('pointermove', move)
-      window.removeEventListener('pointerup', up)
-      if (moved) apply(ev, true) // a plain click leaves the route untouched
-    }
-    window.addEventListener('pointermove', move)
-    window.addEventListener('pointerup', up)
+  /* ── Straight / curve editing ── stored waypoints are the drag handles; a
+   * translucent mid-segment handle inserts a new bend (draw.io style). */
+  const dragStoredWp = (idx: number, base: Pt[]) => {
+    setAnchorFreeze({ sa: srcAnchor, ta: tgtAnchor })
+    runDrag(
+      (fp, commit) => commitWps(base.map((w, i) => (i === idx ? fp : w)), commit),
+      () => setAnchorFreeze(null),
+    )
   }
 
-  // Grab the selected link to reshape it. Orthogonal = move the segment;
-  // curve/straight = insert a bend at the grab point and drag it.
-  const onPathPointerDown = (e: React.PointerEvent) => {
-    if (!editable) return // not selected: let the click select the edge
+  const insertWpDrag = (segIdx: number, at: Pt) => {
+    const insertAt = Math.min(segIdx, storedWps.length)
+    const base = [...storedWps.slice(0, insertAt), at, ...storedWps.slice(insertAt)]
+    commitWps(base, false)
+    dragStoredWp(insertAt, base)
+  }
+
+  /* ── Orthogonal editing ── handles live on the RENDERED polyline: corner
+   * dots move a bend freely; mid-segment handles slide the whole segment
+   * perpendicular (the draw.io interaction). Both materialise the current
+   * route into waypoints first so the rest of the cable stays put. */
+  const orthoCorners = isOrtho ? clipped.slice(1, -1) : []
+
+  const dragOrthoCorner = (idx: number) => {
+    const base = orthoCorners.map((p) => ({ ...p }))
+    runDrag((fp, commit) => commitWps(base.map((w, i) => (i === idx ? fp : w)), commit))
+  }
+
+  const removeOrthoCorner = (idx: number) => {
+    commitWps(orthoCorners.filter((_, i) => i !== idx), true)
+  }
+
+  const dragOrthoSegment = (s: number) => {
+    const P = clipped.map((p) => ({ ...p }))
+    if (P.length < 2) return
+    let W = P.slice(1, -1)
+    let a = s - 1
+    let b = s
+    // End segments are bounded by the anchor itself — materialise a copy of
+    // the anchor point so sliding the segment grows a right-angle jog there.
+    if (s === 0) { W = [{ ...P[0] }, ...W]; a = 0; b = 1 }
+    if (s === P.length - 2) { W = [...W, { ...P[P.length - 1] }]; b = W.length - 1 }
+    const horizontal = Math.abs(P[s].y - P[s + 1].y) < 0.5
+    runDrag((fp, commit) => {
+      const next = W.map((w, i) => (
+        i === a || i === b ? (horizontal ? { x: w.x, y: fp.y } : { x: fp.x, y: w.y }) : w
+      ))
+      commitWps(next, commit)
+    })
+  }
+
+  // Detach a cable end: the tip follows the cursor; on drop MapCanvas hit-tests
+  // the target device/shape and reconnects (or snaps back if dropped on nothing).
+  const startEndDrag = (which: 'src' | 'dst') => (e: React.PointerEvent) => {
+    if (e.button !== 0) return
     e.stopPropagation()
     e.preventDefault()
-    if (shape === 'orthogonal') { dragOrthoSegment(e); return }
-    const fp = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY })
-    const idx = nearestSegmentIndex(path.vertices, fp)
-    const base = [...wps.slice(0, idx), fp, ...wps.slice(idx)]
-    setWaypoints!(base, false)
-    dragBend(base, idx)
+    const move = (ev: PointerEvent) => {
+      const fp = rf.screenToFlowPosition({ x: ev.clientX, y: ev.clientY })
+      setEndDrag({ which, pt: fp })
+    }
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      const fp = rf.screenToFlowPosition({ x: ev.clientX, y: ev.clientY })
+      setEndDrag(null)
+      reconnectEnd?.(which, fp)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
   }
 
-  // Double-click the cable → drop a free bend point you can drag anywhere.
-  // This is the explicit "add a bend" action; works for every shape and is
-  // the way to bend an orthogonal cable (single-drag moves a whole segment).
+  // Grab the selected link to reshape it: ortho slides the grabbed segment,
+  // straight/curve drops a new bend right under the cursor and drags it.
+  const onPathPointerDown = (e: React.PointerEvent) => {
+    if (!editable || e.button !== 0) return // not selected: let the click select the edge
+    e.stopPropagation()
+    e.preventDefault()
+    const fp0 = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY })
+    if (isOrtho) {
+      dragOrthoSegment(nearestSegmentIndex(clipped, fp0))
+      return
+    }
+    insertWpDrag(nearestSegmentIndex(path.vertices, fp0), fp0)
+  }
+
+  // Double-click the cable → drop a bend point at that spot.
   const onPathDoubleClick = (e: React.MouseEvent) => {
     if (!editable) return
     e.stopPropagation()
     e.preventDefault()
     const fp = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY })
-    const idx = nearestSegmentIndex(path.vertices, fp)
-    setWaypoints!([...wps.slice(0, idx), fp, ...wps.slice(idx)], true)
+    if (isOrtho) {
+      const s = nearestSegmentIndex(clipped, fp)
+      const W = clipped.slice(1, -1)
+      const insertAt = Math.max(0, Math.min(s, W.length))
+      commitWps([...W.slice(0, insertAt), fp, ...W.slice(insertAt)], true)
+      return
+    }
+    const segIdx = nearestSegmentIndex(path.vertices, fp)
+    const insertAt = Math.min(segIdx, storedWps.length)
+    commitWps([...storedWps.slice(0, insertAt), fp, ...storedWps.slice(insertAt)], true)
   }
 
   const startWpDrag = (i: number) => (e: React.PointerEvent) => {
+    if (e.button !== 0) return
     e.stopPropagation()
     e.preventDefault()
-    dragBend(wps.slice(), i)
+    if (isOrtho) dragOrthoCorner(i)
+    else dragStoredWp(i, storedWps.slice())
   }
 
   const removeWp = (i: number) => (e: React.MouseEvent) => {
     e.preventDefault()
     e.stopPropagation()
-    setWaypoints!(wps.filter((_, idx) => idx !== i), true)
+    if (isOrtho) removeOrthoCorner(i)
+    else commitWps(storedWps.filter((_, idx) => idx !== i), true)
   }
 
+  const startMidDrag = (m: { index: number; x: number; y: number; horizontal: boolean }) => (e: React.PointerEvent) => {
+    if (e.button !== 0) return
+    e.stopPropagation()
+    e.preventDefault()
+    if (isOrtho) dragOrthoSegment(m.index)
+    else insertWpDrag(m.index, { x: m.x, y: m.y })
+  }
+
+  // Mid-segment handles: ortho gets one per rendered segment (slide), the
+  // others get one per user segment (insert a bend). Tiny segments skipped.
+  // The smooth curve passes exactly through each segment midpoint, so the
+  // handles sit ON the cable — except the no-waypoint arc, which uses the
+  // arc's own midpoint.
+  const editVerts = isOrtho ? clipped : path.vertices
+  const midHandles = !editable
+    ? []
+    : shape === 'curve' && storedWps.length === 0
+      ? [{ index: 0, x: path.mid.x, y: path.mid.y, horizontal: false, len: dlen }].filter((m) => m.len > 30)
+      : editVerts.slice(0, -1).map((p, i) => {
+          const q = editVerts[i + 1]
+          return {
+            index: i,
+            x: (p.x + q.x) / 2,
+            y: (p.y + q.y) / 2,
+            horizontal: Math.abs(p.y - q.y) < 0.5,
+            len: Math.hypot(q.x - p.x, q.y - p.y),
+          }
+        }).filter((m) => m.len > 30)
+
+  // Real bend handles: ortho corners on the rendered route, otherwise the
+  // stored waypoints themselves.
+  const bendHandles = isOrtho ? orthoCorners : storedWps
+
   const r = 9 / zoom
-  const sw = 1.6 / zoom
 
   return (
     <>
@@ -281,7 +379,7 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
         onPointerEnter={liveMode ? () => setHover(true) : undefined}
         onPointerLeave={liveMode ? () => setHover(false) : undefined}
       >
-        {editable && <title>{shape === 'orthogonal' ? 'Drag to move segment · double-click to add a bend' : 'Drag to bend · double-click to add a point'}</title>}
+        {editable && <title>{isOrtho ? 'Drag a segment to slide it · drag a corner to move it · right-click corner to remove' : 'Drag to bend · drag a mid-point handle to add a bend · drag onto line to remove'}</title>}
       </path>
 
       {/* Selection / kind accent halo */}
@@ -324,26 +422,42 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
       {liveMode && flow?.srcDown && <FaultMark x={path.near.x} y={path.near.y} zoom={zoom} />}
       {liveMode && flow?.dstDown && <FaultMark x={path.far.x} y={path.far.y} zoom={zoom} />}
 
-      {/* Existing bend handles (drag to move, right-click/dbl-click to remove). */}
-      {editable && (
-        <g style={{ pointerEvents: 'all' }}>
-          {wps.map((w, i) => (
-            <circle
-              key={`wp-${i}`}
-              cx={w.x}
-              cy={w.y}
-              r={r}
-              className="cursor-grab fill-primary stroke-surface"
-              strokeWidth={sw}
-              onPointerDown={startWpDrag(i)}
-              onContextMenu={removeWp(i)}
-              onDoubleClick={removeWp(i)}
-            />
-          ))}
-        </g>
-      )}
-
       <EdgeLabelRenderer>
+        {/* Bend handles render in the HTML overlay so they stay above device
+            nodes — SVG handles near a device disc were buried and felt stuck. */}
+        {/* Mid-segment handles (draw.io): ortho slides the segment, others
+            insert a bend. Rendered under the corner dots. */}
+        {midHandles.map((m) => (
+          <MidHandle
+            key={`mid-${m.index}`}
+            x={m.x}
+            y={m.y}
+            r={r}
+            hit={handleHit}
+            cursor={isOrtho ? (m.horizontal ? 'ns-resize' : 'ew-resize') : 'copy'}
+            title={isOrtho ? 'Drag to slide this segment' : 'Drag to add a bend here'}
+            onPointerDown={startMidDrag(m)}
+          />
+        ))}
+        {editable && bendHandles.map((w, i) => (
+          <BendHandle
+            key={`wp-${i}`}
+            x={w.x}
+            y={w.y}
+            r={r}
+            hit={handleHit}
+            onPointerDown={startWpDrag(i)}
+            onRemove={removeWp(i)}
+          />
+        ))}
+        {/* Cable-end plugs — drag one off its device/shape and drop it on
+            another item to reconnect the link. */}
+        {editable && !!reconnectEnd && (
+          <>
+            <EndpointHandle x={srcAnchor.x} y={srcAnchor.y} r={r} hit={handleHit} active={endDrag?.which === 'src'} onPointerDown={startEndDrag('src')} />
+            <EndpointHandle x={tgtAnchor.x} y={tgtAnchor.y} r={r} hit={handleHit} active={endDrag?.which === 'dst'} onPointerDown={startEndDrag('dst')} />
+          </>
+        )}
         {srcIf && (
           <IfaceChip x={path.near.x} y={path.near.y} value={srcIf} pos={ipos.src} editable={editChip} showRotate={editChip && !!selected} zoom={zoom}
             down={liveMode && !!flow?.srcDown}
@@ -362,6 +476,87 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
         )}
       </EdgeLabelRenderer>
     </>
+  )
+}
+
+function BendHandle({ x, y, r, hit, onPointerDown, onRemove }: {
+  x: number; y: number; r: number; hit: number
+  onPointerDown: (e: React.PointerEvent) => void
+  onRemove: (e: React.MouseEvent) => void
+}) {
+  return (
+    <div
+      className="nodrag nopan pointer-events-auto absolute z-[1000] cursor-grab"
+      style={{
+        transform: `translate(-50%, -50%) translate(${x}px, ${y}px)`,
+        width: hit * 2,
+        height: hit * 2,
+      }}
+      onPointerDown={onPointerDown}
+      onContextMenu={onRemove}
+      onDoubleClick={onRemove}
+      title="Drag corner · right-click to remove"
+    >
+      <div
+        className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-surface bg-primary shadow-md"
+        style={{ width: r * 2, height: r * 2 }}
+      />
+    </div>
+  )
+}
+
+/* Mid-segment handle (draw.io's translucent dot): on orthogonal cables it
+ * slides the whole segment perpendicular; on straight/curved cables it
+ * inserts a new bend right where it sits. */
+function MidHandle({ x, y, r, hit, cursor, title, onPointerDown }: {
+  x: number; y: number; r: number; hit: number; cursor: string; title: string
+  onPointerDown: (e: React.PointerEvent) => void
+}) {
+  return (
+    <div
+      className="group nodrag nopan pointer-events-auto absolute z-[999]"
+      style={{
+        transform: `translate(-50%, -50%) translate(${x}px, ${y}px)`,
+        width: hit * 2,
+        height: hit * 2,
+        cursor,
+      }}
+      onPointerDown={onPointerDown}
+      title={title}
+    >
+      <div
+        className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-primary/70 bg-primary/30 shadow-sm transition-colors group-hover:bg-primary/60"
+        style={{ width: r * 1.4, height: r * 1.4 }}
+      />
+    </div>
+  )
+}
+
+/* Cable-end plug: hollow ring (vs the solid bend dot) that detaches the
+ * endpoint when dragged, so a link can be re-plugged into another item. */
+function EndpointHandle({ x, y, r, hit, active, onPointerDown }: {
+  x: number; y: number; r: number; hit: number; active: boolean
+  onPointerDown: (e: React.PointerEvent) => void
+}) {
+  return (
+    <div
+      className="nodrag nopan pointer-events-auto absolute z-[1001] cursor-grab"
+      style={{
+        transform: `translate(-50%, -50%) translate(${x}px, ${y}px)`,
+        width: hit * 2,
+        height: hit * 2,
+      }}
+      onPointerDown={onPointerDown}
+      title="Drag to unplug · drop on another device or shape to reconnect"
+    >
+      <div
+        className={cn(
+          'pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 shadow-md',
+          active ? 'border-warning bg-warning/30' : 'border-primary bg-surface',
+        )}
+        style={{ width: r * 2.2, height: r * 2.2 }}
+      />
+    </div>
   )
 }
 
@@ -470,7 +665,7 @@ function IfaceChip({ x, y, value, pos, editable, showRotate, zoom, down, onMove,
   const dx = pos?.dx || 0, dy = pos?.dy || 0, rot = pos?.rot || 0
 
   const startMove = (e: React.PointerEvent) => {
-    if (!editable) return
+    if (!editable || e.button !== 0) return
     e.stopPropagation(); e.preventDefault()
     const sx = e.clientX, sy = e.clientY
     const base = { dx, dy }
@@ -483,6 +678,7 @@ function IfaceChip({ x, y, value, pos, editable, showRotate, zoom, down, onMove,
   }
 
   const startRotate = (e: React.PointerEvent) => {
+    if (e.button !== 0) return
     e.stopPropagation(); e.preventDefault()
     const rect = ref.current!.getBoundingClientRect()
     const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2

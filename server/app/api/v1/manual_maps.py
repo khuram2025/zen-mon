@@ -38,6 +38,9 @@ class NodeCreate(BaseModel):
     icon: str = Field(default="auto", max_length=40)
     x_pct: float = Field(default=50, ge=2, le=98)
     y_pct: float = Field(default=50, ge=2, le=98)
+    # Carried over on duplicate so the copy keeps its styling (size, frame,
+    # label style, label offset).
+    metadata: Optional[dict] = None
 
 
 class NodeUpdate(BaseModel):
@@ -45,6 +48,10 @@ class NodeUpdate(BaseModel):
     icon: Optional[str] = Field(default=None, max_length=40)
     x_pct: Optional[float] = Field(default=None, ge=2, le=98)
     y_pct: Optional[float] = Field(default=None, ge=2, le=98)
+    # Swap which device this node represents ("change device profile") —
+    # position, styling and links stay; interface labels are re-mapped by
+    # the user afterwards via the link editor.
+    device_id: Optional[uuid.UUID] = None
     # Free-form per-node metadata. Used today for `size_scale` (0.5-2.5) so
     # admins can resize the rendered disc; future shape / colour tweaks go
     # here as well without needing a migration.
@@ -63,6 +70,8 @@ class LinkUpdate(BaseModel):
     label: Optional[str] = None
     link_type: Optional[str] = Field(default=None, max_length=40)
     metadata: Optional[dict] = None
+    source_node_id: Optional[uuid.UUID] = None
+    target_node_id: Optional[uuid.UUID] = None
 
 
 # Annotation shapes are positioned/sized as percentages of the canvas so the
@@ -375,13 +384,15 @@ async def create_node(
     if not device_exists:
         raise HTTPException(status_code=404, detail="Device not found")
     try:
+        payload = data.model_dump()
+        payload["metadata"] = json.dumps(payload.get("metadata") or {})
         row = (await db.execute(
             text("""
-                INSERT INTO manual_map_nodes (map_id, device_id, label, icon, x_pct, y_pct)
-                VALUES (:map_id, :device_id, :label, :icon, :x_pct, :y_pct)
+                INSERT INTO manual_map_nodes (map_id, device_id, label, icon, x_pct, y_pct, metadata)
+                VALUES (:map_id, :device_id, :label, :icon, :x_pct, :y_pct, CAST(:metadata AS JSONB))
                 RETURNING id
             """),
-            {"map_id": map_id, **data.model_dump()},
+            {"map_id": map_id, **payload},
         )).first()
         await db.execute(text("UPDATE manual_maps SET updated_at = NOW() WHERE id = :id"), {"id": map_id})
         await db.commit()
@@ -404,6 +415,12 @@ async def update_node(
     fields = data.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
+    if "device_id" in fields:
+        device_exists = (await db.execute(
+            text("SELECT id FROM devices WHERE id = :id"), {"id": fields["device_id"]},
+        )).first()
+        if not device_exists:
+            raise HTTPException(status_code=404, detail="Device not found")
     parts = ["updated_at = NOW()"]
     params = {"map_id": map_id, "node_id": node_id}
     for key, value in fields.items():
@@ -413,15 +430,21 @@ async def update_node(
         else:
             parts.append(f"{key} = :{key}")
             params[key] = value
-    row = (await db.execute(
-        text(f"""
-            UPDATE manual_map_nodes
-            SET {', '.join(parts)}
-            WHERE id = :node_id AND map_id = :map_id
-            RETURNING id
-        """),
-        params,
-    )).first()
+    try:
+        row = (await db.execute(
+            text(f"""
+                UPDATE manual_map_nodes
+                SET {', '.join(parts)}
+                WHERE id = :node_id AND map_id = :map_id
+                RETURNING id
+            """),
+            params,
+        )).first()
+    except Exception as exc:
+        await db.rollback()
+        if "manual_map_nodes_map_id_device_id_key" in str(exc):
+            raise HTTPException(status_code=409, detail="Device already exists on this map") from exc
+        raise
     if not row:
         await db.commit()
         raise HTTPException(status_code=404, detail="Node not found")
@@ -505,6 +528,27 @@ async def update_link(
     fields = data.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
+    if "source_node_id" in fields or "target_node_id" in fields:
+        cur = (await db.execute(
+            text("SELECT source_node_id, target_node_id FROM manual_map_links WHERE id = :link_id AND map_id = :map_id"),
+            {"link_id": link_id, "map_id": map_id},
+        )).mappings().first()
+        if not cur:
+            raise HTTPException(status_code=404, detail="Link not found")
+        src = fields.get("source_node_id", cur["source_node_id"])
+        tgt = fields.get("target_node_id", cur["target_node_id"])
+        if src == tgt:
+            raise HTTPException(status_code=400, detail="Source and target must be different")
+        node_rows = (await db.execute(
+            text("""
+                SELECT id FROM manual_map_nodes
+                WHERE map_id = :map_id
+                  AND (id = :source_node_id OR id = :target_node_id)
+            """),
+            {"map_id": map_id, "source_node_id": src, "target_node_id": tgt},
+        )).all()
+        if len(node_rows) != 2:
+            raise HTTPException(status_code=400, detail="Both nodes must belong to this map")
     parts = ["updated_at = NOW()"]
     params: dict = {"map_id": map_id, "link_id": link_id}
     for key, value in fields.items():
@@ -514,15 +558,21 @@ async def update_link(
         else:
             parts.append(f"{key} = :{key}")
             params[key] = value
-    row = (await db.execute(
-        text(f"""
-            UPDATE manual_map_links
-            SET {', '.join(parts)}
-            WHERE id = :link_id AND map_id = :map_id
-            RETURNING id
-        """),
-        params,
-    )).first()
+    try:
+        row = (await db.execute(
+            text(f"""
+                UPDATE manual_map_links
+                SET {', '.join(parts)}
+                WHERE id = :link_id AND map_id = :map_id
+                RETURNING id
+            """),
+            params,
+        )).first()
+    except Exception as exc:
+        await db.rollback()
+        if "idx_manual_map_links_unique_pair" in str(exc):
+            raise HTTPException(status_code=409, detail="Link already exists") from exc
+        raise
     if not row:
         await db.commit()
         raise HTTPException(status_code=404, detail="Link not found")
