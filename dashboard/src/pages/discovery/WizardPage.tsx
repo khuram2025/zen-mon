@@ -17,6 +17,7 @@ import {
   Shield,
   Sliders,
   Tag,
+  Terminal,
   Trash2,
   X,
 } from 'lucide-react'
@@ -74,6 +75,7 @@ interface WizardState {
   custom_ports: number[]
   snmp_credential_ids: string[]
   windows_credential_ids: string[]
+  ssh_credential_ids: string[]
   detect_lldp: boolean
   detect_mac: boolean
   detect_vendor: boolean
@@ -113,6 +115,7 @@ const DEFAULT_STATE: WizardState = {
   custom_ports: [],
   snmp_credential_ids: [],
   windows_credential_ids: [],
+  ssh_credential_ids: [],
   detect_lldp: true,
   detect_mac: true,
   detect_vendor: true,
@@ -160,6 +163,11 @@ export function WizardPage() {
     queryKey: ['windows-credentials'],
     queryFn: async () => (await api.get('/windows-credentials')).data,
   })
+  const { data: ncmCredsResp } = useQuery<{ data: any[] }>({
+    queryKey: ['ncm', 'credentials'],
+    queryFn: async () => (await api.get('/ncm/credentials')).data,
+  })
+  const sshCreds = ncmCredsResp?.data ?? []
   const { data: groups = [] } = useQuery<any[]>({
     queryKey: ['device-groups'],
     queryFn: async () => (await api.get('/devices/groups')).data,
@@ -184,6 +192,7 @@ export function WizardPage() {
         custom_ports: editing.custom_ports,
         snmp_credential_ids: editing.snmp_credential_ids,
         windows_credential_ids: (editing as any).windows_credential_ids || [],
+        ssh_credential_ids: (editing as any).ssh_credential_ids || [],
         detect_lldp: editing.detect_lldp,
         detect_mac: editing.detect_mac,
         detect_vendor: editing.detect_vendor,
@@ -235,6 +244,7 @@ export function WizardPage() {
       custom_ports: state.custom_ports,
       snmp_credential_ids: state.snmp_credential_ids,
       windows_credential_ids: state.windows_credential_ids,
+      ssh_credential_ids: state.ssh_credential_ids,
       detect_lldp: state.detect_lldp,
       detect_mac: state.detect_mac,
       detect_vendor: state.detect_vendor,
@@ -399,6 +409,7 @@ export function WizardPage() {
             <CredentialsStep
               state={state} update={update}
               credentials={credentials} windowsCreds={windowsCreds}
+              sshCreds={sshCreds}
             />
           )}
           {step === 'schedule' && <ScheduleStep state={state} update={update} />}
@@ -640,11 +651,13 @@ function CredentialsStep({
   update,
   credentials,
   windowsCreds,
+  sshCreds,
 }: {
   state: WizardState
   update: (p: Partial<WizardState>) => void
   credentials: any[]
   windowsCreds: any[]
+  sshCreds: any[]
 }) {
   const toggleProto = (p: DiscoveryProtocol) => {
     const has = state.protocols.includes(p)
@@ -666,6 +679,14 @@ function CredentialsStep({
       windows_credential_ids: has
         ? state.windows_credential_ids.filter((x) => x !== id)
         : [...state.windows_credential_ids, id],
+    })
+  }
+  const toggleSshCred = (id: string) => {
+    const has = state.ssh_credential_ids.includes(id)
+    update({
+      ssh_credential_ids: has
+        ? state.ssh_credential_ids.filter((x) => x !== id)
+        : [...state.ssh_credential_ids, id],
     })
   }
   const needsWindows = state.protocols.includes('wmi') || state.protocols.includes('winrm')
@@ -765,6 +786,52 @@ function CredentialsStep({
                     <span className="ml-auto text-xs text-muted">
                       port {c.port} · {c.timeout_ms}ms
                     </span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {state.protocols.includes('ssh') && (
+        <div>
+          <div className="mb-2 text-sm font-medium">SSH / CLI credentials to try</div>
+          {sshCreds.length === 0 ? (
+            <div className="rounded-md border border-border bg-surface2/30 px-4 py-3 text-sm text-muted">
+              No SSH connection profiles saved yet.{' '}
+              <a className="text-primary underline" href="/ncm" target="_blank">
+                Manage NCM connection profiles
+              </a>{' '}
+              first — discovery will only grab the SSH banner without credentials.
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {sshCreds.map((c) => {
+                const sel = state.ssh_credential_ids.includes(c.id)
+                return (
+                  <button
+                    key={c.id}
+                    type="button"
+                    onClick={() => toggleSshCred(c.id)}
+                    className={cn(
+                      'flex w-full items-center gap-3 rounded-md border p-2.5 text-left transition-colors',
+                      sel ? 'border-primary bg-primary/5' : 'border-border hover:border-primary/40',
+                    )}
+                  >
+                    <div
+                      className={cn(
+                        'flex h-4 w-4 items-center justify-center rounded border',
+                        sel ? 'border-primary bg-primary text-white' : 'border-border',
+                      )}
+                    >
+                      {sel && <CheckCircle2 className="h-3 w-3" />}
+                    </div>
+                    <Terminal className="h-4 w-4 text-muted" />
+                    <span className="text-sm font-medium">{c.name}</span>
+                    <span className="text-xs text-muted">{c.username}</span>
+                    <Badge variant="outline">{(c.protocol || 'ssh').toUpperCase()}</Badge>
+                    <span className="ml-auto text-xs text-muted">port {c.port || 22}</span>
                   </button>
                 )
               })}
@@ -1295,6 +1362,12 @@ function ReviewStep({ state, estimate }: { state: WizardState; estimate?: any })
           <ReviewBlock title="Protocols & credentials">
             <Row label="Protocols" value={state.protocols.join(', ').toUpperCase()} />
             <Row label="SNMP credentials" value={state.snmp_credential_ids.length || 'none selected'} />
+            {state.protocols.includes('ssh') && (
+              <Row label="SSH credentials" value={state.ssh_credential_ids.length || 'none selected'} />
+            )}
+            {(state.protocols.includes('wmi') || state.protocols.includes('winrm')) && (
+              <Row label="Windows credentials" value={state.windows_credential_ids.length || 'none selected'} />
+            )}
             {state.custom_ports.length > 0 && (
               <Row label="Custom ports" value={state.custom_ports.join(', ')} />
             )}

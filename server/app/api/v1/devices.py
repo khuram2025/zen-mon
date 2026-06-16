@@ -1,7 +1,9 @@
 from uuid import UUID
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -21,7 +23,7 @@ from app.api.v1.snmp import (
     SYS_OBJECT_OID,
     SYS_NAME_OID,
 )
-from app.core.crypto import decrypt
+from app.core.crypto import decrypt, decrypt_secret
 from sqlalchemy import text
 import time
 import asyncio
@@ -49,9 +51,9 @@ async def _device_snmp_settings(db: AsyncSession, device) -> dict:
     }
     try:
         if device.snmp_auth_passphrase:
-            out["v3_auth_passphrase"] = decrypt(device.snmp_auth_passphrase)
+            out["v3_auth_passphrase"] = decrypt_secret(device.snmp_auth_passphrase)
         if device.snmp_priv_passphrase:
-            out["v3_priv_passphrase"] = decrypt(device.snmp_priv_passphrase)
+            out["v3_priv_passphrase"] = decrypt_secret(device.snmp_priv_passphrase)
     except Exception:
         pass
 
@@ -77,9 +79,9 @@ async def _device_snmp_settings(db: AsyncSession, device) -> dict:
             out["v3_priv_protocol"] = row["v3_priv_protocol"] or out["v3_priv_protocol"]
             try:
                 if row["v3_auth_passphrase"]:
-                    out["v3_auth_passphrase"] = decrypt(row["v3_auth_passphrase"])
+                    out["v3_auth_passphrase"] = decrypt_secret(row["v3_auth_passphrase"])
                 if row["v3_priv_passphrase"]:
-                    out["v3_priv_passphrase"] = decrypt(row["v3_priv_passphrase"])
+                    out["v3_priv_passphrase"] = decrypt_secret(row["v3_priv_passphrase"])
             except Exception:
                 pass
     return out
@@ -468,6 +470,7 @@ async def get_device_interfaces(
     rows = (await db.execute(
         text("""
             SELECT id, if_index, if_name, if_descr, if_alias, if_type, if_speed,
+                   configured_speed_bps,
                    mac_address::text AS mac_address, admin_status, oper_status,
                    monitored, first_seen, last_seen
             FROM device_interfaces
@@ -477,6 +480,84 @@ async def get_device_interfaces(
         {"id": device_id},
     )).mappings().all()
     return [dict(r) for r in rows]
+
+
+class InterfaceSpeedUpdate(BaseModel):
+    """Set or clear manual speed override (bps). NULL clears override."""
+    configured_speed_bps: Optional[int] = Field(
+        None, ge=1, le=10_000_000_000_000,
+        description="Line rate in bits per second; omit or null to use SNMP if_speed",
+    )
+
+
+class InterfaceBulkSpeedUpdate(BaseModel):
+    if_indexes: list[int] = Field(..., min_length=1)
+    configured_speed_bps: Optional[int] = Field(
+        None, ge=1, le=10_000_000_000_000,
+        description="Line rate in bps for all listed interfaces; null clears overrides",
+    )
+
+
+@router.patch("/{device_id}/interfaces/{if_index}")
+async def update_device_interface_speed(
+    device_id: UUID,
+    if_index: int,
+    payload: InterfaceSpeedUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Set or clear manual speed/bandwidth for a single interface."""
+    row = (await db.execute(
+        text("""
+            UPDATE device_interfaces
+            SET configured_speed_bps = :speed
+            WHERE device_id = :device_id AND if_index = :if_index
+            RETURNING id, if_index, if_name, if_descr, if_alias, if_type, if_speed,
+                      configured_speed_bps, mac_address::text AS mac_address,
+                      admin_status, oper_status, monitored, first_seen, last_seen
+        """),
+        {
+            "device_id": device_id,
+            "if_index": if_index,
+            "speed": payload.configured_speed_bps,
+        },
+    )).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Interface not found")
+    await db.commit()
+    return dict(row)
+
+
+@router.post("/{device_id}/interfaces/bulk-speed")
+async def bulk_update_device_interface_speed(
+    device_id: UUID,
+    payload: InterfaceBulkSpeedUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Apply manual speed/bandwidth to multiple interfaces at once."""
+    result = await db.execute(
+        text("""
+            UPDATE device_interfaces
+            SET configured_speed_bps = :speed
+            WHERE device_id = :device_id AND if_index = ANY(:indexes)
+            RETURNING if_index
+        """),
+        {
+            "device_id": device_id,
+            "indexes": payload.if_indexes,
+            "speed": payload.configured_speed_bps,
+        },
+    )
+    updated = [int(r[0]) for r in result.fetchall()]
+    if not updated:
+        raise HTTPException(status_code=404, detail="No matching interfaces found")
+    await db.commit()
+    return {
+        "updated": len(updated),
+        "if_indexes": updated,
+        "configured_speed_bps": payload.configured_speed_bps,
+    }
 
 
 @router.get("/{device_id}/entities")

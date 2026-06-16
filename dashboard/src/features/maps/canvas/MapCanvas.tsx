@@ -47,6 +47,8 @@ import {
   Ungroup,
   Wand2,
   Zap,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { toast } from '@/components/ui/Toast'
@@ -57,12 +59,16 @@ import {
   DISC_CX,
   DISC_CY,
   DISC_RADIUS,
+  DEFAULT_ICON_FILL,
   LOGICAL_H,
   LOGICAL_W,
   discCenterToNodeXY,
   nodeXYToDiscCenter,
   pctToPx,
   pxToPct,
+  linkWaypoints,
+  endpointGeomFromNode,
+  repositionEndpointWaypoints,
   pxToShape,
   reconcileLinkMetadataOnReconnect,
   shapeToPx,
@@ -742,7 +748,27 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
     if (!hit) { toast.info('Drop the cable end on a device or shape to reconnect') ; return }
     const curEnd = which === 'src' ? edge.source : edge.target
     const otherEnd = which === 'src' ? edge.target : edge.source
-    if (hit.id === curEnd) return // dropped back where it was
+    if (hit.id === curEnd) {
+      // Dropped back on the same device/shape — reposition the anchor around its border.
+      const link = (edge.data as any)?.link as ManualMapLink | undefined
+      if (!link) return
+      const node = nodesRef.current.find((n) => n.id === hit.id)
+      if (!node) return
+      const geom = endpointGeomFromNode(
+        node.position, node.type, node.data, node.measured, node.width, node.height,
+      )
+      if (!geom) return
+      const otherNode = nodesRef.current.find((n) => n.id === otherEnd)
+      const otherGeom = otherNode
+        ? endpointGeomFromNode(otherNode.position, otherNode.type, otherNode.data, otherNode.measured, otherNode.width, otherNode.height)
+        : null
+      const stored = linkWaypoints(link).map((w) => pctToPx(w))
+      const newWps = repositionEndpointWaypoints(
+        stored, which, fp, geom, otherGeom?.center ?? fp,
+      )
+      setEdgeWaypoints(link.id, newWps, true)
+      return
+    }
     if (hit.id === otherEnd) { toast.error('Both cable ends cannot attach to the same item'); return }
     if (!(edge.data as any)?.annotation && hit.kind === 'shape') {
       // A DB link can only join two devices — re-plugging one end onto an
@@ -982,6 +1008,16 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
         const cur = ((n.data as any).node?.metadata?.size_scale as number) || 1
         patchNodeMetaRef.current(n.id, { size_scale: Math.max(0.4, Math.min(3, cur * factor)) }, true)
       }
+    })
+  }, [])
+
+  const resizeIconFill = useCallback((factor: number) => {
+    const sel = nodesRef.current.filter((n) => n.selected && n.type !== 'shape')
+    if (!sel.length) { toast.info('Select device nodes to adjust icon fill'); return }
+    sel.forEach((n) => {
+      const md = ((n.data as any).node?.metadata || {}) as Record<string, unknown>
+      const cur = typeof md.icon_fill === 'number' ? md.icon_fill : DEFAULT_ICON_FILL
+      patchNodeMetaRef.current(n.id, { icon_fill: Math.max(0.45, Math.min(0.95, +(cur * factor).toFixed(2))) }, true)
     })
   }, [])
 
@@ -1259,8 +1295,10 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
       if (anyGrouped) items.push({ type: 'item', label: 'Ungroup (Ctrl+Shift+G)', icon: <Ungroup className="h-4 w-4" />, onClick: () => ungroupSelected() })
       items.push({ type: 'item', label: 'Duplicate selection (Ctrl+D)', icon: <CopyPlus className="h-4 w-4" />, onClick: () => { void duplicateSelectedRef.current() } })
       items.push({ type: 'divider' })
-      items.push({ type: 'item', label: 'Increase size', icon: <Expand className="h-4 w-4" />, onClick: () => resizeSelected(1.15) })
-      items.push({ type: 'item', label: 'Decrease size', icon: <Shrink className="h-4 w-4" />, onClick: () => resizeSelected(1 / 1.15) })
+      items.push({ type: 'item', label: 'Increase tile size', icon: <Expand className="h-4 w-4" />, onClick: () => resizeSelected(1.15) })
+      items.push({ type: 'item', label: 'Decrease tile size', icon: <Shrink className="h-4 w-4" />, onClick: () => resizeSelected(1 / 1.15) })
+      items.push({ type: 'item', label: 'Larger icon', icon: <ZoomIn className="h-4 w-4" />, onClick: () => resizeIconFill(1.08) })
+      items.push({ type: 'item', label: 'Smaller icon', icon: <ZoomOut className="h-4 w-4" />, onClick: () => resizeIconFill(1 / 1.08) })
       items.push({ type: 'divider' })
       items.push({ type: 'item', label: 'Align left', icon: <AlignStartVertical className="h-4 w-4" />, onClick: () => applyAlign('left') })
       items.push({ type: 'item', label: 'Align top', icon: <AlignStartHorizontal className="h-4 w-4" />, onClick: () => applyAlign('top') })
@@ -1292,8 +1330,10 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
       items.push({ type: 'item', label: 'Duplicate', icon: <CopyPlus className="h-4 w-4" />, onClick: () => {
         void duplicateDevice(node.id).then((id) => { if (id) toast.success('Device duplicated') })
       } })
-      items.push({ type: 'item', label: 'Increase size', icon: <Expand className="h-4 w-4" />, onClick: () => resizeSelected(1.15) })
-      items.push({ type: 'item', label: 'Decrease size', icon: <Shrink className="h-4 w-4" />, onClick: () => resizeSelected(1 / 1.15) })
+      items.push({ type: 'item', label: 'Increase tile size', icon: <Expand className="h-4 w-4" />, onClick: () => resizeSelected(1.15) })
+      items.push({ type: 'item', label: 'Decrease tile size', icon: <Shrink className="h-4 w-4" />, onClick: () => resizeSelected(1 / 1.15) })
+      items.push({ type: 'item', label: 'Larger icon', icon: <ZoomIn className="h-4 w-4" />, onClick: () => resizeIconFill(1.08) })
+      items.push({ type: 'item', label: 'Smaller icon', icon: <ZoomOut className="h-4 w-4" />, onClick: () => resizeIconFill(1 / 1.08) })
       if (groupIdOf(node)) items.push({ type: 'item', label: 'Ungroup', icon: <Ungroup className="h-4 w-4" />, onClick: () => ungroupSelected() })
       if (dev?.device_id) items.push({ type: 'item', label: 'Open device', onClick: () => window.open(`/devices/${dev.device_id}`, '_blank') })
       items.push({ type: 'divider' })
@@ -1304,7 +1344,7 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
       }) })
     }
     setMenu({ x: e.clientX, y: e.clientY, items })
-  }, [setNodes, applyAlign, deleteNode, deleteShape, bumpShapeZ, matchSizes, resetLabels, duplicateShape, duplicateDevice, groupSelected, ungroupSelected, resizeSelected])
+  }, [setNodes, applyAlign, deleteNode, deleteShape, bumpShapeZ, matchSizes, resetLabels, duplicateShape, duplicateDevice, groupSelected, ungroupSelected, resizeSelected, resizeIconFill])
 
   const onEdgeContextMenu = useCallback((e: React.MouseEvent, edge: Edge) => {
     e.preventDefault()
@@ -1560,8 +1600,10 @@ export function MapCanvas({ mapId, detail, liveData, nodesLive, liveUpdatedAt, l
               <div className="mx-0.5 h-5 w-px bg-border" />
               <ToolBtn disabled={selCount < 2} onClick={groupSelected} title="Group selection (Ctrl+G) — grouped items move, align & duplicate together"><Group className="h-4 w-4" /></ToolBtn>
               <ToolBtn disabled={!hasGroupSel} onClick={ungroupSelected} title="Ungroup (Ctrl+Shift+G)"><Ungroup className="h-4 w-4" /></ToolBtn>
-              <ToolBtn disabled={selCount < 1} onClick={() => resizeSelected(1.15)} title="Increase size of selected items"><Expand className="h-4 w-4" /></ToolBtn>
-              <ToolBtn disabled={selCount < 1} onClick={() => resizeSelected(1 / 1.15)} title="Decrease size of selected items"><Shrink className="h-4 w-4" /></ToolBtn>
+              <ToolBtn disabled={selCount < 1} onClick={() => resizeSelected(1.15)} title="Increase tile size of selected items"><Expand className="h-4 w-4" /></ToolBtn>
+              <ToolBtn disabled={selCount < 1} onClick={() => resizeSelected(1 / 1.15)} title="Decrease tile size of selected items"><Shrink className="h-4 w-4" /></ToolBtn>
+              <ToolBtn disabled={selCount < 1} onClick={() => resizeIconFill(1.08)} title="Larger icon — fill more of the tile"><ZoomIn className="h-4 w-4" /></ToolBtn>
+              <ToolBtn disabled={selCount < 1} onClick={() => resizeIconFill(1 / 1.08)} title="Smaller icon — more padding in tile"><ZoomOut className="h-4 w-4" /></ToolBtn>
               <div className="mx-0.5 h-5 w-px bg-border" />
               <ToolBtn disabled={selCount < 1} danger onClick={deleteSelected} title="Delete selected"><Trash2 className="h-4 w-4" /></ToolBtn>
               {selCount > 0 && <span className="px-1.5 text-[11px] font-semibold text-muted">{selCount} sel</span>}

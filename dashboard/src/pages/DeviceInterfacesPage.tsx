@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
   ArrowDown,
@@ -9,8 +9,10 @@ import {
   ArrowUpDown,
   CheckCircle2,
   ChevronRight,
+  Gauge,
   Loader2,
   Network,
+  Pencil,
   Search,
   TrendingUp,
   XCircle,
@@ -25,15 +27,44 @@ import {
   YAxis,
 } from 'recharts'
 import { api } from '@/lib/api'
-import { formatBps } from '@/lib/utils'
+import { apiErrorMessage, formatBps } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Input } from '@/components/ui/Input'
 import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/Dialog'
 import { Table, TBody, THead, Td, Th, Tr } from '@/components/ui/Table'
 import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
+import { toast } from '@/components/ui/Toast'
 
 type SortKey = 'name' | 'status' | 'speed' | 'in' | 'out' | 'util' | 'errors'
 type SortDir = 'asc' | 'desc'
+
+const SPEED_PRESETS_MBPS = [
+  { label: '10 Mbps', mbps: 10 },
+  { label: '100 Mbps', mbps: 100 },
+  { label: '1 Gbps', mbps: 1000 },
+  { label: '10 Gbps', mbps: 10000 },
+  { label: '40 Gbps', mbps: 40000 },
+  { label: '100 Gbps', mbps: 100000 },
+] as const
+
+function mbpsToBps(mbps: number): number {
+  return Math.round(mbps * 1_000_000)
+}
+
+function effectiveSpeed(iface: { configured_speed_bps?: number | null; if_speed?: number | null }): number {
+  const manual = iface.configured_speed_bps
+  if (manual != null && manual > 0) return Number(manual)
+  return Number(iface.if_speed) || 0
+}
 
 interface Iface {
   id: number
@@ -43,6 +74,7 @@ interface Iface {
   if_alias: string | null
   if_type: number | null
   if_speed: number | null
+  configured_speed_bps: number | null
   mac_address: string | null
   admin_status: string | null
   oper_status: string | null
@@ -58,6 +90,8 @@ interface Row extends Iface {
   total: number
   util: number
   speed: number
+  snmpSpeed: number
+  hasManualSpeed: boolean
   series: MetricPoint[]
 }
 
@@ -71,6 +105,10 @@ export function DeviceInterfacesPage() {
   const [sortKey, setSortKey] = useState<SortKey>('util')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null)
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [speedDialog, setSpeedDialog] = useState<{ mode: 'single' | 'bulk'; rows: Row[] } | null>(null)
+
+  const qc = useQueryClient()
 
   const { data: device } = useQuery<any>({
     queryKey: ['device', deviceId],
@@ -97,7 +135,9 @@ export function DeviceInterfacesPage() {
       const last = series[series.length - 1]
       const inBps = last?.in_bps || 0
       const outBps = last?.out_bps || 0
-      const speed = Number(i.if_speed) || 0
+      const snmpSpeed = Number(i.if_speed) || 0
+      const speed = effectiveSpeed(i)
+      const hasManualSpeed = i.configured_speed_bps != null && i.configured_speed_bps > 0
       const util = speed > 0 ? Math.min(100, ((inBps + outBps) / speed) * 100) : 0
       return {
         ...i,
@@ -106,6 +146,8 @@ export function DeviceInterfacesPage() {
         total: inBps + outBps,
         util,
         speed,
+        snmpSpeed,
+        hasManualSpeed,
         series,
       }
     })
@@ -172,6 +214,71 @@ export function DeviceInterfacesPage() {
     }
   }
 
+  const visibleIndexes = useMemo(() => sorted.map((r) => r.if_index), [sorted])
+  const allVisibleSelected = visibleIndexes.length > 0 && visibleIndexes.every((idx) => selected.has(idx))
+  const someSelected = selected.size > 0
+
+  function toggleSelect(ifIndex: number) {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(ifIndex)) next.delete(ifIndex)
+      else next.add(ifIndex)
+      return next
+    })
+  }
+
+  function toggleSelectAllVisible() {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (allVisibleSelected) {
+        visibleIndexes.forEach((idx) => next.delete(idx))
+      } else {
+        visibleIndexes.forEach((idx) => next.add(idx))
+      }
+      return next
+    })
+  }
+
+  const selectedRows = useMemo(
+    () => allRows.filter((r) => selected.has(r.if_index)),
+    [allRows, selected],
+  )
+
+  const saveSpeedMutation = useMutation({
+    mutationFn: async ({
+      ifIndexes,
+      configured_speed_bps,
+    }: {
+      ifIndexes: number[]
+      configured_speed_bps: number | null
+    }) => {
+      if (ifIndexes.length === 1) {
+        return (
+          await api.patch(`/devices/${deviceId}/interfaces/${ifIndexes[0]}`, {
+            configured_speed_bps,
+          })
+        ).data
+      }
+      return (
+        await api.post(`/devices/${deviceId}/interfaces/bulk-speed`, {
+          if_indexes: ifIndexes,
+          configured_speed_bps,
+        })
+      ).data
+    },
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: ['device', deviceId, 'interfaces'] })
+      setSpeedDialog(null)
+      if (vars.ifIndexes.length > 1) setSelected(new Set())
+      toast.success(
+        vars.configured_speed_bps
+          ? `Speed set on ${vars.ifIndexes.length} interface(s)`
+          : `Manual speed cleared on ${vars.ifIndexes.length} interface(s)`,
+      )
+    },
+    onError: (e) => toast.error('Failed to update speed', apiErrorMessage(e)),
+  })
+
   return (
     <div className="space-y-4">
       {/* Page header */}
@@ -216,6 +323,17 @@ export function DeviceInterfacesPage() {
               {summary.down > 0 && <Badge variant="outline">{summary.down} down</Badge>}
             </div>
             <div className="flex items-center gap-2">
+              {someSelected && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 text-xs"
+                  onClick={() => setSpeedDialog({ mode: 'bulk', rows: selectedRows })}
+                >
+                  <Gauge className="h-3.5 w-3.5" />
+                  Set speed ({selected.size})
+                </Button>
+              )}
               <div className="flex overflow-hidden rounded-md border border-border text-[11px]">
                 {(['all', 'up', 'down'] as const).map((f) => (
                   <button
@@ -253,6 +371,15 @@ export function DeviceInterfacesPage() {
                 <Table>
                   <THead className="bg-surface2/40">
                     <Tr>
+                      <Th className="w-10">
+                        <input
+                          type="checkbox"
+                          checked={allVisibleSelected}
+                          onChange={toggleSelectAllVisible}
+                          className="h-3.5 w-3.5 rounded border-border"
+                          aria-label="Select all visible interfaces"
+                        />
+                      </Th>
                       <Th>
                         <SortHeader k="status" current={sortKey} dir={sortDir} onClick={toggleSort}>
                           Status
@@ -301,6 +428,15 @@ export function DeviceInterfacesPage() {
                               expanded ? 'bg-primary/5' : 'hover:bg-surface2/40'
                             }`}
                           >
+                            <Td onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                checked={selected.has(r.if_index)}
+                                onChange={() => toggleSelect(r.if_index)}
+                                className="h-3.5 w-3.5 rounded border-border"
+                                aria-label={`Select ${r.if_name || r.if_descr}`}
+                              />
+                            </Td>
                             <Td>
                               <div className="flex items-center gap-1.5">
                                 <ChevronRight
@@ -329,7 +465,29 @@ export function DeviceInterfacesPage() {
                             <Td className="max-w-[220px] truncate text-xs text-muted">
                               {r.if_alias || r.if_descr || '—'}
                             </Td>
-                            <Td className="text-xs">{r.speed > 0 ? formatBps(r.speed) : '—'}</Td>
+                            <Td className="text-xs" onClick={(e) => e.stopPropagation()}>
+                              <div className="flex items-center gap-1.5">
+                                <span>{r.speed > 0 ? formatBps(r.speed) : '—'}</span>
+                                {r.hasManualSpeed && (
+                                  <Badge variant="outline" className="text-[9px] px-1 py-0">
+                                    manual
+                                  </Badge>
+                                )}
+                                <button
+                                  type="button"
+                                  className="rounded p-0.5 text-muted hover:bg-surface2 hover:text-text"
+                                  title="Set manual speed / bandwidth"
+                                  onClick={() => setSpeedDialog({ mode: 'single', rows: [r] })}
+                                >
+                                  <Pencil className="h-3 w-3" />
+                                </button>
+                              </div>
+                              {r.hasManualSpeed && r.snmpSpeed > 0 && r.snmpSpeed !== r.speed && (
+                                <div className="text-[10px] text-muted">
+                                  SNMP: {formatBps(r.snmpSpeed)}
+                                </div>
+                              )}
+                            </Td>
                             <Td className="text-right font-mono text-xs">
                               {isUp && r.inBps > 0 ? formatBps(r.inBps) : '—'}
                             </Td>
@@ -347,7 +505,7 @@ export function DeviceInterfacesPage() {
                           </Tr>
                           {expanded && (
                             <tr key={`${r.id}-detail`}>
-                              <td colSpan={8} className="border-b border-primary/20 bg-surface2/20 p-0">
+                              <td colSpan={9} className="border-b border-primary/20 bg-surface2/20 p-0">
                                 <InterfaceExpansion
                                   deviceId={deviceId}
                                   iface={r}
@@ -362,7 +520,7 @@ export function DeviceInterfacesPage() {
                     })}
                     {sorted.length === 0 && (
                       <Tr>
-                        <Td colSpan={8} className="py-8 text-center text-xs text-muted">
+                        <Td colSpan={9} className="py-8 text-center text-xs text-muted">
                           {allRows.length === 0 ? 'No interfaces discovered yet' : 'No interfaces match your filter'}
                         </Td>
                       </Tr>
@@ -440,6 +598,21 @@ export function DeviceInterfacesPage() {
           </SummaryCard>
         </div>
       </div>
+
+      <SpeedDialog
+        open={!!speedDialog}
+        rows={speedDialog?.rows ?? []}
+        mode={speedDialog?.mode ?? 'single'}
+        saving={saveSpeedMutation.isPending}
+        onClose={() => setSpeedDialog(null)}
+        onSave={(bps) => {
+          if (!speedDialog) return
+          saveSpeedMutation.mutate({
+            ifIndexes: speedDialog.rows.map((r) => r.if_index),
+            configured_speed_bps: bps,
+          })
+        }}
+      />
     </div>
   )
 }
@@ -599,7 +772,15 @@ function InterfaceExpansion({
         <div className="text-xs">
           <span className="font-semibold">{iface.if_name || `if${iface.if_index}`}</span>
           {iface.if_alias && <span className="ml-2 text-muted">· {iface.if_alias}</span>}
-          {iface.speed > 0 && <span className="ml-2 text-muted">· {formatBps(iface.speed)}</span>}
+          {iface.speed > 0 && (
+            <span className="ml-2 text-muted">
+              · {formatBps(iface.speed)}
+              {iface.hasManualSpeed && ' (manual)'}
+            </span>
+          )}
+          {iface.hasManualSpeed && iface.snmpSpeed > 0 && iface.snmpSpeed !== iface.speed && (
+            <span className="ml-2 text-muted">· SNMP {formatBps(iface.snmpSpeed)}</span>
+          )}
         </div>
         <span className="text-[11px] text-muted">{rangeLabel}</span>
       </div>
@@ -715,4 +896,148 @@ function fmtBps(v: number | undefined): string {
   if (v == null) return '—'
   if (v <= 0) return '0 bps'
   return formatBps(v)
+}
+
+function SpeedDialog({
+  open,
+  rows,
+  mode,
+  saving,
+  onClose,
+  onSave,
+}: {
+  open: boolean
+  rows: Row[]
+  mode: 'single' | 'bulk'
+  saving: boolean
+  onClose: () => void
+  onSave: (bps: number | null) => void
+}) {
+  const single = rows[0]
+  const initialMbps =
+    mode === 'single' && single?.configured_speed_bps
+      ? String(single.configured_speed_bps / 1_000_000)
+      : mode === 'single' && single?.snmpSpeed
+        ? String(single.snmpSpeed / 1_000_000)
+        : ''
+
+  const [customMbps, setCustomMbps] = useState(initialMbps)
+  const [selectedPreset, setSelectedPreset] = useState<number | null>(null)
+
+  // Reset form when dialog opens for a different selection
+  const rowKey = rows.map((r) => r.if_index).join(',')
+  useEffect(() => {
+    if (!open) return
+    setCustomMbps(initialMbps)
+    setSelectedPreset(null)
+  }, [open, rowKey, initialMbps])
+
+  const parsedMbps = parseFloat(customMbps)
+  const previewBps =
+    selectedPreset != null
+      ? mbpsToBps(selectedPreset)
+      : !isNaN(parsedMbps) && parsedMbps > 0
+        ? mbpsToBps(parsedMbps)
+        : null
+
+  const title =
+    mode === 'single'
+      ? `Set speed — ${single?.if_name || single?.if_descr || `if${single?.if_index}`}`
+      : `Set speed — ${rows.length} interfaces`
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>
+            Manual line rate used to calculate utilization. SNMP speed is unchanged and shown for reference.
+          </DialogDescription>
+        </DialogHeader>
+
+        {mode === 'single' && single && (
+          <div className="rounded-md border border-border bg-surface2/30 px-3 py-2 text-xs text-muted">
+            SNMP reported speed:{' '}
+            <span className="font-mono text-text">
+              {single.snmpSpeed > 0 ? formatBps(single.snmpSpeed) : 'unknown'}
+            </span>
+            {single.hasManualSpeed && (
+              <>
+                {' '}
+                · current manual:{' '}
+                <span className="font-mono text-text">{formatBps(single.configured_speed_bps!)}</span>
+              </>
+            )}
+          </div>
+        )}
+
+        <div>
+          <div className="mb-2 text-xs font-medium">Presets</div>
+          <div className="flex flex-wrap gap-1.5">
+            {SPEED_PRESETS_MBPS.map((p) => (
+              <button
+                key={p.mbps}
+                type="button"
+                onClick={() => {
+                  setSelectedPreset(p.mbps)
+                  setCustomMbps(String(p.mbps))
+                }}
+                className={`rounded-md border px-2.5 py-1 text-xs transition ${
+                  selectedPreset === p.mbps
+                    ? 'border-primary bg-primary/10 text-primary'
+                    : 'border-border hover:border-primary/40'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <label className="mb-1.5 block text-xs font-medium">Custom speed (Mbps)</label>
+          <Input
+            type="number"
+            min={1}
+            step={1}
+            placeholder="e.g. 1000 for 1 Gbps"
+            value={customMbps}
+            onChange={(e) => {
+              setCustomMbps(e.target.value)
+              setSelectedPreset(null)
+            }}
+            className="h-9 text-sm"
+          />
+          {previewBps && (
+            <p className="mt-1.5 text-[11px] text-muted">
+              = <span className="font-mono text-text">{formatBps(previewBps)}</span> per direction (half-duplex util)
+            </p>
+          )}
+        </div>
+
+        <DialogFooter className="flex-wrap gap-2 sm:justify-between">
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={saving || (mode === 'bulk' && rows.every((r) => !r.hasManualSpeed))}
+            onClick={() => onSave(null)}
+          >
+            Use SNMP speed
+          </Button>
+          <div className="flex gap-2">
+            <Button type="button" variant="outline" onClick={onClose} disabled={saving}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={saving || !previewBps}
+              onClick={() => onSave(previewBps)}
+            >
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Apply'}
+            </Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
 }

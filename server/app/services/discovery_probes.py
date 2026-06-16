@@ -229,6 +229,99 @@ async def ssh_banner(ip: str, port: int = 22, timeout_s: float = 2.0) -> dict[st
         return {"responsive": False, "protocol": "ssh", "data": {}, "error": str(e)}
 
 
+def _ssh_auth_check_sync(
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    enable: str,
+    protocol: str,
+    timeout_s: float,
+) -> tuple[bool, str | None, str | None, str | None]:
+    """Blocking SSH/Telnet login test — run via asyncio.to_thread."""
+    try:
+        from netmiko import ConnectHandler, SSHDetect
+    except ImportError:
+        return False, None, None, "netmiko not installed"
+
+    conn_timeout = max(5, min(int(timeout_s), 30))
+    base: dict[str, Any] = {
+        "host": host,
+        "username": username or "",
+        "password": password or "",
+        "port": port or 22,
+        "conn_timeout": conn_timeout,
+        "timeout": conn_timeout + 10,
+        "fast_cli": False,
+    }
+    if enable:
+        base["secret"] = enable
+
+    try:
+        if (protocol or "ssh").lower() == "telnet":
+            device_type = "cisco_ios_telnet"
+            conn = ConnectHandler(**{**base, "device_type": device_type})
+        else:
+            guesser = SSHDetect(**{**base, "device_type": "autodetect"})
+            device_type = guesser.autodetect() or "linux"
+            conn = ConnectHandler(**{**base, "device_type": device_type})
+        try:
+            if enable:
+                try:
+                    conn.enable()
+                except Exception:
+                    pass
+            try:
+                prompt = conn.find_prompt()
+            except Exception:
+                prompt = ""
+            return True, device_type, prompt or None, None
+        finally:
+            try:
+                conn.disconnect()
+            except Exception:
+                pass
+    except Exception as e:
+        msg = str(e).splitlines()[0][:400] if str(e) else "authentication failed"
+        return False, None, None, msg
+
+
+async def ssh_auth_probe(ip: str, credential: dict, timeout_s: float = 8.0) -> dict[str, Any]:
+    """Try a saved NCM connection profile against an IP via SSH or Telnet."""
+    port = int(credential.get("port") or 22)
+    ok, platform, prompt, err = await asyncio.to_thread(
+        _ssh_auth_check_sync,
+        ip,
+        port,
+        credential.get("username") or "",
+        credential.get("password") or "",
+        credential.get("enable_password") or "",
+        credential.get("protocol") or "ssh",
+        timeout_s,
+    )
+    if ok:
+        return {
+            "responsive": True,
+            "protocol": "ssh",
+            "data": {
+                "credential_id": credential.get("id"),
+                "credential_name": credential.get("name"),
+                "platform": platform,
+                "prompt": prompt,
+                "authenticated": True,
+            },
+            "error": None,
+            "state": "valid",
+        }
+    return {
+        "responsive": False,
+        "protocol": "ssh",
+        "data": {"credential_id": credential.get("id")},
+        "error": err,
+        "state": "invalid",
+    }
+
+
 # ────────────────────────────────────────────────────────────────────
 # SNMP — wraps the existing /api/v1/snmp.py helpers
 # ────────────────────────────────────────────────────────────────────

@@ -7,6 +7,7 @@ import { NetworkIcon, iconLabel } from '@/components/network-icons'
 import { cn } from '@/lib/utils'
 import {
   PALETTE_ICONS,
+  DEFAULT_ICON_FILL,
   iconForNode,
   linkKindOf,
   linkShapeOf,
@@ -64,6 +65,7 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
   const [fontSize, setFontSize] = useState(ls0.fontSize || 11)
   const [bold, setBold] = useState(ls0.bold !== false)
   const [scale, setScale] = useState(md.size_scale || 1)
+  const [iconFill, setIconFill] = useState(md.icon_fill ?? DEFAULT_ICON_FILL)
   const [frame, setFrame] = useState<'circle' | 'rounded'>(md.frame === 'rounded' ? 'rounded' : 'circle')
   const [deviceId, setDeviceId] = useState(node.device_id)
   const devices = useDevices()
@@ -83,7 +85,7 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
   const save = () => onSave({
     label: effectiveLabel(),
     icon,
-    metadata: { ...md, size_scale: scale, frame, label_style: { color, fontFamily: font, fontSize, bold } },
+    metadata: { ...md, size_scale: scale, icon_fill: iconFill, frame, label_style: { color, fontFamily: font, fontSize, bold } },
     ...(profileChanged ? { device_id: deviceId } : {}),
   })
 
@@ -135,13 +137,37 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
           </Field>
         </div>
 
-        <div className="flex items-center gap-3">
-          <button type="button" onClick={() => setBold((v) => !v)}
-            className={cn('h-8 rounded border px-3 text-xs font-bold', bold ? 'border-primary bg-primary/15 text-primary' : 'border-border text-muted')}>B</button>
-          <div className="flex flex-1 items-center gap-2">
-            <span className="text-xs text-muted">Icon size</span>
-            <input type="range" min={0.6} max={2.2} step={0.1} value={scale} onChange={(e) => setScale(Number(e.target.value))} className="flex-1 accent-primary" />
-            <span className="w-10 text-right text-xs tabular-nums text-muted">{Math.round(scale * 100)}%</span>
+        <div className="space-y-2">
+          <div className="flex items-center gap-3">
+            <button type="button" onClick={() => setBold((v) => !v)}
+              className={cn('h-8 rounded border px-3 text-xs font-bold', bold ? 'border-primary bg-primary/15 text-primary' : 'border-border text-muted')}>B</button>
+            <div className="flex flex-1 items-center gap-2">
+              <span className="text-xs text-muted">Tile size</span>
+              <input type="range" min={0.6} max={2.2} step={0.1} value={scale} onChange={(e) => setScale(Number(e.target.value))} className="flex-1 accent-primary" />
+              <span className="w-10 text-right text-xs tabular-nums text-muted">{Math.round(scale * 100)}%</span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="w-8 text-xs text-muted" />
+            <div className="flex flex-1 items-center gap-2">
+              <span className="text-xs text-muted">Icon fill</span>
+              <input type="range" min={0.45} max={0.95} step={0.05} value={iconFill} onChange={(e) => setIconFill(Number(e.target.value))} className="flex-1 accent-primary" />
+              <span className="w-10 text-right text-xs tabular-nums text-muted">{Math.round(iconFill * 100)}%</span>
+            </div>
+          </div>
+          <div className="flex justify-center">
+            <div
+              className={cn(
+                'relative flex items-center justify-center border-2 border-primary/40 bg-surface shadow-sm',
+                frame === 'rounded' ? 'rounded-lg' : 'rounded-full',
+              )}
+              style={{ width: 64 * scale, height: 64 * scale }}
+            >
+              <NetworkIcon
+                name={iconForNode({ ...node, icon })}
+                style={{ width: 64 * scale * iconFill, height: 64 * scale * iconFill }}
+              />
+            </div>
           </div>
         </div>
 

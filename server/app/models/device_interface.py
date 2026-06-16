@@ -25,6 +25,7 @@ class DeviceInterface(Base):
     if_alias: Mapped[str] = mapped_column(String(255), nullable=True)
     if_type: Mapped[int] = mapped_column(Integer, nullable=True)
     if_speed: Mapped[int] = mapped_column(BigInteger, nullable=True)
+    configured_speed_bps: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     mac_address: Mapped[str] = mapped_column(MACADDR, nullable=True)
     admin_status: Mapped[str] = mapped_column(String(20), nullable=True)
     oper_status: Mapped[str] = mapped_column(String(20), nullable=True)

@@ -34,6 +34,7 @@ class DiscoveryProfileBase(BaseModel):
     custom_ports: list[int] = Field(default_factory=list)
     snmp_credential_ids: list[UUID] = Field(default_factory=list)
     windows_credential_ids: list[UUID] = Field(default_factory=list)
+    ssh_credential_ids: list[UUID] = Field(default_factory=list)
     detect_lldp: bool = True
     detect_mac: bool = True
     detect_vendor: bool = True
@@ -71,6 +72,7 @@ class DiscoveryProfileUpdate(BaseModel):
     custom_ports: Optional[list[int]] = None
     snmp_credential_ids: Optional[list[UUID]] = None
     windows_credential_ids: Optional[list[UUID]] = None
+    ssh_credential_ids: Optional[list[UUID]] = None
     detect_lldp: Optional[bool] = None
     detect_mac: Optional[bool] = None
     detect_vendor: Optional[bool] = None
@@ -206,6 +208,7 @@ class DiscoveryResultResponse(BaseModel):
     os_version: Optional[str] = None
 
     protocols_detected: list[str] = Field(default_factory=list)
+    protocol_status: dict[str, dict[str, Any]] = Field(default_factory=dict)
     open_ports: list[int] = Field(default_factory=list)
     response_time_ms: Optional[int] = None
 

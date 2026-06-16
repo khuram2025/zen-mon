@@ -260,7 +260,8 @@ def identify(probes: dict[str, Any], protocols_requested: list[str]) -> dict[str
 
     # ── SSH banner ──
     if ssh and ssh.get("responsive"):
-        out["protocols_detected"].append("ssh")
+        if "ssh" not in out["protocols_detected"]:
+            out["protocols_detected"].append("ssh")
         banner = ssh["data"].get("banner")
         if banner:
             out["raw_data"]["ssh_banner"] = banner
@@ -372,7 +373,7 @@ def identify(probes: dict[str, Any], protocols_requested: list[str]) -> dict[str
             out["device_type"] = dt
 
     # ── If SNMP was requested but no credential worked ──
-    if "snmp" in protocols_requested and 161 in out["open_ports"] \
+    if "snmp" in protocols_requested and snmp_results \
             and not any(r.get("responsive") for r in snmp_results):
         # SNMP port open but no credentials valid → mark partial/invalid
         any_invalid = any(r and r.get("state") in ("invalid", "permission_issue") for r in snmp_results)

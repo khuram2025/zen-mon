@@ -475,6 +475,54 @@ async def bulk_assign_profile(data: BulkAssign, db: AsyncSession = Depends(get_d
     return {"assigned": assigned, "requested": len(data.device_ids)}
 
 
+class BulkBackupSettings(BaseModel):
+    device_ids: list[UUID] = Field(min_length=1, max_length=500)
+    schedule_enabled: bool = False
+    schedule_type: str = Field(default="interval", pattern="^(interval|daily|weekly)$")
+    schedule_interval_hours: int = Field(default=24, ge=1, le=720)
+    schedule_time: Optional[str] = None          # "HH:MM" for daily/weekly
+    schedule_days: Optional[list[int]] = None     # weekly: 0=Sun..6=Sat
+    keep_versions: int = Field(default=5, ge=1, le=100)
+    alert_on_change: bool = True
+
+
+@router.post("/bulk-settings")
+async def bulk_backup_settings(data: BulkBackupSettings, db: AsyncSession = Depends(get_db),
+                               user: User = Depends(require_operator_user)):
+    """Apply schedule / retention / alert settings to many enrolled devices."""
+    days = data.schedule_days if data.schedule_type == "weekly" else None
+    sched_time = None
+    if data.schedule_type in ("daily", "weekly") and data.schedule_time:
+        try:
+            sched_time = datetime.strptime(data.schedule_time.strip(), "%H:%M").time()
+        except ValueError:
+            sched_time = None
+
+    updated = 0
+    skipped = 0
+    for did in data.device_ids:
+        row = (await db.execute(
+            text("SELECT device_id FROM device_ncm WHERE device_id=:id"),
+            {"id": did},
+        )).first()
+        if not row:
+            skipped += 1
+            continue
+        await db.execute(
+            text("""UPDATE device_ncm
+                    SET schedule_enabled=:s, schedule_type=:st,
+                        schedule_interval_hours=:h, schedule_time=:tm, schedule_days=:days,
+                        keep_versions=:kv, alert_on_change=:ac, enabled=true
+                    WHERE device_id=:d"""),
+            {"d": did, "s": data.schedule_enabled, "st": data.schedule_type,
+             "h": data.schedule_interval_hours, "tm": sched_time, "days": days,
+             "kv": data.keep_versions, "ac": data.alert_on_change},
+        )
+        updated += 1
+    await db.commit()
+    return {"updated": updated, "skipped": skipped, "requested": len(data.device_ids)}
+
+
 class _FetchError(Exception):
     pass
 

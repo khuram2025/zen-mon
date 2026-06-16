@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react'
-import { useNavigate, useParams, Link } from 'react-router-dom'
+import { useMemo, useState, useEffect, useCallback } from 'react'
+import { useNavigate, useParams, Link, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
@@ -49,23 +49,43 @@ import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
 import {
   CredentialStatusBadge,
   PhaseLabel,
-  ProtocolPill,
+  ProtocolStatusPills,
   ResultStatusBadge,
   RunStatusBadge,
+  parseResultFilter,
+  type ResultFilter,
 } from './helpers'
 
-type Filter = 'all' | 'new' | 'existing' | 'changed' | 'unknown' | 'failed' | 'ignored' | 'imported'
+type Filter = ResultFilter
 
 export function RunPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const qc = useQueryClient()
 
   const [selected, setSelected] = useState<Set<number>>(new Set())
-  const [filter, setFilter] = useState<Filter>('new')
+  const [filter, setFilter] = useState<Filter>(
+    () => parseResultFilter(searchParams.get('filter')) ?? 'new',
+  )
   const [search, setSearch] = useState('')
   const [importOpen, setImportOpen] = useState(false)
   const [cancelOpen, setCancelOpen] = useState(false)
+
+  useEffect(() => {
+    setFilter(parseResultFilter(searchParams.get('filter')) ?? 'new')
+  }, [searchParams])
+
+  const applyFilter = useCallback(
+    (next: Filter) => {
+      setFilter(next)
+      setSelected(new Set())
+      if (!id) return
+      const qs = next === 'all' ? '' : `?filter=${next}`
+      navigate(`/discovery/runs/${id}${qs}`, { replace: true })
+    },
+    [id, navigate],
+  )
 
   const { data: run, isLoading } = useQuery<DiscoveryRun>({
     queryKey: ['discovery', 'run', id],
@@ -75,6 +95,12 @@ export function RunPage() {
       const status = (q.state.data as any)?.status
       return status === 'running' || status === 'queued' ? 1200 : 8000
     },
+  })
+
+  const { data: profile } = useQuery({
+    queryKey: ['discovery', 'profile', run?.profile_id],
+    queryFn: () => discoveryApi.getProfile(run!.profile_id),
+    enabled: !!run?.profile_id,
   })
 
   const isRunning = run?.status === 'running' || run?.status === 'queued'
@@ -257,7 +283,7 @@ export function RunPage() {
       {isRunning && <RunProgress run={run} />}
 
       {/* Summary cards (after completion) */}
-      {!isRunning && <SummaryCards run={run} />}
+      {!isRunning && <SummaryCards run={run} filter={filter} onFilter={applyFilter} />}
 
       {/* Activity log */}
       {(isRunning || (run.activity_log && run.activity_log.length > 0)) && (
@@ -314,10 +340,7 @@ export function RunPage() {
                   <button
                     key={key}
                     type="button"
-                    onClick={() => {
-                      setFilter(key as Filter)
-                      setSelected(new Set())
-                    }}
+                    onClick={() => applyFilter(key as Filter)}
                     className={cn(
                       'whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium',
                       filter === key
@@ -452,11 +475,11 @@ export function RunPage() {
                           )}
                         </Td>
                         <Td>
-                          <div className="flex flex-wrap gap-1">
-                            {(r.protocols_detected || []).map((p) => (
-                              <ProtocolPill key={p} p={p} />
-                            ))}
-                          </div>
+                          <ProtocolStatusPills
+                            status={r.protocol_status}
+                            requested={profile?.protocols}
+                            detected={r.protocols_detected}
+                          />
                         </Td>
                         <Td className="text-[10px] text-muted">
                           {(r.open_ports || []).join(', ') || '—'}
@@ -577,38 +600,63 @@ function RunProgress({ run }: { run: DiscoveryRun }) {
   )
 }
 
-function SummaryCards({ run }: { run: DiscoveryRun }) {
-  const tiles = [
-    { label: 'New devices', value: run.new_devices, tone: 'info', icon: Network },
-    { label: 'Existing', value: run.existing_devices, tone: 'default', icon: Eye },
-    { label: 'Changed', value: run.changed_devices, tone: 'warning', icon: RefreshCcw },
-    { label: 'Unknown', value: run.unknown_devices, tone: 'default', icon: AlertTriangle },
-    { label: 'Failed', value: run.failed_targets, tone: 'danger', icon: XCircle },
+function SummaryCards({
+  run,
+  filter,
+  onFilter,
+}: {
+  run: DiscoveryRun
+  filter: Filter
+  onFilter: (f: Filter) => void
+}) {
+  const tiles: Array<{
+    label: string
+    value: number
+    tone: string
+    icon: typeof Network
+    filter?: Filter
+  }> = [
+    { label: 'New devices', value: run.new_devices, tone: 'info', icon: Network, filter: 'new' },
+    { label: 'Existing', value: run.existing_devices, tone: 'default', icon: Eye, filter: 'existing' },
+    { label: 'Changed', value: run.changed_devices, tone: 'warning', icon: RefreshCcw, filter: 'changed' },
+    { label: 'Unknown', value: run.unknown_devices, tone: 'default', icon: AlertTriangle, filter: 'unknown' },
+    { label: 'Failed', value: run.failed_targets, tone: 'danger', icon: XCircle, filter: 'failed' },
     { label: 'Ready to import', value: run.ready_to_import, tone: 'success', icon: Upload },
   ]
   return (
     <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-      {tiles.map((t) => (
-        <Card key={t.label}>
-          <CardContent className="p-4">
-            <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-muted">
-              <t.icon className="h-3.5 w-3.5" />
-              {t.label}
-            </div>
-            <div
-              className={cn(
-                'mt-1 text-2xl font-semibold tabular-nums',
-                t.tone === 'info' && 'text-info',
-                t.tone === 'success' && 'text-success',
-                t.tone === 'warning' && 'text-warning',
-                t.tone === 'danger' && 'text-danger',
-              )}
-            >
-              {t.value}
-            </div>
-          </CardContent>
-        </Card>
-      ))}
+      {tiles.map((t) => {
+        const active = t.filter != null && filter === t.filter
+        const clickable = t.filter != null && t.value > 0
+        return (
+          <Card
+            key={t.label}
+            className={cn(
+              clickable && 'cursor-pointer transition-colors hover:border-primary/40',
+              active && 'border-primary/60 ring-1 ring-primary/20',
+            )}
+            onClick={clickable ? () => onFilter(t.filter!) : undefined}
+          >
+            <CardContent className="p-4">
+              <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-muted">
+                <t.icon className="h-3.5 w-3.5" />
+                {t.label}
+              </div>
+              <div
+                className={cn(
+                  'mt-1 text-2xl font-semibold tabular-nums',
+                  t.tone === 'info' && 'text-info',
+                  t.tone === 'success' && 'text-success',
+                  t.tone === 'warning' && 'text-warning',
+                  t.tone === 'danger' && 'text-danger',
+                )}
+              >
+                {t.value}
+              </div>
+            </CardContent>
+          </Card>
+        )
+      })}
     </div>
   )
 }

@@ -30,7 +30,7 @@ from typing import Any, Iterable
 from sqlalchemy import text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.crypto import decrypt
+from app.core.crypto import decrypt, decrypt_secret
 from app.core.database import AsyncSessionLocal
 from app.models.discovery_v2 import (
     DiscoveryProfile,
@@ -125,16 +125,8 @@ async def _load_snmp_credentials(db: AsyncSession, ids: list[str]) -> list[dict]
     out: list[dict] = []
     for r in rows:
         d = dict(r)
-        try:
-            if d.get("v3_auth_passphrase"):
-                d["v3_auth_passphrase"] = decrypt(d["v3_auth_passphrase"])
-        except Exception:
-            d["v3_auth_passphrase"] = None
-        try:
-            if d.get("v3_priv_passphrase"):
-                d["v3_priv_passphrase"] = decrypt(d["v3_priv_passphrase"])
-        except Exception:
-            d["v3_priv_passphrase"] = None
+        d["v3_auth_passphrase"] = decrypt_secret(d.get("v3_auth_passphrase"))
+        d["v3_priv_passphrase"] = decrypt_secret(d.get("v3_priv_passphrase"))
         d["id"] = str(d["id"])
         out.append(d)
     return out
@@ -157,6 +149,34 @@ async def _load_windows_credentials(db: AsyncSession, ids: list[str]) -> list[di
             d["password"] = decrypt(d.pop("password_enc")) if d.get("password_enc") else ""
         except Exception:
             d["password"] = ""
+        d["id"] = str(d["id"])
+        out.append(d)
+    return out
+
+
+async def _load_ssh_credentials(db: AsyncSession, ids: list[str]) -> list[dict]:
+    """Load NCM connection profiles for SSH/Telnet discovery probes."""
+    if not ids:
+        return []
+    rows = (await db.execute(
+        text("""SELECT id, name, protocol, port, username,
+                       password_enc, enable_password_enc
+                FROM ncm_credentials WHERE id = ANY(:ids)"""),
+        {"ids": ids},
+    )).mappings().all()
+    out: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["password"] = decrypt(d.pop("password_enc")) if d.get("password_enc") else ""
+        except Exception:
+            d["password"] = ""
+        try:
+            d["enable_password"] = (
+                decrypt(d.pop("enable_password_enc")) if d.get("enable_password_enc") else ""
+            )
+        except Exception:
+            d["enable_password"] = ""
         d["id"] = str(d["id"])
         out.append(d)
     return out
@@ -212,6 +232,7 @@ async def _probe_ip(
     custom_ports: list[int],
     snmp_creds: list[dict],
     windows_creds: list[dict],
+    ssh_creds: list[dict],
     timeout_ms: int,
 ) -> dict[str, Any]:
     """Run every requested probe against a single IP. Returns the
@@ -228,8 +249,7 @@ async def _probe_ip(
     # 2. Decide which ports to TCP-probe based on selected protocols.
     candidate_ports: set[int] = set(custom_ports or [])
     candidate_ports.update([22])  # SSH banner is always worth a try if reachable
-    if "snmp" in protocols_requested:
-        candidate_ports.add(161)
+    # SNMP uses UDP/161 — probed separately, not via TCP scan.
     if "http" in protocols_requested:
         candidate_ports.update(_HTTP_PORTS)
     if "https" in protocols_requested:
@@ -257,9 +277,38 @@ async def _probe_ip(
         probes.arp_lookup(ip),
     )
 
-    # 4. SSH banner (port 22)
-    if 22 in open_ports:
-        p["ssh"] = await probes.ssh_banner(ip, port=22, timeout_s=timeout_s)
+    # 4. SSH — authenticated probe when profiles selected, else banner grab
+    if "ssh" in protocols_requested:
+        if ssh_creds:
+            ssh_result = None
+            for cred in ssh_creds:
+                port = int(cred.get("port") or 22)
+                if port not in open_ports and not p["icmp"]["responsive"]:
+                    continue
+                r = await probes.ssh_auth_probe(
+                    ip, cred, timeout_s=max(timeout_s, 8.0),
+                )
+                if r.get("responsive"):
+                    p["ssh"] = r
+                    break
+                ssh_result = r
+            if "ssh" not in p:
+                if ssh_result:
+                    p["ssh"] = ssh_result
+                elif 22 in open_ports:
+                    p["ssh"] = await probes.ssh_banner(ip, port=22, timeout_s=timeout_s)
+                else:
+                    p["ssh"] = {
+                        "responsive": False, "protocol": "ssh", "data": {},
+                        "error": "no SSH credential succeeded", "state": "invalid",
+                    }
+        elif 22 in open_ports:
+            p["ssh"] = await probes.ssh_banner(ip, port=22, timeout_s=timeout_s)
+        else:
+            p["ssh"] = {
+                "responsive": False, "protocol": "ssh", "data": {},
+                "error": "port 22 closed", "state": "no_response",
+            }
 
     # 5. HTTP probes — only on ports that actually opened
     if "http" in protocols_requested:
@@ -273,8 +322,8 @@ async def _probe_ip(
         if ports:
             p["https"] = await asyncio.gather(*[probes.http_probe(ip, pp, https=True, timeout_s=timeout_s) for pp in ports])
 
-    # 7. SNMP — try each credential (sequentially; first win = stop)
-    if "snmp" in protocols_requested and 161 in open_ports and snmp_creds:
+    # 7. SNMP — UDP/161; run when requested if the host responded to ICMP/TCP.
+    if "snmp" in protocols_requested and snmp_creds:
         snmp_results = []
         for cred in snmp_creds:
             r = await probes.snmp_probe(ip, cred, timeout_s=timeout_s)
@@ -282,8 +331,7 @@ async def _probe_ip(
             if r.get("responsive"):
                 break
         p["snmp"] = snmp_results
-    elif "snmp" in protocols_requested and 161 in open_ports and not snmp_creds:
-        # Port open but no credentials configured
+    elif "snmp" in protocols_requested and not snmp_creds:
         p["snmp"] = [{"responsive": False, "protocol": "snmp", "data": {},
                        "error": "no SNMP credential configured", "state": "not_tested"}]
 
@@ -336,6 +384,7 @@ async def execute_run(run_id: uuid.UUID) -> None:
             "custom_ports": profile.custom_ports,
             "snmp_credential_ids": [str(c) for c in (profile.snmp_credential_ids or [])],
             "windows_credential_ids": [str(c) for c in (profile.windows_credential_ids or [])],
+            "ssh_credential_ids": [str(c) for c in (profile.ssh_credential_ids or [])],
             "max_concurrency": profile.max_concurrency,
             "scan_timeout_ms": profile.scan_timeout_ms,
         }
@@ -375,6 +424,9 @@ async def execute_run(run_id: uuid.UUID) -> None:
         windows_creds = await _load_windows_credentials(
             db, [str(c) for c in (profile.windows_credential_ids or [])]
         )
+        ssh_creds = await _load_ssh_credentials(
+            db, [str(c) for c in (profile.ssh_credential_ids or [])]
+        )
         await db.execute(
             update(DiscoveryRun).where(DiscoveryRun.id == run_id).values(
                 total_targets=len(targets),
@@ -387,7 +439,7 @@ async def execute_run(run_id: uuid.UUID) -> None:
     async with AsyncSessionLocal() as db:
         run = await db.get(DiscoveryRun, run_id)
         activity = list(run.activity_log or [])
-        _log_event(activity, f"Loaded {len(snmp_creds)} SNMP credential(s), {len(windows_creds)} Windows credential(s)")
+        _log_event(activity, f"Loaded {len(snmp_creds)} SNMP credential(s), {len(windows_creds)} Windows credential(s), {len(ssh_creds)} SSH credential(s)")
         _log_event(
             activity,
             f"Scanning {len(targets)} target(s) with protocols: {', '.join(protocols_requested)}",
@@ -409,7 +461,7 @@ async def execute_run(run_id: uuid.UUID) -> None:
             try:
                 ident = await _probe_ip(
                     ip, protocols_requested, custom_ports,
-                    snmp_creds, windows_creds, timeout_ms,
+                    snmp_creds, windows_creds, ssh_creds, timeout_ms,
                 )
                 return ip, ident
             except Exception as e:
@@ -511,6 +563,12 @@ async def execute_run(run_id: uuid.UUID) -> None:
                 ready_to_import += 1
 
             ip_str = ip
+            probes = ident.get("_probes") or {}
+            raw = dict(ident.get("raw_data") or {})
+            raw["protocol_status"] = _extract_protocol_status(
+                probes, protocols_requested, is_responding,
+            )
+
             row = DiscoveryResultV2(
                 run_id=run_id,
                 profile_id=profile.id,
@@ -542,7 +600,7 @@ async def execute_run(run_id: uuid.UUID) -> None:
                 conflict_with_id=matched_id if conflict_type else None,
                 import_ready=import_ready,
                 error_message=error_message,
-                raw_data=_compact_raw(ident.get("raw_data") or {}),
+                raw_data=_compact_raw(raw),
             )
             db.add(row)
         await db.commit()
@@ -608,10 +666,114 @@ def _uuid_or_none(v) -> uuid.UUID | None:
         return None
 
 
+def _extract_protocol_status(
+    probes: dict[str, Any],
+    protocols_requested: list[str],
+    responsive: bool,
+) -> dict[str, dict[str, Any]]:
+    """Compact per-protocol probe outcome for UI (green = responsive, red = failed)."""
+    out: dict[str, dict[str, Any]] = {}
+    requested = [p.lower() for p in (protocols_requested or [])]
+
+    def _entry(proto: str, ok: bool, error: str | None = None) -> None:
+        item: dict[str, Any] = {"responsive": ok}
+        if error:
+            item["error"] = error[:500]
+        out[proto] = item
+
+    icmp = probes.get("icmp") or {}
+    _entry("icmp", bool(icmp.get("responsive")), icmp.get("error"))
+
+    if not responsive:
+        for proto in requested:
+            if proto not in out:
+                _entry(proto, False, "host unreachable")
+        return out
+
+    open_ports = set((probes.get("tcp") or {}).get("data", {}).get("open", []) or [])
+
+    if "ssh" in requested:
+        ssh = probes.get("ssh")
+        if ssh:
+            _entry("ssh", bool(ssh.get("responsive")), ssh.get("error"))
+        else:
+            _entry("ssh", False, "port 22 closed" if 22 not in open_ports else "no SSH banner")
+
+    if "snmp" in requested:
+        snmp_list = probes.get("snmp") or []
+        if snmp_list:
+            ok = any(r.get("responsive") for r in snmp_list)
+            err = next(
+                (r.get("error") for r in snmp_list if r and not r.get("responsive")),
+                None,
+            )
+            _entry("snmp", ok, None if ok else err)
+        else:
+            _entry("snmp", False, "SNMP not probed")
+
+    if "http" in requested:
+        http_list = probes.get("http") or []
+        ok = any(r and r.get("responsive") for r in http_list)
+        err = next(
+            (r.get("error") for r in http_list if r and not r.get("responsive")),
+            None,
+        )
+        if http_list:
+            _entry("http", ok, None if ok else err)
+        else:
+            _entry("http", False, "no HTTP ports open")
+
+    if "https" in requested:
+        https_list = probes.get("https") or []
+        ok = any(r and r.get("responsive") for r in https_list)
+        err = next(
+            (r.get("error") for r in https_list if r and not r.get("responsive")),
+            None,
+        )
+        if https_list:
+            _entry("https", ok, None if ok else err)
+        else:
+            _entry("https", False, "no HTTPS ports open")
+
+    winrm_requested = "winrm" in requested or "wmi" in requested
+    if winrm_requested:
+        winrm_list = probes.get("winrm") or []
+        if winrm_list:
+            ok = any(r.get("responsive") for r in winrm_list)
+            err = next(
+                (r.get("error") for r in winrm_list if r and not r.get("responsive")),
+                None,
+            )
+            if "winrm" in requested:
+                _entry("winrm", ok, None if ok else err)
+            if "wmi" in requested:
+                _entry("wmi", ok, None if ok else err)
+        else:
+            msg = (
+                "no Windows credential configured"
+                if (5985 in open_ports or 5986 in open_ports)
+                else "WinRM ports closed"
+            )
+            if "winrm" in requested:
+                _entry("winrm", False, msg)
+            if "wmi" in requested:
+                _entry("wmi", False, msg)
+
+    if "tcp" in requested:
+        tcp = probes.get("tcp") or {}
+        ports = tcp.get("data", {}).get("open", []) or []
+        _entry("tcp", bool(ports), None if ports else "no open ports")
+
+    return out
+
+
 def _compact_raw(raw: dict) -> dict:
     """Trim raw_data to a manageable size before persisting."""
     out: dict[str, Any] = {}
     for k, v in (raw or {}).items():
+        if k == "protocol_status":
+            out[k] = v
+            continue
         if isinstance(v, str) and len(v) > 4000:
             out[k] = v[:4000] + "…"
         elif isinstance(v, list):

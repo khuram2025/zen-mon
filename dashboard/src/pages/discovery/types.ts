@@ -51,6 +51,7 @@ export interface DiscoveryProfile {
   custom_ports: number[]
   snmp_credential_ids: string[]
   windows_credential_ids: string[]
+  ssh_credential_ids: string[]
   detect_lldp: boolean
   detect_mac: boolean
   detect_vendor: boolean
@@ -159,6 +160,7 @@ export interface DiscoveryResult {
   os: string | null
   os_version: string | null
   protocols_detected: string[]
+  protocol_status: Record<string, { responsive: boolean; error?: string }>
   open_ports: number[]
   response_time_ms: number | null
   credential_status: CredentialStatus

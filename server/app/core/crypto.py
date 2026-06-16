@@ -92,6 +92,25 @@ def decrypt(token: bytes | memoryview | None) -> str | None:
     return _cipher().decrypt(nonce, ct, None).decode("utf-8")
 
 
+def decrypt_secret(value: bytes | memoryview | str | None) -> str | None:
+    """Return a SNMP secret whether it is encrypted (device columns) or plaintext
+    (snmp_credentials rows)."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        s = value.strip()
+        return s or None
+    buf = bytes(value)
+    if not buf:
+        return None
+    if len(buf) >= 1 + _NONCE_LEN + 16 and buf[0] == _VERSION:
+        try:
+            return decrypt(buf)
+        except CryptoError:
+            pass
+    return buf.decode("utf-8")
+
+
 def is_configured() -> bool:
     """True if SNMP_ENC_KEY is set and decodes to a valid key."""
     try:

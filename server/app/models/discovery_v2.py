@@ -48,6 +48,7 @@ class DiscoveryProfile(Base):
     custom_ports: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     snmp_credential_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     windows_credential_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    ssh_credential_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     detect_lldp: Mapped[bool] = mapped_column(Boolean, default=True)
     detect_mac: Mapped[bool] = mapped_column(Boolean, default=True)
     detect_vendor: Mapped[bool] = mapped_column(Boolean, default=True)

@@ -30,7 +30,7 @@ import {
   DialogTitle,
 } from '@/components/ui/Dialog'
 import { apiErrorMessage, relativeTime } from '@/lib/utils'
-import { RunStatusBadge, formatScope } from './helpers'
+import { RunStatusBadge, formatScope, RunCountLink } from './helpers'
 
 export function ProfilesPage() {
   const navigate = useNavigate()
@@ -188,20 +188,36 @@ export function ProfilesPage() {
                       </div>
                     </Td>
                     <Td className="text-right font-medium tabular-nums">
-                      {p.total_devices_found || '—'}
+                      <RunCountLink
+                        runId={p.last_run_id}
+                        filter="all"
+                        value={p.total_devices_found}
+                        className="font-medium"
+                      />
                     </Td>
                     <Td className="text-right font-medium tabular-nums text-info">
-                      {p.new_devices_found || '—'}
+                      <RunCountLink
+                        runId={p.last_run_id}
+                        filter="new"
+                        value={p.new_devices_found}
+                        className="font-medium text-info"
+                      />
                     </Td>
                     <Td className="text-right font-medium tabular-nums text-muted">
-                      {p.existing_devices_matched || '—'}
+                      <RunCountLink
+                        runId={p.last_run_id}
+                        filter="existing"
+                        value={p.existing_devices_matched}
+                        className="font-medium text-muted"
+                      />
                     </Td>
                     <Td className="text-right font-medium tabular-nums">
-                      {p.failed_targets ? (
-                        <span className="text-warning">{p.failed_targets}</span>
-                      ) : (
-                        <span className="text-muted">—</span>
-                      )}
+                      <RunCountLink
+                        runId={p.last_run_id}
+                        filter="failed"
+                        value={p.failed_targets}
+                        className={p.failed_targets ? 'font-medium text-warning' : 'font-medium text-muted'}
+                      />
                     </Td>
                     <Td>
                       <div className="flex items-center justify-end gap-1">

@@ -108,6 +108,7 @@ async def _load_profile_response(
         custom_ports=profile.custom_ports or [],
         snmp_credential_ids=profile.snmp_credential_ids or [],
         windows_credential_ids=profile.windows_credential_ids or [],
+        ssh_credential_ids=profile.ssh_credential_ids or [],
         detect_lldp=profile.detect_lldp,
         detect_mac=profile.detect_mac,
         detect_vendor=profile.detect_vendor,
@@ -179,6 +180,7 @@ async def create_profile(
         custom_ports=payload.custom_ports,
         snmp_credential_ids=[str(c) for c in payload.snmp_credential_ids],
         windows_credential_ids=[str(c) for c in payload.windows_credential_ids],
+        ssh_credential_ids=[str(c) for c in payload.ssh_credential_ids],
         detect_lldp=payload.detect_lldp,
         detect_mac=payload.detect_mac,
         detect_vendor=payload.detect_vendor,
@@ -258,7 +260,7 @@ async def update_profile(
         raise HTTPException(404, "Profile not found")
     fields = payload.model_dump(exclude_unset=True)
     for k, v in fields.items():
-        if k in ("snmp_credential_ids", "windows_credential_ids") and v is not None:
+        if k in ("snmp_credential_ids", "windows_credential_ids", "ssh_credential_ids") and v is not None:
             v = [str(x) for x in v]
         setattr(p, k, v)
     p.updated_by = user.id
@@ -304,6 +306,7 @@ async def clone_profile(
         custom_ports=list(src.custom_ports or []),
         snmp_credential_ids=list(src.snmp_credential_ids or []),
         windows_credential_ids=list(src.windows_credential_ids or []),
+        ssh_credential_ids=list(src.ssh_credential_ids or []),
         detect_lldp=src.detect_lldp,
         detect_mac=src.detect_mac,
         detect_vendor=src.detect_vendor,
@@ -655,6 +658,7 @@ async def list_results(
             os=r.os,
             os_version=r.os_version,
             protocols_detected=r.protocols_detected or [],
+            protocol_status=(r.raw_data or {}).get("protocol_status") or {},
             open_ports=r.open_ports or [],
             response_time_ms=r.response_time_ms,
             credential_status=r.credential_status,

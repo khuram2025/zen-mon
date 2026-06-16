@@ -25,6 +25,7 @@ import {
   describeNextRun,
   formatScope,
   ProtocolPill,
+  RunCountLink,
 } from './helpers'
 
 export function ProfileDetailPage() {
@@ -155,6 +156,9 @@ export function ProfileDetailPage() {
             <Row label="Concurrency" value={profile.max_concurrency} />
             <Row label="Timeout" value={`${profile.scan_timeout_ms} ms`} />
             <Row label="SNMP creds" value={profile.snmp_credential_ids.length} />
+            {profile.protocols.includes('ssh') && (
+              <Row label="SSH creds" value={profile.ssh_credential_ids?.length ?? 0} />
+            )}
           </CardContent>
         </Card>
         <Card>
@@ -242,19 +246,32 @@ export function ProfileDetailPage() {
                           ? formatDuration(Math.round(r.duration_ms / 1000))
                           : '—'}
                       </Td>
-                      <Td className="text-right tabular-nums">{r.responding_targets}</Td>
+                      <Td className="text-right tabular-nums">
+                        <RunCountLink runId={r.id} filter="all" value={r.responding_targets} />
+                      </Td>
                       <Td className="text-right tabular-nums text-info">
-                        {r.new_devices || '—'}
+                        <RunCountLink
+                          runId={r.id}
+                          filter="new"
+                          value={r.new_devices}
+                          className="text-info"
+                        />
                       </Td>
                       <Td className="text-right tabular-nums text-muted">
-                        {r.existing_devices || '—'}
+                        <RunCountLink
+                          runId={r.id}
+                          filter="existing"
+                          value={r.existing_devices}
+                          className="text-muted"
+                        />
                       </Td>
                       <Td className="text-right tabular-nums">
-                        {r.failed_targets ? (
-                          <span className="text-warning">{r.failed_targets}</span>
-                        ) : (
-                          <span className="text-muted">—</span>
-                        )}
+                        <RunCountLink
+                          runId={r.id}
+                          filter="failed"
+                          value={r.failed_targets}
+                          className={r.failed_targets ? 'text-warning' : 'text-muted'}
+                        />
                       </Td>
                       <Td>
                         <div className="flex justify-end">

@@ -3,7 +3,8 @@ import { Handle, Position, useStore, type NodeProps } from '@xyflow/react'
 import { cn } from '@/lib/utils'
 import { NetworkIcon } from '@/components/network-icons'
 import {
-  DISC, DISC_CX, DISC_CY, NODE_W, STATUS_COLOR,
+  DISC, DISC_CX, DISC_CY, DISC_RADIUS, NODE_W, STATUS_COLOR,
+  iconFillFor,
   formatAgo, formatUptime, iconForNode, statusKey, utilHex,
   type ManualMapNode, type NodeLiveData,
 } from '../core'
@@ -51,6 +52,7 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
   const scale = node.metadata?.size_scale || 1
   const ls = node.metadata?.label_style || {}
   const discSize = DISC * scale
+  const iconFill = iconFillFor(node.metadata)
   // Outer frame: a full circle (default) or a rounded-corner square.
   const frameRadius = node.metadata?.frame === 'rounded' ? Math.round(discSize * 0.22) : discSize / 2
   const lx = LABEL_X + off.dx
@@ -111,7 +113,7 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
           style={{ width: discSize, height: discSize, borderRadius: frameRadius, boxShadow: live ? STATUS_GLOW[sk] : undefined }}
         >
           <span aria-hidden className={cn('absolute -right-0.5 -top-0.5 h-3.5 w-3.5 rounded-full border-2 border-surface', color.dot, live && 'animate-pulse-soft')} />
-          <NetworkIcon name={iconKey} style={{ width: discSize * 0.56, height: discSize * 0.56 }} />
+          <NetworkIcon name={iconKey} style={{ width: discSize * iconFill, height: discSize * iconFill }} />
 
           {/* Active-alert badge */}
           {alertCount > 0 && (

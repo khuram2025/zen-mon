@@ -20,6 +20,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '
 import { toast } from '@/components/ui/Toast'
 
 const PAGE_SIZES = [10, 25, 50, 100]
+const WEEKDAYS = [['Sun', 0], ['Mon', 1], ['Tue', 2], ['Wed', 3], ['Thu', 4], ['Fri', 5], ['Sat', 6]] as const
 type Filter = { key: 'status' | 'type' | 'location' | 'vendor'; value: string } | null
 
 function statusKey(d: any): 'backed_up' | 'failed' | 'pending' | 'unconfigured' {
@@ -73,6 +74,7 @@ export function NcmPage() {
   const [profilesOpen, setProfilesOpen] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [assignOpen, setAssignOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const openDevice = (d: any) => navigate(`/ncm/${d.device_id}`)
 
   const { data: overview, isFetching, refetch } = useQuery<any>({
@@ -228,6 +230,14 @@ export function NcmPage() {
                 <Button variant="outline" size="sm" disabled={!credentials.length} onClick={() => setAssignOpen(true)}>
                   <KeyRound className="h-3.5 w-3.5" /> Assign profile
                 </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!selectedDevices.some((d) => d.enrolled)}
+                  onClick={() => setSettingsOpen(true)}
+                >
+                  <Clock className="h-3.5 w-3.5" /> Backup settings
+                </Button>
                 <Button variant="outline" size="sm" disabled={bulkBackup.isPending || !selectedDevices.some((d) => d.enrolled)} onClick={() => bulkBackup.mutate()}>
                   <DownloadCloud className={`h-3.5 w-3.5 ${bulkBackup.isPending ? 'animate-pulse' : ''}`} /> {bulkBackup.isPending ? 'Backing up…' : 'Run backup now'}
                 </Button>
@@ -305,7 +315,165 @@ export function NcmPage() {
         devices={selectedDevices}
         onDone={() => { clearSelection(); qc.invalidateQueries({ queryKey: ['ncm'] }) }}
       />
+      <BulkBackupSettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        devices={selectedDevices}
+        onDone={() => { qc.invalidateQueries({ queryKey: ['ncm'] }) }}
+      />
     </div>
+  )
+}
+
+function BulkBackupSettingsDialog({
+  open,
+  onOpenChange,
+  devices,
+  onDone,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  devices: any[]
+  onDone: () => void
+}) {
+  const enrolled = devices.filter((d) => d.enrolled)
+  const [scheduleEnabled, setScheduleEnabled] = useState(true)
+  const [scheduleType, setScheduleType] = useState('interval')
+  const [scheduleIntervalHours, setScheduleIntervalHours] = useState(24)
+  const [scheduleTime, setScheduleTime] = useState('02:00')
+  const [scheduleDays, setScheduleDays] = useState<number[]>([1, 2, 3, 4, 5])
+  const [keepVersions, setKeepVersions] = useState(5)
+  const [alertOnChange, setAlertOnChange] = useState(true)
+
+  useEffect(() => {
+    if (!open) return
+    const sample = devices.find((d) => d.enrolled)
+    setScheduleEnabled(sample?.schedule_enabled ?? true)
+    setScheduleType(sample?.schedule_type || 'interval')
+    setScheduleIntervalHours(sample?.schedule_interval_hours || 24)
+    setScheduleTime(sample?.schedule_time || '02:00')
+    setScheduleDays(sample?.schedule_days?.length ? [...sample.schedule_days] : [1, 2, 3, 4, 5])
+    setKeepVersions(sample?.keep_versions || 5)
+    setAlertOnChange(sample?.alert_on_change !== false)
+    // Only seed defaults when the dialog opens — not on every devices refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  const toggleDay = (d: number) =>
+    setScheduleDays((days) => (days.includes(d) ? days.filter((x) => x !== d) : [...days, d].sort()))
+
+  const apply = useMutation({
+    mutationFn: async () => (await api.post('/ncm/bulk-settings', {
+      device_ids: enrolled.map((d) => d.device_id),
+      schedule_enabled: scheduleEnabled,
+      schedule_type: scheduleType,
+      schedule_interval_hours: scheduleIntervalHours,
+      schedule_time: scheduleTime,
+      schedule_days: scheduleDays,
+      keep_versions: keepVersions,
+      alert_on_change: alertOnChange,
+    })).data,
+    onSuccess: (r: any) => {
+      const skipped = r.skipped ? `, ${r.skipped} skipped (not enrolled)` : ''
+      toast.success(`Backup settings applied to ${r.updated} device${r.updated === 1 ? '' : 's'}${skipped}`)
+      onOpenChange(false)
+      onDone()
+    },
+    onError: (e: any) => toast.error('Apply failed', apiErrorMessage(e)),
+  })
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader><DialogTitle>Bulk backup settings</DialogTitle></DialogHeader>
+        <div className="space-y-3">
+          <p className="text-xs text-muted">
+            Apply schedule and retention settings to{' '}
+            <span className="font-medium text-text">{enrolled.length}</span> enrolled device
+            {enrolled.length === 1 ? '' : 's'}
+            {devices.length > enrolled.length && (
+              <span className="text-warning"> ({devices.length - enrolled.length} not enrolled will be skipped)</span>
+            )}
+            .
+          </p>
+          <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
+            <span className="flex items-center gap-1 text-xs font-medium uppercase tracking-wider text-muted">
+              <Clock className="h-3.5 w-3.5" /> Scheduled backup
+            </span>
+            <Switch checked={scheduleEnabled} onCheckedChange={setScheduleEnabled} />
+          </div>
+          {scheduleEnabled && (
+            <div className="space-y-2 rounded-md border border-border p-2">
+              <FormField label="Frequency">
+                <Select value={scheduleType} onValueChange={setScheduleType}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="interval">Every N hours</SelectItem>
+                    <SelectItem value="daily">Daily at a time</SelectItem>
+                    <SelectItem value="weekly">Weekly on days</SelectItem>
+                  </SelectContent>
+                </Select>
+              </FormField>
+              {scheduleType === 'interval' && (
+                <FormField label="Every (hours)">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={720}
+                    value={scheduleIntervalHours}
+                    onChange={(e) => setScheduleIntervalHours(Number(e.target.value))}
+                  />
+                </FormField>
+              )}
+              {(scheduleType === 'daily' || scheduleType === 'weekly') && (
+                <FormField label="At (server time, 24h)">
+                  <Input type="time" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)} />
+                </FormField>
+              )}
+              {scheduleType === 'weekly' && (
+                <div>
+                  <div className="mb-1 text-xs text-muted">On days</div>
+                  <div className="flex flex-wrap gap-1">
+                    {WEEKDAYS.map(([lbl, d]) => (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => toggleDay(d as number)}
+                        className={`rounded px-2 py-1 text-xs font-medium ${
+                          scheduleDays.includes(d) ? 'bg-primary text-white' : 'border border-border text-muted hover:text-text'
+                        }`}
+                      >
+                        {lbl}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <p className="text-[11px] text-muted">A job runs hourly and backs up devices when their schedule is due.</p>
+            </div>
+          )}
+          <FormField label="Keep versions" hint="Older versions beyond this are auto-deleted from the server.">
+            <Input
+              type="number"
+              min={1}
+              max={100}
+              value={keepVersions}
+              onChange={(e) => setKeepVersions(Number(e.target.value))}
+            />
+          </FormField>
+          <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
+            <span className="text-xs font-medium uppercase tracking-wider text-muted">Alert on config change</span>
+            <Switch checked={alertOnChange} onCheckedChange={setAlertOnChange} />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button disabled={!enrolled.length || apply.isPending} onClick={() => apply.mutate()}>
+            <Save className="h-3.5 w-3.5" /> {apply.isPending ? 'Applying…' : `Apply to ${enrolled.length}`}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

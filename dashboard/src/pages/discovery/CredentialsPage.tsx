@@ -1,17 +1,16 @@
 import { useNavigate } from 'react-router-dom'
-import { ArrowUpRight, Key, ShieldCheck } from 'lucide-react'
+import { ArrowUpRight, Key, ShieldCheck, Terminal } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 
 /**
- * Discovery uses two credential stores: SNMP (for SNMP-enabled
- * network devices) and Windows (for WMI / WinRM). Both have their
- * own dedicated management pages.
+ * Discovery uses three credential stores: SNMP (network devices),
+ * NCM connection profiles (SSH/Telnet), and Windows (WMI / WinRM).
  */
 export function CredentialsPage() {
   const navigate = useNavigate()
   return (
-    <div className="grid gap-3 md:grid-cols-2">
+    <div className="grid gap-3 md:grid-cols-3">
       <Card>
         <CardContent className="flex flex-col items-start gap-3 p-6">
           <div className="flex items-center gap-2">
@@ -24,6 +23,22 @@ export function CredentialsPage() {
           </p>
           <Button onClick={() => navigate('/snmp-profiles')}>
             <Key className="h-4 w-4" /> Manage SNMP credentials
+            <ArrowUpRight className="h-3.5 w-3.5" />
+          </Button>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardContent className="flex flex-col items-start gap-3 p-6">
+          <div className="flex items-center gap-2">
+            <Terminal className="h-5 w-5 text-primary" />
+            <h2 className="text-lg font-semibold">SSH / CLI credentials</h2>
+          </div>
+          <p className="text-sm text-muted">
+            NCM connection profiles used for authenticated SSH/Telnet discovery
+            on network devices and Linux hosts.
+          </p>
+          <Button onClick={() => navigate('/ncm')}>
+            <Terminal className="h-4 w-4" /> Manage connection profiles
             <ArrowUpRight className="h-3.5 w-3.5" />
           </Button>
         </CardContent>

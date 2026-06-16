@@ -36,6 +36,8 @@ export type NodeLabelStyle = {
 export type NodeMetadata = {
   label_offset?: { dx: number; dy: number }
   size_scale?: number
+  /** Icon size as a fraction of the tile (0.35–1). */
+  icon_fill?: number
   label_style?: NodeLabelStyle
   /** Outer frame shape of the device tile. */
   frame?: 'circle' | 'rounded'
@@ -235,6 +237,14 @@ export const NODE_W = 128
 export const DISC = 64
 export const DISC_CX = NODE_W / 2 // 64
 export const DISC_CY = DISC / 2 // 32
+/** Default icon size relative to the device tile (was 0.56 — too much padding). */
+export const DEFAULT_ICON_FILL = 0.78
+
+export function iconFillFor(md?: NodeMetadata | null): number {
+  const v = md?.icon_fill
+  if (typeof v === 'number' && v > 0) return Math.min(1, Math.max(0.35, v))
+  return DEFAULT_ICON_FILL
+}
 
 export function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value))
@@ -761,6 +771,77 @@ export function anchorOnRect(center: Pt, toward: Pt, halfW: number, halfH: numbe
   const sy = halfH / (Math.abs(dy) || 1e-6)
   const s = Math.min(sx, sy)
   return { x: center.x + dx * s, y: center.y + dy * s }
+}
+
+export type EndpointGeom = {
+  center: Pt
+  rect: boolean
+  halfW: number
+  halfH: number
+  r: number
+}
+
+/** Flow-space centre + border for a canvas node (device disc or annotation box). */
+export function endpointGeomFromNode(
+  position: { x: number; y: number },
+  type: string | undefined,
+  data: unknown,
+  measured?: { width?: number; height?: number },
+  width?: number | null,
+  height?: number | null,
+): EndpointGeom | null {
+  if (type === 'shape') {
+    const w = measured?.width ?? (typeof width === 'number' ? width : 80)
+    const h = measured?.height ?? (typeof height === 'number' ? height : 60)
+    return { center: { x: position.x + w / 2, y: position.y + h / 2 }, rect: true, halfW: w / 2, halfH: h / 2, r: 0 }
+  }
+  if (type === 'device') {
+    const scale = ((data as any)?.node?.metadata?.size_scale as number) || 1
+    return {
+      center: { x: position.x + DISC_CX, y: position.y + DISC_CY },
+      rect: false,
+      halfW: 0,
+      halfH: 0,
+      r: (DISC * scale) / 2 + 2,
+    }
+  }
+  return null
+}
+
+/** Bend just outside the node border so the cable anchors where the user dropped. */
+export function waypointForEndpointReposition(
+  dropPt: Pt,
+  geom: EndpointGeom,
+  towardFallback: Pt,
+): Pt {
+  let dx = dropPt.x - geom.center.x
+  let dy = dropPt.y - geom.center.y
+  if (Math.hypot(dx, dy) < 8) {
+    dx = towardFallback.x - geom.center.x
+    dy = towardFallback.y - geom.center.y
+  }
+  const d = Math.hypot(dx, dy) || 1
+  const toward = { x: geom.center.x + dx, y: geom.center.y + dy }
+  const anchor = geom.rect
+    ? anchorOnRect(geom.center, toward, geom.halfW, geom.halfH)
+    : anchorOnCircle(geom.center, toward, geom.r)
+  const lead = Math.hypot(anchor.x - geom.center.x, anchor.y - geom.center.y) + 40
+  return { x: geom.center.x + (dx / d) * lead, y: geom.center.y + (dy / d) * lead }
+}
+
+/** Update first/last waypoint so an endpoint can be re-anchored on the same node. */
+export function repositionEndpointWaypoints(
+  storedWpsPx: Pt[],
+  which: 'src' | 'dst',
+  dropPt: Pt,
+  geom: EndpointGeom,
+  towardFallback: Pt,
+): Pt[] {
+  const wp = waypointForEndpointReposition(dropPt, geom, towardFallback)
+  if (which === 'src') {
+    return storedWpsPx.length > 0 ? [wp, ...storedWpsPx.slice(1)] : [wp]
+  }
+  return storedWpsPx.length > 0 ? [...storedWpsPx.slice(0, -1), wp] : [wp]
 }
 
 function distToSegment(p: Pt, a: Pt, b: Pt): number {
