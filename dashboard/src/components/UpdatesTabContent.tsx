@@ -97,6 +97,18 @@ function fmtDate(d: string | null | undefined) {
   }
 }
 
+/**
+ * During an update the appliance stops zenplus-api while it applies code and
+ * restarts services, so the status poll briefly fails with a 502/503/504 from
+ * nginx (no upstream) or a no-response network error. That is expected progress,
+ * not a failure — surface it as "applying / reconnecting" instead of an error.
+ */
+function isApiRestarting(error: unknown): boolean {
+  const resp = (error as any)?.response
+  if (!resp) return true // no response at all → API process is down mid-restart
+  return resp.status === 502 || resp.status === 503 || resp.status === 504
+}
+
 // ─── Main component ─────────────────────────────────────────────────────────
 export function UpdatesTabContent() {
   const queryClient = useQueryClient()
@@ -106,7 +118,14 @@ export function UpdatesTabContent() {
   const { data: status, isLoading, isError, error } = useQuery<UpdateStatus>({
     queryKey: ['system-update-status'],
     queryFn: async () => (await api.get<UpdateStatus>('/system/update-status')).data,
+    // Keep prior data on the screen while a refetch fails (the API restarts
+    // mid-update), so we can show "applying / reconnecting" rather than blanking out.
+    placeholderData: (prev) => prev,
+    retry: false,
     refetchInterval: (query) => {
+      // While the API is unreachable mid-update, retry quickly so the page
+      // recovers as soon as services come back.
+      if (query.state.status === 'error') return 5000
       const d = query.state.data
       return d?.updater_running || d?.active_update ? 5000 : 30000
     },
@@ -162,10 +181,31 @@ export function UpdatesTabContent() {
     )
   }
 
-  if (isError) {
+  const restarting = isError && isApiRestarting(error)
+
+  // Hard failure: only when there's no status to show AND it isn't the expected
+  // mid-update restart window. A genuine error (auth, 500 with a body, …) still surfaces.
+  if (isError && !status && !restarting) {
     return (
       <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-6 text-sm text-red-300">
         Failed to load update status: {apiErrorMessage(error)}
+      </div>
+    )
+  }
+
+  // No prior status yet and the API is unreachable — expected while an update is
+  // applied and services restart. Reassure rather than show an error.
+  if (!status) {
+    return (
+      <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-blue-500/30 bg-blue-500/10 py-16 text-center">
+        <Loader2 className="h-7 w-7 animate-spin text-blue-400" />
+        <div>
+          <p className="text-sm font-semibold text-blue-300">Update in progress — reconnecting…</p>
+          <p className="mx-auto mt-1 max-w-md text-xs text-blue-400/70">
+            The appliance is applying an update and briefly restarting its services.
+            This page will reconnect automatically — no need to refresh.
+          </p>
+        </div>
       </div>
     )
   }
@@ -174,6 +214,20 @@ export function UpdatesTabContent() {
 
   return (
     <div className="space-y-5">
+      {/* Services restarting mid-update: the status poll is briefly failing (502).
+          Show progress instead of an error; the page recovers on its own. */}
+      {restarting && (
+        <div className="flex items-center gap-3 rounded-xl border border-blue-500/30 bg-blue-500/10 p-4">
+          <Loader2 className="h-5 w-5 flex-shrink-0 animate-spin text-blue-400" />
+          <div>
+            <p className="text-sm font-medium text-blue-300">Update is being applied — reconnecting…</p>
+            <p className="text-xs text-blue-400/70">
+              Services are restarting as part of the update. Showing the last known status; this page refreshes automatically.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Registration prompt — defers full registration UI to the Licenses tab. */}
       {!isRegistered && (
         <div className="flex items-center gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-4">
