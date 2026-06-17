@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
-from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, discovery, discovery_v2, users, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm
+from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, discovery, discovery_v2, users, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, host_alert_rules
 from app.api.v1 import settings as settings_api
 from app.api.v1 import sensors as sensors_admin_api
 from app.api.v1 import sensor_api
@@ -38,6 +38,7 @@ def create_app() -> FastAPI:
     app.include_router(alerts.router, prefix="/api/v1")
     app.include_router(settings_api.router, prefix="/api/v1")
     app.include_router(alert_rules.router, prefix="/api/v1")
+    app.include_router(host_alert_rules.router, prefix="/api/v1")
     app.include_router(alert_engine.router, prefix="/api/v1")
     app.include_router(traps.router, prefix="/api/v1")
     app.include_router(ncm.router, prefix="/api/v1")
@@ -82,10 +83,13 @@ def create_app() -> FastAPI:
         # Discovery: recover restart-stranded runs, then fire due schedules.
         from app.services.discovery_scheduler import discovery_scheduler_loop
         app.state.discovery_scheduler = asyncio.create_task(discovery_scheduler_loop())
+        # Host-metric alert rules: periodic threshold evaluation against ClickHouse.
+        from app.services.host_alert_service import host_alert_evaluator_loop
+        app.state.host_alert_evaluator = asyncio.create_task(host_alert_evaluator_loop())
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("health_sweeper", "discovery_scheduler"):
+        for attr in ("health_sweeper", "discovery_scheduler", "host_alert_evaluator"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

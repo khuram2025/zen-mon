@@ -34,7 +34,8 @@ import { ManualMapsEntry } from '@/pages/ManualMapsEntry'
 import { ReportsPage } from '@/pages/ReportsPage'
 import { SensorsPage } from '@/pages/SensorsPage'
 import { NetflowPage, NetflowDevicePage, NetflowSectionPage } from '@/pages/NetflowPage'
-import { ServersPage } from '@/pages/servers/ServersPage'
+import { ServersDashboardPage } from '@/pages/servers/ServersDashboardPage'
+import { ServerInventoryPage } from '@/pages/servers/ServersPage'
 import { ServerDetailPage } from '@/pages/servers/ServerDetailPage'
 import { AgentFleetPage } from '@/pages/servers/AgentFleetPage'
 import { AgentPoliciesPage } from '@/pages/servers/AgentPoliciesPage'
@@ -107,7 +108,8 @@ export default function App() {
         <Route path="devices" element={<DevicesPage />} />
         <Route path="devices/:id" element={<DeviceDetailPage />} />
         <Route path="devices/:id/interfaces" element={<DeviceInterfacesPage />} />
-        <Route path="servers" element={<ServersPage />} />
+        <Route path="servers" element={<ServersDashboardPage />} />
+        <Route path="servers/inventory" element={<ServerInventoryPage />} />
         <Route path="servers/:id" element={<ServerDetailPage />} />
         <Route path="server-agents" element={<AgentFleetPage />} />
         <Route path="agent-policies" element={<AgentPoliciesPage />} />

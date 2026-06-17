@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_clickhouse_client
 from app.schemas.agent import AgentResultsBatch, MetricPoint, MetricSeries
+from app.services.filesystem_monitoring import ch_capacity_filter
 
 logger = logging.getLogger("zenplus.host_metric_service")
 
@@ -302,23 +303,37 @@ def _insert_agent_health(client, agent_id: str, server_id: str, rows: list[dict]
 
 # ── Inventory upsert (Postgres) ──────────────────────────────────────
 
+# Processes not refreshed within this window are treated as exited and pruned
+# from the inventory snapshot. Keep in sync with the freshness filter in
+# server/app/api/v1/servers.py (server_processes). 5× the default 60s upload
+# interval, so a couple of missed uploads won't drop still-running processes.
+PROCESS_STALE_SECONDS = 300
+
+
 async def _upsert_process_inventory(server_id: str, rows: list[dict], db: AsyncSession) -> None:
     for p in rows:
         pid = _i(p.get("pid"))
         name = str(p.get("process_name") or p.get("name") or "")[:255]
         if pid <= 0 or not name:
             continue
+        # When the name for a PID changes the OS has recycled the PID onto a
+        # different process, so reset start time / cmdline instead of carrying
+        # the previous process's values forward.
         await db.execute(text(
             """INSERT INTO server_process_inventory
                    (server_id, pid, name, cmdline, user_name, cpu_pct, memory_bytes, started_at, updated_at)
                VALUES (:sid, :pid, :name, :cmd, :user, :cpu, :mem, :started, NOW())
                ON CONFLICT (server_id, pid) DO UPDATE SET
                    name = EXCLUDED.name,
-                   cmdline = COALESCE(EXCLUDED.cmdline, server_process_inventory.cmdline),
+                   cmdline = CASE WHEN server_process_inventory.name IS DISTINCT FROM EXCLUDED.name
+                                  THEN EXCLUDED.cmdline
+                                  ELSE COALESCE(EXCLUDED.cmdline, server_process_inventory.cmdline) END,
                    user_name = EXCLUDED.user_name,
                    cpu_pct = EXCLUDED.cpu_pct,
                    memory_bytes = EXCLUDED.memory_bytes,
-                   started_at = COALESCE(EXCLUDED.started_at, server_process_inventory.started_at),
+                   started_at = CASE WHEN server_process_inventory.name IS DISTINCT FROM EXCLUDED.name
+                                     THEN EXCLUDED.started_at
+                                     ELSE COALESCE(EXCLUDED.started_at, server_process_inventory.started_at) END,
                    updated_at = NOW()"""
         ), {
             "sid": server_id,
@@ -330,6 +345,17 @@ async def _upsert_process_inventory(server_id: str, rows: list[dict], db: AsyncS
             "mem": _i(p.get("memory_bytes")),
             "started": _dt_or_none(p.get("started_at")),
         })
+
+    # Prune processes we haven't heard about within the freshness window so
+    # exited processes don't linger in the snapshot and the table stays bounded.
+    await db.execute(
+        text(
+            "DELETE FROM server_process_inventory "
+            "WHERE server_id = :sid "
+            "AND updated_at < NOW() - make_interval(secs => :ttl)"
+        ),
+        {"sid": server_id, "ttl": PROCESS_STALE_SECONDS},
+    )
 
 
 async def _upsert_inventory(server_id: str, inv: Dict[str, Any], db: AsyncSession) -> None:
@@ -540,8 +566,8 @@ async def ingest_host_metric_batch(
     # Health: derive server status + reasons from the fresh telemetry.
     try:
         from app.services.server_health_service import compute_server_health, store_server_health
-        status, reasons = await compute_server_health(db, server_id, by_kind)
-        await store_server_health(db, server_id, status, reasons)
+        status, reasons, issues = await compute_server_health(db, server_id, by_kind)
+        await store_server_health(db, server_id, status, reasons, issues)
     except Exception as exc:
         errors.append(f"health: {exc}")
         logger.exception("Health computation failed")
@@ -730,8 +756,9 @@ def query_fleet_latest_metrics(window_minutes: int = 10) -> dict[str, dict]:
                WHERE timestamp >= %(s)s GROUP BY server_id""",
             parameters={"s": since}).result_rows, "memory_pct")
         _merge(client.query(
-            """SELECT server_id, max(used_pct) FROM zenplus.host_filesystem_metrics
-               WHERE timestamp >= %(s)s GROUP BY server_id""",
+            f"""SELECT server_id, max(used_pct) FROM zenplus.host_filesystem_metrics
+               WHERE timestamp >= %(s)s AND {ch_capacity_filter()}
+               GROUP BY server_id""",
             parameters={"s": since}).result_rows, "disk_max_pct")
         _merge(client.query(
             """SELECT server_id, sum(rx_bytes_ps + tx_bytes_ps) / uniqExact(timestamp)
@@ -740,6 +767,78 @@ def query_fleet_latest_metrics(window_minutes: int = 10) -> dict[str, dict]:
             parameters={"s": since}).result_rows, "net_bps")
     except Exception as exc:
         logger.warning("fleet latest metrics query failed: %s", exc)
+    return out
+
+
+def query_server_memory_total(server_id: str, window_minutes: int = 10) -> int:
+    """Latest total physical RAM (bytes) for one server.
+
+    Used to render per-process memory% on the processes tab. Returns 0 when no
+    recent sample exists (caller treats 0 as "unknown" and hides the percentage).
+    """
+    client = get_clickhouse_client()
+    since = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        rows = client.query(
+            """SELECT argMax(total_bytes, timestamp) FROM zenplus.host_memory_metrics
+               WHERE server_id = %(sid)s AND timestamp >= %(s)s""",
+            parameters={"sid": server_id, "s": since}).result_rows
+        if rows and rows[0][0]:
+            return int(rows[0][0])
+    except Exception as exc:
+        logger.warning("server memory total query failed: %s", exc)
+    return 0
+
+
+def query_process_history(
+    server_id: str,
+    process_name: str,
+    from_time: datetime,
+    to_time: datetime,
+) -> list[MetricSeries]:
+    """CPU% and memory over time for all processes sharing a name.
+
+    PIDs churn constantly (a browser spawns a process per tab/renderer), so
+    history is aggregated by ``process_name``: at each sample we sum across that
+    name's PIDs, then bucket over time so the chart stays readable for wide
+    ranges. Reads raw host_process_metrics — there is no process rollup table.
+    """
+    client = get_clickhouse_client()
+    range_s = max(1, int((_utc(to_time) - _utc(from_time)).total_seconds()))
+    bucket = max(60, range_s // 240)  # ~240 points target, never finer than 60s
+    params = {
+        "sid": server_id,
+        "name": process_name,
+        "f": _utc(from_time).strftime("%Y-%m-%d %H:%M:%S"),
+        "t": _utc(to_time).strftime("%Y-%m-%d %H:%M:%S"),
+        "b": bucket,
+    }
+    specs = [
+        ("cpu_pct", "sum(cpu_pct)", "%", "CPU total"),
+        ("memory_bytes", "sum(memory_bytes)", "B", "Memory"),
+    ]
+    out: list[MetricSeries] = []
+    for metric, agg, unit, label in specs:
+        try:
+            sql = f"""SELECT toStartOfInterval(timestamp, toIntervalSecond(%(b)s)) AS ts,
+                             avg(s) AS v
+                      FROM (
+                          SELECT timestamp, {agg} AS s
+                          FROM zenplus.host_process_metrics
+                          WHERE server_id = %(sid)s AND process_name = %(name)s
+                            AND timestamp >= %(f)s AND timestamp <= %(t)s
+                          GROUP BY timestamp
+                      )
+                      GROUP BY ts ORDER BY ts LIMIT 5000"""
+            res = client.query(sql, parameters=params).result_rows
+            out.append(MetricSeries(
+                metric=metric, unit=unit, label=label,
+                points=[MetricPoint(timestamp=_utc(r[0]), value=float(r[1] or 0))
+                        for r in res],
+            ))
+        except Exception as exc:
+            logger.warning("process history query failed for %s/%s: %s", process_name, metric, exc)
+            out.append(MetricSeries(metric=metric, unit=unit, label=label, points=[]))
     return out
 
 
@@ -761,9 +860,9 @@ def query_top_pressure(kind: str, limit: int = 5) -> list[dict]:
                      GROUP BY server_id
                      ORDER BY v DESC LIMIT %(limit)s"""
         elif kind == "disk":
-            sql = """SELECT server_id, max(used_pct) AS v
+            sql = f"""SELECT server_id, max(used_pct) AS v
                      FROM zenplus.host_filesystem_metrics
-                     WHERE timestamp >= %(since)s
+                     WHERE timestamp >= %(since)s AND {ch_capacity_filter()}
                      GROUP BY server_id
                      ORDER BY v DESC LIMIT %(limit)s"""
         elif kind == "network":

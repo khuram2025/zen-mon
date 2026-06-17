@@ -46,6 +46,8 @@ from app.schemas.agent import (
 )
 from app.services.host_metric_service import (
     query_fleet_latest_metrics,
+    query_process_history,
+    query_server_memory_total,
     query_server_metrics,
     query_top_pressure,
 )
@@ -112,6 +114,9 @@ def _server_row_to_response(row: dict) -> ServerResponse:
         environment=row.get("environment"),
         owner=row.get("owner"),
         tags=list(tags) if isinstance(tags, (list, tuple)) else [],
+        windows_credential_id=str(row["windows_credential_id"]) if row.get("windows_credential_id") else None,
+        snmp_credential_id=str(row["snmp_credential_id"]) if row.get("snmp_credential_id") else None,
+        ncm_credential_id=str(row["ncm_credential_id"]) if row.get("ncm_credential_id") else None,
         last_seen=row.get("last_seen"),
         description=row.get("description"),
         status_reasons=[str(r) for r in _json_list(row.get("status_reasons"))],
@@ -379,17 +384,21 @@ async def create_server(
     row = (await db.execute(
         text("""INSERT INTO servers (display_name, hostname, fqdn, primary_ip, site_id, device_id,
                                       os_type, collection_mode, environment, owner, description,
-                                      tags, created_by)
+                                      tags, windows_credential_id, snmp_credential_id, ncm_credential_id, created_by)
                 VALUES (:dn, :hn, :fqdn, :ip, :site, :dev,
                         :os, :cm, :env, :own, :desc,
-                        COALESCE(:tags, '[]'::jsonb), :cb)
+                        COALESCE(:tags, '[]'::jsonb), :wcred, :scred, :ncred, :cb)
                 RETURNING *"""),
         {
             "dn": data.display_name, "hn": data.hostname, "fqdn": data.fqdn,
             "ip": data.primary_ip, "site": data.site_id, "dev": data.device_id,
             "os": data.os_type, "cm": data.collection_mode,
             "env": data.environment, "own": data.owner, "desc": data.description,
-            "tags": json.dumps(data.tags or []), "cb": user.id,
+            "tags": json.dumps(data.tags or []),
+            "wcred": data.windows_credential_id,
+            "scred": data.snmp_credential_id,
+            "ncred": data.ncm_credential_id,
+            "cb": user.id,
         },
     )).mappings().first()
     await db.commit()
@@ -430,7 +439,8 @@ async def update_server(
     sets = []
     params: dict[str, Any] = {"id": server_id}
     for field in ["display_name", "hostname", "fqdn", "primary_ip", "site_id", "device_id",
-                  "os_type", "collection_mode", "status", "environment", "owner", "description"]:
+                  "os_type", "collection_mode", "status", "environment", "owner", "description",
+                  "windows_credential_id", "snmp_credential_id", "ncm_credential_id"]:
         v = getattr(data, field)
         if v is not None:
             sets.append(f"{field} = :{field}")
@@ -512,14 +522,44 @@ async def server_processes(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    # Only return processes refreshed recently so exited processes don't show
+    # as live. Window matches PROCESS_STALE_SECONDS in host_metric_service.py.
     rows = (await db.execute(
         text("""SELECT pid, name, cmdline, user_name, cpu_pct, memory_bytes, started_at, updated_at
                 FROM server_process_inventory
                 WHERE server_id = :id
+                  AND updated_at >= NOW() - make_interval(secs => :ttl)
                 ORDER BY cpu_pct DESC NULLS LAST LIMIT 200"""),
-        {"id": server_id},
+        {"id": server_id, "ttl": 300},
     )).mappings().all()
-    return {"items": [dict(r) for r in rows]}
+    return {
+        "items": [dict(r) for r in rows],
+        "mem_total_bytes": query_server_memory_total(str(server_id)),
+    }
+
+
+@router.get("/{server_id}/processes/history", response_model=ServerMetricsResponse)
+async def server_process_history(
+    server_id: UUID,
+    name: str = Query(..., min_length=1, max_length=255),
+    from_: Optional[datetime] = Query(None, alias="from"),
+    to: Optional[datetime] = None,
+    interval_s: int = 60,
+    user: User = Depends(get_current_user),
+):
+    """CPU/memory trend for all processes sharing a name (aggregated, PID-agnostic)."""
+    if not to:
+        to = datetime.now(timezone.utc)
+    if not from_:
+        from_ = to - timedelta(hours=6)
+    series = query_process_history(str(server_id), name, from_, to)
+    return ServerMetricsResponse(
+        server_id=str(server_id),
+        **{"from": from_},
+        to=to,
+        interval_s=interval_s,
+        series=series,
+    )
 
 
 @router.get("/{server_id}/services")
@@ -586,6 +626,7 @@ async def server_events(
                FROM zenplus.host_event_log_summary
                WHERE server_id = %(sid)s
                  AND timestamp >= now() - INTERVAL 24 HOUR
+                 AND event_count > 0
                ORDER BY timestamp DESC LIMIT %(lim)s""",
             parameters={"sid": str(server_id), "lim": limit},
         ).result_rows

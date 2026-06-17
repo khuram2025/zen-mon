@@ -17,6 +17,7 @@ import {
   HardDrive,
   Inbox,
   Info,
+  Gauge,
   LayoutDashboard,
   Layers,
   LogOut,
@@ -89,7 +90,8 @@ const sections: NavSection[] = [
   {
     label: 'Servers',
     items: [
-      { to: '/servers', label: 'Inventory', icon: Server, end: true },
+      { to: '/servers', label: 'Dashboard', icon: Gauge, end: true },
+      { to: '/servers/inventory', label: 'Inventory', icon: Server },
       { to: '/server-agents', label: 'Agent Fleet', icon: Bot },
       { to: '/agent-policies', label: 'Agent Policies', icon: SlidersHorizontal },
       { to: '/server-baselines', label: 'Baselines', icon: ClipboardCheck },
@@ -138,7 +140,8 @@ const sections: NavSection[] = [
 const routeLabels: Record<string, string> = {
   '/': 'Monitoring Overview',
   '/devices': 'Devices',
-  '/servers': 'Server Inventory',
+  '/servers': 'Server Fleet',
+  '/servers/inventory': 'Server Inventory',
   '/server-agents': 'Agent Fleet',
   '/agent-policies': 'Agent Policies',
   '/server-baselines': 'Baselines',
@@ -171,6 +174,7 @@ const routeSections: Record<string, string> = {
   '/': 'Overview',
   '/devices': 'Monitoring',
   '/servers': 'Servers',
+  '/servers/inventory': 'Servers',
   '/server-agents': 'Servers',
   '/agent-policies': 'Servers',
   '/server-baselines': 'Servers',

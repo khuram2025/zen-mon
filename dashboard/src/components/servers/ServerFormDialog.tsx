@@ -2,7 +2,7 @@
  *  pre-staged hosts; agents normally create their server on enrollment). */
 
 import { useEffect, useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Server } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
@@ -59,6 +59,26 @@ export function ServerFormDialog({
   const [owner, setOwner] = useState('')
   const [tags, setTags] = useState('')
   const [description, setDescription] = useState('')
+  const [windowsCredentialId, setWindowsCredentialId] = useState('')
+  const [snmpCredentialId, setSnmpCredentialId] = useState('')
+  const [ncmCredentialId, setNcmCredentialId] = useState('')
+
+  const { data: windowsCreds = [] } = useQuery<any[]>({
+    queryKey: ['windows-credentials'],
+    queryFn: async () => (await api.get('/windows-credentials')).data,
+    enabled: open,
+  })
+  const { data: snmpCreds = [] } = useQuery<any[]>({
+    queryKey: ['snmp-credentials'],
+    queryFn: async () => (await api.get('/snmp-credentials')).data,
+    enabled: open,
+  })
+  const { data: ncmCredResp } = useQuery<{ data: any[] }>({
+    queryKey: ['ncm', 'credentials'],
+    queryFn: async () => (await api.get('/ncm/credentials')).data,
+    enabled: open,
+  })
+  const ncmCreds = ncmCredResp?.data ?? []
 
   useEffect(() => {
     if (open) {
@@ -71,6 +91,9 @@ export function ServerFormDialog({
       setOwner(server?.owner || '')
       setTags((server?.tags || []).join(', '))
       setDescription(server?.description || '')
+      setWindowsCredentialId(server?.windows_credential_id || '')
+      setSnmpCredentialId(server?.snmp_credential_id || '')
+      setNcmCredentialId(server?.ncm_credential_id || '')
     }
   }, [open, server])
 
@@ -86,6 +109,9 @@ export function ServerFormDialog({
         owner: owner.trim() || null,
         tags: tags.split(',').map((t) => t.trim()).filter(Boolean),
         description: description.trim() || null,
+        windows_credential_id: windowsCredentialId || null,
+        snmp_credential_id: snmpCredentialId || null,
+        ncm_credential_id: ncmCredentialId || null,
       }
       if (editing && server) {
         return (await api.patch(`/servers/${server.id}`, body)).data
@@ -146,6 +172,86 @@ export function ServerFormDialog({
               </SelectContent>
             </Select>
           </div>
+          {(mode === 'agentless_wmi' || mode === 'agentless_winrm') && (
+            <div className="col-span-2 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <Label>Windows credential</Label>
+                <a
+                  href="/credentials?tab=windows"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs text-primary hover:underline"
+                >
+                  Manage / create
+                </a>
+              </div>
+              <Select value={windowsCredentialId || 'none'} onValueChange={(v) => setWindowsCredentialId(v === 'none' ? '' : v)}>
+                <SelectTrigger><SelectValue placeholder="Select saved Windows credential" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None</SelectItem>
+                  {windowsCreds.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.name} {c.domain ? `(${c.domain}\\${c.username})` : `(${c.username})`}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          {mode === 'snmp' && (
+            <div className="col-span-2 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <Label>SNMP credential</Label>
+                <a
+                  href="/credentials?tab=snmp"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs text-primary hover:underline"
+                >
+                  Manage / create
+                </a>
+              </div>
+              <Select value={snmpCredentialId || 'none'} onValueChange={(v) => setSnmpCredentialId(v === 'none' ? '' : v)}>
+                <SelectTrigger><SelectValue placeholder="Select saved SNMP credential" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None</SelectItem>
+                  {snmpCreds.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.name} (v{c.snmp_version})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          {mode === 'ssh' && (
+            <div className="col-span-2 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <Label>SSH credential profile</Label>
+                <a
+                  href="/ncm"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-xs text-primary hover:underline"
+                >
+                  Manage / create
+                </a>
+              </div>
+              <Select value={ncmCredentialId || 'none'} onValueChange={(v) => setNcmCredentialId(v === 'none' ? '' : v)}>
+                <SelectTrigger><SelectValue placeholder="Select saved SSH profile" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None</SelectItem>
+                  {ncmCreds
+                    .filter((c) => (c.protocol || 'ssh') === 'ssh')
+                    .map((c) => (
+                      <SelectItem key={c.id} value={c.id}>
+                        {c.name} ({c.username}@{c.port || 22})
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <div className="space-y-1.5">
             <Label>Environment</Label>
             <Input value={environment} onChange={(e) => setEnvironment(e.target.value)} placeholder="production" />

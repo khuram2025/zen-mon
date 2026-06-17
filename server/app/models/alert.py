@@ -40,6 +40,9 @@ class Alert(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     rule_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("alert_rules.id"), nullable=True)
     device_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("devices.id"), nullable=True)
+    # No ORM-level ForeignKey: the servers table/model isn't always registered in
+    # this metadata at mapper-config time. The DB FK (migrate-035) enforces it.
+    server_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=True)
     service_check_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("service_checks.id", ondelete="CASCADE"), nullable=True)
 
     status: Mapped[str] = mapped_column(String(20), default="active")

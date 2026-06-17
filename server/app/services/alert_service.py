@@ -20,6 +20,7 @@ async def get_alerts(
     search: str | None = None,
     skip: int = 0,
     limit: int = 50,
+    server_id: UUID | None = None,
 ) -> tuple[list[Alert], int]:
     query = select(Alert).options(
         selectinload(Alert.device),
@@ -32,6 +33,8 @@ async def get_alerts(
         query = query.where(Alert.severity == severity)
     if device_id:
         query = query.where(Alert.device_id == device_id)
+    if server_id:
+        query = query.where(Alert.server_id == server_id)
     if service_check_id:
         query = query.where(Alert.service_check_id == service_check_id)
     if from_time:

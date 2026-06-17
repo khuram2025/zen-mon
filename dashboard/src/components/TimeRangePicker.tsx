@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Clock } from 'lucide-react'
 
@@ -46,10 +46,23 @@ export function useTimeRange(): {
     return i >= 0 ? i : 0
   })()
 
-  const fromISO = isCustom
-    ? customFromParam!
-    : new Date(Date.now() - TIME_RANGE_OPTIONS[idx].hours * 3_600_000).toISOString()
-  const toISO = isCustom ? customToParam! : new Date().toISOString()
+  // Preset ranges slide with wall clock; bucket to the minute so query keys
+  // keyed on fromISO/toISO do not change every render (see useReports.ts).
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 60_000)
+    return () => clearInterval(id)
+  }, [])
+
+  const fromISO = useMemo(() => {
+    if (isCustom) return customFromParam!
+    return new Date(nowMs - TIME_RANGE_OPTIONS[idx].hours * 3_600_000).toISOString()
+  }, [isCustom, customFromParam, idx, nowMs])
+
+  const toISO = useMemo(() => {
+    if (isCustom) return customToParam!
+    return new Date(nowMs).toISOString()
+  }, [isCustom, customToParam, nowMs])
   const hours = isCustom
     ? Math.max(1, Math.round((Date.parse(toISO) - Date.parse(fromISO)) / 3_600_000))
     : TIME_RANGE_OPTIONS[idx].hours

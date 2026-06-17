@@ -26,6 +26,8 @@ from typing import Any, Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.filesystem_monitoring import pg_capacity_filter
+
 logger = logging.getLogger("zenplus.server_health")
 
 # ── Health thresholds (percent) ──────────────────────────────────────
@@ -60,9 +62,22 @@ async def create_server_alert(
     or ``agent_offline``) so repeat evaluations don't stack duplicates.
     Returns True when a new alert row was created.
     """
+    # Respect an active silence (snooze until a time, or mute forever).
+    silenced = (await db.execute(
+        text("""SELECT 1 FROM alert_silences
+                WHERE server_id = :sid AND dedupe = :dedupe
+                  AND (until IS NULL OR until > NOW())
+                LIMIT 1"""),
+        {"sid": server_id, "dedupe": dedupe},
+    )).first()
+    if silenced:
+        return False
+
+    # Treat acknowledged like active so an acknowledged alert isn't re-created
+    # every evaluation cycle while the condition persists.
     existing = (await db.execute(
         text("""SELECT id FROM alerts
-                WHERE server_id = :sid AND status = 'active'
+                WHERE server_id = :sid AND status IN ('active', 'acknowledged')
                   AND metadata->>'dedupe' = :dedupe
                 LIMIT 1"""),
         {"sid": server_id, "dedupe": dedupe},
@@ -85,7 +100,7 @@ async def resolve_server_alerts(db: AsyncSession, server_id: str, dedupe: str) -
     """Resolve open alerts for a server matching a dedupe key (or prefix with %)."""
     res = await db.execute(
         text("""UPDATE alerts SET status = 'resolved', resolved_at = NOW()
-                WHERE server_id = :sid AND status = 'active'
+                WHERE server_id = :sid AND status IN ('active', 'acknowledged')
                   AND metadata->>'dedupe' LIKE :dedupe"""),
         {"sid": server_id, "dedupe": dedupe},
     )
@@ -106,19 +121,24 @@ async def compute_server_health(
     db: AsyncSession,
     server_id: str,
     by_kind: dict[str, list[dict]],
-) -> tuple[str, list[str]]:
-    """Derive (status, reasons) from the just-ingested batch + inventory.
+) -> tuple[str, list[str], list[dict[str, str]]]:
+    """Derive (status, reasons, issues) from the just-ingested batch + inventory.
 
     CPU/memory use the batch average (the agent already averages over its
     collection interval); disks and services use the last-known inventory
     rows that the same batch just upserted.
+
+    Each issue includes ``level``, ``reason``, and a stable ``dedupe`` key
+    used to mirror the condition into the alerts table.
     """
     status = "healthy"
     reasons: list[str] = []
+    issues: list[dict[str, str]] = []
 
-    def _bump(level: str, reason: str) -> None:
+    def _bump(level: str, reason: str, dedupe: str) -> None:
         nonlocal status
         reasons.append(reason)
+        issues.append({"level": level, "reason": reason, "dedupe": dedupe})
         if level == "critical":
             status = "critical"
         elif level == "warning" and status != "critical":
@@ -130,7 +150,11 @@ async def compute_server_health(
         avg = sum(vals) / len(vals)
         lvl = _level(avg, CPU_WARN, CPU_CRIT)
         if lvl:
-            _bump(lvl, f"CPU at {avg:.1f}% (≥ {CPU_CRIT if lvl == 'critical' else CPU_WARN:.0f}%)")
+            _bump(
+                lvl,
+                f"CPU at {avg:.1f}% (≥ {CPU_CRIT if lvl == 'critical' else CPU_WARN:.0f}%)",
+                "health:cpu",
+            )
 
     mem_rows = by_kind.get("memory") or []
     if mem_rows:
@@ -144,17 +168,26 @@ async def compute_server_health(
         avg = sum(vals) / len(vals)
         lvl = _level(avg, MEM_WARN, MEM_CRIT)
         if lvl:
-            _bump(lvl, f"Memory at {avg:.1f}% (≥ {MEM_CRIT if lvl == 'critical' else MEM_WARN:.0f}%)")
+            _bump(
+                lvl,
+                f"Memory at {avg:.1f}% (≥ {MEM_CRIT if lvl == 'critical' else MEM_WARN:.0f}%)",
+                "health:memory",
+            )
 
     fs_rows = (await db.execute(
-        text("""SELECT mount, used_pct FROM server_filesystem_inventory
-                WHERE server_id = :sid AND used_pct IS NOT NULL"""),
+        text(f"""SELECT mount, used_pct FROM server_filesystem_inventory
+                WHERE server_id = :sid AND used_pct IS NOT NULL
+                  AND {pg_capacity_filter()}"""),
         {"sid": server_id},
     )).all()
     for mount, used_pct in fs_rows:
         lvl = _level(float(used_pct or 0), DISK_WARN, DISK_CRIT)
         if lvl:
-            _bump(lvl, f"Filesystem {mount} at {float(used_pct):.1f}% (≥ {DISK_CRIT if lvl == 'critical' else DISK_WARN:.0f}%)")
+            _bump(
+                lvl,
+                f"Filesystem {mount} at {float(used_pct):.1f}% (≥ {DISK_CRIT if lvl == 'critical' else DISK_WARN:.0f}%)",
+                f"health:filesystem:{mount}",
+            )
 
     svc_rows = (await db.execute(
         text("""SELECT service_name, state, start_mode FROM server_service_inventory
@@ -164,12 +197,50 @@ async def compute_server_health(
     for name, state, start_mode in svc_rows:
         st = (state or "").lower()
         if st in ("stopped", "stop_pending", "dead", "failed") and (start_mode or "").lower() in ("auto", "automatic"):
-            _bump("warning", f"Watched service {name} is {state} (start mode {start_mode})")
+            _bump(
+                "warning",
+                f"Watched service {name} is {state} (start mode {start_mode})",
+                f"health:service:{name}",
+            )
 
-    return status, reasons
+    return status, reasons, issues
 
 
-async def store_server_health(db: AsyncSession, server_id: str, status: str, reasons: list[str]) -> None:
+async def sync_health_alerts(
+    db: AsyncSession,
+    server_id: str,
+    issues: list[dict[str, str]],
+) -> None:
+    """Mirror computed health issues into the alerts table (create + resolve)."""
+    active_dedupes = {issue["dedupe"] for issue in issues}
+    for issue in issues:
+        await create_server_alert(
+            db,
+            server_id,
+            severity=issue["level"],
+            message=issue["reason"],
+            source="health_threshold",
+            dedupe=issue["dedupe"],
+        )
+
+    open_rows = (await db.execute(
+        text("""SELECT metadata->>'dedupe' AS dedupe FROM alerts
+                WHERE server_id = :sid AND status IN ('active', 'acknowledged')
+                  AND metadata->>'source' = 'health_threshold'"""),
+        {"sid": server_id},
+    )).all()
+    for row in open_rows:
+        if row.dedupe not in active_dedupes:
+            await resolve_server_alerts(db, server_id, row.dedupe)
+
+
+async def store_server_health(
+    db: AsyncSession,
+    server_id: str,
+    status: str,
+    reasons: list[str],
+    issues: Optional[list[dict[str, str]]] = None,
+) -> None:
     """Persist computed health; never overrides disabled servers."""
     await db.execute(
         text("""UPDATE servers SET
@@ -179,6 +250,15 @@ async def store_server_health(db: AsyncSession, server_id: str, status: str, rea
                 WHERE id = :sid"""),
         {"sid": server_id, "st": status, "reasons": json.dumps(reasons)},
     )
+    if issues is not None:
+        await sync_health_alerts(db, server_id, issues)
+
+
+async def refresh_server_health(db: AsyncSession, server_id: str) -> tuple[str, list[str]]:
+    """Recompute health from inventory + latest metrics (no new ingest required)."""
+    status, reasons, issues = await compute_server_health(db, server_id, {})
+    await store_server_health(db, server_id, status, reasons, issues)
+    return status, reasons
 
 
 # ── Staleness sweep ──────────────────────────────────────────────────

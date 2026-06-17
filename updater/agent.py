@@ -399,6 +399,18 @@ def run_update(cfg: AgentConfig, release: dict) -> bool:
         )
         return False
 
+    # Apply any ClickHouse migrations shipped with this release but not yet in
+    # the schema ledger. The code (scripts/migrate-*-clickhouse.sql) has just
+    # landed via apply_code; this guarantees schema keeps up with code even when
+    # a release did not explicitly package a run_migration step. Best-effort: a
+    # ClickHouse problem is logged but must not roll back an otherwise-good code
+    # update.
+    try:
+        from .clickhouse_sync import sync_clickhouse_migrations
+        sync_clickhouse_migrations()
+    except Exception as e:
+        logger.error("ClickHouse migration sync raised (continuing): %s", e)
+
     # Update version file
     version_file = ZENPLUS_DIR / ".version"
     version_file.write_text(

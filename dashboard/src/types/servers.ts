@@ -22,6 +22,9 @@ export interface ServerItem {
   kernel_or_build: string | null
   architecture: string | null
   collection_mode: CollectionMode
+  windows_credential_id: string | null
+  snmp_credential_id: string | null
+  ncm_credential_id: string | null
   status: ServerStatus
   environment: string | null
   owner: string | null

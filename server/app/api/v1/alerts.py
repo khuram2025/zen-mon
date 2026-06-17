@@ -1,7 +1,9 @@
 from uuid import UUID
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import case, func, select
+from pydantic import BaseModel
+from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -21,6 +23,7 @@ def _serialize_alert(alert: Alert) -> dict:
         "id": alert.id,
         "rule_id": alert.rule_id,
         "device_id": alert.device_id,
+        "server_id": alert.server_id,
         "device_hostname": alert.device.hostname if alert.device else None,
         "device_ip": str(alert.device.ip_address) if alert.device else None,
         "service_check_id": alert.service_check_id,
@@ -40,6 +43,7 @@ async def list_alerts(
     status: str | None = None,
     severity: str | None = None,
     device_id: UUID | None = None,
+    server_id: UUID | None = None,
     service_check_id: UUID | None = None,
     from_time: datetime | None = Query(default=None, alias="from"),
     to_time: datetime | None = Query(default=None, alias="to"),
@@ -51,6 +55,7 @@ async def list_alerts(
 ):
     alerts, total = await alert_service.get_alerts(
         db, status, severity, device_id, service_check_id, from_time, to_time, search, skip, limit,
+        server_id=server_id,
     )
     data = [_serialize_alert(alert) for alert in alerts]
 
@@ -110,6 +115,37 @@ async def alert_device_counts(
             "last_triggered_at": row.last_triggered_at.isoformat() if row.last_triggered_at else None,
         }
     return {"from": start.isoformat(), "to": end.isoformat(), "devices": devices}
+
+
+@router.get("/silences")
+async def list_silences(
+    server_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Active (non-expired) silences for a server. Declared before /{alert_id}
+    so the literal path isn't captured as an alert id."""
+    rows = (await db.execute(text(
+        "SELECT id, dedupe, until, reason, created_at FROM alert_silences "
+        "WHERE server_id = :sid AND (until IS NULL OR until > NOW()) "
+        "ORDER BY created_at DESC"
+    ), {"sid": server_id})).all()
+    return {"items": [
+        {"id": str(r.id), "dedupe": r.dedupe, "until": r.until,
+         "forever": r.until is None, "created_at": r.created_at}
+        for r in rows
+    ]}
+
+
+@router.delete("/silences/{silence_id}")
+async def delete_silence(
+    silence_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    res = await db.execute(text("DELETE FROM alert_silences WHERE id = :id"), {"id": silence_id})
+    await db.commit()
+    return {"removed": res.rowcount or 0}
 
 
 @router.get("/{alert_id}")
@@ -193,6 +229,71 @@ async def acknowledge_alert(
         acknowledged_at=alert.acknowledged_at,
         resolved_at=alert.resolved_at,
     )
+
+
+class SnoozeBody(BaseModel):
+    minutes: Optional[int] = None  # None / 0 => mute forever
+
+
+async def _alert_silence_key(db: AsyncSession, alert_id: UUID):
+    """(server_id, dedupe) for a server-scoped alert, or None if not silenceable."""
+    row = (await db.execute(text(
+        "SELECT server_id, metadata->>'dedupe' AS dedupe FROM alerts WHERE id = :id"
+    ), {"id": alert_id})).first()
+    if not row or not row.server_id or not row.dedupe:
+        return None
+    return str(row.server_id), row.dedupe
+
+
+@router.post("/{alert_id}/snooze")
+async def snooze_alert(
+    alert_id: UUID,
+    body: SnoozeBody,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Suppress this alert condition for a while (minutes) or forever (no minutes).
+
+    Resolves the current alert and records a silence so the evaluator won't
+    re-raise the same condition on this server until the silence expires.
+    """
+    key = await _alert_silence_key(db, alert_id)
+    if not key:
+        raise HTTPException(400, "Only server alerts can be snoozed")
+    server_id, dedupe = key
+    until_expr = "NOW() + make_interval(mins => :m)" if body.minutes else "NULL"
+    # Clear any prior silence for this condition, then insert the new one.
+    await db.execute(text(
+        "DELETE FROM alert_silences WHERE server_id = :sid AND dedupe = :d"
+    ), {"sid": server_id, "d": dedupe})
+    await db.execute(text(
+        f"INSERT INTO alert_silences (server_id, dedupe, until, created_by) "
+        f"VALUES (:sid, :d, {until_expr}, :uid)"
+    ), {"sid": server_id, "d": dedupe, "uid": user.id, **({"m": body.minutes} if body.minutes else {})})
+    # Resolve current open alerts for this condition so the active view clears.
+    await db.execute(text(
+        "UPDATE alerts SET status = 'resolved', resolved_at = NOW() "
+        "WHERE server_id = :sid AND metadata->>'dedupe' = :d AND status IN ('active','acknowledged')"
+    ), {"sid": server_id, "d": dedupe})
+    await db.commit()
+    return {"snoozed": True, "forever": not body.minutes, "minutes": body.minutes}
+
+
+@router.post("/{alert_id}/unsnooze")
+async def unsnooze_alert(
+    alert_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    key = await _alert_silence_key(db, alert_id)
+    if not key:
+        raise HTTPException(400, "Only server alerts can be unsnoozed")
+    server_id, dedupe = key
+    res = await db.execute(text(
+        "DELETE FROM alert_silences WHERE server_id = :sid AND dedupe = :d"
+    ), {"sid": server_id, "d": dedupe})
+    await db.commit()
+    return {"removed": res.rowcount or 0}
 
 
 @router.post("/{alert_id}/resolve", response_model=AlertResponse)

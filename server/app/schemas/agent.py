@@ -41,6 +41,9 @@ class ServerCreate(BaseModel):
     owner: Optional[str] = None
     description: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
+    windows_credential_id: Optional[UUID] = None
+    snmp_credential_id: Optional[UUID] = None
+    ncm_credential_id: Optional[UUID] = None
 
 
 class ServerUpdate(BaseModel):
@@ -57,6 +60,9 @@ class ServerUpdate(BaseModel):
     owner: Optional[str] = None
     description: Optional[str] = None
     tags: Optional[List[str]] = None
+    windows_credential_id: Optional[UUID] = None
+    snmp_credential_id: Optional[UUID] = None
+    ncm_credential_id: Optional[UUID] = None
 
 
 class ServerResponse(BaseModel):
@@ -78,6 +84,9 @@ class ServerResponse(BaseModel):
     environment: Optional[str]
     owner: Optional[str]
     tags: List[str] = Field(default_factory=list)
+    windows_credential_id: Optional[str] = None
+    snmp_credential_id: Optional[str] = None
+    ncm_credential_id: Optional[str] = None
     last_seen: Optional[datetime]
     description: Optional[str]
     status_reasons: List[str] = Field(default_factory=list)
