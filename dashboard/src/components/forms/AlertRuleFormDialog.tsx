@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Loader2, Plus, Trash2 } from 'lucide-react'
+import { Check, Loader2, Plus, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
 import {
@@ -41,7 +41,42 @@ type State = {
   service_check_id: string
   service_check_group_id: string
   trap_oid: string
+  target: string
+  notify_channels: string[]
+  schedule_start: string
+  schedule_end: string
+  schedule_days: number[]
 }
+
+// ISO weekday order: 1=Mon … 7=Sun (matches backend schedule_days + enforcement).
+const DAY_LABELS: { n: number; label: string }[] = [
+  { n: 1, label: 'Mon' }, { n: 2, label: 'Tue' }, { n: 3, label: 'Wed' },
+  { n: 4, label: 'Thu' }, { n: 5, label: 'Fri' }, { n: 6, label: 'Sat' }, { n: 7, label: 'Sun' },
+]
+
+const CHANNEL_TYPE_LABEL: Record<string, string> = {
+  email: 'Email', sms: 'SMS', webhook: 'Webhook', slack: 'Slack',
+  telegram: 'Telegram', teams: 'Teams', discord: 'Discord', pagerduty: 'PagerDuty',
+}
+
+// Network-device (SNMP) metrics, evaluated by the periodic network alert
+// evaluator. Interface metrics (if_*) can be narrowed to specific interfaces
+// via the optional interface filter (target).
+const NETWORK_METRICS = [
+  { value: 'if_util_pct', label: 'Interface utilization (%)', iface: true },
+  { value: 'if_in_bps', label: 'Interface inbound (bps)', iface: true },
+  { value: 'if_out_bps', label: 'Interface outbound (bps)', iface: true },
+  { value: 'if_errors', label: 'Interface errors (per window)', iface: true },
+  { value: 'if_discards', label: 'Interface discards (per window)', iface: true },
+  { value: 'if_oper_status', label: 'Interface down (oper=2)', iface: true },
+  { value: 'cpu', label: 'Device CPU (%)', iface: false },
+  { value: 'memory', label: 'Device memory (%)', iface: false },
+  { value: 'temperature', label: 'Device temperature (°)', iface: false },
+  { value: 'session_count', label: 'Session count', iface: false },
+  { value: 'uptime_reset', label: 'Reboot detected (1=yes)', iface: false },
+] as const
+
+const INTERFACE_METRICS = new Set<string>(NETWORK_METRICS.filter((m) => m.iface).map((m) => m.value))
 
 const empty: State = {
   name: '',
@@ -58,6 +93,11 @@ const empty: State = {
   service_check_id: '',
   service_check_group_id: '',
   trap_oid: '',
+  target: '',
+  notify_channels: [],
+  schedule_start: '',
+  schedule_end: '',
+  schedule_days: [],
 }
 
 export function AlertRuleFormDialog({
@@ -99,6 +139,28 @@ export function AlertRuleFormDialog({
     enabled: open,
   })
 
+  const { data: channelsResp } = useQuery<any>({
+    queryKey: ['channels', 'list-min'],
+    queryFn: async () => (await api.get('/settings/channels')).data,
+    enabled: open,
+  })
+  const channels: any[] = Array.isArray(channelsResp) ? channelsResp : channelsResp?.data || []
+
+  const toggleChannel = (id: string) =>
+    setS((st) => ({
+      ...st,
+      notify_channels: st.notify_channels.includes(id)
+        ? st.notify_channels.filter((c) => c !== id)
+        : [...st.notify_channels, id],
+    }))
+  const toggleDay = (n: number) =>
+    setS((st) => ({
+      ...st,
+      schedule_days: st.schedule_days.includes(n)
+        ? st.schedule_days.filter((d) => d !== n)
+        : [...st.schedule_days, n].sort((a, b) => a - b),
+    }))
+
   useEffect(() => {
     if (!open) return
     if (rule) {
@@ -124,6 +186,11 @@ export function AlertRuleFormDialog({
         service_check_id: rule.service_check_id || '',
         service_check_group_id: rule.service_check_group_id || '',
         trap_oid: rule.trap_oid || '',
+        target: rule.target || '',
+        notify_channels: Array.isArray(rule.notify_channels) ? rule.notify_channels : [],
+        schedule_start: rule.schedule_start || '',
+        schedule_end: rule.schedule_end || '',
+        schedule_days: Array.isArray(rule.schedule_days) ? rule.schedule_days : [],
         source:
           rule.metric === 'trap'
             ? 'trap'
@@ -178,6 +245,8 @@ export function AlertRuleFormDialog({
       conditions,
       condition_logic: s.condition_logic,
       trap_oid: isTrap ? s.trap_oid.trim() || null : null,
+      // Interface filter only applies to device-scoped interface metrics.
+      target: isDevice && INTERFACE_METRICS.has(first.metric) ? s.target.trim() || null : null,
       duration: s.duration,
       severity: s.severity,
       cooldown: s.cooldown,
@@ -186,7 +255,10 @@ export function AlertRuleFormDialog({
       group_id: isService ? null : s.group_id || null,
       service_check_id: isService ? s.service_check_id || null : null,
       service_check_group_id: isService ? s.service_check_group_id || null : null,
-      notify_channels: [],
+      notify_channels: s.notify_channels,
+      schedule_start: s.schedule_start || null,
+      schedule_end: s.schedule_end || null,
+      schedule_days: s.schedule_days.length ? s.schedule_days : null,
     })
   }
 
@@ -274,6 +346,11 @@ export function AlertRuleFormDialog({
                             <SelectItem value="rtt">Round-trip time (ms)</SelectItem>
                             <SelectItem value="packet_loss">Packet loss (%)</SelectItem>
                             <SelectItem value="jitter">Jitter (ms)</SelectItem>
+                            {NETWORK_METRICS.map((m) => (
+                              <SelectItem key={m.value} value={m.value}>
+                                {m.label}
+                              </SelectItem>
+                            ))}
                           </SelectContent>
                         </Select>
                       </FormField>
@@ -326,6 +403,18 @@ export function AlertRuleFormDialog({
                     </span>{' '}
                     of the {s.conditions.length} conditions match.
                   </p>
+                )}
+                {s.conditions.some((c) => INTERFACE_METRICS.has(c.metric)) && (
+                  <FormField
+                    label="Interface filter (optional)"
+                    hint="Empty = all monitored interfaces on the in-scope device(s). Otherwise an interface name/description/alias substring (e.g. GigabitEthernet0/1, WAN) or an exact if_index."
+                  >
+                    <Input
+                      value={s.target}
+                      onChange={(e) => setS({ ...s, target: e.target.value })}
+                      placeholder="All interfaces"
+                    />
+                  </FormField>
                 )}
               </div>
             )}
@@ -488,6 +577,97 @@ export function AlertRuleFormDialog({
             <div className="flex items-center justify-between rounded-md border border-border px-3">
               <span className="text-xs font-medium uppercase tracking-wider text-muted">Enabled</span>
               <Switch checked={s.enabled} onCheckedChange={(v) => setS({ ...s, enabled: v })} />
+            </div>
+          </div>
+
+          {/* Notify channels — which channels this rule fires to */}
+          <div className="space-y-3 rounded-md border border-border p-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted">Notify channels</div>
+              <a href="/channels" className="text-[11px] text-primary hover:underline">Manage channels</a>
+            </div>
+            {channels.length === 0 ? (
+              <p className="text-[11px] text-muted">
+                No channels configured yet. Create one under{' '}
+                <a href="/channels" className="text-primary hover:underline">Channels</a> to deliver notifications.
+              </p>
+            ) : (
+              <div className="grid grid-cols-2 gap-2">
+                {channels.map((c) => {
+                  const checked = s.notify_channels.includes(c.id)
+                  return (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => toggleChannel(c.id)}
+                      className={`flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors ${
+                        checked ? 'border-primary bg-primary/10 text-text' : 'border-border text-muted hover:text-text'
+                      } ${c.enabled === false ? 'opacity-50' : ''}`}
+                    >
+                      <span className="min-w-0 truncate">
+                        <span className="font-medium">{c.name}</span>
+                        <span className="ml-1 text-[10px] text-muted">
+                          {CHANNEL_TYPE_LABEL[c.type] || c.type}{c.enabled === false ? ' · off' : ''}
+                        </span>
+                      </span>
+                      {checked && <Check className="h-3.5 w-3.5 shrink-0 text-primary" />}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+            {channels.length > 0 && s.notify_channels.length === 0 && (
+              <p className="text-[11px] text-warning">
+                No channels selected — this rule will record alerts but won't send notifications.
+              </p>
+            )}
+          </div>
+
+          {/* Schedule — quiet hours; outside the window alerts are recorded but not sent */}
+          <div className="space-y-3 rounded-md border border-border p-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted">Schedule (optional)</div>
+              <span className="text-[11px] text-muted">Quiet hours — notify only in-window</span>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <FormField label="Start time">
+                <Input
+                  type="time"
+                  value={s.schedule_start}
+                  onChange={(e) => setS({ ...s, schedule_start: e.target.value })}
+                />
+              </FormField>
+              <FormField label="End time">
+                <Input
+                  type="time"
+                  value={s.schedule_end}
+                  onChange={(e) => setS({ ...s, schedule_end: e.target.value })}
+                />
+              </FormField>
+            </div>
+            <div>
+              <div className="mb-1.5 text-[11px] font-medium text-muted">Active days</div>
+              <div className="flex flex-wrap gap-1.5">
+                {DAY_LABELS.map((d) => {
+                  const active = s.schedule_days.includes(d.n)
+                  return (
+                    <button
+                      key={d.n}
+                      type="button"
+                      onClick={() => toggleDay(d.n)}
+                      className={`h-8 w-11 rounded-md text-xs font-medium transition-colors ${
+                        active ? 'bg-primary text-white' : 'bg-surface2 text-muted hover:text-text'
+                      }`}
+                    >
+                      {d.label}
+                    </button>
+                  )
+                })}
+              </div>
+              <p className="mt-1.5 text-[11px] text-muted">
+                Leave times empty and no days selected to notify 24/7. Times use the appliance timezone.
+                Recovery (“resolved”) notices are always sent.
+              </p>
             </div>
           </div>
 

@@ -19,8 +19,17 @@ router = APIRouter(prefix="/alert-rules", tags=["Alert Rules"])
 # Pydantic schemas
 # ---------------------------------------------------------------------------
 
+# Network-device (SNMP) metric keys, evaluated by network_alert_service.
+_NETWORK_METRICS = (
+    "cpu|memory|uptime_reset|temperature|fan_state|psu_state|"
+    "if_in_bps|if_out_bps|if_util_pct|if_errors|if_discards|if_oper_status|"
+    "session_count|vpn_tunnel_state|ha_state|bgp_neighbor_down"
+)
+_CONDITION_METRICS = f"ping_status|rtt|packet_loss|jitter|service_status|{_NETWORK_METRICS}"
+
+
 class ConditionItem(BaseModel):
-    metric: str = Field(..., pattern="^(ping_status|rtt|packet_loss|jitter|service_status)$")
+    metric: str = Field(..., pattern=f"^({_CONDITION_METRICS})$")
     operator: str = Field(..., pattern="^(>|<|>=|<=|==|!=)$")
     threshold: float
 
@@ -30,12 +39,16 @@ class AlertRuleCreate(BaseModel):
     description: Optional[str] = None
     enabled: bool = True
 
-    metric: str = Field(..., pattern="^(ping_status|rtt|packet_loss|jitter|service_status|trap)$")
+    metric: str = Field(..., pattern=f"^({_CONDITION_METRICS}|trap)$")
     operator: str = Field(..., pattern="^(>|<|>=|<=|==|!=)$")
     threshold: float
 
     # E2: optional trap-OID filter for metric='trap' rules (empty = any trap).
     trap_oid: Optional[str] = None
+
+    # Per-interface scope for network metrics (if_*): interface name/descr/alias
+    # substring or exact if_index. Empty = all monitored interfaces on the device.
+    target: Optional[str] = None
 
     # E1: optional compound conditions. When non-empty these are the source of
     # truth (combined by condition_logic); the flat metric/operator/threshold
@@ -77,10 +90,11 @@ class AlertRuleUpdate(BaseModel):
     description: Optional[str] = None
     enabled: Optional[bool] = None
 
-    metric: Optional[str] = Field(None, pattern="^(ping_status|rtt|packet_loss|jitter|service_status|trap)$")
+    metric: Optional[str] = Field(None, pattern=f"^({_CONDITION_METRICS}|trap)$")
     operator: Optional[str] = Field(None, pattern="^(>|<|>=|<=|==|!=|eq|neq|gt|lt|gte|lte)$")
     threshold: Optional[float] = None
     trap_oid: Optional[str] = None
+    target: Optional[str] = None
 
     conditions: Optional[list[ConditionItem]] = None
     condition_logic: Optional[str] = Field(None, pattern="^(AND|OR)$")
@@ -127,7 +141,7 @@ _RULE_COLUMNS = (
     "min_duration, max_repeat, schedule_start, schedule_end, schedule_days, "
     "email_subject, email_body, sms_template, "
     "recovery_email_subject, recovery_email_body, recovery_sms_template, "
-    "conditions, condition_logic, trap_oid, "
+    "conditions, condition_logic, trap_oid, target, "
     "created_at, updated_at, created_by"
 )
 
@@ -174,6 +188,7 @@ def _row_to_dict(row) -> dict:
         "conditions": getattr(row, "conditions", None) or None,
         "condition_logic": getattr(row, "condition_logic", None) or "AND",
         "trap_oid": getattr(row, "trap_oid", None),
+        "target": getattr(row, "target", None),
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         "created_by": str(row.created_by) if row.created_by else None,
@@ -224,6 +239,7 @@ async def create_alert_rule(
         "conditions": json.dumps(conditions) if conditions else None,
         "condition_logic": data.condition_logic or "AND",
         "trap_oid": (data.trap_oid or None),
+        "target": (data.target or None),
         "duration": data.min_duration,  # legacy column maps to min_duration
         "device_id": data.device_id,
         "group_id": data.group_id,
@@ -256,7 +272,7 @@ async def create_alert_rule(
         text(
             "INSERT INTO alert_rules "
             "(name, description, enabled, metric, operator, threshold, duration, "
-            "conditions, condition_logic, trap_oid, "
+            "conditions, condition_logic, trap_oid, target, "
             "device_id, group_id, service_check_id, service_check_group_id, "
             "severity, notify_channels, cooldown, "
             "device_type, location, trigger_on, recovery_alert, "
@@ -266,7 +282,7 @@ async def create_alert_rule(
             "created_at, updated_at, created_by) "
             "VALUES "
             "(:name, :description, :enabled, :metric, :operator, :threshold, :duration, "
-            "CAST(:conditions AS jsonb), :condition_logic, :trap_oid, "
+            "CAST(:conditions AS jsonb), :condition_logic, :trap_oid, :target, "
             ":device_id, :group_id, :service_check_id, :service_check_group_id, "
             ":severity, CAST(:notify_channels AS jsonb), :cooldown, "
             ":device_type, :location, :trigger_on, :recovery_alert, "

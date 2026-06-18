@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
 from app.core.database import get_db
+from app.services.email_render import build_alert_email_html
+from app.services.alert_schedule import notifications_allowed, get_configured_timezone
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/alert-engine", tags=["Alert Engine (Internal)"])
@@ -93,17 +95,30 @@ async def _send_sms(gw_config: dict, phones: str, message: str):
             await client.get(url, headers=headers, auth=auth)
 
 
-async def _send_email(gw_config: dict, recipients: str, subject: str, body: str):
-    """Send email via SMTP gateway."""
+async def _send_email(gw_config: dict, recipients: str, subject: str, body: str,
+                      html_body: str | None = None):
+    """Send email via SMTP gateway.
+
+    When ``html_body`` is provided the message is sent as multipart/alternative
+    (plain ``body`` + HTML), so clients render the professional HTML template
+    while text-only clients still get a readable fallback.
+    """
     if not gw_config.get("host"):
         return
 
     recipient_list = [r.strip() for r in recipients.split(",") if r.strip()]
-    msg = MIMEMultipart()
+    if html_body:
+        msg = MIMEMultipart("alternative")
+    else:
+        msg = MIMEMultipart()
     msg["From"] = f"{gw_config.get('from_name', 'ZenPlus')} <{gw_config.get('from_email', '')}>"
     msg["To"] = ", ".join(recipient_list)
     msg["Subject"] = subject
+    # For multipart/alternative the LAST part is the client's preferred form, so
+    # attach plain first, HTML second.
     msg.attach(MIMEText(body, "plain"))
+    if html_body:
+        msg.attach(MIMEText(html_body, "html"))
 
     enc = gw_config.get("encryption", "tls")
     if enc == "ssl":
@@ -388,7 +403,8 @@ async def evaluate_status_change(
                    notify_channels, cooldown,
                    metric, operator, threshold, conditions, condition_logic,
                    email_subject, email_body, sms_template,
-                   recovery_email_subject, recovery_email_body, recovery_sms_template
+                   recovery_email_subject, recovery_email_body, recovery_sms_template,
+                   schedule_start, schedule_end, schedule_days
             FROM alert_rules
             WHERE enabled = true
         """)
@@ -418,6 +434,7 @@ async def evaluate_status_change(
     notifications_sent = 0
     resolved_alerts = 0
     suppressed_alerts = 0
+    _tz = await get_configured_timezone(db)
     suppressing_dependency = await _find_suppressing_dependency(db, event.device_id) if is_down else None
 
     # E1: live metric values for condition evaluation. packet_loss arrives from
@@ -557,6 +574,16 @@ async def evaluate_status_change(
             },
         )
 
+        # Quiet hours: suppress outbound notifications outside the rule's
+        # schedule window. Recovery ("resolved") notices still go out so an
+        # operator isn't left thinking something is still down. The alert row
+        # above is always recorded regardless of schedule.
+        if not is_recovery and not notifications_allowed(
+            rule.schedule_start, rule.schedule_end,
+            getattr(rule, "schedule_days", None), _tz,
+        ):
+            continue
+
         # Send notifications to channels
         channel_ids = rule.notify_channels or []
         for ch_id in channel_ids:
@@ -604,7 +631,23 @@ async def evaluate_status_change(
                         gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'smtp' AND is_default = true LIMIT 1"))
                     gw_row = gw_res.first()
                     if gw_row:
-                        await _send_email(dict(gw_row.config), recipients, email_subject, email_body)
+                        email_html = build_alert_email_html({
+                            "severity": rule.severity or "warning",
+                            "resolved": is_recovery,
+                            "status": variables.get("status"),
+                            "title": rule.name or "Alert",
+                            "hostname": event.hostname,
+                            "ip_address": event.ip_address,
+                            "message": email_body,
+                            "details": [
+                                ("Group", variables.get("group")),
+                                ("Location", variables.get("location")),
+                                ("Device type", variables.get("device_type")),
+                            ],
+                            "timestamp": now.isoformat(),
+                        })
+                        await _send_email(dict(gw_row.config), recipients, email_subject,
+                                          email_body, html_body=email_html)
                         notifications_sent += 1
 
                 elif ch.type in ("webhook", "slack", "teams", "discord", "pagerduty"):
@@ -701,7 +744,8 @@ async def evaluate_service_status_change(
                    service_check_id, service_check_group_id, metric,
                    notify_channels, cooldown,
                    email_subject, email_body, sms_template,
-                   recovery_email_subject, recovery_email_body, recovery_sms_template
+                   recovery_email_subject, recovery_email_body, recovery_sms_template,
+                   schedule_start, schedule_end, schedule_days
             FROM alert_rules
             WHERE enabled = true
               AND (service_check_id IS NOT NULL OR service_check_group_id IS NOT NULL OR metric = 'service_status')
@@ -737,6 +781,7 @@ async def evaluate_service_status_change(
     notifications_sent = 0
     resolved_alerts = 0
     suppressed_alerts = 0
+    _tz = await get_configured_timezone(db)
     suppressing_dependency = await _find_suppressing_dependency(db, event.device_id) if (is_down and event.device_id) else None
 
     for rule in rules:
@@ -861,6 +906,13 @@ async def evaluate_service_status_change(
             },
         )
 
+        # Quiet hours (see device path). Recovery notices are never suppressed.
+        if not is_recovery and not notifications_allowed(
+            rule.schedule_start, rule.schedule_end,
+            getattr(rule, "schedule_days", None), _tz,
+        ):
+            continue
+
         channel_ids = rule.notify_channels or []
         for ch_id in channel_ids:
             try:
@@ -899,7 +951,23 @@ async def evaluate_service_status_change(
                         gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'smtp' AND is_default = true LIMIT 1"))
                     gw_row = gw_res.first()
                     if gw_row:
-                        await _send_email(dict(gw_row.config), recipients, email_subject, email_body)
+                        email_html = build_alert_email_html({
+                            "severity": rule.severity or "warning",
+                            "resolved": is_recovery,
+                            "status": variables.get("status"),
+                            "title": rule.name or "Service alert",
+                            "hostname": variables.get("check_name") or variables.get("hostname"),
+                            "message": email_body,
+                            "details": [
+                                ("Check", variables.get("check_name")),
+                                ("Type", variables.get("check_type")),
+                                ("Target", variables.get("target")),
+                                ("Error", variables.get("error")),
+                            ],
+                            "timestamp": now.isoformat(),
+                        })
+                        await _send_email(dict(gw_row.config), recipients, email_subject,
+                                          email_body, html_body=email_html)
                         notifications_sent += 1
 
             except Exception as exc:

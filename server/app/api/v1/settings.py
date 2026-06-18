@@ -965,17 +965,22 @@ async def test_channel(
 
         recipient_list = [r.strip() for r in recipients.split(",") if r.strip()]
         try:
-            msg = MIMEMultipart()
+            from app.services.email_render import build_alert_email_html, build_alert_email_text
+            test_ctx = {
+                "severity": "info",
+                "status": "TEST",
+                "title": "Test notification",
+                "hostname": row.name,
+                "message": "This is a test email from ZenPlus. If you received it, "
+                           "this notification channel is configured correctly.",
+                "details": [("Channel", row.name), ("Recipients", recipients)],
+            }
+            msg = MIMEMultipart("alternative")
             msg["From"] = f"{smtp_cfg.from_name} <{smtp_cfg.from_email}>"
             msg["To"] = ", ".join(recipient_list)
             msg["Subject"] = "ZenPlus Test Notification"
-            msg.attach(MIMEText(
-                f"This is a test email from ZenPlus Monitoring System.\n\n"
-                f"Channel: {row.name}\n"
-                f"Recipients: {recipients}\n\n"
-                f"If you received this, your email notification channel is working correctly.",
-                "plain",
-            ))
+            msg.attach(MIMEText(build_alert_email_text(test_ctx), "plain"))
+            msg.attach(MIMEText(build_alert_email_html(test_ctx), "html"))
 
             if smtp_cfg.encryption == "ssl":
                 server = smtplib.SMTP_SSL(smtp_cfg.host, smtp_cfg.port, timeout=10)

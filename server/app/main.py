@@ -86,10 +86,13 @@ def create_app() -> FastAPI:
         # Host-metric alert rules: periodic threshold evaluation against ClickHouse.
         from app.services.host_alert_service import host_alert_evaluator_loop
         app.state.host_alert_evaluator = asyncio.create_task(host_alert_evaluator_loop())
+        # Network-device (SNMP) alert rules: periodic threshold evaluation against ClickHouse.
+        from app.services.network_alert_service import network_alert_evaluator_loop
+        app.state.network_alert_evaluator = asyncio.create_task(network_alert_evaluator_loop())
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("health_sweeper", "discovery_scheduler", "host_alert_evaluator"):
+        for attr in ("health_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

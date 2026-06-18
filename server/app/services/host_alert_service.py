@@ -121,7 +121,19 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
                 rcpt = cfg.get("recipients", "")
                 gw = await _gateway_config(db, ch, "smtp")
                 if rcpt and gw:
-                    await _send_email(gw, rcpt, ctx["subject"], ctx["body"])
+                    from app.services.email_render import build_alert_email_html
+                    html_body = build_alert_email_html({
+                        "severity": ctx.get("severity"),
+                        "status": ctx.get("status"),
+                        "resolved": (ctx.get("status") == "RESOLVED"),
+                        "title": ctx.get("rule_name"),
+                        "hostname": ctx.get("hostname"),
+                        "ip_address": ctx.get("ip_address"),
+                        "message": ctx.get("message") or ctx.get("body"),
+                        "details": ctx.get("details"),
+                        "timestamp": ctx.get("triggered_at"),
+                    })
+                    await _send_email(gw, rcpt, ctx["subject"], ctx["body"], html_body=html_body)
                     sent += 1
             elif ch.type == "sms":
                 phones = cfg.get("phone_numbers", "")
@@ -190,12 +202,14 @@ def _message(rule, hostname: str, detail: str) -> str:
 async def evaluate_host_rules(db: AsyncSession) -> dict[str, int]:
     rules = (await db.execute(text(
         "SELECT id, name, metric, operator, threshold, severity, min_duration, "
-        "notify_channels, server_id, target "
+        "notify_channels, server_id, target, schedule_start, schedule_end, schedule_days "
         "FROM alert_rules WHERE enabled = true AND metric LIKE 'host\\_%'"
     ))).all()
     if not rules:
         return {"rules": 0, "raised": 0, "resolved": 0}
 
+    from app.services.alert_schedule import notifications_allowed, get_configured_timezone
+    _tz = await get_configured_timezone(db)
     servers = await _servers(db)
     fs_worst = await _fs_worst(db)
     # Pre-fetch ClickHouse fleet values once per metric/window combination.
@@ -227,6 +241,13 @@ async def evaluate_host_rules(db: AsyncSession) -> dict[str, int]:
                 if created:
                     raised += 1
                     await db.commit()
+                    # Quiet hours: alert is recorded above; only suppress the
+                    # outbound notification when outside the rule's schedule.
+                    if not notifications_allowed(
+                        getattr(rule, "schedule_start", None), getattr(rule, "schedule_end", None),
+                        getattr(rule, "schedule_days", None), _tz,
+                    ):
+                        continue
                     msg = _message(rule, hostname, detail)
                     await dispatch_to_channels(db, rule.notify_channels or [], {
                         "subject": f"[{(rule.severity or 'warning').upper()}] {rule.name} — {hostname}",
