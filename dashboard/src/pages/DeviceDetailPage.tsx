@@ -63,7 +63,7 @@ import {
   YAxis,
 } from 'recharts'
 import { api } from '@/lib/api'
-import { apiErrorMessage, formatBps, formatBytes, formatDuration, relativeTime, timeAxisTickFormatter, timeTooltipLabelFormatter } from '@/lib/utils'
+import { apiErrorMessage, cn, formatBps, formatBytes, formatDuration, relativeTime, timeAxisTickFormatter, timeTooltipLabelFormatter } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -627,6 +627,11 @@ function DashboardSection({
           subtitle={uptimeSec != null ? `Up ${uptimeDaysCompact}` : undefined}
         />
       </div>
+
+      {/* ═══════════ Availability timeline (full width) ═══════════ */}
+      {device.ping_enabled && (
+        <AvailabilityTimelineCard points={pts} rangeLabel={range.label} />
+      )}
 
       {/* ═══════════ Middle row (3 cols) ═══════════ */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,0.95fr)_minmax(0,0.8fr)]">
@@ -1381,6 +1386,80 @@ function InventoryConfigCard({
             </div>
           </div>
         </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+/* ════════════════════════════════════════════════════════════
+   Availability Timeline — horizontal green/red up/down strip
+   ════════════════════════════════════════════════════════════ */
+
+function AvailabilityTimelineCard({
+  points, rangeLabel,
+}: {
+  points: { timestamp: string; is_up: boolean }[]
+  rangeLabel: string
+}) {
+  const total = points.length
+  const upCount = points.filter(
+    (p) => p.is_up === true || (p.is_up as unknown as number) === 1 || (typeof p.is_up === 'number' && p.is_up > 0.5),
+  ).length
+  const pct = total ? (upCount / total) * 100 : null
+  const pctColor =
+    pct == null ? 'text-muted' : pct > 99 ? 'text-success' : pct > 95 ? 'text-warning' : 'text-danger'
+
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-baseline gap-2">
+            <h3 className="text-sm font-semibold">Availability Timeline</h3>
+            <span className="truncate text-[11px] font-medium text-muted">
+              {rangeLabel}{total ? ` · ${total} checks` : ''}
+            </span>
+          </div>
+          {pct != null && (
+            <span className={cn('text-xs font-mono font-medium', pctColor)}>{pct.toFixed(2)}% uptime</span>
+          )}
+        </div>
+
+        {total === 0 ? (
+          <div className="flex flex-col items-center gap-1 py-6 text-center">
+            <Activity className="h-5 w-5 text-muted/60" />
+            <div className="text-[11px] font-medium text-text">No availability data in {rangeLabel.toLowerCase()}</div>
+            <div className="text-[10px] text-muted">Ping checks for this device will appear here</div>
+          </div>
+        ) : (
+          <>
+            <div className="flex h-7 gap-[1px] overflow-hidden rounded-lg bg-surface2">
+              {points.map((p, i) => {
+                const isUp =
+                  p.is_up === true || (p.is_up as unknown as number) === 1 || (typeof p.is_up === 'number' && p.is_up > 0.5)
+                return (
+                  <div
+                    key={i}
+                    className="min-w-[2px] flex-1 transition-opacity hover:opacity-70"
+                    style={{ backgroundColor: isUp ? '#22C55E' : '#EF4444' }}
+                    title={`${timeTooltipLabelFormatter(p.timestamp)} — ${isUp ? 'UP' : 'DOWN'}`}
+                  />
+                )
+              })}
+            </div>
+            <div className="mt-1 flex items-center justify-between">
+              <span className="text-[10px] text-muted">{timeTooltipLabelFormatter(points[0]!.timestamp)}</span>
+              <div className="flex items-center gap-3">
+                <span className="flex items-center gap-1 text-[10px] text-muted">
+                  <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: '#22C55E' }} />Up
+                </span>
+                <span className="flex items-center gap-1 text-[10px] text-muted">
+                  <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: '#EF4444' }} />Down
+                </span>
+              </div>
+              <span className="text-[10px] text-muted">{timeTooltipLabelFormatter(points[total - 1]!.timestamp)}</span>
+            </div>
+          </>
+        )}
       </CardContent>
     </Card>
   )
