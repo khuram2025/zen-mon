@@ -10,6 +10,10 @@ from app.api.v1 import sensors as sensors_admin_api
 from app.api.v1 import sensor_api
 from app.api.v1 import agents as agents_runtime_api
 from app.api.v1 import servers as servers_admin_api
+from app.api.v1 import apm as apm_control_api
+from app.api.v1 import apm_ingest as apm_ingest_api
+from app.api.v1 import apm_traces as apm_traces_api
+from app.api.v1 import apm_services as apm_services_api
 from app.api.websocket import realtime
 
 settings = get_settings()
@@ -71,6 +75,14 @@ def create_app() -> FastAPI:
     app.include_router(servers_admin_api.fleet_router, prefix="/api/v1")
     app.include_router(servers_admin_api.overview_router, prefix="/api/v1")
     app.include_router(servers_admin_api.baselines_router, prefix="/api/v1")
+    # APM control plane (ingest keys, enrollment tokens) under /api/v1/apm/*
+    app.include_router(apm_control_api.router, prefix="/api/v1")
+    # APM trace explorer + waterfall under /api/v1/apm/traces
+    app.include_router(apm_traces_api.router, prefix="/api/v1")
+    # APM services RED + service map under /api/v1/apm/services|service-map
+    app.include_router(apm_services_api.router, prefix="/api/v1")
+    # APM OTLP receiver mounted at ROOT so the path is exactly /v1/traces.
+    app.include_router(apm_ingest_api.router)
 
     @app.get("/api/v1/system/health")
     async def health_check():
@@ -93,13 +105,18 @@ def create_app() -> FastAPI:
         # Scheduled reports: fire due report schedules (render + email delivery).
         from app.services.report_scheduler import report_scheduler_loop
         app.state.report_scheduler = asyncio.create_task(report_scheduler_loop())
+        # APM OTLP fallback receiver: buffered batch writer to ClickHouse apm_spans.
+        await apm_ingest_api.start_batch_writer()
+        # APM service registry: upsert apm_services + denormalise health from RED.
+        app.state.apm_service_registry = asyncio.create_task(apm_services_api.apm_service_registry_loop())
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("health_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler"):
+        for attr in ("health_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()
+        await apm_ingest_api.stop_batch_writer()
 
     return app
 

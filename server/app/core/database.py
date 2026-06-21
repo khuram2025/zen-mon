@@ -49,3 +49,31 @@ def get_clickhouse_client():
             password=settings.CLICKHOUSE_PASSWORD,
         )
     return _clickhouse_client
+
+
+import threading
+
+_ch_threadlocal = threading.local()
+
+
+def get_ch_client():
+    """Thread-local ClickHouse client.
+
+    A single ``clickhouse_connect`` client session does NOT allow concurrent
+    queries ("Attempt to execute concurrent queries within the same session").
+    APM runs all ClickHouse work inside the threadpool (``asyncio.to_thread``),
+    so each worker thread gets its own client/session. Thread count (and thus
+    open clients) is bounded by the threadpool size, so this does not leak fds
+    the way a per-request client would.
+    """
+    c = getattr(_ch_threadlocal, "client", None)
+    if c is None:
+        c = clickhouse_connect.get_client(
+            host=settings.CLICKHOUSE_HOST,
+            port=settings.CLICKHOUSE_HTTP_PORT,
+            database=settings.CLICKHOUSE_DB,
+            username=settings.CLICKHOUSE_USER,
+            password=settings.CLICKHOUSE_PASSWORD,
+        )
+        _ch_threadlocal.client = c
+    return c

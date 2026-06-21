@@ -35,6 +35,13 @@ import { ManualMapsEntry } from '@/pages/ManualMapsEntry'
 import { ReportsPage } from '@/pages/ReportsPage'
 import { SensorsPage } from '@/pages/SensorsPage'
 import { NetflowPage, NetflowDevicePage, NetflowSectionPage } from '@/pages/NetflowPage'
+import { ApmSettingsPage } from '@/pages/apm/ApmSettingsPage'
+import { TraceExplorerPage } from '@/pages/apm/TraceExplorerPage'
+import { TraceWaterfallPage } from '@/pages/apm/TraceWaterfallPage'
+import { ApmOverviewPage } from '@/pages/apm/ApmOverviewPage'
+import { ServicesPage as ApmServicesPage } from '@/pages/apm/ServicesPage'
+import { ServiceDetailPage as ApmServiceDetailPage } from '@/pages/apm/ServiceDetailPage'
+import { ServiceMapPage as ApmServiceMapPage } from '@/pages/apm/ServiceMapPage'
 import { ServersDashboardPage } from '@/pages/servers/ServersDashboardPage'
 import { ServerInventoryPage } from '@/pages/servers/ServersPage'
 import { ServerDetailPage } from '@/pages/servers/ServerDetailPage'
@@ -145,6 +152,13 @@ export default function App() {
         <Route path="netflow/:section" element={<NetflowSectionPage />} />
         <Route path="mibs" element={<MibLibraryPage />} />
         <Route path="sensors" element={<SensorsPage />} />
+        <Route path="apm" element={<ApmOverviewPage />} />
+        <Route path="apm/services" element={<ApmServicesPage />} />
+        <Route path="apm/services/:name" element={<ApmServiceDetailPage />} />
+        <Route path="apm/service-map" element={<ApmServiceMapPage />} />
+        <Route path="apm/traces" element={<TraceExplorerPage />} />
+        <Route path="apm/traces/:traceId" element={<TraceWaterfallPage />} />
+        <Route path="apm/settings" element={<ApmSettingsPage />} />
         <Route path="alerts" element={<AlertsPage />} />
         <Route path="alerts/:id" element={<AlertDetailPage />} />
         <Route path="alert-rules" element={<AlertRulesPage />} />

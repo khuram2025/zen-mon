@@ -10,6 +10,7 @@ import {
   FileBarChart,
   Plug,
   MapPinned,
+  Layers,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -17,6 +18,7 @@ const navItems = [
   { path: '/', icon: LayoutDashboard, label: 'Dashboard' },
   { path: '/devices', icon: Monitor, label: 'Devices' },
   { path: '/services', icon: ShieldCheck, label: 'Services' },
+  { path: '/apm/settings', icon: Layers, label: 'APM' },
   { path: '/maps/manual', icon: MapPinned, label: 'Manual Map' },
   { path: '/sensors', icon: Plug, label: 'Sensors' },
   { path: '/discovery', icon: Radar, label: 'Discovery' },
