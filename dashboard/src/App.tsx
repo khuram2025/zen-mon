@@ -42,6 +42,8 @@ import { ApmOverviewPage } from '@/pages/apm/ApmOverviewPage'
 import { ServicesPage as ApmServicesPage } from '@/pages/apm/ServicesPage'
 import { ServiceDetailPage as ApmServiceDetailPage } from '@/pages/apm/ServiceDetailPage'
 import { ServiceMapPage as ApmServiceMapPage } from '@/pages/apm/ServiceMapPage'
+import { ErrorsInboxPage } from '@/pages/apm/ErrorsInboxPage'
+import { ErrorIssueDetailPage } from '@/pages/apm/ErrorIssueDetailPage'
 import { ServersDashboardPage } from '@/pages/servers/ServersDashboardPage'
 import { ServerInventoryPage } from '@/pages/servers/ServersPage'
 import { ServerDetailPage } from '@/pages/servers/ServerDetailPage'
@@ -156,6 +158,8 @@ export default function App() {
         <Route path="apm/services" element={<ApmServicesPage />} />
         <Route path="apm/services/:name" element={<ApmServiceDetailPage />} />
         <Route path="apm/service-map" element={<ApmServiceMapPage />} />
+        <Route path="apm/errors" element={<ErrorsInboxPage />} />
+        <Route path="apm/errors/:id" element={<ErrorIssueDetailPage />} />
         <Route path="apm/traces" element={<TraceExplorerPage />} />
         <Route path="apm/traces/:traceId" element={<TraceWaterfallPage />} />
         <Route path="apm/settings" element={<ApmSettingsPage />} />

@@ -14,6 +14,7 @@ from app.api.v1 import apm as apm_control_api
 from app.api.v1 import apm_ingest as apm_ingest_api
 from app.api.v1 import apm_traces as apm_traces_api
 from app.api.v1 import apm_services as apm_services_api
+from app.api.v1 import apm_errors as apm_errors_api
 from app.api.websocket import realtime
 
 settings = get_settings()
@@ -81,6 +82,8 @@ def create_app() -> FastAPI:
     app.include_router(apm_traces_api.router, prefix="/api/v1")
     # APM services RED + service map under /api/v1/apm/services|service-map
     app.include_router(apm_services_api.router, prefix="/api/v1")
+    # APM error tracking / issues under /api/v1/apm/errors
+    app.include_router(apm_errors_api.router, prefix="/api/v1")
     # APM OTLP receiver mounted at ROOT so the path is exactly /v1/traces.
     app.include_router(apm_ingest_api.router)
 

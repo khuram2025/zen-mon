@@ -195,6 +195,11 @@ This document is the **sprint-ready execution contract** for ZenPlus Application
 
 **Goal:** `apm_exceptions` (CH) + `apm_error_issues` (PG triage state); fingerprint grouping in the collector; Errors inbox + issue detail with triage + assignee.
 
+> **Implementation status — 2026-06-21 (SHIPPED & verified).**
+> **Done:** ingest extracts OTel `exception` span-events into `apm_exceptions` with a **`group_id` fingerprint** = sha1(type + normalized stack/message; UUIDs/hex/line-numbers stripped) — verified 5 occurrences with varying line numbers + hex addresses collapse to one issue; error-status spans without an exception event are **synthesized** into an `Error` issue. `apm_errors.py`: `GET /apm/errors` (CH group occurrences + PG triage join, status/service/env filters + status counts), `GET /apm/errors/{group_id}` (occurrences, sample stack, hourly trend, per-service, representative trace_id), `PATCH /apm/errors/{group_id}` (status/assignee/resolved_in_version → `apm_error_issues`, resolving/creating the service row). UI: `ErrorsInboxPage` (status chips + filters + table), `ErrorIssueDetailPage` (KPIs, trend chart, stack, recent occurrences with one-click trace links, triage panel), errors tab on `ServiceDetailPage`, `Errors` nav + breadcrumbs. Verified via curl (grouping/synthesis/triage/status-filter) and Playwright (inbox → detail → change status to Ignored → Save → badge + inbox update).
+> **Fixed:** ClickHouse `FixedString` columns (`group_id`/`trace_id`) decode to bytes — now decoded to str before use (asyncpg rejected bytes in the triage join).
+> **Deferred:** fingerprinting runs in the FastAPI ingest path (the Go collector is the scale path). Triage is keyed per (group_id, service) with the group's dominant service.
+
 ### Tasks — Collector (Go)
 - [ ] Exception extraction from span events + `group_id` fingerprint = hash(`exception_type` + normalized stack; strip UUIDs/hex/line-noise). *AC: two occurrences of the same error in different requests share `group_id`; an unrelated error differs.*
 - [ ] Emit `apm_exceptions` rows (type/message/stack/escaped, `trace_id`/`span_id`, `http_route`, `resource_tags`). *AC: every error span yields one exception row linked to its trace.*

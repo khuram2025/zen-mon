@@ -19,7 +19,9 @@ import binascii
 import hashlib
 import json
 import logging
+import re
 import time
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
@@ -47,6 +49,32 @@ SPAN_COLUMNS = [
     "links_trace_id", "links_span_id", "ts_bucket", "deployment_id",
 ]
 RESOURCE_COLUMNS = ["fingerprint", "labels", "seen_at", "ts_bucket"]
+EXC_COLUMNS = [
+    "timestamp", "error_id", "group_id", "trace_id", "span_id", "service_name",
+    "env", "service_version", "exception_type", "exception_message",
+    "exception_stack", "exception_escaped", "http_route", "resource_tags", "ts_bucket",
+]
+
+# Stack/message normalisation for stable fingerprints — collapse line-noise so
+# the same logical error groups regardless of addresses / ids / line numbers.
+_NORM_SUBS = [
+    (re.compile(r"0x[0-9a-fA-F]+"), "0xADDR"),
+    (re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"), "UUID"),
+    (re.compile(r":\d+"), ":N"),
+    (re.compile(r"\b\d+\b"), "N"),
+]
+
+
+def _normalize(s: str) -> str:
+    for rx, rep in _NORM_SUBS:
+        s = rx.sub(rep, s)
+    return s
+
+
+def exception_group_id(exc_type: str, stack: str, message: str) -> str:
+    """16-hex fingerprint of (type + normalized stack||message)."""
+    basis = (exc_type or "") + "|" + _normalize(stack or message or "")
+    return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:16]
 
 _ZERO_UUID = "00000000-0000-0000-0000-000000000000"
 _SPAN_KIND_STR = {0: "UNSPECIFIED", 1: "INTERNAL", 2: "SERVER", 3: "CLIENT",
@@ -126,6 +154,7 @@ def decode_otlp_traces_json(payload: dict, default_env: str | None) -> tuple[lis
     """
     span_rows: list = []
     res_rows: dict = {}
+    exc_rows: list = []
     rejected = 0
 
     for rs in payload.get("resourceSpans", []) or []:
@@ -192,6 +221,41 @@ def decode_otlp_traces_json(payload: dict, default_env: str | None) -> tuple[lis
                         _ZERO_UUID,                                    # deployment_id
                     ])
                     produced_spans = True
+
+                    # ── exceptions -> apm_exceptions ──
+                    tid = _norm_id(sp.get("traceId", ""), 32)
+                    sid = _norm_id(sp.get("spanId", ""), 16)
+                    route = a_s.get("http.route") or ""
+                    rtags = {k: str(v) for k, v in all_res.items() if v is not None}
+                    found_exc = False
+                    for e in ev:
+                        if (e.get("name") or "") != "exception":
+                            continue
+                        ea = {}
+                        for at in e.get("attributes", []) or []:
+                            av = at.get("value") or {}
+                            ea[at.get("key")] = av.get("stringValue") or av.get("intValue") or av.get("boolValue")
+                        etype = ea.get("exception.type") or "Exception"
+                        emsg = ea.get("exception.message") or ""
+                        estack = ea.get("exception.stacktrace") or ""
+                        eesc = 1 if str(ea.get("exception.escaped")).lower() in ("true", "1") else 0
+                        et_ns = int(e.get("timeUnixNano") or start_ns)
+                        exc_rows.append([
+                            _ts_from_nano(et_ns), str(uuid.uuid4()),
+                            exception_group_id(etype, estack, emsg), tid, sid,
+                            service_name, env, service_version, etype, emsg, estack,
+                            eesc, route, rtags, int(ts_bucket),
+                        ])
+                        found_exc = True
+                    if not found_exc and scode == 2:
+                        # error-status span with no exception event -> synthesize one
+                        emsg = (status.get("message") or "") or sp.get("name", "")
+                        exc_rows.append([
+                            _ts_from_nano(start_ns), str(uuid.uuid4()),
+                            exception_group_id("Error", "", f"{service_name}|{sp.get('name','')}"),
+                            tid, sid, service_name, env, service_version, "Error", emsg, "",
+                            0, route, rtags, int(ts_bucket),
+                        ])
                 except Exception:  # one bad span never sinks the batch
                     rejected += 1
                     continue
@@ -199,7 +263,7 @@ def decode_otlp_traces_json(payload: dict, default_env: str | None) -> tuple[lis
         if produced_spans and fp not in res_rows:
             res_rows[fp] = [fp, res_json, datetime.now(timezone.utc), 0]
 
-    return span_rows, res_rows, rejected
+    return span_rows, res_rows, exc_rows, rejected
 
 
 # ── batch writer ─────────────────────────────────────────────────────────────
@@ -210,11 +274,13 @@ def _insert(table: str, rows: list, cols: list) -> None:
     get_ch_client().insert(table, rows, column_names=cols, database="zenplus")
 
 
-async def _flush(span_rows: list, res_rows: dict) -> None:
+async def _flush(span_rows: list, res_rows: dict, exc_rows: list) -> None:
     if span_rows:
         await asyncio.to_thread(_insert, "apm_spans", span_rows, SPAN_COLUMNS)
     if res_rows:
         await asyncio.to_thread(_insert, "apm_traces_resource", list(res_rows.values()), RESOURCE_COLUMNS)
+    if exc_rows:
+        await asyncio.to_thread(_insert, "apm_exceptions", exc_rows, EXC_COLUMNS)
     STATS["flushes"] += 1
     STATS["accepted_spans"] += len(span_rows)
 
@@ -223,28 +289,30 @@ async def _writer_loop() -> None:
     assert _queue is not None
     spans: list = []
     res: dict = {}
+    excs: list = []
     while True:
         try:
             item = await asyncio.wait_for(_queue.get(), timeout=BATCH_INTERVAL_S)
             spans.extend(item[0])
             res.update(item[1])
+            excs.extend(item[2])
             _queue.task_done()
         except asyncio.TimeoutError:
             pass
         except asyncio.CancelledError:
-            if spans:
+            if spans or excs:
                 try:
-                    await _flush(spans, res)
+                    await _flush(spans, res, excs)
                 except Exception:
                     logger.exception("apm final flush failed")
             raise
-        if spans and (len(spans) >= BATCH_MAX_ROWS or _queue.empty()):
+        if (spans or excs) and (len(spans) >= BATCH_MAX_ROWS or _queue.empty()):
             try:
-                await _flush(spans, res)
+                await _flush(spans, res, excs)
             except Exception:
                 STATS["dropped_spans"] += len(spans)
                 logger.exception("apm flush to ClickHouse failed; dropped %d spans", len(spans))
-            spans, res = [], {}
+            spans, res, excs = [], {}, []
 
 
 async def start_batch_writer() -> None:
@@ -293,13 +361,13 @@ async def otlp_traces(
     except json.JSONDecodeError:
         raise HTTPException(400, "Invalid OTLP/JSON body")
 
-    span_rows, res_rows, rejected = decode_otlp_traces_json(payload, key.get("env_name"))
+    span_rows, res_rows, exc_rows, rejected = decode_otlp_traces_json(payload, key.get("env_name"))
 
     if span_rows:
         if _queue is None:
             raise HTTPException(503, "APM ingest not ready")
         try:
-            _queue.put_nowait((span_rows, res_rows))
+            _queue.put_nowait((span_rows, res_rows, exc_rows))
         except asyncio.QueueFull:
             STATS["rejected_spans"] += len(span_rows)
             response.headers["Retry-After"] = "1"

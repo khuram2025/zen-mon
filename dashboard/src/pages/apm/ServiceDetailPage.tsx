@@ -7,13 +7,14 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { HealthBadge, KpiTile, fmtMs, fmtRps, fmtPct, HEALTH_COLOR } from '@/components/apm/shared'
+import { ErrorStatusBadge } from '@/components/apm/errorShared'
 
 interface ServiceRED { name: string; envs: string[]; health: string; request_count: number; rps: number; error_rate: number; p50_ms: number; p95_ms: number; p99_ms: number; apdex: number }
 interface REDPoint { timestamp: string; rps: number; error_rate: number; p50_ms: number; p95_ms: number }
 interface Op { operation: string; request_count: number; rps: number; error_rate: number; p95_ms: number }
 
 const RANGES = ['15m', '1h', '6h', '24h']
-const TABS = ['overview', 'performance'] as const
+const TABS = ['overview', 'performance', 'errors'] as const
 
 function REDChart({ data, dataKey, color, label, fmt }: { data: REDPoint[]; dataKey: string; color: string; label: string; fmt: (v: number) => string }) {
   return (
@@ -53,6 +54,7 @@ export function ServiceDetailPage() {
   const summary = useQuery<ServiceRED>({ queryKey: ['apm', 'service', name, { range }], queryFn: async () => (await api.get(`/apm/services/${encodeURIComponent(name)}?range=${range}`)).data, refetchInterval: 15000 })
   const red = useQuery<REDPoint[]>({ queryKey: ['apm', 'service-red', name, { range }], queryFn: async () => (await api.get(`/apm/services/${encodeURIComponent(name)}/red?range=${range}`)).data })
   const ops = useQuery<Op[]>({ queryKey: ['apm', 'service-ops', name, { range }], queryFn: async () => (await api.get(`/apm/services/${encodeURIComponent(name)}/operations?range=${range}`)).data })
+  const errs = useQuery<{ issues: any[] }>({ queryKey: ['apm', 'errors', { service: name }], queryFn: async () => (await api.get(`/apm/errors?range=24h&service=${encodeURIComponent(name)}`)).data, enabled: tab === 'errors' })
 
   const s = summary.data
   const points = red.data ?? []
@@ -128,6 +130,27 @@ export function ServiceDetailPage() {
               <REDChart data={points} dataKey="rps" color="var(--accent)" label="Throughput (req/s)" fmt={(v) => v.toFixed(2)} />
               <REDChart data={points} dataKey="error_rate" color={HEALTH_COLOR.critical} label="Error rate" fmt={(v) => `${(v * 100).toFixed(1)}%`} />
             </div>
+          )}
+
+          {tab === 'errors' && (
+            <Card>
+              <CardContent className="p-0">
+                <Table>
+                  <THead><Tr><Th>Error</Th><Th className="text-right">Events</Th><Th className="text-right">Traces</Th><Th>Status</Th></Tr></THead>
+                  <TBody>
+                    {(errs.data?.issues ?? []).map((e) => (
+                      <Tr key={e.group_id} className="cursor-pointer hover:bg-[var(--bg-tertiary)]" onClick={() => navigate(`/apm/errors/${e.group_id}`)}>
+                        <Td><div className="font-medium text-[var(--text-primary)]">{e.exception_type}</div><div className="text-xs text-[var(--text-muted)] truncate max-w-md">{e.message}</div></Td>
+                        <Td className="text-right font-mono text-xs">{e.occurrences}</Td>
+                        <Td className="text-right font-mono text-xs">{e.traces}</Td>
+                        <Td><ErrorStatusBadge status={e.status} /></Td>
+                      </Tr>
+                    ))}
+                    {(errs.data?.issues ?? []).length === 0 && <Tr><Td colSpan={4} className="text-center text-[var(--text-muted)] py-6">No errors for this service.</Td></Tr>}
+                  </TBody>
+                </Table>
+              </CardContent>
+            </Card>
           )}
         </>
       )}
