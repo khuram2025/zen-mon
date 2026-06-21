@@ -34,7 +34,9 @@ import { Input } from '@/components/ui/Input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
 import { Switch } from '@/components/ui/Switch'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { toast } from '@/components/ui/Toast'
+import { RoutingTab } from '@/pages/channels/RoutingTab'
 
 type ChannelType = 'email' | 'sms' | 'webhook' | 'slack' | 'telegram'
 type GatewayType = 'smtp' | 'sms'
@@ -134,6 +136,7 @@ export function ChannelsPage() {
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<Channel | null>(null)
   const [deleting, setDeleting] = useState<Channel | null>(null)
+  const [tab, setTab] = useState<'channels' | 'routing'>('channels')
 
   const { data: channels = [], isLoading: loadingChannels, error: channelsError } = useQuery<Channel[]>({
     queryKey: ['settings', 'channels'],
@@ -200,18 +203,27 @@ export function ChannelsPage() {
             </div>
           </div>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" onClick={() => navigate('/gateways')}>
-            <Settings className="h-4 w-4" />
-            Gateways
-          </Button>
-          <Button onClick={() => openCreate()}>
-            <Plus className="h-4 w-4" />
-            New channel
-          </Button>
-        </div>
+        {tab === 'channels' && (
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={() => navigate('/gateways')}>
+              <Settings className="h-4 w-4" />
+              Gateways
+            </Button>
+            <Button onClick={() => openCreate()}>
+              <Plus className="h-4 w-4" />
+              New channel
+            </Button>
+          </div>
+        )}
       </div>
 
+      <Tabs value={tab} onValueChange={(v) => setTab(v as 'channels' | 'routing')}>
+        <TabsList>
+          <TabsTrigger value="channels">Channels</TabsTrigger>
+          <TabsTrigger value="routing">Routing &amp; Schedules</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="channels" className="space-y-5">
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
         <MetricCard icon={ShieldCheck} label="Enabled Channels" value={summary.enabled} sub={`${summary.disabled} disabled`} tone="success" />
         <MetricCard icon={Settings} label="Active Gateways" value={summary.gatewayReady} sub={`${gateways.length} configured`} tone="info" />
@@ -425,6 +437,12 @@ export function ChannelsPage() {
           </Card>
         </div>
       </div>
+        </TabsContent>
+
+        <TabsContent value="routing">
+          <RoutingTab />
+        </TabsContent>
+      </Tabs>
 
       <ChannelFormDialog
         open={formOpen}

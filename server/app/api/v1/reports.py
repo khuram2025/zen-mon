@@ -2,8 +2,9 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, HTMLResponse
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -166,6 +167,30 @@ async def get_inventory_data(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Inventory report data failed: {e}")
+
+
+@router.get("/shared/{token}", response_class=HTMLResponse)
+async def view_shared_report(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Token-gated, read-only HTML view of a generated report.
+
+    Intentionally unauthenticated so email recipients (who are not logged in)
+    can open the "View full report" link. The 32+ char random token is the
+    capability; rows can carry an optional expires_at.
+    """
+    row = (await db.execute(
+        text("SELECT html, expires_at FROM report_runs WHERE token = :t"),
+        {"t": token},
+    )).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Report not found or expired")
+    if row.expires_at is not None:
+        from datetime import datetime, timezone
+        if row.expires_at < datetime.now(timezone.utc):
+            raise HTTPException(status_code=410, detail="This report link has expired")
+    return HTMLResponse(content=row.html)
 
 
 @router.get("/types")

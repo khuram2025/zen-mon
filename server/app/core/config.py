@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     API_HOST: str = "0.0.0.0"
     API_PORT: int = 8000
+    # Public base URL of this appliance (no trailing slash), used to build
+    # absolute links in outbound emails (e.g. scheduled-report share links).
+    # Falls back to the company system-setting 'base_url' when empty.
+    APP_BASE_URL: str = ""
 
     # PostgreSQL
     DATABASE_URL: str = "postgresql+asyncpg://zenplus:changeme@localhost:5432/zenplus"

@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
-from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, discovery, discovery_v2, users, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, host_alert_rules
+from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, report_schedules, discovery, discovery_v2, users, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, host_alert_rules
 from app.api.v1 import settings as settings_api
 from app.api.v1 import sensors as sensors_admin_api
 from app.api.v1 import sensor_api
@@ -48,6 +48,7 @@ def create_app() -> FastAPI:
     app.include_router(service_checks.maintenance_router, prefix="/api/v1")
     app.include_router(service_checks.templates_router, prefix="/api/v1")
     app.include_router(reports.router, prefix="/api/v1")
+    app.include_router(report_schedules.router, prefix="/api/v1")
     app.include_router(realtime.router, prefix="/api/v1")
     app.include_router(discovery.router, prefix="/api/v1")
     app.include_router(discovery_v2.router, prefix="/api/v1")
@@ -89,10 +90,13 @@ def create_app() -> FastAPI:
         # Network-device (SNMP) alert rules: periodic threshold evaluation against ClickHouse.
         from app.services.network_alert_service import network_alert_evaluator_loop
         app.state.network_alert_evaluator = asyncio.create_task(network_alert_evaluator_loop())
+        # Scheduled reports: fire due report schedules (render + email delivery).
+        from app.services.report_scheduler import report_scheduler_loop
+        app.state.report_scheduler = asyncio.create_task(report_scheduler_loop())
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("health_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator"):
+        for attr in ("health_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()
