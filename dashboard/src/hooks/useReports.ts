@@ -163,6 +163,9 @@ export interface InventoryData {
 const STALE_MS = 30_000
 const RETRY_COUNT = 1
 
+/** Keep prior report data visible while the time window refetches. */
+const keepPrev = <T,>(prev: T | undefined) => prev
+
 /**
  * `useTimeRange()` recomputes `toISO` from `Date.now()` on every render. If we
  * key React Query directly on those raw ISO strings, every render mints a
@@ -183,6 +186,7 @@ export function useExecutiveReport({ fromISO, toISO }: RangeArgs) {
     queryFn: async () => (await api.get('/reports/data/executive', { params: { from: fromISO, to: toISO } })).data,
     staleTime: STALE_MS,
     retry: RETRY_COUNT,
+    placeholderData: keepPrev,
   })
 }
 
@@ -192,6 +196,7 @@ export function useTechnicalReport({ fromISO, toISO }: RangeArgs) {
     queryFn: async () => (await api.get('/reports/data/technical', { params: { from: fromISO, to: toISO } })).data,
     staleTime: STALE_MS,
     retry: RETRY_COUNT,
+    placeholderData: keepPrev,
   })
 }
 
@@ -201,6 +206,7 @@ export function useBusinessReport({ fromISO, toISO }: RangeArgs) {
     queryFn: async () => (await api.get('/reports/data/business', { params: { from: fromISO, to: toISO } })).data,
     staleTime: STALE_MS,
     retry: RETRY_COUNT,
+    placeholderData: keepPrev,
   })
 }
 

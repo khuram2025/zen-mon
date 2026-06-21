@@ -719,6 +719,27 @@ def _device_uptime_pct(ping_rows: list[dict], device_id: str) -> float:
     return (up / len(rows)) * 100
 
 
+def _ping_outage_episodes(ping_rows: list[dict], device_id: str) -> int:
+    """Count consecutive is_up=false spans — aligned with sample-based uptime %."""
+    rows = sorted(
+        [r for r in ping_rows if str(r["device_id"]) == str(device_id)],
+        key=lambda r: r["timestamp"],
+    )
+    if not rows:
+        return 0
+    episodes = 0
+    in_outage = False
+    for r in rows:
+        up = bool(r.get("is_up"))
+        if not up:
+            if not in_outage:
+                episodes += 1
+                in_outage = True
+        else:
+            in_outage = False
+    return episodes
+
+
 def _device_rtt_stats(ping_rows: list[dict], device_id: str) -> dict:
     rows = [r for r in ping_rows if str(r["device_id"]) == str(device_id) and r.get("rtt_ms") is not None]
     rtts = [r["rtt_ms"] for r in rows if r["rtt_ms"] is not None and r["rtt_ms"] > 0]

@@ -2,6 +2,8 @@
  * Animated SVG ring gauge — used for "Device Availability" tiles
  * and the central Health Status donut.
  */
+import { cn } from '@/lib/utils'
+
 type Color = 'success' | 'warning' | 'danger' | 'info' | 'primary' | 'accent'
 
 const COLOR_STOPS: Record<Color, [string, string]> = {
@@ -37,9 +39,16 @@ export function RingGauge({
   const [c1, c2] = COLOR_STOPS[color]
   const id = `ring-${color}-${size}-${stroke}`
 
+  const dense = size < 100
+  const inset = stroke + (dense ? 8 : 6)
+  const mainText = dense
+    ? size < 72 ? 'text-[11px] leading-none' : 'text-sm leading-none'
+    : 'text-xl leading-none'
+  const subText = dense ? 'text-[7px] leading-tight mt-0.5' : 'mt-0.5 text-[10px] uppercase tracking-wider text-muted'
+
   return (
     <div className="flex flex-col items-center gap-1.5">
-      <div className="relative" style={{ width: size, height: size }}>
+      <div className="relative shrink-0" style={{ width: size, height: size }}>
         <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
           <defs>
             <linearGradient id={id} x1="0" y1="0" x2="1" y2="1">
@@ -61,11 +70,14 @@ export function RingGauge({
                   transform={`rotate(-90 ${size / 2} ${size / 2})`}
                   style={{ transition: 'stroke-dashoffset 800ms ease' }} />
         </svg>
-        <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <div className="text-xl font-semibold tabular-nums">
-            {centerLabel ?? `${v.toFixed(1).replace(/\.0$/, '')}%`}
+        <div
+          className="absolute flex flex-col items-center justify-center text-center"
+          style={{ top: inset, left: inset, right: inset, bottom: inset }}
+        >
+          <div className={cn('font-semibold tabular-nums text-text', mainText)}>
+            {centerLabel ?? `${v.toFixed(dense && v >= 99.95 ? 0 : 1).replace(/\.0$/, '')}%`}
           </div>
-          {sub && <div className="mt-0.5 text-[10px] uppercase tracking-wider text-muted">{sub}</div>}
+          {sub && <div className={cn(subText, 'max-w-full truncate text-muted')}>{sub}</div>}
         </div>
       </div>
       {label && <div className="text-xs font-medium text-text2">{label}</div>}

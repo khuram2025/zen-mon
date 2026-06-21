@@ -4,6 +4,7 @@ import { useAuth } from '@/stores/auth'
 import { Layout } from '@/components/Layout'
 import { LoginPage } from '@/pages/LoginPage'
 import { DashboardPage } from '@/pages/DashboardPage'
+import { AvailabilityPage } from '@/pages/AvailabilityPage'
 import { DevicesPage } from '@/pages/DevicesPage'
 import { DeviceDetailPage } from '@/pages/DeviceDetailPage'
 import { DeviceInterfacesPage } from '@/pages/DeviceInterfacesPage'
@@ -105,6 +106,7 @@ export default function App() {
         }
       >
         <Route index element={<DashboardPage />} />
+        <Route path="availability" element={<AvailabilityPage />} />
         <Route path="devices" element={<DevicesPage />} />
         <Route path="devices/:id" element={<DeviceDetailPage />} />
         <Route path="devices/:id/interfaces" element={<DeviceInterfacesPage />} />

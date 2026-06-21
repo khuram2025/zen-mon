@@ -29,6 +29,7 @@ from app.services.report_service import (
     _fetch_service_status_log,
     _device_uptime_pct,
     _device_rtt_stats,
+    _ping_outage_episodes,
     _service_uptime_pct,
     _mttr_seconds,
 )
@@ -310,10 +311,7 @@ async def build_technical(
             continue
         up_pct = sum(1 for r in rows if r.get("is_up")) / len(rows) * 100
         rtt_stats = _device_rtt_stats(ping_rows, did)
-        outage_count = sum(
-            1 for e in status_log
-            if str(e["device_id"]) == did and (e.get("new_status") or "").lower() in ("down", "offline")
-        )
+        outage_count = _ping_outage_episodes(ping_rows, did)
         per_device_uptime.append((did, up_pct, rtt_stats, outage_count))
 
     per_device_uptime.sort(key=lambda x: x[1])

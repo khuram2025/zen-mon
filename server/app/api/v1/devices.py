@@ -140,11 +140,13 @@ async def dashboard_uptime_stats(
     else:
         tables_to_try = ["ping_metrics_1h", "ping_metrics_5m", "ping_metrics"]
 
-    uptime_map = {}
+    uptime_map: dict[str, float] = {}
+    failed_map: dict[str, int] = {}
     for table in tables_to_try:
         query = f"""
             SELECT device_id,
                    countIf(is_up = 1) AS up_count,
+                   countIf(is_up = 0) AS down_count,
                    count() AS total_count
             FROM zenplus.{table}
             WHERE timestamp >= %(from)s AND timestamp <= %(to)s
@@ -156,13 +158,21 @@ async def dashboard_uptime_stats(
                 for row in result.result_rows:
                     device_id = str(row[0])
                     up = row[1]
-                    total = row[2]
+                    down = int(row[2] or 0)
+                    total = row[3]
                     uptime_map[device_id] = round((up / total * 100) if total > 0 else 0, 2)
+                    failed_map[device_id] = down
                 break
         except Exception:
             continue
 
-    return {"hours": hours, "from": from_time.isoformat(), "to": to_time.isoformat(), "devices": uptime_map}
+    return {
+        "hours": hours,
+        "from": from_time.isoformat(),
+        "to": to_time.isoformat(),
+        "devices": uptime_map,
+        "failed_checks": failed_map,
+    }
 
 
 @router.get("/current-uptime")

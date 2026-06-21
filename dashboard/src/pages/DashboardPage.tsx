@@ -376,7 +376,7 @@ export function DashboardPage() {
           sub={<span className="text-[10.5px] text-muted">peak {fmtBps(trafficStats.peak)}</span>}
           foot={<Sparkline values={trafficSpark.slice(-30)} color="#22d3ee" width={250} height={30} />}
         />
-        <KpiCard to="/reports" label="Availability" icon={<HeartPulse className="h-4 w-4" />}
+        <KpiCard to="/availability" label="Availability" icon={<HeartPulse className="h-4 w-4" />}
           accent={(exec?.kpis?.availability_pct ?? 100) >= 99.5 ? 'success' : 'warning'}
           value={exec ? `${exec.kpis.availability_pct.toFixed(2)}%` : '—'}
           sub={exec && (

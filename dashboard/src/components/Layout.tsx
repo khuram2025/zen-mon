@@ -18,6 +18,7 @@ import {
   Inbox,
   Info,
   Gauge,
+  HeartPulse,
   LayoutDashboard,
   Layers,
   LogOut,
@@ -82,6 +83,7 @@ const sections: NavSection[] = [
     label: 'Monitoring',
     items: [
       { to: '/devices', label: 'Devices', icon: Router },
+      { to: '/availability', label: 'Availability', icon: HeartPulse },
       { to: '/services', label: 'Services', icon: Activity },
       { to: '/netflow', label: 'NetFlow', icon: Network },
       { to: '/discovery', label: 'Discovery', icon: Radar },
@@ -140,6 +142,7 @@ const sections: NavSection[] = [
 const routeLabels: Record<string, string> = {
   '/': 'Monitoring Overview',
   '/devices': 'Devices',
+  '/availability': 'Availability Dashboard',
   '/servers': 'Server Fleet',
   '/servers/inventory': 'Server Inventory',
   '/server-agents': 'Agent Fleet',
@@ -173,6 +176,7 @@ const routeLabels: Record<string, string> = {
 const routeSections: Record<string, string> = {
   '/': 'Overview',
   '/devices': 'Monitoring',
+  '/availability': 'Monitoring',
   '/servers': 'Servers',
   '/servers/inventory': 'Servers',
   '/server-agents': 'Servers',

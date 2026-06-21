@@ -52,6 +52,7 @@ const requiredRoutes = [
   '/',
   '/login',
   '/devices',
+  '/availability',
   '/devices/:id',
   '/devices/:id/interfaces',
   '/services',
