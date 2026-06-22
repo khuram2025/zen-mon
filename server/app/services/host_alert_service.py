@@ -169,17 +169,16 @@ async def _current_value(db: AsyncSession, rule, server_id: str, ch_fleets: dict
         return _cmp(v, op, thr), v, f"{mount} at {v:.1f}%"
 
     if metric == "host_service_down":
-        target = rule.target
+        if not rule.target:
+            return None
         row = (await db.execute(text(
             """SELECT count(*), max(service_name) FROM server_service_inventory
                WHERE server_id = :sid
-                 AND lower(state) IN ('stopped','stop_pending','dead','failed')
-                 AND ( (:target)::text IS NULL
-                       AND lower(start_mode) IN ('auto','automatic')
-                       OR service_name = :target )"""
-        ), {"sid": server_id, "target": target})).first()
+                 AND service_name = :target
+                 AND lower(state) IN ('stopped','stop_pending','dead','failed')"""
+        ), {"sid": server_id, "target": rule.target})).first()
         n = int(row[0] or 0)
-        return n > 0, float(n), (f"{row[1]} stopped" if n else "all watched services running")
+        return n > 0, float(n), (f"{rule.target} stopped" if n else f"{rule.target} running")
 
     if metric == "host_process_down":
         if not rule.target:

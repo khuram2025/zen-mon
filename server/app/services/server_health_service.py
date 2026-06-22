@@ -125,8 +125,12 @@ async def compute_server_health(
     """Derive (status, reasons, issues) from the just-ingested batch + inventory.
 
     CPU/memory use the batch average (the agent already averages over its
-    collection interval); disks and services use the last-known inventory
+    collection interval); filesystem usage uses the last-known inventory
     rows that the same batch just upserted.
+
+    Service stop/start state is inventory-only here — admins opt in to
+    service/process alerts via ``host_service_down`` / ``host_process_down``
+    rules (evaluated by host_alert_service).
 
     Each issue includes ``level``, ``reason``, and a stable ``dedupe`` key
     used to mirror the condition into the alerts table.
@@ -187,20 +191,6 @@ async def compute_server_health(
                 lvl,
                 f"Filesystem {mount} at {float(used_pct):.1f}% (≥ {DISK_CRIT if lvl == 'critical' else DISK_WARN:.0f}%)",
                 f"health:filesystem:{mount}",
-            )
-
-    svc_rows = (await db.execute(
-        text("""SELECT service_name, state, start_mode FROM server_service_inventory
-                WHERE server_id = :sid"""),
-        {"sid": server_id},
-    )).all()
-    for name, state, start_mode in svc_rows:
-        st = (state or "").lower()
-        if st in ("stopped", "stop_pending", "dead", "failed") and (start_mode or "").lower() in ("auto", "automatic"):
-            _bump(
-                "warning",
-                f"Watched service {name} is {state} (start mode {start_mode})",
-                f"health:service:{name}",
             )
 
     return status, reasons, issues

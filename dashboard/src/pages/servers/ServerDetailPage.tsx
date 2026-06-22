@@ -4,7 +4,7 @@
  *        · Software · Compliance · Events · Agent · Settings
  */
 
-import { Fragment, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -307,8 +307,7 @@ export function ServerDetailPage() {
         <KpiTile
           icon={Wrench} label="Services"
           value={svcItems.length ? `${svcRunning}/${svcItems.length}` : '—'}
-          sub={svcItems.length ? 'running / watched' : undefined}
-          tone={svcItems.length && svcRunning < svcItems.length ? 'warning' : 'default'}
+          sub={svcItems.length ? 'running / reported' : undefined}
         />
       </div>
 
@@ -334,7 +333,7 @@ export function ServerDetailPage() {
       {tab === 'overview' && <OverviewTab serverId={server.id} filesystems={fsItems} processes={processes?.items || []} />}
       {tab === 'performance' && <PerformanceTab serverId={server.id} />}
       {tab === 'processes' && <ProcessesTab serverId={id || ''} items={processes?.items || []} memTotal={processes?.mem_total_bytes || 0} />}
-      {tab === 'services' && <ServicesTab items={svcItems} />}
+      {tab === 'services' && <ServicesTab serverId={server.id} items={svcItems} />}
       {tab === 'storage' && <StorageTab serverId={server.id} items={fsItems} />}
       {tab === 'network' && <NetworkTab serverId={server.id} />}
       {tab === 'software' && <SoftwareTab serverId={server.id} />}
@@ -1170,16 +1169,83 @@ function ProcessHistory({ serverId, name }: { serverId: string; name: string }) 
 
 /* ── Services ────────────────────────────────────────────────────── */
 
-function ServicesTab({ items }: { items: ServerService[] }) {
+interface HostRule {
+  id: string
+  name: string
+  enabled: boolean
+  metric: string
+  operator: string
+  threshold: number | null
+  severity: string
+  min_duration: number
+  server_id: string | null
+  target: string | null
+}
+
+type HostRulePrefill = {
+  metric?: string
+  target?: string
+  name?: string
+  severity?: string
+}
+
+function ServicesTab({ serverId, items }: { serverId: string; items: ServerService[] }) {
+  const qc = useQueryClient()
   const [filter, setFilter] = useState('all')
+  const [createOpen, setCreateOpen] = useState(false)
+  const [prefill, setPrefill] = useState<HostRulePrefill | undefined>()
+
+  const { data: rulesResp } = useQuery<{ items: HostRule[] }>({
+    queryKey: ['servers', serverId, 'host-rules'],
+    queryFn: async () => (await api.get('/host-alert-rules', { params: { server_id: serverId } })).data,
+  })
+  const serviceRules = (rulesResp?.items || []).filter(
+    (r) => r.metric === 'host_service_down' && r.enabled && r.target,
+  )
+  const ruleByService = useMemo(() => {
+    const map = new Map<string, HostRule>()
+    for (const r of serviceRules) {
+      if (r.target) map.set(r.target.toLowerCase(), r)
+    }
+    return map
+  }, [serviceRules])
+
+  const delRule = useMutation({
+    mutationFn: async (id: string) => (await api.delete(`/host-alert-rules/${id}`)).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['servers', serverId, 'host-rules'] })
+      toast.success('Alert rule removed')
+    },
+    onError: (e) => toast.error(apiErrorMessage(e)),
+  })
+
+  const isStopped = (state: string | null) => {
+    const st = (state || '').toLowerCase()
+    return st !== 'running' && st !== 'not_found' && !!st
+  }
+
   const filtered = items.filter((s) => {
     const st = (s.state || '').toLowerCase()
+    const hasRule = ruleByService.has(s.service_name.toLowerCase())
     if (filter === 'running') return st === 'running'
-    if (filter === 'stopped') return st !== 'running' && st !== 'not_found'
+    if (filter === 'stopped') return isStopped(s.state)
     if (filter === 'not_found') return st === 'not_found'
+    if (filter === 'alert_enabled') return hasRule
     return true
   })
   const running = items.filter((s) => (s.state || '').toLowerCase() === 'running').length
+  const alertBreaches = items.filter(
+    (s) => ruleByService.has(s.service_name.toLowerCase()) && isStopped(s.state),
+  ).length
+
+  const openAlertDialog = (serviceName: string) => {
+    setPrefill({
+      metric: 'host_service_down',
+      target: serviceName,
+      name: `${serviceName} stopped`,
+    })
+    setCreateOpen(true)
+  }
 
   const stateBadge = (state: string | null) => {
     const st = (state || '').toLowerCase()
@@ -1189,55 +1255,113 @@ function ServicesTab({ items }: { items: ServerService[] }) {
     return <Badge variant="danger">{state}</Badge>
   }
 
+  const alertBadge = (serviceName: string, state: string | null) => {
+    const rule = ruleByService.get(serviceName.toLowerCase())
+    if (!rule) return <span className="text-xs text-muted">—</span>
+    if (isStopped(state)) return <Badge variant="danger">Alert firing</Badge>
+    return <Badge variant="outline">Monitored</Badge>
+  }
+
   return (
-    <TablePanel
-      icon={<Wrench className="h-3.5 w-3.5" />}
-      title="Watched services"
-      hint={`${items.length} in policy`}
-      toolbar={(
-        <div className="flex flex-wrap items-center gap-3">
-          <Select value={filter} onValueChange={setFilter}>
-            <SelectTrigger className="h-8 w-[160px]"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All states</SelectItem>
-              <SelectItem value="running">Running</SelectItem>
-              <SelectItem value="stopped">Stopped / failed</SelectItem>
-              <SelectItem value="not_found">Not installed</SelectItem>
-            </SelectContent>
-          </Select>
-          <div className="grid flex-1 grid-cols-2 gap-2 sm:grid-cols-3">
-            <PanelMiniStat label="Running" value={`${running}/${items.length}`} tone="text-success" />
-            <PanelMiniStat label="Filtered" value={String(filtered.length)} />
-            <PanelMiniStat label="Watchlist" value="Agent policy" />
+    <>
+      <TablePanel
+        icon={<Wrench className="h-3.5 w-3.5" />}
+        title="Reported services"
+        hint={`${items.length} in inventory · ${serviceRules.length} alert rule${serviceRules.length === 1 ? '' : 's'}`}
+        toolbar={(
+          <div className="flex flex-wrap items-center gap-3">
+            <Select value={filter} onValueChange={setFilter}>
+              <SelectTrigger className="h-8 w-[180px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All states</SelectItem>
+                <SelectItem value="running">Running</SelectItem>
+                <SelectItem value="stopped">Stopped / failed</SelectItem>
+                <SelectItem value="not_found">Not installed</SelectItem>
+                <SelectItem value="alert_enabled">Alert enabled</SelectItem>
+              </SelectContent>
+            </Select>
+            <div className="grid flex-1 grid-cols-2 gap-2 sm:grid-cols-4">
+              <PanelMiniStat label="Running" value={`${running}/${items.length}`} tone="text-success" />
+              <PanelMiniStat label="Filtered" value={String(filtered.length)} />
+              <PanelMiniStat label="Alert rules" value={String(serviceRules.length)} />
+              <PanelMiniStat
+                label="Alert breaches"
+                value={String(alertBreaches)}
+                tone={alertBreaches > 0 ? 'text-danger' : undefined}
+              />
+            </div>
           </div>
-        </div>
-      )}
-    >
-      <div className="overflow-hidden">
-        <Table>
-          <THead className="bg-surface2/40">
-            <Tr><Th className="pl-4">Service</Th><Th>State</Th><Th>Start mode</Th><Th className="text-right">PID</Th><Th className="pr-4">Updated</Th></Tr>
-          </THead>
-          <TBody>
-            {filtered.length === 0 && (
-              <Tr><Td colSpan={5}><div className="py-10 text-center text-xs text-muted">No services match</div></Td></Tr>
-            )}
-            {filtered.map((s, i) => (
-              <Tr key={s.service_name} className={i % 2 === 0 ? 'bg-surface2/10' : undefined}>
-                <Td className="py-2 pl-4">
-                  <div className="text-sm font-medium">{s.display_name || s.service_name}</div>
-                  <div className="text-[11px] text-muted">{s.service_name}</div>
-                </Td>
-                <Td>{stateBadge(s.state)}</Td>
-                <Td className="text-xs">{s.start_mode || '—'}</Td>
-                <Td className="text-right text-xs tabular-nums text-muted">{s.pid || '—'}</Td>
-                <Td className="pr-4 text-xs text-muted">{relativeTime(s.updated_at)}</Td>
+        )}
+      >
+        <p className="border-b border-border/50 px-4 py-2 text-[11px] text-muted">
+          Services are reported for visibility. Alerts fire only for services you configure — use
+          {' '}<Bell className="inline h-3 w-3" /> Alert when stopped on a row, or create a rule on the Alerts tab.
+        </p>
+        <div className="overflow-hidden">
+          <Table>
+            <THead className="bg-surface2/40">
+              <Tr>
+                <Th className="pl-4">Service</Th>
+                <Th>State</Th>
+                <Th>Start mode</Th>
+                <Th>Alert</Th>
+                <Th className="text-right">PID</Th>
+                <Th>Updated</Th>
+                <Th className="pr-4 text-right">Actions</Th>
               </Tr>
-            ))}
-          </TBody>
-        </Table>
-      </div>
-    </TablePanel>
+            </THead>
+            <TBody>
+              {filtered.length === 0 && (
+                <Tr><Td colSpan={7}><div className="py-10 text-center text-xs text-muted">No services match</div></Td></Tr>
+              )}
+              {filtered.map((s, i) => {
+                const rule = ruleByService.get(s.service_name.toLowerCase())
+                return (
+                  <Tr key={s.service_name} className={i % 2 === 0 ? 'bg-surface2/10' : undefined}>
+                    <Td className="py-2 pl-4">
+                      <div className="text-sm font-medium">{s.display_name || s.service_name}</div>
+                      <div className="text-[11px] text-muted">{s.service_name}</div>
+                    </Td>
+                    <Td>{stateBadge(s.state)}</Td>
+                    <Td className="text-xs">{s.start_mode || '—'}</Td>
+                    <Td>{alertBadge(s.service_name, s.state)}</Td>
+                    <Td className="text-right text-xs tabular-nums text-muted">{s.pid || '—'}</Td>
+                    <Td className="text-xs text-muted">{relativeTime(s.updated_at)}</Td>
+                    <Td className="pr-4 text-right">
+                      {rule ? (
+                        rule.server_id ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => delRule.mutate(rule.id)}
+                          >
+                            Remove alert
+                          </Button>
+                        ) : (
+                          <span className="text-[11px] text-muted">Global rule</span>
+                        )
+                      ) : (
+                        <Button size="sm" variant="outline" onClick={() => openAlertDialog(s.service_name)}>
+                          <Bell className="h-3 w-3" /> Alert when stopped
+                        </Button>
+                      )}
+                    </Td>
+                  </Tr>
+                )
+              })}
+            </TBody>
+          </Table>
+        </div>
+      </TablePanel>
+
+      <CreateHostRuleDialog
+        serverId={serverId}
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        initial={prefill}
+        onCreated={() => qc.invalidateQueries({ queryKey: ['servers', serverId, 'host-rules'] })}
+      />
+    </>
   )
 }
 
@@ -1570,19 +1694,6 @@ interface ServerAlert {
   resolved_at: string | null
 }
 
-interface HostRule {
-  id: string
-  name: string
-  enabled: boolean
-  metric: string
-  operator: string
-  threshold: number | null
-  severity: string
-  min_duration: number
-  server_id: string | null
-  target: string | null
-}
-
 const HOST_METRICS = [
   { value: 'host_cpu_pct', label: 'CPU usage', kind: 'pct' },
   { value: 'host_memory_pct', label: 'Memory usage', kind: 'pct' },
@@ -1603,7 +1714,7 @@ function metricLabel(metric: string): string {
 
 function ruleCondition(r: HostRule): string {
   const m = HOST_METRICS.find((x) => x.value === r.metric)
-  if (m?.kind === 'svc') return `Service ${r.target || '(any auto-start)'} stopped`
+  if (m?.kind === 'svc') return `Service ${r.target || '?'} stopped`
   if (m?.kind === 'proc') return `Process ${r.target || '?'} not running`
   return `${metricLabel(r.metric)} ${OP_SYMBOL[r.operator] || r.operator} ${r.threshold}%`
 }
@@ -1913,8 +2024,14 @@ function ServerAlertsTab({
 }
 
 function CreateHostRuleDialog({
-  serverId, open, onOpenChange, onCreated,
-}: { serverId: string; open: boolean; onOpenChange: (v: boolean) => void; onCreated: () => void }) {
+  serverId, open, onOpenChange, onCreated, initial,
+}: {
+  serverId: string
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  onCreated: () => void
+  initial?: HostRulePrefill
+}) {
   const [name, setName] = useState('')
   const [metric, setMetric] = useState<string>('host_cpu_pct')
   const [operator, setOperator] = useState('gt')
@@ -1927,6 +2044,24 @@ function CreateHostRuleDialog({
 
   const kind = HOST_METRICS.find((m) => m.value === metric)?.kind || 'pct'
 
+  const applyInitial = (prefill?: HostRulePrefill) => {
+    if (!prefill) {
+      setName(''); setMetric('host_cpu_pct'); setOperator('gt'); setThreshold('90')
+      setSeverity('warning'); setMinutes('5'); setTarget(''); setAllServers(false); setChannels([])
+      return
+    }
+    setName(prefill.name || '')
+    setMetric(prefill.metric || 'host_cpu_pct')
+    setTarget(prefill.target || '')
+    setSeverity(prefill.severity || 'warning')
+    setAllServers(false)
+  }
+
+  // Apply prefill when the dialog opens (e.g. from Services tab row action).
+  useEffect(() => {
+    if (open) applyInitial(initial)
+  }, [open, initial])
+
   const { data: chResp } = useQuery<{ data: { id: string; name: string; type: string }[] }>({
     queryKey: ['notification-channels'],
     queryFn: async () => (await api.get('/settings/channels')).data,
@@ -1935,16 +2070,21 @@ function CreateHostRuleDialog({
   const allChannels = chResp?.data || []
 
   const create = useMutation({
-    mutationFn: async () => (await api.post('/host-alert-rules', {
-      name: name || `${metricLabel(metric)} alert`,
-      metric, operator,
-      threshold: kind === 'pct' ? Number(threshold) : 0,
-      severity,
-      min_duration: kind === 'pct' ? Math.round(Number(minutes) * 60) : 0,
-      target: (kind === 'svc' || kind === 'proc') ? (target || null) : null,
-      server_id: allServers ? null : serverId,
-      notify_channels: channels,
-    })).data,
+    mutationFn: async () => {
+      if ((kind === 'svc' || kind === 'proc') && !target.trim()) {
+        throw new Error(kind === 'svc' ? 'Service name is required' : 'Process name is required')
+      }
+      return (await api.post('/host-alert-rules', {
+        name: name || `${metricLabel(metric)} alert`,
+        metric, operator,
+        threshold: kind === 'pct' ? Number(threshold) : 0,
+        severity,
+        min_duration: kind === 'pct' ? Math.round(Number(minutes) * 60) : 0,
+        target: (kind === 'svc' || kind === 'proc') ? target.trim() : null,
+        server_id: allServers ? null : serverId,
+        notify_channels: channels,
+      })).data
+    },
     onSuccess: () => { toast.success('Alert rule created'); onCreated(); onOpenChange(false); reset() },
     onError: (e) => toast.error(apiErrorMessage(e)),
   })
@@ -2014,8 +2154,8 @@ function CreateHostRuleDialog({
             </div>
           ) : (
             <div>
-              <Label>{kind === 'svc' ? 'Service name (blank = any auto-start service)' : 'Process name'}</Label>
-              <Input value={target} onChange={(e) => setTarget(e.target.value)} placeholder={kind === 'svc' ? 'e.g. MSSQLSERVER' : 'e.g. nginx.exe'} />
+              <Label>{kind === 'svc' ? 'Service name' : 'Process name'}</Label>
+              <Input value={target} onChange={(e) => setTarget(e.target.value)} placeholder={kind === 'svc' ? 'e.g. MSSQLSERVER' : 'e.g. nginx.exe'} required />
             </div>
           )}
 

@@ -109,8 +109,8 @@ async def create_host_rule(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_operator_user),
 ):
-    if data.metric in ("host_process_down",) and not data.target:
-        raise HTTPException(400, "target (process name) is required for host_process_down")
+    if data.metric in ("host_process_down", "host_service_down") and not data.target:
+        raise HTTPException(400, f"target is required for {data.metric}")
     row = (await db.execute(text(
         "INSERT INTO alert_rules "
         "(name, description, enabled, metric, operator, threshold, severity, "

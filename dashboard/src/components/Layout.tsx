@@ -86,6 +86,7 @@ const sections: NavSection[] = [
     label: 'Monitoring',
     items: [
       { to: '/devices', label: 'Devices', icon: Router },
+      { to: '/link-utilization', label: 'Link Utilization', icon: Gauge },
       { to: '/availability', label: 'Availability', icon: HeartPulse },
       { to: '/services', label: 'Services', icon: Activity },
       { to: '/netflow', label: 'NetFlow', icon: Network },
@@ -156,6 +157,7 @@ const sections: NavSection[] = [
 const routeLabels: Record<string, string> = {
   '/': 'Monitoring Overview',
   '/devices': 'Devices',
+  '/link-utilization': 'Link Utilization',
   '/availability': 'Availability Dashboard',
   '/servers': 'Server Fleet',
   '/servers/inventory': 'Server Inventory',

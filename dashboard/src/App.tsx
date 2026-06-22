@@ -8,6 +8,7 @@ import { AvailabilityPage } from '@/pages/AvailabilityPage'
 import { DevicesPage } from '@/pages/DevicesPage'
 import { DeviceDetailPage } from '@/pages/DeviceDetailPage'
 import { DeviceInterfacesPage } from '@/pages/DeviceInterfacesPage'
+import { LinkUtilizationPage } from '@/pages/LinkUtilizationPage'
 import { AlertsPage } from '@/pages/AlertsPage'
 import { AlertDetailPage } from '@/pages/AlertDetailPage'
 import { AlertRulesPage } from '@/pages/AlertRulesPage'
@@ -119,6 +120,7 @@ export default function App() {
         <Route path="devices" element={<DevicesPage />} />
         <Route path="devices/:id" element={<DeviceDetailPage />} />
         <Route path="devices/:id/interfaces" element={<DeviceInterfacesPage />} />
+        <Route path="link-utilization" element={<LinkUtilizationPage />} />
         <Route path="servers" element={<ServersDashboardPage />} />
         <Route path="servers/inventory" element={<ServerInventoryPage />} />
         <Route path="servers/:id" element={<ServerDetailPage />} />
