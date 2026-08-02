@@ -23,8 +23,8 @@ import {
 } from 'recharts'
 import { api } from '@/lib/api'
 import {
-  apiErrorMessage, cn, formatBps, formatBpsAxis, formatBytes,
-  timeAxisTickFormatter, timeTooltipLabelFormatter,
+  apiErrorMessage, axisRightPad, cn, formatBps, formatBpsAxis, formatBytes,
+  timeAxisTickFormatter, timeTicks, timeTooltipLabelFormatter,
 } from '@/lib/utils'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -56,9 +56,19 @@ type LinkRow = {
   in_bps: number
   out_bps: number
   total_bps: number
+  avg_in_bps: number
+  avg_out_bps: number
+  max_in_bps: number
+  max_out_bps: number
   util_pct: number | null
   peak_util_pct: number | null
   has_netflow: boolean
+}
+
+/** Window-average utilisation for a row, in percent. */
+function rowAvgUtil(row: LinkRow): number | null {
+  if (!row.effective_speed_bps) return null
+  return (Math.max(row.avg_in_bps || 0, row.avg_out_bps || 0) / row.effective_speed_bps) * 100
 }
 
 type LinkKey = { device_id: string; if_index: number }
@@ -71,10 +81,15 @@ function formatBucket(seconds: number): string {
 
 const SORT_LABELS: Record<string, string> = {
   util: 'utilization',
+  peak: 'peak utilization',
   traffic: 'total traffic',
   in: 'inbound',
   out: 'outbound',
   name: 'name',
+}
+
+const PROTO_NAMES: Record<number, string> = {
+  1: 'ICMP', 6: 'TCP', 17: 'UDP', 47: 'GRE', 50: 'ESP',
 }
 
 /** Keep the previous page of results on screen while the next one loads. */
@@ -106,12 +121,30 @@ function utilBarColor(pct: number): string {
   return 'bg-success'
 }
 
-function UtilBar({ pct, className }: { pct: number; className?: string }) {
+function UtilBar({ pct, avg, peak, className }: {
+  pct: number
+  /** Window average %, shown in the tooltip for context. */
+  avg?: number | null
+  /** Window peak %, drawn as a notch so a bursty link doesn't read as idle. */
+  peak?: number | null
+  className?: string
+}) {
   const w = Math.min(100, Math.max(pct > 0 ? 2 : 0, pct))
+  const title = [
+    `Current ${pct.toFixed(1)}%`,
+    avg != null ? `Avg ${avg.toFixed(1)}%` : null,
+    peak != null ? `Peak ${peak.toFixed(1)}%` : null,
+  ].filter(Boolean).join(' · ')
   return (
-    <div className={cn('flex items-center gap-2', className)}>
-      <div className="h-2 flex-1 overflow-hidden rounded-full bg-surface2">
+    <div className={cn('flex items-center gap-2', className)} title={title}>
+      <div className="relative h-2 flex-1 rounded-full bg-surface2">
         <div className={cn('h-full rounded-full transition-all', utilBarColor(pct))} style={{ width: `${w}%` }} />
+        {peak != null && peak > pct + 0.5 && (
+          <span
+            className="absolute top-1/2 h-3 w-0.5 -translate-y-1/2 rounded-full bg-text/60"
+            style={{ left: `${Math.min(100, peak)}%` }}
+          />
+        )}
       </div>
       <span className={cn('w-11 text-right font-mono text-[11px] tabular-nums', utilTone(pct))}>
         {pct.toFixed(0)}%
@@ -151,11 +184,17 @@ export function LinkUtilizationPage() {
       limit: '200',
       sort,
     })
+    // A custom window is absolute — without from/to the API would silently
+    // substitute "the last N hours".
+    if (range.isCustom) {
+      p.set('from', range.fromISO)
+      p.set('to', range.toISO)
+    }
     if (debouncedSearch.trim()) p.set('search', debouncedSearch.trim())
     if (status !== 'all') p.set('status', status)
     if (minUtil) p.set('min_util', minUtil)
     return p.toString()
-  }, [range.hours, debouncedSearch, status, minUtil, sort])
+  }, [range.hours, range.isCustom, range.fromISO, range.toISO, debouncedSearch, status, minUtil, sort])
 
   const { data, isLoading, isFetching } = useQuery<{
     items: LinkRow[]
@@ -171,7 +210,8 @@ export function LinkUtilizationPage() {
   }>({
     queryKey: ['link-utilization', qs],
     queryFn: async () => (await api.get(`/link-utilization?${qs}`)).data,
-    refetchInterval: 30_000,
+    // A pinned historical window never changes — don't re-poll it.
+    refetchInterval: range.isCustom ? false : 30_000,
     // Changing a filter or sort should not blank the table behind a spinner.
     placeholderData: keepPrev,
   })
@@ -260,6 +300,7 @@ export function LinkUtilizationPage() {
             <SelectTrigger className="h-9 w-[150px]"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="util">Sort: Utilization</SelectItem>
+              <SelectItem value="peak">Sort: Peak util</SelectItem>
               <SelectItem value="traffic">Sort: Total traffic</SelectItem>
               <SelectItem value="in">Sort: Inbound</SelectItem>
               <SelectItem value="out">Sort: Outbound</SelectItem>
@@ -269,10 +310,12 @@ export function LinkUtilizationPage() {
           <Select value={minUtil || 'any'} onValueChange={(v) => setMinUtil(v === 'any' ? '' : v)}>
             <SelectTrigger className="h-9 w-[140px]"><SelectValue placeholder="Min util" /></SelectTrigger>
             <SelectContent>
+              {/* Matches on the window's peak — a bursty link that idles
+                  between spikes is what this filter exists to find. */}
               <SelectItem value="any">Any util</SelectItem>
-              <SelectItem value="50">≥ 50%</SelectItem>
-              <SelectItem value="75">≥ 75%</SelectItem>
-              <SelectItem value="90">≥ 90%</SelectItem>
+              <SelectItem value="50">Peak ≥ 50%</SelectItem>
+              <SelectItem value="75">Peak ≥ 75%</SelectItem>
+              <SelectItem value="90">Peak ≥ 90%</SelectItem>
             </SelectContent>
           </Select>
           {isFetching && !isLoading && (
@@ -309,7 +352,11 @@ export function LinkUtilizationPage() {
                     <Th>Status</Th>
                     <Th className="text-right">In</Th>
                     <Th className="text-right">Out</Th>
-                    <Th className="min-w-[140px]">Utilization</Th>
+                    <Th className="min-w-[140px]">
+                      <span title="Bar and number are the latest sample · notch marks the peak in the selected window · hover a bar for avg/peak">
+                        Utilization
+                      </span>
+                    </Th>
                     <Th className="pr-4">Flow</Th>
                   </Tr>
                 </THead>
@@ -366,18 +413,24 @@ export function LinkUtilizationPage() {
                           )}
                         </Td>
                         <Td className="text-right font-mono text-xs tabular-nums">
-                          <span className="inline-flex items-center gap-0.5 text-success">
+                          <span
+                            className="inline-flex items-center gap-0.5 text-success"
+                            title={`Latest sample · avg ${formatBps(row.avg_in_bps || 0)} · max ${formatBps(row.max_in_bps || 0)} in window`}
+                          >
                             <ArrowDown className="h-3 w-3" />{row.in_bps > 0 ? formatBps(row.in_bps) : '—'}
                           </span>
                         </Td>
                         <Td className="text-right font-mono text-xs tabular-nums">
-                          <span className="inline-flex items-center gap-0.5 text-info">
+                          <span
+                            className="inline-flex items-center gap-0.5 text-info"
+                            title={`Latest sample · avg ${formatBps(row.avg_out_bps || 0)} · max ${formatBps(row.max_out_bps || 0)} in window`}
+                          >
                             <ArrowUp className="h-3 w-3" />{row.out_bps > 0 ? formatBps(row.out_bps) : '—'}
                           </span>
                         </Td>
                         <Td>
                           {row.util_pct != null ? (
-                            <UtilBar pct={row.util_pct} />
+                            <UtilBar pct={row.util_pct} avg={rowAvgUtil(row)} peak={row.peak_util_pct} />
                           ) : (
                             <span className="text-xs text-muted">—</span>
                           )}
@@ -404,8 +457,7 @@ export function LinkUtilizationPage() {
             <LinkDetailPanel
               key={`${selected.device_id}-${selected.if_index}`}
               link={selectedRow}
-              hours={range.hours}
-              rangeLabel={range.label}
+              range={range}
               onClose={() => setSelected(null)}
               onAlert={() => setAlertOpen(true)}
             />
@@ -425,15 +477,26 @@ export function LinkUtilizationPage() {
 }
 
 function LinkDetailPanel({
-  link, hours, rangeLabel, onClose, onAlert,
+  link, range, onClose, onAlert,
 }: {
   link: LinkRow
-  hours: number
-  rangeLabel: string
+  range: { hours: number; fromISO: string; toISO: string; isCustom: boolean; label: string }
   onClose: () => void
   onAlert: () => void
 }) {
   const label = link.if_alias || link.if_name || link.if_descr || `if${link.if_index}`
+  const { hours, label: rangeLabel } = range
+  const fromTs = Date.parse(range.fromISO)
+  const toTs = Date.parse(range.toISO)
+
+  const detailQs = useMemo(() => {
+    const p = new URLSearchParams({ hours: String(range.hours) })
+    if (range.isCustom) {
+      p.set('from', range.fromISO)
+      p.set('to', range.toISO)
+    }
+    return p.toString()
+  }, [range.hours, range.isCustom, range.fromISO, range.toISO])
 
   const { data, isLoading } = useQuery<{
     traffic: { ts: number; in_bps: number; out_bps: number; in_peak_bps?: number; out_peak_bps?: number }[]
@@ -447,10 +510,14 @@ function LinkDetailPanel({
       protocols: { protocol: number; bytes: number }[]
     }
   }>({
-    queryKey: ['link-utilization', 'detail', link.device_id, link.if_index, hours],
+    queryKey: ['link-utilization', 'detail', link.device_id, link.if_index, detailQs],
     queryFn: async () =>
-      (await api.get(`/link-utilization/${link.device_id}/${link.if_index}?hours=${hours}`)).data,
-    refetchInterval: 30_000,
+      (await api.get(`/link-utilization/${link.device_id}/${link.if_index}?${detailQs}`)).data,
+    refetchInterval: range.isCustom ? false : 30_000,
+    // Range switches on an already-open panel keep the old chart in place
+    // instead of collapsing to a spinner. Link switches remount (keyed), so
+    // stale data never appears under another interface's name.
+    placeholderData: keepPrev,
   })
 
   const traffic = data?.traffic || []
@@ -459,6 +526,7 @@ function LinkDetailPanel({
   const speed = link.effective_speed_bps
   // HH:mm alone repeats itself once the window spans more than a day.
   const tickFormatter = useMemo(() => timeAxisTickFormatter(hours), [hours])
+  const ticks = useMemo(() => timeTicks(fromTs, toTs, hours), [fromTs, toTs, hours])
 
   /* Wide windows bucket the samples, so the plotted average hides the bursts
      that "IN MAX" reports. Draw the per-bucket peak behind the average so the
@@ -497,9 +565,19 @@ function LinkDetailPanel({
   const overCapacity = peakUtil > 100
   const utilAxisMax = overCapacity ? Math.ceil(peakUtil / 50) * 50 : 100
 
-  const PROTO_NAMES: Record<number, string> = {
-    1: 'ICMP', 6: 'TCP', 17: 'UDP', 47: 'GRE', 50: 'ESP',
-  }
+  /* Show the capacity line once traffic reaches half the link speed: the axis
+     extends to 100%, making remaining headroom visible. Below that, scaling a
+     quiet link's chart to capacity would flatten the traffic into a ribbon. */
+  const maxTrafficBps = useMemo(
+    () => chartData.reduce((m, p) => Math.max(m, p.in_peak_bps || 0, p.out_peak_bps || 0), 0),
+    [chartData],
+  )
+  const showCapacityLine = speed > 0 && maxTrafficBps >= speed * 0.5
+
+  const avgUtil =
+    speed > 0 && (sum.in_avg_bps != null || sum.out_avg_bps != null)
+      ? (Math.max(sum.in_avg_bps || 0, sum.out_avg_bps || 0) / speed) * 100
+      : null
 
   return (
     <Card className="sticky top-4">
@@ -531,12 +609,28 @@ function LinkDetailPanel({
           </div>
         </div>
 
-        {/* Mini stats */}
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {/* Mini stats — current + window average + window peak, so a bursty
+            link reads as bursty rather than whatever the last sample was. */}
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           <MiniStat label="Current util" value={sum.util_pct != null ? `${sum.util_pct.toFixed(1)}%` : '—'} tone={utilTone(sum.util_pct)} />
+          <MiniStat label="Avg util" value={avgUtil != null ? `${avgUtil.toFixed(1)}%` : '—'} tone={utilTone(avgUtil)} />
           <MiniStat label="Peak util" value={sum.peak_util_pct != null ? `${sum.peak_util_pct.toFixed(1)}%` : '—'} tone={utilTone(sum.peak_util_pct)} />
-          <MiniStat label="In max" value={sum.in_max_bps ? formatBps(sum.in_max_bps) : '—'} />
-          <MiniStat label="Out max" value={sum.out_max_bps ? formatBps(sum.out_max_bps) : '—'} />
+          <MiniStat
+            label="In max"
+            value={sum.in_max_bps ? formatBps(sum.in_max_bps) : '—'}
+            sub={sum.in_avg_bps != null ? `avg ${formatBps(sum.in_avg_bps)}` : undefined}
+          />
+          <MiniStat
+            label="Out max"
+            value={sum.out_max_bps ? formatBps(sum.out_max_bps) : '—'}
+            sub={sum.out_avg_bps != null ? `avg ${formatBps(sum.out_avg_bps)}` : undefined}
+          />
+          <MiniStat
+            label="Errors"
+            value={String(sum.total_errors ?? '—')}
+            sub={sum.total_discards != null ? `${sum.total_discards} discards` : undefined}
+            tone={(sum.total_errors || 0) > 0 || (sum.total_discards || 0) > 0 ? 'text-danger' : undefined}
+          />
         </div>
 
         {/* Bandwidth chart */}
@@ -558,7 +652,7 @@ function LinkDetailPanel({
               <div className="flex h-full items-center justify-center text-sm text-muted">No traffic in this window</div>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={chartData} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+                <AreaChart data={chartData} margin={{ top: 8, right: axisRightPad(hours), bottom: 0, left: 0 }}>
                   <defs>
                     <linearGradient id="linkIn" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="0%" stopColor="rgb(var(--success))" stopOpacity={0.4} />
@@ -570,13 +664,20 @@ function LinkDetailPanel({
                     </linearGradient>
                   </defs>
                   <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.4} strokeDasharray="3 3" vertical={false} />
+                  {/* Numeric time scale over the selected window: a category
+                      axis spaces points by index, hiding polling gaps and
+                      stretching partial data across the full width. */}
                   <XAxis
                     dataKey="ts"
+                    type="number"
+                    scale="time"
+                    domain={[fromTs, toTs]}
+                    ticks={ticks}
+                    interval={0}
                     tickFormatter={tickFormatter}
                     tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
                     axisLine={false}
                     tickLine={false}
-                    minTickGap={40}
                   />
                   <YAxis
                     width={52}
@@ -585,8 +686,18 @@ function LinkDetailPanel({
                     axisLine={false}
                     tickLine={false}
                   />
-                  {speed > 0 && (
-                    <ReferenceLine y={speed} stroke="rgb(var(--warning))" strokeDasharray="4 4" label={{ value: '100%', fontSize: 10, fill: 'rgb(var(--warning))' }} />
+                  {/* extendDomain pins the y-axis to link capacity so the
+                      remaining headroom is visible; gated so quiet links
+                      aren't flattened against a far-away ceiling. */}
+                  {showCapacityLine && (
+                    <ReferenceLine
+                      y={speed}
+                      ifOverflow="extendDomain"
+                      stroke="rgb(var(--warning))"
+                      strokeDasharray="4 4"
+                      // Bottom-left: the legend owns the top-right corner.
+                      label={{ value: `100% · ${formatBps(speed)}`, fontSize: 10, fill: 'rgb(var(--warning))', position: 'insideBottomLeft' }}
+                    />
                   )}
                   <Tooltip
                     contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: 12 }}
@@ -630,7 +741,9 @@ function LinkDetailPanel({
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
                   <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.4} strokeDasharray="3 3" vertical={false} />
-                  <XAxis dataKey="ts" hide />
+                  {/* Same numeric domain as the bandwidth chart so the two
+                      stay vertically aligned and gaps line up. */}
+                  <XAxis dataKey="ts" type="number" scale="time" domain={[fromTs, toTs]} hide />
                   <YAxis width={44} domain={[0, utilAxisMax]} tickFormatter={(v) => `${v}%`} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} />
                   <ReferenceLine y={80} stroke="rgb(var(--danger))" strokeDasharray="3 3" strokeOpacity={0.6} />
                   <ReferenceLine y={50} stroke="rgb(var(--warning))" strokeDasharray="3 3" strokeOpacity={0.5} />
@@ -671,7 +784,7 @@ function LinkDetailPanel({
                   <ResponsiveContainer width="100%" height="100%">
                     <AreaChart data={nf.timeseries} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
                       <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.3} vertical={false} />
-                      <XAxis dataKey="ts" hide />
+                      <XAxis dataKey="ts" type="number" scale="time" domain={[fromTs, toTs]} hide />
                       <YAxis width={44} tickFormatter={(v) => formatBpsAxis(Number(v))} tick={{ fontSize: 9, fill: 'rgb(var(--muted))' }} />
                       <Tooltip
                         contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: 11 }}
@@ -732,11 +845,12 @@ function LinkDetailPanel({
   )
 }
 
-function MiniStat({ label, value, tone }: { label: string; value: string; tone?: string }) {
+function MiniStat({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: string }) {
   return (
     <div className="rounded-md border border-border/50 bg-surface2/30 px-3 py-2">
       <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
       <div className={cn('text-sm font-semibold tabular-nums', tone)}>{value}</div>
+      {sub && <div className="text-[10px] tabular-nums text-muted">{sub}</div>}
     </div>
   )
 }

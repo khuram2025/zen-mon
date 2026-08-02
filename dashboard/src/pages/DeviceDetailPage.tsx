@@ -63,7 +63,7 @@ import {
   YAxis,
 } from 'recharts'
 import { api } from '@/lib/api'
-import { apiErrorMessage, cn, formatBps, formatBpsAxis, formatBytes, formatDuration, relativeTime, timeAxisTickFormatter, timeTooltipLabelFormatter } from '@/lib/utils'
+import { apiErrorMessage, axisRightPad, cn, formatBps, formatBpsAxis, formatBytes, formatDuration, relativeTime, timeAxisTickFormatter, timeTicks, timeTooltipLabelFormatter } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -87,23 +87,6 @@ function deviceAxisFormatter(rangeHours: number): (ts: number) => string {
     }
   }
   return (ts) => new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' })
-}
-
-/** Room for the final axis label, which is centred on the right edge of the
- *  plot and gets clipped by the SVG without it. */
-function axisRightPad(rangeHours: number): number {
-  return rangeHours > 12 && rangeHours <= 24 * 7 ? 46 : 20
-}
-
-/** Evenly spaced ticks across the selected window. Recharts derives ticks from
- *  the data, so a range whose samples all land in one corner ends up with a
- *  single label and no sense of scale. */
-function timeTicks(fromTs: number, toTs: number, rangeHours: number): number[] {
-  if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || toTs <= fromTs) return []
-  // "Jul 29, 10:55 PM" is roughly twice as wide as "Jul 29" — fit fewer of them.
-  const count = rangeHours > 12 && rangeHours <= 24 * 7 ? 4 : 5
-  const step = (toTs - fromTs) / (count - 1)
-  return Array.from({ length: count }, (_, i) => Math.round(fromTs + i * step))
 }
 
 const ttStyle = () => ({

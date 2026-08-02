@@ -31,6 +31,22 @@ export function formatBpsAxis(bps: number): string {
   return `${v.toFixed(v < 10 ? 1 : 0)}${units[i]}`
 }
 
+/** Evenly spaced ticks across a time window. Recharts derives ticks from the
+ *  data, so a range whose samples cluster in one corner gets a single label
+ *  and no sense of scale. Wide "Jul 29, 10:55 PM" labels fit 4, not 5. */
+export function timeTicks(fromTs: number, toTs: number, rangeHours: number): number[] {
+  if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || toTs <= fromTs) return []
+  const count = rangeHours > 12 && rangeHours <= 24 * 7 ? 4 : 5
+  const step = (toTs - fromTs) / (count - 1)
+  return Array.from({ length: count }, (_, i) => Math.round(fromTs + i * step))
+}
+
+/** Right margin so the final axis label, centred on the plot's right edge,
+ *  isn't clipped by the SVG. */
+export function axisRightPad(rangeHours: number): number {
+  return rangeHours > 12 && rangeHours <= 24 * 7 ? 46 : 20
+}
+
 export function formatDuration(seconds: number): string {
   if (!seconds || seconds < 0) return '—'
   const d = Math.floor(seconds / 86400)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -23,6 +24,31 @@ def _clean_ip(ip: str | None) -> str:
     if not ip:
         return ""
     return str(ip).split("/")[0]
+
+
+def _naive_utc(dt: datetime) -> datetime:
+    """ClickHouse stores naive UTC; strip the tzinfo FastAPI parsed."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _window_filter(
+    hours: int, from_time: datetime | None, to_time: datetime | None, params: dict,
+) -> str:
+    """ClickHouse WHERE fragment for the active window, filling `params`.
+
+    Presets stay relative (now() - N hours) so auto-refresh tracks the clock.
+    An explicit from/to pins the window — previously both endpoints ignored it,
+    so the Custom range picker silently showed "the last N hours" instead of
+    the chosen window.
+    """
+    if from_time is not None and to_time is not None:
+        params["from_ts"] = _naive_utc(from_time)
+        params["to_ts"] = _naive_utc(to_time)
+        return "timestamp >= %(from_ts)s AND timestamp < %(to_ts)s"
+    params["hours"] = hours
+    return "timestamp >= now() - INTERVAL %(hours)s HOUR"
 
 
 def _bucket_seconds(hours: int) -> int:
@@ -51,11 +77,13 @@ def _util_pct(in_bps: float, out_bps: float, speed: int) -> float | None:
 @router.get("")
 async def list_links(
     hours: int = Query(default=24, ge=1, le=720),
+    from_time: datetime | None = Query(default=None, alias="from"),
+    to_time: datetime | None = Query(default=None, alias="to"),
     limit: int = Query(default=200, ge=1, le=500),
     search: str | None = Query(default=None),
     status: str | None = Query(default=None, pattern="^(up|down)$"),
     min_util: float | None = Query(default=None, ge=0, le=200),
-    sort: str = Query(default="util", pattern="^(util|traffic|in|out|name)$"),
+    sort: str = Query(default="util", pattern="^(util|peak|traffic|in|out|name)$"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -65,9 +93,11 @@ async def list_links(
     client = get_clickhouse_client()
 
     # Latest SNMP stats per interface in the window.
+    ch_params: dict = {}
+    window = _window_filter(hours, from_time, to_time, ch_params)
     try:
         ch = client.query(
-            """
+            f"""
             SELECT
                 device_id,
                 if_index,
@@ -79,10 +109,10 @@ async def list_links(
                 argMax(out_bps, timestamp) AS cur_out,
                 argMax(oper_status, timestamp) AS oper_status
             FROM zenplus.snmp_if_metrics
-            WHERE timestamp >= now() - INTERVAL %(hours)s HOUR
+            WHERE {window}
             GROUP BY device_id, if_index
             """,
-            parameters={"hours": hours},
+            parameters=ch_params,
         )
     except Exception as e:
         raise HTTPException(500, f"clickhouse query failed: {e}")
@@ -124,26 +154,28 @@ async def list_links(
 
     # NetFlow-enabled interfaces in the same window.
     nf_set: set[tuple[str, int]] = set()
+    nf_params: dict = {}
+    nf_window = _window_filter(hours, from_time, to_time, nf_params)
     try:
         nf = client.query(
-            """
+            f"""
             SELECT DISTINCT toString(exporter_ip) AS ip, ifindex
             FROM (
                 SELECT exporter_ip, input_snmp AS ifindex
                 FROM zenplus.flow_records
-                WHERE timestamp >= now() - INTERVAL %(hours)s HOUR AND input_snmp != 0
+                WHERE {nf_window} AND input_snmp != 0
                 UNION ALL
                 SELECT exporter_ip, output_snmp AS ifindex
                 FROM zenplus.flow_records
-                WHERE timestamp >= now() - INTERVAL %(hours)s HOUR AND output_snmp != 0
+                WHERE {nf_window} AND output_snmp != 0
             )
             """,
-            parameters={"hours": hours},
+            parameters=nf_params,
         )
         for r in nf.result_rows:
             nf_set.add((str(r[0]), int(r[1])))
     except Exception:
-        pass
+        logger.exception("netflow interface lookup failed")
 
     items = []
     for row in inv_rows:
@@ -207,7 +239,13 @@ async def list_links(
     elif status == "down":
         items = [i for i in items if i["oper_status"] != "up"]
     if min_util is not None:
-        items = [i for i in items if (i["util_pct"] or 0) >= min_util]
+        # Filter on the window's peak, not the instantaneous sample: a bursty
+        # uplink that hit 64% five minutes ago but idles at 4% right now is
+        # exactly what a ">= 50%" filter is trying to find.
+        items = [
+            i for i in items
+            if max(i["util_pct"] or 0, i["peak_util_pct"] or 0) >= min_util
+        ]
 
     # Sort
     if sort == "name":
@@ -218,6 +256,8 @@ async def list_links(
         items.sort(key=lambda x: x["out_bps"], reverse=True)
     elif sort == "traffic":
         items.sort(key=lambda x: x["total_bps"], reverse=True)
+    elif sort == "peak":
+        items.sort(key=lambda x: (x["peak_util_pct"] or 0), reverse=True)
     else:
         items.sort(key=lambda x: (x["util_pct"] or 0), reverse=True)
 
@@ -243,6 +283,8 @@ async def link_detail(
     device_id: UUID,
     if_index: int,
     hours: int = Query(default=24, ge=1, le=720),
+    from_time: datetime | None = Query(default=None, alias="from"),
+    to_time: datetime | None = Query(default=None, alias="to"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -265,15 +307,17 @@ async def link_detail(
     bucket = _bucket_seconds(hours)
     did = str(device_id)
 
+    params: dict = {"id": did, "if": if_index}
+    window = _window_filter(hours, from_time, to_time, params)
+
     # SNMP traffic series
     if bucket == 0:
-        snmp_sql = """
+        snmp_sql = f"""
             SELECT toUnixTimestamp64Milli(timestamp) AS ts,
                    in_bps, out_bps, in_errors, out_errors, in_discards, out_discards,
                    in_bps AS in_peak, out_bps AS out_peak
             FROM zenplus.snmp_if_metrics
-            WHERE device_id = %(id)s AND if_index = %(if)s
-              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+            WHERE device_id = %(id)s AND if_index = %(if)s AND {window}
             ORDER BY timestamp
         """
     else:
@@ -293,11 +337,9 @@ async def link_detail(
                    max(out_discards) - min(out_discards) AS d_out_disc,
                    max(in_bps) AS peak_in, max(out_bps) AS peak_out
             FROM zenplus.snmp_if_metrics
-            WHERE device_id = %(id)s AND if_index = %(if)s
-              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+            WHERE device_id = %(id)s AND if_index = %(if)s AND {window}
             GROUP BY ts ORDER BY ts
         """
-    params = {"id": did, "if": if_index, "hours": hours}
 
     try:
         snmp_res = client.query(snmp_sql, parameters=params)
@@ -327,15 +369,14 @@ async def link_detail(
     summary: dict = {}
     try:
         agg = client.query(
-            """
+            f"""
             SELECT avg(in_bps), max(in_bps), argMax(in_bps, timestamp),
                    avg(out_bps), max(out_bps), argMax(out_bps, timestamp),
                    max(in_errors) - min(in_errors), max(out_errors) - min(out_errors),
                    max(in_discards) - min(in_discards), max(out_discards) - min(out_discards),
                    count()
             FROM zenplus.snmp_if_metrics
-            WHERE device_id = %(id)s AND if_index = %(if)s
-              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+            WHERE device_id = %(id)s AND if_index = %(if)s AND {window}
             """,
             parameters=params,
         )
@@ -368,6 +409,8 @@ async def link_detail(
 
     if exporter_ip:
         nf_bucket = 60 if hours <= 6 else (300 if hours <= 48 else 1800)
+        nf_params: dict = {"ip": exporter_ip, "if": if_index}
+        nf_window = _window_filter(hours, from_time, to_time, nf_params)
         try:
             # The inner aliases must not shadow `bytes`: aliasing sum(bytes) AS
             # bytes made the outer sum() resolve to sum(sum(bytes)), which
@@ -384,7 +427,7 @@ async def link_detail(
                     FROM zenplus.flow_records
                     WHERE exporter_ip = %(ip)s
                       AND input_snmp = %(if)s
-                      AND timestamp >= now() - INTERVAL %(hours)s HOUR
+                      AND {nf_window}
                     GROUP BY ts
                     UNION ALL
                     SELECT toUnixTimestamp(toStartOfInterval(timestamp, INTERVAL {nf_bucket} SECOND)) * 1000 AS ts,
@@ -394,12 +437,12 @@ async def link_detail(
                     FROM zenplus.flow_records
                     WHERE exporter_ip = %(ip)s
                       AND output_snmp = %(if)s
-                      AND timestamp >= now() - INTERVAL %(hours)s HOUR
+                      AND {nf_window}
                     GROUP BY ts
                 )
                 GROUP BY ts ORDER BY ts
                 """,
-                parameters={"ip": exporter_ip, "if": if_index, "hours": hours},
+                parameters=nf_params,
             )
             ts_map: dict[int, dict] = {}
             for r in nf_ts.result_rows:
@@ -412,24 +455,24 @@ async def link_detail(
             netflow["has_flows"] = len(netflow["timeseries"]) > 0
 
             talkers = client.query(
-                """
-                SELECT ip, sum(bytes) AS bytes, sum(packets) AS packets, count() AS flows
+                f"""
+                SELECT ip, sum(bytes) AS total_bytes, sum(packets) AS total_packets, count() AS flows
                 FROM (
                     SELECT toString(src_addr) AS ip, bytes, packets
                     FROM zenplus.flow_records
                     WHERE exporter_ip = %(ip)s
                       AND (input_snmp = %(if)s OR output_snmp = %(if)s)
-                      AND timestamp >= now() - INTERVAL %(hours)s HOUR
+                      AND {nf_window}
                     UNION ALL
                     SELECT toString(dst_addr) AS ip, bytes, packets
                     FROM zenplus.flow_records
                     WHERE exporter_ip = %(ip)s
                       AND (input_snmp = %(if)s OR output_snmp = %(if)s)
-                      AND timestamp >= now() - INTERVAL %(hours)s HOUR
+                      AND {nf_window}
                 )
-                GROUP BY ip ORDER BY bytes DESC LIMIT 10
+                GROUP BY ip ORDER BY total_bytes DESC LIMIT 10
                 """,
-                parameters={"ip": exporter_ip, "if": if_index, "hours": hours},
+                parameters=nf_params,
             )
             netflow["top_talkers"] = [
                 {"ip": r[0], "bytes": int(r[1]), "packets": int(r[2]), "flows": int(r[3])}
@@ -437,15 +480,15 @@ async def link_detail(
             ]
 
             protos = client.query(
-                """
-                SELECT protocol, sum(bytes) AS bytes
+                f"""
+                SELECT protocol, sum(bytes) AS total_bytes
                 FROM zenplus.flow_records
                 WHERE exporter_ip = %(ip)s
                   AND (input_snmp = %(if)s OR output_snmp = %(if)s)
-                  AND timestamp >= now() - INTERVAL %(hours)s HOUR
-                GROUP BY protocol ORDER BY bytes DESC LIMIT 8
+                  AND {nf_window}
+                GROUP BY protocol ORDER BY total_bytes DESC LIMIT 8
                 """,
-                parameters={"ip": exporter_ip, "if": if_index, "hours": hours},
+                parameters=nf_params,
             )
             netflow["protocols"] = [
                 {"protocol": int(r[0]), "bytes": int(r[1])} for r in protos.result_rows
