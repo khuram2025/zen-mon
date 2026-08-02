@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 from uuid import UUID
 
@@ -12,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.user import User
+
+logger = logging.getLogger("zenplus.link_utilization")
 
 router = APIRouter(prefix="/link-utilization", tags=["Link Utilization"])
 
@@ -101,20 +104,23 @@ async def list_links(
         return {"items": [], "summary": {"total": 0, "high_util": 0, "with_netflow": 0, "avg_util": None}}
 
     # Inventory from Postgres.
-    keys = list(metrics.keys())
-    placeholders = ", ".join(f"(:d{i}, :i{i})" for i in range(len(keys)))
-    params: dict = {f"d{i}": k[0] for i, k in enumerate(keys)}
-    params.update({f"i{i}": k[1] for i, k in enumerate(keys)})
+    #
+    # Scope by device, not by (device, interface) pair. Enumerating every pair
+    # meant one placeholder per interface — ~6.3k bound parameters for a 35
+    # device fleet — and the device_id::text cast blocked the index, costing
+    # 3.2s of a 3.6s response. Filtering on the ~35 device UUIDs is 0.05s; the
+    # extra interfaces it returns are dropped by the metrics lookup below.
+    device_ids = sorted({k[0] for k in metrics})
 
-    inv_rows = (await db.execute(text(f"""
+    inv_rows = (await db.execute(text("""
         SELECT di.device_id::text, di.if_index, di.if_name, di.if_descr, di.if_alias,
                di.if_speed, di.configured_speed_bps, di.oper_status, di.admin_status,
                di.monitored, d.hostname, d.ip_address::text, d.id::text
         FROM device_interfaces di
         JOIN devices d ON d.id = di.device_id
-        WHERE (di.device_id::text, di.if_index) IN ({placeholders})
+        WHERE di.device_id = ANY(CAST(:device_ids AS uuid[]))
           AND di.monitored = TRUE
-    """), params)).all()
+    """), {"device_ids": device_ids})).all()
 
     # NetFlow-enabled interfaces in the same window.
     nf_set: set[tuple[str, int]] = set()
@@ -142,20 +148,27 @@ async def list_links(
     items = []
     for row in inv_rows:
         did, idx = row[0], int(row[1])
-        m = metrics.get((did, idx), {})
+        m = metrics.get((did, idx))
+        # Device-scoped inventory also returns interfaces with no samples in
+        # the window; they cannot be ranked, so leave them out as before.
+        if m is None:
+            continue
         speed = _effective_speed({"configured_speed_bps": row[6], "if_speed": row[5]})
         in_bps = m.get("in_bps", 0.0)
         out_bps = m.get("out_bps", 0.0)
         util = _util_pct(in_bps, out_bps, speed)
         peak_util = _util_pct(m.get("max_in_bps", 0), m.get("max_out_bps", 0), speed)
         oper = row[7] or ("up" if m.get("oper_status_ch") == 1 else "down")
-        ip = row[11] or ""
+        # ip_address is inet, so ::text yields "192.168.100.102/32", but the
+        # flow exporter IPs from ClickHouse carry no prefix. Comparing the raw
+        # values never matched, so has_netflow was always False.
+        ip = _clean_ip(row[11])
         has_nf = (ip, idx) in nf_set
 
         item = {
             "device_id": did,
             "hostname": row[10],
-            "device_ip": _clean_ip(ip),
+            "device_ip": ip,
             "if_index": idx,
             "if_name": row[2],
             "if_descr": row[3],
@@ -208,8 +221,9 @@ async def list_links(
     else:
         items.sort(key=lambda x: (x["util_pct"] or 0), reverse=True)
 
-    items = items[:limit]
-
+    # Summarise the whole filtered set, not just the page. These drive KPIs
+    # labelled "Fleet avg util" and "interfaces with flow data"; computing them
+    # after the cut reported the top-N slice as if it were the fleet.
     utils = [i["util_pct"] for i in items if i["util_pct"] is not None]
     summary = {
         "total": len(items),
@@ -217,7 +231,10 @@ async def list_links(
         "warning_util": sum(1 for u in utils if 50 <= u < 80),
         "with_netflow": sum(1 for i in items if i["has_netflow"]),
         "avg_util": round(sum(utils) / len(utils), 1) if utils else None,
+        "returned": min(len(items), limit),
     }
+
+    items = items[:limit]
     return {"items": items, "summary": summary, "hours": hours}
 
 
@@ -304,18 +321,27 @@ async def link_detail(
     else:
         summary = {}
 
-    exporter_ip = inv[9] or ""
+    # Strip the inet prefix before querying ClickHouse — flow_records stores
+    # bare exporter IPs, so "192.168.41.105/32" matched nothing and every
+    # interface reported "no flow records".
+    exporter_ip = _clean_ip(inv[9])
     netflow = {"has_flows": False, "timeseries": [], "top_talkers": [], "protocols": []}
 
     if exporter_ip:
         nf_bucket = 60 if hours <= 6 else (300 if hours <= 48 else 1800)
         try:
+            # The inner aliases must not shadow `bytes`: aliasing sum(bytes) AS
+            # bytes made the outer sum() resolve to sum(sum(bytes)), which
+            # ClickHouse rejects with ILLEGAL_AGGREGATION.
             nf_ts = client.query(
                 f"""
-                SELECT ts, sum(in_bps) AS in_bps, sum(out_bps) AS out_bps, sum(bytes) AS bytes
+                SELECT ts, sum(bucket_in_bps) AS in_bps, sum(bucket_out_bps) AS out_bps,
+                       sum(bucket_bytes) AS bytes
                 FROM (
                     SELECT toUnixTimestamp(toStartOfInterval(timestamp, INTERVAL {nf_bucket} SECOND)) * 1000 AS ts,
-                           sum(bytes) * 8.0 / {nf_bucket} AS in_bps, 0 AS out_bps, sum(bytes) AS bytes
+                           sum(bytes) * 8.0 / {nf_bucket} AS bucket_in_bps,
+                           0 AS bucket_out_bps,
+                           sum(bytes) AS bucket_bytes
                     FROM zenplus.flow_records
                     WHERE exporter_ip = %(ip)s
                       AND input_snmp = %(if)s
@@ -323,7 +349,9 @@ async def link_detail(
                     GROUP BY ts
                     UNION ALL
                     SELECT toUnixTimestamp(toStartOfInterval(timestamp, INTERVAL {nf_bucket} SECOND)) * 1000 AS ts,
-                           0 AS in_bps, sum(bytes) * 8.0 / {nf_bucket} AS out_bps, sum(bytes) AS bytes
+                           0 AS bucket_in_bps,
+                           sum(bytes) * 8.0 / {nf_bucket} AS bucket_out_bps,
+                           sum(bytes) AS bucket_bytes
                     FROM zenplus.flow_records
                     WHERE exporter_ip = %(ip)s
                       AND output_snmp = %(if)s
@@ -384,13 +412,16 @@ async def link_detail(
                 {"protocol": int(r[0]), "bytes": int(r[1])} for r in protos.result_rows
             ]
         except Exception:
-            pass
+            # NetFlow is an optional overlay, so a failure here must not break
+            # the SNMP view — but log it. Swallowing silently hid a malformed
+            # query that made every interface report "no flow records".
+            logger.exception("netflow overlay failed for %s/%s", exporter_ip, if_index)
 
     return {
         "device_id": did,
         "if_index": if_index,
         "hostname": inv[8],
-        "device_ip": _clean_ip(exporter_ip),
+        "device_ip": exporter_ip,
         "if_name": inv[0],
         "if_descr": inv[1],
         "if_alias": inv[2],

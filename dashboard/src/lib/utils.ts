@@ -21,6 +21,16 @@ export function formatBps(bps: number): string {
   return `${(bps / Math.pow(k, i)).toFixed(2)} ${units[i]}`
 }
 
+/** Compact bps for chart axes. formatBps' two decimals ("315.46 Kbps") overflow
+ *  a narrow y-axis gutter and get clipped mid-number. */
+export function formatBpsAxis(bps: number): string {
+  if (!bps) return '0'
+  const units = ['', 'K', 'M', 'G', 'T']
+  const i = Math.min(Math.floor(Math.log(Math.abs(bps)) / Math.log(1000)), units.length - 1)
+  const v = bps / Math.pow(1000, i)
+  return `${v.toFixed(v < 10 ? 1 : 0)}${units[i]}`
+}
+
 export function formatDuration(seconds: number): string {
   if (!seconds || seconds < 0) return '—'
   const d = Math.floor(seconds / 86400)

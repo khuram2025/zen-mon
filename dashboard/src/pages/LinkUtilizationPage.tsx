@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -22,7 +22,10 @@ import {
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
 import { api } from '@/lib/api'
-import { apiErrorMessage, cn, formatBps, formatBytes, relativeTime } from '@/lib/utils'
+import {
+  apiErrorMessage, cn, formatBps, formatBpsAxis, formatBytes,
+  timeAxisTickFormatter, timeTooltipLabelFormatter,
+} from '@/lib/utils'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent } from '@/components/ui/Card'
@@ -59,6 +62,28 @@ type LinkRow = {
 }
 
 type LinkKey = { device_id: string; if_index: number }
+
+const SORT_LABELS: Record<string, string> = {
+  util: 'utilization',
+  traffic: 'total traffic',
+  in: 'inbound',
+  out: 'outbound',
+  name: 'name',
+}
+
+/** Keep the previous page of results on screen while the next one loads. */
+const keepPrev = <T,>(prev: T | undefined) => prev
+
+/** Search is a server-side filter, so every keystroke would otherwise be its
+ *  own fleet-wide query. Hold off until typing pauses. */
+function useDebounced<T>(value: T, delay = 350): T {
+  const [debounced, setDebounced] = useState(value)
+  useEffect(() => {
+    const id = window.setTimeout(() => setDebounced(value), delay)
+    return () => window.clearTimeout(id)
+  }, [value, delay])
+  return debounced
+}
 
 function utilTone(pct: number | null | undefined): string {
   if (pct == null) return 'text-muted'
@@ -112,17 +137,19 @@ export function LinkUtilizationPage() {
   const [selected, setSelected] = useState<LinkKey | null>(null)
   const [alertOpen, setAlertOpen] = useState(false)
 
+  const debouncedSearch = useDebounced(search)
+
   const qs = useMemo(() => {
     const p = new URLSearchParams({
       hours: String(range.hours),
       limit: '200',
       sort,
     })
-    if (search.trim()) p.set('search', search.trim())
+    if (debouncedSearch.trim()) p.set('search', debouncedSearch.trim())
     if (status !== 'all') p.set('status', status)
     if (minUtil) p.set('min_util', minUtil)
     return p.toString()
-  }, [range.hours, search, status, minUtil, sort])
+  }, [range.hours, debouncedSearch, status, minUtil, sort])
 
   const { data, isLoading, isFetching } = useQuery<{
     items: LinkRow[]
@@ -132,11 +159,15 @@ export function LinkUtilizationPage() {
       warning_util: number
       with_netflow: number
       avg_util: number | null
+      /** How many of `total` are actually in `items` (server caps at 200). */
+      returned?: number
     }
   }>({
     queryKey: ['link-utilization', qs],
     queryFn: async () => (await api.get(`/link-utilization?${qs}`)).data,
     refetchInterval: 30_000,
+    // Changing a filter or sort should not blank the table behind a spinner.
+    placeholderData: keepPrev,
   })
 
   const items = data?.items || []
@@ -146,6 +177,12 @@ export function LinkUtilizationPage() {
     () => items.find((i) => i.device_id === selected?.device_id && i.if_index === selected?.if_index),
     [items, selected],
   )
+
+  // Drop a selection that the current filters exclude, so the layout doesn't
+  // hold a column open for a panel that can no longer render.
+  useEffect(() => {
+    if (selected && data && !isFetching && !selectedRow) setSelected(null)
+  }, [selected, data, isFetching, selectedRow])
 
   return (
     <div className="space-y-4">
@@ -240,12 +277,21 @@ export function LinkUtilizationPage() {
 
       <div className="grid gap-4 xl:grid-cols-5">
         {/* Link table */}
-        <Card className={cn('overflow-hidden', selected ? 'xl:col-span-2' : 'xl:col-span-5')}>
+        {/* Width must follow the same condition as the panel below, or a
+            filtered-out selection leaves 3/5 of the row empty. */}
+        <Card className={cn('overflow-hidden', selectedRow ? 'xl:col-span-2' : 'xl:col-span-5')}>
           <CardContent className="p-0">
             <div className="border-b border-border/60 px-4 py-3">
-              <div className="flex items-center gap-2 text-sm font-medium">
+              <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
                 <Network className="h-4 w-4 text-primary" />
                 Interface links
+                {/* The server caps the page — say so rather than let the table
+                    look like the complete set. */}
+                {summary && summary.returned != null && summary.returned < summary.total && (
+                  <span className="text-xs font-normal text-muted">
+                    · showing top {summary.returned.toLocaleString()} of {summary.total.toLocaleString()} by {SORT_LABELS[sort] ?? sort}
+                  </span>
+                )}
                 <span className="text-xs font-normal text-muted">· click a row for drill-down</span>
               </div>
             </div>
@@ -403,6 +449,8 @@ function LinkDetailPanel({
   const nf = data?.netflow
   const sum = data?.summary || {}
   const speed = link.effective_speed_bps
+  // HH:mm alone repeats itself once the window spans more than a day.
+  const tickFormatter = useMemo(() => timeAxisTickFormatter(hours), [hours])
 
   const chartData = useMemo(() => {
     const nfMap = new Map((nf?.timeseries || []).map((p) => [p.ts, p]))
@@ -419,6 +467,17 @@ function LinkDetailPanel({
       }
     })
   }, [traffic, nf, speed])
+
+  /* Throughput above the reported link speed means ifSpeed is wrong, not that
+     the link is 686% loaded — some ports report a stale 10 Mbps after
+     renegotiating. Give the axis a rounded ceiling so the 50/80% guide lines
+     stay readable, and say what the reader is looking at. */
+  const peakUtil = useMemo(
+    () => chartData.reduce((m, p) => Math.max(m, p.util_in || 0, p.util_out || 0), 0),
+    [chartData],
+  )
+  const overCapacity = peakUtil > 100
+  const utilAxisMax = overCapacity ? Math.ceil(peakUtil / 50) * 50 : 100
 
   const PROTO_NAMES: Record<number, string> = {
     1: 'ICMP', 6: 'TCP', 17: 'UDP', 47: 'GRE', 50: 'ESP',
@@ -491,14 +550,15 @@ function LinkDetailPanel({
                   <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.4} strokeDasharray="3 3" vertical={false} />
                   <XAxis
                     dataKey="ts"
-                    tickFormatter={(ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    tickFormatter={tickFormatter}
                     tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
                     axisLine={false}
                     tickLine={false}
+                    minTickGap={40}
                   />
                   <YAxis
-                    width={56}
-                    tickFormatter={(v) => formatBps(Number(v))}
+                    width={52}
+                    tickFormatter={(v) => formatBpsAxis(Number(v))}
                     tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
                     axisLine={false}
                     tickLine={false}
@@ -508,8 +568,8 @@ function LinkDetailPanel({
                   )}
                   <Tooltip
                     contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: 12 }}
-                    labelFormatter={(ts) => new Date(Number(ts)).toLocaleString()}
-                    formatter={(v: number, name: string) => [formatBps(v), name === 'in_bps' ? 'Inbound' : 'Outbound']}
+                    labelFormatter={timeTooltipLabelFormatter}
+                    formatter={(v: number, name: string) => [formatBps(v), name]}
                   />
                   <Legend verticalAlign="top" align="right" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
                   <Area type="monotone" dataKey="in_bps" name="Inbound" stroke="rgb(var(--success))" fill="url(#linkIn)" strokeWidth={2} dot={false} isAnimationActive={false} />
@@ -523,18 +583,29 @@ function LinkDetailPanel({
         {/* Utilization % chart */}
         {speed > 0 && chartData.length > 0 && (
           <div>
-            <h3 className="mb-2 text-sm font-medium">Utilization %</h3>
+            <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+              <h3 className="text-sm font-medium">Utilization %</h3>
+              {overCapacity && (
+                <span
+                  className="text-[11px] text-warning"
+                  title="Throughput exceeds the interface speed reported over SNMP, so the percentage is not meaningful. Set a manual speed override for this interface to correct it."
+                >
+                  Exceeds reported {formatBps(speed)} capacity — link speed looks misreported
+                </span>
+              )}
+            </div>
             <div className="h-36 rounded-lg border border-border/60 bg-surface2/20 p-2">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
                   <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.4} strokeDasharray="3 3" vertical={false} />
                   <XAxis dataKey="ts" hide />
-                  <YAxis width={40} domain={[0, 100]} tickFormatter={(v) => `${v}%`} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} />
+                  <YAxis width={44} domain={[0, utilAxisMax]} tickFormatter={(v) => `${v}%`} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} />
                   <ReferenceLine y={80} stroke="rgb(var(--danger))" strokeDasharray="3 3" strokeOpacity={0.6} />
                   <ReferenceLine y={50} stroke="rgb(var(--warning))" strokeDasharray="3 3" strokeOpacity={0.5} />
                   <Tooltip
                     contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: 12 }}
-                    formatter={(v: number, name: string) => [`${v.toFixed(1)}%`, name === 'util_in' ? 'In util' : 'Out util']}
+                    labelFormatter={timeTooltipLabelFormatter}
+                    formatter={(v: number, name: string) => [`${v.toFixed(1)}%`, name]}
                   />
                   <Area type="monotone" dataKey="util_in" name="In util" stroke="rgb(var(--success))" fill="rgb(var(--success))" fillOpacity={0.15} strokeWidth={1.5} dot={false} isAnimationActive={false} />
                   <Area type="monotone" dataKey="util_out" name="Out util" stroke="rgb(var(--info))" fill="rgb(var(--info))" fillOpacity={0.15} strokeWidth={1.5} dot={false} isAnimationActive={false} />
@@ -569,9 +640,10 @@ function LinkDetailPanel({
                     <AreaChart data={nf.timeseries} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
                       <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.3} vertical={false} />
                       <XAxis dataKey="ts" hide />
-                      <YAxis width={48} tickFormatter={(v) => formatBps(v)} tick={{ fontSize: 9, fill: 'rgb(var(--muted))' }} />
+                      <YAxis width={44} tickFormatter={(v) => formatBpsAxis(Number(v))} tick={{ fontSize: 9, fill: 'rgb(var(--muted))' }} />
                       <Tooltip
                         contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: 11 }}
+                        labelFormatter={timeTooltipLabelFormatter}
                         formatter={(v: number, n: string) => [formatBps(v), n === 'in_bps' ? 'Flow in' : 'Flow out']}
                       />
                       <Area type="monotone" dataKey="in_bps" stroke="rgb(var(--success))" fill="rgb(var(--success))" fillOpacity={0.2} strokeWidth={1.5} dot={false} isAnimationActive={false} />

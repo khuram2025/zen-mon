@@ -63,7 +63,7 @@ import {
   YAxis,
 } from 'recharts'
 import { api } from '@/lib/api'
-import { apiErrorMessage, cn, formatBps, formatBytes, formatDuration, relativeTime, timeAxisTickFormatter, timeTooltipLabelFormatter } from '@/lib/utils'
+import { apiErrorMessage, cn, formatBps, formatBpsAxis, formatBytes, formatDuration, relativeTime, timeAxisTickFormatter, timeTooltipLabelFormatter } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -2806,16 +2806,6 @@ function formatBpsShort(bps: number): string {
   const units = ['bps', 'K', 'M', 'G', 'T']
   const i = Math.min(Math.floor(Math.log(Math.abs(bps)) / Math.log(k)), units.length - 1)
   return `${(bps / Math.pow(k, i)).toFixed(1)} ${units[i] === 'bps' ? 'bps' : units[i] + 'bps'}`
-}
-
-/** Compact bps for chart axes. formatBps' two decimals ("315.46 Kbps") overflow
- *  the narrow gutter and get clipped mid-number. */
-function formatBpsAxis(bps: number): string {
-  if (!bps) return '0'
-  const units = ['', 'K', 'M', 'G', 'T']
-  const i = Math.min(Math.floor(Math.log(Math.abs(bps)) / Math.log(1000)), units.length - 1)
-  const v = bps / Math.pow(1000, i)
-  return `${v.toFixed(v < 10 ? 1 : 0)}${units[i]}`
 }
 
 /** Link utilisation is often a small fraction of a 10G port — don't round
