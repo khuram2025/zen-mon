@@ -11,6 +11,16 @@ export const TIME_RANGE_OPTIONS = [
 
 export type TimeRangeKey = typeof TIME_RANGE_OPTIONS[number]['key'] | 'custom'
 
+/**
+ * Mid-sentence form of a range label ("No events in {…}").
+ *
+ * Never lowercase the whole label: "Last 1M" (one month) would become
+ * "last 1m", which reads as one minute. Only the leading "Last" is folded.
+ */
+export function rangePhrase(label: string): string {
+  return label.startsWith('Last ') ? `the last ${label.slice(5)}` : label
+}
+
 export interface TimeRange {
   hours: number
   fromISO: string

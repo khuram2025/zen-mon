@@ -25,6 +25,7 @@ import {
   LockKeyhole,
   MapPin,
   MemoryStick,
+  Minus,
   MoreVertical,
   Network,
   Pencil,
@@ -41,7 +42,6 @@ import {
   Shield,
   SquareStack,
   Tag as TagIcon,
-  Terminal,
   Thermometer,
   Trash2,
   TrendingDown,
@@ -67,12 +67,44 @@ import { apiErrorMessage, cn, formatBps, formatBytes, formatDuration, relativeTi
 import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/Dialog'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/Dialog'
 import { DeviceFormDialog } from '@/components/forms/DeviceFormDialog'
 import { toast } from '@/components/ui/Toast'
-import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
+import { TimeRangePicker, rangePhrase, useTimeRange } from '@/components/TimeRangePicker'
 
 /* ── Shared helpers ────────────────────────────────────────── */
+
+/** Axis labels for the fixed 5-tick device charts. A plain "10:54 AM" at both
+ *  ends of a 24h window is ambiguous, and there is room here for the date. */
+function deviceAxisFormatter(rangeHours: number): (ts: number) => string {
+  if (rangeHours <= 12) {
+    return (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+  if (rangeHours <= 24 * 7) {
+    return (ts) => {
+      const d = new Date(ts)
+      return `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    }
+  }
+  return (ts) => new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' })
+}
+
+/** Room for the final axis label, which is centred on the right edge of the
+ *  plot and gets clipped by the SVG without it. */
+function axisRightPad(rangeHours: number): number {
+  return rangeHours > 12 && rangeHours <= 24 * 7 ? 46 : 20
+}
+
+/** Evenly spaced ticks across the selected window. Recharts derives ticks from
+ *  the data, so a range whose samples all land in one corner ends up with a
+ *  single label and no sense of scale. */
+function timeTicks(fromTs: number, toTs: number, rangeHours: number): number[] {
+  if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || toTs <= fromTs) return []
+  // "Jul 29, 10:55 PM" is roughly twice as wide as "Jul 29" — fit fewer of them.
+  const count = rangeHours > 12 && rangeHours <= 24 * 7 ? 4 : 5
+  const step = (toTs - fromTs) / (count - 1)
+  return Array.from({ length: count }, (_, i) => Math.round(fromTs + i * step))
+}
 
 const ttStyle = () => ({
   contentStyle: {
@@ -203,6 +235,24 @@ function DeviceHeader({
   })
   const availabilityPct = device?.id && uptimeStats?.devices ? uptimeStats.devices[device.id] : undefined
 
+  /* Diagnostics = the reachability checks we can actually run from the server:
+     an ICMP probe plus, when SNMP is configured, a live SNMP GET. */
+  const [diagOpen, setDiagOpen] = useState(false)
+  const [diagResult, setDiagResult] = useState<DiagnosticsResult | null>(null)
+  const diagnostics = useMutation({
+    mutationFn: async (): Promise<DiagnosticsResult> => {
+      const ping = api.post(`/devices/${device.id}/ping-test`).then((r) => r.data, (e) => ({ ok: false, reason: apiErrorMessage(e) }))
+      const snmp = device.snmp_enabled
+        ? api.post(`/devices/${device.id}/snmp-test`).then((r) => r.data, (e) => ({ ok: false, reason: apiErrorMessage(e) }))
+        : Promise.resolve(null)
+      const [pingRes, snmpRes] = await Promise.all([ping, snmp])
+      return { ping: pingRes, snmp: snmpRes }
+    },
+    onMutate: () => setDiagResult(null),
+    onSuccess: (data) => setDiagResult(data),
+    onError: (e: any) => toast.error('Diagnostics failed', apiErrorMessage(e)),
+  })
+
   const kind = {
     healthy: { pill: 'bg-success/15 text-success border-success/30', dot: 'bg-success', label: 'Healthy' },
     warning: { pill: 'bg-warning/15 text-warning border-warning/30', dot: 'bg-warning', label: 'Warning' },
@@ -225,7 +275,7 @@ function DeviceHeader({
     uptimeSec != null
       ? formatDuration(uptimeSec)
       : availabilityPct !== undefined
-        ? `${availabilityPct.toFixed(availabilityPct >= 99.95 ? 1 : 2)}% (${range.label.toLowerCase()})`
+        ? `${availabilityPct.toFixed(availabilityPct >= 99.95 ? 1 : 2)}% (${rangePhrase(range.label)})`
         : '—'
   const secondary: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; value: string; color?: string }> = [
     { icon: Clock, label: 'Uptime', value: uptimeDisplay, color: 'text-success' },
@@ -274,13 +324,15 @@ function DeviceHeader({
                 <Pencil className="h-4 w-4" />
                 Edit Device
               </Button>
-              <Button variant="outline" size="default" className="h-9">
-                <Zap className="h-4 w-4" />
+              <Button
+                variant="outline"
+                size="default"
+                className="h-9"
+                disabled={diagnostics.isPending}
+                onClick={() => { setDiagOpen(true); diagnostics.mutate() }}
+              >
+                {diagnostics.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
                 Run Diagnostics
-              </Button>
-              <Button size="default" className="h-9">
-                <Terminal className="h-4 w-4" />
-                Open Console
               </Button>
               <Button
                 variant="outline"
@@ -306,7 +358,114 @@ function DeviceHeader({
           </div>
         </div>
       </CardContent>
+
+      <DiagnosticsDialog
+        open={diagOpen}
+        onOpenChange={setDiagOpen}
+        running={diagnostics.isPending}
+        result={diagResult}
+        snmpEnabled={!!device.snmp_enabled}
+        onRerun={() => diagnostics.mutate()}
+      />
     </Card>
+  )
+}
+
+/* ════════════════════════════════════════════════════════════
+   Diagnostics — ping + SNMP reachability, run on demand
+   ════════════════════════════════════════════════════════════ */
+
+type DiagnosticsResult = { ping: any; snmp: any | null }
+
+function DiagnosticsDialog({
+  open, onOpenChange, running, result, snmpEnabled, onRerun,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  running: boolean
+  result: DiagnosticsResult | null
+  snmpEnabled: boolean
+  onRerun: () => void
+}) {
+  const ping = result?.ping
+  const snmp = result?.snmp
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Zap className="h-5 w-5 text-primary" />
+            Diagnostics
+          </DialogTitle>
+          <DialogDescription>Live reachability checks run from the ZenPlus server.</DialogDescription>
+        </DialogHeader>
+
+        {running || !result ? (
+          <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Running checks…
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <DiagnosticRow
+              icon={Activity}
+              label="ICMP ping"
+              ok={!!ping?.ok}
+              detail={
+                ping?.ok
+                  ? `${ping.received}/${ping.transmitted} replies · ${ping.rtt_avg_ms != null ? `${ping.rtt_avg_ms.toFixed(1)} ms avg` : 'no RTT'}`
+                  : ping?.reason || 'No reply'
+              }
+            />
+            {snmpEnabled ? (
+              <DiagnosticRow
+                icon={Shield}
+                label="SNMP GET"
+                ok={!!snmp?.ok}
+                detail={snmp?.ok ? (snmp.sys_descr || 'Responded') : snmp?.reason || 'No response'}
+              />
+            ) : (
+              <DiagnosticRow icon={Shield} label="SNMP GET" ok={null} detail="SNMP is disabled for this device" />
+            )}
+          </div>
+        )}
+
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>Close</Button>
+          <Button size="sm" disabled={running} onClick={onRerun}>
+            {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            Run again
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function DiagnosticRow({
+  icon: Icon, label, ok, detail,
+}: {
+  icon: React.ComponentType<{ className?: string }>
+  label: string
+  ok: boolean | null
+  detail: string
+}) {
+  return (
+    <div className="flex items-start gap-3 rounded-lg border border-border bg-surface2/40 p-3">
+      <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${ok == null ? 'text-muted' : ok ? 'text-success' : 'text-danger'}`} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium">{label}</span>
+          <span className={`rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${
+            ok == null ? 'bg-surface2 text-muted' : ok ? 'bg-success/15 text-success' : 'bg-danger/15 text-danger'
+          }`}>
+            {ok == null ? 'Skipped' : ok ? 'Pass' : 'Fail'}
+          </span>
+        </div>
+        <div className="mt-0.5 break-words text-xs text-muted">{detail}</div>
+      </div>
+    </div>
   )
 }
 
@@ -352,6 +511,14 @@ type NetflowOverview = {
   top_protocol: { protocol: number; name: string; bytes: number } | null
 }
 
+type DeviceAlert = {
+  id: string
+  status: 'active' | 'acknowledged' | 'resolved'
+  severity: string
+  message: string
+  triggered_at: string
+}
+
 type NetflowSeriesPoint = { ts: number; bps: number; bytes: number; packets: number; flows: number }
 type NetflowApplication = { name: string; bytes: number; packets: number; flows: number }
 type NetflowConversation = { src: string; dst: string; protocol_name: string; dst_port: number; service: string; bytes: number; packets: number; flows: number }
@@ -365,6 +532,10 @@ function DashboardSection({
 }) {
   const snmp = !!device.snmp_enabled
   const hoursRange = range.hours
+  // Chart x-domains are the selected window, not the extent of the returned
+  // samples — sparse data must read as sparse, not as full coverage.
+  const fromTs = Date.parse(range.fromISO)
+  const toTs = Date.parse(range.toISO)
   const [eventsOpen, setEventsOpen] = useState(false)
   const [healthOpen, setHealthOpen] = useState(false)
   const [inventoryOpen, setInventoryOpen] = useState(false)
@@ -394,9 +565,12 @@ function DashboardSection({
     refetchInterval: 30_000,
     enabled: snmp,
   })
+  // The endpoint accepts up to 720h and buckets server-side; follow the page
+  // range so the tiles below aren't labelled 1M while showing 24h of data.
+  const ifMetricHours = Math.min(720, Math.max(1, Math.round(hoursRange)))
   const { data: ifMetrics } = useQuery<Record<string, any[]>>({
-    queryKey: ['device', deviceId, 'if-metrics', hoursRange],
-    queryFn: async () => (await api.get(`/devices/${deviceId}/snmp-if-metrics?hours=${Math.min(24, hoursRange)}`)).data,
+    queryKey: ['device', deviceId, 'if-metrics', ifMetricHours],
+    queryFn: async () => (await api.get(`/devices/${deviceId}/snmp-if-metrics?hours=${ifMetricHours}`)).data,
     refetchInterval: 30_000,
     enabled: snmp,
   })
@@ -536,7 +710,8 @@ function DashboardSection({
   const latSeries = rttPts.map((p) => p.rtt)
   const lossSeries = rttPts.map((p) => p.loss)
   const bwMbpsSeries = bwSeries.map((p) => p.value / 1_000_000)
-  const uptimeSpark = uptimeHistory(uptimeSec)
+  // Real availability sparkline: 100 when the check was up, 0 when it was down.
+  const uptimeSpark = pts.map((p) => (isUpPoint(p.is_up) ? 100 : 0))
 
   const perfStats = {
     cpu: { avg: avg(cpuSeries), max: Math.max(0, ...cpuSeries) },
@@ -547,10 +722,28 @@ function DashboardSection({
     status: device.status, cpu: cpuVal, mem: memVal, loss: avgLoss, ifUp, ifTotal,
   })
 
-  const recentAlerts = (traps || []).slice(0, 5).map((t: any) => ({
-    severity: normalizeSeverity(t.severity),
-    title: t.trap_name || t.message || 'SNMP trap',
-    ago: relativeTime(t.timestamp),
+  /* Real alerts raised against this device. The card used to list SNMP traps
+     under an "Alerts" heading, which is a different thing entirely. */
+  const { data: alertsResp } = useQuery<{ data: DeviceAlert[]; meta: { total: number } }>({
+    queryKey: ['device', deviceId, 'alerts'],
+    queryFn: async () => (await api.get(`/alerts?device_id=${deviceId}&limit=20`)).data,
+    refetchInterval: 30_000,
+  })
+  const deviceAlerts = alertsResp?.data || []
+  // The list above is capped at 20 — ask the API for the real active count so
+  // the Acknowledge button can't understate what it is about to change.
+  const { data: activeAlertsResp } = useQuery<{ meta: { total: number } }>({
+    queryKey: ['device', deviceId, 'alerts', 'active-count'],
+    queryFn: async () => (await api.get(`/alerts?device_id=${deviceId}&status=active&limit=1`)).data,
+    refetchInterval: 30_000,
+  })
+  const activeAlertCount = activeAlertsResp?.meta?.total ?? 0
+  const recentAlerts = deviceAlerts.slice(0, 5).map((a) => ({
+    id: a.id,
+    severity: normalizeSeverity(a.severity),
+    title: a.message || 'Alert',
+    ago: relativeTime(a.triggered_at),
+    acknowledged: a.status === 'acknowledged',
   }))
   const activityEvents = useMemo(
     () => buildActivityEvents(traps || [], statusHistory || [], metrics || {}, range.fromISO, range.toISO),
@@ -566,8 +759,8 @@ function DashboardSection({
           label="CPU Usage"
           value={cpuVal != null ? `${cpuVal.toFixed(0)}%` : '—'}
           trend={cpuTrend}
-          trendUnit="%"
           color="info"
+          invertTrend
           series={cpuSeries.slice(-22)}
         />
         <KpiTile
@@ -575,25 +768,26 @@ function DashboardSection({
           label="Memory Usage"
           value={memVal != null ? `${memVal.toFixed(0)}%` : '—'}
           trend={memTrend}
-          trendUnit="%"
           color="accent"
+          invertTrend
           series={memSeries.slice(-22)}
         />
         <KpiTile
           icon={<Network className="h-4 w-4" />}
           label="Interface Utilization"
-          value={ifTotal ? `${ifUtilPct.toFixed(0)}%` : '—'}
+          value={ifTotal ? formatUtilPct(ifUtilPct) : '—'}
           trend={ifTrend}
-          trendUnit="%"
+          trendLabel="total throughput vs. earlier in range"
           color="success"
+          invertTrend
           series={bwMbpsSeries.slice(-22)}
+          subtitle={ifTotal ? `Busiest of ${ifTotal} interfaces` : undefined}
         />
         <KpiTile
           icon={<Activity className="h-4 w-4" />}
           label="Latency"
           value={lastRtt != null ? `${Number(lastRtt).toFixed(0)} ms` : '—'}
           trend={latTrend}
-          trendUnit="ms"
           color="info"
           invertTrend
           series={latSeries.slice(-22)}
@@ -603,17 +797,17 @@ function DashboardSection({
           label="Packet Loss"
           value={avgLoss != null ? `${avgLoss.toFixed(1)}%` : '—'}
           trend={lossTrend}
-          trendUnit="%"
-          color="danger"
+          // Zero loss is a healthy state — don't paint it in the danger colour.
+          color={avgLoss == null ? 'info' : avgLoss === 0 ? 'success' : avgLoss < 2 ? 'warning' : 'danger'}
           invertTrend
           series={lossSeries.slice(-22)}
+          subtitle={avgLoss != null ? `Avg over ${rangePhrase(range.label)}` : undefined}
         />
         <KpiTile
           icon={<Clock className="h-4 w-4" />}
           label={`Uptime (${range.label})`}
           value={availabilityLabel}
           trend={null}
-          trendUnit="%"
           color={
             availabilityPct === undefined
               ? 'warning'
@@ -624,13 +818,14 @@ function DashboardSection({
                   : 'danger'
           }
           series={uptimeSpark}
-          subtitle={uptimeSec != null ? `Up ${uptimeDaysCompact}` : undefined}
+          // Device boot time, distinct from the availability % above it.
+          subtitle={uptimeSec != null ? `Booted ${uptimeDaysCompact} ago` : undefined}
         />
       </div>
 
       {/* ═══════════ Availability timeline (full width) ═══════════ */}
       {device.ping_enabled && (
-        <AvailabilityTimelineCard points={pts} rangeLabel={range.label} />
+        <AvailabilityTimelineCard points={pts} rangeLabel={range.label} fromTs={fromTs} toTs={toTs} />
       )}
 
       {/* ═══════════ Middle row (3 cols) ═══════════ */}
@@ -640,6 +835,8 @@ function DashboardSection({
           stats={perfStats}
           rangeLabel={range.label}
           rangeHours={range.hours}
+          fromTs={fromTs}
+          toTs={toTs}
         />
         <InterfaceStatusCard
           ifs={ifs || []}
@@ -649,11 +846,14 @@ function DashboardSection({
         <HealthScoreCard
           score={healthScore}
           alerts={recentAlerts}
+          totalAlerts={deviceAlerts.length}
+          deviceId={deviceId}
           metrics={metrics || {}}
           sensors={sensors || []}
           memVal={memVal}
+          cpuVal={cpuVal}
+          avgLoss={avgLoss}
           onViewDetails={() => setHealthOpen(true)}
-          onViewAllAlerts={() => setEventsOpen(true)}
         />
       </div>
 
@@ -666,6 +866,8 @@ function DashboardSection({
           conversations={netflowConversations || []}
           rangeLabel={range.label}
           rangeHours={range.hours}
+          fromTs={fromTs}
+          toTs={toTs}
         />
       )}
 
@@ -687,6 +889,7 @@ function DashboardSection({
           metrics={metrics || {}}
           sensors={sensors || []}
           lastBw={lastBw}
+          openAlerts={activeAlertCount}
         />
       </div>
 
@@ -718,15 +921,18 @@ function DashboardSection({
    ════════════════════════════════════════════════════════════ */
 
 function KpiTile({
-  icon, label, value, trend, trendUnit, color, series, invertTrend, subtitle,
+  icon, label, value, trend, trendLabel, color, series, invertTrend, subtitle,
 }: {
   icon: React.ReactNode
   label: string
   value: string
+  /** Percent change between the first and second half of the selected range. */
   trend: number | null
-  trendUnit: '%' | 'ms'
+  /** What the trend is measuring, for the badge tooltip. */
+  trendLabel?: string
   color: 'primary' | 'success' | 'warning' | 'danger' | 'info' | 'accent'
   series?: number[]
+  /** Set when a rising value is bad (usage, latency, loss). */
   invertTrend?: boolean
   subtitle?: string
 }) {
@@ -739,7 +945,10 @@ function KpiTile({
     accent:  { chip: 'bg-accent/10 text-accent',   stroke: 'rgb(var(--accent))',  from: 'rgb(var(--accent) / 0.35)',  to: 'rgb(var(--accent) / 0)' },
   }
   const c = COLORS[color]
-  const good = trend == null ? null : invertTrend ? trend <= 0 : trend >= 0
+  // A change under 0.05% rounds to "0.0%" — render it as flat rather than
+  // colouring an arrow that points at nothing.
+  const flat = trend != null && Math.abs(trend) < 0.05
+  const good = trend == null || flat ? null : invertTrend ? trend < 0 : trend > 0
 
   return (
     <div className="flex flex-col gap-1.5 rounded-xl border border-border bg-surface p-3 transition-colors hover:border-border-strong">
@@ -751,9 +960,14 @@ function KpiTile({
       <div className="flex items-baseline gap-2">
         <div className="text-[26px] font-bold leading-none tabular-nums" style={{ color: c.stroke }}>{value}</div>
         {trend != null && (
-          <span className={`inline-flex items-center gap-0.5 text-[11px] font-medium tabular-nums ${good ? 'text-success' : 'text-danger'}`}>
-            {trend >= 0 ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />}
-            {Math.abs(trend).toFixed(trendUnit === 'ms' ? 0 : 1)}{trendUnit === 'ms' ? ' ms' : '%'}
+          <span
+            className={`inline-flex items-center gap-0.5 text-[11px] font-medium tabular-nums ${
+              good == null ? 'text-muted' : good ? 'text-success' : 'text-danger'
+            }`}
+            title={`${flat ? 'No change' : trend > 0 ? 'Up' : 'Down'} ${Math.abs(trend).toFixed(1)}% — ${trendLabel || 'second half of the selected range vs. the first'}`}
+          >
+            {flat ? <Minus className="h-3 w-3" /> : trend > 0 ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />}
+            {Math.abs(trend).toFixed(1)}%
           </span>
         )}
       </div>
@@ -774,16 +988,30 @@ function KpiTile({
    ════════════════════════════════════════════════════════════ */
 
 function PerformanceOverviewCard({
-  series, stats, rangeLabel, rangeHours,
+  series, stats, rangeLabel, rangeHours, fromTs, toTs,
 }: {
   series: Array<{ ts: number; cpu?: number; mem?: number }>
   stats: { cpu: { avg: number; max: number }; mem: { avg: number; max: number } }
   rangeLabel: string
   rangeHours: number
+  fromTs: number
+  toTs: number
 }) {
-  const hasData = series.length > 1
-  const tickFormatter = useMemo(() => timeAxisTickFormatter(rangeHours), [rangeHours])
-  const minTickGap = rangeHours <= 24 ? 30 : rangeHours <= 24 * 7 ? 60 : 50
+  const hasData = series.length > 0
+  const tickFormatter = useMemo(() => deviceAxisFormatter(rangeHours), [rangeHours])
+  const ticks = useMemo(() => timeTicks(fromTs, toTs, rangeHours), [fromTs, toTs, rangeHours])
+  // A single sample draws no line — show its marker instead of an empty plot.
+  const showDots = series.length === 1
+
+  /* Retention and polling gaps mean the samples often cover a fraction of the
+     selected window. The axis now shows that honestly, which makes a clustered
+     plot look broken unless we say why. */
+  const coverage = useMemo(() => {
+    if (series.length < 2 || toTs <= fromTs) return null
+    const span = series[series.length - 1].ts - series[0].ts
+    const pct = (span / (toTs - fromTs)) * 100
+    return pct < 90 ? pct : null
+  }, [series, fromTs, toTs])
 
   return (
     <Card>
@@ -793,7 +1021,17 @@ function PerformanceOverviewCard({
             <Activity className="h-4 w-4 text-primary" />
             <h3 className="text-sm font-semibold">Performance Overview</h3>
           </div>
-          <span className="text-[11px] font-medium text-muted">{rangeLabel}</span>
+          <div className="flex items-baseline gap-2">
+            {coverage != null && (
+              <span
+                className="text-[10px] text-muted"
+                title="Samples only exist for part of the selected window — the rest of the axis has no data."
+              >
+                data covers {coverage < 1 ? '<1' : coverage.toFixed(0)}%
+              </span>
+            )}
+            <span className="text-[11px] font-medium text-muted">{rangeLabel}</span>
+          </div>
         </div>
 
         {/* Legend */}
@@ -805,20 +1043,28 @@ function PerformanceOverviewCard({
         <div className="mt-2 h-52">
           {hasData ? (
             <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={series} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+              <LineChart data={series} margin={{ top: 4, right: axisRightPad(rangeHours), bottom: 0, left: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--border)/0.25)" vertical={false} />
+                {/* Numeric time scale: samples are irregular, so a category
+                    axis would space them evenly and misplace old points. */}
                 <XAxis
                   dataKey="ts"
+                  type="number"
+                  scale="time"
+                  domain={[fromTs, toTs]}
+                  ticks={ticks}
+                  /* We choose the ticks, so render them all rather than let
+                     Recharts drop the ends to satisfy its own spacing rule. */
+                  interval={0}
                   tickFormatter={tickFormatter}
                   tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
                   axisLine={false}
                   tickLine={false}
-                  minTickGap={minTickGap}
                 />
-                <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} width={30} axisLine={false} tickLine={false} tickFormatter={(v) => `${v}%`} />
+                <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} width={38} axisLine={false} tickLine={false} tickFormatter={(v) => `${v}%`} />
                 <Tooltip {...ttStyle()} />
-                <Line type="monotone" dataKey="cpu" stroke="rgb(var(--info))" strokeWidth={1.8} dot={false} connectNulls />
-                <Line type="monotone" dataKey="mem" stroke="rgb(var(--accent))" strokeWidth={1.8} dot={false} connectNulls />
+                <Line type="monotone" dataKey="cpu" name="CPU" stroke="rgb(var(--info))" strokeWidth={1.8} dot={showDots} connectNulls />
+                <Line type="monotone" dataKey="mem" name="Memory" stroke="rgb(var(--accent))" strokeWidth={1.8} dot={showDots} connectNulls />
               </LineChart>
             </ResponsiveContainer>
           ) : (
@@ -863,7 +1109,7 @@ function LegendDot({ color, label }: { color: string; label: string }) {
    ════════════════════════════════════════════════════════════ */
 
 function DeviceNetflowCard({
-  exporterIp, overview, series, applications, conversations, rangeLabel, rangeHours,
+  exporterIp, overview, series, applications, conversations, rangeLabel, rangeHours, fromTs, toTs,
 }: {
   exporterIp: string
   overview: NetflowOverview
@@ -872,10 +1118,16 @@ function DeviceNetflowCard({
   conversations: NetflowConversation[]
   rangeLabel: string
   rangeHours: number
+  fromTs: number
+  toTs: number
 }) {
-  const tickFormatter = useMemo(() => timeAxisTickFormatter(rangeHours), [rangeHours])
+  const tickFormatter = useMemo(() => deviceAxisFormatter(rangeHours), [rangeHours])
+  const ticks = useMemo(() => timeTicks(fromTs, toTs, rangeHours), [fromTs, toTs, rangeHours])
   const topApp = applications[0]
   const topConversation = conversations[0]
+  // Long ranges collapse into few (sometimes one) buckets. One bucket is still
+  // data — plot it as a marker rather than pretending we're still collecting.
+  const showDots = series.length === 1
 
   return (
     <Card>
@@ -901,16 +1153,19 @@ function DeviceNetflowCard({
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(280px,0.75fr)]">
           <div className="min-w-0">
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <NetflowStat label="Rate" value={formatBps(overview.current_bps)} />
+              {/* "Rate" is the instantaneous rate, which is 0 whenever the
+                  exporter has stopped sending — say so rather than implying
+                  the whole window averaged zero. */}
+              <NetflowStat label="Current Rate" value={overview.current_bps > 0 ? formatBps(overview.current_bps) : 'Idle'} />
               <NetflowStat label="Volume" value={formatBytes(overview.bytes)} />
               <NetflowStat label="Flows" value={overview.flows.toLocaleString()} />
               <NetflowStat label="Last Seen" value={relativeTime(overview.last_seen)} />
             </div>
 
             <div className="mt-3 h-44">
-              {series.length > 1 ? (
+              {series.length > 0 ? (
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={series} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                  <AreaChart data={series} margin={{ top: 4, right: axisRightPad(rangeHours), bottom: 0, left: 0 }}>
                     <defs>
                       <linearGradient id="deviceNetflowBps" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor="rgb(var(--primary))" stopOpacity={0.35} />
@@ -920,18 +1175,22 @@ function DeviceNetflowCard({
                     <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--border)/0.25)" vertical={false} />
                     <XAxis
                       dataKey="ts"
+                      type="number"
+                      scale="time"
+                      domain={[fromTs, toTs]}
+                      ticks={ticks}
+                      interval={0}
                       tickFormatter={tickFormatter}
                       tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
                       axisLine={false}
                       tickLine={false}
-                      minTickGap={rangeHours <= 24 ? 30 : 55}
                     />
                     <YAxis
                       tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
-                      width={54}
+                      width={52}
                       axisLine={false}
                       tickLine={false}
-                      tickFormatter={(v) => formatBps(Number(v)).replace(' ', '')}
+                      tickFormatter={(v) => formatBpsAxis(Number(v))}
                     />
                     <Tooltip
                       {...ttStyle()}
@@ -940,11 +1199,15 @@ function DeviceNetflowCard({
                         name === 'bps' ? 'Throughput' : name,
                       ]}
                     />
-                    <Area type="monotone" dataKey="bps" stroke="rgb(var(--primary))" strokeWidth={1.8} fill="url(#deviceNetflowBps)" dot={false} />
+                    <Area type="monotone" dataKey="bps" stroke="rgb(var(--primary))" strokeWidth={1.8} fill="url(#deviceNetflowBps)" dot={showDots} />
                   </AreaChart>
                 </ResponsiveContainer>
               ) : (
-                <div className="flex h-full items-center justify-center text-xs text-muted">Collecting flow series…</div>
+                <div className="flex h-full flex-col items-center justify-center gap-1 text-center">
+                  <Network className="h-5 w-5 text-muted/60" />
+                  <div className="text-[11px] font-medium text-text">No flow series in {rangePhrase(rangeLabel)}</div>
+                  <div className="text-[10px] text-muted">Totals above cover the whole window</div>
+                </div>
               )}
             </div>
           </div>
@@ -1097,10 +1360,12 @@ function InterfaceStatusCard({
                             className={`h-full rounded-full ${
                               i.util > 80 ? 'bg-danger' : i.util > 50 ? 'bg-warning' : 'bg-success'
                             }`}
-                            style={{ width: `${Math.max(2, i.util)}%` }}
+                            /* Idle links get no bar at all; anything carrying
+                               traffic gets a visible minimum sliver. */
+                            style={{ width: i.util <= 0 ? '0%' : `${Math.max(4, i.util)}%` }}
                           />
                         </div>
-                        <span className="w-7 text-right text-[10px] tabular-nums">{i.util.toFixed(0)}%</span>
+                        <span className="w-8 text-right text-[10px] tabular-nums">{formatUtilPct(i.util)}</span>
                       </div>
                     </td>
                   </tr>
@@ -1122,15 +1387,18 @@ function InterfaceStatusCard({
    ════════════════════════════════════════════════════════════ */
 
 function HealthScoreCard({
-  score, alerts, metrics, sensors, memVal, onViewDetails, onViewAllAlerts,
+  score, alerts, totalAlerts, deviceId, metrics, sensors, memVal, cpuVal, avgLoss, onViewDetails,
 }: {
   score: number
-  alerts: Array<{ severity: 'critical' | 'warning' | 'info' | 'success'; title: string; ago: string }>
+  alerts: Array<{ id: string; severity: 'critical' | 'warning' | 'info' | 'success'; title: string; ago: string; acknowledged: boolean }>
+  totalAlerts: number
+  deviceId: string
   metrics: Record<string, { points: { ts: number; value: number }[] }>
   sensors: any[]
   memVal: number | null
+  cpuVal: number | null
+  avgLoss: number | null
   onViewDetails: () => void
-  onViewAllAlerts: () => void
 }) {
   const color =
     score >= 80 ? 'rgb(var(--success))'
@@ -1171,12 +1439,30 @@ function HealthScoreCard({
       tone: 'info',
     })
   }
+  // The score is driven by CPU, memory and loss — show those alongside any
+  // environmental readings so the gauge isn't sitting next to empty space.
+  if (cpuVal != null) {
+    chips.push({
+      icon: Cpu,
+      label: 'CPU',
+      value: `${cpuVal.toFixed(0)}%`,
+      tone: cpuVal > 90 ? 'danger' : cpuVal > 75 ? 'warning' : 'info',
+    })
+  }
   if (memVal != null) {
     chips.push({
       icon: MemoryStick,
       label: 'Memory',
       value: `${memVal.toFixed(0)}%`,
       tone: memVal > 85 ? 'danger' : memVal > 70 ? 'warning' : 'accent',
+    })
+  }
+  if (avgLoss != null) {
+    chips.push({
+      icon: ZapOff,
+      label: 'Loss',
+      value: `${avgLoss.toFixed(1)}%`,
+      tone: avgLoss >= 2 ? 'danger' : avgLoss > 0 ? 'warning' : 'success',
     })
   }
 
@@ -1213,21 +1499,24 @@ function HealthScoreCard({
         {/* Recent Alerts */}
         <div className="mt-4 border-t border-border/60 pt-3">
           <div className="mb-2 flex items-center justify-between">
-            <h4 className="text-xs font-semibold">Recent Alerts</h4>
-            <button
-              type="button"
-              onClick={onViewAllAlerts}
-              className="text-[11px] text-primary hover:underline"
-            >
+            <h4 className="text-xs font-semibold">
+              Recent Alerts
+              {totalAlerts > 0 && <span className="ml-1 font-normal text-muted">({totalAlerts})</span>}
+            </h4>
+            <Link to={`/alerts?device_id=${deviceId}`} className="text-[11px] text-primary hover:underline">
               View All
-            </button>
+            </Link>
           </div>
           <div className="space-y-1.5">
             {alerts.length === 0 && (
-              <div className="py-3 text-center text-[11px] text-muted">No recent alerts</div>
+              <div className="py-3 text-center text-[11px] text-muted">No alerts for this device</div>
             )}
-            {alerts.map((a, i) => (
-              <div key={i} className="flex items-center gap-2">
+            {alerts.map((a) => (
+              <Link
+                key={a.id}
+                to={`/alerts/${a.id}`}
+                className="flex items-center gap-2 rounded px-1 py-0.5 -mx-1 hover:bg-surface2/60"
+              >
                 <span className={`inline-flex items-center gap-0.5 rounded-sm px-1 text-[9px] font-semibold uppercase tracking-wider ${
                   a.severity === 'critical' ? 'bg-danger/15 text-danger'
                   : a.severity === 'warning' ? 'bg-warning/15 text-warning'
@@ -1240,8 +1529,9 @@ function HealthScoreCard({
                   : 'INFO'}
                 </span>
                 <span className="min-w-0 flex-1 truncate text-[11px]" title={a.title}>{a.title}</span>
+                {a.acknowledged && <CheckCircle2 className="h-3 w-3 shrink-0 text-muted" aria-label="Acknowledged" />}
                 <span className="shrink-0 text-[10px] text-muted">{a.ago}</span>
-              </div>
+              </Link>
             ))}
           </div>
         </div>
@@ -1395,19 +1685,65 @@ function InventoryConfigCard({
    Availability Timeline — horizontal green/red up/down strip
    ════════════════════════════════════════════════════════════ */
 
+const TIMELINE_MAX_BUCKETS = 96
+const TIMELINE_MIN_BUCKETS = 24
+const UP_COLOR = '#22C55E'
+const DOWN_COLOR = '#EF4444'
+
 function AvailabilityTimelineCard({
-  points, rangeLabel,
+  points, rangeLabel, fromTs, toTs,
 }: {
   points: { timestamp: string; is_up: boolean }[]
   rangeLabel: string
+  fromTs: number
+  toTs: number
 }) {
   const total = points.length
-  const upCount = points.filter(
-    (p) => p.is_up === true || (p.is_up as unknown as number) === 1 || (typeof p.is_up === 'number' && p.is_up > 0.5),
-  ).length
+  const upCount = points.filter((p) => isUpPoint(p.is_up)).length
   const pct = total ? (upCount / total) * 100 : null
   const pctColor =
     pct == null ? 'text-muted' : pct > 99 ? 'text-success' : pct > 95 ? 'text-warning' : 'text-danger'
+
+  /* Lay the checks out on the real clock. Rendering one equal-width segment
+     per check made three hourly pings fill a whole month of timeline and read
+     as full coverage; gaps between checks must stay visibly empty. */
+  const buckets = useMemo(() => {
+    const span = Math.max(1, toTs - fromTs)
+    const stamps = points
+      .map((p) => Date.parse(p.timestamp))
+      .filter((t) => Number.isFinite(t))
+      .sort((a, b) => a - b)
+
+    /* Buckets must be at least one polling interval wide. Narrower than that
+       and a perfectly healthy device alternates bar/gap purely from aliasing. */
+    const gaps = stamps.slice(1).map((t, i) => t - stamps[i]).sort((a, b) => a - b)
+    const medianGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 0
+    const count = medianGap > 0
+      ? Math.max(TIMELINE_MIN_BUCKETS, Math.min(TIMELINE_MAX_BUCKETS, Math.round(span / medianGap)))
+      : TIMELINE_MAX_BUCKETS
+
+    const width = span / count
+    const slots: Array<{ up: number; down: number; start: number }> = Array.from(
+      { length: count },
+      (_, i) => ({ up: 0, down: 0, start: fromTs + i * width }),
+    )
+    points.forEach((p) => {
+      const ts = Date.parse(p.timestamp)
+      if (!Number.isFinite(ts)) return
+      const i = Math.min(count - 1, Math.floor((ts - fromTs) / width))
+      if (i < 0) return
+      if (isUpPoint(p.is_up)) slots[i].up += 1
+      else slots[i].down += 1
+    })
+    return slots.map((s) => ({
+      ...s,
+      end: s.start + width,
+      state: s.up + s.down === 0 ? 'gap' as const : s.down > 0 ? 'down' as const : 'up' as const,
+    }))
+  }, [points, fromTs, toTs])
+
+  const coveredBuckets = buckets.filter((b) => b.state !== 'gap').length
+  const coveragePct = buckets.length ? (coveredBuckets / buckets.length) * 100 : 0
 
   return (
     <Card>
@@ -1416,47 +1752,63 @@ function AvailabilityTimelineCard({
           <div className="flex min-w-0 items-baseline gap-2">
             <h3 className="text-sm font-semibold">Availability Timeline</h3>
             <span className="truncate text-[11px] font-medium text-muted">
-              {rangeLabel}{total ? ` · ${total} checks` : ''}
+              {rangeLabel}{total ? ` · ${total} check${total === 1 ? '' : 's'}` : ''}
             </span>
           </div>
           {pct != null && (
-            <span className={cn('text-xs font-mono font-medium', pctColor)}>{pct.toFixed(2)}% uptime</span>
+            <div className="flex items-baseline gap-2">
+              {coveragePct < 95 && (
+                <span
+                  className="text-[10px] text-muted"
+                  title="Share of the selected window that has ping data. Uptime is measured only over the checks that exist."
+                >
+                  {coveragePct < 1 ? '<1' : coveragePct.toFixed(0)}% of range covered
+                </span>
+              )}
+              <span className={cn('text-xs font-mono font-medium', pctColor)}>{pct.toFixed(2)}% uptime</span>
+            </div>
           )}
         </div>
 
         {total === 0 ? (
           <div className="flex flex-col items-center gap-1 py-6 text-center">
             <Activity className="h-5 w-5 text-muted/60" />
-            <div className="text-[11px] font-medium text-text">No availability data in {rangeLabel.toLowerCase()}</div>
+            <div className="text-[11px] font-medium text-text">No availability data in {rangePhrase(rangeLabel)}</div>
             <div className="text-[10px] text-muted">Ping checks for this device will appear here</div>
           </div>
         ) : (
           <>
             <div className="flex h-7 gap-[1px] overflow-hidden rounded-lg bg-surface2">
-              {points.map((p, i) => {
-                const isUp =
-                  p.is_up === true || (p.is_up as unknown as number) === 1 || (typeof p.is_up === 'number' && p.is_up > 0.5)
-                return (
-                  <div
-                    key={i}
-                    className="min-w-[2px] flex-1 transition-opacity hover:opacity-70"
-                    style={{ backgroundColor: isUp ? '#22C55E' : '#EF4444' }}
-                    title={`${timeTooltipLabelFormatter(p.timestamp)} — ${isUp ? 'UP' : 'DOWN'}`}
-                  />
-                )
-              })}
+              {buckets.map((b, i) => (
+                <div
+                  key={i}
+                  className="flex-1 transition-opacity hover:opacity-70"
+                  style={{
+                    backgroundColor:
+                      b.state === 'up' ? UP_COLOR : b.state === 'down' ? DOWN_COLOR : 'transparent',
+                  }}
+                  title={
+                    b.state === 'gap'
+                      ? `${timeTooltipLabelFormatter(b.start)} — no data`
+                      : `${timeTooltipLabelFormatter(b.start)} — ${b.state === 'up' ? 'UP' : `DOWN (${b.down} of ${b.up + b.down} checks)`}`
+                  }
+                />
+              ))}
             </div>
             <div className="mt-1 flex items-center justify-between">
-              <span className="text-[10px] text-muted">{timeTooltipLabelFormatter(points[0]!.timestamp)}</span>
+              <span className="text-[10px] text-muted">{timeTooltipLabelFormatter(fromTs)}</span>
               <div className="flex items-center gap-3">
                 <span className="flex items-center gap-1 text-[10px] text-muted">
-                  <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: '#22C55E' }} />Up
+                  <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: UP_COLOR }} />Up
                 </span>
                 <span className="flex items-center gap-1 text-[10px] text-muted">
-                  <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: '#EF4444' }} />Down
+                  <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: DOWN_COLOR }} />Down
+                </span>
+                <span className="flex items-center gap-1 text-[10px] text-muted">
+                  <span className="h-2 w-2 rounded-sm bg-surface2 ring-1 ring-inset ring-border" />No data
                 </span>
               </div>
-              <span className="text-[10px] text-muted">{timeTooltipLabelFormatter(points[total - 1]!.timestamp)}</span>
+              <span className="text-[10px] text-muted">{timeTooltipLabelFormatter(toTs)}</span>
             </div>
           </>
         )}
@@ -1489,11 +1841,12 @@ function ActivityLogCard({
             <h3 className="text-sm font-semibold">Recent Events / Activity Log</h3>
             <span className="truncate text-[11px] font-medium text-muted">{rangeLabel}</span>
           </div>
+          {/* Always enabled: the dialog has its own range picker, so an empty
+              page range is exactly when widening the window is useful. */}
           <button
             type="button"
             onClick={onViewAll}
-            disabled={events.length === 0}
-            className="text-xs text-primary hover:underline disabled:text-muted disabled:no-underline disabled:cursor-not-allowed"
+            className="text-xs text-primary hover:underline"
           >
             View All
           </button>
@@ -1505,7 +1858,7 @@ function ActivityLogCard({
             {events.length === 0 && (
               <div className="flex flex-col items-center gap-1 py-6 text-center">
                 <Info className="h-5 w-5 text-muted/60" />
-                <div className="text-[11px] font-medium text-text">No events in {rangeLabel.toLowerCase()}</div>
+                <div className="text-[11px] font-medium text-text">No events in {rangePhrase(rangeLabel)}</div>
                 <div className="text-[10px] text-muted">Status changes, reboots, and SNMP traps will appear here</div>
               </div>
             )}
@@ -1682,14 +2035,16 @@ function inferRebootEvent(metrics: MetricSeriesMap, fromISO: string, toISO: stri
    ════════════════════════════════════════════════════════════ */
 
 function EnvironmentalActionsCard({
-  deviceId, snmpEnabled, metrics, sensors, lastBw,
+  deviceId, snmpEnabled, metrics, sensors, lastBw, openAlerts,
 }: {
   deviceId: string
   snmpEnabled: boolean
   metrics: Record<string, { points: { ts: number; value: number }[] }>
   sensors: any[]
   lastBw: number
+  openAlerts: number
 }) {
+  const qc = useQueryClient()
   const tempVal = latestSensor(metrics, sensors, ['temperature', 'celsius'])
   const voltVal = latestSensor(metrics, sensors, ['voltage', 'volts'])
   const fanVal = latestSensor(metrics, sensors, ['fan', 'rpm'])
@@ -1745,6 +2100,44 @@ function EnvironmentalActionsCard({
       const run: LastRun = { at: new Date().toISOString(), ok: false, summary: msg }
       saveLastRun(pingKey, run); setLastPing(run)
       toast.error('Ping failed', msg)
+    },
+  })
+
+  // On-demand SSH config pull. Requires the device to be enrolled in NCM —
+  // the API answers 400 with a usable message when it isn't.
+  const backup = useMutation({
+    mutationFn: async () => (await api.post(`/devices/${deviceId}/config-fetch`)).data,
+    onSuccess: (data: any) => {
+      if (data?.is_change === false) toast.success('Backup complete', 'No change since the last backup')
+      else toast.success('Backup complete', 'New configuration version saved')
+      qc.invalidateQueries({ queryKey: ['device', deviceId, 'configs'] })
+    },
+    onError: (e: any) => toast.error('Backup failed', apiErrorMessage(e)),
+  })
+
+  const [ackConfirm, setAckConfirm] = useState(false)
+  const ackAll = useMutation({
+    mutationFn: async () => {
+      const { data } = await api.get(`/alerts?device_id=${deviceId}&status=active&limit=200`)
+      const ids: string[] = (data?.data || []).map((a: any) => a.id)
+      // Acknowledge in small batches — a device with dozens of open alerts
+      // would otherwise fire that many simultaneous requests.
+      let done = 0
+      for (let i = 0; i < ids.length; i += 8) {
+        await Promise.all(ids.slice(i, i + 8).map((id) => api.post(`/alerts/${id}/acknowledge`)))
+        done += Math.min(8, ids.length - i)
+      }
+      return done
+    },
+    onSuccess: (n) => {
+      setAckConfirm(false)
+      toast.success('Alerts acknowledged', `${n} alert${n === 1 ? '' : 's'} acknowledged`)
+      qc.invalidateQueries({ queryKey: ['device', deviceId, 'alerts'] })
+      qc.invalidateQueries({ queryKey: ['alerts'] })
+    },
+    onError: (e: any) => {
+      setAckConfirm(false)
+      toast.error('Acknowledge failed', apiErrorMessage(e))
     },
   })
 
@@ -1831,15 +2224,26 @@ function EnvironmentalActionsCard({
               disabledReason={!snmpEnabled ? 'SNMP is disabled' : undefined}
               onRun={() => snmpTest.mutate()}
             />
-            <Button variant="outline" size="sm" className="h-8 justify-center">
-              <Save className="h-3.5 w-3.5" /> Backup Config
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 justify-center"
+              disabled={backup.isPending}
+              onClick={() => backup.mutate()}
+            >
+              {backup.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+              Backup Config
             </Button>
             <Button
               variant="outline"
               size="sm"
-              className="h-8 justify-center border-warning/30 bg-warning/5 text-warning hover:bg-warning/10 hover:text-warning"
+              className="h-8 justify-center border-warning/30 bg-warning/5 text-warning hover:bg-warning/10 hover:text-warning disabled:border-border disabled:bg-transparent disabled:text-muted"
+              disabled={openAlerts === 0 || ackAll.isPending}
+              title={openAlerts === 0 ? 'No active alerts to acknowledge' : `Acknowledge ${openAlerts} active alert${openAlerts === 1 ? '' : 's'}`}
+              onClick={() => setAckConfirm(true)}
             >
-              <BellRing className="h-3.5 w-3.5" /> Acknowledge
+              {ackAll.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BellRing className="h-3.5 w-3.5" />}
+              Acknowledge{openAlerts > 0 ? ` (${openAlerts})` : ''}
             </Button>
           </div>
         </div>
@@ -1850,6 +2254,20 @@ function EnvironmentalActionsCard({
           running={snmpTest.isPending}
           result={snmpResult}
           onRetest={() => snmpTest.mutate()}
+        />
+
+        <ConfirmDialog
+          open={ackConfirm}
+          onOpenChange={setAckConfirm}
+          title="Acknowledge alerts"
+          description={
+            <>
+              Acknowledge all <b>{openAlerts}</b> active alert{openAlerts === 1 ? '' : 's'} for this device?
+            </>
+          }
+          confirmText="Acknowledge"
+          loading={ackAll.isPending}
+          onConfirm={() => ackAll.mutate()}
         />
       </CardContent>
     </Card>
@@ -2390,6 +2808,24 @@ function formatBpsShort(bps: number): string {
   return `${(bps / Math.pow(k, i)).toFixed(1)} ${units[i] === 'bps' ? 'bps' : units[i] + 'bps'}`
 }
 
+/** Compact bps for chart axes. formatBps' two decimals ("315.46 Kbps") overflow
+ *  the narrow gutter and get clipped mid-number. */
+function formatBpsAxis(bps: number): string {
+  if (!bps) return '0'
+  const units = ['', 'K', 'M', 'G', 'T']
+  const i = Math.min(Math.floor(Math.log(Math.abs(bps)) / Math.log(1000)), units.length - 1)
+  const v = bps / Math.pow(1000, i)
+  return `${v.toFixed(v < 10 ? 1 : 0)}${units[i]}`
+}
+
+/** Link utilisation is often a small fraction of a 10G port — don't round
+ *  live traffic down to a flat "0%". */
+function formatUtilPct(util: number): string {
+  if (util <= 0) return '0%'
+  if (util < 0.5) return '<1%'
+  return `${util.toFixed(0)}%`
+}
+
 function formatSpeed(speed: any): string {
   const n = Number(speed) || 0
   if (!n) return '—'
@@ -2428,15 +2864,11 @@ function formatDaysCompact(s: number): string {
   return `${d}d ${h}h`
 }
 
-function uptimeHistory(upSec: number | null): number[] {
-  // Steadily increasing sparkline, flat-ish — represents uptime climbing.
-  if (upSec == null) return []
-  const n = 22
-  const out: number[] = []
-  for (let i = 0; i < n; i++) {
-    out.push(upSec - (n - i) * 60)
-  }
-  return out.filter((v) => v >= 0)
+/** ClickHouse returns is_up as a bool, a UInt8 or an aggregated fraction. */
+function isUpPoint(v: unknown): boolean {
+  if (typeof v === 'boolean') return v
+  if (typeof v === 'number') return v > 0.5
+  return false
 }
 
 function computeHealthScore({
