@@ -98,8 +98,8 @@ type NetflowInterface = {
 }
 
 type ExecutiveData = {
-  kpis: { availability_pct: number; availability_delta_pct: number; devices_monitored: number; sla_target_pct: number }
-  availability_trend: Array<{ ts: string; availability_pct: number }>
+  kpis: { availability_pct: number | null; availability_delta_pct: number | null; devices_monitored: number; sla_target_pct: number }
+  availability_trend: Array<{ ts: string; availability_pct: number | null }>
 }
 
 type CurrentMetrics = {
@@ -378,14 +378,21 @@ export function DashboardPage() {
         />
         <KpiCard to="/availability" label="Availability" icon={<HeartPulse className="h-4 w-4" />}
           accent={(exec?.kpis?.availability_pct ?? 100) >= 99.5 ? 'success' : 'warning'}
-          value={exec ? `${exec.kpis.availability_pct.toFixed(2)}%` : '—'}
-          sub={exec && (
-            <span className={`flex items-center gap-0.5 text-[10.5px] ${exec.kpis.availability_delta_pct >= 0 ? 'text-success' : 'text-danger'}`}>
-              {exec.kpis.availability_delta_pct >= 0 ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
-              {exec.kpis.availability_delta_pct >= 0 ? '+' : ''}{exec.kpis.availability_delta_pct.toFixed(2)}% · SLA {exec.kpis.sla_target_pct}%
-            </span>
-          )}
-          foot={<Sparkline values={(exec?.availability_trend || []).map((p) => p.availability_pct)} color="#34d399" width={250} height={30} />}
+          value={exec?.kpis?.availability_pct != null ? `${exec.kpis.availability_pct.toFixed(2)}%` : '—'}
+          sub={exec && (() => {
+            // delta is null when there is no prior window to compare against (fresh install)
+            const delta = exec.kpis.availability_delta_pct
+            if (delta == null) {
+              return <span className="text-[10.5px] text-muted">SLA {exec.kpis.sla_target_pct}%</span>
+            }
+            return (
+              <span className={`flex items-center gap-0.5 text-[10.5px] ${delta >= 0 ? 'text-success' : 'text-danger'}`}>
+                {delta >= 0 ? <ArrowUpRight className="h-3 w-3" /> : <ArrowDownRight className="h-3 w-3" />}
+                {delta >= 0 ? '+' : ''}{delta.toFixed(2)}% · SLA {exec.kpis.sla_target_pct}%
+              </span>
+            )
+          })()}
+          foot={<Sparkline values={(exec?.availability_trend || []).flatMap((p) => (p.availability_pct == null ? [] : [p.availability_pct]))} color="#34d399" width={250} height={30} />}
         />
         <KpiCard to="/services" label="Services" icon={<Shield className="h-4 w-4" />}
           accent={(services?.down ?? 0) > 0 ? 'danger' : 'success'}

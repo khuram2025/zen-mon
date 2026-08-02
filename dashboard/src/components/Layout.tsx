@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
+import { ErrorBoundary } from '@/components/ErrorBoundary'
 import {
   Activity,
   AlertCircle,
@@ -479,6 +480,7 @@ export function Layout() {
   const { user, logout } = useAuth()
   const { theme, toggle } = useTheme()
   const navigate = useNavigate()
+  const { pathname } = useLocation()
 
   const [pinned, setPinned] = useState(() => {
     try { return localStorage.getItem('zp-sidebar-pinned') === 'true' } catch { return false }
@@ -584,7 +586,9 @@ export function Layout() {
 
         {/* Content — full width */}
         <main className="flex-1 overflow-y-auto p-5 animate-fade-in">
-          <Outlet />
+          <ErrorBoundary resetKey={pathname}>
+            <Outlet />
+          </ErrorBoundary>
         </main>
       </div>
     </div>
