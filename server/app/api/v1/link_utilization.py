@@ -269,18 +269,29 @@ async def link_detail(
     if bucket == 0:
         snmp_sql = """
             SELECT toUnixTimestamp64Milli(timestamp) AS ts,
-                   in_bps, out_bps, in_errors, out_errors, in_discards, out_discards
+                   in_bps, out_bps, in_errors, out_errors, in_discards, out_discards,
+                   in_bps AS in_peak, out_bps AS out_peak
             FROM zenplus.snmp_if_metrics
             WHERE device_id = %(id)s AND if_index = %(if)s
               AND timestamp >= now() - INTERVAL %(hours)s HOUR
             ORDER BY timestamp
         """
     else:
+        # Carry the per-bucket peak alongside the average: the chart plots the
+        # average, but a summary built from averages hides the real peaks.
+        # Errors/discards are cumulative counters, so the in-bucket increase is
+        # max-min — summing the counter readings produced nonsense totals.
+        # Aliases must not reuse the source column names: `avg(in_bps) AS in_bps`
+        # makes a later max(in_bps) resolve to the alias, which ClickHouse
+        # rejects as a nested aggregate (ILLEGAL_AGGREGATION).
         snmp_sql = f"""
             SELECT toUnixTimestamp(toStartOfInterval(timestamp, INTERVAL {bucket} SECOND)) * 1000 AS ts,
-                   avg(in_bps) AS in_bps, avg(out_bps) AS out_bps,
-                   sum(in_errors) AS in_errors, sum(out_errors) AS out_errors,
-                   sum(in_discards) AS in_discards, sum(out_discards) AS out_discards
+                   avg(in_bps) AS avg_in, avg(out_bps) AS avg_out,
+                   max(in_errors) - min(in_errors) AS d_in_err,
+                   max(out_errors) - min(out_errors) AS d_out_err,
+                   max(in_discards) - min(in_discards) AS d_in_disc,
+                   max(out_discards) - min(out_discards) AS d_out_disc,
+                   max(in_bps) AS peak_in, max(out_bps) AS peak_out
             FROM zenplus.snmp_if_metrics
             WHERE device_id = %(id)s AND if_index = %(if)s
               AND timestamp >= now() - INTERVAL %(hours)s HOUR
@@ -296,30 +307,58 @@ async def link_detail(
     traffic = []
     errors = []
     for r in snmp_res.result_rows:
-        traffic.append({"ts": int(r[0]), "in_bps": float(r[1]), "out_bps": float(r[2])})
+        traffic.append({
+            "ts": int(r[0]),
+            "in_bps": float(r[1]), "out_bps": float(r[2]),
+            # Per-bucket peak. Equals the average on unbucketed ranges; on wider
+            # windows it's what keeps the chart's ceiling honest against IN MAX.
+            "in_peak_bps": float(r[7] or 0), "out_peak_bps": float(r[8] or 0),
+        })
         errors.append({
             "ts": int(r[0]),
             "in_errors": int(r[3] or 0), "out_errors": int(r[4] or 0),
             "in_discards": int(r[5] or 0), "out_discards": int(r[6] or 0),
         })
 
-    if traffic:
-        in_vals = [p["in_bps"] for p in traffic]
-        out_vals = [p["out_bps"] for p in traffic]
+    # Summary comes from the raw samples, never from the plotted buckets.
+    # Deriving max/current from bucket averages understated this interface's
+    # peak by 27% over 24h and disagreed with the fleet table, which aggregates
+    # raw. Both now use the same aggregation, so the row and the panel match.
+    summary: dict = {}
+    try:
+        agg = client.query(
+            """
+            SELECT avg(in_bps), max(in_bps), argMax(in_bps, timestamp),
+                   avg(out_bps), max(out_bps), argMax(out_bps, timestamp),
+                   max(in_errors) - min(in_errors), max(out_errors) - min(out_errors),
+                   max(in_discards) - min(in_discards), max(out_discards) - min(out_discards),
+                   count()
+            FROM zenplus.snmp_if_metrics
+            WHERE device_id = %(id)s AND if_index = %(if)s
+              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+            """,
+            parameters=params,
+        )
+        row = agg.result_rows[0] if agg.result_rows else None
+    except Exception as e:
+        raise HTTPException(500, f"snmp summary query failed: {e}")
+
+    if row and int(row[10] or 0) > 0:
+        in_avg, in_max, in_cur = float(row[0] or 0), float(row[1] or 0), float(row[2] or 0)
+        out_avg, out_max, out_cur = float(row[3] or 0), float(row[4] or 0), float(row[5] or 0)
         summary = {
-            "in_avg_bps": sum(in_vals) / len(in_vals),
-            "in_max_bps": max(in_vals),
-            "in_current_bps": in_vals[-1],
-            "out_avg_bps": sum(out_vals) / len(out_vals),
-            "out_max_bps": max(out_vals),
-            "out_current_bps": out_vals[-1],
-            "util_pct": _util_pct(in_vals[-1], out_vals[-1], speed),
-            "peak_util_pct": _util_pct(max(in_vals), max(out_vals), speed),
-            "total_errors": sum(e["in_errors"] + e["out_errors"] for e in errors),
-            "total_discards": sum(e["in_discards"] + e["out_discards"] for e in errors),
+            "in_avg_bps": in_avg,
+            "in_max_bps": in_max,
+            "in_current_bps": in_cur,
+            "out_avg_bps": out_avg,
+            "out_max_bps": out_max,
+            "out_current_bps": out_cur,
+            "util_pct": _util_pct(in_cur, out_cur, speed),
+            "peak_util_pct": _util_pct(in_max, out_max, speed),
+            "total_errors": max(0, int(row[6] or 0)) + max(0, int(row[7] or 0)),
+            "total_discards": max(0, int(row[8] or 0)) + max(0, int(row[9] or 0)),
+            "samples": int(row[10]),
         }
-    else:
-        summary = {}
 
     # Strip the inet prefix before querying ClickHouse — flow_records stores
     # bare exporter IPs, so "192.168.41.105/32" matched nothing and every
@@ -432,6 +471,9 @@ async def link_detail(
         "admin_status": inv[6],
         "mac_address": inv[7],
         "hours": hours,
+        # Buckets wider than the poll interval mean the plotted line is an
+        # average; the client says so rather than presenting it as raw usage.
+        "bucket_seconds": bucket,
         "traffic": traffic,
         "errors": errors,
         "summary": summary,

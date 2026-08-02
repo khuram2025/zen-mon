@@ -63,6 +63,12 @@ type LinkRow = {
 
 type LinkKey = { device_id: string; if_index: number }
 
+function formatBucket(seconds: number): string {
+  if (seconds % 3600 === 0) return `${seconds / 3600}h`
+  if (seconds % 60 === 0) return `${seconds / 60}-min`
+  return `${seconds}s`
+}
+
 const SORT_LABELS: Record<string, string> = {
   util: 'utilization',
   traffic: 'total traffic',
@@ -430,8 +436,10 @@ function LinkDetailPanel({
   const label = link.if_alias || link.if_name || link.if_descr || `if${link.if_index}`
 
   const { data, isLoading } = useQuery<{
-    traffic: { ts: number; in_bps: number; out_bps: number }[]
+    traffic: { ts: number; in_bps: number; out_bps: number; in_peak_bps?: number; out_peak_bps?: number }[]
     summary: Record<string, number>
+    /** 0 = raw samples; otherwise the plotted line is a per-bucket average. */
+    bucket_seconds?: number
     netflow: {
       has_flows: boolean
       timeseries: { ts: number; in_bps: number; out_bps: number; bytes: number }[]
@@ -452,16 +460,26 @@ function LinkDetailPanel({
   // HH:mm alone repeats itself once the window spans more than a day.
   const tickFormatter = useMemo(() => timeAxisTickFormatter(hours), [hours])
 
+  /* Wide windows bucket the samples, so the plotted average hides the bursts
+     that "IN MAX" reports. Draw the per-bucket peak behind the average so the
+     chart's ceiling matches the stat above it. */
+  const bucketSeconds = data?.bucket_seconds ?? 0
+  const isAveraged = bucketSeconds > 0
+
   const chartData = useMemo(() => {
     const nfMap = new Map((nf?.timeseries || []).map((p) => [p.ts, p]))
     return traffic.map((p) => {
       const nfPt = nfMap.get(p.ts)
-      const utilIn = speed > 0 ? (p.in_bps / speed) * 100 : 0
-      const utilOut = speed > 0 ? (p.out_bps / speed) * 100 : 0
+      const peakIn = p.in_peak_bps ?? p.in_bps
+      const peakOut = p.out_peak_bps ?? p.out_bps
       return {
         ...p,
-        util_in: utilIn,
-        util_out: utilOut,
+        in_peak_bps: peakIn,
+        out_peak_bps: peakOut,
+        // Utilisation follows the peak: a burst to 100% matters even if the
+        // five-minute average around it looks calm.
+        util_in: speed > 0 ? (peakIn / speed) * 100 : 0,
+        util_out: speed > 0 ? (peakOut / speed) * 100 : 0,
         nf_in: nfPt?.in_bps,
         nf_out: nfPt?.out_bps,
       }
@@ -523,9 +541,13 @@ function LinkDetailPanel({
 
         {/* Bandwidth chart */}
         <div>
-          <div className="mb-2 flex items-center justify-between">
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3">
             <h3 className="text-sm font-medium">Bandwidth · {rangeLabel}</h3>
-            <span className="text-[11px] text-muted">SNMP polling</span>
+            <span className="text-[11px] text-muted">
+              {isAveraged
+                ? `SNMP polling · ${formatBucket(bucketSeconds)} average, peak shaded`
+                : 'SNMP polling · raw samples'}
+            </span>
           </div>
           <div className="h-56 rounded-lg border border-border/60 bg-surface2/20 p-2">
             {isLoading ? (
@@ -572,6 +594,13 @@ function LinkDetailPanel({
                     formatter={(v: number, name: string) => [formatBps(v), name]}
                   />
                   <Legend verticalAlign="top" align="right" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
+                  {/* Peaks first so the averages draw on top of them. */}
+                  {isAveraged && (
+                    <Area type="monotone" dataKey="in_peak_bps" name="Inbound peak" stroke="rgb(var(--success))" strokeOpacity={0.45} fill="rgb(var(--success))" fillOpacity={0.1} strokeWidth={1} dot={false} isAnimationActive={false} />
+                  )}
+                  {isAveraged && (
+                    <Area type="monotone" dataKey="out_peak_bps" name="Outbound peak" stroke="rgb(var(--info))" strokeOpacity={0.45} fill="rgb(var(--info))" fillOpacity={0.1} strokeWidth={1} dot={false} isAnimationActive={false} />
+                  )}
                   <Area type="monotone" dataKey="in_bps" name="Inbound" stroke="rgb(var(--success))" fill="url(#linkIn)" strokeWidth={2} dot={false} isAnimationActive={false} />
                   <Area type="monotone" dataKey="out_bps" name="Outbound" stroke="rgb(var(--info))" fill="url(#linkOut)" strokeWidth={2} dot={false} isAnimationActive={false} />
                 </AreaChart>
@@ -584,7 +613,10 @@ function LinkDetailPanel({
         {speed > 0 && chartData.length > 0 && (
           <div>
             <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
-              <h3 className="text-sm font-medium">Utilization %</h3>
+              <h3 className="text-sm font-medium">
+                Utilization %
+                {isAveraged && <span className="ml-1.5 font-normal text-muted">· peak per {formatBucket(bucketSeconds)}</span>}
+              </h3>
               {overCapacity && (
                 <span
                   className="text-[11px] text-warning"
