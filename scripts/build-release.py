@@ -341,6 +341,24 @@ def build_package(version: str, changelog: str, severity: str,
         go_dir.mkdir()
         sensor_dir = build_dir / "sensor-artifacts" / "bin" / "linux-amd64"
         sensor_dir.mkdir(parents=True)
+
+    # Agent installers are built on Windows, not here, so the release carries
+    # whatever is currently published in the artifact store. Without this a
+    # freshly updated appliance reports "no package published" until someone
+    # copies an MSI across by hand.
+    agent_src = Path("/opt/zenplus/artifacts/agents")
+    agent_staged = []
+    if agent_src.is_dir():
+        for plat_dir in sorted(p for p in agent_src.iterdir() if p.is_dir()):
+            for pkg in sorted(plat_dir.glob("zenplus-agent-*")):
+                if not pkg.is_file():
+                    continue
+                dest_dir = build_dir / "agent-artifacts" / plat_dir.name
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(pkg, dest_dir / pkg.name)
+                agent_staged.append((plat_dir.name, pkg.name))
+        if agent_staged:
+            print(f"      bundled {len(agent_staged)} agent package(s)")
         poller_src = ZENPLUS_DIR / "poller"
         commit = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -519,6 +537,14 @@ def build_package(version: str, changelog: str, severity: str,
         steps.append({"type": "install_systemd",
                        "source": "code/poller/systemd/zenplus-netflow-collector.service",
                        "enable": True})
+
+    agent_artifact_dir = build_dir / "agent-artifacts"
+    if agent_artifact_dir.is_dir():
+        for plat_dir in sorted(p for p in agent_artifact_dir.iterdir() if p.is_dir()):
+            for pkg in sorted(plat_dir.iterdir()):
+                steps.append({"type": "install_config",
+                              "source": f"agent-artifacts/{plat_dir.name}/{pkg.name}",
+                              "dest": f"/opt/zenplus/artifacts/agents/{plat_dir.name}/{pkg.name}"})
 
     sensor_artifact_dir = build_dir / "sensor-artifacts" / "bin" / "linux-amd64"
     if (sensor_artifact_dir / "zenplus-sensor").exists():

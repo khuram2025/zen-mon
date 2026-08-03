@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -113,6 +114,22 @@ def create_app() -> FastAPI:
         await apm_ingest_api.start_batch_writer()
         # APM service registry: upsert apm_services + denormalise health from RED.
         app.state.apm_service_registry = asyncio.create_task(apm_services_api.apm_service_registry_loop())
+        # Agent packages: reconcile the DB against the on-disk artifact store so
+        # a release that shipped a new MSI is downloadable without a manual
+        # publish step.
+        app.state.agent_package_sync = asyncio.create_task(_sync_agent_packages_once())
+
+    async def _sync_agent_packages_once():
+        _pkg_logger = logging.getLogger("zenplus.agent_packages")
+        from app.api.v1.servers import sync_agent_packages
+        from app.core.database import AsyncSessionLocal
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await sync_agent_packages(db)
+            if any(result.values()):
+                _pkg_logger.info("agent package store reconciled at startup: %s", result)
+        except Exception:
+            _pkg_logger.exception("agent package sync at startup failed")
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():

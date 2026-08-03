@@ -175,7 +175,8 @@ class InstallTokenCreate(BaseModel):
     hostname_hint: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     ttl_hours: int = Field(24, ge=1, le=720)
-    max_uses: int = Field(1, ge=1, le=100)
+    # 0 = unlimited within the token's lifetime, for mass deployment.
+    max_uses: int = Field(1, ge=0, le=100000)
 
 
 class InstallTokenResponse(BaseModel):
@@ -467,7 +468,9 @@ class AgentPackageDownloadRequest(BaseModel):
     that many servers.
     """
     platform: Literal["windows", "linux", "macos"] = "windows"
-    server_count: int = Field(1, ge=1, le=1000)
+    # 0 = reusable on any number of hosts until the token expires. A fixed
+    # count is available for tightly-scoped rollouts.
+    server_count: int = Field(0, ge=0, le=100000)
     ttl_hours: int = Field(72, ge=1, le=8760)
     site_id: Optional[UUID] = None
     policy_id: Optional[UUID] = None

@@ -76,6 +76,7 @@ import {
   EmptyState, ExportCsvButton, QueryError, TablePager, TableStateRow,
   cmp, sortIndicator, sortableTh, usePagedRows,
 } from '@/components/servers/tables'
+import { NetworkCapturePanel } from '@/components/servers/NetworkCapture'
 
 const ttStyle = () => ({
   contentStyle: {
@@ -1887,6 +1888,12 @@ function NetworkTab({ serverId, serverName }: { serverId: string; serverName: st
   const cols = hasSpeed ? 7 : 6
 
   return (
+    <div className="space-y-4">
+    <NetworkCapturePanel
+      serverId={serverId}
+      serverName={serverName}
+      interfaces={items.map((n) => n.if_name)}
+    />
     <TablePanel
       icon={<NetworkIcon className="h-3.5 w-3.5" />}
       title="Network interfaces"
@@ -1946,6 +1953,7 @@ function NetworkTab({ serverId, serverName }: { serverId: string; serverName: st
         </Table>
       </div>
     </TablePanel>
+    </div>
   )
 }
 

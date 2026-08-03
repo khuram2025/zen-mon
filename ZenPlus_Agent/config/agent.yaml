@@ -1,0 +1,69 @@
+version: 1
+controller_url: http://192.168.8.221
+enrollment_token: ""
+agent_name: ""
+site_id: ""
+policy_id: policy_windows_baseline
+proxy_url: ""
+verify_tls: true
+data_dir: ../data
+heartbeat_interval_seconds: 30
+upload_interval_seconds: 60
+config_interval_seconds: 60
+collect_interval_seconds: 60
+collector_timeout_seconds: 20
+update_ring: stable
+compress_uploads: false
+collectors:
+  cpu:
+    enabled: true
+    interval_seconds: 60
+  memory:
+    enabled: true
+    interval_seconds: 60
+  filesystem:
+    enabled: true
+    interval_seconds: 60
+  disk_io:
+    enabled: true
+    interval_seconds: 60
+  network:
+    enabled: true
+    interval_seconds: 60
+  processes:
+    enabled: true
+    interval_seconds: 120
+    top_n: 10
+    watchlist:
+      - sqlservr.exe
+      - w3wp.exe
+  services:
+    enabled: true
+    interval_seconds: 60
+    watchlist:
+      - MSSQLSERVER
+      - W3SVC
+  event_log:
+    enabled: true
+    interval_seconds: 60
+    channels:
+      - System
+      - Application
+    levels:
+      - Critical
+      - Error
+      - Warning
+    lookback_minutes: 5
+  inventory:
+    enabled: true
+    interval_seconds: 21600
+spool:
+  max_bytes: 268435456
+  max_age_hours: 24
+security:
+  require_signed_config: false
+limits:
+  max_process_count: 10
+  max_payload_bytes: 2097152
+labels:
+  environment: test

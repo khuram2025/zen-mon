@@ -1,0 +1,848 @@
+# ZenPlus Agent ↔ Controller Integration Contract
+
+Date: 2026-05-21
+Status: Authoritative — describes the API as implemented in
+`server/app/api/v1/agents.py` and `server/app/schemas/agent.py`.
+Audience: the team building the ZenPlus host agent.
+
+---
+
+## 1. Purpose & How to Read This Document
+
+This is the single source of truth for how the **ZenPlus host agent** talks to
+the **ZenPlus controller**. If the agent follows this contract, it enrolls,
+uploads telemetry, receives policy, and runs commands without any further
+coordination.
+
+- **§4–§10** describe what is implemented and live today. Build against it.
+- **§11** lists behavioral requirements the agent must satisfy.
+- **§13** lists known limitations and planned contract changes — build the agent
+  so these can be turned on later without a rewrite.
+- **§14** is the checklist of what we need back from the agent team.
+
+The controller code is the implementation; this document describes it. Where
+they ever disagree, the code wins — tell us and we will fix the document.
+
+---
+
+## 2. Glossary
+
+| Term | Meaning |
+| --- | --- |
+| Controller | The ZenPlus server. Base URL e.g. `https://monitor.example.com`. |
+| Agent | The software you build, installed on one Windows host as a service. |
+| Server | The controller's record of a monitored host. One agent ↔ one server. |
+| `agent_uid` | A stable, agent-generated unique string identifying this install. Must survive restarts and upgrades. |
+| Enrollment token | A one-time, short-lived secret used once to obtain an api-key. |
+| api-key | The durable per-agent credential issued at enrollment. Format `zpa_key_…`. |
+| Policy | The collection configuration the controller hands the agent. |
+| Batch | One `results/host` upload: an envelope wrapping many metric samples. |
+| `kind` | The category of a metric sample (`cpu`, `memory`, `network`, …). |
+| ETag | An opaque config-version token; lets the agent skip unchanged config. |
+
+---
+
+## 3. Lifecycle Overview
+
+```
+  INSTALL ──▶ ENROLL ──▶ ┌──────────── STEADY STATE ────────────┐ ──▶ UPDATE
+                         │                                      │
+  MSI writes   POST       │  every 30s   POST /heartbeat         │   when
+  bootstrap    /enroll    │  on change   GET  /config (ETag)     │   desired_
+  config:      ───────▶   │  per policy  collect metrics         │   version
+  controller   returns    │  every 60s   POST /results/host      │   changes:
+  url + token  api-key    │  if flagged  POST /commands/poll     │   pull pkg
+                          │              POST /commands/{id}/... │   manifest
+                          └──────────────────────────────────────┘
+```
+
+Step by step:
+
+1. **Install.** The MSI writes a bootstrap config containing the controller URL
+   and a one-time enrollment token (see document 04 for MSI properties:
+   `CONTROLLER_URL`, `ENROLLMENT_TOKEN`, `SITE_ID`, `POLICY_ID`, …).
+2. **Enroll.** The agent calls `POST /agents/enroll` with the token and host
+   identity. It receives `agent_id`, `server_id`, and a durable `api_key`.
+3. **Persist & clean up.** Store `agent_id` / `server_id` / `api_key` securely
+   (Windows DPAPI). Delete the bootstrap enrollment token from disk.
+4. **Steady state.** Run the loops in §3's diagram, all using the api-key.
+5. **Self-update.** When a heartbeat response carries a new `desired_version`,
+   fetch the package manifest, verify, install, and report back.
+
+---
+
+## 4. Connection Basics
+
+### 4.1 Transport
+
+- **Base URL:** `https://<controller>/api/v1` — all agent endpoints are under
+  `/api/v1/agents`.
+- **HTTPS only.** TLS certificate verification **must be on by default**.
+  Support an explicit private-CA / verification-off option for lab use only.
+- **Outbound only.** The agent opens no inbound ports.
+- **Proxy.** Honor a configured HTTP(S) proxy.
+
+### 4.2 Authentication
+
+| Endpoint | Auth required |
+| --- | --- |
+| `POST /agents/enroll` | None — the enrollment token in the body *is* the auth. |
+| `GET /agents/packages/manifest` | None today (public manifest). |
+| Everything else | api-key, on **every** request. |
+
+api-key requests must send **both** headers:
+
+```
+Authorization: Bearer <api_key>
+X-Agent-Id: <agent_id>
+```
+
+- The api-key looks like `zpa_key_AbC123…` (~50 chars). Treat it as an opaque
+  secret. It is stored only as a SHA-256 hash on the controller — it cannot be
+  recovered, only rotated.
+- `X-Agent-Id` is the `agent_id` UUID returned at enrollment.
+- A missing/!mismatched pair returns `401`. A disabled agent returns `403`.
+
+### 4.3 Content & encoding
+
+- Request and response bodies are **JSON**, `Content-Type: application/json`.
+- **Compression:** send **uncompressed** JSON today. gzip request bodies are not
+  yet decompressed by the controller (see §13). Build your uploader so a single
+  config flag enables `Content-Encoding: gzip` later.
+- **Timestamps:** RFC 3339 / ISO 8601, UTC, e.g. `2026-05-21T17:00:00Z` or
+  `2026-05-21T17:00:00.123Z`. Always include a timezone. **Stamp every sample at
+  collection time** — do not rely on controller receive-time.
+- **UUIDs:** standard hyphenated form (`agt_…` is *not* used; raw UUIDs are).
+
+### 4.4 Identity rules
+
+- `agent_uid` — you generate this once and keep it forever for this install.
+  Derive it from a stable source (e.g. the Windows Machine GUID) so a service
+  restart or agent upgrade reuses the same `agent_uid`. Re-enrolling with an
+  existing `agent_uid` is treated as re-enrollment of the same agent (it
+  rotates the api-key, keeps the identity).
+- `agent_id` / `server_id` — assigned by the controller at enrollment. Store and
+  reuse them; never invent them.
+
+---
+
+## 5. Endpoint Reference
+
+Nine endpoints. Base path `/api/v1/agents`.
+
+### 5.1 `POST /agents/enroll`
+
+Exchange a one-time enrollment token for a durable api-key. No auth headers.
+
+**Request body**
+
+| Field | Type | Req | Notes |
+| --- | --- | --- | --- |
+| `enrollment_token` | string | ✔ | The one-time token from the MSI bootstrap. |
+| `agent_uid` | string (8–128) | ✔ | Your stable per-install id (§4.4). |
+| `hostname` | string | ✔ | Host short name. |
+| `platform` | enum | ✔ | `windows` \| `linux` \| `macos` \| `other`. Default `windows`. Must match the token's platform scope. |
+| `version` | string | ✔ | Agent version, e.g. `1.0.0`. |
+| `fqdn` | string | – | Fully-qualified domain name. |
+| `primary_ip` | string | – | Primary IPv4/IPv6. |
+| `os_name` | string | – | e.g. `Windows Server 2022 Standard`. |
+| `os_version` | string | – | e.g. `10.0.20348`. |
+| `kernel_or_build` | string | – | Build number / kernel. |
+| `architecture` | string | – | e.g. `amd64`. |
+| `install_id` | string | – | Optional MSI/install correlation id. |
+
+```json
+POST /api/v1/agents/enroll
+Content-Type: application/json
+
+{
+  "enrollment_token": "zps_enr_w7Yc...redacted",
+  "agent_uid": "win-{D2A1...machine-guid}",
+  "hostname": "WIN-APP01",
+  "fqdn": "win-app01.corp.example.com",
+  "primary_ip": "10.20.4.11",
+  "platform": "windows",
+  "os_name": "Windows Server 2022 Standard",
+  "os_version": "10.0.20348",
+  "kernel_or_build": "20348.2402",
+  "architecture": "amd64",
+  "version": "1.0.0",
+  "install_id": "msi-7f3c9e"
+}
+```
+
+**Response `200`** — store every field; `api_key` is shown **once**.
+
+```json
+{
+  "agent_id":  "6f1e3b2a-1c4d-4e9a-8b7c-0a1b2c3d4e5f",
+  "server_id": "a0b1c2d3-4e5f-6071-8293-a4b5c6d7e8f9",
+  "api_key":   "zpa_key_AbC123dEf456GhI789jKl012MnO345pQr678",
+  "heartbeat_interval_s": 30,
+  "config_poll_interval_s": 60,
+  "upload_interval_s": 60,
+  "policy_id": "11112222-3333-4444-5555-666677778888"
+}
+```
+
+**Errors:** `401` invalid / revoked / expired / already-used token;
+`400` token platform does not match the agent platform.
+
+### 5.2 `POST /agents/heartbeat`
+
+Liveness + agent self-status. Send every `heartbeat_interval_s` (default 30 s).
+
+**Request body**
+
+| Field | Type | Req | Notes |
+| --- | --- | --- | --- |
+| `version` | string | ✔ | Current agent version. |
+| `uptime_seconds` | int | – | Host uptime. |
+| `queue_depth` | int | – | Items waiting in the local spool. Default 0. |
+| `spool_bytes` | int | – | Bytes used by the local spool. Default 0. |
+| `config_hash` | string | – | ETag of the config the agent currently has applied. |
+| `config_apply_error` | string | – | Last config-apply error, or omit if healthy. |
+
+**Response `200`**
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `ok` | bool | Always `true` on success. |
+| `server_time` | datetime | Controller UTC time — use for clock-skew detection. |
+| `config_etag` | string | Current policy ETag. If it differs from your applied `config_hash`, fetch `/config`. |
+| `has_commands` | bool | If `true`, call `POST /commands/poll`. |
+| `desired_version` | string\|null | If set and ≠ your version, run the self-update flow (§10). |
+| `backpressure` | object\|null | If present, slow down (see §12). Not populated yet (§13). |
+
+```json
+{
+  "ok": true,
+  "server_time": "2026-05-21T17:00:05Z",
+  "config_etag": "9f2c…",
+  "has_commands": false,
+  "desired_version": null,
+  "backpressure": null
+}
+```
+
+> **Pattern:** the heartbeat already tells you the current `config_etag` and
+> whether commands are waiting. Use it as the trigger — only call `/config` when
+> the ETag changed, only call `/commands/poll` when `has_commands` is `true`.
+
+### 5.3 `GET /agents/config`
+
+Fetch the resolved policy. Send `If-None-Match` with your last ETag.
+
+**Request headers:** auth + `If-None-Match: <last_etag>` (optional).
+
+**Response `304`** — config unchanged; keep what you have.
+**Response `200`** — `AgentConfigResponse`:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `config_version` | int | Increments on policy change. |
+| `policy_id` | string | The resolved policy id. |
+| `etag` | string | Store this; send it back as `If-None-Match` and in heartbeat `config_hash`. |
+| `metric_interval_s` | int | How often to collect metrics. |
+| `upload_interval_s` | int | How often to flush a batch. |
+| `process_top_n` | int | Number of processes to report (by CPU and by memory). |
+| `service_watchlist` | string[] | Service names to always report state for. |
+| `process_watchlist` | string[] | Process names to always report. |
+| `event_log_filters` | object[] | Channels/levels/IDs to collect (see §8). |
+| `disk_ignore` | string[] | Mounts/volumes to skip. |
+| `network_ignore` | string[] | Interface name patterns to skip. |
+| `cardinality_limits` | object | Caps (max processes, max event sources, …). |
+| `feature_flags` | object | On/off switches for optional collectors. |
+| `update_ring` | string | `canary` \| `beta` \| `stable` \| `pinned`. |
+| `signature` | string\|null | Config signature. `null` today (see §13). |
+| `signed_at` | datetime | When the controller produced this config. |
+
+### 5.4 `POST /agents/results/host`
+
+The bulk telemetry upload. Send every `upload_interval_s`. This is the most
+important endpoint — see §6 for the full sample model and field tables.
+
+**Request body — envelope** (`AgentResultsBatch`)
+
+| Field | Type | Req | Notes |
+| --- | --- | --- | --- |
+| `agent_id` | string | ✔ | Must equal your `agent_id` (also in `X-Agent-Id`). |
+| `server_id` | string | ✔ | Must equal the `server_id` from enrollment. |
+| `batch_id` | string | ✔ | Unique per batch (UUID/ULID). Reuse the *same* id when replaying a spooled batch. |
+| `sequence_start` | int | ✔ | First sample sequence number in this batch. |
+| `sequence_end` | int | ✔ | Last sample sequence number. Monotonic across batches. |
+| `agent_version` | string | ✔ | Agent version. |
+| `collected_at` | datetime | ✔ | When the oldest sample in the batch was collected. |
+| `sent_at` | datetime | ✔ | When the batch was transmitted. |
+| `config_hash` | string | – | ETag of the applied config. |
+| `metrics` | sample[] | ✔ | The metric samples (§6). |
+| `inventory` | object | – | Inventory snapshot (§7). Send periodically, not every batch. |
+| `events` | object[] | – | Lifecycle events. Accepted but not yet stored (§13). |
+
+**Response `200`** (`AgentResultsResponse`)
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `ok` | bool | |
+| `accepted` | int | Samples written. |
+| `rejected` | int | Samples refused (see `errors`). |
+| `duplicates` | int | Samples skipped as already-seen. `0` today (§13). |
+| `backpressure` | object\|null | Slow down if present. |
+| `errors` | string[] | Up to 25 human-readable rejection reasons. |
+
+**Errors:** `401` bad credentials; `403` `agent_id` ≠ bearer identity;
+`400` `server_id` mismatch or the agent has no server binding.
+
+### 5.5 `POST /agents/events`
+
+Lifecycle/status events (service crash, reboot, agent error). Body:
+`{ "agent_id": "<uuid>", "events": [ {…}, … ] }`. Returns
+`{ "ok": true, "accepted": N }`.
+
+> Today this endpoint only logs — events are **not stored**. Until §13 item E4
+> lands, do not depend on it; carry anything you need durably inside `metrics`.
+
+### 5.6 `POST /agents/diagnostics`
+
+Register a diagnostics bundle (metadata only — see §13).
+
+| Field | Type | Req | Notes |
+| --- | --- | --- | --- |
+| `agent_id` | string | ✔ | Must match bearer identity. |
+| `file_name` | string | ✔ | Bundle file name. |
+| `file_size` | int | ✔ | Bytes. |
+| `sha256` | string | ✔ | Bundle checksum. |
+| `diagnostic_id` | string | – | If the controller requested it (via the `upload_diagnostics` command), echo the id. |
+| `notes` | string | – | Free text. |
+
+Returns `{ "ok": true }`.
+
+### 5.7 `GET /agents/packages/manifest`
+
+Look up the latest agent package for self-update.
+
+**Query:** `platform` (`windows`\|`linux`\|`macos`), `channel`
+(`canary`\|`beta`\|`stable`\|`pinned`, default `stable`), `arch` (default
+`amd64`).
+
+**Response `200`**
+
+```json
+{
+  "platform": "windows", "channel": "stable", "arch": "amd64",
+  "latest_version": "1.1.0",
+  "file_name": "ZenPlusAgent-x64-1.1.0.msi",
+  "file_size": 14680064,
+  "sha256": "5f3a…hex",
+  "signature": "base64-or-null",
+  "released_at": "2026-05-20T09:00:00Z",
+  "download_url": "/api/v1/agents/packages/windows/1.1.0"
+}
+```
+
+`404` if no package is published for that platform/channel/arch.
+
+### 5.8 `POST /agents/commands/poll`
+
+Pick up queued safe commands. No request body. Call only when a heartbeat
+returned `has_commands: true`. Polled commands are marked `sent`.
+
+**Response** (`AgentCommandPoll`)
+
+```json
+{
+  "has_commands": true,
+  "commands": [
+    { "id": "c1d2…", "command": "collect_now", "params": {}, "expires_at": "2026-05-21T17:30:00Z" }
+  ]
+}
+```
+
+### 5.9 `POST /agents/commands/{command_id}/result`
+
+Report the outcome of one command.
+
+| Field | Type | Req | Notes |
+| --- | --- | --- | --- |
+| `success` | bool | ✔ | |
+| `output` | object | – | Structured result. |
+| `error_message` | string | – | On failure. |
+
+Returns `{ "ok": true }`. `403` if the command is not addressed to this agent;
+`404` if unknown.
+
+---
+
+## 6. The Metric Upload Model
+
+This section defines exactly what goes into `metrics[]` of a `results/host`
+batch. Getting the field names right here is the whole integration.
+
+### 6.1 Sample structure
+
+`metrics` is an array of **samples**. Each sample is:
+
+```json
+{ "kind": "<category>", "timestamp": "2026-05-21T17:00:00Z", "data": { … } }
+```
+
+- `kind` — one of: `cpu`, `memory`, `filesystem`, `disk_io`, `network`,
+  `process`, `service_state`, `event_log`, `agent_health`, `inventory`.
+- `timestamp` — when the sample was collected (RFC 3339 UTC).
+- `data` — a flat object whose keys depend on `kind` (§6.3). **Unknown keys are
+  ignored; missing numeric keys default to `0`.** Use the exact key names below.
+
+### 6.2 One sample per entity per tick
+
+Singletons send **one** sample per collection tick; per-entity kinds send **one
+sample per entity**. For a host with 4 volumes, 2 NICs, 2 disks, 25 processes,
+one tick produces:
+
+| Kind | Samples per tick |
+| --- | --- |
+| `cpu` | 1 |
+| `memory` | 1 |
+| `agent_health` | 1 |
+| `filesystem` | 1 per mounted volume (4) |
+| `disk_io` | 1 per physical disk (2) |
+| `network` | 1 per interface (2) |
+| `process` | 1 per reported process (≤ `process_top_n`, 25) |
+| `service_state` | 1 per watched/changed service |
+| `event_log` | 1 per `(channel, level)` bucket |
+
+All of them go into the single `metrics[]` array of the batch.
+
+### 6.3 `data` field tables by `kind`
+
+Types: `float`, `int` (whole number; bytes are integers), `bool`, `string`,
+`float[]`. "—" in Req means optional (defaults to 0/empty). `used_pct` fields
+are computed by the controller from used/total if you omit them.
+
+**`kind: "cpu"`** → CPU utilization and load. One per tick.
+
+| `data` key | Type | Req | Unit / notes |
+| --- | --- | --- | --- |
+| `cpu_total_pct` | float | ✔ | 0–100, "everything but idle". |
+| `cpu_user_pct` | float | – | 0–100. |
+| `cpu_system_pct` | float | – | 0–100. |
+| `cpu_iowait_pct` | float | – | 0–100. |
+| `cpu_steal_pct` | float | – | 0–100 (hypervisor steal). |
+| `cpu_idle_pct` | float | – | 0–100. |
+| `per_core` | float[] | – | Per-core total %, index = logical core. |
+| `load_1` / `load_5` / `load_15` | float | – | Load average (Windows: processor-queue equivalent). |
+
+**`kind: "memory"`** → physical + swap memory. One per tick.
+
+| `data` key | Type | Req | Unit |
+| --- | --- | --- | --- |
+| `total_bytes` | int | ✔ | bytes |
+| `used_bytes` | int | ✔ | bytes |
+| `available_bytes` | int | – | bytes |
+| `cached_bytes` | int | – | bytes |
+| `committed_bytes` | int | – | bytes (Windows commit charge) |
+| `swap_total_bytes` | int | – | bytes (Windows: page file) |
+| `swap_used_bytes` | int | – | bytes |
+| `used_pct` | float | – | 0–100; computed from used/total if omitted |
+
+**`kind: "filesystem"`** → one sample **per mounted volume**.
+
+| `data` key | Type | Req | Unit |
+| --- | --- | --- | --- |
+| `mount` | string | ✔ | e.g. `C:\` |
+| `fs_type` | string | – | e.g. `NTFS` |
+| `total_bytes` | int | ✔ | bytes |
+| `used_bytes` | int | ✔ | bytes |
+| `free_bytes` | int | – | bytes |
+| `used_pct` | float | – | computed if omitted |
+| `inodes_total` | int | – | leave 0 on Windows |
+| `inodes_used` | int | – | leave 0 on Windows |
+
+**`kind: "disk_io"`** → one sample **per physical disk/device**.
+
+| `data` key | Type | Req | Unit |
+| --- | --- | --- | --- |
+| `device` | string | ✔ | e.g. `PhysicalDisk0` |
+| `read_bytes_ps` / `write_bytes_ps` | float | – | bytes/sec |
+| `read_iops` / `write_iops` | float | – | ops/sec |
+| `queue_length` | float | – | avg queue length |
+| `util_pct` | float | – | 0–100 (% busy) |
+| `avg_read_ms` / `avg_write_ms` | float | – | ms latency |
+
+**`kind: "network"`** → one sample **per interface**.
+
+| `data` key | Type | Req | Unit |
+| --- | --- | --- | --- |
+| `if_name` | string | ✔ | interface name |
+| `rx_bytes_ps` / `tx_bytes_ps` | float | – | bytes/sec |
+| `rx_packets_ps` / `tx_packets_ps` | float | – | packets/sec |
+| `rx_errors_ps` / `tx_errors_ps` | float | – | errors/sec |
+| `rx_dropped_ps` / `tx_dropped_ps` | float | – | drops/sec |
+| `is_up` | bool | – | link operational |
+
+**`kind: "process"`** → one sample **per process** (top `process_top_n` by CPU
+and by memory, plus everything on `process_watchlist`).
+
+| `data` key | Type | Req | Unit |
+| --- | --- | --- | --- |
+| `process_name` | string | ✔ | image name, e.g. `sqlservr.exe` |
+| `pid` | int | ✔ | |
+| `cpu_pct` | float | – | 0–100 |
+| `memory_bytes` | int | – | working set, bytes |
+| `thread_count` | int | – | |
+| `handle_count` | int | – | Windows handle count |
+| `user_name` | string | – | owning account |
+
+**`kind: "service_state"`** → one sample **per watched or changed service**.
+
+| `data` key | Type | Req | Notes |
+| --- | --- | --- | --- |
+| `service_name` | string | ✔ | service short name |
+| `state` | string | ✔ | `running` \| `stopped` \| `paused` \| `start_pending` \| … |
+| `start_mode` | string | – | `auto` \| `manual` \| `disabled` |
+| `pid` | int | – | |
+| `exit_code` | int | – | last exit code |
+
+**`kind: "event_log"`** → one sample **per `(channel, level)` bucket** for the
+collection window.
+
+| `data` key | Type | Req | Notes |
+| --- | --- | --- | --- |
+| `log_name` | string | ✔ | `System` \| `Application` \| `Security` \| … |
+| `level` | string | ✔ | `critical` \| `error` \| `warning` \| `information` \| `verbose` |
+| `event_count` | int | ✔ | count in the window |
+| `sample_ids` | int[] | – | up to 50 representative Event IDs |
+
+**`kind: "agent_health"`** → agent self-metrics. One per tick.
+
+| `data` key | Type | Req | Notes |
+| --- | --- | --- | --- |
+| `cpu_pct` | float | – | agent process CPU |
+| `memory_bytes` | int | – | agent process memory |
+| `queue_depth` | int | – | spool items pending |
+| `spool_bytes` | int | – | spool size on disk |
+| `upload_lag_ms` | int | – | age of the oldest unsent sample |
+| `config_apply_ok` | bool | – | did the last config apply cleanly |
+| `last_error` | string | – | last agent error text |
+
+**`kind: "inventory"`** → see §7. The `data` object holds the inventory
+snapshot. You may send it as a sample of this kind, or as the top-level
+`inventory` field of the batch — both are accepted.
+
+### 6.4 Worked example — a complete batch
+
+```json
+POST /api/v1/agents/results/host
+Authorization: Bearer zpa_key_AbC123…
+X-Agent-Id: 6f1e3b2a-1c4d-4e9a-8b7c-0a1b2c3d4e5f
+Content-Type: application/json
+
+{
+  "agent_id":  "6f1e3b2a-1c4d-4e9a-8b7c-0a1b2c3d4e5f",
+  "server_id": "a0b1c2d3-4e5f-6071-8293-a4b5c6d7e8f9",
+  "batch_id":  "01J9Z6Q5K8B2X7N3M4P0R1S2T3",
+  "sequence_start": 4100,
+  "sequence_end":   4112,
+  "agent_version": "1.0.0",
+  "config_hash": "9f2c…",
+  "collected_at": "2026-05-21T17:00:00Z",
+  "sent_at":      "2026-05-21T17:01:00Z",
+  "metrics": [
+    { "kind": "cpu", "timestamp": "2026-05-21T17:00:00Z",
+      "data": { "cpu_total_pct": 37.2, "cpu_user_pct": 22.1, "cpu_system_pct": 13.0,
+                "cpu_idle_pct": 62.8, "per_core": [41.0, 33.4], "load_1": 1.8 } },
+    { "kind": "memory", "timestamp": "2026-05-21T17:00:00Z",
+      "data": { "total_bytes": 17179869184, "used_bytes": 11274289152,
+                "available_bytes": 5905580032, "committed_bytes": 12884901888 } },
+    { "kind": "filesystem", "timestamp": "2026-05-21T17:00:00Z",
+      "data": { "mount": "C:\\", "fs_type": "NTFS",
+                "total_bytes": 137438953472, "used_bytes": 96479313920, "free_bytes": 40959639552 } },
+    { "kind": "network", "timestamp": "2026-05-21T17:00:00Z",
+      "data": { "if_name": "Ethernet0", "rx_bytes_ps": 184320.0, "tx_bytes_ps": 65536.0,
+                "is_up": true } },
+    { "kind": "process", "timestamp": "2026-05-21T17:00:00Z",
+      "data": { "process_name": "sqlservr.exe", "pid": 4288, "cpu_pct": 18.6,
+                "memory_bytes": 3221225472, "thread_count": 74, "handle_count": 2210,
+                "user_name": "NT SERVICE\\MSSQLSERVER" } },
+    { "kind": "service_state", "timestamp": "2026-05-21T17:00:00Z",
+      "data": { "service_name": "MSSQLSERVER", "state": "running", "start_mode": "auto", "pid": 4288 } },
+    { "kind": "event_log", "timestamp": "2026-05-21T17:00:00Z",
+      "data": { "log_name": "System", "level": "error", "event_count": 3, "sample_ids": [7000, 7011] } },
+    { "kind": "agent_health", "timestamp": "2026-05-21T17:00:00Z",
+      "data": { "cpu_pct": 0.4, "memory_bytes": 48234496, "queue_depth": 0,
+                "spool_bytes": 0, "upload_lag_ms": 1200, "config_apply_ok": true } }
+  ],
+  "inventory": {},
+  "events": []
+}
+```
+
+---
+
+## 7. Inventory Payload
+
+Inventory is the **current** snapshot of the host's services, volumes, NICs, and
+OS — stored in Postgres for instant UI lookup (not time-series). Send it on a
+slow cadence (e.g. every 30–60 min and on change), as the batch's top-level
+`inventory` object or as a `kind: "inventory"` sample's `data`.
+
+```json
+"inventory": {
+  "os": {
+    "name": "Windows Server 2022 Standard",
+    "version": "10.0.20348",
+    "kernel_or_build": "20348.2402",
+    "architecture": "amd64",
+    "fqdn": "win-app01.corp.example.com"
+  },
+  "services": [
+    { "service_name": "MSSQLSERVER", "display_name": "SQL Server (MSSQLSERVER)",
+      "start_mode": "auto", "state": "running", "pid": 4288, "description": "…" }
+  ],
+  "filesystems": [
+    { "mount": "C:\\", "fs_type": "NTFS", "device": "PhysicalDisk0",
+      "total_bytes": 137438953472, "used_bytes": 96479313920, "free_bytes": 40959639552 }
+  ],
+  "network_interfaces": [
+    { "if_name": "Ethernet0", "mac_address": "00:15:5D:01:02:03",
+      "ip_addresses": ["10.20.4.11"], "speed_mbps": 10000, "is_up": true, "mtu": 1500 }
+  ]
+}
+```
+
+Field notes:
+
+- `services[]` — `service_name` (or `name`), `display_name`, `start_mode`,
+  `state`, `pid`, `description`.
+- `filesystems[]` — `mount`, `fs_type`, `device`, `total_bytes`, `used_bytes`,
+  `free_bytes`, `used_pct` (computed if omitted).
+- `network_interfaces[]` — `if_name` (or `name`), `mac_address`,
+  `ip_addresses[]`, `speed_mbps`, `is_up`, `mtu`.
+- `os{}` — `name`, `version`, `kernel_or_build`, `architecture`, `fqdn`. Updates
+  the server record.
+
+> Process inventory and software inventory are **not yet consumed** by the
+> controller (the tables exist; ingestion is pending — doc 05 gap G7). You may
+> include `processes[]` and `software[]` arrays now; they will start being
+> stored without a contract change. Per-process *time-series* already works via
+> `kind: "process"` — use that for live process data today.
+
+---
+
+## 8. Config / Policy Contract
+
+The agent's behavior is driven entirely by `/config` (§5.3). Apply it as:
+
+| Config field | Agent behavior |
+| --- | --- |
+| `metric_interval_s` | Collection tick period for resource metrics. |
+| `upload_interval_s` | Flush a `results/host` batch this often. |
+| `process_top_n` | Report this many processes by CPU and by memory. |
+| `service_watchlist` | Always emit `service_state` for these, every tick. |
+| `process_watchlist` | Always emit `process` for these, even outside top-N. |
+| `event_log_filters` | Which channels/levels/IDs to collect. Each entry is an object, e.g. `{ "channel": "System", "levels": ["critical","error"] }`. |
+| `disk_ignore` | Skip these mounts/volumes. |
+| `network_ignore` | Skip interfaces matching these patterns. |
+| `cardinality_limits` | Hard caps, e.g. `{ "max_processes": 100, "max_event_sources": 50 }`. Never exceed. |
+| `feature_flags` | Enable/disable optional collectors, e.g. `{ "collect_event_log": true }`. |
+| `update_ring` | Which package channel this agent follows. |
+
+Rules:
+
+1. **ETag handling.** Persist `etag`. Send it as `If-None-Match` on `/config`
+   and as `config_hash` on heartbeat and results. On `304`, keep current config.
+2. **Last-known-good.** If a fetched config fails to apply, keep the previous
+   working config and report the failure via heartbeat `config_apply_error` +
+   `agent_health.config_apply_ok = false`.
+3. **Signature.** `signature` is `null` today. When it becomes non-null (§13),
+   verify it against the public key shipped in the MSI and refuse unsigned or
+   bad-signature config. Build the verify hook now, disabled.
+4. **Jitter.** Apply 10–20 % random jitter to all interval timers so a fleet
+   does not synchronize into thundering-herd requests.
+
+---
+
+## 9. Command Channel
+
+Safe, controller-issued commands. Flow: heartbeat returns `has_commands: true` →
+`POST /commands/poll` → execute → `POST /commands/{id}/result`.
+
+| Command | Expected agent action |
+| --- | --- |
+| `status` | Report current status in the command result `output`. |
+| `collect_now` | Run one collection tick immediately and flush. |
+| `refresh_config` | Fetch `/config` now, ignoring the ETag. |
+| `upload_diagnostics` | Build a redacted diagnostics bundle; register it via `POST /agents/diagnostics` (echo `diagnostic_id` from `params`). |
+| `rotate_certificate` | Re-key / re-enroll credentials (relevant once mTLS lands). |
+| `restart_agent` | Restart the agent service gracefully. |
+| `upgrade_agent` | Run the self-update flow (§10), optionally to a `params.version`. |
+
+Rules: honor `expires_at` — skip an expired command and report it failed with a
+clear reason. Always post a result, success or failure. There is **no arbitrary
+shell / script execution** in this contract and there must not be.
+
+---
+
+## 10. Self-Update
+
+1. A heartbeat response returns `desired_version` ≠ the running version.
+2. `GET /agents/packages/manifest?platform=windows&channel=<update_ring>&arch=amd64`.
+3. Download `download_url`; verify `sha256` (and `signature` when present).
+4. Install (MSI major-upgrade). The service restarts.
+5. After restart, the new agent heartbeats with the new `version`; the
+   controller marks the upgrade complete. If health checks fail, roll back and
+   report the failure (heartbeat `config_apply_error` / a command result).
+
+---
+
+## 11. Agent Behavioral Requirements
+
+The contract is HTTP; these are the behaviors that make the agent correct.
+
+| # | Requirement |
+| --- | --- |
+| R1 | **Stable `agent_uid`** across restarts and upgrades (derive from Machine GUID). |
+| R2 | **Timestamp every sample** at collection time, in UTC. Never rely on receive-time. |
+| R3 | **Batch** — never one request per metric. One `results/host` per `upload_interval_s`. |
+| R4 | **Durable disk spool.** Persist unsent batches; survive a controller outage of ≥ 24 h; replay on reconnect. |
+| R5 | **Replay with the same `batch_id`.** A retried batch must carry the id it had originally, so server-side dedup (coming, §13) works. |
+| R6 | **Retry with exponential backoff + jitter.** Honor `Retry-After` on `429`/`503`. Never hot-loop. |
+| R7 | **Bounded spool.** Cap by bytes and age; when full, drop oldest low-priority data first; never drop heartbeats. |
+| R8 | **Heartbeat is independent.** A metric backlog must never delay or block the heartbeat loop. |
+| R9 | **Honor policy** — intervals, watchlists, ignores, and `cardinality_limits` exactly. |
+| R10 | **Secure credentials.** Store the api-key with Windows DPAPI. Delete the bootstrap enrollment token after enrollment. Never log secrets. |
+| R11 | **TLS verification on** by default. |
+| R12 | **Resource budget.** Target < 2 % CPU average and < 100 MB RAM. Report your own usage via `agent_health`. |
+| R13 | **Clock skew.** Compare `server_time` from responses to the local clock; surface large skew in `agent_health.last_error`. |
+| R14 | **Graceful shutdown.** Flush or persist the spool before the service stops. |
+| R15 | **Redaction.** Diagnostics bundles must redact tokens, keys, and passwords. |
+
+---
+
+## 12. Error Handling & Status Codes
+
+| Status | Meaning | Agent action |
+| --- | --- | --- |
+| `200` | OK | Proceed. For `results/host`, read `accepted`/`rejected`/`errors`. |
+| `304` | Config unchanged | Keep current config. |
+| `400` | Bad request — `server_id` mismatch, platform mismatch, malformed body | Do **not** blind-retry. Fix the payload; if identity is wrong, re-enroll. |
+| `401` | Bad/missing credentials or token | For runtime endpoints: credentials are invalid — re-enroll. For `enroll`: the token is invalid/expired/used. |
+| `403` | Agent disabled, or id ≠ bearer identity | Stop uploading; surface "agent disabled" locally. Do not retry until reconfigured. |
+| `404` | Not found (e.g. no package, unknown command) | Treat as terminal for that request. |
+| `429` | Rate limited | Back off; honor `Retry-After`; keep data spooled. |
+| `503` | Controller overloaded / backpressure | Back off; honor `Retry-After`; keep data spooled. |
+| `5xx` | Transient server error | Retry with exponential backoff; keep data spooled. |
+
+`backpressure` object (when present on a `200`): `{ "retry_after_s": <int>,
+"reason": "<string>" }` — treat it like a soft `Retry-After`: lengthen upload
+intervals until it clears.
+
+---
+
+## 13. Known Limitations & Planned Changes
+
+Build the agent so each of these can be enabled by config, without a rewrite.
+
+| # | Item | Today | Planned |
+| --- | --- | --- | --- |
+| E1 | **Idempotency** | `results/host` does **not** deduplicate; `duplicates` is always `0`. A retried batch double-inserts. | Server-side dedup on `(agent_id, batch_id)`. **Already required of you:** unique `batch_id`, reused verbatim on replay (R5). Until dedup ships, only replay a batch you are confident did **not** commit. |
+| E2 | **Request compression** | gzip request bodies are not decompressed. | gzip (then zstd). Keep a `Content-Encoding` switch ready. |
+| E3 | **Config signing** | `signature` is `null`. | Ed25519-signed config; public key in the MSI. Build a verify hook now, disabled. |
+| E4 | **Events** | `POST /agents/events` and `events[]` are accepted but not stored. | Real events pipeline + server-detail timeline. Carry critical signals in `metrics` until then. |
+| E5 | **Backpressure** | `backpressure` is never populated. | Populated under load. Handle it if present; handle `429`/`503` regardless. |
+| E6 | **mTLS** | Bearer api-key over TLS only. | Optional per-agent client certificate at enrollment, with rotation (the `rotate_certificate` command). |
+| E7 | **Process/software inventory** | Not stored. | Will be stored without a contract change — you may send `processes[]`/`software[]` in `inventory` now. |
+| E8 | **`uptime_seconds`** | Accepted on heartbeat, not persisted. | Will be persisted; keep sending it. |
+
+None of these block first integration. The agent can ship against §4–§10 today.
+
+---
+
+## 14. What We Need From the Agent Team
+
+Please confirm each item so we can finish the controller side and schedule
+integration testing.
+
+**Contract confirmation**
+
+1. Can the agent emit the **exact `data` key names** in §6.3 for every `kind`
+   you support? List any key you cannot produce, or want renamed.
+2. Confirm `agent_uid` is **stable** across restart and upgrade, and how it is
+   derived.
+3. Confirm the enrollment fields in §5.1 the agent can populate at install time.
+
+**Capability & scheduling**
+
+4. Which collectors are in **v1** of the agent vs later? (cpu, memory,
+   filesystem, disk_io, network, process, service_state, event_log,
+   agent_health, inventory.) We will set built-in policy `feature_flags` to
+   match so the UI never shows empty tabs.
+5. Agent **version string** format (we expect semver, e.g. `1.0.0`).
+6. Self-update: do you want ZenPlus to **drive upgrades** via `desired_version`
+   + the package manifest (§10), or will the agent team own updates? If ZenPlus
+   drives it, who publishes packages into `agent_packages`?
+7. Platforms/architectures for v1 (`windows/amd64` only, or also `arm64`?).
+
+**Quality & security**
+
+8. Measured **resource footprint** (CPU %, RAM) on an idle and a busy host.
+9. How the api-key is **stored at rest** (we expect DPAPI) — for our security
+   review.
+10. How the agent handles **clock skew** and time sync.
+
+**Integration**
+
+11. We will provide a **staging controller URL + enrollment token**. Please run
+    a full enroll → heartbeat → config → upload cycle against it.
+12. Send us **one real captured `results/host` batch JSON** from the agent so we
+    can validate ingestion field-by-field before go-live.
+13. Confirm the agent handles every status code in §12 as described —
+    especially `401`/`403` (re-enroll vs stop) and `429`/`503` (spool + back off).
+
+---
+
+## 15. Cheat Sheet
+
+**Endpoints** (base `/api/v1/agents`)
+
+| Method | Path | Auth | Purpose |
+| --- | --- | --- | --- |
+| POST | `/enroll` | token in body | Get api-key + ids |
+| POST | `/heartbeat` | api-key | Liveness, ETag, commands flag, desired version |
+| GET | `/config` | api-key + `If-None-Match` | Fetch policy (304 if unchanged) |
+| POST | `/results/host` | api-key | Batched metric + inventory upload |
+| POST | `/events` | api-key | Lifecycle events (not yet stored) |
+| POST | `/diagnostics` | api-key | Register a diagnostics bundle |
+| GET | `/packages/manifest` | none | Latest package for self-update |
+| POST | `/commands/poll` | api-key | Pick up queued commands |
+| POST | `/commands/{id}/result` | api-key | Report command outcome |
+
+**Headers on every api-key request:** `Authorization: Bearer <api_key>` +
+`X-Agent-Id: <agent_id>`.
+
+**Metric kinds → `data` keys**
+
+| `kind` | Cardinality | Key `data` fields |
+| --- | --- | --- |
+| `cpu` | 1/tick | `cpu_total_pct`, `cpu_*_pct`, `per_core[]`, `load_1/5/15` |
+| `memory` | 1/tick | `total_bytes`, `used_bytes`, `available_bytes`, `committed_bytes`, `swap_*` |
+| `filesystem` | 1/volume | `mount`, `fs_type`, `total_bytes`, `used_bytes`, `free_bytes` |
+| `disk_io` | 1/disk | `device`, `read/write_bytes_ps`, `read/write_iops`, `queue_length`, `util_pct`, `avg_*_ms` |
+| `network` | 1/NIC | `if_name`, `rx/tx_bytes_ps`, `rx/tx_packets_ps`, `rx/tx_errors_ps`, `rx/tx_dropped_ps`, `is_up` |
+| `process` | 1/process | `process_name`, `pid`, `cpu_pct`, `memory_bytes`, `thread_count`, `handle_count`, `user_name` |
+| `service_state` | 1/service | `service_name`, `state`, `start_mode`, `pid`, `exit_code` |
+| `event_log` | 1/(chan,level) | `log_name`, `level`, `event_count`, `sample_ids[]` |
+| `agent_health` | 1/tick | `cpu_pct`, `memory_bytes`, `queue_depth`, `spool_bytes`, `upload_lag_ms`, `config_apply_ok` |
+| `inventory` | periodic | `os{}`, `services[]`, `filesystems[]`, `network_interfaces[]` |
+
+**Default intervals:** heartbeat 30 s · config poll 60 s · upload 60 s (the
+controller's enrollment response and policy are authoritative — use those).
+
+---
+
+## 16. Related Documents
+
+- `server-monitoring-04-windows-agent-msi-design.md` — Windows agent runtime &
+  MSI packaging design (bootstrap config, service, install layout).
+- `server-monitoring-05-status-architecture-and-roadmap.md` — controller-side
+  status, architecture, metrics catalog, and roadmap.
+- `server-monitoring-02-feature-plan-and-roadmap.md` — original product plan.

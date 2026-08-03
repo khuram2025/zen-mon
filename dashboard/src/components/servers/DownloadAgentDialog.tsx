@@ -1,9 +1,10 @@
 /** "Download agent" dialog: hands back the published installer with the
  *  controller URL and a freshly minted enrollment token already inside it.
  *
- *  The operator says how many servers the package is for; that count becomes
- *  the token's max_uses, so one downloaded file installs on exactly that many
- *  hosts with nothing to type on any of them. */
+ *  By default the package is reusable: its token has no install limit and is
+ *  bounded only by an expiry, so one download can be pushed to a whole estate
+ *  through GPO/Intune/SCCM. A fixed install count is available when a rollout
+ *  should be tightly scoped. */
 
 import { useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
@@ -70,7 +71,9 @@ export function DownloadAgentDialog({
   onOpenChange: (open: boolean) => void
 }) {
   const [platform, setPlatform] = useState<Platform>('windows')
-  const [serverCount, setServerCount] = useState('1')
+  // 'fleet' issues a reusable token (max_uses = 0); 'limited' caps installs.
+  const [scope, setScope] = useState<'fleet' | 'limited'>('fleet')
+  const [serverCount, setServerCount] = useState('10')
   const [ttlHours, setTtlHours] = useState('72')
   const [policyId, setPolicyId] = useState('')
   const [label, setLabel] = useState('')
@@ -92,7 +95,10 @@ export function DownloadAgentDialog({
     (p) => p.platform === platform && p.is_latest,
   )
 
-  const count = Math.max(1, Math.min(1000, Number(serverCount) || 1))
+  // 0 tells the controller the token is reusable until it expires.
+  const count = scope === 'fleet'
+    ? 0
+    : Math.max(1, Math.min(100000, Number(serverCount) || 1))
 
   const download = useMutation({
     mutationFn: async () => {
@@ -134,7 +140,12 @@ export function DownloadAgentDialog({
     },
     onSuccess: (info) => {
       setIssued(info)
-      toast.success(`${info.fileName} downloaded — good for ${info.maxUses} server(s)`)
+      toast.success(
+        `${info.fileName} downloaded`,
+        info.maxUses === 0
+          ? 'Reusable on any number of servers until it expires'
+          : `Good for ${info.maxUses} install${info.maxUses === 1 ? '' : 's'}`,
+      )
     },
     onError: async (err: unknown) => {
       // An error body on a blob-typed request arrives as a Blob, so the
@@ -190,17 +201,32 @@ export function DownloadAgentDialog({
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="dl-count">How many servers?</Label>
+              <Label htmlFor="dl-scope">Install limit</Label>
+              <Select value={scope} onValueChange={(v) => setScope(v as 'fleet' | 'limited')}>
+                <SelectTrigger id="dl-scope">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="fleet">Unlimited — reusable package</SelectItem>
+                  <SelectItem value="limited">Limit to a fixed number</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+
+          {scope === 'limited' && (
+            <div className="space-y-1.5">
+              <Label htmlFor="dl-count">Maximum installs</Label>
               <Input
                 id="dl-count"
                 type="number"
                 min={1}
-                max={1000}
+                max={100000}
                 value={serverCount}
                 onChange={(e) => setServerCount(e.target.value)}
               />
             </div>
-          </div>
+          )}
 
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
@@ -247,12 +273,22 @@ export function DownloadAgentDialog({
 
           <div className="flex items-start gap-2 rounded-md border border-border bg-surface-2 px-3 py-2 text-xs text-muted">
             <Server className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <span>
-              One enrollment is consumed per host, so this package covers{' '}
-              <span className="font-medium text-fg">{count}</span> server
-              {count === 1 ? '' : 's'}. Need more later? Download again — each download gets
-              its own token.
-            </span>
+            {scope === 'fleet' ? (
+              <span>
+                One file, any number of servers. Push it through GPO, Intune, SCCM or your
+                imaging pipeline — every host enrols with the same package. Access is bounded
+                by the expiry below, and the token can be revoked at any time from
+                the fleet page.
+              </span>
+            ) : (
+              <span>
+                One enrollment is consumed per host, so this package stops working after{' '}
+                <span className="font-medium text-fg">{count}</span> install
+                {count === 1 ? '' : 's'}. Use this to keep a rollout tightly scoped;
+                choose <span className="font-medium text-fg">Unlimited</span> for estate-wide
+                deployment.
+              </span>
+            )}
           </div>
 
           {!packagesLoading && !published ? (
@@ -284,8 +320,10 @@ export function DownloadAgentDialog({
                 {issued.fileName} downloaded
               </div>
               <div className="text-muted">
-                Token {issued.tokenPrefix}… · {issued.maxUses} install
-                {issued.maxUses === 1 ? '' : 's'}
+                Token {issued.tokenPrefix}… ·{' '}
+                {issued.maxUses === 0
+                  ? 'unlimited installs'
+                  : `${issued.maxUses} install${issued.maxUses === 1 ? '' : 's'}`}
                 {issued.expiresAt
                   ? ` · expires ${new Date(issued.expiresAt).toLocaleString()}`
                   : ''}

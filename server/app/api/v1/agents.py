@@ -197,15 +197,16 @@ async def enroll(
     claimed = (await db.execute(
         text("""UPDATE agent_enrollment_tokens SET
                   uses = uses + 1,
-                  consumed_at = CASE WHEN uses + 1 >= max_uses
+                  consumed_at = CASE WHEN max_uses > 0 AND uses + 1 >= max_uses
                                      THEN COALESCE(consumed_at, NOW()) ELSE consumed_at END,
                   consumed_ip = COALESCE(consumed_ip, :ip)
-                WHERE id = :id AND uses < max_uses AND revoked_at IS NULL
+                WHERE id = :id AND (max_uses = 0 OR uses < max_uses)
+                  AND revoked_at IS NULL
                 RETURNING id"""),
         {"id": tok["id"], "ip": client_ip},
     )).first()
     if not claimed:
-        raise HTTPException(401, "Enrollment token already used")
+        raise HTTPException(401, "Enrollment token has no uses left")
 
     # Reconcile or create the server record.
     server_id = tok.get("server_id")
@@ -577,6 +578,125 @@ async def post_diagnostics(
 
 
 # ── Packages manifest ───────────────────────────────────────────────
+
+# ── Network capture ingest ──────────────────────────────────────────
+
+@router.post("/network-capture")
+async def post_network_capture(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+    x_agent_id: str = Header(default=""),
+    authorization: str = Header(default=""),
+):
+    """Receive flows from a running or finished capture.
+
+    Called repeatedly while a capture runs so the dashboard can follow it.
+    Flows are keyed by their 5-tuple in a ReplacingMergeTree, so a later
+    upload supersedes the earlier partial rather than double-counting.
+    """
+    agent = await _authenticate(x_agent_id, _strip_bearer(authorization), db)
+
+    capture_id = str(data.get("capture_id") or "").strip()
+    if not capture_id:
+        raise HTTPException(400, "capture_id is required")
+
+    row = (await db.execute(
+        text("SELECT id, server_id, status FROM network_captures WHERE id = :id"),
+        {"id": capture_id},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(404, "Unknown capture")
+    if str(row["server_id"]) != str(agent["server_id"]):
+        # An agent may only report on captures for its own server.
+        raise HTTPException(403, "Capture belongs to a different server")
+    if row["status"] in ("completed", "failed", "expired"):
+        return {"ok": True, "ignored": True,
+                "detail": f"Capture already {row['status']}"}
+
+    flows = data.get("flows") or []
+    status = str(data.get("status") or "running")
+    if status not in ("running", "completed", "failed"):
+        status = "running"
+
+    sent_total = sum(int(f.get("bytes_sent") or 0) for f in flows)
+    recv_total = sum(int(f.get("bytes_received") or 0) for f in flows)
+
+    if flows:
+        from app.core.database import get_clickhouse_client
+        client = get_clickhouse_client()
+        now = datetime.now(timezone.utc)
+        rows = []
+        for f in flows:
+            try:
+                rows.append([
+                    capture_id, str(agent["server_id"]), str(agent["id"]), now,
+                    str(f.get("protocol") or "tcp")[:8],
+                    str(f.get("local_ip") or "")[:64], int(f.get("local_port") or 0),
+                    str(f.get("remote_ip") or "")[:64], int(f.get("remote_port") or 0),
+                    int(f.get("pid") or 0),
+                    str(f.get("process_name") or "")[:255],
+                    str(f.get("service_name") or "")[:255],
+                    str(f.get("state") or "")[:32],
+                    int(f.get("bytes_sent") or 0), int(f.get("bytes_received") or 0),
+                    1 if f.get("bytes_known") else 0,
+                    _parse_dt(f.get("first_seen")) or now,
+                    _parse_dt(f.get("last_seen")) or now,
+                    int(f.get("samples") or 0),
+                ])
+            except (TypeError, ValueError):
+                continue
+        if rows:
+            client.insert(
+                "zenplus.host_network_flows", rows,
+                column_names=["capture_id", "server_id", "agent_id", "observed_at",
+                              "protocol", "local_ip", "local_port", "remote_ip",
+                              "remote_port", "pid", "process_name", "service_name",
+                              "state", "bytes_sent", "bytes_received", "bytes_known",
+                              "first_seen", "last_seen", "samples"],
+            )
+
+    await db.execute(
+        text("""UPDATE network_captures SET
+                  status = CAST(:st AS VARCHAR),
+                  started_at = COALESCE(started_at, CAST(:started AS TIMESTAMPTZ)),
+                  ends_at = COALESCE(CAST(:ends AS TIMESTAMPTZ), ends_at),
+                  completed_at = CASE WHEN CAST(:st AS VARCHAR) IN ('completed','failed')
+                                      THEN NOW() ELSE completed_at END,
+                  samples = GREATEST(samples, :samples),
+                  flow_count = GREATEST(flow_count, :fc),
+                  bytes_sent = GREATEST(bytes_sent, :bs),
+                  bytes_received = GREATEST(bytes_received, :br),
+                  bytes_available = :ba,
+                  truncated = :trunc,
+                  note = COALESCE(NULLIF(CAST(:note AS TEXT), ''), note),
+                  error_message = COALESCE(NULLIF(CAST(:err AS TEXT), ''), error_message),
+                  updated_at = NOW()
+                WHERE id = :id"""),
+        {
+            "id": capture_id, "st": status,
+            "started": _parse_dt(data.get("started_at")),
+            "ends": _parse_dt(data.get("ends_at")),
+            "samples": int(data.get("samples") or 0),
+            "fc": len(flows),
+            "bs": sent_total, "br": recv_total,
+            "ba": bool(data.get("bytes_available")),
+            "trunc": bool(data.get("truncated")),
+            "note": str(data.get("note") or ""),
+            "err": str(data.get("error_message") or ""),
+        },
+    )
+    await db.commit()
+    return {"ok": True, "accepted": len(flows), "status": status}
+
+
+def _parse_dt(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
 
 @router.get("/packages/manifest")
 async def packages_manifest(

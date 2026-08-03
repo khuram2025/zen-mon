@@ -1,0 +1,740 @@
+# Windows Agent And MSI Design
+
+Date: 2026-05-15
+
+## Purpose
+
+Build the first ZenPlus host agent for Windows. The Windows agent is a per-server service that collects local host telemetry and sends it securely to the ZenPlus controller.
+
+This is separate from the existing remote sensor:
+
+- Remote sensor: site-level appliance or binary that monitors many devices and executes agentless checks.
+- Windows agent: host-level service installed on one Windows server to monitor that server deeply and reliably.
+
+Recommended binary name:
+
+- `zenplus-agent.exe`
+
+Recommended service name:
+
+- `ZenPlus Agent`
+
+Recommended package name:
+
+- `ZenPlusAgent-x64.msi`
+
+## Design Goals
+
+- Reliable during controller downtime.
+- Secure by default.
+- Outbound-only communication.
+- Low CPU, memory, disk, and network footprint.
+- Silent install support for GPO, SCCM, Intune, and scripted deployment.
+- MSI install, upgrade, uninstall, and optional purge.
+- Extensible collectors for future application monitoring.
+- Clear local diagnostics for support.
+
+## Runtime Architecture
+
+Use Go for the Windows agent to align with the existing Go sensor runtime and keep deployment simple.
+
+Recommended modules:
+
+- `bootstrap`: read first-run MSI properties and bootstrap config.
+- `identity`: host identity and agent identity.
+- `enroll`: exchange install token for durable agent credential.
+- `secrets`: DPAPI-backed credential storage.
+- `config`: ETag config polling, signature verification, last known good config.
+- `scheduler`: intervals, jitter, worker pool, timeout control.
+- `collectors`: CPU, memory, filesystem, disk IO, network, process, services, event log, inventory.
+- `spool`: durable local queue.
+- `uploader`: compressed batch upload, retry, backoff, idempotency.
+- `health`: self metrics and agent status.
+- `updater`: signed manifest and package upgrade flow.
+- `diag`: support bundle and local status command.
+- `service`: Windows service lifecycle.
+
+Recommended Windows APIs/libraries:
+
+- Windows Service Control Manager through `golang.org/x/sys/windows/svc`.
+- Windows Performance Counters or PDH for CPU, disk, network, and memory.
+- WMI only where Performance Counters are insufficient.
+- Windows Event Log APIs for event summaries and agent logging.
+- DPAPI for stored secrets.
+- Windows certificate store for mTLS in the target design.
+
+References:
+
+- Go Windows service package: https://pkg.go.dev/golang.org/x/sys/windows/svc
+- Microsoft Service Control Manager: https://learn.microsoft.com/en-us/windows/win32/services/service-control-manager
+- Microsoft Performance Counters: https://learn.microsoft.com/en-us/windows/win32/perfctrs/performance-counters-portal
+- Microsoft WMI: https://learn.microsoft.com/en-us/windows/win32/wmisdk/wmi-start-page
+
+## Installation Layout
+
+Program files:
+
+- `%ProgramFiles%\ZenPlus\Agent\zenplus-agent.exe`
+- `%ProgramFiles%\ZenPlus\Agent\zenplus-agentctl.exe`
+- `%ProgramFiles%\ZenPlus\Agent\LICENSE.txt`
+- `%ProgramFiles%\ZenPlus\Agent\NOTICE.txt`
+
+Program data:
+
+- `%ProgramData%\ZenPlus\Agent\config\agent.yaml`
+- `%ProgramData%\ZenPlus\Agent\state\agent.db`
+- `%ProgramData%\ZenPlus\Agent\state\spool\`
+- `%ProgramData%\ZenPlus\Agent\logs\agent.log`
+- `%ProgramData%\ZenPlus\Agent\diag\`
+
+ACL requirements:
+
+- Administrators: full control.
+- SYSTEM: full control.
+- Agent service account: read/write for config, state, logs, diagnostics.
+- Normal users: no access to secrets or state.
+
+## Service Account
+
+Recommended default:
+
+- Use a virtual service account: `NT SERVICE\ZenPlusAgent`, if compatible with required collectors.
+
+Alternative:
+
+- Use `LocalService` if virtual account behavior creates deployment friction.
+
+Avoid:
+
+- Running as a domain admin.
+- Running with interactive desktop privileges.
+- Opening inbound network ports by default.
+
+## MSI Design
+
+Use WiX Toolset v4 for MSI creation.
+
+Reference:
+
+- Microsoft Windows Installer: https://learn.microsoft.com/en-us/windows/win32/msi/windows-installer-portal
+- WiX Toolset: https://docs.firegiant.com/wix/
+
+MSI behavior:
+
+- Per-machine install.
+- Requires administrator rights.
+- Installs files under Program Files.
+- Creates ProgramData directories.
+- Writes bootstrap config.
+- Installs Windows service.
+- Starts service after install.
+- Stops service during uninstall.
+- Removes service during uninstall.
+- Preserves state by default.
+- Deletes state only with explicit `PURGE=1`.
+- Supports MajorUpgrade.
+- Supports silent installation.
+
+MSI public properties:
+
+- `CONTROLLER_URL`
+- `ENROLLMENT_TOKEN`
+- `AGENT_NAME`
+- `SITE_ID`
+- `POLICY_ID`
+- `PROXY_URL`
+- `VERIFY_TLS`
+- `INSTALLDIR`
+- `PURGE`
+
+Example silent install:
+
+```powershell
+msiexec /i ZenPlusAgent-x64.msi CONTROLLER_URL="https://monitor.example.com" ENROLLMENT_TOKEN="zp_enroll_xxx" SITE_ID="site_123" POLICY_ID="policy_windows_baseline" /qn /norestart
+```
+
+Example uninstall preserving state:
+
+```powershell
+msiexec /x ZenPlusAgent-x64.msi /qn /norestart
+```
+
+Example uninstall purging state:
+
+```powershell
+msiexec /x ZenPlusAgent-x64.msi PURGE=1 /qn /norestart
+```
+
+## Enrollment Flow
+
+1. Admin opens Add Server in the dashboard.
+2. Admin chooses Windows Agent.
+3. Admin chooses site and policy.
+4. Backend creates a scoped, expiring, one-time enrollment token.
+5. UI shows MSI download and silent install command.
+6. MSI writes bootstrap config with controller URL, token, site, policy, proxy, and TLS settings.
+7. MSI starts `ZenPlus Agent`.
+8. Agent reads bootstrap config.
+9. Agent posts to `POST /api/v1/agents/enroll`.
+10. Backend validates token hash, expiry, scope, and reuse.
+11. Backend creates or reconciles server and agent records.
+12. Backend returns agent id, server id, credential, config URL, and optional mTLS bootstrap data.
+13. Agent stores durable credential with DPAPI.
+14. Agent removes or invalidates bootstrap token.
+15. Agent starts heartbeat, config, collection, and upload loops.
+
+Enrollment response fields:
+
+```json
+{
+  "agent_id": "agt_123",
+  "server_id": "srv_123",
+  "credential": "secret_or_cert_bootstrap",
+  "config_url": "https://monitor.example.com/api/v1/agents/config",
+  "heartbeat_interval_seconds": 30,
+  "upload_interval_seconds": 30
+}
+```
+
+## Security Model
+
+### Transport
+
+MVP:
+
+- HTTPS only.
+- TLS verification enabled by default.
+- Proxy support.
+- Private CA support.
+
+Target:
+
+- mTLS for every agent.
+- Certificate rotation before expiry.
+- Certificate revocation on decommission.
+
+### Secrets
+
+Requirements:
+
+- Enrollment token is one-time and short-lived.
+- Enrollment token is removed after successful enrollment.
+- Durable agent credential is stored with DPAPI.
+- Secrets are never written to normal logs.
+- Diagnostic bundles redact tokens, credentials, proxy passwords, and certificates.
+
+### Config
+
+Requirements:
+
+- Config payloads are signed.
+- Agent verifies signature before applying.
+- Agent keeps last known good config.
+- Agent reports config apply failures.
+- Agent refuses incompatible config versions.
+
+### Updates
+
+Requirements:
+
+- `zenplus-agent.exe` is Authenticode signed.
+- MSI is Authenticode signed.
+- Package manifest is signed.
+- Package checksum is SHA256.
+- Agent verifies manifest and package before upgrade.
+- Upgrade rolls back if service health check fails.
+
+### Command Channel
+
+MVP allowed commands:
+
+- Refresh config.
+- Collect now.
+- Upload diagnostics.
+- Rotate certificate.
+- Restart agent.
+- Upgrade agent.
+
+Not allowed in MVP:
+
+- Arbitrary remote shell.
+- Arbitrary PowerShell execution.
+- File download and execute.
+
+Every command must have:
+
+- Issuer.
+- RBAC check.
+- Expiry.
+- Audit record.
+- Agent result record.
+
+## Durable Spool
+
+Recommended storage:
+
+- SQLite with WAL mode for inspectability and safe local persistence.
+
+Acceptable alternative:
+
+- bbolt if simpler operationally.
+
+Spool requirements:
+
+- Bounded by max bytes.
+- Bounded by max age.
+- Stores batches before upload.
+- Acknowledges only after backend acceptance.
+- Retries with exponential backoff.
+- Drops lowest-priority data first when full.
+- Never blocks heartbeat permanently.
+- Reports queue depth and spool bytes in heartbeat.
+
+Default retention target:
+
+- At least 24 hours of baseline metrics during controller outage.
+
+## Collector Set
+
+### MVP Collectors
+
+CPU:
+
+- Total utilization.
+- Per-core utilization.
+- Processor count.
+
+Memory:
+
+- Total.
+- Available.
+- Used.
+- Percent used.
+- Committed.
+
+Filesystem:
+
+- Volume name.
+- Mount path.
+- Filesystem type.
+- Total bytes.
+- Used bytes.
+- Free bytes.
+- Percent used.
+
+Disk IO:
+
+- Reads/sec.
+- Writes/sec.
+- Read bytes/sec.
+- Write bytes/sec.
+- Queue length where available.
+
+Network:
+
+- Interface inventory.
+- Bytes sent/received.
+- Packets sent/received.
+- Errors.
+- Drops/discards where available.
+
+Processes:
+
+- Process count.
+- Top N by CPU.
+- Top N by memory.
+- Watchlist process state.
+
+Services:
+
+- Service state for configured watchlist.
+- Auto-start services that are stopped.
+- Recent service failures where available.
+
+Event Log:
+
+- System critical/error/warning counts.
+- Application critical/error/warning counts.
+- Optional event source filters.
+- Last representative event metadata without full message body in MVP.
+
+Inventory:
+
+- Hostname.
+- FQDN.
+- OS name.
+- OS version.
+- Build number.
+- Architecture.
+- Boot time.
+- CPU model/count.
+- Memory size.
+- Disk inventory.
+- NIC inventory.
+
+Agent self-health:
+
+- Version.
+- Config hash.
+- Last config time.
+- Last successful upload.
+- Queue depth.
+- Spool bytes.
+- Collector errors.
+- Upload errors.
+- Update status.
+
+### Application-Ready Collectors
+
+Design now, implement later:
+
+- Listening ports and owning processes.
+- IIS sites and app pools.
+- SQL Server service and performance counters.
+- Active Directory service checks.
+- DNS and DHCP service checks.
+- Windows scheduled task status.
+- Windows update status.
+- Certificate expiry for local machine certs.
+
+## Performance Controls
+
+Agent defaults:
+
+- Heartbeat interval: 30 seconds.
+- Baseline metric interval: 60 seconds.
+- Inventory interval: 6 hours.
+- Process summary interval: 60 to 120 seconds.
+- Event log summary interval: 60 seconds.
+- Upload interval: 30 seconds.
+- Jitter: 10 to 20 percent.
+
+Limits:
+
+- Max concurrent collectors.
+- Per-collector timeout.
+- Max payload bytes.
+- Max process count in payload.
+- Max event sources in payload.
+- Max spool bytes.
+- Max retained spool age.
+
+Targets:
+
+- CPU below 2 percent average.
+- Memory below 100 MB.
+- No unbounded labels.
+- No inbound ports.
+- No blocking on a slow collector.
+
+## Agent Configuration Example
+
+```yaml
+version: 1
+agent_id: agt_123
+server_id: srv_123
+controller_url: https://monitor.example.com
+policy_id: policy_windows_baseline
+config_hash: sha256:abc123
+heartbeat_interval_seconds: 30
+upload_interval_seconds: 30
+collectors:
+  cpu:
+    enabled: true
+    interval_seconds: 60
+  memory:
+    enabled: true
+    interval_seconds: 60
+  filesystem:
+    enabled: true
+    interval_seconds: 60
+    ignore_mounts:
+      - A:\
+  disk_io:
+    enabled: true
+    interval_seconds: 60
+  network:
+    enabled: true
+    interval_seconds: 60
+  processes:
+    enabled: true
+    interval_seconds: 120
+    top_n: 10
+    watchlist:
+      - sqlservr.exe
+      - w3wp.exe
+  services:
+    enabled: true
+    interval_seconds: 60
+    watchlist:
+      - MSSQLSERVER
+      - W3SVC
+  event_log:
+    enabled: true
+    interval_seconds: 60
+    channels:
+      - System
+      - Application
+    levels:
+      - Critical
+      - Error
+      - Warning
+spool:
+  max_bytes: 1073741824
+  max_age_hours: 24
+security:
+  verify_tls: true
+  require_signed_config: true
+signature: base64-signature
+```
+
+## Batch Upload Example
+
+```json
+{
+  "agent_id": "agt_123",
+  "server_id": "srv_123",
+  "batch_id": "01HXAMPLEBATCH",
+  "sequence_start": 100,
+  "sequence_end": 132,
+  "config_hash": "sha256:abc123",
+  "agent_version": "1.0.0",
+  "collected_at": "2026-05-15T17:00:00Z",
+  "sent_at": "2026-05-15T17:00:10Z",
+  "metrics": [
+    {
+      "name": "system.cpu.utilization",
+      "timestamp": "2026-05-15T17:00:00Z",
+      "value": 37.2,
+      "unit": "percent",
+      "labels": {
+        "cpu": "total"
+      }
+    }
+  ],
+  "inventory": {},
+  "events": []
+}
+```
+
+## Local CLI
+
+Ship a companion executable:
+
+- `zenplus-agentctl.exe`
+
+Commands:
+
+- `zenplus-agentctl.exe status`
+- `zenplus-agentctl.exe diag`
+- `zenplus-agentctl.exe collect-now`
+- `zenplus-agentctl.exe print-config`
+- `zenplus-agentctl.exe reset-enrollment`
+- `zenplus-agentctl.exe version`
+
+Rules:
+
+- Commands that expose sensitive data require administrator privileges.
+- Diagnostic output redacts secrets.
+- `reset-enrollment` stops the service and removes durable identity only after confirmation unless `--force` is supplied.
+
+## Logging
+
+Local log:
+
+- `%ProgramData%\ZenPlus\Agent\logs\agent.log`
+
+Windows Event Log:
+
+- Source: `ZenPlus Agent`
+
+Log requirements:
+
+- Rotation.
+- Redaction.
+- Info logs for lifecycle events.
+- Warning logs for collector failures.
+- Error logs for enrollment, config, upload, and update failures.
+- No full metric payload logging by default.
+
+## Build Pipeline
+
+Recommended CI stages:
+
+1. Run Go unit tests.
+2. Build `zenplus-agent.exe` for Windows amd64.
+3. Build `zenplus-agentctl.exe` for Windows amd64.
+4. Run static checks.
+5. Sign executables.
+6. Build MSI through WiX on a Windows runner.
+7. Sign MSI.
+8. Generate SHA256 checksums.
+9. Generate signed package manifest.
+10. Upload artifacts.
+11. Register package in backend package table for the target environment.
+
+Windows runner is recommended for MSI build and signing. Cross-compiling the Go binary from Linux is possible, but MSI creation and Authenticode signing are cleaner on Windows CI.
+
+## Package Manifest Example
+
+```json
+{
+  "platform": "windows",
+  "architecture": "amd64",
+  "version": "1.0.0",
+  "channel": "stable",
+  "file_name": "ZenPlusAgent-x64-1.0.0.msi",
+  "sha256": "hex-checksum",
+  "size_bytes": 12345678,
+  "download_url": "/api/v1/agents/packages/windows/1.0.0",
+  "signature": "base64-signature",
+  "release_notes": "Initial Windows agent MVP"
+}
+```
+
+## Update Strategy
+
+Use update rings:
+
+- `lab`
+- `canary`
+- `early`
+- `stable`
+- `pinned`
+
+Update flow:
+
+1. Backend marks desired version for a ring.
+2. Agent receives desired version in config.
+3. Agent downloads signed manifest.
+4. Agent verifies manifest signature.
+5. Agent downloads package.
+6. Agent verifies checksum and signature.
+7. Agent starts MSI upgrade.
+8. Service restarts.
+9. Agent reports healthy.
+10. Backend marks upgrade complete.
+11. If health fails, rollback or mark failed with diagnostics.
+
+## UI Integration
+
+Add Server flow should show:
+
+- MSI download button.
+- Silent install command.
+- Token expiry.
+- Site.
+- Policy.
+- Package version.
+- SHA256 checksum.
+- Signing status.
+- Proxy options.
+- Private CA option.
+
+Agent Fleet should show:
+
+- Installed version.
+- Desired version.
+- Update ring.
+- Last update status.
+- Last update error.
+- Last heartbeat.
+- Queue depth.
+- Spool bytes.
+- Config hash.
+- Certificate expiry.
+
+Server Detail agent tab should show:
+
+- Agent status.
+- Service status.
+- Last heartbeat.
+- Last metric upload.
+- Last config apply.
+- Collector errors.
+- Diagnostics button.
+- Rotate certificate action.
+- Decommission action.
+
+## Failure Handling
+
+Enrollment failure:
+
+- Retry with backoff until token expires.
+- Log clear error code.
+- Surface installer troubleshooting steps in UI.
+
+Config failure:
+
+- Keep last known good config.
+- Report error in heartbeat.
+- Do not stop baseline heartbeat.
+
+Collector failure:
+
+- Isolate failure to collector.
+- Report collector error count.
+- Continue other collectors.
+
+Upload failure:
+
+- Queue locally.
+- Back off.
+- Respect backend 429/503 hints.
+
+Spool full:
+
+- Preserve newest heartbeat and health data.
+- Drop lower-priority high-cardinality data first.
+- Report data loss counter.
+
+Upgrade failure:
+
+- Roll back where MSI supports it.
+- Mark update failed.
+- Upload diagnostics.
+
+## Windows Compatibility Matrix
+
+Test at minimum:
+
+- Windows Server 2019.
+- Windows Server 2022.
+- Windows Server 2025 where available.
+- Windows 10 for workstation environments if product scope includes workstations.
+- Windows 11 for workstation environments if product scope includes workstations.
+
+Deployment systems:
+
+- Manual MSI.
+- Silent PowerShell install.
+- Group Policy.
+- Microsoft Intune.
+- SCCM/MECM.
+
+Network:
+
+- Direct HTTPS.
+- HTTPS through proxy.
+- Private CA.
+- Controller unreachable.
+- DNS failure.
+- TLS failure.
+
+## Acceptance Criteria
+
+The Windows agent and MSI are production-ready when:
+
+- MSI installs silently and starts the service.
+- Agent enrolls with a scoped one-time token.
+- Agent stores durable credentials securely.
+- Agent removes bootstrap token after enrollment.
+- Agent collects MVP metrics.
+- Agent queues during outage and drains after recovery.
+- Agent applies signed config and rejects unsigned config.
+- Agent reports self-health.
+- Agent can be upgraded through MSI.
+- Agent can be uninstalled cleanly.
+- Agent package and MSI are signed or pre-production signing is explicitly documented.
+- UI supports install, status, diagnostics, update ring, and decommission.
+- Backend tests, agent tests, Windows integration tests, and UI tests pass.
