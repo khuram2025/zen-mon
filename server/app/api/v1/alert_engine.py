@@ -437,6 +437,35 @@ async def evaluate_status_change(
     _tz = await get_configured_timezone(db)
     suppressing_dependency = await _find_suppressing_dependency(db, event.device_id) if is_down else None
 
+    # Recovery closes ALL open down/degraded status alerts on this device,
+    # before any per-rule gating. This used to live inside the rules loop
+    # behind `rule.recovery_alert`, so rules without a recovery notification
+    # never resolved their alerts — one firewall accumulated 100+ permanently
+    # "active" DEGRADED alerts, poisoning every alert counter in the UI.
+    if is_recovery:
+        resolved = await db.execute(
+            text("""
+                UPDATE alerts
+                SET status = 'resolved',
+                    resolved_at = :resolved_at,
+                    metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:resolution_metadata AS jsonb)
+                WHERE status IN ('active', 'acknowledged')
+                  AND device_id = :device_id
+                  AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
+                  AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded')
+            """),
+            {
+                "resolved_at": now,
+                "device_id": event.device_id,
+                "resolution_metadata": json.dumps({
+                    "resolved_by_recovery": True,
+                    "recovery_status": event.new_status,
+                    "recovery_at": now.isoformat(),
+                }),
+            },
+        )
+        resolved_alerts += resolved.rowcount or 0
+
     # E1: live metric values for condition evaluation. packet_loss arrives from
     # the poller as a fraction (0..1); rule thresholds are in percent, so scale.
     metric_values = {
@@ -520,32 +549,6 @@ async def evaluate_status_change(
             suppressed_alerts += 1
             continue
 
-        if is_recovery:
-            resolved = await db.execute(
-                text("""
-                    UPDATE alerts
-                    SET status = 'resolved',
-                        resolved_at = :resolved_at,
-                        metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:resolution_metadata AS jsonb)
-                    WHERE status IN ('active', 'acknowledged')
-                      AND device_id = :device_id
-                      AND rule_id = :rule_id
-                      AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
-                      AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded')
-                """),
-                {
-                    "resolved_at": now,
-                    "device_id": event.device_id,
-                    "rule_id": str(rule.id),
-                    "resolution_metadata": json.dumps({
-                        "resolved_by_recovery": True,
-                        "recovery_status": event.new_status,
-                        "recovery_at": now.isoformat(),
-                    }),
-                },
-            )
-            resolved_alerts += resolved.rowcount or 0
-
         # Build messages from templates
         if is_recovery:
             email_subject = _render(rule.recovery_email_subject or "[{severity}] RESOLVED: {rule_name}", variables)
@@ -556,7 +559,42 @@ async def evaluate_status_change(
             email_body = _render(rule.email_body or variables["status_intro"], variables)
             sms_body = _render(rule.sms_template or "[ZenPlus {severity}] {hostname} ({ip_address}) is {status}. Rule: {rule_name}", variables)
 
-        # Create alert record in DB
+        if not is_recovery:
+            # Respect an active snooze for this rule/device condition: the
+            # operator explicitly asked not to be re-alerted on it.
+            silenced = (await db.execute(
+                text("""SELECT 1 FROM alert_silences
+                        WHERE device_id = :did AND dedupe = :d
+                          AND (until IS NULL OR until > NOW()) LIMIT 1"""),
+                {"did": event.device_id, "d": f"rule:{rule.id}"},
+            )).first()
+            if silenced:
+                suppressed_alerts += 1
+                continue
+
+            # A new status supersedes this rule's previous open status alert
+            # (down -> degraded and back used to stack a fresh active row per
+            # transition, none of which ever closed).
+            superseded = await db.execute(
+                text("""
+                    UPDATE alerts
+                    SET status = 'resolved', resolved_at = :now,
+                        metadata = COALESCE(metadata, '{}'::jsonb) ||
+                                   CAST(:m AS jsonb)
+                    WHERE status IN ('active', 'acknowledged')
+                      AND device_id = :device_id AND rule_id = :rule_id
+                      AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded')
+                """),
+                {"now": now, "device_id": event.device_id, "rule_id": str(rule.id),
+                 "m": json.dumps({"superseded_by_status": event.new_status,
+                                  "resolved_by": "status_transition"})},
+            )
+            resolved_alerts += superseded.rowcount or 0
+
+        # Create alert record in DB. The stored message is a clean human
+        # sentence — the rendered SMS/email templates are transport payloads
+        # only (persisting sms_body here put "[ZenPlus WARNING] ..." template
+        # text all over the alert UIs).
         await db.execute(
             text("""
                 INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata)
@@ -567,7 +605,11 @@ async def evaluate_status_change(
                 "rule_id": str(rule.id),
                 "status": "resolved" if is_recovery else "active",
                 "severity": rule.severity or "warning",
-                "message": sms_body,
+                "message": (
+                    f"{rule.name}: {event.hostname} ({event.ip_address}) recovered — UP"
+                    if is_recovery else
+                    f"{rule.name}: {event.hostname} ({event.ip_address}) is {event.new_status.upper()}"
+                ),
                 "triggered_at": now,
                 "resolved_at": now if is_recovery else None,
                 "metadata": json.dumps({"old_status": event.old_status, "new_status": event.new_status, "is_recovery": is_recovery}),
@@ -1035,6 +1077,17 @@ async def evaluate_trap(
             continue
         if not _trap_oid_matches(rule.trap_oid, event.trap_oid):
             continue
+
+        # Respect an active snooze for this rule on this device.
+        if did:
+            silenced = (await db.execute(
+                text("""SELECT 1 FROM alert_silences
+                        WHERE device_id = :did AND dedupe = :d
+                          AND (until IS NULL OR until > NOW()) LIMIT 1"""),
+                {"did": did, "d": f"rule:{rule.id}"},
+            )).first()
+            if silenced:
+                continue
 
         label = event.trap_name or event.trap_oid
         message = event.message or f"SNMP trap {label} from {event.source_ip}"

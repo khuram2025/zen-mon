@@ -361,6 +361,15 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
         return {"rules": len(rules), "raised": 0, "resolved": 0}
     interfaces = await _interfaces(db)
 
+    # Active device-scoped silences (snoozes), loaded once per pass. Keys match
+    # the dedupe written by the snooze endpoint: rule:<id>[:if:<idx>].
+    silences: set[tuple[str, str]] = {
+        (r.did, r.dedupe) for r in (await db.execute(text(
+            "SELECT device_id::text AS did, dedupe FROM alert_silences "
+            "WHERE device_id IS NOT NULL AND (until IS NULL OR until > NOW())"
+        ))).all()
+    }
+
     # Pre-fetch ClickHouse fleet data once per distinct window.
     windows = {max(r.min_duration or 0, DEFAULT_WINDOW_S) for r in rules}
     if_cache = {w: _if_fleet(w) for w in windows}
@@ -389,6 +398,7 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
                         db, rule, did, dev["hostname"], iface["if_index"],
                         _iface_label(iface), breach, value, detail,
                         {"if_name": iface["if_name"]}, raised, resolved,
+                        silences,
                     )
             await db.commit()
             continue
@@ -410,6 +420,7 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
             raised, resolved = await _apply(
                 db, rule, did, dev["hostname"], None, None,
                 breach, value, detail, {}, raised, resolved,
+                silences,
             )
         await db.commit()
 
@@ -419,10 +430,17 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
 
 
 async def _apply(db, rule, device_id, hostname, if_index, iface_label,
-                 breach, value, detail, extra, raised, resolved):
+                 breach, value, detail, extra, raised, resolved,
+                 silences: set[tuple[str, str]] | None = None):
     """Raise (if breaching and not already open) or resolve one rule/device/iface."""
     existing = await _active_alert_id(db, rule.id, device_id, if_index)
     if breach:
+        # An active snooze suppresses re-raising this exact condition; the
+        # resolve branch below still runs so a snoozed condition that clears
+        # closes out any open alert.
+        dedupe = f"rule:{rule.id}" + (f":if:{if_index}" if if_index is not None else "")
+        if silences and (device_id, dedupe) in silences:
+            return raised, resolved
         if existing is None:
             msg = _message(rule, hostname, detail, iface_label)
             if await _raise(db, rule, device_id, msg, value, if_index, extra):

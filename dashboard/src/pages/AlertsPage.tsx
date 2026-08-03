@@ -23,6 +23,9 @@ import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
+import {
+  AlertChannel, ChannelIcons, cleanAlertMessage, SnoozeMenu,
+} from '@/components/alerts/AlertBits'
 
 type AlertStatus = 'active' | 'acknowledged' | 'resolved'
 type AlertSeverity = 'critical' | 'warning' | 'info'
@@ -42,6 +45,11 @@ type AlertRow = {
   acknowledged_at: string | null
   resolved_at: string | null
   metadata?: Record<string, unknown>
+  /** Channels the owning rule notifies (resolved server-side). */
+  channels?: AlertChannel[]
+  /** True when this alert's condition has an active silence. */
+  snoozed?: boolean
+  snoozed_until?: string | null
 }
 
 const STATUS_OPTIONS: AlertStatus[] = ['active', 'acknowledged', 'resolved']
@@ -262,6 +270,7 @@ export function AlertsPage() {
                     <Th>Alert</Th>
                     <Th>Entity</Th>
                     <Th>Status</Th>
+                    <Th title="Notification channels attached to this alert's rule">Notify</Th>
                     <Th>Triggered</Th>
                     <Th className="text-right">Actions</Th>
                   </Tr>
@@ -274,12 +283,17 @@ export function AlertsPage() {
                           <SeverityIcon severity={alert.severity} />
                           <div className="min-w-0">
                             <Link to={`/alerts/${alert.id}`} className="block max-w-[520px] truncate text-sm font-medium hover:text-primary hover:underline">
-                              {alert.message || 'Alert'}
+                              {cleanAlertMessage(alert.message)}
                             </Link>
                             <div className="mt-1 flex flex-wrap items-center gap-1.5">
                               <Badge variant={severityVariant(alert.severity)}>{alert.severity}</Badge>
                               {alert.service_check_name && <Badge variant="outline">service</Badge>}
                               {alert.metadata?.is_recovery === true && <Badge variant="success">recovery</Badge>}
+                              {alert.snoozed && (
+                                <Badge variant="outline" title={alert.snoozed_until ? `Snoozed until ${new Date(alert.snoozed_until).toLocaleString()}` : 'Muted until cleared'}>
+                                  snoozed
+                                </Badge>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -299,6 +313,7 @@ export function AlertsPage() {
                         )}
                       </Td>
                       <Td><StatusBadge status={alert.status} /></Td>
+                      <Td><ChannelIcons channels={alert.channels} /></Td>
                       <Td className="text-xs text-muted">
                         <div>{relativeTime(alert.triggered_at)}</div>
                         <div className="font-mono text-[10px]">{formatDateTime(alert.triggered_at)}</div>
@@ -318,13 +333,19 @@ export function AlertsPage() {
                               <X className="h-3.5 w-3.5" /> Resolve
                             </Button>
                           )}
+                          {/* Snoozable = the condition has an identity the evaluators
+                              can match: device+rule, or a server dedupe key. */}
+                          {(alert.status === 'active' || alert.status === 'acknowledged' || alert.snoozed) &&
+                            ((alert.device_id && alert.rule_id) || alert.metadata?.dedupe != null) && (
+                            <SnoozeMenu alertId={alert.id} snoozed={alert.snoozed} />
+                          )}
                         </div>
                       </Td>
                     </Tr>
                   ))}
                   {alerts.length === 0 && (
                     <Tr>
-                      <Td colSpan={5} className="py-12 text-center text-muted">
+                      <Td colSpan={6} className="py-12 text-center text-muted">
                         {isFetching ? 'Loading alerts...' : `No ${status} alerts`}
                       </Td>
                     </Tr>

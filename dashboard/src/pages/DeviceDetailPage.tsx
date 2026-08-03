@@ -721,16 +721,51 @@ function DashboardSection({
     refetchInterval: 30_000,
   })
   const activeAlertCount = activeAlertsResp?.meta?.total ?? 0
-  const recentAlerts = deviceAlerts.slice(0, 5).map((a) => ({
-    id: a.id,
-    severity: normalizeSeverity(a.severity),
-    title: a.message || 'Alert',
-    ago: relativeTime(a.triggered_at),
-    acknowledged: a.status === 'acknowledged',
-  }))
+  // Open alerts first (that's what needs attention), then recent history.
+  // Legacy rows stored the rendered SMS template as the message — strip the
+  // "[ZenPlus SEVERITY]" transport prefix so the list reads as events.
+  const recentAlerts = useMemo(() => {
+    const rank = (s: string) => (s === 'active' ? 0 : s === 'acknowledged' ? 1 : 2)
+    return [...deviceAlerts]
+      .sort((a, b) => rank(a.status) - rank(b.status) || Date.parse(b.triggered_at) - Date.parse(a.triggered_at))
+      .slice(0, 5)
+      .map((a) => ({
+        id: a.id,
+        severity: normalizeSeverity(a.severity),
+        title: (a.message || 'Alert').replace(/^\[ZenPlus\s+[A-Z]+\]\s*/, ''),
+        ago: relativeTime(a.triggered_at),
+        acknowledged: a.status === 'acknowledged',
+        resolved: a.status === 'resolved',
+      }))
+  }, [deviceAlerts])
   const activityEvents = useMemo(
     () => buildActivityEvents(traps || [], statusHistory || [], metrics || {}, range.fromISO, range.toISO),
     [traps, statusHistory, metrics, range.fromISO, range.toISO],
+  )
+
+  // The activity card is range-bound; a quiet hour on a healthy device showed
+  // a permanently-empty timeline that read as broken. When the selected range
+  // has nothing, pull the latest events from a wide window and say so.
+  const wantsEventFallback = activityEvents.length === 0 && statusHistory !== undefined
+  const wideFrom = useMemo(() => new Date(Date.now() - 720 * 3600_000).toISOString(), [wantsEventFallback])
+  const { data: fbTraps } = useQuery<any[]>({
+    queryKey: ['device', deviceId, 'traps-fallback'],
+    queryFn: async () => (await api.get(`/devices/${deviceId}/traps?hours=720&limit=10`)).data,
+    enabled: snmp && wantsEventFallback,
+    staleTime: 60_000,
+  })
+  const { data: fbStatus } = useQuery<StatusHistoryEvent[]>({
+    queryKey: ['device', deviceId, 'status-history-fallback'],
+    queryFn: async () =>
+      (await api.get(
+        `/devices/${deviceId}/status-history?from=${encodeURIComponent(wideFrom)}&to=${encodeURIComponent(new Date().toISOString())}&limit=20`,
+      )).data,
+    enabled: wantsEventFallback,
+    staleTime: 60_000,
+  })
+  const fallbackEvents = useMemo(
+    () => (wantsEventFallback ? buildActivityEvents(fbTraps || [], fbStatus || [], {}, wideFrom, range.toISO) : []),
+    [wantsEventFallback, fbTraps, fbStatus, wideFrom, range.toISO],
   )
 
   return (
@@ -862,8 +897,9 @@ function DashboardSection({
           onDetails={() => setInventoryOpen(true)}
         />
         <ActivityLogCard
-          events={activityEvents}
+          events={activityEvents.length > 0 ? activityEvents : fallbackEvents}
           rangeLabel={range.label}
+          showingFallback={activityEvents.length === 0 && fallbackEvents.length > 0}
           onViewAll={() => setEventsOpen(true)}
         />
         <EnvironmentalActionsCard
@@ -1373,7 +1409,7 @@ function HealthScoreCard({
   score, alerts, totalAlerts, deviceId, metrics, sensors, memVal, cpuVal, avgLoss, onViewDetails,
 }: {
   score: number
-  alerts: Array<{ id: string; severity: 'critical' | 'warning' | 'info' | 'success'; title: string; ago: string; acknowledged: boolean }>
+  alerts: Array<{ id: string; severity: 'critical' | 'warning' | 'info' | 'success'; title: string; ago: string; acknowledged: boolean; resolved?: boolean }>
   totalAlerts: number
   deviceId: string
   metrics: Record<string, { points: { ts: number; value: number }[] }>
@@ -1498,7 +1534,7 @@ function HealthScoreCard({
               <Link
                 key={a.id}
                 to={`/alerts/${a.id}`}
-                className="flex items-center gap-2 rounded px-1 py-0.5 -mx-1 hover:bg-surface2/60"
+                className={`flex items-center gap-2 rounded px-1 py-0.5 -mx-1 hover:bg-surface2/60 ${a.resolved ? 'opacity-55' : ''}`}
               >
                 <span className={`inline-flex items-center gap-0.5 rounded-sm px-1 text-[9px] font-semibold uppercase tracking-wider ${
                   a.severity === 'critical' ? 'bg-danger/15 text-danger'
@@ -1512,6 +1548,9 @@ function HealthScoreCard({
                   : 'INFO'}
                 </span>
                 <span className="min-w-0 flex-1 truncate text-[11px]" title={a.title}>{a.title}</span>
+                {a.resolved && (
+                  <span className="shrink-0 rounded-sm bg-success/10 px-1 text-[9px] font-medium text-success">resolved</span>
+                )}
                 {a.acknowledged && <CheckCircle2 className="h-3 w-3 shrink-0 text-muted" aria-label="Acknowledged" />}
                 <span className="shrink-0 text-[10px] text-muted">{a.ago}</span>
               </Link>
@@ -1805,8 +1844,8 @@ function AvailabilityTimelineCard({
    ════════════════════════════════════════════════════════════ */
 
 function ActivityLogCard({
-  events: activityEvents, rangeLabel, onViewAll,
-}: { events: ActivityEvent[]; rangeLabel: string; onViewAll: () => void }) {
+  events: activityEvents, rangeLabel, showingFallback, onViewAll,
+}: { events: ActivityEvent[]; rangeLabel: string; showingFallback?: boolean; onViewAll: () => void }) {
   const events = activityEvents.slice(0, 5).map((e) => ({
     icon: e.icon,
     tone: toneForSeverity(e.severity),
@@ -1822,7 +1861,9 @@ function ActivityLogCard({
         <div className="mb-3 flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-baseline gap-2">
             <h3 className="text-sm font-semibold">Recent Events / Activity Log</h3>
-            <span className="truncate text-[11px] font-medium text-muted">{rangeLabel}</span>
+            <span className="truncate text-[11px] font-medium text-muted">
+              {showingFallback ? `nothing in ${rangePhrase(rangeLabel)} · showing latest` : rangeLabel}
+            </span>
           </div>
           {/* Always enabled: the dialog has its own range picker, so an empty
               page range is exactly when widening the window is useful. */}

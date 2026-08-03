@@ -129,7 +129,9 @@ type AvailabilityRow = {
 }
 type DeviceAlertCount = {
   total: number
+  /** Currently-active alerts (any age), not window-scoped. */
   active: number
+  active_critical: number
   critical: number
   warning: number
   info: number
@@ -889,7 +891,12 @@ export function DevicesPage() {
                     const isSel = selected.has(d.id)
                     const typeInfo = TYPE_STYLE[normalizeType(d.device_type)] || TYPE_STYLE.other
                     const alertCount = alertCountMap[d.id]
-                    const alertTone = alertCount?.critical ? 'bg-danger text-white' : alertCount?.active ? 'bg-warning text-black' : 'bg-primary text-black'
+                    // Badge counts alerts that are open RIGHT NOW — the range
+                    // filter only affects the history shown in the tooltip.
+                    // Counting the window's total here made a healthy device
+                    // wear a big red number for long-resolved noise.
+                    const openAlerts = alertCount?.active || 0
+                    const alertTone = alertCount?.active_critical ? 'bg-danger text-white' : 'bg-warning text-black'
                     return (
                       <Tr key={d.id} className={isSel ? 'bg-primary/5' : ''}>
                         <Td className="py-2.5">
@@ -904,12 +911,14 @@ export function DevicesPage() {
                           <div className="flex items-center gap-2.5">
                             <span
                               className={`relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md border ${typeInfo.badge}`}
-                              title={alertCount ? `${alertCount.total} alert${alertCount.total === 1 ? '' : 's'} in ${rangeLabel}` : undefined}
+                              title={alertCount
+                                ? `${openAlerts} active alert${openAlerts === 1 ? '' : 's'} now · ${alertCount.total} total in ${rangeLabel}`
+                                : undefined}
                             >
                               <typeInfo.Icon className="h-4 w-4" />
-                              {(alertCount?.total || 0) > 0 && (
+                              {openAlerts > 0 && (
                                 <span className={`absolute -right-1.5 -top-1.5 min-w-[17px] rounded-full px-1 text-center text-[9px] font-bold leading-[17px] shadow-sm ring-2 ring-surface ${alertTone}`}>
-                                  {alertCount.total > 99 ? '99+' : alertCount.total}
+                                  {openAlerts > 99 ? '99+' : openAlerts}
                                 </span>
                               )}
                             </span>
