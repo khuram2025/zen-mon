@@ -58,9 +58,10 @@ export function useTimeRange(): {
 
   // Preset ranges slide with wall clock; bucket to the minute so query keys
   // keyed on fromISO/toISO do not change every render (see useReports.ts).
-  const [nowMs, setNowMs] = useState(() => Date.now())
+  const minuteFloor = () => Math.floor(Date.now() / 60_000) * 60_000
+  const [nowMs, setNowMs] = useState(minuteFloor)
   useEffect(() => {
-    const id = window.setInterval(() => setNowMs(Date.now()), 60_000)
+    const id = window.setInterval(() => setNowMs(minuteFloor()), 60_000)
     return () => clearInterval(id)
   }, [])
 

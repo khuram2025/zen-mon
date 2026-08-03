@@ -97,11 +97,15 @@ async def create_server_alert(
 
 
 async def resolve_server_alerts(db: AsyncSession, server_id: str, dedupe: str) -> int:
-    """Resolve open alerts for a server matching a dedupe key (or prefix with %)."""
+    """Resolve open alerts for a server with exactly this dedupe key.
+
+    Exact equality on purpose: dedupe keys contain ``_`` and mount paths,
+    which LIKE would treat as wildcards and resolve unrelated alerts.
+    """
     res = await db.execute(
         text("""UPDATE alerts SET status = 'resolved', resolved_at = NOW()
                 WHERE server_id = :sid AND status IN ('active', 'acknowledged')
-                  AND metadata->>'dedupe' LIKE :dedupe"""),
+                  AND metadata->>'dedupe' = :dedupe"""),
         {"sid": server_id, "dedupe": dedupe},
     )
     return res.rowcount or 0
@@ -148,7 +152,26 @@ async def compute_server_health(
         elif level == "warning" and status != "critical":
             status = "warning"
 
+    # A batch may legitimately omit cpu/memory (inventory-only or disk-only
+    # uploads). Carry forward the still-open cpu/memory health alerts instead
+    # of silently dropping them, so status doesn't flap healthy on every
+    # partial upload.
+    async def _carry_forward(dedupe: str) -> None:
+        row = (await db.execute(
+            text("""SELECT severity, message FROM alerts
+                    WHERE server_id = :sid AND status IN ('active', 'acknowledged')
+                      AND metadata->>'source' = 'health_threshold'
+                      AND metadata->>'dedupe' = :dedupe
+                    LIMIT 1"""),
+            {"sid": server_id, "dedupe": dedupe},
+        )).first()
+        if row:
+            level = "critical" if row[0] == "critical" else "warning"
+            _bump(level, str(row[1]), dedupe)
+
     cpu_rows = by_kind.get("cpu") or []
+    if not cpu_rows:
+        await _carry_forward("health:cpu")
     if cpu_rows:
         vals = [float(r.get("cpu_total_pct") or 0) for r in cpu_rows]
         avg = sum(vals) / len(vals)
@@ -161,6 +184,8 @@ async def compute_server_health(
             )
 
     mem_rows = by_kind.get("memory") or []
+    if not mem_rows:
+        await _carry_forward("health:memory")
     if mem_rows:
         vals = []
         for r in mem_rows:

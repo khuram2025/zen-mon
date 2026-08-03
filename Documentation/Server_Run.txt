@@ -1,0 +1,44 @@
+
+Start the dev server
+
+cd /opt/zenplus/dashboard
+npm run dev
+
+This runs in the foreground of your terminal — the UI is then at http://192.168.8.221:5173/. Press Ctrl+C to stop it. Source edits under src/ hot-reload automatically; no restart needed.
+
+Start it in the background (survives closing the terminal)
+
+cd /opt/zenplus/dashboard
+nohup npm run dev > /tmp/vite-dev.log 2>&1 &
+
+Then check the log with tail -f /tmp/vite-dev.log.
+
+Check whether it's running
+
+ss -tln | grep 5173        # port listening = running
+
+Stop the background server
+
+pkill -f "vite"
+
+When your changes are done → build for release
+
+cd /opt/zenplus/dashboard
+npm run build              # runs tsc -b && vite build → outputs to dist/
+
+Then package it with the release script from the repo root:
+
+cd /opt/zenplus
+python3 scripts/build-release.py
+
+Quick reference
+
+┌──────────────────────────────┬────────────────────────────────┐
+│             What             │         URL / command          │
+├──────────────────────────────┼────────────────────────────────┤
+│ Dev (hot reload)             │ http://192.168.8.221:5173/     │
+├──────────────────────────────┼────────────────────────────────┤
+│ Production (installed build) │ http://192.168.8.221/          │
+├──────────────────────────────┼────────────────────────────────┤
+│ API backend (both use it)    │ port 8000, zenplus-api.service │
+└──────────────────────────────┴────────────────────────────────┘

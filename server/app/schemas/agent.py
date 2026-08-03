@@ -88,6 +88,7 @@ class ServerResponse(BaseModel):
     snmp_credential_id: Optional[str] = None
     ncm_credential_id: Optional[str] = None
     last_seen: Optional[datetime]
+    boot_time: Optional[datetime] = None
     description: Optional[str]
     status_reasons: List[str] = Field(default_factory=list)
     agent_id: Optional[str] = None
@@ -210,6 +211,7 @@ class AgentResponse(BaseModel):
     last_config_hash: Optional[str]
     queue_depth: int
     spool_bytes: int
+    clock_skew_s: int = 0
     update_ring: str
     desired_version: Optional[str]
     current_version: Optional[str]
@@ -453,3 +455,21 @@ class ServerMetricsResponse(BaseModel):
 
     class Config:
         populate_by_name = True
+
+
+# ── Pre-configured package download ─────────────────────────────────
+
+class AgentPackageDownloadRequest(BaseModel):
+    """Mint an enrollment token sized to a rollout and stamp it into the MSI.
+
+    server_count becomes the token's max_uses: one use is consumed per host
+    that enrolls, so the same downloaded package can be installed on exactly
+    that many servers.
+    """
+    platform: Literal["windows", "linux", "macos"] = "windows"
+    server_count: int = Field(1, ge=1, le=1000)
+    ttl_hours: int = Field(72, ge=1, le=8760)
+    site_id: Optional[UUID] = None
+    policy_id: Optional[UUID] = None
+    tags: List[str] = Field(default_factory=list)
+    label: Optional[str] = None

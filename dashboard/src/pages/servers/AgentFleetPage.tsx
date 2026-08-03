@@ -1,11 +1,12 @@
 /** Agent Fleet: fleet-wide agent health, filtering and bulk operations
  *  (policy / update ring changes, diagnostics, certificate rotation). */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  AlertTriangle, Bot, FileDown, HardDrive, Inbox, KeyRound, Plus, Search, Wifi, WifiOff, X,
+  AlertTriangle, Bot, ChevronLeft, ChevronRight, Clock, CloudOff, Download, FileDown,
+  HardDrive, Inbox, KeyRound, Plus, Search, Trash2, Wifi, WifiOff, X,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, formatBytes, relativeTime } from '@/lib/utils'
@@ -22,13 +23,25 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { toast } from '@/components/ui/Toast'
 import { AgentStatusBadge, KpiTile, TagList } from '@/components/servers/shared'
 import { InstallTokenDialog } from '@/components/servers/InstallTokenDialog'
+import { DownloadAgentDialog } from '@/components/servers/DownloadAgentDialog'
 import type { AgentItem, AgentPolicy, UpdateRing } from '@/types/servers'
+
+interface AgentFleetSummary {
+  online: number
+  stale: number
+  offline: number
+  disabled: number
+  total: number
+  queue_depth: number
+  spool_bytes: number
+}
 
 interface AgentFleetResponse {
   items: AgentItem[]
   total: number
   page: number
   page_size: number
+  summary?: AgentFleetSummary
 }
 
 type BulkAction =
@@ -36,6 +49,7 @@ type BulkAction =
   | 'change_update_ring'
   | 'request_diagnostics'
   | 'rotate_certificate'
+  | 'trigger_upgrade'
   | 'disable'
   | 'enable'
 
@@ -44,9 +58,13 @@ const BULK_ACTIONS: { value: BulkAction; label: string }[] = [
   { value: 'change_update_ring', label: 'Change update ring' },
   { value: 'request_diagnostics', label: 'Request diagnostics' },
   { value: 'rotate_certificate', label: 'Rotate certificate' },
+  { value: 'trigger_upgrade', label: 'Trigger upgrade' },
   { value: 'disable', label: 'Disable' },
   { value: 'enable', label: 'Enable' },
 ]
+
+/** Clocks off by more than this get a visible warning in the fleet table. */
+const CLOCK_SKEW_WARN_S = 120
 
 const STATUS_FILTERS = [
   { value: 'all', label: 'All statuses' },
@@ -61,6 +79,7 @@ const PLATFORM_FILTERS = [
   { value: 'all', label: 'All platforms' },
   { value: 'windows', label: 'Windows' },
   { value: 'linux', label: 'Linux' },
+  { value: 'macos', label: 'macOS' },
 ]
 
 const RING_FILTERS = [
@@ -75,21 +94,39 @@ const UPDATE_RINGS: UpdateRing[] = ['canary', 'beta', 'stable', 'pinned']
 
 const COLS = 11
 
+const PAGE_SIZE = 50
+
 export function AgentFleetPage() {
   const qc = useQueryClient()
+  const [qDraft, setQDraft] = useState('')
   const [q, setQ] = useState('')
   const [status, setStatus] = useState('all')
   const [platform, setPlatform] = useState('all')
   const [ring, setRing] = useState('all')
+  const [page, setPage] = useState(1)
   const [deployOpen, setDeployOpen] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [bulkAction, setBulkAction] = useState<BulkAction>('request_diagnostics')
   const [bulkPolicy, setBulkPolicy] = useState('')
   const [bulkRing, setBulkRing] = useState<UpdateRing>('stable')
+  const [bulkVersion, setBulkVersion] = useState('')
   const [confirmDisable, setConfirmDisable] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<AgentItem | null>(null)
+  const [pendingRow, setPendingRow] = useState<string | null>(null)
 
-  const { data, isLoading } = useQuery<AgentFleetResponse>({
-    queryKey: ['agent-fleet', q, status, platform, ring],
+  // Debounce the search box so we don't fire a request per keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setQ(qDraft), 300)
+    return () => clearTimeout(t)
+  }, [qDraft])
+  // Filters change the result set — page and selection no longer apply.
+  useEffect(() => {
+    setPage(1)
+    setSelected(new Set())
+  }, [q, status, platform, ring])
+
+  const { data, isLoading, isError, error } = useQuery<AgentFleetResponse>({
+    queryKey: ['agent-fleet', q, status, platform, ring, page],
     queryFn: async () =>
       (await api.get('/agent-fleet', {
         params: {
@@ -97,8 +134,8 @@ export function AgentFleetPage() {
           platform: platform === 'all' ? '' : platform,
           update_ring: ring === 'all' ? '' : ring,
           q,
-          page: 1,
-          page_size: 50,
+          page,
+          page_size: PAGE_SIZE,
         },
       })).data,
     refetchInterval: 15_000,
@@ -110,13 +147,19 @@ export function AgentFleetPage() {
   })
 
   const items = data?.items || []
+  const [downloadOpen, setDownloadOpen] = useState(false)
   const total = data?.total ?? 0
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const hasFilters = q !== '' || status !== 'all' || platform !== 'all' || ring !== 'all'
 
-  const online = items.filter((a) => a.status === 'online').length
-  const down = items.filter((a) => a.status === 'offline' || a.status === 'stale' || a.status === 'error').length
-  const queueBacklog = items.reduce((sum, a) => sum + (a.queue_depth || 0), 0)
-  const spoolTotal = items.reduce((sum, a) => sum + (a.spool_bytes || 0), 0)
+  // Fleet-wide KPIs from the backend summary — never from the visible page,
+  // which is filtered and capped at PAGE_SIZE.
+  const summary = data?.summary
+  const online = summary?.online ?? 0
+  const down = (summary?.offline ?? 0) + (summary?.stale ?? 0)
+  const queueBacklog = summary?.queue_depth ?? 0
+  const spoolTotal = summary?.spool_bytes ?? 0
+  const fleetTotal = summary?.total ?? total
 
   // ---- selection ----
   const toggleOne = (id: string) => setSelected((s) => {
@@ -137,21 +180,32 @@ export function AgentFleetPage() {
   const invalidate = () => qc.invalidateQueries({ queryKey: ['agent-fleet'] })
 
   const requestDiagnostics = useMutation({
-    mutationFn: async (id: string) => api.post(`/agent-fleet/${id}/request-diagnostics`),
+    mutationFn: async (id: string) => { setPendingRow(id); return api.post(`/agent-fleet/${id}/request-diagnostics`) },
     onSuccess: () => {
       toast.success('Diagnostics requested', 'The agent will upload a support bundle on its next check-in')
       invalidate()
     },
     onError: (e) => toast.error('Diagnostics request failed', apiErrorMessage(e)),
+    onSettled: () => setPendingRow(null),
   })
 
   const rotateCertificate = useMutation({
-    mutationFn: async (id: string) => api.post(`/agent-fleet/${id}/rotate-certificate`),
+    mutationFn: async (id: string) => { setPendingRow(id); return api.post(`/agent-fleet/${id}/rotate-certificate`) },
     onSuccess: () => {
       toast.success('Certificate rotation requested')
       invalidate()
     },
     onError: (e) => toast.error('Certificate rotation failed', apiErrorMessage(e)),
+    onSettled: () => setPendingRow(null),
+  })
+
+  const deleteAgent = useMutation({
+    mutationFn: async (id: string) => api.delete(`/agent-fleet/${id}`),
+    onSuccess: () => {
+      toast.success('Agent removed', 'Its API key no longer authenticates; the host can re-enroll with a new token')
+      invalidate()
+    },
+    onError: (e) => toast.error('Agent removal failed', apiErrorMessage(e)),
   })
 
   const bulk = useMutation({
@@ -165,6 +219,7 @@ export function AgentFleetPage() {
       } = { agent_ids: Array.from(selected), action: bulkAction }
       if (bulkAction === 'change_policy') body.policy_id = bulkPolicy
       if (bulkAction === 'change_update_ring') body.update_ring = bulkRing
+      if (bulkAction === 'trigger_upgrade' && bulkVersion.trim()) body.target_version = bulkVersion.trim()
       return api.post('/agent-fleet/bulk', body)
     },
     onSuccess: () => {
@@ -185,7 +240,9 @@ export function AgentFleetPage() {
     bulk.mutate()
   }
   const applyDisabled =
-    bulk.isPending || selected.size === 0 || (bulkAction === 'change_policy' && !bulkPolicy)
+    bulk.isPending || selected.size === 0
+    || (bulkAction === 'change_policy' && !bulkPolicy)
+    || (bulkAction === 'trigger_upgrade' && !bulkVersion.trim())
 
   return (
     <div className="space-y-4">
@@ -196,12 +253,21 @@ export function AgentFleetPage() {
             <Bot className="h-5 w-5 text-primary" />
             Agent Fleet
           </h1>
-          <p className="text-xs text-muted">{total} agents enrolled</p>
+          <p className="text-xs text-muted">
+            {fleetTotal} agent{fleetTotal === 1 ? '' : 's'} enrolled
+            {hasFilters && total !== fleetTotal ? ` · ${total} matching filters` : ''}
+          </p>
         </div>
-        <Button onClick={() => setDeployOpen(true)}>
-          <Plus className="h-4 w-4" />
-          Deploy agent
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => setDownloadOpen(true)}>
+            <Download className="h-4 w-4" />
+            Download agent
+          </Button>
+          <Button onClick={() => setDeployOpen(true)}>
+            <Plus className="h-4 w-4" />
+            Deploy agent
+          </Button>
+        </div>
       </div>
 
       {/* KPIs */}
@@ -221,8 +287,8 @@ export function AgentFleetPage() {
               <Input
                 className="pl-8"
                 placeholder="Search hostname, server, IP…"
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
+                value={qDraft}
+                onChange={(e) => setQDraft(e.target.value)}
               />
             </div>
             <Select value={status} onValueChange={setStatus}>
@@ -249,7 +315,7 @@ export function AgentFleetPage() {
           {selected.size > 0 && (
             <div className="sticky top-2 z-10 flex flex-wrap items-center gap-2 rounded-md border border-primary/30 bg-surface px-3 py-2 text-xs shadow-sm">
               <span className="font-medium text-primary">{selected.size} selected</span>
-              <Select value={bulkAction} onValueChange={(v) => setBulkAction(v as BulkAction)}>
+              <Select value={bulkAction} onValueChange={(v) => { setBulkAction(v as BulkAction); setBulkPolicy(''); setBulkVersion('') }}>
                 <SelectTrigger className="h-8 w-[180px]"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {BULK_ACTIONS.map((a) => <SelectItem key={a.value} value={a.value}>{a.label}</SelectItem>)}
@@ -270,6 +336,15 @@ export function AgentFleetPage() {
                     {UPDATE_RINGS.map((r) => <SelectItem key={r} value={r} className="capitalize">{r}</SelectItem>)}
                   </SelectContent>
                 </Select>
+              )}
+              {bulkAction === 'trigger_upgrade' && (
+                <Input
+                  className="h-8 w-[130px]"
+                  placeholder="e.g. 1.1.0"
+                  value={bulkVersion}
+                  onChange={(e) => setBulkVersion(e.target.value)}
+                  title="Target agent version"
+                />
               )}
               <Button size="sm" onClick={applyBulk} disabled={applyDisabled}>
                 {bulk.isPending ? 'Applying…' : 'Apply'}
@@ -326,6 +401,17 @@ export function AgentFleetPage() {
                         <Td colSpan={COLS}><Skeleton className="h-5 w-full" /></Td>
                       </Tr>
                     ))}
+                  {!isLoading && isError && (
+                    <Tr>
+                      <Td colSpan={COLS}>
+                        <div className="flex flex-col items-center gap-2 py-10 text-center">
+                          <CloudOff className="h-8 w-8 text-danger/60" />
+                          <div className="text-sm font-medium">Could not load the agent fleet</div>
+                          <div className="text-xs text-muted">{apiErrorMessage(error)}</div>
+                        </div>
+                      </Td>
+                    </Tr>
+                  )}
                   {!isLoading && items.map((agent) => (
                     <Tr key={agent.id} className={selected.has(agent.id) ? 'bg-primary/5' : undefined}>
                       <Td>
@@ -362,6 +448,11 @@ export function AgentFleetPage() {
                               <AlertTriangle className="h-3.5 w-3.5 text-warning" />
                             </span>
                           )}
+                          {Math.abs(agent.clock_skew_s || 0) > CLOCK_SKEW_WARN_S && (
+                            <span title={`Host clock is off by ${Math.round(Math.abs(agent.clock_skew_s) / 60)} min — metric timestamps are being corrected at ingest. Fix the host's clock/NTP.`}>
+                              <Clock className="h-3.5 w-3.5 text-warning" />
+                            </span>
+                          )}
                         </div>
                       </Td>
                       <Td className="text-xs">{agent.policy_name || '—'}</Td>
@@ -379,7 +470,7 @@ export function AgentFleetPage() {
                           <Button
                             variant="ghost" size="icon" className="h-7 w-7"
                             onClick={() => requestDiagnostics.mutate(agent.id)}
-                            disabled={requestDiagnostics.isPending}
+                            disabled={pendingRow === agent.id}
                             title="Request diagnostics"
                           >
                             <FileDown className="h-3.5 w-3.5" />
@@ -387,10 +478,17 @@ export function AgentFleetPage() {
                           <Button
                             variant="ghost" size="icon" className="h-7 w-7"
                             onClick={() => rotateCertificate.mutate(agent.id)}
-                            disabled={rotateCertificate.isPending}
+                            disabled={pendingRow === agent.id}
                             title="Rotate certificate"
                           >
                             <KeyRound className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button
+                            variant="ghost" size="icon" className="h-7 w-7 text-muted hover:text-danger"
+                            onClick={() => setDeleteTarget(agent)}
+                            title="Remove agent"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
                           </Button>
                         </div>
                       </Td>
@@ -405,12 +503,45 @@ export function AgentFleetPage() {
                   )}
                 </TBody>
               </Table>
+              {pages > 1 && (
+                <div className="flex items-center justify-between border-t border-border px-4 py-2 text-xs text-muted">
+                  <span>Page {page} of {pages} · {total} agents</span>
+                  <div className="flex items-center gap-1">
+                    <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>
+                      <ChevronLeft className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button variant="outline" size="sm" disabled={page >= pages} onClick={() => setPage(page + 1)}>
+                      <ChevronRight className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </CardContent>
       </Card>
 
       <InstallTokenDialog open={deployOpen} onOpenChange={setDeployOpen} />
+      <DownloadAgentDialog open={downloadOpen} onOpenChange={setDownloadOpen} />
+      <ConfirmDialog
+        open={Boolean(deleteTarget)}
+        onOpenChange={(o) => { if (!o) setDeleteTarget(null) }}
+        title="Remove agent"
+        description={
+          <>
+            Remove the agent on <span className="font-semibold text-text">{deleteTarget?.hostname || deleteTarget?.agent_uid}</span>?
+            Its API key stops authenticating immediately. The server record and its
+            history are kept; a live host can re-enroll with a fresh token.
+          </>
+        }
+        confirmText="Remove"
+        destructive
+        loading={deleteAgent.isPending}
+        onConfirm={() => {
+          if (deleteTarget) deleteAgent.mutate(deleteTarget.id)
+          setDeleteTarget(null)
+        }}
+      />
       <ConfirmDialog
         open={confirmDisable}
         onOpenChange={setConfirmDisable}

@@ -332,7 +332,7 @@ export function ServersDashboardPage() {
                         </div>
                         <div className="truncate text-[11px] text-muted">
                           {s.primary_ip || s.hostname || '—'}
-                          {s.status_reasons[0] ? ` · ${s.status_reasons[0]}` : ''}
+                          {s.status_reasons?.[0] ? ` · ${s.status_reasons[0]}` : ''}
                         </div>
                       </div>
                       <div className="hidden shrink-0 items-center gap-3 sm:flex">
@@ -353,7 +353,9 @@ export function ServersDashboardPage() {
       {/* Resource pressure */}
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         {pressurePanels.map(({ title, icon: Icon, list, unit, tone }) => {
-          const max = list.length ? Math.max(...list.map((t) => t.value), 1) : 1
+          // Percent panels use the absolute 0–100 scale — normalizing to the
+          // panel max made the top host always show a full bar at any load.
+          const max = unit === 'pct' ? 100 : list.length ? Math.max(...list.map((t) => t.value), 1) : 1
           return (
             <Card key={title} className="overflow-hidden">
               <PanelHeader icon={<Icon className="h-3.5 w-3.5" />} title={title} hint="last 10 min" />

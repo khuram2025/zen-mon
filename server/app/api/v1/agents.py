@@ -33,7 +33,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from uuid import UUID
 
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,6 +61,10 @@ router = APIRouter(prefix="/agents", tags=["Agents (runtime)"])
 logger = logging.getLogger("zenplus.agents")
 
 AGENT_KEY_PREFIX = "zpa_"          # zenplus agent key
+# On-disk package store. Publish flow (POST /agent-fleet/packages/publish)
+# scans this tree and registers rows in agent_packages; the download endpoint
+# below serves only files registered there.
+AGENT_PKG_DIR = Path("/opt/zenplus/artifacts/agents")
 DEFAULT_HEARTBEAT_S = 30
 DEFAULT_CONFIG_POLL_S = 60
 DEFAULT_UPLOAD_S = 60
@@ -180,13 +187,25 @@ async def enroll(
     expires = tok.get("expires_at")
     if expires and expires.replace(tzinfo=expires.tzinfo or timezone.utc) < datetime.now(timezone.utc):
         raise HTTPException(401, "Enrollment token expired")
-    if tok["uses"] >= tok["max_uses"]:
-        raise HTTPException(401, "Enrollment token already used")
-
     if tok["platform"] not in ("any", data.platform):
         raise HTTPException(400, f"Token issued for {tok['platform']} but agent is {data.platform}")
 
     client_ip = _client_ip(request)
+
+    # Claim one use atomically so concurrent bulk installs can't blow past
+    # max_uses via read-check-write races.
+    claimed = (await db.execute(
+        text("""UPDATE agent_enrollment_tokens SET
+                  uses = uses + 1,
+                  consumed_at = CASE WHEN uses + 1 >= max_uses
+                                     THEN COALESCE(consumed_at, NOW()) ELSE consumed_at END,
+                  consumed_ip = COALESCE(consumed_ip, :ip)
+                WHERE id = :id AND uses < max_uses AND revoked_at IS NULL
+                RETURNING id"""),
+        {"id": tok["id"], "ip": client_ip},
+    )).first()
+    if not claimed:
+        raise HTTPException(401, "Enrollment token already used")
 
     # Reconcile or create the server record.
     server_id = tok.get("server_id")
@@ -308,18 +327,6 @@ async def enroll(
         )).first()
         agent_id = ins[0]
 
-    # Update token usage
-    new_uses = tok["uses"] + 1
-    consumed_at_set = "consumed_at = COALESCE(consumed_at, NOW())," if new_uses >= tok["max_uses"] else ""
-    await db.execute(
-        text(f"""UPDATE agent_enrollment_tokens SET
-                   uses = :u,
-                   {consumed_at_set}
-                   consumed_ip = COALESCE(consumed_ip, :ip)
-                 WHERE id = :id"""),
-        {"u": new_uses, "ip": client_ip, "id": tok["id"]},
-    )
-
     await db.commit()
     return AgentEnrollResponse(
         agent_id=str(agent_id),
@@ -371,6 +378,8 @@ async def heartbeat(
                                        status = CASE WHEN status = 'disabled' THEN status
                                                      WHEN status = 'stale' THEN 'healthy'
                                                      ELSE status END,
+                                       status_reasons = CASE WHEN status = 'stale' THEN '[]'::jsonb
+                                                             ELSE status_reasons END,
                                        updated_at = NOW()
                     WHERE id = :id"""),
             {"id": agent["server_id"]},
@@ -491,15 +500,16 @@ async def post_results(
     # batch ledger can be added later if needed.
     duplicates = 0
 
-    accepted, rejected, errors = await ingest_host_metric_batch(
+    accepted, rejected, errors, clock_skew_s = await ingest_host_metric_batch(
         str(agent["id"]), str(server_id), data, db,
     )
 
     # Update last_metric_at + inventory snapshots
     await db.execute(
-        text("""UPDATE agents SET last_metric_at = NOW(), updated_at = NOW()
+        text("""UPDATE agents SET last_metric_at = NOW(), clock_skew_s = :skew,
+                                  updated_at = NOW()
                 WHERE id = :id"""),
-        {"id": agent["id"]},
+        {"id": agent["id"], "skew": clock_skew_s},
     )
     await db.execute(
         text("""UPDATE servers SET last_seen = NOW(), updated_at = NOW()
@@ -595,6 +605,170 @@ async def packages_manifest(
         "released_at": row["released_at"],
         "download_url": row["download_path"],
     }
+
+
+# ── Package download + installer scripts ────────────────────────────
+# Unauthenticated by design: installers run before the host has any
+# credential. Tokens gate enrollment; these endpoints only hand out the
+# published package (integrity via sha256 in the manifest) and install logic.
+
+async def _latest_package(platform: str, db: AsyncSession, arch: str = "amd64") -> Optional[dict]:
+    row = (await db.execute(
+        text("""SELECT * FROM agent_packages
+                WHERE platform = :p AND arch = :a AND channel = 'stable' AND is_latest = TRUE
+                ORDER BY released_at DESC LIMIT 1"""),
+        {"p": platform, "a": arch},
+    )).mappings().first()
+    return dict(row) if row else None
+
+
+@router.get("/packages/{platform}/latest")
+async def download_latest_package(
+    platform: str,
+    arch: str = Query("amd64"),
+    db: AsyncSession = Depends(get_db),
+):
+    if platform not in ("windows", "linux", "macos"):
+        raise HTTPException(404, "Unknown platform")
+    pkg = await _latest_package(platform, db, arch)
+    if not pkg:
+        raise HTTPException(
+            404,
+            f"No {platform} agent package published. Drop the package into "
+            f"{AGENT_PKG_DIR}/{platform}/ and publish it from the Agent Fleet page.",
+        )
+    file_path = (AGENT_PKG_DIR / platform / pkg["file_name"]).resolve()
+    if not str(file_path).startswith(str(AGENT_PKG_DIR)) or not file_path.is_file():
+        raise HTTPException(410, "Published package file is missing on disk")
+    media = "application/x-msi" if pkg["file_name"].endswith(".msi") else "application/octet-stream"
+    return FileResponse(file_path, media_type=media, filename=pkg["file_name"],
+                        headers={"X-Package-Version": pkg["version"],
+                                 "X-Package-Sha256": pkg["sha256"]})
+
+
+_INSTALL_PS1 = r'''#Requires -RunAsAdministrator
+<#
+ZenPlus agent installer (Windows).
+Downloads the latest published MSI from the controller, verifies its SHA-256
+against the manifest, then installs silently with enrollment properties.
+
+Usage:
+  .\install.ps1 -ControllerUrl "https://zenplus.example.com" -EnrollmentToken "zpa_enr_..."
+Optional: -Tags "prod,web-tier"  -Arch amd64
+#>
+param(
+    [Parameter(Mandatory=$true)][string]$ControllerUrl,
+    [Parameter(Mandatory=$true)][string]$EnrollmentToken,
+    [string]$Tags = "",
+    [string]$Arch = "amd64"
+)
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
+$ControllerUrl = $ControllerUrl.TrimEnd("/")
+
+Write-Host "[zenplus] Fetching package manifest from $ControllerUrl ..."
+$manifest = Invoke-RestMethod -UseBasicParsing -Uri "$ControllerUrl/api/v1/agents/packages/manifest?platform=windows&channel=stable&arch=$Arch"
+$version = $manifest.latest_version
+$expectedSha = $manifest.sha256.ToLower()
+Write-Host "[zenplus] Latest agent version: $version"
+
+$msi = Join-Path $env:TEMP "zenplus-agent-$version.msi"
+Write-Host "[zenplus] Downloading MSI ..."
+Invoke-WebRequest -UseBasicParsing -Uri "$ControllerUrl/api/v1/agents/packages/windows/latest?arch=$Arch" -OutFile $msi
+
+$actualSha = (Get-FileHash -Algorithm SHA256 -Path $msi).Hash.ToLower()
+if ($actualSha -ne $expectedSha) {
+    Remove-Item -Force $msi
+    throw "[zenplus] SHA-256 mismatch (expected $expectedSha, got $actualSha) - aborting install."
+}
+Write-Host "[zenplus] Checksum OK."
+
+$msiArgs = @("/i", "`"$msi`"", "/quiet", "/norestart",
+             "CONTROLLER_URL=`"$ControllerUrl`"",
+             "ENROLLMENT_TOKEN=`"$EnrollmentToken`"")
+if ($Tags) { $msiArgs += "AGENT_TAGS=`"$Tags`"" }
+Write-Host "[zenplus] Installing ..."
+$proc = Start-Process msiexec.exe -ArgumentList $msiArgs -Wait -PassThru
+if ($proc.ExitCode -ne 0) {
+    throw "[zenplus] msiexec exited with code $($proc.ExitCode)."
+}
+Write-Host "[zenplus] Installed. The agent enrolls itself and appears in the dashboard within a minute."
+'''
+
+
+@router.get("/install.ps1")
+async def install_ps1():
+    """Windows installer script (download + verify + silent MSI install)."""
+    return PlainTextResponse(_INSTALL_PS1, media_type="text/plain; charset=utf-8")
+
+
+_INSTALL_SH = r'''#!/usr/bin/env bash
+# ZenPlus agent installer (Linux).
+# Required env: ZENPLUS_CONTROLLER_URL, ZENPLUS_ENROLLMENT_TOKEN
+# Optional env: ZENPLUS_AGENT_TAGS (comma-separated), ZENPLUS_ARCH (default amd64)
+set -euo pipefail
+
+CTRL="${ZENPLUS_CONTROLLER_URL:?ZENPLUS_CONTROLLER_URL is required}"
+TOKEN="${ZENPLUS_ENROLLMENT_TOKEN:?ZENPLUS_ENROLLMENT_TOKEN is required}"
+ARCH="${ZENPLUS_ARCH:-amd64}"
+CTRL="${CTRL%/}"
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "[zenplus] must run as root (use sudo)" >&2; exit 1
+fi
+
+echo "[zenplus] fetching package manifest ..."
+MANIFEST=$(curl -fsSL "$CTRL/api/v1/agents/packages/manifest?platform=linux&channel=stable&arch=$ARCH")
+VERSION=$(printf '%s' "$MANIFEST" | python3 -c 'import sys,json;print(json.load(sys.stdin)["latest_version"])')
+SHA=$(printf '%s' "$MANIFEST" | python3 -c 'import sys,json;print(json.load(sys.stdin)["sha256"].lower())')
+echo "[zenplus] latest agent version: $VERSION"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+PKG="$TMP/zenplus-agent.tar.gz"
+curl -fsSL "$CTRL/api/v1/agents/packages/linux/latest?arch=$ARCH" -o "$PKG"
+echo "$SHA  $PKG" | sha256sum -c - >/dev/null || {
+    echo "[zenplus] SHA-256 mismatch - aborting" >&2; exit 1; }
+echo "[zenplus] checksum OK"
+
+install -d /opt/zenplus-agent /etc/zenplus-agent
+tar -xzf "$PKG" -C /opt/zenplus-agent
+chmod 0755 /opt/zenplus-agent/zenplus-agent
+
+cat > /etc/zenplus-agent/agent.env <<EOF
+ZENPLUS_CONTROLLER_URL=$CTRL
+ZENPLUS_ENROLLMENT_TOKEN=$TOKEN
+ZENPLUS_AGENT_TAGS=${ZENPLUS_AGENT_TAGS:-}
+EOF
+chmod 0600 /etc/zenplus-agent/agent.env
+
+cat > /etc/systemd/system/zenplus-agent.service <<'EOF'
+[Unit]
+Description=ZenPlus Server Monitoring Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/zenplus-agent/agent.env
+ExecStart=/opt/zenplus-agent/zenplus-agent
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now zenplus-agent.service
+echo "[zenplus] installed and started. The agent enrolls itself and appears in the dashboard within a minute."
+'''
+
+
+@router.get("/install.sh")
+async def install_sh():
+    """Linux installer script (download + verify + systemd service)."""
+    return PlainTextResponse(_INSTALL_SH, media_type="text/plain; charset=utf-8")
 
 
 # ── Command channel ──────────────────────────────────────────────────

@@ -553,7 +553,8 @@ def build_package(version: str, changelog: str, severity: str,
         "rollback_steps": [
             {"type": "restore_backup"},
             {"type": "start_services",
-             "services": ["zenplus-api", "zenplus-poller", "netmon-gunicorn",
+             "services": ["zenplus-api", "zenplus-poller",
+                          "zenplus-netflow-collector", "netmon-gunicorn",
                           "netmon-celery", "netmon-celery-beat", "nginx"]},
         ],
     }

@@ -92,7 +92,9 @@ def test_install_token_lifecycle(auth):
     ).json()
     assert tok["enrollment_token"].startswith("zpa_enr_")
     assert tok["platform"] == "windows"
-    assert "msiexec" in tok["install_command"]
+    # Windows deploys via the checksum-verifying install.ps1 bootstrap.
+    assert "install.ps1" in tok["install_command"]
+    assert tok["enrollment_token"] in tok["install_command"]
 
     # 3) agent enrolls
     enroll = requests.post(

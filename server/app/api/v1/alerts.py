@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_operator_user
 from app.models.alert import Alert
 from app.models.user import User
 from app.schemas.alert import AlertResponse, AlertStats
@@ -141,7 +141,7 @@ async def list_silences(
 async def delete_silence(
     silence_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     res = await db.execute(text("DELETE FROM alert_silences WHERE id = :id"), {"id": silence_id})
     await db.commit()
@@ -204,7 +204,7 @@ async def get_alert_detail(
 async def acknowledge_alert(
     alert_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     alert = await alert_service.acknowledge_alert(db, alert_id, user.id)
     if not alert:
@@ -250,7 +250,7 @@ async def snooze_alert(
     alert_id: UUID,
     body: SnoozeBody,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     """Suppress this alert condition for a while (minutes) or forever (no minutes).
 
@@ -283,7 +283,7 @@ async def snooze_alert(
 async def unsnooze_alert(
     alert_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     key = await _alert_silence_key(db, alert_id)
     if not key:
@@ -300,7 +300,7 @@ async def unsnooze_alert(
 async def resolve_alert(
     alert_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     alert = await alert_service.resolve_alert(db, alert_id)
     if not alert:

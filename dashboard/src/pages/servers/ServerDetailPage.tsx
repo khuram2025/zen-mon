@@ -68,9 +68,14 @@ import {
 } from '@/components/servers/shared'
 import type {
   AgentItem, ComplianceResult, ComplianceSummary, ServerCommand, ServerEventRow,
-  ServerFilesystem, ServerItem, ServerLiveMetrics, ServerMetricsResponse,
-  ServerNetworkInterface, ServerProcess, ServerService, ServerSoftware,
+  ServerEventsResponse, ServerFilesystem, ServerItem, ServerLiveMetrics,
+  ServerMetricsResponse, ServerNetworkInterface, ServerProcess, ServerService,
+  ServerSoftware,
 } from '@/types/servers'
+import {
+  EmptyState, ExportCsvButton, QueryError, TablePager, TableStateRow,
+  cmp, sortIndicator, sortableTh, usePagedRows,
+} from '@/components/servers/tables'
 
 const ttStyle = () => ({
   contentStyle: {
@@ -87,6 +92,18 @@ const ttStyle = () => ({
 })
 
 type ChartRow = Record<string, number | null> & { ts: number }
+
+/** Compact uptime from a boot timestamp, e.g. "12d 4h" / "3h 20m".
+ *  The agent has always reported boot time; nothing stored or showed it. */
+function formatUptime(bootTime: string): string {
+  const secs = Math.max(0, (Date.now() - Date.parse(bootTime)) / 1000)
+  const d = Math.floor(secs / 86400)
+  const h = Math.floor((secs % 86400) / 3600)
+  const m = Math.floor((secs % 3600) / 60)
+  if (d > 0) return `${d}d ${h}h`
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m`
+}
 
 function seriesStats(rows: ChartRow[], key: string) {
   const vals = rows.map((r) => r[key]).filter((v): v is number => v != null && !Number.isNaN(v))
@@ -111,22 +128,120 @@ function netTotalStats(rows: ChartRow[]) {
   }
 }
 
+/** Six sections instead of twelve.
+ *
+ *  The old strip had a tab per data source, which pushed related things
+ *  apart (services and their alert rules; agent and the server record) and
+ *  duplicated panels across tabs — filesystems rendered identically under
+ *  Overview and Storage, and the disk-I/O and network charts each appeared
+ *  twice. Inventory, Alerts and Manage now group by task, with a
+ *  sub-navigation inside. */
 const TABS = [
   { key: 'overview', label: 'Overview', icon: Gauge },
-  { key: 'performance', label: 'Performance', icon: Cpu },
-  { key: 'processes', label: 'Processes', icon: ListTree },
-  { key: 'services', label: 'Services', icon: Wrench },
-  { key: 'storage', label: 'Storage', icon: HardDrive },
-  { key: 'network', label: 'Network', icon: NetworkIcon },
-  { key: 'software', label: 'Software', icon: Package },
-  { key: 'compliance', label: 'Compliance', icon: ClipboardCheck },
+  { key: 'performance', label: 'Performance', icon: Activity },
+  { key: 'inventory', label: 'Inventory', icon: ListTree },
   { key: 'alerts', label: 'Alerts', icon: Bell },
-  { key: 'events', label: 'Events', icon: ScrollText },
-  { key: 'agent', label: 'Agent', icon: Bot },
-  { key: 'settings', label: 'Settings', icon: Settings2 },
+  { key: 'compliance', label: 'Compliance', icon: ClipboardCheck },
+  { key: 'manage', label: 'Manage', icon: Settings2 },
 ] as const
 
 type TabKey = typeof TABS[number]['key']
+
+const TAB_KEYS = TABS.map((t) => t.key) as readonly TabKey[]
+
+type TabBadge = { count: number; tone: 'danger' | 'warning' | 'muted' }
+
+function CountPill({ count, tone }: TabBadge) {
+  if (!count) return null
+  return (
+    <span
+      className={cn(
+        'ml-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-bold leading-none tabular-nums',
+        tone === 'danger' ? 'bg-danger/15 text-danger'
+          : tone === 'warning' ? 'bg-warning/15 text-warning'
+            : 'bg-surface2 text-muted',
+      )}
+    >
+      {count > 99 ? '99+' : count}
+    </span>
+  )
+}
+
+function TabBar({
+  tab, setTab, badges,
+}: {
+  tab: TabKey
+  setTab: (t: TabKey) => void
+  badges: Partial<Record<TabKey, TabBadge>>
+}) {
+  return (
+    <div
+      role="tablist"
+      aria-label="Server sections"
+      className="sticky top-0 z-20 -mx-1 flex gap-1 overflow-x-auto border-b border-border bg-bg/95 px-1 backdrop-blur supports-[backdrop-filter]:bg-bg/80"
+    >
+      {TABS.map((t) => {
+        const active = tab === t.key
+        const badge = badges[t.key]
+        return (
+          <button
+            key={t.key}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            onClick={() => setTab(t.key)}
+            className={cn(
+              'inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-4 py-2.5 text-sm font-medium transition-colors',
+              active
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted hover:border-border hover:text-text',
+            )}
+          >
+            <t.icon className="h-4 w-4" />
+            {t.label}
+            {badge && <CountPill {...badge} />}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+/** Segmented control for the sections nested inside a tab. Deep-linked via
+ *  ?sub= so a specific view stays shareable and survives a refresh. */
+function SubNav<K extends string>({
+  items, value, onChange,
+}: {
+  items: readonly { key: K; label: string; icon?: React.ComponentType<{ className?: string }>; badge?: TabBadge }[]
+  value: K
+  onChange: (k: K) => void
+}) {
+  return (
+    <div className="flex flex-wrap gap-1 rounded-lg border border-border bg-surface2/30 p-1">
+      {items.map((it) => {
+        const active = it.key === value
+        return (
+          <button
+            key={it.key}
+            type="button"
+            onClick={() => onChange(it.key)}
+            aria-pressed={active}
+            className={cn(
+              'inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+              active
+                ? 'bg-surface text-text shadow-sm ring-1 ring-border'
+                : 'text-muted hover:text-text',
+            )}
+          >
+            {it.icon && <it.icon className="h-3.5 w-3.5" />}
+            {it.label}
+            {it.badge && <CountPill {...it.badge} />}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
 
 /** series[] → recharts rows keyed by epoch ms, one column per metric. */
 function toChartRows(resp: ServerMetricsResponse | undefined, keys: Record<string, string>) {
@@ -149,10 +264,21 @@ export function ServerDetailPage() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const [params, setParams] = useSearchParams()
-  const tab = (params.get('tab') as TabKey) || 'overview'
+  // A stale or hand-edited ?tab= used to render no tab body at all.
+  const requested = params.get('tab') as TabKey | null
+  const tab: TabKey = requested && TAB_KEYS.includes(requested) ? requested : 'overview'
   const setTab = (t: TabKey) => {
     const next = new URLSearchParams(params)
     next.set('tab', t)
+    // Sub-section belongs to the tab it came from; carrying it across would
+    // land on a section that does not exist in the new tab.
+    next.delete('sub')
+    setParams(next, { replace: true })
+  }
+  const sub = params.get('sub') || ''
+  const setSub = (s: string) => {
+    const next = new URLSearchParams(params)
+    next.set('sub', s)
     setParams(next, { replace: true })
   }
 
@@ -160,7 +286,7 @@ export function ServerDetailPage() {
   const [editOpen, setEditOpen] = useState(false)
   const [confirm, setConfirm] = useState<'delete' | 'decommission' | null>(null)
 
-  const { data: server, isLoading } = useQuery<ServerItem>({
+  const { data: server, isLoading, isError, error } = useQuery<ServerItem>({
     queryKey: ['servers', id],
     queryFn: async () => (await api.get(`/servers/${id}`)).data,
     refetchInterval: 15_000,
@@ -193,6 +319,23 @@ export function ServerDetailPage() {
     enabled: Boolean(id),
   })
 
+  // Counts for the tab badges, so a problem is visible without opening
+  // every tab. Cheap queries the tabs themselves also use, so React Query
+  // dedupes rather than double-fetching.
+  const { data: openAlerts } = useQuery<{ meta: { total: number } }>({
+    queryKey: ['servers', id, 'alerts', 'badge'],
+    queryFn: async () =>
+      (await api.get('/alerts', { params: { server_id: id, status: 'active', limit: 1 } })).data,
+    refetchInterval: 30_000,
+    enabled: Boolean(id),
+  })
+  const { data: compliance } = useQuery<{ summary: ComplianceSummary }>({
+    queryKey: ['servers', id, 'compliance'],
+    queryFn: async () => (await api.get(`/servers/${id}/compliance`)).data,
+    refetchInterval: 60_000,
+    enabled: Boolean(id),
+  })
+
   const del = useMutation({
     mutationFn: async () => (await api.delete(`/servers/${id}`)).data,
     onSuccess: () => {
@@ -210,6 +353,19 @@ export function ServerDetailPage() {
     onError: (e) => toast.error('Decommission failed', apiErrorMessage(e)),
   })
 
+  if (isError) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-20 text-center">
+        <CloudOff className="h-10 w-10 text-muted/50" />
+        <div className="text-sm font-medium">Could not load this server</div>
+        <div className="max-w-sm text-xs text-muted">{apiErrorMessage(error)}</div>
+        <Button variant="outline" size="sm" onClick={() => navigate('/servers/inventory')}>
+          Back to inventory
+        </Button>
+      </div>
+    )
+  }
+
   if (isLoading || !server) {
     return (
       <div className="space-y-4">
@@ -221,8 +377,26 @@ export function ServerDetailPage() {
 
   const svcItems = services?.items || []
   const svcRunning = svcItems.filter((s) => (s.state || '').toLowerCase() === 'running').length
+  const svcStopped = svcItems.filter((s) => {
+    const st = (s.state || '').toLowerCase()
+    return st !== '' && st !== 'running' && st !== 'not_found'
+  }).length
   const fsItems = filesystems?.items || []
+  const fsCritical = fsItems.filter((fs) => (fs.used_pct || 0) >= 90).length
   const isLive = server.status !== 'stale' && server.status !== 'disabled' && server.status !== 'unknown'
+
+  const complianceFailures = compliance?.summary
+    ? compliance.summary.missing + compliance.summary.outdated + compliance.summary.prohibited
+    : 0
+
+  const openAlertCount = openAlerts?.meta?.total ?? 0
+  const tabBadges: Partial<Record<TabKey, TabBadge>> = {
+    alerts: { count: openAlertCount, tone: 'danger' },
+    compliance: { count: complianceFailures, tone: 'warning' },
+    // Roll the nested sections' problems up to the parent tab so nothing
+    // needing attention is hidden one level down.
+    inventory: { count: svcStopped + fsCritical, tone: 'warning' },
+  }
 
   return (
     <div className="space-y-4">
@@ -247,6 +421,7 @@ export function ServerDetailPage() {
               {server.fqdn && <span>{server.fqdn}</span>}
               <span>{server.os_name || server.os_type} {server.os_version || ''}</span>
               {server.architecture && <span>{server.architecture}</span>}
+              {server.boot_time && <span title={`Booted ${new Date(server.boot_time).toLocaleString()}`}>up {formatUptime(server.boot_time)}</span>}
               {server.environment && <Badge variant="outline" className="text-[10px]">{server.environment}</Badge>}
               {server.owner && <span>owner: {server.owner}</span>}
               <span>seen {relativeTime(server.last_seen)}</span>
@@ -303,59 +478,58 @@ export function ServerDetailPage() {
           icon={NetworkIcon} label="Network"
           value={isLive && lm.net_bps != null ? formatBps(lm.net_bps * 8) : '—'}
         />
-        <KpiTile icon={ListTree} label="Processes" value={processes?.items?.length ?? '—'} />
+        {/* The agent reports a top-N sample, not every PID on the host —
+            labelling it "Processes" implied a full count. */}
+        <KpiTile
+          icon={ListTree} label="Top processes"
+          value={processes?.items?.length ?? '—'}
+          sub={processes?.items?.length ? 'sampled by CPU / memory' : undefined}
+        />
         <KpiTile
           icon={Wrench} label="Services"
           value={svcItems.length ? `${svcRunning}/${svcItems.length}` : '—'}
           sub={svcItems.length ? 'running / reported' : undefined}
+          tone={svcStopped > 0 ? 'warning' : 'default'}
         />
       </div>
 
-      {/* Tab nav */}
-      <div className="flex flex-wrap gap-1 border-b border-border">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            onClick={() => setTab(t.key)}
-            className={cn(
-              'inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium transition-colors',
-              tab === t.key
-                ? 'border-primary text-primary'
-                : 'border-transparent text-muted hover:text-text',
-            )}
-          >
-            <t.icon className="h-3.5 w-3.5" /> {t.label}
-          </button>
-        ))}
-      </div>
+      <TabBar tab={tab} setTab={setTab} badges={tabBadges} />
 
-      {tab === 'overview' && <OverviewTab serverId={server.id} filesystems={fsItems} processes={processes?.items || []} />}
+      {tab === 'overview' && (
+        <OverviewTab
+          serverId={server.id}
+          filesystems={fsItems}
+          processes={processes?.items || []}
+          onGoTo={(t, s) => { setTab(t); if (s) setTimeout(() => setSub(s), 0) }}
+          openAlertCount={openAlertCount}
+          complianceFailures={complianceFailures}
+          stoppedServices={svcStopped}
+        />
+      )}
       {tab === 'performance' && <PerformanceTab serverId={server.id} />}
-      {tab === 'processes' && <ProcessesTab serverId={id || ''} items={processes?.items || []} memTotal={processes?.mem_total_bytes || 0} />}
-      {tab === 'services' && <ServicesTab serverId={server.id} items={svcItems} />}
-      {tab === 'storage' && <StorageTab serverId={server.id} items={fsItems} />}
-      {tab === 'network' && <NetworkTab serverId={server.id} />}
-      {tab === 'software' && <SoftwareTab serverId={server.id} />}
-      {tab === 'compliance' && <ComplianceTab serverId={server.id} />}
-      {tab === 'alerts' && (
-        <ServerAlertsTab
-          serverId={server.id}
-          serverStatus={server.status}
-          statusReasons={server.status_reasons}
-        />
-      )}
-      {tab === 'events' && <EventsTab serverId={server.id} />}
-      {tab === 'agent' && (
-        <AgentTab
-          serverId={server.id}
-          serverName={server.display_name}
-          onDeployAgent={() => setDeployOpen(true)}
-        />
-      )}
-      {tab === 'settings' && (
-        <SettingsTab
+      {tab === 'inventory' && (
+        <InventoryTab
           server={server}
+          sub={sub}
+          setSub={setSub}
+          processes={processes?.items || []}
+          memTotal={processes?.mem_total_bytes || 0}
+          services={svcItems}
+          filesystems={fsItems}
+          stoppedServices={svcStopped}
+          fullVolumes={fsCritical}
+        />
+      )}
+      {tab === 'alerts' && (
+        <MonitoringTab server={server} sub={sub} setSub={setSub} openAlertCount={openAlertCount} />
+      )}
+      {tab === 'compliance' && <ComplianceTab serverId={server.id} />}
+      {tab === 'manage' && (
+        <ManageTab
+          server={server}
+          sub={sub}
+          setSub={setSub}
+          onDeployAgent={() => setDeployOpen(true)}
           onEdit={() => setEditOpen(true)}
           onDecommission={() => setConfirm('decommission')}
           onDelete={() => setConfirm('delete')}
@@ -382,6 +556,124 @@ export function ServerDetailPage() {
           setConfirm(null)
         }}
       />
+    </div>
+  )
+}
+
+/* ── Grouped tabs ────────────────────────────────────────────────── */
+
+type InventorySection = 'processes' | 'services' | 'software' | 'storage' | 'network'
+
+function InventoryTab({
+  server, sub, setSub, processes, memTotal, services, filesystems, stoppedServices, fullVolumes,
+}: {
+  server: ServerItem
+  sub: string
+  setSub: (s: string) => void
+  processes: ServerProcess[]
+  memTotal: number
+  services: ServerService[]
+  filesystems: ServerFilesystem[]
+  stoppedServices: number
+  fullVolumes: number
+}) {
+  const sections = [
+    { key: 'processes' as const, label: 'Processes', icon: ListTree },
+    { key: 'services' as const, label: 'Services', icon: Wrench, badge: { count: stoppedServices, tone: 'warning' as const } },
+    { key: 'software' as const, label: 'Software', icon: Package },
+    { key: 'storage' as const, label: 'Storage', icon: HardDrive, badge: { count: fullVolumes, tone: 'danger' as const } },
+    { key: 'network' as const, label: 'Network', icon: NetworkIcon },
+  ]
+  const active = (sections.some((s) => s.key === sub) ? sub : 'processes') as InventorySection
+
+  return (
+    <div className="space-y-4">
+      <SubNav items={sections} value={active} onChange={setSub} />
+      {active === 'processes' && (
+        <ProcessesTab serverId={server.id} items={processes} memTotal={memTotal} />
+      )}
+      {active === 'services' && (
+        <ServicesTab serverId={server.id} serverName={server.display_name} items={services} />
+      )}
+      {active === 'software' && (
+        <SoftwareTab serverId={server.id} serverName={server.display_name} />
+      )}
+      {active === 'storage' && (
+        <StorageTab items={filesystems} />
+      )}
+      {active === 'network' && (
+        <NetworkTab serverId={server.id} serverName={server.display_name} />
+      )}
+    </div>
+  )
+}
+
+function MonitoringTab({
+  server, sub, setSub, openAlertCount,
+}: {
+  server: ServerItem
+  sub: string
+  setSub: (s: string) => void
+  openAlertCount: number
+}) {
+  const sections = [
+    { key: 'alerts' as const, label: 'Alerts & rules', icon: Bell, badge: { count: openAlertCount, tone: 'danger' as const } },
+    { key: 'events' as const, label: 'Event log', icon: ScrollText },
+  ]
+  const active = sections.some((s) => s.key === sub) ? sub : 'alerts'
+
+  return (
+    <div className="space-y-4">
+      <SubNav items={sections} value={active as 'alerts' | 'events'} onChange={setSub} />
+      {active === 'alerts' && (
+        <ServerAlertsTab
+          serverId={server.id}
+          serverStatus={server.status}
+          statusReasons={server.status_reasons}
+        />
+      )}
+      {active === 'events' && (
+        <EventsTab serverId={server.id} serverName={server.display_name} />
+      )}
+    </div>
+  )
+}
+
+function ManageTab({
+  server, sub, setSub, onDeployAgent, onEdit, onDecommission, onDelete,
+}: {
+  server: ServerItem
+  sub: string
+  setSub: (s: string) => void
+  onDeployAgent: () => void
+  onEdit: () => void
+  onDecommission: () => void
+  onDelete: () => void
+}) {
+  const sections = [
+    { key: 'agent' as const, label: 'Agent', icon: Bot },
+    { key: 'record' as const, label: 'Server record', icon: Settings2 },
+  ]
+  const active = sections.some((s) => s.key === sub) ? sub : 'agent'
+
+  return (
+    <div className="space-y-4">
+      <SubNav items={sections} value={active as 'agent' | 'record'} onChange={setSub} />
+      {active === 'agent' && (
+        <AgentTab
+          serverId={server.id}
+          serverName={server.display_name}
+          onDeployAgent={onDeployAgent}
+        />
+      )}
+      {active === 'record' && (
+        <SettingsTab
+          server={server}
+          onEdit={onEdit}
+          onDecommission={onDecommission}
+          onDelete={onDelete}
+        />
+      )}
     </div>
   )
 }
@@ -512,18 +804,86 @@ function InfoGrid({ rows }: { rows: [string, React.ReactNode][] }) {
 
 /* ── Overview ────────────────────────────────────────────────────── */
 
-function OverviewTab({ serverId, filesystems, processes }: {
+/** Actionable summary: what on this host needs a human, and where to go.
+ *  Replaces the old Overview habit of repeating panels that already exist
+ *  verbatim on other tabs. */
+function NeedsAttention({
+  openAlertCount, complianceFailures, stoppedServices, fullVolumes, onGoTo,
+}: {
+  openAlertCount: number
+  complianceFailures: number
+  stoppedServices: number
+  fullVolumes: number
+  onGoTo: (tab: TabKey, sub?: string) => void
+}) {
+  const rows = [
+    { n: openAlertCount, label: 'open alert', tone: 'danger' as const, icon: Bell, go: () => onGoTo('alerts') },
+    { n: fullVolumes, label: 'volume over 90% full', tone: 'danger' as const, icon: HardDrive, go: () => onGoTo('inventory', 'storage') },
+    { n: complianceFailures, label: 'compliance failure', tone: 'warning' as const, icon: ClipboardCheck, go: () => onGoTo('compliance') },
+    { n: stoppedServices, label: 'stopped service', tone: 'warning' as const, icon: Wrench, go: () => onGoTo('inventory', 'services') },
+  ].filter((r) => r.n > 0)
+
+  return (
+    <Card className="overflow-hidden">
+      <PanelHeader
+        icon={<AlertTriangle className="h-3.5 w-3.5" />}
+        title="Needs attention"
+        hint={rows.length ? undefined : 'all clear'}
+      />
+      <CardContent className="px-4 pb-4 pt-3">
+        {rows.length === 0 ? (
+          <div className="flex items-center gap-2 text-sm text-success">
+            <CheckCircle2 className="h-4 w-4" />
+            Nothing outstanding on this server.
+          </div>
+        ) : (
+          <div className="grid gap-2 sm:grid-cols-2">
+            {rows.map((r) => (
+              <button
+                key={r.label}
+                type="button"
+                onClick={r.go}
+                className={cn(
+                  'flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm transition-colors',
+                  r.tone === 'danger'
+                    ? 'border-danger/30 bg-danger/5 hover:bg-danger/10'
+                    : 'border-warning/30 bg-warning/5 hover:bg-warning/10',
+                )}
+              >
+                <r.icon className={cn('h-4 w-4 shrink-0', r.tone === 'danger' ? 'text-danger' : 'text-warning')} />
+                <span className="font-semibold tabular-nums">{r.n}</span>
+                <span className="text-text2">{r.label}{r.n === 1 ? '' : 's'}</span>
+                <ChevronRight className="ml-auto h-3.5 w-3.5 text-muted" />
+              </button>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function OverviewTab({
+  serverId, filesystems, processes, onGoTo,
+  openAlertCount, complianceFailures, stoppedServices,
+}: {
   serverId: string
   filesystems: ServerFilesystem[]
   processes: ServerProcess[]
+  onGoTo: (tab: TabKey, sub?: string) => void
+  openAlertCount: number
+  complianceFailures: number
+  stoppedServices: number
 }) {
   const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
+  // Only what this tab actually plots — the network chart lived here and on
+  // Performance identically, so it is requested and drawn once now.
   const { data: metrics, isLoading } = useQuery<ServerMetricsResponse>({
     queryKey: ['servers', serverId, 'metrics', 'overview', range.fromISO, range.toISO],
     queryFn: async () =>
       (await api.get(`/servers/${serverId}/metrics`, {
         params: {
-          metrics: 'cpu_total_pct,memory_used_pct,network_rx_bps,network_tx_bps',
+          metrics: 'cpu_total_pct,memory_used_pct',
           from: range.fromISO, to: range.toISO,
         },
       })).data,
@@ -532,10 +892,9 @@ function OverviewTab({ serverId, filesystems, processes }: {
   })
 
   const cpuMem = toChartRows(metrics, { cpu_total_pct: 'cpu', memory_used_pct: 'mem' }) as ChartRow[]
-  const net = toChartRows(metrics, { network_rx_bps: 'rx', network_tx_bps: 'tx' }) as ChartRow[]
   const cpuStats = seriesStats(cpuMem, 'cpu')
   const memStats = seriesStats(cpuMem, 'mem')
-  const netStats = netTotalStats(net)
+  const fullVolumes = filesystems.filter((fs) => (fs.used_pct || 0) >= 90).length
   const topProcs = [...processes].sort((a, b) => (b.cpu_pct || 0) - (a.cpu_pct || 0)).slice(0, 8)
   const maxProcCpu = Math.max(1, ...topProcs.map((p) => p.cpu_pct || 0))
   const tick = timeAxisTickFormatter(range.hours)
@@ -555,6 +914,14 @@ function OverviewTab({ serverId, filesystems, processes }: {
 
   return (
     <div className="space-y-4">
+      <NeedsAttention
+        openAlertCount={openAlertCount}
+        complianceFailures={complianceFailures}
+        stoppedServices={stoppedServices}
+        fullVolumes={fullVolumes}
+        onGoTo={onGoTo}
+      />
+
       <PanelToolbar label={<>Resource trends for <span className="font-medium text-text2">{range.label}</span></>}>
         <TimeRangePicker
           rangeIdx={rangeIdx} isCustom={isCustom}
@@ -563,12 +930,21 @@ function OverviewTab({ serverId, filesystems, processes }: {
         />
       </PanelToolbar>
 
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className="grid gap-4">
         <Card className="overflow-hidden">
           <PanelHeader
             icon={<Cpu className="h-3.5 w-3.5" />}
             title="CPU & Memory"
             hint={range.label}
+            right={(
+              <button
+                type="button"
+                onClick={() => onGoTo('performance')}
+                className="text-[11px] font-medium text-primary hover:underline"
+              >
+                Full charts →
+              </button>
+            )}
           />
           <div className="grid grid-cols-2 gap-2 px-4 pt-3 sm:grid-cols-4">
             <PanelMiniStat label="CPU now" value={cpuStats ? `${cpuStats.current.toFixed(1)}%` : '—'} tone="text-info" />
@@ -609,49 +985,6 @@ function OverviewTab({ serverId, filesystems, processes }: {
           </CardContent>
         </Card>
 
-        <Card className="overflow-hidden">
-          <PanelHeader
-            icon={<Activity className="h-3.5 w-3.5" />}
-            title="Network throughput"
-            hint={range.label}
-          />
-          <div className="grid grid-cols-2 gap-2 px-4 pt-3 sm:grid-cols-4">
-            <PanelMiniStat label="Current" value={netStats ? formatBps(netStats.current * 8) : '—'} tone="text-info" />
-            <PanelMiniStat label="Average" value={netStats ? formatBps(netStats.avg * 8) : '—'} />
-            <PanelMiniStat label="95th pct" value={netStats ? formatBps(netStats.p95 * 8) : '—'} tone="text-primary" />
-            <PanelMiniStat label="Peak" value={netStats ? formatBps(netStats.peak * 8) : '—'} tone="text-warning" />
-          </div>
-          <CardContent className="px-2 pb-3 pt-2" style={{ height: chartH }}>
-            {isLoading ? <Skeleton className="mx-2 h-full w-[calc(100%-1rem)]" /> : net.length === 0 ? <NoData /> : (
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={net} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
-                  <defs>
-                    <linearGradient id="srvOverviewRx" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="rgb(var(--primary))" stopOpacity={0.4} />
-                      <stop offset="60%" stopColor="rgb(var(--primary))" stopOpacity={0.12} />
-                      <stop offset="100%" stopColor="rgb(var(--primary))" stopOpacity={0} />
-                    </linearGradient>
-                    <linearGradient id="srvOverviewTx" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="rgb(var(--success))" stopOpacity={0.35} />
-                      <stop offset="100%" stopColor="rgb(var(--success))" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.45} strokeDasharray="3 3" vertical={false} />
-                  <XAxis {...axisProps} />
-                  <YAxis width={48} tickFormatter={(v) => formatBps(Number(v) * 8)} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
-                  <Tooltip {...ttStyle()} formatter={(v: number, n: string) => [formatBps(Number(v) * 8), n === 'rx' ? 'Receive' : 'Transmit']} />
-                  <Legend
-                    verticalAlign="top" align="right" iconType="circle" iconSize={8}
-                    wrapperStyle={{ fontSize: 11, paddingBottom: 4 }}
-                    formatter={(v) => <span className="text-text2">{v}</span>}
-                  />
-                  <Area type="monotone" dataKey="rx" name="Receive" stroke="rgb(var(--primary))" strokeWidth={2} fill="url(#srvOverviewRx)" dot={false} isAnimationActive={false} activeDot={{ r: 3.5, strokeWidth: 0 }} connectNulls />
-                  <Area type="monotone" dataKey="tx" name="Transmit" stroke="rgb(var(--success))" strokeWidth={2} fill="url(#srvOverviewTx)" dot={false} isAnimationActive={false} activeDot={{ r: 3.5, strokeWidth: 0 }} connectNulls />
-                </AreaChart>
-              </ResponsiveContainer>
-            )}
-          </CardContent>
-        </Card>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
@@ -1035,7 +1368,19 @@ function ProcessesTab({ serverId, items, memTotal }: { serverId: string; items: 
         </div>
       )}
     >
-      <div className="overflow-hidden">
+      {/* The API returns the top 200 by CPU. Sorting by memory therefore
+          reorders that CPU-selected slice — a high-memory, idle process is
+          not in it at all. Say so rather than implying a full process list. */}
+      {items.length >= 200 && (
+        <div className="flex items-start gap-2 border-b border-border/50 bg-surface2/20 px-4 py-2 text-[11px] text-muted">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
+          <span>
+            Showing the 200 most CPU-intensive processes. Sorting by memory reorders
+            this sample, so a low-CPU process using a lot of memory may not appear.
+          </span>
+        </div>
+      )}
+      <div className="overflow-x-auto">
         <Table>
           <THead className="bg-surface2/40">
             <Tr>
@@ -1189,9 +1534,23 @@ type HostRulePrefill = {
   severity?: string
 }
 
-function ServicesTab({ serverId, items }: { serverId: string; items: ServerService[] }) {
+const SERVICES_CSV = [
+  { header: 'Service', value: (s: ServerService) => s.service_name },
+  { header: 'Display name', value: (s: ServerService) => s.display_name },
+  { header: 'State', value: (s: ServerService) => s.state },
+  { header: 'Start mode', value: (s: ServerService) => s.start_mode },
+  { header: 'PID', value: (s: ServerService) => s.pid },
+  { header: 'Updated', value: (s: ServerService) => s.updated_at },
+]
+
+function ServicesTab({ serverId, serverName, items }: {
+  serverId: string
+  serverName: string
+  items: ServerService[]
+}) {
   const qc = useQueryClient()
   const [filter, setFilter] = useState('all')
+  const [q, setQ] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
   const [prefill, setPrefill] = useState<HostRulePrefill | undefined>()
 
@@ -1224,15 +1583,24 @@ function ServicesTab({ serverId, items }: { serverId: string; items: ServerServi
     return st !== 'running' && st !== 'not_found' && !!st
   }
 
-  const filtered = items.filter((s) => {
+  const filtered = useMemo(() => items.filter((s) => {
     const st = (s.state || '').toLowerCase()
     const hasRule = ruleByService.has(s.service_name.toLowerCase())
+    const needle = q.trim().toLowerCase()
+    if (needle && !(
+      s.service_name.toLowerCase().includes(needle) ||
+      (s.display_name || '').toLowerCase().includes(needle)
+    )) return false
     if (filter === 'running') return st === 'running'
     if (filter === 'stopped') return isStopped(s.state)
     if (filter === 'not_found') return st === 'not_found'
     if (filter === 'alert_enabled') return hasRule
     return true
-  })
+  }), [items, filter, q, ruleByService])
+  const pager = usePagedRows(filtered, 50)
+  // Inventory rows persist after an agent stops reporting; say so rather
+  // than presenting a dead host's last snapshot as current state.
+  const stale = items.some((s) => s.is_stale)
   const running = items.filter((s) => (s.state || '').toLowerCase() === 'running').length
   const alertBreaches = items.filter(
     (s) => ruleByService.has(s.service_name.toLowerCase()) && isStopped(s.state),
@@ -1269,18 +1637,30 @@ function ServicesTab({ serverId, items }: { serverId: string; items: ServerServi
         title="Reported services"
         hint={`${items.length} in inventory · ${serviceRules.length} alert rule${serviceRules.length === 1 ? '' : 's'}`}
         toolbar={(
-          <div className="flex flex-wrap items-center gap-3">
-            <Select value={filter} onValueChange={setFilter}>
-              <SelectTrigger className="h-8 w-[180px]"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All states</SelectItem>
-                <SelectItem value="running">Running</SelectItem>
-                <SelectItem value="stopped">Stopped / failed</SelectItem>
-                <SelectItem value="not_found">Not installed</SelectItem>
-                <SelectItem value="alert_enabled">Alert enabled</SelectItem>
-              </SelectContent>
-            </Select>
-            <div className="grid flex-1 grid-cols-2 gap-2 sm:grid-cols-4">
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative min-w-[200px] flex-1">
+                <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
+                <Input
+                  className="h-8 pl-8"
+                  placeholder="Filter services…"
+                  value={q}
+                  onChange={(e) => { setQ(e.target.value); pager.reset() }}
+                />
+              </div>
+              <Select value={filter} onValueChange={(v) => { setFilter(v); pager.reset() }}>
+                <SelectTrigger className="h-8 w-[180px]"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All states</SelectItem>
+                  <SelectItem value="running">Running</SelectItem>
+                  <SelectItem value="stopped">Stopped / failed</SelectItem>
+                  <SelectItem value="not_found">Not installed</SelectItem>
+                  <SelectItem value="alert_enabled">Alert enabled</SelectItem>
+                </SelectContent>
+              </Select>
+              <ExportCsvButton rows={filtered} columns={SERVICES_CSV} filename={`${serverName}-services.csv`} />
+            </div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               <PanelMiniStat label="Running" value={`${running}/${items.length}`} tone="text-success" />
               <PanelMiniStat label="Filtered" value={String(filtered.length)} />
               <PanelMiniStat label="Alert rules" value={String(serviceRules.length)} />
@@ -1293,6 +1673,15 @@ function ServicesTab({ serverId, items }: { serverId: string; items: ServerServi
           </div>
         )}
       >
+        {stale && (
+          <div className="flex items-start gap-2 border-b border-warning/30 bg-warning/5 px-4 py-2 text-[11px] text-warning">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>
+              The agent has not re-reported services recently — these are last-known states,
+              not live ones.
+            </span>
+          </div>
+        )}
         <p className="border-b border-border/50 px-4 py-2 text-[11px] text-muted">
           Services are reported for visibility. Alerts fire only for services you configure — use
           {' '}<Bell className="inline h-3 w-3" /> Alert when stopped on a row, or create a rule on the Alerts tab.
@@ -1312,9 +1701,17 @@ function ServicesTab({ serverId, items }: { serverId: string; items: ServerServi
             </THead>
             <TBody>
               {filtered.length === 0 && (
-                <Tr><Td colSpan={7}><div className="py-10 text-center text-xs text-muted">No services match</div></Td></Tr>
+                <TableStateRow colSpan={7}>
+                  <EmptyState
+                    icon={<Wrench className="h-7 w-7" />}
+                    title={items.length ? 'No services match these filters' : 'No services reported yet'}
+                    hint={items.length
+                      ? 'Clear the search or state filter to see the full list.'
+                      : 'The agent reports service state with each collection cycle.'}
+                  />
+                </TableStateRow>
               )}
-              {filtered.map((s, i) => {
+              {pager.pageRows.map((s, i) => {
                 const rule = ruleByService.get(s.service_name.toLowerCase())
                 return (
                   <Tr key={s.service_name} className={i % 2 === 0 ? 'bg-surface2/10' : undefined}>
@@ -1352,6 +1749,7 @@ function ServicesTab({ serverId, items }: { serverId: string; items: ServerServi
             </TBody>
           </Table>
         </div>
+        <TablePager {...pager} noun="services" />
       </TablePanel>
 
       <CreateHostRuleDialog
@@ -1367,40 +1765,67 @@ function ServicesTab({ serverId, items }: { serverId: string; items: ServerServi
 
 /* ── Storage ─────────────────────────────────────────────────────── */
 
-function StorageTab({ serverId, items }: { serverId: string; items: ServerFilesystem[] }) {
-  const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
-  const { data: metrics, isLoading } = useQuery<ServerMetricsResponse>({
-    queryKey: ['servers', serverId, 'metrics', 'diskio', range.fromISO, range.toISO],
-    queryFn: async () =>
-      (await api.get(`/servers/${serverId}/metrics`, {
-        params: { metrics: 'disk_read_bps,disk_write_bps', from: range.fromISO, to: range.toISO },
-      })).data,
-    staleTime: 30_000,
-    refetchInterval: 60_000,
-  })
-  const disk = toChartRows(metrics, { disk_read_bps: 'read', disk_write_bps: 'write' }) as ChartRow[]
-  const tick = timeAxisTickFormatter(range.hours)
-  const axis = chartAxis(tick)
-  const diskStats = diskIoStats(disk)
+/** Volumes only. Disk I/O throughput lives on the Performance tab; this tab
+ *  used to render an identical copy of that chart. */
+function StorageTab({ items }: { items: ServerFilesystem[] }) {
   const maxPct = Math.max(0, ...items.map((fs) => fs.used_pct || 0))
+  const stale = items.some((fs) => fs.is_stale)
 
   return (
     <div className="space-y-4">
-      <PanelToolbar label={<>Storage metrics for <span className="font-medium text-text2">{range.label}</span></>}>
-        <TimeRangePicker
-          rangeIdx={rangeIdx} isCustom={isCustom}
-          customFrom={range.fromISO} customTo={range.toISO}
-          onPreset={setPreset} onCustom={setCustom}
-        />
-      </PanelToolbar>
-
       <TablePanel
         icon={<HardDrive className="h-3.5 w-3.5" />}
         title="Filesystems"
-        hint={`${items.length} volumes`}
+        hint={items.length ? `${items.length} volume${items.length === 1 ? '' : 's'}` : undefined}
+        toolbar={items.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="grid flex-1 grid-cols-2 gap-2 sm:grid-cols-4">
+              <PanelMiniStat label="Volumes" value={String(items.length)} />
+              <PanelMiniStat
+                label="Highest used"
+                value={`${maxPct.toFixed(1)}%`}
+                tone={maxPct >= 95 ? 'text-danger' : maxPct >= 85 ? 'text-warning' : undefined}
+              />
+              <PanelMiniStat
+                label="Total capacity"
+                value={formatBytes(items.reduce((s, fs) => s + (fs.total_bytes || 0), 0))}
+              />
+              <PanelMiniStat
+                label="Free"
+                value={formatBytes(items.reduce((s, fs) => s + (fs.free_bytes || 0), 0))}
+                tone="text-success"
+              />
+            </div>
+            <ExportCsvButton
+              rows={items}
+              columns={[
+                { header: 'Mount', value: (f: ServerFilesystem) => f.mount },
+                { header: 'Type', value: (f: ServerFilesystem) => f.fs_type },
+                { header: 'Device', value: (f: ServerFilesystem) => f.device },
+                { header: 'Total bytes', value: (f: ServerFilesystem) => f.total_bytes },
+                { header: 'Used bytes', value: (f: ServerFilesystem) => f.used_bytes },
+                { header: 'Free bytes', value: (f: ServerFilesystem) => f.free_bytes },
+                { header: 'Used %', value: (f: ServerFilesystem) => f.used_pct },
+              ]}
+              filename="filesystems.csv"
+            />
+          </div>
+        ) : undefined}
       >
-        <div className="overflow-hidden px-4 pb-2">
-          {items.length === 0 ? <NoData /> : (
+        {stale && (
+          <div className="flex items-start gap-2 border-b border-warning/30 bg-warning/5 px-4 py-2 text-[11px] text-warning">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>Last-known capacity — the agent has not re-reported these volumes recently.</span>
+          </div>
+        )}
+        <div className="overflow-hidden px-4 pb-2 pt-3">
+          {items.length === 0 ? (
+            <EmptyState
+              icon={<HardDrive className="h-7 w-7" />}
+              title="No volumes reported"
+              hint="Pseudo and removable filesystems (ISO, tmpfs, overlay) are excluded from capacity monitoring."
+            />
+          ) : (
             <div className="space-y-3">
               {items.map((fs) => {
                 const pct = Math.min(100, fs.used_pct || 0)
@@ -1432,88 +1857,87 @@ function StorageTab({ serverId, items }: { serverId: string; items: ServerFilesy
         </div>
       </TablePanel>
 
-      <MetricChartCard
-        icon={<Activity className="h-3.5 w-3.5" />}
-        title="Disk I/O"
-        hint={range.label}
-        isLoading={isLoading}
-        rows={disk}
-        miniStats={(
-          <div className="grid grid-cols-2 gap-2 px-4 pt-3 sm:grid-cols-4">
-            <PanelMiniStat label="Current" value={diskStats ? `${formatBytes(diskStats.current)}/s` : '—'} tone="text-info" />
-            <PanelMiniStat label="Average" value={diskStats ? `${formatBytes(diskStats.avg)}/s` : '—'} />
-            <PanelMiniStat label="95th pct" value={diskStats ? `${formatBytes(diskStats.p95)}/s` : '—'} tone="text-primary" />
-            <PanelMiniStat label="Max usage" value={maxPct ? `${maxPct.toFixed(1)}%` : '—'} tone={maxPct >= 95 ? 'text-danger' : 'text-warning'} />
-          </div>
-        )}
-      >
-        <AreaChart data={disk} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
-          <defs>
-            <linearGradient id="storageRead" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="rgb(var(--info))" stopOpacity={0.35} />
-              <stop offset="100%" stopColor="rgb(var(--info))" stopOpacity={0} />
-            </linearGradient>
-            <linearGradient id="storageWrite" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="rgb(var(--warning))" stopOpacity={0.35} />
-              <stop offset="100%" stopColor="rgb(var(--warning))" stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.45} strokeDasharray="3 3" vertical={false} />
-          <XAxis {...axis} />
-          <YAxis width={52} tickFormatter={(v) => `${formatBytes(Number(v))}/s`} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
-          <Tooltip {...ttStyle()} formatter={(v: number, n: string) => [`${formatBytes(Number(v))}/s`, n === 'read' ? 'Read' : 'Write']} />
-          <Legend verticalAlign="top" align="right" iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11, paddingBottom: 4 }} />
-          <Area type="monotone" dataKey="read" name="Read" stroke="rgb(var(--info))" strokeWidth={2} fill="url(#storageRead)" dot={false} isAnimationActive={false} connectNulls />
-          <Area type="monotone" dataKey="write" name="Write" stroke="rgb(var(--warning))" strokeWidth={2} fill="url(#storageWrite)" dot={false} isAnimationActive={false} connectNulls />
-        </AreaChart>
-      </MetricChartCard>
     </div>
   )
 }
 
 /* ── Network ─────────────────────────────────────────────────────── */
 
-function NetworkTab({ serverId }: { serverId: string }) {
-  const { data } = useQuery<{ items: ServerNetworkInterface[] }>({
+const NETWORK_CSV = [
+  { header: 'Interface', value: (n: ServerNetworkInterface) => n.if_name },
+  { header: 'State', value: (n: ServerNetworkInterface) => (n.is_up ? 'up' : 'down') },
+  { header: 'IP addresses', value: (n: ServerNetworkInterface) => (n.ip_addresses || []).join(' ') },
+  { header: 'MAC', value: (n: ServerNetworkInterface) => n.mac_address },
+  { header: 'Speed Mbps', value: (n: ServerNetworkInterface) => n.speed_mbps },
+  { header: 'MTU', value: (n: ServerNetworkInterface) => n.mtu },
+  { header: 'Updated', value: (n: ServerNetworkInterface) => n.updated_at },
+]
+
+function NetworkTab({ serverId, serverName }: { serverId: string; serverName: string }) {
+  const { data, isLoading, isError, error, refetch } = useQuery<{ items: ServerNetworkInterface[] }>({
     queryKey: ['servers', serverId, 'network'],
     queryFn: async () => (await api.get(`/servers/${serverId}/network`)).data,
     refetchInterval: 60_000,
   })
   const items = data?.items || []
   const upCount = items.filter((n) => n.is_up).length
+  // Link speed is not part of the agent's interface inventory, so the column
+  // was permanently "—". Show it only if some host actually reports it.
+  const hasSpeed = items.some((n) => n.speed_mbps != null)
+  const cols = hasSpeed ? 7 : 6
 
   return (
     <TablePanel
       icon={<NetworkIcon className="h-3.5 w-3.5" />}
       title="Network interfaces"
-      hint={`${upCount}/${items.length} up`}
+      hint={items.length ? `${upCount}/${items.length} up` : undefined}
       toolbar={items.length > 0 ? (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-          <PanelMiniStat label="Interfaces" value={String(items.length)} />
-          <PanelMiniStat label="Up" value={String(upCount)} tone="text-success" />
-          <PanelMiniStat label="Down" value={String(items.length - upCount)} tone={items.length - upCount > 0 ? 'text-danger' : undefined} />
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="grid flex-1 grid-cols-2 gap-2 sm:grid-cols-3">
+            <PanelMiniStat label="Interfaces" value={String(items.length)} />
+            <PanelMiniStat label="Up" value={String(upCount)} tone="text-success" />
+            <PanelMiniStat label="Down" value={String(items.length - upCount)} tone={items.length - upCount > 0 ? 'text-danger' : undefined} />
+          </div>
+          <ExportCsvButton rows={items} columns={NETWORK_CSV} filename={`${serverName}-interfaces.csv`} />
         </div>
       ) : undefined}
     >
-      <div className="overflow-hidden">
+      <div className="overflow-x-auto">
         <Table>
           <THead className="bg-surface2/40">
             <Tr>
               <Th className="pl-4">Interface</Th><Th>State</Th><Th>IP addresses</Th>
-              <Th>MAC</Th><Th className="text-right">Speed</Th><Th className="text-right">MTU</Th><Th className="pr-4">Updated</Th>
+              <Th>MAC</Th>
+              {hasSpeed && <Th className="text-right">Speed</Th>}
+              <Th className="text-right">MTU</Th><Th className="pr-4">Updated</Th>
             </Tr>
           </THead>
           <TBody>
-            {items.length === 0 && (
-              <Tr><Td colSpan={7}><div className="py-10 text-center text-xs text-muted">No interfaces reported</div></Td></Tr>
-            )}
-            {items.map((nic, i) => (
+            {isError ? (
+              <TableStateRow colSpan={cols}><QueryError error={error} onRetry={() => refetch()} /></TableStateRow>
+            ) : isLoading ? (
+              <TableStateRow colSpan={cols}><div className="py-10"><Skeleton className="h-20 w-full" /></div></TableStateRow>
+            ) : items.length === 0 ? (
+              <TableStateRow colSpan={cols}>
+                <EmptyState
+                  icon={<NetworkIcon className="h-7 w-7" />}
+                  title="No interfaces reported"
+                  hint="The agent reports network interfaces with its inventory snapshot."
+                />
+              </TableStateRow>
+            ) : items.map((nic, i) => (
               <Tr key={nic.if_name} className={i % 2 === 0 ? 'bg-surface2/10' : undefined}>
                 <Td className="py-2 pl-4 text-sm font-medium">{nic.if_name}</Td>
                 <Td>{nic.is_up ? <Badge variant="success">Up</Badge> : <Badge variant="danger">Down</Badge>}</Td>
-                <Td className="max-w-[200px] truncate font-mono text-xs" title={(nic.ip_addresses || []).join(', ')}>{(nic.ip_addresses || []).join(', ') || '—'}</Td>
+                <Td className="max-w-[260px] font-mono text-xs">
+                  <div className="truncate" title={(nic.ip_addresses || []).join(', ')}>
+                    {(nic.ip_addresses || []).join(', ') || '—'}
+                  </div>
+                </Td>
                 <Td className="font-mono text-xs text-muted">{nic.mac_address || '—'}</Td>
-                <Td className="text-right text-xs tabular-nums">{nic.speed_mbps ? `${nic.speed_mbps} Mbps` : '—'}</Td>
+                {hasSpeed && (
+                  <Td className="text-right text-xs tabular-nums">{nic.speed_mbps ? `${nic.speed_mbps} Mbps` : '—'}</Td>
+                )}
                 <Td className="text-right text-xs tabular-nums">{nic.mtu || '—'}</Td>
                 <Td className="pr-4 text-xs text-muted">{relativeTime(nic.updated_at)}</Td>
               </Tr>
@@ -1527,42 +1951,102 @@ function NetworkTab({ serverId }: { serverId: string }) {
 
 /* ── Software ────────────────────────────────────────────────────── */
 
-function SoftwareTab({ serverId }: { serverId: string }) {
+const SOFTWARE_CSV = [
+  { header: 'Package', value: (s: ServerSoftware) => s.package_name },
+  { header: 'Version', value: (s: ServerSoftware) => s.version },
+  { header: 'Vendor', value: (s: ServerSoftware) => s.vendor },
+  { header: 'Installed', value: (s: ServerSoftware) => s.install_date },
+  { header: 'Last reported', value: (s: ServerSoftware) => s.updated_at },
+]
+
+function SoftwareTab({ serverId, serverName }: { serverId: string; serverName: string }) {
   const [q, setQ] = useState('')
-  const { data } = useQuery<{ items: ServerSoftware[] }>({
+  const [sortBy, setSortBy] = useState<'package_name' | 'vendor' | 'install_date'>('package_name')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+
+  const { data, isLoading, isError, error, refetch } = useQuery<{ items: ServerSoftware[] }>({
     queryKey: ['servers', serverId, 'software'],
     queryFn: async () => (await api.get(`/servers/${serverId}/software`)).data,
     refetchInterval: 60_000,
   })
   const items = data?.items || []
-  const filtered = q
-    ? items.filter((s) =>
-        s.package_name.toLowerCase().includes(q.toLowerCase()) ||
-        (s.vendor || '').toLowerCase().includes(q.toLowerCase()))
-    : items
+
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase()
+    const base = needle
+      ? items.filter((s) =>
+          s.package_name.toLowerCase().includes(needle) ||
+          (s.vendor || '').toLowerCase().includes(needle) ||
+          (s.version || '').toLowerCase().includes(needle))
+      : items
+    const dir = sortDir === 'asc' ? 1 : -1
+    return [...base].sort((a, b) => dir * cmp(a[sortBy], b[sortBy]))
+  }, [items, q, sortBy, sortDir])
+
+  const pager = usePagedRows(filtered, 50)
+  const toggleSort = (col: typeof sortBy) => {
+    if (sortBy === col) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    else { setSortBy(col); setSortDir('asc') }
+    pager.reset()
+  }
 
   return (
     <TablePanel
       icon={<Package className="h-3.5 w-3.5" />}
       title="Software inventory"
-      hint={`${filtered.length} of ${items.length} packages`}
+      hint={items.length ? `${filtered.length.toLocaleString()} of ${items.length.toLocaleString()} packages` : undefined}
       toolbar={(
-        <div className="relative min-w-[220px]">
-          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
-          <Input className="h-8 pl-8" placeholder="Filter packages or vendors…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative min-w-[220px] flex-1">
+            <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
+            <Input
+              className="h-8 pl-8"
+              placeholder="Filter packages, vendors or versions…"
+              value={q}
+              onChange={(e) => { setQ(e.target.value); pager.reset() }}
+            />
+          </div>
+          <ExportCsvButton
+            rows={filtered}
+            columns={SOFTWARE_CSV}
+            filename={`${serverName}-software.csv`}
+          />
         </div>
       )}
     >
-      <div className="overflow-hidden">
+      <div className="overflow-x-auto">
         <Table>
           <THead className="bg-surface2/40">
-            <Tr><Th className="pl-4">Package</Th><Th>Version</Th><Th>Vendor</Th><Th>Installed</Th><Th className="pr-4">Last reported</Th></Tr>
+            <Tr>
+              <Th className={cn('pl-4', sortableTh)} onClick={() => toggleSort('package_name')}>
+                Package{sortIndicator(sortBy === 'package_name', sortDir)}
+              </Th>
+              <Th>Version</Th>
+              <Th className={sortableTh} onClick={() => toggleSort('vendor')}>
+                Vendor{sortIndicator(sortBy === 'vendor', sortDir)}
+              </Th>
+              <Th className={sortableTh} onClick={() => toggleSort('install_date')}>
+                Installed{sortIndicator(sortBy === 'install_date', sortDir)}
+              </Th>
+              <Th className="pr-4">Last reported</Th>
+            </Tr>
           </THead>
           <TBody>
-            {filtered.length === 0 && (
-              <Tr><Td colSpan={5}><div className="py-10 text-center text-xs text-muted">No software inventory yet — the agent uploads it with its inventory snapshot</div></Td></Tr>
-            )}
-            {filtered.map((s, i) => (
+            {isError ? (
+              <TableStateRow colSpan={5}><QueryError error={error} onRetry={() => refetch()} /></TableStateRow>
+            ) : isLoading ? (
+              <TableStateRow colSpan={5}><div className="py-10"><Skeleton className="h-24 w-full" /></div></TableStateRow>
+            ) : filtered.length === 0 ? (
+              <TableStateRow colSpan={5}>
+                <EmptyState
+                  icon={<Package className="h-7 w-7" />}
+                  title={items.length ? 'No packages match this filter' : 'No software inventory yet'}
+                  hint={items.length
+                    ? 'Clear the filter to see the full inventory.'
+                    : 'The agent uploads software inventory with its periodic inventory snapshot (every 6 hours by default).'}
+                />
+              </TableStateRow>
+            ) : pager.pageRows.map((s, i) => (
               <Tr key={s.package_name} className={i % 2 === 0 ? 'bg-surface2/10' : undefined}>
                 <Td className="py-2 pl-4 text-sm font-medium">{s.package_name}</Td>
                 <Td className="text-xs tabular-nums">{s.version || '—'}</Td>
@@ -1574,6 +2058,7 @@ function SoftwareTab({ serverId }: { serverId: string }) {
           </TBody>
         </Table>
       </div>
+      <TablePager {...pager} noun="packages" />
     </TablePanel>
   )
 }
@@ -2198,14 +2683,30 @@ function CreateHostRuleDialog({
 
 /* ── Events ──────────────────────────────────────────────────────── */
 
-function EventsTab({ serverId }: { serverId: string }) {
+const EVENT_WINDOWS = [
+  { value: '1', label: 'Last hour' },
+  { value: '6', label: 'Last 6 hours' },
+  { value: '24', label: 'Last 24 hours' },
+  { value: '168', label: 'Last 7 days' },
+] as const
+
+function EventsTab({ serverId, serverName }: { serverId: string; serverName: string }) {
   const [level, setLevel] = useState('all')
-  const { data } = useQuery<{ items: ServerEventRow[] }>({
-    queryKey: ['servers', serverId, 'events'],
-    queryFn: async () => (await api.get(`/servers/${serverId}/events`)).data,
+  const [hours, setHours] = useState('24')
+
+  // Level and window are applied server-side now: filtering client-side over
+  // the most recent N rows searched only that slice, so picking "critical"
+  // could miss critical events that fell outside it.
+  const { data, isLoading, isError, error, refetch } = useQuery<ServerEventsResponse>({
+    queryKey: ['servers', serverId, 'events', hours, level],
+    queryFn: async () => (await api.get(`/servers/${serverId}/events`, {
+      params: { hours: Number(hours), ...(level !== 'all' ? { level } : {}) },
+    })).data,
     refetchInterval: 60_000,
   })
-  const items = (data?.items || []).filter((e) => level === 'all' || e.level === level)
+  const items = data?.items || []
+  const channels = data?.channels || []
+  const windowLabel = EVENT_WINDOWS.find((w) => w.value === hours)?.label ?? `last ${hours}h`
 
   const levelBadge = (lv: string) => {
     if (lv === 'critical') return <Badge variant="danger">Critical</Badge>
@@ -2220,9 +2721,17 @@ function EventsTab({ serverId }: { serverId: string }) {
     <TablePanel
       icon={<ScrollText className="h-3.5 w-3.5" />}
       title="Event log summaries"
-      hint="last 24h"
+      hint={windowLabel}
       toolbar={(
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Select value={hours} onValueChange={setHours}>
+            <SelectTrigger className="h-8 w-[150px]"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {EVENT_WINDOWS.map((w) => (
+                <SelectItem key={w.value} value={w.value}>{w.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <Select value={level} onValueChange={setLevel}>
             <SelectTrigger className="h-8 w-[150px]"><SelectValue /></SelectTrigger>
             <SelectContent>
@@ -2235,8 +2744,18 @@ function EventsTab({ serverId }: { serverId: string }) {
           <div className="grid flex-1 grid-cols-2 gap-2 sm:grid-cols-3">
             <PanelMiniStat label="Rows" value={String(items.length)} />
             <PanelMiniStat label="Total events" value={totalEvents.toLocaleString()} tone="text-info" />
-            <PanelMiniStat label="Filter" value={level === 'all' ? 'All levels' : level} />
+            <PanelMiniStat label="Channels" value={channels.length ? String(channels.length) : '—'} />
           </div>
+          <ExportCsvButton
+            rows={items}
+            columns={[
+              { header: 'Time', value: (e: ServerEventRow) => e.timestamp },
+              { header: 'Log', value: (e: ServerEventRow) => e.log_name },
+              { header: 'Level', value: (e: ServerEventRow) => e.level },
+              { header: 'Events', value: (e: ServerEventRow) => e.count },
+            ]}
+            filename={`${serverName}-events.csv`}
+          />
         </div>
       )}
     >
@@ -2246,10 +2765,28 @@ function EventsTab({ serverId }: { serverId: string }) {
             <Tr><Th className="pl-4">Time</Th><Th>Log</Th><Th>Level</Th><Th className="pr-4 text-right">Events</Th></Tr>
           </THead>
           <TBody>
-            {items.length === 0 && (
-              <Tr><Td colSpan={4}><div className="py-10 text-center text-xs text-muted">No event summaries in the last 24h</div></Td></Tr>
-            )}
-            {items.map((e, i) => (
+            {isError ? (
+              <TableStateRow colSpan={4}><QueryError error={error} onRetry={() => refetch()} /></TableStateRow>
+            ) : isLoading ? (
+              <TableStateRow colSpan={4}><div className="py-10"><Skeleton className="h-20 w-full" /></div></TableStateRow>
+            ) : items.length === 0 ? (
+              <TableStateRow colSpan={4}>
+                {/* An idle host reports plenty of zero-count rows; those are
+                    filtered out server-side, which used to look identical to
+                    "the agent never collected anything". */}
+                <EmptyState
+                  icon={channels.length
+                    ? <CheckCircle2 className="h-7 w-7 text-success/70" />
+                    : <ScrollText className="h-7 w-7" />}
+                  title={channels.length
+                    ? `No ${level === 'all' ? '' : `${level} `}events in the ${windowLabel.toLowerCase()}`
+                    : 'No event log data collected'}
+                  hint={channels.length
+                    ? `The agent checked ${channels.join(', ')} and found nothing matching.`
+                    : 'Enable the event log collector in this server’s agent policy to collect Windows Event Log summaries.'}
+                />
+              </TableStateRow>
+            ) : items.map((e, i) => (
               <Tr key={`${e.timestamp}-${e.log_name}-${e.level}-${i}`} className={i % 2 === 0 ? 'bg-surface2/10' : undefined}>
                 <Td className="py-2 pl-4 text-xs tabular-nums">{new Date(e.timestamp).toLocaleString()}</Td>
                 <Td className="text-xs font-medium">{e.log_name}</Td>
@@ -2276,7 +2813,7 @@ function AgentTab({
   onDeployAgent: () => void
 }) {
   const qc = useQueryClient()
-  const { data: agent } = useQuery<AgentItem | null>({
+  const { data: agent, isLoading: agentLoading } = useQuery<AgentItem | null>({
     queryKey: ['servers', serverId, 'agent'],
     queryFn: async () => (await api.get(`/servers/${serverId}/agent`)).data,
     refetchInterval: 15_000,
@@ -2289,12 +2826,38 @@ function AgentTab({
 
   const act = useMutation({
     mutationFn: async ({ url }: { url: string; label: string }) => (await api.post(url)).data,
-    onSuccess: (_d, v) => {
-      toast.success(`${v.label} queued`, 'The agent picks it up on its next poll')
+    onSuccess: (d, v) => {
+      // The command endpoint reports when an identical command is already
+      // queued, so repeated clicks don't silently stack duplicates.
+      const detail = (d as { detail?: string; queued?: boolean } | undefined)
+      toast.success(
+        detail?.queued === false ? 'Already queued' : `${v.label} queued`,
+        detail?.detail ?? 'The agent picks it up on its next poll',
+      )
       qc.invalidateQueries({ queryKey: ['servers', serverId, 'commands'] })
+      qc.invalidateQueries({ queryKey: ['servers', serverId, 'agent'] })
     },
     onError: (e) => toast.error('Action failed', apiErrorMessage(e)),
   })
+
+  const setRing = useMutation({
+    mutationFn: async (ring: string) =>
+      (await api.post(`/agent-fleet/${agent?.id}/set-update-ring`, { update_ring: ring })).data,
+    onSuccess: () => {
+      toast.success('Update ring changed')
+      qc.invalidateQueries({ queryKey: ['servers', serverId, 'agent'] })
+    },
+    onError: (e) => toast.error('Could not change update ring', apiErrorMessage(e)),
+  })
+
+  if (agentLoading) {
+    return (
+      <Card className="overflow-hidden">
+        <PanelHeader icon={<Bot className="h-3.5 w-3.5" />} title="Agent" />
+        <CardContent className="p-4"><Skeleton className="h-32 w-full" /></CardContent>
+      </Card>
+    )
+  }
 
   if (!agent) {
     return (
@@ -2325,6 +2888,7 @@ function AgentTab({
     return <Badge variant="outline">{c.status}</Badge>
   }
 
+  const skew = agent.clock_skew_s ?? 0
   const info: [string, React.ReactNode][] = [
     ['Status', <AgentStatusBadge key="st" status={agent.status} />],
     ['Version', agent.version || '—'],
@@ -2333,7 +2897,22 @@ function AgentTab({
     ['Last metrics', relativeTime(agent.last_metric_at)],
     ['Queue depth', String(agent.queue_depth)],
     ['Spool size', formatBytes(agent.spool_bytes)],
-    ['Update ring', agent.update_ring],
+    ['Clock offset', Math.abs(skew) < 60
+      ? <span key="skew" className="text-success">in sync</span>
+      : <span key="skew" className="text-warning">{skew > 0 ? '+' : ''}{Math.round(skew / 60)} min</span>],
+    // The endpoint to change this has existed all along with no caller —
+    // rings were filterable on the fleet page but not settable anywhere.
+    ['Update ring', (
+      <Select key="ring" value={agent.update_ring} onValueChange={(v) => setRing.mutate(v)}>
+        <SelectTrigger className="mt-0.5 h-7 w-[130px] text-xs"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="canary">Canary</SelectItem>
+          <SelectItem value="beta">Beta</SelectItem>
+          <SelectItem value="stable">Stable</SelectItem>
+          <SelectItem value="pinned">Pinned</SelectItem>
+        </SelectContent>
+      </Select>
+    )],
     ['Policy', agent.policy_name || 'Platform default'],
     ['API key', agent.api_key_prefix ? `${agent.api_key_prefix}…` : '—'],
     ['Last IP', agent.last_ip || '—'],
@@ -2358,25 +2937,38 @@ function AgentTab({
           title="Agent"
           hint={agent.status}
           right={(
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {/* collect_now and refresh_config are implemented by the agent
+                  but nothing could queue them, so an operator had to wait out
+                  the collection interval to see a change take effect. */}
+              <Button
+                size="sm"
+                disabled={act.isPending}
+                onClick={() => act.mutate({ url: `/agent-fleet/${agent.id}/commands/collect_now`, label: 'Collect now' })}
+                title="Ask the agent to collect and upload immediately"
+              >
+                <RefreshCw className={cn('h-3.5 w-3.5', act.isPending && 'animate-spin')} /> Collect now
+              </Button>
+              <Button
+                variant="outline" size="sm"
+                disabled={act.isPending}
+                onClick={() => act.mutate({ url: `/agent-fleet/${agent.id}/commands/refresh_config`, label: 'Config refresh' })}
+                title="Force the agent to re-pull its policy"
+              >
+                <Settings2 className="h-3.5 w-3.5" /> Refresh config
+              </Button>
+              <Button
+                variant="outline" size="sm"
+                onClick={() => act.mutate({ url: `/agent-fleet/${agent.id}/request-diagnostics`, label: 'Diagnostics upload' })}
+              >
+                <FileDown className="h-3.5 w-3.5" /> Diagnostics
+              </Button>
               <Button
                 variant="outline" size="sm"
                 onClick={onDeployAgent}
                 title={`Generate a new enrollment key for ${serverName}`}
               >
                 <KeyRound className="h-3.5 w-3.5" /> Generate key
-              </Button>
-              <Button
-                variant="outline" size="sm"
-                onClick={() => act.mutate({ url: `/agent-fleet/${agent.id}/request-diagnostics`, label: 'Diagnostics upload' })}
-              >
-                <FileDown className="h-3.5 w-3.5" /> Request diagnostics
-              </Button>
-              <Button
-                variant="outline" size="sm"
-                onClick={() => act.mutate({ url: `/agent-fleet/${agent.id}/rotate-certificate`, label: 'Credential rotation' })}
-              >
-                <KeyRound className="h-3.5 w-3.5" /> Rotate credentials
               </Button>
             </div>
           )}
@@ -2434,6 +3026,9 @@ function SettingsTab({ server, onEdit, onDecommission, onDelete }: {
     ['Build', server.kernel_or_build || '—'],
     ['Architecture', server.architecture || '—'],
     ['Collection mode', server.collection_mode],
+    ['Uptime', server.boot_time
+      ? <span key="up">{formatUptime(server.boot_time)} <span className="text-muted">· booted {new Date(server.boot_time).toLocaleString()}</span></span>
+      : '—'],
     ['Environment', server.environment || '—'],
     ['Owner', server.owner || '—'],
     ['Site', server.site_name || '—'],

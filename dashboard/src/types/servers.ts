@@ -30,12 +30,18 @@ export interface ServerItem {
   owner: string | null
   tags: string[]
   last_seen: string | null
+  /** Host boot time from the agent inventory; uptime is derived from it. */
+  boot_time?: string | null
   description: string | null
   status_reasons: string[]
   agent_id: string | null
   agent_status: AgentStatus | null
   agent_version: string | null
   agent_last_heartbeat_at: string | null
+  agent_last_metric_at?: string | null
+  /** Agent clock offset from the controller, in seconds. A non-zero value
+   *  on every agent points at the controller's clock, not the hosts'. */
+  agent_clock_skew_s?: number | null
   created_at: string
   updated_at: string
 }
@@ -100,6 +106,7 @@ export interface AgentItem {
   last_config_hash: string | null
   queue_depth: number
   spool_bytes: number
+  clock_skew_s: number
   update_ring: UpdateRing
   desired_version: string | null
   current_version: string | null
@@ -177,6 +184,7 @@ export interface ServerProcess {
 }
 
 export interface ServerService {
+  is_stale?: boolean
   service_name: string
   display_name: string | null
   start_mode: string | null
@@ -187,6 +195,9 @@ export interface ServerService {
 }
 
 export interface ServerFilesystem {
+  /** Inventory row older than the freshness window — the agent has not
+   *  re-reported this volume, so treat the numbers as last-known. */
+  is_stale?: boolean
   mount: string
   fs_type: string | null
   device: string | null
@@ -220,6 +231,21 @@ export interface ServerEventRow {
   log_name: string
   level: string
   count: number
+}
+
+export interface ServerEventsResponse {
+  items: ServerEventRow[]
+  /** Channels the agent actually checked in the window, so an empty list
+   *  can be shown as "clean" rather than "nothing collected". */
+  channels: string[]
+  hours: number
+  truncated: boolean
+}
+
+export interface ServerSoftwareResponse {
+  items: ServerSoftware[]
+  total: number
+  truncated: boolean
 }
 
 export interface ServerCommand {

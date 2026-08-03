@@ -309,6 +309,11 @@ def _insert_agent_health(client, agent_id: str, server_id: str, rows: list[dict]
 # interval, so a couple of missed uploads won't drop still-running processes.
 PROCESS_STALE_SECONDS = 300
 
+# Agent batches whose newest sample deviates from server time by more than
+# this are shifted to server time (see ingest_host_metric_batch); the offset
+# is recorded on the agent row as clock_skew_s for fleet visibility.
+CLOCK_SKEW_TOLERANCE_S = 300
+
 
 async def _upsert_process_inventory(server_id: str, rows: list[dict], db: AsyncSession) -> None:
     for p in rows:
@@ -359,6 +364,25 @@ async def _upsert_process_inventory(server_id: str, rows: list[dict], db: AsyncS
 
 
 async def _upsert_inventory(server_id: str, inv: Dict[str, Any], db: AsyncSession) -> None:
+    os_info = inv.get("os")
+    if isinstance(os_info, dict):
+        boot_raw = os_info.get("boot_time")
+        boot_dt = None
+        if boot_raw:
+            try:
+                boot_dt = datetime.fromisoformat(str(boot_raw).replace("Z", "+00:00"))
+            except ValueError:
+                boot_dt = None
+        elif _i(os_info.get("uptime_seconds")):
+            boot_dt = datetime.now(timezone.utc) - timedelta(
+                seconds=_i(os_info.get("uptime_seconds")))
+        if boot_dt is not None:
+            await db.execute(text(
+                """UPDATE servers SET boot_time = :bt, updated_at = NOW()
+                   WHERE id = :sid
+                     AND (boot_time IS NULL OR abs(extract(epoch FROM (boot_time - :bt))) > 120)"""
+            ), {"sid": server_id, "bt": boot_dt})
+
     services = inv.get("services") or []
     if isinstance(services, list) and services:
         for s in services:
@@ -460,6 +484,27 @@ async def _upsert_inventory(server_id: str, inv: Dict[str, Any], db: AsyncSessio
                 "install_date": _dt_or_none(app.get("install_date")),
             })
 
+    # Prune rows the snapshot no longer contains. Each section above stamps
+    # updated_at = NOW() for everything present, so anything older than a
+    # short grace window was dropped by the agent (software uninstalled,
+    # volume unmounted, NIC removed). Without this, uninstalled software
+    # fails "prohibited" baselines forever and dead mounts keep driving
+    # disk health. Only prune when the section was actually sent — an
+    # omitted section means "no update", not "empty".
+    prune_map = [
+        (services, "server_service_inventory"),
+        (filesystems, "server_filesystem_inventory"),
+        (interfaces, "server_network_interface_inventory"),
+        (software, "server_software_inventory"),
+    ]
+    for sent, table in prune_map:
+        if isinstance(sent, list) and sent:
+            await db.execute(
+                text(f"DELETE FROM {table} "
+                     "WHERE server_id = :sid AND updated_at < NOW() - INTERVAL '2 minutes'"),
+                {"sid": server_id},
+            )
+
     # OS info
     os_info = inv.get("os") or {}
     if os_info:
@@ -500,10 +545,10 @@ async def ingest_host_metric_batch(
     server_id: str,
     batch: AgentResultsBatch,
     db: AsyncSession,
-) -> tuple[int, int, list[str]]:
+) -> tuple[int, int, list[str], int]:
     """Fan-out a metrics envelope to ClickHouse + inventory tables.
 
-    Returns (accepted_count, rejected_count, errors).
+    Returns (accepted_count, rejected_count, errors, clock_skew_s).
     """
     accepted = 0
     rejected = 0
@@ -515,6 +560,7 @@ async def ingest_host_metric_batch(
         kind = sample.kind
         row = dict(sample.data) if sample.data else {}
         row.setdefault("timestamp", sample.timestamp)
+        row["timestamp"] = _ts(row.get("timestamp"))
         if kind == "inventory":
             # handled separately
             by_kind.setdefault("inventory", []).append(row)
@@ -524,6 +570,25 @@ async def ingest_host_metric_batch(
             errors.append(f"unknown kind: {kind}")
             continue
         by_kind.setdefault(kind, []).append(row)
+
+    # Clock-skew correction: agent timestamps are wall-clock on the host and
+    # hosts routinely have wrong clocks/timezones. If the newest sample in the
+    # batch deviates from server time by more than the tolerance, shift every
+    # sample by that offset — this keeps spooled-sample spacing intact while
+    # anchoring the batch to server time, so "latest" windows stay truthful.
+    clock_skew_s = 0
+    metric_rows = [r for k, rows in by_kind.items() if k != "inventory" for r in rows]
+    if metric_rows:
+        newest = max(r["timestamp"] for r in metric_rows)
+        offset = datetime.now(timezone.utc) - newest
+        clock_skew_s = -int(offset.total_seconds())
+        if abs(offset.total_seconds()) > CLOCK_SKEW_TOLERANCE_S:
+            for r in metric_rows:
+                r["timestamp"] = r["timestamp"] + offset
+            logger.warning(
+                "clock skew of %+ds corrected for agent=%s (batch shifted to server time)",
+                clock_skew_s, agent_id,
+            )
 
     client = get_clickhouse_client()
     for kind, rows in by_kind.items():
@@ -581,7 +646,7 @@ async def ingest_host_metric_batch(
             errors.append(f"baseline: {exc}")
             logger.exception("Baseline evaluation failed")
 
-    return accepted, rejected, errors
+    return accepted, rejected, errors, clock_skew_s
 
 
 # ── Query helpers (for the admin metrics endpoints) ──────────────────
@@ -866,7 +931,8 @@ def query_top_pressure(kind: str, limit: int = 5) -> list[dict]:
                      GROUP BY server_id
                      ORDER BY v DESC LIMIT %(limit)s"""
         elif kind == "network":
-            sql = """SELECT server_id, sum(rx_bytes_ps + tx_bytes_ps) AS v
+            # Average per-sample throughput, not the sum over the window.
+            sql = """SELECT server_id, sum(rx_bytes_ps + tx_bytes_ps) / uniqExact(timestamp) AS v
                      FROM zenplus.host_network_metrics
                      WHERE timestamp >= %(since)s
                      GROUP BY server_id

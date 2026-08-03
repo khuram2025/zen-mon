@@ -1,6 +1,6 @@
 /** Server Inventory — searchable, filterable fleet list with live resource metrics. */
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -120,15 +120,38 @@ export function ServerInventoryPage() {
   const [bulkTags, setBulkTags] = useState('')
   const [view, setView] = useState<'table' | 'cards'>('table')
 
-  const setParam = (key: string, value: string) => {
+  // Multi-key setter: consecutive setParam calls in one handler share a
+  // closure over stale `params`, so writing sort+order needs a single update.
+  const setQuery = (entries: Record<string, string>) => {
     const next = new URLSearchParams(params)
-    if (value) next.set(key, value)
-    else next.delete(key)
-    if (key !== 'page') next.delete('page')
+    let pageChange = false
+    for (const [key, value] of Object.entries(entries)) {
+      if (value) next.set(key, value)
+      else next.delete(key)
+      if (key === 'page') pageChange = true
+    }
+    if (!pageChange) next.delete('page')
     setParams(next, { replace: true })
   }
+  const setParam = (key: string, value: string) => setQuery({ [key]: value })
 
-  const { data, isLoading } = useQuery<ServerListResponse>({
+  // Debounced search box → URL param.
+  const [searchDraft, setSearchDraft] = useState(search)
+  useEffect(() => { setSearchDraft(search) }, [search])
+  useEffect(() => {
+    if (searchDraft === search) return
+    const t = setTimeout(() => setParam('search', searchDraft), 300)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchDraft])
+
+  // Selection is page/filter-scoped: keeping it across filter changes lets a
+  // bulk delete hit rows the user can no longer see.
+  useEffect(() => {
+    setSelected(new Set())
+  }, [status, osType, mode, tag, search, page])
+
+  const { data, isLoading, isError, error } = useQuery<ServerListResponse>({
     queryKey: ['servers', 'list', { status, osType, mode, tag, search, sort, order, page }],
     queryFn: async () => {
       const q = new URLSearchParams()
@@ -200,7 +223,7 @@ export function ServerInventoryPage() {
       className="inline-flex items-center gap-1 hover:text-text"
       onClick={() => {
         if (sort === key) setParam('order', order === 'asc' ? 'desc' : 'asc')
-        else { setParam('sort', key); setParam('order', 'asc') }
+        else setQuery({ sort: key, order: 'asc' })
       }}
     >
       {label}
@@ -215,6 +238,11 @@ export function ServerInventoryPage() {
 
   const statusCount = (key: string) =>
     facets?.status?.find((f) => f.value === key)?.count
+
+  // "All" must count the whole fleet, not the filtered result set.
+  const allCount = facets?.status
+    ? facets.status.reduce((sum, f) => sum + f.count, 0)
+    : total
 
   return (
     <div className="space-y-4">
@@ -268,7 +296,7 @@ export function ServerInventoryPage() {
       <div className="flex flex-wrap gap-1.5">
         {STATUS_CHIPS.map(({ key, label }) => {
           const active = status === key
-          const count = key === '' ? total : statusCount(key)
+          const count = key === '' ? allCount : statusCount(key)
           return (
             <button
               key={key || 'all'}
@@ -297,8 +325,8 @@ export function ServerInventoryPage() {
             <Input
               className="h-9 pl-8"
               placeholder="Search name, IP, FQDN, owner, tags…"
-              value={search}
-              onChange={(e) => setParam('search', e.target.value)}
+              value={searchDraft}
+              onChange={(e) => setSearchDraft(e.target.value)}
             />
           </div>
           <Select value={osType || 'all'} onValueChange={(v) => setParam('os', v === 'all' ? '' : v)}>
@@ -415,7 +443,18 @@ export function ServerInventoryPage() {
                       </Tr>
                     ))
                   )}
-                  {!isLoading && items.length === 0 && (
+                  {!isLoading && isError && (
+                    <Tr>
+                      <Td colSpan={12}>
+                        <div className="flex flex-col items-center gap-2 py-12 text-center">
+                          <CloudOff className="h-8 w-8 text-danger/60" />
+                          <div className="text-sm font-medium">Could not load servers</div>
+                          <div className="max-w-sm text-xs text-muted">{apiErrorMessage(error)}</div>
+                        </div>
+                      </Td>
+                    </Tr>
+                  )}
+                  {!isLoading && !isError && items.length === 0 && (
                     <Tr>
                       <Td colSpan={12}>
                         <div className="flex flex-col items-center gap-2 py-12 text-center">
@@ -549,11 +588,11 @@ export function ServerInventoryPage() {
                 <CardContent className="grid grid-cols-2 gap-2 p-3 text-xs">
                   <div>
                     <div className="text-[10px] uppercase text-muted">CPU</div>
-                    {liveStale ? '—' : <UsageCell pct={lm.cpu_pct} />}
+                    {liveStale ? '—' : <UsageCell pct={lm.cpu_pct} warn={90} crit={98} />}
                   </div>
                   <div>
                     <div className="text-[10px] uppercase text-muted">Memory</div>
-                    {liveStale ? '—' : <UsageCell pct={lm.memory_pct} />}
+                    {liveStale ? '—' : <UsageCell pct={lm.memory_pct} warn={90} crit={97} />}
                   </div>
                   <div>
                     <div className="text-[10px] uppercase text-muted">Disk</div>

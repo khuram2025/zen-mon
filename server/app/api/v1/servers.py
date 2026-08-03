@@ -17,15 +17,18 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_operator_user
+from app.services.filesystem_monitoring import pg_capacity_filter
 from app.models.user import User
 from app.schemas.agent import (
     AgentBulkAction,
+    AgentPackageDownloadRequest,
     AgentPolicyCreate,
     AgentPolicyResponse,
     AgentPolicyUpdate,
@@ -75,7 +78,22 @@ def _new_enrollment_token() -> tuple[str, str, str]:
     return raw, _sha256(raw), raw[:12]
 
 
-def _server_url(request: Request) -> str:
+async def _server_url(request: Request, db: AsyncSession) -> str:
+    """Base URL that *target servers* must be able to reach.
+
+    Resolution order: APP_BASE_URL from .env, then the company system-setting
+    ``base_url``, then the request's Host header. The header fallback is wrong
+    behind dev proxies (it yields localhost), so deployments should set one of
+    the first two.
+    """
+    base = (get_settings().APP_BASE_URL or "").strip()
+    if not base:
+        row = (await db.execute(
+            text("SELECT value->>'base_url' FROM system_settings WHERE key = 'company'"),
+        )).first()
+        base = (row[0] or "").strip() if row and row[0] else ""
+    if base:
+        return base.rstrip("/")
     proto = request.headers.get("x-forwarded-proto") or request.url.scheme
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
     return f"{proto}://{host}"
@@ -98,6 +116,7 @@ def _server_row_to_response(row: dict) -> ServerResponse:
     return ServerResponse(
         id=str(row["id"]),
         display_name=row["display_name"],
+        boot_time=row.get("boot_time"),
         hostname=row.get("hostname"),
         fqdn=row.get("fqdn"),
         primary_ip=str(row["primary_ip"]) if row.get("primary_ip") else None,
@@ -311,7 +330,7 @@ async def servers_latest_metrics(
 async def bulk_server_action(
     data: ServerBulkAction,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     if not data.server_ids:
         raise HTTPException(400, "server_ids required")
@@ -354,6 +373,10 @@ async def bulk_server_action(
         )
         affected = res.rowcount or 0
     elif data.action == "delete":
+        await db.execute(
+            text("DELETE FROM agents WHERE server_id = ANY(CAST(:ids AS uuid[]))"),
+            {"ids": ids},
+        )
         res = await db.execute(
             text("DELETE FROM servers WHERE id = ANY(CAST(:ids AS uuid[]))"),
             {"ids": ids},
@@ -379,7 +402,7 @@ async def bulk_server_action(
 async def create_server(
     data: ServerCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     row = (await db.execute(
         text("""INSERT INTO servers (display_name, hostname, fqdn, primary_ip, site_id, device_id,
@@ -413,11 +436,16 @@ async def get_server(
 ):
     row = (await db.execute(
         text("""SELECT s.*, st.name AS site_name,
-                       a.id AS agent_id, a.status AS agent_status, a.version AS agent_version
+                       a.id AS agent_id, a.status AS agent_status, a.version AS agent_version,
+                       a.last_heartbeat_at AS agent_last_heartbeat_at,
+                       a.last_metric_at AS agent_last_metric_at,
+                       a.clock_skew_s AS agent_clock_skew_s
                 FROM servers s
                 LEFT JOIN sites st ON st.id = s.site_id
                 LEFT JOIN LATERAL (
-                    SELECT id, status, version FROM agents
+                    SELECT id, status, version, last_heartbeat_at, last_metric_at,
+                           clock_skew_s
+                    FROM agents
                     WHERE server_id = s.id
                     ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 1
                 ) a ON TRUE
@@ -434,7 +462,7 @@ async def update_server(
     server_id: UUID,
     data: ServerUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     sets = []
     params: dict[str, Any] = {"id": server_id}
@@ -462,8 +490,12 @@ async def update_server(
 async def delete_server(
     server_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
+    # Remove the server's agents first: the FK is ON DELETE SET NULL, which
+    # would leave an orphan agent authenticating forever with no server
+    # binding (every upload 400s). Deleting the row lets the host re-enroll.
+    await db.execute(text("DELETE FROM agents WHERE server_id = :id"), {"id": server_id})
     res = await db.execute(text("DELETE FROM servers WHERE id = :id"), {"id": server_id})
     await db.commit()
     if res.rowcount == 0:
@@ -475,7 +507,7 @@ async def delete_server(
 async def decommission_server(
     server_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     await db.execute(
         text("UPDATE servers SET status = 'disabled', updated_at = NOW() WHERE id = :id"),
@@ -569,7 +601,9 @@ async def server_services(
     user: User = Depends(get_current_user),
 ):
     rows = (await db.execute(
-        text("""SELECT service_name, display_name, start_mode, state, pid, description, updated_at
+        text("""SELECT service_name, display_name, start_mode, state, pid, description,
+                       updated_at,
+                       updated_at < NOW() - INTERVAL '15 minutes' AS is_stale
                 FROM server_service_inventory
                 WHERE server_id = :id
                 ORDER BY service_name"""),
@@ -585,10 +619,13 @@ async def server_filesystems(
     user: User = Depends(get_current_user),
 ):
     rows = (await db.execute(
-        text("""SELECT mount, fs_type, device, total_bytes, used_bytes, free_bytes, used_pct, updated_at
-                FROM server_filesystem_inventory
-                WHERE server_id = :id
-                ORDER BY mount"""),
+        text(f"""SELECT mount, fs_type, device, total_bytes, used_bytes, free_bytes,
+                        used_pct, updated_at,
+                        updated_at < NOW() - INTERVAL '15 minutes' AS is_stale
+                 FROM server_filesystem_inventory
+                 WHERE server_id = :id
+                   AND {pg_capacity_filter()}
+                 ORDER BY mount"""),
         {"id": server_id},
     )).mappings().all()
     return {"items": [dict(r) for r in rows]}
@@ -613,7 +650,10 @@ async def server_network(
 @router.get("/{server_id}/events")
 async def server_events(
     server_id: UUID,
-    limit: int = 200,
+    limit: int = Query(200, ge=1, le=1000),
+    hours: int = Query(24, ge=1, le=720),
+    level: Optional[str] = Query(None, regex="^(critical|error|warning|information|verbose)$"),
+    include_empty: bool = Query(False),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -621,25 +661,40 @@ async def server_events(
     from app.core.database import get_clickhouse_client
     client = get_clickhouse_client()
     try:
+        conditions = ["server_id = %(sid)s", "timestamp >= now() - INTERVAL %(hrs)s HOUR"]
+        params: dict[str, Any] = {"sid": str(server_id), "lim": limit, "hrs": hours}
+        if not include_empty:
+            conditions.append("event_count > 0")
+        if level:
+            conditions.append("level = %(lvl)s")
+            params["lvl"] = level
         res = client.query(
-            """SELECT timestamp, log_name, level, event_count
-               FROM zenplus.host_event_log_summary
-               WHERE server_id = %(sid)s
-                 AND timestamp >= now() - INTERVAL 24 HOUR
-                 AND event_count > 0
-               ORDER BY timestamp DESC LIMIT %(lim)s""",
-            parameters={"sid": str(server_id), "lim": limit},
+            f"""SELECT timestamp, log_name, level, event_count
+                FROM zenplus.host_event_log_summary
+                WHERE {' AND '.join(conditions)}
+                ORDER BY timestamp DESC LIMIT %(lim)s""",
+            parameters=params,
         ).result_rows
         items = [{"timestamp": r[0], "log_name": r[1], "level": r[2], "count": int(r[3])} for r in res]
+        # Which channels the agent actually checked, so "nothing to report"
+        # can be distinguished from "nothing was collected".
+        checked = client.query(
+            """SELECT DISTINCT log_name FROM zenplus.host_event_log_summary
+               WHERE server_id = %(sid)s AND timestamp >= now() - INTERVAL %(hrs)s HOUR""",
+            parameters={"sid": str(server_id), "hrs": hours},
+        ).result_rows
     except Exception as exc:
         logger.warning("event log query failed: %s", exc)
-        items = []
-    return {"items": items}
+        # A store outage must not render as a clean host.
+        raise HTTPException(503, f"Event log store unavailable: {exc}")
+    return {"items": items, "channels": sorted(r[0] for r in checked),
+            "hours": hours, "truncated": len(items) >= limit}
 
 
 @router.get("/{server_id}/software")
 async def server_software(
     server_id: UUID,
+    limit: int = Query(5000, ge=1, le=20000),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -648,10 +703,15 @@ async def server_software(
                 FROM server_software_inventory
                 WHERE server_id = :id
                 ORDER BY lower(package_name)
-                LIMIT 1000"""),
-        {"id": server_id},
+                LIMIT :lim"""),
+        {"id": server_id, "lim": limit},
     )).mappings().all()
-    return {"items": [dict(r) for r in rows]}
+    total = (await db.execute(
+        text("SELECT COUNT(*) FROM server_software_inventory WHERE server_id = :id"),
+        {"id": server_id},
+    )).scalar_one()
+    return {"items": [dict(r) for r in rows], "total": int(total),
+            "truncated": int(total) > len(rows)}
 
 
 @router.get("/{server_id}/compliance")
@@ -685,7 +745,7 @@ async def server_compliance(
 async def server_evaluate_baselines(
     server_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     from app.services.baseline_service import evaluate_server
     summary = await evaluate_server(db, str(server_id))
@@ -761,6 +821,7 @@ def _agent_response(row: dict) -> AgentResponse:
         last_config_hash=row.get("last_config_hash"),
         queue_depth=row.get("queue_depth") or 0,
         spool_bytes=row.get("spool_bytes") or 0,
+        clock_skew_s=row.get("clock_skew_s") or 0,
         update_ring=row["update_ring"],
         desired_version=row.get("desired_version"),
         current_version=row.get("current_version"),
@@ -783,7 +844,7 @@ async def server_install_token(
     request: Request,
     data: Optional[InstallTokenCreate] = None,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     server_row = (await db.execute(
         text("SELECT site_id, hostname FROM servers WHERE id = :id"),
@@ -817,7 +878,7 @@ async def server_install_token(
     )).first()
     await db.commit()
 
-    server_url = _server_url(request)
+    server_url = await _server_url(request, db)
     msi_url = await _msi_download_url(platform, db, server_url)
     install_cmd = _msi_install_command(server_url, raw, platform)
 
@@ -841,7 +902,7 @@ async def standalone_install_token(
     request: Request,
     data: InstallTokenCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     """Generate an install token not bound to an existing server.
 
@@ -866,7 +927,7 @@ async def standalone_install_token(
     )).first()
     await db.commit()
 
-    server_url = _server_url(request)
+    server_url = await _server_url(request, db)
     msi_url = await _msi_download_url(data.platform, db, server_url)
     install_cmd = _msi_install_command(server_url, raw, data.platform)
 
@@ -902,14 +963,15 @@ async def _msi_download_url(platform: str, db: AsyncSession, server_url: str) ->
 
 def _msi_install_command(server_url: str, token: str, platform: str) -> str:
     if platform == "windows":
-        # msiexec silent install with public properties.
-        msi_url = shlex.quote(f"{server_url}/api/v1/agents/packages/windows/latest")
-        return (
-            f"msiexec /i {msi_url} /quiet /norestart "
-            f"CONTROLLER_URL=\"{server_url}\" "
-            f"ENROLLMENT_TOKEN=\"{token}\" "
-            f"VERIFY_TLS=1"
+        # Elevated PowerShell one-liner: fetch the installer script, which
+        # downloads the MSI, verifies its SHA-256 against the manifest, and
+        # installs silently with enrollment properties.
+        ps = (
+            f"$s=Join-Path $env:TEMP 'zenplus-agent-install.ps1'; "
+            f"Invoke-WebRequest -UseBasicParsing '{server_url}/api/v1/agents/install.ps1' -OutFile $s; "
+            f"& $s -ControllerUrl '{server_url}' -EnrollmentToken '{token}'"
         )
+        return f"powershell -NoProfile -ExecutionPolicy Bypass -Command \"{ps}\""
     elif platform == "linux":
         install_url = shlex.quote(f"{server_url}/api/v1/agents/install.sh")
         return (
@@ -918,7 +980,71 @@ def _msi_install_command(server_url: str, token: str, platform: str) -> str:
             f"ZENPLUS_ENROLLMENT_TOKEN={shlex.quote(token)} "
             "bash"
         )
-    return f"# install command for platform={platform} not yet defined"
+    return (f"# No installer is published for platform={platform} yet — "
+            "register the server and install the agent manually")
+
+
+# ── Enrollment token lifecycle ──────────────────────────────────────
+
+@router.get("/enrollment-tokens/list")
+async def list_enrollment_tokens(
+    include_expired: bool = Query(False),
+    limit: int = Query(100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Recent enrollment tokens (prefix only — raw tokens are never stored)."""
+    where = "1=1" if include_expired else "(t.expires_at > NOW() AND t.revoked_at IS NULL AND t.uses < t.max_uses)"
+    rows = (await db.execute(
+        text(f"""SELECT t.id, t.token_prefix, t.platform, t.hostname_hint, t.tags,
+                        t.expires_at, t.max_uses, t.uses, t.consumed_at, t.consumed_ip,
+                        t.revoked_at, t.created_at, t.server_id, t.policy_id,
+                        u.username AS created_by_name, p.name AS policy_name,
+                        s.display_name AS server_name
+                 FROM agent_enrollment_tokens t
+                 LEFT JOIN users u ON u.id = t.created_by
+                 LEFT JOIN agent_policies p ON p.id = t.policy_id
+                 LEFT JOIN servers s ON s.id = t.server_id
+                 WHERE {where}
+                 ORDER BY t.created_at DESC LIMIT :lim"""),
+        {"lim": limit},
+    )).mappings().all()
+    return {"items": [{
+        "id": str(r["id"]),
+        "token_prefix": r["token_prefix"],
+        "platform": r["platform"],
+        "hostname_hint": r["hostname_hint"],
+        "tags": _json_list(r["tags"]),
+        "expires_at": r["expires_at"],
+        "max_uses": r["max_uses"],
+        "uses": r["uses"],
+        "consumed_at": r["consumed_at"],
+        "consumed_ip": str(r["consumed_ip"]) if r["consumed_ip"] else None,
+        "revoked_at": r["revoked_at"],
+        "created_at": r["created_at"],
+        "created_by_name": r["created_by_name"],
+        "policy_id": str(r["policy_id"]) if r["policy_id"] else None,
+        "policy_name": r["policy_name"],
+        "server_id": str(r["server_id"]) if r["server_id"] else None,
+        "server_name": r["server_name"],
+    } for r in rows]}
+
+
+@router.post("/enrollment-tokens/{token_id}/revoke")
+async def revoke_enrollment_token(
+    token_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    res = await db.execute(
+        text("""UPDATE agent_enrollment_tokens SET revoked_at = NOW()
+                WHERE id = :id AND revoked_at IS NULL"""),
+        {"id": token_id},
+    )
+    await db.commit()
+    if res.rowcount == 0:
+        raise HTTPException(404, "Token not found or already revoked")
+    return {"ok": True}
 
 
 # ── Agent policies CRUD ─────────────────────────────────────────────
@@ -952,7 +1078,7 @@ async def list_policies(
 async def create_policy(
     data: AgentPolicyCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     row = (await db.execute(
         text("""INSERT INTO agent_policies
@@ -1009,7 +1135,7 @@ async def update_policy(
     policy_id: UUID,
     data: AgentPolicyUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     sets = []
     params: dict[str, Any] = {"id": policy_id}
@@ -1042,7 +1168,7 @@ async def update_policy(
 async def delete_policy(
     policy_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     row = (await db.execute(
         text("SELECT is_builtin FROM agent_policies WHERE id = :id"),
@@ -1125,10 +1251,233 @@ async def list_fleet(
                  LIMIT :limit OFFSET :offset"""),
         params,
     )).mappings().all()
+    summary_row = (await db.execute(text(
+        """SELECT COUNT(*) FILTER (WHERE status = 'online')   AS online,
+                  COUNT(*) FILTER (WHERE status = 'stale')    AS stale,
+                  COUNT(*) FILTER (WHERE status = 'offline')  AS offline,
+                  COUNT(*) FILTER (WHERE status = 'disabled') AS disabled,
+                  COUNT(*)                                    AS total,
+                  COALESCE(SUM(queue_depth), 0)               AS queue_depth,
+                  COALESCE(SUM(spool_bytes), 0)               AS spool_bytes
+           FROM agents"""
+    ))).mappings().first()
+
     return {
         "items": [_agent_response(dict(r)) for r in rows],
         "total": total, "page": page, "page_size": page_size,
+        "summary": dict(summary_row) if summary_row else {},
     }
+
+
+# ── Agent packages (register before /{agent_id} so the literal path wins) ──
+
+@fleet_router.get("/packages")
+async def list_agent_packages(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    rows = (await db.execute(
+        text("""SELECT id, platform, arch, version, channel, file_name, file_size,
+                       sha256, is_latest, released_at
+                FROM agent_packages ORDER BY platform, released_at DESC"""),
+    )).mappings().all()
+    return {"items": [dict(r) | {"id": str(r["id"])} for r in rows]}
+
+
+@fleet_router.post("/packages/publish")
+async def publish_agent_packages(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Scan the on-disk package store and (re)register packages.
+
+    Layout: /opt/zenplus/artifacts/agents/<platform>/zenplus-agent-<version>.<ext>
+    (.msi for windows, .tar.gz for linux/macos). The newest version per
+    platform is flagged is_latest and served by the download endpoint.
+    """
+    from app.api.v1.agents import AGENT_PKG_DIR
+
+    def _parse_version(name: str) -> Optional[str]:
+        import re
+        m = re.match(r"^zenplus-agent[-_](\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+)?)\.(msi|tar\.gz)$", name)
+        return m.group(1) if m else None
+
+    published: list[dict] = []
+    skipped: list[str] = []
+    for platform in ("windows", "linux", "macos"):
+        pdir = AGENT_PKG_DIR / platform
+        if not pdir.is_dir():
+            continue
+        candidates = []
+        for f in sorted(pdir.iterdir()):
+            if not f.is_file():
+                continue
+            version = _parse_version(f.name)
+            if not version:
+                skipped.append(f"{platform}/{f.name}")
+                continue
+            digest = hashlib.sha256(f.read_bytes()).hexdigest()
+            candidates.append((version, f.name, f.stat().st_size, digest))
+        if not candidates:
+            continue
+        # Highest version (numeric-aware) becomes latest.
+        def _vkey(v: str):
+            return [int(p) if p.isdigit() else 0 for p in v.split("-")[0].split(".")]
+        candidates.sort(key=lambda c: _vkey(c[0]))
+        latest_version = candidates[-1][0]
+        for version, fname, fsize, digest in candidates:
+            await db.execute(
+                text("""INSERT INTO agent_packages
+                          (platform, arch, version, channel, file_name, file_size, sha256,
+                           download_path, is_latest)
+                        VALUES (:pl, 'amd64', :v, 'stable', :fn, :fs, :sha, :dp, :latest)
+                        ON CONFLICT (platform, arch, version, channel) DO UPDATE SET
+                          file_name = EXCLUDED.file_name,
+                          file_size = EXCLUDED.file_size,
+                          sha256 = EXCLUDED.sha256,
+                          download_path = EXCLUDED.download_path,
+                          is_latest = EXCLUDED.is_latest"""),
+                {"pl": platform, "v": version, "fn": fname, "fs": fsize, "sha": digest,
+                 "dp": f"/api/v1/agents/packages/{platform}/latest",
+                 "latest": version == latest_version},
+            )
+            published.append({"platform": platform, "version": version, "file_name": fname,
+                              "is_latest": version == latest_version})
+        await db.execute(
+            text("""UPDATE agent_packages SET is_latest = FALSE
+                    WHERE platform = :pl AND channel = 'stable' AND version != :v"""),
+            {"pl": platform, "v": latest_version},
+        )
+    await db.commit()
+    return {"published": published, "skipped": skipped,
+            "package_dir": str(AGENT_PKG_DIR)}
+
+
+# ── Pre-configured package download ─────────────────────────────────
+#
+# The published MSI ships with a fixed-width placeholder as the default value
+# of its ENROLLMENT_TOKEN property. Because every enrollment token is exactly
+# the same length ("zpa_enr_" + 32 chars), the placeholder can be rewritten
+# byte-for-byte in the packaged file: the compound-file layout, stream sizes
+# and string-pool offsets all stay valid, so no MSI rebuild is needed and the
+# operator gets a package that installs on N hosts with nothing to type.
+
+# Must match config.PlaceholderEnrollmentToken in the agent source.
+PKG_TOKEN_PLACEHOLDER = b"zpa_enr_PLACEHOLDERTOKENPLACEHOLDERTOKEN"
+
+
+def _stamp_enrollment_token(blob: bytes, raw_token: str) -> bytes:
+    """Rewrite the package's placeholder token in place.
+
+    Length equality is what makes this safe; it is asserted rather than
+    assumed, because a mismatch would silently corrupt the package.
+    """
+    token = raw_token.encode()
+    if len(token) != len(PKG_TOKEN_PLACEHOLDER):
+        raise HTTPException(
+            500,
+            f"Enrollment token is {len(token)} bytes but the package placeholder is "
+            f"{len(PKG_TOKEN_PLACEHOLDER)}; refusing to produce a corrupt package.",
+        )
+    occurrences = blob.count(PKG_TOKEN_PLACEHOLDER)
+    if occurrences == 0:
+        raise HTTPException(
+            409,
+            "The published package predates pre-configured downloads (no token "
+            "placeholder found). Rebuild and republish the agent package.",
+        )
+    return blob.replace(PKG_TOKEN_PLACEHOLDER, token)
+
+
+@fleet_router.post("/packages/download")
+async def download_preconfigured_package(
+    data: AgentPackageDownloadRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Return the published package with a freshly minted token stamped in.
+
+    The token's max_uses equals the requested server count, so one download
+    covers exactly that many hosts. The raw token is never persisted — only
+    its hash is stored, and the only copy leaves in the response body.
+    """
+    from app.api.v1.agents import AGENT_PKG_DIR
+
+    pkg = await _latest_package_for_download(data.platform, db)
+    if not pkg:
+        raise HTTPException(
+            404,
+            f"No {data.platform} agent package is published yet. Drop the package into "
+            f"{AGENT_PKG_DIR}/{data.platform}/ and publish it from this page.",
+        )
+    file_path = (AGENT_PKG_DIR / data.platform / pkg["file_name"]).resolve()
+    if not str(file_path).startswith(str(AGENT_PKG_DIR)) or not file_path.is_file():
+        raise HTTPException(410, "Published package file is missing on disk")
+
+    raw, hashed, prefix = _new_enrollment_token()
+    expires = datetime.now(timezone.utc) + timedelta(hours=data.ttl_hours)
+    tags = list(data.tags or [])
+    if data.label:
+        tags.append(data.label)
+
+    blob = _stamp_enrollment_token(file_path.read_bytes(), raw)
+
+    row = (await db.execute(
+        text("""INSERT INTO agent_enrollment_tokens
+                  (token_hash, token_prefix, platform, site_id, policy_id,
+                   hostname_hint, tags, expires_at, max_uses, created_by)
+                VALUES (:h, :p, :pl, :site, :pol, :hint, :tags, :exp, :mu, :cb)
+                RETURNING id, expires_at"""),
+        {
+            "h": hashed, "p": prefix,
+            # 'any' lets one package cover mixed hosts; the package itself is
+            # already platform-specific.
+            "pl": "any",
+            "site": data.site_id, "pol": data.policy_id,
+            "hint": data.label or f"pre-configured {data.platform} package",
+            "tags": json.dumps(tags), "exp": expires,
+            "mu": data.server_count, "cb": user.id,
+        },
+    )).first()
+    await db.commit()
+
+    logger.info(
+        "pre-configured %s package downloaded by user=%s token=%s max_uses=%d",
+        data.platform, user.id, prefix, data.server_count,
+    )
+
+    filename = pkg["file_name"]
+    media = "application/x-msi" if filename.endswith(".msi") else "application/octet-stream"
+    return Response(
+        content=blob,
+        media_type=media,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(blob)),
+            # Read by the dashboard to show what the download is good for.
+            # Deliberately no raw token here — it lives only inside the file.
+            "X-Token-Id": str(row[0]),
+            "X-Token-Prefix": prefix,
+            "X-Token-Expires-At": row[1].isoformat(),
+            "X-Token-Max-Uses": str(data.server_count),
+            "X-Package-Version": pkg["version"],
+            "Access-Control-Expose-Headers": (
+                "Content-Disposition,X-Token-Id,X-Token-Prefix,"
+                "X-Token-Expires-At,X-Token-Max-Uses,X-Package-Version"
+            ),
+        },
+    )
+
+
+async def _latest_package_for_download(platform: str, db: AsyncSession) -> Optional[dict]:
+    row = (await db.execute(
+        text("""SELECT * FROM agent_packages
+                WHERE platform = :p AND channel = 'stable' AND is_latest = TRUE
+                ORDER BY released_at DESC LIMIT 1"""),
+        {"p": platform},
+    )).mappings().first()
+    return dict(row) if row else None
 
 
 @fleet_router.get("/{agent_id}", response_model=AgentResponse)
@@ -1156,7 +1505,7 @@ async def get_agent(
 async def rotate_certificate(
     agent_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     await db.execute(
         text("""INSERT INTO agent_commands (agent_id, command, requested_by)
@@ -1171,7 +1520,7 @@ async def rotate_certificate(
 async def request_diagnostics(
     agent_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     row = (await db.execute(
         text("""INSERT INTO agent_commands (agent_id, command, requested_by)
@@ -1187,12 +1536,68 @@ async def request_diagnostics(
     return {"ok": True, "command_id": str(row[0])}
 
 
+# ── On-demand agent commands ────────────────────────────────────────
+# The agent implements collect_now and refresh_config but nothing could
+# queue them, so an operator had to wait out the collection interval to see
+# a change. Only commands the agent actually implements are accepted —
+# queueing an unsupported one just produces a failed row in its history.
+
+AGENT_ON_DEMAND_COMMANDS = {
+    "collect_now": "Collect now",
+    "refresh_config": "Refresh config",
+    "status": "Status report",
+}
+
+
+@fleet_router.post("/{agent_id}/commands/{command}")
+async def queue_agent_command(
+    agent_id: UUID,
+    command: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    if command not in AGENT_ON_DEMAND_COMMANDS:
+        raise HTTPException(
+            400,
+            f"Unsupported command '{command}'. Supported: "
+            + ", ".join(sorted(AGENT_ON_DEMAND_COMMANDS)),
+        )
+    agent = (await db.execute(
+        text("SELECT id, status FROM agents WHERE id = :id"), {"id": agent_id},
+    )).mappings().first()
+    if not agent:
+        raise HTTPException(404, "Agent not found")
+    if agent["status"] == "disabled":
+        raise HTTPException(409, "Agent is disabled; enable it before sending commands")
+
+    # Don't stack duplicates the agent hasn't picked up yet.
+    pending = (await db.execute(
+        text("""SELECT id FROM agent_commands
+                WHERE agent_id = :aid AND command = :cmd
+                  AND status IN ('queued', 'sent')
+                LIMIT 1"""),
+        {"aid": agent_id, "cmd": command},
+    )).first()
+    if pending:
+        return {"ok": True, "queued": False, "command": command,
+                "detail": f"{AGENT_ON_DEMAND_COMMANDS[command]} is already queued"}
+
+    await db.execute(
+        text("""INSERT INTO agent_commands (agent_id, command, requested_by)
+                VALUES (:aid, :cmd, :u)"""),
+        {"aid": agent_id, "cmd": command, "u": user.id},
+    )
+    await db.commit()
+    return {"ok": True, "queued": True, "command": command,
+            "detail": f"{AGENT_ON_DEMAND_COMMANDS[command]} queued"}
+
+
 @fleet_router.post("/{agent_id}/set-update-ring")
 async def set_update_ring(
     agent_id: UUID,
     ring: str = Query(..., regex="^(canary|beta|stable|pinned)$"),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     await db.execute(
         text("UPDATE agents SET update_ring = :r, updated_at = NOW() WHERE id = :id"),
@@ -1202,11 +1607,29 @@ async def set_update_ring(
     return {"ok": True}
 
 
+@fleet_router.delete("/{agent_id}")
+async def delete_agent(
+    agent_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Remove an agent record (offline leftovers, decommissioned hosts).
+
+    The uninstalled/retired agent's key stops authenticating immediately;
+    a live host can re-enroll with a fresh token. The server row is kept.
+    """
+    res = await db.execute(text("DELETE FROM agents WHERE id = :id"), {"id": agent_id})
+    await db.commit()
+    if res.rowcount == 0:
+        raise HTTPException(404, "Agent not found")
+    return {"ok": True}
+
+
 @fleet_router.post("/bulk")
 async def fleet_bulk_action(
     data: AgentBulkAction,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     if not data.agent_ids:
         return {"ok": True, "affected": 0}
@@ -1445,7 +1868,7 @@ async def _insert_rules(db: AsyncSession, baseline_id: str, rules) -> None:
 async def create_baseline(
     data: BaselineCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     dup = (await db.execute(
         text("SELECT 1 FROM software_baselines WHERE name = :n"), {"n": data.name},
@@ -1485,7 +1908,7 @@ async def update_baseline(
     baseline_id: UUID,
     data: BaselineUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     sets, params = [], {"id": baseline_id}
     for field in ("name", "description", "enabled", "alerting"):
@@ -1529,7 +1952,7 @@ async def update_baseline(
 async def delete_baseline(
     baseline_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     res = await db.execute(
         text("DELETE FROM software_baselines WHERE id = :id"), {"id": baseline_id},
@@ -1550,7 +1973,7 @@ async def delete_baseline(
 async def evaluate_baseline_now(
     baseline_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     from app.services.baseline_service import evaluate_baseline
     n = await evaluate_baseline(db, str(baseline_id))

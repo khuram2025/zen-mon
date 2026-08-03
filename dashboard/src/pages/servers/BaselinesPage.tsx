@@ -218,7 +218,7 @@ export function BaselinesPage() {
                             <Button
                               variant="ghost" size="icon" className="h-7 w-7"
                               onClick={() => evaluate.mutate(b)}
-                              disabled={evaluate.isPending}
+                              disabled={evaluate.isPending && evaluate.variables?.id === b.id}
                               title="Evaluate now"
                             >
                               <RefreshCw className={cn(
@@ -543,7 +543,7 @@ function ResultsDialog({
   const results = data?.items || []
 
   const counts: Record<ComplianceStatus, number> = { compliant: 0, missing: 0, outdated: 0, prohibited: 0 }
-  for (const r of results) counts[r.status] += 1
+  for (const r of results) counts[r.status] = (counts[r.status] ?? 0) + 1
 
   return (
     <Dialog open={!!baseline} onOpenChange={onOpenChange}>
