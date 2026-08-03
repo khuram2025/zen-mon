@@ -7,13 +7,18 @@ import {
   ArrowDown,
   ArrowUp,
   Bell,
+  BellOff,
+  BellRing,
   CheckCircle2,
   ChevronRight,
   Gauge,
   Layers,
   Loader2,
   Network,
+  Pencil,
+  Plus,
   Search,
+  Trash2,
   X,
   XCircle,
 } from 'lucide-react'
@@ -72,6 +77,58 @@ function rowAvgUtil(row: LinkRow): number | null {
 }
 
 type LinkKey = { device_id: string; if_index: number }
+
+type AlertRule = {
+  id: string
+  name: string
+  metric: string
+  operator: string
+  threshold: number | null
+  severity: string
+  enabled: boolean
+  min_duration: number
+  target: string | null
+  device_id: string | null
+  group_id: string | null
+  device_type: string | null
+  location: string | null
+  conditions: { metric: string; operator: string; threshold: number }[] | null
+}
+
+const IF_METRIC_LABELS: Record<string, string> = {
+  if_util_pct: 'Utilization',
+  if_in_bps: 'Inbound',
+  if_out_bps: 'Outbound',
+  if_errors: 'Errors',
+  if_discards: 'Discards',
+  if_oper_status: 'Link state',
+}
+
+/** Which existing rules cover this link? Mirrors the server's scope test
+ *  (network_alert_service._iface_matches_target): target is an if_index or a
+ *  name/descr/alias substring; empty target = every interface on the device.
+ *  Rules pinned to another device — or scoped by group/type/location we can't
+ *  resolve client-side — are left out rather than shown as a guess. */
+function ruleMatchesLink(rule: AlertRule, link: LinkRow): boolean {
+  if (!rule.metric?.startsWith('if_')) return false
+  if (rule.device_id) {
+    if (rule.device_id !== link.device_id) return false
+  } else if (rule.group_id || rule.device_type || rule.location) {
+    return false
+  }
+  const t = (rule.target || '').trim().toLowerCase()
+  if (!t) return true
+  if (/^\d+$/.test(t) && Number(t) === link.if_index) return true
+  return [link.if_name, link.if_descr, link.if_alias]
+    .some((s) => (s || '').toLowerCase().includes(t))
+}
+
+function ruleThresholdLabel(rule: AlertRule): string {
+  if (rule.threshold == null) return ''
+  if (rule.metric === 'if_util_pct') return `${rule.threshold}%`
+  if (rule.metric.includes('bps')) return formatBps(rule.threshold)
+  return String(rule.threshold)
+}
 
 function formatBucket(seconds: number): string {
   if (seconds % 3600 === 0) return `${seconds / 3600}h`
@@ -175,6 +232,8 @@ export function LinkUtilizationPage() {
   const [sort, setSort] = useState('util')
   const [selected, setSelected] = useState<LinkKey | null>(null)
   const [alertOpen, setAlertOpen] = useState(false)
+  /** Rule being edited in the alert dialog; null = creating a new one. */
+  const [editRule, setEditRule] = useState<AlertRule | null>(null)
 
   const debouncedSearch = useDebounced(search)
 
@@ -459,7 +518,8 @@ export function LinkUtilizationPage() {
               link={selectedRow}
               range={range}
               onClose={() => setSelected(null)}
-              onAlert={() => setAlertOpen(true)}
+              onAlert={() => { setEditRule(null); setAlertOpen(true) }}
+              onEditAlert={(rule) => { setEditRule(rule); setAlertOpen(true) }}
             />
           </div>
         )}
@@ -468,8 +528,9 @@ export function LinkUtilizationPage() {
       {selectedRow && (
         <LinkAlertDialog
           open={alertOpen}
-          onOpenChange={setAlertOpen}
+          onOpenChange={(v) => { setAlertOpen(v); if (!v) setEditRule(null) }}
           link={selectedRow}
+          rule={editRule}
         />
       )}
     </div>
@@ -477,12 +538,13 @@ export function LinkUtilizationPage() {
 }
 
 function LinkDetailPanel({
-  link, range, onClose, onAlert,
+  link, range, onClose, onAlert, onEditAlert,
 }: {
   link: LinkRow
   range: { hours: number; fromISO: string; toISO: string; isCustom: boolean; label: string }
   onClose: () => void
   onAlert: () => void
+  onEditAlert: (rule: AlertRule) => void
 }) {
   const label = link.if_alias || link.if_name || link.if_descr || `if${link.if_index}`
   const { hours, label: rangeLabel } = range
@@ -826,6 +888,8 @@ function LinkDetailPanel({
           </div>
         )}
 
+        <LinkAlertsSection link={link} onCreate={onAlert} onEdit={onEditAlert} />
+
         <div className="flex flex-wrap gap-2 border-t border-border/50 pt-3">
           <Button size="sm" variant="outline" asChild>
             <Link to={`/devices/${link.device_id}/interfaces`}>
@@ -845,6 +909,144 @@ function LinkDetailPanel({
   )
 }
 
+function LinkAlertsSection({
+  link, onCreate, onEdit,
+}: {
+  link: LinkRow
+  onCreate: () => void
+  onEdit: (rule: AlertRule) => void
+}) {
+  const qc = useQueryClient()
+  const { data, isLoading } = useQuery<{ data: AlertRule[] }>({
+    queryKey: ['alert-rules'],
+    queryFn: async () => (await api.get('/alert-rules')).data,
+  })
+
+  const rules = useMemo(
+    () => (data?.data || []).filter((r) => ruleMatchesLink(r, link)),
+    [data, link],
+  )
+
+  const toggle = useMutation({
+    mutationFn: async (id: string) => (await api.post(`/alert-rules/${id}/toggle`)).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['alert-rules'] }),
+    onError: (e) => toast.error(apiErrorMessage(e)),
+  })
+  const remove = useMutation({
+    mutationFn: async (id: string) => api.delete(`/alert-rules/${id}`),
+    onSuccess: () => {
+      toast.success('Alert rule deleted')
+      qc.invalidateQueries({ queryKey: ['alert-rules'] })
+    },
+    onError: (e) => toast.error(apiErrorMessage(e)),
+  })
+
+  return (
+    <div className="rounded-lg border border-border/60 bg-surface2/20 p-4">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h3 className="flex items-center gap-2 text-sm font-semibold">
+          <Bell className="h-4 w-4 text-warning" />
+          Configured alerts
+          {rules.length > 0 && (
+            <Badge variant="outline" className="text-[10px]">{rules.length}</Badge>
+          )}
+        </h3>
+        <Button size="sm" variant="outline" onClick={onCreate}>
+          <Plus className="h-3.5 w-3.5" /> Add rule
+        </Button>
+      </div>
+
+      {isLoading ? (
+        <div className="py-2 text-xs text-muted">
+          <Loader2 className="mr-1 inline h-3.5 w-3.5 animate-spin" /> Loading rules…
+        </div>
+      ) : rules.length === 0 ? (
+        <p className="text-xs text-muted">
+          No alert rules cover this interface yet — add one to get notified on high
+          utilization, errors, or link state changes.
+        </p>
+      ) : (
+        <div className="space-y-1.5">
+          {rules.map((r) => {
+            // Rules with several AND/OR conditions can't be edited by this
+            // simple dialog without dropping the other conditions.
+            const compound = (r.conditions?.length || 0) > 1
+            return (
+              <div
+                key={r.id}
+                className={cn(
+                  'flex flex-wrap items-center gap-2 rounded-md border border-border/50 bg-surface/60 px-3 py-2',
+                  !r.enabled && 'opacity-60',
+                )}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-xs font-medium">{r.name}</div>
+                  <div className="text-[11px] text-muted">
+                    {compound
+                      ? `${r.conditions!.length} conditions`
+                      : `${IF_METRIC_LABELS[r.metric] || r.metric} ${r.operator} ${ruleThresholdLabel(r)}`}
+                    {r.min_duration > 0 && ` · sustained ${Math.round(r.min_duration / 60)}m`}
+                    {' · '}
+                    {r.target ? 'this interface' : 'all interfaces'}
+                    {!r.device_id && ' · all devices'}
+                  </div>
+                </div>
+                <Badge
+                  variant={r.severity === 'critical' ? 'danger' : r.severity === 'warning' ? 'warning' : 'info'}
+                  className="text-[10px]"
+                >
+                  {r.severity}
+                </Badge>
+                <div className="flex items-center gap-0.5">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 w-7 p-0"
+                    title={r.enabled ? 'Disable rule' : 'Enable rule'}
+                    disabled={toggle.isPending}
+                    onClick={() => toggle.mutate(r.id)}
+                  >
+                    {r.enabled
+                      ? <BellRing className="h-3.5 w-3.5 text-success" />
+                      : <BellOff className="h-3.5 w-3.5 text-muted" />}
+                  </Button>
+                  {compound ? (
+                    <Button size="sm" variant="ghost" className="h-7 w-7 p-0" title="Compound rule — edit in Alert Rules" asChild>
+                      <Link to="/alert-rules"><Pencil className="h-3.5 w-3.5" /></Link>
+                    </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 w-7 p-0"
+                      title="Edit rule"
+                      onClick={() => onEdit(r)}
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 w-7 p-0"
+                    title="Delete rule"
+                    disabled={remove.isPending}
+                    onClick={() => {
+                      if (window.confirm(`Delete alert rule "${r.name}"?`)) remove.mutate(r.id)
+                    }}
+                  >
+                    <Trash2 className="h-3.5 w-3.5 text-danger" />
+                  </Button>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function MiniStat({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: string }) {
   return (
     <div className="rounded-md border border-border/50 bg-surface2/30 px-3 py-2">
@@ -856,9 +1058,16 @@ function MiniStat({ label, value, sub, tone }: { label: string; value: string; s
 }
 
 function LinkAlertDialog({
-  open, onOpenChange, link,
-}: { open: boolean; onOpenChange: (v: boolean) => void; link: LinkRow }) {
+  open, onOpenChange, link, rule,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  link: LinkRow
+  /** When set, the dialog edits this existing rule instead of creating one. */
+  rule?: AlertRule | null
+}) {
   const qc = useQueryClient()
+  const isEdit = !!rule
   const label = link.if_alias || link.if_name || `if${link.if_index}`
   const [name, setName] = useState('')
   const [metric, setMetric] = useState('if_util_pct')
@@ -866,21 +1075,53 @@ function LinkAlertDialog({
   const [severity, setSeverity] = useState('warning')
   const [minutes, setMinutes] = useState('5')
 
+  // The dialog stays mounted across open/close, so seed the fields on every
+  // open: from the rule when editing, back to defaults when creating.
+  useEffect(() => {
+    if (!open) return
+    setName(rule?.name ?? '')
+    setMetric(rule?.metric ?? 'if_util_pct')
+    setThreshold(rule?.threshold != null ? String(rule.threshold) : '80')
+    setSeverity(rule?.severity ?? 'warning')
+    setMinutes(rule ? String(Math.round((rule.min_duration || 0) / 60)) : '5')
+  }, [open, rule])
+
   const create = useMutation({
-    mutationFn: async () => (await api.post('/alert-rules', {
-      name: name || `${label} high utilization`,
-      metric,
-      operator: '>',
-      threshold: Number(threshold),
-      severity,
-      min_duration: Math.round(Number(minutes) * 60),
-      device_id: link.device_id,
-      target: link.if_name || String(link.if_index),
-      enabled: true,
-      notify_channels: [],
-    })).data,
+    mutationFn: async () => {
+      const body = {
+        name: name || `${label} high utilization`,
+        metric,
+        threshold: Number(threshold),
+        severity,
+        min_duration: Math.round(Number(minutes) * 60),
+      }
+      if (isEdit) {
+        // Operator and scope are preserved. The engine reads the flat fields,
+        // but a rule saved with a conditions array keeps it as the source of
+        // truth in the Alert Rules editor — resend it so both stay in step.
+        const withConditions = rule!.conditions?.length === 1
+          ? {
+              ...body,
+              conditions: [{
+                metric,
+                operator: rule!.operator || '>',
+                threshold: Number(threshold),
+              }],
+            }
+          : body
+        return (await api.put(`/alert-rules/${rule!.id}`, withConditions)).data
+      }
+      return (await api.post('/alert-rules', {
+        ...body,
+        operator: '>',
+        device_id: link.device_id,
+        target: link.if_name || String(link.if_index),
+        enabled: true,
+        notify_channels: [],
+      })).data
+    },
     onSuccess: () => {
-      toast.success('Alert rule created')
+      toast.success(isEdit ? 'Alert rule updated' : 'Alert rule created')
       qc.invalidateQueries({ queryKey: ['alert-rules'] })
       onOpenChange(false)
     },
@@ -893,7 +1134,7 @@ function LinkAlertDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <AlertTriangle className="h-4 w-4 text-warning" />
-            Usage alert for {label}
+            {isEdit ? `Edit alert · ${rule!.name}` : `Usage alert for ${label}`}
           </DialogTitle>
         </DialogHeader>
         <div className="space-y-3 text-sm">
@@ -944,7 +1185,9 @@ function LinkAlertDialog({
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button onClick={() => create.mutate()} disabled={create.isPending}>
-            {create.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Create rule'}
+            {create.isPending
+              ? <Loader2 className="h-4 w-4 animate-spin" />
+              : isEdit ? 'Save changes' : 'Create rule'}
           </Button>
         </DialogFooter>
       </DialogContent>

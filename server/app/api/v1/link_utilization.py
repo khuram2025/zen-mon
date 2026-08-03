@@ -191,6 +191,14 @@ async def list_links(
         util = _util_pct(in_bps, out_bps, speed)
         peak_util = _util_pct(m.get("max_in_bps", 0), m.get("max_out_bps", 0), speed)
         oper = row[7] or ("up" if m.get("oper_status_ch") == 1 else "down")
+        # SPAN/mirror destination ports (and some LAG members) report
+        # ifOperStatus=down while forwarding real traffic — Cisco marks SPAN
+        # destinations "down (monitoring)". Moving counters are ground truth:
+        # a genuinely down port cannot produce a non-zero rate in its latest
+        # sample, so present these as up instead of the contradictory
+        # "Down + 240 Mbps".
+        if oper != "up" and (in_bps > 0 or out_bps > 0):
+            oper = "up"
         # ip_address is inet, so ::text yields "192.168.100.102/32", but the
         # flow exporter IPs from ClickHouse carry no prefix. Comparing the raw
         # values never matched, so has_netflow was always False.
@@ -499,6 +507,14 @@ async def link_detail(
             # query that made every interface report "no flow records".
             logger.exception("netflow overlay failed for %s/%s", exporter_ip, if_index)
 
+    # Same SPAN/mirror-port correction as the list endpoint: ifOperStatus says
+    # down, but the latest sample carries traffic — the port is forwarding.
+    oper_status = inv[5]
+    if oper_status != "up" and (
+        summary.get("in_current_bps", 0) > 0 or summary.get("out_current_bps", 0) > 0
+    ):
+        oper_status = "up"
+
     return {
         "device_id": did,
         "if_index": if_index,
@@ -510,7 +526,7 @@ async def link_detail(
         "if_speed": inv[3],
         "configured_speed_bps": inv[4],
         "effective_speed_bps": speed,
-        "oper_status": inv[5],
+        "oper_status": oper_status,
         "admin_status": inv[6],
         "mac_address": inv[7],
         "hours": hours,
