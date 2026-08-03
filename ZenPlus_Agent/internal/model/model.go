@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-const AgentVersion = "1.3.1"
+const AgentVersion = "1.3.2"
 
 var AgentCapabilities = []string{
 	"network_capture_v1",
