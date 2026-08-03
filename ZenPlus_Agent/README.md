@@ -11,7 +11,7 @@ This workspace contains a runnable Windows host agent based on `agent.md.txt`.
 .\open-agent-app.cmd
 ```
 
-The included config points to the test controller at `http://192.168.8.152`.
+The included config points to the test controller at `http://192.168.8.221`.
 If the controller has not shipped the Windows-agent endpoints yet, the agent keeps collecting locally and spools batches in `data\state\spool.db` until upload succeeds.
 
 ## Enrollment
@@ -19,14 +19,14 @@ If the controller has not shipped the Windows-agent endpoints yet, the agent kee
 Set `enrollment_token` in `config\agent.yaml`, or pass another config file:
 
 ```yaml
-controller_url: http://192.168.8.152
+controller_url: http://192.168.8.221
 enrollment_token: zp_enroll_xxx
 site_id: site_123
 policy_id: policy_windows_baseline
 ```
 
 The agent posts to `POST /api/v1/agents/enroll`, stores the returned durable credential with Windows DPAPI, then uses that credential for heartbeats and uploads.
-After a successful enrollment the one-time `enrollment_token` is cleared from the config file.
+After a successful enrollment the bootstrap `enrollment_token` is cleared from the config file. A rollout token may be configured for multiple hosts; the controller consumes one use per enrolled host, not per package download.
 
 ## Commands
 
@@ -55,11 +55,23 @@ Build the self-contained setup executable:
 .\build.cmd
 ```
 
-The installer artifact is written to:
+The release artifacts are written to:
 
 ```powershell
 .\dist\ZenPlusAgentSetup-x64.exe
+.\dist\zenplus-agent-1.3.1.msi
+.\dist\agent-manifest.json
 ```
+
+The x64 MSI is generic and immutable: it contains no enrollment token. Download it once and distribute the same checksum-verified package through GPO, Intune, SCCM, or another fleet tool, supplying a suitably scoped rollout token as an install-time secret.
+
+For a signed release, provide a certificate thumbprint and require signing so the build cannot silently publish an unsigned artifact:
+
+```powershell
+.\scripts\build.ps1 -ControllerUrl "https://controller.example" -SigningThumbprint "<sha1-thumbprint>" -RequireSigning
+```
+
+The certificate may be in the current-user or local-machine `My` store. `ZENPLUS_SIGNING_THUMBPRINT` and `ZENPLUS_TIMESTAMP_URL` are supported for CI/release automation.
 
 Interactive install:
 
@@ -105,8 +117,7 @@ For current-user installs, setup installs under `%LOCALAPPDATA%\Programs\ZenPlus
 It also creates Startup shortcuts that launch the dashboard with `--start-hidden`, so the companion app starts in the Windows notification area/tray after sign-in. Windows decides whether that tray icon is shown directly or under the hidden-icons overflow.
 During install and uninstall the setup removes stale Start Menu entries, stops old ZenPlus agent/dashboard processes without showing console windows, removes the legacy `%ProgramData%\ZenPlus\Agent\bin` runtime folder, and reinstalls the service with restart-on-failure recovery actions for machine installs.
 
-To avoid Microsoft SmartScreen or "Unknown Publisher" warnings for customers, sign `dist\ZenPlusAgentSetup-x64.exe` and the embedded executables with a trusted Authenticode code-signing certificate before distribution.
-WiX/.NET are not installed in this workspace, so this build currently emits the production EXE setup only. Build the MSI on a release machine with WiX available, or add WiX to the build image before enabling MSI output.
+To avoid Microsoft SmartScreen or "Unknown Publisher" warnings for customers, sign the MSI, setup, and embedded executables with a trusted Authenticode code-signing certificate in the release pipeline. Recompute the published SHA-256 after signing and never patch a signed MSI.
 
 ## Implemented
 
@@ -123,6 +134,8 @@ WiX/.NET are not installed in this workspace, so this build currently emits the 
 - Windows tray/taskbar companion with Open Dashboard, Collect Now, hide-to-tray, and Quit UI actions.
 - Single-instance dashboard/tray process guard.
 - Service status visibility in both dashboard and `zenplus-agentctl service-status`.
+- On-demand, cancellable network capture with process/service, endpoint, port, protocol, and byte counters.
+- Per-interface cumulative traffic, current/peak throughput, link speed, and utilisation samples during capture windows.
 
 ## Controller Contract
 
@@ -134,3 +147,6 @@ The agent expects these endpoints:
 - `POST /api/v1/agents/results/host`
 - `POST /api/v1/agents/commands/poll`
 - `POST /api/v1/agents/commands/{id}/result`
+- `POST /api/v1/agents/network-capture`
+
+Heartbeat capabilities in version 1.3.1 are `network_capture_v1`, `capture_stop_v1`, and `interface_traffic_v1`.

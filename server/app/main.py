@@ -98,6 +98,11 @@ def create_app() -> FastAPI:
         # Agent/server staleness sweep (online → stale → offline + alerts).
         from app.services.server_health_service import health_sweeper_loop
         app.state.health_sweeper = asyncio.create_task(health_sweeper_loop())
+        # On-demand network captures: reconcile expired commands and runs that
+        # lost their final agent upload.  The loop uses a Postgres advisory
+        # lock, so it is safe when every Uvicorn worker starts one.
+        from app.services.network_capture_service import capture_sweeper_loop
+        app.state.network_capture_sweeper = asyncio.create_task(capture_sweeper_loop())
         # Discovery: recover restart-stranded runs, then fire due schedules.
         from app.services.discovery_scheduler import discovery_scheduler_loop
         app.state.discovery_scheduler = asyncio.create_task(discovery_scheduler_loop())
@@ -133,7 +138,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("health_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry"):
+        for attr in ("health_sweeper", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

@@ -24,6 +24,7 @@ import { toast } from '@/components/ui/Toast'
 import { AgentStatusBadge, KpiTile, TagList } from '@/components/servers/shared'
 import { InstallTokenDialog } from '@/components/servers/InstallTokenDialog'
 import { DownloadAgentDialog } from '@/components/servers/DownloadAgentDialog'
+import { RolloutTokensDialog } from '@/components/servers/RolloutTokensDialog'
 import type { AgentItem, AgentPolicy, UpdateRing } from '@/types/servers'
 
 interface AgentFleetSummary {
@@ -105,6 +106,7 @@ export function AgentFleetPage() {
   const [ring, setRing] = useState('all')
   const [page, setPage] = useState(1)
   const [deployOpen, setDeployOpen] = useState(false)
+  const [tokensOpen, setTokensOpen] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [bulkAction, setBulkAction] = useState<BulkAction>('request_diagnostics')
   const [bulkPolicy, setBulkPolicy] = useState('')
@@ -259,6 +261,10 @@ export function AgentFleetPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => setTokensOpen(true)}>
+            <KeyRound className="h-4 w-4" />
+            Rollout tokens
+          </Button>
           <Button variant="outline" onClick={() => setDownloadOpen(true)}>
             <Download className="h-4 w-4" />
             Download agent
@@ -523,6 +529,7 @@ export function AgentFleetPage() {
 
       <InstallTokenDialog open={deployOpen} onOpenChange={setDeployOpen} />
       <DownloadAgentDialog open={downloadOpen} onOpenChange={setDownloadOpen} />
+      <RolloutTokensDialog open={tokensOpen} onOpenChange={setTokensOpen} />
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         onOpenChange={(o) => { if (!o) setDeleteTarget(null) }}

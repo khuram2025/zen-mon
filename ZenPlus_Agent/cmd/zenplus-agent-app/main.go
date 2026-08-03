@@ -435,7 +435,7 @@ func (a *appUI) showSettings() {
 				Layout:     Grid{Margins: Margins{Left: 12, Top: 10, Right: 12, Bottom: 10}, Spacing: 8, Columns: 2},
 				Children: []Widget{
 					Label{Text: "Controller URL", TextColor: text, MinSize: Size{Width: 118}},
-					LineEdit{AssignTo: &remoteURL, Text: cfg.ControllerURL, CueBanner: "http://192.168.8.152", Background: SolidColorBrush{Color: fieldBg}, TextColor: text, MinSize: Size{Height: 28}},
+					LineEdit{AssignTo: &remoteURL, Text: cfg.ControllerURL, CueBanner: "http://192.168.8.221", Background: SolidColorBrush{Color: fieldBg}, TextColor: text, MinSize: Size{Height: 28}},
 					Label{Text: "Site ID", TextColor: text},
 					LineEdit{AssignTo: &siteID, Text: cfg.SiteID, CueBanner: "Optional", Background: SolidColorBrush{Color: fieldBg}, TextColor: text, MinSize: Size{Height: 28}},
 					Label{Text: "Policy ID", TextColor: text},

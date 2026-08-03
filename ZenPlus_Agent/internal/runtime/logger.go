@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
+	"regexp"
 )
 
 type Logger struct {
@@ -28,7 +28,7 @@ func NewLogger(path string, mirrorStdout bool) (*Logger, error) {
 	if mirrorStdout {
 		w = io.MultiWriter(os.Stdout, f)
 	}
-	return &Logger{Logger: log.New(w, "", log.LstdFlags|log.LUTC), file: f}, nil
+	return &Logger{Logger: log.New(redactingWriter{Writer: w}, "", log.LstdFlags|log.LUTC), file: f}, nil
 }
 
 func (l *Logger) Close() error {
@@ -39,10 +39,32 @@ func (l *Logger) Close() error {
 }
 
 func Redact(s string) string {
-	for _, marker := range []string{"zp_enroll_", "Bearer ", "credential=", "token="} {
-		if idx := strings.Index(s, marker); idx >= 0 {
-			return s[:idx+len(marker)] + "REDACTED"
-		}
+	for _, rule := range redactionRules {
+		s = rule.pattern.ReplaceAllString(s, rule.replacement)
 	}
 	return s
+}
+
+type redactingWriter struct {
+	io.Writer
+}
+
+func (w redactingWriter) Write(p []byte) (int, error) {
+	redacted := []byte(Redact(string(p)))
+	_, err := w.Writer.Write(redacted)
+	if err != nil {
+		return 0, err
+	}
+	// log.Logger expects a successful writer to report the length of its input,
+	// even when redaction changes the output length.
+	return len(p), nil
+}
+
+var redactionRules = []struct {
+	pattern     *regexp.Regexp
+	replacement string
+}{
+	{regexp.MustCompile(`(?i)\b(zpa_enr_|zp_enroll_)[a-z0-9._~-]+`), `${1}REDACTED`},
+	{regexp.MustCompile(`(?i)(\bbearer\s+)[^\s,;"']+`), `${1}REDACTED`},
+	{regexp.MustCompile(`(?i)(\b(?:enrollment_token|token|credential)\s*[:=]\s*["']?)[^\s,;"'&]+`), `${1}REDACTED`},
 }

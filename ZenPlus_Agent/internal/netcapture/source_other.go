@@ -27,7 +27,7 @@ type rawConn struct {
 }
 
 type source interface {
-	Sample() ([]rawConn, error)
+	Sample(context.Context) ([]rawConn, error)
 	Close()
 }
 
@@ -46,8 +46,8 @@ func newSource() (source, string, bool) {
 
 func (s *posixSource) Close() {}
 
-func (s *posixSource) Sample() ([]rawConn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+func (s *posixSource) Sample(parent context.Context) ([]rawConn, error) {
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 
 	conns, err := net.ConnectionsWithContext(ctx, "inet")

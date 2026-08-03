@@ -159,7 +159,7 @@ func (u *setupWindow) settingsPanel() Widget {
 		Layout:     Grid{Margins: Margins{Left: 12, Top: 10, Right: 12, Bottom: 10}, Spacing: 8, Columns: 2},
 		Children: []Widget{
 			Label{Text: "Controller URL", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9}, MinSize: Size{Width: 120}},
-			LineEdit{AssignTo: &u.controllerURL, CueBanner: "http://192.168.8.152", Text: u.opts.controllerURL, Background: SolidColorBrush{Color: setupField}, TextColor: setupText, MinSize: Size{Height: 28}},
+			LineEdit{AssignTo: &u.controllerURL, CueBanner: "http://192.168.8.221", Text: u.opts.controllerURL, Background: SolidColorBrush{Color: setupField}, TextColor: setupText, MinSize: Size{Height: 28}},
 			Label{Text: "Enrollment Token", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9}},
 			LineEdit{AssignTo: &u.token, CueBanner: "Optional", Text: u.opts.enrollmentToken, PasswordMode: true, Background: SolidColorBrush{Color: setupField}, TextColor: setupText, MinSize: Size{Height: 28}},
 			Label{Text: "Site ID", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9}},

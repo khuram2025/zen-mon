@@ -2,7 +2,13 @@ package model
 
 import "time"
 
-const AgentVersion = "1.2.0"
+const AgentVersion = "1.3.1"
+
+var AgentCapabilities = []string{
+	"network_capture_v1",
+	"capture_stop_v1",
+	"interface_traffic_v1",
+}
 
 type Metric struct {
 	Kind      string         `json:"kind"`
@@ -47,12 +53,13 @@ type Health struct {
 }
 
 type Heartbeat struct {
-	Version          string `json:"version"`
-	UptimeSeconds    int64  `json:"uptime_seconds,omitempty"`
-	QueueDepth       int    `json:"queue_depth,omitempty"`
-	SpoolBytes       int64  `json:"spool_bytes,omitempty"`
-	ConfigHash       string `json:"config_hash,omitempty"`
-	ConfigApplyError string `json:"config_apply_error,omitempty"`
+	Version          string   `json:"version"`
+	Capabilities     []string `json:"capabilities,omitempty"`
+	UptimeSeconds    int64    `json:"uptime_seconds,omitempty"`
+	QueueDepth       int      `json:"queue_depth,omitempty"`
+	SpoolBytes       int64    `json:"spool_bytes,omitempty"`
+	ConfigHash       string   `json:"config_hash,omitempty"`
+	ConfigApplyError string   `json:"config_apply_error,omitempty"`
 }
 
 type HeartbeatResponse struct {
@@ -152,19 +159,20 @@ type CommandResult struct {
 
 // NetworkCaptureUpload streams flows from an in-progress or finished capture.
 type NetworkCaptureUpload struct {
-	CaptureID      string        `json:"capture_id"`
-	AgentID        string        `json:"agent_id"`
-	ServerID       string        `json:"server_id"`
-	Status         string        `json:"status"` // running | completed | failed
-	Interface      string        `json:"interface,omitempty"`
-	StartedAt      time.Time     `json:"started_at"`
-	EndsAt         time.Time     `json:"ends_at"`
-	Samples        int           `json:"samples"`
-	Truncated      bool          `json:"truncated"`
-	BytesAvailable bool          `json:"bytes_available"`
-	Note           string        `json:"note,omitempty"`
-	ErrorMessage   string        `json:"error_message,omitempty"`
-	Flows          []NetworkFlow `json:"flows"`
+	CaptureID      string                    `json:"capture_id"`
+	AgentID        string                    `json:"agent_id"`
+	ServerID       string                    `json:"server_id"`
+	Status         string                    `json:"status"` // running | completed | cancelled | failed
+	Interface      string                    `json:"interface,omitempty"`
+	StartedAt      time.Time                 `json:"started_at"`
+	EndsAt         time.Time                 `json:"ends_at"`
+	Samples        int                       `json:"samples"`
+	Truncated      bool                      `json:"truncated"`
+	BytesAvailable bool                      `json:"bytes_available"`
+	Note           string                    `json:"note,omitempty"`
+	ErrorMessage   string                    `json:"error_message,omitempty"`
+	Flows          []NetworkFlow             `json:"flows"`
+	Interfaces     []NetworkInterfaceTraffic `json:"interfaces,omitempty"`
 }
 
 type NetworkFlow struct {
@@ -183,6 +191,26 @@ type NetworkFlow struct {
 	FirstSeen     time.Time `json:"first_seen"`
 	LastSeen      time.Time `json:"last_seen"`
 	Samples       int       `json:"samples"`
+}
+
+// NetworkInterfaceTraffic is total interface traffic observed during a
+// capture window. Flow rows remain local/remote socket observations; these
+// counters are the authoritative all-protocol totals for interface usage.
+type NetworkInterfaceTraffic struct {
+	Interface            string    `json:"interface"`
+	InterfaceIndex       uint32    `json:"interface_index,omitempty"`
+	Timestamp            time.Time `json:"timestamp"`
+	RXBytes              uint64    `json:"rx_bytes"`
+	TXBytes              uint64    `json:"tx_bytes"`
+	RXBPS                float64   `json:"rx_bps"`
+	TXBPS                float64   `json:"tx_bps"`
+	PeakRXBPS            float64   `json:"peak_rx_bps"`
+	PeakTXBPS            float64   `json:"peak_tx_bps"`
+	LinkSpeedBPS         uint64    `json:"link_speed_bps,omitempty"`
+	ReceiveLinkSpeedBPS  uint64    `json:"receive_link_speed_bps,omitempty"`
+	TransmitLinkSpeedBPS uint64    `json:"transmit_link_speed_bps,omitempty"`
+	RXUtilizationPct     float64   `json:"rx_utilization_pct,omitempty"`
+	TXUtilizationPct     float64   `json:"tx_utilization_pct,omitempty"`
 }
 
 type DiagnosticsRequest struct {

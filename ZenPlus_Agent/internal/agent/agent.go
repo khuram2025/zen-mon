@@ -6,13 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"zenplus-agent/internal/backoff"
@@ -141,15 +139,11 @@ func Run(ctx context.Context, opts Options) error {
 		log.Printf("enrollment error: %v", err)
 	}
 	applyEnrollment(&cfg, enrollment)
-	if enrollment.Fresh && cfg.EnrollmentToken != "" {
+	if enrollment.Enrolled && cfg.EnrollmentToken != "" {
 		if err := config.ClearEnrollmentToken(opts.ConfigPath); err != nil {
 			log.Printf("unable to clear enrollment token from config: %v", err)
 		} else {
-			if config.HasEmbeddedEnrollmentToken() {
-				log.Printf("enrollment token removed from bootstrap config; this build keeps a compiled-in token as a re-enrollment fallback")
-			} else {
-				log.Printf("enrollment token cleared from bootstrap config")
-			}
+			log.Printf("enrollment token cleared from bootstrap config")
 			cfg.EnrollmentToken = ""
 		}
 	}
@@ -318,7 +312,7 @@ func refreshLocalRuntime(ctx context.Context, configPath string, cfg *config.Con
 		logf("%s", status.LastConfigError)
 		return false
 	}
-	if nextEnrollment.Fresh && cfg.EnrollmentToken != "" {
+	if nextEnrollment.Enrolled && cfg.EnrollmentToken != "" {
 		if err := config.ClearEnrollmentToken(configPath); err != nil {
 			logf("unable to clear enrollment token from config: %v", err)
 		} else {
@@ -559,9 +553,11 @@ func tryRecoverAuth(ctx context.Context, configPath string, cfg *config.Config, 
 		}
 		return
 	}
-	if res.Fresh && cfg.EnrollmentToken != "" {
+	if res.Enrolled && cfg.EnrollmentToken != "" {
 		if err := config.ClearEnrollmentToken(configPath); err != nil {
 			logf("unable to clear enrollment token from config: %v", err)
+		} else {
+			cfg.EnrollmentToken = ""
 		}
 	}
 	applyEnrollment(cfg, res)
@@ -601,6 +597,7 @@ func sendHeartbeat(ctx context.Context, cfg config.Config, store *spool.Store, u
 	now := time.Now().UTC()
 	hb := model.Heartbeat{
 		Version:          model.AgentVersion,
+		Capabilities:     append([]string(nil), model.AgentCapabilities...),
 		UptimeSeconds:    uptimeSeconds(enrollment.Identity.BootTime, now),
 		QueueDepth:       st.Depth,
 		SpoolBytes:       st.Bytes,
@@ -774,30 +771,39 @@ func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, 
 		if captureID == "" {
 			captureID = cmd.ID
 		}
-		if !captureMu.TryLock() {
-			return model.CommandResult{Success: false,
-				ErrorMessage: "a network capture is already running on this host"}
-		}
-		opts := netcapture.Options{
+		opts := netcapture.NormalizeOptions(netcapture.Options{
 			Duration:       time.Duration(paramInt(cmd.Params, "duration_s", 300)) * time.Second,
 			SampleInterval: time.Duration(paramInt(cmd.Params, "sample_interval_s", 2)) * time.Second,
+			FlushInterval:  time.Duration(paramInt(cmd.Params, "flush_interval_s", 10)) * time.Second,
 			MaxFlows:       paramInt(cmd.Params, "max_flows", 5000),
-		}
+		})
 		if iface, ok := cmd.Params["interface"].(string); ok {
-			opts.Interface = iface
+			opts.Interface = strings.TrimSpace(iface)
 		}
-		// The capture outlives this command result: the controller marks the
-		// command succeeded once the run starts, then follows progress through
-		// the streamed uploads.
-		go func() {
-			defer captureMu.Unlock()
-			runNetworkCapture(context.Background(), captureID, opts, up, logf)
-		}()
+		if err := netcapture.ValidateInterface(opts.Interface); err != nil {
+			return model.CommandResult{Success: false, ErrorMessage: err.Error()}
+		}
+		started, err := networkCaptures.Start(ctx, captureID, opts, up, logf)
+		if err != nil {
+			return model.CommandResult{Success: false, ErrorMessage: err.Error()}
+		}
 		return model.CommandResult{Success: true, Output: map[string]any{
-			"capture_id": captureID,
+			"capture_id": started.CaptureID,
 			"duration_s": int(opts.Duration.Seconds()),
 			"interface":  opts.Interface,
-			"status":     "running",
+			"status":     started.Status,
+			"duplicate":  started.Duplicate,
+		}}
+	case "stop_network_capture":
+		captureID, _ := cmd.Params["capture_id"].(string)
+		stopped, err := networkCaptures.Stop(ctx, captureID)
+		if err != nil {
+			return model.CommandResult{Success: false, ErrorMessage: err.Error()}
+		}
+		return model.CommandResult{Success: true, Output: map[string]any{
+			"capture_id": stopped.CaptureID,
+			"status":     stopped.Status,
+			"duplicate":  stopped.Duplicate,
 		}}
 	case "rotate_certificate":
 		return model.CommandResult{Success: false, ErrorMessage: "rotate_certificate is reserved for the future mTLS contract and is not enabled in this build"}
@@ -834,10 +840,6 @@ func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, 
 	}
 }
 
-// Only one capture at a time: concurrent runs would double the sampling cost
-// and interleave ESTATS enablement on the same connections.
-var captureMu sync.Mutex
-
 func paramInt(params map[string]any, key string, fallback int) int {
 	switch v := params[key].(type) {
 	case float64: // JSON numbers decode as float64
@@ -867,7 +869,25 @@ func toModelFlows(flows []netcapture.Flow) []model.NetworkFlow {
 	return out
 }
 
-func runNetworkCapture(ctx context.Context, captureID string, opts netcapture.Options, up *uploader.Uploader, logf func(string, ...any)) {
+func toModelInterfaces(samples []netcapture.InterfaceTraffic) []model.NetworkInterfaceTraffic {
+	out := make([]model.NetworkInterfaceTraffic, 0, len(samples))
+	for _, sample := range samples {
+		out = append(out, model.NetworkInterfaceTraffic{
+			Interface: sample.Interface, InterfaceIndex: sample.InterfaceIndex,
+			Timestamp: sample.Timestamp, RXBytes: sample.RXBytes, TXBytes: sample.TXBytes,
+			RXBPS: sample.RXBPS, TXBPS: sample.TXBPS,
+			PeakRXBPS: sample.PeakRXBPS, PeakTXBPS: sample.PeakTXBPS,
+			LinkSpeedBPS:         sample.LinkSpeedBPS,
+			ReceiveLinkSpeedBPS:  sample.ReceiveLinkSpeedBPS,
+			TransmitLinkSpeedBPS: sample.TransmitLinkSpeedBPS,
+			RXUtilizationPct:     sample.RXUtilizationPct,
+			TXUtilizationPct:     sample.TXUtilizationPct,
+		})
+	}
+	return out
+}
+
+func runNetworkCapture(ctx context.Context, captureID string, opts netcapture.Options, up captureSender, logf func(string, ...any)) string {
 	logf("network capture %s starting: duration=%s interval=%s interface=%q",
 		captureID, opts.Duration, opts.SampleInterval, opts.Interface)
 
@@ -875,6 +895,9 @@ func runNetworkCapture(ctx context.Context, captureID string, opts netcapture.Op
 		status := "running"
 		if final {
 			status = "completed"
+		}
+		if final && ctx.Err() != nil {
+			status = "cancelled"
 		}
 		if errMsg != "" {
 			status = "failed"
@@ -884,8 +907,15 @@ func runNetworkCapture(ctx context.Context, captureID string, opts netcapture.Op
 			StartedAt: st.StartedAt, EndsAt: st.EndsAt, Samples: st.Samples,
 			Truncated: st.Truncated, BytesAvailable: st.BytesAvailable,
 			Note: st.Note, ErrorMessage: errMsg, Flows: toModelFlows(flows),
+			Interfaces: toModelInterfaces(st.Interfaces),
 		}
-		sendCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		// A final cancelled status still has to leave the host after the capture
+		// context is cancelled, so uploads use a short independent deadline.
+		baseCtx := ctx
+		if final && ctx.Err() != nil {
+			baseCtx = context.WithoutCancel(ctx)
+		}
+		sendCtx, cancel := context.WithTimeout(baseCtx, 30*time.Second)
 		defer cancel()
 		if err := up.SendNetworkCapture(sendCtx, payload); err != nil {
 			logf("network capture %s upload failed: %v", captureID, err)
@@ -895,12 +925,17 @@ func runNetworkCapture(ctx context.Context, captureID string, opts netcapture.Op
 	stats, err := netcapture.Run(ctx, opts, func(flows []netcapture.Flow, final bool, st netcapture.Stats) {
 		send(flows, final, st, "")
 	}, logf)
-	if err != nil && !errors.Is(err, context.Canceled) {
+	if err != nil && ctx.Err() == nil {
 		logf("network capture %s failed: %v", captureID, err)
 		send(nil, true, stats, err.Error())
-		return
+		return "failed"
+	}
+	if err != nil && ctx.Err() != nil {
+		logf("network capture %s cancelled: %d samples, %d flows", captureID, stats.Samples, stats.FlowCount)
+		return "cancelled"
 	}
 	logf("network capture %s finished: %d samples, %d flows", captureID, stats.Samples, stats.FlowCount)
+	return "completed"
 }
 
 func diagnosticsRequest(paths runtime.Paths, enrollment enroll.Result, cmd model.Command) (model.DiagnosticsRequest, error) {
@@ -986,9 +1021,14 @@ func PrintConfig(configPath string) error {
 	if err != nil {
 		return err
 	}
-	b, _ := json.MarshalIndent(cfg, "", "  ")
+	b, _ := json.MarshalIndent(printableConfig(cfg), "", "  ")
 	fmt.Println(string(b))
 	return nil
+}
+
+func printableConfig(cfg config.Config) config.Config {
+	cfg.EnrollmentToken = ""
+	return cfg
 }
 
 func ResetEnrollment(configPath string) error {

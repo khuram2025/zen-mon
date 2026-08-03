@@ -1,0 +1,162 @@
+name: Windows agent MSI
+
+on:
+  push:
+    paths:
+      - "ZenPlus_Agent/**"
+      - "server/app/api/v1/agents.py"
+      - "server/app/api/v1/servers.py"
+      - "scripts/build-release.py"
+      - ".github/workflows/windows-agent.yml"
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-msi:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ZenPlus_Agent/go.mod
+          cache-dependency-path: ZenPlus_Agent/go.sum
+
+      - name: Require portal publishing configuration
+        shell: pwsh
+        env:
+          AUTO_PUBLISH: ${{ vars.ZENPLUS_AGENT_AUTO_PUBLISH }}
+          PORTAL_HOST: ${{ vars.ZENPLUS_AGENT_HOST }}
+          PORTAL_USER: ${{ vars.ZENPLUS_AGENT_USER }}
+          DEPLOYMENT_KEY: ${{ secrets.ZENPLUS_AGENT_SSH_PRIVATE_KEY }}
+        run: |
+          if ($env:AUTO_PUBLISH -ne 'true' -or
+              [string]::IsNullOrWhiteSpace($env:PORTAL_HOST) -or
+              [string]::IsNullOrWhiteSpace($env:PORTAL_USER) -or
+              [string]::IsNullOrWhiteSpace($env:DEPLOYMENT_KEY)) {
+            throw "MSI builds must publish to the portal. Configure ZENPLUS_AGENT_AUTO_PUBLISH=true, ZENPLUS_AGENT_HOST, ZENPLUS_AGENT_USER, and ZENPLUS_AGENT_SSH_PRIVATE_KEY."
+          }
+
+      - name: Build and test immutable x64 MSI
+        shell: pwsh
+        working-directory: ZenPlus_Agent
+        run: ./scripts/build.ps1
+
+      - name: Verify release outputs
+        shell: pwsh
+        working-directory: ZenPlus_Agent
+        run: |
+          $manifest = Get-Content ./dist/agent-manifest.json -Raw | ConvertFrom-Json
+          $msi = Get-Item (Join-Path ./dist $manifest.file_name)
+          if ($msi.Length -ne $manifest.size_bytes) {
+            throw "MSI size does not match agent-manifest.json"
+          }
+          $sha = (Get-FileHash -Algorithm SHA256 $msi.FullName).Hash.ToLowerInvariant()
+          if ($sha -ne $manifest.sha256) {
+            throw "MSI SHA-256 does not match agent-manifest.json"
+          }
+          if ($msi.Name -ne "zenplus-agent-$($manifest.version).msi") {
+            throw "MSI filename/version mismatch"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zenplus-agent-windows
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            ZenPlus_Agent/dist/zenplus-agent-*.msi
+            ZenPlus_Agent/dist/agent-manifest.json
+
+      - name: Attach MSI to GitHub release
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: >-
+          gh release upload $env:RELEASE_TAG
+          ZenPlus_Agent/dist/zenplus-agent-*.msi
+          ZenPlus_Agent/dist/agent-manifest.json
+          --clobber
+
+  publish-to-portal:
+    # The build job fails closed unless these repository variables and the
+    # deployment-key secret are configured, so a successful agent commit or
+    # release cannot silently omit the MSI from the portal.
+    # Agent-source commits publish the rebuilt package immediately; a GitHub
+    # release publishes the exact same verified artifact as a second path.
+    # The portal reconciles its package table from this directory on startup
+    # and whenever the fleet package list is opened; no manual publish call is
+    # required after the copy.
+    if: >-
+      vars.ZENPLUS_AGENT_AUTO_PUBLISH == 'true' &&
+      (github.event_name == 'push' || github.event_name == 'release' ||
+       github.event_name == 'workflow_dispatch')
+    needs: build-msi
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: zenplus-agent-windows
+          path: agent-artifact
+
+      - name: Configure deployment key
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.ZENPLUS_AGENT_SSH_PRIVATE_KEY }}
+          ZENPLUS_AGENT_HOST: ${{ vars.ZENPLUS_AGENT_HOST }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/zenplus-agent-release
+          chmod 0600 ~/.ssh/zenplus-agent-release
+          ssh-keyscan -H "$ZENPLUS_AGENT_HOST" >> ~/.ssh/known_hosts
+
+      - name: Publish MSI to portal artifact store
+        shell: bash
+        env:
+          ZENPLUS_AGENT_HOST: ${{ vars.ZENPLUS_AGENT_HOST }}
+          ZENPLUS_AGENT_USER: ${{ vars.ZENPLUS_AGENT_USER }}
+        run: |
+          set -euo pipefail
+          msi="$(find agent-artifact -maxdepth 1 -type f -name 'zenplus-agent-*.msi' -print -quit)"
+          test -n "$msi"
+          name="$(basename "$msi")"
+          sha="$(sha256sum "$msi" | awk '{print $1}')"
+          incoming="/tmp/${name}.${sha}.incoming"
+          scp -i ~/.ssh/zenplus-agent-release "$msi" \
+            "$ZENPLUS_AGENT_USER@$ZENPLUS_AGENT_HOST:$incoming"
+          ssh -i ~/.ssh/zenplus-agent-release \
+            "$ZENPLUS_AGENT_USER@$ZENPLUS_AGENT_HOST" \
+            bash -s -- "$name" "$sha" <<'REMOTE'
+          set -euo pipefail
+          name="$1"
+          expected_sha="$2"
+          incoming="/tmp/${name}.${expected_sha}.incoming"
+          destination="/opt/zenplus/artifacts/agents/windows/${name}"
+          trap 'rm -f -- "$incoming"' EXIT
+
+          [[ "$name" =~ ^zenplus-agent-[0-9]+\.[0-9]+\.[0-9]+\.msi$ ]]
+          [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]]
+          install -d -m 0755 /opt/zenplus/artifacts/agents/windows
+
+          if [[ -e "$destination" ]]; then
+            existing_sha="$(sha256sum "$destination" | awk '{print $1}')"
+            if [[ "$existing_sha" != "$expected_sha" ]]; then
+              echo "Refusing to replace immutable package $name ($existing_sha != $expected_sha). Bump AgentVersion and publish a new filename." >&2
+              exit 1
+            fi
+          else
+            install -m 0644 "$incoming" "$destination"
+          fi
+
+          actual_sha="$(sha256sum "$destination" | awk '{print $1}')"
+          [[ "$actual_sha" == "$expected_sha" ]]
+          REMOTE

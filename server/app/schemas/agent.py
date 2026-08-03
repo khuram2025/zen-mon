@@ -95,6 +95,7 @@ class ServerResponse(BaseModel):
     agent_status: Optional[str] = None
     agent_version: Optional[str] = None
     agent_last_heartbeat_at: Optional[datetime] = None
+    agent_capabilities: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -221,6 +222,7 @@ class AgentResponse(BaseModel):
     policy_id: Optional[str]
     policy_name: Optional[str] = None
     config_apply_error: Optional[str]
+    capabilities: List[str] = Field(default_factory=list)
     tags: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
@@ -269,6 +271,9 @@ class AgentHeartbeatRequest(BaseModel):
     spool_bytes: int = 0
     config_hash: Optional[str] = None
     config_apply_error: Optional[str] = None
+    # Optional preserves capabilities last advertised by a newer agent when
+    # an older binary briefly checks in during rollback/recovery.
+    capabilities: Optional[List[str]] = None
 
 
 class AgentHeartbeatResponse(BaseModel):
@@ -278,6 +283,7 @@ class AgentHeartbeatResponse(BaseModel):
     has_commands: bool = False
     desired_version: Optional[str] = None
     backpressure: Optional[Dict[str, Any]] = None
+    capabilities: List[str] = Field(default_factory=list)
 
 
 class AgentConfigResponse(BaseModel):
@@ -366,6 +372,65 @@ class AgentCommandResult(BaseModel):
     success: bool
     output: Dict[str, Any] = Field(default_factory=dict)
     error_message: Optional[str] = None
+
+
+class NetworkCaptureFlow(BaseModel):
+    protocol: str = Field("tcp", max_length=8)
+    direction: Literal["inbound", "outbound", "local", "unknown"] = "unknown"
+    kind: Literal["connection", "listener", "endpoint", "unknown"] = "unknown"
+    local_ip: str = Field("", max_length=64)
+    local_port: int = Field(0, ge=0, le=65535)
+    remote_ip: str = Field("", max_length=64)
+    remote_port: int = Field(0, ge=0, le=65535)
+    pid: int = Field(0, ge=0)
+    process_name: str = Field("", max_length=255)
+    service_name: str = Field("", max_length=255)
+    state: str = Field("", max_length=32)
+    bytes_sent: int = Field(0, ge=0)
+    bytes_received: int = Field(0, ge=0)
+    bytes_known: bool = False
+    first_seen: Optional[datetime] = None
+    last_seen: Optional[datetime] = None
+    samples: int = Field(0, ge=0)
+
+
+class NetworkCaptureInterfaceSample(BaseModel):
+    """One interface rate sample collected during an on-demand capture.
+
+    ``*_bps`` values are bits per second.  The byte counters are cumulative
+    within this capture (they reset when the capture starts).
+    """
+
+    interface: str = Field(..., min_length=1, max_length=255)
+    interface_index: int = Field(0, ge=0)
+    timestamp: datetime
+    rx_bytes: int = Field(0, ge=0)
+    tx_bytes: int = Field(0, ge=0)
+    rx_bps: float = Field(0, ge=0)
+    tx_bps: float = Field(0, ge=0)
+    peak_rx_bps: float = Field(0, ge=0)
+    peak_tx_bps: float = Field(0, ge=0)
+    link_speed_bps: int = Field(0, ge=0)
+    receive_link_speed_bps: int = Field(0, ge=0)
+    transmit_link_speed_bps: int = Field(0, ge=0)
+    rx_utilization_pct: Optional[float] = Field(None, ge=0)
+    tx_utilization_pct: Optional[float] = Field(None, ge=0)
+
+
+class NetworkCaptureUpload(BaseModel):
+    capture_id: UUID
+    status: Literal["running", "completed", "failed", "cancelled"] = "running"
+    started_at: Optional[datetime] = None
+    ends_at: Optional[datetime] = None
+    samples: int = Field(0, ge=0)
+    flows: List[NetworkCaptureFlow] = Field(default_factory=list, max_length=50000)
+    interfaces: List[NetworkCaptureInterfaceSample] = Field(
+        default_factory=list, max_length=256
+    )
+    bytes_available: bool = False
+    truncated: bool = False
+    note: Optional[str] = Field(None, max_length=4000)
+    error_message: Optional[str] = Field(None, max_length=4000)
 
 
 # ── Software baselines (compliance) ──────────────────────────────────
@@ -461,11 +526,10 @@ class ServerMetricsResponse(BaseModel):
 # ── Pre-configured package download ─────────────────────────────────
 
 class AgentPackageDownloadRequest(BaseModel):
-    """Mint an enrollment token sized to a rollout and stamp it into the MSI.
+    """Mint an enrollment token for an immutable rollout package download.
 
     server_count becomes the token's max_uses: one use is consumed per host
-    that enrolls, so the same downloaded package can be installed on exactly
-    that many servers.
+    that enrolls. Zero creates a reusable token for large deployments.
     """
     platform: Literal["windows", "linux", "macos"] = "windows"
     # 0 = reusable on any number of hosts until the token expires. A fixed

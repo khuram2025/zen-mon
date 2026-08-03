@@ -1,6 +1,8 @@
 import * as React from 'react'
 import { AlertTriangle } from 'lucide-react'
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from './Dialog'
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from './Dialog'
 import { Button } from './Button'
 
 export function ConfirmDialog({
@@ -33,7 +35,7 @@ export function ConfirmDialog({
             {title}
           </DialogTitle>
         </DialogHeader>
-        {description && <div className="text-sm text-muted">{description}</div>}
+        {description && <DialogDescription>{description}</DialogDescription>}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={loading}>
             {cancelText}

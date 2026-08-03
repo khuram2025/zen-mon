@@ -10,6 +10,7 @@
 
     <Package
       InstallerVersion="500"
+      Platform="x64"
       Compressed="yes"
       InstallScope="perMachine"
       InstallPrivileges="elevated"
@@ -20,58 +21,51 @@
 
     <Property Id="ARPSYSTEMCOMPONENT" Value="1" />
     <Property Id="CONTROLLER_URL" Secure="yes" />
-    <!--
-      Default value is a fixed-width placeholder that the controller rewrites
-      in place when an operator downloads the package, so each download
-      carries an enrollment token sized to that rollout. Enrollment tokens are
-      always exactly 40 chars ("zpa_enr_" + 32), matching this placeholder
-      byte for byte, which keeps the MSI's compound-file layout and string
-      pool valid without a rebuild. Do not change its length.
-      Passing ENROLLMENT_TOKEN on the msiexec command line still overrides it.
-    -->
-    <Property Id="ENROLLMENT_TOKEN" Secure="yes" Hidden="yes" Value="zpa_enr_PLACEHOLDERTOKENPLACEHOLDERTOKEN" />
+    <Property Id="ENROLLMENT_TOKEN" Secure="yes" Hidden="yes" />
     <Property Id="SITE_ID" Secure="yes" />
     <Property Id="POLICY_ID" Secure="yes" />
     <Property Id="PURGE" Secure="yes" />
+    <Property Id="InstallViaExe" Hidden="yes" />
 
     <Binary Id="ZenPlusAgentSetupExe" SourceFile="$(var.SetupExe)" />
 
-    <CustomAction
-      Id="SetInstallViaExe"
-      Property="InstallViaExe"
-      Value="/machine /quiet /norestart CONTROLLER_URL=&quot;[CONTROLLER_URL]&quot; ENROLLMENT_TOKEN=&quot;[ENROLLMENT_TOKEN]&quot; SITE_ID=&quot;[SITE_ID]&quot; POLICY_ID=&quot;[POLICY_ID]&quot;" />
+    <SetProperty
+      Id="InstallViaExe"
+      Value="/machine /quiet /norestart CONTROLLER_URL=&quot;[CONTROLLER_URL]&quot; ENROLLMENT_TOKEN=&quot;[ENROLLMENT_TOKEN]&quot; SITE_ID=&quot;[SITE_ID]&quot; POLICY_ID=&quot;[POLICY_ID]&quot;"
+      Sequence="execute"
+      Before="InstallViaExe">NOT Installed AND NOT REMOVE</SetProperty>
     <CustomAction
       Id="InstallViaExe"
       BinaryKey="ZenPlusAgentSetupExe"
-      ExeCommand="[CustomActionData]"
+      ExeCommand="[InstallViaExe]"
       Execute="deferred"
       Return="check"
-      Impersonate="no" />
+      Impersonate="no"
+      HideTarget="yes" />
 
-    <CustomAction
-      Id="SetUninstallViaExe"
-      Property="UninstallViaExe"
-      Value="&quot;[ProgramFilesFolder]ZenPlus\Agent\ZenPlusAgentSetup.exe&quot; /uninstall /quiet /machine" />
+    <SetProperty
+      Id="UninstallViaExe"
+      Value="&quot;[ProgramFiles64Folder]ZenPlus\Agent\ZenPlusAgentSetup.exe&quot; /uninstall /quiet /machine PURGE=&quot;[PURGE]&quot;"
+      Sequence="execute"
+      Before="UninstallViaExe">REMOVE=&quot;ALL&quot;</SetProperty>
     <CustomAction
       Id="UninstallViaExe"
       Directory="TARGETDIR"
-      ExeCommand="[CustomActionData]"
+      ExeCommand="[UninstallViaExe]"
       Execute="deferred"
       Return="ignore"
       Impersonate="no" />
 
     <InstallExecuteSequence>
-      <Custom Action="SetInstallViaExe" After="CostFinalize">NOT Installed AND NOT REMOVE</Custom>
-      <Custom Action="SetUninstallViaExe" After="SetInstallViaExe">REMOVE="ALL"</Custom>
-      <Custom Action="UninstallViaExe" After="InstallInitialize">REMOVE="ALL"</Custom>
-      <Custom Action="InstallViaExe" After="UninstallViaExe">NOT Installed AND NOT REMOVE</Custom>
+      <Custom Action="InstallViaExe" After="InstallInitialize">NOT Installed AND NOT REMOVE</Custom>
+      <Custom Action="UninstallViaExe" After="InstallViaExe">REMOVE="ALL"</Custom>
     </InstallExecuteSequence>
 
     <Directory Id="TARGETDIR" Name="SourceDir">
-      <Directory Id="ProgramFilesFolder">
+      <Directory Id="ProgramFiles64Folder">
         <Directory Id="CompanyFolder" Name="ZenPlus">
           <Directory Id="INSTALLFOLDER" Name="Agent">
-            <Component Id="MsiRegistryAnchor" Guid="dfac707f-a59f-4059-b139-734365363bfb">
+            <Component Id="MsiRegistryAnchor" Guid="dfac707f-a59f-4059-b139-734365363bfb" Win64="yes">
               <RegistryValue
                 Root="HKLM"
                 Key="Software\ZenPlus\AgentMsi"

@@ -13,10 +13,14 @@ See `deployment.md` for the build → publish → install flow.
   - `zenplus-agentctl.exe`
   - `zenplus-agent-app.exe`
   - `ZenPlusAgentSetup-x64.exe`
-- Build `zenplus-agent-<version>.msi` on a release machine with WiX installed.
+  - `zenplus-agent-<version>.msi`
+  - `agent-manifest.json`
 - Confirm the MSI `ProductVersion` matches `model.AgentVersion`.
-- If the build bakes in a controller URL/token, confirm both appear in
-  `dist\zenplus-agent.exe` and that the token is one you intend to publish.
+- Confirm the MSI summary template is `x64;1033`, its components are 64-bit,
+  and every EXE has PE machine type `0x8664`.
+- Confirm the MSI and binaries contain no enrollment-token placeholder or
+  compiled enrollment credential.
+- Confirm the MSI SHA-256 and byte length match `agent-manifest.json`.
 
 ## Signing
 
@@ -33,8 +37,12 @@ See `deployment.md` for the build → publish → install flow.
 - Upgrade over a previous ZenPlus install.
 - Upgrade over a legacy `%ProgramData%\ZenPlus\Agent\bin` install.
 - Quiet install with `CONTROLLER_URL`, `ENROLLMENT_TOKEN`, `SITE_ID`, and `POLICY_ID`.
-- Quiet install with **no** properties enrols using the baked-in controller/token.
-- MSI properties override the baked-in controller URL and token.
+- Quiet install with no token installs and waits for enrollment without an
+  authentication retry storm.
+- MSI properties override the default controller URL and supply a bootstrap
+  token only for the current deployment.
+- A multi-use rollout token enrolls the intended fleet from one unchanged MSI;
+  package download itself consumes no enrollment use.
 - Download from `/api/v1/agents/packages/windows/latest` matches the manifest SHA-256.
 - Uninstall without purge preserves config/state.
 - Current-user uninstall with purge removes `%LOCALAPPDATA%\ZenPlus\Agent`.
@@ -59,12 +67,22 @@ See `deployment.md` for the build → publish → install flow.
   than two hosts sharing one identity.
 - Controller reports `System clock synchronized: yes`; agents show
   `clock_skew_s` near zero and detail-page charts render points.
+- Heartbeat advertises `network_capture_v1`, `capture_stop_v1`, and
+  `interface_traffic_v1`.
+- A five-minute capture starts on demand, streams running updates, completes,
+  and records process/service, endpoints, ports, and available byte totals.
+- Stopping a capture produces `cancelled`; duplicate start/stop commands are
+  idempotent and do not create concurrent collectors.
+- Interface samples show cumulative RX/TX bytes, current/peak bit rates, link
+  speed, and utilisation for the selected NIC or all NICs.
 
 ## Security
 
 - Verify config and state live under `%ProgramData%\ZenPlus\Agent`.
 - Verify credentials are stored with DPAPI and are not printed in logs/UI.
 - Verify installer does not expose enrollment tokens after enrollment.
+- Verify `zenplus-agentctl print-config` omits the enrollment token and logs
+  redact token, credential, and bearer values.
 - Review whether `LocalSystem` is still required for collectors before release.
 
 ## Release Notes

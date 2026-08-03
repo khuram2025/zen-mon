@@ -54,7 +54,7 @@ func newSource() (source, string, bool) {
 }
 
 type source interface {
-	Sample() ([]rawConn, error)
+	Sample(context.Context) ([]rawConn, error)
 	Close()
 }
 
@@ -64,8 +64,8 @@ func (s *winSource) Close() {
 	}
 }
 
-func (s *winSource) Sample() ([]rawConn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+func (s *winSource) Sample(parent context.Context) ([]rawConn, error) {
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 
 	conns, err := net.ConnectionsWithContext(ctx, "inet")

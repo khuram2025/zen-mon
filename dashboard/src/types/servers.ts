@@ -37,6 +37,8 @@ export interface ServerItem {
   agent_id: string | null
   agent_status: AgentStatus | null
   agent_version: string | null
+  /** Feature flags advertised by the installed agent. */
+  agent_capabilities?: string[]
   agent_last_heartbeat_at: string | null
   agent_last_metric_at?: string | null
   /** Agent clock offset from the controller, in seconds. A non-zero value

@@ -1,15 +1,13 @@
-/** "Download agent" dialog: hands back the published installer with the
- *  controller URL and a freshly minted enrollment token already inside it.
+/** Download an immutable agent package and issue a separate rollout token.
  *
- *  By default the package is reusable: its token has no install limit and is
- *  bounded only by an expiry, so one download can be pushed to a whole estate
- *  through GPO/Intune/SCCM. A fixed install count is available when a rollout
- *  should be tightly scoped. */
+ * The controller returns the published binary unchanged. Enrollment metadata
+ * is delivered in response headers and is used to build a deployment command;
+ * it is never written into, or represented as part of, the MSI itself. */
 
 import { useState } from 'react'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  AlertTriangle, CheckCircle2, Download, Loader2, Server, ShieldCheck,
+  AlertTriangle, Check, CheckCircle2, Copy, Download, Loader2, Server, ShieldCheck,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
@@ -25,7 +23,7 @@ import { Input } from '@/components/ui/Input'
 import { toast } from '@/components/ui/Toast'
 import type { AgentPolicy } from '@/types/servers'
 
-type Platform = 'windows' | 'linux' | 'macos'
+type Platform = 'windows' | 'linux'
 
 interface AgentPackage {
   id: string
@@ -33,21 +31,26 @@ interface AgentPackage {
   version: string
   file_name: string
   file_size: number
+  sha256?: string | null
   is_latest: boolean
 }
 
 interface IssuedPackage {
   fileName: string
   version: string
+  packageSha256: string
+  enrollmentToken: string
+  tokenId: string
   tokenPrefix: string
   maxUses: number
   expiresAt: string
+  controllerUrl: string
+  installCommand: string
 }
 
 const EXT: Record<Platform, string> = {
   windows: '.msi',
   linux: '.tar.gz',
-  macos: '.tar.gz',
 }
 
 function fmtSize(bytes: number) {
@@ -56,11 +59,31 @@ function fmtSize(bytes: number) {
   return `${mb.toFixed(1)} MB`
 }
 
-/** Pull the server-supplied filename out of Content-Disposition. */
 function filenameFrom(disposition: unknown, fallback: string) {
   if (typeof disposition !== 'string') return fallback
   const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)
   return match?.[1] ? decodeURIComponent(match[1]) : fallback
+}
+
+function msiValue(value: string) {
+  return value.replace(/"/g, '""')
+}
+
+function shellValue(value: string) {
+  return `'${value.replace(/'/g, `'"'"'`)}'`
+}
+
+function deploymentCommand(
+  platform: Platform,
+  fileName: string,
+  controllerUrl: string,
+  enrollmentToken: string,
+) {
+  if (platform === 'windows') {
+    return `msiexec.exe /i "${msiValue(fileName)}" /qn /norestart CONTROLLER_URL="${msiValue(controllerUrl)}" ENROLLMENT_TOKEN="${msiValue(enrollmentToken)}"`
+  }
+  const installerUrl = `${controllerUrl.replace(/\/$/, '')}/api/v1/agents/install.sh`
+  return `curl -fsSL ${shellValue(installerUrl)} | sudo env ZENPLUS_CONTROLLER_URL=${shellValue(controllerUrl)} ZENPLUS_ENROLLMENT_TOKEN=${shellValue(enrollmentToken)} bash`
 }
 
 export function DownloadAgentDialog({
@@ -70,14 +93,15 @@ export function DownloadAgentDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
+  const qc = useQueryClient()
   const [platform, setPlatform] = useState<Platform>('windows')
-  // 'fleet' issues a reusable token (max_uses = 0); 'limited' caps installs.
   const [scope, setScope] = useState<'fleet' | 'limited'>('fleet')
   const [serverCount, setServerCount] = useState('10')
   const [ttlHours, setTtlHours] = useState('72')
   const [policyId, setPolicyId] = useState('')
   const [label, setLabel] = useState('')
   const [issued, setIssued] = useState<IssuedPackage | null>(null)
+  const [copied, setCopied] = useState(false)
 
   const { data: policies } = useQuery<AgentPolicy[]>({
     queryKey: ['agent-policies'],
@@ -92,95 +116,111 @@ export function DownloadAgentDialog({
   })
 
   const published = (packages?.items ?? []).find(
-    (p) => p.platform === platform && p.is_latest,
+    (item) => item.platform === platform && item.is_latest,
   )
-
-  // 0 tells the controller the token is reusable until it expires.
   const count = scope === 'fleet'
     ? 0
     : Math.max(1, Math.min(100000, Number(serverCount) || 1))
 
   const download = useMutation({
     mutationFn: async () => {
-      const res = await api.post(
+      const response = await api.post(
         '/agent-fleet/packages/download',
         {
           platform,
           server_count: count,
-          ttl_hours: Math.max(1, Number(ttlHours) || 72),
+          ttl_hours: Math.max(1, Math.min(8760, Number(ttlHours) || 72)),
           policy_id: policyId || null,
           label: label.trim() || null,
         },
-        // Binary response, and large: the shared 30s client timeout is not
-        // enough for a ~40 MB package over a slow link.
         { responseType: 'blob', timeout: 10 * 60_000 },
       )
 
       const fallback = `zenplus-agent${EXT[platform]}`
-      const fileName = filenameFrom(res.headers['content-disposition'], fallback)
-
-      // Hand the blob to the browser as a download.
-      const url = URL.createObjectURL(res.data as Blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = fileName
-      document.body.appendChild(a)
-      a.click()
-      a.remove()
-      // Revoke on the next tick so the navigation has picked the blob up.
-      setTimeout(() => URL.revokeObjectURL(url), 60_000)
-
-      return {
-        fileName,
-        version: String(res.headers['x-package-version'] ?? ''),
-        tokenPrefix: String(res.headers['x-token-prefix'] ?? ''),
-        maxUses: Number(res.headers['x-token-max-uses'] ?? count),
-        expiresAt: String(res.headers['x-token-expires-at'] ?? ''),
+      const fileName = filenameFrom(response.headers['content-disposition'], fallback)
+      const enrollmentToken = String(response.headers['x-enrollment-token'] ?? '')
+      const controllerUrl = String(response.headers['x-controller-url'] ?? window.location.origin)
+      if (!enrollmentToken) {
+        throw new Error('The controller did not return a rollout token for this package')
       }
+
+      const info: IssuedPackage = {
+        fileName,
+        version: String(response.headers['x-package-version'] ?? published?.version ?? ''),
+        packageSha256: String(response.headers['x-package-sha256'] ?? published?.sha256 ?? ''),
+        enrollmentToken,
+        tokenId: String(response.headers['x-token-id'] ?? ''),
+        tokenPrefix: String(response.headers['x-token-prefix'] ?? enrollmentToken.slice(0, 12)),
+        maxUses: Number(response.headers['x-token-max-uses'] ?? count),
+        expiresAt: String(response.headers['x-token-expires-at'] ?? ''),
+        controllerUrl,
+        installCommand: deploymentCommand(platform, fileName, controllerUrl, enrollmentToken),
+      }
+
+      // The response body is the published package byte-for-byte. The rollout
+      // credential stays in the command above, preserving package signatures.
+      const url = URL.createObjectURL(response.data as Blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = fileName
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 60_000)
+      return info
     },
     onSuccess: (info) => {
       setIssued(info)
-      toast.success(
-        `${info.fileName} downloaded`,
-        info.maxUses === 0
-          ? 'Reusable on any number of servers until it expires'
-          : `Good for ${info.maxUses} install${info.maxUses === 1 ? '' : 's'}`,
-      )
+      setCopied(false)
+      qc.invalidateQueries({ queryKey: ['enrollment-tokens'] })
+      toast.success(`${info.fileName} downloaded`, 'Copy the rollout command to deploy it')
     },
-    onError: async (err: unknown) => {
-      // An error body on a blob-typed request arrives as a Blob, so the
-      // usual message extraction needs the text read out first.
-      const resp = (err as { response?: { data?: unknown } })?.response
-      if (resp?.data instanceof Blob) {
+    onError: async (error: unknown) => {
+      const response = (error as { response?: { data?: unknown } })?.response
+      if (response?.data instanceof Blob) {
         try {
-          const parsed = JSON.parse(await resp.data.text())
+          const parsed = JSON.parse(await response.data.text())
           toast.error(parsed.detail ?? 'Download failed')
           return
         } catch {
-          /* fall through to the generic message */
+          // Fall through to the shared error formatter.
         }
       }
-      toast.error(apiErrorMessage(err))
+      toast.error('Download failed', apiErrorMessage(error))
     },
   })
 
-  const reset = (nextOpen: boolean) => {
-    if (!nextOpen) {
-      setIssued(null)
-      download.reset()
+  const copyCommand = async () => {
+    if (!issued) return
+    try {
+      await navigator.clipboard.writeText(issued.installCommand)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      toast.error('Copy failed', 'Clipboard access was denied by the browser')
     }
+  }
+
+  const clearIssued = () => {
+    setIssued(null)
+    setCopied(false)
+    download.reset()
+  }
+
+  const reset = (nextOpen: boolean) => {
+    if (!nextOpen) clearIssued()
     onOpenChange(nextOpen)
   }
 
   return (
     <Dialog open={open} onOpenChange={reset}>
-      <DialogContent className="sm:max-w-[560px]">
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[640px]">
         <DialogHeader>
-          <DialogTitle>Download pre-configured agent</DialogTitle>
+          <DialogTitle>Download agent and rollout command</DialogTitle>
           <DialogDescription>
-            The installer is stamped with this controller&apos;s address and an enrollment
-            token before it downloads. Run it on a server and it enrolls itself — nothing
-            to type, and no per-host setup.
+            Download the published, generic installer once, then deploy it with the command issued
+            here. The MSI remains unchanged and reusable; the separate token controls which
+            hosts may enroll and for how long.
           </DialogDescription>
         </DialogHeader>
 
@@ -188,26 +228,27 @@ export function DownloadAgentDialog({
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label htmlFor="dl-platform">Platform</Label>
-              <Select value={platform} onValueChange={(v) => setPlatform(v as Platform)}>
-                <SelectTrigger id="dl-platform">
-                  <SelectValue />
-                </SelectTrigger>
+              <Select
+                value={platform}
+                onValueChange={(value) => { setPlatform(value as Platform); clearIssued() }}
+              >
+                <SelectTrigger id="dl-platform"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="windows">Windows</SelectItem>
                   <SelectItem value="linux">Linux</SelectItem>
-                  <SelectItem value="macos">macOS</SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
             <div className="space-y-1.5">
-              <Label htmlFor="dl-scope">Install limit</Label>
-              <Select value={scope} onValueChange={(v) => setScope(v as 'fleet' | 'limited')}>
-                <SelectTrigger id="dl-scope">
-                  <SelectValue />
-                </SelectTrigger>
+              <Label htmlFor="dl-scope">Rollout token</Label>
+              <Select
+                value={scope}
+                onValueChange={(value) => { setScope(value as 'fleet' | 'limited'); clearIssued() }}
+              >
+                <SelectTrigger id="dl-scope"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="fleet">Unlimited — reusable package</SelectItem>
+                  <SelectItem value="fleet">Unlimited hosts until expiry</SelectItem>
                   <SelectItem value="limited">Limit to a fixed number</SelectItem>
                 </SelectContent>
               </Select>
@@ -216,14 +257,14 @@ export function DownloadAgentDialog({
 
           {scope === 'limited' && (
             <div className="space-y-1.5">
-              <Label htmlFor="dl-count">Maximum installs</Label>
+              <Label htmlFor="dl-count">Maximum enrollments</Label>
               <Input
                 id="dl-count"
                 type="number"
                 min={1}
                 max={100000}
                 value={serverCount}
-                onChange={(e) => setServerCount(e.target.value)}
+                onChange={(event) => { setServerCount(event.target.value); clearIssued() }}
               />
             </div>
           )}
@@ -237,24 +278,20 @@ export function DownloadAgentDialog({
                 min={1}
                 max={8760}
                 value={ttlHours}
-                onChange={(e) => setTtlHours(e.target.value)}
+                onChange={(event) => { setTtlHours(event.target.value); clearIssued() }}
               />
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="dl-policy">Policy (optional)</Label>
               <Select
                 value={policyId || '__default'}
-                onValueChange={(v) => setPolicyId(v === '__default' ? '' : v)}
+                onValueChange={(value) => { setPolicyId(value === '__default' ? '' : value); clearIssued() }}
               >
-                <SelectTrigger id="dl-policy">
-                  <SelectValue placeholder="Default policy" />
-                </SelectTrigger>
+                <SelectTrigger id="dl-policy"><SelectValue placeholder="Default policy" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__default">Default policy</SelectItem>
-                  {(policies ?? []).map((p) => (
-                    <SelectItem key={p.id} value={p.id}>
-                      {p.name}
-                    </SelectItem>
+                  {(policies ?? []).map((policy) => (
+                    <SelectItem key={policy.id} value={policy.id}>{policy.name}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
@@ -262,98 +299,99 @@ export function DownloadAgentDialog({
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="dl-label">Label (optional)</Label>
+            <Label htmlFor="dl-label">Rollout label (optional)</Label>
             <Input
               id="dl-label"
               placeholder="e.g. Datacentre A rollout"
               value={label}
-              onChange={(e) => setLabel(e.target.value)}
+              onChange={(event) => { setLabel(event.target.value); clearIssued() }}
             />
           </div>
 
-          <div className="flex items-start gap-2 rounded-md border border-border bg-surface-2 px-3 py-2 text-xs text-muted">
+          <div className="flex items-start gap-2 rounded-md border border-border bg-surface2/40 px-3 py-2 text-xs text-muted">
             <Server className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            {scope === 'fleet' ? (
-              <span>
-                One file, any number of servers. Push it through GPO, Intune, SCCM or your
-                imaging pipeline — every host enrols with the same package. Access is bounded
-                by the expiry below, and the token can be revoked at any time from
-                the fleet page.
-              </span>
-            ) : (
-              <span>
-                One enrollment is consumed per host, so this package stops working after{' '}
-                <span className="font-medium text-fg">{count}</span> install
-                {count === 1 ? '' : 's'}. Use this to keep a rollout tightly scoped;
-                choose <span className="font-medium text-fg">Unlimited</span> for estate-wide
-                deployment.
-              </span>
-            )}
+            <span>
+              Push the same installer through GPO, Intune, SCCM, RMM, or imaging. Enrollment
+              is authorized by the command, not by a modified package.{' '}
+              {scope === 'fleet'
+                ? 'This token permits any number of hosts until it expires or is revoked.'
+                : `This token permits ${count.toLocaleString()} enrollment${count === 1 ? '' : 's'}.`}
+            </span>
           </div>
 
-          {!packagesLoading && !published ? (
+          {!packagesLoading && !published && (
             <div className="flex items-start gap-2 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
               <span>
-                No {platform} package is published yet. Drop the build into{' '}
-                <code>/opt/zenplus/artifacts/agents/{platform}/</code> and publish it before
-                downloading.
+                No {platform} package is published yet. The release pipeline must publish an
+                immutable package before a rollout can be issued.
               </span>
             </div>
-          ) : null}
+          )}
 
-          {published ? (
+          {published && (
             <div className="flex items-center gap-2 text-xs text-muted">
               <ShieldCheck className="h-3.5 w-3.5 text-success" />
               <span>
-                Serving <span className="font-medium text-fg">{published.file_name}</span>{' '}
-                (v{published.version}
-                {published.file_size ? `, ${fmtSize(published.file_size)}` : ''})
+                Published <span className="font-medium text-text">{published.file_name}</span>{' '}
+                (v{published.version}{published.file_size ? `, ${fmtSize(published.file_size)}` : ''})
               </span>
             </div>
-          ) : null}
+          )}
 
-          {issued ? (
-            <div className="space-y-1 rounded-md border border-success/40 bg-success/10 px-3 py-2 text-xs">
+          {issued && (
+            <div className="space-y-3 rounded-md border border-success/40 bg-success/10 px-3 py-3 text-xs">
               <div className="flex items-center gap-2 font-medium text-success">
                 <CheckCircle2 className="h-3.5 w-3.5" />
-                {issued.fileName} downloaded
+                Immutable package downloaded; rollout command ready
               </div>
-              <div className="text-muted">
-                Token {issued.tokenPrefix}… ·{' '}
-                {issued.maxUses === 0
-                  ? 'unlimited installs'
-                  : `${issued.maxUses} install${issued.maxUses === 1 ? '' : 's'}`}
-                {issued.expiresAt
-                  ? ` · expires ${new Date(issued.expiresAt).toLocaleString()}`
-                  : ''}
+              <div className="grid gap-1 text-muted sm:grid-cols-2">
+                <span>Package: <span className="font-medium text-text">{issued.fileName}</span></span>
+                <span>Token: {issued.tokenPrefix}...</span>
+                <span>
+                  Scope: {issued.maxUses === 0 ? 'unlimited hosts' : `${issued.maxUses.toLocaleString()} hosts`}
+                </span>
+                <span>
+                  {issued.expiresAt ? `Expires: ${new Date(issued.expiresAt).toLocaleString()}` : 'Expiry unavailable'}
+                </span>
+                {issued.packageSha256 && (
+                  <span className="col-span-full truncate font-mono" title={issued.packageSha256}>
+                    SHA-256: {issued.packageSha256}
+                  </span>
+                )}
               </div>
-              <div className="text-muted">
-                Install silently with{' '}
-                <code>msiexec /i {issued.fileName} /qn /norestart</code>
+              <div className="space-y-1.5">
+                <Label htmlFor="rollout-command">
+                  {platform === 'windows' ? 'Silent deployment command' : 'Deployment command'}
+                </Label>
+                <div className="flex items-start gap-2">
+                  <code
+                    id="rollout-command"
+                    className="min-w-0 flex-1 select-all break-all rounded-md border border-border bg-bg px-3 py-2 font-mono text-[11px] leading-relaxed text-text"
+                  >
+                    {issued.installCommand}
+                  </code>
+                  <Button size="sm" variant="outline" onClick={copyCommand} aria-label="Copy rollout command">
+                    {copied ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
+                    {copied ? 'Copied' : 'Copy'}
+                  </Button>
+                </div>
+                <p className="text-[11px] text-warning">
+                  The command contains an enrollment credential. Store it as a protected deployment
+                  secret and revoke it from Rollout tokens when the rollout finishes.
+                </p>
               </div>
             </div>
-          ) : null}
+          )}
         </div>
 
         <DialogFooter>
-          <Button variant="ghost" onClick={() => reset(false)}>
-            Close
-          </Button>
-          <Button
-            onClick={() => download.mutate()}
-            disabled={download.isPending || !published}
-          >
+          <Button variant="ghost" onClick={() => reset(false)}>Close</Button>
+          <Button onClick={() => download.mutate()} disabled={download.isPending || !published}>
             {download.isPending ? (
-              <>
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                Preparing…
-              </>
+              <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Preparing...</>
             ) : (
-              <>
-                <Download className="h-3.5 w-3.5" />
-                Download installer
-              </>
+              <><Download className="h-3.5 w-3.5" /> Issue token and download</>
             )}
           </Button>
         </DialogFooter>

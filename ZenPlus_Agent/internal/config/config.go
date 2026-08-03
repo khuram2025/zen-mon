@@ -22,31 +22,16 @@ const (
 
 // Baked in at build time via
 //
-//	-ldflags "-X zenplus-agent/internal/config.embeddedControllerURL=... \
-//	          -X zenplus-agent/internal/config.embeddedEnrollmentToken=..."
+//	-ldflags "-X zenplus-agent/internal/config.embeddedControllerURL=..."
 //
-// so the published MSI installs and enrolls with zero operator input. Both
-// remain overridable afterwards through agent.yaml or MSI properties.
-var (
-	embeddedControllerURL   string
-	embeddedEnrollmentToken string
-)
+// The controller URL remains overridable through agent.yaml or MSI properties.
+// Enrollment tokens are deliberately never compiled into release binaries.
+var embeddedControllerURL string
 
-// PlaceholderEnrollmentToken is the fixed-width default carried by the MSI's
-// ENROLLMENT_TOKEN property. The controller rewrites it in place when an
-// operator downloads the package. If it survives to the agent, the package
-// was fetched without going through that flow, so it is treated as "no token"
-// rather than attempted (and rejected) as a real one.
-const PlaceholderEnrollmentToken = "zpa_enr_PLACEHOLDERTOKENPLACEHOLDERTOKEN"
-
-// NormalizeEnrollmentToken trims a configured token and discards the
-// un-substituted MSI placeholder.
+// NormalizeEnrollmentToken trims a token supplied through config or an MSI
+// property. The generic release MSI carries no default token.
 func NormalizeEnrollmentToken(token string) string {
-	token = strings.TrimSpace(token)
-	if token == PlaceholderEnrollmentToken {
-		return ""
-	}
-	return token
+	return strings.TrimSpace(token)
 }
 
 type Config struct {
@@ -143,7 +128,7 @@ func Default() Config {
 	return Config{
 		Version:                  1,
 		ControllerURL:            controllerURL,
-		EnrollmentToken:          NormalizeEnrollmentToken(embeddedEnrollmentToken),
+		EnrollmentToken:          "",
 		VerifyTLS:                true,
 		DataDir:                  "data",
 		HeartbeatIntervalSeconds: 30,
@@ -183,14 +168,6 @@ func Default() Config {
 		},
 		Labels: map[string]string{},
 	}
-}
-
-// HasEmbeddedEnrollmentToken reports whether this build carries a compiled-in
-// bootstrap token. Such a build can re-enroll itself after losing its
-// credential file, so the token is never fully "cleared" — only removed from
-// the on-disk config.
-func HasEmbeddedEnrollmentToken() bool {
-	return NormalizeEnrollmentToken(embeddedEnrollmentToken) != ""
 }
 
 func ClearEnrollmentToken(path string) error {

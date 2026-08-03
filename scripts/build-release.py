@@ -24,6 +24,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -84,6 +85,113 @@ def sha256_file(path: str) -> str:
         for chunk in iter(lambda: f.read(8192), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+AGENT_PACKAGE_PATTERNS = {
+    "windows": re.compile(r"^zenplus-agent-(\d+\.\d+\.\d+)\.msi$"),
+    "linux": re.compile(r"^zenplus-agent-(\d+\.\d+\.\d+)\.tar\.gz$"),
+    "macos": re.compile(r"^zenplus-agent-(\d+\.\d+\.\d+)\.(?:pkg|tar\.gz)$"),
+}
+
+
+def _version_key(version: str) -> tuple[int, int, int]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def _agent_source_version() -> str:
+    """Return the Windows agent version declared by the vendored source."""
+    model_file = ZENPLUS_DIR / "ZenPlus_Agent" / "internal" / "model" / "model.go"
+    if not model_file.is_file():
+        raise RuntimeError(f"Vendored agent version file is missing: {model_file}")
+    match = re.search(
+        r'AgentVersion\s*=\s*"(\d+\.\d+\.\d+)"',
+        model_file.read_text(encoding="utf-8"),
+    )
+    if not match:
+        raise RuntimeError(f"Could not read AgentVersion from {model_file}")
+    return match.group(1)
+
+
+def stage_agent_artifacts(
+    build_dir: Path,
+    artifact_dir: Path | None = None,
+    *,
+    required: bool = True,
+) -> list[dict]:
+    """Validate and stage one current package per supported agent platform.
+
+    Agent installers are produced on their native build runners, not by this
+    Linux release builder.  A portal release must nevertheless carry the
+    current Windows MSI, otherwise an upgraded appliance regresses to the
+    misleading "no package published" state.  The vendored AgentVersion is the
+    contract between source and artifact: a stale MSI fails the release.
+    """
+    source = artifact_dir or Path(
+        os.getenv(
+            "ZENPLUS_AGENT_ARTIFACT_DIR",
+            str(ZENPLUS_DIR / "artifacts" / "agents"),
+        )
+    )
+    expected_windows = _agent_source_version()
+    expected_msi = source / "windows" / f"zenplus-agent-{expected_windows}.msi"
+    if not expected_msi.is_file():
+        message = (
+            f"Required Windows agent MSI is missing or stale. Expected {expected_msi} "
+            f"for vendored AgentVersion {expected_windows}. Build the agent on Windows "
+            "and place the MSI in the artifact store before creating a release."
+        )
+        if required:
+            raise RuntimeError(message)
+        print(f"  WARNING: {message}")
+        return []
+
+    staged: list[dict] = []
+    output_root = build_dir / "agent-artifacts"
+    for platform, pattern in AGENT_PACKAGE_PATTERNS.items():
+        platform_dir = source / platform
+        candidates: list[tuple[tuple[int, int, int], str, Path]] = []
+        if platform_dir.is_dir():
+            for package in platform_dir.iterdir():
+                if not package.is_file() or package.is_symlink():
+                    continue
+                match = pattern.fullmatch(package.name)
+                if match:
+                    candidates.append((_version_key(match.group(1)), match.group(1), package))
+        if not candidates:
+            continue
+        _, version, package = max(candidates, key=lambda item: item[0])
+        if platform == "windows" and version != expected_windows:
+            # The exact file check above normally catches this; keep the
+            # assertion beside selection so future naming changes stay safe.
+            raise RuntimeError(
+                f"Latest Windows MSI is {version}, but vendored AgentVersion is {expected_windows}"
+            )
+        if package.stat().st_size < 1_000_000:
+            raise RuntimeError(f"Agent package looks truncated ({package.stat().st_size} bytes): {package}")
+
+        destination = output_root / platform / package.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(package, destination)
+        staged.append({
+            "platform": platform,
+            "version": version,
+            "file_name": package.name,
+            "file_size": package.stat().st_size,
+            "sha256": sha256_file(str(package)),
+        })
+
+    manifest = {
+        "format_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "required_windows_version": expected_windows,
+        "packages": staged,
+    }
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return staged
 
 
 # ─── Migration lint ───────────────────────────────────────────────────────────
@@ -262,7 +370,9 @@ def get_admin_token() -> str:
 def build_package(version: str, changelog: str, severity: str,
                   min_version: str | None, skip_dashboard: bool,
                   skip_go: bool, include_migrations: bool,
-                  migration_files: list[str] | None = None) -> Path:
+                  migration_files: list[str] | None = None,
+                  agent_artifact_dir: Path | None = None,
+                  skip_agent_artifacts: bool = False) -> Path:
     """Build a .zup release package from the current codebase."""
 
     print(f"\n{'='*60}")
@@ -334,6 +444,27 @@ def build_package(version: str, changelog: str, severity: str,
     else:
         print("[2/7] Skipping dashboard build (--skip-dashboard)")
 
+    # Windows installers come from the native Windows build.  Validate them
+    # independently from the Linux Go binaries so --skip-go remains safe and
+    # so a missing artifact can never silently disappear from a portal OTA.
+    print("[2a/7] Validating agent release artifacts ...")
+    if skip_agent_artifacts:
+        print("  Skipping agent artifacts (--skip-agent-artifacts)")
+        agent_staged = []
+    else:
+        agent_staged = stage_agent_artifacts(
+            build_dir,
+            artifact_dir=agent_artifact_dir,
+            required=True,
+        )
+        for package in agent_staged:
+            size_mb = package["file_size"] / 1024 / 1024
+            print(
+                f"  + {package['platform']}/{package['file_name']} "
+                f"v{package['version']} ({size_mb:.1f} MB, "
+                f"{package['sha256'][:12]}…)"
+            )
+
     # 3. Build Go binaries
     if not skip_go:
         print("[3/7] Building Go poller and remote sensor ...")
@@ -341,24 +472,6 @@ def build_package(version: str, changelog: str, severity: str,
         go_dir.mkdir()
         sensor_dir = build_dir / "sensor-artifacts" / "bin" / "linux-amd64"
         sensor_dir.mkdir(parents=True)
-
-    # Agent installers are built on Windows, not here, so the release carries
-    # whatever is currently published in the artifact store. Without this a
-    # freshly updated appliance reports "no package published" until someone
-    # copies an MSI across by hand.
-    agent_src = Path("/opt/zenplus/artifacts/agents")
-    agent_staged = []
-    if agent_src.is_dir():
-        for plat_dir in sorted(p for p in agent_src.iterdir() if p.is_dir()):
-            for pkg in sorted(plat_dir.glob("zenplus-agent-*")):
-                if not pkg.is_file():
-                    continue
-                dest_dir = build_dir / "agent-artifacts" / plat_dir.name
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(pkg, dest_dir / pkg.name)
-                agent_staged.append((plat_dir.name, pkg.name))
-        if agent_staged:
-            print(f"      bundled {len(agent_staged)} agent package(s)")
         poller_src = ZENPLUS_DIR / "poller"
         commit = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -545,6 +658,10 @@ def build_package(version: str, changelog: str, severity: str,
                 steps.append({"type": "install_config",
                               "source": f"agent-artifacts/{plat_dir.name}/{pkg.name}",
                               "dest": f"/opt/zenplus/artifacts/agents/{plat_dir.name}/{pkg.name}"})
+        if (agent_artifact_dir / "manifest.json").is_file():
+            steps.append({"type": "install_config",
+                          "source": "agent-artifacts/manifest.json",
+                          "dest": "/opt/zenplus/artifacts/agents/manifest.json"})
 
     sensor_artifact_dir = build_dir / "sensor-artifacts" / "bin" / "linux-amd64"
     if (sensor_artifact_dir / "zenplus-sensor").exists():
@@ -575,6 +692,7 @@ def build_package(version: str, changelog: str, severity: str,
         "severity": severity,
         "arch": "amd64",
         "os_min": "ubuntu-22.04",
+        "agent_packages": agent_staged,
         "steps": steps,
         "rollback_steps": [
             {"type": "restore_backup"},
@@ -639,6 +757,7 @@ def build_package(version: str, changelog: str, severity: str,
         "package_size": pkg_size,
         "built_at": datetime.now(timezone.utc).isoformat(),
         "migrations": [p.name for p in selected_migrations],
+        "agent_packages": agent_staged,
     }
     meta_path = RELEASE_DIR / f"update-{version}.meta.json"
     meta_path.write_text(json.dumps(meta, indent=2))
@@ -836,6 +955,16 @@ Examples:
     build_p.add_argument("--min-version", default=None, help="Minimum version to upgrade from")
     build_p.add_argument("--skip-dashboard", action="store_true", help="Skip dashboard build")
     build_p.add_argument("--skip-go", action="store_true", help="Skip Go binary build")
+    build_p.add_argument(
+        "--agent-artifact-dir",
+        default=None,
+        help="Agent artifact root containing windows/, linux/, macos/ (default: <ZENPLUS_DIR>/artifacts/agents)",
+    )
+    build_p.add_argument(
+        "--skip-agent-artifacts",
+        action="store_true",
+        help="Emergency override: build without an agent installer",
+    )
     build_p.add_argument("--include-migrations", action="store_true",
                          help="Require explicit --migration values for schema releases")
     build_p.add_argument("--migration", action="append", default=[],
@@ -851,6 +980,8 @@ Examples:
     pub_p.add_argument("--file", "-f", default=None, help="Use existing .zup file instead of building")
     pub_p.add_argument("--skip-dashboard", action="store_true")
     pub_p.add_argument("--skip-go", action="store_true")
+    pub_p.add_argument("--agent-artifact-dir", default=None)
+    pub_p.add_argument("--skip-agent-artifacts", action="store_true")
     pub_p.add_argument("--include-migrations", action="store_true",
                        help="Require explicit --migration values for schema releases")
     pub_p.add_argument("--migration", action="append", default=[],
@@ -882,7 +1013,9 @@ Examples:
     if args.command == "build":
         build_package(args.version, args.changelog, args.severity,
                       args.min_version, args.skip_dashboard, args.skip_go,
-                      args.include_migrations, args.migration)
+                      args.include_migrations, args.migration,
+                      Path(args.agent_artifact_dir) if args.agent_artifact_dir else None,
+                      args.skip_agent_artifacts)
 
     elif args.command == "publish":
         if args.file:
@@ -893,7 +1026,9 @@ Examples:
         else:
             zup_path = build_package(args.version, args.changelog, args.severity,
                                      args.min_version, args.skip_dashboard, args.skip_go,
-                                     args.include_migrations, args.migration)
+                                     args.include_migrations, args.migration,
+                                     Path(args.agent_artifact_dir) if args.agent_artifact_dir else None,
+                                     args.skip_agent_artifacts)
         publish_package(zup_path, args.version, args.changelog,
                         args.severity, args.min_version)
 
