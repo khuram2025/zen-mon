@@ -14,17 +14,21 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
-from sqlalchemy import String, cast, select
+from sqlalchemy import String, cast, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_ch_client, get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_operator_user
 from app.services import geoip
 from app.models.device import Device
 from app.models.device_interface import DeviceInterface
 from app.models.netflow_saved_view import NetflowSavedView
 from app.models.user import User
 from pydantic import BaseModel, Field
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/netflow", tags=["NetFlow"])
 
@@ -1223,6 +1227,32 @@ async def netflow_heatmap(
     return {"max_bytes": max_bytes, "cells": cells}
 
 
+async def _exporter_device_overrides(
+    db: AsyncSession, exporter_ips: list[str]
+) -> dict[str, tuple]:
+    """{exporter_ip -> (device_id, hostname)} from netflow_exporter_devices.
+
+    Tolerates the table not existing yet so an appliance running this code
+    before migrate-054 keeps the previous behaviour instead of erroring.
+    """
+    if not exporter_ips:
+        return {}
+    try:
+        rows = (await db.execute(
+            text("""
+                SELECT host(m.exporter_ip) AS exporter_ip, d.id, d.hostname
+                FROM netflow_exporter_devices m
+                JOIN devices d ON d.id = m.device_id
+                WHERE host(m.exporter_ip) = ANY(:ips)
+            """),
+            {"ips": exporter_ips},
+        )).all()
+    except Exception:
+        logger.debug("exporter->device mapping lookup skipped", exc_info=True)
+        return {}
+    return {r.exporter_ip: (r.id, r.hostname) for r in rows}
+
+
 async def _resolve_interface_names(rows: list[tuple], db: AsyncSession) -> dict[tuple[str, int], dict]:
     """Build a {(exporter_ip, ifindex) -> {if_name, if_alias, if_speed}} map from device_interfaces."""
     keys = {(str(r[0]), int(r[1])) for r in rows}
@@ -1236,6 +1266,14 @@ async def _resolve_interface_names(rows: list[tuple], db: AsyncSession) -> dict[
         )
     )
     ip_to_device = {str(row.ip_address).split("/")[0]: (row.id, row.hostname) for row in devices_q.all()}
+
+    # Exporters whose source IP is not the device's management IP (loopback or
+    # WAN-sourced export) never match above; fall back to the operator-defined
+    # mapping so their ifIndex values still resolve to real interface names.
+    unmapped = [ip for ip in exporter_ips if ip not in ip_to_device]
+    if unmapped:
+        ip_to_device.update(await _exporter_device_overrides(db, unmapped))
+
     if not ip_to_device:
         return {}
     device_ids = [d[0] for d in ip_to_device.values()]
@@ -2103,6 +2141,121 @@ async def delete_saved_view(
     await db.delete(view)
     await db.commit()
     return {"deleted": view_id}
+
+
+class ExporterDeviceIn(BaseModel):
+    device_id: str
+    note: str | None = Field(default=None, max_length=2000)
+
+
+@router.get("/exporter-devices")
+async def list_exporter_devices(
+    hours: int = Query(default=168, ge=1, le=720),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Exporters seen in the window, each with how its interface names resolve.
+
+    `source` is 'ip-match' when the exporter IP is a device's management IP,
+    'mapped' when an operator linked it explicitly, and null when neither —
+    the case where the UI can only show raw ifIndex numbers.
+    """
+    start, end = _resolve_window(hours, None, None)
+    rows = (await _query(
+        """
+        SELECT exporter_ip, count() AS flows, max(timestamp) AS last_seen
+        FROM zenplus.flow_records
+        WHERE timestamp >= %(start)s AND timestamp <= %(end)s
+        GROUP BY exporter_ip ORDER BY flows DESC LIMIT 200
+        """,
+        {"start": start, "end": end},
+    )).result_rows
+    exporter_ips = [str(r[0]) for r in rows]
+    if not exporter_ips:
+        return []
+
+    devices_q = await db.execute(
+        select(Device.id, Device.ip_address, Device.hostname).where(
+            cast(Device.ip_address, String).in_([f"{ip}/32" for ip in exporter_ips] + exporter_ips)
+        )
+    )
+    by_ip = {str(r.ip_address).split("/")[0]: (r.id, r.hostname) for r in devices_q.all()}
+    overrides = await _exporter_device_overrides(db, exporter_ips)
+
+    out = []
+    for r in rows:
+        ip = str(r[0])
+        dev = by_ip.get(ip)
+        source = "ip-match" if dev else ("mapped" if ip in overrides else None)
+        if not dev:
+            dev = overrides.get(ip)
+        out.append({
+            "exporter_ip": ip,
+            "flows": int(r[1] or 0),
+            "last_seen": r[2],
+            "device_id": str(dev[0]) if dev else None,
+            "device_hostname": dev[1] if dev else None,
+            "source": source,
+        })
+    return out
+
+
+@router.put("/exporter-devices/{exporter_ip}")
+async def set_exporter_device(
+    exporter_ip: str,
+    body: ExporterDeviceIn,
+    user: User = Depends(require_operator_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Link a NetFlow exporter IP to the device that owns it."""
+    try:
+        ipaddress.ip_address(exporter_ip)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="exporter_ip must be a valid IP address")
+
+    dev = (await db.execute(
+        select(Device.id, Device.hostname).where(Device.id == body.device_id)
+    )).first()
+    if not dev:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    await db.execute(
+        text("""
+            INSERT INTO netflow_exporter_devices (exporter_ip, device_id, note, created_by)
+            VALUES (CAST(:ip AS inet), :did, :note, :uid)
+            ON CONFLICT (exporter_ip) DO UPDATE
+              SET device_id = EXCLUDED.device_id,
+                  note = EXCLUDED.note,
+                  updated_at = NOW()
+        """),
+        {"ip": exporter_ip, "did": str(body.device_id), "note": body.note, "uid": str(user.id)},
+    )
+    from app.services.audit_service import write_audit_log
+    await write_audit_log(
+        db, actor=user, action="update", resource_type="netflow_exporter_device",
+        resource_id=exporter_ip,
+        metadata={"device_id": str(body.device_id), "device_hostname": dev.hostname},
+    )
+    await db.commit()
+    return {"exporter_ip": exporter_ip, "device_id": str(dev.id), "device_hostname": dev.hostname}
+
+
+@router.delete("/exporter-devices/{exporter_ip}", status_code=204)
+async def delete_exporter_device(
+    exporter_ip: str,
+    user: User = Depends(require_operator_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await db.execute(
+        text("DELETE FROM netflow_exporter_devices WHERE host(exporter_ip) = :ip"),
+        {"ip": exporter_ip},
+    )
+    from app.services.audit_service import write_audit_log
+    await write_audit_log(
+        db, actor=user, action="delete", resource_type="netflow_exporter_device",
+        resource_id=exporter_ip,
+    )
+    await db.commit()
 
 
 @router.get("/exporters")
