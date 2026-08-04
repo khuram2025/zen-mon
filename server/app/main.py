@@ -41,6 +41,7 @@ def create_app() -> FastAPI:
     # API routes
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(devices.router, prefix="/api/v1")
+    app.include_router(devices.maintenance_router, prefix="/api/v1")
     app.include_router(alerts.router, prefix="/api/v1")
     app.include_router(settings_api.router, prefix="/api/v1")
     app.include_router(alert_rules.router, prefix="/api/v1")

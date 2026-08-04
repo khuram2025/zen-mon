@@ -479,6 +479,39 @@ func (s *PostgresStore) LoadActiveMaintenanceCheckIDs(ctx context.Context) (map[
 	return out, rows.Err()
 }
 
+// LoadActiveMaintenanceDeviceIDs returns the set of device IDs currently
+// inside an active device_maintenance window (scope: device, group, tag, or
+// all — devices.tags is a JSONB string array). Mirrors
+// LoadActiveMaintenanceCheckIDs: the poller keeps collecting metrics for
+// these devices but suppresses status transitions and alerting.
+func (s *PostgresStore) LoadActiveMaintenanceDeviceIDs(ctx context.Context) (map[uuid.UUID]struct{}, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT d.id
+		FROM devices d
+		JOIN device_maintenance m ON (
+		       (m.scope_type = 'device' AND m.scope_device_id = d.id)
+		    OR (m.scope_type = 'group'  AND m.scope_group_id = d.group_id)
+		    OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
+		    OR (m.scope_type = 'all')
+		)
+		WHERE m.starts_at <= now() AND m.ends_at >= now()
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("load device maintenance ids: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[uuid.UUID]struct{}{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
 // UpdateServiceCheckStatus updates the service check's current state in PostgreSQL.
 func (s *PostgresStore) UpdateServiceCheckStatus(
 	ctx context.Context,

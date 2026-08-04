@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal, Optional
 from uuid import UUID
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 SnmpVersion = Literal["1", "2c", "3"]
 SnmpAuthProtocol = Literal["MD5", "SHA", "SHA224", "SHA256", "SHA384", "SHA512"]
@@ -188,3 +188,40 @@ class DeviceExportItem(BaseModel):
     status: str
     last_rtt_ms: Optional[float]
     description: Optional[str]
+
+
+class DeviceMaintenanceCreate(BaseModel):
+    scope_type: Literal["device", "group", "tag", "all"]
+    scope_device_id: Optional[UUID] = None
+    scope_group_id: Optional[UUID] = None
+    scope_tag: Optional[str] = Field(default=None, max_length=120)
+    starts_at: datetime
+    ends_at: datetime
+    reason: Optional[str] = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _validate(self) -> "DeviceMaintenanceCreate":
+        if self.ends_at <= self.starts_at:
+            raise ValueError("ends_at must be after starts_at")
+        if self.scope_type == "device" and not self.scope_device_id:
+            raise ValueError("scope_device_id is required for scope_type=device")
+        if self.scope_type == "group" and not self.scope_group_id:
+            raise ValueError("scope_group_id is required for scope_type=group")
+        if self.scope_type == "tag" and not (self.scope_tag or "").strip():
+            raise ValueError("scope_tag is required for scope_type=tag")
+        return self
+
+
+class DeviceMaintenanceResponse(BaseModel):
+    id: UUID
+    scope_type: str
+    scope_device_id: Optional[UUID] = None
+    scope_group_id: Optional[UUID] = None
+    scope_tag: Optional[str] = None
+    scope_label: str
+    starts_at: datetime
+    ends_at: datetime
+    reason: Optional[str] = None
+    created_by: Optional[UUID] = None
+    created_at: datetime
+    active: bool

@@ -22,6 +22,7 @@ import (
 type DeviceLoader interface {
 	LoadDevices(ctx context.Context) ([]*Device, error)
 	UpdateDeviceStatus(ctx context.Context, deviceID uuid.UUID, status string, lastSeen time.Time, rttMs float64) error
+	LoadActiveMaintenanceDeviceIDs(ctx context.Context) (map[uuid.UUID]struct{}, error)
 }
 
 // MetricWriter writes ping results to the metrics store.
@@ -110,6 +111,7 @@ type Engine struct {
 
 	mu            sync.RWMutex
 	devices       map[uuid.UUID]*Device
+	deviceMaint   map[uuid.UUID]struct{} // devices inside an active maintenance window
 	serviceChecks map[uuid.UUID]*checker.ServiceCheck
 	snmpDevices   map[uuid.UUID]*snmp.Device
 	lastPingAt    map[uuid.UUID]time.Time
@@ -335,6 +337,17 @@ func (e *Engine) runPingCycle(ctx context.Context) {
 		return
 	}
 
+	// Active device maintenance windows — processStatusChange uses this set
+	// to mute transitions/alerting while metrics keep flowing. On error the
+	// previous set is kept rather than clobbered with an empty one.
+	if maint, err := e.loader.LoadActiveMaintenanceDeviceIDs(ctx); err != nil {
+		e.logger.Warnf("Failed to load device maintenance ids: %v", err)
+	} else {
+		e.mu.Lock()
+		e.deviceMaint = maint
+		e.mu.Unlock()
+	}
+
 	e.logger.Infof("Starting ping cycle for %d devices", len(deviceList))
 	start := time.Now()
 
@@ -380,6 +393,8 @@ func (e *Engine) processStatusChange(ctx context.Context, result *PingResult) {
 		return
 	}
 
+	_, inMaint := e.deviceMaint[result.DeviceID]
+
 	oldStatus := device.Status
 	var newStatus string
 
@@ -388,6 +403,11 @@ func (e *Engine) processStatusChange(ctx context.Context, result *PingResult) {
 		if device.DownCount >= e.cfg.Poller.DownThreshold {
 			newStatus = "down"
 		} else {
+			// Not confirmed down yet — but still flag a freshly opened
+			// maintenance window so the UI shows it immediately.
+			if inMaint && oldStatus != "maintenance" {
+				e.enterMaintenance(ctx, device, oldStatus, result)
+			}
 			return
 		}
 	} else {
@@ -403,13 +423,33 @@ func (e *Engine) processStatusChange(ctx context.Context, result *PingResult) {
 		device.LastSeen = result.Timestamp
 		device.LastRTT = rttMs
 
+		// While a maintenance window is active the stored status stays
+		// pinned to 'maintenance'; last_seen/rtt still refresh.
+		statusForPG := newStatus
+		if inMaint {
+			statusForPG = "maintenance"
+		}
 		go func() {
-			if err := e.loader.UpdateDeviceStatus(ctx, device.ID, newStatus, result.Timestamp, rttMs); err != nil {
+			if err := e.loader.UpdateDeviceStatus(ctx, device.ID, statusForPG, result.Timestamp, rttMs); err != nil {
 				e.logger.Errorf("Failed to update device last_seen in PG: %v", err)
 			}
 		}()
 	}
 
+	if inMaint {
+		// Maintenance mute (mirrors the service-check behavior): metrics were
+		// already written above, DownCount keeps counting so the post-window
+		// state is confirmed immediately, but there are no transitions and no
+		// alert evaluation while the window is active.
+		if oldStatus != "maintenance" {
+			e.enterMaintenance(ctx, device, oldStatus, result)
+		}
+		return
+	}
+
+	// Note: when a window ends, oldStatus is 'maintenance' and the normal
+	// path below transitions to the real status — including alerting, so a
+	// device that is still down after maintenance pages right away.
 	if newStatus != oldStatus {
 		device.Status = newStatus
 
@@ -457,6 +497,43 @@ func (e *Engine) processStatusChange(ctx context.Context, result *PingResult) {
 			}
 		}()
 	}
+}
+
+// enterMaintenance transitions a device into 'maintenance': one status-log
+// row, a PG status write and a realtime publish — and deliberately NO alert
+// evaluation. Caller must hold e.mu.
+func (e *Engine) enterMaintenance(ctx context.Context, device *Device, oldStatus string, result *PingResult) {
+	device.Status = "maintenance"
+
+	sc := &StatusChange{
+		DeviceID:  device.ID,
+		OldStatus: oldStatus,
+		NewStatus: "maintenance",
+		Reason:    "Maintenance window active",
+		Timestamp: time.Now().UTC(),
+	}
+
+	e.logger.Infof("Status change: %s (%s) %s → maintenance (alerting muted)",
+		device.Hostname, device.IPAddress, oldStatus)
+
+	rttMs := float64(result.RTT.Microseconds()) / 1000.0
+	go func() {
+		if err := e.loader.UpdateDeviceStatus(ctx, device.ID, "maintenance", result.Timestamp, rttMs); err != nil {
+			e.logger.Errorf("Failed to update device status in PG: %v", err)
+		}
+	}()
+
+	go func() {
+		if err := e.writer.WriteStatusChange(ctx, sc, 0); err != nil {
+			e.logger.Errorf("Failed to write status change to CH: %v", err)
+		}
+	}()
+
+	go func() {
+		if err := e.publisher.PublishStatusChange(ctx, sc); err != nil {
+			e.logger.Errorf("Failed to publish status change: %v", err)
+		}
+	}()
 }
 
 func (e *Engine) evaluateAlerts(ctx context.Context, device *Device, oldStatus, newStatus string, result *PingResult) {

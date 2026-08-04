@@ -364,6 +364,35 @@ def _conditions_match(rule, values: dict) -> bool:
     return _eval_one(metric, getattr(rule, "operator", None), getattr(rule, "threshold", None), values)
 
 
+async def _device_in_maintenance(db: AsyncSession, device_id: str) -> bool:
+    """True when the device is inside an active device_maintenance window.
+
+    Defense in depth: the poller already suppresses transitions for devices in
+    maintenance, but this also covers events raised while a window was being
+    created, and traps. Tolerates the table not existing yet (rolling upgrade
+    before migrate-053 has run).
+    """
+    try:
+        row = await db.execute(
+            text("""
+                SELECT 1
+                FROM device_maintenance m
+                JOIN devices d ON d.id = :did AND (
+                       (m.scope_type = 'device' AND m.scope_device_id = d.id)
+                    OR (m.scope_type = 'group'  AND m.scope_group_id = d.group_id)
+                    OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
+                    OR (m.scope_type = 'all')
+                )
+                WHERE m.starts_at <= now() AND m.ends_at >= now()
+                LIMIT 1
+            """),
+            {"did": device_id},
+        )
+        return row.first() is not None
+    except Exception:
+        return False
+
+
 @router.post("/evaluate")
 async def evaluate_status_change(
     event: StatusChangeEvent,
@@ -387,6 +416,11 @@ async def evaluate_status_change(
     device_type = dev_row.device_type if dev_row else event.device_type
     group_id = str(dev_row.group_id) if dev_row and dev_row.group_id else event.group_id
     location = dev_row.location if dev_row else event.location
+
+    # Planned downtime: never raise alerts for a device in an active
+    # maintenance window. Recovery events still pass so open alerts resolve.
+    if not is_recovery and await _device_in_maintenance(db, event.device_id):
+        return {"evaluated": 0, "matched": 0, "suppressed": "maintenance"}
 
     # Get group name
     group_name = ""
@@ -1060,6 +1094,10 @@ async def evaluate_trap(
             text("SELECT group_id FROM devices WHERE id = :id"), {"id": did}
         )).first()
         group_id = str(dev.group_id) if dev and dev.group_id else None
+
+        # Planned downtime: traps from a device in maintenance don't raise alerts.
+        if await _device_in_maintenance(db, did):
+            return {"alerts_created": 0, "suppressed": "maintenance"}
 
     rules = (await db.execute(
         text("""

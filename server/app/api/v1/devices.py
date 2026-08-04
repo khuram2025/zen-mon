@@ -12,6 +12,7 @@ from app.models.user import User
 from app.schemas.device import (
     DeviceCreate, DeviceUpdate, DeviceResponse, DeviceSummary, DeviceGroupResponse,
     BulkImportRequest, BulkImportResult,
+    DeviceMaintenanceCreate, DeviceMaintenanceResponse,
 )
 from app.schemas.metric import MetricResponse, StatusChangeEvent
 from app.services import device_service, metric_service
@@ -140,8 +141,9 @@ async def dashboard_uptime_stats(
     else:
         tables_to_try = ["ping_metrics_1h", "ping_metrics_5m", "ping_metrics"]
 
-    uptime_map: dict[str, float] = {}
-    failed_map: dict[str, int] = {}
+    # (up, down, total) per device from the chosen table.
+    counts: dict[str, list[int]] = {}
+    chosen_table: str | None = None
     for table in tables_to_try:
         query = f"""
             SELECT device_id,
@@ -156,15 +158,72 @@ async def dashboard_uptime_stats(
             result = client.query(query, parameters={"from": from_time, "to": to_time})
             if len(result.result_rows) > 0:
                 for row in result.result_rows:
-                    device_id = str(row[0])
-                    up = row[1]
-                    down = int(row[2] or 0)
-                    total = row[3]
-                    uptime_map[device_id] = round((up / total * 100) if total > 0 else 0, 2)
-                    failed_map[device_id] = down
+                    counts[str(row[0])] = [int(row[1] or 0), int(row[2] or 0), int(row[3] or 0)]
+                chosen_table = table
                 break
         except Exception:
             continue
+
+    # Maintenance-aware SLA: samples that fall inside a device_maintenance
+    # window are excluded from numerator AND denominator, so planned downtime
+    # never dents availability. Windows are clamped to the query range.
+    if counts and chosen_table:
+        try:
+            win_rows = (await db.execute(
+                text(f"""
+                    SELECT d.id AS device_id,
+                           GREATEST(m.starts_at, :from_ts) AS s,
+                           LEAST(m.ends_at, :to_ts) AS e
+                    FROM device_maintenance m
+                    JOIN devices d ON {MAINT_COVERS_DEVICE_SQL}
+                    WHERE m.starts_at < :to_ts AND m.ends_at > :from_ts
+                    LIMIT 500
+                """),
+                {"from_ts": from_time.replace(tzinfo=timezone.utc),
+                 "to_ts": to_time.replace(tzinfo=timezone.utc)},
+            )).all()
+        except Exception:
+            win_rows = []
+        if win_rows:
+            conds, params = [], {}
+            for i, r in enumerate(win_rows):
+                conds.append(
+                    f"(device_id = %(d{i})s AND timestamp >= %(s{i})s AND timestamp <= %(e{i})s)"
+                )
+                params[f"d{i}"] = str(r.device_id)
+                params[f"s{i}"] = r.s.astimezone(timezone.utc).replace(tzinfo=None)
+                params[f"e{i}"] = r.e.astimezone(timezone.utc).replace(tzinfo=None)
+            try:
+                mres = client.query(
+                    f"""
+                    SELECT device_id,
+                           countIf(is_up = 1) AS up_count,
+                           countIf(is_up = 0) AS down_count,
+                           count() AS total_count
+                    FROM zenplus.{chosen_table}
+                    WHERE {' OR '.join(conds)}
+                    GROUP BY device_id
+                    """,
+                    parameters=params,
+                )
+                for row in mres.result_rows:
+                    did = str(row[0])
+                    if did in counts:
+                        counts[did][0] = max(0, counts[did][0] - int(row[1] or 0))
+                        counts[did][1] = max(0, counts[did][1] - int(row[2] or 0))
+                        counts[did][2] = max(0, counts[did][2] - int(row[3] or 0))
+            except Exception:
+                pass
+
+    uptime_map: dict[str, float] = {}
+    failed_map: dict[str, int] = {}
+    for did, (up, down, total) in counts.items():
+        # A device whose entire window was maintenance has no SLA-relevant
+        # samples — omit it so the UI shows "—" rather than 0% or 100%.
+        if total <= 0:
+            continue
+        uptime_map[did] = round(up / total * 100, 2)
+        failed_map[did] = down
 
     return {
         "hours": hours,
@@ -792,18 +851,46 @@ async def get_interface_detail_metrics(
     client = get_clickhouse_client()
 
     # Bucket from the raw 30-day-retention table; rollups are unreliable.
+    #
+    # in_errors/out_errors/in_discards/out_discards and the packet counters are
+    # cumulative SNMP counters. Plotting the reading draws a rising staircase,
+    # and summing readings across a bucket multiplies the running total by the
+    # sample count — this endpoint reported error totals millions of times the
+    # real value and disagreed with /link-utilization for the same interface.
+    # Difference consecutive samples instead, keeping only the positive step so
+    # an agent restart or counter wrap doesn't register as a burst of errors.
+    lag_cols = """
+                       lagInFrame(in_errors)     OVER w AS p_ie,
+                       lagInFrame(out_errors)    OVER w AS p_oe,
+                       lagInFrame(in_discards)   OVER w AS p_id,
+                       lagInFrame(out_discards)  OVER w AS p_od,
+                       lagInFrame(in_ucast_pkts) OVER w AS p_ip,
+                       lagInFrame(out_ucast_pkts) OVER w AS p_op,
+                       row_number() OVER w AS rn"""
+
+    def _delta(col: str, prev: str) -> str:
+        return f"if(rn > 1, greatest(toInt64({col}) - toInt64({prev}), 0), 0)"
+
     if hours <= 6:
-        sql = """
-            SELECT toUnixTimestamp64Milli(timestamp) AS ts_ms,
-                   in_bps, out_bps,
-                   in_errors, out_errors,
-                   in_discards, out_discards,
-                   in_ucast_pkts, out_ucast_pkts,
-                   in_octets, out_octets
-            FROM zenplus.snmp_if_metrics
-            WHERE device_id = %(id)s AND if_index = %(if)s
-              AND timestamp >= now() - INTERVAL %(hours)s HOUR
-            ORDER BY timestamp
+        sql = f"""
+            SELECT ts_ms, in_bps, out_bps,
+                   {_delta('in_errors', 'p_ie')} AS in_errors,
+                   {_delta('out_errors', 'p_oe')} AS out_errors,
+                   {_delta('in_discards', 'p_id')} AS in_discards,
+                   {_delta('out_discards', 'p_od')} AS out_discards,
+                   {_delta('in_ucast_pkts', 'p_ip')} AS in_ucast_pkts,
+                   {_delta('out_ucast_pkts', 'p_op')} AS out_ucast_pkts
+            FROM (
+                SELECT toUnixTimestamp64Milli(timestamp) AS ts_ms, timestamp,
+                       in_bps, out_bps, in_errors, out_errors,
+                       in_discards, out_discards, in_ucast_pkts, out_ucast_pkts,
+                       {lag_cols}
+                FROM zenplus.snmp_if_metrics
+                WHERE device_id = %(id)s AND if_index = %(if)s
+                  AND timestamp >= now() - INTERVAL %(hours)s HOUR
+                WINDOW w AS (ORDER BY timestamp)
+            )
+            ORDER BY ts_ms
         """
     else:
         bucket_seconds = 300 if hours <= 24 else (1800 if hours <= 24 * 7 else 7200)
@@ -813,17 +900,21 @@ async def get_interface_detail_metrics(
                    ) * 1000 AS ts_ms,
                    avg(in_bps) AS in_bps,
                    avg(out_bps) AS out_bps,
-                   sum(in_errors) AS in_errors,
-                   sum(out_errors) AS out_errors,
-                   sum(in_discards) AS in_discards,
-                   sum(out_discards) AS out_discards,
-                   sum(in_ucast_pkts) AS in_ucast_pkts,
-                   sum(out_ucast_pkts) AS out_ucast_pkts,
-                   sum(in_octets) AS in_octets,
-                   sum(out_octets) AS out_octets
-            FROM zenplus.snmp_if_metrics
-            WHERE device_id = %(id)s AND if_index = %(if)s
-              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+                   sum({_delta('in_errors', 'p_ie')}) AS in_errors,
+                   sum({_delta('out_errors', 'p_oe')}) AS out_errors,
+                   sum({_delta('in_discards', 'p_id')}) AS in_discards,
+                   sum({_delta('out_discards', 'p_od')}) AS out_discards,
+                   sum({_delta('in_ucast_pkts', 'p_ip')}) AS in_ucast_pkts,
+                   sum({_delta('out_ucast_pkts', 'p_op')}) AS out_ucast_pkts
+            FROM (
+                SELECT timestamp, in_bps, out_bps, in_errors, out_errors,
+                       in_discards, out_discards, in_ucast_pkts, out_ucast_pkts,
+                       {lag_cols}
+                FROM zenplus.snmp_if_metrics
+                WHERE device_id = %(id)s AND if_index = %(if)s
+                  AND timestamp >= now() - INTERVAL %(hours)s HOUR
+                WINDOW w AS (ORDER BY timestamp)
+            )
             GROUP BY ts_ms
             ORDER BY ts_ms
         """
@@ -1140,3 +1231,249 @@ def _device_to_response(device) -> DeviceResponse:
         snmp_auth_configured=device.snmp_auth_passphrase is not None,
         snmp_priv_configured=device.snmp_priv_passphrase is not None,
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Device maintenance windows (planned downtime)
+#
+# Mirrors the service-check maintenance feature (migrate-006): while a window
+# is active the poller keeps collecting metrics but suppresses status
+# transitions + alerting, the device shows status 'maintenance', and
+# SLA/uptime calculations exclude samples inside the window.
+# ═══════════════════════════════════════════════════════════════════════════
+
+maintenance_router = APIRouter(prefix="/device-maintenance", tags=["Device Maintenance"])
+
+# "Window m covers device d" — shared by every maintenance query. devices.tags
+# is a JSONB string array, so tag scope uses jsonb_exists().
+MAINT_COVERS_DEVICE_SQL = """(
+       (m.scope_type = 'device' AND m.scope_device_id = d.id)
+    OR (m.scope_type = 'group'  AND m.scope_group_id = d.group_id)
+    OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
+    OR (m.scope_type = 'all')
+)"""
+
+
+def _maint_response(m, label: str) -> DeviceMaintenanceResponse:
+    now = datetime.now(timezone.utc)
+    starts = m.starts_at if m.starts_at.tzinfo else m.starts_at.replace(tzinfo=timezone.utc)
+    ends = m.ends_at if m.ends_at.tzinfo else m.ends_at.replace(tzinfo=timezone.utc)
+    return DeviceMaintenanceResponse(
+        id=m.id,
+        scope_type=m.scope_type,
+        scope_device_id=m.scope_device_id,
+        scope_group_id=m.scope_group_id,
+        scope_tag=m.scope_tag,
+        scope_label=label,
+        starts_at=m.starts_at,
+        ends_at=m.ends_at,
+        reason=m.reason,
+        created_by=m.created_by,
+        created_at=m.created_at,
+        active=starts <= now <= ends,
+    )
+
+
+async def _maint_labels(db: AsyncSession, rows) -> dict:
+    """id -> human label for a batch of maintenance rows."""
+    from app.models.device import Device as DeviceModel, DeviceGroup as GroupModel
+    device_ids = [m.scope_device_id for m in rows if m.scope_device_id]
+    group_ids = [m.scope_group_id for m in rows if m.scope_group_id]
+    device_names: dict = {}
+    group_names: dict = {}
+    if device_ids:
+        res = await db.execute(
+            text("SELECT id, hostname FROM devices WHERE id = ANY(:ids)"), {"ids": device_ids}
+        )
+        device_names = {r.id: r.hostname for r in res}
+    if group_ids:
+        res = await db.execute(
+            text("SELECT id, name FROM device_groups WHERE id = ANY(:ids)"), {"ids": group_ids}
+        )
+        group_names = {r.id: r.name for r in res}
+    labels = {}
+    for m in rows:
+        if m.scope_type == "device":
+            labels[m.id] = device_names.get(m.scope_device_id, "(deleted device)")
+        elif m.scope_type == "group":
+            labels[m.id] = group_names.get(m.scope_group_id, "(deleted group)")
+        elif m.scope_type == "tag":
+            labels[m.id] = f"tag:{m.scope_tag}"
+        else:
+            labels[m.id] = "All devices"
+    return labels
+
+
+async def _covered_device_ids(db: AsyncSession, m) -> list:
+    """Device ids covered by one maintenance window."""
+    res = await db.execute(
+        text(f"""
+            SELECT d.id FROM devices d
+            JOIN device_maintenance m ON m.id = :mid
+            WHERE {MAINT_COVERS_DEVICE_SQL}
+        """),
+        {"mid": str(m.id)},
+    )
+    return [r.id for r in res]
+
+
+@maintenance_router.get("", response_model=list[DeviceMaintenanceResponse])
+async def list_device_maintenance(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    from sqlalchemy import select
+    from app.models.device import DeviceMaintenance
+    rows = (await db.execute(
+        select(DeviceMaintenance).order_by(DeviceMaintenance.starts_at.desc()).limit(500)
+    )).scalars().all()
+    labels = await _maint_labels(db, rows)
+    return [_maint_response(m, labels[m.id]) for m in rows]
+
+
+@maintenance_router.post("", response_model=DeviceMaintenanceResponse, status_code=201)
+async def create_device_maintenance(
+    data: DeviceMaintenanceCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    from app.models.device import DeviceMaintenance
+    from app.services.audit_service import write_audit_log
+
+    m = DeviceMaintenance(
+        scope_type=data.scope_type,
+        scope_device_id=data.scope_device_id if data.scope_type == "device" else None,
+        scope_group_id=data.scope_group_id if data.scope_type == "group" else None,
+        scope_tag=data.scope_tag.strip() if data.scope_type == "tag" and data.scope_tag else None,
+        starts_at=data.starts_at,
+        ends_at=data.ends_at,
+        reason=data.reason,
+        created_by=user.id,
+    )
+    db.add(m)
+    await db.flush()
+
+    now = datetime.now(timezone.utc)
+    starts = m.starts_at if m.starts_at.tzinfo else m.starts_at.replace(tzinfo=timezone.utc)
+    ends = m.ends_at if m.ends_at.tzinfo else m.ends_at.replace(tzinfo=timezone.utc)
+    if starts <= now <= ends:
+        # Window is active right now: flip covered devices to 'maintenance'
+        # immediately (the poller would do it within one poll anyway) and
+        # auto-resolve their open alerts so the alert list reflects planned
+        # downtime, not an incident.
+        covered = await _covered_device_ids(db, m)
+        if covered:
+            await db.execute(
+                text("""
+                    UPDATE devices SET status = 'maintenance', updated_at = now()
+                    WHERE id = ANY(:ids)
+                """),
+                {"ids": covered},
+            )
+            await db.execute(
+                text("""
+                    UPDATE alerts SET status = 'resolved', resolved_at = now(),
+                        metadata = COALESCE(metadata, '{}'::jsonb)
+                                   || jsonb_build_object('resolved_by', 'maintenance',
+                                                         'maintenance_id', CAST(:mid AS text))
+                    WHERE status = 'active' AND device_id = ANY(:ids)
+                """),
+                {"mid": str(m.id), "ids": covered},
+            )
+
+    await write_audit_log(
+        db, actor=user, action="create", resource_type="device_maintenance",
+        resource_id=str(m.id),
+        metadata={"scope_type": m.scope_type, "starts_at": str(m.starts_at),
+                  "ends_at": str(m.ends_at), "reason": m.reason},
+    )
+    await db.commit()
+    await db.refresh(m)
+    labels = await _maint_labels(db, [m])
+    return _maint_response(m, labels[m.id])
+
+
+@maintenance_router.delete("/{maintenance_id}", status_code=204)
+async def delete_device_maintenance(
+    maintenance_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    from sqlalchemy import select
+    from app.models.device import DeviceMaintenance
+    from app.services.audit_service import write_audit_log
+
+    m = (await db.execute(
+        select(DeviceMaintenance).where(DeviceMaintenance.id == maintenance_id)
+    )).scalar_one_or_none()
+    if not m:
+        raise HTTPException(status_code=404, detail="Maintenance window not found")
+
+    now = datetime.now(timezone.utc)
+    starts = m.starts_at if m.starts_at.tzinfo else m.starts_at.replace(tzinfo=timezone.utc)
+    ends = m.ends_at if m.ends_at.tzinfo else m.ends_at.replace(tzinfo=timezone.utc)
+    was_active = starts <= now <= ends
+    covered = await _covered_device_ids(db, m) if was_active else []
+
+    await db.execute(
+        text("DELETE FROM device_maintenance WHERE id = :mid"), {"mid": str(maintenance_id)}
+    )
+
+    if covered:
+        # Devices the poller pings recover their real status within one poll
+        # cycle. Ping-disabled devices have no status writer, so reset any
+        # that are no longer covered by another active window.
+        await db.execute(
+            text(f"""
+                UPDATE devices SET status = 'unknown', updated_at = now()
+                WHERE id = ANY(:ids) AND status = 'maintenance' AND ping_enabled = false
+                  AND NOT EXISTS (
+                      SELECT 1 FROM device_maintenance m
+                      JOIN devices d ON d.id = devices.id AND {MAINT_COVERS_DEVICE_SQL}
+                      WHERE m.starts_at <= now() AND m.ends_at >= now()
+                  )
+            """),
+            {"ids": covered},
+        )
+
+    await write_audit_log(
+        db, actor=user, action="delete", resource_type="device_maintenance",
+        resource_id=str(maintenance_id),
+        metadata={"scope_type": m.scope_type, "was_active": was_active},
+    )
+    await db.commit()
+
+
+@router.get("/{device_id}/maintenance")
+async def get_device_maintenance(
+    device_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Active + upcoming maintenance windows covering one device."""
+    from app.models.device import DeviceMaintenance
+    from sqlalchemy import select
+
+    res = await db.execute(
+        text(f"""
+            SELECT m.id FROM device_maintenance m
+            JOIN devices d ON d.id = :did AND {MAINT_COVERS_DEVICE_SQL}
+            WHERE m.ends_at >= now()
+            ORDER BY m.starts_at ASC
+            LIMIT 100
+        """),
+        {"did": str(device_id)},
+    )
+    ids = [r.id for r in res]
+    if not ids:
+        return {"active": [], "upcoming": []}
+    rows = (await db.execute(
+        select(DeviceMaintenance).where(DeviceMaintenance.id.in_(ids))
+        .order_by(DeviceMaintenance.starts_at.asc())
+    )).scalars().all()
+    labels = await _maint_labels(db, rows)
+    out = [_maint_response(m, labels[m.id]) for m in rows]
+    return {
+        "active": [o for o in out if o.active],
+        "upcoming": [o for o in out if not o.active],
+    }

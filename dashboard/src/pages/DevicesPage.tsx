@@ -119,7 +119,7 @@ type SortKey =
   | 'last_seen'
 type SortOrder = 'asc' | 'desc'
 
-type HealthKind = 'healthy' | 'warning' | 'critical' | 'offline'
+type HealthKind = 'healthy' | 'warning' | 'critical' | 'offline' | 'maintenance'
 type AvailabilityRow = {
   key: string
   label: string
@@ -371,6 +371,7 @@ export function DevicesPage() {
         if (statusFilter === 'warning' && health !== 'warning') return false
         if (statusFilter === 'critical' && health !== 'critical') return false
         if (statusFilter === 'offline' && health !== 'offline') return false
+        if (statusFilter === 'maintenance' && health !== 'maintenance') return false
       }
       return true
     })
@@ -407,7 +408,7 @@ export function DevicesPage() {
   // -----------------------------------------------------------------------
 
   const agg = useMemo(() => {
-    const counts = { healthy: 0, warning: 0, critical: 0, offline: 0 }
+    const counts = { healthy: 0, warning: 0, critical: 0, offline: 0, maintenance: 0 }
     const byCategory: Record<string, number> = {
       Server: 0, Network: 0, Security: 0, Wireless: 0, Other: 0,
     }
@@ -638,6 +639,7 @@ export function DevicesPage() {
               { value: 'warning', label: 'Warning' },
               { value: 'critical', label: 'Critical' },
               { value: 'offline', label: 'Offline' },
+              { value: 'maintenance', label: 'Maintenance' },
             ]}
           />
           <FilterInline
@@ -1046,6 +1048,7 @@ export function DevicesPage() {
             warning={agg.warning}
             critical={agg.critical}
             offline={agg.offline}
+            maintenance={(agg as any).maintenance}
             onPickStatus={(s) => patchParams({ status: statusFilter === s ? null : s, page: '1' })}
           />
           <RecentActivityCard alerts={recentAlerts?.data || []} />
@@ -1214,6 +1217,7 @@ function HealthPill({ kind }: { kind: HealthKind }) {
     warning:  { label: 'Warning',  className: 'border-warning/30 bg-warning/10 text-warning', dot: 'bg-warning' },
     critical: { label: 'Critical', className: 'border-danger/30 bg-danger/10 text-danger',    dot: 'bg-danger' },
     offline:  { label: 'Offline',  className: 'border-border bg-surface2 text-muted',         dot: 'bg-muted' },
+    maintenance: { label: 'Maintenance', className: 'border-primary/30 bg-primary/10 text-primary', dot: 'bg-primary' },
   }
   const v = map[kind]
   return (
@@ -1433,9 +1437,10 @@ function Donut({
 // =========================================================================
 
 function StatusBreakdownCard({
-  healthy, warning, critical, offline, onPickStatus,
+  healthy, warning, critical, offline, maintenance = 0, onPickStatus,
 }: {
   healthy: number; warning: number; critical: number; offline: number
+  maintenance?: number
   onPickStatus: (s: string) => void
 }) {
   const items = [
@@ -1443,6 +1448,7 @@ function StatusBreakdownCard({
     { key: 'warning',  label: 'Warning',  value: warning,  color: 'rgb(var(--warning))' },
     { key: 'critical', label: 'Critical', value: critical, color: 'rgb(var(--danger))' },
     { key: 'offline',  label: 'Offline',  value: offline,  color: 'rgb(var(--muted))' },
+    { key: 'maintenance', label: 'Maintenance', value: maintenance, color: 'rgb(var(--primary))' },
   ]
   const max = Math.max(1, ...items.map((i) => i.value))
   const ticks = [0, Math.round(max / 4), Math.round(max / 2), Math.round((max * 3) / 4), max]
@@ -2201,6 +2207,7 @@ function healthOf(d: Device): HealthKind {
   if (d.status === 'up') return 'healthy'
   if (d.status === 'degraded') return 'warning'
   if (d.status === 'down') return 'critical'
+  if (d.status === 'maintenance') return 'maintenance'
   return 'offline'
 }
 

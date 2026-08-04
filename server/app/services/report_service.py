@@ -651,6 +651,63 @@ def _fetch_ping_metrics(start: datetime, end: datetime,
     return [dict(zip(cols, row)) for row in result.result_rows]
 
 
+def _to_naive_utc(dt: datetime) -> datetime:
+    return dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+
+
+async def _fetch_device_maintenance_windows(
+    db: AsyncSession, start: datetime, end: datetime,
+) -> dict[str, list[tuple[datetime, datetime]]]:
+    """device_id -> [(start, end), ...] maintenance intervals overlapping the
+    report range, clamped to it. Naive-UTC datetimes to match ClickHouse rows.
+    Tolerates the table not existing yet (pre-migrate-053 appliances)."""
+    try:
+        rows = (await db.execute(
+            text("""
+                SELECT d.id AS device_id,
+                       GREATEST(m.starts_at, :start_ts) AS s,
+                       LEAST(m.ends_at, :end_ts) AS e
+                FROM device_maintenance m
+                JOIN devices d ON (
+                       (m.scope_type = 'device' AND m.scope_device_id = d.id)
+                    OR (m.scope_type = 'group'  AND m.scope_group_id = d.group_id)
+                    OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
+                    OR (m.scope_type = 'all')
+                )
+                WHERE m.starts_at < :end_ts AND m.ends_at > :start_ts
+            """),
+            {
+                "start_ts": start if start.tzinfo else start.replace(tzinfo=timezone.utc),
+                "end_ts": end if end.tzinfo else end.replace(tzinfo=timezone.utc),
+            },
+        )).all()
+    except Exception:
+        return {}
+    out: dict[str, list[tuple[datetime, datetime]]] = {}
+    for r in rows:
+        out.setdefault(str(r.device_id), []).append((_to_naive_utc(r.s), _to_naive_utc(r.e)))
+    return out
+
+
+def _exclude_maintenance_samples(
+    ping_rows: list[dict],
+    windows: dict[str, list[tuple[datetime, datetime]]],
+) -> list[dict]:
+    """Drop ping samples inside maintenance windows so uptime %, outage
+    episodes and RTT stats reflect only SLA-relevant time."""
+    if not windows:
+        return ping_rows
+    out = []
+    for r in ping_rows:
+        wins = windows.get(str(r["device_id"]))
+        if wins:
+            ts = _to_naive_utc(r["timestamp"]) if isinstance(r["timestamp"], datetime) else r["timestamp"]
+            if any(s <= ts <= e for s, e in wins):
+                continue
+        out.append(r)
+    return out
+
+
 def _fetch_service_metrics(start: datetime, end: datetime,
                            service_ids: list[str] | None = None) -> list[dict]:
     client = get_clickhouse_client()
@@ -788,7 +845,10 @@ async def _build_executive_summary(pdf: ZenPlusReport, db: AsyncSession,
     services = await _fetch_service_checks(db)
     filtered_device_ids = [str(d["id"]) for d in devices] if devices else device_ids
     alerts = await _fetch_alerts(db, start, end, filtered_device_ids)
-    ping_rows = _fetch_ping_metrics(start, end, filtered_device_ids)
+    ping_rows = _exclude_maintenance_samples(
+        _fetch_ping_metrics(start, end, filtered_device_ids),
+        await _fetch_device_maintenance_windows(db, start, end),
+    )
     svc_ids = [str(s["id"]) for s in services]
     svc_rows = _fetch_service_metrics(start, end, svc_ids)
 
@@ -923,7 +983,10 @@ async def _build_device_health(pdf: ZenPlusReport, db: AsyncSession,
                                group_ids: list[str] | None):
     devices = await _fetch_devices(db, device_ids, group_ids)
     filtered_device_ids = [str(d["id"]) for d in devices] if devices else device_ids
-    ping_rows = _fetch_ping_metrics(start, end, filtered_device_ids)
+    ping_rows = _exclude_maintenance_samples(
+        _fetch_ping_metrics(start, end, filtered_device_ids),
+        await _fetch_device_maintenance_windows(db, start, end),
+    )
     status_log = _fetch_device_status_log(start, end, filtered_device_ids)
 
     pdf.add_page()

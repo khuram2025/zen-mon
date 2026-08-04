@@ -44,6 +44,7 @@ import {
   Tag as TagIcon,
   Thermometer,
   Trash2,
+  Wrench,
   TrendingDown,
   TrendingUp,
   Wifi,
@@ -68,6 +69,8 @@ import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/Dialog'
+import { Input } from '@/components/ui/Input'
+import { Textarea } from '@/components/ui/Textarea'
 import { DeviceFormDialog } from '@/components/forms/DeviceFormDialog'
 import { toast } from '@/components/ui/Toast'
 import { TimeRangePicker, rangePhrase, useTimeRange } from '@/components/TimeRangePicker'
@@ -101,12 +104,13 @@ const ttStyle = () => ({
   labelFormatter: timeTooltipLabelFormatter,
 })
 
-type HealthKind = 'healthy' | 'warning' | 'critical' | 'offline'
+type HealthKind = 'healthy' | 'warning' | 'critical' | 'offline' | 'maintenance'
 
 function healthOf(status: string): HealthKind {
   if (status === 'up') return 'healthy'
   if (status === 'degraded') return 'warning'
   if (status === 'down') return 'critical'
+  if (status === 'maintenance') return 'maintenance'
   return 'offline'
 }
 
@@ -140,6 +144,14 @@ export function DeviceDetailPage() {
     enabled: !!id,
   })
 
+  const [maintOpen, setMaintOpen] = useState(false)
+  const { data: maint } = useQuery<{ active: any[]; upcoming: any[] }>({
+    queryKey: ['device-maintenance', id],
+    queryFn: async () => (await api.get(`/devices/${id}/maintenance`)).data,
+    refetchInterval: 60_000,
+    enabled: !!id,
+  })
+
   const del = useMutation({
     mutationFn: async () => api.delete(`/devices/${id}`),
     onSuccess: () => {
@@ -164,6 +176,7 @@ export function DeviceDetailPage() {
         device={device}
         onEdit={() => setEditOpen(true)}
         onDelete={() => setDelOpen(true)}
+        onMaintenance={() => setMaintOpen(true)}
         rangePicker={(
           <TimeRangePicker
             rangeIdx={rangeIdx}
@@ -176,9 +189,17 @@ export function DeviceDetailPage() {
         )}
       />
 
+      <MaintenanceBanner windows={maint?.active || []} onManage={() => setMaintOpen(true)} />
+
       <DashboardSection device={device} deviceId={id!} range={range} />
 
       <DeviceFormDialog open={editOpen} onOpenChange={setEditOpen} device={device} />
+      <DeviceMaintenanceDialog
+        open={maintOpen}
+        onOpenChange={setMaintOpen}
+        device={device}
+        windows={maint}
+      />
       <ConfirmDialog
         open={delOpen}
         onOpenChange={setDelOpen}
@@ -202,8 +223,8 @@ export function DeviceDetailPage() {
    ════════════════════════════════════════════════════════════ */
 
 function DeviceHeader({
-  device, onEdit, onDelete, rangePicker,
-}: { device: any; onEdit: () => void; onDelete: () => void; rangePicker?: React.ReactNode }) {
+  device, onEdit, onDelete, onMaintenance, rangePicker,
+}: { device: any; onEdit: () => void; onDelete: () => void; onMaintenance?: () => void; rangePicker?: React.ReactNode }) {
   const health = healthOf(device.status)
   const Icon = typeIconMap[device.device_type] || Box
 
@@ -241,6 +262,7 @@ function DeviceHeader({
     warning: { pill: 'bg-warning/15 text-warning border-warning/30', dot: 'bg-warning', label: 'Warning' },
     critical: { pill: 'bg-danger/15 text-danger border-danger/30', dot: 'bg-danger', label: 'Critical' },
     offline: { pill: 'bg-surface2 text-muted border-border', dot: 'bg-muted', label: 'Offline' },
+    maintenance: { pill: 'bg-primary/15 text-primary border-primary/30', dot: 'bg-primary', label: 'Maintenance' },
   }[health]
 
   /* Primary row (5 metadata fields) */
@@ -307,6 +329,12 @@ function DeviceHeader({
                 <Pencil className="h-4 w-4" />
                 Edit Device
               </Button>
+              {onMaintenance && (
+                <Button variant="outline" size="default" className="h-9" onClick={onMaintenance}>
+                  <Wrench className="h-4 w-4" />
+                  Maintenance
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="default"
@@ -3684,5 +3712,198 @@ function InvStat({
         {value}
       </div>
     </div>
+  )
+}
+
+/* ════════════════════════════════════════════════════════════
+   Maintenance windows — banner + schedule/manage dialog
+   ════════════════════════════════════════════════════════════ */
+
+function MaintenanceBanner({ windows, onManage }: { windows: any[]; onManage: () => void }) {
+  if (!windows.length) return null
+  const w = windows[0]
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-lg border border-primary/30 bg-primary/10 px-4 py-3 text-sm">
+      <Wrench className="h-4 w-4 shrink-0 text-primary" />
+      <div className="min-w-0 flex-1">
+        <span className="font-semibold text-primary">Under maintenance</span>{' '}
+        <span>
+          until {new Date(w.ends_at).toLocaleString()} — status changes, alerting and SLA impact are paused.
+        </span>
+        {w.reason ? <span className="text-muted"> Reason: {w.reason}</span> : null}
+      </div>
+      <Button variant="outline" size="sm" onClick={onManage}>Manage</Button>
+    </div>
+  )
+}
+
+const MAINT_DURATIONS: Array<{ value: string; label: string }> = [
+  { value: '1800', label: '30 minutes' },
+  { value: '3600', label: '1 hour' },
+  { value: '7200', label: '2 hours' },
+  { value: '14400', label: '4 hours' },
+  { value: '28800', label: '8 hours' },
+  { value: '86400', label: '24 hours' },
+  { value: 'custom', label: 'Custom end time' },
+]
+
+function DeviceMaintenanceDialog({
+  open, onOpenChange, device, windows,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  device: any
+  windows?: { active: any[]; upcoming: any[] }
+}) {
+  const qc = useQueryClient()
+  const [startMode, setStartMode] = useState<'now' | 'later'>('now')
+  const [startAt, setStartAt] = useState('')
+  const [duration, setDuration] = useState('3600')
+  const [endAt, setEndAt] = useState('')
+  const [reason, setReason] = useState('')
+
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ['device-maintenance', device.id] })
+    qc.invalidateQueries({ queryKey: ['device', device.id] })
+    qc.invalidateQueries({ queryKey: ['devices'] })
+  }
+
+  const computeRange = (): { start: Date; end: Date } | null => {
+    const start = startMode === 'now' ? new Date() : (startAt ? new Date(startAt) : null)
+    if (!start || Number.isNaN(start.getTime())) return null
+    const end = duration === 'custom'
+      ? (endAt ? new Date(endAt) : null)
+      : new Date(start.getTime() + Number(duration) * 1000)
+    if (!end || Number.isNaN(end.getTime()) || end <= start) return null
+    return { start, end }
+  }
+  const range = computeRange()
+
+  const create = useMutation({
+    mutationFn: async () => {
+      const r = computeRange()
+      if (!r) throw new Error('invalid range')
+      return api.post('/device-maintenance', {
+        scope_type: 'device',
+        scope_device_id: device.id,
+        starts_at: r.start.toISOString(),
+        ends_at: r.end.toISOString(),
+        reason: reason.trim() || null,
+      })
+    },
+    onSuccess: () => {
+      toast.success('Maintenance scheduled', 'Alerting and SLA impact are paused for this device during the window.')
+      setReason('')
+      invalidate()
+    },
+    onError: (e: any) => toast.error('Could not schedule maintenance', apiErrorMessage(e)),
+  })
+
+  const cancelWin = useMutation({
+    mutationFn: async (mid: string) => api.delete(`/device-maintenance/${mid}`),
+    onSuccess: () => { toast.success('Maintenance window removed'); invalidate() },
+    onError: (e: any) => toast.error('Could not remove window', apiErrorMessage(e)),
+  })
+
+  const existing = [...(windows?.active || []), ...(windows?.upcoming || [])]
+  const selectCls = 'h-9 w-full rounded-md border border-border bg-surface px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40'
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Wrench className="h-4 w-4 text-primary" />
+            Maintenance — {device.hostname}
+          </DialogTitle>
+          <DialogDescription>
+            While a window is active the device keeps being polled and metrics are recorded,
+            but status changes, alerts and notifications are suppressed and the window is
+            excluded from uptime/SLA and reports.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <div className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted">Start</div>
+              <select className={selectCls} value={startMode} onChange={(e) => setStartMode(e.target.value as any)}>
+                <option value="now">Now</option>
+                <option value="later">At a scheduled time</option>
+              </select>
+            </div>
+            <div>
+              <div className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted">Duration</div>
+              <select className={selectCls} value={duration} onChange={(e) => setDuration(e.target.value)}>
+                {MAINT_DURATIONS.map((d) => <option key={d.value} value={d.value}>{d.label}</option>)}
+              </select>
+            </div>
+          </div>
+
+          {startMode === 'later' && (
+            <div>
+              <div className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted">Start time</div>
+              <Input type="datetime-local" value={startAt} onChange={(e) => setStartAt(e.target.value)} />
+            </div>
+          )}
+          {duration === 'custom' && (
+            <div>
+              <div className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted">End time</div>
+              <Input type="datetime-local" value={endAt} onChange={(e) => setEndAt(e.target.value)} />
+            </div>
+          )}
+
+          <div>
+            <div className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted">Reason (shown in reports & audit log)</div>
+            <Textarea rows={2} placeholder="e.g. Firmware upgrade, change #1234" value={reason} onChange={(e) => setReason(e.target.value)} />
+          </div>
+
+          {range && (
+            <div className="rounded-md border border-border bg-surface2 px-3 py-2 text-xs text-muted">
+              Window: <span className="text-text">{range.start.toLocaleString()}</span> → <span className="text-text">{range.end.toLocaleString()}</span>
+            </div>
+          )}
+
+          {existing.length > 0 && (
+            <div>
+              <div className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted">Scheduled windows</div>
+              <div className="space-y-1.5">
+                {existing.map((w: any) => (
+                  <div key={w.id} className="flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-xs">
+                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${w.active ? 'bg-primary' : 'bg-muted'}`} />
+                    <div className="min-w-0 flex-1">
+                      <span className="font-medium">{w.active ? 'Active' : 'Upcoming'}</span>{' '}
+                      <span className="text-muted">
+                        {new Date(w.starts_at).toLocaleString()} → {new Date(w.ends_at).toLocaleString()}
+                        {w.scope_type !== 'device' ? ` · via ${w.scope_label}` : ''}
+                      </span>
+                      {w.reason ? <div className="truncate text-muted" title={w.reason}>{w.reason}</div> : null}
+                    </div>
+                    {w.scope_type === 'device' && (
+                      <Button
+                        variant="outline" size="sm"
+                        className="h-7 px-2 text-danger"
+                        disabled={cancelWin.isPending}
+                        onClick={() => cancelWin.mutate(w.id)}
+                      >
+                        {w.active ? 'End now' : 'Remove'}
+                      </Button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>Close</Button>
+          <Button size="sm" disabled={!range || create.isPending} onClick={() => create.mutate()}>
+            {create.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wrench className="h-3.5 w-3.5" />}
+            Schedule maintenance
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
