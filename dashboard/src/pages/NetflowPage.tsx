@@ -122,6 +122,7 @@ type Interface = {
   flows: number
 }
 
+type Country = { country: string | null; country_name: string | null; bytes: number; packets: number; flows: number }
 type DscpClass = { dscp: number; label: string; bytes: number; packets: number; flows: number }
 type TcpFlagSummary = { total_tcp: number; syn_only: number; ack_only: number; rst: number; fin: number; psh: number; urg: number; no_flags: number }
 type NetClass = { name: string; bytes: number; packets: number; flows: number }
@@ -191,7 +192,7 @@ export function NetflowSectionPage() {
   const { data = [], isLoading, error } = useQuery<any[]>({
     queryKey: ['netflow', 'section', section, qs],
     queryFn: async () => (await api.get(`/netflow/${meta.endpoint}?${qs}`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    refetchInterval: isCustom ? false : pollMs(range.hours),
   })
 
   const Icon = meta.icon
@@ -244,6 +245,13 @@ export function NetflowSectionPage() {
       </Card>
     </div>
   )
+}
+
+// Auto-refresh cadence scaled to the window: multi-day windows run multi-second
+// ClickHouse scans — re-polling those every 15s just burns the database.
+function pollMs(hours: number, floor = 15_000): number | false {
+  const ms = hours <= 6 ? 15_000 : hours <= 48 ? 60_000 : 300_000
+  return Math.max(ms, floor)
 }
 
 export function NetflowPage({ exporter }: { exporter?: string } = {}) {
@@ -354,12 +362,12 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
   const overview = useQuery<Overview>({
     queryKey: ['netflow', 'overview', rangeKey],
     queryFn: async () => (await api.get(`/netflow/overview?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    refetchInterval: isCustom ? false : pollMs(hours),
   })
   const timeseries = useQuery<SeriesPoint[]>({
     queryKey: ['netflow', 'timeseries', rangeKey],
     queryFn: async () => (await api.get(`/netflow/timeseries?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    refetchInterval: isCustom ? false : pollMs(hours),
   })
   const timeseriesPrior = useQuery<SeriesPoint[]>({
     queryKey: ['netflow', 'timeseries-prior', priorQS],
@@ -369,63 +377,75 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
   })
   const talkers = useQuery<Talker[]>({
     queryKey: ['netflow', 'talkers', rangeKey],
-    queryFn: async () => (await api.get(`/netflow/top-talkers?${rangeQS}&limit=6`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    queryFn: async () => (await api.get(`/netflow/top-talkers?${rangeQS}&limit=6&by=src`)).data,
+    refetchInterval: isCustom ? false : pollMs(hours),
   })
   const endpoints = useQuery<Endpoint[]>({
     queryKey: ['netflow', 'endpoints', rangeKey],
     queryFn: async () => (await api.get(`/netflow/top-endpoints?${rangeQS}&limit=6`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    refetchInterval: isCustom ? false : pollMs(hours),
   })
   const conversations = useQuery<Conversation[]>({
     queryKey: ['netflow', 'conversations', rangeKey],
     queryFn: async () => (await api.get(`/netflow/top-conversations?${rangeQS}&limit=10`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    refetchInterval: isCustom ? false : pollMs(hours),
   })
   const protocols = useQuery<Protocol[]>({
     queryKey: ['netflow', 'protocols', rangeKey],
     queryFn: async () => (await api.get(`/netflow/protocols?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    refetchInterval: isCustom ? false : pollMs(hours),
   })
   const applications = useQuery<Application[]>({
     queryKey: ['netflow', 'applications', rangeKey],
     queryFn: async () => (await api.get(`/netflow/applications?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    refetchInterval: isCustom ? false : pollMs(hours),
   })
   const exporters = useQuery<Exporter[]>({
     queryKey: ['netflow', 'exporters', rangeKey],
     queryFn: async () => (await api.get(`/netflow/exporters?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    refetchInterval: isCustom ? false : pollMs(hours),
   })
   const deviceStatus = useQuery<DeviceStatus>({
     queryKey: ['netflow', 'device-status', rangeKey],
     queryFn: async () => (await api.get(`/netflow/device-status?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 30_000,
+    refetchInterval: isCustom ? false : pollMs(hours, 30_000),
   })
+  // The heatmap is a 7-day hour×day picker — pin it to a week (or the custom
+  // window) instead of the page range, otherwise a 1h range leaves it empty.
+  const heatmapQS = useMemo(() => {
+    const params = new URLSearchParams(rangeQS)
+    if (!isCustom) params.set('hours', '168')
+    return params.toString()
+  }, [rangeQS, isCustom])
   const heatmap = useQuery<Heatmap>({
-    queryKey: ['netflow', 'heatmap', rangeKey],
-    queryFn: async () => (await api.get(`/netflow/heatmap?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 60_000,
+    queryKey: ['netflow', 'heatmap', `${rangeKey}|7d`],
+    queryFn: async () => (await api.get(`/netflow/heatmap?${heatmapQS}`)).data,
+    refetchInterval: isCustom ? false : pollMs(hours, 60_000),
   })
   const interfaces = useQuery<Interface[]>({
     queryKey: ['netflow', 'interfaces', `${isCustom ? `c:${range.fromISO}|${range.toISO}` : `p:${hours}h`}|${exporter || 'all'}`],
     queryFn: async () => (await api.get(`/netflow/interfaces?${interfacesQS}`)).data,
-    refetchInterval: isCustom ? false : 60_000,
+    refetchInterval: isCustom ? false : pollMs(hours, 60_000),
   })
   const dscp = useQuery<DscpClass[]>({
     queryKey: ['netflow', 'dscp', rangeKey],
     queryFn: async () => (await api.get(`/netflow/dscp?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 30_000,
+    refetchInterval: isCustom ? false : pollMs(hours, 30_000),
   })
   const tcpFlags = useQuery<TcpFlagSummary>({
     queryKey: ['netflow', 'tcp-flags', rangeKey],
     queryFn: async () => (await api.get(`/netflow/tcp-flags?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 30_000,
+    refetchInterval: isCustom ? false : pollMs(hours, 30_000),
   })
   const netClasses = useQuery<NetClass[]>({
     queryKey: ['netflow', 'network-classes', rangeKey],
     queryFn: async () => (await api.get(`/netflow/network-classes?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 60_000,
+    refetchInterval: isCustom ? false : pollMs(hours, 60_000),
+  })
+  const countries = useQuery<Country[]>({
+    queryKey: ['netflow', 'countries', rangeKey],
+    queryFn: async () => (await api.get(`/netflow/countries?${rangeQS}`)).data,
+    refetchInterval: isCustom ? false : pollMs(hours, 60_000),
   })
 
   const loading = overview.isLoading || timeseries.isLoading
@@ -552,7 +572,7 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search devices, applications, interfaces..."
+              placeholder="Filter flow records (IP, service, protocol)…"
               className="h-8 w-80 rounded-md border border-border bg-surface2/60 pl-7 pr-3 text-xs placeholder:text-muted focus:border-primary focus:outline-none"
             />
           </div>
@@ -579,30 +599,30 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
         <KpiCard
           icon={Wifi}
           tone="violet"
-          label="Active Flows"
+          label="Flows in Window"
           value={(overview.data?.flows || 0).toLocaleString()}
           sub={`${formatBps(overview.data?.current_bps || 0)} current rate`}
         />
         <KpiCard
           icon={RadioTower}
           tone="amber"
-          label="Top Devices"
+          label="Exporters"
           value={(overview.data?.exporters || 0).toLocaleString()}
           sub={<Badge variant={health.variant}>{health.label}</Badge>}
         />
         <KpiCard
           icon={Layers}
           tone="emerald"
-          label="Top Applications"
+          label="Applications"
           value={applicationData.length.toLocaleString()}
-          sub={applicationData[0]?.name || '—'}
+          sub={applicationData[0] ? `top: ${applicationData[0].name}` : '—'}
         />
         <KpiCard
           icon={Smartphone}
           tone="pink"
-          label="Active Sessions"
+          label="Unique Hosts"
           value={`${(overview.data?.src_hosts || 0).toLocaleString()} / ${(overview.data?.dst_hosts || 0).toLocaleString()}`}
-          sub="src / dst hosts"
+          sub="sources / destinations"
         />
       </div>
 
@@ -615,8 +635,7 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
               <p className="text-xs text-muted">{range.label}{compareEnabled ? ' · vs prior period' : ''}</p>
             </div>
             <div className="flex items-center gap-2 text-xs">
-              <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-cyan-400" />Inbound</span>
-              <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-violet-400" />Outbound</span>
+              <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-cyan-400" />Throughput</span>
               {compareEnabled && <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-amber-400 opacity-70" />Prior</span>}
               <button
                 onClick={toggleCompare}
@@ -649,24 +668,19 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
                         <stop offset="5%" stopColor="#22d3ee" stopOpacity={0.55} />
                         <stop offset="95%" stopColor="#22d3ee" stopOpacity={0.02} />
                       </linearGradient>
-                      <linearGradient id="netflowOut" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#a78bfa" stopOpacity={0.45} />
-                        <stop offset="95%" stopColor="#a78bfa" stopOpacity={0.02} />
-                      </linearGradient>
                     </defs>
                     <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.4} vertical={false} />
                     <XAxis dataKey="ts" tickFormatter={timeAxisTickFormatter(hours)} tick={{ fontSize: 11, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
                     <YAxis tickFormatter={formatBps} tick={{ fontSize: 11, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} width={72} />
                     <Tooltip
                       labelFormatter={timeTooltipLabelFormatter}
-                      formatter={(value: any, name: string) => [formatBps(Number(value)), name === 'prior_bps' ? 'Prior' : 'Rate']}
+                      formatter={(value: any, name: string) => [formatBps(Number(value)), name === 'prior_bps' ? 'Prior' : 'Throughput']}
                       contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8 }}
                     />
                     {compareEnabled && (
                       <Area type="monotone" dataKey="prior_bps" stroke="#fbbf24" strokeWidth={1.5} strokeDasharray="4 3" fill="none" connectNulls />
                     )}
                     <Area type="monotone" dataKey="bps" stroke="#22d3ee" strokeWidth={2} fill="url(#netflowIn)" />
-                    <Area type="monotone" dataKey="packets" stroke="#a78bfa" strokeWidth={1.4} fill="url(#netflowOut)" />
                   </AreaChart>
                 </ResponsiveContainer>
               )}
@@ -690,8 +704,8 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
       <div className="grid grid-cols-1 items-stretch gap-4 md:grid-cols-2 xl:grid-cols-5">
         <DonutCard
           title="Top Talkers"
-          subtitle="By bytes — click to filter"
-          data={talkerData.map((t) => ({ name: t.ip, value: t.bytes }))}
+          subtitle="By bytes sent — click to filter"
+          data={talkerData.map((t: any) => ({ name: t.ip, value: t.src_bytes ?? t.bytes }))}
           colors={TALKER_COLORS}
           labelMode="ip"
           activeName={filterTalker || null}
@@ -772,6 +786,7 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
             compact
           />
           <AlertsPanel alerts={alerts} />
+          <CountriesCard data={countries.data || []} />
         </div>
       </div>
 
@@ -1572,7 +1587,7 @@ function DonutCard({
                   {...(onSelect ? { onClick: () => onSelect(d.name), type: 'button' as const } : {})}
                   className={`flex w-full items-center justify-between gap-2 rounded px-1 py-0.5 text-left transition-colors ${onSelect ? 'cursor-pointer hover:bg-primary/5' : ''} ${active ? 'bg-primary/10 ring-1 ring-primary/40' : ''}`}
                 >
-                  <span className="flex min-w-0 items-center gap-1.5 truncate">
+                  <span className="flex min-w-0 items-center gap-1.5 truncate" title={d.name}>
                     <span className="h-2 w-2 shrink-0 rounded-sm" style={{ backgroundColor: colors[i % colors.length] }} />
                     <span className={`truncate ${labelMode === 'ip' || compactNames ? 'font-mono text-[10px]' : ''}`}>{d.name}</span>
                   </span>
@@ -1650,10 +1665,10 @@ function buildAlerts(overview?: Overview, exporters: Exporter[] = [], device?: D
   }
   if (device && device.packet_loss_pct >= 5) {
     list.push({
-      id: 'loss',
-      title: 'Elevated Packet Loss',
-      body: `${device.packet_loss_pct.toFixed(2)}% RST/abort flows`,
-      severity: 'critical',
+      id: 'rst-ratio',
+      title: 'High TCP RST Ratio',
+      body: `${device.packet_loss_pct.toFixed(2)}% of TCP flows carried RST (aborts/probes)`,
+      severity: 'warning',
       icon: ShieldAlert,
     })
   }
@@ -1687,7 +1702,7 @@ function AlertsPanel({ alerts }: { alerts: Alert[] }) {
           <Bell className="h-4 w-4 text-warning" />
           <div>
             <CardTitle>Alerts / Incidents</CardTitle>
-            <p className="text-xs text-muted">Live signals from the collector</p>
+            <p className="text-xs text-muted">Derived from flow telemetry in this window</p>
           </div>
         </div>
         <Badge variant={alerts.some((a) => a.severity === 'critical') ? 'danger' : alerts.length ? 'warning' : 'success'}>{alerts.length}</Badge>
@@ -1734,18 +1749,20 @@ function AlertsPanel({ alerts }: { alerts: Alert[] }) {
 // ─────────────────────────────────────────────────────────────────
 
 function DeviceStatusCard({ status, exporters, deviceView }: { status?: DeviceStatus; exporters: Exporter[]; deviceView?: boolean }) {
-  const latency = status?.latency_ms ?? 0
-  const loss = status?.packet_loss_pct ?? 0
+  // These are flow-derived heuristics (avg flow duration, TCP RST ratio) —
+  // NOT real latency / packet-loss measurements. Label them honestly.
+  const flowDuration = status?.latency_ms ?? 0
+  const rstRatio = status?.packet_loss_pct ?? 0
   return (
     <Card className="shrink-0">
       <CardHeader className="pb-2">
-        <CardTitle className="text-sm">Device Status</CardTitle>
-        <p className="text-[11px] text-muted">Health from flow telemetry</p>
+        <CardTitle className="text-sm">Exporter Health</CardTitle>
+        <p className="text-[11px] text-muted">Flow-derived signals (not ICMP/SNMP probes)</p>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="grid grid-cols-2 gap-2">
-          <MiniStat icon={Gauge} label="Latency" value={`${latency} ms`} tone="cyan" />
-          <MiniStat icon={Database} label="Packet Loss" value={`${loss.toFixed(2)}%`} tone={loss >= 5 ? 'rose' : 'emerald'} />
+          <MiniStat icon={Gauge} label="Avg Flow Duration" value={`${flowDuration} ms`} tone="cyan" />
+          <MiniStat icon={Database} label="TCP RST Ratio" value={`${rstRatio.toFixed(2)}%`} tone={rstRatio >= 5 ? 'rose' : 'emerald'} />
         </div>
         <div className="rounded-md border border-border bg-surface2/30 p-2.5">
           <div className="mb-1.5 flex items-center justify-between text-[11px]">
@@ -1845,11 +1862,11 @@ function ConversationTable({ conversations, lastSeen, label }: { conversations: 
             <Tr>
               <Th><button className="flex items-center gap-1 hover:text-text" onClick={() => toggle('src')}>Source{arrow('src')}</button></Th>
               <Th><button className="flex items-center gap-1 hover:text-text" onClick={() => toggle('dst')}>Destination{arrow('dst')}</button></Th>
-              <Th><button className="flex items-center gap-1 hover:text-text" onClick={() => toggle('service')}>Application{arrow('service')}</button></Th>
+              <Th><button className="flex items-center gap-1 hover:text-text" onClick={() => toggle('service')}>Service{arrow('service')}</button></Th>
               <Th><button className="flex items-center gap-1 hover:text-text" onClick={() => toggle('protocol_name')}>Protocol{arrow('protocol_name')}</button></Th>
               <Th className="text-right"><button className="ml-auto flex items-center gap-1 hover:text-text" onClick={() => toggle('bytes')}>Bytes{arrow('bytes')}</button></Th>
               <Th className="text-right"><button className="ml-auto flex items-center gap-1 hover:text-text" onClick={() => toggle('packets')}>Packets{arrow('packets')}</button></Th>
-              <Th>Status</Th>
+              <Th className="text-right">Flows</Th>
             </Tr>
           </THead>
           <TBody>
@@ -1864,7 +1881,7 @@ function ConversationTable({ conversations, lastSeen, label }: { conversations: 
                 <Td><Badge variant="outline">{c.protocol_name}</Badge></Td>
                 <Td className="text-right text-sm">{formatBytes(c.bytes)}</Td>
                 <Td className="text-right text-sm">{c.packets.toLocaleString()}</Td>
-                <Td><span className="inline-flex items-center gap-1.5 text-xs text-success"><span className="h-1.5 w-1.5 rounded-full bg-success" />Allowed</span></Td>
+                <Td className="text-right text-sm">{c.flows.toLocaleString()}</Td>
               </Tr>
             ))}
           </TBody>
@@ -2249,6 +2266,48 @@ function TopInterfacesCard({
             })}
           </div>
         )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function flagEmoji(cc: string | null): string {
+  if (!cc || cc.length !== 2) return '🌐'
+  const base = 0x1f1e6
+  const a = 'A'.charCodeAt(0)
+  return String.fromCodePoint(base + cc.charCodeAt(0) - a, base + cc.charCodeAt(1) - a)
+}
+
+function CountriesCard({ data }: { data: Country[] }) {
+  // Endpoint returns [] when no GeoIP database is provisioned — hide entirely.
+  if (data.length === 0) return null
+  const top = data.slice(0, 6)
+  const max = Math.max(1, ...top.map((c) => c.bytes))
+  const total = Math.max(1, data.reduce((a, b) => a + b.bytes, 0))
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center gap-2 pb-2">
+        <RadioTower className="h-4 w-4 text-primary" />
+        <div>
+          <CardTitle className="text-sm">Top Countries</CardTitle>
+          <p className="text-[11px] text-muted">GeoIP on top endpoint IPs · src + dst bytes</p>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {top.map((c) => (
+          <div key={c.country || 'unknown'}>
+            <div className="flex items-center justify-between gap-2 text-[11px]">
+              <span className="flex min-w-0 items-center gap-1.5 truncate">
+                <span>{flagEmoji(c.country)}</span>
+                <span className="truncate">{c.country_name || 'Private / Unknown'}</span>
+              </span>
+              <span className="shrink-0 text-muted">{formatBytes(c.bytes)} · {((c.bytes / total) * 100).toFixed(1)}%</span>
+            </div>
+            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface">
+              <div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(3, (c.bytes / max) * 100)}%` }} />
+            </div>
+          </div>
+        ))}
       </CardContent>
     </Card>
   )

@@ -74,6 +74,194 @@ def _util_pct(in_bps: float, out_bps: float, speed: int) -> float | None:
     return round(max(in_bps, out_bps) / speed * 100.0, 1)
 
 
+# ── Interface health: errors, discards, stability ────────────────────────────
+#
+# ifInErrors/ifOutErrors/ifInDiscards/ifOutDiscards and the packet counters are
+# CUMULATIVE SNMP counters, so the increase over a window — not the reading —
+# is the number of events.
+#
+# `max(x) - min(x)` is exact while the counter rises monotonically, which is
+# almost always. It breaks when an agent restart or 32-bit wrap resets the
+# counter to zero: max-min then charges the whole pre-reset peak as new errors.
+# One interface in the field read 23,956 errors that way against 3,393 real ones.
+#
+# The reset-safe answer is to sum only the positive step between consecutive
+# samples, but that needs `lagInFrame`, whose PARTITION BY ... ORDER BY sort
+# costs ~4.3s across an 18M-row 7-day fleet scan versus 0.3s for plain
+# aggregates. So this runs in two tiers:
+#
+#   Pass 1 (always, cheap): plain aggregates for every interface, plus two
+#     flags — `has_reset` (some sample sits below the first one, which a
+#     monotonic counter can never do) and `maybe_flap` (more than one distinct
+#     oper_status, so at least one transition happened).
+#   Pass 2 (only for flagged interfaces): the precise windowed pass.
+#
+# In the field that is ~70 of 3,174 interfaces, so the pair costs ~0.35s and
+# returns exactly what the expensive query would have.
+
+_COUNTER_COLUMNS = (
+    ("in_errors", "ie"),
+    ("out_errors", "oe"),
+    ("in_discards", "id"),
+    ("out_discards", "od"),
+    ("in_ucast_pkts", "ip"),
+    ("out_ucast_pkts", "op"),
+)
+
+
+def _health_cheap_columns() -> str:
+    """Aggregate-only health columns — exact unless a counter reset (flagged)."""
+    deltas = ",\n                   ".join(
+        f"max({col}) - min({col}) AS d_{alias}" for col, alias in _COUNTER_COLUMNS
+    )
+    # A monotonic counter's first sample is also its smallest. Anything else
+    # means the counter went backwards somewhere in the window.
+    resets = "\n                    OR ".join(
+        f"(argMin({col}, timestamp) != min({col}))" for col, _ in _COUNTER_COLUMNS
+    )
+    return f"""{deltas},
+                   uniqExact(oper_status) > 1 AS maybe_flap,
+                   avg(oper_status) * 100 AS availability,
+                   ({resets}) AS has_reset"""
+
+
+def _health_precise_sql(window: str, pairs_sql: str) -> str:
+    """Reset-safe deltas + exact flap counts, scoped to the flagged interfaces.
+
+    row_number() = 1 has no predecessor (lagInFrame yields 0 there, which would
+    score the entire counter as one delta), so every delta is gated on rn > 1.
+    """
+    lags = ",\n                       ".join(
+        f"lagInFrame({col}) OVER w AS p_{alias}" for col, alias in _COUNTER_COLUMNS
+    )
+    deltas = ",\n                   ".join(
+        f"sum(if(rn > 1, greatest(toInt64({col}) - toInt64(p_{alias}), 0), 0)) AS d_{alias}"
+        for col, alias in _COUNTER_COLUMNS
+    )
+    cols = ", ".join(col for col, _ in _COUNTER_COLUMNS)
+    return f"""
+        SELECT device_id, if_index,
+               {deltas},
+               countIf(rn > 1 AND oper_status != p_os) AS flaps
+        FROM (
+            SELECT device_id, if_index, timestamp, oper_status, {cols},
+                   {lags},
+                   lagInFrame(oper_status) OVER w AS p_os,
+                   row_number() OVER w AS rn
+            FROM zenplus.snmp_if_metrics
+            WHERE {window} AND (device_id, if_index) IN ({pairs_sql})
+            WINDOW w AS (PARTITION BY device_id, if_index ORDER BY timestamp)
+        )
+        GROUP BY device_id, if_index
+    """
+
+
+def _pairs_sql(pairs: list[tuple[str, int]]) -> str:
+    """Inline (uuid, ifindex) tuple list. Both halves are re-typed from values
+    ClickHouse itself returned, so there is nothing to inject."""
+    return ",".join(f"(toUUID('{UUID(d)}'),{int(i)})" for d, i in pairs)
+
+
+def _ppm(events: int, packets: int) -> float | None:
+    """Events per million packets. None when the device reports no packet
+    counters — a bare count with no denominator can't be judged."""
+    if packets <= 0:
+        return None
+    return round(events * 1_000_000.0 / packets, 2)
+
+
+# Error/discard severity is a RATE, not a count. 517 errors against 256M packets
+# (2 ppm) is a healthy link; 517 against 50k packets is a broken one. Thresholds
+# follow the usual operational rule of thumb — 0.1% of frames erroring is a
+# fault, 0.01% is worth watching. Discards tolerate more: a policed or congested
+# port drops by design, so only a sustained 1% counts as critical.
+_ERR_PPM_CRITICAL = 1_000     # 0.1 %
+_ERR_PPM_WARNING = 100        # 0.01 %
+_DISCARD_PPM_CRITICAL = 10_000  # 1 %
+_DISCARD_PPM_WARNING = 1_000    # 0.1 %
+# Without packet counters there is no denominator; fall back to an absolute
+# floor high enough that a handful of stray events doesn't flag every port.
+_ERR_ABS_FLOOR = 1_000
+_FLAP_CRITICAL = 5
+
+
+def _link_health(errors: int, discards: int, err_ppm: float | None,
+                 disc_ppm: float | None, flaps: int) -> tuple[str, list[str]]:
+    """Classify a link as ok/warning/critical and name the reasons.
+
+    The reason list drives the UI badges, so it stays empty for healthy links
+    rather than reporting "0 errors" as a finding.
+    """
+    issues: list[str] = []
+    severity = "ok"
+
+    def _raise(level: str) -> None:
+        nonlocal severity
+        if level == "critical" or (level == "warning" and severity == "ok"):
+            severity = level
+
+    if errors > 0:
+        if err_ppm is not None:
+            if err_ppm >= _ERR_PPM_CRITICAL:
+                issues.append("errors"); _raise("critical")
+            elif err_ppm >= _ERR_PPM_WARNING:
+                issues.append("errors"); _raise("warning")
+        elif errors >= _ERR_ABS_FLOOR:
+            issues.append("errors"); _raise("warning")
+    if discards > 0:
+        if disc_ppm is not None:
+            if disc_ppm >= _DISCARD_PPM_CRITICAL:
+                issues.append("discards"); _raise("critical")
+            elif disc_ppm >= _DISCARD_PPM_WARNING:
+                issues.append("discards"); _raise("warning")
+        elif discards >= _ERR_ABS_FLOOR:
+            issues.append("discards"); _raise("warning")
+    if flaps >= _FLAP_CRITICAL:
+        issues.append("flapping"); _raise("critical")
+    elif flaps > 0:
+        issues.append("flapping"); _raise("warning")
+
+    return severity, issues
+
+
+def _health_payload(d: dict, window_seconds: float) -> dict:
+    """Build the per-link health block from one row of delta aggregates."""
+    in_err, out_err = int(d.get("d_ie", 0)), int(d.get("d_oe", 0))
+    in_disc, out_disc = int(d.get("d_id", 0)), int(d.get("d_od", 0))
+    in_pkts, out_pkts = int(d.get("d_ip", 0)), int(d.get("d_op", 0))
+    flaps = int(d.get("flaps", 0))
+
+    errors = in_err + out_err
+    discards = in_disc + out_disc
+    # Errored/discarded frames never reached the ucast counter, so add them back
+    # to get the attempted-frame denominator.
+    in_total = in_pkts + in_err + in_disc
+    out_total = out_pkts + out_err + out_disc
+    err_ppm = _ppm(errors, in_total + out_total)
+    disc_ppm = _ppm(discards, in_total + out_total)
+    severity, issues = _link_health(errors, discards, err_ppm, disc_ppm, flaps)
+
+    secs = max(window_seconds, 1.0)
+    return {
+        "in_errors": in_err,
+        "out_errors": out_err,
+        "in_discards": in_disc,
+        "out_discards": out_disc,
+        "errors": errors,
+        "discards": discards,
+        "in_pkts": in_pkts,
+        "out_pkts": out_pkts,
+        "in_pps": round(in_pkts / secs, 1),
+        "out_pps": round(out_pkts / secs, 1),
+        "error_ppm": err_ppm,
+        "discard_ppm": disc_ppm,
+        "flaps": flaps,
+        "availability_pct": round(float(d.get("availability") or 0), 1),
+        "health": severity,
+        "issues": issues,
+    }
+
+
 @router.get("")
 async def list_links(
     hours: int = Query(default=24, ge=1, le=720),
@@ -83,16 +271,25 @@ async def list_links(
     search: str | None = Query(default=None),
     status: str | None = Query(default=None, pattern="^(up|down)$"),
     min_util: float | None = Query(default=None, ge=0, le=200),
-    sort: str = Query(default="util", pattern="^(util|peak|traffic|in|out|name)$"),
+    issue: str | None = Query(
+        default=None,
+        pattern="^(any|errors|discards|flapping)$",
+        description="Only links with this health problem",
+    ),
+    sort: str = Query(
+        default="util",
+        pattern="^(util|peak|traffic|in|out|name|errors|discards|error_rate|flaps)$",
+    ),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Rank monitored interfaces by SNMP utilization across the fleet."""
+    """Rank monitored interfaces by SNMP utilization and health across the fleet."""
     from app.core.database import get_clickhouse_client
 
     client = get_clickhouse_client()
 
-    # Latest SNMP stats per interface in the window.
+    # Pass 1: bps stats + aggregate-only health for every interface (see the
+    # two-tier note above _health_cheap_columns).
     ch_params: dict = {}
     window = _window_filter(hours, from_time, to_time, ch_params)
     try:
@@ -107,7 +304,13 @@ async def list_links(
                 max(out_bps) AS max_out,
                 argMax(in_bps, timestamp) AS cur_in,
                 argMax(out_bps, timestamp) AS cur_out,
-                argMax(oper_status, timestamp) AS oper_status
+                -- Must NOT be aliased `oper_status`: ClickHouse would resolve
+                -- the oper_status references inside the health columns to this
+                -- alias and reject them as nested aggregates.
+                argMax(oper_status, timestamp) AS cur_oper,
+                {_health_cheap_columns()},
+                min(timestamp) AS first_ts,
+                max(timestamp) AS last_ts
             FROM zenplus.snmp_if_metrics
             WHERE {window}
             GROUP BY device_id, if_index
@@ -117,17 +320,64 @@ async def list_links(
     except Exception as e:
         raise HTTPException(500, f"clickhouse query failed: {e}")
 
+    # Both passes read by column name: the health column lists are generated,
+    # so positional indexing silently shifts every time one is added.
+    raw: dict[tuple[str, int], dict] = {}
+    needs_precise: list[tuple[str, int]] = []
+    for r in ch.named_results():
+        did, idx = str(r["device_id"]), int(r["if_index"])
+        if r["maybe_flap"] or r["has_reset"]:
+            needs_precise.append((did, idx))
+        raw[(did, idx)] = {
+            "bps": (
+                float(r["avg_in"] or 0), float(r["avg_out"] or 0),
+                float(r["max_in"] or 0), float(r["max_out"] or 0),
+                float(r["cur_in"] or 0), float(r["cur_out"] or 0),
+            ),
+            "oper_status_ch": int(r["cur_oper"] or 0),
+            **{f"d_{a}": r[f"d_{a}"] for _, a in _COUNTER_COLUMNS},
+            # A single distinct oper_status over the window means no transition.
+            "flaps": 0,
+            "availability": r["availability"],
+            "first_ts": r["first_ts"], "last_ts": r["last_ts"],
+        }
+
+    # Pass 2: exact deltas + flap counts for the few flagged interfaces.
+    if needs_precise:
+        try:
+            precise = client.query(
+                _health_precise_sql(window, _pairs_sql(needs_precise)),
+                parameters=ch_params,
+            )
+            for r in precise.named_results():
+                entry = raw.get((str(r["device_id"]), int(r["if_index"])))
+                if entry is None:
+                    continue
+                entry.update({f"d_{a}": r[f"d_{a}"] for _, a in _COUNTER_COLUMNS})
+                entry["flaps"] = int(r["flaps"] or 0)
+        except Exception:
+            # Falling back to pass-1 numbers is better than failing the page:
+            # they're right for every interface without a counter reset, and
+            # flap counts stay at 0 rather than becoming wrong.
+            logger.exception("precise interface health pass failed")
+
     metrics: dict[tuple[str, int], dict] = {}
-    for r in ch.result_rows:
-        did, idx = str(r[0]), int(r[1])
-        metrics[(did, idx)] = {
-            "avg_in_bps": float(r[2] or 0),
-            "avg_out_bps": float(r[3] or 0),
-            "max_in_bps": float(r[4] or 0),
-            "max_out_bps": float(r[5] or 0),
-            "in_bps": float(r[6] or 0),
-            "out_bps": float(r[7] or 0),
-            "oper_status_ch": int(r[8] or 0),
+    for key, d in raw.items():
+        avg_in, avg_out, max_in, max_out, cur_in, cur_out = d["bps"]
+        # Rates are per-second over the interface's own observed span, not the
+        # nominal window — an interface that only started reporting an hour ago
+        # would otherwise read as near-idle across a 24h window.
+        first_ts, last_ts = d["first_ts"], d["last_ts"]
+        span = (last_ts - first_ts).total_seconds() if first_ts and last_ts else 0.0
+        metrics[key] = {
+            "avg_in_bps": avg_in,
+            "avg_out_bps": avg_out,
+            "max_in_bps": max_in,
+            "max_out_bps": max_out,
+            "in_bps": cur_in,
+            "out_bps": cur_out,
+            "oper_status_ch": d["oper_status_ch"],
+            "health": _health_payload(d, span),
         }
 
     if not metrics:
@@ -197,13 +447,36 @@ async def list_links(
         # a genuinely down port cannot produce a non-zero rate in its latest
         # sample, so present these as up instead of the contradictory
         # "Down + 240 Mbps".
+        oper_unreliable = False
         if oper != "up" and (in_bps > 0 or out_bps > 0):
             oper = "up"
+            # Everything derived from ifOperStatus — availability, flap count —
+            # is meaningless on a port whose agent reports "down" while it
+            # forwards. Flag it so the UI doesn't show a contradictory
+            # "Up · 0% available" instead of hiding the number.
+            oper_unreliable = True
         # ip_address is inet, so ::text yields "192.168.100.102/32", but the
         # flow exporter IPs from ClickHouse carry no prefix. Comparing the raw
         # values never matched, so has_netflow was always False.
         ip = _clean_ip(row[11])
         has_nf = (ip, idx) in nf_set
+        health = m.get("health") or {}
+        # An administratively shut port isn't a fault — don't let its flap
+        # count or stale counters read as a health problem.
+        if (row[8] or "").lower() == "down":
+            health = {**health, "health": "ok", "issues": []}
+        if oper_unreliable:
+            health = {
+                **health,
+                "oper_status_reliable": False,
+                "availability_pct": None,
+                "flaps": 0,
+                "issues": [i for i in health.get("issues", []) if i != "flapping"],
+            }
+            if not health["issues"]:
+                health["health"] = "ok"
+        else:
+            health = {**health, "oper_status_reliable": True}
 
         item = {
             "device_id": did,
@@ -228,6 +501,7 @@ async def list_links(
             "util_pct": util,
             "peak_util_pct": peak_util,
             "has_netflow": has_nf,
+            **health,
         }
         items.append(item)
 
@@ -254,6 +528,10 @@ async def list_links(
             i for i in items
             if max(i["util_pct"] or 0, i["peak_util_pct"] or 0) >= min_util
         ]
+    if issue == "any":
+        items = [i for i in items if i.get("issues")]
+    elif issue:
+        items = [i for i in items if issue in (i.get("issues") or [])]
 
     # Sort
     if sort == "name":
@@ -266,6 +544,16 @@ async def list_links(
         items.sort(key=lambda x: x["total_bps"], reverse=True)
     elif sort == "peak":
         items.sort(key=lambda x: (x["peak_util_pct"] or 0), reverse=True)
+    elif sort == "errors":
+        items.sort(key=lambda x: x.get("errors") or 0, reverse=True)
+    elif sort == "discards":
+        items.sort(key=lambda x: x.get("discards") or 0, reverse=True)
+    elif sort == "flaps":
+        items.sort(key=lambda x: x.get("flaps") or 0, reverse=True)
+    elif sort == "error_rate":
+        # Links with no packet counters have no rate; sort them last rather
+        # than letting a None rank above a measured 900 ppm.
+        items.sort(key=lambda x: x.get("error_ppm") or -1, reverse=True)
     else:
         items.sort(key=lambda x: (x["util_pct"] or 0), reverse=True)
 
@@ -280,6 +568,13 @@ async def list_links(
         "with_netflow": sum(1 for i in items if i["has_netflow"]),
         "avg_util": round(sum(utils) / len(utils), 1) if utils else None,
         "returned": min(len(items), limit),
+        "with_errors": sum(1 for i in items if "errors" in (i.get("issues") or [])),
+        "with_discards": sum(1 for i in items if "discards" in (i.get("issues") or [])),
+        "flapping": sum(1 for i in items if "flapping" in (i.get("issues") or [])),
+        "critical_health": sum(1 for i in items if i.get("health") == "critical"),
+        "unhealthy": sum(1 for i in items if i.get("issues")),
+        "total_errors": sum(i.get("errors") or 0 for i in items),
+        "total_discards": sum(i.get("discards") or 0 for i in items),
     }
 
     items = items[:limit]
@@ -320,13 +615,28 @@ async def link_detail(
 
     # SNMP traffic series
     if bucket == 0:
+        # Raw view still has to difference the counters — plotting the running
+        # total would draw a monotonic staircase, not the errors per sample.
         snmp_sql = f"""
-            SELECT toUnixTimestamp64Milli(timestamp) AS ts,
-                   in_bps, out_bps, in_errors, out_errors, in_discards, out_discards,
+            SELECT ts, in_bps, out_bps,
+                   if(rn > 1, greatest(toInt64(in_errors) - toInt64(p_ie), 0), 0) AS d_in_err,
+                   if(rn > 1, greatest(toInt64(out_errors) - toInt64(p_oe), 0), 0) AS d_out_err,
+                   if(rn > 1, greatest(toInt64(in_discards) - toInt64(p_id), 0), 0) AS d_in_disc,
+                   if(rn > 1, greatest(toInt64(out_discards) - toInt64(p_od), 0), 0) AS d_out_disc,
                    in_bps AS in_peak, out_bps AS out_peak
-            FROM zenplus.snmp_if_metrics
-            WHERE device_id = %(id)s AND if_index = %(if)s AND {window}
-            ORDER BY timestamp
+            FROM (
+                SELECT toUnixTimestamp64Milli(timestamp) AS ts, timestamp,
+                       in_bps, out_bps, in_errors, out_errors, in_discards, out_discards,
+                       lagInFrame(in_errors) OVER w AS p_ie,
+                       lagInFrame(out_errors) OVER w AS p_oe,
+                       lagInFrame(in_discards) OVER w AS p_id,
+                       lagInFrame(out_discards) OVER w AS p_od,
+                       row_number() OVER w AS rn
+                FROM zenplus.snmp_if_metrics
+                WHERE device_id = %(id)s AND if_index = %(if)s AND {window}
+                WINDOW w AS (ORDER BY timestamp)
+            )
+            ORDER BY ts
         """
     else:
         # Carry the per-bucket peak alongside the average: the chart plots the
@@ -339,13 +649,23 @@ async def link_detail(
         snmp_sql = f"""
             SELECT toUnixTimestamp(toStartOfInterval(timestamp, INTERVAL {bucket} SECOND)) * 1000 AS ts,
                    avg(in_bps) AS avg_in, avg(out_bps) AS avg_out,
-                   max(in_errors) - min(in_errors) AS d_in_err,
-                   max(out_errors) - min(out_errors) AS d_out_err,
-                   max(in_discards) - min(in_discards) AS d_in_disc,
-                   max(out_discards) - min(out_discards) AS d_out_disc,
+                   sum(if(rn > 1, greatest(toInt64(in_errors) - toInt64(p_ie), 0), 0)) AS d_in_err,
+                   sum(if(rn > 1, greatest(toInt64(out_errors) - toInt64(p_oe), 0), 0)) AS d_out_err,
+                   sum(if(rn > 1, greatest(toInt64(in_discards) - toInt64(p_id), 0), 0)) AS d_in_disc,
+                   sum(if(rn > 1, greatest(toInt64(out_discards) - toInt64(p_od), 0), 0)) AS d_out_disc,
                    max(in_bps) AS peak_in, max(out_bps) AS peak_out
-            FROM zenplus.snmp_if_metrics
-            WHERE device_id = %(id)s AND if_index = %(if)s AND {window}
+            FROM (
+                SELECT timestamp, in_bps, out_bps,
+                       in_errors, out_errors, in_discards, out_discards,
+                       lagInFrame(in_errors) OVER w AS p_ie,
+                       lagInFrame(out_errors) OVER w AS p_oe,
+                       lagInFrame(in_discards) OVER w AS p_id,
+                       lagInFrame(out_discards) OVER w AS p_od,
+                       row_number() OVER w AS rn
+                FROM zenplus.snmp_if_metrics
+                WHERE device_id = %(id)s AND if_index = %(if)s AND {window}
+                WINDOW w AS (ORDER BY timestamp)
+            )
             GROUP BY ts ORDER BY ts
         """
 
@@ -376,25 +696,54 @@ async def link_detail(
     # raw. Both now use the same aggregation, so the row and the panel match.
     summary: dict = {}
     try:
+        # One interface, so the precise windowed form is cheap — no need for
+        # the fleet view's two-tier split.
+        deltas = ",\n                   ".join(
+            f"sum(if(rn > 1, greatest(toInt64({col}) - toInt64(p_{alias}), 0), 0)) AS d_{alias}"
+            for col, alias in _COUNTER_COLUMNS
+        )
+        lags = ",\n                       ".join(
+            f"lagInFrame({col}) OVER w AS p_{alias}" for col, alias in _COUNTER_COLUMNS
+        )
+        cols = ", ".join(col for col, _ in _COUNTER_COLUMNS)
         agg = client.query(
             f"""
-            SELECT avg(in_bps), max(in_bps), argMax(in_bps, timestamp),
-                   avg(out_bps), max(out_bps), argMax(out_bps, timestamp),
-                   max(in_errors) - min(in_errors), max(out_errors) - min(out_errors),
-                   max(in_discards) - min(in_discards), max(out_discards) - min(out_discards),
-                   count()
-            FROM zenplus.snmp_if_metrics
-            WHERE device_id = %(id)s AND if_index = %(if)s AND {window}
+            SELECT avg(in_bps) AS in_avg, max(in_bps) AS in_max,
+                   argMax(in_bps, timestamp) AS in_cur,
+                   avg(out_bps) AS out_avg, max(out_bps) AS out_max,
+                   argMax(out_bps, timestamp) AS out_cur,
+                   {deltas},
+                   countIf(rn > 1 AND oper_status != p_os) AS flaps,
+                   avg(oper_status) * 100 AS availability,
+                   count() AS samples, min(timestamp) AS first_ts, max(timestamp) AS last_ts
+            FROM (
+                SELECT timestamp, in_bps, out_bps, oper_status, {cols},
+                       {lags},
+                       lagInFrame(oper_status) OVER w AS p_os,
+                       row_number() OVER w AS rn
+                FROM zenplus.snmp_if_metrics
+                WHERE device_id = %(id)s AND if_index = %(if)s AND {window}
+                WINDOW w AS (ORDER BY timestamp)
+            )
             """,
             parameters=params,
         )
-        row = agg.result_rows[0] if agg.result_rows else None
+        rows = list(agg.named_results())
+        row = rows[0] if rows else None
     except Exception as e:
         raise HTTPException(500, f"snmp summary query failed: {e}")
 
-    if row and int(row[10] or 0) > 0:
-        in_avg, in_max, in_cur = float(row[0] or 0), float(row[1] or 0), float(row[2] or 0)
-        out_avg, out_max, out_cur = float(row[3] or 0), float(row[4] or 0), float(row[5] or 0)
+    health: dict = {}
+    if row and int(row["samples"] or 0) > 0:
+        in_avg, in_max = float(row["in_avg"] or 0), float(row["in_max"] or 0)
+        in_cur = float(row["in_cur"] or 0)
+        out_avg, out_max = float(row["out_avg"] or 0), float(row["out_max"] or 0)
+        out_cur = float(row["out_cur"] or 0)
+        first_ts, last_ts = row["first_ts"], row["last_ts"]
+        span = (last_ts - first_ts).total_seconds() if first_ts and last_ts else 0.0
+        health = _health_payload(row, span)
+        if (inv[6] or "").lower() == "down":  # admin-down is not a fault
+            health = {**health, "health": "ok", "issues": []}
         summary = {
             "in_avg_bps": in_avg,
             "in_max_bps": in_max,
@@ -404,9 +753,10 @@ async def link_detail(
             "out_current_bps": out_cur,
             "util_pct": _util_pct(in_cur, out_cur, speed),
             "peak_util_pct": _util_pct(in_max, out_max, speed),
-            "total_errors": max(0, int(row[6] or 0)) + max(0, int(row[7] or 0)),
-            "total_discards": max(0, int(row[8] or 0)) + max(0, int(row[9] or 0)),
-            "samples": int(row[10]),
+            "total_errors": health["errors"],
+            "total_discards": health["discards"],
+            "samples": int(row["samples"]),
+            **health,
         }
 
     # Strip the inet prefix before querying ClickHouse — flow_records stores
@@ -514,6 +864,20 @@ async def link_detail(
         summary.get("in_current_bps", 0) > 0 or summary.get("out_current_bps", 0) > 0
     ):
         oper_status = "up"
+        # See the list endpoint: ifOperStatus-derived stability is meaningless
+        # on a port that reports down while forwarding.
+        for block in (health, summary):
+            if block:
+                block["oper_status_reliable"] = False
+                block["availability_pct"] = None
+                block["flaps"] = 0
+                block["issues"] = [i for i in block.get("issues", []) if i != "flapping"]
+                if not block["issues"]:
+                    block["health"] = "ok"
+    else:
+        for block in (health, summary):
+            if block:
+                block["oper_status_reliable"] = True
 
     return {
         "device_id": did,
@@ -536,5 +900,6 @@ async def link_detail(
         "traffic": traffic,
         "errors": errors,
         "summary": summary,
+        "health": health,
         "netflow": netflow,
     }
