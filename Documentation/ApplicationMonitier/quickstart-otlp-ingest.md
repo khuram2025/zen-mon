@@ -1,6 +1,8 @@
 # APM Quickstart — Send your first trace (OTLP ingest)
 
-*Status: AM-E1 shipped · 2026-06-21 · Part of the ZenPlus Application Monitoring design set ([00-INDEX.md](00-INDEX.md)).*
+*Status: AM-E1 **partial** (FastAPI OTLP/HTTP+JSON fallback only; gRPC/protobuf collector still open — see [09 §2](09-MODERNITY-ASSESSMENT-AND-BUILD-STATE.md)) · 2026-06-21, updated 2026-08-04 · Part of the ZenPlus Application Monitoring design set ([00-INDEX.md](00-INDEX.md)).*
+
+> Requires appliance ≥ the 2026-08-04 build: earlier `install.sh` nginx configs did not proxy `/v1/`, so the curl in step 3 returned the dashboard's HTML instead of reaching the ingest API.
 
 This gets a trace from any OpenTelemetry-instrumented app into ZenPlus APM in three steps. It uses the **FastAPI OTLP/HTTP+JSON fallback** that ships in AM-E1. The high-throughput Go collector (OTLP/gRPC `:4317`, OTLP/protobuf `:4318`) lands in a later AM-E1 task; until then use OTLP/HTTP **JSON** as shown below.
 

@@ -1,8 +1,10 @@
 # ZenPlus Application Monitoring (APM) — Design Set Index & Pinned-Names Registry
 
-*Status: Design proposal · 2026-06-21 · Part of the ZenPlus Application Monitoring design set.*
+*Status: Design proposal · 2026-06-21 · reconciled 2026-08-04 · Part of the ZenPlus Application Monitoring design set.*
 
 This is the **navigation hub and single source of pinned truth** for the ZenPlus Application Monitoring (APM) module design. Every sibling document defers to this file for the *authoritative* names, routes, table names, ports, metric keys, epic IDs, and the migration-file allocation. If a value here disagrees with a sibling, **this file wins** — it is the reconciliation point.
+
+> **Build state (2026-08-04):** this file pins the *target* design. What is actually implemented, what is dead schema, and the gap-closure order are recorded in [`09-MODERNITY-ASSESSMENT-AND-BUILD-STATE.md`](09-MODERNITY-ASSESSMENT-AND-BUILD-STATE.md) — **for implementation status, 09 wins over every status header and checkbox in this set.** The agent-assisted onboarding path (the module's most important post-design addition) is specified in [`10-AGENT-APM-INTEGRATION-SPEC.md`](10-AGENT-APM-INTEGRATION-SPEC.md).
 
 ## Thesis (one paragraph)
 
@@ -23,6 +25,8 @@ ZenPlus APM is an **OpenTelemetry-native, ClickHouse-backed Application Performa
 | **06** | [`06-UI-UX-AND-DASHBOARDS.md`](06-UI-UX-AND-DASHBOARDS.md) | The frontend contract: routes, sidebar, `?tab=` set, page-by-page ASCII wireframes, shared primitives, query-key registry, correlation pivots, build order. |
 | **07** | [`07-ROADMAP-AND-EPICS.md`](07-ROADMAP-AND-EPICS.md) | The delivery contract: effort/impact/dependency table, per-epic detail, 4-phase plan, build-order diagram, risks, KPIs. |
 | **08** | [`08-TASK-LIST-AND-TEST-PLAN.md`](08-TASK-LIST-AND-TEST-PLAN.md) | Sprint-ready, per-epic layered task lists (Collector/API/Migration/UI/Alerting/Docs) with acceptance criteria + per-epic test plans (unit/integration/load/e2e) + module DoD. |
+| **09** | [`09-MODERNITY-ASSESSMENT-AND-BUILD-STATE.md`](09-MODERNITY-ASSESSMENT-AND-BUILD-STATE.md) | **Status of record**: modernity verdict vs the 2026 APM bar, epic-by-epic built-vs-spec'd table, doc-vs-code contradiction catalog, and the prioritized gap-closure plan (E-0…E-8). |
+| **10** | [`10-AGENT-APM-INTEGRATION-SPEC.md`](10-AGENT-APM-INTEGRATION-SPEC.md) | The agent-side input specification: the eight roles of the ZenPlus agent in APM, the exact per-signal input contract, the resource/correlation contract, zero-code instrumentation mechanics (Windows first), and phasing. |
 
 **Where to start building:** Phase 1 = **AM-E1 → AM-E2 → AM-E3** (OTLP ingest + span storage → trace explorer/waterfall → service registry + RED + service map). That trio is the MVP and the only hard dependency is AM-E1. Read `03` then `08 §AM-E1`.
 
@@ -47,8 +51,8 @@ ZenPlus APM is an **OpenTelemetry-native, ClickHouse-backed Application Performa
 | Table | Engine | Partition | ORDER BY | TTL |
 |---|---|---|---|---|
 | `apm_spans` | MergeTree | `toYYYYMMDD(timestamp)` | `(service_name, name, ts_bucket, trace_id)` | raw 7d |
-| `apm_span_metrics_5m` | SummingMergeTree | `toYYYYMM(timestamp)` | `(service_name, operation, span_kind, env, status_code, timestamp)` | 90d |
-| `apm_span_metrics_1h` | SummingMergeTree | `toYYYYMM(timestamp)` | `(service_name, operation, span_kind, env, status_code, timestamp)` | 395d |
+| `apm_span_metrics_5m` | AggregatingMergeTree *(shipped as such in migrate-039; originally pinned SummingMergeTree — see 08 §AM-E3 note)* | `toYYYYMM(timestamp)` | `(service_name, operation, span_kind, env, status_code, timestamp)` | 90d |
+| `apm_span_metrics_1h` | AggregatingMergeTree *(same)* | `toYYYYMM(timestamp)` | `(service_name, operation, span_kind, env, status_code, timestamp)` | 395d |
 | `apm_traces_resource` | ReplacingMergeTree | `toYYYYMM(seen_at)` | `(fingerprint)` | 7d |
 | `apm_service_graph` | SummingMergeTree | `toYYYYMM(timestamp)` | `(client_service, server_service, env, timestamp)` | 90d |
 | `apm_exceptions` | MergeTree | `toYYYYMMDD(timestamp)` | `(service_name, group_id, ts_bucket, timestamp)` | raw 30d |

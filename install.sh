@@ -498,6 +498,21 @@ server {
         proxy_read_timeout 86400;
     }
 
+    # OTLP ingest lives at the appliance ROOT (/v1/traces) per the OTel
+    # endpoint convention, not under /api/. Without this location an
+    # instrumented app POSTing traces gets the SPA's index.html back.
+    location /v1/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        client_max_body_size 32m;
+        proxy_read_timeout 120s;
+    }
+
     location ~* \.(js|css|png|jpg|ico|svg|woff2?)$ {
         expires 30d;
         add_header Cache-Control "public, no-transform";
