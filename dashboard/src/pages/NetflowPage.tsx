@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -44,7 +44,7 @@ import { apiErrorMessage, formatBps, formatBytes, relativeTime, timeAxisTickForm
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
 import { Table, TBody, THead, Td, Th, Tr } from '@/components/ui/Table'
-import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
+import { TIME_RANGE_OPTIONS, TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
 
 type Overview = {
   bytes: number
@@ -126,6 +126,11 @@ type Country = { country: string | null; country_name: string | null; bytes: num
 type DscpClass = { dscp: number; label: string; bytes: number; packets: number; flows: number }
 type TcpFlagSummary = { total_tcp: number; syn_only: number; ack_only: number; rst: number; fin: number; psh: number; urg: number; no_flags: number }
 type NetClass = { name: string; bytes: number; packets: number; flows: number }
+
+// The traffic heatmap is always a 7-day hour×day grid. Any "When" (hour/dow)
+// filter picked from it therefore needs a page range at least this wide to
+// match anything — see the onSelect handler and the range guard below.
+const HEATMAP_HOURS = 168
 
 const TALKER_COLORS = ['#22d3ee', '#a78bfa', '#f472b6', '#34d399', '#facc15', '#fb923c']
 const APP_COLORS = ['#22d3ee', '#34d399', '#facc15', '#fb7185', '#a78bfa', '#f59e0b', '#10b981', '#ef4444']
@@ -308,6 +313,23 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
     for (const k of ['talker', 'protocol', 'dscp', 'app', 'netclass', 'tcpflag', 'hour', 'dow', 'iface']) next.delete(k)
     setSearchParams(next, { replace: true })
   }
+
+  // A shared link like ?hour=19&dow=7 carries no range, so it would fall back
+  // to the 1h default and render an empty page: a weekday+hour filter only
+  // matches over a multi-day window. Give those links the heatmap's own 7-day
+  // window. An explicit ?range= is always respected, so this never fights a
+  // range the user chose.
+  useEffect(() => {
+    if ((filterHour || filterDow) && !searchParams.get('range')) {
+      const next = new URLSearchParams(searchParams)
+      next.set('range', '7d')
+      setSearchParams(next, { replace: true })
+    }
+  }, [filterHour, filterDow, searchParams, setSearchParams])
+
+  // A "When" filter that the current range cannot possibly satisfy: surfaced
+  // in the UI instead of silently rendering zeros everywhere.
+  const whenFilterOutOfRange = !!(filterHour || filterDow) && !isCustom && hours < HEATMAP_HOURS
   const anyExtraFilter = !!(filterTalker || filterProtocol || filterDscp || filterApp || filterNetClass || filterTcpFlag || filterHour || filterDow || isIfaceFiltered)
 
   // Build prior-window QS by shifting back exactly one window length.
@@ -414,7 +436,7 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
   // window) instead of the page range, otherwise a 1h range leaves it empty.
   const heatmapQS = useMemo(() => {
     const params = new URLSearchParams(rangeQS)
-    if (!isCustom) params.set('hours', '168')
+    if (!isCustom) params.set('hours', String(HEATMAP_HOURS))
     return params.toString()
   }, [rangeQS, isCustom])
   const heatmap = useQuery<Heatmap>({
@@ -565,6 +587,27 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
               </button>
             </div>
           )}
+          {whenFilterOutOfRange && (
+            <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] text-warning">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              <span>
+                The <b>When</b> filter picks one hour of one weekday, which the <b>{range.label}</b> range cannot
+                contain — that is why the panels below are empty.
+              </span>
+              <button
+                onClick={() => setPreset(TIME_RANGE_OPTIONS.findIndex((r) => r.key === '7d'))}
+                className="rounded-full border border-warning/40 px-2 py-0.5 font-medium hover:bg-warning/20"
+              >
+                Switch to 7d
+              </button>
+              <button
+                onClick={() => setParams([['hour', null], ['dow', null]])}
+                className="rounded-full border border-warning/40 px-2 py-0.5 font-medium hover:bg-warning/20"
+              >
+                Clear When
+              </button>
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <div className="relative hidden md:block">
@@ -694,7 +737,17 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
           activeDow={filterDow ? Number(filterDow) : null}
           onSelect={(dow, hour) => {
             const sameCell = filterHour === String(hour) && filterDow === String(dow)
-            setParams([['hour', sameCell ? null : String(hour)], ['dow', sameCell ? null : String(dow)]])
+            const entries: [string, string | null][] = [
+              ['hour', sameCell ? null : String(hour)],
+              ['dow', sameCell ? null : String(dow)],
+            ]
+            // The heatmap always covers 7 days, but the page range does not.
+            // Picking "Sun 19:00" while the page is on 1h asks for flows that
+            // are both in the last hour and on a Sunday evening — empty unless
+            // it happens to be Sunday 19:xx right now. Widen to the window the
+            // user is actually looking at; a custom range is left alone.
+            if (!sameCell && !isCustom && hours < HEATMAP_HOURS) entries.push(['range', '7d'])
+            setParams(entries)
           }}
         />
         <DeviceStatusCard status={deviceStatus.data} exporters={exporterData} deviceView={isDeviceView} />
