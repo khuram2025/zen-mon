@@ -43,7 +43,7 @@ SERVER_URL = os.getenv("ZENPLUS_RELEASE_SERVER_URL", "https://zentryc.com")
 GO_BIN = shutil.which("go") or "/usr/local/go/bin/go"
 
 # Directories to include in the code update
-CODE_DIRS = ["server", "poller", "scripts", "support"]
+CODE_DIRS = ["server", "poller", "scripts", "support", "docker"]
 # Files to include at root level
 CODE_FILES = [".version", "docker-compose.yml"]
 CODE_IGNORE = [
@@ -609,6 +609,17 @@ def build_package(version: str, changelog: str, severity: str,
             "type": "run_hook",
             "script": "code/scripts/setup-support.sh",
             "timeout": 120,
+        })
+
+    # Storage management (Settings -> Storage): install the root-owned helper
+    # scripts, sudoers grant, backup dirs, and ClickHouse backups-disk config.
+    # Idempotent — safe on every OTA, and required on appliances installed
+    # before the Storage tab existed.
+    if (Path(build_dir) / "code" / "scripts" / "setup-storage.sh").exists():
+        steps.append({
+            "type": "run_hook",
+            "script": "code/scripts/setup-storage.sh",
+            "timeout": 300,
         })
 
     # Best-effort GeoIP provisioning (Phase 2b). fetch-geoip.py always exits 0
