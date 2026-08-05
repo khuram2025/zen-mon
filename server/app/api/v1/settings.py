@@ -343,15 +343,27 @@ def _do_smtp_test(raw_config: dict, recipient: str) -> dict:
     from email.mime.multipart import MIMEMultipart
 
     try:
-        msg = MIMEMultipart()
+        from app.services.email_render import (
+            build_notification_email_html, build_notification_email_text,
+        )
+        test_ctx = {
+            "status": "TEST",
+            "title": "SMTP configuration verified",
+            "message": "This is a test email from ZenPlus. If you are reading it, "
+                       "this SMTP gateway can deliver mail to your inbox and is "
+                       "ready to carry alerts, reports, and notifications.",
+            "details": [
+                ("Gateway", config.host + (f":{config.port}" if config.port else "")),
+                ("Encryption", (config.encryption or "none").upper()),
+                ("From", f"{config.from_name or 'ZenPlus'} <{config.from_email}>"),
+            ],
+        }
+        msg = MIMEMultipart("alternative")
         msg["From"] = f"{config.from_name or 'ZenPlus'} <{config.from_email}>"
         msg["To"] = ", ".join(recipients)
-        msg["Subject"] = "ZenPlus SMTP Test"
-        msg.attach(MIMEText(
-            "This is a test email from ZenPlus Monitoring System.\n\n"
-            "If you received this, your SMTP configuration is working correctly.",
-            "plain",
-        ))
+        msg["Subject"] = "ZenPlus SMTP Test — configuration verified"
+        msg.attach(MIMEText(build_notification_email_text(test_ctx), "plain"))
+        msg.attach(MIMEText(build_notification_email_html(test_ctx), "html"))
 
         if config.encryption == "ssl":
             server = smtplib.SMTP_SSL(config.host, config.port or 465, timeout=15)
@@ -965,22 +977,23 @@ async def test_channel(
 
         recipient_list = [r.strip() for r in recipients.split(",") if r.strip()]
         try:
-            from app.services.email_render import build_alert_email_html, build_alert_email_text
+            from app.services.email_render import (
+                build_notification_email_html, build_notification_email_text,
+            )
             test_ctx = {
-                "severity": "info",
                 "status": "TEST",
-                "title": "Test notification",
-                "hostname": row.name,
-                "message": "This is a test email from ZenPlus. If you received it, "
-                           "this notification channel is configured correctly.",
+                "title": "Notification channel verified",
+                "message": "This is a test email from ZenPlus. If you are reading it, "
+                           f"the '{row.name}' notification channel is configured "
+                           "correctly and will deliver alerts to these recipients.",
                 "details": [("Channel", row.name), ("Recipients", recipients)],
             }
             msg = MIMEMultipart("alternative")
             msg["From"] = f"{smtp_cfg.from_name} <{smtp_cfg.from_email}>"
             msg["To"] = ", ".join(recipient_list)
-            msg["Subject"] = "ZenPlus Test Notification"
-            msg.attach(MIMEText(build_alert_email_text(test_ctx), "plain"))
-            msg.attach(MIMEText(build_alert_email_html(test_ctx), "html"))
+            msg["Subject"] = f"ZenPlus Test Notification — {row.name}"
+            msg.attach(MIMEText(build_notification_email_text(test_ctx), "plain"))
+            msg.attach(MIMEText(build_notification_email_html(test_ctx), "html"))
 
             if smtp_cfg.encryption == "ssl":
                 server = smtplib.SMTP_SSL(smtp_cfg.host, smtp_cfg.port, timeout=10)

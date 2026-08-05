@@ -4,7 +4,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, EmailStr
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -13,6 +13,42 @@ from app.models.user import User
 from app.services.audit_service import write_audit_log
 
 router = APIRouter(prefix="/users", tags=["User Management"])
+
+
+async def _send_account_notice(db: AsyncSession, user: User, *, subject: str,
+                               title: str, message: str, changed_by: str) -> None:
+    """Best-effort security notice to the affected user. Never raises: account
+    changes must succeed even when no SMTP gateway is configured."""
+    try:
+        row = (await db.execute(text(
+            "SELECT config FROM notification_gateways "
+            "WHERE type = 'smtp' AND is_default = true LIMIT 1"
+        ))).first()
+        gw = dict(row.config) if row else None
+        if not gw:
+            row = (await db.execute(text(
+                "SELECT value FROM system_settings WHERE key = 'smtp'"
+            ))).first()
+            gw = row[0] if row and isinstance(row[0], dict) else None
+        if not gw or not gw.get("host") or not gw.get("enabled", True):
+            return
+        from app.api.v1.alert_engine import _send_email
+        from app.services.email_render import (
+            build_account_email_html, build_account_email_text,
+        )
+        ctx = {
+            "title": title,
+            "recipient_name": user.full_name or user.username,
+            "message": message,
+            "details": [("Account", user.username), ("Changed by", changed_by)],
+        }
+        await _send_email(gw, user.email, subject,
+                          build_account_email_text(ctx),
+                          html_body=build_account_email_html(ctx))
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "account notice email to %s failed", user.email, exc_info=True)
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -306,6 +342,14 @@ async def reset_password(
         metadata={"username": user.username},
     )
     await db.commit()
+    await _send_account_notice(
+        db, user,
+        subject="[ZenPlus] Your password was reset",
+        title="Your password was reset",
+        message="An administrator has reset the password for your ZenPlus "
+                "account. Use the new password provided to you to sign in.",
+        changed_by=f"{current_user.username} (administrator)",
+    )
     return {"message": "Password reset successfully"}
 
 
@@ -331,4 +375,12 @@ async def change_own_password(
         metadata={"username": current_user.username},
     )
     await db.commit()
+    await _send_account_notice(
+        db, current_user,
+        subject="[ZenPlus] Your password was changed",
+        title="Your password was changed",
+        message="The password for your ZenPlus account was just changed. "
+                "Your sessions on other devices remain signed in.",
+        changed_by="you",
+    )
     return {"message": "Password changed successfully"}
