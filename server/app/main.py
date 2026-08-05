@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
 from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, report_schedules, discovery, discovery_v2, users, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, host_alert_rules, link_utilization
 from app.api.v1 import settings as settings_api
+from app.api.v1 import storage_management as storage_api
 from app.api.v1 import sensors as sensors_admin_api
 from app.api.v1 import sensor_api
 from app.api.v1 import agents as agents_runtime_api
@@ -64,6 +65,7 @@ def create_app() -> FastAPI:
     app.include_router(users.router, prefix="/api/v1")
     app.include_router(subscription.router, prefix="/api/v1")
     app.include_router(system_updates.router, prefix="/api/v1")
+    app.include_router(storage_api.router, prefix="/api/v1")
     app.include_router(support.router, prefix="/api/v1")
     app.include_router(snmp.router, prefix="/api/v1")
     app.include_router(snmp_credentials.router, prefix="/api/v1")
@@ -133,6 +135,10 @@ def create_app() -> FastAPI:
         # SLO error-budget burn: multi-window multi-burn-rate evaluation.
         from app.services.apm_slo_service import apm_slo_burn_loop
         app.state.apm_slo_burn = asyncio.create_task(apm_slo_burn_loop())
+        # Storage: emergency auto-purge on disk pressure + scheduled backups.
+        # Advisory-locked, so safe with multiple Uvicorn workers.
+        from app.services.storage_service import storage_sweeper_loop
+        app.state.storage_sweeper = asyncio.create_task(storage_sweeper_loop())
         # Agent packages: reconcile the DB against the on-disk artifact store so
         # a release that shipped a new MSI is downloadable without a manual
         # publish step.
@@ -152,7 +158,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("health_sweeper", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry"):
+        for attr in ("health_sweeper", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

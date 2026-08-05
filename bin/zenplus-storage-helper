@@ -1,0 +1,127 @@
+#!/bin/bash
+# /opt/zenplus/bin/zenplus-storage-helper
+#
+# Privileged storage operations for the ZenPlus API. The API runs as the
+# unprivileged `zenplus` user; /etc/sudoers.d/zenplus-storage grants it
+# NOPASSWD access to the root-owned installed copy of this script at
+# /usr/local/sbin/zenplus-storage-helper. Every subcommand validates its
+# arguments before touching anything — this script is a security boundary.
+#
+# Subcommands:
+#   rescan-scsi                       Rescan SCSI hosts + block devices
+#   pg-dump <file>                    pg_dump -Fc the zenplus DB (as postgres)
+#   pg-restore <file> [dbname]        pg_restore into dbname (default zenplus)
+#   pg-createdb <dbname>              Create an empty DB for restore testing
+#   pg-dropdb <dbname>                Drop a zenplus_* scratch DB
+#   os-usage                          JSON: journal + apt cache sizes (bytes)
+#   vacuum-journal <max-size-mb>      Shrink systemd journal on the root disk
+#   apt-clean                         Clear the apt package cache
+#   restart-app-services              Restart zenplus app services (no-block)
+set -euo pipefail
+
+BACKUP_ROOTS=("/data/backups" "/opt/zenplus/backups")
+
+err() { echo "[storage-helper] ERROR: $*" >&2; exit 1; }
+
+# A path argument must be absolute, contain no traversal, and sit under one
+# of the allowed backup roots.
+validate_backup_path() {
+    local p="$1"
+    [[ "$p" == /* ]] || err "path must be absolute: $p"
+    [[ "$p" == *".."* ]] && err "path traversal rejected: $p"
+    [[ "$p" =~ ^[A-Za-z0-9/._-]+$ ]] || err "path contains unsafe characters: $p"
+    local ok=0
+    for root in "${BACKUP_ROOTS[@]}"; do
+        [[ "$p" == "$root"/* ]] && ok=1
+    done
+    [[ "$ok" == 1 ]] || err "path must be under ${BACKUP_ROOTS[*]}: $p"
+}
+
+# Restores are only allowed into the production DB or clearly-named scratch DBs.
+validate_dbname() {
+    local db="$1"
+    [[ "$db" =~ ^zenplus(_[a-z0-9_]{1,40})?$ ]] || err "invalid database name: $db"
+}
+
+case "${1:-}" in
+    rescan-scsi)
+        for scan in /sys/class/scsi_host/*/scan; do
+            [ -w "$scan" ] && echo '- - -' > "$scan" || true
+        done
+        for rescan in /sys/class/block/sd*/device/rescan; do
+            [ -w "$rescan" ] && echo 1 > "$rescan" || true
+        done
+        echo "rescan complete"
+        ;;
+
+    pg-dump)
+        [ $# -eq 2 ] || err "usage: pg-dump <file>"
+        validate_backup_path "$2"
+        dir=$(dirname "$2")
+        mkdir -p "$dir"
+        # Dump as the postgres superuser (tables are owned by postgres).
+        runuser -u postgres -- pg_dump -Fc --no-owner zenplus > "$2"
+        chown zenplus:zenplus "$2"
+        echo "dumped to $2"
+        ;;
+
+    pg-restore)
+        [ $# -ge 2 ] || err "usage: pg-restore <file> [dbname]"
+        validate_backup_path "$2"
+        [ -f "$2" ] || err "no such file: $2"
+        db="${3:-zenplus}"
+        validate_dbname "$db"
+        # --clean --if-exists drops and recreates objects from the archive.
+        # --no-owner because role layout may differ between appliances.
+        runuser -u postgres -- pg_restore --clean --if-exists --no-owner \
+            -d "$db" "$2"
+        # The app role must keep full access to the recreated objects.
+        runuser -u postgres -- psql -d "$db" -qc \
+            "GRANT ALL ON ALL TABLES IN SCHEMA public TO zenplus; GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO zenplus;"
+        echo "restored $2 into $db"
+        ;;
+
+    pg-createdb)
+        [ $# -eq 2 ] || err "usage: pg-createdb <dbname>"
+        validate_dbname "$2"
+        [ "$2" != "zenplus" ] || err "refusing to recreate the production database"
+        runuser -u postgres -- createdb "$2"
+        echo "created $2"
+        ;;
+
+    pg-dropdb)
+        [ $# -eq 2 ] || err "usage: pg-dropdb <dbname>"
+        validate_dbname "$2"
+        [ "$2" != "zenplus" ] || err "refusing to drop the production database"
+        runuser -u postgres -- dropdb --if-exists "$2"
+        echo "dropped $2"
+        ;;
+
+    os-usage)
+        journal=$(du -sb /var/log/journal 2>/dev/null | cut -f1)
+        aptc=$(du -sb /var/cache/apt 2>/dev/null | cut -f1)
+        echo "{\"journal_bytes\":${journal:-0},\"apt_cache_bytes\":${aptc:-0}}"
+        ;;
+
+    vacuum-journal)
+        [ $# -eq 2 ] || err "usage: vacuum-journal <max-size-mb>"
+        [[ "$2" =~ ^[0-9]{2,5}$ ]] || err "size must be 10..99999 (MB)"
+        journalctl --vacuum-size="${2}M"
+        ;;
+
+    apt-clean)
+        apt-get clean
+        echo "apt cache cleared"
+        ;;
+
+    restart-app-services)
+        # --no-block: the API calls this to restart itself after a restore.
+        systemctl --no-block restart zenplus-poller.service zenplus-netflow-collector.service
+        systemctl --no-block restart zenplus-api.service
+        echo "restart requested"
+        ;;
+
+    *)
+        err "unknown subcommand: ${1:-<none>} (see script header for usage)"
+        ;;
+esac

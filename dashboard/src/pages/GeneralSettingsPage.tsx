@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Building2, Download, KeyRound, LifeBuoy, Loader2, Mail, Palette, Plug, Save, Send, Settings, User as UserIcon } from 'lucide-react'
+import { Building2, Download, HardDrive, KeyRound, LifeBuoy, Loader2, Mail, Palette, Plug, Save, Send, Settings, User as UserIcon } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
@@ -19,6 +19,7 @@ import { UpdatesTabContent } from '@/components/UpdatesTabContent'
 import { LicensesTabContent } from '@/components/LicensesTabContent'
 import { SensorsCard } from '@/components/SensorsCard'
 import { SupportTabContent } from '@/components/SupportTabContent'
+import { StorageTabContent } from '@/components/StorageTabContent'
 
 const TABS = [
   { value: 'company', label: 'Company', icon: Building2 },
@@ -26,6 +27,7 @@ const TABS = [
   { value: 'appearance', label: 'Appearance', icon: Palette },
   { value: 'licenses', label: 'Licenses', icon: KeyRound },
   { value: 'updates', label: 'Updates', icon: Download },
+  { value: 'storage', label: 'Storage', icon: HardDrive },
   { value: 'sensors', label: 'Sensors', icon: Plug },
   { value: 'support', label: 'Support', icon: LifeBuoy },
   { value: 'profile', label: 'Profile', icon: UserIcon },
@@ -80,6 +82,9 @@ export function GeneralSettingsPage() {
         </TabsContent>
         <TabsContent value="updates">
           <UpdatesTabContent />
+        </TabsContent>
+        <TabsContent value="storage">
+          <StorageTabContent />
         </TabsContent>
         <TabsContent value="sensors">
           <SensorsCard />
