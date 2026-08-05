@@ -125,6 +125,56 @@ type InterfaceSample struct {
 	PollerID     string
 }
 
+// FdbEntry is one learned MAC from a bridge forwarding database
+// (BRIDGE-MIB dot1dTpFdbTable or Q-BRIDGE-MIB dot1qTpFdbTable).
+type FdbEntry struct {
+	VlanID  int    // 0 when the device gave no VLAN context
+	MAC     string // aa:bb:cc:dd:ee:ff
+	IfIndex int    // resolved via dot1dBasePortIfIndex
+	Status  int    // 1 other, 3 learned (2 invalid / 4 self / 5 mgmt are filtered)
+}
+
+// ArpEntry is one IP->MAC binding from ipNetToMediaTable (IPv4) or
+// ipNetToPhysicalTable (IPv4+IPv6 ND).
+type ArpEntry struct {
+	IfIndex int
+	IP      string
+	MAC     string
+	IsIPv6  bool
+	Source  string // "arp" | "nd"
+}
+
+// LldpNeighbor is one discovered L2 neighbor (LLDP or CDP).
+type LldpNeighbor struct {
+	LocalIfIndex     int
+	Protocol         string // "lldp" | "cdp"
+	ChassisIDSubtype int    // LLDP: 4 = macAddress
+	ChassisID        string // MAC string when subtype 4, else raw
+	PortID           string
+	PortDesc         string
+	SysName          string
+	SysDescr         string
+}
+
+// VlanInfo is one VLAN known to the device.
+type VlanInfo struct {
+	ID   int
+	Name string
+}
+
+// UdtData bundles one device's user-device-tracker poll output:
+// forwarding databases, ARP/ND caches, neighbors and VLAN inventory.
+type UdtData struct {
+	Fdb        []FdbEntry
+	Arp        []ArpEntry
+	Neighbors  []LldpNeighbor
+	Vlans      []VlanInfo
+	Pvids      map[int]int  // ifIndex -> untagged VLAN
+	TrunkPorts map[int]bool // ifIndex set (Cisco VTP trunking status)
+	BridgeMAC  string
+	OwnMACs    map[string]bool // the device's own interface MACs
+}
+
 // Result bundles one device's full SNMP poll output. The collector
 // writes into this struct progressively so that partial results are
 // preserved if the outer cycle times out on a slow device — basic
@@ -135,6 +185,7 @@ type Result struct {
 	DeviceID   uuid.UUID
 	Timestamp  time.Time
 	Duration   time.Duration
+	WantUdt    bool // set by the engine before Collect when UDT is due
 	Err        error
 	System     *SystemInfo
 	Interfaces []Interface
@@ -142,4 +193,5 @@ type Result struct {
 	Sensors    []Sensor
 	Scalars    []MetricSample // CPU, memory, temperature, etc.
 	IfSamples  []InterfaceSample
+	Udt        *UdtData // populated only on UDT-due cycles
 }

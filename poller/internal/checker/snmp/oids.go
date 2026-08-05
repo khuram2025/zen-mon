@@ -107,6 +107,46 @@ const (
 	OIDEntPhySensorValue       = "1.3.6.1.2.1.99.1.1.1.4"
 	OIDEntPhySensorOperStatus  = "1.3.6.1.2.1.99.1.1.1.5"
 	OIDEntPhySensorUnitsDisplay = "1.3.6.1.2.1.99.1.1.1.6"
+
+	// ── UDT: BRIDGE-MIB (RFC 4188) ──
+	OIDDot1dBaseBridgeAddress = "1.3.6.1.2.1.17.1.1.0"
+	OIDDot1dBasePortIfIndex   = "1.3.6.1.2.1.17.1.4.1.2" // bridge port -> ifIndex
+	OIDDot1dTpFdbPort         = "1.3.6.1.2.1.17.4.3.1.2" // index: 6 MAC bytes
+	OIDDot1dTpFdbStatus       = "1.3.6.1.2.1.17.4.3.1.3"
+
+	// ── UDT: Q-BRIDGE-MIB (RFC 4363) — VLAN-aware FDB ──
+	OIDDot1qTpFdbPort       = "1.3.6.1.2.1.17.7.1.2.2.1.2" // index: fdbId + 6 MAC bytes
+	OIDDot1qTpFdbStatus     = "1.3.6.1.2.1.17.7.1.2.2.1.3"
+	OIDDot1qVlanFdbID       = "1.3.6.1.2.1.17.7.1.4.2.1.3" // index: timeMark + vlan -> fdbId
+	OIDDot1qVlanStaticName  = "1.3.6.1.2.1.17.7.1.4.3.1.1" // index: vlan
+	OIDDot1qPvid            = "1.3.6.1.2.1.17.7.1.4.5.1.1" // index: bridge port
+
+	// ── UDT: IP-MIB — ARP / neighbor tables ──
+	OIDIpNetToMediaPhysAddress = "1.3.6.1.2.1.4.22.1.2" // index: ifIndex + IPv4
+	OIDIpNetToMediaType        = "1.3.6.1.2.1.4.22.1.4" // 1 other 2 invalid 3 dynamic 4 static
+	OIDIpNetToPhysicalPhysAddr = "1.3.6.1.2.1.4.35.1.4" // index: ifIndex + addrType + addrLen + addr
+
+	// ── UDT: LLDP-MIB (IEEE 802.1AB) ──
+	OIDLldpLocPortID           = "1.0.8802.1.1.2.1.3.7.1.3"  // index: lldpLocPortNum
+	OIDLldpLocPortDesc         = "1.0.8802.1.1.2.1.3.7.1.4"
+	OIDLldpRemChassisIDSubtype = "1.0.8802.1.1.2.1.4.1.1.4"  // index: timeMark.localPortNum.remIndex
+	OIDLldpRemChassisID        = "1.0.8802.1.1.2.1.4.1.1.5"
+	OIDLldpRemPortIDSubtype    = "1.0.8802.1.1.2.1.4.1.1.6"
+	OIDLldpRemPortID           = "1.0.8802.1.1.2.1.4.1.1.7"
+	OIDLldpRemPortDesc         = "1.0.8802.1.1.2.1.4.1.1.8"
+	OIDLldpRemSysName          = "1.0.8802.1.1.2.1.4.1.1.9"
+	OIDLldpRemSysDesc          = "1.0.8802.1.1.2.1.4.1.1.10"
+
+	// ── UDT: CDP (CISCO-CDP-MIB) ──
+	OIDCdpCacheAddress    = "1.3.6.1.4.1.9.9.23.1.2.1.1.4" // index: ifIndex.deviceIndex
+	OIDCdpCacheDeviceID   = "1.3.6.1.4.1.9.9.23.1.2.1.1.6"
+	OIDCdpCacheDevicePort = "1.3.6.1.4.1.9.9.23.1.2.1.1.7"
+	OIDCdpCachePlatform   = "1.3.6.1.4.1.9.9.23.1.2.1.1.8"
+
+	// ── UDT: Cisco VLAN + trunk MIBs ──
+	OIDVtpVlanState             = "1.3.6.1.4.1.9.9.46.1.3.1.1.2"  // index: mgmtDomain.vlan -> 1 operational
+	OIDVtpVlanName              = "1.3.6.1.4.1.9.9.46.1.3.1.1.4"
+	OIDVlanTrunkPortDynamicStat = "1.3.6.1.4.1.9.9.46.1.6.1.1.14" // index: ifIndex -> 1 trunking
 )
 
 // entPhysicalClass values (ENTITY-MIB)

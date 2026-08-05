@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -68,6 +69,7 @@ type SNMPLoader interface {
 	UpsertSensors(ctx context.Context, deviceID uuid.UUID, sensors []snmp.Sensor) error
 	UpsertProfile(ctx context.Context, p *snmp.Profile) error
 	AssignProfileIfUnset(ctx context.Context, deviceID, profileID uuid.UUID) error
+	UpsertUdtData(ctx context.Context, deviceID uuid.UUID, u *snmp.UdtData) error
 }
 
 // SNMPMetricWriter persists SNMP metrics to the time-series store.
@@ -116,6 +118,8 @@ type Engine struct {
 	snmpDevices   map[uuid.UUID]*snmp.Device
 	lastPingAt    map[uuid.UUID]time.Time
 	lastServiceAt map[uuid.UUID]time.Time
+	lastUdtAt     map[uuid.UUID]time.Time
+	udtInterval   time.Duration
 	startTime     time.Time
 	lastCycleMs   int64
 	activePings   int
@@ -171,8 +175,22 @@ func NewEngine(
 		snmpDevices:    make(map[uuid.UUID]*snmp.Device),
 		lastPingAt:     make(map[uuid.UUID]time.Time),
 		lastServiceAt:  make(map[uuid.UUID]time.Time),
+		lastUdtAt:      make(map[uuid.UUID]time.Time),
+		udtInterval:    udtIntervalFromEnv(),
 		startTime:      time.Now(),
 	}, nil
+}
+
+// udtIntervalFromEnv returns the UDT (MAC/ARP/LLDP) collection cadence.
+// Default 5 minutes — an order of magnitude fresher than the 30-minute
+// industry norm, while staying gentle on switch CPUs.
+func udtIntervalFromEnv() time.Duration {
+	if v := os.Getenv("UDT_POLL_INTERVAL"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 30 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 5 * time.Minute
 }
 
 // Run starts the main monitoring loop.
@@ -972,10 +990,13 @@ func (e *Engine) runSNMPCycle(ctx context.Context) {
 		return
 	}
 	e.snmpRunning = true
+	now := time.Now()
 	devices := make([]*snmp.Device, 0, len(e.snmpDevices))
+	udtDue := make(map[uuid.UUID]bool, len(e.snmpDevices))
 	for _, d := range e.snmpDevices {
 		if d.Enabled {
 			devices = append(devices, d)
+			udtDue[d.ID] = now.Sub(e.lastUdtAt[d.ID]) >= e.udtInterval
 		}
 	}
 	e.mu.Unlock()
@@ -1008,8 +1029,10 @@ func (e *Engine) runSNMPCycle(ctx context.Context) {
 	var countMu sync.Mutex
 
 	// Hard per-device budget — no single unreachable device can stall
-	// the cycle longer than this.
-	const devBudget = 20 * time.Second
+	// the cycle longer than this. UDT cycles walk large FDB/ARP tables
+	// (plus per-VLAN sessions on Cisco), so they get a bigger budget.
+	const devBudgetBase = 20 * time.Second
+	const devBudgetUdt = 75 * time.Second
 
 	for _, d := range devices {
 		select {
@@ -1022,11 +1045,15 @@ func (e *Engine) runSNMPCycle(ctx context.Context) {
 		go func(d *snmp.Device) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			devBudget := devBudgetBase
+			if udtDue[d.ID] {
+				devBudget = devBudgetUdt
+			}
 			// Pre-allocate the Result so the collector can write into
 			// it progressively. If the per-device budget fires mid-poll
 			// we still have whatever was collected so far (at minimum
 			// the System info — enough to populate vendor/model/OS).
-			res := &snmp.Result{DeviceID: d.ID, Timestamp: time.Now().UTC()}
+			res := &snmp.Result{DeviceID: d.ID, Timestamp: time.Now().UTC(), WantUdt: udtDue[d.ID]}
 
 			// Cancel the collector's context if budget expires so any
 			// in-flight walk stops as soon as it checks ctx.
@@ -1094,6 +1121,7 @@ func (e *Engine) handleSNMPResult(ctx context.Context, d *snmp.Device, r *snmp.R
 	rSens := r.Sensors
 	rScal := r.Scalars
 	rIfSamp := r.IfSamples
+	rUdt := r.Udt
 	r.Mu.Unlock()
 
 	// IMPORTANT: even when the poll cycle errored (e.g. per-device budget
@@ -1136,6 +1164,18 @@ func (e *Engine) handleSNMPResult(ctx context.Context, d *snmp.Device, r *snmp.R
 		if err := e.snmpLoader.UpsertSensors(ctx, d.ID, rSens); err != nil {
 			e.logger.Warnf("UpsertSensors %s (%d rows): %v", d.Hostname, len(rSens), err)
 		}
+	}
+	if rUdt != nil {
+		if err := e.snmpLoader.UpsertUdtData(ctx, d.ID, rUdt); err != nil {
+			e.logger.Warnf("UpsertUdtData %s (%d fdb, %d arp, %d nbrs): %v",
+				d.Hostname, len(rUdt.Fdb), len(rUdt.Arp), len(rUdt.Neighbors), err)
+		} else {
+			e.logger.Infof("UDT %s: %d fdb, %d arp, %d neighbors, %d vlans",
+				d.Hostname, len(rUdt.Fdb), len(rUdt.Arp), len(rUdt.Neighbors), len(rUdt.Vlans))
+		}
+		e.mu.Lock()
+		e.lastUdtAt[d.ID] = time.Now()
+		e.mu.Unlock()
 	}
 
 	// 2) ClickHouse time-series writes — skip when the poll errored so we

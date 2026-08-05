@@ -72,6 +72,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Input } from '@/components/ui/Input'
 import { Textarea } from '@/components/ui/Textarea'
 import { DeviceFormDialog } from '@/components/forms/DeviceFormDialog'
+import { ConnectedEndpointsCard } from '@/components/udt/ConnectedEndpointsCard'
 import { toast } from '@/components/ui/Toast'
 import { TimeRangePicker, rangePhrase, useTimeRange } from '@/components/TimeRangePicker'
 
@@ -938,6 +939,9 @@ function DashboardSection({
           lastBw={lastBw}
           openAlerts={activeAlertCount}
         />
+        {snmp && ['switch', 'router', 'firewall'].includes(device.device_type) && (
+          <ConnectedEndpointsCard deviceId={deviceId} />
+        )}
       </div>
 
       <EventsDialog

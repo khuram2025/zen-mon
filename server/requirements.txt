@@ -22,6 +22,9 @@ fpdf2==2.8.2
 matplotlib==3.9.4
 Pillow==11.1.0
 
+# Windows/AD user-login correlation (UDT domain-controller polling) + discovery WinRM probe
+pywinrm==0.5.0
+
 # Tests
 pytest==8.3.4
 pytest-asyncio==0.25.0

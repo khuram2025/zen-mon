@@ -130,6 +130,29 @@ func (c *Collector) Collect(ctx context.Context, d *Device, r *Result) {
 		}
 	}
 
+	// 6) UDT — bridge FDB, ARP/ND, LLDP/CDP, VLANs. Runs on its own
+	// cadence (engine sets WantUdt); partial output is still persisted.
+	r.Mu.Lock()
+	wantUdt := r.WantUdt
+	ifsForUdt := r.Interfaces
+	r.Mu.Unlock()
+	if wantUdt && ctx.Err() == nil {
+		d2 := *d
+		if sysOID != "" {
+			d2.SysObjectID = sysOID
+		}
+		udt, _ := c.CollectUDT(ctx, &d2, client, ifsForUdt)
+		if udt != nil {
+			r.Mu.Lock()
+			r.Udt = udt
+			r.Scalars = append(r.Scalars, MetricSample{
+				DeviceID: d.ID, Key: "udt_mac_count",
+				Value: float64(len(udt.Fdb)), Unit: "count", Timestamp: start, PollerID: c.pollerID,
+			})
+			r.Mu.Unlock()
+		}
+	}
+
 	r.Mu.Lock()
 	if sysErr != nil && ifErr != nil {
 		r.Err = fmt.Errorf("system+interfaces failed: sys=%v if=%v", sysErr, ifErr)

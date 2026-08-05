@@ -31,6 +31,14 @@ import { ReportsPage as DiscoveryReportsPage } from '@/pages/discovery/ReportsPa
 import { ImportsPage as DiscoveryImportsPage } from '@/pages/discovery/ImportsPage'
 import { IgnoredPage as DiscoveryIgnoredPage } from '@/pages/discovery/IgnoredPage'
 import { CredentialsPage as DiscoveryCredentialsPage } from '@/pages/discovery/CredentialsPage'
+import { UdtLayout } from '@/pages/udt/UdtLayout'
+import { EndpointSearchPage } from '@/pages/udt/EndpointSearchPage'
+import { EndpointDetailPage } from '@/pages/udt/EndpointDetailPage'
+import { SwitchPortsPage } from '@/pages/udt/SwitchPortsPage'
+import { UserLoginsPage } from '@/pages/udt/UserLoginsPage'
+import { WatchListsPage } from '@/pages/udt/WatchListsPage'
+import { ActivityPage as UdtActivityPage } from '@/pages/udt/ActivityPage'
+import { SettingsPage as UdtSettingsPage } from '@/pages/udt/SettingsPage'
 import { MibLibraryPage } from '@/pages/MibLibraryPage'
 import { ManualMapsEntry } from '@/pages/ManualMapsEntry'
 import { ReportsPage } from '@/pages/ReportsPage'
@@ -152,6 +160,15 @@ export default function App() {
           <Route path="profiles/:id" element={<DiscoveryProfileDetailPage />} />
           <Route path="profiles/:id/edit" element={<DiscoveryWizardPage />} />
           <Route path="runs/:id" element={<DiscoveryRunPage />} />
+        </Route>
+        <Route path="udt" element={<UdtLayout />}>
+          <Route index element={<EndpointSearchPage />} />
+          <Route path="ports" element={<SwitchPortsPage />} />
+          <Route path="users" element={<UserLoginsPage />} />
+          <Route path="watch-lists" element={<WatchListsPage />} />
+          <Route path="activity" element={<UdtActivityPage />} />
+          <Route path="settings" element={<UdtSettingsPage />} />
+          <Route path="endpoints/:id" element={<EndpointDetailPage />} />
         </Route>
         <Route path="maps" element={<Navigate to="/maps/manual" replace />} />
         <Route path="maps/manual" element={<ManualMapsEntry />} />

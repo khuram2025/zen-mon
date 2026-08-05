@@ -35,7 +35,15 @@ _APM_METRICS = (
     "apm_error_rate|apm_throughput|apm_apdex|"
     "apm_slo_burn|apm_synthetic_down|apm_anomaly"
 )
-_CONDITION_METRICS = f"ping_status|rtt|packet_loss|jitter|service_status|{_NETWORK_METRICS}|{_APM_METRICS}"
+# User Device Tracker metric keys (migrate-060 CHECK), evaluated by
+# udt_alert_service. The first four are event-driven (threshold acts as an
+# on/off toggle); udt_port_capacity_pct is a numeric percentage with
+# raise/resolve.
+_UDT_METRICS = (
+    "udt_new_endpoint|udt_rogue_endpoint|udt_watch_endpoint|"
+    "udt_endpoint_moved|udt_port_capacity_pct"
+)
+_CONDITION_METRICS = f"ping_status|rtt|packet_loss|jitter|service_status|{_NETWORK_METRICS}|{_APM_METRICS}|{_UDT_METRICS}"
 
 
 class ConditionItem(BaseModel):

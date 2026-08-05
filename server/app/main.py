@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
-from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, report_schedules, discovery, discovery_v2, users, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, host_alert_rules, link_utilization
+from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, report_schedules, discovery, discovery_v2, users, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, host_alert_rules, link_utilization, udt
 from app.api.v1 import settings as settings_api
 from app.api.v1 import storage_management as storage_api
 from app.api.v1 import sensors as sensors_admin_api
@@ -75,6 +75,7 @@ def create_app() -> FastAPI:
     app.include_router(audit_logs.router, prefix="/api/v1")
     app.include_router(netflow.router, prefix="/api/v1")
     app.include_router(link_utilization.router, prefix="/api/v1")
+    app.include_router(udt.router, prefix="/api/v1")
     app.include_router(manual_maps.router, prefix="/api/v1")
     app.include_router(sensors_admin_api.router, prefix="/api/v1")
     app.include_router(sensors_admin_api.sites_router, prefix="/api/v1")
@@ -153,6 +154,15 @@ def create_app() -> FastAPI:
         # a release that shipped a new MSI is downloadable without a manual
         # publish step.
         app.state.agent_package_sync = asyncio.create_task(_sync_agent_packages_once())
+        # UDT: sessionize/classify/watch/rogue sweep (advisory-locked).
+        from app.services.udt_sweeper import udt_sweeper_loop
+        app.state.udt_sweeper = asyncio.create_task(udt_sweeper_loop())
+        # UDT: event-driven + capacity alert evaluation.
+        from app.services.udt_alert_service import udt_alert_evaluator_loop
+        app.state.udt_alert_evaluator = asyncio.create_task(udt_alert_evaluator_loop())
+        # UDT: agentless AD user-login correlation over WinRM (advisory-locked).
+        from app.services.udt_ad_service import udt_ad_poller_loop
+        app.state.udt_ad_poller = asyncio.create_task(udt_ad_poller_loop())
 
     async def _sync_agent_packages_once():
         _pkg_logger = logging.getLogger("zenplus.agent_packages")
@@ -168,7 +178,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("health_sweeper", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner"):
+        for attr in ("health_sweeper", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()
