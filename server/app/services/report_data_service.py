@@ -27,12 +27,34 @@ from app.services.report_service import (
     _fetch_ping_metrics,
     _fetch_service_metrics,
     _fetch_service_status_log,
+    _fetch_device_maintenance_windows,
+    _exclude_maintenance_samples,
+    _to_naive_utc,
     _device_uptime_pct,
     _device_rtt_stats,
     _ping_outage_episodes,
     _service_uptime_pct,
     _mttr_seconds,
 )
+
+MaintWindows = dict[str, list[tuple[datetime, datetime]]]
+
+
+def _in_maintenance(windows: MaintWindows, device_id: str, ts: datetime) -> bool:
+    wins = windows.get(str(device_id))
+    if not wins:
+        return False
+    t = _to_naive_utc(ts) if ts.tzinfo else ts
+    return any(s <= t <= e for s, e in wins)
+
+
+def _maintenance_minutes(windows: MaintWindows) -> float:
+    """Total device-minutes of planned maintenance inside the query window."""
+    total = 0.0
+    for wins in windows.values():
+        for s, e in wins:
+            total += max(0.0, (e - s).total_seconds() / 60)
+    return round(total, 1)
 
 
 def _safe_device_status_log(start: datetime, end: datetime) -> list[dict]:
@@ -104,27 +126,69 @@ def _availability_pct(ping_rows: list[dict]) -> Optional[float]:
     return round((up / len(ping_rows)) * 100, 2)
 
 
-def _availability_trend(start: datetime, end: datetime) -> list[dict]:
-    """One ClickHouse query buckets is_up over time across all devices."""
+_INTERVAL_SECONDS = {
+    "5 MINUTE": 300,
+    "30 MINUTE": 1800,
+    "1 HOUR": 3600,
+    "6 HOUR": 21600,
+    "1 DAY": 86400,
+}
+
+
+def _availability_trend(start: datetime, end: datetime,
+                        windows: MaintWindows | None = None) -> list[dict]:
+    """Fleet availability bucketed over time.
+
+    When maintenance windows exist, buckets are aggregated per device first so
+    a device's samples can be dropped for the buckets that fall inside its
+    maintenance window — planned downtime never dents the trend line.
+    """
     interval, _ = _trend_bucket(start, end)
     client = get_clickhouse_client()
-    q = f"""
-        SELECT
-            toStartOfInterval(timestamp, INTERVAL {interval}) AS ts,
-            avg(is_up) * 100 AS availability_pct
-        FROM zenplus.ping_metrics
-        WHERE timestamp >= %(start)s AND timestamp <= %(end)s
-        GROUP BY ts
-        ORDER BY ts
-    """
     try:
+        if not windows:
+            q = f"""
+                SELECT
+                    toStartOfInterval(timestamp, INTERVAL {interval}) AS ts,
+                    avg(is_up) * 100 AS availability_pct
+                FROM zenplus.ping_metrics
+                WHERE timestamp >= %(start)s AND timestamp <= %(end)s
+                GROUP BY ts
+                ORDER BY ts
+            """
+            rs = client.query(q, parameters={"start": start, "end": end})
+            return [
+                {
+                    "ts": (r[0].replace(tzinfo=timezone.utc) if r[0].tzinfo is None else r[0]).isoformat(),
+                    "availability_pct": round(float(r[1]), 2) if r[1] is not None else None,
+                }
+                for r in rs.result_rows
+            ]
+        q = f"""
+            SELECT device_id,
+                   toStartOfInterval(timestamp, INTERVAL {interval}) AS ts,
+                   countIf(is_up = 1) AS up_count,
+                   count() AS total_count
+            FROM zenplus.ping_metrics
+            WHERE timestamp >= %(start)s AND timestamp <= %(end)s
+            GROUP BY device_id, ts
+            ORDER BY ts
+        """
         rs = client.query(q, parameters={"start": start, "end": end})
+        half = timedelta(seconds=_INTERVAL_SECONDS.get(interval, 300) / 2)
+        buckets: dict[datetime, list[int]] = defaultdict(lambda: [0, 0])
+        for did, ts, up, total in rs.result_rows:
+            if _in_maintenance(windows, str(did), ts + half):
+                continue
+            b = buckets[ts]
+            b[0] += int(up or 0)
+            b[1] += int(total or 0)
         return [
             {
-                "ts": (r[0].replace(tzinfo=timezone.utc) if r[0].tzinfo is None else r[0]).isoformat(),
-                "availability_pct": round(float(r[1]), 2) if r[1] is not None else None,
+                "ts": (ts.replace(tzinfo=timezone.utc) if ts.tzinfo is None else ts).isoformat(),
+                "availability_pct": round(up / total * 100, 2) if total else None,
             }
-            for r in rs.result_rows
+            for ts, (up, total) in sorted(buckets.items())
         ]
     except Exception:
         return []
@@ -154,14 +218,20 @@ def _alert_volume_by_severity(start: datetime, end: datetime, alerts: list[dict]
     ]
 
 
-def _outage_intervals(status_log: list[dict], device_map: dict[str, dict]) -> list[dict]:
-    """Convert status-log rows into outage intervals (down→up duration)."""
+def _outage_intervals(status_log: list[dict], device_map: dict[str, dict],
+                      windows: MaintWindows | None = None) -> list[dict]:
+    """Convert status-log rows into outage intervals (down→up duration).
+
+    Outages that begin inside a planned maintenance window are excluded."""
     out: list[dict] = []
     for entry in status_log:
         ns = (entry.get("new_status") or "").lower()
         if ns not in ("down", "offline"):
             continue
         did = str(entry["device_id"])
+        ets = entry.get("timestamp")
+        if windows and ets is not None and _in_maintenance(windows, did, ets):
+            continue
         ts = entry.get("timestamp")
         if ts and ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
@@ -192,8 +262,13 @@ async def build_executive(
     devices = await _fetch_devices(db)
     alerts = await _fetch_alerts(db, start, end)
     prev_alerts = await _fetch_alerts(db, prev_start, prev_end)
-    ping_rows = _fetch_ping_metrics(start, end)
-    prev_pings = _fetch_ping_metrics(prev_start, prev_end)
+    # Planned maintenance is excluded from every availability figure so SLA
+    # numbers only reflect unplanned downtime.
+    maint = await _fetch_device_maintenance_windows(db, start, end)
+    prev_maint = await _fetch_device_maintenance_windows(db, prev_start, prev_end)
+    ping_rows = _exclude_maintenance_samples(_fetch_ping_metrics(start, end), maint)
+    prev_pings = _exclude_maintenance_samples(
+        _fetch_ping_metrics(prev_start, prev_end), prev_maint)
     status_log = _safe_device_status_log(start, end)
 
     device_map = {str(d["id"]): d for d in devices}
@@ -227,6 +302,9 @@ async def build_executive(
     downtime_by_dev: dict[str, float] = defaultdict(float)
     for entry in status_log:
         if (entry.get("new_status") or "").lower() in ("down", "offline"):
+            ets = entry.get("timestamp")
+            if ets is not None and _in_maintenance(maint, str(entry["device_id"]), ets):
+                continue  # planned downtime is not an issue
             downtime_by_dev[str(entry["device_id"])] += float(entry.get("duration_sec") or 0)
 
     scored: list[tuple[str, float, float]] = []
@@ -280,11 +358,14 @@ async def build_executive(
             "sla_attained_pct": sla_attained,
             "incidents_count": incidents,
             "incidents_delta": incidents - prev_incidents,
+            # Device-minutes of planned maintenance excluded from the figures
+            # above (0 when no windows overlap the range).
+            "maintenance_minutes": _maintenance_minutes(maint),
         },
-        "availability_trend": _availability_trend(start, end),
+        "availability_trend": _availability_trend(start, end, maint),
         "top_issues": top_issues,
         "location_summary": location_summary,
-        "outage_timeline": _outage_intervals(status_log[:50], device_map),
+        "outage_timeline": _outage_intervals(status_log[:50], device_map, maint),
     }
 
 
@@ -297,12 +378,13 @@ async def build_technical(
 
     devices = await _fetch_devices(db)
     alerts = await _fetch_alerts(db, start, end)
-    ping_rows = _fetch_ping_metrics(start, end)
+    maint = await _fetch_device_maintenance_windows(db, start, end)
+    ping_rows = _exclude_maintenance_samples(_fetch_ping_metrics(start, end), maint)
     status_log = _safe_device_status_log(start, end)
 
     device_map = {str(d["id"]): d for d in devices}
 
-    # Top-10 worst availability devices
+    # Top-10 worst availability devices (maintenance samples already excluded)
     per_device_uptime: list[tuple[str, float, dict, int]] = []
     for d in devices:
         did = str(d["id"])
@@ -438,7 +520,7 @@ async def build_technical(
         "top_bandwidth_interfaces": top_bw,
         "alert_volume_by_severity": _alert_volume_by_severity(start, end, alerts),
         "interface_errors": iface_errors,
-        "outage_history": _outage_intervals(status_log, device_map),
+        "outage_history": _outage_intervals(status_log, device_map, maint),
     }
 
 

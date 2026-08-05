@@ -218,41 +218,71 @@ async def _node_availability(ctx: SectionCtx) -> dict:
     if ids:
         ch_params["ids"] = ids
 
+    # Planned maintenance windows (device_id -> [(start, end)], naive UTC):
+    # 5-minute rollup buckets whose midpoint falls inside a window are dropped
+    # so planned downtime never dents availability or the trend.
+    from app.services.report_service import _fetch_device_maintenance_windows
+    try:
+        maint = await _fetch_device_maintenance_windows(ctx.db, ctx.frm, ctx.to)
+    except Exception:
+        maint = {}
+
+    def _in_maint(device_id: str, ts) -> bool:
+        wins = maint.get(str(device_id))
+        if not wins:
+            return False
+        t = ts.replace(tzinfo=None) if ts.tzinfo else ts
+        return any(s <= t <= e for s, e in wins)
+
     stats: dict[str, dict] = {}
     trend: list[dict] = []
+    bucket_secs = {"5 MINUTE": 300, "30 MINUTE": 1800, "2 HOUR": 7200, "1 DAY": 86400}
     try:
         rows = ctx.ch().query(
             f"""
             SELECT device_id,
+                   toStartOfInterval(timestamp, INTERVAL {ctx.bucket()}) AS b,
                    -- uptime_pct is stored as a 0..1 fraction in the rollup
-                   sum(uptime_pct * sample_count) / sum(sample_count) * 100 AS avail,
+                   sum(uptime_pct * sample_count) AS up_weighted,
+                   sum(sample_count) AS samples,
                    avg(avg_rtt_ms) AS rtt
             FROM zenplus.ping_metrics_5m
             WHERE timestamp >= %(f)s AND timestamp <= %(t)s{id_cond}
-            GROUP BY device_id
+            GROUP BY device_id, b ORDER BY b
             """, parameters=ch_params).result_rows
-        stats = {str(r[0]): {"avail": float(r[1]), "rtt": float(r[2] or 0)} for r in rows}
+        half = timedelta(seconds=bucket_secs.get(ctx.bucket(), 300) / 2)
+        per_dev: dict[str, list[float]] = {}
+        per_bucket: dict[Any, list[float]] = {}
+        for did, b, upw, sc, rtt in rows:
+            if _in_maint(str(did), b + half):
+                continue
+            dv = per_dev.setdefault(str(did), [0.0, 0.0, 0.0, 0])
+            dv[0] += float(upw or 0)
+            dv[1] += float(sc or 0)
+            dv[2] += float(rtt or 0)
+            dv[3] += 1
+            bv = per_bucket.setdefault(b, [0.0, 0.0])
+            bv[0] += float(upw or 0)
+            bv[1] += float(sc or 0)
+        for did, (upw, sc, rtt_sum, nb) in per_dev.items():
+            if sc > 0:
+                stats[did] = {"avail": upw / sc * 100, "rtt": (rtt_sum / nb) if nb else 0}
+        trend = [{"t": b.isoformat(), "v": round(upw / sc * 100, 2)}
+                 for b, (upw, sc) in sorted(per_bucket.items()) if sc > 0]
+
         out_rows = ctx.ch().query(
             f"""
-            SELECT device_id,
-                   countIf(lower(new_status) IN ('down', 'offline')) AS outages,
-                   sumIf(duration_sec, lower(new_status) IN ('down', 'offline')) AS down_s
+            SELECT device_id, timestamp, duration_sec
             FROM zenplus.device_status_log
             WHERE timestamp >= %(f)s AND timestamp <= %(t)s{id_cond}
-            GROUP BY device_id
+              AND lower(new_status) IN ('down', 'offline')
             """, parameters=ch_params).result_rows
-        for r in out_rows:
-            stats.setdefault(str(r[0]), {}).update(
-                outages=int(r[1] or 0), logged_down_s=int(r[2] or 0))
-        trend_rows = ctx.ch().query(
-            f"""
-            SELECT toStartOfInterval(timestamp, INTERVAL {ctx.bucket()}) AS b,
-                   sum(uptime_pct * sample_count) / sum(sample_count) * 100 AS avail
-            FROM zenplus.ping_metrics_5m
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s{id_cond}
-            GROUP BY b ORDER BY b
-            """, parameters=ch_params).result_rows
-        trend = [{"t": r[0].isoformat(), "v": round(float(r[1] or 0), 2)} for r in trend_rows]
+        for did, ts, dur in out_rows:
+            if _in_maint(str(did), ts):
+                continue  # planned downtime
+            s = stats.setdefault(str(did), {})
+            s["outages"] = s.get("outages", 0) + 1
+            s["logged_down_s"] = s.get("logged_down_s", 0) + int(dur or 0)
     except Exception:
         logger.exception("node availability query failed")
 
@@ -261,12 +291,17 @@ async def _node_availability(ctx: SectionCtx) -> dict:
     for d in devices:
         s = stats.get(d["id"], {})
         avail = s.get("avail")
+        # SLA-relevant minutes for this node exclude its own maintenance time.
+        maint_min = sum(max(0.0, (e - st).total_seconds() / 60)
+                        for st, e in maint.get(d["id"], []))
+        sla_min = max(window_min - maint_min, 0.0)
         nodes.append({
             **d,
             "avail": round(avail, 3) if avail is not None else None,
-            "downtime_min": round((100 - avail) / 100 * window_min, 1) if avail is not None else None,
+            "downtime_min": round((100 - avail) / 100 * sla_min, 1) if avail is not None else None,
             "outages": s.get("outages", 0),
             "rtt": s.get("rtt"),
+            "maintenance_min": round(maint_min, 1) if maint_min else 0,
         })
     # Problems first; devices with no data at the bottom.
     nodes.sort(key=lambda n: (n["avail"] is None, n["avail"] if n["avail"] is not None else 0))
@@ -282,6 +317,7 @@ async def _node_availability(ctx: SectionCtx) -> dict:
         "downtime_min": round(sum(n["downtime_min"] or 0 for n in nodes), 1),
         "outage_events": sum(n["outages"] for n in nodes),
         "filtered": bool(ids),
+        "maint_excluded_min": round(sum(n["maintenance_min"] for n in nodes), 1),
     }
     ctx._cache["node_avail"] = result
     return result
@@ -291,8 +327,13 @@ async def _sec_availability_kpis(ctx: SectionCtx) -> dict:
     na = await _node_availability(ctx)
     avail = na["overall"]
     scope = f"{len(na['nodes'])} selected node(s)" if na["filtered"] else "all monitored nodes"
+    maint_note = ([f"Planned maintenance excluded: {na['maint_excluded_min']:,.0f} "
+                   "device-minutes fell inside maintenance windows and do not "
+                   "count against availability."]
+                  if na.get("maint_excluded_min") else [])
     return _section(
         "availability_kpis", "Availability Summary",
+        notes=maint_note,
         description=f"Computed over {scope} for the reporting window.",
         kpis=[
             {"label": "Availability", "value": _fmt_pct(avail),

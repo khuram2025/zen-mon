@@ -24,6 +24,8 @@ export interface ExecutiveData {
     sla_attained_pct: number
     incidents_count: number
     incidents_delta: number
+    /** Device-minutes of planned maintenance excluded from availability. */
+    maintenance_minutes?: number
   }
   availability_trend: { ts: string; availability_pct: number | null }[]
   top_issues: {

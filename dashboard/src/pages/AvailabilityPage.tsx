@@ -25,6 +25,7 @@ import {
   Sparkles,
   Target,
   TrendingUp,
+  Wrench,
   Zap,
 } from 'lucide-react'
 import {
@@ -81,7 +82,9 @@ type ServiceSummary = {
 type AvailSegment = {
   key: string
   label: string
-  pct: number
+  /** Window availability averaged over devices with uptime data; null when
+   *  no device in the segment reported any SLA-relevant samples. */
+  pct: number | null
   up: number
   total: number
 }
@@ -105,14 +108,21 @@ type TileAccent = {
 
 /* ── Theme tokens ───────────────────────────────────────────────────────── */
 
-const TILE_ACCENTS: TileAccent[] = [
-  { bar: 'bg-emerald-500', bg: 'from-emerald-500/10 to-teal-500/5', glow: 'group-hover:shadow-emerald-500/15', ring: 'success' },
-  { bar: 'bg-sky-500', bg: 'from-sky-500/10 to-blue-500/5', glow: 'group-hover:shadow-sky-500/15', ring: 'info' },
-  { bar: 'bg-violet-500', bg: 'from-violet-500/10 to-purple-500/5', glow: 'group-hover:shadow-violet-500/15', ring: 'accent' },
-  { bar: 'bg-amber-500', bg: 'from-amber-500/10 to-orange-500/5', glow: 'group-hover:shadow-amber-500/15', ring: 'warning' },
-  { bar: 'bg-rose-500', bg: 'from-rose-500/10 to-pink-500/5', glow: 'group-hover:shadow-rose-500/15', ring: 'danger' },
-  { bar: 'bg-cyan-500', bg: 'from-cyan-500/10 to-teal-500/5', glow: 'group-hover:shadow-cyan-500/15', ring: 'info' },
-]
+/** Tile chrome follows the tile's own health — color always encodes data,
+ *  never the tile's position in the grid. */
+const HEALTH_TILE_ACCENTS: Record<'success' | 'warning' | 'danger' | 'none', TileAccent> = {
+  success: { bar: 'bg-emerald-500', bg: 'from-emerald-500/10 to-teal-500/5', glow: 'group-hover:shadow-emerald-500/15', ring: 'success' },
+  warning: { bar: 'bg-amber-500', bg: 'from-amber-500/10 to-orange-500/5', glow: 'group-hover:shadow-amber-500/15', ring: 'warning' },
+  danger: { bar: 'bg-rose-500', bg: 'from-rose-500/10 to-pink-500/5', glow: 'group-hover:shadow-rose-500/15', ring: 'danger' },
+  none: { bar: 'bg-slate-400', bg: 'from-slate-500/10 to-slate-500/5', glow: 'group-hover:shadow-slate-500/10', ring: 'info' },
+}
+
+function tileAccent(pct: number | null): TileAccent {
+  if (pct == null) return HEALTH_TILE_ACCENTS.none
+  if (pct >= 99.9) return HEALTH_TILE_ACCENTS.success
+  if (pct >= 95) return HEALTH_TILE_ACCENTS.warning
+  return HEALTH_TILE_ACCENTS.danger
+}
 
 const KPI_THEMES = {
   devices: {
@@ -143,23 +153,27 @@ const keepPrev = <T,>(prev: T | undefined) => prev
 
 function availColor(pct: number): RingColor {
   if (pct >= 99.9) return 'success'
-  if (pct >= 99) return 'warning'
   if (pct >= 95) return 'warning'
   return 'danger'
 }
 
 function availText(pct: number) {
   if (pct >= 99.9) return 'text-success'
-  if (pct >= 99) return 'text-warning'
   if (pct >= 95) return 'text-warning'
   return 'text-danger'
 }
 
 function availBarGradient(pct: number) {
   if (pct >= 99.9) return 'from-emerald-400 to-teal-500'
-  if (pct >= 99) return 'from-amber-400 to-orange-500'
   if (pct >= 95) return 'from-amber-400 to-orange-500'
   return 'from-rose-400 to-red-500'
+}
+
+/** Hero figure gradient follows the health of the number, never a fixed hue. */
+function heroGradient(pct: number) {
+  if (pct >= 99.9) return 'from-emerald-600 via-teal-600 to-cyan-600 dark:from-emerald-300 dark:via-teal-300 dark:to-cyan-300'
+  if (pct >= 95) return 'from-amber-600 via-orange-600 to-amber-600 dark:from-amber-300 dark:via-orange-300 dark:to-amber-300'
+  return 'from-rose-600 via-red-600 to-rose-600 dark:from-rose-300 dark:via-red-300 dark:to-rose-300'
 }
 
 function fmtPct(v: number | null | undefined, digits = 2) {
@@ -184,20 +198,26 @@ function buildSegments(
   getKey: (d: Device) => string,
   labelOf: (key: string) => string,
 ): AvailSegment[] {
-  const grouped = new Map<string, { score: number; up: number; total: number }>()
+  const grouped = new Map<string, { score: number; counted: number; up: number; total: number }>()
   for (const d of devices) {
     const key = getKey(d) || 'Unassigned'
-    const cur = grouped.get(key) || { score: 0, up: 0, total: 0 }
+    const cur = grouped.get(key) || { score: 0, counted: 0, up: 0, total: 0 }
     cur.total += 1
     if (d.status === 'up') cur.up += 1
-    cur.score += uptime[d.id] ?? (d.status === 'up' ? 100 : d.status === 'degraded' ? 75 : 0)
+    // Only measured uptime counts — never invent a number for a device that
+    // has no samples in the window (e.g. fully in maintenance, or brand new).
+    const pct = uptime[d.id]
+    if (pct !== undefined) {
+      cur.score += pct
+      cur.counted += 1
+    }
     grouped.set(key, cur)
   }
   return Array.from(grouped.entries())
     .map(([key, v]) => ({
       key,
       label: labelOf(key),
-      pct: v.total ? v.score / v.total : 0,
+      pct: v.counted ? v.score / v.counted : null,
       up: v.up,
       total: v.total,
     }))
@@ -309,7 +329,6 @@ export function AvailabilityPage() {
   const segmentsLoading = (devicesLoading && !devices.length) || (uptimeFetching && !uptime)
 
   const ut = uptime?.devices || {}
-  const failedChecks = uptime?.failed_checks || {}
   const k = exec?.kpis
   const fleetPct = k?.availability_pct ?? 0
   const slaMet = k ? k.sla_attained_pct >= k.sla_target_pct : true
@@ -337,39 +356,70 @@ export function AvailabilityPage() {
     [devices],
   )
 
-  /** Devices below 100% uptime — failed checks align with ping-sample uptime math. */
+  const maintDevices = useMemo(
+    () => devices.filter((d) => d.status === 'maintenance').slice(0, 6),
+    [devices],
+  )
+
+  /** Devices below 100% uptime in the window.
+   *  Preferred source: the technical report (server-side, maintenance-aware,
+   *  includes outage counts and latency). Falls back to the uptime map. */
   const worstDevices = useMemo(() => {
-    const sampleEst = Math.max(1, Math.round(range.hours * 12))
+    if (technical?.worst_devices?.length) {
+      return technical.worst_devices
+        .filter((d) => d.availability_pct < 100)
+        .slice(0, 12)
+    }
     return devices
       .map((d) => {
         const pct = ut[d.id]
         if (pct === undefined || pct >= 100) return null
-        const failed =
-          failedChecks[d.id] ??
-          Math.max(1, Math.round(sampleEst * (100 - pct) / 100))
         return {
           device_id: d.id,
           hostname: d.hostname,
           ip: d.ip_address,
           availability_pct: pct,
-          failed_checks: failed,
+          outage_count: null as number | null,
+          avg_rtt_ms: null as number | null,
+          p95_rtt_ms: null as number | null,
         }
       })
       .filter((row): row is NonNullable<typeof row> => row !== null)
       .sort((a, b) => a.availability_pct - b.availability_pct)
       .slice(0, 12)
-  }, [devices, ut, failedChecks, range.hours])
+  }, [technical, devices, ut])
 
   const serverTotal = servers?.total ?? 0
   const serverHealthy = servers?.status_counts?.healthy ?? 0
-  const serverPct = serverTotal > 0 ? (serverHealthy / serverTotal) * 100 : 100
+  const serverPct = serverTotal > 0 ? (serverHealthy / serverTotal) * 100 : null
 
   const serviceAvail = business?.service_availability || []
-  const avgServicePct = serviceAvail.length
-    ? serviceAvail.reduce((s, r) => s + (r.availability_pct ?? 0), 0) / serviceAvail.length
-    : services && services.total > 0 ? (services.up / services.total) * 100 : 100
+  // Weight by check volume so a busy check counts more than a rarely-run one.
+  const avgServicePct = useMemo(() => {
+    const withData = serviceAvail.filter((r) => r.availability_pct != null)
+    const weight = withData.reduce((s, r) => s + (r.checks_total ?? 0), 0)
+    if (weight > 0) {
+      return withData.reduce(
+        (s, r) => s + (r.availability_pct ?? 0) * (r.checks_total ?? 0), 0) / weight
+    }
+    if (withData.length) {
+      return withData.reduce((s, r) => s + (r.availability_pct ?? 0), 0) / withData.length
+    }
+    return services && services.total > 0 ? (services.up / services.total) * 100 : null
+  }, [serviceAvail, services])
 
   const trendData = exec?.availability_trend || []
+
+  /** Honest, tidy Y axis: zoom to the healthy band only when the data allows. */
+  const { trendYDomain, trendYTicks } = useMemo(() => {
+    const vals = trendData
+      .map((p) => p.availability_pct)
+      .filter((v): v is number => v != null)
+    const min = vals.length ? Math.min(...vals) : 100
+    if (min >= 95) return { trendYDomain: [95, 100] as [number, number], trendYTicks: [95, 96, 97, 98, 99, 100] }
+    if (min >= 70) return { trendYDomain: [70, 100] as [number, number], trendYTicks: [70, 80, 90, 100] }
+    return { trendYDomain: [0, 100] as [number, number], trendYTicks: [0, 25, 50, 75, 100] }
+  }, [trendData])
 
   const serviceFailedChecks = useMemo(
     () => serviceAvail.reduce((s, r) => s + (r.checks_failed ?? 0), 0),
@@ -380,10 +430,9 @@ export function AvailabilityPage() {
     const views = {
       devices: {
         title: 'Device Availability',
-        pct: fleetPct,
+        pct: fleetPct as number | null,
         sub: `${summary?.up ?? 0}/${summary?.total ?? 0} UP`,
         ringLabel: 'Network Devices',
-        gradient: 'from-emerald-600 via-teal-600 to-cyan-600 dark:from-emerald-300 dark:via-teal-300 dark:to-cyan-300',
         labelAccent: 'text-emerald-600 dark:text-emerald-400',
         metrics: [
           { icon: <Server className="h-3.5 w-3.5" />, label: 'Monitored', value: String(k?.devices_monitored ?? summary?.total ?? '—') },
@@ -397,7 +446,6 @@ export function AvailabilityPage() {
         pct: avgServicePct,
         sub: `${services?.up ?? 0}/${services?.total ?? 0} UP`,
         ringLabel: 'Service Checks',
-        gradient: 'from-violet-600 via-purple-600 to-fuchsia-600 dark:from-violet-300 dark:via-purple-300 dark:to-fuchsia-300',
         labelAccent: 'text-violet-600 dark:text-violet-400',
         metrics: [
           { icon: <Shield className="h-3.5 w-3.5" />, label: 'Checks', value: String(services?.total ?? '—') },
@@ -409,9 +457,8 @@ export function AvailabilityPage() {
       servers: {
         title: 'Server Availability',
         pct: serverPct,
-        sub: `${serverHealthy}/${serverTotal} healthy`,
+        sub: serverTotal ? `${serverHealthy}/${serverTotal} healthy` : 'No agents',
         ringLabel: 'Server Fleet',
-        gradient: 'from-sky-600 via-blue-600 to-indigo-600 dark:from-sky-300 dark:via-blue-300 dark:to-indigo-300',
         labelAccent: 'text-sky-600 dark:text-sky-400',
         metrics: [
           { icon: <Activity className="h-3.5 w-3.5" />, label: 'Total', value: String(serverTotal || '—') },
@@ -428,6 +475,7 @@ export function AvailabilityPage() {
   ])
 
   const heroPct = activeFleet.pct
+  const maintMinutes = k?.maintenance_minutes ?? 0
 
   return (
     <div className={cn('relative', noc && 'fixed inset-0 z-40 overflow-y-auto p-4 md:p-6')}>
@@ -474,7 +522,7 @@ export function AvailabilityPage() {
                 )}
               </div>
               <p className="mt-1 text-xs text-muted">
-                Real-time fleet health · {range.label} analytics · SSE push + 15s polling
+                Live fleet health · {range.label} analytics · planned maintenance excluded from SLA
               </p>
             </div>
           </div>
@@ -517,7 +565,7 @@ export function AvailabilityPage() {
               ) : (
                 <div className={cn(
                   'mt-2 bg-gradient-to-r bg-clip-text font-black tabular-nums tracking-tight text-transparent',
-                  activeFleet.gradient,
+                  heroGradient(heroPct ?? 0),
                   noc ? 'text-7xl' : 'text-6xl',
                 )}>
                   {fmtPct(heroPct)}
@@ -536,7 +584,16 @@ export function AvailabilityPage() {
                       : <ArrowDownRight className="h-3.5 w-3.5" />}
                     {(k.availability_delta_pct ?? 0) >= 0 ? '+' : ''}{fmtPct(k.availability_delta_pct, 2)} vs prior window
                   </span>
-                  <SlaChip met={slaMet} attained={k.sla_attained_pct} target={k.sla_target_pct} />
+                  <SlaChip met={slaMet} target={k.sla_target_pct} />
+                  {maintMinutes > 0 && (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-lg border border-info/40 bg-info/10 px-2.5 py-1 text-xs font-semibold text-info"
+                      title="Samples inside planned maintenance windows are excluded from every availability figure on this page"
+                    >
+                      <Wrench className="h-3 w-3" />
+                      {fmtMin(maintMinutes)} maintenance excluded
+                    </span>
+                  )}
                 </div>
               )}
               {fleetDomain === 'services' && (services?.down ?? 0) > 0 && (
@@ -566,15 +623,15 @@ export function AvailabilityPage() {
               <div className="relative">
                 <div className={cn(
                   'absolute inset-0 rounded-full blur-2xl',
-                  heroPct >= 99.9 ? 'bg-emerald-400/30 dark:bg-emerald-500/20' : heroPct >= 99 ? 'bg-amber-400/30' : 'bg-rose-400/30',
-                  fleetDomain === 'services' && 'bg-violet-400/25 dark:bg-violet-500/15',
-                  fleetDomain === 'servers' && 'bg-sky-400/25 dark:bg-sky-500/15',
+                  heroPct == null ? 'bg-slate-400/20'
+                    : heroPct >= 99.9 ? 'bg-emerald-400/30 dark:bg-emerald-500/20'
+                    : heroPct >= 95 ? 'bg-amber-400/30' : 'bg-rose-400/30',
                 )} />
                 <RingGauge
-                  value={heroPct}
+                  value={heroPct ?? 0}
                   size={noc ? 190 : 160}
                   stroke={noc ? 15 : 13}
-                  color={availColor(heroPct)}
+                  color={availColor(heroPct ?? 0)}
                   sub={activeFleet.sub}
                   label={activeFleet.ringLabel}
                 />
@@ -596,8 +653,8 @@ export function AvailabilityPage() {
               <DomainKpi
                 theme={KPI_THEMES.services}
                 label="Services"
-                value={services ? `${services.up}/${services.total}` : '—'}
-                pct={avgServicePct}
+                value={services && services.total > 0 ? `${services.up}/${services.total}` : '—'}
+                pct={services && services.total > 0 ? avgServicePct : null}
                 icon={<Shield className="h-4 w-4" />}
                 to="/services"
                 issue={services?.down}
@@ -618,6 +675,7 @@ export function AvailabilityPage() {
                 label="Critical Alerts"
                 value={String(k?.active_critical_count ?? 0)}
                 pct={k?.active_critical_count ? 0 : 100}
+                barClass={k?.active_critical_count ? 'from-rose-400 to-red-500' : 'from-emerald-400 to-teal-500'}
                 icon={<AlertOctagon className="h-4 w-4" />}
                 to="/alerts"
                 large={noc}
@@ -642,19 +700,14 @@ export function AvailabilityPage() {
                 <EmptyPanel icon={<TrendingUp className="h-8 w-8" />} text="No trend data for this window" />
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={trendData} margin={{ top: 16, right: 20, left: -4, bottom: 0 }}>
+                  <AreaChart data={trendData} margin={{ top: 16, right: 16, left: -4, bottom: 0 }}>
                     <defs>
                       <linearGradient id="availTrendFill2" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="rgb(var(--success))" stopOpacity={0.45} />
+                        <stop offset="0%" stopColor="rgb(var(--success))" stopOpacity={0.35} />
                         <stop offset="100%" stopColor="rgb(var(--success))" stopOpacity={0} />
                       </linearGradient>
-                      <linearGradient id="availTrendStroke" x1="0" y1="0" x2="1" y2="0">
-                        <stop offset="0%" stopColor="#10b981" />
-                        <stop offset="50%" stopColor="#06b6d4" />
-                        <stop offset="100%" stopColor="#8b5cf6" />
-                      </linearGradient>
                     </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--border))" strokeOpacity={0.6} vertical={false} />
+                    <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.5} vertical={false} />
                     <XAxis
                       dataKey="ts"
                       tickFormatter={(v) => {
@@ -669,7 +722,8 @@ export function AvailabilityPage() {
                       minTickGap={36}
                     />
                     <YAxis
-                      domain={[(min: number) => Math.max(0, Math.floor(min - 2)), 100]}
+                      domain={trendYDomain}
+                      ticks={trendYTicks}
                       tickFormatter={(v) => `${v}%`}
                       tick={{ fontSize: 11, fill: 'rgb(var(--muted))' }}
                       axisLine={false}
@@ -683,18 +737,18 @@ export function AvailabilityPage() {
                         stroke="rgb(var(--success))"
                         strokeDasharray="5 5"
                         strokeOpacity={0.8}
-                        label={{ value: `SLA ${k.sla_target_pct}%`, position: 'right', fill: 'rgb(var(--success))', fontSize: 10 }}
+                        label={{ value: `SLA ${k.sla_target_pct}%`, position: 'insideBottomRight', fill: 'rgb(var(--success))', fontSize: 10, dy: 12 }}
                       />
                     )}
                     <Area
                       type="monotone"
                       dataKey="availability_pct"
-                      stroke="url(#availTrendStroke)"
-                      strokeWidth={3}
+                      stroke="rgb(var(--success))"
+                      strokeWidth={2.5}
                       fill="url(#availTrendFill2)"
                       isAnimationActive={false}
                       dot={false}
-                      activeDot={{ r: 5, fill: '#10b981', stroke: '#fff', strokeWidth: 2 }}
+                      activeDot={{ r: 5, fill: 'rgb(var(--success))', stroke: '#fff', strokeWidth: 2 }}
                     />
                   </AreaChart>
                 </ResponsiveContainer>
@@ -746,6 +800,25 @@ export function AvailabilityPage() {
                         <Badge variant={d.status === 'down' ? 'danger' : 'warning'} className="capitalize">
                           {d.status}
                         </Badge>
+                      </Link>
+                    ))}
+                  </div>
+                )}
+                {maintDevices.length > 0 && (
+                  <div className="mt-2 border-t border-border/60 pt-2">
+                    <div className="mb-1 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-info">
+                      <Wrench className="h-3 w-3" />
+                      Planned maintenance — excluded from SLA
+                    </div>
+                    {maintDevices.map((d) => (
+                      <Link
+                        key={d.id}
+                        to={`/devices/${d.id}`}
+                        className="flex items-center gap-2 rounded-lg px-2 py-1.5 transition hover:bg-surface/80"
+                      >
+                        <span className="h-2 w-2 shrink-0 rounded-full bg-info" />
+                        <span className="min-w-0 flex-1 truncate text-xs font-medium text-muted">{d.hostname}</span>
+                        <Badge variant="info">Maint</Badge>
                       </Link>
                     ))}
                   </div>
@@ -831,19 +904,19 @@ export function AvailabilityPage() {
             title="Lowest Availability Devices"
             icon={<Target className="h-4 w-4 text-amber-500" />}
             hint={range.label}
-            loading={segmentsLoading && !worstDevices.length}
+            loading={(techFetching || segmentsLoading) && !worstDevices.length}
             empty="No device issues in this window"
-            columns={['Device', 'IP', 'Failed checks', 'Uptime']}
+            columns={['Device', 'IP', 'Outages', 'P95 RTT', 'Uptime']}
             rows={worstDevices.map((d) => ({
               key: d.device_id,
               cells: [
                 <Link to={`/devices/${d.device_id}`} className="font-medium text-primary hover:underline">{d.hostname}</Link>,
                 <span className="font-mono text-xs text-muted">{d.ip}</span>,
-                <span
-                  className="tabular-nums"
-                  title="Ping samples that did not respond in this window (same source as uptime %)"
-                >
-                  {d.failed_checks}
+                <span className="tabular-nums" title="Distinct outage episodes in this window (maintenance excluded)">
+                  {d.outage_count ?? '—'}
+                </span>,
+                <span className="tabular-nums text-muted">
+                  {d.p95_rtt_ms != null ? `${d.p95_rtt_ms.toFixed(0)} ms` : '—'}
                 </span>,
                 <GradientBar pct={d.availability_pct} />,
               ],
@@ -854,8 +927,12 @@ export function AvailabilityPage() {
             icon={<Clock className="h-4 w-4 text-rose-500" />}
             hint={range.label}
             loading={initialLoading && !(exec?.outage_timeline?.length)}
-            empty="No outages recorded — fleet is healthy"
-            emptyTone="success"
+            empty={
+              (summary?.down ?? 0) > 0
+                ? `No status changes in this window — ${summary!.down} device${summary!.down === 1 ? ' is' : 's are'} still down from an earlier outage`
+                : 'No outages recorded — fleet is healthy'
+            }
+            emptyTone={(summary?.down ?? 0) > 0 ? 'muted' : 'success'}
             columns={['Started', 'Device', 'Duration']}
             rows={(exec?.outage_timeline || []).slice(0, 12).map((o, i) => ({
               key: `${o.device_id}-${i}`,
@@ -936,7 +1013,7 @@ function FleetDomainTabs({
             className={cn(
               'inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-semibold transition-colors',
               active
-                ? 'bg-primary text-black shadow-sm'
+                ? 'bg-primary text-white shadow-sm'
                 : 'text-muted hover:bg-surface2 hover:text-text',
             )}
           >
@@ -975,14 +1052,17 @@ function ClockDisplay({ date, large }: { date: Date; large?: boolean }) {
   )
 }
 
-function SlaChip({ met, attained, target }: { met: boolean; attained: number; target: number }) {
+function SlaChip({ met, target }: { met: boolean; target: number }) {
   return (
-    <span className={cn(
-      'inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold',
-      met ? 'border-success/40 bg-success/10 text-success' : 'border-danger/40 bg-danger/10 text-danger',
-    )}>
+    <span
+      className={cn(
+        'inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold',
+        met ? 'border-success/40 bg-success/10 text-success' : 'border-danger/40 bg-danger/10 text-danger',
+      )}
+      title="Availability for the selected window vs the SLA target (planned maintenance excluded)"
+    >
       <Target className="h-3 w-3" />
-      SLA {fmtPct(attained, 2)} / {target}%
+      {met ? 'SLA met' : 'Below SLA'} · target {target}%
     </span>
   )
 }
@@ -1000,17 +1080,18 @@ function MetricChip({ icon, label, value }: { icon: React.ReactNode; label: stri
 }
 
 function DomainKpi({
-  theme, label, value, pct, icon, to, issue, loading, large,
+  theme, label, value, pct, icon, to, issue, loading, large, barClass,
 }: {
   theme: (typeof KPI_THEMES)[keyof typeof KPI_THEMES]
   label: string
   value: string
-  pct: number
+  pct: number | null
   icon: React.ReactNode
   to: string
   issue?: number
   loading?: boolean
   large?: boolean
+  barClass?: string
 }) {
   return (
     <Link
@@ -1039,7 +1120,7 @@ function DomainKpi({
         </span>
       </div>
       <div className="mt-3">
-        <GradientBar pct={pct} compact barClass={theme.bar} />
+        <GradientBar pct={pct} compact barClass={barClass ?? theme.bar} />
       </div>
     </Link>
   )
@@ -1107,8 +1188,8 @@ function BreakdownPanel({
         {!loading && segments.length === 0 && (
           <EmptyPanel icon={icon} text="No data for this window" />
         )}
-        {!loading && segments.slice(0, large ? 9 : 6).map((seg, i) => {
-          const accentStyle = TILE_ACCENTS[i % TILE_ACCENTS.length]
+        {!loading && segments.slice(0, large ? 9 : 6).map((seg) => {
+          const accentStyle = tileAccent(seg.pct)
           return (
             <div
               key={seg.key}
@@ -1121,18 +1202,27 @@ function BreakdownPanel({
             >
               <div className={cn('absolute left-0 top-0 h-full w-1', accentStyle.bar)} />
               <div className="flex items-center gap-3 pl-2">
-                <RingGauge
-                  value={seg.pct}
-                  size={large ? 72 : 64}
-                  stroke={large ? 7 : 6}
-                  color={accentStyle.ring}
-                />
+                {seg.pct == null ? (
+                  <div
+                    className={cn(
+                      'flex shrink-0 items-center justify-center rounded-full border-4 border-dashed border-border text-xs font-bold text-muted',
+                    )}
+                    style={{ width: large ? 72 : 64, height: large ? 72 : 64 }}
+                    title="No SLA-relevant samples in this window"
+                  >
+                    —
+                  </div>
+                ) : (
+                  <RingGauge
+                    value={seg.pct}
+                    size={large ? 72 : 64}
+                    stroke={large ? 7 : 6}
+                    color={accentStyle.ring}
+                  />
+                )}
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-bold text-text" title={seg.label}>{seg.label}</div>
-                  <div className="text-[10px] font-medium text-muted">{seg.up}/{seg.total} up</div>
-                  <div className={cn('mt-0.5 text-lg font-black tabular-nums', availText(seg.pct))}>
-                    {seg.pct.toFixed(1)}%
-                  </div>
+                  <div className="text-[10px] font-medium text-muted">{seg.up}/{seg.total} up now</div>
                   <GradientBar pct={seg.pct} compact className="mt-2" />
                 </div>
               </div>
@@ -1202,11 +1292,21 @@ function DataTablePanel({
 function GradientBar({
   pct, compact, barClass, className,
 }: {
-  pct: number
+  pct: number | null
   compact?: boolean
   barClass?: string
   className?: string
 }) {
+  if (pct == null) {
+    return (
+      <div className={cn('flex items-center gap-2', compact ? '' : 'justify-end', className)}>
+        <div className={cn(compact ? 'h-2 flex-1' : 'h-2 w-20', 'overflow-hidden rounded-full bg-surface2 ring-1 ring-border/40')} />
+        <span className={cn('shrink-0 text-xs font-bold tabular-nums text-muted', compact ? '' : 'min-w-[52px] text-right')}>
+          —
+        </span>
+      </div>
+    )
+  }
   const grad = barClass || availBarGradient(pct)
   return (
     <div className={cn('flex items-center gap-2', compact ? '' : 'justify-end', className)}>
