@@ -206,7 +206,11 @@ async def _sec_availability_trend(ctx: SectionCtx) -> dict:
     return _section(
         "availability_trend", "Availability Trend",
         description="Network-wide ping availability over the reporting window.",
-        charts=[{"title": "", "png": png}],
+        charts=[{"title": "", "png": png,
+                 "series": {"kind": "area", "unit": "%", "color": "success",
+                            "y_domain": [80, 100],
+                            "points": [{"t": t.isoformat(), "v": round(v, 2)}
+                                       for t, v in zip(ts, vals)]}}],
     )
 
 
@@ -220,7 +224,8 @@ async def _sec_device_uptime(ctx: SectionCtx) -> dict:
     return _section(
         "device_uptime", "Lowest-Availability Devices",
         description="Devices with the poorest availability in the window — start remediation here.",
-        tables=[{"headers": ["Device", "IP", "Availability", "Outages", "Avg RTT", "P95 RTT"], "rows": rows}],
+        tables=[{"headers": ["Device", "IP", "Availability", "Outages", "Avg RTT", "P95 RTT"],
+                 "styles": ["text", "mono", "pct-bar", "num", "num", "num"], "rows": rows}],
     )
 
 
@@ -231,8 +236,9 @@ async def _sec_top_outages(ctx: SectionCtx) -> dict:
     rows = [[o.get("hostname") or "—", _iso_short(o.get("started_at")),
              f"{o.get('duration_minutes') or 0:,.0f} min"] for o in outages]
     return _section(
-        "top_outages", "Longest Outages",
-        tables=[{"headers": ["Device", "Started", "Duration"], "rows": rows}],
+        "top_outages", "Longest Outages", half=True,
+        tables=[{"headers": ["Device", "Started", "Duration"],
+                 "styles": ["text", "num", "num"], "rows": rows}],
     )
 
 
@@ -247,10 +253,12 @@ async def _sec_service_availability(ctx: SectionCtx) -> dict:
     tls = [[w.get("name") or "—", str(w.get("days_remaining")), w.get("severity") or ""]
            for w in (d.get("tls_warnings") or [])]
     tables = [{"title": "Service check availability",
-               "headers": ["Service", "Type", "Status", "Availability", "Failed checks"], "rows": rows}]
+               "headers": ["Service", "Type", "Status", "Availability", "Failed checks"],
+               "styles": ["text", "text", "status", "pct-bar", "num"], "rows": rows}]
     if tls:
         tables.append({"title": "TLS certificates expiring within 30 days",
-                       "headers": ["Service", "Days remaining", "Severity"], "rows": tls})
+                       "headers": ["Service", "Days remaining", "Severity"],
+                       "styles": ["text", "num", "severity"], "rows": tls})
     return _section("service_availability", "Service Availability", tables=tables)
 
 
@@ -271,7 +279,8 @@ async def _sec_network_performance(ctx: SectionCtx) -> dict:
         "network_performance", "Network Device Performance",
         description="Round-trip latency and stability for the most stressed devices.",
         kpis=kpis,
-        tables=[{"headers": ["Device", "Avg RTT", "P95 RTT", "Availability", "Outages"], "rows": rows}],
+        tables=[{"headers": ["Device", "Avg RTT", "P95 RTT", "Availability", "Outages"],
+                 "styles": ["text", "num", "num", "pct-bar", "num"], "rows": rows}],
     )
 
 
@@ -286,7 +295,8 @@ async def _sec_interface_utilization(ctx: SectionCtx) -> dict:
     return _section(
         "interface_utilization", "Busiest Interfaces",
         description="Top interfaces by average throughput over the window.",
-        tables=[{"headers": ["Interface", "Avg In", "Avg Out", "Utilization"], "rows": rows}],
+        tables=[{"headers": ["Interface", "Avg In", "Avg Out", "Utilization"],
+                 "styles": ["text", "num", "num", "pct-bar"], "rows": rows}],
     )
 
 
@@ -331,7 +341,8 @@ async def _sec_server_performance(ctx: SectionCtx) -> dict:
     return _section(
         "server_performance", "Server Performance",
         description="Agent-monitored servers ranked by average CPU load.",
-        tables=[{"headers": ["Server", "Avg CPU", "Peak CPU", "Avg Mem", "Peak Mem"], "rows": rows_out}],
+        tables=[{"headers": ["Server", "Avg CPU", "Peak CPU", "Avg Mem", "Peak Mem"],
+                 "styles": ["text", "pct-bar", "num", "pct-bar", "num"], "rows": rows_out}],
         notes=[] if rows_out else ["No agent-monitored servers reported in this window."],
     )
 
@@ -382,7 +393,10 @@ async def _sec_traffic_trend(ctx: SectionCtx) -> dict:
     png = _make_line_chart(ts, vals, ylabel="Mbps", color=HEX_INFO)
     return _section("traffic_trend", "Traffic Trend",
                     description="Network-wide NetFlow throughput.",
-                    charts=[{"title": "", "png": png}])
+                    charts=[{"title": "", "png": png,
+                             "series": {"kind": "area", "unit": "Mbps", "color": "info",
+                                        "points": [{"t": t.isoformat(), "v": round(v, 2)}
+                                                   for t, v in zip(ts, vals)]}}])
 
 
 async def _sec_traffic_protocols(ctx: SectionCtx) -> dict:
@@ -403,30 +417,67 @@ async def _sec_traffic_protocols(ctx: SectionCtx) -> dict:
     png = _make_donut(labels, [round(v, 2) for v in values],
                       [HEX_PRIMARY, HEX_INFO, HEX_SUCCESS, HEX_WARNING, HEX_DANGER, HEX_MUTED][:max(len(labels), 1)],
                       center_text="GB")
-    return _section("traffic_protocols", "Traffic by Protocol",
-                    charts=[{"title": "Share of bytes (GB)", "png": png}])
+    return _section("traffic_protocols", "Traffic by Protocol", half=True,
+                    charts=[{"title": "Share of bytes (GB)", "png": png,
+                             "series": {"kind": "donut", "unit": "GB",
+                                        "points": [{"label": l, "value": round(v, 2)}
+                                                   for l, v in zip(labels, values)]}}])
 
 
 async def _sec_traffic_ports(ctx: SectionCtx) -> dict:
     port_names = {80: "HTTP", 443: "HTTPS", 53: "DNS", 22: "SSH", 25: "SMTP", 3389: "RDP",
-                  445: "SMB", 123: "NTP", 161: "SNMP", 1194: "OpenVPN", 500: "IPsec IKE", 8123: "ClickHouse"}
-    rows_out: list[list[str]] = []
+                  445: "SMB", 123: "NTP", 161: "SNMP", 1194: "OpenVPN", 500: "IPsec IKE",
+                  514: "Syslog", 1556: "NetBackup", 8123: "ClickHouse"}
+    rows_out: list[list[Any]] = []
     try:
         rows = ctx.ch().query(
             "SELECT dst_port, sum(bytes) AS b, sum(flow_count) AS fc "
             "FROM zenplus.flow_traffic_5m WHERE timestamp >= %(f)s AND timestamp <= %(t)s "
-            "GROUP BY dst_port ORDER BY b DESC LIMIT 15",
+            "GROUP BY dst_port ORDER BY b DESC LIMIT 12",
             parameters={"f": ctx.frm, "t": ctx.to}).result_rows
+        total = sum(float(r[1] or 0) for r in rows) or 1.0
         for r in rows:
             port = int(r[0])
-            rows_out.append([
-                f"{port} ({port_names[port]})" if port in port_names else str(port),
-                _fmt_bytes(float(r[1] or 0)), f"{int(r[2] or 0):,}",
-            ])
+            label = (f"{port} · {port_names[port]}" if port in port_names
+                     else "non-TCP/UDP traffic" if port == 0 else str(port))
+            share = float(r[1] or 0) / total * 100
+            rows_out.append([label, _fmt_bytes(float(r[1] or 0)),
+                             f"{share:.1f}%", f"{int(r[2] or 0):,}"])
     except Exception:
         logger.debug("traffic ports unavailable", exc_info=True)
-    return _section("traffic_ports", "Top Applications / Ports",
-                    tables=[{"headers": ["Destination port", "Volume", "Flows"], "rows": rows_out}])
+    return _section("traffic_ports", "Top Applications / Ports", half=True,
+                    tables=[{"headers": ["Application / port", "Volume", "Share", "Flows"],
+                             "styles": ["text", "num", "pct-bar", "num"],
+                             "rows": rows_out}])
+
+
+async def _sec_traffic_talkers(ctx: SectionCtx) -> dict:
+    """Top source/destination endpoints by bytes, from raw flow records."""
+    src_rows: list[list[Any]] = []
+    dst_rows: list[list[Any]] = []
+    try:
+        for col, out in (("src_addr", src_rows), ("dst_addr", dst_rows)):
+            rows = ctx.ch().query(
+                f"SELECT {col}, sum(bytes) AS b, count() AS fc "
+                f"FROM zenplus.flow_records WHERE timestamp >= %(f)s AND timestamp <= %(t)s "
+                f"GROUP BY {col} ORDER BY b DESC LIMIT 10",
+                parameters={"f": ctx.frm, "t": ctx.to}).result_rows
+            total = sum(float(r[1] or 0) for r in rows) or 1.0
+            for r in rows:
+                out.append([str(r[0]), _fmt_bytes(float(r[1] or 0)),
+                            f"{float(r[1] or 0) / total * 100:.1f}%", f"{int(r[2]):,}"])
+    except Exception:
+        logger.debug("traffic talkers unavailable", exc_info=True)
+    return _section(
+        "traffic_talkers", "Top Talkers",
+        description="Endpoints moving the most traffic (raw NetFlow records).",
+        tables=[
+            {"title": "Top sources", "headers": ["Source", "Volume", "Share", "Flows"],
+             "styles": ["mono", "num", "pct-bar", "num"], "rows": src_rows},
+            {"title": "Top destinations", "headers": ["Destination", "Volume", "Share", "Flows"],
+             "styles": ["mono", "num", "pct-bar", "num"], "rows": dst_rows},
+        ],
+    )
 
 
 # ─── APM sections ───────────────────────────────────────────────────────────
@@ -470,6 +521,7 @@ async def _sec_apm_services(ctx: SectionCtx) -> dict:
              "accent": "danger" if degraded else "success"},
         ],
         tables=[{"headers": ["Service", "Requests", "Error rate", "P50", "P95", "Apdex", "Health"],
+                 "styles": ["text", "num", "num", "num", "num", "num", "status"],
                  "rows": rows_out}],
     )
 
@@ -518,7 +570,7 @@ async def _sec_slo_attainment(ctx: SectionCtx) -> dict:
     return _section(
         "slo_attainment", "SLO Attainment",
         tables=[{"headers": ["SLO", "Service", "Objective", "Budget remaining", "Status"],
-                 "rows": rows_out}],
+                 "styles": ["text", "text", "text", "pct-bar", "status"], "rows": rows_out}],
         notes=[] if rows_out else ["No SLOs defined."],
     )
 
@@ -551,7 +603,8 @@ async def _sec_synthetics(ctx: SectionCtx) -> dict:
     return _section(
         "synthetics", "Synthetic Scenario Uptime",
         description="Scripted user-journey checks run from the appliance.",
-        tables=[{"headers": ["Scenario", "Status", "Uptime", "Runs", "Avg duration"], "rows": rows_out}],
+        tables=[{"headers": ["Scenario", "Status", "Uptime", "Runs", "Avg duration"],
+                 "styles": ["text", "status", "pct-bar", "num", "num"], "rows": rows_out}],
         notes=[] if rows_out else ["No synthetic scenarios configured."],
     )
 
@@ -586,7 +639,8 @@ async def _sec_usage_kpis(ctx: SectionCtx) -> dict:
             WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND span_kind_str IN {ENTRY_KINDS}
             GROUP BY b ORDER BY b
             """, parameters={"f": frm, "t": ctx.to}).result_rows
-        series_png = _make_line_chart([r[0] for r in series], [float(r[1]) for r in series],
+        series_pts = [(r[0], float(r[1])) for r in series]
+        series_png = _make_line_chart([t for t, _ in series_pts], [v for _, v in series_pts],
                                       ylabel="requests", color=HEX_PRIMARY)
     except Exception:
         logger.debug("usage kpis unavailable", exc_info=True)
@@ -601,7 +655,10 @@ async def _sec_usage_kpis(ctx: SectionCtx) -> dict:
              "accent": "danger" if reqs and errors / reqs > 0.02 else "success"},
             {"label": "P95 latency", "value": _fmt_ms(p95), "accent": "warning"},
         ],
-        charts=([{"title": "Request volume", "png": series_png}] if series_png else []),
+        charts=([{"title": "Request volume", "png": series_png,
+                  "series": {"kind": "area", "unit": "requests", "color": "primary",
+                             "points": [{"t": t.isoformat(), "v": v}
+                                        for t, v in series_pts]}}] if series_png else []),
     )
 
 
@@ -626,6 +683,7 @@ async def _sec_usage_pages(ctx: SectionCtx) -> dict:
         logger.debug("usage pages unavailable", exc_info=True)
     return _section("usage_pages", "Top Pages",
                     tables=[{"headers": ["Route", "Service", "Hits", "Users", "Error rate", "P95"],
+                             "styles": ["mono", "text", "num", "num", "num", "num"],
                              "rows": rows_out}])
 
 
@@ -648,7 +706,8 @@ async def _sec_usage_users(ctx: SectionCtx) -> dict:
         logger.debug("usage users unavailable", exc_info=True)
     return _section(
         "usage_users", "Top Users",
-        tables=[{"headers": ["User", "Requests", "Errors", "Pages", "Last seen"], "rows": rows_out}],
+        tables=[{"headers": ["User", "Requests", "Errors", "Pages", "Last seen"],
+                 "styles": ["mono", "num", "num", "num", "num"], "rows": rows_out}],
         notes=[] if rows_out else
         ["No user attribution — set the enduser.id span attribute to unlock per-user analytics."],
     )
@@ -679,7 +738,8 @@ async def _sec_capacity_filesystems(ctx: SectionCtx) -> dict:
         description="Fullest filesystems across agent-monitored servers.",
         kpis=[{"label": "Filesystems ≥90% full", "value": str(critical),
                "accent": "danger" if critical else "success"}],
-        tables=[{"headers": ["Server", "Mount", "Used", "Size", "Free"], "rows": rows_out}],
+        tables=[{"headers": ["Server", "Mount", "Used", "Size", "Free"],
+                 "styles": ["text", "mono", "pct-bar", "num", "num"], "rows": rows_out}],
     )
 
 
@@ -738,11 +798,14 @@ async def _sec_alert_trend(ctx: SectionCtx) -> dict:
     vol = d.get("alert_volume_by_severity") or []
     ts = [_parse_ts(p["ts"]) for p in vol]
     crit = [p.get("critical") or 0 for p in vol]
-    png = _make_time_bar_chart(ts, [(p.get("critical") or 0) + (p.get("warning") or 0) +
-                                    (p.get("info") or 0) for p in vol],
-                               color=HEX_WARNING, ylabel="alerts")
-    sec = _section("alert_trend", "Alert Volume Over Time",
-                   charts=[{"title": "", "png": png}])
+    totals = [(p.get("critical") or 0) + (p.get("warning") or 0) +
+              (p.get("info") or 0) for p in vol]
+    png = _make_time_bar_chart(ts, totals, color=HEX_WARNING, ylabel="alerts")
+    sec = _section("alert_trend", "Alert Volume Over Time", half=True,
+                   charts=[{"title": "", "png": png,
+                            "series": {"kind": "bars", "unit": "alerts", "color": "warning",
+                                       "points": [{"t": t.isoformat(), "v": v}
+                                                  for t, v in zip(ts, totals)]}}])
     if any(crit):
         sec["notes"].append(f"{sum(crit)} critical alert(s) in the window.")
     return sec
@@ -753,8 +816,9 @@ async def _sec_noisy_sources(ctx: SectionCtx) -> dict:
     rows = [[n.get("hostname") or "—", (n.get("sample_message") or "")[:60],
              (n.get("severity") or "").upper(), str(n.get("alert_count") or 0)]
             for n in (d.get("noisy_alerts") or [])]
-    return _section("noisy_sources", "Noisiest Alert Sources",
-                    tables=[{"headers": ["Device", "Sample message", "Severity", "Count"], "rows": rows}])
+    return _section("noisy_sources", "Noisiest Alert Sources", half=True,
+                    tables=[{"headers": ["Device", "Sample message", "Severity", "Count"],
+                             "styles": ["text", "text", "severity", "num"], "rows": rows}])
 
 
 async def _sec_recent_alerts(ctx: SectionCtx) -> dict:
@@ -775,6 +839,7 @@ async def _sec_recent_alerts(ctx: SectionCtx) -> dict:
         logger.debug("recent alerts unavailable", exc_info=True)
     return _section("recent_alerts", "Recent Alerts",
                     tables=[{"headers": ["Severity", "Message", "Source", "Status", "Triggered"],
+                             "styles": ["severity", "text", "text", "status", "num"],
                              "rows": rows_out}])
 
 
@@ -806,7 +871,11 @@ async def _sec_inventory_breakdown(ctx: SectionCtx) -> dict:
                 for l in (d.get("devices_by_location") or [])[:10]]
     return _section(
         "inventory_breakdown", "Device Breakdown",
-        charts=[{"title": "Devices by type", "png": png}],
+        charts=[{"title": "Devices by type", "png": png,
+                 "series": {"kind": "donut", "unit": "devices",
+                            "points": [{"label": t.get("type") or "unknown",
+                                        "value": t.get("count") or 0}
+                                       for t in by_type[:6]]}}],
         tables=[{"title": "By vendor", "headers": ["Vendor", "Devices"], "rows": vendor_rows},
                 {"title": "By location", "headers": ["Location", "Devices"], "rows": loc_rows}],
     )
@@ -870,6 +939,9 @@ SECTION_REGISTRY: dict[str, dict[str, Any]] = {
                           "category": "Traffic", "description": "Protocol share of total bytes."},
     "traffic_ports": {"fn": _sec_traffic_ports, "title": "Top Applications / Ports",
                       "category": "Traffic", "description": "Destination ports ranked by volume."},
+    "traffic_talkers": {"fn": _sec_traffic_talkers, "title": "Top Talkers",
+                        "category": "Traffic",
+                        "description": "Source and destination endpoints by traffic volume."},
     # Applications
     "apm_services": {"fn": _sec_apm_services, "title": "Application Service Health",
                      "category": "Applications",
@@ -932,7 +1004,8 @@ REPORT_PRESETS: dict[str, dict[str, Any]] = {
         "title": "Traffic Analysis Report",
         "description": "NetFlow volumes, protocols and top applications.",
         "category": "Operations",
-        "sections": ["traffic_kpis", "traffic_trend", "traffic_protocols", "traffic_ports"],
+        "sections": ["traffic_kpis", "traffic_trend", "traffic_protocols", "traffic_ports",
+                     "traffic_talkers"],
     },
     "alerts": {
         "title": "Alert Insights Report",
@@ -992,11 +1065,17 @@ def sections_to_json(sections: list[dict]) -> list[dict]:
     out = []
     for s in sections:
         j = dict(s)
-        j["charts"] = [
-            {"title": c.get("title") or "",
-             "data_uri": "data:image/png;base64," + base64.b64encode(c["png"]).decode()}
-            for c in s.get("charts") or []
-        ]
+        charts = []
+        for c in s.get("charts") or []:
+            entry: dict[str, Any] = {"title": c.get("title") or ""}
+            if c.get("series"):
+                # Native series render client-side; skip the heavy PNG payload.
+                entry["series"] = c["series"]
+            elif c.get("png"):
+                entry["data_uri"] = ("data:image/png;base64,"
+                                     + base64.b64encode(c["png"]).decode())
+            charts.append(entry)
+        j["charts"] = charts
         out.append(j)
     return out
 
