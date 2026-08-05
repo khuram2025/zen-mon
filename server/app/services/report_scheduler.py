@@ -211,7 +211,7 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
             db, "custom" if report_type == "custom" else report_type,
             str(custom_id) if custom_id else None)
         title = schedule.get("name") or preset_title
-        secs = await _sections.build_sections(db, section_ids, start, end)
+        secs = await _sections.build_sections(db, section_ids, start, end, filters or None)
         sec_meta = await _sections.build_report_meta(db, title, start, end)
     else:
         # Legacy types: executive dataset drives the universal HTML/email summary.

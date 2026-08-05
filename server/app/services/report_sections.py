@@ -128,11 +128,18 @@ def _parse_ts(iso: str) -> datetime:
 class SectionCtx:
     """Carries the window + db handle and memoises shared dataset builders."""
 
-    def __init__(self, db: AsyncSession, frm: datetime, to: datetime):
+    def __init__(self, db: AsyncSession, frm: datetime, to: datetime,
+                 filters: Optional[dict] = None):
         self.db = db
         self.frm = frm
         self.to = to
+        self.filters = filters or {}
         self._cache: dict[str, Any] = {}
+
+    @property
+    def device_ids(self) -> Optional[list[str]]:
+        ids = self.filters.get("device_ids")
+        return [str(i) for i in ids] if ids else None
 
     async def dataset(self, name: str) -> dict:
         if name not in self._cache:
@@ -175,42 +182,162 @@ def _section(id: str, title: str, **parts: Any) -> dict:
 
 # ─── Availability sections ──────────────────────────────────────────────────
 
+SLA_TARGET_PCT = 99.9  # mirrors report_data_service.build_executive
+
+
+async def _node_availability(ctx: SectionCtx) -> dict:
+    """Per-node availability over the window, honouring the device filter.
+
+    Weighted from ping_metrics_5m (uptime_pct x sample_count), outages from
+    device_status_log, device identity/status from Postgres. Cached per render
+    so KPIs, trend and the node table share one computation.
+    """
+    if "node_avail" in ctx._cache:
+        return ctx._cache["node_avail"]
+
+    ids = ctx.device_ids
+    pg_sql = ("SELECT id::text, hostname, ip_address::text, COALESCE(location, ''), "
+              "COALESCE(status, 'unknown') FROM devices")
+    pg_params: dict[str, Any] = {}
+    if ids:
+        pg_sql += " WHERE id::text = ANY(:ids)"
+        pg_params["ids"] = ids
+    devices = [
+        {"id": r[0], "hostname": r[1] or r[2] or r[0][:8],
+         "ip": (r[2] or "").split("/")[0],
+         "location": r[3], "status": r[4]}
+        for r in (await ctx.db.execute(text(pg_sql + " ORDER BY hostname"), pg_params)).fetchall()
+    ]
+
+    id_cond = " AND device_id IN %(ids)s" if ids else ""
+    ch_params: dict[str, Any] = {"f": ctx.frm, "t": ctx.to}
+    if ids:
+        ch_params["ids"] = ids
+
+    stats: dict[str, dict] = {}
+    trend: list[dict] = []
+    try:
+        rows = ctx.ch().query(
+            f"""
+            SELECT device_id,
+                   -- uptime_pct is stored as a 0..1 fraction in the rollup
+                   sum(uptime_pct * sample_count) / sum(sample_count) * 100 AS avail,
+                   avg(avg_rtt_ms) AS rtt
+            FROM zenplus.ping_metrics_5m
+            WHERE timestamp >= %(f)s AND timestamp <= %(t)s{id_cond}
+            GROUP BY device_id
+            """, parameters=ch_params).result_rows
+        stats = {str(r[0]): {"avail": float(r[1]), "rtt": float(r[2] or 0)} for r in rows}
+        out_rows = ctx.ch().query(
+            f"""
+            SELECT device_id,
+                   countIf(lower(new_status) IN ('down', 'offline')) AS outages,
+                   sumIf(duration_sec, lower(new_status) IN ('down', 'offline')) AS down_s
+            FROM zenplus.device_status_log
+            WHERE timestamp >= %(f)s AND timestamp <= %(t)s{id_cond}
+            GROUP BY device_id
+            """, parameters=ch_params).result_rows
+        for r in out_rows:
+            stats.setdefault(str(r[0]), {}).update(
+                outages=int(r[1] or 0), logged_down_s=int(r[2] or 0))
+        trend_rows = ctx.ch().query(
+            f"""
+            SELECT toStartOfInterval(timestamp, INTERVAL {ctx.bucket()}) AS b,
+                   sum(uptime_pct * sample_count) / sum(sample_count) * 100 AS avail
+            FROM zenplus.ping_metrics_5m
+            WHERE timestamp >= %(f)s AND timestamp <= %(t)s{id_cond}
+            GROUP BY b ORDER BY b
+            """, parameters=ch_params).result_rows
+        trend = [{"t": r[0].isoformat(), "v": round(float(r[1] or 0), 2)} for r in trend_rows]
+    except Exception:
+        logger.exception("node availability query failed")
+
+    window_min = ctx.hours * 60
+    nodes = []
+    for d in devices:
+        s = stats.get(d["id"], {})
+        avail = s.get("avail")
+        nodes.append({
+            **d,
+            "avail": round(avail, 3) if avail is not None else None,
+            "downtime_min": round((100 - avail) / 100 * window_min, 1) if avail is not None else None,
+            "outages": s.get("outages", 0),
+            "rtt": s.get("rtt"),
+        })
+    # Problems first; devices with no data at the bottom.
+    nodes.sort(key=lambda n: (n["avail"] is None, n["avail"] if n["avail"] is not None else 0))
+
+    reporting = [n for n in nodes if n["avail"] is not None]
+    overall = (sum(n["avail"] for n in reporting) / len(reporting)) if reporting else None
+    result = {
+        "nodes": nodes,
+        "trend": trend,
+        "overall": round(overall, 3) if overall is not None else None,
+        "up": sum(1 for n in nodes if n["status"] == "up"),
+        "below_sla": sum(1 for n in reporting if n["avail"] < SLA_TARGET_PCT),
+        "downtime_min": round(sum(n["downtime_min"] or 0 for n in nodes), 1),
+        "outage_events": sum(n["outages"] for n in nodes),
+        "filtered": bool(ids),
+    }
+    ctx._cache["node_avail"] = result
+    return result
+
+
 async def _sec_availability_kpis(ctx: SectionCtx) -> dict:
-    d = await ctx.dataset("executive")
-    k = d.get("kpis") or {}
-    avail = k.get("availability_pct")
-    sla_t = k.get("sla_target_pct")
-    sla_a = k.get("sla_attained_pct")
-    downtime_min = sum(o.get("duration_minutes") or 0 for o in d.get("outage_timeline") or [])
+    na = await _node_availability(ctx)
+    avail = na["overall"]
+    scope = f"{len(na['nodes'])} selected node(s)" if na["filtered"] else "all monitored nodes"
     return _section(
         "availability_kpis", "Availability Summary",
+        description=f"Computed over {scope} for the reporting window.",
         kpis=[
-            {"label": "Network availability", "value": _fmt_pct(avail),
-             "accent": "success" if (avail or 0) >= (sla_t or 99) else "danger"},
-            {"label": f"SLA attainment (target {_fmt_pct(sla_t)})", "value": _fmt_pct(sla_a),
-             "accent": "success" if (sla_a or 0) >= (sla_t or 99) else "warning"},
-            {"label": "Incidents", "value": str(k.get("incidents_count") or 0), "accent": "info"},
-            {"label": "Total downtime", "value": f"{downtime_min:,.0f} min", "accent": "warning"},
-            {"label": "MTTR", "value": (f"{k['mttr_minutes']:.0f} min" if k.get("mttr_minutes") else "—"),
-             "accent": "primary"},
+            {"label": "Availability", "value": _fmt_pct(avail),
+             "accent": "success" if (avail or 0) >= SLA_TARGET_PCT else "danger"},
+            {"label": f"Nodes up (of {len(na['nodes'])})", "value": str(na["up"]),
+             "accent": "success" if na["up"] == len(na["nodes"]) else "warning"},
+            {"label": f"Below SLA target ({SLA_TARGET_PCT}%)", "value": str(na["below_sla"]),
+             "accent": "danger" if na["below_sla"] else "success"},
+            {"label": "Total downtime", "value": f"{na['downtime_min']:,.0f} min",
+             "accent": "warning" if na["downtime_min"] else "success"},
+            {"label": "Outage events", "value": str(na["outage_events"]), "accent": "info"},
         ],
     )
 
 
 async def _sec_availability_trend(ctx: SectionCtx) -> dict:
-    d = await ctx.dataset("executive")
-    trend = d.get("availability_trend") or []
-    ts = [_parse_ts(p["ts"]) for p in trend if p.get("availability_pct") is not None]
-    vals = [p["availability_pct"] for p in trend if p.get("availability_pct") is not None]
+    na = await _node_availability(ctx)
+    trend = na["trend"]
+    ts = [_parse_ts(p["t"]) for p in trend]
+    vals = [p["v"] for p in trend]
     png = _make_line_chart(ts, vals, ylabel="availability %", color=HEX_SUCCESS)
+    scope = "selected nodes" if na["filtered"] else "all monitored nodes"
     return _section(
         "availability_trend", "Availability Trend",
-        description="Network-wide ping availability over the reporting window.",
+        description=f"Ping availability across {scope} over the reporting window.",
         charts=[{"title": "", "png": png,
                  "series": {"kind": "area", "unit": "%", "color": "success",
-                            "y_domain": [80, 100],
-                            "points": [{"t": t.isoformat(), "v": round(v, 2)}
-                                       for t, v in zip(ts, vals)]}}],
+                            "y_domain": [80, 100], "points": trend}}],
+    )
+
+
+async def _sec_device_availability(ctx: SectionCtx) -> dict:
+    na = await _node_availability(ctx)
+    rows = [
+        [n["hostname"], n["ip"], n["location"] or "—", n["status"],
+         _fmt_pct(n["avail"], 2) if n["avail"] is not None else "—",
+         f"{n['downtime_min']:,.0f} min" if n["downtime_min"] is not None else "—",
+         str(n["outages"]),
+         _fmt_ms(n["rtt"]) if n["rtt"] else "—"]
+        for n in na["nodes"]
+    ]
+    scope = "the selected nodes" if na["filtered"] else "every monitored node"
+    return _section(
+        "device_availability", "Node Availability",
+        description=f"Availability, downtime and outages for {scope} — worst first.",
+        tables=[{"headers": ["Node", "IP address", "Location", "Status",
+                             "Availability", "Downtime", "Outages", "Avg RTT"],
+                 "styles": ["text", "mono", "text", "status", "pct-bar", "num", "num", "num"],
+                 "rows": rows}],
     )
 
 
@@ -912,6 +1039,10 @@ SECTION_REGISTRY: dict[str, dict[str, Any]] = {
     "availability_trend": {"fn": _sec_availability_trend, "title": "Availability Trend",
                            "category": "Availability",
                            "description": "Network-wide availability chart over the window."},
+    "device_availability": {"fn": _sec_device_availability, "title": "Node Availability",
+                            "category": "Availability",
+                            "description": "Per-node availability, downtime and outages "
+                                           "(supports node selection)."},
     "device_uptime": {"fn": _sec_device_uptime, "title": "Lowest-Availability Devices",
                       "category": "Availability",
                       "description": "Devices with the worst uptime and their latency."},
@@ -991,7 +1122,7 @@ REPORT_PRESETS: dict[str, dict[str, Any]] = {
         "title": "Availability & SLA Report",
         "description": "Uptime, SLA attainment, outages and service availability.",
         "category": "Operations",
-        "sections": ["availability_kpis", "availability_trend", "device_uptime",
+        "sections": ["availability_kpis", "availability_trend", "device_availability",
                      "top_outages", "service_availability"],
     },
     "performance": {
@@ -1041,10 +1172,11 @@ REPORT_PRESETS: dict[str, dict[str, Any]] = {
 
 
 async def build_sections(db: AsyncSession, section_ids: list[str],
-                         frm: datetime, to: datetime) -> list[dict]:
+                         frm: datetime, to: datetime,
+                         filters: Optional[dict] = None) -> list[dict]:
     """Run the given sections; a failing section becomes an error note, never
     a failed report."""
-    ctx = SectionCtx(db, frm, to)
+    ctx = SectionCtx(db, frm, to, filters)
     out: list[dict] = []
     for sid in section_ids:
         entry = SECTION_REGISTRY.get(sid)

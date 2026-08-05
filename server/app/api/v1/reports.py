@@ -290,7 +290,9 @@ async def report_catalog(
     presets = [
         {"key": k, "title": p["title"], "description": p["description"],
          "category": p["category"], "engine": "sections",
-         "formats": ["html", "pdf"], "sections": p["sections"]}
+         "formats": ["html", "pdf"], "sections": p["sections"],
+         # Reports whose sections honour the device filter.
+         "filterable": (["devices"] if k == "availability" else [])}
         for k, p in _rs.REPORT_PRESETS.items()
     ]
     sections = [
@@ -317,6 +319,7 @@ async def render_section_report(
     to: Optional[datetime] = Query(None),
     hours: int = Query(24, ge=1, le=24 * 92),
     custom_id: Optional[str] = None,
+    device_ids: Optional[str] = Query(None, description="Comma-separated device UUIDs to scope node-aware sections"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -327,8 +330,20 @@ async def render_section_report(
     except KeyError:
         raise HTTPException(404, f"Unknown report: {key}")
 
+    filters = None
+    if device_ids:
+        ids = [i.strip() for i in device_ids.split(",") if i.strip()]
+        try:
+            for i in ids:
+                _uuid.UUID(i)
+        except ValueError:
+            raise HTTPException(400, "device_ids must be UUIDs")
+        if len(ids) > 500:
+            raise HTTPException(400, "Too many device ids (max 500)")
+        filters = {"device_ids": ids}
+
     start, end = _window_from_query(from_, to, hours)
-    sections = await _rs.build_sections(db, section_ids, start, end)
+    sections = await _rs.build_sections(db, section_ids, start, end, filters)
     meta = await _rs.build_report_meta(db, title, start, end)
 
     if format == "json":

@@ -18,11 +18,15 @@ import {
 import {
   ArrowLeft,
   CalendarClock,
+  Check,
   ChevronDown,
   Download,
   FileCode,
   FileText,
   Loader2,
+  Search,
+  Server,
+  X,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, cn } from '@/lib/utils'
@@ -482,6 +486,142 @@ function layoutRows(sections: RenderSection[]): RenderSection[][] {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Node scope picker (reports that support a device filter)           */
+/* ------------------------------------------------------------------ */
+
+interface DeviceLite {
+  id: string
+  hostname: string | null
+  ip_address: string | null
+}
+
+function DeviceScopePicker({
+  selected,
+  onChange,
+}: {
+  selected: string[]
+  onChange: (ids: string[]) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [q, setQ] = useState('')
+
+  const { data } = useQuery<DeviceLite[]>({
+    queryKey: ['devices', 'report-picker'],
+    queryFn: async () => {
+      const res = (await api.get('/devices', { params: { limit: 200 } })).data
+      return (res?.data ?? res ?? []) as DeviceLite[]
+    },
+    staleTime: 5 * 60_000,
+  })
+
+  const devices = data ?? []
+  const filtered = q
+    ? devices.filter(
+        (d) =>
+          (d.hostname || '').toLowerCase().includes(q.toLowerCase()) ||
+          (d.ip_address || '').includes(q),
+      )
+    : devices
+  const selectedSet = new Set(selected)
+
+  const toggle = (id: string) => {
+    const next = new Set(selectedSet)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    onChange([...next])
+  }
+
+  return (
+    <div className="relative">
+      <Button
+        variant="outline"
+        size="sm"
+        className={cn('h-8 gap-1.5', selected.length > 0 && 'border-primary/50 text-primary')}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <Server className="h-3.5 w-3.5" />
+        <span className="text-xs font-semibold">
+          {selected.length > 0 ? `${selected.length} node${selected.length === 1 ? '' : 's'}` : 'All nodes'}
+        </span>
+        <ChevronDown className={cn('h-3 w-3 transition-transform', open && 'rotate-180')} />
+      </Button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 top-full z-40 mt-1 w-80 overflow-hidden rounded-md border border-border bg-surface shadow-xl animate-fade-in">
+            <div className="flex items-center justify-between border-b border-border px-3 py-2">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted">
+                Report scope · {devices.length} nodes
+              </p>
+              {selected.length > 0 && (
+                <button
+                  onClick={() => onChange([])}
+                  className="inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline"
+                >
+                  <X className="h-3 w-3" /> All nodes
+                </button>
+              )}
+            </div>
+            <div className="border-b border-border p-2">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
+                <input
+                  autoFocus
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder="Search hostname or IP…"
+                  className="h-8 w-full rounded-md border border-border bg-surface2/40 pl-7 pr-2 text-xs text-text outline-none placeholder:text-muted focus:border-primary/60"
+                />
+              </div>
+            </div>
+            <div className="max-h-72 overflow-y-auto p-1">
+              {filtered.length === 0 ? (
+                <p className="px-3 py-4 text-center text-xs text-muted">No matching nodes</p>
+              ) : (
+                filtered.map((d) => {
+                  const on = selectedSet.has(d.id)
+                  return (
+                    <button
+                      key={d.id}
+                      onClick={() => toggle(d.id)}
+                      className={cn(
+                        'flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-surface2',
+                        on && 'bg-primary/10',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border',
+                          on ? 'border-primary bg-primary text-white' : 'border-border',
+                        )}
+                      >
+                        {on && <Check className="h-2.5 w-2.5" />}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate font-medium text-text">
+                        {d.hostname || d.ip_address}
+                      </span>
+                      <span className="shrink-0 font-mono text-[10px] text-muted">
+                        {(d.ip_address || '').split('/')[0]}
+                      </span>
+                    </button>
+                  )
+                })
+              )}
+            </div>
+            <div className="border-t border-border px-3 py-1.5 text-[10px] text-muted">
+              {selected.length > 0
+                ? `Report scoped to ${selected.length} node(s)`
+                : 'No selection — the report covers every monitored node'}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
 /*  Export dropdown (PDF / HTML via the render endpoint)               */
 /* ------------------------------------------------------------------ */
 
@@ -503,11 +643,13 @@ function RenderExportMenu({
   customId,
   fromISO,
   toISO,
+  deviceIds,
 }: {
   reportKey: string
   customId: string | null
   fromISO: string
   toISO: string
+  deviceIds?: string[]
 }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState<RenderFormat | null>(null)
@@ -524,6 +666,7 @@ function RenderExportMenu({
           from: fromISO,
           to: toISO,
           ...(customId ? { custom_id: customId } : {}),
+          ...(deviceIds && deviceIds.length > 0 ? { device_ids: deviceIds.join(',') } : {}),
         },
         responseType: 'blob',
         timeout: 120_000,
@@ -591,10 +734,30 @@ function RenderExportMenu({
 
 export default function SectionReportViewer() {
   const { key = '' } = useParams<{ key: string }>()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   const customId = searchParams.get('custom_id')
   const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
   const [scheduleOpen, setScheduleOpen] = useState(false)
+
+  // Node scope (availability report): kept in the URL so views are shareable.
+  const nodeIds = useMemo(
+    () => (searchParams.get('nodes') || '').split(',').filter(Boolean),
+    [searchParams],
+  )
+  const setNodeIds = (ids: string[]) => {
+    const next = new URLSearchParams(searchParams)
+    if (ids.length > 0) next.set('nodes', ids.join(','))
+    else next.delete('nodes')
+    setSearchParams(next, { replace: true })
+  }
+
+  const { data: catalog } = useQuery<{ types: { key: string; filterable?: string[] }[] }>({
+    queryKey: ['reports', 'catalog'],
+    queryFn: async () => (await api.get('/reports/catalog')).data,
+    staleTime: 5 * 60_000,
+  })
+  const supportsDeviceFilter =
+    catalog?.types.find((t) => t.key === key)?.filterable?.includes('devices') ?? false
 
   // Presets slide with the wall clock every minute; bucket the window to 5
   // minutes so a heavy report isn't refetched (and reset to skeletons) each
@@ -609,7 +772,7 @@ export default function SectionReportViewer() {
   }, [range.fromISO, range.toISO])
 
   const { data, isLoading, error, isPlaceholderData } = useQuery<RenderReport>({
-    queryKey: ['reports', 'render', key, customId ?? null, fromISO, toISO],
+    queryKey: ['reports', 'render', key, customId ?? null, fromISO, toISO, nodeIds.join(',')],
     queryFn: async () =>
       (
         await api.get(`/reports/render/${key}`, {
@@ -618,6 +781,7 @@ export default function SectionReportViewer() {
             from: fromISO,
             to: toISO,
             ...(customId ? { custom_id: customId } : {}),
+            ...(nodeIds.length > 0 ? { device_ids: nodeIds.join(',') } : {}),
           },
           timeout: 120_000,
         })
@@ -664,7 +828,14 @@ export default function SectionReportViewer() {
               onPreset={setPreset}
               onCustom={setCustom}
             />
-            <RenderExportMenu reportKey={key} customId={customId} fromISO={fromISO} toISO={toISO} />
+            {supportsDeviceFilter && <DeviceScopePicker selected={nodeIds} onChange={setNodeIds} />}
+            <RenderExportMenu
+              reportKey={key}
+              customId={customId}
+              fromISO={fromISO}
+              toISO={toISO}
+              deviceIds={nodeIds}
+            />
             <Button variant="outline" size="sm" className="h-8 gap-1.5" onClick={() => setScheduleOpen(true)}>
               <CalendarClock className="h-3.5 w-3.5" />
               <span className="text-xs font-semibold">Schedule…</span>
