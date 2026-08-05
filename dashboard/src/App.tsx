@@ -64,6 +64,10 @@ const TechnicalReport = lazy(() => import('@/pages/reports/TechnicalReport'))
 const BusinessReport = lazy(() => import('@/pages/reports/BusinessReport'))
 const InventoryReport = lazy(() => import('@/pages/reports/InventoryReport'))
 const ApmReport = lazy(() => import('@/pages/reports/ApmReport'))
+const ReportLibrary = lazy(() => import('@/pages/reports/ReportLibrary'))
+const SectionReportViewer = lazy(() => import('@/pages/reports/SectionReportViewer'))
+const ReportBuilder = lazy(() => import('@/pages/reports/ReportBuilder'))
+const ReportSchedulesPage = lazy(() => import('@/pages/reports/SchedulesPage'))
 
 function ReportTabFallback() {
   return <div className="py-10 text-center text-sm text-muted">Loading report…</div>
@@ -179,12 +183,15 @@ export default function App() {
         <Route path="ncm" element={<NcmPage />} />
         <Route path="ncm/:deviceId" element={<NcmDevicePage />} />
         <Route path="reports" element={<ReportsPage />}>
-          <Route index element={<Navigate to="executive" replace />} />
+          <Route index element={<Suspense fallback={<ReportTabFallback />}><ReportLibrary /></Suspense>} />
           <Route path="executive" element={<Suspense fallback={<ReportTabFallback />}><ExecutiveReport /></Suspense>} />
           <Route path="technical" element={<Suspense fallback={<ReportTabFallback />}><TechnicalReport /></Suspense>} />
           <Route path="business" element={<Suspense fallback={<ReportTabFallback />}><BusinessReport /></Suspense>} />
           <Route path="inventory" element={<Suspense fallback={<ReportTabFallback />}><InventoryReport /></Suspense>} />
           <Route path="apm" element={<Suspense fallback={<ReportTabFallback />}><ApmReport /></Suspense>} />
+          <Route path="view/:key" element={<Suspense fallback={<ReportTabFallback />}><SectionReportViewer /></Suspense>} />
+          <Route path="builder" element={<Suspense fallback={<ReportTabFallback />}><ReportBuilder /></Suspense>} />
+          <Route path="schedules" element={<Suspense fallback={<ReportTabFallback />}><ReportSchedulesPage /></Suspense>} />
         </Route>
 
         {/* Broken-out settings pages */}

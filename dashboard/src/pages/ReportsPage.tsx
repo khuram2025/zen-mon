@@ -58,8 +58,14 @@ const TABS = [
 export function ReportsPage() {
   const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
   const { pathname } = useLocation()
-  const activeSlug = pathname.split('/').filter(Boolean)[1] || 'executive'
-  const activeTab = TABS.find((t) => t.to === activeSlug) ?? TABS[0]
+  const activeSlug = pathname.split('/').filter(Boolean)[1] || ''
+  const activeTab = TABS.find((t) => t.to === activeSlug)
+
+  // The header + persona tab strip only apply to the 5 legacy tabs. The
+  // library (index), viewer, builder and schedules pages bring their own
+  // headers — render just the outlet there.
+  if (!activeTab) return <Outlet />
+
   // Inventory is point-in-time; the APM tab uses its own fixed windows per section.
   const showTimeRange = activeSlug !== 'inventory' && activeSlug !== 'apm'
 

@@ -124,6 +124,7 @@ def _resolve_period(
         "last_24h": (timedelta(hours=24), "Last 24 Hours"),
         "last_7d": (timedelta(days=7), "Last 7 Days"),
         "last_30d": (timedelta(days=30), "Last 30 Days"),
+        "last_90d": (timedelta(days=90), "Last 90 Days"),
     }
     delta, label = mapping.get(period, (timedelta(hours=24), "Last 24 Hours"))
     return now - delta, now, label

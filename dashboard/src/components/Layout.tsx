@@ -202,6 +202,9 @@ const routeLabels: Record<string, string> = {
   '/reports/technical': 'Technical',
   '/reports/business': 'Business',
   '/reports/inventory': 'Inventory',
+  '/reports/apm': 'APM',
+  '/reports/schedules': 'Schedules',
+  '/reports/builder': 'Custom Report',
   '/subscription': 'Subscription',
 }
 
@@ -245,6 +248,9 @@ const routeSections: Record<string, string> = {
   '/reports/technical': 'Reports',
   '/reports/business': 'Reports',
   '/reports/inventory': 'Reports',
+  '/reports/apm': 'Reports',
+  '/reports/schedules': 'Reports',
+  '/reports/builder': 'Reports',
   '/subscription': 'Administration',
 }
 
