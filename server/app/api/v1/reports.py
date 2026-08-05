@@ -344,7 +344,14 @@ async def render_section_report(
 
     start, end = _window_from_query(from_, to, hours)
     sections = await _rs.build_sections(db, section_ids, start, end, filters)
-    meta = await _rs.build_report_meta(db, title, start, end)
+    category = (_rs.REPORT_PRESETS.get(key) or {}).get("category") or \
+        ("Custom Report" if key == "custom" else "")
+    scope_label = (f"{len(filters['device_ids'])} selected device(s)"
+                   if filters else "All monitored infrastructure")
+    meta = await _rs.build_report_meta(db, title, start, end,
+                                      description=description,
+                                      category=category,
+                                      scope_label=scope_label)
 
     if format == "json":
         return {

@@ -43,20 +43,24 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.report_service import (
-    COLOR_PRIMARY,
-    HEX_DANGER,
-    HEX_MUTED,
+    COLOR_FAINT,
+    COLOR_HAIRLINE,
+    COLOR_MUTED,
+    COLOR_TEXT,
+    CONTENT_W,
+    HEX_INFO,
     HEX_PRIMARY,
     HEX_SUCCESS,
     HEX_WARNING,
+    MARGIN_L,
+    MARGIN_T,
     ZenPlusReport,
     _fetch_company_info,
     _make_donut,
     _make_line_chart,
     _make_time_bar_chart,
+    _safe,
 )
-
-HEX_INFO = "#22D3EE"
 from app.services.report_data_service import (
     build_business,
     build_executive,
@@ -309,7 +313,8 @@ async def _sec_availability_trend(ctx: SectionCtx) -> dict:
     trend = na["trend"]
     ts = [_parse_ts(p["t"]) for p in trend]
     vals = [p["v"] for p in trend]
-    png = _make_line_chart(ts, vals, ylabel="availability %", color=HEX_SUCCESS)
+    png = _make_line_chart(ts, vals, ylabel="availability %", color=HEX_SUCCESS,
+                           unit="%", y_domain=(80, 100), h_mm=46)
     scope = "selected nodes" if na["filtered"] else "all monitored nodes"
     return _section(
         "availability_trend", "Availability Trend",
@@ -542,8 +547,8 @@ async def _sec_traffic_protocols(ctx: SectionCtx) -> dict:
     except Exception:
         logger.debug("traffic protocols unavailable", exc_info=True)
     png = _make_donut(labels, [round(v, 2) for v in values],
-                      [HEX_PRIMARY, HEX_INFO, HEX_SUCCESS, HEX_WARNING, HEX_DANGER, HEX_MUTED][:max(len(labels), 1)],
-                      center_text="GB")
+                      center_text=_fmt_bytes(sum(values) * 1e9) if values else "",
+                      center_sub="total", unit="GB")
     return _section("traffic_protocols", "Traffic by Protocol", half=True,
                     charts=[{"title": "Share of bytes (GB)", "png": png,
                              "series": {"kind": "donut", "unit": "GB",
@@ -927,7 +932,8 @@ async def _sec_alert_trend(ctx: SectionCtx) -> dict:
     crit = [p.get("critical") or 0 for p in vol]
     totals = [(p.get("critical") or 0) + (p.get("warning") or 0) +
               (p.get("info") or 0) for p in vol]
-    png = _make_time_bar_chart(ts, totals, color=HEX_WARNING, ylabel="alerts")
+    png = _make_time_bar_chart(ts, totals, color=HEX_WARNING, ylabel="alerts",
+                               w_mm=85, h_mm=52)
     sec = _section("alert_trend", "Alert Volume Over Time", half=True,
                    charts=[{"title": "", "png": png,
                             "series": {"kind": "bars", "unit": "alerts", "color": "warning",
@@ -989,9 +995,11 @@ async def _sec_inventory_summary(ctx: SectionCtx) -> dict:
 async def _sec_inventory_breakdown(ctx: SectionCtx) -> dict:
     d = await ctx.dataset("inventory")
     by_type = d.get("devices_by_type") or []
-    png = _make_donut([t.get("type") or "unknown" for t in by_type[:6]],
+    total_dev = sum(t.get("count") or 0 for t in by_type)
+    png = _make_donut([(t.get("type") or "unknown").replace("_", " ") for t in by_type[:6]],
                       [t.get("count") or 0 for t in by_type[:6]],
-                      [HEX_PRIMARY, HEX_INFO, HEX_SUCCESS, HEX_WARNING, HEX_DANGER, HEX_MUTED][:max(len(by_type[:6]), 1)])
+                      center_text=f"{total_dev:,}" if total_dev else "",
+                      center_sub="devices")
     vendor_rows = [[v.get("vendor") or "unknown", str(v.get("count") or 0)]
                    for v in (d.get("devices_by_vendor") or [])[:10]]
     loc_rows = [[l.get("location") or "unknown", str(l.get("count") or 0)]
@@ -1183,11 +1191,13 @@ async def build_sections(db: AsyncSession, section_ids: list[str],
         if not entry:
             continue
         try:
-            out.append(await entry["fn"](ctx))
+            sec = await entry["fn"](ctx)
         except Exception as exc:
             logger.exception("report section %s failed", sid)
-            out.append(_section(sid, entry["title"],
-                                notes=[f"Section could not be generated: {exc}"]))
+            sec = _section(sid, entry["title"],
+                           notes=[f"Section could not be generated: {exc}"])
+        sec.setdefault("category", entry.get("category"))
+        out.append(sec)
     return out
 
 
@@ -1319,38 +1329,151 @@ def render_html(meta: dict, sections: list[dict]) -> str:
     return "".join(parts)
 
 
+_COL_GAP = 8
+
+
+def _pdf_section_body(pdf: ZenPlusReport, s: dict, half: bool = False) -> None:
+    """Render a section's KPIs, charts, tables and notes with the current
+    margins (full page or a half-width column)."""
+    kpis = s.get("kpis") or []
+    charts = s.get("charts") or []
+    tables = s.get("tables") or []
+    notes = s.get("notes") or []
+    if kpis:
+        pdf.kpi_row(kpis, per_row=2 if half else None)
+    for c in charts:
+        if c.get("png"):
+            pdf.add_chart(c["png"], title=c.get("title") or "")
+    for t in tables:
+        rows = [["" if c is None else str(c) for c in row] for row in (t.get("rows") or [])]
+        if not rows and notes:
+            continue  # the section's note already explains the absence of data
+        if t.get("title"):
+            pdf.sub_heading(t["title"])
+        headers = t.get("headers") or []
+        pdf.data_table(headers, rows, col_styles=t.get("styles"),
+                       max_rows=30 if half else 100)
+    for n in notes:
+        pdf.note(n, kind="warning" if "could not be generated" in str(n) else "info")
+    if not kpis and not charts and not tables and not notes:
+        pdf.empty_state()
+
+
+def _half_heading(pdf: ZenPlusReport, s: dict, number: int) -> None:
+    """Compact heading used when two sections sit side by side."""
+    x = pdf.l_margin
+    y = pdf.get_y()
+    if s.get("category"):
+        pdf._eyebrow(x, y, s["category"], COLOR_FAINT, size=5.8)
+        y += 4.2
+    pdf._sans("B", 8.8)
+    pdf.set_text_color(*pdf.accent)
+    ns = f"{number:02d}"
+    pdf.set_xy(x, y + 1.1)
+    pdf.cell(pdf.get_string_width(ns) + 1, 5, ns)
+    tx = x + pdf.get_string_width(ns) + 2.8
+    pdf._sans("B", 11)
+    pdf.set_text_color(*COLOR_TEXT)
+    pdf.set_xy(tx, y)
+    pdf.cell(pdf.content_w - (tx - x), 6.6,
+             pdf._fit(_safe(s["title"]), pdf.content_w - (tx - x)))
+    y2 = y + 7.8
+    pdf.set_fill_color(*pdf.accent)
+    pdf.rect(x, y2, 9, 0.8, "F")
+    pdf._hairline(x + 11, y2 + 0.4, x + pdf.content_w)
+    pdf.set_y(y2 + 3)
+    if s.get("description"):
+        pdf._sans("", 7.4)
+        pdf.set_text_color(*COLOR_MUTED)
+        pdf.set_x(x)
+        pdf.multi_cell(pdf.content_w, 3.9, _safe(s["description"]))
+        pdf.set_y(pdf.get_y() + 1.4)
+
+
+def _measure_half(s: dict, col_w: float) -> float | None:
+    """Height of a section rendered at column width, or None if it cannot fit
+    on a single page."""
+    try:
+        probe = ZenPlusReport(title="probe")
+        probe._decor = False
+        probe._outline_on = False
+        probe.add_page()
+        probe.begin_column(MARGIN_L, col_w)
+        probe.set_y(MARGIN_T)
+        _half_heading(probe, s, 99)
+        _pdf_section_body(probe, s, half=True)
+        h = probe.get_y() - MARGIN_T
+        probe.end_column()
+        if probe.page_no() > 1:
+            return None
+        return h
+    except Exception:
+        logger.debug("half-section measurement failed", exc_info=True)
+        return None
+
+
 def render_pdf(meta: dict, sections: list[dict]) -> bytes:
+    """Enterprise PDF: branded cover, contents (long reports), numbered
+    sections with side-by-side placement of compact half-width sections."""
     pdf = ZenPlusReport(
         title=meta.get("title") or "Report",
         company_name=meta.get("company_name") or "ZenPlus",
         logo_bytes=meta.get("logo_bytes"),
         period_label=meta.get("period_label") or "",
+        subtitle=meta.get("description") or "",
+        category=meta.get("category") or "",
+        scope_label=meta.get("scope_label") or "",
     )
-    pdf.add_page()
-    for s in sections:
-        pdf.section_title(s["title"])
-        if s.get("description"):
-            pdf.muted_text(s["description"])
-        kpis = s.get("kpis") or []
-        if kpis:
-            pdf.kpi_row([
-                (k.get("label") or "", str(k.get("value") or "—"),
-                 ACCENT_RGB.get(k.get("accent") or "primary", COLOR_PRIMARY))
-                for k in kpis[:5]
-            ])
-        for c in s.get("charts") or []:
-            pdf.add_chart(c["png"], w=160, caption=c.get("title") or "")
-        for t in s.get("tables") or []:
-            if t.get("title"):
-                pdf.sub_heading(t["title"])
-            headers = t.get("headers") or []
-            rows = [[str(c) for c in row] for row in (t.get("rows") or [])]
-            if rows:
-                pdf.data_table(headers, rows)
-            else:
-                pdf.muted_text("No data for this window.")
-        for n in s.get("notes") or []:
-            pdf.muted_text(n)
+    pdf.cover()
+    if len(sections) >= 5:
+        pdf.toc(expected_entries=len(sections))
+    else:
+        pdf.add_page()
+
+    i = 0
+    while i < len(sections):
+        s = sections[i]
+        nxt = sections[i + 1] if i + 1 < len(sections) else None
+        if s.get("half") and nxt is not None and nxt.get("half"):
+            col_w = (CONTENT_W - _COL_GAP) / 2
+            h1 = _measure_half(s, col_w)
+            h2 = _measure_half(nxt, col_w)
+            page_capacity = pdf.page_break_trigger - MARGIN_T
+            if h1 is not None and h2 is not None and max(h1, h2) <= page_capacity:
+                if max(h1, h2) > pdf.page_break_trigger - pdf.get_y() - 3:
+                    pdf.add_page()
+                n1 = pdf._section_n = pdf._section_n + 1
+                n2 = pdf._section_n = pdf._section_n + 1
+                if pdf._outline_on:
+                    try:
+                        pdf.start_section(_safe(s["title"]), level=0)
+                        pdf.start_section(_safe(nxt["title"]), level=0)
+                    except Exception:
+                        pass
+                y0 = pdf.get_y() + 2
+                x_left = MARGIN_L
+                x_right = MARGIN_L + col_w + _COL_GAP
+                ends = []
+                for sec, num, x in ((s, n1, x_left), (nxt, n2, x_right)):
+                    pdf.begin_column(x, col_w)
+                    pdf.set_y(y0)
+                    _half_heading(pdf, sec, num)
+                    _pdf_section_body(pdf, sec, half=True)
+                    ends.append(pdf.get_y())
+                    pdf.end_column()
+                # vertical divider between the columns
+                divider_x = MARGIN_L + col_w + _COL_GAP / 2
+                pdf.set_draw_color(*COLOR_HAIRLINE)
+                pdf.set_line_width(0.2)
+                pdf.line(divider_x, y0 + 1, divider_x, max(ends) - 2)
+                pdf.set_y(max(ends) + 7)
+                i += 2
+                continue
+        pdf.section_title(s["title"], description=s.get("description"),
+                          category=s.get("category"))
+        _pdf_section_body(pdf, s, half=False)
+        pdf.ln(4)
+        i += 1
     return bytes(pdf.output())
 
 
@@ -1372,7 +1495,10 @@ async def resolve_report(db: AsyncSession, key: str,
     return preset["title"], preset["description"], preset["sections"]
 
 
-async def build_report_meta(db: AsyncSession, title: str, frm: datetime, to: datetime) -> dict:
+async def build_report_meta(db: AsyncSession, title: str, frm: datetime, to: datetime,
+                            description: str | None = None,
+                            category: str | None = None,
+                            scope_label: str | None = None) -> dict:
     company = await _fetch_company_info(db)
     logo_bytes = company.get("logo_bytes")
     return {
@@ -1383,6 +1509,9 @@ async def build_report_meta(db: AsyncSession, title: str, frm: datetime, to: dat
                          if logo_bytes else None,
         "period_label": f"{frm.strftime('%Y-%m-%d %H:%M')} — {to.strftime('%Y-%m-%d %H:%M')} UTC",
         "generated_label": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "description": description or "",
+        "category": category or "",
+        "scope_label": scope_label or "",
     }
 
 

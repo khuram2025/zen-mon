@@ -212,7 +212,13 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
             str(custom_id) if custom_id else None)
         title = schedule.get("name") or preset_title
         secs = await _sections.build_sections(db, section_ids, start, end, filters or None)
-        sec_meta = await _sections.build_report_meta(db, title, start, end)
+        cat = (_sections.REPORT_PRESETS.get(report_type) or {}).get("category") or \
+            ("Custom Report" if report_type == "custom" else "")
+        dev_filter = (filters or {}).get("device_ids")
+        sec_meta = await _sections.build_report_meta(
+            db, title, start, end, description=_desc, category=cat,
+            scope_label=(f"{len(dev_filter)} selected device(s)" if dev_filter
+                         else "All monitored infrastructure"))
     else:
         # Legacy types: executive dataset drives the universal HTML/email summary.
         data = await build_executive(db, start, end)
