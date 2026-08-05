@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import ReactECharts from 'echarts-for-react'
 import { Loader2, Network } from 'lucide-react'
 import { api } from '@/lib/api'
+import { apiErrorMessage } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
 import { HEALTH_COLOR, fmtMs, fmtPct } from '@/components/apm/shared'
 
@@ -31,8 +32,8 @@ export function ServiceMapPage() {
     const maxRps = Math.max(...nodes.map((n) => n.rps), 0.0001)
     return {
       tooltip: {
-        backgroundColor: 'var(--bg-secondary)',
-        borderColor: 'var(--bg-elevated)',
+        backgroundColor: '#0d121b',
+        borderColor: '#1e293b',
         textStyle: { color: '#e5e7eb', fontSize: 12 },
         formatter: (p: any) => {
           if (p.dataType === 'edge') return `${p.data.source} → ${p.data.target}<br/>calls: ${p.data.calls}<br/>err: ${(p.data.error_rate * 100).toFixed(1)}%<br/>p95: ${p.data.p95_ms} ms`
@@ -67,26 +68,32 @@ export function ServiceMapPage() {
   }, [q.data])
 
   return (
-    <div className="p-6 space-y-4">
+    <div className="space-y-4">
       <div className="flex items-center gap-3">
-        <h1 className="text-2xl font-semibold text-[var(--text-primary)]">Service Map</h1>
+        <h1 className="text-2xl font-semibold text-text">Service Map</h1>
         <div className="flex-1" />
         <select value={range} onChange={(e) => set('range', e.target.value)}
-          className="h-9 rounded-md bg-[var(--bg-tertiary)] border border-[var(--bg-elevated)] text-sm px-2 text-[var(--text-primary)]">
+          className="h-9 rounded-md bg-surface2 border border-border text-sm px-2 text-text">
           {RANGES.map((r) => <option key={r} value={r}>Last {r}</option>)}
         </select>
-        {q.isFetching && <Loader2 className="w-4 h-4 animate-spin text-[var(--text-muted)]" />}
+        {q.isFetching && <Loader2 className="w-4 h-4 animate-spin text-muted" />}
       </div>
-      <p className="text-sm text-[var(--text-muted)]">
+      <p className="text-sm text-muted">
         Auto-derived dependency topology — nodes are services (color = health, size = throughput), edges are calls (width = volume, color = error rate).
       </p>
+
+      {q.isError && (
+        <div className="rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
+          Failed to load service map — {apiErrorMessage(q.error)}
+        </div>
+      )}
 
       <Card>
         <CardContent className="p-2">
           {q.isLoading ? (
-            <div className="flex items-center justify-center gap-2 text-[var(--text-muted)] py-24"><Loader2 className="w-4 h-4 animate-spin" /> Loading…</div>
+            <div className="flex items-center justify-center gap-2 text-muted py-24"><Loader2 className="w-4 h-4 animate-spin" /> Loading…</div>
           ) : (q.data?.nodes.length ?? 0) === 0 ? (
-            <div className="flex flex-col items-center gap-2 text-[var(--text-muted)] py-24"><Network className="w-6 h-6" /> No service dependencies yet.</div>
+            <div className="flex flex-col items-center gap-2 text-muted py-24"><Network className="w-6 h-6" /> No service dependencies yet.</div>
           ) : (
             <ReactECharts
               option={option}

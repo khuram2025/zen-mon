@@ -45,6 +45,8 @@ import { ServiceDetailPage as ApmServiceDetailPage } from '@/pages/apm/ServiceDe
 import { ServiceMapPage as ApmServiceMapPage } from '@/pages/apm/ServiceMapPage'
 import { ErrorsInboxPage } from '@/pages/apm/ErrorsInboxPage'
 import { SlosPage } from '@/pages/apm/SlosPage'
+import { SyntheticsPage } from '@/pages/apm/SyntheticsPage'
+import { UsagePage } from '@/pages/apm/UsagePage'
 import { ErrorIssueDetailPage } from '@/pages/apm/ErrorIssueDetailPage'
 import { ServersDashboardPage } from '@/pages/servers/ServersDashboardPage'
 import { ServerInventoryPage } from '@/pages/servers/ServersPage'
@@ -61,6 +63,7 @@ const ExecutiveReport = lazy(() => import('@/pages/reports/ExecutiveReport'))
 const TechnicalReport = lazy(() => import('@/pages/reports/TechnicalReport'))
 const BusinessReport = lazy(() => import('@/pages/reports/BusinessReport'))
 const InventoryReport = lazy(() => import('@/pages/reports/InventoryReport'))
+const ApmReport = lazy(() => import('@/pages/reports/ApmReport'))
 
 function ReportTabFallback() {
   return <div className="py-10 text-center text-sm text-muted">Loading report…</div>
@@ -162,6 +165,8 @@ export default function App() {
         <Route path="apm/services/:name" element={<ApmServiceDetailPage />} />
         <Route path="apm/service-map" element={<ApmServiceMapPage />} />
         <Route path="apm/slos" element={<SlosPage />} />
+        <Route path="apm/synthetics" element={<SyntheticsPage />} />
+        <Route path="apm/usage" element={<UsagePage />} />
         <Route path="apm/errors" element={<ErrorsInboxPage />} />
         <Route path="apm/errors/:id" element={<ErrorIssueDetailPage />} />
         <Route path="apm/traces" element={<TraceExplorerPage />} />
@@ -179,6 +184,7 @@ export default function App() {
           <Route path="technical" element={<Suspense fallback={<ReportTabFallback />}><TechnicalReport /></Suspense>} />
           <Route path="business" element={<Suspense fallback={<ReportTabFallback />}><BusinessReport /></Suspense>} />
           <Route path="inventory" element={<Suspense fallback={<ReportTabFallback />}><InventoryReport /></Suspense>} />
+          <Route path="apm" element={<Suspense fallback={<ReportTabFallback />}><ApmReport /></Suspense>} />
         </Route>
 
         {/* Broken-out settings pages */}

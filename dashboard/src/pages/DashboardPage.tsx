@@ -18,6 +18,7 @@ import {
   AlertTriangle,
   ArrowDownRight,
   ArrowUpRight,
+  Boxes,
   Clock,
   Cpu,
   Flame,
@@ -46,6 +47,7 @@ import { Badge } from '@/components/ui/Badge'
 import { relativeTime } from '@/lib/utils'
 import { RingGauge } from '@/components/dashboard/RingGauge'
 import { Sparkline } from '@/components/dashboard/Sparkline'
+import { fmtMs, fmtPct } from '@/components/apm/shared'
 
 /* ── Types ──────────────────────────────────────────────────────────────── */
 
@@ -109,6 +111,14 @@ type CurrentMetrics = {
 type ServiceSummary = { total: number; up: number; down: number; warning: number; degraded: number; unknown: number }
 
 type DeviceAlertCounts = { devices: Record<string, { active: number; critical: number; warning: number }> }
+
+type ApmServiceRow = {
+  name: string
+  health: 'healthy' | 'degraded' | 'critical' | 'no_data' | string
+  error_rate: number
+  p95_ms: number
+  request_count?: number
+}
 
 /* ── Range selector ─────────────────────────────────────────────────────── */
 
@@ -221,6 +231,13 @@ export function DashboardPage() {
     refetchInterval: 60_000,
   }).data
 
+  const apmServices = useQuery<{ services: ApmServiceRow[] }>({
+    queryKey: ['noc', 'apm-services'],
+    queryFn: async () => (await api.get('/apm/services?range=1h')).data,
+    refetchInterval: 30_000,
+    retry: 1,
+  }).data
+
   /* — derived — */
 
   const total = summary?.total ?? 0
@@ -327,6 +344,24 @@ export function DashboardPage() {
     }
   }, [metrics, devices])
 
+  // APM service health roll-up (worst signal wins; card never crashes on empty/error).
+  const apm = useMemo(() => {
+    const list = apmServices?.services ?? []
+    const count = (h: string) => list.filter((s) => s.health === h).length
+    const healthy = count('healthy')
+    const degraded = count('degraded')
+    const critical = count('critical')
+    const noData = list.filter((s) => s.health !== 'healthy' && s.health !== 'degraded' && s.health !== 'critical').length
+    const worstP95 = list.reduce((m, s) => Math.max(m, s.p95_ms || 0), 0)
+    const reqs = list.reduce((sum, s) => sum + (s.request_count ?? 0), 0)
+    const errRate = reqs > 0
+      ? list.reduce((sum, s) => sum + (s.error_rate || 0) * (s.request_count ?? 0), 0) / reqs
+      : list.length
+        ? list.reduce((sum, s) => sum + (s.error_rate || 0), 0) / list.length
+        : 0
+    return { list, healthy, degraded, critical, noData, worstP95, errRate }
+  }, [apmServices])
+
   /* — render — */
 
   return (
@@ -356,7 +391,7 @@ export function DashboardPage() {
       </div>
 
       {/* KPI strip — every figure is real */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-7">
         <KpiCard to="/devices" label="Devices Online" icon={<Server className="h-4 w-4" />} accent="success"
           value={<>{up}<span className="text-base font-medium text-muted">/{total}</span></>}
           sub={summary ? <StatusDots s={summary} /> : null}
@@ -406,6 +441,25 @@ export function DashboardPage() {
           value={`${fleet.avgCpu.toFixed(0)}%`}
           sub={<span className="text-[10.5px] text-muted">mem {fleet.avgMem.toFixed(0)}% · {fleet.sampled} devices</span>}
           foot={<DualBar a={fleet.avgCpu} b={fleet.avgMem} />}
+        />
+        <KpiCard to="/apm" label="APM Services" icon={<Boxes className="h-4 w-4" />}
+          accent={apm.critical > 0 || apm.errRate >= 0.05 ? 'danger' : apm.degraded > 0 || apm.errRate >= 0.01 ? 'warning' : 'success'}
+          value={apm.list.length
+            ? <>{apm.healthy}<span className="text-base font-medium text-muted">/{apm.list.length}</span></>
+            : '—'}
+          sub={apm.list.length === 0
+            ? <span className="text-[10.5px] text-muted">no services reporting</span>
+            : apm.critical > 0
+              ? <span className="text-[10.5px] font-semibold text-danger">{apm.critical} critical · p95 {fmtMs(apm.worstP95)}</span>
+              : apm.degraded > 0
+                ? <span className="text-[10.5px] text-warning">{apm.degraded} degraded · p95 {fmtMs(apm.worstP95)}</span>
+                : <span className="text-[10.5px] text-success">All healthy</span>}
+          foot={apm.list.length
+            ? <div className="space-y-1">
+                <ApmHealthBar healthy={apm.healthy} degraded={apm.degraded} critical={apm.critical} noData={apm.noData} />
+                <div className="text-[10px] text-muted">err {fmtPct(apm.errRate)}</div>
+              </div>
+            : <div className="text-[10px] text-muted">traces via OTLP ingest</div>}
         />
       </div>
 
@@ -701,6 +755,21 @@ function StatusBar({ s }: { s?: DeviceSummary }) {
       <div style={{ width: seg(s.down) }} className="bg-danger" />
       <div style={{ width: seg(s.maintenance) }} className="bg-info" />
       <div style={{ width: seg(s.unknown) }} className="bg-muted/60" />
+    </div>
+  )
+}
+
+/** APM service health as a single proportional bar (healthy/degraded/critical/no-data). */
+function ApmHealthBar({ healthy, degraded, critical, noData }: { healthy: number; degraded: number; critical: number; noData: number }) {
+  const total = healthy + degraded + critical + noData
+  if (!total) return <div className="h-1.5 rounded-full bg-surface2" />
+  const seg = (n: number) => `${(n / total) * 100}%`
+  return (
+    <div className="flex h-1.5 w-full overflow-hidden rounded-full bg-surface2">
+      <div style={{ width: seg(healthy) }} className="bg-success" />
+      <div style={{ width: seg(degraded) }} className="bg-warning" />
+      <div style={{ width: seg(critical) }} className="bg-danger" />
+      <div style={{ width: seg(noData) }} className="bg-muted/60" />
     </div>
   )
 }

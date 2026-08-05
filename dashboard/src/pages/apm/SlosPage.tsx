@@ -65,10 +65,10 @@ function BudgetCell({ slo, onDetail }: { slo: Slo; onDetail: (b: Budget) => void
     queryFn: async () => (await api.get(`/apm/slos/${slo.id}/budget`)).data,
     refetchInterval: 60_000,
   })
-  if (q.isLoading) return <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--text-muted)]" />
+  if (q.isLoading) return <Loader2 className="w-3.5 h-3.5 animate-spin text-muted" />
   const b = q.data
   if (!b || b.budget_remaining == null) {
-    return <span className="text-xs text-[var(--text-muted)]">no data</span>
+    return <span className="text-xs text-muted">no data</span>
   }
   const remaining = b.budget_remaining
   const breaching = b.tiers.some((t) => t.breaching)
@@ -79,7 +79,7 @@ function BudgetCell({ slo, onDetail }: { slo: Slo; onDetail: (b: Budget) => void
         <span style={{ color }} className="font-medium">{(remaining * 100).toFixed(1)}% left</span>
         {breaching && <span className="text-[10px] font-semibold text-[#ef4444] uppercase">burning</span>}
       </div>
-      <div className="h-1.5 rounded-full bg-[var(--bg-elevated)] overflow-hidden">
+      <div className="h-1.5 rounded-full bg-surface2 overflow-hidden">
         <div className="h-full rounded-full transition-all" style={{ width: `${Math.max(2, remaining * 100)}%`, backgroundColor: color }} />
       </div>
     </button>
@@ -110,11 +110,11 @@ export function SlosPage() {
   })
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="space-y-5">
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-[var(--text-primary)]">SLOs</h1>
-          <p className="text-sm text-[var(--text-muted)] mt-1">
+          <h1 className="text-2xl font-semibold text-text">SLOs</h1>
+          <p className="text-sm text-muted mt-1">
             Reliability targets with error budgets. Burn alerts page when the budget is being consumed
             too fast (multi-window burn rate), not on isolated spikes.
           </p>
@@ -129,17 +129,23 @@ export function SlosPage() {
         <KpiTile label="Burn alerts on" value={slos.filter((s) => s.burn_alert_enabled).length} />
       </div>
 
+      {slosQuery.isError && (
+        <div className="rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
+          Failed to load SLOs — {apiErrorMessage(slosQuery.error)}
+        </div>
+      )}
+
       <Card>
         <CardContent className="p-0">
           {slosQuery.isLoading ? (
-            <div className="flex items-center justify-center gap-2 text-[var(--text-muted)] py-10">
+            <div className="flex items-center justify-center gap-2 text-muted py-10">
               <Loader2 className="w-4 h-4 animate-spin" /> Loading…
             </div>
           ) : slos.length === 0 ? (
             <div className="text-center py-14 px-6">
-              <Target className="w-8 h-8 mx-auto text-[var(--text-muted)]" />
-              <div className="mt-3 font-medium text-[var(--text-primary)]">No SLOs yet</div>
-              <p className="text-sm text-[var(--text-muted)] mt-1 max-w-md mx-auto">
+              <Target className="w-8 h-8 mx-auto text-muted" />
+              <div className="mt-3 font-medium text-text">No SLOs yet</div>
+              <p className="text-sm text-muted mt-1 max-w-md mx-auto">
                 Define a target like “99.9% of checkout requests succeed over 30 days” and ZenPlus
                 will track the error budget and alert on fast burn.
               </p>
@@ -158,16 +164,16 @@ export function SlosPage() {
               <TBody>
                 {slos.map((s) => (
                   <Tr key={s.id}>
-                    <Td className="font-medium text-[var(--text-primary)]">{s.name}</Td>
+                    <Td className="font-medium text-text">{s.name}</Td>
                     <Td>
                       {s.service_name}
-                      {s.env && <span className="ml-1.5 text-xs text-[var(--text-muted)]">{s.env}</span>}
-                      {s.operation && <div className="text-xs text-[var(--text-muted)]">{s.operation}</div>}
+                      {s.env && <span className="ml-1.5 text-xs text-muted">{s.env}</span>}
+                      {s.operation && <div className="text-xs text-muted">{s.operation}</div>}
                     </Td>
                     <Td>
                       {SLI_LABEL[s.sli_type] || s.sli_type}
                       {s.sli_type === 'latency' && s.latency_threshold_ms != null && (
-                        <span className="ml-1 text-xs text-[var(--text-muted)]">≤{s.latency_threshold_ms}ms</span>
+                        <span className="ml-1 text-xs text-muted">≤{s.latency_threshold_ms}ms</span>
                       )}
                     </Td>
                     <Td>{s.target}%</Td>
@@ -176,7 +182,7 @@ export function SlosPage() {
                     <Td>
                       {s.burn_alert_enabled
                         ? <span className="text-xs text-[#22c55e]">on</span>
-                        : <span className="text-xs text-[var(--text-muted)]">off</span>}
+                        : <span className="text-xs text-muted">off</span>}
                     </Td>
                     <Td>
                       <div className="flex gap-1">
@@ -184,7 +190,7 @@ export function SlosPage() {
                           onClick={() => { setEditing(s); setFormOpen(true) }} title="Edit">
                           <Pencil className="w-3.5 h-3.5" />
                         </Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7 text-[var(--text-muted)] hover:text-[#ef4444]"
+                        <Button variant="ghost" size="icon" className="h-7 w-7 text-muted hover:text-[#ef4444]"
                           onClick={() => setDeleting(s)} title="Delete">
                           <Trash2 className="w-3.5 h-3.5" />
                         </Button>
@@ -254,7 +260,7 @@ export function SlosPage() {
                   ))}
                 </TBody>
               </Table>
-              <p className="text-[11px] text-[var(--text-muted)]">
+              <p className="text-[11px] text-muted">
                 A tier alerts only when both its long and short windows burn faster than the threshold —
                 the short window makes the alert clear within minutes of recovery.
               </p>
@@ -298,8 +304,8 @@ function SloFormDialog({ open, onOpenChange, slo, onSaved }: {
   })
   const allChannels: any[] = Array.isArray(channelsResp) ? channelsResp : channelsResp?.data || []
 
-  // Populate on open (mirrors AlertRuleFormDialog's effect-free reset-on-open idiom
-  // via key remount below — the parent passes a new `slo` each time).
+  // Populate on open (effect-free reset-on-open idiom — re-seed local state
+  // whenever the dialog opens for a different SLO).
   const [seededFor, setSeededFor] = useState<string | null>(null)
   const seedKey = open ? (slo?.id ?? '__new__') : null
   if (seedKey !== seededFor) {
@@ -423,10 +429,10 @@ function SloFormDialog({ open, onOpenChange, slo, onSaved }: {
             </FormField>
           )}
 
-          <div className="flex items-center justify-between rounded-md border border-[var(--bg-elevated)] px-3 py-2">
+          <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
             <div>
-              <div className="text-sm font-medium text-[var(--text-primary)]">Burn-rate alerts</div>
-              <div className="text-[11px] text-[var(--text-muted)]">
+              <div className="text-sm font-medium text-text">Burn-rate alerts</div>
+              <div className="text-[11px] text-muted">
                 Page at 14.4× (1h) and 6× (6h); ticket at 1× (3d).
               </div>
             </div>
@@ -435,9 +441,9 @@ function SloFormDialog({ open, onOpenChange, slo, onSaved }: {
 
           {burnEnabled && (
             <div className="space-y-2">
-              <div className="text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]">Notify channels</div>
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted">Notify channels</div>
               {allChannels.length === 0 ? (
-                <p className="text-[11px] text-[var(--text-muted)]">
+                <p className="text-[11px] text-muted">
                   No channels configured — burn alerts will be recorded but not delivered.
                 </p>
               ) : (
@@ -449,11 +455,11 @@ function SloFormDialog({ open, onOpenChange, slo, onSaved }: {
                         onClick={() => setChannels(checked ? channels.filter((x) => x !== c.id) : [...channels, c.id])}
                         className={`flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-xs transition-colors ${
                           checked
-                            ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--text-primary)]'
-                            : 'border-[var(--bg-elevated)] text-[var(--text-muted)] hover:text-[var(--text-primary)]'
+                            ? 'border-primary bg-primary/10 text-text'
+                            : 'border-border text-muted hover:text-text'
                         }`}>
                         <span className="min-w-0 truncate font-medium">{c.name}</span>
-                        {checked && <Check className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />}
+                        {checked && <Check className="h-3.5 w-3.5 shrink-0 text-primary" />}
                       </button>
                     )
                   })}

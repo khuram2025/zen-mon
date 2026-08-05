@@ -348,3 +348,106 @@ async def revoke_enrollment_token(
     if res.rowcount == 0:
         raise HTTPException(404, "Enrollment token not found or already revoked")
     return None
+
+
+# ── Data quality (ingest health, service freshness, agent forwarders) ────────
+
+@router.get("/data-quality")
+async def data_quality(
+    hours: int = 24,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Monitor the *quality* of ingested APM data: cluster-wide ingest
+    counters (accepted / rejected / clock-skewed / dropped, persisted across
+    restarts), per-service reporting freshness, and the health of agent-side
+    APM forwarders. This is how operators catch unacceptable data — skewed
+    clocks, silently dying producers, flush failures — before it corrupts
+    dashboards."""
+    import asyncio as _asyncio
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    hours = max(1, min(hours, 720))
+
+    def _ingest() -> dict:
+        from app.core.database import get_ch_client
+        since = (_dt.now(_tz.utc) - _td(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+        client = get_ch_client()
+        totals = client.query(
+            "SELECT sum(accepted), sum(rejected), sum(dropped), sum(skewed), sum(flushes) "
+            "FROM zenplus.apm_ingest_stats WHERE timestamp >= %(s)s",
+            parameters={"s": since},
+        ).result_rows[0]
+        series = client.query(
+            "SELECT toStartOfInterval(timestamp, INTERVAL 300 SECOND) AS t, "
+            "       sum(accepted), sum(rejected) + sum(skewed), sum(dropped) "
+            "FROM zenplus.apm_ingest_stats WHERE timestamp >= %(s)s "
+            "GROUP BY t ORDER BY t",
+            parameters={"s": since},
+        ).result_rows
+        accepted = int(totals[0] or 0)
+        rejected = int(totals[1] or 0)
+        return {
+            "accepted": accepted, "rejected": rejected,
+            "dropped": int(totals[2] or 0), "skewed": int(totals[3] or 0),
+            "flushes": int(totals[4] or 0),
+            "reject_rate": round(rejected / (accepted + rejected), 5)
+                           if (accepted + rejected) else 0.0,
+            "series": [{"t": r[0].isoformat(), "accepted": int(r[1]),
+                        "rejected": int(r[2]), "dropped": int(r[3])} for r in series],
+        }
+
+    ingest = await _asyncio.to_thread(_ingest)
+
+    # Live queue depth for THIS worker (indicative; counters above are global).
+    from app.api.v1 import apm_ingest as _ingest_mod
+    ingest["queue_depth"] = _ingest_mod._queue.qsize() if _ingest_mod._queue else None
+
+    services = [
+        {
+            "name": r["name"], "health": r["health"],
+            "last_seen_at": r["last_seen_at"].isoformat() if r["last_seen_at"] else None,
+            "silent_for_s": int(r["silent_s"]) if r["silent_s"] is not None else None,
+            "reporting": (r["silent_s"] or 0) < 600 if r["silent_s"] is not None else False,
+        }
+        for r in (await db.execute(text("""
+            SELECT name, health, last_seen_at,
+                   EXTRACT(EPOCH FROM (NOW() - last_seen_at)) AS silent_s
+            FROM apm_services ORDER BY last_seen_at DESC NULLS LAST
+        """))).mappings().all()
+    ]
+
+    forwarders = [
+        {
+            "agent_id": str(r["id"]), "hostname": r["hostname"],
+            "agent_status": r["status"], "clock_skew_s": r["clock_skew_s"],
+            **{k: (r["apm_status"] or {}).get(k) for k in
+               ("enabled", "failed", "spans_forwarded_1m", "export_errors_1m",
+                "spool_depth_spans", "dropped_spans_total", "last_error")},
+        }
+        for r in (await db.execute(text("""
+            SELECT id, hostname, status, clock_skew_s, apm_status
+            FROM agents WHERE apm_status IS NOT NULL ORDER BY hostname
+        """))).mappings().all()
+    ]
+
+    silent = sum(1 for s in services if not s["reporting"])
+    issues = []
+    if ingest["dropped"]:
+        issues.append(f"{ingest['dropped']} span(s) dropped on ClickHouse flush failures")
+    if ingest["skewed"]:
+        issues.append(f"{ingest['skewed']} span(s) rejected for clock skew")
+    if silent:
+        issues.append(f"{silent} registered service(s) not reporting")
+    failing_fwd = [f["hostname"] for f in forwarders
+                   if f.get("failed") or (f.get("export_errors_1m") or 0) > 0]
+    if failing_fwd:
+        issues.append(f"agent forwarder issues on: {', '.join(failing_fwd[:5])}")
+
+    return {
+        "ingest": ingest,
+        "services": services,
+        "agent_forwarders": forwarders,
+        "health": "issues" if issues else "ok",
+        "issues": issues,
+    }

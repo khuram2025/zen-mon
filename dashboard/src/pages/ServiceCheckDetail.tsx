@@ -24,7 +24,6 @@ import {
   Gauge,
   Globe,
   Info,
-  MapPin,
   Network,
   Pause,
   Play,
@@ -828,7 +827,6 @@ export function ServiceCheckDetailPage() {
 
         {/* ── Right sidebar ───────────────────────────────────────── */}
         <div className="lg:col-span-3 space-y-3">
-          <RegionStatus />
           <CurrentChecksSummary points={points} />
           <div className="grid grid-cols-2 gap-3">
             <QuickActions
@@ -2304,44 +2302,6 @@ function RecentActivityTable({
           </table>
         </div>
       )}
-    </div>
-  )
-}
-
-function RegionStatus() {
-  const C = useC()
-  const regions = [
-    { name: 'us-east-1', status: 'up' },
-    { name: 'eu-west-1', status: 'up' },
-    { name: 'ap-southeast-1', status: 'up' },
-  ]
-  return (
-    <div className="rounded-xl p-3" style={{ background: C.panel, border: `1px solid ${C.border}` }}>
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs font-semibold">Region Status</span>
-        <button className="text-[10px] hover:underline" style={{ color: C.primary }}>View all regions</button>
-      </div>
-      <div className="space-y-1.5">
-        {regions.map((r) => {
-          const sm = statusMeta[r.status] || statusMeta.unknown
-          return (
-            <div
-              key={r.name}
-              className="flex items-center justify-between rounded-md px-2 py-1.5 text-[11px]"
-              style={{ background: C.borderSoft }}
-            >
-              <div className="flex items-center gap-2">
-                <MapPin className="h-3 w-3" style={{ color: C.textMuted }} />
-                <span>{r.name}</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span style={{ color: sm.color }}>● {sm.label}</span>
-                <span className="text-[9px]" style={{ color: C.textMuted }}>▁▂▃▂▁▂▁</span>
-              </div>
-            </div>
-          )
-        })}
-      </div>
     </div>
   )
 }

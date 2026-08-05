@@ -19,6 +19,8 @@ from app.api.v1 import apm_traces as apm_traces_api
 from app.api.v1 import apm_services as apm_services_api
 from app.api.v1 import apm_errors as apm_errors_api
 from app.api.v1 import apm_slos as apm_slos_api
+from app.api.v1 import apm_synthetics as apm_synthetics_api
+from app.api.v1 import apm_usage as apm_usage_api
 from app.api.websocket import realtime
 
 settings = get_settings()
@@ -96,6 +98,10 @@ def create_app() -> FastAPI:
     app.include_router(apm_errors_api.router, prefix="/api/v1")
     # APM SLOs (CRUD + error-budget status) under /api/v1/apm/slos
     app.include_router(apm_slos_api.router, prefix="/api/v1")
+    # APM synthetic user scenarios under /api/v1/apm/synthetics
+    app.include_router(apm_synthetics_api.router, prefix="/api/v1")
+    # APM usage analytics (pages/operations/users) under /api/v1/apm/usage
+    app.include_router(apm_usage_api.router, prefix="/api/v1")
     # APM OTLP receiver mounted at ROOT so the path is exactly /v1/traces.
     app.include_router(apm_ingest_api.router)
 
@@ -135,6 +141,10 @@ def create_app() -> FastAPI:
         # SLO error-budget burn: multi-window multi-burn-rate evaluation.
         from app.services.apm_slo_service import apm_slo_burn_loop
         app.state.apm_slo_burn = asyncio.create_task(apm_slo_burn_loop())
+        # Synthetic user scenarios: advisory-locked runner (one per tick
+        # fleet-wide), raises/clears apm_synthetic_down alerts.
+        from app.services.apm_synthetic_service import apm_synthetic_runner_loop
+        app.state.apm_synthetic_runner = asyncio.create_task(apm_synthetic_runner_loop())
         # Storage: emergency auto-purge on disk pressure + scheduled backups.
         # Advisory-locked, so safe with multiple Uvicorn workers.
         from app.services.storage_service import storage_sweeper_loop
@@ -158,7 +168,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("health_sweeper", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper"):
+        for attr in ("health_sweeper", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

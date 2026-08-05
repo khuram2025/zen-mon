@@ -46,7 +46,7 @@ type WizardState = {
   description: string
   enabled: boolean
   severity: 'info' | 'warning' | 'critical'
-  source: 'device' | 'service' | 'trap'
+  source: 'device' | 'service' | 'trap' | 'apm'
   conditions: Cond[]
   condition_logic: 'AND' | 'OR'
   trigger_on: 'any' | 'down' | 'up' | 'degraded'
@@ -114,6 +114,20 @@ const NETWORK_METRICS = [
 
 const INTERFACE_METRICS = new Set(NETWORK_METRICS.filter((m) => m.iface).map((m) => m.value))
 
+// APM (application) metrics, evaluated per-service every minute by the APM
+// alert evaluator against the RED rollups. Latency is milliseconds; error
+// rate and apdex are fractions in 0–1; throughput is requests/second.
+// Scope: the service picker on the Scope step (stored in `target`; empty =
+// every reporting service).
+const APM_METRICS = [
+  { value: 'apm_latency_p95', label: 'p95 latency (ms)' },
+  { value: 'apm_latency_p99', label: 'p99 latency (ms)' },
+  { value: 'apm_latency_p50', label: 'p50 latency (ms)' },
+  { value: 'apm_error_rate', label: 'Error rate (0.02 = 2%)' },
+  { value: 'apm_throughput', label: 'Throughput (req/s)' },
+  { value: 'apm_apdex', label: 'Apdex (0–1)' },
+] as const
+
 const TEMPLATE_VARS = [
   '{hostname}', '{ip_address}', '{status}', '{severity}', '{rule_name}',
   '{group}', '{location}', '{device_type}', '{metric}', '{operator}',
@@ -159,6 +173,8 @@ function ruleToState(rule: any): WizardState {
   const source =
     rule.metric === 'trap'
       ? 'trap'
+      : String(rule.metric || '').startsWith('apm_')
+      ? 'apm'
       : rule.service_check_id || rule.service_check_group_id || rule.metric === 'service_status'
       ? 'service'
       : 'device'
@@ -209,6 +225,7 @@ function stateToPayload(s: WizardState) {
   const isService = s.source === 'service'
   const isTrap = s.source === 'trap'
   const isDevice = s.source === 'device'
+  const isApm = s.source === 'apm'
   const first = s.conditions[0]
   const conditions = isDevice && s.conditions.length > 1 ? s.conditions : null
   const recovery = s.reset_mode === 'auto'
@@ -218,22 +235,28 @@ function stateToPayload(s: WizardState) {
     description: s.description || null,
     enabled: s.enabled,
     metric: isService ? 'service_status' : isTrap ? 'trap' : first.metric,
-    operator: isDevice ? first.operator : '==',
-    threshold: isDevice ? first.threshold : 0,
+    operator: isDevice || isApm ? first.operator : '==',
+    threshold: isDevice || isApm ? first.threshold : 0,
     conditions,
     condition_logic: s.condition_logic,
     trigger_on: isService ? s.trigger_on : isDevice && first.metric === 'ping_status' ? s.trigger_on : 'any',
     recovery_alert: recovery,
     trap_oid: isTrap ? s.trap_oid.trim() || null : null,
-    target: isDevice && s.conditions.some((c) => INTERFACE_METRICS.has(c.metric)) ? s.target.trim() || null : null,
+    // target: interface filter for device interface metrics; APM service name
+    // for APM rules (empty = every reporting service).
+    target: isApm
+      ? s.target.trim() || null
+      : isDevice && s.conditions.some((c) => INTERFACE_METRICS.has(c.metric))
+      ? s.target.trim() || null
+      : null,
     min_duration: s.min_duration,
     severity: s.severity,
     cooldown: s.cooldown,
     max_repeat: s.max_repeat,
-    device_id: isService ? null : s.device_id || null,
-    group_id: isService ? null : s.group_id || null,
-    device_type: isService ? null : s.device_type || null,
-    location: isService ? null : s.location || null,
+    device_id: isService || isApm ? null : s.device_id || null,
+    group_id: isService || isApm ? null : s.group_id || null,
+    device_type: isService || isApm ? null : s.device_type || null,
+    location: isService || isApm ? null : s.location || null,
     service_check_id: isService ? s.service_check_id || null : null,
     service_check_group_id: isService ? s.service_check_group_id || null : null,
     notify_channels: s.notify_channels,
@@ -305,6 +328,13 @@ export function AlertRuleWizardDialog({
     enabled: open,
   })
   const channels: any[] = Array.isArray(channelsResp) ? channelsResp : channelsResp?.data || []
+
+  const { data: apmServicesResp } = useQuery<any>({
+    queryKey: ['apm', 'services', 'list-min'],
+    queryFn: async () => (await api.get('/apm/services?range=24h')).data,
+    enabled: open && s.source === 'apm',
+  })
+  const apmServices: string[] = (apmServicesResp?.services || []).map((x: any) => x.name)
 
   useEffect(() => {
     if (!open) return
@@ -498,14 +528,25 @@ export function AlertRuleWizardDialog({
               <div className="space-y-4">
                 <SectionTitle title="Trigger Conditions" hint="Define when this alert fires. Add multiple child conditions with AND/OR logic." />
                 <div className="flex rounded-lg border border-border bg-surface2 p-1 text-xs">
-                  {(['device', 'service', 'trap'] as const).map((src) => (
+                  {(['device', 'service', 'trap', 'apm'] as const).map((src) => (
                     <button
                       key={src}
                       type="button"
-                      onClick={() => setS({ ...s, source: src })}
+                      onClick={() => {
+                        if (src === s.source) return
+                        // Entering/leaving APM swaps the condition metric domain,
+                        // and `target` changes meaning (service name vs interface).
+                        if (src === 'apm') {
+                          setS({ ...s, source: src, target: '', conditions: [{ metric: 'apm_latency_p95', operator: '>', threshold: 800 }] })
+                        } else if (s.source === 'apm') {
+                          setS({ ...s, source: src, target: '', conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }] })
+                        } else {
+                          setS({ ...s, source: src })
+                        }
+                      }}
                       className={cn('flex-1 rounded-md py-2 font-medium', s.source === src ? 'bg-primary text-white' : 'text-muted')}
                     >
-                      {src === 'device' ? 'Device / SNMP' : src === 'service' ? 'Service Check' : 'SNMP Trap'}
+                      {src === 'device' ? 'Device / SNMP' : src === 'service' ? 'Service Check' : src === 'trap' ? 'SNMP Trap' : 'APM Service'}
                     </button>
                   ))}
                 </div>
@@ -603,6 +644,36 @@ export function AlertRuleWizardDialog({
                   </>
                 )}
 
+                {s.source === 'apm' && (
+                  <div className="flex items-end gap-2 rounded-lg border border-border/60 bg-surface2/30 p-3">
+                    <div className="grid flex-1 grid-cols-3 gap-2">
+                      <FormField label="Metric">
+                        <Select value={s.conditions[0]?.metric} onValueChange={(v) => updateCond(0, { metric: v })}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            {APM_METRICS.map((m) => (
+                              <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </FormField>
+                      <FormField label="Operator">
+                        <Select value={s.conditions[0]?.operator} onValueChange={(v) => updateCond(0, { operator: v })}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            {['>', '>=', '<', '<=', '==', '!='].map((op) => (
+                              <SelectItem key={op} value={op}>{op}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </FormField>
+                      <FormField label="Threshold">
+                        <Input type="number" step="any" value={s.conditions[0]?.threshold} onChange={(e) => updateCond(0, { threshold: Number(e.target.value) })} />
+                      </FormField>
+                    </div>
+                  </div>
+                )}
+
                 <FormField label="Condition must exist for" hint="Hold time before firing — prevents flapping alerts (SolarWinds 'condition must exist for more than').">
                   <div className="flex items-center gap-3">
                     <Input type="number" min={0} value={s.min_duration} onChange={(e) => setS({ ...s, min_duration: Number(e.target.value) })} className="w-28" />
@@ -643,7 +714,25 @@ export function AlertRuleWizardDialog({
             {step === 'scope' && (
               <div className="space-y-4">
                 <SectionTitle title="Scope" hint="Which objects this alert monitors." />
-                {s.source === 'service' ? (
+                {s.source === 'apm' ? (
+                  <FormField
+                    label="Application service"
+                    hint="Empty = every service reporting traces. Evaluated per service every minute against the RED rollups."
+                  >
+                    <Select
+                      value={s.target || '__all__'}
+                      onValueChange={(v) => setS({ ...s, target: v === '__all__' ? '' : v })}
+                    >
+                      <SelectTrigger><SelectValue placeholder="All services" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__all__">All services</SelectItem>
+                        {apmServices.map((name) => (
+                          <SelectItem key={name} value={name}>{name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </FormField>
+                ) : s.source === 'service' ? (
                   <div className="grid grid-cols-2 gap-3">
                     <FormField label="Service check">
                       <Select value={s.service_check_id || '__all__'} onValueChange={(v) => setS({ ...s, service_check_id: v === '__all__' ? '' : v, service_check_group_id: '' })}>

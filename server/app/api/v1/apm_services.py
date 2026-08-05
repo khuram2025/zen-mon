@@ -342,6 +342,24 @@ async def service_map(
 
 # ── background: service registry upsert + health denormalisation ─────────────
 
+# A registered service silent for this long is DOWN from APM's perspective:
+# the health freeze at last-known-good was audit finding #1 (a dead service
+# looked healthy forever). 10 minutes = two rollup buckets of grace.
+NO_DATA_AFTER_S = 600
+
+
+async def _decay_silent_services(db) -> int:
+    """Flip services that stopped reporting to no_data (once, idempotent)."""
+    res = await db.execute(text("""
+        UPDATE apm_services
+        SET health = 'no_data', last_rps = 0, updated_at = NOW()
+        WHERE health != 'no_data'
+          AND last_seen_at IS NOT NULL
+          AND last_seen_at < NOW() - make_interval(secs => :cutoff)
+    """), {"cutoff": NO_DATA_AFTER_S})
+    return res.rowcount or 0
+
+
 async def apm_service_registry_loop(interval_s: int = 60):
     """Upsert apm_services from recent entry-span RED; denormalise health."""
     await asyncio.sleep(15)
@@ -349,6 +367,11 @@ async def apm_service_registry_loop(interval_s: int = 60):
         try:
             now = int(datetime.now(timezone.utc).timestamp() * 1000)
             rows = await asyncio.to_thread(_query_services, now - 10 * 60_000, now, None)
+            async with AsyncSessionLocal() as db:
+                decayed = await _decay_silent_services(db)
+                if decayed:
+                    logger.warning("apm registry: %d service(s) stopped reporting -> no_data", decayed)
+                await db.commit()
             if rows:
                 async with AsyncSessionLocal() as db:
                     # env name -> id map

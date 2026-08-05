@@ -5,6 +5,7 @@ import {
   Wrench,
   Briefcase,
   Boxes,
+  Activity,
 } from 'lucide-react'
 import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
 import { ExportMenu } from '@/components/reports/ExportMenu'
@@ -43,6 +44,15 @@ const TABS = [
     accent: 'text-sky-400',
     reportType: 'full_report' as const,
   },
+  {
+    to: 'apm',
+    label: 'APM',
+    description: 'App performance',
+    icon: Activity,
+    accent: 'text-rose-400',
+    // No server-side export document for APM yet — the tab is print-friendly instead.
+    reportType: null,
+  },
 ]
 
 export function ReportsPage() {
@@ -50,7 +60,8 @@ export function ReportsPage() {
   const { pathname } = useLocation()
   const activeSlug = pathname.split('/').filter(Boolean)[1] || 'executive'
   const activeTab = TABS.find((t) => t.to === activeSlug) ?? TABS[0]
-  const showTimeRange = activeSlug !== 'inventory'
+  // Inventory is point-in-time; the APM tab uses its own fixed windows per section.
+  const showTimeRange = activeSlug !== 'inventory' && activeSlug !== 'apm'
 
   return (
     <div className="space-y-5">
@@ -77,17 +88,19 @@ export function ReportsPage() {
               onCustom={setCustom}
             />
           )}
-          <ExportMenu
-            reportType={activeTab.reportType}
-            fromISO={range.fromISO}
-            toISO={range.toISO}
-            label={`Export ${activeTab.label}`}
-          />
+          {activeTab.reportType && (
+            <ExportMenu
+              reportType={activeTab.reportType}
+              fromISO={range.fromISO}
+              toISO={range.toISO}
+              label={`Export ${activeTab.label}`}
+            />
+          )}
         </div>
       </div>
 
       {/* Persona tab strip */}
-      <nav className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <nav className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
         {TABS.map((tab) => (
           <NavLink
             key={tab.to}
