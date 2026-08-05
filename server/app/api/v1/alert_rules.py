@@ -25,7 +25,17 @@ _NETWORK_METRICS = (
     "if_in_bps|if_out_bps|if_util_pct|if_errors|if_discards|if_oper_status|"
     "session_count|vpn_tunnel_state|ha_state|bgp_neighbor_down"
 )
-_CONDITION_METRICS = f"ping_status|rtt|packet_loss|jitter|service_status|{_NETWORK_METRICS}"
+# APM metric keys (AM-E6/F8), in lockstep with the migrate-039 CHECK. The six
+# RED keys are evaluated by apm_alert_service against the ClickHouse rollups
+# (scope: `target` = APM service name, empty = all services; latency in ms,
+# error_rate/apdex as fractions, throughput in req/s). slo_burn/synthetic/
+# anomaly are accepted but their evaluators land with F7-adjacent/AM-E9/E12.
+_APM_METRICS = (
+    "apm_latency_p50|apm_latency_p95|apm_latency_p99|"
+    "apm_error_rate|apm_throughput|apm_apdex|"
+    "apm_slo_burn|apm_synthetic_down|apm_anomaly"
+)
+_CONDITION_METRICS = f"ping_status|rtt|packet_loss|jitter|service_status|{_NETWORK_METRICS}|{_APM_METRICS}"
 
 
 class ConditionItem(BaseModel):

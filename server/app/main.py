@@ -12,10 +12,12 @@ from app.api.v1 import sensor_api
 from app.api.v1 import agents as agents_runtime_api
 from app.api.v1 import servers as servers_admin_api
 from app.api.v1 import apm as apm_control_api
+from app.api.v1 import apm_agents as apm_agents_api
 from app.api.v1 import apm_ingest as apm_ingest_api
 from app.api.v1 import apm_traces as apm_traces_api
 from app.api.v1 import apm_services as apm_services_api
 from app.api.v1 import apm_errors as apm_errors_api
+from app.api.v1 import apm_slos as apm_slos_api
 from app.api.websocket import realtime
 
 settings = get_settings()
@@ -79,6 +81,9 @@ def create_app() -> FastAPI:
     app.include_router(servers_admin_api.fleet_router, prefix="/api/v1")
     app.include_router(servers_admin_api.overview_router, prefix="/api/v1")
     app.include_router(servers_admin_api.baselines_router, prefix="/api/v1")
+    # Agent APM enrollment/discovery; host route uses the existing agent credential.
+    app.include_router(apm_agents_api.router, prefix="/api/v1")
+    app.include_router(apm_agents_api.admin_router, prefix="/api/v1")
     # APM control plane (ingest keys, enrollment tokens) under /api/v1/apm/*
     app.include_router(apm_control_api.router, prefix="/api/v1")
     # APM trace explorer + waterfall under /api/v1/apm/traces
@@ -87,6 +92,8 @@ def create_app() -> FastAPI:
     app.include_router(apm_services_api.router, prefix="/api/v1")
     # APM error tracking / issues under /api/v1/apm/errors
     app.include_router(apm_errors_api.router, prefix="/api/v1")
+    # APM SLOs (CRUD + error-budget status) under /api/v1/apm/slos
+    app.include_router(apm_slos_api.router, prefix="/api/v1")
     # APM OTLP receiver mounted at ROOT so the path is exactly /v1/traces.
     app.include_router(apm_ingest_api.router)
 
@@ -120,6 +127,12 @@ def create_app() -> FastAPI:
         await apm_ingest_api.start_batch_writer()
         # APM service registry: upsert apm_services + denormalise health from RED.
         app.state.apm_service_registry = asyncio.create_task(apm_services_api.apm_service_registry_loop())
+        # APM alert rules (apm_* metric keys): periodic RED-rollup evaluation.
+        from app.services.apm_alert_service import apm_alert_evaluator_loop
+        app.state.apm_alert_evaluator = asyncio.create_task(apm_alert_evaluator_loop())
+        # SLO error-budget burn: multi-window multi-burn-rate evaluation.
+        from app.services.apm_slo_service import apm_slo_burn_loop
+        app.state.apm_slo_burn = asyncio.create_task(apm_slo_burn_loop())
         # Agent packages: reconcile the DB against the on-disk artifact store so
         # a release that shipped a new MSI is downloadable without a manual
         # publish step.

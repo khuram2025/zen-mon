@@ -208,6 +208,11 @@ class AgentResponse(BaseModel):
     version: Optional[str]
     status: str
     api_key_prefix: Optional[str]
+    authorization_state: Literal["pending", "authorized", "revoked"] = "pending"
+    authorization_source: Optional[str] = None
+    enrollment_token_prefix: Optional[str] = None
+    authorized_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
     last_heartbeat_at: Optional[datetime]
     last_metric_at: Optional[datetime]
     last_config_hash: Optional[str]
@@ -231,7 +236,8 @@ class AgentResponse(BaseModel):
 class AgentBulkAction(BaseModel):
     agent_ids: List[UUID] = Field(default_factory=list)
     action: Literal["change_policy", "change_update_ring", "request_diagnostics",
-                    "rotate_certificate", "trigger_upgrade", "disable", "enable"]
+                    "rotate_certificate", "trigger_upgrade", "disable", "enable",
+                    "authorize", "revoke"]
     policy_id: Optional[UUID] = None
     update_ring: Optional[UpdateRing] = None
     target_version: Optional[str] = None
@@ -240,7 +246,8 @@ class AgentBulkAction(BaseModel):
 # ── Agent-facing API ─────────────────────────────────────────────────
 
 class AgentEnrollRequest(BaseModel):
-    enrollment_token: str
+    enrollment_token: Optional[str] = None
+    pending_secret: Optional[str] = Field(default=None, min_length=32, max_length=256)
     agent_uid: str = Field(..., min_length=8, max_length=128)
     hostname: str
     platform: AgentPlatform = "windows"
@@ -256,12 +263,32 @@ class AgentEnrollRequest(BaseModel):
 
 class AgentEnrollResponse(BaseModel):
     agent_id: str
-    server_id: str
-    api_key: str
+    server_id: Optional[str] = None
+    api_key: Optional[str] = None
+    authorization_state: Literal["pending", "authorized", "revoked"] = "authorized"
     heartbeat_interval_s: int = 30
     config_poll_interval_s: int = 60
     upload_interval_s: int = 60
     policy_id: Optional[str] = None
+
+
+class AgentAPMGatewayStatus(BaseModel):
+    listening: bool = False
+    grpc_port: int = Field(default=4317, ge=0, le=65535)
+    http_port: int = Field(default=4318, ge=0, le=65535)
+
+
+class AgentAPMHeartbeat(BaseModel):
+    gateway: AgentAPMGatewayStatus = Field(default_factory=AgentAPMGatewayStatus)
+    instrumented: int = Field(default=0, ge=0)
+    failed: int = Field(default=0, ge=0)
+    spans_forwarded_1m: int = Field(default=0, ge=0)
+    export_errors_1m: int = Field(default=0, ge=0)
+    spool_depth_spans: int = Field(default=0, ge=0)
+    spool_bytes: int = Field(default=0, ge=0)
+    dropped_spans_total: int = Field(default=0, ge=0)
+    bundles: Dict[str, str] = Field(default_factory=dict)
+    last_error: Optional[str] = None
 
 
 class AgentHeartbeatRequest(BaseModel):
@@ -274,6 +301,9 @@ class AgentHeartbeatRequest(BaseModel):
     # Optional preserves capabilities last advertised by a newer agent when
     # an older binary briefly checks in during rollback/recovery.
     capabilities: Optional[List[str]] = None
+    # Optional for rollback compatibility; APM-capable agents always send the
+    # complete block, including zero-valued counters.
+    apm: Optional[AgentAPMHeartbeat] = None
 
 
 class AgentHeartbeatResponse(BaseModel):

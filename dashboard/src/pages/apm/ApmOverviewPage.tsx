@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { Loader2, AlertTriangle, GitBranch, Network, Boxes } from 'lucide-react'
+import { Loader2, AlertTriangle, GitBranch, Network, Boxes, Target } from 'lucide-react'
 import { api } from '@/lib/api'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
@@ -38,9 +38,12 @@ export function ApmOverviewPage() {
         <KpiTile label="Throughput" value={fmtRps(totalRps)} />
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
         <button onClick={() => navigate('/apm/services')} className="flex items-center gap-3 rounded-lg border border-[var(--bg-elevated)] bg-[var(--bg-secondary)] px-4 py-3 hover:bg-[var(--bg-tertiary)] text-left">
           <Boxes className="w-5 h-5 text-[var(--accent)]" /><div><div className="font-medium text-[var(--text-primary)]">Services</div><div className="text-xs text-[var(--text-muted)]">RED dashboards & apdex</div></div>
+        </button>
+        <button onClick={() => navigate('/apm/slos')} className="flex items-center gap-3 rounded-lg border border-[var(--bg-elevated)] bg-[var(--bg-secondary)] px-4 py-3 hover:bg-[var(--bg-tertiary)] text-left">
+          <Target className="w-5 h-5 text-[var(--accent)]" /><div><div className="font-medium text-[var(--text-primary)]">SLOs</div><div className="text-xs text-[var(--text-muted)]">Error budgets & burn alerts</div></div>
         </button>
         <button onClick={() => navigate('/apm/service-map')} className="flex items-center gap-3 rounded-lg border border-[var(--bg-elevated)] bg-[var(--bg-secondary)] px-4 py-3 hover:bg-[var(--bg-tertiary)] text-left">
           <Network className="w-5 h-5 text-[var(--accent)]" /><div><div className="font-medium text-[var(--text-primary)]">Service Map</div><div className="text-xs text-[var(--text-muted)]">Dependency topology</div></div>

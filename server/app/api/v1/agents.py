@@ -15,7 +15,9 @@ this module hosts the per-host agent runtime endpoints:
 
 Auth model
 ----------
-``/enroll`` accepts a one-time enrollment token (hashed at rest).
+``/enroll`` accepts either a one-time enrollment token or a tokenless pending
+registration. Pending registrations cannot send monitoring data until an
+operator authorizes them in Agent Fleet.
 All other endpoints require::
 
     Authorization: Bearer <api_key>
@@ -177,6 +179,10 @@ async def _authenticate(
     )).mappings().first()
     if not row:
         raise HTTPException(401, "Agent not registered")
+    if row.get("revoked_at") is not None:
+        raise HTTPException(403, "Agent authorization revoked")
+    if row.get("authorized_at") is None:
+        raise HTTPException(403, "Agent awaiting authorization")
     if row["status"] == "disabled":
         raise HTTPException(403, "Agent disabled")
     if not row.get("api_key_hash"):
@@ -300,18 +306,153 @@ async def _claim_enrollment_token(
 
 # ── Enrollment ───────────────────────────────────────────────────────
 
+async def _default_policy_id(platform: str, db: AsyncSession):
+    row = (await db.execute(
+        text("""SELECT id FROM agent_policies
+                WHERE platform = :p AND is_builtin = TRUE
+                ORDER BY created_at LIMIT 1"""),
+        {"p": platform if platform in ("windows", "linux") else "any"},
+    )).first()
+    return row[0] if row else None
+
+
+async def _ensure_pending_server(data: AgentEnrollRequest, db: AsyncSession):
+    existing = (await db.execute(
+        text("SELECT id FROM servers WHERE hostname = :h LIMIT 1"),
+        {"h": data.hostname},
+    )).first()
+    if existing:
+        return existing[0]
+    row = (await db.execute(
+        text("""INSERT INTO servers
+                  (display_name, hostname, fqdn, primary_ip, os_type, os_name,
+                   os_version, kernel_or_build, architecture, collection_mode,
+                   status, tags)
+                VALUES (:dn, :hn, :fqdn, :ip, :os_t, :os_n,
+                        :os_v, :kb, :arch, 'agent', 'unknown', '[]'::jsonb)
+                RETURNING id"""),
+        {
+            "dn": data.hostname, "hn": data.hostname, "fqdn": data.fqdn,
+            "ip": data.primary_ip,
+            "os_t": data.platform if data.platform in ("windows", "linux", "macos") else "other",
+            "os_n": data.os_name, "os_v": data.os_version,
+            "kb": data.kernel_or_build, "arch": data.architecture,
+        },
+    )).first()
+    return row[0]
+
+
+async def _enroll_pending_agent(
+    data: AgentEnrollRequest,
+    client_ip: Optional[str],
+    db: AsyncSession,
+) -> AgentEnrollResponse:
+    if not data.pending_secret:
+        raise HTTPException(400, "pending_secret required when enrollment_token is omitted")
+    agent_uid = data.agent_uid.strip()
+    pending_hash = _sha256(data.pending_secret)
+    current = (await db.execute(
+        text("SELECT * FROM agents WHERE agent_uid = :uid FOR UPDATE"),
+        {"uid": agent_uid},
+    )).mappings().first()
+
+    if not current:
+        policy_id = await _default_policy_id(data.platform, db)
+        row = (await db.execute(
+            text("""INSERT INTO agents
+                      (agent_uid, hostname, platform, version, install_id,
+                       policy_id, pending_secret_hash, authorization_source,
+                       status, current_version, last_ip)
+                    VALUES (:uid, :hn, :plat, :v, :iid,
+                            :pol, :pending, 'pending',
+                            'enrolling', :v, :ip)
+                    RETURNING id"""),
+            {
+                "uid": agent_uid, "hn": data.hostname, "plat": data.platform,
+                "v": data.version, "iid": data.install_id, "pol": policy_id,
+                "pending": pending_hash, "ip": client_ip,
+            },
+        )).first()
+        await db.commit()
+        return AgentEnrollResponse(
+            agent_id=str(row[0]), authorization_state="pending",
+            policy_id=str(policy_id) if policy_id else None,
+        )
+
+    current = dict(current)
+    stored_pending = current.get("pending_secret_hash")
+    if stored_pending and not hmac.compare_digest(str(stored_pending), pending_hash):
+        raise HTTPException(409, "Pending registration belongs to another agent installation")
+
+    await db.execute(
+        text("""UPDATE agents SET hostname = :hn, platform = :plat,
+                  version = :v, install_id = :iid,
+                  pending_secret_hash = COALESCE(pending_secret_hash, :pending),
+                  current_version = :v, last_ip = :ip, updated_at = NOW()
+                WHERE id = :id"""),
+        {
+            "hn": data.hostname, "plat": data.platform, "v": data.version,
+            "iid": data.install_id, "pending": pending_hash,
+            "ip": client_ip, "id": current["id"],
+        },
+    )
+
+    if current.get("revoked_at") is not None:
+        await db.commit()
+        return AgentEnrollResponse(
+            agent_id=str(current["id"]),
+            server_id=str(current["server_id"]) if current.get("server_id") else None,
+            authorization_state="revoked",
+            policy_id=str(current["policy_id"]) if current.get("policy_id") else None,
+        )
+    if current.get("authorized_at") is None:
+        await db.commit()
+        return AgentEnrollResponse(
+            agent_id=str(current["id"]),
+            server_id=str(current["server_id"]) if current.get("server_id") else None,
+            authorization_state="pending",
+            policy_id=str(current["policy_id"]) if current.get("policy_id") else None,
+        )
+
+    server_id = current.get("server_id") or await _ensure_pending_server(data, db)
+    api_key, api_hash, prefix = _new_api_key()
+    await db.execute(
+        text("""UPDATE agents SET server_id = :sid,
+                  api_key_hash = :hash, api_key_prefix = :prefix,
+                  api_key_rotated_at = NOW(), status = 'enrolling',
+                  revoked_at = NULL, revoked_by = NULL, updated_at = NOW()
+                WHERE id = :id"""),
+        {
+            "sid": server_id, "hash": api_hash, "prefix": prefix,
+            "id": current["id"],
+        },
+    )
+    await db.commit()
+    return AgentEnrollResponse(
+        agent_id=str(current["id"]), server_id=str(server_id), api_key=api_key,
+        authorization_state="authorized",
+        heartbeat_interval_s=DEFAULT_HEARTBEAT_S,
+        config_poll_interval_s=DEFAULT_CONFIG_POLL_S,
+        upload_interval_s=DEFAULT_UPLOAD_S,
+        policy_id=str(current["policy_id"]) if current.get("policy_id") else None,
+    )
+
+
 @router.post("/enroll", response_model=AgentEnrollResponse)
 async def enroll(
     data: AgentEnrollRequest,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Exchange a one-time enrollment token for a long-lived api-key."""
+    """Register pending, or exchange authorization for a long-lived API key."""
     client_ip = _client_ip(request)
     agent_uid = data.agent_uid.strip()
+    enrollment_token = (data.enrollment_token or "").strip()
+    if not enrollment_token:
+        return await _enroll_pending_agent(data, client_ip, db)
     tok, _first_claim = await _claim_enrollment_token(
         db,
-        token_hash=_sha256(data.enrollment_token),
+        token_hash=_sha256(enrollment_token),
         agent_uid=agent_uid,
         platform=data.platform,
         client_ip=client_ip,
@@ -385,6 +526,12 @@ async def enroll(
                       api_key_hash = :h,
                       api_key_prefix = :p,
                       api_key_rotated_at = NOW(),
+                      pending_secret_hash = COALESCE(:pending, pending_secret_hash),
+                      authorized_at = NOW(),
+                      revoked_at = NULL,
+                      revoked_by = NULL,
+                      authorization_source = 'enrollment_token',
+                      enrollment_token_prefix = :token_prefix,
                       status = 'online',
                       last_heartbeat_at = NOW(),
                       current_version = :v,
@@ -401,6 +548,8 @@ async def enroll(
                 "pol": tok.get("policy_id"),
                 "h": api_hash,
                 "p": prefix,
+                "pending": _sha256(data.pending_secret) if data.pending_secret else None,
+                "token_prefix": tok.get("token_prefix"),
                 "ip": client_ip,
                 "aid": agent_id,
             },
@@ -421,11 +570,14 @@ async def enroll(
         ins = (await db.execute(
             text("""INSERT INTO agents (server_id, agent_uid, hostname, platform, version, install_id,
                                          site_id, policy_id, api_key_hash, api_key_prefix,
-                                         api_key_rotated_at, status, last_heartbeat_at,
+                                         api_key_rotated_at, pending_secret_hash,
+                                         authorized_at, authorization_source,
+                                         enrollment_token_prefix, status, last_heartbeat_at,
                                          current_version, last_ip)
                     VALUES (:sid, :uid, :hn, :plat, :v, :iid,
                             :site, :pol, :h, :p,
-                            NOW(), 'online', NOW(),
+                            NOW(), :pending,
+                            NOW(), 'enrollment_token', :token_prefix, 'online', NOW(),
                             :v, :ip)
                     RETURNING id"""),
             {
@@ -433,6 +585,8 @@ async def enroll(
                 "plat": data.platform, "v": data.version, "iid": data.install_id,
                 "site": tok.get("site_id"), "pol": policy_id,
                 "h": api_hash, "p": prefix, "ip": client_ip,
+                "pending": _sha256(data.pending_secret) if data.pending_secret else None,
+                "token_prefix": tok.get("token_prefix"),
             },
         )).first()
         agent_id = ins[0]
@@ -442,6 +596,7 @@ async def enroll(
         agent_id=str(agent_id),
         server_id=str(server_id),
         api_key=api_key,
+        authorization_state="authorized",
         heartbeat_interval_s=DEFAULT_HEARTBEAT_S,
         config_poll_interval_s=DEFAULT_CONFIG_POLL_S,
         upload_interval_s=DEFAULT_UPLOAD_S,
@@ -479,6 +634,9 @@ async def heartbeat(
                   capabilities = CASE WHEN :caps_present
                                       THEN CAST(:caps AS jsonb)
                                       ELSE capabilities END,
+                  apm_status = CASE WHEN :apm_present
+                                    THEN CAST(:apm AS jsonb)
+                                    ELSE apm_status END,
                   last_ip = COALESCE(:ip, last_ip),
                   status = CASE WHEN status IN ('disabled') THEN status ELSE 'online' END,
                   updated_at = NOW()
@@ -488,6 +646,8 @@ async def heartbeat(
             "ch": data.config_hash, "err": data.config_apply_error,
             "caps_present": capabilities is not None,
             "caps": json.dumps(capabilities or []),
+            "apm_present": data.apm is not None,
+            "apm": json.dumps(data.apm.model_dump(mode="json") if data.apm else {}),
             "ip": client_ip, "id": agent["id"],
         },
     )

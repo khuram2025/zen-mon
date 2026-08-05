@@ -44,6 +44,7 @@ import { ServicesPage as ApmServicesPage } from '@/pages/apm/ServicesPage'
 import { ServiceDetailPage as ApmServiceDetailPage } from '@/pages/apm/ServiceDetailPage'
 import { ServiceMapPage as ApmServiceMapPage } from '@/pages/apm/ServiceMapPage'
 import { ErrorsInboxPage } from '@/pages/apm/ErrorsInboxPage'
+import { SlosPage } from '@/pages/apm/SlosPage'
 import { ErrorIssueDetailPage } from '@/pages/apm/ErrorIssueDetailPage'
 import { ServersDashboardPage } from '@/pages/servers/ServersDashboardPage'
 import { ServerInventoryPage } from '@/pages/servers/ServersPage'
@@ -160,6 +161,7 @@ export default function App() {
         <Route path="apm/services" element={<ApmServicesPage />} />
         <Route path="apm/services/:name" element={<ApmServiceDetailPage />} />
         <Route path="apm/service-map" element={<ApmServiceMapPage />} />
+        <Route path="apm/slos" element={<SlosPage />} />
         <Route path="apm/errors" element={<ErrorsInboxPage />} />
         <Route path="apm/errors/:id" element={<ErrorIssueDetailPage />} />
         <Route path="apm/traces" element={<TraceExplorerPage />} />

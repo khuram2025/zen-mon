@@ -35,7 +35,7 @@ type State = {
   duration: number
   severity: 'info' | 'warning' | 'critical'
   cooldown: number
-  source: 'device' | 'service' | 'trap'
+  source: 'device' | 'service' | 'trap' | 'apm'
   device_id: string
   group_id: string
   service_check_id: string
@@ -77,6 +77,19 @@ const NETWORK_METRICS = [
 ] as const
 
 const INTERFACE_METRICS = new Set<string>(NETWORK_METRICS.filter((m) => m.iface).map((m) => m.value))
+
+// APM (application) metrics, evaluated per-service by the periodic APM alert
+// evaluator against the RED rollups. Latency is milliseconds; error rate and
+// apdex are fractions in 0–1; throughput is requests/second. Scope: the
+// service picker (stored in `target`; empty = every reporting service).
+const APM_METRICS = [
+  { value: 'apm_latency_p95', label: 'p95 latency (ms)' },
+  { value: 'apm_latency_p99', label: 'p99 latency (ms)' },
+  { value: 'apm_latency_p50', label: 'p50 latency (ms)' },
+  { value: 'apm_error_rate', label: 'Error rate (0.02 = 2%)' },
+  { value: 'apm_throughput', label: 'Throughput (req/s)' },
+  { value: 'apm_apdex', label: 'Apdex (0–1)' },
+] as const
 
 const empty: State = {
   name: '',
@@ -144,6 +157,13 @@ export function AlertRuleFormDialog({
     queryFn: async () => (await api.get('/settings/channels')).data,
     enabled: open,
   })
+
+  const { data: apmServicesResp } = useQuery<any>({
+    queryKey: ['apm', 'services', 'list-min'],
+    queryFn: async () => (await api.get('/apm/services?range=24h')).data,
+    enabled: open && s.source === 'apm',
+  })
+  const apmServices: string[] = (apmServicesResp?.services || []).map((x: any) => x.name)
   const channels: any[] = Array.isArray(channelsResp) ? channelsResp : channelsResp?.data || []
 
   const toggleChannel = (id: string) =>
@@ -194,6 +214,8 @@ export function AlertRuleFormDialog({
         source:
           rule.metric === 'trap'
             ? 'trap'
+            : String(rule.metric || '').startsWith('apm_')
+            ? 'apm'
             : rule.service_check_id || rule.service_check_group_id || rule.metric === 'service_status'
             ? 'service'
             : 'device',
@@ -231,6 +253,7 @@ export function AlertRuleFormDialog({
     const isService = s.source === 'service'
     const isTrap = s.source === 'trap'
     const isDevice = s.source === 'device'
+    const isApm = s.source === 'apm'
     const first = s.conditions[0]
     // Device rules: send the full conditions array only when compound (>1);
     // a single condition stays in the legacy flat columns (conditions = null).
@@ -240,13 +263,18 @@ export function AlertRuleFormDialog({
       description: s.description || null,
       enabled: s.enabled,
       metric: isService ? 'service_status' : isTrap ? 'trap' : first.metric,
-      operator: isDevice ? first.operator : '==',
-      threshold: isDevice ? first.threshold : 0,
+      operator: isDevice || isApm ? first.operator : '==',
+      threshold: isDevice || isApm ? first.threshold : 0,
       conditions,
       condition_logic: s.condition_logic,
       trap_oid: isTrap ? s.trap_oid.trim() || null : null,
-      // Interface filter only applies to device-scoped interface metrics.
-      target: isDevice && INTERFACE_METRICS.has(first.metric) ? s.target.trim() || null : null,
+      // target: interface filter for device interface metrics; APM service
+      // name for APM rules (empty = every reporting service).
+      target: isApm
+        ? s.target.trim() || null
+        : isDevice && INTERFACE_METRICS.has(first.metric)
+        ? s.target.trim() || null
+        : null,
       duration: s.duration,
       severity: s.severity,
       cooldown: s.cooldown,
@@ -342,15 +370,25 @@ export function AlertRuleFormDialog({
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="ping_status">Ping status (0/1)</SelectItem>
-                            <SelectItem value="rtt">Round-trip time (ms)</SelectItem>
-                            <SelectItem value="packet_loss">Packet loss (%)</SelectItem>
-                            <SelectItem value="jitter">Jitter (ms)</SelectItem>
-                            {NETWORK_METRICS.map((m) => (
-                              <SelectItem key={m.value} value={m.value}>
-                                {m.label}
-                              </SelectItem>
-                            ))}
+                            {s.source === 'apm' ? (
+                              APM_METRICS.map((m) => (
+                                <SelectItem key={m.value} value={m.value}>
+                                  {m.label}
+                                </SelectItem>
+                              ))
+                            ) : (
+                              <>
+                                <SelectItem value="ping_status">Ping status (0/1)</SelectItem>
+                                <SelectItem value="rtt">Round-trip time (ms)</SelectItem>
+                                <SelectItem value="packet_loss">Packet loss (%)</SelectItem>
+                                <SelectItem value="jitter">Jitter (ms)</SelectItem>
+                                {NETWORK_METRICS.map((m) => (
+                                  <SelectItem key={m.value} value={m.value}>
+                                    {m.label}
+                                  </SelectItem>
+                                ))}
+                              </>
+                            )}
                           </SelectContent>
                         </Select>
                       </FormField>
@@ -391,10 +429,12 @@ export function AlertRuleFormDialog({
                     </Button>
                   </div>
                 ))}
-                <Button type="button" variant="outline" size="sm" onClick={addCond}>
-                  <Plus className="h-3.5 w-3.5" />
-                  Add condition
-                </Button>
+                {s.source !== 'apm' && (
+                  <Button type="button" variant="outline" size="sm" onClick={addCond}>
+                    <Plus className="h-3.5 w-3.5" />
+                    Add condition
+                  </Button>
+                )}
                 {s.conditions.length > 1 && (
                   <p className="text-[11px] text-muted">
                     Rule fires when{' '}
@@ -445,7 +485,18 @@ export function AlertRuleFormDialog({
               <div className="flex rounded-md border border-border bg-surface2 p-0.5 text-xs">
                 <button
                   type="button"
-                  onClick={() => setS({ ...s, source: 'device', service_check_id: '', service_check_group_id: '' })}
+                  onClick={() =>
+                    setS({
+                      ...s,
+                      source: 'device',
+                      service_check_id: '',
+                      service_check_group_id: '',
+                      // Leaving APM scope: reset APM conditions/target to device defaults.
+                      ...(s.source === 'apm'
+                        ? { target: '', conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }] }
+                        : {}),
+                    })
+                  }
                   className={`rounded px-2.5 py-1 font-medium ${
                     s.source === 'device' ? 'bg-primary text-white' : 'text-muted hover:text-text'
                   }`}
@@ -470,9 +521,51 @@ export function AlertRuleFormDialog({
                 >
                   SNMP Trap
                 </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setS({
+                      ...s,
+                      source: 'apm',
+                      device_id: '',
+                      group_id: '',
+                      service_check_id: '',
+                      service_check_group_id: '',
+                      target: '',
+                      conditions: [{ metric: 'apm_latency_p95', operator: '>', threshold: 800 }],
+                    })
+                  }
+                  className={`rounded px-2.5 py-1 font-medium ${
+                    s.source === 'apm' ? 'bg-primary text-white' : 'text-muted hover:text-text'
+                  }`}
+                >
+                  APM
+                </button>
               </div>
             </div>
-            {s.source !== 'service' ? (
+            {s.source === 'apm' ? (
+              <div className="grid grid-cols-1 gap-3">
+                <FormField
+                  label="Application service"
+                  hint="Empty = every service reporting traces. Evaluated per service every minute against the RED rollups."
+                >
+                  <Select
+                    value={s.target || '__all__'}
+                    onValueChange={(v) => setS({ ...s, target: v === '__all__' ? '' : v })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Any service" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__all__">Any service</SelectItem>
+                      {apmServices.map((name) => (
+                        <SelectItem key={name} value={name}>{name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </FormField>
+              </div>
+            ) : s.source !== 'service' ? (
               <div className="grid grid-cols-2 gap-3">
                 <FormField label="Device">
                   <Select

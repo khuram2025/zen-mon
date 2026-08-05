@@ -81,6 +81,19 @@ _SPAN_KIND_STR = {0: "UNSPECIFIED", 1: "INTERNAL", 2: "SERVER", 3: "CLIENT",
                   4: "PRODUCER", 5: "CONSUMER"}
 _STATUS_STR = {0: "UNSET", 1: "OK", 2: "ERROR"}
 
+
+def _otlp_enum_number(value: object, prefix: str, names: dict[int, str]) -> int:
+    """Decode either the numeric or canonical string OTLP/JSON enum form."""
+    if value is None or value == "":
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        normalized = str(value).upper()
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):]
+        return next((number for number, name in names.items() if name == normalized), 0)
+
 # observability counters (read by /v1/traces health + tests)
 STATS = {"accepted_spans": 0, "rejected_spans": 0, "dropped_spans": 0, "flushes": 0}
 
@@ -181,9 +194,13 @@ def decode_otlp_traces_json(payload: dict, default_env: str | None) -> tuple[lis
                         continue
                     dur = max(0, end_ns - start_ns)
                     a_s, a_n, a_b = _attr_list_to_maps(sp.get("attributes", []))
-                    kind = int(sp.get("kind", 0) or 0)
+                    kind = _otlp_enum_number(
+                        sp.get("kind", 0), "SPAN_KIND_", _SPAN_KIND_STR,
+                    )
                     status = sp.get("status") or {}
-                    scode = int(status.get("code", 0) or 0)
+                    scode = _otlp_enum_number(
+                        status.get("code", 0), "STATUS_CODE_", _STATUS_STR,
+                    )
                     ev = sp.get("events", []) or []
                     lk = sp.get("links", []) or []
                     http_sc = a_n.get("http.status_code") or a_n.get("http.response.status_code") or 0

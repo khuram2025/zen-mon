@@ -835,6 +835,15 @@ def _agent_response(row: dict) -> AgentResponse:
         version=row.get("version"),
         status=row["status"],
         api_key_prefix=row.get("api_key_prefix"),
+        authorization_state=(
+            "revoked" if row.get("revoked_at") is not None
+            else "authorized" if row.get("authorized_at") is not None or row.get("api_key_hash")
+            else "pending"
+        ),
+        authorization_source=row.get("authorization_source"),
+        enrollment_token_prefix=row.get("enrollment_token_prefix"),
+        authorized_at=row.get("authorized_at"),
+        revoked_at=row.get("revoked_at"),
         last_heartbeat_at=row.get("last_heartbeat_at"),
         last_metric_at=row.get("last_metric_at"),
         last_config_hash=row.get("last_config_hash"),
@@ -900,6 +909,47 @@ class NetworkCaptureStart(BaseModel):
         ge=CAPTURE_RETENTION_MIN_S,
         le=CAPTURE_RETENTION_MAX_S,
     )
+
+
+async def _authorize_agents(ids: list[UUID], user_id: UUID, db: AsyncSession) -> int:
+    result = await db.execute(
+        text("""UPDATE agents SET
+                  authorized_at = NOW(), authorized_by = :user,
+                  revoked_at = NULL, revoked_by = NULL,
+                  authorization_source = 'admin',
+                  status = 'enrolling', updated_at = NOW()
+                WHERE id = ANY(:ids)
+                RETURNING id"""),
+        {"ids": ids, "user": user_id},
+    )
+    return len(result.fetchall())
+
+
+async def _revoke_agents(ids: list[UUID], user_id: UUID, db: AsyncSession) -> int:
+    # Revoke the APM key first while its provenance mapping is still present.
+    await db.execute(
+        text("""UPDATE apm_ingest_keys AS key SET
+                  enabled = FALSE, revoked_at = NOW(), rotated_at = NOW()
+                FROM agent_apm_credentials AS credential
+                WHERE credential.key_id = key.id
+                  AND credential.agent_id = ANY(:ids)
+                  AND key.revoked_at IS NULL"""),
+        {"ids": ids},
+    )
+    await db.execute(
+        text("DELETE FROM agent_apm_credentials WHERE agent_id = ANY(:ids)"),
+        {"ids": ids},
+    )
+    result = await db.execute(
+        text("""UPDATE agents SET
+                  api_key_hash = NULL, api_key_prefix = NULL,
+                  revoked_at = NOW(), revoked_by = :user,
+                  status = 'disabled', updated_at = NOW()
+                WHERE id = ANY(:ids)
+                RETURNING id"""),
+        {"ids": ids, "user": user_id},
+    )
+    return len(result.fetchall())
 
 
 @router.post("/{server_id}/network-capture")
@@ -2494,6 +2544,32 @@ async def get_agent(
     return _agent_response(dict(row))
 
 
+@fleet_router.post("/{agent_id}/authorize")
+async def authorize_agent(
+    agent_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    affected = await _authorize_agents([agent_id], user.id, db)
+    await db.commit()
+    if not affected:
+        raise HTTPException(404, "Agent not found")
+    return {"ok": True, "authorization_state": "authorized"}
+
+
+@fleet_router.post("/{agent_id}/revoke")
+async def revoke_agent(
+    agent_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    affected = await _revoke_agents([agent_id], user.id, db)
+    await db.commit()
+    if not affected:
+        raise HTTPException(404, "Agent not found")
+    return {"ok": True, "authorization_state": "revoked"}
+
+
 @fleet_router.post("/{agent_id}/rotate-certificate")
 async def rotate_certificate(
     agent_id: UUID,
@@ -2627,7 +2703,12 @@ async def fleet_bulk_action(
     if not data.agent_ids:
         return {"ok": True, "affected": 0}
     ids = list(data.agent_ids)
-    if data.action == "change_policy":
+    affected = len(ids)
+    if data.action == "authorize":
+        affected = await _authorize_agents(ids, user.id, db)
+    elif data.action == "revoke":
+        affected = await _revoke_agents(ids, user.id, db)
+    elif data.action == "change_policy":
         if not data.policy_id:
             raise HTTPException(400, "policy_id required")
         await db.execute(
@@ -2686,7 +2767,7 @@ async def fleet_bulk_action(
     else:
         raise HTTPException(400, "Unknown action")
     await db.commit()
-    return {"ok": True, "affected": len(ids)}
+    return {"ok": True, "affected": affected}
 
 
 # ── Server monitoring overview KPIs ─────────────────────────────────
