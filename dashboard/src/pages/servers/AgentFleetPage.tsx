@@ -5,8 +5,9 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  AlertTriangle, Bot, ChevronLeft, ChevronRight, Clock, CloudOff, Download, FileDown,
-  HardDrive, Inbox, KeyRound, Plus, Search, Trash2, Wifi, WifiOff, X,
+  AlertTriangle, Bot, CheckCircle2, ChevronLeft, ChevronRight, Clock, CloudOff, Download,
+  FileDown, HardDrive, Inbox, KeyRound, Plus, Search, ShieldAlert, ShieldOff, Trash2,
+  UserCheck, Wifi, WifiOff, X,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, formatBytes, relativeTime } from '@/lib/utils'
@@ -21,7 +22,7 @@ import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { toast } from '@/components/ui/Toast'
-import { AgentStatusBadge, KpiTile, TagList } from '@/components/servers/shared'
+import { AgentStatusBadge, AuthorizationBadge, KpiTile, TagList } from '@/components/servers/shared'
 import { InstallTokenDialog } from '@/components/servers/InstallTokenDialog'
 import { DownloadAgentDialog } from '@/components/servers/DownloadAgentDialog'
 import { RolloutTokensDialog } from '@/components/servers/RolloutTokensDialog'
@@ -32,6 +33,7 @@ interface AgentFleetSummary {
   stale: number
   offline: number
   disabled: number
+  pending_authorization: number
   total: number
   queue_depth: number
   spool_bytes: number
@@ -46,6 +48,8 @@ interface AgentFleetResponse {
 }
 
 type BulkAction =
+  | 'authorize'
+  | 'revoke'
   | 'change_policy'
   | 'change_update_ring'
   | 'request_diagnostics'
@@ -55,6 +59,8 @@ type BulkAction =
   | 'enable'
 
 const BULK_ACTIONS: { value: BulkAction; label: string }[] = [
+  { value: 'authorize', label: 'Authorize' },
+  { value: 'revoke', label: 'Revoke authorization' },
   { value: 'change_policy', label: 'Change policy' },
   { value: 'change_update_ring', label: 'Change update ring' },
   { value: 'request_diagnostics', label: 'Request diagnostics' },
@@ -76,6 +82,13 @@ const STATUS_FILTERS = [
   { value: 'error', label: 'Error' },
 ]
 
+const AUTHORIZATION_FILTERS = [
+  { value: 'all', label: 'All authorization' },
+  { value: 'pending', label: 'Awaiting authorization' },
+  { value: 'authorized', label: 'Authorized' },
+  { value: 'revoked', label: 'Revoked' },
+]
+
 const PLATFORM_FILTERS = [
   { value: 'all', label: 'All platforms' },
   { value: 'windows', label: 'Windows' },
@@ -93,7 +106,7 @@ const RING_FILTERS = [
 
 const UPDATE_RINGS: UpdateRing[] = ['canary', 'beta', 'stable', 'pinned']
 
-const COLS = 11
+const COLS = 12
 
 const PAGE_SIZE = 50
 
@@ -104,6 +117,7 @@ export function AgentFleetPage() {
   const [status, setStatus] = useState('all')
   const [platform, setPlatform] = useState('all')
   const [ring, setRing] = useState('all')
+  const [authFilter, setAuthFilter] = useState('all')
   const [page, setPage] = useState(1)
   const [deployOpen, setDeployOpen] = useState(false)
   const [tokensOpen, setTokensOpen] = useState(false)
@@ -114,6 +128,8 @@ export function AgentFleetPage() {
   const [bulkVersion, setBulkVersion] = useState('')
   const [confirmDisable, setConfirmDisable] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<AgentItem | null>(null)
+  const [revokeTarget, setRevokeTarget] = useState<AgentItem | null>(null)
+  const [confirmBulkRevoke, setConfirmBulkRevoke] = useState(false)
   const [pendingRow, setPendingRow] = useState<string | null>(null)
 
   // Debounce the search box so we don't fire a request per keystroke.
@@ -125,16 +141,17 @@ export function AgentFleetPage() {
   useEffect(() => {
     setPage(1)
     setSelected(new Set())
-  }, [q, status, platform, ring])
+  }, [q, status, platform, ring, authFilter])
 
   const { data, isLoading, isError, error } = useQuery<AgentFleetResponse>({
-    queryKey: ['agent-fleet', q, status, platform, ring, page],
+    queryKey: ['agent-fleet', q, status, platform, ring, authFilter, page],
     queryFn: async () =>
       (await api.get('/agent-fleet', {
         params: {
           status: status === 'all' ? '' : status,
           platform: platform === 'all' ? '' : platform,
           update_ring: ring === 'all' ? '' : ring,
+          authorization: authFilter === 'all' ? '' : authFilter,
           q,
           page,
           page_size: PAGE_SIZE,
@@ -159,6 +176,7 @@ export function AgentFleetPage() {
   const summary = data?.summary
   const online = summary?.online ?? 0
   const down = (summary?.offline ?? 0) + (summary?.stale ?? 0)
+  const pendingAuth = summary?.pending_authorization ?? 0
   const queueBacklog = summary?.queue_depth ?? 0
   const spoolTotal = summary?.spool_bytes ?? 0
   const fleetTotal = summary?.total ?? total
@@ -180,6 +198,25 @@ export function AgentFleetPage() {
 
   // ---- mutations ----
   const invalidate = () => qc.invalidateQueries({ queryKey: ['agent-fleet'] })
+
+  const authorize = useMutation({
+    mutationFn: async (id: string) => { setPendingRow(id); return api.post(`/agent-fleet/${id}/authorize`) },
+    onSuccess: () => {
+      toast.success('Agent authorized', 'It will receive its API key on the next check-in')
+      invalidate()
+    },
+    onError: (e) => toast.error('Authorization failed', apiErrorMessage(e)),
+    onSettled: () => setPendingRow(null),
+  })
+
+  const revoke = useMutation({
+    mutationFn: async (id: string) => api.post(`/agent-fleet/${id}/revoke`),
+    onSuccess: () => {
+      toast.success('Authorization revoked', "The agent's API key no longer authenticates")
+      invalidate()
+    },
+    onError: (e) => toast.error('Revoke failed', apiErrorMessage(e)),
+  })
 
   const requestDiagnostics = useMutation({
     mutationFn: async (id: string) => { setPendingRow(id); return api.post(`/agent-fleet/${id}/request-diagnostics`) },
@@ -230,6 +267,7 @@ export function AgentFleetPage() {
       invalidate()
       clearSelection()
       setConfirmDisable(false)
+      setConfirmBulkRevoke(false)
     },
     onError: (e) => toast.error('Bulk action failed', apiErrorMessage(e)),
   })
@@ -237,6 +275,10 @@ export function AgentFleetPage() {
   const applyBulk = () => {
     if (bulkAction === 'disable') {
       setConfirmDisable(true)
+      return
+    }
+    if (bulkAction === 'revoke') {
+      setConfirmBulkRevoke(true)
       return
     }
     bulk.mutate()
@@ -277,9 +319,24 @@ export function AgentFleetPage() {
       </div>
 
       {/* KPIs */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
         <KpiTile icon={Wifi} label="Online" value={online} tone="success" />
         <KpiTile icon={WifiOff} label="Offline / Stale" value={down} tone="danger" />
+        {pendingAuth > 0 ? (
+          <button
+            type="button"
+            onClick={() => setAuthFilter('pending')}
+            className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-left transition-colors hover:bg-warning/15"
+          >
+            <div className="flex items-center gap-2 text-xs font-medium text-warning">
+              <ShieldAlert className="h-3.5 w-3.5" /> Awaiting authorization
+            </div>
+            <div className="mt-1 text-xl font-semibold text-warning">{pendingAuth}</div>
+            <div className="text-[11px] text-warning/80">click to review</div>
+          </button>
+        ) : (
+          <KpiTile icon={UserCheck} label="Awaiting authorization" value={0} />
+        )}
         <KpiTile icon={Inbox} label="Queue backlog" value={queueBacklog.toLocaleString()} sub="pending batches" tone="info" />
         <KpiTile icon={HardDrive} label="Spool size" value={formatBytes(spoolTotal)} sub="buffered on disk" />
       </div>
@@ -313,6 +370,12 @@ export function AgentFleetPage() {
               <SelectTrigger className="w-[130px]"><SelectValue /></SelectTrigger>
               <SelectContent>
                 {RING_FILTERS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Select value={authFilter} onValueChange={setAuthFilter}>
+              <SelectTrigger className="w-[190px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {AUTHORIZATION_FILTERS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>
@@ -392,12 +455,13 @@ export function AgentFleetPage() {
                     <Th>Platform</Th>
                     <Th>Version</Th>
                     <Th>Status</Th>
+                    <Th>Authorization</Th>
                     <Th>Policy</Th>
                     <Th>Ring</Th>
                     <Th>Heartbeat</Th>
                     <Th>Queue</Th>
                     <Th>Last IP</Th>
-                    <Th className="w-20 text-right">Actions</Th>
+                    <Th className="w-28 text-right">Actions</Th>
                   </Tr>
                 </THead>
                 <TBody>
@@ -461,6 +525,9 @@ export function AgentFleetPage() {
                           )}
                         </div>
                       </Td>
+                      <Td>
+                        <AuthorizationBadge state={agent.authorization_state} source={agent.authorization_source} />
+                      </Td>
                       <Td className="text-xs">{agent.policy_name || '—'}</Td>
                       <Td>
                         <Badge variant="outline" className="capitalize">{agent.update_ring}</Badge>
@@ -473,22 +540,42 @@ export function AgentFleetPage() {
                       <Td className="font-mono text-xs text-muted">{agent.last_ip || '—'}</Td>
                       <Td>
                         <div className="flex justify-end gap-0.5">
-                          <Button
-                            variant="ghost" size="icon" className="h-7 w-7"
-                            onClick={() => requestDiagnostics.mutate(agent.id)}
-                            disabled={pendingRow === agent.id}
-                            title="Request diagnostics"
-                          >
-                            <FileDown className="h-3.5 w-3.5" />
-                          </Button>
-                          <Button
-                            variant="ghost" size="icon" className="h-7 w-7"
-                            onClick={() => rotateCertificate.mutate(agent.id)}
-                            disabled={pendingRow === agent.id}
-                            title="Rotate certificate"
-                          >
-                            <KeyRound className="h-3.5 w-3.5" />
-                          </Button>
+                          {agent.authorization_state === 'authorized' ? (
+                            <>
+                              <Button
+                                variant="ghost" size="icon" className="h-7 w-7"
+                                onClick={() => requestDiagnostics.mutate(agent.id)}
+                                disabled={pendingRow === agent.id}
+                                title="Request diagnostics"
+                              >
+                                <FileDown className="h-3.5 w-3.5" />
+                              </Button>
+                              <Button
+                                variant="ghost" size="icon" className="h-7 w-7"
+                                onClick={() => rotateCertificate.mutate(agent.id)}
+                                disabled={pendingRow === agent.id}
+                                title="Rotate certificate"
+                              >
+                                <KeyRound className="h-3.5 w-3.5" />
+                              </Button>
+                              <Button
+                                variant="ghost" size="icon" className="h-7 w-7 text-muted hover:text-danger"
+                                onClick={() => setRevokeTarget(agent)}
+                                title="Revoke authorization"
+                              >
+                                <ShieldOff className="h-3.5 w-3.5" />
+                              </Button>
+                            </>
+                          ) : (
+                            <Button
+                              variant="ghost" size="icon" className="h-7 w-7 text-warning hover:text-warning"
+                              onClick={() => authorize.mutate(agent.id)}
+                              disabled={pendingRow === agent.id}
+                              title={agent.authorization_state === 'revoked' ? 'Re-authorize agent' : 'Authorize agent'}
+                            >
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
                           <Button
                             variant="ghost" size="icon" className="h-7 w-7 text-muted hover:text-danger"
                             onClick={() => setDeleteTarget(agent)}
@@ -563,6 +650,41 @@ export function AgentFleetPage() {
         destructive
         loading={bulk.isPending}
         onConfirm={() => bulk.mutate()}
+      />
+      <ConfirmDialog
+        open={confirmBulkRevoke}
+        onOpenChange={setConfirmBulkRevoke}
+        title="Revoke authorization"
+        description={
+          <>
+            Revoke authorization for <span className="font-semibold text-text">{selected.size}</span> selected
+            agent{selected.size === 1 ? '' : 's'}? Each agent's API key stops authenticating immediately;
+            it can be re-authorized later without re-enrolling.
+          </>
+        }
+        confirmText="Revoke"
+        destructive
+        loading={bulk.isPending}
+        onConfirm={() => bulk.mutate()}
+      />
+      <ConfirmDialog
+        open={Boolean(revokeTarget)}
+        onOpenChange={(o) => { if (!o) setRevokeTarget(null) }}
+        title="Revoke authorization"
+        description={
+          <>
+            Revoke authorization for <span className="font-semibold text-text">{revokeTarget?.hostname || revokeTarget?.agent_uid}</span>?
+            Its API key stops authenticating immediately; it can be re-authorized later
+            without re-enrolling.
+          </>
+        }
+        confirmText="Revoke"
+        destructive
+        loading={revoke.isPending}
+        onConfirm={() => {
+          if (revokeTarget) revoke.mutate(revokeTarget.id)
+          setRevokeTarget(null)
+        }}
       />
     </div>
   )

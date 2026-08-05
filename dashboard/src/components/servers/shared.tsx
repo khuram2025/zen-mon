@@ -46,6 +46,29 @@ export function AgentStatusBadge({ status }: { status: AgentStatus | null }) {
   return <Badge variant={meta.variant}><Bot className="h-3 w-3" /> {meta.label}</Badge>
 }
 
+const AUTHORIZATION_META: Record<'pending' | 'authorized' | 'revoked', { label: string; variant: 'success' | 'warning' | 'danger' }> = {
+  pending: { label: 'Pending', variant: 'warning' },
+  authorized: { label: 'Authorized', variant: 'success' },
+  revoked: { label: 'Revoked', variant: 'danger' },
+}
+
+const AUTH_SOURCE_LABEL: Record<string, string> = {
+  legacy: 'legacy key',
+  enrollment_token: 'enrollment token',
+  admin: 'admin',
+  pending: 'self-registered',
+}
+
+export function AuthorizationBadge({ state, source }: { state: 'pending' | 'authorized' | 'revoked'; source?: string | null }) {
+  const meta = AUTHORIZATION_META[state] || AUTHORIZATION_META.pending
+  const sourceLabel = source ? (AUTH_SOURCE_LABEL[source] || source) : undefined
+  return (
+    <Badge variant={meta.variant} title={sourceLabel ? `via ${sourceLabel}` : undefined}>
+      {meta.label}
+    </Badge>
+  )
+}
+
 export function OsIcon({ os, className }: { os: OsType | string | null; className?: string }) {
   const cls = cn('h-4 w-4 shrink-0', className)
   switch (os) {

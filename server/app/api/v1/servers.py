@@ -2092,6 +2092,7 @@ async def list_fleet(
     site_id: Optional[UUID] = None,
     policy_id: Optional[UUID] = None,
     update_ring: Optional[str] = None,
+    authorization: Optional[str] = None,
     q: Optional[str] = None,
     sort: str = "last_heartbeat_at",
     order: str = "desc",
@@ -2128,6 +2129,12 @@ async def list_fleet(
         where.append("a.policy_id = :pol"); params["pol"] = policy_id
     if update_ring:
         where.append("a.update_ring = :ur"); params["ur"] = update_ring
+    if authorization == "pending":
+        where.append("a.authorized_at IS NULL AND a.revoked_at IS NULL")
+    elif authorization == "authorized":
+        where.append("a.authorized_at IS NOT NULL AND a.revoked_at IS NULL")
+    elif authorization == "revoked":
+        where.append("a.revoked_at IS NOT NULL")
     if q:
         where.append("(a.hostname ILIKE :q OR a.agent_uid ILIKE :q OR a.version ILIKE :q)")
         params["q"] = f"%{q}%"
@@ -2152,6 +2159,8 @@ async def list_fleet(
                   COUNT(*) FILTER (WHERE status = 'stale')    AS stale,
                   COUNT(*) FILTER (WHERE status = 'offline')  AS offline,
                   COUNT(*) FILTER (WHERE status = 'disabled') AS disabled,
+                  COUNT(*) FILTER (WHERE authorized_at IS NULL
+                                     AND revoked_at IS NULL)   AS pending_authorization,
                   COUNT(*)                                    AS total,
                   COALESCE(SUM(queue_depth), 0)               AS queue_depth,
                   COALESCE(SUM(spool_bytes), 0)               AS spool_bytes

@@ -103,6 +103,11 @@ export interface AgentItem {
   version: string | null
   status: AgentStatus
   api_key_prefix: string | null
+  authorization_state: 'pending' | 'authorized' | 'revoked'
+  authorization_source: string | null
+  enrollment_token_prefix: string | null
+  authorized_at: string | null
+  revoked_at: string | null
   last_heartbeat_at: string | null
   last_metric_at: string | null
   last_config_hash: string | null
