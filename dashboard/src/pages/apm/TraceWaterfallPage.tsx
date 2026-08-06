@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { Loader2, ArrowLeft, AlertCircle, Database, Server, ArrowRightLeft } from 'lucide-react'
+import { Loader2, ArrowLeft, AlertCircle, Check, Copy, Database, Server, ArrowRightLeft } from 'lucide-react'
 import { api } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
+import { KbLink } from '@/components/apm/KbLink'
 
 interface SpanNode {
   span_id: string
@@ -50,6 +51,7 @@ export function TraceWaterfallPage() {
   const { traceId } = useParams()
   const navigate = useNavigate()
   const [selected, setSelected] = useState<SpanNode | null>(null)
+  const [copied, setCopied] = useState(false)
 
   const query = useQuery<TraceDetail>({
     queryKey: ['apm', 'trace', traceId],
@@ -77,7 +79,16 @@ export function TraceWaterfallPage() {
       <div className="flex items-center gap-3">
         <Button variant="ghost" size="sm" onClick={() => navigate('/apm/traces')}><ArrowLeft className="w-4 h-4 mr-1" /> Traces</Button>
         <h1 className="text-lg font-semibold text-text">Trace</h1>
-        <code className="text-xs text-muted font-mono">{trace.trace_id}</code>
+        <button
+          onClick={() => { navigator.clipboard?.writeText(trace.trace_id); setCopied(true); window.setTimeout(() => setCopied(false), 1500) }}
+          title="Copy trace ID"
+          className="inline-flex items-center gap-1.5 rounded border border-transparent px-1.5 py-0.5 font-mono text-xs text-muted hover:border-border hover:text-text"
+        >
+          {trace.trace_id}
+          {copied ? <Check className="h-3 w-3 text-success" /> : <Copy className="h-3 w-3" />}
+        </button>
+        <div className="flex-1" />
+        <KbLink article="traces" />
       </div>
 
       <div className="flex flex-wrap gap-6 text-sm">

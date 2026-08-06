@@ -1,6 +1,6 @@
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { Loader2, ArrowLeft } from 'lucide-react'
+import { Loader2, ArrowLeft, GitBranch } from 'lucide-react'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
@@ -9,12 +9,10 @@ import { Button } from '@/components/ui/Button'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { HealthBadge, KpiTile, fmtMs, fmtRps, fmtPct, HEALTH_COLOR } from '@/components/apm/shared'
 import { ErrorStatusBadge } from '@/components/apm/errorShared'
+import { ApmRangePicker, type ApmRangeKey } from '@/components/apm/ApmRange'
+import { KbLink } from '@/components/apm/KbLink'
+import type { OperationRED as Op, REDPoint, ServiceRED } from '@/types/apm'
 
-interface ServiceRED { name: string; envs: string[]; health: string; request_count: number; rps: number; error_rate: number; p50_ms: number; p95_ms: number; p99_ms: number; apdex: number }
-interface REDPoint { timestamp: string; rps: number; error_rate: number; p50_ms: number; p95_ms: number }
-interface Op { operation: string; request_count: number; rps: number; error_rate: number; p95_ms: number }
-
-const RANGES = ['15m', '1h', '6h', '24h']
 const TABS = ['overview', 'performance', 'errors'] as const
 
 function REDChart({ data, dataKey, color, label, fmt, domain }: { data: REDPoint[]; dataKey: string; color: string; label: string; fmt: (v: number) => string; domain?: [number, (max: number) => number] }) {
@@ -49,7 +47,7 @@ export function ServiceDetailPage() {
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const tab = (params.get('tab') as typeof TABS[number]) || 'overview'
-  const range = params.get('range') || '1h'
+  const range = (params.get('range') || '1h') as ApmRangeKey
   const setParam = (k: string, v: string) => { const n = new URLSearchParams(params); n.set(k, v); setParams(n, { replace: true }) }
 
   const summary = useQuery<ServiceRED>({ queryKey: ['apm', 'service', name, { range }], queryFn: async () => (await api.get(`/apm/services/${encodeURIComponent(name)}?range=${range}`)).data, refetchInterval: 15000 })
@@ -62,15 +60,19 @@ export function ServiceDetailPage() {
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <Button variant="ghost" size="sm" onClick={() => navigate('/apm/services')}><ArrowLeft className="w-4 h-4 mr-1" /> Services</Button>
         <h1 className="text-lg font-semibold text-text">{name}</h1>
         {s && <HealthBadge health={s.health} />}
         <div className="flex-1" />
-        <select value={range} onChange={(e) => setParam('range', e.target.value)}
-          className="h-9 rounded-md bg-surface2 border border-border text-sm px-2 text-text">
-          {RANGES.map((r) => <option key={r} value={r}>Last {r}</option>)}
-        </select>
+        <button
+          onClick={() => navigate(`/apm/traces?mode=indexed&service=${encodeURIComponent(name)}&range=${range}`)}
+          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border px-2.5 text-xs font-medium text-muted hover:text-text"
+        >
+          <GitBranch className="h-3.5 w-3.5" /> View traces
+        </button>
+        <ApmRangePicker value={range} onChange={(r) => setParam('range', r)} />
+        <KbLink article="services" />
       </div>
 
       {summary.isError && (

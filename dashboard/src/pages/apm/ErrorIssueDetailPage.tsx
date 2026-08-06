@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/Input'
 import { toast } from '@/components/ui/Toast'
 import { KpiTile } from '@/components/apm/shared'
 import { ErrorStatusBadge, ERROR_STATUSES } from '@/components/apm/errorShared'
+import { KbLink } from '@/components/apm/KbLink'
 
 interface Occurrence { timestamp: string; trace_id: string; span_id: string; service: string; message: string }
 interface ErrorDetail {
@@ -62,6 +63,8 @@ export function ErrorIssueDetailPage() {
         <Button variant="ghost" size="sm" onClick={() => navigate('/apm/errors')}><ArrowLeft className="w-4 h-4 mr-1" /> Errors</Button>
         <h1 className="text-lg font-semibold text-text">{d.exception_type}</h1>
         <ErrorStatusBadge status={d.status} />
+        <div className="flex-1" />
+        <KbLink article="errors" />
       </div>
       <div className="text-sm text-danger font-mono">{d.message}</div>
 

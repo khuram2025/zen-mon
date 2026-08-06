@@ -4,26 +4,16 @@ import { Loader2, Search, AlertCircle } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
-import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Badge } from '@/components/ui/Badge'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
+import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
+import { APM_RANGES, RANGE_MS, type ApmRangeKey } from '@/components/apm/ApmRange'
+import type { TraceSummary } from '@/types/apm'
 
-interface TraceSummary {
-  trace_id: string
-  root_service: string
-  root_operation: string
-  start_time: string
-  duration_ms: number
-  span_count: number
-  error_count: number
-  has_error: boolean
-  services: string[]
-}
-
-const RANGES: Record<string, number> = {
-  '15m': 15 * 60_000, '1h': 60 * 60_000, '6h': 6 * 60 * 60_000, '24h': 24 * 60 * 60_000,
-}
+/** Indexed mode reuses the module-wide range vocabulary. */
+const RANGES: Record<string, number> = RANGE_MS
+const RANGE_KEYS: readonly ApmRangeKey[] = APM_RANGES
 
 function relTime(iso: string): string {
   const d = Date.now() - new Date(iso).getTime()
@@ -71,13 +61,13 @@ export function TraceExplorerPage() {
   const traces = query.data?.traces ?? []
 
   return (
-    <div className="space-y-5">
-      <div>
-        <h1 className="text-2xl font-semibold text-text">Traces</h1>
-        <p className="text-sm text-muted mt-1">
-          Search distributed traces and open any trace as a waterfall.
-        </p>
-      </div>
+    <div className="space-y-4">
+      <ApmPageHeader
+        title="Traces"
+        description="Search distributed traces and open any one as a waterfall to see exactly where a request spent its time."
+        article="traces"
+        actions={query.isFetching ? <Loader2 className="h-4 w-4 animate-spin text-muted" /> : undefined}
+      />
 
       {query.isError && (
         <div className="rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
@@ -105,7 +95,7 @@ export function TraceExplorerPage() {
                 onChange={(e) => set('range', e.target.value)}
                 className="h-9 rounded-md bg-surface2 border border-border text-sm px-2 text-text"
               >
-                {Object.keys(RANGES).map((r) => <option key={r} value={r}>Last {r}</option>)}
+                {RANGE_KEYS.map((r) => <option key={r} value={r}>Last {r}</option>)}
               </select>
             )}
             <Input className="w-40" placeholder="service" value={service} onChange={(e) => set('service', e.target.value)} />

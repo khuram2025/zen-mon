@@ -13,6 +13,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Input } from '@/components/ui/Input'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { KpiTile, fmtMs, fmtPct } from '@/components/apm/shared'
+import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
 import { toCsv, downloadCsv } from '@/components/servers/tables'
 
 /* ── Types (mirror /apm/usage/*) ────────────────────────────────────────── */
@@ -231,31 +232,31 @@ export function UsagePage() {
   ]))
 
   return (
-    <div className="space-y-5">
-      {/* Header */}
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold text-text">Usage Analytics</h1>
-          <p className="text-sm text-muted mt-1">Who uses what — traffic, pages, functions and users across your instrumented services.</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {isFetching && <Loader2 className="w-4 h-4 animate-spin text-muted" />}
-          <Input
-            className="w-52"
-            placeholder="Filter by service…"
-            value={serviceInput}
-            onChange={(e) => setServiceInput(e.target.value)}
-          />
-          <select
-            value={hours}
-            onChange={(e) => setParam('hours', e.target.value)}
-            className="h-9 rounded-md bg-surface2 border border-border text-sm px-2 text-text"
-            title="Usage data is retained for 7 days"
-          >
-            {HOURS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
-        </div>
-      </div>
+    <div className="space-y-4">
+      <ApmPageHeader
+        title="Usage Analytics"
+        description="Who uses what — traffic, pages, functions and users across your instrumented services."
+        article="usage"
+        actions={
+          <>
+            {isFetching && <Loader2 className="w-4 h-4 animate-spin text-muted" />}
+            <Input
+              className="w-52"
+              placeholder="Filter by service…"
+              value={serviceInput}
+              onChange={(e) => setServiceInput(e.target.value)}
+            />
+            <select
+              value={hours}
+              onChange={(e) => setParam('hours', e.target.value)}
+              className="h-9 rounded-md bg-surface2 border border-border text-sm px-2 text-text"
+              title="Usage data is retained for 7 days"
+            >
+              {HOURS_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </>
+        }
+      />
 
       {summary.isError && <QueryError label="usage summary" error={summary.error} />}
 

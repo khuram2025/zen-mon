@@ -1,8 +1,11 @@
 import { useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, Copy, Check, KeyRound, Loader2, ShieldCheck } from 'lucide-react'
+import {
+  Plus, Trash2, Copy, Check, KeyRound, Loader2, ShieldCheck, Ticket, Terminal,
+} from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage } from '@/lib/utils'
+import { apiErrorMessage, relativeTime } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -13,6 +16,8 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
+import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
+import { KbLink } from '@/components/apm/KbLink'
 
 interface IngestKey {
   id: string
@@ -21,6 +26,19 @@ interface IngestKey {
   key_prefix: string
   env: string | null
   enabled: boolean
+  last_used_at: string | null
+  revoked_at: string | null
+  created_at: string
+}
+
+interface EnrollmentToken {
+  id: string
+  token_prefix: string
+  kind: 'sdk' | 'rum'
+  env: string | null
+  max_uses: number
+  uses: number
+  expires_at: string | null
   revoked_at: string | null
   created_at: string
 }
@@ -30,8 +48,21 @@ interface Environment {
   name: string
 }
 
+const SETTINGS_TABS = [
+  { key: 'start', label: 'Getting started' },
+  { key: 'keys', label: 'Ingest keys' },
+  { key: 'tokens', label: 'Enrollment tokens' },
+  { key: 'quality', label: 'Data quality' },
+] as const
+type SettingsTab = typeof SETTINGS_TABS[number]['key']
+
 export function ApmSettingsPage() {
   const qc = useQueryClient()
+  const [params, setParams] = useSearchParams()
+  const tab = (params.get('tab') as SettingsTab) || 'start'
+  const setTab = (t: SettingsTab) => {
+    const n = new URLSearchParams(params); n.set('tab', t); setParams(n, { replace: true })
+  }
   const [formOpen, setFormOpen] = useState(false)
   const [revoking, setRevoking] = useState<IngestKey | null>(null)
   const [createdKey, setCreatedKey] = useState<string | null>(null)
@@ -54,14 +85,33 @@ export function ApmSettingsPage() {
   const keys = keysQuery.data ?? []
 
   return (
-    <div className="space-y-5">
-      <div>
-        <h1 className="text-2xl font-semibold text-text">APM Settings</h1>
-        <p className="text-sm text-muted mt-1">
-          Manage OpenTelemetry ingest keys for sending traces to ZenPlus APM.
-        </p>
+    <div className="space-y-4">
+      <ApmPageHeader
+        title="APM Settings"
+        description="Ingest keys, agent enrollment, and the health of the telemetry pipeline itself."
+        article="settings"
+      />
+
+      <div className="flex items-center gap-1 overflow-x-auto border-b border-border">
+        {SETTINGS_TABS.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className={`-mb-px whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium transition-colors ${
+              tab === t.key ? 'border-primary text-text' : 'border-transparent text-muted hover:text-text'
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
 
+      {tab === 'start' && <GettingStartedTab keys={keys} onCreateKey={() => setFormOpen(true)} />}
+      {tab === 'tokens' && <EnrollmentTokensTab />}
+      {tab === 'quality' && <DataQualityCard />}
+
+      {tab === 'keys' && (
+        <>
       {keysQuery.isError && (
         <div className="rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
           Failed to load ingest keys — {apiErrorMessage(keysQuery.error)}
@@ -95,6 +145,7 @@ export function ApmSettingsPage() {
                   <Th>Key prefix</Th>
                   <Th>Environment</Th>
                   <Th>Status</Th>
+                  <Th>Last used</Th>
                   <Th>Created</Th>
                   <Th className="text-right">Actions</Th>
                 </Tr>
@@ -113,6 +164,11 @@ export function ApmSettingsPage() {
                         <Badge variant="success">Active</Badge>
                       )}
                     </Td>
+                    <Td className="text-xs text-muted">
+                      {k.last_used_at
+                        ? relativeTime(k.last_used_at)
+                        : <span title="No telemetry has ever authenticated with this key">never used</span>}
+                    </Td>
                     <Td className="text-muted text-xs">
                       {new Date(k.created_at).toLocaleDateString()}
                     </Td>
@@ -130,8 +186,8 @@ export function ApmSettingsPage() {
           )}
         </CardContent>
       </Card>
-
-      <DataQualityCard />
+        </>
+      )}
 
       <IngestKeyFormDialog
         open={formOpen}
@@ -152,6 +208,293 @@ export function ApmSettingsPage() {
         onConfirm={() => { if (revoking) revoke.mutate(revoking.id) }}
       />
     </div>
+  )
+}
+
+// ─── Getting started ────────────────────────────────────────────────────────
+
+function CodeBlock({ code }: { code: string }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <div className="relative">
+      <pre className="overflow-x-auto rounded-md border border-border bg-surface2/50 p-3 text-xs leading-relaxed text-text">
+        <code>{code}</code>
+      </pre>
+      <button
+        onClick={() => {
+          navigator.clipboard?.writeText(code)
+          setCopied(true)
+          window.setTimeout(() => setCopied(false), 1500)
+        }}
+        className="absolute right-2 top-2 rounded border border-border bg-surface px-1.5 py-1 text-muted hover:text-text"
+        title="Copy"
+      >
+        {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+      </button>
+    </div>
+  )
+}
+
+/**
+ * The onboarding path that did not exist: this screen used to show a key table
+ * and nothing else, so a new operator had a key and no idea what to do with it.
+ * Endpoint URLs are derived from the browser's origin, which is by definition
+ * an address that reaches this appliance.
+ */
+function GettingStartedTab({ keys, onCreateKey }: { keys: IngestKey[]; onCreateKey: () => void }) {
+  const origin = window.location.origin
+  const activeKey = keys.find((k) => k.enabled && !k.revoked_at)
+  const keyPlaceholder = activeKey ? `${activeKey.key_prefix}…` : 'zpi_your_key_here'
+  const hasTraffic = keys.some((k) => k.last_used_at)
+
+  const steps: { title: string; body: React.ReactNode }[] = [
+    {
+      title: 'Create an ingest key',
+      body: (
+        <>
+          <p className="text-sm text-muted">
+            Every producer authenticates with a <code className="rounded bg-surface2 px-1">zpi_</code> key scoped to an
+            environment. Create one per environment (or per service, if you want to revoke them independently).
+          </p>
+          {keys.length === 0 ? (
+            <Button size="sm" className="mt-2" onClick={onCreateKey}>
+              <Plus className="h-4 w-4" /> Create ingest key
+            </Button>
+          ) : (
+            <p className="mt-2 flex items-center gap-1.5 text-xs text-success">
+              <Check className="h-3.5 w-3.5" /> {keys.length} key{keys.length === 1 ? '' : 's'} configured
+            </p>
+          )}
+        </>
+      ),
+    },
+    {
+      title: 'Point an OpenTelemetry SDK at the appliance',
+      body: (
+        <>
+          <p className="mb-2 text-sm text-muted">
+            The receiver speaks <strong>OTLP/HTTP with JSON encoding</strong>. Most SDKs default to protobuf, so set the
+            protocol explicitly — this is the single most common reason spans never arrive.
+          </p>
+          <CodeBlock code={`export OTEL_EXPORTER_OTLP_ENDPOINT="${origin}"
+export OTEL_EXPORTER_OTLP_PROTOCOL="http/json"
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer ${keyPlaceholder}"
+export OTEL_SERVICE_NAME="checkout-service"
+export OTEL_RESOURCE_ATTRIBUTES="deployment.environment=prod,service.version=1.4.2"`} />
+        </>
+      ),
+    },
+    {
+      title: 'Verify spans are arriving',
+      body: (
+        <>
+          <p className="mb-2 text-sm text-muted">
+            Send one span by hand. A <code className="rounded bg-surface2 px-1">{'{"partialSuccess":{}}'}</code> response
+            means it was accepted.
+          </p>
+          <CodeBlock code={`curl -sS -X POST ${origin}/v1/traces \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer ${keyPlaceholder}" \\
+  -d '{"resourceSpans":[{"resource":{"attributes":[
+        {"key":"service.name","value":{"stringValue":"hello-service"}}]},
+      "scopeSpans":[{"spans":[{
+        "traceId":"5b8efff798038103d269b633813fc60c",
+        "spanId":"eee19b7ec3c1b174","name":"GET /health","kind":2,
+        "startTimeUnixNano":"'$(date +%s)'000000000",
+        "endTimeUnixNano":"'$(date +%s)'100000000",
+        "status":{"code":1}}]}]}]}'`} />
+          <p className="mt-2 text-xs text-muted">
+            {hasTraffic
+              ? 'At least one key has authenticated telemetry — the pipeline is live.'
+              : 'No key has authenticated yet. Once one does, its “last used” timestamp appears on the Ingest keys tab.'}
+          </p>
+        </>
+      ),
+    },
+    {
+      title: 'Set a reliability target',
+      body: (
+        <p className="text-sm text-muted">
+          Services and traces populate on their own. What does <em>not</em> happen automatically is paging: define an SLO
+          so error-budget burn raises an alert, and add a synthetic scenario for the journeys that matter most.
+        </p>
+      ),
+    },
+  ]
+
+  return (
+    <div className="space-y-3">
+      <Card>
+        <CardHeader className="flex flex-row items-start justify-between">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <Terminal className="h-4 w-4 text-primary" /> Instrument your first service
+            </CardTitle>
+            <p className="mt-1 text-xs text-muted">
+              Four steps from an empty APM module to a service reporting golden signals.
+            </p>
+          </div>
+          <KbLink article="getting-started" label="Full setup guide" />
+        </CardHeader>
+        <CardContent className="space-y-5">
+          {steps.map((s, i) => (
+            <div key={s.title} className="flex gap-3">
+              <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border bg-surface2 text-xs font-semibold text-text">
+                {i + 1}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="mb-1 text-sm font-medium text-text">{s.title}</div>
+                {s.body}
+              </div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+// ─── Enrollment tokens ──────────────────────────────────────────────────────
+
+/**
+ * Short-lived, use-capped tokens a host redeems for its own ingest key, so a
+ * provisioning script never has to carry a long-lived credential. The API has
+ * shipped these since the module launched; this is the first UI for them.
+ */
+function EnrollmentTokensTab() {
+  const qc = useQueryClient()
+  const [created, setCreated] = useState<string | null>(null)
+  const [revoking, setRevoking] = useState<EnrollmentToken | null>(null)
+  const [env, setEnv] = useState('prod')
+  const [maxUses, setMaxUses] = useState('1')
+  const [hours, setHours] = useState('720')
+
+  const q = useQuery<EnrollmentToken[]>({
+    queryKey: ['apm', 'enrollment-tokens'],
+    queryFn: async () => (await api.get('/apm/enrollment-tokens')).data,
+  })
+  const envs = useQuery<Environment[]>({
+    queryKey: ['apm', 'environments'],
+    queryFn: async () => (await api.get('/apm/environments')).data,
+  })
+  const create = useMutation({
+    mutationFn: async () => (await api.post('/apm/enrollment-tokens', {
+      kind: 'sdk', env, max_uses: Number(maxUses) || 1, expires_in_hours: Number(hours) || 720,
+    })).data,
+    onSuccess: (d: { token: string }) => {
+      qc.invalidateQueries({ queryKey: ['apm', 'enrollment-tokens'] })
+      setCreated(d.token)
+    },
+    onError: (e: any) => toast.error('Could not create token', apiErrorMessage(e)),
+  })
+  const revoke = useMutation({
+    mutationFn: async (id: string) => api.delete(`/apm/enrollment-tokens/${id}`),
+    onSuccess: () => {
+      toast.success('Enrollment token revoked')
+      qc.invalidateQueries({ queryKey: ['apm', 'enrollment-tokens'] })
+      setRevoking(null)
+    },
+    onError: (e: any) => toast.error('Revoke failed', apiErrorMessage(e)),
+  })
+
+  const tokens = q.data ?? []
+  const state = (t: EnrollmentToken) => {
+    if (t.revoked_at) return <Badge variant="danger">Revoked</Badge>
+    if (t.expires_at && new Date(t.expires_at) < new Date()) return <Badge variant="outline">Expired</Badge>
+    if (t.uses >= t.max_uses) return <Badge variant="outline">Used up</Badge>
+    return <Badge variant="success">Available</Badge>
+  }
+
+  return (
+    <>
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Ticket className="h-4 w-4 text-primary" /> Enrollment tokens
+          </CardTitle>
+          <p className="text-xs text-muted">
+            A one-shot token a host redeems for its own ingest key at provisioning time. Prefer these over baking a
+            long-lived <code className="rounded bg-surface2 px-1">zpi_</code> key into an image — a token expires, is
+            use-capped, and can be revoked before it is ever redeemed.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-end gap-2">
+            <FormField label="Environment">
+              <Select value={env} onValueChange={setEnv}>
+                <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {(envs.data ?? []).map((e) => <SelectItem key={e.id} value={e.name}>{e.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </FormField>
+            <FormField label="Max uses">
+              <Input className="w-24" type="number" min={1} max={100} value={maxUses}
+                onChange={(e) => setMaxUses(e.target.value)} />
+            </FormField>
+            <FormField label="Expires in (hours)">
+              <Input className="w-32" type="number" min={1} max={8760} value={hours}
+                onChange={(e) => setHours(e.target.value)} />
+            </FormField>
+            <Button size="sm" disabled={create.isPending} onClick={() => create.mutate()}>
+              {create.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+              Generate token
+            </Button>
+          </div>
+
+          {q.isLoading ? (
+            <div className="flex items-center justify-center gap-2 py-8 text-muted">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+            </div>
+          ) : tokens.length === 0 ? (
+            <div className="py-8 text-center text-sm text-muted">
+              No enrollment tokens. Generate one when provisioning a host that should self-register.
+            </div>
+          ) : (
+            <Table>
+              <THead>
+                <Tr>
+                  <Th>Token</Th><Th>Environment</Th><Th className="text-right">Uses</Th>
+                  <Th>Expires</Th><Th>State</Th><Th className="text-right">Actions</Th>
+                </Tr>
+              </THead>
+              <TBody>
+                {tokens.map((t) => (
+                  <Tr key={t.id}>
+                    <Td className="font-mono text-xs">{t.token_prefix}…</Td>
+                    <Td>{t.env ?? <span className="text-muted">all</span>}</Td>
+                    <Td className="text-right tabular-nums">{t.uses} / {t.max_uses}</Td>
+                    <Td className="text-xs text-muted">
+                      {t.expires_at ? new Date(t.expires_at).toLocaleString() : 'never'}
+                    </Td>
+                    <Td>{state(t)}</Td>
+                    <Td className="text-right">
+                      {!t.revoked_at && (
+                        <Button variant="ghost" size="sm" onClick={() => setRevoking(t)}>
+                          <Trash2 className="h-4 w-4 text-danger" />
+                        </Button>
+                      )}
+                    </Td>
+                  </Tr>
+                ))}
+              </TBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      <CopyOnceDialog value={created} onClose={() => setCreated(null)} />
+      <ConfirmDialog
+        open={!!revoking}
+        onOpenChange={(o) => !o && setRevoking(null)}
+        title="Revoke enrollment token"
+        description="Revoke this token? Hosts that have not redeemed it yet will fail to enrol."
+        confirmText="Revoke"
+        destructive
+        loading={revoke.isPending}
+        onConfirm={() => { if (revoking) revoke.mutate(revoking.id) }}
+      />
+    </>
   )
 }
 

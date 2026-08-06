@@ -14,8 +14,11 @@ resolves a service-scoped row in ``alerts``.
 Rule semantics:
 - Scope: ``target`` holds the APM service name (exact, case-insensitive);
   empty target = every service reporting in the window.
-- Window: ``max(min_duration, 300)`` seconds — 300 is the floor because the
-  rollup granularity is 5 minutes.
+- Window: ``max(min_duration, 300)`` seconds, then snapped down to a rollup
+  bucket boundary and floored at two buckets (``apm_rollup``). Rollup rows carry
+  their bucket *start*, so an unaligned window silently excluded the bucket
+  holding most of the requested span; rates are divided by the seconds the
+  window actually covers, not the nominal length.
 - Units: latency keys are milliseconds; ``apm_error_rate`` and ``apm_apdex``
   are fractions in [0,1] (e.g. 0.02 = 2%, matching the /apm/services API);
   ``apm_throughput`` is requests/second.
@@ -41,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.apm_rollup import rollup_window
 from app.services.host_alert_service import dispatch_to_channels
 
 logger = logging.getLogger("zenplus.apm_alerts")
@@ -75,10 +79,18 @@ def _cmp(value: float, operator: str, threshold: float) -> bool:
 # ─── ClickHouse fetcher ──────────────────────────────────────────────────────
 
 def _service_fleet(window_s: int) -> dict[str, dict]:
-    """{service_name: {p50, p95, p99, error_rate, throughput, apdex, reqs}}."""
+    """{service_name: {p50, p95, p99, error_rate, throughput, apdex, reqs}}.
+
+    The window is bucket-aligned and its *covered* duration drives the rate
+    math (see apm_rollup). Reading ``timestamp >= now() - 300s`` off a rollup
+    labelled by bucket start used to see only the still-filling current bucket
+    and then divide that partial count by a full 300 s, under-reporting
+    throughput by up to 5x — enough to make any "throughput below X" rule fire
+    permanently.
+    """
     from app.core.database import get_clickhouse_client
 
-    since = (datetime.now(timezone.utc) - timedelta(seconds=window_s)).strftime("%Y-%m-%d %H:%M:%S")
+    win = rollup_window(window_s)
     try:
         client = get_clickhouse_client()
         rows = client.query(
@@ -91,11 +103,11 @@ def _service_fleet(window_s: int) -> dict[str, dict]:
                    arrayElement(quantilesTDigestMerge(0.5,0.95,0.99)(duration_state),3) AS p99,
                    sum(satisfied_count)                                                 AS sat,
                    sum(tolerating_count)                                                AS tol
-            FROM zenplus.apm_span_metrics_5m
+            FROM zenplus.{win.table}
             WHERE timestamp >= %(s)s AND span_kind IN {_ENTRY_KINDS}
             GROUP BY service_name
             """,
-            parameters={"s": since},
+            parameters={"s": win.start_str},
         ).result_rows
     except Exception as exc:
         logger.warning("apm alert: clickhouse RED query failed: %s", exc)
@@ -112,7 +124,7 @@ def _service_fleet(window_s: int) -> dict[str, dict]:
             "apm_latency_p95": float(r[4] or 0),
             "apm_latency_p99": float(r[5] or 0),
             "apm_error_rate": errs / reqs,
-            "apm_throughput": reqs / float(window_s),
+            "apm_throughput": reqs / win.covered_s,
             "apm_apdex": (sat + tol / 2.0) / reqs,
             "reqs": reqs,
         }

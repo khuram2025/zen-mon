@@ -136,6 +136,10 @@ def create_app() -> FastAPI:
         await apm_ingest_api.start_batch_writer()
         # APM service registry: upsert apm_services + denormalise health from RED.
         app.state.apm_service_registry = asyncio.create_task(apm_services_api.apm_service_registry_loop())
+        # APM service graph: incremental parent/child rollup so the service map
+        # reads a pre-aggregated table instead of self-joining raw spans.
+        from app.services.apm_service_graph import apm_service_graph_loop
+        app.state.apm_service_graph = asyncio.create_task(apm_service_graph_loop())
         # APM alert rules (apm_* metric keys): periodic RED-rollup evaluation.
         from app.services.apm_alert_service import apm_alert_evaluator_loop
         app.state.apm_alert_evaluator = asyncio.create_task(apm_alert_evaluator_loop())
@@ -178,7 +182,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("health_sweeper", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller"):
+        for attr in ("health_sweeper", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

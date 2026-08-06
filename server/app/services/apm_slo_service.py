@@ -25,7 +25,12 @@ from 100% of spans pre-sampling):
 - ``custom``: not evaluated in v1 (skipped with a debug log).
 
 Windows ≤ 6h read ``apm_span_metrics_5m``; longer windows and the budget
-window read ``apm_span_metrics_1h`` (395-day TTL covers the 90-day max).
+window read ``apm_span_metrics_1h`` (395-day TTL covers the 90-day max). Every
+window is snapped down to a bucket boundary and floored at two buckets
+(``apm_rollup``) — rollup rows are labelled with their bucket *start*, so a
+plain ``timestamp >= now() - 300s`` filter dropped the bucket holding most of
+the window and left ``short_burn`` pinned at 0, which silently disabled every
+burn tier. The tier payload reports the effective window it was measured over.
 
 Alerts dedupe on metadata ``slo:<id>:<tier>`` so both uvicorn workers can run
 the loop (mirrors the host/network/apm evaluators). Notifications go to the
@@ -43,6 +48,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.apm_rollup import min_window_for, rollup_window
 from app.services.host_alert_service import dispatch_to_channels
 
 logger = logging.getLogger("zenplus.apm_slo")
@@ -83,26 +89,28 @@ def _frac_above(threshold_ms: float, grid_values: list[float]) -> float:
     return 0.0
 
 
-def _table_for(window_s: int) -> str:
-    return "apm_span_metrics_5m" if window_s <= 6 * 3_600 else "apm_span_metrics_1h"
-
-
 def _bad_fraction(service: str, env: str | None, operation: str | None,
                   sli_type: str, latency_threshold_ms: int | None,
                   window_s: int) -> tuple[float, int] | None:
-    """(bad_fraction, total_requests) over the window, or None when no data."""
+    """(bad_fraction, total_requests) over the window, or None when no data.
+
+    The window is snapped down to a rollup-bucket boundary (see apm_rollup):
+    without that, a 5 m short window reads only the still-filling current bucket,
+    so ``short_burn`` sat at 0 and no burn tier could ever satisfy its
+    both-windows gate.
+    """
     from app.core.database import get_clickhouse_client
 
-    since = (datetime.now(timezone.utc) - timedelta(seconds=window_s)).strftime("%Y-%m-%d %H:%M:%S")
+    win = rollup_window(window_s)
     conds = ["timestamp >= %(since)s", f"span_kind IN {_ENTRY_KINDS}",
              "service_name = %(svc)s"]
-    params: dict = {"since": since, "svc": service}
+    params: dict = {"since": win.start_str, "svc": service}
     if env:
         conds.append("env = %(env)s"); params["env"] = env
     if operation:
         conds.append("operation = %(op)s"); params["op"] = operation
     where = " AND ".join(conds)
-    table = _table_for(window_s)
+    table = win.table
 
     q_list = ",".join(str(q) for q in _Q_GRID)
     try:
@@ -159,6 +167,13 @@ def compute_slo_status(slo: dict) -> dict:
         short_burn = (short_r[0] / budget) if short_r else None
         tiers.append({
             "tier": tier, "long_window_s": long_s, "short_window_s": short_s,
+            # What the rollup granularity actually let us measure — the fast
+            # tier's nominal 5 m short window is read over 10 m, because one
+            # 5-minute bucket is always partly unfilled.
+            "long_window_effective_s": min_window_for(long_s),
+            "short_window_effective_s": min_window_for(short_s),
+            "long_requests": long_r[1] if long_r else 0,
+            "short_requests": short_r[1] if short_r else 0,
             "factor": factor, "severity": severity,
             "long_burn": None if long_burn is None else round(long_burn, 2),
             "short_burn": None if short_burn is None else round(short_burn, 2),
@@ -216,12 +231,21 @@ async def _resolve(db: AsyncSession, alert_id) -> int:
     return res.rowcount or 0
 
 
+def _duration_label(seconds: int) -> str:
+    if seconds >= 86_400 and seconds % 86_400 == 0:
+        return f"{seconds // 86_400}d"
+    if seconds >= 3_600:
+        return f"{seconds // 3_600}h"
+    return f"{seconds // 60}m"
+
+
 def _burn_message(slo: dict, tier: dict) -> str:
-    long_h = tier["long_window_s"] // 3600
-    long_lbl = f"{long_h}h" if long_h else f"{tier['long_window_s'] // 60}m"
-    short_m = tier["short_window_s"] // 60
+    # Report the windows actually measured — bucket alignment widens the
+    # nominal 5m short window to 10m, and saying "5m" would misdescribe it.
+    long_lbl = _duration_label(tier.get("long_window_effective_s") or tier["long_window_s"])
+    short_lbl = _duration_label(tier.get("short_window_effective_s") or tier["short_window_s"])
     return (f"SLO burn: {slo['name']} ({slo['service_name']}) burning at "
-            f"{tier['long_burn']}x over {long_lbl} / {tier['short_burn']}x over {short_m}m "
+            f"{tier['long_burn']}x over {long_lbl} / {tier['short_burn']}x over {short_lbl} "
             f"(page threshold {tier['factor']}x, target {slo['target']}%)")
 
 

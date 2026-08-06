@@ -44,6 +44,7 @@ import { ManualMapsEntry } from '@/pages/ManualMapsEntry'
 import { ReportsPage } from '@/pages/ReportsPage'
 import { SensorsPage } from '@/pages/SensorsPage'
 import { NetflowPage, NetflowDevicePage, NetflowSectionPage } from '@/pages/NetflowPage'
+import { ApmLayout } from '@/pages/apm/ApmLayout'
 import { ApmSettingsPage } from '@/pages/apm/ApmSettingsPage'
 import { TraceExplorerPage } from '@/pages/apm/TraceExplorerPage'
 import { TraceWaterfallPage } from '@/pages/apm/TraceWaterfallPage'
@@ -181,18 +182,20 @@ export default function App() {
         <Route path="netflow/:section" element={<NetflowSectionPage />} />
         <Route path="mibs" element={<MibLibraryPage />} />
         <Route path="sensors" element={<SensorsPage />} />
-        <Route path="apm" element={<ApmOverviewPage />} />
-        <Route path="apm/services" element={<ApmServicesPage />} />
-        <Route path="apm/services/:name" element={<ApmServiceDetailPage />} />
-        <Route path="apm/service-map" element={<ApmServiceMapPage />} />
-        <Route path="apm/slos" element={<SlosPage />} />
-        <Route path="apm/synthetics" element={<SyntheticsPage />} />
-        <Route path="apm/usage" element={<UsagePage />} />
-        <Route path="apm/errors" element={<ErrorsInboxPage />} />
-        <Route path="apm/errors/:id" element={<ErrorIssueDetailPage />} />
-        <Route path="apm/traces" element={<TraceExplorerPage />} />
-        <Route path="apm/traces/:traceId" element={<TraceWaterfallPage />} />
-        <Route path="apm/settings" element={<ApmSettingsPage />} />
+        <Route path="apm" element={<ApmLayout />}>
+          <Route index element={<ApmOverviewPage />} />
+          <Route path="services" element={<ApmServicesPage />} />
+          <Route path="services/:name" element={<ApmServiceDetailPage />} />
+          <Route path="service-map" element={<ApmServiceMapPage />} />
+          <Route path="slos" element={<SlosPage />} />
+          <Route path="synthetics" element={<SyntheticsPage />} />
+          <Route path="usage" element={<UsagePage />} />
+          <Route path="errors" element={<ErrorsInboxPage />} />
+          <Route path="errors/:id" element={<ErrorIssueDetailPage />} />
+          <Route path="traces" element={<TraceExplorerPage />} />
+          <Route path="traces/:traceId" element={<TraceWaterfallPage />} />
+          <Route path="settings" element={<ApmSettingsPage />} />
+        </Route>
         <Route path="alerts" element={<AlertsPage />} />
         <Route path="alerts/:id" element={<AlertDetailPage />} />
         <Route path="alert-rules" element={<AlertRulesPage />} />

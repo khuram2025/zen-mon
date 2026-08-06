@@ -66,9 +66,32 @@ def _client_ip(request: Request) -> Optional[str]:
 _KEY_CACHE: dict[str, tuple[float, dict]] = {}
 _KEY_CACHE_TTL = 30.0
 
+# `last_used_at` is what tells an operator a key is live vs. abandoned, but the
+# ingest path runs per batch — writing it on every call would put a Postgres
+# UPDATE in front of the hot loop. Stamp it at most once per key per interval.
+_LAST_USED_TTL = 60.0
+_LAST_USED_SEEN: dict[str, float] = {}
+
 
 def invalidate_ingest_key_cache() -> None:
     _KEY_CACHE.clear()
+    _LAST_USED_SEEN.clear()
+
+
+async def _touch_last_used(db: AsyncSession, key_id, key_hash: str) -> None:
+    """Best-effort `last_used_at` stamp, throttled to one write per minute."""
+    now = time.monotonic()
+    if _LAST_USED_SEEN.get(key_hash, 0.0) > now:
+        return
+    _LAST_USED_SEEN[key_hash] = now + _LAST_USED_TTL
+    try:
+        await db.execute(
+            text("UPDATE apm_ingest_keys SET last_used_at = NOW() WHERE id = :id"),
+            {"id": key_id},
+        )
+        await db.commit()
+    except Exception:  # never fail an ingest because bookkeeping failed
+        await db.rollback()
 
 
 async def authenticate_ingest_key(
@@ -113,6 +136,7 @@ async def authenticate_ingest_key(
 
     if kind is not None and row["kind"] != kind:
         raise HTTPException(401, f"Ingest key is not of kind '{kind}'")
+    await _touch_last_used(db, row["id"], key_hash)
     return row
 
 

@@ -1,9 +1,11 @@
 """APM service registry, RED analytics, and service map (AM-E3).
 
-Reads RED rollups from ClickHouse `apm_span_metrics_5m` (request/error counts,
-tdigest latency, apdex buckets) and derives the dependency graph from
-`apm_spans` parent/child pairs. A background loop upserts `apm_services` in
-Postgres with denormalised last-seen RED + health.
+Reads RED rollups from ClickHouse `apm_span_metrics_5m` / `_1h` (request/error
+counts, tdigest latency, apdex buckets) and the dependency graph from the
+pre-aggregated `apm_service_graph` (see services/apm_service_graph.py), with a
+raw parent/child join only over the few minutes that rollup has not covered yet.
+A background loop upserts `apm_services` in Postgres with denormalised last-seen
+RED + health.
 
 RED is measured on **entry spans** (SERVER/CONSUMER) — internal/client spans are
 not counted as inbound requests.
@@ -23,12 +25,12 @@ from sqlalchemy import text
 from app.core.database import get_ch_client, get_db, AsyncSessionLocal
 from app.core.security import get_current_user
 from app.models.user import User
+from app.services.apm_rollup import align_ms_window, bucket_for, table_for
 
 logger = logging.getLogger("zenplus.apm.services")
 router = APIRouter(prefix="/apm", tags=["APM services"])
 
 ENTRY_KINDS = "('SERVER','CONSUMER')"
-APDEX_T_MS = 500
 
 
 # ── schemas ──────────────────────────────────────────────────────────────────
@@ -81,7 +83,10 @@ class MapEdge(BaseModel):
     server: str
     calls: int
     error_rate: float
-    p95_ms: float
+    #: Mean call latency. The graph rollup stores sum+count (SummingMergeTree),
+    #: which cannot reconstruct a percentile — service-level p95 lives on the
+    #: node, per-edge latency is an average by construction.
+    avg_ms: float
 
 
 class ServiceMapResponse(BaseModel):
@@ -91,12 +96,30 @@ class ServiceMapResponse(BaseModel):
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
+RANGE_MS = {
+    "15m": 15 * 60_000, "1h": 3_600_000, "6h": 6 * 3_600_000,
+    "24h": 24 * 3_600_000, "7d": 7 * 24 * 3_600_000,
+}
+
+
 def _window(from_ms: Optional[int], to_ms: Optional[int], range_: Optional[str]) -> tuple[int, int]:
+    """Requested window, bucket-aligned so no rollup bucket is silently dropped.
+
+    Rollup rows are labelled with their bucket start, so `timestamp >= from` on
+    an unaligned boundary excludes the bucket that covers most of the window.
+    Only the lower bound moves; see apm_rollup.align_ms_window.
+    """
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    spans = {"15m": 15 * 60_000, "1h": 3_600_000, "6h": 6 * 3_600_000, "24h": 24 * 3_600_000}
-    if from_ms is not None and to_ms is not None:
-        return from_ms, to_ms
-    return now - spans.get(range_ or "1h", 3_600_000), now
+    if from_ms is None or to_ms is None:
+        from_ms = now - RANGE_MS.get(range_ or "1h", 3_600_000)
+        to_ms = now
+    aligned_from, aligned_to, _covered = align_ms_window(from_ms, to_ms)
+    return aligned_from, aligned_to
+
+
+def _covered_seconds(frm: int, to: int) -> float:
+    """Seconds the aligned window actually spans — the divisor for req/s."""
+    return max((to - frm) / 1000.0, 1.0)
 
 
 def _health(error_rate: float, p95_ms: float, reqs: int) -> str:
@@ -114,7 +137,7 @@ def _ch():
 
 
 def _query_services(frm: int, to: int, env: Optional[str]) -> list[dict]:
-    win_s = max((to - frm) / 1000.0, 1.0)
+    win_s = _covered_seconds(frm, to)
     params = {"frm": frm, "to": to}
     env_cond = ""
     if env:
@@ -130,7 +153,7 @@ def _query_services(frm: int, to: int, env: Optional[str]) -> list[dict]:
             arrayElement(quantilesTDigestMerge(0.5,0.95,0.99)(duration_state),3) AS p99,
             sum(satisfied_count)                                             AS sat,
             sum(tolerating_count)                                            AS tol
-        FROM zenplus.apm_span_metrics_5m
+        FROM zenplus.{table_for(int(win_s))}
         WHERE timestamp >= fromUnixTimestamp64Milli({{frm:Int64}})
           AND timestamp <  fromUnixTimestamp64Milli({{to:Int64}})
           AND span_kind IN {ENTRY_KINDS} {env_cond}
@@ -169,7 +192,7 @@ async def list_services(
     def facets():
         sql = f"""
             SELECT env, uniqExact(service_name)
-            FROM zenplus.apm_span_metrics_5m
+            FROM zenplus.{table_for(int(_covered_seconds(frm, to)))}
             WHERE timestamp >= fromUnixTimestamp64Milli({{frm:Int64}})
               AND timestamp <  fromUnixTimestamp64Milli({{to:Int64}})
               AND span_kind IN {ENTRY_KINDS}
@@ -219,6 +242,11 @@ async def service_red_timeseries(
     env_cond = ""
     if env:
         env_cond = "AND env = {env:String}"; params["env"] = env
+    # Long ranges read the hourly rollup: a 7-day range off the 5-minute table
+    # is 2016 points, which is neither chartable nor cheap.
+    span_s = _covered_seconds(frm, to)
+    table = table_for(int(span_s))
+    bucket_s = float(bucket_for(int(span_s)))
 
     def run():
         sql = f"""
@@ -227,7 +255,7 @@ async def service_red_timeseries(
                    sum(error_count)   AS errs,
                    arrayElement(quantilesTDigestMerge(0.5)(duration_state),1)  AS p50,
                    arrayElement(quantilesTDigestMerge(0.95)(duration_state),1) AS p95
-            FROM zenplus.apm_span_metrics_5m
+            FROM zenplus.{table}
             WHERE service_name = {{svc:String}}
               AND timestamp >= fromUnixTimestamp64Milli({{frm:Int64}})
               AND timestamp <  fromUnixTimestamp64Milli({{to:Int64}})
@@ -238,7 +266,7 @@ async def service_red_timeseries(
         for r in _ch().query(sql, parameters=params).result_rows:
             reqs, errs = int(r[1]), int(r[2])
             pts.append(REDPoint(
-                timestamp=r[0], rps=round(reqs / 300.0, 3),
+                timestamp=r[0], rps=round(reqs / bucket_s, 3),
                 error_rate=round((errs / reqs) if reqs else 0.0, 5),
                 p50_ms=round(float(r[3] or 0), 2), p95_ms=round(float(r[4] or 0), 2),
             ))
@@ -255,7 +283,7 @@ async def service_operations(
     user: User = Depends(get_current_user),
 ):
     frm, to = _window(from_ms, to_ms, range_)
-    win_s = max((to - frm) / 1000.0, 1.0)
+    win_s = _covered_seconds(frm, to)
     params = {"frm": frm, "to": to, "svc": name}
     env_cond = ""
     if env:
@@ -266,7 +294,7 @@ async def service_operations(
             SELECT operation,
                    sum(request_count) AS reqs, sum(error_count) AS errs,
                    arrayElement(quantilesTDigestMerge(0.95)(duration_state),1) AS p95
-            FROM zenplus.apm_span_metrics_5m
+            FROM zenplus.{table_for(int(win_s))}
             WHERE service_name = {{svc:String}}
               AND timestamp >= fromUnixTimestamp64Milli({{frm:Int64}})
               AND timestamp <  fromUnixTimestamp64Milli({{to:Int64}})
@@ -297,31 +325,75 @@ async def service_map(
     nodes = await asyncio.to_thread(_query_services, frm, to, env)
 
     def edges():
-        params = {"frm": frm, "to": to}
-        env_cond = ""
-        if env:
-            env_cond = "AND child.env = {env:String}"; params["env"] = env
-        # Edge A->B: a CLIENT/parent span in service A whose child SERVER span is
-        # in service B. Derived from apm_spans parent/child join (collector's
-        # servicegraph connector is the scale path; this is the fallback).
-        sql = f"""
-            SELECT parent.service_name AS client, child.service_name AS server,
-                   count() AS calls, countIf(child.has_error = 1) AS errs,
-                   arrayElement(quantilesTDigest(0.95)(child.duration_nano/1e6),1) AS p95
-            FROM zenplus.apm_spans AS child
-            INNER JOIN zenplus.apm_spans AS parent
-              ON child.parent_span_id = parent.span_id AND child.trace_id = parent.trace_id
-            WHERE child.timestamp >= fromUnixTimestamp64Milli({{frm:Int64}})
-              AND child.timestamp <  fromUnixTimestamp64Milli({{to:Int64}})
-              AND parent.service_name != child.service_name {env_cond}
-            GROUP BY client, server
+        """Edges from the pre-aggregated graph, plus a live tail.
+
+        `apm_service_graph` is filled per closed 5-minute bucket by
+        services/apm_service_graph.py. Everything after its watermark has not
+        been aggregated yet, so the last few minutes still come from the raw
+        parent/child join — but over a bounded tail, not the whole range, which
+        is what made the old map the first query to fall over at volume.
         """
+        params = {"frm": frm, "to": to}
+        env_cond = "AND env = {env:String}" if env else ""
+        if env:
+            params["env"] = env
+
+        watermark_row = _ch().query(
+            "SELECT toUnixTimestamp64Milli(max(timestamp)) FROM zenplus.apm_service_graph"
+        ).result_rows
+        watermark = int(watermark_row[0][0] or 0) if watermark_row else 0
+        # Aggregated rows are bucket-start stamped and cover BUCKET..BUCKET+5m.
+        aggregated_to = min(to, watermark + 300_000) if watermark else frm
+
+        agg: dict[tuple[str, str], list[float]] = {}
+        if aggregated_to > frm:
+            params["agg_to"] = aggregated_to
+            for r in _ch().query(f"""
+                SELECT client_service, server_service,
+                       sum(request_count), sum(error_count), sum(duration_sum_ms)
+                FROM zenplus.apm_service_graph
+                WHERE timestamp >= fromUnixTimestamp64Milli({{frm:Int64}})
+                  AND timestamp <  fromUnixTimestamp64Milli({{agg_to:Int64}}) {env_cond}
+                GROUP BY client_service, server_service
+            """, parameters=params).result_rows:
+                agg[(r[0], r[1])] = [float(r[2] or 0), float(r[3] or 0), float(r[4] or 0)]
+
+        # Live tail: raw join, but only over the un-aggregated window.
+        tail_from = max(frm, aggregated_to)
+        if tail_from < to:
+            tail_params = {"frm": tail_from, "to": to}
+            tail_env = ""
+            if env:
+                tail_env = "AND child.env = {env:String}"; tail_params["env"] = env
+            for r in _ch().query(f"""
+                SELECT parent.service_name AS client, child.service_name AS server,
+                       count(), countIf(child.has_error = 1),
+                       sum(child.duration_nano) / 1e6
+                FROM zenplus.apm_spans AS child
+                INNER JOIN zenplus.apm_spans AS parent
+                  ON child.parent_span_id = parent.span_id AND child.trace_id = parent.trace_id
+                WHERE child.timestamp >= fromUnixTimestamp64Milli({{frm:Int64}})
+                  AND child.timestamp <  fromUnixTimestamp64Milli({{to:Int64}})
+                  AND parent.timestamp >= fromUnixTimestamp64Milli({{frm:Int64}}) - 300000
+                  AND parent.service_name != child.service_name {tail_env}
+                GROUP BY client, server
+            """, parameters=tail_params).result_rows:
+                slot = agg.setdefault((r[0], r[1]), [0.0, 0.0, 0.0])
+                slot[0] += float(r[2] or 0)
+                slot[1] += float(r[3] or 0)
+                slot[2] += float(r[4] or 0)
+
         out = []
-        for r in _ch().query(sql, parameters=params).result_rows:
-            calls, errs = int(r[2]), int(r[3])
-            out.append(MapEdge(client=r[0], server=r[1], calls=calls,
-                               error_rate=round((errs / calls) if calls else 0.0, 5),
-                               p95_ms=round(float(r[4] or 0), 2)))
+        for (client, server), (calls, errs, dur_sum) in agg.items():
+            n = int(calls)
+            if n <= 0:
+                continue
+            out.append(MapEdge(
+                client=client, server=server, calls=n,
+                error_rate=round(errs / n, 5),
+                avg_ms=round(dur_sum / n, 2),
+            ))
+        out.sort(key=lambda e: e.calls, reverse=True)
         return out
 
     edge_list = await asyncio.to_thread(edges)

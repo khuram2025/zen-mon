@@ -132,11 +132,20 @@ def _query_groups(frm: int, to: int, service: Optional[str], env: Optional[str])
 
 
 async def _triage_map(db: AsyncSession, group_ids: list[str]) -> dict[str, dict]:
+    """group_id -> triage row.
+
+    ``apm_error_issues`` is keyed on (group_id, service_id), so a fingerprint
+    seen in two services has two rows while the inbox shows one issue. Collapse
+    deterministically on the most recently touched row rather than letting the
+    dict-build pick an arbitrary one — otherwise the displayed status flipped
+    between refreshes for any cross-service error.
+    """
     if not group_ids:
         return {}
     rows = (await db.execute(text(
-        "SELECT group_id, status, assignee, resolved_in_version FROM apm_error_issues "
-        "WHERE group_id = ANY(:gids)"
+        "SELECT DISTINCT ON (group_id) group_id, status, assignee, resolved_in_version "
+        "FROM apm_error_issues WHERE group_id = ANY(:gids) "
+        "ORDER BY group_id, updated_at DESC NULLS LAST, last_seen_at DESC NULLS LAST"
     ), {"gids": group_ids})).mappings().all()
     return {r["group_id"]: dict(r) for r in rows}
 
@@ -157,7 +166,10 @@ async def list_errors(
     triage = await _triage_map(db, [g["group_id"] for g in groups])
 
     issues = []
-    counts: dict[str, int] = {}
+    # Every status gets a key even at zero, so the filter chips render a stable
+    # row of counts instead of appearing and disappearing as triage changes.
+    counts: dict[str, int] = {s: 0 for s in VALID_STATUS}
+    counts["all"] = len(groups)
     for g in groups:
         t = triage.get(g["group_id"], {})
         st = t.get("status") or "unresolved"

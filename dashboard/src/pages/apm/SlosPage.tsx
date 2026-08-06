@@ -14,6 +14,7 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
 import { KpiTile } from '@/components/apm/shared'
+import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
 
 interface Slo {
   id: string
@@ -110,19 +111,17 @@ export function SlosPage() {
   })
 
   return (
-    <div className="space-y-5">
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-text">SLOs</h1>
-          <p className="text-sm text-muted mt-1">
-            Reliability targets with error budgets. Burn alerts page when the budget is being consumed
-            too fast (multi-window burn rate), not on isolated spikes.
-          </p>
-        </div>
-        <Button onClick={() => { setEditing(null); setFormOpen(true) }}>
-          <Plus className="w-4 h-4" /> New SLO
-        </Button>
-      </div>
+    <div className="space-y-4">
+      <ApmPageHeader
+        title="SLOs"
+        description="Reliability targets with error budgets. Burn alerts page when the budget is being consumed too fast (multi-window burn rate), not on isolated spikes."
+        article="slos"
+        actions={
+          <Button size="sm" onClick={() => { setEditing(null); setFormOpen(true) }}>
+            <Plus className="w-4 h-4" /> New SLO
+          </Button>
+        }
+      />
 
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-w-xl">
         <KpiTile label="SLOs" value={slos.length} />

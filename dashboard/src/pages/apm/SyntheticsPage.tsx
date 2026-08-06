@@ -27,6 +27,7 @@ import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { Textarea } from '@/components/ui/Textarea'
 import { toast } from '@/components/ui/Toast'
 import { KpiTile, fmtMs } from '@/components/apm/shared'
+import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -103,19 +104,17 @@ export function SyntheticsPage() {
   const s = q.data?.summary
 
   return (
-    <div className="space-y-5">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold text-text">Synthetic Scenarios</h1>
-          <p className="text-sm text-muted mt-1">
-            Scripted user journeys run from the appliance on a schedule — multi-step HTTP
-            flows with assertions, so you know a workflow is broken before users do.
-          </p>
-        </div>
-        <Button onClick={() => setEditor('new')}>
-          <Plus className="h-4 w-4" /> New scenario
-        </Button>
-      </div>
+    <div className="space-y-4">
+      <ApmPageHeader
+        title="Synthetic Scenarios"
+        description="Scripted user journeys run from the appliance on a schedule — multi-step HTTP flows with assertions, so you know a workflow is broken before users do."
+        article="synthetics"
+        actions={
+          <Button size="sm" onClick={() => setEditor('new')}>
+            <Plus className="h-4 w-4" /> New scenario
+          </Button>
+        }
+      />
 
       {q.isError && (
         <div className="rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
