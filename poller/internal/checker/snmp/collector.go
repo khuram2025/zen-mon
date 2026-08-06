@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	g "github.com/gosnmp/gosnmp"
@@ -752,14 +753,70 @@ func rateBps(cur, prev uint64, dtSec float64, hc bool) float64 {
 func asString(v g.SnmpPDU) string {
 	switch x := v.Value.(type) {
 	case string:
-		return x
+		return cleanText(x)
 	case []byte:
-		return string(x)
+		return cleanText(string(x))
 	case nil:
 		return ""
 	default:
 		return fmt.Sprint(x)
 	}
+}
+
+// cleanText makes an SNMP OctetString safe to store in a Postgres text
+// column. Agents routinely return values that are not text at all —
+// NUL-padded fixed-width fields, binary chassis/port IDs, Latin-1
+// descriptions. Postgres rejects both NUL bytes and invalid UTF-8 with
+// SQLSTATE 22021, which aborts the entire poll transaction and silently
+// discards everything else collected for that device.
+//
+// Invalid bytes and C0 control characters are dropped rather than
+// replaced so a NUL-padded string collapses to its printable prefix.
+func cleanText(s string) string {
+	if utf8.ValidString(s) && strings.IndexFunc(s, isDiscardedRune) < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		// RuneError from a decode failure is a single invalid byte.
+		if r == utf8.RuneError || isDiscardedRune(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// isDiscardedRune reports whether r is a control character that has no
+// business in a stored description (tab/newline are kept).
+func isDiscardedRune(r rune) bool {
+	if r == '\t' || r == '\n' || r == '\r' {
+		return false
+	}
+	return r < 0x20 || r == 0x7f
+}
+
+// bytesOf returns the raw octets behind a PDU value, or nil when the
+// value is not an OctetString. Needed for LLDP identifiers, which are
+// typed by a companion subtype rather than by SNMP.
+func bytesOf(v g.SnmpPDU) []byte {
+	switch x := v.Value.(type) {
+	case []byte:
+		return x
+	case string:
+		return []byte(x)
+	default:
+		return nil
+	}
+}
+
+// macOf formats 6 raw octets as a lowercase colon-separated MAC.
+func macOf(b []byte) string {
+	if len(b) != 6 {
+		return ""
+	}
+	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", b[0], b[1], b[2], b[3], b[4], b[5])
 }
 
 func asInt(v g.SnmpPDU) int64 {

@@ -94,7 +94,10 @@ func (c *Collector) CollectUDT(ctx context.Context, d *Device, s *g.GoSNMP, ifs 
 		fdb = c.collectDot1dFdb(s, portToIf, 0)
 	}
 	if len(fdb) == 0 && isCisco && len(vlans) > 0 {
-		fdb = c.collectCiscoPerVlanFdb(ctx, d, vlans)
+		fdb, u.FdbNote = c.collectCiscoPerVlanFdb(ctx, d, vlans)
+	}
+	if len(fdb) == 0 && u.FdbNote == "" && len(portToIf) > 0 {
+		u.FdbNote = "bridge MIB returned no MACs (check the SNMP view exposes 1.3.6.1.2.1.17)"
 	}
 	u.Fdb = fdb
 
@@ -213,9 +216,19 @@ func (c *Collector) collectQBridgeFdb(s *g.GoSNMP, portToIf map[int]int) []FdbEn
 // collectDot1dFdb walks the classic dot1dTpFdbTable on session s,
 // attributing entries to the given VLAN (0 = unknown).
 func (c *Collector) collectDot1dFdb(s *g.GoSNMP, portToIf map[int]int, vlan int) []FdbEntry {
+	out, _ := c.walkDot1dFdb(s, portToIf, vlan)
+	return out
+}
+
+// walkDot1dFdb is collectDot1dFdb with the walk error preserved, so a
+// per-VLAN caller can tell "denied" apart from "empty".
+func (c *Collector) walkDot1dFdb(s *g.GoSNMP, portToIf map[int]int, vlan int) ([]FdbEntry, error) {
 	ports, err := s.BulkWalkAll(OIDDot1dTpFdbPort)
-	if err != nil || len(ports) == 0 {
-		return nil
+	if err != nil {
+		return nil, err
+	}
+	if len(ports) == 0 {
+		return nil, nil
 	}
 	status := make(map[string]int)
 	if sts, err := s.BulkWalkAll(OIDDot1dTpFdbStatus); err == nil {
@@ -252,16 +265,18 @@ func (c *Collector) collectDot1dFdb(s *g.GoSNMP, portToIf map[int]int, vlan int)
 		}
 		out = append(out, FdbEntry{VlanID: vlan, MAC: mac, IfIndex: ifIdx, Status: st})
 	}
-	return out
+	return out, nil
 }
 
 // collectCiscoPerVlanFdb opens one short-lived session per VLAN using
 // Cisco community-string indexing (community@vlan) or, for SNMPv3, the
 // vlan-N context, and walks BRIDGE-MIB inside it. The bridge-port map
 // is VLAN-specific, so it is re-walked per context.
-func (c *Collector) collectCiscoPerVlanFdb(ctx context.Context, d *Device, vlans []VlanInfo) []FdbEntry {
+// It also returns a note describing why the walk came up empty, so an
+// unconfigured switch is distinguishable from a genuinely idle one.
+func (c *Collector) collectCiscoPerVlanFdb(ctx context.Context, d *Device, vlans []VlanInfo) ([]FdbEntry, string) {
 	var out []FdbEntry
-	count := 0
+	count, denied, failed := 0, 0, 0
 	for _, v := range vlans {
 		if ctx.Err() != nil {
 			break
@@ -282,17 +297,53 @@ func (c *Collector) collectCiscoPerVlanFdb(ctx context.Context, d *Device, vlans
 		}
 		vs, err := NewSession(&vd)
 		if err != nil {
+			failed++
 			continue
 		}
 		if err := vs.Connect(); err != nil {
+			failed++
 			continue
 		}
 		portToIf := c.collectBasePortMap(vs)
-		entries := c.collectDot1dFdb(vs, portToIf, v.ID)
+		entries, err := c.walkDot1dFdb(vs, portToIf, v.ID)
 		_ = vs.Conn.Close()
+		switch {
+		case isAuthzError(err):
+			denied++
+		case err != nil:
+			failed++
+		}
 		out = append(out, entries...)
 	}
-	return out
+
+	if len(out) > 0 || count == 0 {
+		return out, ""
+	}
+	switch {
+	case denied > 0 && d.Version == "3":
+		return nil, fmt.Sprintf("SNMPv3 user not authorized for the vlan-N contexts "+
+			"(%d/%d VLANs denied); add 'snmp-server group <group> v3 priv context vlan- match prefix' on the switch", denied, count)
+	case denied > 0:
+		return nil, fmt.Sprintf("community@vlan indexing denied on %d/%d VLANs", denied, count)
+	case failed == count:
+		return nil, fmt.Sprintf("per-VLAN BRIDGE-MIB walk failed on all %d VLANs", count)
+	}
+	return nil, ""
+}
+
+// isAuthzError reports whether an SNMP error is the agent refusing access
+// to a context/view, as opposed to a timeout or transport failure.
+func isAuthzError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "authorizationerror") ||
+		strings.Contains(s, "access denied") ||
+		strings.Contains(s, "unknown context") ||
+		strings.Contains(s, "bad context") ||
+		strings.Contains(s, "noaccess") ||
+		strings.Contains(s, "no access")
 }
 
 // collectArp walks ipNetToMediaTable (IPv4) and ipNetToPhysicalTable
@@ -401,6 +452,7 @@ func (c *Collector) collectLldp(s *g.GoSNMP, ifs []Interface, portToIf map[int]i
 	}
 	chassisSub := walk(OIDLldpRemChassisIDSubtype)
 	chassisID := walk(OIDLldpRemChassisID)
+	portSub := walk(OIDLldpRemPortIDSubtype)
 	portID := walk(OIDLldpRemPortID)
 	portDesc := walk(OIDLldpRemPortDesc)
 	sysDesc := walk(OIDLldpRemSysDesc)
@@ -453,15 +505,16 @@ func (c *Collector) collectLldp(s *g.GoSNMP, ifs []Interface, portToIf map[int]i
 			n.ChassisIDSubtype = int(asInt(v))
 		}
 		if v, ok := chassisID[suffix]; ok {
-			if n.ChassisIDSubtype == 4 { // macAddress
-				n.ChassisID = macString(v)
-			}
-			if n.ChassisID == "" {
-				n.ChassisID = asString(v)
-			}
+			// chassisId subtypes: 4 = macAddress, 5 = networkAddress.
+			n.ChassisID = decodeLldpID(v, n.ChassisIDSubtype, 4, 5)
 		}
 		if v, ok := portID[suffix]; ok {
-			n.PortID = asString(v)
+			sub := 0
+			if sv, ok := portSub[suffix]; ok {
+				sub = int(asInt(sv))
+			}
+			// portId subtypes: 3 = macAddress, 4 = networkAddress.
+			n.PortID = decodeLldpID(v, sub, 3, 4)
 		}
 		if v, ok := portDesc[suffix]; ok {
 			n.PortDesc = asString(v)
@@ -517,6 +570,64 @@ func (c *Collector) collectCdp(s *g.GoSNMP) []LldpNeighbor {
 }
 
 // --- helpers ---
+
+// decodeLldpID renders an LLDP chassis or port identifier as text.
+// Both are OctetStrings whose meaning is given by a companion subtype
+// column, so the raw bytes are frequently not text at all — a bare MAC,
+// an address-family-prefixed IP, or a NUL-padded fixed-width field
+// (ArubaOS-CX reports chassisId "17 00 00 00 00 00" for Cisco phones).
+// macSub/addrSub carry the subtype values that mean macAddress and
+// networkAddress for this particular column.
+//
+// Anything that survives as neither is cleaned to printable text, and
+// falls back to hex when nothing printable remains — an opaque but
+// stable identifier beats an empty string, which would make every
+// neighbor on the port collapse into one topology link.
+func decodeLldpID(v g.SnmpPDU, subtype, macSub, addrSub int) string {
+	b := bytesOf(v)
+	declaredBinary := false
+	switch {
+	case subtype == macSub:
+		declaredBinary = true
+		if len(b) == 6 {
+			return macOf(b)
+		}
+	case subtype == addrSub:
+		declaredBinary = true
+		if s := lldpNetworkAddr(b); s != "" {
+			return s
+		}
+	}
+	if s := asString(v); s != "" {
+		return s
+	}
+	// Only guess at a bare MAC when the agent did not already declare the
+	// value to be something else; a malformed networkAddress rendered as a
+	// MAC would read as a real endpoint identity.
+	if len(b) == 6 && !declaredBinary {
+		return macOf(b)
+	}
+	if len(b) > 0 {
+		return fmt.Sprintf("%x", b)
+	}
+	return ""
+}
+
+// lldpNetworkAddr decodes an LLDP networkAddress: a one-octet IANA
+// address family followed by the address itself.
+func lldpNetworkAddr(b []byte) string {
+	switch {
+	case b[0] == 1 && len(b) == 5: // IPv4
+		return fmt.Sprintf("%d.%d.%d.%d", b[1], b[2], b[3], b[4])
+	case b[0] == 2 && len(b) == 17: // IPv6
+		parts := make([]string, 0, 8)
+		for i := 1; i < 17; i += 2 {
+			parts = append(parts, fmt.Sprintf("%x", uint16(b[i])<<8|uint16(b[i+1])))
+		}
+		return strings.Join(parts, ":")
+	}
+	return ""
+}
 
 // oidSuffix strips the base OID (with or without leading dot) and the
 // separating dot from a returned PDU name.

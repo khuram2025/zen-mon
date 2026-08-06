@@ -1201,6 +1201,9 @@ func (e *Engine) handleSNMPResult(ctx context.Context, d *snmp.Device, r *snmp.R
 			e.logger.Infof("UDT %s: %d fdb, %d arp, %d neighbors, %d vlans",
 				d.Hostname, len(rUdt.Fdb), len(rUdt.Arp), len(rUdt.Neighbors), len(rUdt.Vlans))
 		}
+		if rUdt.FdbNote != "" {
+			e.logger.Warnf("UDT %s: no switch-port data — %s", d.Hostname, rUdt.FdbNote)
+		}
 		e.mu.Lock()
 		e.lastUdtAt[d.ID] = time.Now()
 		e.mu.Unlock()

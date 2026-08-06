@@ -178,6 +178,12 @@ type UdtData struct {
 	TrunkPorts map[int]bool // ifIndex set (Cisco VTP trunking status)
 	BridgeMAC  string
 	OwnMACs    map[string]bool // the device's own interface MACs
+
+	// FdbNote explains an empty or partial forwarding database. A switch
+	// that returns no MACs is almost always a configuration problem on the
+	// device (Cisco per-VLAN SNMP contexts in particular), not an outage,
+	// and without this the poller reports "0 fdb" with no reason.
+	FdbNote string
 }
 
 // Result bundles one device's full SNMP poll output. The collector

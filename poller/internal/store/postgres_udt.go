@@ -51,9 +51,21 @@ func (s *PostgresStore) UpsertUdtData(ctx context.Context, deviceID uuid.UUID, u
 	}
 
 	// ---- topology links (LLDP/CDP) --------------------------------------
-	if err := upsertTopologyLinks(ctx, tx, deviceID, u.Neighbors, deviceHostnames, deviceMacs); err != nil {
-		return fmt.Errorf("udt topology: %w", err)
-	}
+	// Neighbor data is the least important thing UDT collects and the most
+	// likely to be malformed, since its strings come straight off whatever
+	// gear is plugged in. Run it inside a savepoint: a switch that reports
+	// one unstorable neighbor must still get its FDB, ports and VLANs.
+	topoErr := func() error {
+		sp, err := tx.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		if err := upsertTopologyLinks(ctx, sp, deviceID, u.Neighbors, deviceHostnames, deviceMacs); err != nil {
+			_ = sp.Rollback(ctx)
+			return err
+		}
+		return sp.Commit(ctx)
+	}()
 
 	// ---- per-port rollup + uplink classification ------------------------
 	ownMacs := make(map[string]bool, len(u.OwnMACs)+1)
@@ -163,7 +175,10 @@ func (s *PostgresStore) UpsertUdtData(ctx context.Context, deviceID uuid.UUID, u
 		macSet[a.MAC] = true
 	}
 	if len(macSet) == 0 {
-		return tx.Commit(ctx)
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		return topoNonFatal(topoErr)
 	}
 
 	endpointIDs, newMacs, err := upsertEndpoints(ctx, tx, macSet)
@@ -230,7 +245,19 @@ func (s *PostgresStore) UpsertUdtData(ctx context.Context, deviceID uuid.UUID, u
 		return fmt.Errorf("udt events: %w", err)
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	return topoNonFatal(topoErr)
+}
+
+// topoNonFatal reports a rolled-back topology savepoint without implying
+// the rest of the snapshot was lost.
+func topoNonFatal(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("udt topology skipped (endpoint data saved): %w", err)
 }
 
 // loadInfraSets returns (lowercased hostnames of monitored devices,
