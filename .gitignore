@@ -110,3 +110,6 @@ zenplus-support-*/
 # ─── OTA updater per-migration backups & binary backups ───
 *.pre-update
 bin/*.bak
+
+# ─── Per-appliance schema verdict, written by scripts/sync-schema.py ───
+.schema-status.json

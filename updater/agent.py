@@ -355,7 +355,7 @@ def run_update(cfg: AgentConfig, release: dict) -> bool:
 
     Returns True on success, False on failure (with rollback).
     """
-    from .executor import execute_manifest, ExecutionError
+    from .executor import execute_manifest, rollback_manifest, ExecutionError
 
     version = release["version"]
     release_id = release.get("id", release.get("update_id", ""))
@@ -399,19 +399,34 @@ def run_update(cfg: AgentConfig, release: dict) -> bool:
         )
         return False
 
-    # Apply any ClickHouse migrations shipped with this release but not yet in
-    # the schema ledger. The code (scripts/migrate-*-clickhouse.sql) has just
-    # landed via apply_code; this guarantees schema keeps up with code even when
-    # a release did not explicitly package a run_migration step. Best-effort: a
-    # ClickHouse problem is logged but must not roll back an otherwise-good code
-    # update.
+    # Schema gate. Every migrate-*.sql on disk has just been refreshed by
+    # apply_code; converge both databases with it and refuse to stamp the new
+    # version unless the result is clean. A passing HTTP health check is not
+    # evidence that the schema matches the code — an appliance once ran a whole
+    # release with its ClickHouse SNMP tables missing and reported healthy.
     try:
-        from .clickhouse_sync import sync_clickhouse_migrations
-        sync_clickhouse_migrations()
+        from .schema_gate import sync_and_verify
+        schema_status = sync_and_verify()
     except Exception as e:
-        logger.error("ClickHouse migration sync raised (continuing): %s", e)
+        logger.exception("Schema gate raised: %s", e)
+        schema_status = {"ok": False, "problems": [f"schema gate error: {e}"]}
 
-    # Update version file
+    if not schema_status.get("ok"):
+        problems = schema_status.get("problems", [])
+        detail = "; ".join(problems[:10]) or "unknown schema drift"
+        logger.error(
+            "Schema does not match the installed code after update — rolling back. %s",
+            detail,
+        )
+        rollback_manifest(manifest, extract_dir, cfg)
+        report_status(
+            cfg, release_id, "failed", from_version, version,
+            error_message=f"Schema verification failed: {detail}",
+            changelog=changelog, severity=severity,
+        )
+        return False
+
+    # Update version file — only now, with code and schema proven consistent.
     version_file = ZENPLUS_DIR / ".version"
     version_file.write_text(
         f"{version}\n{datetime.now(timezone.utc).isoformat()}\n"

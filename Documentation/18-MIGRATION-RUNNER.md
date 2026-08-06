@@ -1,114 +1,178 @@
-# ZenPlus Migration Runner
+# ZenPlus Schema Convergence
 
-Date: 2026-05-06
+Date: 2026-08-06 (supersedes the 2026-05-06 migration-runner design)
 
-## Purpose
+## The failure this design exists to prevent
 
-ZenPlus now has a PostgreSQL migration runner that tracks applied migrations in a `schema_migrations` table. This replaces the unsafe pattern of blindly running every `migrate-*.sql` file during every install or update.
+An appliance reported version 1.6.0 and looked healthy. Its poller logged
+`SNMP cycle complete: 6 ok, 0 errors` and then failed every write with
+`Table zenplus.snmp_metrics does not exist`. CPU and memory showed `—` on
+`/devices` indefinitely. Ping worked, because `ping_metrics` happened to exist.
 
-The runner applies PostgreSQL migrations in sorted filename order, skips already-applied files, detects checksum drift, and records duration.
+Three independent defects combined:
 
-## Command
+1. **Delivery.** A release shipped only the migrations that release introduced.
+   An appliance that skipped a release, or a release whose author forgot
+   `--migration`, never received the SQL file at all — and had no way to catch
+   up later.
+2. **A ledger that was trusted instead of verified.** The ClickHouse sync
+   *baselined* a hardcoded list of legacy migrations — recording them as applied
+   without running them — whenever the ledger was empty. On an appliance that
+   had never received `migrate-004-snmp-clickhouse.sql`, that stamped a lie into
+   the ledger, and the table was never created.
+3. **A health check that proved nothing.** The updater declared success once
+   `/api/v1/system/health` returned 200. That says the API process started. It
+   says nothing about whether the database has the tables that process needs —
+   so the version marker advanced past a schema that could not support it.
+
+Two appliances then reported the same version while running different code and
+different schema, with nothing in the check-in payload able to reveal it.
+
+## The four rules
+
+1. **Every release ships every migration.** Shipping a migration is not running
+   one. The runners keep a ledger per engine and apply only what is missing.
+2. **Order comes from `scripts/migrations.lock`, not from filenames.** Migration
+   numbers are not unique (two 016s, two 030s, two 031s, two 039s, two 043s, and
+   one date-stamped file), so a filename sort is not a sequence. The lockfile is
+   append-only and its *line order* is release order.
+3. **Never trust the ledger alone — probe.** Before recording a migration as
+   applied, check that the objects it creates actually exist. Before re-running
+   one, check that doing so cannot duplicate data.
+4. **The version marker moves last.** Code, schema, and version advance together
+   or not at all.
+
+## Components
+
+| Path | Role |
+| --- | --- |
+| `scripts/migration_order.py` | Ordering + static analysis. Single source of truth, dependency-free, imported by everything below. |
+| `scripts/run-migrations.py` | PostgreSQL runner. Ledger: `schema_migrations`. |
+| `scripts/ch_migrate.py` | ClickHouse runner. Ledger: `zenplus.schema_migrations`. |
+| `scripts/sync-schema.py` | Orchestrator + gate. Runs both, writes `.schema-status.json`, exits non-zero on unresolved drift. |
+| `updater/schema_gate.py` | Updater-side wrapper; its verdict decides whether the version marker moves. |
+| `updater/clickhouse_sync.py` | Thin adapter kept so an appliance on the *old* updater still heals on the first update that carries this change. |
+
+## How a migration is classified
+
+For each migration not recorded in the ledger, both runners ask the database
+what already exists:
+
+| Ledger | Objects present | Action |
+| --- | --- | --- |
+| recorded | yes | skip |
+| not recorded | yes | **baseline** — record without running |
+| not recorded | no | **apply**, then record |
+| recorded | no | **heal** — the ledger is lying; re-apply (ClickHouse) |
+
+Two cases refuse to guess and are reported instead:
+
+- A migration that is partially present and would duplicate rows on replay.
+- A migration with nothing probeable that also inserts rows.
+
+Both surface as `unresolved` and fail the gate, because a wrong guess either
+doubles seed data or leaves a silent gap.
+
+### Why "probe" and not "assume"
+
+An appliance installed before tracking existed has a complete schema and an
+empty ledger. Without probing, all 60 PostgreSQL migrations would look pending
+and be re-run — seven of them insert seed rows. Probing turns an unanswerable
+"has this run?" into an answerable "is it here?". On a fully-provisioned
+appliance with an empty ledger the result is 32 baselined, 28 applied (all
+guarded column/constraint work), 0 unresolved.
+
+## Replay safety
+
+`migration_order.is_replay_safe()` derives the replay decision from the SQL
+rather than a hand-maintained list — the hand-maintained list is exactly what
+went stale. Guarded idioms it recognises:
+
+- `IF NOT EXISTS` / `IF EXISTS` on DDL
+- `DROP CONSTRAINT IF EXISTS x` followed by `ADD CONSTRAINT x`
+- `INSERT ... ON CONFLICT` / `INSERT ... WHERE NOT EXISTS`
+
+A bare `INSERT` is never replay-safe. New ClickHouse migrations **must** be
+replay-safe; the release builder rejects them otherwise, because healing a false
+ledger entry works by re-running the file.
+
+## Commands
 
 ```bash
-python3 /opt/zenplus/scripts/run-migrations.py --database zenplus
+# Is this appliance's schema consistent with its code? (read-only, exit 2 on drift)
+sudo /opt/zenplus/scripts/sync-schema.py --check
+
+# Converge it
+sudo /opt/zenplus/scripts/sync-schema.py
+
+# One engine only, machine-readable
+sudo /opt/zenplus/scripts/sync-schema.py --engine clickhouse --json
+
+# PostgreSQL ledger status on its own
+sudo -u postgres python3 /opt/zenplus/scripts/run-migrations.py --status
 ```
 
-Useful options:
+The verdict is written to `/opt/zenplus/.schema-status.json` and reported at
+check-in as `schema_status`, alongside `dashboard_build` (the served JS bundle
+filename) so version drift is visible fleet-wide rather than only in one
+appliance's logs.
+
+## Adding a migration
 
 ```bash
-python3 scripts/run-migrations.py --status
-python3 scripts/run-migrations.py --dry-run
-python3 scripts/run-migrations.py --include-init
-python3 scripts/run-migrations.py --database zenplus --user zenplus --host localhost
-```
-
-## Tracking Table
-
-```sql
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    filename TEXT PRIMARY KEY,
-    checksum TEXT NOT NULL,
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    duration_ms INTEGER NOT NULL
-);
-```
-
-## Rules
-
-- PostgreSQL migrations are files matching `scripts/migrate-*.sql`.
-- ClickHouse migrations are excluded by the runner for now and remain on the existing ClickHouse path.
-- Already-applied migrations with the same checksum are skipped.
-- Already-applied migrations with a different checksum are reported as checksum drift and are not re-applied.
-- New migrations should be idempotent where possible.
-- Released migration files are immutable. Do not edit a migration after it has shipped; add a new numbered migration that moves the schema forward.
-- Release packages must include only the migration files introduced by that release. Do not bundle the historical migration set in an OTA package.
-
-## Updater Integration
-
-The OTA updater `run_migration` step now prefers the tracked migration runner for PostgreSQL migrations when `/opt/zenplus/scripts/run-migrations.py` is available. It falls back to the legacy direct `psql -f` path only if the runner is unavailable.
-
-## Release Workflow
-
-Before building or publishing a release, the release builder checks
-`scripts/migrations.lock`. The lockfile records the SHA-256 digest of every
-released `migrate-*.sql` file and makes migration edits fail before a package is
-published.
-
-When adding a new migration:
-
-```bash
+# 1. Write scripts/migrate-NNN-description.sql (next free number; -clickhouse suffix for CH)
+# 2. Record it
 python3 scripts/build-release.py lint-migrations --update-lock
+# 3. Commit the migration and scripts/migrations.lock together
 ```
 
-Commit the new migration and the updated `scripts/migrations.lock` together.
+The linter rejects, at build time:
 
-When building a schema release, name the release's migration files explicitly:
+- an edit to an already-released migration (checksum drift)
+- a reused sequence number
+- a deleted migration that appliances may not have applied
+- a new ClickHouse migration that is not replay-safe
 
-```bash
-python3 scripts/build-release.py build --version 1.2.12 \
-  --migration migrate-017-discovery-v2.sql \
-  --migration migrate-018-discovery-windows-creds.sql
-```
+## Release integration
 
-`--include-migrations` no longer packages every historical migration. It now
-requires explicit `--migration` values so an edited old file cannot block an
-unrelated appliance update.
+`build-release.py` emits a `run_hook` step for `scripts/sync-schema.py` on
+**every** release, not only schema releases. It runs after `apply_code` has
+landed the complete migration set and before services start. A non-zero exit
+fails the step, which triggers the manifest's rollback.
 
-The release builder excludes SQL migrations from the ordinary `code/scripts/`
-payload. Selected migrations are shipped under the package `migrations/`
-directory, executed from there, and then copied into `/opt/zenplus/scripts/`
-after successful application.
+`--migration FILE` still works but is now emphasis, not delivery: it adds an
+explicit `run_migration` step to the manifest. Forgetting it can no longer
+strand an appliance.
 
-## Checksum Drift Recovery
+## Failure modes and what they mean
 
-If an appliance reports a message such as:
+**`changed migrate-NNN.sql checksum differs from applied record`** — a released
+migration was edited. That is a release problem, not a database problem. Add a
+new forward-only migration instead. For a single blocked appliance, after a
+backup and schema inspection, an operator may update
+`schema_migrations.checksum` to match the shipped file if the database already
+reflects the intended schema. Never delete ledger rows or re-run old migrations
+blindly.
 
-```text
-changed migrate-004-snmp.sql checksum differs from applied record
-```
+**`unresolved ... cannot verify, inserts rows`** — the runner cannot tell
+whether the migration ran and re-running it would duplicate data. Inspect the
+table, then either apply it by hand or insert its ledger row.
 
-the appliance has already applied a file with that name, but the update package
-contains different bytes for the same filename. Treat this as a release problem,
-not as a database problem.
+**`clickhouse: ... partially applied and not replay-safe`** — some of the
+migration's objects exist and some do not. Create the missing objects by hand,
+then re-run the sync.
 
-Preferred recovery:
+**Schema gate fails the update** — the appliance rolls back to the previous code
+and stays on the previous version number. An appliance on an older version with
+a consistent schema is a working appliance; a half-migrated one is not.
 
-1. Rebuild the release without historical migrations.
-2. Include only the new migration files required for the target version.
-3. If the schema needs a correction, create a new forward-only migration.
+## Test coverage
 
-For a single blocked appliance, only after a database backup and schema
-inspection, an operator may update `schema_migrations.checksum` to match the
-currently shipped file if the database already reflects the intended schema.
-Do not delete rows from `schema_migrations` or rerun old migrations blindly.
-
-## Verification
-
-The runner has unit coverage for:
-
-- sorted migration discovery
-- ClickHouse file exclusion
-- optional init/seed inclusion
-- skip behavior for already-applied migrations
-- checksum drift detection
+- `server/tests/test_schema_convergence.py` — ordering, static analysis,
+  ClickHouse baseline/heal/apply/unresolved paths, gate verdicts. Includes a
+  regression test that reproduces the original field failure: ledger claims
+  `migrate-004-snmp-clickhouse.sql` was applied, `snmp_metrics` is missing, and
+  the sync heals it.
+- `server/tests/test_migration_runner.py` — PostgreSQL discovery order,
+  baselining on evidence, checksum drift, unverifiable-insert refusal.
+- `server/tests/test_migrations_lint.py` — every build-time guard above.

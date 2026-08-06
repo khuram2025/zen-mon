@@ -2,19 +2,28 @@
 """Run ZenPlus SQL migrations with applied-migration tracking.
 
 PostgreSQL migrations are tracked in ``schema_migrations``. ClickHouse
-migrations are intentionally left to the existing installer path for now.
+migrations are handled by ``updater/clickhouse_sync.py``, which keeps an
+equivalent ledger in ClickHouse.
+
+Migrations are applied in release order (see ``migration_order``), never in
+plain filename order — migration numbers are not unique, so a filename sort is
+not a stable sequence.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import migration_order  # noqa: E402
 
 
 DEFAULT_DB = "zenplus"
@@ -35,7 +44,13 @@ class Migration:
     checksum: str
 
 
-def discover_migrations(scripts_dir: Path, include_init: bool = False) -> list[Migration]:
+def discover_migrations(
+    scripts_dir: Path,
+    include_init: bool = False,
+    *,
+    lock_path: Path | None = None,
+) -> list[Migration]:
+    """Return PostgreSQL migrations under scripts_dir in release order."""
     files: list[Path] = []
     if include_init:
         for name in ("init-postgres.sql", "seed-devices.sql"):
@@ -44,9 +59,9 @@ def discover_migrations(scripts_dir: Path, include_init: bool = False) -> list[M
                 files.append(path)
 
     files.extend(
-        path
-        for path in sorted(scripts_dir.glob("migrate-*.sql"))
-        if "clickhouse" not in path.name
+        migration_order.ordered_migrations(
+            scripts_dir, engine="postgres", lock_path=lock_path
+        )
     )
     return [Migration(path=p, filename=p.name, checksum=sha256_file(p)) for p in files]
 
@@ -108,6 +123,51 @@ def applied_migrations(cmd: list[str]) -> dict[str, str]:
     return out
 
 
+EXISTING_OBJECTS_SQL = """
+SELECT n.nspname || '.' || c.relname
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'v', 'm', 'p', 'f')
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast');
+"""
+
+
+def existing_objects(cmd: list[str]) -> set[str]:
+    """Return every relation in the database, qualified and bare, lowercased.
+
+    Migrations name tables unqualified (``devices``), so both forms are stored
+    and the caller can match either.
+    """
+    result = run_psql(cmd, sql=EXISTING_OBJECTS_SQL)
+    if result.returncode != 0:
+        raise RuntimeError(f"Could not list relations: {result.stderr.strip()}")
+
+    objects: set[str] = set()
+    for line in result.stdout.splitlines():
+        line = line.strip().lower()
+        if not line or "." not in line or line.startswith("(") or line.startswith("-"):
+            continue
+        objects.add(line)
+        objects.add(line.split(".", 1)[1])
+    return objects
+
+
+def evidence_of(migration: Migration, present: set[str], sql: str | None = None) -> bool:
+    """True when this migration's tables already exist in the database.
+
+    An appliance installed before migrations were tracked has a full schema and
+    an empty ledger — every migration would look pending. Re-running them would
+    duplicate seed rows from the seven migrations that INSERT. Asking the
+    database what it already has turns an unknowable "has this run?" into an
+    answerable one.
+    """
+    objects = migration_order.created_objects(
+        migration.path.read_text() if sql is None else sql
+    )
+    if not objects:
+        return False
+    return all(obj.lower() in present for obj in objects)
+
+
 def record_migration(cmd: list[str], migration: Migration, duration_ms: int) -> None:
     sql = (
         "INSERT INTO schema_migrations (filename, checksum, duration_ms) "
@@ -124,28 +184,68 @@ def escape_sql(value: str) -> str:
     return value.replace("'", "''")
 
 
+def new_report() -> dict:
+    """Empty structured result, filled in by run_migrations()."""
+    return {"applied": [], "skipped": [], "pending": [], "drift": [],
+            "failed": [], "baselined": [], "unresolved": []}
+
+
 def run_migrations(
     migrations: list[Migration],
     cmd: list[str],
     *,
     dry_run: bool = False,
     status_only: bool = False,
+    report: dict | None = None,
 ) -> int:
+    """Apply every pending migration in the given order.
+
+    ``report`` is filled in with the per-file outcome so callers (the OTA
+    updater) can gate on real state instead of parsing stdout. Returns 0 when
+    the database matches the migration set on disk, 2 when it does not.
+    """
+    if report is None:
+        report = new_report()
     ensure_tracking(cmd)
     applied = applied_migrations(cmd)
+    present = existing_objects(cmd)
 
     exit_code = 0
     for migration in migrations:
         existing_checksum = applied.get(migration.filename)
         if existing_checksum == migration.checksum:
             print(f"skip    {migration.filename}")
+            report["skipped"].append(migration.filename)
             continue
         if existing_checksum and existing_checksum != migration.checksum:
             print(f"changed {migration.filename} checksum differs from applied record", file=sys.stderr)
+            report["drift"].append(migration.filename)
             exit_code = 2
             continue
+
+        sql = migration.path.read_text()
+        if not existing_checksum and evidence_of(migration, present, sql):
+            # Its tables are already there: record it instead of re-running it.
+            print(f"baseline {migration.filename} (objects already present)")
+            report["baselined"].append(migration.filename)
+            if not (status_only or dry_run):
+                record_migration(cmd, migration, 0)
+            continue
+
+        if not existing_checksum and migration_order.writes_rows(sql) \
+                and not migration_order.created_objects(sql):
+            # Nothing to probe and it INSERTs rows — running it blind could
+            # duplicate data. Surface it rather than guess.
+            print(f"unresolved {migration.filename}: cannot verify, inserts rows",
+                  file=sys.stderr)
+            report["unresolved"].append(migration.filename)
+            exit_code = 2
+            continue
+
         if status_only or dry_run:
             print(f"pending {migration.filename}")
+            report["pending"].append(migration.filename)
+            exit_code = 2
             continue
 
         print(f"apply   {migration.filename}")
@@ -155,8 +255,13 @@ def run_migrations(
         if result.returncode != 0:
             print(result.stdout, end="")
             print(result.stderr, end="", file=sys.stderr)
+            report["failed"].append(
+                {"filename": migration.filename, "error": result.stderr.strip()[:2000]}
+            )
             raise RuntimeError(f"Migration failed: {migration.filename}")
         record_migration(cmd, migration, duration_ms)
+        report["applied"].append(migration.filename)
+        present |= {o.lower() for o in migration_order.created_objects(sql)}
 
     return exit_code
 
@@ -171,15 +276,36 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--include-init", action="store_true", help="Include init-postgres.sql and seed-devices.sql")
     parser.add_argument("--dry-run", action="store_true", help="Print pending migrations without applying them")
     parser.add_argument("--status", action="store_true", help="Show applied/pending status without applying migrations")
+    parser.add_argument("--lock", default=None, help="Path to migrations.lock (defaults to one in --scripts-dir)")
+    parser.add_argument("--json", action="store_true", help="Emit a machine-readable summary on the last stdout line")
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     scripts_dir = Path(args.scripts_dir)
-    migrations = discover_migrations(scripts_dir, include_init=args.include_init)
+    lock_path = Path(args.lock) if args.lock else None
+    migrations = discover_migrations(
+        scripts_dir, include_init=args.include_init, lock_path=lock_path
+    )
     cmd = psql_base_cmd(args.database, args.user, args.host, args.port)
-    return run_migrations(migrations, cmd, dry_run=args.dry_run, status_only=args.status)
+    report = new_report()
+    try:
+        code = run_migrations(
+            migrations,
+            cmd,
+            dry_run=args.dry_run,
+            status_only=args.status,
+            report=report,
+        )
+    except RuntimeError as e:
+        report["error"] = str(e)
+        code = 1
+        if not args.json:
+            raise
+    if args.json:
+        print("ZENPLUS_MIGRATION_JSON " + json.dumps(report))
+    return code
 
 
 if __name__ == "__main__":

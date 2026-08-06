@@ -87,3 +87,69 @@ def test_stage_agent_artifacts_rejects_truncated_msi(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="looks truncated"):
         builder.stage_agent_artifacts(build, artifacts)
+
+
+# ─── Agent source not vendored here ───────────────────────────────────────────
+
+
+def test_newest_msi_ships_when_the_agent_source_is_not_vendored(tmp_path, monkeypatch):
+    """The agent lives in its own repo. Without its source there is nothing to
+    check a version against, so the newest package in the store is shipped."""
+    builder = _load_builder()
+    repo = tmp_path / "repo"          # no ZenPlus_Agent/ inside
+    repo.mkdir()
+    artifacts = tmp_path / "artifacts"
+    build = tmp_path / "build"
+    build.mkdir()
+    _write_sparse_package(artifacts / "windows" / "zenplus-agent-1.3.2.msi")
+    newest = artifacts / "windows" / "zenplus-agent-1.5.2.msi"
+    with newest.open("wb") as package:
+        package.seek(1_000_001)
+        package.write(b"\0")
+    monkeypatch.setattr(builder, "ZENPLUS_DIR", repo)
+
+    staged = builder.stage_agent_artifacts(build, artifacts)
+
+    assert [p["version"] for p in staged] == ["1.5.2"]
+    manifest = json.loads((build / "agent-artifacts" / "manifest.json").read_text())
+    assert manifest["required_windows_version"] == "1.5.2"
+    assert (build / "agent-artifacts" / "windows" / newest.name).is_file()
+
+
+def test_missing_msi_still_fails_when_the_source_is_not_vendored(tmp_path, monkeypatch):
+    """Dropping the version contract must not also drop the artifact check —
+    a release with no MSI regresses appliances to 'no package published'."""
+    builder = _load_builder()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "windows").mkdir(parents=True)
+    build = tmp_path / "build"
+    build.mkdir()
+    monkeypatch.setattr(builder, "ZENPLUS_DIR", repo)
+
+    with pytest.raises(RuntimeError, match="No Windows agent MSI"):
+        builder.stage_agent_artifacts(build, artifacts)
+
+
+def test_missing_msi_is_a_warning_when_not_required(tmp_path, monkeypatch, capsys):
+    builder = _load_builder()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "windows").mkdir(parents=True)
+    build = tmp_path / "build"
+    build.mkdir()
+    monkeypatch.setattr(builder, "ZENPLUS_DIR", repo)
+
+    assert builder.stage_agent_artifacts(build, artifacts, required=False) == []
+    assert "No Windows agent MSI" in capsys.readouterr().out
+
+
+def test_agent_source_version_is_none_when_not_vendored(tmp_path, monkeypatch):
+    builder = _load_builder()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(builder, "ZENPLUS_DIR", repo)
+
+    assert builder._agent_source_version() is None

@@ -73,8 +73,23 @@ class RemoteSubscription(BaseModel):
     license: Optional[NodeLicense] = None
 
 
+class SchemaHealth(BaseModel):
+    """Whether the database schema matches the code this version expects.
+
+    A version number alone proved to be a lie: an appliance ran v1.6.0 with its
+    ClickHouse SNMP tables missing and reported "success" here, because the
+    post-update health check only asked whether the API answered HTTP 200.
+    """
+    ok: Optional[bool] = None          # None = never checked
+    checked_at: str = ""
+    problem_count: int = 0
+    problems: list[str] = []
+    summary: str = ""
+
+
 class UpdateStatus(BaseModel):
     current_version: str
+    schema_health: Optional[SchemaHealth] = None
     installed_at: str = ""
     appliance_id: str
     server_url: str
@@ -266,6 +281,50 @@ def _registration_is_valid() -> bool:
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
+def _read_schema_health() -> SchemaHealth:
+    """Read the verdict scripts/sync-schema.py writes on every update.
+
+    Reported next to the version number so an operator can see that code and
+    schema agree — the thing this page could not previously tell them.
+    """
+    status_file = Path("/opt/zenplus/.schema-status.json")
+    if not status_file.exists():
+        return SchemaHealth(
+            ok=None,
+            summary="Not verified yet — runs on the next update, or "
+                    "`sudo /opt/zenplus/scripts/sync-schema.py --check`",
+        )
+    try:
+        data = json.loads(status_file.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        return SchemaHealth(ok=None, summary=f"Verdict file unreadable: {e}")
+
+    problems = [str(p) for p in (data.get("problems") or [])]
+    ok = bool(data.get("ok"))
+    pg = data.get("postgres") or {}
+    ch = data.get("clickhouse") or {}
+
+    if ok:
+        applied = len(pg.get("applied", [])) + len(ch.get("applied", []))
+        healed = len(ch.get("healed", []))
+        parts = ["Schema matches this version"]
+        if applied:
+            parts.append(f"{applied} migration(s) applied")
+        if healed:
+            parts.append(f"{healed} repaired")
+        summary = " — ".join(parts)
+    else:
+        summary = f"{len(problems)} unresolved schema problem(s)"
+
+    return SchemaHealth(
+        ok=ok,
+        checked_at=data.get("checked_at", ""),
+        problem_count=len(problems),
+        problems=problems[:20],
+        summary=summary,
+    )
+
+
 @router.get("/update-status")
 async def get_update_status(user: User = Depends(require_admin_user)):
     """Get full update agent status including history and errors."""
@@ -306,6 +365,7 @@ async def get_update_status(user: User = Depends(require_admin_user)):
 
     return UpdateStatus(
         current_version=version,
+        schema_health=_read_schema_health(),
         installed_at=installed_at,
         appliance_id=config.get("appliance", "id", fallback=""),
         server_url=config.get("server", "url", fallback="https://zentryc.com"),

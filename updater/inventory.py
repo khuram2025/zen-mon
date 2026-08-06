@@ -140,6 +140,45 @@ def get_node_count() -> int:
         return 0
 
 
+def get_schema_status() -> dict:
+    """Report whether this appliance's schema matches its code.
+
+    Written by scripts/sync-schema.py on every update. Reported at check-in so
+    a drifting appliance is visible from the fleet view instead of only from
+    its own logs — two appliances on the same version number are not
+    necessarily running the same thing, and that was invisible before.
+    """
+    status_file = ZENPLUS_DIR / ".schema-status.json"
+    if not status_file.exists():
+        return {"ok": None, "reason": "never checked"}
+    try:
+        import json
+        data = json.loads(status_file.read_text())
+    except (OSError, ValueError) as e:
+        return {"ok": None, "reason": f"unreadable: {e}"}
+
+    problems = data.get("problems", []) or []
+    return {
+        "ok": bool(data.get("ok")),
+        "checked_at": data.get("checked_at", ""),
+        "problem_count": len(problems),
+        "problems": problems[:20],
+    }
+
+
+def get_dashboard_build() -> str:
+    """Fingerprint the dashboard bundle actually being served.
+
+    Two appliances reporting the same version served different JS bundles, and
+    nothing in the check-in payload could have revealed it.
+    """
+    assets = ZENPLUS_DIR / "dashboard" / "dist" / "assets"
+    if not assets.is_dir():
+        return ""
+    names = sorted(p.name for p in assets.glob("index-*.js"))
+    return ",".join(names)
+
+
 def collect_inventory() -> dict:
     """Collect full system inventory for check-in."""
     return {
@@ -152,4 +191,6 @@ def collect_inventory() -> dict:
         "services_status": get_services_status(),
         "disk": get_disk_usage(),
         "node_count": get_node_count(),
+        "schema_status": get_schema_status(),
+        "dashboard_build": get_dashboard_build(),
     }

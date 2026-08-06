@@ -303,6 +303,21 @@ CREATE TABLE IF NOT EXISTS zenplus.service_metrics_5m (service_check_id UUID, de
 CREATE TABLE IF NOT EXISTS zenplus.service_status_log (service_check_id UUID, device_id Nullable(UUID), timestamp DateTime64(3, 'UTC'), check_type LowCardinality(String), old_status String, new_status String, reason String, duration_sec UInt64) ENGINE = MergeTree() PARTITION BY toYYYYMM(timestamp) ORDER BY (service_check_id, timestamp) TTL toDateTime(timestamp) + INTERVAL 365 DAY DELETE;
 CHSQL
     log "ClickHouse configured"
+
+    # Seed the migration ledgers. The loops above apply every migration but
+    # record nothing, so without this a freshly installed appliance looks
+    # untracked to the first OTA update. sync-schema.py probes what actually
+    # exists and baselines accordingly, then applies anything genuinely
+    # missing. Non-fatal: a fresh install must not abort here, and the same
+    # script runs again on the first update.
+    if [[ -x "$ZENPLUS_HOME/scripts/sync-schema.py" ]]; then
+        info "Recording applied migrations..."
+        CLICKHOUSE_PASSWORD="$CH_PASSWORD" \
+            python3 "$ZENPLUS_HOME/scripts/sync-schema.py" \
+            --scripts-dir "$ZENPLUS_HOME/scripts" \
+            && log "Migration ledgers seeded" \
+            || warn "Schema ledger incomplete — see $ZENPLUS_HOME/.schema-status.json"
+    fi
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -707,10 +722,20 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC
 get_ip() { ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1; }
 
 run_migrations() {
-    # Apply any pending migrate-*.sql files. Postgres migrations are
-    # expected to be idempotent (CREATE TABLE IF NOT EXISTS, etc.).
+    # Converge both databases through the same tracked path the OTA updater
+    # uses, so an appliance updated by hand and one updated over the air end up
+    # with identical schema. The old loop re-ran every file blind and discarded
+    # every error, which recorded nothing and hid failures.
     set +e
     [[ -f "$ZENPLUS_HOME/.env" ]] && set -a && . "$ZENPLUS_HOME/.env" && set +a
+    if [[ -x "$ZENPLUS_HOME/scripts/sync-schema.py" ]]; then
+        python3 "$ZENPLUS_HOME/scripts/sync-schema.py" --scripts-dir "$ZENPLUS_HOME/scripts"
+        local rc=$?
+        [[ $rc -eq 0 ]] || echo -e "${YELLOW}  Schema drift remains — see $ZENPLUS_HOME/.schema-status.json${NC}"
+        return $rc
+    fi
+
+    # Fallback for an appliance that predates sync-schema.py.
     for sql in "$ZENPLUS_HOME"/scripts/migrate-*.sql; do
         [[ -f "$sql" ]] || continue
         case "$(basename "$sql")" in *clickhouse*) continue ;; esac
@@ -808,13 +833,23 @@ EOF
         echo "  building dashboard..."
         ( cd "$ZENPLUS_HOME/dashboard" && npm install --silent 2>/dev/null && npx vite build 2>/dev/null )
         echo "  running migrations..."
-        run_migrations
+        MIGRATION_RC=0
+        run_migrations || MIGRATION_RC=$?
         echo "  reloading systemd..."
         reinstall_units
         chown -R "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME" 2>/dev/null
         echo "  restarting services..."
         systemctl restart zenplus-api zenplus-poller nginx
         systemctl restart zenplus-updater.timer 2>/dev/null || true
+        # Stamp the version only if the schema actually matches this code. A
+        # version marker that outruns the schema is what made two appliances
+        # reporting the same version behave differently.
+        if [[ $MIGRATION_RC -ne 0 ]]; then
+            echo -e "${RED}Schema drift — version not stamped. Code is at $NEW, schema is not.${NC}"
+            echo -e "${YELLOW}Details: $ZENPLUS_HOME/.schema-status.json${NC}"
+            echo -e "${YELLOW}Re-run after fixing: zenplus update${NC}"
+            exit 1
+        fi
         echo "$NEW" > "$ZENPLUS_HOME/.version"
         date -Iseconds >> "$ZENPLUS_HOME/.version"
         echo -e "${GREEN}Updated to $NEW${NC}"
