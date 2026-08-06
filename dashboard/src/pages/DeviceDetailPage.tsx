@@ -276,21 +276,20 @@ function DeviceHeader({
     { label: 'OS / Version', value: device.os_version || '—' },
   ]
 
-  /* Secondary row */
-  const uptimeSec = readUptimeSeconds(device)
-  const uptimeDisplay =
-    uptimeSec != null
-      ? formatDuration(uptimeSec)
-      : availabilityPct !== undefined
-        ? `${availabilityPct.toFixed(availabilityPct >= 99.95 ? 1 : 2)}% (${rangePhrase(range.label)})`
-        : '—'
+  /* Secondary row. Uptime is deliberately absent — the KPI row states both the
+   * availability percentage and the boot time, and carrying it here as well
+   * meant the same number appeared three times above the fold (header, KPI
+   * tile, availability timeline). Entries with nothing to show are dropped
+   * rather than rendered as a dash. */
+  const firmware = device.firmware_version && device.firmware_version !== device.os_version
+    ? device.firmware_version
+    : ''
   const secondary: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; value: string; color?: string }> = [
-    { icon: Clock, label: 'Uptime', value: uptimeDisplay, color: 'text-success' },
     { icon: Activity, label: 'Last Seen', value: relativeTime(device.last_seen), color: 'text-muted' },
-    { icon: HardDrive, label: 'Serial Number', value: device.serial_number || '—', color: 'text-muted' },
-    { icon: GitBranch, label: 'Firmware Version', value: device.firmware_version || device.os_version || '—', color: 'text-muted' },
-    { icon: MapPin, label: device.group_name ? '' : 'Group', value: device.group_name || '—', color: 'text-muted' },
-  ]
+    { icon: HardDrive, label: 'Serial Number', value: device.serial_number || '', color: 'text-muted' },
+    { icon: GitBranch, label: 'Firmware Version', value: firmware, color: 'text-muted' },
+    { icon: MapPin, label: device.group_name ? '' : 'Group', value: device.group_name || '', color: 'text-muted' },
+  ].filter((s) => s.value)
 
   return (
     <Card>
@@ -896,8 +895,6 @@ function DashboardSection({
           alerts={recentAlerts}
           totalAlerts={deviceAlerts.length}
           deviceId={deviceId}
-          metrics={metrics || {}}
-          sensors={sensors || []}
           memVal={memVal}
           cpuVal={cpuVal}
           avgLoss={avgLoss}
@@ -940,7 +937,6 @@ function DashboardSection({
           snmpEnabled={snmp}
           metrics={metrics || {}}
           sensors={sensors || []}
-          lastBw={lastBw}
           openAlerts={activeAlertCount}
         />
         {snmp && ['switch', 'router', 'firewall'].includes(device.device_type) && (
@@ -1376,12 +1372,12 @@ function InterfaceStatusCard({
             <thead className="text-[10px] uppercase tracking-wider text-muted">
               <tr className="border-b border-border/50">
                 <th className="pb-1.5 pr-2 text-left font-medium">Interface</th>
-                <th className="pb-1.5 px-1 text-left font-medium">Status</th>
-                <th className="pb-1.5 px-1 text-left font-medium">Speed</th>
-                <th className="pb-1.5 px-1 text-right font-medium">In</th>
-                <th className="pb-1.5 px-1 text-right font-medium">Out</th>
-                <th className="pb-1.5 px-1 text-right font-medium">Err</th>
-                <th className="pb-1.5 pl-1 text-right font-medium">Util</th>
+                <th className="whitespace-nowrap pb-1.5 px-1 text-left font-medium">Status</th>
+                <th className="whitespace-nowrap pb-1.5 px-1 text-left font-medium">Speed</th>
+                <th className="whitespace-nowrap pb-1.5 px-1 text-right font-medium">In</th>
+                <th className="whitespace-nowrap pb-1.5 px-1 text-right font-medium">Out</th>
+                <th className="whitespace-nowrap pb-1.5 px-1 text-right font-medium">Err</th>
+                <th className="whitespace-nowrap pb-1.5 pl-1 text-right font-medium">Util</th>
               </tr>
             </thead>
             <tbody>
@@ -1391,10 +1387,13 @@ function InterfaceStatusCard({
                 const speedLabel = formatSpeed(i.if_speed)
                 return (
                   <tr key={i.id || i.if_index} className="border-b border-border/30 last:border-0">
-                    <td className="py-2 pr-2">
+                    {/* The name is the only elastic column — capped so a long
+                      * interface name truncates rather than squeezing the
+                      * numeric columns until "10 Gbps" wraps onto two lines. */}
+                    <td className="w-full max-w-0 py-2 pr-2">
                       <div className="truncate font-medium text-text" title={i.if_name || i.if_descr}>{i.if_name || i.if_descr}</div>
                     </td>
-                    <td className="py-2 px-1">
+                    <td className="whitespace-nowrap py-2 px-1">
                       <span className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
                         !up ? 'bg-danger/15 text-danger'
                           : warn ? 'bg-warning/15 text-warning'
@@ -1404,11 +1403,11 @@ function InterfaceStatusCard({
                         {up ? (warn ? 'Warn' : 'Up') : 'Down'}
                       </span>
                     </td>
-                    <td className="py-2 px-1 text-muted">{speedLabel}</td>
-                    <td className="py-2 px-1 text-right font-mono text-[10px] tabular-nums">{formatBpsShort(i.inBps)}</td>
-                    <td className="py-2 px-1 text-right font-mono text-[10px] tabular-nums">{formatBpsShort(i.outBps)}</td>
-                    <td className="py-2 px-1 text-right font-mono text-[10px] tabular-nums">{i.errors}</td>
-                    <td className="py-2 pl-1">
+                    <td className="whitespace-nowrap py-2 px-1 text-muted">{speedLabel}</td>
+                    <td className="whitespace-nowrap py-2 px-1 text-right font-mono text-[10px] tabular-nums">{formatBpsShort(i.inBps)}</td>
+                    <td className="whitespace-nowrap py-2 px-1 text-right font-mono text-[10px] tabular-nums">{formatBpsShort(i.outBps)}</td>
+                    <td className="whitespace-nowrap py-2 px-1 text-right font-mono text-[10px] tabular-nums">{i.errors}</td>
+                    <td className="whitespace-nowrap py-2 pl-1">
                       <div className="flex items-center justify-end gap-1.5">
                         <div className="h-1.5 w-12 overflow-hidden rounded-full bg-surface2">
                           <div
@@ -1442,14 +1441,12 @@ function InterfaceStatusCard({
    ════════════════════════════════════════════════════════════ */
 
 function HealthScoreCard({
-  score, alerts, totalAlerts, deviceId, metrics, sensors, memVal, cpuVal, avgLoss, onViewDetails,
+  score, alerts, totalAlerts, deviceId, memVal, cpuVal, avgLoss, onViewDetails,
 }: {
   score: number
   alerts: Array<{ id: string; severity: 'critical' | 'warning' | 'info' | 'success'; title: string; ago: string; acknowledged: boolean; resolved?: boolean }>
   totalAlerts: number
   deviceId: string
-  metrics: Record<string, { points: { ts: number; value: number }[] }>
-  sensors: any[]
   memVal: number | null
   cpuVal: number | null
   avgLoss: number | null
@@ -1462,64 +1459,15 @@ function HealthScoreCard({
   const label =
     score >= 80 ? 'Excellent' : score >= 60 ? 'Good' : score >= 40 ? 'Fair' : 'Poor'
 
-  // Summary health chips — only render chips for sensors that are actually
-  // present. No hardcoded "Normal" / "OK" fallbacks.
-  const tempVal = latestSensor(metrics, sensors, ['temperature', 'celsius'])
-  const fanVal = latestSensor(metrics, sensors, ['fan', 'rpm'])
-  const voltVal = latestSensor(metrics, sensors, ['voltage', 'volts'])
-
-  type ChipTone = 'success' | 'warning' | 'danger' | 'info' | 'accent' | 'muted'
-  const chips: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; value: string; tone: ChipTone }> = []
-  if (tempVal != null) {
-    chips.push({
-      icon: Thermometer,
-      label: 'Temperature',
-      value: `${tempVal.toFixed(0)}°C`,
-      tone: tempVal > 70 ? 'danger' : tempVal > 55 ? 'warning' : 'success',
-    })
-  }
-  if (voltVal != null) {
-    chips.push({
-      icon: Power,
-      label: 'Voltage',
-      value: `${voltVal.toFixed(1)} V`,
-      tone: 'success',
-    })
-  }
-  if (fanVal != null) {
-    chips.push({
-      icon: Fan,
-      label: 'Fan',
-      value: fanVal > 100 ? `${fanVal.toFixed(0)} rpm` : `${fanVal.toFixed(0)}%`,
-      tone: 'info',
-    })
-  }
-  // The score is driven by CPU, memory and loss — show those alongside any
-  // environmental readings so the gauge isn't sitting next to empty space.
-  if (cpuVal != null) {
-    chips.push({
-      icon: Cpu,
-      label: 'CPU',
-      value: `${cpuVal.toFixed(0)}%`,
-      tone: cpuVal > 90 ? 'danger' : cpuVal > 75 ? 'warning' : 'info',
-    })
-  }
-  if (memVal != null) {
-    chips.push({
-      icon: MemoryStick,
-      label: 'Memory',
-      value: `${memVal.toFixed(0)}%`,
-      tone: memVal > 85 ? 'danger' : memVal > 70 ? 'warning' : 'accent',
-    })
-  }
-  if (avgLoss != null) {
-    chips.push({
-      icon: ZapOff,
-      label: 'Loss',
-      value: `${avgLoss.toFixed(1)}%`,
-      tone: avgLoss >= 2 ? 'danger' : avgLoss > 0 ? 'warning' : 'success',
-    })
-  }
+  // This card used to repeat CPU / memory / loss as chips beside the gauge and
+  // temperature / voltage / fan below them — the first three are already the
+  // KPI row at the top of the page, the last three are the environment card.
+  // Instead, name only the inputs that are actually costing the device points,
+  // which is the one thing the score alone does not tell you.
+  const detractors: string[] = []
+  if (cpuVal != null && cpuVal > 75) detractors.push(`CPU ${cpuVal.toFixed(0)}%`)
+  if (memVal != null && memVal > 70) detractors.push(`memory ${memVal.toFixed(0)}%`)
+  if (avgLoss != null && avgLoss > 0) detractors.push(`${avgLoss.toFixed(1)}% loss`)
 
   return (
     <Card className="flex flex-col">
@@ -1536,17 +1484,21 @@ function HealthScoreCard({
         </div>
 
         <div className="flex items-center gap-4">
-          <div className="flex flex-col items-center">
+          <div className="flex shrink-0 flex-col items-center">
             <HealthGauge value={score} color={color} />
             <div className="mt-1 text-[11px] font-semibold" style={{ color }}>{label}</div>
           </div>
-          <div className="grid flex-1 grid-cols-2 gap-2">
-            {chips.length === 0 ? (
-              <div className="col-span-2 rounded-md border border-border bg-surface2/30 px-3 py-3 text-center text-[11px] text-muted">
-                No sensor data
-              </div>
+          <div className="min-w-0 flex-1 text-[11px] leading-relaxed text-muted">
+            {detractors.length > 0 ? (
+              <>
+                <span className="font-medium text-text">Losing points to </span>
+                {detractors.join(', ')}.
+              </>
             ) : (
-              chips.map((c, i) => <ChipTile key={i} {...c} />)
+              <>CPU, memory and packet loss are all within their thresholds.</>
+            )}
+            {totalAlerts > 0 && (
+              <> {totalAlerts} alert{totalAlerts === 1 ? '' : 's'} in this window.</>
             )}
           </div>
         </div>
@@ -1679,8 +1631,11 @@ function InventoryConfigCard({
   device, entities, onDetails,
 }: { device: any; entities: any[]; onDetails: () => void }) {
   const snmp = !!device.snmp_enabled
+  // Management IP, vendor/model and OS version deliberately omitted — the page
+  // header already states all three, and repeating them here was the biggest
+  // source of duplicated content on the page. This card covers how the device
+  // is *monitored*, which the header does not.
   const rows: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; value: React.ReactNode }> = [
-    { icon: Network, label: 'Management IP', value: device.ip_address || '—' },
     { icon: Shield, label: 'SNMP', value: snmp ? `v${device.snmp_version} · port ${device.snmp_port}` : 'Disabled' },
     {
       icon: Layers, label: 'Monitoring Template',
@@ -1689,8 +1644,6 @@ function InventoryConfigCard({
         : (snmp ? 'Default (auto-detect)' : '—'),
     },
     { icon: Wifi, label: 'Ping', value: device.ping_enabled ? `Enabled · ${device.ping_interval}s` : 'Disabled' },
-    { icon: HardDrive, label: 'Vendor / Model', value: [device.vendor, device.model].filter(Boolean).join(' ') || '—' },
-    { icon: FileText, label: 'OS Version', value: device.os_version || '—' },
     { icon: Info, label: 'System OID', value: <span className="font-mono text-[10px] break-all">{device.sys_object_id || '—'}</span> },
     { icon: Layers, label: 'Hardware', value: entities.length > 0 ? `${entities.length} component${entities.length === 1 ? '' : 's'}` : '—' },
     { icon: Clock, label: 'Last Updated', value: relativeTime(device.updated_at || device.last_seen) },
@@ -2101,20 +2054,18 @@ function inferRebootEvent(metrics: MetricSeriesMap, fromISO: string, toISO: stri
    ════════════════════════════════════════════════════════════ */
 
 function EnvironmentalActionsCard({
-  deviceId, snmpEnabled, metrics, sensors, lastBw, openAlerts,
+  deviceId, snmpEnabled, metrics, sensors, openAlerts,
 }: {
   deviceId: string
   snmpEnabled: boolean
   metrics: Record<string, { points: { ts: number; value: number }[] }>
   sensors: any[]
-  lastBw: number
   openAlerts: number
 }) {
   const qc = useQueryClient()
   const tempVal = latestSensor(metrics, sensors, ['temperature', 'celsius'])
   const voltVal = latestSensor(metrics, sensors, ['voltage', 'volts'])
   const fanVal = latestSensor(metrics, sensors, ['fan', 'rpm'])
-  const sesCount = latestFromMetrics(metrics, ['session', 'sessions'])
 
   // Persisted last-run state for Ping Test + SNMP Test (per-device).
   const pingKey = `zp-ping-last-${deviceId}`
@@ -2226,51 +2177,35 @@ function EnvironmentalActionsCard({
     })
   }
 
-  // System stats — throughput is always available (derived from iface counters);
-  // session count and routing table come from vendor MIBs if collected.
-  const bwMbps = lastBw / 1_000_000
-  const stats: Array<{ label: string; value: string }> = []
-  if (sesCount != null) {
-    stats.push({ label: 'Active Sessions', value: sesCount.toLocaleString() })
-  }
-  if (lastBw > 0) {
-    stats.push({ label: 'Throughput', value: `${bwMbps.toFixed(bwMbps < 1 ? 2 : 0)} Mbps` })
-  }
+  // Session count and throughput used to be repeated here as "System Stats".
+  // Both are stated more precisely elsewhere on the page — sessions by the
+  // vendor insight groups, throughput by the interface KPI and NetFlow card —
+  // so this card is now just environment plus the actions.
+  const hasEnv = tiles.length > 0
 
   return (
     <Card>
       <CardContent className="p-4">
         <div className="mb-3 flex items-center justify-between">
-          <h3 className="text-sm font-semibold">Environmental / System Stats</h3>
-          <span className="text-[10px] text-muted">{sensors.length} sensor{sensors.length === 1 ? '' : 's'}</span>
+          <h3 className="text-sm font-semibold">{hasEnv ? 'Environment & Actions' : 'Quick Actions'}</h3>
+          {/* Only when there really are entity sensors. Readings can also come
+           * from the metric series, so a "0 sensors" caption used to sit right
+           * above a populated tile. */}
+          {sensors.length > 0 && (
+            <span className="text-[10px] text-muted">{sensors.length} sensor{sensors.length === 1 ? '' : 's'}</span>
+          )}
         </div>
 
-        {/* Sensor tiles — only real values */}
-        {tiles.length > 0 ? (
-          <div className={`grid gap-2 ${tiles.length === 1 ? 'grid-cols-1' : tiles.length === 2 ? 'grid-cols-2' : 'grid-cols-3'}`}>
+        {/* Sensor tiles — only when the device actually reports them. An empty
+         * placeholder box just took up space on the majority of devices. */}
+        {hasEnv && (
+          <div className="mb-4 grid auto-rows-fr grid-cols-[repeat(auto-fit,minmax(7rem,1fr))] gap-2 border-b border-border/60 pb-4">
             {tiles.map((t, i) => <EnvSensorTile key={i} {...t} />)}
-          </div>
-        ) : (
-          <div className="rounded-md border border-border bg-surface2/30 px-3 py-3 text-center text-[11px] text-muted">
-            No environmental sensors reported
-          </div>
-        )}
-
-        {/* System stats — only if we have real data */}
-        {stats.length > 0 && (
-          <div className={`mt-2 grid gap-2 ${stats.length === 1 ? 'grid-cols-1' : 'grid-cols-2'}`}>
-            {stats.map((t, i) => (
-              <div key={i} className="rounded-lg border border-border bg-surface2/40 p-2 text-center">
-                <div className="text-[9px] font-semibold uppercase tracking-wider text-muted">{t.label}</div>
-                <div className="mt-0.5 text-lg font-bold leading-tight tabular-nums">{t.value}</div>
-              </div>
-            ))}
           </div>
         )}
 
         {/* Quick actions */}
-        <div className="mt-4 border-t border-border/60 pt-3">
-          <div className="mb-2 text-xs font-semibold">Quick Actions</div>
+        <div>
           <div className="grid grid-cols-2 gap-2">
             <ActionCard
               icon={Activity}
