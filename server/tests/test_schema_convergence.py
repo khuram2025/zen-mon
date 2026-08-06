@@ -384,3 +384,80 @@ def test_dry_run_does_not_create_the_ledger_table(tmp_path):
 
     assert writes == []
     assert summary["pending"] == ["migrate-004-snmp-clickhouse.sql"]
+
+
+# ─── String literals must not break statement analysis ───────────────────────
+#
+# Regression for a shipped failure: migrate-063 seeds templates with INSERT …
+# ON CONFLICT, but its JSON payload contained "only; empty". _INSERT_RE ends a
+# statement at the first ';', so the ON CONFLICT fell outside the captured body,
+# the INSERT read as unguarded, and the migration was refused as unverifiable —
+# failing the update at step 9/24 on every appliance and rolling it back.
+
+_SEED_WITH_SEMICOLON_IN_LITERAL = """
+INSERT INTO device_profiles (name, oid_groups, builtin)
+VALUES (
+  'Juniper JunOS',
+  $oidg$ [{"key":"srx_flow","description":"flow-mode SRX only; empty on EX/MX"}] $oidg$::jsonb,
+  TRUE
+)
+ON CONFLICT (name, version) DO UPDATE SET oid_groups = EXCLUDED.oid_groups;
+"""
+
+_SEED_UNGUARDED = """
+INSERT INTO device_profiles (name) VALUES ('no guard here; really');
+"""
+
+_DO_BLOCK_GUARDED = """
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'x_fkey') THEN
+        ALTER TABLE devices ADD CONSTRAINT x_fkey FOREIGN KEY (p) REFERENCES q(id);
+    END IF;
+END $$;
+"""
+
+_DO_BLOCK_UNGUARDED = """
+DO $$
+BEGIN
+    ALTER TABLE devices ADD COLUMN surprise TEXT;
+END $$;
+"""
+
+
+def test_semicolon_inside_literal_does_not_hide_on_conflict():
+    """A guarded seed stays guarded even when its payload contains a semicolon."""
+    assert migration_order.writes_rows(_SEED_WITH_SEMICOLON_IN_LITERAL) is False
+    assert migration_order.is_replay_safe(_SEED_WITH_SEMICOLON_IN_LITERAL) is True
+
+
+def test_unguarded_insert_still_detected():
+    """The guard must not be so lenient that a bare INSERT slips through."""
+    assert migration_order.writes_rows(_SEED_UNGUARDED) is True
+    assert migration_order.is_replay_safe(_SEED_UNGUARDED) is False
+
+
+def test_do_block_ddl_replay_safety():
+    """DDL inside a DO block is judged on the block's own IF NOT EXISTS probe."""
+    assert migration_order.is_replay_safe(_DO_BLOCK_GUARDED) is True
+    assert migration_order.is_replay_safe(_DO_BLOCK_UNGUARDED) is False
+
+
+def test_analyzable_neutralises_literals_but_keeps_structure():
+    out = migration_order.analyzable(_SEED_WITH_SEMICOLON_IN_LITERAL)
+    assert "only; empty" not in out
+    assert "ON CONFLICT" in out
+    assert "INSERT INTO device_profiles" in out
+
+
+def test_shipped_template_seeds_are_runnable():
+    """The two real template migrations must be verifiable by the runner."""
+    scripts = Path("/opt/zenplus/scripts")
+    for name in ("migrate-062-monitoring-templates.sql",
+                 "migrate-063-templates-juniper-aruba.sql"):
+        path = scripts / name
+        if not path.exists():
+            pytest.skip(f"{name} not present")
+        sql = path.read_text()
+        assert migration_order.writes_rows(sql) is False, f"{name} reads as unguarded"
+        assert migration_order.is_replay_safe(sql) is True, f"{name} reads as unsafe to replay"

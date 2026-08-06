@@ -58,6 +58,24 @@ _ALTER_GUARD_RE = re.compile(
 _DROP_UNGUARDED_RE = re.compile(
     r"\bDROP\s+(?:TABLE|VIEW|COLUMN|INDEX)\s+(?!IF\s+EXISTS)", re.IGNORECASE
 )
+# Dollar-quoted bodies ($$…$$, $tag$…$tag$) and single-quoted literals. Their
+# CONTENTS must never reach the analysers below: _INSERT_RE ends a statement at
+# the first `;`, so one semicolon inside a seed payload truncates the statement
+# before its trailing ON CONFLICT and the INSERT reads as unguarded. That is not
+# hypothetical — a template-seed migration whose JSON contained "only; empty"
+# was classified unverifiable and failed the update on every appliance.
+_DOLLAR_QUOTED_RE = re.compile(r"\$(?P<tag>[A-Za-z_0-9]*)\$.*?\$(?P=tag)\$", re.DOTALL)
+_SINGLE_QUOTED_RE = re.compile(r"'(?:[^']|'')*'", re.DOTALL)
+# DDL inside a DO $$ … $$ block is invisible to the statement-level analysers
+# once the block is neutralised, so replay-safety is judged on the block itself:
+# every such block in this tree wraps its DDL in an IF NOT EXISTS probe, and one
+# that does not is not safe to re-execute.
+_DDL_IN_BLOCK_RE = re.compile(
+    r"\bALTER\s+TABLE\b|\bCREATE\s+(?:MATERIALIZED\s+)?(?:TABLE|VIEW|DICTIONARY)\b"
+    r"|\bDROP\s+(?:TABLE|VIEW|COLUMN|INDEX|CONSTRAINT)\b",
+    re.IGNORECASE,
+)
+_BLOCK_GUARD_RE = re.compile(r"\bIF\s+(?:NOT\s+)?EXISTS\b", re.IGNORECASE)
 
 
 def engine_of(name: str | Path) -> str:
@@ -146,6 +164,20 @@ def ordered_migrations(
     return sorted(paths, key=key)
 
 
+def analyzable(sql: str) -> str:
+    """Strip comments and string-literal contents for pattern analysis.
+
+    Every analyser in this module is regex-based, so anything that can contain
+    a statement terminator or a SQL keyword without meaning one has to go first:
+    comments, dollar-quoted bodies and single-quoted literals. Literals collapse
+    to ``''`` rather than being deleted, so statement structure survives.
+    """
+    stripped = re.sub(r"--[^\n]*", "", sql)
+    stripped = re.sub(r"/\*.*?\*/", "", stripped, flags=re.DOTALL)
+    stripped = _DOLLAR_QUOTED_RE.sub("''", stripped)
+    return _SINGLE_QUOTED_RE.sub("''", stripped)
+
+
 def created_objects(sql: str) -> list[str]:
     """Return the fully-qualified objects a migration creates, in order.
 
@@ -155,7 +187,7 @@ def created_objects(sql: str) -> list[str]:
     """
     seen: set[str] = set()
     objects: list[str] = []
-    for match in _CREATE_RE.finditer(sql):
+    for match in _CREATE_RE.finditer(analyzable(sql)):
         name = match.group(1).strip('`"')
         if name.lower() in seen:
             continue
@@ -173,8 +205,7 @@ def writes_rows(sql: str) -> bool:
     rows. Only the latter is a reason to refuse to run a migration we cannot
     otherwise verify.
     """
-    stripped = re.sub(r"--[^\n]*", "", sql)
-    stripped = re.sub(r"/\*.*?\*/", "", stripped, flags=re.DOTALL)
+    stripped = analyzable(sql)
     return any(
         not _INSERT_GUARD_RE.search(match.group("body"))
         for match in _INSERT_RE.finditer(stripped)
@@ -195,10 +226,17 @@ def is_replay_safe(sql: str) -> bool:
 
     A bare ``INSERT`` is not replay-safe: it duplicates seed rows on a second
     run. Neither is an unguarded ``CREATE``, which hard-errors against an
-    object that already exists.
+    object that already exists, nor a ``DO`` block whose DDL carries no
+    ``IF NOT EXISTS`` probe of its own.
     """
-    stripped = re.sub(r"--[^\n]*", "", sql)
-    stripped = re.sub(r"/\*.*?\*/", "", stripped, flags=re.DOTALL)
+    no_comments = re.sub(r"--[^\n]*", "", sql)
+    no_comments = re.sub(r"/\*.*?\*/", "", no_comments, flags=re.DOTALL)
+    for block in _DOLLAR_QUOTED_RE.finditer(no_comments):
+        body = block.group(0)
+        if _DDL_IN_BLOCK_RE.search(body) and not _BLOCK_GUARD_RE.search(body):
+            return False
+
+    stripped = analyzable(sql)
 
     for match in _INSERT_RE.finditer(stripped):
         if not _INSERT_GUARD_RE.search(match.group("body")):
