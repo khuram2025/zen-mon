@@ -180,23 +180,25 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 // stall the whole sync).
 func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, hostname, host(ip_address)::text,
-		       snmp_version, snmp_port, COALESCE(snmp_community, ''),
-		       COALESCE(snmp_v3_username, ''), COALESCE(snmp_v3_context, ''),
-		       COALESCE(snmp_auth_protocol, ''), snmp_auth_passphrase,
-		       COALESCE(snmp_priv_protocol, ''), snmp_priv_passphrase,
-		       COALESCE(snmp_timeout_ms, 2000),
-		       COALESCE(snmp_retries, 2),
-		       COALESCE(snmp_max_repetitions, 25),
-		       COALESCE(snmp_poll_interval, 60),
-		       profile_id,
-		       COALESCE(sys_object_id, ''),
-		       COALESCE(vendor, ''),
-		       COALESCE(model, ''),
-		       COALESCE(os_version, '')
-		FROM devices
-		WHERE snmp_enabled = TRUE
-		ORDER BY hostname
+		SELECT d.id, d.hostname, host(d.ip_address)::text,
+		       d.snmp_version, d.snmp_port, COALESCE(d.snmp_community, ''),
+		       COALESCE(d.snmp_v3_username, ''), COALESCE(d.snmp_v3_context, ''),
+		       COALESCE(d.snmp_auth_protocol, ''), d.snmp_auth_passphrase,
+		       COALESCE(d.snmp_priv_protocol, ''), d.snmp_priv_passphrase,
+		       COALESCE(d.snmp_timeout_ms, 2000),
+		       COALESCE(d.snmp_retries, 2),
+		       COALESCE(d.snmp_max_repetitions, 25),
+		       COALESCE(d.snmp_poll_interval, 60),
+		       d.profile_id,
+		       COALESCE(d.sys_object_id, ''),
+		       COALESCE(d.vendor, ''),
+		       COALESCE(d.model, ''),
+		       COALESCE(d.os_version, ''),
+		       COALESCE(p.oid_groups::text, '')
+		FROM devices d
+		LEFT JOIN device_profiles p ON p.id = d.profile_id
+		WHERE d.snmp_enabled = TRUE
+		ORDER BY d.hostname
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("query snmp devices: %w", err)
@@ -210,6 +212,7 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 		var authBlob, privBlob []byte
 		var intervalSec int
 		var profileID *uuid.UUID
+		var oidGroupsJSON string
 		err := rows.Scan(
 			&d.ID, &d.Hostname, &ipStr,
 			&d.Version, &d.Port, &d.Community,
@@ -218,6 +221,7 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 			&d.PrivProtocol, &privBlob,
 			&d.TimeoutMs, &d.Retries, &d.MaxRepetitions, &intervalSec,
 			&profileID, &d.SysObjectID, &d.Vendor, &d.Model, &d.OSVersion,
+			&oidGroupsJSON,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan snmp device: %w", err)
@@ -226,6 +230,11 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 		d.Enabled = true
 		d.PollInterval = time.Duration(intervalSec) * time.Second
 		d.ProfileID = profileID
+		if oidGroupsJSON != "" && oidGroupsJSON != "[]" {
+			// Parse errors are non-fatal: a bad template entry must not
+			// take standard monitoring down with it.
+			d.OidGroups, _ = snmp.ParseOidGroups(json.RawMessage(oidGroupsJSON))
+		}
 
 		if len(authBlob) > 0 {
 			pt, err := snmp.Decrypt(authBlob)
@@ -334,6 +343,104 @@ func (s *PostgresStore) UpsertProfile(ctx context.Context, p *snmp.Profile) erro
 	}
 	p.ID = id
 	return nil
+}
+
+// LoadProfiles returns every row of device_profiles. The DB is the
+// source of truth for monitoring templates (builtins are seeded by SQL
+// migration; operators create custom ones through the API), so the
+// classifier is refreshed from here on the periodic sync tick.
+func (s *PostgresStore) LoadProfiles(ctx context.Context) ([]*snmp.Profile, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, name, COALESCE(vendor, ''), match_rules, oid_groups,
+		       version, builtin, COALESCE(description, '')
+		FROM device_profiles
+		ORDER BY name
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query device_profiles: %w", err)
+	}
+	defer rows.Close()
+
+	var profiles []*snmp.Profile
+	for rows.Next() {
+		var p snmp.Profile
+		var matchJSON, groupsJSON []byte
+		if err := rows.Scan(&p.ID, &p.Name, &p.Vendor, &matchJSON, &groupsJSON,
+			&p.Version, &p.Builtin, &p.Description); err != nil {
+			return nil, fmt.Errorf("scan device_profile: %w", err)
+		}
+		if len(matchJSON) > 0 {
+			if err := json.Unmarshal(matchJSON, &p.Match); err != nil {
+				continue // malformed match rules: skip, don't stall the sync
+			}
+		}
+		p.OidGroups = json.RawMessage(groupsJSON)
+		profiles = append(profiles, &p)
+	}
+	return profiles, rows.Err()
+}
+
+// UpsertTemplateValues replaces a device's latest template-metric
+// snapshot. Rows are upserted, then rows belonging to a group that was
+// polled this cycle but no longer contains the instance are purged (a
+// deleted VPN tunnel or a disconnected AP disappears from the UI rather
+// than lingering with stale numbers). Groups that were NOT polled this
+// cycle (agent timeout mid-poll) are left untouched.
+func (s *PostgresStore) UpsertTemplateValues(
+	ctx context.Context, deviceID uuid.UUID, vals []snmp.TemplateValue, polledGroups []string,
+) error {
+	if len(vals) == 0 && len(polledGroups) == 0 {
+		return nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin template values tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// The purge below removes rows older than this cycle; write the same
+	// timestamp we compare against so freshly-upserted rows can never be
+	// swept by their own cycle.
+	cycleStart := time.Now().UTC()
+	batch := &pgx.Batch{}
+	for i := range vals {
+		v := &vals[i]
+		batch.Queue(`
+			INSERT INTO device_template_values
+			    (device_id, group_key, metric_key, instance, series_key,
+			     label, unit, value_num, value_text, updated_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+			ON CONFLICT (device_id, group_key, metric_key, instance) DO UPDATE SET
+			    series_key = EXCLUDED.series_key,
+			    label      = EXCLUDED.label,
+			    unit       = EXCLUDED.unit,
+			    value_num  = EXCLUDED.value_num,
+			    value_text = EXCLUDED.value_text,
+			    updated_at = EXCLUDED.updated_at
+		`, deviceID, v.GroupKey, v.MetricKey, v.Instance, v.SeriesKey,
+			v.Label, v.Unit, v.ValueNum, v.ValueText, cycleStart)
+	}
+	if batch.Len() > 0 {
+		br := tx.SendBatch(ctx, batch)
+		for i := 0; i < batch.Len(); i++ {
+			if _, err := br.Exec(); err != nil {
+				br.Close()
+				return fmt.Errorf("upsert template value: %w", err)
+			}
+		}
+		if err := br.Close(); err != nil {
+			return fmt.Errorf("close template batch: %w", err)
+		}
+	}
+	if len(polledGroups) > 0 {
+		if _, err := tx.Exec(ctx, `
+			DELETE FROM device_template_values
+			WHERE device_id = $1 AND group_key = ANY($2) AND updated_at < $3
+		`, deviceID, polledGroups, cycleStart); err != nil {
+			return fmt.Errorf("purge stale template values: %w", err)
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // UpsertInterfaces upserts the discovered interface list for a device.

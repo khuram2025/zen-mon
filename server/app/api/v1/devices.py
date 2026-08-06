@@ -103,8 +103,9 @@ async def list_devices(
     devices, total = await device_service.get_devices(
         db, status, group_id, device_type, location, search, skip, limit
     )
+    profile_names = await _profile_name_map(db)
     return {
-        "data": [_device_to_response(d) for d in devices],
+        "data": [_device_to_response(d, profile_names) for d in devices],
         "meta": {"total": total, "skip": skip, "limit": limit},
     }
 
@@ -425,7 +426,7 @@ async def get_device(
     device = await device_service.get_device(db, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
-    return _device_to_response(device)
+    return _device_to_response(device, await _profile_name_map(db))
 
 
 @router.put("/{device_id}", response_model=DeviceResponse)
@@ -438,7 +439,7 @@ async def update_device(
     device = await device_service.update_device(db, device_id, data)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
-    return _device_to_response(device)
+    return _device_to_response(device, await _profile_name_map(db))
 
 
 @router.delete("/{device_id}", status_code=204)
@@ -1191,7 +1192,181 @@ async def test_device_snmp(
     }
 
 
-def _device_to_response(device) -> DeviceResponse:
+async def _profile_name_map(db) -> dict:
+    """profile_id -> template name (tiny table, one query)."""
+    rows = (await db.execute(text("SELECT id, name FROM device_profiles"))).all()
+    return {r[0]: r[1] for r in rows}
+
+
+_SEV_RANK = {"ok": 0, "info": 0, "warn": 1, "crit": 2}
+
+
+def _metric_status(metric: dict, value_num, value_text: str) -> str:
+    """Evaluate a template metric's status from its enum labels or thresholds."""
+    labels = metric.get("labels") or {}
+    if labels and value_num is not None:
+        code = str(int(value_num)) if float(value_num).is_integer() else str(value_num)
+        lab = labels.get(code)
+        if lab:
+            return lab.get("sev", "info")
+    th = metric.get("thresholds") or {}
+    if value_num is None or (th.get("warn") is None and th.get("crit") is None):
+        return "none"
+    op = th.get("op", ">=")
+    v = float(value_num)
+    if op == "<=":
+        if th.get("crit") is not None and v <= th["crit"]:
+            return "crit"
+        if th.get("warn") is not None and v <= th["warn"]:
+            return "warn"
+    else:
+        if th.get("crit") is not None and v >= th["crit"]:
+            return "crit"
+        if th.get("warn") is not None and v >= th["warn"]:
+            return "warn"
+    return "ok"
+
+
+def _metric_display(metric: dict, value_num, value_text: str) -> str:
+    """Human display string for enum metrics (label text beats raw text/code)."""
+    labels = metric.get("labels") or {}
+    if value_num is not None and labels:
+        code = str(int(value_num)) if float(value_num).is_integer() else str(value_num)
+        lab = labels.get(code)
+        if lab and lab.get("text"):
+            return lab["text"]
+    return value_text or ""
+
+
+@router.get("/{device_id}/template-insights")
+async def device_template_insights(
+    device_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Vendor-template metrics for one device, shaped for direct rendering:
+    the attached template's groups with the latest collected values, per-row
+    labels for tables, evaluated statuses and ClickHouse series keys for
+    charting via /devices/{id}/snmp-metrics."""
+    import json as _json
+
+    dev = (await db.execute(
+        text("""
+            SELECT d.profile_id, p.name, p.vendor, p.description, p.builtin, p.oid_groups
+            FROM devices d
+            LEFT JOIN device_profiles p ON p.id = d.profile_id
+            WHERE d.id = :id
+        """),
+        {"id": device_id},
+    )).mappings().first()
+    if dev is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if dev["profile_id"] is None:
+        return {"template": None, "groups": [], "updated_at": None}
+
+    oid_groups = dev["oid_groups"] or []
+    if isinstance(oid_groups, str):
+        oid_groups = _json.loads(oid_groups)
+
+    vals = (await db.execute(
+        text("""
+            SELECT group_key, metric_key, instance, series_key, label, unit,
+                   value_num, value_text, updated_at
+            FROM device_template_values WHERE device_id = :id
+        """),
+        {"id": device_id},
+    )).mappings().all()
+
+    by_group: dict = {}
+    latest_ts = None
+    for v in vals:
+        by_group.setdefault(v["group_key"], []).append(v)
+        if latest_ts is None or v["updated_at"] > latest_ts:
+            latest_ts = v["updated_at"]
+
+    groups_out = []
+    for gr in oid_groups:
+        gkey = gr.get("key")
+        metrics_def = {m["key"]: m for m in gr.get("metrics", [])}
+        rows_for_group = by_group.get(gkey, [])
+        worst = "none"
+
+        def bump(status: str):
+            nonlocal worst
+            if _SEV_RANK.get(status, -1) > _SEV_RANK.get(worst, -1):
+                worst = status
+
+        if gr.get("kind") == "table":
+            # rows keyed by instance
+            by_inst: dict = {}
+            for v in rows_for_group:
+                by_inst.setdefault(v["instance"], {"label": v["label"], "cells": {}})
+                inst = by_inst[v["instance"]]
+                if v["label"]:
+                    inst["label"] = v["label"]
+                m = metrics_def.get(v["metric_key"], {})
+                status = _metric_status(m, v["value_num"], v["value_text"])
+                bump(status)
+                inst["cells"][v["metric_key"]] = {
+                    "value": v["value_num"],
+                    "text": _metric_display(m, v["value_num"], v["value_text"]),
+                    "status": status,
+                    "series_key": v["series_key"],
+                }
+            rows = [
+                {"instance": inst, "label": data["label"] or inst, "cells": data["cells"]}
+                for inst, data in sorted(by_inst.items(), key=lambda kv: (kv[1]["label"] or kv[0]).lower())
+            ]
+            groups_out.append({
+                "key": gkey, "name": gr.get("name"), "kind": "table",
+                "description": gr.get("description"),
+                "status": worst,
+                "columns": [
+                    {"key": m["key"], "name": m.get("name"), "unit": m.get("unit"),
+                     "type": m.get("type", "gauge")}
+                    for m in gr.get("metrics", [])
+                ],
+                "rows": rows,
+            })
+        else:
+            by_metric = {v["metric_key"]: v for v in rows_for_group}
+            metrics_out = []
+            for m in gr.get("metrics", []):
+                v = by_metric.get(m["key"])
+                status = _metric_status(m, v["value_num"], v["value_text"]) if v else "none"
+                if v:
+                    bump(status)
+                metrics_out.append({
+                    "key": m["key"], "name": m.get("name"),
+                    "type": m.get("type", "gauge"), "unit": m.get("unit"),
+                    "thresholds": m.get("thresholds"),
+                    "value": v["value_num"] if v else None,
+                    "text": _metric_display(m, v["value_num"], v["value_text"]) if v else "",
+                    "status": status,
+                    "series_key": v["series_key"] if v else f"tpl_{m['key']}",
+                    "has_data": v is not None,
+                })
+            groups_out.append({
+                "key": gkey, "name": gr.get("name"), "kind": "scalar",
+                "description": gr.get("description"),
+                "status": worst,
+                "metrics": metrics_out,
+            })
+
+    return {
+        "template": {
+            "id": str(dev["profile_id"]),
+            "name": dev["name"],
+            "vendor": dev["vendor"],
+            "description": dev["description"],
+            "builtin": dev["builtin"],
+        },
+        "updated_at": latest_ts.isoformat() if latest_ts else None,
+        "groups": groups_out,
+    }
+
+
+def _device_to_response(device, profile_names: dict | None = None) -> DeviceResponse:
     return DeviceResponse(
         id=device.id,
         hostname=device.hostname,
@@ -1227,6 +1402,7 @@ def _device_to_response(device) -> DeviceResponse:
         model=device.model,
         os_version=device.os_version,
         profile_id=device.profile_id,
+        profile_name=(profile_names or {}).get(device.profile_id),
         snmp_credential_id=device.snmp_credential_id,
         snmp_auth_configured=device.snmp_auth_passphrase is not None,
         snmp_priv_configured=device.snmp_priv_passphrase is not None,

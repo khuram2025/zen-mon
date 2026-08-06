@@ -127,6 +127,27 @@ func (c *Classifier) LoadFromDir(dir string) ([]*Profile, []error) {
 	return loaded, errs
 }
 
+// SetProfiles replaces the classifier's profile set from an
+// already-loaded slice (the DB-driven path — device_profiles is the
+// source of truth; JSON files under data/profiles are only an optional
+// bootstrap). Profiles that fail to compile are skipped.
+func (c *Classifier) SetProfiles(profiles []*Profile) []error {
+	var errs []error
+	compiled := make([]compiledProfile, 0, len(profiles))
+	for _, p := range profiles {
+		cp, err := compile(p)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", p.Name, err))
+			continue
+		}
+		compiled = append(compiled, cp)
+	}
+	c.mu.Lock()
+	c.profiles = compiled
+	c.mu.Unlock()
+	return errs
+}
+
 // Match returns the best profile for the given sysObjectID + sysDescr.
 // Returns nil if nothing matches. Priority:
 //

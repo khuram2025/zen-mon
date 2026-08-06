@@ -68,8 +68,10 @@ type SNMPLoader interface {
 	UpsertEntities(ctx context.Context, deviceID uuid.UUID, ents []snmp.Entity) error
 	UpsertSensors(ctx context.Context, deviceID uuid.UUID, sensors []snmp.Sensor) error
 	UpsertProfile(ctx context.Context, p *snmp.Profile) error
+	LoadProfiles(ctx context.Context) ([]*snmp.Profile, error)
 	AssignProfileIfUnset(ctx context.Context, deviceID, profileID uuid.UUID) error
 	UpsertUdtData(ctx context.Context, deviceID uuid.UUID, u *snmp.UdtData) error
+	UpsertTemplateValues(ctx context.Context, deviceID uuid.UUID, vals []snmp.TemplateValue, polledGroups []string) error
 }
 
 // SNMPMetricWriter persists SNMP metrics to the time-series store.
@@ -951,7 +953,26 @@ func (e *Engine) processServiceStatusChange(ctx context.Context, result *checker
 
 // --- SNMP Logic ---
 
+// syncSNMPProfiles refreshes the classifier from device_profiles. The
+// DB is the template source of truth (builtins arrive via SQL
+// migration, custom templates via the API), so this runs on the same
+// cadence as the device sync — template edits go live within a minute
+// without a poller restart.
+func (e *Engine) syncSNMPProfiles(ctx context.Context) error {
+	profiles, err := e.snmpLoader.LoadProfiles(ctx)
+	if err != nil {
+		return err
+	}
+	for _, cerr := range e.snmpClassifier.SetProfiles(profiles) {
+		e.logger.Warnf("profile compile: %v", cerr)
+	}
+	return nil
+}
+
 func (e *Engine) syncSNMPDevices(ctx context.Context) error {
+	if err := e.syncSNMPProfiles(ctx); err != nil {
+		e.logger.Warnf("SNMP profile sync failed: %v", err)
+	}
 	devices, err := e.snmpLoader.LoadSNMPDevices(ctx)
 	if err != nil {
 		return err
@@ -1122,6 +1143,8 @@ func (e *Engine) handleSNMPResult(ctx context.Context, d *snmp.Device, r *snmp.R
 	rScal := r.Scalars
 	rIfSamp := r.IfSamples
 	rUdt := r.Udt
+	rTplVals := r.TplValues
+	rTplGroups := r.TplGroups
 	r.Mu.Unlock()
 
 	// IMPORTANT: even when the poll cycle errored (e.g. per-device budget
@@ -1165,6 +1188,11 @@ func (e *Engine) handleSNMPResult(ctx context.Context, d *snmp.Device, r *snmp.R
 			e.logger.Warnf("UpsertSensors %s (%d rows): %v", d.Hostname, len(rSens), err)
 		}
 	}
+	if len(rTplVals) > 0 || len(rTplGroups) > 0 {
+		if err := e.snmpLoader.UpsertTemplateValues(ctx, d.ID, rTplVals, rTplGroups); err != nil {
+			e.logger.Warnf("UpsertTemplateValues %s (%d rows): %v", d.Hostname, len(rTplVals), err)
+		}
+	}
 	if rUdt != nil {
 		if err := e.snmpLoader.UpsertUdtData(ctx, d.ID, rUdt); err != nil {
 			e.logger.Warnf("UpsertUdtData %s (%d fdb, %d arp, %d nbrs): %v",
@@ -1190,27 +1218,34 @@ func (e *Engine) handleSNMPResult(ctx context.Context, d *snmp.Device, r *snmp.R
 	}
 }
 
-// seedSNMPProfiles loads built-in profile packs from disk and upserts
-// them into device_profiles. Runs once at startup. The directory can
-// be overridden via SNMP_PROFILES_DIR for dev / testing.
+// seedSNMPProfiles optionally imports profile packs from disk (a dev /
+// air-gapped bootstrap path), then loads the authoritative profile set
+// from the database into the classifier. Builtin templates normally
+// arrive via SQL migration, so a missing directory is not an error.
 func (e *Engine) seedSNMPProfiles(ctx context.Context) error {
 	dir := os.Getenv("SNMP_PROFILES_DIR")
 	if dir == "" {
 		dir = "/opt/zenplus/data/profiles"
 	}
-	profiles, loadErrs := e.snmpClassifier.LoadFromDir(dir)
-	for _, le := range loadErrs {
-		e.logger.Warnf("profile load: %v", le)
-	}
-	if len(profiles) == 0 {
-		return fmt.Errorf("no profiles loaded from %s", dir)
-	}
-	for _, p := range profiles {
-		if err := e.snmpLoader.UpsertProfile(ctx, p); err != nil {
-			e.logger.Warnf("upsert profile %s: %v", p.Name, err)
-			continue
+	if _, statErr := os.Stat(dir); statErr == nil {
+		profiles, loadErrs := e.snmpClassifier.LoadFromDir(dir)
+		for _, le := range loadErrs {
+			e.logger.Warnf("profile load: %v", le)
+		}
+		for _, p := range profiles {
+			if err := e.snmpLoader.UpsertProfile(ctx, p); err != nil {
+				e.logger.Warnf("upsert profile %s: %v", p.Name, err)
+				continue
+			}
+		}
+		if len(profiles) > 0 {
+			e.logger.Infof("SNMP profile file seed: %d profiles from %s", len(profiles), dir)
 		}
 	}
-	e.logger.Infof("SNMP profile seed complete: %d profiles from %s", len(profiles), dir)
+	// DB is the source of truth — always finish by (re)loading from it,
+	// which also replaces whatever LoadFromDir put in the classifier.
+	if err := e.syncSNMPProfiles(ctx); err != nil {
+		return err
+	}
 	return nil
 }

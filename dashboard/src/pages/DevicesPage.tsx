@@ -93,6 +93,8 @@ type Device = {
   vendor: string | null
   model: string | null
   os_version: string | null
+  profile_id?: string | null
+  profile_name?: string | null
 }
 
 type Group = { id: string; name: string; color?: string | null; device_count?: number }
@@ -153,6 +155,7 @@ const DEVICE_TYPES = [
 const HIDEABLE_COLUMNS = [
   'type',
   'group_location',
+  'template',
   'cpu',
   'memory',
   'uptime',
@@ -163,6 +166,7 @@ type HideableCol = (typeof HIDEABLE_COLUMNS)[number]
 const DEFAULT_VISIBLE: Record<HideableCol, boolean> = {
   type: true,
   group_location: true,
+  template: true,
   cpu: true,
   memory: true,
   uptime: true,
@@ -172,6 +176,7 @@ const DEFAULT_VISIBLE: Record<HideableCol, boolean> = {
 const COLUMN_LABELS: Record<HideableCol, string> = {
   type: 'Type',
   group_location: 'Group / Location',
+  template: 'Template',
   cpu: 'CPU',
   memory: 'Memory',
   uptime: 'Uptime',
@@ -180,7 +185,7 @@ const COLUMN_LABELS: Record<HideableCol, string> = {
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100]
 
-const PREFS_KEY = 'zp-devices-prefs-v2'
+const PREFS_KEY = 'zp-devices-prefs-v3'
 type Prefs = { visible: Record<HideableCol, boolean>; pageSize: number }
 function loadPrefs(): Prefs {
   try {
@@ -839,6 +844,7 @@ export function DevicesPage() {
                       <SortableTh label="Group / Location" col="group_name" current={sortKey} order={sortOrder} onClick={onSortClick} />
                     )}
                     <SortableTh label="Status" col="status" current={sortKey} order={sortOrder} onClick={onSortClick} />
+                    {prefs.visible.template && <Th className="whitespace-nowrap">Template</Th>}
                     {prefs.visible.cpu && <Th className="min-w-[140px]">CPU</Th>}
                     {prefs.visible.memory && <Th className="min-w-[140px]">Memory</Th>}
                     {prefs.visible.uptime && (
@@ -855,14 +861,14 @@ export function DevicesPage() {
                 <TBody>
                   {isLoading && (
                     <Tr>
-                      <Td colSpan={12}>
+                      <Td colSpan={13}>
                         <SkeletonTable rows={6} cols={10} />
                       </Td>
                     </Tr>
                   )}
                   {!isLoading && pageRows.length === 0 && (
                     <Tr>
-                      <Td colSpan={12} className="py-14">
+                      <Td colSpan={13} className="py-14">
                         <div className="flex flex-col items-center gap-2 text-center text-muted">
                           <Server className="h-8 w-8 opacity-50" />
                           <div className="text-sm font-medium text-text">No devices match</div>
@@ -956,6 +962,24 @@ export function DevicesPage() {
                         <Td>
                           <HealthPill kind={health} />
                         </Td>
+                        {prefs.visible.template && (
+                          <Td className="whitespace-nowrap">
+                            {d.profile_name ? (
+                              <Link
+                                to="/templates"
+                                onClick={(e) => e.stopPropagation()}
+                                className="inline-flex max-w-[150px] items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/20"
+                                title={d.profile_name}
+                              >
+                                <span className="truncate">{d.profile_name}</span>
+                              </Link>
+                            ) : d.snmp_enabled ? (
+                              <span className="text-[10px] text-muted">Default</span>
+                            ) : (
+                              <span className="text-muted">—</span>
+                            )}
+                          </Td>
+                        )}
                         {prefs.visible.cpu && (
                           <Td>
                             <MetricCell value={cpu} />

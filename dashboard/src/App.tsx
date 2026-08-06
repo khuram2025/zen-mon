@@ -40,6 +40,7 @@ import { WatchListsPage } from '@/pages/udt/WatchListsPage'
 import { ActivityPage as UdtActivityPage } from '@/pages/udt/ActivityPage'
 import { SettingsPage as UdtSettingsPage } from '@/pages/udt/SettingsPage'
 import { MibLibraryPage } from '@/pages/MibLibraryPage'
+import MonitoringTemplatesPage from '@/pages/MonitoringTemplatesPage'
 import { ManualMapsEntry } from '@/pages/ManualMapsEntry'
 import { ReportsPage } from '@/pages/ReportsPage'
 import { SensorsPage } from '@/pages/SensorsPage'
@@ -181,6 +182,7 @@ export default function App() {
         <Route path="netflow/devices/:ip" element={<NetflowDevicePage />} />
         <Route path="netflow/:section" element={<NetflowSectionPage />} />
         <Route path="mibs" element={<MibLibraryPage />} />
+        <Route path="templates" element={<MonitoringTemplatesPage />} />
         <Route path="sensors" element={<SensorsPage />} />
         <Route path="apm" element={<ApmLayout />}>
           <Route index element={<ApmOverviewPage />} />

@@ -34,6 +34,11 @@ type Device struct {
 
 	ProfileID *uuid.UUID
 
+	// OidGroups is the device's monitoring-template content, joined
+	// from device_profiles.oid_groups at load time. Empty when the
+	// device has no template (or the template declares no groups).
+	OidGroups []OidGroup
+
 	// Discovery cache (optional, for classification in Phase 2).
 	SysObjectID string
 	Vendor      string
@@ -194,4 +199,8 @@ type Result struct {
 	Scalars    []MetricSample // CPU, memory, temperature, etc.
 	IfSamples  []InterfaceSample
 	Udt        *UdtData // populated only on UDT-due cycles
+
+	// Template-driven collection output (device_profiles.oid_groups).
+	TplValues []TemplateValue // latest snapshot rows for Postgres
+	TplGroups []string        // group keys polled to completion (stale-row purge)
 }

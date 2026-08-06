@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Key, Loader2 } from 'lucide-react'
+import { Key, Layers, Loader2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
 import {
@@ -37,6 +37,7 @@ type DeviceState = {
   snmp_priv_protocol: string; snmp_priv_passphrase: string;
   snmp_timeout_ms: number; snmp_retries: number;
   snmp_poll_interval: number; snmp_max_repetitions: number;
+  profile_id: string;
 }
 
 const empty: DeviceState = {
@@ -50,6 +51,7 @@ const empty: DeviceState = {
   snmp_priv_protocol: '', snmp_priv_passphrase: '',
   snmp_timeout_ms: 2000, snmp_retries: 2,
   snmp_poll_interval: 60, snmp_max_repetitions: 25,
+  profile_id: '',
 }
 
 export function DeviceFormDialog({
@@ -70,6 +72,12 @@ export function DeviceFormDialog({
   const { data: credentials } = useQuery<Credential[]>({
     queryKey: ['snmp-credentials'],
     queryFn: async () => (await api.get('/snmp-credentials')).data,
+    enabled: open,
+  })
+
+  const { data: templates } = useQuery<any[]>({
+    queryKey: ['snmp-profiles'],
+    queryFn: async () => (await api.get('/snmp/profiles')).data,
     enabled: open,
   })
 
@@ -104,6 +112,7 @@ export function DeviceFormDialog({
         snmp_retries: device.snmp_retries ?? 2,
         snmp_poll_interval: device.snmp_poll_interval || 60,
         snmp_max_repetitions: device.snmp_max_repetitions || 25,
+        profile_id: device.profile_id || '',
       })
     } else {
       setState({
@@ -136,6 +145,7 @@ export function DeviceFormDialog({
       description: state.description || null, group_id: state.group_id || null,
       ping_enabled: state.ping_enabled, ping_interval: state.ping_interval,
       snmp_enabled: state.snmp_enabled, snmp_poll_interval: state.snmp_poll_interval,
+      profile_id: state.profile_id || null,
     }
 
     if (state.snmp_enabled) {
@@ -371,6 +381,29 @@ export function DeviceFormDialog({
                   <FormField label="Poll interval (seconds)" hint="How often to collect SNMP data">
                     <Input type="number" min={30} max={3600} value={state.snmp_poll_interval} onChange={(e) => setState({ ...state, snmp_poll_interval: Number(e.target.value) })} />
                   </FormField>
+
+                  {/* Monitoring template */}
+                  <div className="rounded-lg border border-border p-4">
+                    <div className="mb-1 flex items-center gap-1.5 text-sm font-semibold">
+                      <Layers className="h-3.5 w-3.5 text-primary" /> Monitoring Template
+                    </div>
+                    <p className="mb-3 text-xs text-muted">
+                      Vendor templates collect deep, device-specific insights (HA, VPN tunnels, SD-WAN,
+                      managed APs/switches…) on top of standard monitoring. Leave on Default to
+                      auto-detect from the device's SNMP identity.
+                    </p>
+                    <Select value={state.profile_id || '__default__'} onValueChange={(v) => setState({ ...state, profile_id: v === '__default__' ? '' : v })}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__default__">Default (auto-detect)</SelectItem>
+                        {(templates || []).map((t: any) => (
+                          <SelectItem key={t.id} value={t.id}>
+                            {t.name}{t.vendor ? <span className="text-muted"> · {t.vendor}</span> : null}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </>
               )}
             </TabsContent>

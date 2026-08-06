@@ -127,6 +127,7 @@ class DeviceResponse(BaseModel):
     model: Optional[str] = None
     os_version: Optional[str] = None
     profile_id: Optional[UUID] = None
+    profile_name: Optional[str] = None
     snmp_credential_id: Optional[UUID] = None
     snmp_auth_configured: bool = False
     snmp_priv_configured: bool = False

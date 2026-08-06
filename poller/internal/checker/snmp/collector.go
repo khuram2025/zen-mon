@@ -22,6 +22,7 @@ type Collector struct {
 
 	mu      sync.Mutex
 	prevIfs map[uuid.UUID]map[uint32]ifSnapshot
+	prevTpl map[uuid.UUID]map[string]tplSnap
 }
 
 type ifSnapshot struct {
@@ -36,6 +37,7 @@ func NewCollector(pollerID string, sessions *SessionCache) *Collector {
 		sessions: sessions,
 		pollerID: pollerID,
 		prevIfs:  make(map[uuid.UUID]map[uint32]ifSnapshot),
+		prevTpl:  make(map[uuid.UUID]map[string]tplSnap),
 	}
 }
 
@@ -93,6 +95,20 @@ func (c *Collector) Collect(ctx context.Context, d *Device, r *Result) {
 		r.Mu.Lock()
 		r.Scalars = append(r.Scalars, scalars...)
 		r.Mu.Unlock()
+	}
+
+	// 2.5) Monitoring template — vendor-specific OID groups declared by
+	// the device's profile. Runs early so the high-value vendor insights
+	// survive a budget kill during the (much heavier) interface walk.
+	if len(d.OidGroups) > 0 && ctx.Err() == nil {
+		tplSamples, tplValues, tplGroups := c.collectTemplateMetrics(ctx, client, d, start)
+		if len(tplValues) > 0 || len(tplGroups) > 0 {
+			r.Mu.Lock()
+			r.Scalars = append(r.Scalars, tplSamples...)
+			r.TplValues = append(r.TplValues, tplValues...)
+			r.TplGroups = append(r.TplGroups, tplGroups...)
+			r.Mu.Unlock()
+		}
 	}
 
 	// 3) Interfaces — the big one. Skip if we're already cancelled.

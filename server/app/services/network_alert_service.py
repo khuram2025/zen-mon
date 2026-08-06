@@ -147,6 +147,50 @@ def _scalar_fleet(window_s: int) -> dict[str, dict]:
     return out
 
 
+def _tpl_fleet(window_s: int) -> dict[str, dict[str, float]]:
+    """{device_id: {series_key: latest_value}} for monitoring-template metrics
+    (series keys 'tpl_*', written by the poller's template collector)."""
+    from app.core.database import get_clickhouse_client
+
+    try:
+        client = get_clickhouse_client()
+        rows = client.query(
+            """
+            SELECT device_id, metric_key, argMax(value, timestamp)
+            FROM zenplus.snmp_metrics
+            WHERE metric_key LIKE 'tpl\\_%%' AND timestamp >= %(s)s
+            GROUP BY device_id, metric_key
+            """,
+            parameters={"s": _since(window_s)},
+        ).result_rows
+    except Exception as exc:
+        logger.warning("network alert: clickhouse template query failed: %s", exc)
+        return {}
+
+    out: dict[str, dict[str, float]] = {}
+    for r in rows:
+        out.setdefault(str(r[0]), {})[str(r[1])] = float(r[2] or 0)
+    return out
+
+
+def _eval_template(rule, series: dict[str, float]) -> tuple[bool, float, str] | None:
+    """Evaluate a tpl_* rule for one device. A rule on 'tpl_fgt_tun_status'
+    matches the scalar series of that key AND every per-row instance series
+    ('tpl_fgt_tun_status_<inst>'); the rule breaches when ANY matching series
+    does — e.g. 'any tunnel down', 'any AP above 90% CPU'."""
+    key = rule.metric
+    matches = {k: v for k, v in series.items() if k == key or k.startswith(key + "_")}
+    if not matches:
+        return None
+    op, thr = rule.operator, float(rule.threshold or 0)
+    breaching = {k: v for k, v in matches.items() if _cmp(v, op, thr)}
+    if breaching:
+        pick = max if (op or "").strip() in ("gt", ">", "gte", ">=") else min
+        worst = pick(breaching.values())
+        return True, worst, f"{len(breaching)}/{len(matches)} series breach (worst {worst:g})"
+    return False, next(iter(matches.values())), f"0/{len(matches)} series breach"
+
+
 def _uptime_resets() -> set[str]:
     """device_ids whose sysUpTime dropped within the lookback window (reboot)."""
     from app.core.database import get_clickhouse_client
@@ -351,7 +395,8 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
         f"SELECT id, name, metric, operator, threshold, severity, min_duration, "
         f"notify_channels, device_id, group_id, device_type, location, target, "
         f"schedule_start, schedule_end, schedule_days "
-        f"FROM alert_rules WHERE enabled = true AND metric IN ({metric_list})"
+        f"FROM alert_rules WHERE enabled = true "
+        f"AND (metric IN ({metric_list}) OR metric LIKE 'tpl\\_%')"
     ))).all()
     if not rules:
         return {"rules": 0, "raised": 0, "resolved": 0}
@@ -374,6 +419,8 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
     windows = {max(r.min_duration or 0, DEFAULT_WINDOW_S) for r in rules}
     if_cache = {w: _if_fleet(w) for w in windows}
     scalar_cache = {w: _scalar_fleet(w) for w in windows}
+    has_tpl = any(r.metric.startswith("tpl_") for r in rules)
+    tpl_cache = {w: _tpl_fleet(w) for w in windows} if has_tpl else {}
     uptime_reset_ids = _uptime_resets() if any(r.metric == "uptime_reset" for r in rules) else set()
 
     raised = resolved = 0
@@ -407,6 +454,8 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
         for did, dev in in_scope:
             if rule.metric in SCALAR_METRICS:
                 res = _eval_scalar(rule, scalar_cache[window].get(did, {}))
+            elif rule.metric.startswith("tpl_"):
+                res = _eval_template(rule, tpl_cache.get(window, {}).get(did, {}))
             elif rule.metric == "uptime_reset":
                 is_reset = did in uptime_reset_ids
                 res = (_cmp(1.0 if is_reset else 0.0, rule.operator, float(rule.threshold or 0)),

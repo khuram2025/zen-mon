@@ -73,6 +73,7 @@ import { Input } from '@/components/ui/Input'
 import { Textarea } from '@/components/ui/Textarea'
 import { DeviceFormDialog } from '@/components/forms/DeviceFormDialog'
 import { ConnectedEndpointsCard } from '@/components/udt/ConnectedEndpointsCard'
+import { TemplateInsightsSection } from '@/components/devices/TemplateInsightsSection'
 import { toast } from '@/components/ui/Toast'
 import { TimeRangePicker, rangePhrase, useTimeRange } from '@/components/TimeRangePicker'
 
@@ -904,6 +905,9 @@ function DashboardSection({
         />
       </div>
 
+      {/* ═══════════ Vendor template insights ═══════════ */}
+      {snmp && <TemplateInsightsSection deviceId={deviceId} rangeHours={range.hours} />}
+
       {hasNetflow && (
         <DeviceNetflowCard
           exporterIp={netflowExporter}
@@ -1678,6 +1682,12 @@ function InventoryConfigCard({
   const rows: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; value: React.ReactNode }> = [
     { icon: Network, label: 'Management IP', value: device.ip_address || '—' },
     { icon: Shield, label: 'SNMP', value: snmp ? `v${device.snmp_version} · port ${device.snmp_port}` : 'Disabled' },
+    {
+      icon: Layers, label: 'Monitoring Template',
+      value: device.profile_name
+        ? <Link to="/templates" className="text-primary hover:underline">{device.profile_name}</Link>
+        : (snmp ? 'Default (auto-detect)' : '—'),
+    },
     { icon: Wifi, label: 'Ping', value: device.ping_enabled ? `Enabled · ${device.ping_interval}s` : 'Disabled' },
     { icon: HardDrive, label: 'Vendor / Model', value: [device.vendor, device.model].filter(Boolean).join(' ') || '—' },
     { icon: FileText, label: 'OS Version', value: device.os_version || '—' },
