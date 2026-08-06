@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import sys
 from pathlib import Path
@@ -209,3 +210,85 @@ def test_migrations_are_discovered_in_lockfile_order(tmp_path):
     names = [m.filename for m in runner.discover_migrations(tmp_path)]
 
     assert names == ["migrate-030-b.sql", "migrate-002-a.sql"]
+
+
+def test_superseded_checksum_is_reconciled_not_reported_as_drift(tmp_path):
+    """A migration edited after it shipped leaves already-migrated appliances
+    holding the pre-rewrite checksum. That is a legitimate applied record, and
+    failing the update over it strands the appliance on its current version."""
+    write(tmp_path / "migrate-001-a.sql", "SELECT 1;")
+    migration = runner.discover_migrations(tmp_path)[0]
+    old_checksum = "0" * 64
+    applied = {migration.filename: old_checksum}
+    calls: list = []
+    report = runner.new_report()
+
+    original_map = runner.SUPERSEDED_CHECKSUMS
+    runner.SUPERSEDED_CHECKSUMS = {migration.filename: {old_checksum}}
+    original = runner.run_psql
+    runner.run_psql = _fake_psql(applied, [], calls)
+    try:
+        code = runner.run_migrations([migration], ["psql"], report=report)
+    finally:
+        runner.run_psql = original
+        runner.SUPERSEDED_CHECKSUMS = original_map
+
+    assert code == 0
+    assert report["reconciled"] == [migration.filename]
+    assert report["drift"] == []
+    # Reconciling records the new checksum; it must never re-run the file,
+    # which would revert whatever a later migration has since superseded.
+    assert all(file is None for _, file in calls)
+    assert applied[migration.filename] == "recorded"
+
+
+def test_unknown_checksum_change_is_still_drift(tmp_path):
+    """Only the specific historical rewrites are forgiven. Any other edit to an
+    applied migration must still fail the gate."""
+    write(tmp_path / "migrate-001-a.sql", "SELECT 1;")
+    migration = runner.discover_migrations(tmp_path)[0]
+    applied = {migration.filename: "f" * 64}
+    report = runner.new_report()
+
+    original_map = runner.SUPERSEDED_CHECKSUMS
+    runner.SUPERSEDED_CHECKSUMS = {migration.filename: {"0" * 64}}
+    original = runner.run_psql
+    runner.run_psql = _fake_psql(applied, [])
+    try:
+        code = runner.run_migrations([migration], ["psql"], report=report)
+    finally:
+        runner.run_psql = original
+        runner.SUPERSEDED_CHECKSUMS = original_map
+
+    assert code == 2
+    assert report["drift"] == [migration.filename]
+    assert report["reconciled"] == []
+
+
+def test_shipped_superseded_checksums_match_the_real_history():
+    """The recorded pre-rewrite checksums must be the actual bytes appliances
+    ran, or the reconciliation silently fails to match in the field."""
+    import subprocess
+
+    repo = Path(__file__).resolve().parents[2]
+    for filename, checksums in runner.SUPERSEDED_CHECKSUMS.items():
+        current = runner.sha256_file(repo / "scripts" / filename)
+        assert current not in checksums, (
+            f"{filename}: the current checksum is listed as superseded"
+        )
+        for checksum in checksums:
+            found = subprocess.run(
+                ["git", "log", "--all", "--format=%H", "--", f"scripts/{filename}"],
+                cwd=repo, capture_output=True, text=True, check=True,
+            ).stdout.split()
+            digests = set()
+            for commit in found:
+                blob = subprocess.run(
+                    ["git", "show", f"{commit}:scripts/{filename}"],
+                    cwd=repo, capture_output=True, check=True,
+                ).stdout
+                digests.add(hashlib.sha256(blob).hexdigest())
+            assert checksum in digests, (
+                f"{filename}: superseded checksum {checksum[:12]} matches no "
+                f"revision in git history"
+            )

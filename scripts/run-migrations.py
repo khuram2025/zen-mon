@@ -44,6 +44,36 @@ class Migration:
     checksum: str
 
 
+# Migrations whose text was edited after they had already shipped and run in
+# the field, mapped to the checksums that edit superseded. An appliance
+# carrying one of these recorded a legitimately-applied migration; it is not
+# drift, and failing the update over it strands the appliance on its current
+# version.
+#
+# Only add an entry when the rewrite left nothing for an already-migrated
+# appliance to do. These must be reconciled by recording the new checksum,
+# never by re-running the file: every entry below rewrites
+# alert_rules_metric_check, which migrations 022/037/039/060 have since
+# rewritten again, so re-running would drop the current constraint and
+# replace it with a much older, narrower metric list.
+SUPERSEDED_CHECKSUMS: dict[str, set[str]] = {
+    # 3fb2edc (2026-05-14) widened both CHECK lists into supersets so the
+    # drop+add became order-independent. Appliances that had already run
+    # either migration keep the constraint a later migration gave them.
+    "migrate-004-snmp.sql": {
+        "d1a31a15bdf5539c798b4822ccf2eeebb1d0ba2d5b8bf348ca801410e74b0652",
+    },
+    "migrate-006-services-v2.sql": {
+        "12acd2f87031ae6e7ab7e78ab6e49e67b6b3663516acc8da0bf03eaed04dca73",
+    },
+}
+
+
+def is_superseded(filename: str, applied_checksum: str) -> bool:
+    """Whether a differing checksum is a known historical rewrite."""
+    return applied_checksum in SUPERSEDED_CHECKSUMS.get(filename, frozenset())
+
+
 def discover_migrations(
     scripts_dir: Path,
     include_init: bool = False,
@@ -187,7 +217,7 @@ def escape_sql(value: str) -> str:
 def new_report() -> dict:
     """Empty structured result, filled in by run_migrations()."""
     return {"applied": [], "skipped": [], "pending": [], "drift": [],
-            "failed": [], "baselined": [], "unresolved": []}
+            "failed": [], "baselined": [], "unresolved": [], "reconciled": []}
 
 
 def run_migrations(
@@ -218,6 +248,14 @@ def run_migrations(
             report["skipped"].append(migration.filename)
             continue
         if existing_checksum and existing_checksum != migration.checksum:
+            if is_superseded(migration.filename, existing_checksum):
+                # Applied before the file was rewritten. Heal the record so
+                # this appliance stops tripping the gate on every update.
+                print(f"reconcile {migration.filename} (applied before a known rewrite)")
+                report["reconciled"].append(migration.filename)
+                if not (status_only or dry_run):
+                    record_migration(cmd, migration, 0)
+                continue
             print(f"changed {migration.filename} checksum differs from applied record", file=sys.stderr)
             report["drift"].append(migration.filename)
             exit_code = 2
