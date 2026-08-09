@@ -27,6 +27,12 @@ Routes (prefix /api/v1/udt):
     GET    /events                           activity feed
     GET    /capacity                         per-device capacity + trend
     GET    /vendors                          OUI vendor rollup
+    GET    /settings                         global UDT settings (poll interval)
+    PUT    /settings                         update global UDT settings
+    GET    /settings/devices                 per-device UDT settings + credentials
+    PUT    /settings/devices/{device_id}     set one device's UDT settings
+    POST   /settings/devices/bulk            bulk enable/disable/credential/interval
+    POST   /devices/{device_id}/ports/bulk-monitor   bulk port monitor toggle
     GET    /domain-controllers               list DCs
     POST   /domain-controllers               add a DC
     PATCH  /domain-controllers/{id}          update a DC
@@ -58,6 +64,9 @@ from app.services.udt_service import normalize_mac, ENDPOINT_TYPES
 router = APIRouter(prefix="/udt", tags=["User Device Tracker"])
 
 _BRIDGE_IFADMIN_OID = "1.3.6.1.2.1.2.2.1.7"  # ifAdminStatus.<ifIndex>
+
+# Must match the poller's udtIntervalFromEnv default (engine.go).
+_UDT_DEFAULT_INTERVAL_S = 300
 
 
 # ── Schemas ──────────────────────────────────────────────────────────
@@ -107,6 +116,33 @@ class DCUpdate(BaseModel):
     windows_credential_id: Optional[str] = None
     poll_interval_s: Optional[int] = Field(default=None, ge=60, le=86400)
     enabled: Optional[bool] = None
+
+
+class UdtGlobalSettingsUpdate(BaseModel):
+    poll_interval_s: int = Field(..., ge=30, le=86400)
+
+
+class UdtDeviceSettingsUpdate(BaseModel):
+    """Full-state upsert for one device (PUT semantics)."""
+    enabled: bool = True
+    snmp_credential_id: Optional[str] = None
+    poll_interval_s: Optional[int] = Field(default=None, ge=60, le=86400)
+
+
+class UdtBulkDeviceSettings(BaseModel):
+    """Partial bulk update: each set_* flag gates its field so callers
+    can e.g. flip enabled without clobbering credential choices."""
+    device_ids: list[str] = Field(..., min_length=1, max_length=1000)
+    set_enabled: Optional[bool] = None
+    set_credential: bool = False
+    snmp_credential_id: Optional[str] = None
+    set_interval: bool = False
+    poll_interval_s: Optional[int] = Field(default=None, ge=60, le=86400)
+
+
+class PortBulkMonitor(BaseModel):
+    if_indexes: list[int] = Field(..., min_length=1, max_length=1000)
+    monitored: bool
 
 
 # ── Summary ──────────────────────────────────────────────────────────
@@ -452,6 +488,8 @@ async def update_port(
         raise HTTPException(status_code=400, detail="no fields to update")
     sets.append("updated_at = NOW()")
     await db.execute(text(f"UPDATE udt_port_state SET {', '.join(sets)} WHERE device_id=:d AND if_index=:i"), params)
+    if payload.monitored is False:
+        await _close_port_sessions(db, device_id, [if_index])
     await write_audit_log(db, actor=user, action="udt.port.update",
                           resource_type="udt_port", resource_id=f"{device_id}/{if_index}",
                           metadata=payload.model_dump(exclude_none=True))
@@ -469,6 +507,8 @@ async def port_action(
             "INSERT INTO udt_port_state (device_id, if_index, monitored) VALUES (:d,:i,:m) "
             "ON CONFLICT (device_id, if_index) DO UPDATE SET monitored = :m, updated_at = NOW()"
         ), {"d": device_id, "i": if_index, "m": payload.action == "monitor"})
+        if payload.action == "unmonitor":
+            await _close_port_sessions(db, device_id, [if_index])
         await write_audit_log(db, actor=user, action=f"udt.port.{payload.action}",
                               resource_type="udt_port", resource_id=f"{device_id}/{if_index}", metadata={})
         await db.commit()
@@ -544,6 +584,186 @@ async def _snmpset_int(ip: str, settings: dict, oid: str, value: str) -> tuple[b
         return True, None
     except Exception as exc:  # noqa: BLE001
         return False, f"snmpset invocation failed: {exc}"
+
+
+# ── Settings ─────────────────────────────────────────────────────────
+
+@router.get("/settings")
+async def udt_settings(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    val = (await db.execute(text(
+        "SELECT value FROM system_settings WHERE key = 'udt'"
+    ))).scalar()
+    interval = _UDT_DEFAULT_INTERVAL_S
+    if isinstance(val, dict):
+        try:
+            interval = int(val.get("poll_interval_s") or _UDT_DEFAULT_INTERVAL_S)
+        except (TypeError, ValueError):
+            pass
+    counts = (await db.execute(text(
+        """SELECT COUNT(*) AS total,
+                  COUNT(*) FILTER (WHERE COALESCE(us.enabled, TRUE)) AS enabled
+           FROM devices d
+           LEFT JOIN udt_device_settings us ON us.device_id = d.id
+           WHERE d.snmp_enabled = TRUE"""
+    ))).mappings().first()
+    return {"poll_interval_s": interval,
+            "devices_total": counts["total"], "devices_enabled": counts["enabled"]}
+
+
+@router.put("/settings")
+async def update_udt_settings(
+    payload: UdtGlobalSettingsUpdate,
+    db: AsyncSession = Depends(get_db), user: User = Depends(require_operator_user),
+):
+    # Merge so future keys under 'udt' survive an interval change. The
+    # poller re-reads this on its device-sync cadence (~1 min).
+    await db.execute(text(
+        "INSERT INTO system_settings (key, value) VALUES ('udt', CAST(:v AS jsonb)) "
+        "ON CONFLICT (key) DO UPDATE SET "
+        "value = system_settings.value || EXCLUDED.value, updated_at = NOW()"
+    ), {"v": json.dumps({"poll_interval_s": payload.poll_interval_s})})
+    await write_audit_log(db, actor=user, action="udt.settings.update",
+                          resource_type="udt_settings", resource_id="global",
+                          metadata={"poll_interval_s": payload.poll_interval_s})
+    await db.commit()
+    return {"status": "ok", "poll_interval_s": payload.poll_interval_s}
+
+
+@router.get("/settings/devices")
+async def udt_device_settings(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    rows = (await db.execute(text(
+        """SELECT d.id AS device_id, d.hostname, host(d.ip_address) AS ip,
+                  d.vendor, d.model, d.device_type,
+                  (d.device_type = 'switch'
+                   OR EXISTS (SELECT 1 FROM udt_port_state ps
+                              WHERE ps.device_id = d.id AND ps.mac_count > 0)) AS is_l2,
+                  COALESCE(us.enabled, TRUE) AS enabled,
+                  us.snmp_credential_id, sc.name AS credential_name,
+                  us.poll_interval_s,
+                  (SELECT COUNT(*) FROM udt_port_state ps WHERE ps.device_id = d.id) AS ports_total,
+                  (SELECT COUNT(*) FROM udt_port_state ps WHERE ps.device_id = d.id AND ps.monitored) AS ports_monitored,
+                  (SELECT COUNT(*) FROM udt_endpoint_locations l WHERE l.device_id = d.id AND l.active) AS active_endpoints,
+                  (SELECT MAX(ps.updated_at) FROM udt_port_state ps WHERE ps.device_id = d.id) AS last_udt_at
+           FROM devices d
+           LEFT JOIN udt_device_settings us ON us.device_id = d.id
+           LEFT JOIN snmp_credentials sc ON sc.id = us.snmp_credential_id
+           WHERE d.snmp_enabled = TRUE
+           ORDER BY is_l2 DESC, d.hostname"""
+    ))).mappings().all()
+    # id+name only, so operators get a working picker without the
+    # admin-only /snmp-credentials routes (which expose secrets).
+    creds = (await db.execute(text(
+        "SELECT id, name, snmp_version FROM snmp_credentials ORDER BY name"
+    ))).mappings().all()
+    return {
+        "data": [dict(r) | {"device_id": str(r["device_id"]),
+                            "snmp_credential_id": str(r["snmp_credential_id"]) if r["snmp_credential_id"] else None}
+                 for r in rows],
+        "credentials": [dict(c) | {"id": str(c["id"])} for c in creds],
+    }
+
+
+@router.put("/settings/devices/{device_id}")
+async def update_udt_device_settings(
+    device_id: str, payload: UdtDeviceSettingsUpdate,
+    db: AsyncSession = Depends(get_db), user: User = Depends(require_operator_user),
+):
+    dev = (await db.execute(text(
+        "SELECT id FROM devices WHERE id = :id AND snmp_enabled = TRUE"
+    ), {"id": device_id})).first()
+    if not dev:
+        raise HTTPException(status_code=404, detail="SNMP device not found")
+    if payload.snmp_credential_id:
+        cred = (await db.execute(text(
+            "SELECT id FROM snmp_credentials WHERE id = :id"
+        ), {"id": payload.snmp_credential_id})).first()
+        if not cred:
+            raise HTTPException(status_code=404, detail="SNMP credential not found")
+    await db.execute(text(
+        """INSERT INTO udt_device_settings (device_id, enabled, snmp_credential_id, poll_interval_s, updated_at)
+           VALUES (:d, :e, :c, :p, NOW())
+           ON CONFLICT (device_id) DO UPDATE SET
+               enabled = :e, snmp_credential_id = :c, poll_interval_s = :p, updated_at = NOW()"""
+    ), {"d": device_id, "e": payload.enabled,
+        "c": payload.snmp_credential_id, "p": payload.poll_interval_s})
+    await write_audit_log(db, actor=user, action="udt.device_settings.update",
+                          resource_type="udt_device_settings", resource_id=device_id,
+                          metadata=payload.model_dump())
+    await db.commit()
+    return {"status": "ok"}
+
+
+@router.post("/settings/devices/bulk")
+async def bulk_udt_device_settings(
+    payload: UdtBulkDeviceSettings,
+    db: AsyncSession = Depends(get_db), user: User = Depends(require_operator_user),
+):
+    if payload.set_enabled is None and not payload.set_credential and not payload.set_interval:
+        raise HTTPException(status_code=400, detail="no fields to update")
+    if payload.set_credential and payload.snmp_credential_id:
+        cred = (await db.execute(text(
+            "SELECT id FROM snmp_credentials WHERE id = :id"
+        ), {"id": payload.snmp_credential_id})).first()
+        if not cred:
+            raise HTTPException(status_code=404, detail="SNMP credential not found")
+    try:
+        ids = [uuid.UUID(s) for s in payload.device_ids]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid device id")
+    result = await db.execute(text(
+        """INSERT INTO udt_device_settings (device_id, enabled, snmp_credential_id, poll_interval_s, updated_at)
+           SELECT d.id, COALESCE(CAST(:en AS boolean), TRUE),
+                  CASE WHEN :has_cred THEN CAST(:cred AS uuid) ELSE NULL END,
+                  CASE WHEN :has_int THEN CAST(:ival AS int) ELSE NULL END,
+                  NOW()
+           FROM devices d WHERE d.id = ANY(:ids) AND d.snmp_enabled = TRUE
+           ON CONFLICT (device_id) DO UPDATE SET
+               enabled = CASE WHEN :has_en THEN CAST(:en AS boolean) ELSE udt_device_settings.enabled END,
+               snmp_credential_id = CASE WHEN :has_cred THEN CAST(:cred AS uuid)
+                                         ELSE udt_device_settings.snmp_credential_id END,
+               poll_interval_s = CASE WHEN :has_int THEN CAST(:ival AS int)
+                                      ELSE udt_device_settings.poll_interval_s END,
+               updated_at = NOW()"""
+    ), {"ids": ids,
+        "has_en": payload.set_enabled is not None, "en": payload.set_enabled,
+        "has_cred": payload.set_credential, "cred": payload.snmp_credential_id,
+        "has_int": payload.set_interval, "ival": payload.poll_interval_s})
+    await write_audit_log(db, actor=user, action="udt.device_settings.bulk",
+                          resource_type="udt_device_settings", resource_id=f"{len(ids)} devices",
+                          metadata=payload.model_dump(exclude={"device_ids"}))
+    await db.commit()
+    return {"status": "ok", "updated": result.rowcount}
+
+
+@router.post("/devices/{device_id}/ports/bulk-monitor")
+async def bulk_port_monitor(
+    device_id: str, payload: PortBulkMonitor,
+    db: AsyncSession = Depends(get_db), user: User = Depends(require_operator_user),
+):
+    dev = (await db.execute(text("SELECT id FROM devices WHERE id = :id"), {"id": device_id})).first()
+    if not dev:
+        raise HTTPException(status_code=404, detail="Device not found")
+    await db.execute(text(
+        """INSERT INTO udt_port_state (device_id, if_index, monitored)
+           SELECT :d, x.if_index, :m FROM unnest(CAST(:idx AS int[])) AS x(if_index)
+           ON CONFLICT (device_id, if_index) DO UPDATE SET monitored = :m, updated_at = NOW()"""
+    ), {"d": device_id, "idx": payload.if_indexes, "m": payload.monitored})
+    if not payload.monitored:
+        await _close_port_sessions(db, device_id, payload.if_indexes)
+    await write_audit_log(db, actor=user, action="udt.port.bulk-monitor",
+                          resource_type="udt_port", resource_id=device_id,
+                          metadata={"if_indexes": payload.if_indexes, "monitored": payload.monitored})
+    await db.commit()
+    return {"status": "ok", "updated": len(payload.if_indexes)}
+
+
+async def _close_port_sessions(db: AsyncSession, device_id: str, if_indexes: list[int]) -> None:
+    """Un-monitoring a port ends its endpoint sessions right away
+    instead of waiting for the sweeper's stale-session grace period."""
+    await db.execute(text(
+        "UPDATE udt_endpoint_locations SET active = FALSE, closed_at = NOW() "
+        "WHERE device_id = :d AND if_index = ANY(:idx) AND active"
+    ), {"d": device_id, "idx": if_indexes})
 
 
 # ── Rules ────────────────────────────────────────────────────────────

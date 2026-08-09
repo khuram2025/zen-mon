@@ -71,6 +71,7 @@ type SNMPLoader interface {
 	LoadProfiles(ctx context.Context) ([]*snmp.Profile, error)
 	AssignProfileIfUnset(ctx context.Context, deviceID, profileID uuid.UUID) error
 	UpsertUdtData(ctx context.Context, deviceID uuid.UUID, u *snmp.UdtData) error
+	LoadUdtGlobalInterval(ctx context.Context) (int, error)
 	UpsertTemplateValues(ctx context.Context, deviceID uuid.UUID, vals []snmp.TemplateValue, polledGroups []string) error
 }
 
@@ -978,8 +979,18 @@ func (e *Engine) syncSNMPDevices(ctx context.Context) error {
 		return err
 	}
 
+	// Operator-configured global UDT cadence (Settings → UDT). Falls
+	// back to the UDT_POLL_INTERVAL env var / 5m default when unset.
+	udtGlobal := udtIntervalFromEnv()
+	if n, err := e.snmpLoader.LoadUdtGlobalInterval(ctx); err != nil {
+		e.logger.Warnf("UDT global interval load failed: %v", err)
+	} else if n > 0 {
+		udtGlobal = time.Duration(n) * time.Second
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.udtInterval = udtGlobal
 
 	seen := make(map[uuid.UUID]bool, len(devices))
 	for _, d := range devices {
@@ -1017,7 +1028,11 @@ func (e *Engine) runSNMPCycle(ctx context.Context) {
 	for _, d := range e.snmpDevices {
 		if d.Enabled {
 			devices = append(devices, d)
-			udtDue[d.ID] = now.Sub(e.lastUdtAt[d.ID]) >= e.udtInterval
+			ival := e.udtInterval
+			if d.UdtInterval > 0 {
+				ival = d.UdtInterval
+			}
+			udtDue[d.ID] = d.UdtEnabled && now.Sub(e.lastUdtAt[d.ID]) >= ival
 		}
 	}
 	e.mu.Unlock()

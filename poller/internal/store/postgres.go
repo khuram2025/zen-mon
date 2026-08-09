@@ -194,9 +194,20 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 		       COALESCE(d.vendor, ''),
 		       COALESCE(d.model, ''),
 		       COALESCE(d.os_version, ''),
-		       COALESCE(p.oid_groups::text, '')
+		       COALESCE(p.oid_groups::text, ''),
+		       COALESCE(us.enabled, TRUE),
+		       COALESCE(us.poll_interval_s, 0),
+		       sc.id IS NOT NULL,
+		       COALESCE(sc.snmp_version, ''), COALESCE(sc.port, 0),
+		       COALESCE(sc.community, ''),
+		       COALESCE(sc.v3_username, ''), COALESCE(sc.v3_context, ''),
+		       COALESCE(sc.v3_auth_protocol, ''), COALESCE(sc.v3_auth_passphrase, ''),
+		       COALESCE(sc.v3_priv_protocol, ''), COALESCE(sc.v3_priv_passphrase, ''),
+		       COALESCE(sc.timeout_ms, 0), COALESCE(sc.retries, 0)
 		FROM devices d
 		LEFT JOIN device_profiles p ON p.id = d.profile_id
+		LEFT JOIN udt_device_settings us ON us.device_id = d.id
+		LEFT JOIN snmp_credentials sc ON sc.id = us.snmp_credential_id
 		WHERE d.snmp_enabled = TRUE
 		ORDER BY d.hostname
 	`)
@@ -213,6 +224,9 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 		var intervalSec int
 		var profileID *uuid.UUID
 		var oidGroupsJSON string
+		var udtIntervalSec int
+		var hasUdtCred bool
+		var uc snmp.UdtCredential
 		err := rows.Scan(
 			&d.ID, &d.Hostname, &ipStr,
 			&d.Version, &d.Port, &d.Community,
@@ -222,6 +236,12 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 			&d.TimeoutMs, &d.Retries, &d.MaxRepetitions, &intervalSec,
 			&profileID, &d.SysObjectID, &d.Vendor, &d.Model, &d.OSVersion,
 			&oidGroupsJSON,
+			&d.UdtEnabled, &udtIntervalSec, &hasUdtCred,
+			&uc.Version, &uc.Port, &uc.Community,
+			&uc.V3Username, &uc.V3Context,
+			&uc.AuthProtocol, &uc.AuthPassphrase,
+			&uc.PrivProtocol, &uc.PrivPassphrase,
+			&uc.TimeoutMs, &uc.Retries,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan snmp device: %w", err)
@@ -229,6 +249,10 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 		d.IPAddress = net.ParseIP(ipStr)
 		d.Enabled = true
 		d.PollInterval = time.Duration(intervalSec) * time.Second
+		d.UdtInterval = time.Duration(udtIntervalSec) * time.Second
+		if hasUdtCred {
+			d.UdtCredential = &uc
+		}
 		d.ProfileID = profileID
 		if oidGroupsJSON != "" && oidGroupsJSON != "[]" {
 			// Parse errors are non-fatal: a bad template entry must not
@@ -255,6 +279,27 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 		devices = append(devices, &d)
 	}
 	return devices, rows.Err()
+}
+
+// LoadUdtGlobalInterval returns the operator-configured global UDT
+// poll interval in seconds from system_settings (key 'udt'), or 0
+// when unset — the engine then falls back to UDT_POLL_INTERVAL / 5m.
+func (s *PostgresStore) LoadUdtGlobalInterval(ctx context.Context) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE((value->>'poll_interval_s')::int, 0)
+		FROM system_settings WHERE key = 'udt'
+	`).Scan(&n)
+	if err == pgx.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if n < 30 {
+		return 0, nil
+	}
+	return n, nil
 }
 
 // UpsertSystemInfo writes discovered system-group fields back to

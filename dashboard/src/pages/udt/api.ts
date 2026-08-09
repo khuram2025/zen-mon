@@ -1,7 +1,8 @@
 import { api } from '@/lib/api'
 import type {
   CapacityRow, DomainController, Endpoint, EndpointDetail, EndpointList,
-  UdtEvent, UdtPort, UdtRule, UdtSummary,
+  UdtCredentialOption, UdtDeviceSettings, UdtEvent, UdtGlobalSettings,
+  UdtPort, UdtRule, UdtSummary,
 } from './types'
 
 const base = '/udt'
@@ -66,6 +67,24 @@ export const udtApi = {
   },
   async events(params: Record<string, any> = {}): Promise<{ data: UdtEvent[] }> {
     return (await api.get(`${base}/events`, { params })).data
+  },
+  async settings(): Promise<UdtGlobalSettings> {
+    return (await api.get(`${base}/settings`)).data
+  },
+  async updateSettings(body: { poll_interval_s: number }) {
+    return (await api.put(`${base}/settings`, body)).data
+  },
+  async deviceSettings(): Promise<{ data: UdtDeviceSettings[]; credentials: UdtCredentialOption[] }> {
+    return (await api.get(`${base}/settings/devices`)).data
+  },
+  async updateDeviceSettings(deviceId: string, body: { enabled: boolean; snmp_credential_id: string | null; poll_interval_s: number | null }) {
+    return (await api.put(`${base}/settings/devices/${deviceId}`, body)).data
+  },
+  async bulkDeviceSettings(body: Record<string, any>) {
+    return (await api.post(`${base}/settings/devices/bulk`, body)).data
+  },
+  async bulkPortMonitor(deviceId: string, ifIndexes: number[], monitored: boolean) {
+    return (await api.post(`${base}/devices/${deviceId}/ports/bulk-monitor`, { if_indexes: ifIndexes, monitored })).data
   },
   async domainControllers(): Promise<{ data: DomainController[] }> {
     return (await api.get(`${base}/domain-controllers`)).data

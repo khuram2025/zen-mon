@@ -158,7 +158,21 @@ func (c *Collector) Collect(ctx context.Context, d *Device, r *Result) {
 		if sysOID != "" {
 			d2.SysObjectID = sysOID
 		}
-		udt, _ := c.CollectUDT(ctx, &d2, client, ifsForUdt)
+		// A UDT credential override gets its own short-lived session;
+		// CollectUDT's Cisco per-VLAN fallback derives community@vlan /
+		// v3 contexts from d2's fields, so the override must be applied
+		// to the device copy as well, not just the socket.
+		udtClient := client
+		if d.UdtCredential != nil {
+			d.UdtCredential.ApplyTo(&d2)
+			if s, err := NewSession(&d2); err == nil {
+				if err := s.Connect(); err == nil {
+					udtClient = s
+					defer s.Conn.Close()
+				}
+			}
+		}
+		udt, _ := c.CollectUDT(ctx, &d2, udtClient, ifsForUdt)
 		if udt != nil {
 			r.Mu.Lock()
 			r.Udt = udt

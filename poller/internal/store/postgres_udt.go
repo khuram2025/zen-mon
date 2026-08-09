@@ -49,6 +49,10 @@ func (s *PostgresStore) UpsertUdtData(ctx context.Context, deviceID uuid.UUID, u
 	if err != nil {
 		return err
 	}
+	unmonitored, err := loadUnmonitoredPorts(ctx, tx, deviceID)
+	if err != nil {
+		return err
+	}
 
 	// ---- topology links (LLDP/CDP) --------------------------------------
 	// Neighbor data is the least important thing UDT collects and the most
@@ -159,11 +163,24 @@ func (s *PostgresStore) UpsertUdtData(ctx context.Context, deviceID uuid.UUID, u
 		return fmt.Errorf("udt vlans: %w", err)
 	}
 
+	// Ports the operator un-monitored keep their port-state rollups
+	// (mac_count, VLANs) above, but contribute no endpoints, sessions
+	// or events below.
+	monFdb := fdb
+	if len(unmonitored) > 0 {
+		monFdb = make([]snmp.FdbEntry, 0, len(fdb))
+		for _, f := range fdb {
+			if !unmonitored[f.IfIndex] {
+				monFdb = append(monFdb, f)
+			}
+		}
+	}
+
 	// ---- endpoints ------------------------------------------------------
 	// Collect every observable MAC: FDB plus ARP (ARP-only endpoints are
 	// real — e.g. hosts behind non-bridging gear).
-	macSet := make(map[string]bool, len(fdb))
-	for _, f := range fdb {
+	macSet := make(map[string]bool, len(monFdb))
+	for _, f := range monFdb {
 		macSet[f.MAC] = true
 	}
 	arp := make([]snmp.ArpEntry, 0, len(u.Arp))
@@ -187,9 +204,9 @@ func (s *PostgresStore) UpsertUdtData(ctx context.Context, deviceID uuid.UUID, u
 	}
 
 	// ---- sessions -------------------------------------------------------
-	sessions := make([]udtSessionRow, 0, len(fdb))
-	sessKey := make(map[string]bool, len(fdb))
-	for _, f := range fdb {
+	sessions := make([]udtSessionRow, 0, len(monFdb))
+	sessKey := make(map[string]bool, len(monFdb))
+	for _, f := range monFdb {
 		epID, ok := endpointIDs[f.MAC]
 		if !ok {
 			continue
@@ -241,7 +258,7 @@ func (s *PostgresStore) UpsertUdtData(ctx context.Context, deviceID uuid.UUID, u
 	}
 
 	// ---- events ---------------------------------------------------------
-	if err := insertUdtEvents(ctx, tx, deviceID, fdb, endpointIDs, newMacs, moveEvents); err != nil {
+	if err := insertUdtEvents(ctx, tx, deviceID, monFdb, endpointIDs, newMacs, moveEvents); err != nil {
 		return fmt.Errorf("udt events: %w", err)
 	}
 
@@ -258,6 +275,28 @@ func topoNonFatal(err error) error {
 		return nil
 	}
 	return fmt.Errorf("udt topology skipped (endpoint data saved): %w", err)
+}
+
+// loadUnmonitoredPorts returns the set of if_index values the operator
+// excluded from UDT on this device (udt_port_state.monitored = FALSE).
+func loadUnmonitoredPorts(ctx context.Context, tx pgx.Tx, deviceID uuid.UUID) (map[int]bool, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT if_index FROM udt_port_state
+		WHERE device_id = $1 AND NOT monitored
+	`, deviceID)
+	if err != nil {
+		return nil, fmt.Errorf("udt load unmonitored ports: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[int]bool)
+	for rows.Next() {
+		var ix int
+		if err := rows.Scan(&ix); err != nil {
+			return nil, err
+		}
+		out[ix] = true
+	}
+	return out, rows.Err()
 }
 
 // loadInfraSets returns (lowercased hostnames of monitored devices,

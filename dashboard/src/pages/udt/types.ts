@@ -126,6 +126,36 @@ export interface UdtEvent {
   created_at: string
 }
 
+export interface UdtGlobalSettings {
+  poll_interval_s: number
+  devices_total: number
+  devices_enabled: number
+}
+
+export interface UdtCredentialOption {
+  id: string
+  name: string
+  snmp_version: string
+}
+
+export interface UdtDeviceSettings {
+  device_id: string
+  hostname: string
+  ip: string | null
+  vendor: string | null
+  model: string | null
+  device_type: string
+  is_l2: boolean
+  enabled: boolean
+  snmp_credential_id: string | null
+  credential_name: string | null
+  poll_interval_s: number | null
+  ports_total: number
+  ports_monitored: number
+  active_endpoints: number
+  last_udt_at: string | null
+}
+
 export interface DomainController {
   id: string
   name: string

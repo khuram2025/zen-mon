@@ -1,7 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { PlugZap, Plus, RefreshCw, ServerCog, Trash2 } from 'lucide-react'
+import { KeyRound, Network, PlugZap, Plus, RefreshCw, ServerCog, Trash2 } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
@@ -15,8 +15,10 @@ import { toast } from '@/components/ui/Toast'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
 import { udtApi } from './api'
-import type { DomainController } from './types'
+import type { DomainController, UdtDeviceSettings } from './types'
 import { ENDPOINT_TYPE_META, relTime } from './helpers'
+
+const DEVICE_CRED = '__device__' // sentinel: use the device's own SNMP settings
 
 function statusBadge(s: string | null) {
   if (s === 'ok') return <Badge variant="success">ok</Badge>
@@ -71,6 +73,204 @@ function AddDCDialog({ onClose }: { onClose: () => void }) {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+function RowIntervalInput({ row, globalInterval, onSave }: {
+  row: UdtDeviceSettings
+  globalInterval: number
+  onSave: (v: number | null) => void
+}) {
+  const [val, setVal] = useState(row.poll_interval_s == null ? '' : String(row.poll_interval_s))
+  useEffect(() => { setVal(row.poll_interval_s == null ? '' : String(row.poll_interval_s)) }, [row.poll_interval_s])
+  const commit = () => {
+    const next = val.trim() === '' ? null : Math.max(60, Math.min(86400, Number(val)))
+    if (next !== row.poll_interval_s) onSave(next)
+    if (next != null) setVal(String(next))
+  }
+  return (
+    <Input
+      type="number" min={60} max={86400}
+      className="h-7 w-24 text-xs"
+      placeholder={`${globalInterval}s`}
+      value={val}
+      onChange={(e) => setVal(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+    />
+  )
+}
+
+function DevicePolling() {
+  const qc = useQueryClient()
+  const settings = useQuery({ queryKey: ['udt', 'settings'], queryFn: () => udtApi.settings() })
+  const deviceSettings = useQuery({
+    queryKey: ['udt', 'device-settings'],
+    queryFn: () => udtApi.deviceSettings(),
+    refetchInterval: 30_000,
+  })
+  const [globalInterval, setGlobalInterval] = useState('')
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [showAll, setShowAll] = useState(false)
+  useEffect(() => {
+    if (settings.data) setGlobalInterval(String(settings.data.poll_interval_s))
+  }, [settings.data])
+
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ['udt', 'device-settings'] })
+    qc.invalidateQueries({ queryKey: ['udt', 'settings'] })
+  }
+  const saveGlobal = useMutation({
+    mutationFn: () => udtApi.updateSettings({ poll_interval_s: Math.max(30, Math.min(86400, Number(globalInterval))) }),
+    onSuccess: () => { invalidate(); toast.success('Global UDT poll interval saved') },
+    onError: (e: any) => toast.error('Could not save', apiErrorMessage(e)),
+  })
+  const saveDevice = useMutation({
+    mutationFn: ({ row, patch }: { row: UdtDeviceSettings; patch: Partial<{ enabled: boolean; snmp_credential_id: string | null; poll_interval_s: number | null }> }) =>
+      udtApi.updateDeviceSettings(row.device_id, {
+        enabled: row.enabled,
+        snmp_credential_id: row.snmp_credential_id,
+        poll_interval_s: row.poll_interval_s,
+        ...patch,
+      }),
+    onSuccess: () => invalidate(),
+    onError: (e: any) => { toast.error('Could not save', apiErrorMessage(e)); invalidate() },
+  })
+  const bulk = useMutation({
+    mutationFn: (body: Record<string, any>) => udtApi.bulkDeviceSettings({ device_ids: Array.from(selected), ...body }),
+    onSuccess: (r: any) => { invalidate(); setSelected(new Set()); toast.success(`Updated ${r.updated ?? 0} devices`) },
+    onError: (e: any) => toast.error('Bulk update failed', apiErrorMessage(e)),
+  })
+
+  const allRows = deviceSettings.data?.data || []
+  const rows = showAll ? allRows : allRows.filter((r) => r.is_l2)
+  const hiddenCount = allRows.length - allRows.filter((r) => r.is_l2).length
+  const creds = deviceSettings.data?.credentials || []
+  const allSelected = rows.length > 0 && selected.size === rows.length
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(rows.map((r) => r.device_id)))
+  const toggleOne = (id: string) => setSelected((prev) => {
+    const next = new Set(prev)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  })
+
+  return (
+    <Card>
+      <CardContent className="p-0">
+        <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border p-4">
+          <div>
+            <h3 className="flex items-center gap-2 text-sm font-semibold"><Network className="h-4 w-4 text-primary" /> Layer-2 polling</h3>
+            <p className="mt-0.5 text-xs text-muted">
+              Layer-2 devices (switches and anything returning bridge-table data) that UDT polls for MAC/ARP/LLDP tables.
+              Devices are enabled by default and use their own SNMP settings unless overridden here.
+              Per-port exclusions live on the <Link to="/udt/ports" className="text-primary hover:underline">Switch Ports</Link> tab.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {hiddenCount > 0 && (
+              <label className="mr-2 flex cursor-pointer items-center gap-1.5 text-xs text-muted">
+                <Switch checked={showAll} onCheckedChange={(v) => { setShowAll(v); setSelected(new Set()) }} />
+                Show all SNMP devices ({hiddenCount} non-L2)
+              </label>
+            )}
+            <label className="text-xs text-muted">Default interval</label>
+            <Input
+              type="number" min={30} max={86400}
+              className="h-8 w-24 text-xs"
+              value={globalInterval}
+              onChange={(e) => setGlobalInterval(e.target.value)}
+            />
+            <span className="text-xs text-muted">s</span>
+            <Button size="sm" variant="outline"
+              disabled={saveGlobal.isPending || !globalInterval || Number(globalInterval) === settings.data?.poll_interval_s}
+              onClick={() => saveGlobal.mutate()}>
+              Save
+            </Button>
+          </div>
+        </div>
+
+        {selected.size > 0 && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-border bg-primary/5 px-4 py-2">
+            <span className="text-xs font-medium">{selected.size} selected</span>
+            <Button size="sm" variant="outline" disabled={bulk.isPending} onClick={() => bulk.mutate({ set_enabled: true })}>Enable UDT</Button>
+            <Button size="sm" variant="outline" disabled={bulk.isPending} onClick={() => bulk.mutate({ set_enabled: false })}>Disable UDT</Button>
+            <div className="flex items-center gap-1">
+              <KeyRound className="h-3.5 w-3.5 text-muted" />
+              <Select value="" onValueChange={(v) => bulk.mutate({ set_credential: true, snmp_credential_id: v === DEVICE_CRED ? null : v })}>
+                <SelectTrigger className="h-8 w-52 text-xs"><SelectValue placeholder="Assign credential…" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={DEVICE_CRED}>Device SNMP settings</SelectItem>
+                  {creds.map((c) => <SelectItem key={c.id} value={c.id}>{c.name} (v{c.snmp_version})</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button size="sm" variant="ghost" onClick={() => setSelected(new Set())}>Clear</Button>
+          </div>
+        )}
+
+        {deviceSettings.isLoading ? (
+          <div className="space-y-2 p-4">{Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-9 w-full" />)}</div>
+        ) : rows.length === 0 ? (
+          <div className="py-8 text-center text-xs text-muted">
+            No layer-2 devices found — enable SNMP on your switches{hiddenCount > 0 ? ', or use "Show all SNMP devices" above' : ''}.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <Table>
+              <THead className="bg-surface2/40">
+                <Tr>
+                  <Th className="w-8"><input type="checkbox" className="accent-primary" checked={allSelected} onChange={toggleAll} /></Th>
+                  <Th>Device</Th><Th>UDT credential</Th><Th>Interval</Th>
+                  <Th className="text-right">Ports monitored</Th><Th className="text-right">Endpoints</Th>
+                  <Th>Last poll</Th><Th>UDT</Th>
+                </Tr>
+              </THead>
+              <TBody>
+                {rows.map((r) => (
+                  <Tr key={r.device_id} className={r.enabled ? '' : 'opacity-60'}>
+                    <Td><input type="checkbox" className="accent-primary" checked={selected.has(r.device_id)} onChange={() => toggleOne(r.device_id)} /></Td>
+                    <Td>
+                      <div className="flex items-center gap-1.5">
+                        <Link to={`/devices/${r.device_id}`} className="font-medium hover:text-primary">{r.hostname}</Link>
+                        {!r.is_l2 && <Badge variant="outline">{r.device_type}</Badge>}
+                      </div>
+                      <div className="font-mono text-[11px] text-muted">{r.ip || '—'}{r.vendor ? ` · ${r.vendor}` : ''}</div>
+                    </Td>
+                    <Td>
+                      <Select
+                        value={r.snmp_credential_id || DEVICE_CRED}
+                        onValueChange={(v) => saveDevice.mutate({ row: r, patch: { snmp_credential_id: v === DEVICE_CRED ? null : v } })}
+                      >
+                        <SelectTrigger className="h-7 w-48 text-xs"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={DEVICE_CRED}>Device SNMP settings</SelectItem>
+                          {creds.map((c) => <SelectItem key={c.id} value={c.id}>{c.name} (v{c.snmp_version})</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </Td>
+                    <Td>
+                      <RowIntervalInput
+                        row={r}
+                        globalInterval={settings.data?.poll_interval_s ?? 300}
+                        onSave={(v) => saveDevice.mutate({ row: r, patch: { poll_interval_s: v } })}
+                      />
+                    </Td>
+                    <Td className="text-right text-xs tabular-nums">
+                      {r.ports_total > 0
+                        ? <span className={r.ports_monitored < r.ports_total ? 'text-warning' : ''}>{r.ports_monitored}/{r.ports_total}</span>
+                        : <span className="text-muted">—</span>}
+                    </Td>
+                    <Td className="text-right text-xs tabular-nums">{r.active_endpoints}</Td>
+                    <Td className="text-xs text-muted">{relTime(r.last_udt_at)}</Td>
+                    <Td><Switch checked={r.enabled} onCheckedChange={(v) => saveDevice.mutate({ row: r, patch: { enabled: v } })} /></Td>
+                  </Tr>
+                ))}
+              </TBody>
+            </Table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 
@@ -192,13 +392,16 @@ function VendorBreakdown() {
 export function SettingsPage() {
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <div className="lg:col-span-2"><DevicePolling /></div>
       <div className="lg:col-span-2"><DomainControllers /></div>
       <VendorBreakdown />
       <Card>
         <CardContent className="space-y-3 p-4 text-xs text-muted">
           <h3 className="text-sm font-semibold text-text">How UDT collects data</h3>
-          <p>Each SNMP-enabled switch is polled every 5 minutes for its bridge forwarding database (BRIDGE-MIB / Q-BRIDGE-MIB),
-            ARP/neighbor tables (IP-MIB) and LLDP/CDP neighbors. MAC-to-port, IP-to-MAC and user-to-endpoint are correlated into unified endpoints.</p>
+          <p>Each SNMP-enabled switch is polled (every 5 minutes by default — configurable above, globally or per device) for its
+            bridge forwarding database (BRIDGE-MIB / Q-BRIDGE-MIB), ARP/neighbor tables (IP-MIB) and LLDP/CDP neighbors.
+            MAC-to-port, IP-to-MAC and user-to-endpoint are correlated into unified endpoints. Ports excluded from monitoring
+            keep their capacity stats but produce no endpoints or events.</p>
           <p>Uplink and trunk ports are detected automatically from LLDP/CDP neighbors, Cisco VTP trunk status and MAC-count
             heuristics, so aggregation ports don't flood the endpoint views. Override any port's role on the Switch Ports tab.</p>
           <p>Endpoint types below are inferred from OUI vendor and hostname:</p>

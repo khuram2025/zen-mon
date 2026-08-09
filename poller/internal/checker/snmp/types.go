@@ -34,6 +34,16 @@ type Device struct {
 
 	ProfileID *uuid.UUID
 
+	// Per-device UDT settings, joined from udt_device_settings at load
+	// time. A device with no settings row gets UdtEnabled=true and
+	// UdtInterval=0 (0 = follow the engine's global cadence).
+	UdtEnabled  bool
+	UdtInterval time.Duration
+	// UdtCredential, when non-nil, replaces the device's own SNMP
+	// settings for UDT walks only — e.g. a v3 user with per-VLAN
+	// context access that the regular monitoring credential lacks.
+	UdtCredential *UdtCredential
+
 	// OidGroups is the device's monitoring-template content, joined
 	// from device_profiles.oid_groups at load time. Empty when the
 	// device has no template (or the template declares no groups).
@@ -44,6 +54,44 @@ type Device struct {
 	Vendor      string
 	Model       string
 	OSVersion   string
+}
+
+// UdtCredential is a reusable snmp_credentials row selected for a
+// device's UDT collection. Zero-valued fields fall back to the same
+// defaults NewSession applies for a Device.
+type UdtCredential struct {
+	Version        string
+	Port           int
+	Community      string
+	V3Username     string
+	V3Context      string
+	AuthProtocol   string
+	AuthPassphrase string
+	PrivProtocol   string
+	PrivPassphrase string
+	TimeoutMs      int
+	Retries        int
+}
+
+// ApplyTo overwrites d's session-relevant fields with the credential's.
+func (c *UdtCredential) ApplyTo(d *Device) {
+	d.Version = c.Version
+	if c.Port > 0 {
+		d.Port = c.Port
+	}
+	d.Community = c.Community
+	d.V3Username = c.V3Username
+	d.V3Context = c.V3Context
+	d.AuthProtocol = c.AuthProtocol
+	d.AuthPassphrase = c.AuthPassphrase
+	d.PrivProtocol = c.PrivProtocol
+	d.PrivPassphrase = c.PrivPassphrase
+	if c.TimeoutMs > 0 {
+		d.TimeoutMs = c.TimeoutMs
+	}
+	if c.Retries > 0 {
+		d.Retries = c.Retries
+	}
 }
 
 // SystemInfo is the result of CollectSystem.

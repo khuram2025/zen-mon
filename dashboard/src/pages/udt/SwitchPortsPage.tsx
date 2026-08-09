@@ -5,6 +5,7 @@ import { ArrowUpFromLine, Power, PowerOff, Server } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
+import { Switch } from '@/components/ui/Switch'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -33,6 +34,7 @@ export function SwitchPortsPage() {
   const qc = useQueryClient()
   const selected = params.get('device')
   const [confirm, setConfirm] = useState<{ port: UdtPort; action: 'shutdown' | 'enable' } | null>(null)
+  const [checked, setChecked] = useState<Set<number>>(new Set())
 
   const capacity = useQuery({
     queryKey: ['udt', 'capacity'],
@@ -70,6 +72,35 @@ export function SwitchPortsPage() {
     onError: (e: any) => toast.error('Update failed', apiErrorMessage(e)),
   })
 
+  const monitorMut = useMutation({
+    mutationFn: ({ port, monitored }: { port: UdtPort; monitored: boolean }) =>
+      udtApi.updatePort(activeDevice!, port.if_index, { monitored }),
+    onSuccess: (_d, v) => {
+      qc.invalidateQueries({ queryKey: ['udt', 'device-ports', activeDevice] })
+      toast.success(v.monitored ? 'Port included in UDT' : 'Port excluded from UDT')
+    },
+    onError: (e: any) => toast.error('Update failed', apiErrorMessage(e)),
+  })
+
+  const bulkMonitorMut = useMutation({
+    mutationFn: (monitored: boolean) => udtApi.bulkPortMonitor(activeDevice!, Array.from(checked), monitored),
+    onSuccess: (r: any, monitored) => {
+      qc.invalidateQueries({ queryKey: ['udt', 'device-ports', activeDevice] })
+      setChecked(new Set())
+      toast.success(`${r.updated ?? 0} ports ${monitored ? 'included in' : 'excluded from'} UDT`)
+    },
+    onError: (e: any) => toast.error('Bulk update failed', apiErrorMessage(e)),
+  })
+
+  const portRows = ports.data?.ports || []
+  const allChecked = portRows.length > 0 && checked.size === portRows.length
+  const toggleAll = () => setChecked(allChecked ? new Set() : new Set(portRows.map((p) => p.if_index)))
+  const toggleOne = (ifIndex: number) => setChecked((prev) => {
+    const next = new Set(prev)
+    if (next.has(ifIndex)) next.delete(ifIndex); else next.add(ifIndex)
+    return next
+  })
+
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
       {/* Device list / capacity rail */}
@@ -83,7 +114,7 @@ export function SwitchPortsPage() {
           devices.map((d: CapacityRow) => (
             <button
               key={d.id}
-              onClick={() => setParams((p) => { p.set('device', d.id); return p }, { replace: true })}
+              onClick={() => { setChecked(new Set()); setParams((p) => { p.set('device', d.id); return p }, { replace: true }) }}
               className={`w-full rounded-lg border p-3 text-left transition-colors ${
                 activeDevice === d.id ? 'border-primary bg-primary/5' : 'border-border hover:border-border-strong'
               }`}
@@ -109,9 +140,20 @@ export function SwitchPortsPage() {
               {ports.data?.device.hostname || 'Ports'}
               {ports.data && <span className="ml-2 text-xs font-normal text-muted">{ports.data.ports.length} ports</span>}
             </h3>
-            {activeDevice && (
-              <Button size="sm" variant="ghost" onClick={() => navigate(`/devices/${activeDevice}`)}>Device page</Button>
-            )}
+            <div className="flex items-center gap-2">
+              {checked.size > 0 && (
+                <>
+                  <span className="text-xs font-medium">{checked.size} selected</span>
+                  <Button size="sm" variant="outline" disabled={bulkMonitorMut.isPending}
+                    onClick={() => bulkMonitorMut.mutate(true)}>Include in UDT</Button>
+                  <Button size="sm" variant="outline" disabled={bulkMonitorMut.isPending}
+                    onClick={() => bulkMonitorMut.mutate(false)}>Exclude from UDT</Button>
+                </>
+              )}
+              {activeDevice && (
+                <Button size="sm" variant="ghost" onClick={() => navigate(`/devices/${activeDevice}`)}>Device page</Button>
+              )}
+            </div>
           </div>
           {ports.isLoading ? (
             <div className="space-y-2 p-4">{Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-9 w-full" />)}</div>
@@ -122,8 +164,10 @@ export function SwitchPortsPage() {
               <Table>
                 <THead className="bg-surface2/40">
                   <Tr>
+                    <Th className="w-8"><input type="checkbox" className="accent-primary" checked={allChecked} onChange={toggleAll} /></Th>
                     <Th>Port</Th><Th>Description</Th><Th>Status</Th><Th>Speed</Th>
                     <Th>VLAN</Th><Th className="text-right">Endpoints</Th><Th>Role</Th>
+                    <Th>UDT</Th>
                     <Th className="text-right">Last device</Th><Th className="text-right">Actions</Th>
                   </Tr>
                 </THead>
@@ -132,7 +176,8 @@ export function SwitchPortsPage() {
                     const up = p.oper_status === 'up'
                     const adminDown = p.admin_status === 'down'
                     return (
-                      <Tr key={p.if_index}>
+                      <Tr key={p.if_index} className={p.monitored === false ? 'opacity-60' : ''}>
+                        <Td><input type="checkbox" className="accent-primary" checked={checked.has(p.if_index)} onChange={() => toggleOne(p.if_index)} /></Td>
                         <Td className="font-medium">{p.if_name || `if ${p.if_index}`}</Td>
                         <Td className="max-w-[220px] truncate text-xs text-muted" title={p.if_alias || p.if_descr || ''}>
                           {p.if_alias || p.if_descr || '—'}
@@ -159,6 +204,12 @@ export function SwitchPortsPage() {
                               {p.uplink_reason && <span className="text-[10px] text-muted">{p.uplink_reason}</span>}
                             </span>
                           ) : <span className="text-xs text-muted">access</span>}
+                        </Td>
+                        <Td>
+                          <Switch
+                            checked={p.monitored !== false}
+                            onCheckedChange={(v) => monitorMut.mutate({ port: p, monitored: v })}
+                          />
                         </Td>
                         <Td className="text-right text-xs text-muted">{relTime(p.last_endpoint_seen)}</Td>
                         <Td className="text-right">
