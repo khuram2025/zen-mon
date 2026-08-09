@@ -89,12 +89,16 @@ class DeviceUpdate(BaseModel):
     snmp_poll_interval: Optional[int] = Field(default=None, ge=30, le=3600)
     profile_id: Optional[UUID] = None
     snmp_credential_id: Optional[UUID] = None
+    # Controller opt-in: materialize template-reported managed devices
+    # (APs, FortiSwitches) as child devices of this one.
+    promote_managed: Optional[bool] = None
 
 
 class DeviceResponse(BaseModel):
     id: UUID
     hostname: str
-    ip_address: str
+    # None for controller-reported children that expose no reachable IP.
+    ip_address: Optional[str]
     device_type: str
     location: Optional[str]
     group_id: Optional[UUID]
@@ -131,6 +135,17 @@ class DeviceResponse(BaseModel):
     snmp_credential_id: Optional[UUID] = None
     snmp_auth_configured: bool = False
     snmp_priv_configured: bool = False
+
+    # Controller-managed children (migrate-069)
+    poll_mode: str = "direct"
+    managed_by_device_id: Optional[UUID] = None
+    managed_by_hostname: Optional[str] = None
+    serial_number: Optional[str] = None
+    managed_ip: Optional[str] = None
+    managed_source: Optional[str] = None
+    managed_last_seen: Optional[datetime] = None
+    promote_managed: bool = False
+    managed_children_count: int = 0
 
     model_config = {"from_attributes": True}
 

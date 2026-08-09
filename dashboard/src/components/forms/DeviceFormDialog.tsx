@@ -17,6 +17,7 @@ import {
 } from '@/components/ui/Select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { toast } from '@/components/ui/Toast'
+import { TagPicker } from '@/components/tags/TagPicker'
 
 type Credential = {
   id: string; name: string; snmp_version: string;
@@ -28,6 +29,7 @@ type Credential = {
 type DeviceState = {
   hostname: string; ip_address: string; device_type: string;
   location: string; description: string; group_id: string;
+  tags: string[];
   ping_enabled: boolean; ping_interval: number;
   snmp_enabled: boolean; snmp_credential_mode: 'saved' | 'manual';
   snmp_credential_id: string;
@@ -43,6 +45,7 @@ type DeviceState = {
 const empty: DeviceState = {
   hostname: '', ip_address: '', device_type: 'other',
   location: '', description: '', group_id: '',
+  tags: [],
   ping_enabled: true, ping_interval: 60,
   snmp_enabled: false, snmp_credential_mode: 'saved', snmp_credential_id: '',
   snmp_version: '2c', snmp_port: 161, snmp_community: 'public',
@@ -94,6 +97,7 @@ export function DeviceFormDialog({
         location: device.location || '',
         description: device.description || '',
         group_id: device.group_id || '',
+        tags: Array.isArray(device.tags) ? device.tags : [],
         ping_enabled: device.ping_enabled ?? true,
         ping_interval: device.ping_interval || 60,
         snmp_enabled: device.snmp_enabled ?? false,
@@ -140,9 +144,13 @@ export function DeviceFormDialog({
   function submit(e: FormEvent) {
     e.preventDefault()
     const payload: any = {
-      hostname: state.hostname, ip_address: state.ip_address,
+      hostname: state.hostname,
+      // Controller-managed children may legitimately have no IP; omitting the
+      // field on edit leaves it unchanged instead of writing ''.
+      ...(state.ip_address || !isEdit ? { ip_address: state.ip_address } : {}),
       device_type: state.device_type, location: state.location || null,
       description: state.description || null, group_id: state.group_id || null,
+      tags: state.tags,
       ping_enabled: state.ping_enabled, ping_interval: state.ping_interval,
       snmp_enabled: state.snmp_enabled, snmp_poll_interval: state.snmp_poll_interval,
       profile_id: state.profile_id || null,
@@ -208,8 +216,8 @@ export function DeviceFormDialog({
               <FormField label="Hostname" required className="col-span-2">
                 <Input required value={state.hostname} onChange={(e) => setState({ ...state, hostname: e.target.value })} placeholder="core-router-01" />
               </FormField>
-              <FormField label="IP address" required>
-                <Input required value={state.ip_address} onChange={(e) => setState({ ...state, ip_address: e.target.value })} placeholder="192.168.1.1" />
+              <FormField label={isEdit && !device?.ip_address ? 'IP address (managed via controller)' : 'IP address'} required={!isEdit || !!device?.ip_address}>
+                <Input required={!isEdit || !!device?.ip_address} value={state.ip_address} onChange={(e) => setState({ ...state, ip_address: e.target.value })} placeholder="192.168.1.1" />
               </FormField>
               <FormField label="Device type">
                 <Select value={state.device_type} onValueChange={(v) => setState({ ...state, device_type: v })}>
@@ -232,6 +240,9 @@ export function DeviceFormDialog({
                     {(groups || []).map((g: any) => <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>)}
                   </SelectContent>
                 </Select>
+              </FormField>
+              <FormField label="Tags" className="col-span-2" hint="Used for filtering, dashboards and reports">
+                <TagPicker value={state.tags} onChange={(tags) => setState({ ...state, tags })} />
               </FormField>
               <FormField label="Description" className="col-span-2">
                 <Textarea value={state.description} onChange={(e) => setState({ ...state, description: e.target.value })} placeholder="Optional notes" />

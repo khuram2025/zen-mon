@@ -13,6 +13,15 @@ interface RangeArgs {
 export interface ExecutiveData {
   from: string
   to: string
+  /** Span the figures were actually measured over. Shorter than [from, to]
+   *  when retention or a collection gap means the window is only partly
+   *  covered — a 30-day request on an appliance with eight days of samples
+   *  still returns eight days of numbers. */
+  coverage?: {
+    source_table: string | null
+    from: string | null
+    to: string | null
+  }
   kpis: {
     availability_pct: number | null
     availability_delta_pct: number | null
@@ -36,7 +45,10 @@ export interface ExecutiveData {
     alert_count: number
     severity: string
   }[]
-  location_summary: { location: string; devices: number; down: number; availability_pct: number }[]
+  /** `availability_pct` is measured over the selected window (maintenance
+   *  excluded) and is null when the location reported no samples in it;
+   *  `devices`/`down` are live counts. */
+  location_summary: { location: string; devices: number; down: number; availability_pct: number | null }[]
   outage_timeline: {
     device_id: string
     hostname: string
@@ -162,51 +174,72 @@ export interface InventoryData {
 /*  Hooks                                                              */
 /* ------------------------------------------------------------------ */
 
-const STALE_MS = 30_000
 const RETRY_COUNT = 1
 
 /** Keep prior report data visible while the time window refetches. */
 const keepPrev = <T,>(prev: T | undefined) => prev
 
 /**
- * `useTimeRange()` recomputes `toISO` from `Date.now()` on every render. If we
- * key React Query directly on those raw ISO strings, every render mints a
- * brand-new key and triggers an immediate refetch. Round the key components
- * to the nearest minute to give us a stable bucket while still passing the
- * exact ISOs to the API.
+ * `useTimeRange()` slides preset windows with the wall clock, re-deriving
+ * `fromISO`/`toISO` every minute. Keying React Query on those raw ISO strings
+ * mints a brand-new key on every tick, so all three (expensive) reports
+ * refetch from scratch once a minute — and on a 7d/30d window a fresh minute
+ * of samples cannot move the numbers.
+ *
+ * Bucket the key to a granularity proportional to the window instead: short
+ * windows still feel live, long windows refresh at a rate that matches how
+ * fast they can actually change. The exact ISOs are still sent to the API.
  */
-function bucketKey(iso: string): string {
+function bucketMs(fromISO: string, toISO: string): number {
+  const span = Date.parse(toISO) - Date.parse(fromISO)
+  if (!Number.isFinite(span)) return 60_000
+  if (span <= 2 * 3_600_000) return 60_000        // <= 2h  → 1 min
+  if (span <= 24 * 3_600_000) return 5 * 60_000   // <= 24h → 5 min
+  if (span <= 7 * 24 * 3_600_000) return 15 * 60_000  // <= 7d → 15 min
+  return 30 * 60_000                              // longer → 30 min
+}
+
+function bucketKey(iso: string, ms: number): string {
   const t = Date.parse(iso)
   if (Number.isNaN(t)) return iso
-  const bucketed = Math.floor(t / 60_000) * 60_000
-  return new Date(bucketed).toISOString()
+  return new Date(Math.floor(t / ms) * ms).toISOString()
+}
+
+/** Stable query key + a matching staleTime, so the data stays fresh for
+ *  exactly as long as the key it is stored under. */
+function rangeKey({ fromISO, toISO }: RangeArgs) {
+  const ms = bucketMs(fromISO, toISO)
+  return { key: [bucketKey(fromISO, ms), bucketKey(toISO, ms)], staleMs: ms }
 }
 
 export function useExecutiveReport({ fromISO, toISO }: RangeArgs) {
+  const { key, staleMs } = rangeKey({ fromISO, toISO })
   return useQuery<ExecutiveData>({
-    queryKey: ['report', 'executive', bucketKey(fromISO), bucketKey(toISO)],
+    queryKey: ['report', 'executive', ...key],
     queryFn: async () => (await api.get('/reports/data/executive', { params: { from: fromISO, to: toISO } })).data,
-    staleTime: STALE_MS,
+    staleTime: staleMs,
     retry: RETRY_COUNT,
     placeholderData: keepPrev,
   })
 }
 
 export function useTechnicalReport({ fromISO, toISO }: RangeArgs) {
+  const { key, staleMs } = rangeKey({ fromISO, toISO })
   return useQuery<TechnicalData>({
-    queryKey: ['report', 'technical', bucketKey(fromISO), bucketKey(toISO)],
+    queryKey: ['report', 'technical', ...key],
     queryFn: async () => (await api.get('/reports/data/technical', { params: { from: fromISO, to: toISO } })).data,
-    staleTime: STALE_MS,
+    staleTime: staleMs,
     retry: RETRY_COUNT,
     placeholderData: keepPrev,
   })
 }
 
 export function useBusinessReport({ fromISO, toISO }: RangeArgs) {
+  const { key, staleMs } = rangeKey({ fromISO, toISO })
   return useQuery<BusinessData>({
-    queryKey: ['report', 'business', bucketKey(fromISO), bucketKey(toISO)],
+    queryKey: ['report', 'business', ...key],
     queryFn: async () => (await api.get('/reports/data/business', { params: { from: fromISO, to: toISO } })).data,
-    staleTime: STALE_MS,
+    staleTime: staleMs,
     retry: RETRY_COUNT,
     placeholderData: keepPrev,
   })

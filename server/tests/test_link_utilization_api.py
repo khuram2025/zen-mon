@@ -276,8 +276,14 @@ def test_health_sorts_are_descending(auth, sort, key):
     r = requests.get(
         f"{API}/api/v1/link-utilization?hours=24&limit=50&sort={sort}", headers=auth, timeout=180,
     )
-    values = [i[key] for i in r.json()["items"]]
-    assert values == sorted(values, reverse=True)
+    items = r.json()["items"]
+    # Favourites are pinned above everything regardless of sort, so the ordering
+    # holds within each block rather than across the whole page.
+    for block in (
+        [i[key] for i in items if i.get("is_favorite")],
+        [i[key] for i in items if not i.get("is_favorite")],
+    ):
+        assert block == sorted(block, reverse=True)
 
 
 @live
@@ -285,7 +291,8 @@ def test_error_rate_sort_ranks_measured_links_above_unmeasurable_ones(auth):
     r = requests.get(
         f"{API}/api/v1/link-utilization?hours=24&limit=50&sort=error_rate", headers=auth, timeout=180,
     )
-    items = r.json()["items"]
+    # Pinned favourites sit above the sort, so judge the unpinned tail.
+    items = [i for i in r.json()["items"] if not i.get("is_favorite")]
     seen_null = False
     for item in items:
         if item["error_ppm"] is None:
@@ -349,3 +356,111 @@ def test_device_interface_metrics_agree_with_link_utilization(auth, fleet):
     # Both endpoints difference the same cumulative counters over the same
     # window; allow a sample of drift between the two round-trips.
     assert devices_total == pytest.approx(target["errors"], rel=0.05, abs=50)
+
+
+# ── Favourites ───────────────────────────────────────────────────────────────
+#
+# These mutate the admin user's favourites, so each one restores the starting
+# state — a leftover star would silently reorder every other sort test.
+
+
+@pytest.fixture
+def unstarred_link(auth, fleet):
+    """A link that is not currently a favourite, cleaned up after the test.
+
+    Taken from the BOTTOM of the default utilization ranking, so "it ended up
+    first" can only be the pin at work, never where it already sat.
+    """
+    target = next((i for i in reversed(fleet["items"]) if not i.get("is_favorite")), None)
+    if target is None:
+        pytest.skip("no unstarred interface available")
+    yield target
+    requests.delete(
+        f"{API}/api/v1/link-utilization/favorites/{target['device_id']}/{target['if_index']}",
+        headers=auth, timeout=30,
+    )
+
+
+@live
+def test_every_link_reports_its_favorite_state(fleet):
+    # A missing flag would render every star as "off" and silently lose the pin.
+    for item in fleet["items"]:
+        assert isinstance(item["is_favorite"], bool)
+    assert fleet["summary"]["favorites"] == sum(1 for i in fleet["items"] if i["is_favorite"])
+
+
+@live
+def test_starred_link_is_pinned_to_the_top(auth, unstarred_link):
+    """A favourite outranks the sort — that is the whole point of the feature."""
+    target = unstarred_link
+    r = requests.put(
+        f"{API}/api/v1/link-utilization/favorites/{target['device_id']}/{target['if_index']}",
+        headers=auth, timeout=30,
+    )
+    assert r.status_code == 204
+
+    items = requests.get(
+        f"{API}/api/v1/link-utilization?hours=24&limit=200", headers=auth, timeout=180,
+    ).json()["items"]
+    assert items[0]["device_id"] == target["device_id"]
+    assert items[0]["if_index"] == target["if_index"]
+    assert items[0]["is_favorite"] is True
+    # The pinned block must be contiguous — no favourite interleaved below it.
+    first_unstarred = next((n for n, i in enumerate(items) if not i["is_favorite"]), len(items))
+    assert all(i["is_favorite"] for i in items[:first_unstarred])
+    assert not any(i["is_favorite"] for i in items[first_unstarred:])
+
+
+@live
+def test_starring_is_idempotent(auth, unstarred_link):
+    target = unstarred_link
+    path = f"{API}/api/v1/link-utilization/favorites/{target['device_id']}/{target['if_index']}"
+    assert requests.put(path, headers=auth, timeout=30).status_code == 204
+    assert requests.put(path, headers=auth, timeout=30).status_code == 204
+
+    favorites = requests.get(
+        f"{API}/api/v1/link-utilization/favorites", headers=auth, timeout=30,
+    ).json()["items"]
+    matches = [
+        f for f in favorites
+        if f["device_id"] == target["device_id"] and f["if_index"] == target["if_index"]
+    ]
+    assert len(matches) == 1
+
+
+@live
+def test_favorites_only_filter_returns_just_the_starred_links(auth, unstarred_link):
+    target = unstarred_link
+    requests.put(
+        f"{API}/api/v1/link-utilization/favorites/{target['device_id']}/{target['if_index']}",
+        headers=auth, timeout=30,
+    )
+    body = requests.get(
+        f"{API}/api/v1/link-utilization?hours=24&limit=200&favorites_only=true",
+        headers=auth, timeout=180,
+    ).json()
+    assert body["items"], "favorites filter dropped a link that was just starred"
+    assert all(i["is_favorite"] for i in body["items"])
+    assert any(
+        i["device_id"] == target["device_id"] and i["if_index"] == target["if_index"]
+        for i in body["items"]
+    )
+
+
+@live
+def test_unstarring_is_safe_when_not_starred(auth, fleet):
+    """The UI toggle must not wedge on a favourite another tab already cleared."""
+    target = fleet["items"][0]
+    path = f"{API}/api/v1/link-utilization/favorites/{target['device_id']}/{target['if_index']}"
+    requests.delete(path, headers=auth, timeout=30)
+    assert requests.delete(path, headers=auth, timeout=30).status_code == 204
+
+
+@live
+def test_cannot_star_an_unknown_interface(auth, fleet):
+    target = fleet["items"][0]
+    r = requests.put(
+        f"{API}/api/v1/link-utilization/favorites/{target['device_id']}/999999",
+        headers=auth, timeout=30,
+    )
+    assert r.status_code == 404

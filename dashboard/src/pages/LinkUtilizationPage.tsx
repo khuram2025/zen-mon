@@ -18,6 +18,7 @@ import {
   Pencil,
   Plus,
   Search,
+  Star,
   Trash2,
   X,
   XCircle,
@@ -68,6 +69,8 @@ type LinkRow = {
   util_pct: number | null
   peak_util_pct: number | null
   has_netflow: boolean
+  /** Starred by the signed-in user; the server pins these to the top. */
+  is_favorite: boolean
   // Interface health — counter increases over the window, not raw readings.
   in_errors: number
   out_errors: number
@@ -299,6 +302,75 @@ function UtilBar({ pct, avg, peak, className }: {
   )
 }
 
+/** Star/unstar a link for the signed-in user.
+ *
+ *  Updates the cached rows before the request lands: the list query is a
+ *  fleet-wide aggregate over ClickHouse, so waiting for a refetch would leave
+ *  the star visibly dead for a second. The refetch in `onSettled` is what
+ *  actually re-pins the row to the top and refreshes the favourites count. */
+function useFavoriteToggle() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async ({ link, next }: { link: LinkKey; next: boolean }) => {
+      const path = `/link-utilization/favorites/${link.device_id}/${link.if_index}`
+      await (next ? api.put(path) : api.delete(path))
+      return next
+    },
+    onMutate: async ({ link, next }) => {
+      await qc.cancelQueries({ queryKey: ['link-utilization'] })
+      const prev = qc.getQueriesData({ queryKey: ['link-utilization'] })
+      // The drill-down query shares the ['link-utilization'] prefix and has no
+      // `items`, so leave anything without a row list untouched.
+      qc.setQueriesData({ queryKey: ['link-utilization'] }, (old: any) => {
+        if (!old?.items) return old
+        return {
+          ...old,
+          items: old.items.map((i: LinkRow) =>
+            i.device_id === link.device_id && i.if_index === link.if_index
+              ? { ...i, is_favorite: next }
+              : i,
+          ),
+        }
+      })
+      return { prev }
+    },
+    onError: (e, _vars, ctx) => {
+      ctx?.prev?.forEach(([key, data]) => qc.setQueryData(key, data))
+      toast.error(apiErrorMessage(e))
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['link-utilization'] }),
+  })
+}
+
+function FavoriteStar({ row, className }: { row: LinkRow; className?: string }) {
+  const toggle = useFavoriteToggle()
+  const on = !!row.is_favorite
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      aria-label={on ? 'Remove from favorites' : 'Add to favorites'}
+      title={on ? 'Favorite — pinned to the top. Click to unpin.' : 'Add to favorites — pins this link to the top'}
+      disabled={toggle.isPending}
+      // Rows are clickable (they open the drill-down), so the star must not
+      // also select the link.
+      onClick={(e) => {
+        e.stopPropagation()
+        toggle.mutate({ link: { device_id: row.device_id, if_index: row.if_index }, next: !on })
+      }}
+      className={cn(
+        'rounded p-0.5 transition-colors',
+        // Kept faint until hovered: at 200 rows a column of bright outlines
+        // would compete with the health chips for attention.
+        on ? 'text-warning' : 'text-muted/40 hover:text-warning',
+        className,
+      )}
+    >
+      <Star className={cn('h-3.5 w-3.5', on && 'fill-current')} />
+    </button>
+  )
+}
+
 function KpiCard({
   label, value, sub, tone, onClick, active,
 }: {
@@ -346,6 +418,7 @@ export function LinkUtilizationPage() {
   const [status, setStatus] = useState<'all' | 'up' | 'down'>('all')
   const [minUtil, setMinUtil] = useState<string>('')
   const [issue, setIssue] = useState<string>('')
+  const [favoritesOnly, setFavoritesOnly] = useState(false)
   const [sort, setSort] = useState('util')
   const [selected, setSelected] = useState<LinkKey | null>(null)
   const [alertOpen, setAlertOpen] = useState(false)
@@ -370,8 +443,9 @@ export function LinkUtilizationPage() {
     if (status !== 'all') p.set('status', status)
     if (minUtil) p.set('min_util', minUtil)
     if (issue) p.set('issue', issue)
+    if (favoritesOnly) p.set('favorites_only', 'true')
     return p.toString()
-  }, [range.hours, range.isCustom, range.fromISO, range.toISO, debouncedSearch, status, minUtil, issue, sort])
+  }, [range.hours, range.isCustom, range.fromISO, range.toISO, debouncedSearch, status, minUtil, issue, favoritesOnly, sort])
 
   const { data, isLoading, isFetching } = useQuery<{
     items: LinkRow[]
@@ -380,6 +454,10 @@ export function LinkUtilizationPage() {
       high_util: number
       warning_util: number
       with_netflow: number
+      /** Favourites present in the current result set. */
+      favorites: number
+      /** Every star this user holds, whether or not it reported in the window. */
+      total_favorites: number
       avg_util: number | null
       /** How many of `total` are actually in `items` (server caps at 200). */
       returned?: number
@@ -497,6 +575,23 @@ export function LinkUtilizationPage() {
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
+          {/* Favourites are already pinned to the top of every sort; this
+              narrows the table to just them. */}
+          <Button
+            variant={favoritesOnly ? 'default' : 'outline'}
+            className="h-9"
+            aria-pressed={favoritesOnly}
+            title={favoritesOnly ? 'Show all links' : 'Show only your favorites'}
+            onClick={() => setFavoritesOnly((v) => !v)}
+          >
+            <Star className={cn('h-3.5 w-3.5', favoritesOnly && 'fill-current')} />
+            Favorites
+            {summary?.total_favorites != null && summary.total_favorites > 0 && (
+              <span className={cn('text-xs', favoritesOnly ? 'text-white/80' : 'text-muted')}>
+                {summary.total_favorites}
+              </span>
+            )}
+          </Button>
           <Select value={status} onValueChange={(v) => setStatus(v as typeof status)}>
             <SelectTrigger className="h-9 w-[130px]"><SelectValue /></SelectTrigger>
             <SelectContent>
@@ -564,6 +659,11 @@ export function LinkUtilizationPage() {
                     · showing top {summary.returned.toLocaleString()} of {summary.total.toLocaleString()} by {SORT_LABELS[sort] ?? sort}
                   </span>
                 )}
+                {!favoritesOnly && (summary?.favorites || 0) > 0 && (
+                  <span className="inline-flex items-center gap-1 text-xs font-normal text-muted">
+                    · <Star className="h-3 w-3 fill-current text-warning" /> favorites pinned to the top
+                  </span>
+                )}
                 <span className="text-xs font-normal text-muted">· click a row for drill-down</span>
               </div>
             </div>
@@ -615,9 +715,13 @@ export function LinkUtilizationPage() {
                   )}
                   {!isLoading && items.length === 0 && (
                     <Tr><Td colSpan={colCount} className="py-12 text-center text-sm text-muted">
-                      {issue
-                        ? 'No links with this health problem in the selected window.'
-                        : 'No interfaces match — ensure SNMP polling is active and interfaces are monitored.'}
+                      {favoritesOnly
+                        ? (summary?.total_favorites
+                            ? 'None of your favorites reported traffic in the selected window or match the other filters.'
+                            : 'No favorites yet — click the ☆ next to a link to pin it to the top of this table.')
+                        : issue
+                          ? 'No links with this health problem in the selected window.'
+                          : 'No interfaces match — ensure SNMP polling is active and interfaces are monitored.'}
                     </Td></Tr>
                   )}
                   {items.map((row) => {
@@ -636,6 +740,7 @@ export function LinkUtilizationPage() {
                       >
                         <Td className="py-2.5 pl-4">
                           <div className="flex items-center gap-1.5">
+                            <FavoriteStar row={row} />
                             <ChevronRight className={cn('h-3.5 w-3.5 text-muted transition-transform', isSel && 'rotate-90 text-primary')} />
                             <div>
                               <div className="text-sm font-medium">{label}</div>
@@ -890,6 +995,7 @@ function LinkDetailPanel({
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div>
             <div className="flex items-center gap-2">
+              <FavoriteStar row={link} className="p-0" />
               <h2 className="text-lg font-semibold">{label}</h2>
               {link.has_netflow && <Badge variant="info">NetFlow</Badge>}
               {link.oper_status === 'up' ? (

@@ -1,0 +1,90 @@
+"""Tag registry helpers.
+
+Tags live in two places by design: the `tags` table is the catalog (stable
+id, canonical spelling, color, description) while assignments stay in the
+devices.tags JSONB array, so jsonb_exists() filters, maintenance-window tag
+scoping and the GIN index keep working unchanged.
+
+Every device write goes through canonicalize_tags() so a device row only
+ever carries registry spellings ("Core" and "core" can't drift apart) and
+labels the registry has never seen auto-register instead of erroring —
+CSV imports and raw API clients keep working with zero ceremony.
+"""
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+# Kept in sync with the seed palette in migrate-067-tag-registry.sql.
+PALETTE = [
+    "#6366f1", "#0ea5e9", "#10b981", "#f59e0b", "#ef4444",
+    "#8b5cf6", "#ec4899", "#14b8a6", "#f97316", "#84cc16",
+]
+
+MAX_TAG_LEN = 64
+
+
+def auto_color(name: str) -> str:
+    """Deterministic palette pick so a tag gets the same color everywhere."""
+    return PALETTE[sum(name.lower().encode()) % len(PALETTE)]
+
+
+def clean_tags(raw) -> list[str]:
+    """Trim, drop empties, cap length, dedupe case-insensitively.
+
+    First spelling wins and input order is preserved.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in raw or []:
+        t = str(t).strip()[:MAX_TAG_LEN]
+        if not t or t.lower() in seen:
+            continue
+        seen.add(t.lower())
+        out.append(t)
+    return out
+
+
+async def canonicalize_tags(db: AsyncSession, raw) -> list[str]:
+    """Map each tag to its registry spelling, registering unknown ones.
+
+    Runs inside the caller's transaction — a failed device write also rolls
+    back any tags it would have registered.
+    """
+    out: list[str] = []
+    for t in clean_tags(raw):
+        row = (await db.execute(
+            text("SELECT name FROM tags WHERE LOWER(name) = LOWER(:n)"),
+            {"n": t},
+        )).first()
+        if row:
+            out.append(row[0])
+            continue
+        await db.execute(
+            text("INSERT INTO tags (name, color) VALUES (:n, :c) ON CONFLICT DO NOTHING"),
+            {"n": t, "c": auto_color(t)},
+        )
+        out.append(t)
+    return out
+
+
+async def adopt_device_tags(db: AsyncSession, commit: bool = True) -> int:
+    """Register any labels found on devices that the registry doesn't know.
+
+    Covers fleets that tagged devices before the registry existed and rows
+    written by paths that bypass canonicalize_tags().
+    """
+    missing = (await db.execute(text("""
+        SELECT DISTINCT el
+        FROM devices d, jsonb_array_elements_text(COALESCE(d.tags, '[]'::jsonb)) el
+        WHERE btrim(el) <> ''
+          AND NOT EXISTS (SELECT 1 FROM tags x WHERE LOWER(x.name) = LOWER(el))
+    """))).scalars().all()
+    for name in missing:
+        name = name.strip()[:MAX_TAG_LEN]
+        await db.execute(
+            text("INSERT INTO tags (name, color) VALUES (:n, :c) ON CONFLICT DO NOTHING"),
+            {"n": name, "c": auto_color(name)},
+        )
+    if missing and commit:
+        await db.commit()
+    return len(missing)

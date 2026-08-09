@@ -1,5 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
@@ -11,6 +12,7 @@ import {
 } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
+import { Switch } from '@/components/ui/Switch'
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@/components/ui/Dialog'
@@ -30,6 +32,9 @@ type InsightMetric = {
 type InsightCell = { value: number | null; text: string; status: string; series_key: string }
 type InsightRow = {
   instance: string; label: string; cells: Record<string, InsightCell>
+  // Set on children-capable groups when this row has been materialized as a
+  // child device (managed AP / switch promoted to its own device page).
+  child_device_id?: string | null
   // Set by collapseRepeatedRows when several identical device rows were folded
   // into this one.
   dupCount?: number
@@ -38,6 +43,7 @@ type InsightColumn = { key: string; name: string; unit?: string | null; type: st
 type InsightGroup = {
   key: string; name: string; kind: 'scalar' | 'table'
   description?: string | null; status: string
+  children_capable?: boolean
   metrics?: InsightMetric[]
   columns?: InsightColumn[]
   rows?: InsightRow[]
@@ -46,6 +52,10 @@ type Insights = {
   template: { id: string; name: string; vendor?: string | null } | null
   updated_at: string | null
   groups: InsightGroup[]
+  // True when the template declares managed-device tables (APs, switches)
+  // that can be promoted to child devices of this controller.
+  children_capable?: boolean
+  promote_managed?: boolean
 }
 
 const statusText: Record<string, string> = {
@@ -155,6 +165,7 @@ export function TemplateInsightsSection({ deviceId, rangeHours }: {
   deviceId: string; rangeHours: number
 }) {
   const [chart, setChart] = useState<{ seriesKey: string; title: string; unit?: string | null } | null>(null)
+  const queryClient = useQueryClient()
 
   const { data } = useQuery<Insights>({
     queryKey: ['device', deviceId, 'template-insights'],
@@ -162,10 +173,22 @@ export function TemplateInsightsSection({ deviceId, rangeHours }: {
     refetchInterval: 30_000,
   })
 
+  const promote = useMutation({
+    mutationFn: async (on: boolean) =>
+      (await api.put(`/devices/${deviceId}`, { promote_managed: on })).data,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['device', deviceId] })
+      queryClient.invalidateQueries({ queryKey: ['devices'] })
+    },
+  })
+
   if (!data?.template) return null
   const groups = (data.groups || []).filter((g) =>
     g.kind === 'table' ? (g.rows?.length || 0) > 0 : (g.metrics || []).some((m) => m.has_data),
   )
+  const promotedCount = groups
+    .filter((g) => g.children_capable)
+    .reduce((n, g) => n + (g.rows || []).filter((r) => r.child_device_id).length, 0)
 
   return (
     <div className="space-y-3">
@@ -177,6 +200,27 @@ export function TemplateInsightsSection({ deviceId, rangeHours }: {
           <span className="text-[11px] text-muted">updated {relativeTime(data.updated_at)}</span>
         ) : (
           <span className="text-[11px] text-muted">waiting for first template poll…</span>
+        )}
+        {data.children_capable && (
+          <span
+            className="ml-auto inline-flex items-center gap-2 text-[11px] text-muted"
+            title="Create a child device for every AP/switch this controller manages, so alert rules, maintenance windows, tags and reports apply to each one. A controller outage raises a single root-cause alert; child alerts are suppressed."
+          >
+            <span>Managed devices as children</span>
+            <Switch
+              checked={!!data.promote_managed}
+              disabled={promote.isPending}
+              onCheckedChange={(on) => promote.mutate(on)}
+            />
+            {data.promote_managed && promotedCount > 0 && (
+              <Link
+                to={`/devices?managed_by=${deviceId}`}
+                className="font-medium text-primary hover:underline"
+              >
+                {promotedCount} child device{promotedCount === 1 ? '' : 's'}
+              </Link>
+            )}
+          </span>
         )}
       </div>
 
@@ -207,6 +251,20 @@ export function TemplateInsightsSection({ deviceId, rangeHours }: {
           onOpenChange={(o) => !o && setChart(null)} />
       )}
     </div>
+  )
+}
+
+/* A row that has been materialized as a child device links to its page. */
+function RowLabelText({ row }: { row: InsightRow }) {
+  if (!row.child_device_id) return <>{row.label}</>
+  return (
+    <Link
+      to={`/devices/${row.child_device_id}`}
+      className="text-primary hover:underline"
+      title={`Open the device page for ${row.label}`}
+    >
+      {row.label}
+    </Link>
   )
 }
 
@@ -365,7 +423,7 @@ function CompactListGroup({ group: g, cols, rows, onChart }: {
             <div key={r.instance}
               className="flex items-baseline justify-between gap-3 border-b border-border/30 py-1.5 text-xs">
               <span className="min-w-0 flex-1 truncate font-medium" title={r.label}>
-                {r.label}
+                <RowLabelText row={r} />
                 {r.dupCount && <span className="ml-1.5 font-normal text-muted">×{r.dupCount}</span>}
               </span>
               {cols.map((c) => {
@@ -485,7 +543,7 @@ function TableGroupCard({ group: g, onChart }: {
               {shown.map((r) => (
                 <Tr key={r.instance}>
                   <Td className="max-w-[220px] truncate p-2 text-xs font-medium" title={r.label}>
-                    {r.label}
+                    <RowLabelText row={r} />
                     {r.dupCount && (
                       <span className="ml-1.5 font-normal text-muted"
                         title={`The device reports ${r.dupCount} entries under this name with identical values`}>

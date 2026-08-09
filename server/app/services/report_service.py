@@ -35,7 +35,7 @@ import matplotlib.font_manager as _fm
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_clickhouse_client
+from app.core.database import get_ch_client
 
 
 # ---------------------------------------------------------------------------
@@ -1554,7 +1554,7 @@ async def _fetch_alerts(db: AsyncSession, start: datetime, end: datetime,
 
 def _fetch_ping_metrics(start: datetime, end: datetime,
                         device_ids: list[str] | None = None) -> list[dict]:
-    client = get_clickhouse_client()
+    client = get_ch_client()
     dev_filt = _ch_device_filter(device_ids)
     q = f"""
         SELECT device_id, timestamp, rtt_ms, packet_loss, jitter_ms, is_up,
@@ -1628,7 +1628,7 @@ def _exclude_maintenance_samples(
 
 def _fetch_service_metrics(start: datetime, end: datetime,
                            service_ids: list[str] | None = None) -> list[dict]:
-    client = get_clickhouse_client()
+    client = get_ch_client()
     svc_filt = _ch_service_filter(service_ids)
     q = f"""
         SELECT service_check_id, timestamp, response_ms, is_up, status_code, error_message
@@ -1644,7 +1644,7 @@ def _fetch_service_metrics(start: datetime, end: datetime,
 
 def _fetch_device_status_log(start: datetime, end: datetime,
                              device_ids: list[str] | None = None) -> list[dict]:
-    client = get_clickhouse_client()
+    client = get_ch_client()
     dev_filt = _ch_device_filter(device_ids)
     q = f"""
         SELECT device_id, timestamp, old_status, new_status, reason, duration_sec
@@ -1665,7 +1665,7 @@ def _fetch_device_status_log(start: datetime, end: datetime,
 
 def _fetch_service_status_log(start: datetime, end: datetime,
                               service_ids: list[str] | None = None) -> list[dict]:
-    client = get_clickhouse_client()
+    client = get_ch_client()
     svc_filt = _ch_service_filter(service_ids)
     q = f"""
         SELECT service_check_id, timestamp, old_status, new_status, reason, duration_sec

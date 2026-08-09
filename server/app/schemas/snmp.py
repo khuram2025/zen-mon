@@ -127,6 +127,41 @@ class OidGroupTable(BaseModel):
                                      description="Column walked for per-row labels")
 
 
+class OidGroupChildren(BaseModel):
+    """Declares that rows of a table group are controller-managed devices
+    (FortiGate's FortiAPs/FortiSwitches, a WLC's thin APs). The managed-device
+    sync service materializes each row as a child device of the polled
+    controller when the controller has promote_managed enabled."""
+    device_type: str = Field(default="access_point")
+    vendor: Optional[str] = Field(default=None, max_length=100)
+    status_key: Optional[str] = Field(
+        default=None, pattern=_KEY_PATTERN,
+        description="Metric key whose enum code drives the child's status")
+    status_map: dict[str, str] = Field(
+        default_factory=dict,
+        description="Enum code -> up|down|degraded; unmapped codes -> unknown")
+    model_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
+    os_version_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
+    serial_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
+    ip_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
+
+    @field_validator("device_type")
+    @classmethod
+    def _dtype_ok(cls, v: str) -> str:
+        allowed = ("router", "switch", "firewall", "server", "access_point", "printer", "other")
+        if v not in allowed:
+            raise ValueError(f"device_type must be one of {allowed}")
+        return v
+
+    @field_validator("status_map")
+    @classmethod
+    def _map_ok(cls, v: dict[str, str]) -> dict[str, str]:
+        for code, status in v.items():
+            if status not in ("up", "down", "degraded"):
+                raise ValueError(f"status_map[{code}] must be up|down|degraded")
+        return v
+
+
 class OidGroup(BaseModel):
     key: str = Field(..., pattern=_KEY_PATTERN)
     name: str = Field(..., min_length=1, max_length=120)
@@ -134,6 +169,7 @@ class OidGroup(BaseModel):
     description: Optional[str] = None
     table: Optional[OidGroupTable] = None
     metrics: list[OidMetric] = Field(default_factory=list)
+    children: Optional[OidGroupChildren] = None
 
     @field_validator("kind")
     @classmethod

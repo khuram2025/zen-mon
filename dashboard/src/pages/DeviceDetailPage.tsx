@@ -76,6 +76,8 @@ import { ConnectedEndpointsCard } from '@/components/udt/ConnectedEndpointsCard'
 import { TemplateInsightsSection } from '@/components/devices/TemplateInsightsSection'
 import { toast } from '@/components/ui/Toast'
 import { TimeRangePicker, rangePhrase, useTimeRange } from '@/components/TimeRangePicker'
+import { TagBadge } from '@/components/tags/TagBadge'
+import { tagColor, tagColorMap, useTags } from '@/hooks/useTags'
 
 /* ── Shared helpers ────────────────────────────────────────── */
 
@@ -269,7 +271,10 @@ function DeviceHeader({
 
   /* Primary row (5 metadata fields) */
   const primary: Array<{ label: string; value: string }> = [
-    { label: 'IP Address', value: device.ip_address || '—' },
+    {
+      label: device.ip_address ? 'IP Address' : 'IP (from controller)',
+      value: device.ip_address || device.managed_ip || '—',
+    },
     { label: 'Type', value: titleCase((device.device_type || 'other').replace('_', ' ')) },
     { label: 'Location', value: device.location || '—' },
     { label: 'Vendor / Model', value: [device.vendor, device.model].filter(Boolean).join(' ') || '—' },
@@ -307,6 +312,15 @@ function DeviceHeader({
                   <span className={`h-1.5 w-1.5 rounded-full ${kind.dot}`} />
                   {kind.label}
                 </span>
+                {device.managed_by_device_id && (
+                  <Link
+                    to={`/devices/${device.managed_by_device_id}`}
+                    className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/20"
+                    title="Status and metrics come from the managing controller"
+                  >
+                    via {device.managed_by_hostname || 'controller'}
+                  </Link>
+                )}
               </div>
 
               {/* Primary metadata row */}
@@ -1631,6 +1645,8 @@ function InventoryConfigCard({
   device, entities, onDetails,
 }: { device: any; entities: any[]; onDetails: () => void }) {
   const snmp = !!device.snmp_enabled
+  const { data: tagDefs } = useTags()
+  const tagColors = useMemo(() => tagColorMap(tagDefs), [tagDefs])
   // Management IP, vendor/model and OS version deliberately omitted — the page
   // header already states all three, and repeating them here was the biggest
   // source of duplicated content on the page. This card covers how the device
@@ -1684,11 +1700,18 @@ function InventoryConfigCard({
                 <span className="text-muted">—</span>
               ) : (
                 tags.slice(0, 4).map((t) => (
-                  <span key={t} className="rounded-full border border-border bg-surface2 px-1.5 py-0.5 text-[9px] font-medium">{t}</span>
+                  <Link key={t} to={`/devices?tag=${encodeURIComponent(t)}`} title={`Show devices tagged “${t}”`}>
+                    <TagBadge name={t} color={tagColor(t, tagColors)} />
+                  </Link>
                 ))
               )}
               {tags.length > 4 && (
-                <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[9px] font-medium text-primary">+{tags.length - 4}</span>
+                <span
+                  className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[9px] font-medium text-primary"
+                  title={tags.slice(4).join(', ')}
+                >
+                  +{tags.length - 4}
+                </span>
               )}
             </div>
           </div>
@@ -2067,11 +2090,26 @@ function EnvironmentalActionsCard({
   const voltVal = latestSensor(metrics, sensors, ['voltage', 'volts'])
   const fanVal = latestSensor(metrics, sensors, ['fan', 'rpm'])
 
-  // Persisted last-run state for Ping Test + SNMP Test (per-device).
+  // Last-run state for Ping Test + SNMP Test is hybrid, in two layers:
+  //  1. the server's record — the last manual test by *any* operator, plus
+  //     passive evidence from the pollers (a device the SNMP collector has
+  //     been polling all along is not "never tested");
+  //  2. this browser's localStorage — so the run you just triggered shows
+  //     instantly and survives an API hiccup.
+  // Whichever is newer wins.
   const pingKey = `zp-ping-last-${deviceId}`
   const snmpKey = `zp-snmp-last-${deviceId}`
-  const [lastPing, setLastPing] = useState<LastRun | null>(() => loadLastRun(pingKey))
-  const [lastSnmp, setLastSnmp] = useState<LastRun | null>(() => loadLastRun(snmpKey))
+  const [localPing, setLocalPing] = useState<LastRun | null>(() => loadLastRun(pingKey))
+  const [localSnmp, setLocalSnmp] = useState<LastRun | null>(() => loadLastRun(snmpKey))
+
+  const { data: testRuns } = useQuery({
+    queryKey: ['device', deviceId, 'test-runs'],
+    queryFn: async () => (await api.get(`/devices/${deviceId}/test-runs`)).data,
+    refetchInterval: 60_000,
+  })
+
+  const lastPing = newerRun(testRuns?.ping ?? null, localPing)
+  const lastSnmp = newerRun(testRuns?.snmp ?? null, localSnmp)
   // Tick every 15s so the "1m ago" labels stay fresh.
   const [, setTick] = useState(0)
   useEffect(() => {
@@ -2090,14 +2128,17 @@ function EnvironmentalActionsCard({
         at: new Date().toISOString(),
         ok: !!data.ok,
         summary: data.ok ? 'responded' : (data.reason || 'failed'),
+        source: 'manual',
       }
-      saveLastRun(snmpKey, run); setLastSnmp(run)
+      saveLastRun(snmpKey, run); setLocalSnmp(run)
+      qc.invalidateQueries({ queryKey: ['device', deviceId, 'test-runs'] })
     },
     onError: (e: any) => {
       const msg = apiErrorMessage(e)
       setSnmpResult({ ok: false, reason: msg, snmp_responded: false })
-      const run: LastRun = { at: new Date().toISOString(), ok: false, summary: msg }
-      saveLastRun(snmpKey, run); setLastSnmp(run)
+      const run: LastRun = { at: new Date().toISOString(), ok: false, summary: msg, source: 'manual' }
+      saveLastRun(snmpKey, run); setLocalSnmp(run)
+      qc.invalidateQueries({ queryKey: ['device', deviceId, 'test-runs'] })
     },
   })
 
@@ -2107,15 +2148,17 @@ function EnvironmentalActionsCard({
       const summary = data.ok
         ? `${data.received}/${data.transmitted} · ${data.rtt_avg_ms != null ? data.rtt_avg_ms.toFixed(1) + ' ms' : '—'}`
         : (data.reason || 'failed')
-      const run: LastRun = { at: new Date().toISOString(), ok: !!data.ok, summary }
-      saveLastRun(pingKey, run); setLastPing(run)
+      const run: LastRun = { at: new Date().toISOString(), ok: !!data.ok, summary, source: 'manual' }
+      saveLastRun(pingKey, run); setLocalPing(run)
+      qc.invalidateQueries({ queryKey: ['device', deviceId, 'test-runs'] })
       if (data.ok) toast.success('Ping succeeded', `${data.received}/${data.transmitted} replies · ${data.rtt_avg_ms?.toFixed(1) || '—'} ms`)
       else toast.error('Ping failed', data.reason || 'no reply')
     },
     onError: (e: any) => {
       const msg = apiErrorMessage(e)
-      const run: LastRun = { at: new Date().toISOString(), ok: false, summary: msg }
-      saveLastRun(pingKey, run); setLastPing(run)
+      const run: LastRun = { at: new Date().toISOString(), ok: false, summary: msg, source: 'manual' }
+      saveLastRun(pingKey, run); setLocalPing(run)
+      qc.invalidateQueries({ queryKey: ['device', deviceId, 'test-runs'] })
       toast.error('Ping failed', msg)
     },
   })
@@ -2275,7 +2318,14 @@ function EnvironmentalActionsCard({
   )
 }
 
-type LastRun = { at: string; ok: boolean; summary: string }
+type LastRun = { at: string; ok: boolean; summary: string; source?: 'manual' | 'poller'; by?: string | null }
+
+/** Newest of the two, treating a missing/invalid timestamp as "no run". */
+function newerRun(a: LastRun | null, b: LastRun | null): LastRun | null {
+  if (!a?.at) return b?.at ? b : null
+  if (!b?.at) return a
+  return Date.parse(b.at) > Date.parse(a.at) ? b : a
+}
 
 function loadLastRun(key: string): LastRun | null {
   try {
@@ -2335,10 +2385,17 @@ function ActionCard({
           <span className="text-muted">{disabledReason}</span>
         ) : lastRun ? (
           <>
-            <span className="text-muted">Last: </span>
+            {/* Passive evidence is labelled as such — the monitoring stack
+              * exercised this path, nobody pressed the button. */}
+            <span className="text-muted">{lastRun.source === 'poller' ? 'Auto: ' : 'Last: '}</span>
             <span className={lastRun.ok ? 'text-text' : 'text-danger'}>{relativeTime(lastRun.at)}</span>
             {lastRun.summary && (
-              <span className="block truncate text-muted" title={lastRun.summary}>{lastRun.summary}</span>
+              <span
+                className="block truncate text-muted"
+                title={lastRun.by ? `${lastRun.summary} — run by ${lastRun.by}` : lastRun.summary}
+              >
+                {lastRun.summary}
+              </span>
             )}
           </>
         ) : (

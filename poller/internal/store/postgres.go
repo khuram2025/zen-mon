@@ -54,6 +54,7 @@ func (s *PostgresStore) LoadDevices(ctx context.Context) ([]*pinger.Device, erro
 		       COALESCE(last_rtt_ms, 0)
 		FROM devices
 		WHERE ping_enabled = TRUE
+		  AND ip_address IS NOT NULL
 		ORDER BY hostname
 	`)
 	if err != nil {
@@ -209,6 +210,7 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 		LEFT JOIN udt_device_settings us ON us.device_id = d.id
 		LEFT JOIN snmp_credentials sc ON sc.id = us.snmp_credential_id
 		WHERE d.snmp_enabled = TRUE
+		  AND d.ip_address IS NOT NULL
 		ORDER BY d.hostname
 	`)
 	if err != nil {

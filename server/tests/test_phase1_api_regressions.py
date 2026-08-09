@@ -44,6 +44,13 @@ def _device(**overrides):
         "os_version": None,
         "profile_id": None,
         "snmp_credential_id": None,
+        "poll_mode": "direct",
+        "managed_by_device_id": None,
+        "serial_number": None,
+        "managed_ip": None,
+        "managed_source": None,
+        "managed_last_seen": None,
+        "promote_managed": False,
     }
     data.update(overrides)
     return SimpleNamespace(**data)

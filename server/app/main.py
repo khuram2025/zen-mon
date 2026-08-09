@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
-from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, report_schedules, discovery, discovery_v2, users, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, host_alert_rules, link_utilization, udt
+from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, report_schedules, discovery, discovery_v2, users, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, host_alert_rules, link_utilization, udt, tags
 from app.api.v1 import settings as settings_api
 from app.api.v1 import storage_management as storage_api
 from app.api.v1 import sensors as sensors_admin_api
@@ -47,6 +47,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(devices.router, prefix="/api/v1")
     app.include_router(devices.maintenance_router, prefix="/api/v1")
+    app.include_router(tags.router, prefix="/api/v1")
     app.include_router(alerts.router, prefix="/api/v1")
     app.include_router(settings_api.router, prefix="/api/v1")
     app.include_router(alert_rules.router, prefix="/api/v1")
@@ -167,6 +168,10 @@ def create_app() -> FastAPI:
         # UDT: agentless AD user-login correlation over WinRM (advisory-locked).
         from app.services.udt_ad_service import udt_ad_poller_loop
         app.state.udt_ad_poller = asyncio.create_task(udt_ad_poller_loop())
+        # Controller-managed children: materialize template-reported APs and
+        # switches as child devices (advisory-locked).
+        from app.services.managed_device_service import managed_sync_loop
+        app.state.managed_device_sync = asyncio.create_task(managed_sync_loop())
 
     async def _sync_agent_packages_once():
         _pkg_logger = logging.getLogger("zenplus.agent_packages")
@@ -182,7 +187,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("health_sweeper", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller"):
+        for attr in ("health_sweeper", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "managed_device_sync"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

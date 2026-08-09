@@ -1,7 +1,8 @@
 export interface Device {
   id: string
   hostname: string
-  ip_address: string
+  // null for controller-reported children with no reachable IP of their own
+  ip_address: string | null
   device_type: string
   location: string | null
   group_id: string | null
@@ -15,6 +16,16 @@ export interface Device {
   description: string | null
   created_at: string
   updated_at: string
+  // Controller-managed children (migrate-069)
+  poll_mode?: 'direct' | 'via_controller'
+  managed_by_device_id?: string | null
+  managed_by_hostname?: string | null
+  serial_number?: string | null
+  managed_ip?: string | null
+  managed_source?: string | null
+  managed_last_seen?: string | null
+  promote_managed?: boolean
+  managed_children_count?: number
 }
 
 export type DeviceStatus = 'up' | 'down' | 'degraded' | 'unknown' | 'maintenance'

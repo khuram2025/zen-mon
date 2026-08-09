@@ -188,6 +188,14 @@ function fmtMin(v: number | null | undefined) {
   return `${(v / 60).toFixed(1)}h`
 }
 
+/** Coarse span label for coverage notes — "6d", "18h", "45m". */
+function fmtSpan(ms: number) {
+  const hours = ms / 3_600_000
+  if (hours >= 48) return `${(hours / 24).toFixed(hours / 24 >= 10 ? 0 : 1)}d`
+  if (hours >= 1) return `${hours.toFixed(hours >= 10 ? 0 : 1)}h`
+  return `${Math.max(1, Math.round(hours * 60))}m`
+}
+
 function titleCase(s: string) {
   return s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
@@ -241,9 +249,17 @@ export function AvailabilityPage() {
     return () => clearInterval(id)
   }, [])
 
+  // A status change only moves the live counters. Invalidating all of ['avail']
+  // would also re-run the windowed uptime-stats query on every flap, so scope
+  // the refresh to the live queries and let the historical ones keep their
+  // own polling cadence.
   useSSE('/api/v1/stream/status', {
     enabled: true,
-    onMessage: () => qc.invalidateQueries({ queryKey: ['avail'] }),
+    onMessage: () => {
+      for (const k of [['avail', 'summary'], ['avail', 'devices'], ['avail', 'services'], ['avail', 'servers']]) {
+        qc.invalidateQueries({ queryKey: k })
+      }
+    },
   })
 
   useEffect(() => {
@@ -421,6 +437,24 @@ export function AvailabilityPage() {
     return { trendYDomain: [0, 100] as [number, number], trendYTicks: [0, 25, 50, 75, 100] }
   }, [trendData])
 
+  /** Non-null when the report covers materially less than the window asked
+   *  for — retention, or an appliance younger than the range. 10% slack keeps
+   *  the badge off for the normal case where the first sample simply lands a
+   *  poll interval after the window opens. */
+  const coverageGap = useMemo(() => {
+    const first = exec?.coverage?.from
+    if (!first || !exec?.from) return null
+    const requestedMs = Date.parse(range.toISO) - Date.parse(exec.from)
+    const measuredMs = Date.parse(range.toISO) - Date.parse(first)
+    if (!(requestedMs > 0) || !(measuredMs > 0)) return null
+    if (measuredMs >= requestedMs * 0.9) return null
+    return {
+      measuredLabel: fmtSpan(measuredMs),
+      requestedLabel: fmtSpan(requestedMs),
+      startsLabel: new Date(first).toLocaleDateString([], { month: 'short', day: 'numeric' }),
+    }
+  }, [exec, range.toISO])
+
   const serviceFailedChecks = useMemo(
     () => serviceAvail.reduce((s, r) => s + (r.checks_failed ?? 0), 0),
     [serviceAvail],
@@ -524,6 +558,15 @@ export function AvailabilityPage() {
               <p className="mt-1 text-xs text-muted">
                 Live fleet health · {range.label} analytics · planned maintenance excluded from SLA
               </p>
+              {/* A window is only as long as the data under it. Without this,
+                * a 30-day view on an appliance holding eight days of samples
+                * shows eight days of numbers under a "1M" heading. */}
+              {coverageGap && (
+                <p className="mt-1 inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-400">
+                  <Clock className="h-3 w-3" />
+                  Measured over {coverageGap.measuredLabel} of the {coverageGap.requestedLabel} window — data starts {coverageGap.startsLabel}
+                </p>
+              )}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -643,7 +686,13 @@ export function AvailabilityPage() {
                 theme={KPI_THEMES.devices}
                 label="Devices"
                 value={summary ? `${summary.up}/${summary.total}` : '—'}
-                pct={summary && summary.total ? (summary.up / summary.total) * 100 : 100}
+                // Devices under planned maintenance leave the denominator, the
+                // same rule the headline SLA follows. Counting them as "not up"
+                // put a 97.3% on this tile next to a 100% hero figure, 0 DOWN
+                // and "all devices reachable".
+                pct={summary && summary.total - summary.maintenance > 0
+                  ? (summary.up / (summary.total - summary.maintenance)) * 100
+                  : 100}
                 icon={<Server className="h-4 w-4" />}
                 to="/devices"
                 issue={summary?.down}

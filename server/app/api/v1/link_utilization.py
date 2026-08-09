@@ -262,6 +262,23 @@ def _health_payload(d: dict, window_seconds: float) -> dict:
     }
 
 
+async def _favorite_keys(db: AsyncSession, user_id) -> set[tuple[str, int]]:
+    """(device_id, if_index) pairs this user has starred.
+
+    Favourites are a display concern, so a missing table — an appliance that
+    hasn't run migration 067 yet — degrades to "nobody has favourites" rather
+    than failing the page.
+    """
+    try:
+        rows = (await db.execute(text("""
+            SELECT device_id::text, if_index FROM link_favorites WHERE user_id = :uid
+        """), {"uid": str(user_id)})).all()
+    except Exception:
+        logger.exception("link favourites lookup failed")
+        return set()
+    return {(r[0], int(r[1])) for r in rows}
+
+
 @router.get("")
 async def list_links(
     hours: int = Query(default=24, ge=1, le=720),
@@ -270,6 +287,9 @@ async def list_links(
     limit: int = Query(default=200, ge=1, le=500),
     search: str | None = Query(default=None),
     status: str | None = Query(default=None, pattern="^(up|down)$"),
+    favorites_only: bool = Query(
+        default=False, description="Only links this user has starred"
+    ),
     min_util: float | None = Query(default=None, ge=0, le=200),
     issue: str | None = Query(
         default=None,
@@ -380,8 +400,19 @@ async def list_links(
             "health": _health_payload(d, span),
         }
 
+    favorites = await _favorite_keys(db, user.id)
+
     if not metrics:
-        return {"items": [], "summary": {"total": 0, "high_util": 0, "with_netflow": 0, "avg_util": None}}
+        # `total_favorites` still reports the user's stars: the fleet having no
+        # samples in this window doesn't mean they have no favourites, and the
+        # UI's empty state says different things for the two cases.
+        return {
+            "items": [],
+            "summary": {
+                "total": 0, "high_util": 0, "with_netflow": 0, "avg_util": None,
+                "favorites": 0, "total_favorites": len(favorites),
+            },
+        }
 
     # Inventory from Postgres.
     #
@@ -501,11 +532,14 @@ async def list_links(
             "util_pct": util,
             "peak_util_pct": peak_util,
             "has_netflow": has_nf,
+            "is_favorite": (did, idx) in favorites,
             **health,
         }
         items.append(item)
 
     # Filters
+    if favorites_only:
+        items = [i for i in items if i["is_favorite"]]
     q = (search or "").strip().lower()
     if q:
         items = [
@@ -557,6 +591,12 @@ async def list_links(
     else:
         items.sort(key=lambda x: (x["util_pct"] or 0), reverse=True)
 
+    # Favourites float to the top of whatever the chosen sort produced. Python's
+    # sort is stable, so this only lifts the starred links — their order among
+    # themselves, and everything below them, still follows `sort`. Pinning runs
+    # after the filters, so a favourite the user filtered out stays out.
+    items.sort(key=lambda x: not x["is_favorite"])
+
     # Summarise the whole filtered set, not just the page. These drive KPIs
     # labelled "Fleet avg util" and "interfaces with flow data"; computing them
     # after the cut reported the top-N slice as if it were the fleet.
@@ -566,6 +606,11 @@ async def list_links(
         "high_util": sum(1 for u in utils if u >= 80),
         "warning_util": sum(1 for u in utils if 50 <= u < 80),
         "with_netflow": sum(1 for i in items if i["has_netflow"]),
+        # Favourites still reporting in this window. `total_favorites` counts
+        # every star the user holds, so the filter chip doesn't read "0" when
+        # a favoured link simply went quiet.
+        "favorites": sum(1 for i in items if i["is_favorite"]),
+        "total_favorites": len(favorites),
         "avg_util": round(sum(utils) / len(utils), 1) if utils else None,
         "returned": min(len(items), limit),
         "with_errors": sum(1 for i in items if "errors" in (i.get("issues") or [])),
@@ -579,6 +624,88 @@ async def list_links(
 
     items = items[:limit]
     return {"items": items, "summary": summary, "hours": hours}
+
+
+# ── Favourites ───────────────────────────────────────────────────────────────
+#
+# Declared before the /{device_id}/{if_index} drill-down: the paths differ in
+# segment count so FastAPI would not confuse them, but keeping the literal route
+# first makes that independent of declaration order.
+
+
+@router.get("/favorites")
+async def list_favorites(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """This user's starred links, newest first.
+
+    Joined against the live inventory so a stale star — an interface that
+    discovery has since removed — is reported with `exists: false` rather than
+    as a nameless row.
+    """
+    rows = (await db.execute(text("""
+        SELECT f.device_id::text, f.if_index, f.created_at,
+               d.hostname, di.if_name, di.if_descr, di.if_alias
+        FROM link_favorites f
+        JOIN devices d ON d.id = f.device_id
+        LEFT JOIN device_interfaces di
+               ON di.device_id = f.device_id AND di.if_index = f.if_index
+        WHERE f.user_id = :uid
+        ORDER BY f.created_at DESC
+    """), {"uid": str(user.id)})).all()
+    return {
+        "items": [
+            {
+                "device_id": r[0],
+                "if_index": int(r[1]),
+                "created_at": r[2],
+                "hostname": r[3],
+                "if_name": r[4],
+                "if_descr": r[5],
+                "if_alias": r[6],
+                "exists": r[4] is not None or r[5] is not None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.put("/favorites/{device_id}/{if_index}", status_code=204)
+async def add_favorite(
+    device_id: UUID,
+    if_index: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Star a link. Idempotent — re-starring keeps the original timestamp."""
+    known = (await db.execute(text("""
+        SELECT 1 FROM device_interfaces WHERE device_id = :did AND if_index = :idx
+    """), {"did": device_id, "idx": if_index})).first()
+    if not known:
+        raise HTTPException(404, "interface not found")
+    await db.execute(text("""
+        INSERT INTO link_favorites (user_id, device_id, if_index)
+        VALUES (:uid, :did, :idx)
+        ON CONFLICT (user_id, device_id, if_index) DO NOTHING
+    """), {"uid": str(user.id), "did": device_id, "idx": if_index})
+    await db.commit()
+
+
+@router.delete("/favorites/{device_id}/{if_index}", status_code=204)
+async def remove_favorite(
+    device_id: UUID,
+    if_index: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Unstar a link. Succeeds whether or not it was starred, so the UI toggle
+    can't get stuck on a favourite that another tab already cleared."""
+    await db.execute(text("""
+        DELETE FROM link_favorites
+        WHERE user_id = :uid AND device_id = :did AND if_index = :idx
+    """), {"uid": str(user.id), "did": device_id, "idx": if_index})
+    await db.commit()
 
 
 @router.get("/{device_id}/{if_index}")
