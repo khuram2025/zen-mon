@@ -182,6 +182,9 @@ async def test_flow_list_and_summary_dedupe_snapshots_before_filtering(
         "bytes_available": True,
         "requested_by": uuid4(),
         "requested_by_name": "admin",
+        "flow_count": 1,
+        "archived_at": None,
+        "purge_after": None,
     }
 
     class MetaDB:
@@ -197,9 +200,12 @@ async def test_flow_list_and_summary_dedupe_snapshots_before_filtering(
         if normalized.startswith("SELECT count()"):
             return [(1,)]
         if normalized.startswith("SELECT protocol"):
-            return [("tcp", "10.0.0.1", 50123, "198.51.100.5", 443, 42,
-                     "web.exe", "https", "established", 100, 200, 1,
-                     now, now, 3)]
+            # Column order must track the SELECT list in
+            # network_capture_flows(); the endpoint indexes this tuple
+            # positionally, so a stale row silently mis-assigns every field.
+            return [("tcp", "outbound", "external", "10.0.0.1", 50123,
+                     "198.51.100.5", 443, 42, "web.exe", "https",
+                     "established", 100, 200, 1, now, now, 3)]
         if normalized.startswith("SELECT process_name"):
             return [("web.exe", "https", 100, 200, 1)]
         if normalized.startswith("SELECT remote_ip"):
