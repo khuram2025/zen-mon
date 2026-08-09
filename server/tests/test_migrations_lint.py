@@ -274,6 +274,135 @@ def test_updating_the_lock_never_reorders_existing_entries(tmp_path):
     assert names == ["migrate-030-b.sql", "migrate-002-a.sql", "migrate-031-new.sql"]
 
 
+# ─── Git-history audit ────────────────────────────────────────────────────────
+
+
+def git_repo(tmp_path: Path) -> Path:
+    """A throwaway checkout with a scripts/ directory, ready to commit into."""
+    import subprocess
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for cmd in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+    ):
+        subprocess.run(cmd, cwd=tmp_path, check=True, capture_output=True)
+    return scripts
+
+
+def git_commit(scripts: Path, message: str) -> None:
+    import subprocess
+
+    subprocess.run(["git", "add", "-A"], cwd=scripts.parent, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", message],
+        cwd=scripts.parent, check=True, capture_output=True,
+    )
+
+
+def test_history_audit_catches_a_migration_edited_after_it_shipped(tmp_path, capsys):
+    """The 004/006 failure, reproduced: an edit the lockfile never witnessed.
+
+    Both files were rewritten before migrations.lock existed, so the lock
+    recorded the post-rewrite hash as if it were original and the lint passed
+    for three months while part of the fleet carried the old one.
+    """
+    scripts = git_repo(tmp_path)
+    write(scripts / "migrate-001-a.sql", "SELECT 1;")
+    git_commit(scripts, "ship it")
+    write(scripts / "migrate-001-a.sql", "SELECT 1; -- rewritten in place")
+    git_commit(scripts, "edit it")
+
+    lock = tmp_path / "migrations.lock"
+    lock.write_text(f"{hash_of('SELECT 1; -- rewritten in place')}  migrate-001-a.sql\n")
+
+    # Lock and disk agree, so the original drift check is happy.
+    with pytest.raises(SystemExit) as exc:
+        build_release.lint_migrations(scripts_dir=scripts, lock_path=lock)
+
+    assert exc.value.code == 1
+    out = capsys.readouterr().out
+    assert "edited after it shipped" in out
+    assert hash_of("SELECT 1;") in out
+
+
+def test_history_audit_accepts_a_reconciled_checksum(tmp_path, monkeypatch):
+    """Once the superseded hash is recorded, the runner heals the ledger row and
+    the build is allowed through."""
+    scripts = git_repo(tmp_path)
+    write(scripts / "migrate-001-a.sql", "SELECT 1;")
+    git_commit(scripts, "ship it")
+    write(scripts / "migrate-001-a.sql", "SELECT 1; -- rewritten in place")
+    git_commit(scripts, "edit it")
+
+    monkeypatch.setattr(
+        build_release,
+        "_superseded_checksums",
+        lambda: {"migrate-001-a.sql": {hash_of("SELECT 1;")}},
+    )
+    lock = tmp_path / "migrations.lock"
+    lock.write_text(f"{hash_of('SELECT 1; -- rewritten in place')}  migrate-001-a.sql\n")
+
+    build_release.lint_migrations(scripts_dir=scripts, lock_path=lock)
+
+
+def test_history_audit_ignores_clickhouse_migrations(tmp_path):
+    """ch_migrate.py keys its ledger on filename and object presence, never on
+    a checksum, so a rewritten ClickHouse migration strands nobody."""
+    scripts = git_repo(tmp_path)
+    write(scripts / "migrate-001-a-clickhouse.sql", "CREATE TABLE IF NOT EXISTS zenplus.t (a Int) ENGINE = Log;")
+    git_commit(scripts, "ship it")
+    write(scripts / "migrate-001-a-clickhouse.sql", "CREATE TABLE IF NOT EXISTS zenplus.t (a Int, b Int) ENGINE = Log;")
+    git_commit(scripts, "edit it")
+
+    lock = tmp_path / "migrations.lock"
+    lock.write_text(
+        f"{hash_of('CREATE TABLE IF NOT EXISTS zenplus.t (a Int, b Int) ENGINE = Log;')}"
+        "  migrate-001-a-clickhouse.sql\n"
+    )
+
+    build_release.lint_migrations(scripts_dir=scripts, lock_path=lock)
+
+
+def test_history_audit_is_silent_outside_a_git_checkout(tmp_path):
+    """Building from an extracted payload or a source tarball must still work."""
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    write(scripts / "migrate-001-a.sql", "SELECT 1;")
+    lock = tmp_path / "migrations.lock"
+    lock.write_text(f"{hash_of('SELECT 1;')}  migrate-001-a.sql\n")
+
+    assert build_release._lint_migration_history(scripts, {"migrate-001-a.sql": hash_of("SELECT 1;")}) == []
+    build_release.lint_migrations(scripts_dir=scripts, lock_path=lock)
+
+
+def test_repo_history_holds_no_unreconciled_migration_edits():
+    """The whole fleet's exposure, checked against the whole repo history.
+
+    Three migrations have ever been rewritten. 004-snmp and 006-services-v2 are
+    reconciled in run-migrations.py; 004-snmp-clickhouse is not checksum-gated.
+    A fourth would strand appliances, and must be caught here rather than by a
+    customer's failed update.
+    """
+    repo_scripts = Path(__file__).resolve().parents[2] / "scripts"
+    on_disk = {
+        f.name: build_release.sha256_file(str(f))
+        for f in sorted(repo_scripts.glob("migrate-*.sql"))
+    }
+
+    assert build_release._lint_migration_history(repo_scripts, on_disk) == []
+
+
+def test_superseded_checksums_are_loaded_from_the_runner():
+    """The audit must read the runner's table, not a copy of it."""
+    superseded = build_release._superseded_checksums()
+
+    assert "migrate-004-snmp.sql" in superseded
+    assert "migrate-006-services-v2.sql" in superseded
+
+
 def test_migrations_are_shipped_in_the_code_payload():
     """Every release must carry the complete migration set; an appliance that
     skipped a release has no other way to receive what it missed."""

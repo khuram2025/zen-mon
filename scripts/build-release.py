@@ -20,6 +20,7 @@ Usage:
 """
 
 import argparse
+import ast
 import base64
 import hashlib
 import json
@@ -251,6 +252,125 @@ def _write_migrations_lock(lock_path: Path, entries: dict[str, str]) -> None:
     migration_order.write_lock(lock_path, ordered)
 
 
+def _superseded_checksums() -> dict[str, set[str]]:
+    """The reconciliation table run-migrations.py carries, read from its source.
+
+    Read rather than duplicated: the runner is the authority on which historical
+    checksums an appliance may legitimately be carrying, and two copies would
+    drift apart exactly when it matters. Parsed with ast rather than imported —
+    the runner is a script, not a library, and the lint has no business running
+    its module body.
+    """
+    runner = Path(__file__).resolve().parent / "run-migrations.py"
+    if not runner.exists():
+        return {}
+    try:
+        tree = ast.parse(runner.read_text())
+    except (OSError, SyntaxError):
+        return {}
+
+    for node in tree.body:
+        targets = (
+            [node.target] if isinstance(node, ast.AnnAssign)
+            else node.targets if isinstance(node, ast.Assign)
+            else []
+        )
+        if not any(isinstance(t, ast.Name) and t.id == "SUPERSEDED_CHECKSUMS" for t in targets):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except ValueError:
+            return {}
+        return {name: set(checksums) for name, checksums in value.items()}
+    return {}
+
+
+def _git_prefix(scripts_dir: Path) -> str | None:
+    """The migration directory's path from the repo root, or None if not in one.
+
+    ``git show COMMIT:PATH`` resolves PATH from the repo root, not from -C, so
+    the audit needs this to address historical blobs at all.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(scripts_dir), "rev-parse", "--show-prefix"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _git_history_checksums(scripts_dir: Path, prefix: str, name: str) -> dict[str, str]:
+    """Every distinct sha256 this migration has ever had, → newest commit."""
+    log = subprocess.run(
+        ["git", "-C", str(scripts_dir), "log", "--follow", "--format=%H", "--", name],
+        capture_output=True, text=True,
+    )
+    if log.returncode != 0:
+        return {}
+
+    history: dict[str, str] = {}
+    for commit in log.stdout.split():
+        blob = subprocess.run(
+            ["git", "-C", str(scripts_dir), "show", f"{commit}:{prefix}{name}"],
+            capture_output=True,
+        )
+        if blob.returncode != 0:
+            # The file was added under a different name in this commit;
+            # --follow found it, `show` at this path cannot.
+            continue
+        # git log lists newest first, so the first commit to show a given
+        # checksum is the newest one carrying it.
+        history.setdefault(hashlib.sha256(blob.stdout).hexdigest(), commit[:7])
+    return history
+
+
+def _lint_migration_history(scripts_dir: Path, on_disk: dict[str, str]) -> list[str]:
+    """Reject a migration whose git history holds an unreconciled checksum.
+
+    Appliances record the sha256 of each migration as they apply it, and since
+    v1.7.0 the OTA schema gate fails the update on any mismatch. So *every*
+    revision a migration has ever had is a checksum some appliance in the field
+    may be carrying — not just the current one.
+
+    migrations.lock only guards edits made after it existed (2026-05-20).
+    migrate-004-snmp.sql and migrate-006-services-v2.sql were rewritten before
+    that, went unnoticed for three months, and then stranded part of the fleet
+    on 1.6.0 the moment the gate shipped. Git remembers what the lockfile
+    cannot, so ask git.
+
+    An unreconciled historical checksum is a build failure, not a field
+    failure: either restore the file's shipped bytes, or record the superseded
+    checksum in run-migrations.py so the runner heals the ledger row.
+
+    PostgreSQL only. The ClickHouse ledger (ch_migrate.py) keys on filename and
+    object presence and never compares checksums, so a rewritten ClickHouse
+    migration cannot strand anyone.
+    """
+    prefix = _git_prefix(scripts_dir)
+    if prefix is None:
+        return []
+
+    superseded = _superseded_checksums()
+    errors: list[str] = []
+
+    for name, current in on_disk.items():
+        if migration_order.engine_of(name) != "postgres":
+            continue
+        reconciled = superseded.get(name, frozenset())
+        for checksum, commit in _git_history_checksums(scripts_dir, prefix, name).items():
+            if checksum == current or checksum in reconciled:
+                continue
+            errors.append(
+                f"{name}: shipped as {checksum} in commit {commit}, now {current}. "
+                f"Appliances that applied the old bytes will fail the schema gate. "
+                f"Add {checksum!r} to SUPERSEDED_CHECKSUMS in scripts/run-migrations.py "
+                f"(only if the rewrite left already-migrated appliances nothing to do), "
+                f"or restore the file and put the change in a new migration."
+            )
+    return errors
+
+
 def _lint_new_migrations(scripts_dir: Path, new_files: list[str]) -> list[str]:
     """Reject new migrations that would be unsafe or ambiguous in the field.
 
@@ -361,6 +481,16 @@ def lint_migrations(
             print(f"  {name}")
             print(f"    locked:  {old}")
             print(f"    on disk: {new_digest}")
+        sys.exit(1)
+
+    history = _lint_migration_history(scripts_dir, on_disk)
+    if history:
+        print("\nERROR: a migration was edited after it shipped.")
+        print("Appliances checksum each migration as they apply it, so every past")
+        print("revision is a checksum some appliance is still carrying. The lockfile")
+        print("only guards edits made since it existed; git history goes back further.")
+        for err in history:
+            print(f"  {err}")
         sys.exit(1)
 
     if new_files and not update_lock:
