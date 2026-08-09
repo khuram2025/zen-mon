@@ -46,6 +46,15 @@ _INSERT_RE = re.compile(
 _INSERT_GUARD_RE = re.compile(
     r"\bON\s+CONFLICT\b|\bWHERE\s+NOT\s+EXISTS\b|\bON\s+DUPLICATE\b", re.IGNORECASE
 )
+_INSERT_TARGET_RE = re.compile(r"\s*([A-Za-z0-9_.\"`]+)")
+# Scratch tables scoped to the migration's own transaction. _CREATE_RE
+# deliberately does not match these — they are not probe-able evidence that a
+# migration ran — but writes_rows() has to know they exist.
+_TEMP_TABLE_RE = re.compile(
+    r"\bCREATE\s+(?:GLOBAL\s+|LOCAL\s+)?(?:TEMP|TEMPORARY)\s+TABLE\s+"
+    r"(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_.\"`]+)",
+    re.IGNORECASE,
+)
 _ADD_CONSTRAINT_RE = re.compile(
     r"\bADD\s+CONSTRAINT\s+([A-Za-z0-9_.\"`]+)", re.IGNORECASE
 )
@@ -196,6 +205,18 @@ def created_objects(sql: str) -> list[str]:
     return objects
 
 
+def temp_tables(sql: str) -> set[str]:
+    """Names of the temporary tables a migration creates, lowercased.
+
+    A temp table lives and dies inside the migration, so writing to one can
+    never duplicate anything an earlier run left behind.
+    """
+    return {
+        match.group(1).strip('`"').lower()
+        for match in _TEMP_TABLE_RE.finditer(analyzable(sql))
+    }
+
+
 def writes_rows(sql: str) -> bool:
     """True when re-running this migration would duplicate data.
 
@@ -204,12 +225,27 @@ def writes_rows(sql: str) -> bool:
     caught and reported, whereas an unguarded ``INSERT`` silently doubles seed
     rows. Only the latter is a reason to refuse to run a migration we cannot
     otherwise verify.
+
+    Writes into the migration's own temporary tables do not count. They are
+    scratch space for a multi-step transform, dropped at COMMIT, and invisible
+    to any later run — but they look exactly like an unguarded seed INSERT to a
+    statement-level analyser. migrate-064 stages its work in two ``ON COMMIT
+    DROP`` temp tables and otherwise only UPDATEs and DELETEs under guards, so
+    reading those as persistent writes made a fully idempotent migration
+    unrunnable and failed the schema gate on every appliance that had not
+    already applied it.
     """
     stripped = analyzable(sql)
-    return any(
-        not _INSERT_GUARD_RE.search(match.group("body"))
-        for match in _INSERT_RE.finditer(stripped)
-    )
+    scratch = temp_tables(sql)
+    for match in _INSERT_RE.finditer(stripped):
+        body = match.group("body")
+        if _INSERT_GUARD_RE.search(body):
+            continue
+        target = _INSERT_TARGET_RE.match(body)
+        if target and target.group(1).strip('`"').lower() in scratch:
+            continue
+        return True
+    return False
 
 
 def is_replay_safe(sql: str) -> bool:

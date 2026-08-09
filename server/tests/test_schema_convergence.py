@@ -443,6 +443,57 @@ def test_do_block_ddl_replay_safety():
     assert migration_order.is_replay_safe(_DO_BLOCK_UNGUARDED) is False
 
 
+_TEMP_TABLE_STAGING = """
+CREATE TEMP TABLE _stub_migration (stub text, pack text) ON COMMIT DROP;
+INSERT INTO _stub_migration (stub, pack) VALUES ('old', 'new');
+UPDATE devices d SET profile_id = m.pack FROM _stub_migration m WHERE d.name = m.stub;
+"""
+
+_TEMP_TABLE_PLUS_REAL_SEED = """
+CREATE TEMPORARY TABLE _scratch (a int);
+INSERT INTO _scratch VALUES (1);
+INSERT INTO device_profiles (name) VALUES ('seeded');
+"""
+
+
+def test_writing_to_a_temp_table_is_not_writing_rows():
+    """migrate-064 staged its transform in two ON COMMIT DROP temp tables.
+
+    Reading those as persistent seed writes made a fully idempotent migration
+    look unverifiable, so the runner refused to run it and the schema gate
+    failed the update on every appliance that had not already applied it.
+    """
+    assert migration_order.temp_tables(_TEMP_TABLE_STAGING) == {"_stub_migration"}
+    assert migration_order.writes_rows(_TEMP_TABLE_STAGING) is False
+
+
+def test_a_real_seed_alongside_a_temp_table_still_counts():
+    """The exemption is per-target, not per-file."""
+    assert migration_order.writes_rows(_TEMP_TABLE_PLUS_REAL_SEED) is True
+
+
+def test_an_insert_into_an_undeclared_table_is_never_exempt():
+    """Only tables this migration declares TEMP are scratch space."""
+    assert migration_order.writes_rows("INSERT INTO _scratch VALUES (1);") is True
+
+
+def test_every_shipped_postgres_migration_can_be_classified():
+    """An appliance that skipped releases must be able to catch up in one pass.
+
+    run-migrations.py refuses to run a migration that inserts rows and creates
+    nothing to probe, and the gate turns that refusal into a failed update and a
+    rollback. Any migration in that state strands every appliance that has not
+    already applied it — with no way to ever converge.
+    """
+    unclassifiable = []
+    for path in migration_order.ordered_migrations(SCRIPTS_DIR, engine="postgres"):
+        sql = path.read_text()
+        if migration_order.writes_rows(sql) and not migration_order.created_objects(sql):
+            unclassifiable.append(path.name)
+
+    assert unclassifiable == []
+
+
 def test_analyzable_neutralises_literals_but_keeps_structure():
     out = migration_order.analyzable(_SEED_WITH_SEMICOLON_IN_LITERAL)
     assert "only; empty" not in out
