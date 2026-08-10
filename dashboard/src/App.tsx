@@ -37,6 +37,7 @@ import { EndpointDetailPage } from '@/pages/udt/EndpointDetailPage'
 import { SwitchPortsPage } from '@/pages/udt/SwitchPortsPage'
 import { UserLoginsPage } from '@/pages/udt/UserLoginsPage'
 import { WatchListsPage } from '@/pages/udt/WatchListsPage'
+import { ClassificationPage as UdtClassificationPage } from '@/pages/udt/ClassificationPage'
 import { ActivityPage as UdtActivityPage } from '@/pages/udt/ActivityPage'
 import { SettingsPage as UdtSettingsPage } from '@/pages/udt/SettingsPage'
 import { MibLibraryPage } from '@/pages/MibLibraryPage'
@@ -167,6 +168,7 @@ export default function App() {
           <Route index element={<EndpointSearchPage />} />
           <Route path="ports" element={<SwitchPortsPage />} />
           <Route path="users" element={<UserLoginsPage />} />
+          <Route path="classification" element={<UdtClassificationPage />} />
           <Route path="watch-lists" element={<WatchListsPage />} />
           <Route path="activity" element={<UdtActivityPage />} />
           <Route path="settings" element={<UdtSettingsPage />} />

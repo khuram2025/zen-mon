@@ -11,6 +11,8 @@ import ipaddress
 import logging
 import re
 
+from sqlalchemy import text
+
 logger = logging.getLogger("zenplus.udt")
 
 MAC_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -19,6 +21,10 @@ ENDPOINT_TYPES = (
     "workstation", "server", "phone", "printer", "access_point", "camera",
     "virtual", "network", "iot", "unknown",
 )
+
+# Custom classification groups: lowercase slug, same shape as the
+# built-in types so they share the endpoint_type column and filters.
+TYPE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,29}$")
 
 
 def normalize_mac(raw: str) -> str | None:
@@ -146,6 +152,47 @@ _HOSTNAME_PATTERNS: list[tuple[str, re.Pattern]] = [
     ("access_point", re.compile(r"^ap-|-ap\d|accesspoint", re.I)),
     ("server", re.compile(r"^srv-|^esxi|^nas-|server", re.I)),
 ]
+
+
+async def apply_class_rules(db) -> int:
+    """Apply enabled classification rules to udt_endpoints.
+
+    Rules are evaluated in priority order (lowest number wins) as one
+    CASE expression, so each endpoint gets exactly the highest-priority
+    matching rule's set_type. Endpoints an operator pinned
+    (type_source = 'manual') are never touched; endpoints previously
+    typed by a rule that no longer matches revert to 'unknown' /
+    'auto' so the heuristic can reclassify them. Returns the number of
+    endpoints updated."""
+    rules = (await db.execute(text(
+        "SELECT id, match_type, pattern, set_type FROM udt_class_rules "
+        "WHERE enabled ORDER BY priority, created_at"
+    ))).mappings().all()
+    params: dict = {}
+    branches = []
+    for i, r in enumerate(rules):
+        cond = rule_condition(dict(r), params, i)
+        if cond is None:
+            continue
+        params[f"t{i}"] = r["set_type"]
+        branches.append(f"WHEN {cond} THEN CAST(:t{i} AS varchar)")
+    case_sql = "CASE " + " ".join(branches) + " END" if branches else "CAST(NULL AS varchar)"
+    res = await db.execute(text(
+        f"""WITH m AS (
+                SELECT e.id AS eid, {case_sql} AS nt
+                FROM udt_endpoints e
+                WHERE e.type_source <> 'manual'
+            )
+            UPDATE udt_endpoints e
+            SET endpoint_type = COALESCE(m.nt, 'unknown'),
+                type_source   = CASE WHEN m.nt IS NULL THEN 'auto' ELSE 'rule' END,
+                updated_at    = NOW()
+            FROM m
+            WHERE e.id = m.eid
+              AND ((m.nt IS NOT NULL AND (e.endpoint_type <> m.nt OR e.type_source <> 'rule'))
+                   OR (m.nt IS NULL AND e.type_source = 'rule'))"""
+    ), params)
+    return res.rowcount or 0
 
 
 def classify_endpoint(vendor: str | None, hostname: str | None, device_type: str | None) -> str:

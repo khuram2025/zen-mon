@@ -1,8 +1,8 @@
 import { api } from '@/lib/api'
 import type {
   CapacityRow, DomainController, Endpoint, EndpointDetail, EndpointList,
-  UdtCredentialOption, UdtDeviceSettings, UdtEvent, UdtGlobalSettings,
-  UdtPort, UdtRule, UdtSummary,
+  UdtClassRule, UdtCredentialOption, UdtDeviceSettings, UdtEvent,
+  UdtGlobalSettings, UdtPort, UdtRule, UdtSummary, UdtTypeInfo,
 } from './types'
 
 const base = '/udt'
@@ -55,6 +55,21 @@ export const udtApi = {
   },
   async deleteRule(id: string) {
     return (await api.delete(`${base}/rules/${id}`)).data
+  },
+  async classRules(): Promise<{ data: UdtClassRule[] }> {
+    return (await api.get(`${base}/class-rules`)).data
+  },
+  async createClassRule(body: Record<string, any>) {
+    return (await api.post(`${base}/class-rules`, body)).data
+  },
+  async updateClassRule(id: string, body: Record<string, any>) {
+    return (await api.patch(`${base}/class-rules/${id}`, body)).data
+  },
+  async deleteClassRule(id: string) {
+    return (await api.delete(`${base}/class-rules/${id}`)).data
+  },
+  async types(): Promise<{ data: UdtTypeInfo[] }> {
+    return (await api.get(`${base}/types`)).data
   },
   async rogues(params: Record<string, any> = {}): Promise<{ data: Endpoint[]; meta: any }> {
     return (await api.get(`${base}/rogues`, { params })).data

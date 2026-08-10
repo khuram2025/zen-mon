@@ -2,7 +2,8 @@
 
 Runs every 60 s (Postgres advisory-locked, so multi-worker safe):
   1. close stale endpoint-location sessions and IP bindings
-  2. classify endpoint types (vendor/hostname heuristics)
+  2. seed the OUI vendor table when empty (best-effort download)
+  2b. apply classification rules, then vendor/hostname heuristics
   3. apply ignore rules
   4. apply allow rules -> rogue flagging (+ rogue_detected events)
   5. apply watch rules (+ watch_seen events on reappearance)
@@ -14,15 +15,19 @@ Runs every 60 s (Postgres advisory-locked, so multi-worker safe):
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import logging
 import socket
+import time
+import urllib.request
 from datetime import datetime, timezone
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal
-from app.services.udt_service import classify_endpoint, rules_where
+from app.services.udt_service import apply_class_rules, classify_endpoint, rules_where
 
 logger = logging.getLogger("zenplus.udt")
 
@@ -48,12 +53,84 @@ async def _close_stale(db: AsyncSession) -> None:
     ))
 
 
+# ── OUI vendor seeding ───────────────────────────────────────────────
+# Fresh installs ship with an empty udt_oui table; without it every
+# endpoint shows an unknown vendor and the heuristic classifier is
+# blind. Best-effort: when the table is empty, download the IEEE
+# registry (Wireshark manuf as fallback) at most once per retry window.
+
+OUI_RETRY_S = 6 * 3600
+_OUI_SOURCES = (
+    "https://standards-oui.ieee.org/oui/oui.csv",
+    "https://www.wireshark.org/download/automated/data/manuf",
+)
+_oui_next_attempt = 0.0
+
+
+def _download_ouis() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for url in _OUI_SOURCES:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "zenplus-udt/1.0"})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw = resp.read().decode("utf-8", "replace")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("OUI download failed (%s): %s", url, exc)
+            continue
+        if url.endswith(".csv"):
+            reader = csv.reader(io.StringIO(raw))
+            header = next(reader, None)
+            if header and "Assignment" in header:
+                ai, oi = header.index("Assignment"), header.index("Organization Name")
+                for row in reader:
+                    if len(row) > max(ai, oi) and len(row[ai].strip()) == 6 and row[oi].strip():
+                        out[row[ai].strip().lower()] = row[oi].strip()[:255]
+        else:  # wireshark manuf: "aa:bb:cc<TAB>Short<TAB>Vendor name"
+            for line in raw.splitlines():
+                parts = line.strip().split("\t")
+                if len(parts) < 2 or parts[0].startswith("#") or "/" in parts[0]:
+                    continue
+                prefix = parts[0].replace(":", "").replace("-", "").lower()
+                vendor = (parts[2] if len(parts) > 2 else parts[1]).strip()
+                if len(prefix) == 6 and vendor:
+                    out[prefix] = vendor[:255]
+        if len(out) > 1000:
+            break
+    return out
+
+
+async def _seed_oui_if_empty(db: AsyncSession) -> None:
+    global _oui_next_attempt
+    if (await db.execute(text("SELECT EXISTS (SELECT 1 FROM udt_oui)"))).scalar():
+        return
+    now = time.monotonic()
+    if now < _oui_next_attempt:
+        return
+    _oui_next_attempt = now + OUI_RETRY_S
+    ouis = await asyncio.to_thread(_download_ouis)
+    if len(ouis) < 100:
+        return
+    prefixes, vendors = zip(*sorted(ouis.items()))
+    await db.execute(text(
+        "INSERT INTO udt_oui (prefix, vendor) "
+        "SELECT * FROM unnest(CAST(:p AS varchar[]), CAST(:v AS varchar[])) "
+        "ON CONFLICT (prefix) DO UPDATE SET vendor = EXCLUDED.vendor"
+    ), {"p": list(prefixes), "v": list(vendors)})
+    await db.execute(text(
+        "UPDATE udt_endpoints e SET vendor = o.vendor, updated_at = NOW() "
+        "FROM udt_oui o WHERE e.vendor IS NULL "
+        "AND o.prefix = replace(substring(e.mac::text, 1, 8), ':', '')"
+    ))
+    logger.info("seeded udt_oui with %d vendor prefixes", len(ouis))
+
+
 async def _classify(db: AsyncSession) -> None:
+    await apply_class_rules(db)
     rows = (await db.execute(text(
         """SELECT e.id, e.vendor, e.hostname, d.device_type
            FROM udt_endpoints e
            LEFT JOIN devices d ON d.id = e.device_id
-           WHERE e.endpoint_type = 'unknown'
+           WHERE e.endpoint_type = 'unknown' AND e.type_source = 'auto'
              AND (e.vendor IS NOT NULL OR e.hostname IS NOT NULL OR e.device_id IS NOT NULL)
            LIMIT 2000"""
     ))).mappings().all()
@@ -247,6 +324,7 @@ async def run_sweep_once(db: AsyncSession) -> bool:
         return False
     try:
         await _close_stale(db)
+        await _seed_oui_if_empty(db)
         await _classify(db)
         await _apply_ignore(db)
         await _apply_allow(db)

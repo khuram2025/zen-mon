@@ -1,4 +1,4 @@
-import { Activity, ListChecks, ScanSearch, Server, Settings, UserRound } from 'lucide-react'
+import { Activity, ListChecks, ScanSearch, Server, Settings, Shapes, UserRound } from 'lucide-react'
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 
@@ -8,6 +8,7 @@ const tabs: TabDef[] = [
   { to: '/udt', label: 'Endpoints', icon: ScanSearch, end: true },
   { to: '/udt/ports', label: 'Switch Ports', icon: Server },
   { to: '/udt/users', label: 'User Logins', icon: UserRound },
+  { to: '/udt/classification', label: 'Classification', icon: Shapes },
   { to: '/udt/watch-lists', label: 'Watch Lists', icon: ListChecks },
   { to: '/udt/activity', label: 'Activity', icon: Activity },
   { to: '/udt/settings', label: 'Settings', icon: Settings },

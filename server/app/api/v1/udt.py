@@ -21,6 +21,11 @@ Routes (prefix /api/v1/udt):
     POST   /rules                            create a rule
     PATCH  /rules/{id}                       update a rule
     DELETE /rules/{id}                       delete a rule
+    GET    /class-rules                      list classification rules (+match counts)
+    POST   /class-rules                      create a classification rule
+    PATCH  /class-rules/{id}                 update a classification rule
+    DELETE /class-rules/{id}                 delete a classification rule
+    GET    /types                            endpoint types/groups with counts
     GET    /rogues                           current rogue endpoints
     GET    /users                            user-login rollup
     GET    /users/{user}                     one user's endpoints/logins
@@ -59,7 +64,10 @@ from app.core.database import get_db
 from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
 from app.services.audit_service import write_audit_log
-from app.services.udt_service import normalize_mac, ENDPOINT_TYPES
+from app.services.udt_service import (
+    ENDPOINT_TYPES, TYPE_SLUG_RE, apply_class_rules, classify_endpoint,
+    normalize_mac, rule_condition,
+)
 
 router = APIRouter(prefix="/udt", tags=["User Device Tracker"])
 
@@ -89,6 +97,28 @@ class RuleCreate(BaseModel):
 
 class RuleUpdate(BaseModel):
     pattern: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+_MATCH_TYPE_PATTERN = "^(mac|mac_prefix|ip|ip_range|subnet|hostname|vendor|user)$"
+_TYPE_SLUG_PATTERN = "^[a-z0-9][a-z0-9_-]{0,29}$"
+
+
+class ClassRuleCreate(BaseModel):
+    match_type: str = Field(..., pattern=_MATCH_TYPE_PATTERN)
+    pattern: str = Field(..., min_length=1, max_length=255)
+    set_type: str = Field(..., pattern=_TYPE_SLUG_PATTERN)
+    priority: int = Field(default=100, ge=1, le=10000)
+    description: Optional[str] = None
+    enabled: bool = True
+
+
+class ClassRuleUpdate(BaseModel):
+    match_type: Optional[str] = Field(default=None, pattern=_MATCH_TYPE_PATTERN)
+    pattern: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    set_type: Optional[str] = Field(default=None, pattern=_TYPE_SLUG_PATTERN)
+    priority: Optional[int] = Field(default=None, ge=1, le=10000)
     description: Optional[str] = None
     enabled: Optional[bool] = None
 
@@ -263,7 +293,7 @@ async def list_endpoints(
     params.update({"skip": skip, "limit": limit})
     rows = (await db.execute(text(
         f"""SELECT e.id, e.mac::text AS mac, e.vendor, e.hostname, host(e.ip_address) AS ip,
-                   e.endpoint_type, e.is_randomized, e.is_watched, e.authorized, e.ignored,
+                   e.endpoint_type, e.type_source, e.is_randomized, e.is_watched, e.authorized, e.ignored,
                    e.user_name, e.user_domain, e.device_id,
                    e.first_seen, e.last_seen,
                    loc.device_id AS loc_device_id, dv.hostname AS switch_hostname,
@@ -294,7 +324,7 @@ async def list_endpoints(
 async def endpoint_detail(endpoint_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     e = (await db.execute(text(
         """SELECT e.id, e.mac::text AS mac, e.vendor, e.hostname, host(e.ip_address) AS ip,
-                  e.endpoint_type, e.is_randomized, e.is_watched, e.authorized, e.ignored,
+                  e.endpoint_type, e.type_source, e.is_randomized, e.is_watched, e.authorized, e.ignored,
                   e.user_name, e.user_domain, e.user_seen_at, e.notes, e.device_id,
                   e.first_seen, e.last_seen,
                   d.hostname AS managed_hostname
@@ -354,9 +384,16 @@ async def update_endpoint(
 ):
     sets, params = [], {"id": endpoint_id}
     if payload.endpoint_type is not None:
-        if payload.endpoint_type not in ENDPOINT_TYPES:
-            raise HTTPException(status_code=400, detail=f"invalid endpoint_type; one of {ENDPOINT_TYPES}")
-        sets.append("endpoint_type = :etype"); params["etype"] = payload.endpoint_type
+        et = payload.endpoint_type
+        if et == "auto":
+            # Un-pin: back to sweeper management (rules, then heuristic).
+            sets.append("endpoint_type = 'unknown'"); sets.append("type_source = 'auto'")
+        elif et in ENDPOINT_TYPES or TYPE_SLUG_RE.match(et):
+            sets.append("endpoint_type = :etype"); sets.append("type_source = 'manual'")
+            params["etype"] = et
+        else:
+            raise HTTPException(status_code=400,
+                                detail=f"invalid endpoint_type; 'auto', one of {ENDPOINT_TYPES}, or a lowercase group slug")
     if payload.notes is not None:
         sets.append("notes = :notes"); params["notes"] = payload.notes
     if payload.is_watched is not None:
@@ -374,6 +411,20 @@ async def update_endpoint(
     res = await db.execute(text(f"UPDATE udt_endpoints SET {', '.join(sets)} WHERE id = :id RETURNING id"), params)
     if not res.first():
         raise HTTPException(status_code=404, detail="Endpoint not found")
+    if payload.endpoint_type == "auto":
+        # Reclassify immediately instead of waiting for the next sweep.
+        await apply_class_rules(db)
+        row = (await db.execute(text(
+            """SELECT e.endpoint_type, e.type_source, e.vendor, e.hostname, d.device_type
+               FROM udt_endpoints e LEFT JOIN devices d ON d.id = e.device_id
+               WHERE e.id = :id"""
+        ), {"id": endpoint_id})).mappings().first()
+        if row and row["type_source"] == "auto" and row["endpoint_type"] == "unknown":
+            etype = classify_endpoint(row["vendor"], row["hostname"], row["device_type"])
+            if etype != "unknown":
+                await db.execute(text(
+                    "UPDATE udt_endpoints SET endpoint_type = :t, updated_at = NOW() WHERE id = :id"
+                ), {"t": etype, "id": endpoint_id})
     await write_audit_log(db, actor=user, action="udt.endpoint.update",
                           resource_type="udt_endpoint", resource_id=endpoint_id,
                           metadata=payload.model_dump(exclude_none=True))
@@ -828,6 +879,107 @@ async def delete_rule(rule_id: str, db: AsyncSession = Depends(get_db),
                           resource_type="udt_rule", resource_id=rule_id, metadata={})
     await db.commit()
     return {"status": "ok"}
+
+
+# ── Classification rules (vendor/MAC -> type/group overrides) ────────
+
+@router.get("/class-rules")
+async def list_class_rules(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    rows = (await db.execute(text(
+        "SELECT id, priority, match_type, pattern, set_type, description, enabled, created_at, updated_at "
+        "FROM udt_class_rules ORDER BY priority, created_at"
+    ))).mappings().all()
+    # One aggregate pass for per-rule match counts (rule lists are small).
+    counts: dict[int, int] = {}
+    params: dict = {}
+    selects = []
+    for i, r in enumerate(rows):
+        cond = rule_condition(dict(r), params, i)
+        if cond:
+            selects.append(f"COUNT(*) FILTER (WHERE {cond}) AS c{i}")
+    if selects:
+        crow = (await db.execute(text(
+            f"SELECT {', '.join(selects)} FROM udt_endpoints e"
+        ), params)).mappings().first()
+        counts = {int(k[1:]): v for k, v in crow.items()}
+    return {"data": [dict(r) | {"id": str(r["id"]), "match_count": counts.get(i, 0)}
+                     for i, r in enumerate(rows)]}
+
+
+@router.post("/class-rules")
+async def create_class_rule(payload: ClassRuleCreate, db: AsyncSession = Depends(get_db),
+                            user: User = Depends(require_operator_user)):
+    if rule_condition({"match_type": payload.match_type, "pattern": payload.pattern}, {}, 0) is None:
+        raise HTTPException(status_code=400, detail="pattern does not parse for the chosen match_type")
+    row = (await db.execute(text(
+        """INSERT INTO udt_class_rules (priority, match_type, pattern, set_type, description, enabled, created_by)
+           VALUES (:pr, :mt, :p, :st, :d, :e, :u) RETURNING id"""
+    ), {"pr": payload.priority, "mt": payload.match_type, "p": payload.pattern,
+        "st": payload.set_type, "d": payload.description, "e": payload.enabled,
+        "u": str(user.id)})).first()
+    changed = await apply_class_rules(db)
+    await write_audit_log(db, actor=user, action="udt.class_rule.create",
+                          resource_type="udt_class_rule", resource_id=str(row[0]),
+                          metadata=payload.model_dump())
+    await db.commit()
+    return {"status": "ok", "id": str(row[0]), "endpoints_updated": changed}
+
+
+@router.patch("/class-rules/{rule_id}")
+async def update_class_rule(rule_id: str, payload: ClassRuleUpdate, db: AsyncSession = Depends(get_db),
+                            user: User = Depends(require_operator_user)):
+    sets, params = [], {"id": rule_id}
+    for col, key, val in (("priority", "pr", payload.priority), ("match_type", "mt", payload.match_type),
+                          ("pattern", "p", payload.pattern), ("set_type", "st", payload.set_type),
+                          ("description", "d", payload.description), ("enabled", "e", payload.enabled)):
+        if val is not None:
+            sets.append(f"{col} = :{key}"); params[key] = val
+    if not sets:
+        raise HTTPException(status_code=400, detail="no fields to update")
+    sets.append("updated_at = NOW()")
+    res = (await db.execute(text(
+        f"UPDATE udt_class_rules SET {', '.join(sets)} WHERE id = :id RETURNING match_type, pattern"
+    ), params)).first()
+    if not res:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    if rule_condition({"match_type": res[0], "pattern": res[1]}, {}, 0) is None:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="pattern does not parse for the chosen match_type")
+    changed = await apply_class_rules(db)
+    await write_audit_log(db, actor=user, action="udt.class_rule.update",
+                          resource_type="udt_class_rule", resource_id=rule_id,
+                          metadata=payload.model_dump(exclude_none=True))
+    await db.commit()
+    return {"status": "ok", "endpoints_updated": changed}
+
+
+@router.delete("/class-rules/{rule_id}")
+async def delete_class_rule(rule_id: str, db: AsyncSession = Depends(get_db),
+                            user: User = Depends(require_operator_user)):
+    res = await db.execute(text("DELETE FROM udt_class_rules WHERE id = :id RETURNING id"), {"id": rule_id})
+    if not res.first():
+        raise HTTPException(status_code=404, detail="Rule not found")
+    changed = await apply_class_rules(db)
+    await write_audit_log(db, actor=user, action="udt.class_rule.delete",
+                          resource_type="udt_class_rule", resource_id=rule_id, metadata={})
+    await db.commit()
+    return {"status": "ok", "endpoints_updated": changed}
+
+
+@router.get("/types")
+async def list_types(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    """Built-in endpoint types plus custom groups (from rules or manual
+    assignment), each with its current non-ignored endpoint count."""
+    rows = (await db.execute(text(
+        "SELECT endpoint_type AS t, COUNT(*) AS n FROM udt_endpoints WHERE NOT ignored GROUP BY 1"
+    ))).mappings().all()
+    counts = {r["t"]: r["n"] for r in rows}
+    rule_types = (await db.execute(text("SELECT DISTINCT set_type FROM udt_class_rules"))).scalars().all()
+    data = [{"type": t, "builtin": True, "count": counts.pop(t, 0)} for t in ENDPOINT_TYPES]
+    custom = set(counts) | (set(rule_types) - set(ENDPOINT_TYPES))
+    data += sorted(({"type": t, "builtin": False, "count": counts.get(t, 0)} for t in custom),
+                   key=lambda x: (-x["count"], x["type"]))
+    return {"data": data}
 
 
 # ── Rogues / users / events / capacity / vendors ─────────────────────

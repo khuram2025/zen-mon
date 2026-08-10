@@ -10,8 +10,11 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import { toast } from '@/components/ui/Toast'
 import { apiErrorMessage } from '@/lib/utils'
 import { udtApi } from './api'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
+import type { EndpointLocation } from './types'
 import {
-  AuthBadge, ENDPOINT_TYPE_META, EndpointTypeIcon, EventBadge, durationSince, fmtDate, portLabel, relTime,
+  AuthBadge, EndpointTypeIcon, EventBadge, TypeSourceBadge, durationBetween,
+  durationSince, endpointTypeMeta, fmtDate, portLabel, relTime,
 } from './helpers'
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -20,6 +23,93 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <div className="text-[11px] uppercase tracking-wide text-muted">{label}</div>
       <div className="mt-0.5 text-sm">{children}</div>
     </div>
+  )
+}
+
+function TypeEditor({ value, source, onChange }: {
+  value: string; source?: 'auto' | 'rule' | 'manual'; onChange: (t: string) => void
+}) {
+  const types = useQuery({ queryKey: ['udt', 'types'], queryFn: () => udtApi.types() })
+  const options = types.data?.data || []
+  const known = options.some((t) => t.type === value)
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <EndpointTypeIcon type={value} className="h-3.5 w-3.5" />
+      <Select value={value} onValueChange={(v) => onChange(v)}>
+        <SelectTrigger className="h-7 w-auto min-w-[130px] text-sm"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          {!known && <SelectItem value={value}>{endpointTypeMeta(value).label}</SelectItem>}
+          {options.map((t) => (
+            <SelectItem key={t.type} value={t.type}>{endpointTypeMeta(t.type).label}</SelectItem>
+          ))}
+          <SelectItem value="auto">Auto (reclassify)</SelectItem>
+        </SelectContent>
+      </Select>
+      <TypeSourceBadge source={source} />
+    </span>
+  )
+}
+
+function TimelineEntry({ loc }: { loc: EndpointLocation }) {
+  return (
+    <li className="relative pb-4 pl-5 last:pb-1">
+      {/* rail + dot */}
+      <span className="absolute left-[3px] top-[18px] bottom-0 w-px bg-border" aria-hidden />
+      <span className={`absolute left-0 top-[6px] h-[7px] w-[7px] rounded-full ring-2 ${
+        loc.active ? 'bg-success ring-success/25' : 'bg-muted/50 ring-transparent'
+      }`} aria-hidden />
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <Link to={`/devices/${loc.device_id}`} className="text-sm font-medium text-primary hover:underline">
+          {loc.switch}
+        </Link>
+        <span className="rounded bg-surface2 px-1.5 py-0.5 font-mono text-[11px]">{portLabel(loc.if_name, loc.if_index)}</span>
+        {loc.vlan_id != null && <span className="text-[11px] text-muted">VLAN {loc.vlan_id}</span>}
+        {loc.is_direct
+          ? <Badge variant="success">direct</Badge>
+          : <Badge variant="outline" title="MAC learned through another switch's uplink">via uplink</Badge>}
+        {loc.active && <Badge variant="info">connected</Badge>}
+      </div>
+      {loc.if_alias && <div className="mt-0.5 text-[11px] text-muted">{loc.if_alias}</div>}
+      <div className="mt-0.5 text-[11px] text-muted tabular-nums">
+        {fmtDate(loc.first_seen)} → {loc.active ? 'now' : fmtDate(loc.closed_at || loc.last_seen)}
+        <span className="ml-2 rounded bg-surface2 px-1.5 py-px">{durationBetween(loc.first_seen, loc.active ? null : (loc.closed_at || loc.last_seen))}</span>
+      </div>
+    </li>
+  )
+}
+
+function ConnectionHistoryCard({ locations }: { locations: EndpointLocation[] }) {
+  const [showIndirect, setShowIndirect] = useState(false)
+  const byRecency = (a: EndpointLocation, b: EndpointLocation) =>
+    Number(b.active) - Number(a.active) || new Date(b.last_seen).getTime() - new Date(a.last_seen).getTime()
+  const direct = locations.filter((l) => l.is_direct).sort(byRecency)
+  const indirect = locations.filter((l) => !l.is_direct).sort(byRecency)
+  // Without any direct sighting (endpoint only ever seen through uplinks)
+  // the indirect rows ARE the history — show them unconditionally.
+  const shown = direct.length === 0 ? indirect : (showIndirect ? [...direct, ...indirect].sort(byRecency) : direct)
+  return (
+    <Card>
+      <CardContent className="p-0">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
+          <h3 className="text-sm font-semibold">Connection history</h3>
+          {direct.length > 0 && indirect.length > 0 && (
+            <button
+              onClick={() => setShowIndirect((v) => !v)}
+              className="text-xs text-muted transition-colors hover:text-text"
+            >
+              {showIndirect ? 'Hide' : 'Show'} {indirect.length} uplink sighting{indirect.length === 1 ? '' : 's'}
+            </button>
+          )}
+        </div>
+        {shown.length === 0 ? (
+          <div className="p-6 text-center text-sm text-muted">No connection history yet.</div>
+        ) : (
+          <ul className="max-h-[420px] overflow-y-auto p-4">
+            {shown.map((l) => <TimelineEntry key={l.id} loc={l} />)}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 
@@ -60,7 +150,7 @@ export function EndpointDetailPage() {
   }
 
   const e = data.endpoint
-  const meta = ENDPOINT_TYPE_META[e.endpoint_type]
+  const meta = endpointTypeMeta(e.endpoint_type)
   const activeLoc = data.locations.find((l) => l.active)
 
   return (
@@ -111,7 +201,8 @@ export function EndpointDetailPage() {
       <Card>
         <CardContent className="grid grid-cols-2 gap-4 p-4 sm:grid-cols-3 lg:grid-cols-6">
           <Field label="Type">
-            <span className="inline-flex items-center gap-1"><EndpointTypeIcon type={e.endpoint_type} className="h-3.5 w-3.5" /> {meta.label}</span>
+            <TypeEditor value={e.endpoint_type} source={e.type_source}
+              onChange={(t) => mutate.mutate({ endpoint_type: t })} />
           </Field>
           <Field label="Vendor">{e.vendor || '—'}</Field>
           <Field label="Current location">
@@ -133,35 +224,7 @@ export function EndpointDetailPage() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {/* Connection history */}
-        <Card>
-          <CardContent className="p-0">
-            <h3 className="border-b border-border px-4 py-3 text-sm font-semibold">Connection history</h3>
-            {data.locations.length === 0 ? (
-              <div className="p-6 text-center text-sm text-muted">No connection history yet.</div>
-            ) : (
-              <Table>
-                <THead className="bg-surface2/40">
-                  <Tr><Th>Switch · Port</Th><Th>VLAN</Th><Th>Type</Th><Th className="text-right">First</Th><Th className="text-right">Last</Th></Tr>
-                </THead>
-                <TBody>
-                  {data.locations.map((l) => (
-                    <Tr key={l.id}>
-                      <Td className="text-xs">
-                        <Link to={`/devices/${l.device_id}`} className="text-primary hover:underline">{l.switch}</Link>
-                        <span className="text-muted"> · {portLabel(l.if_name, l.if_index)}</span>
-                        {l.active && <span className="ml-1 inline-block h-2 w-2 rounded-full bg-success align-middle" title="active" />}
-                      </Td>
-                      <Td className="text-xs tabular-nums">{l.vlan_id ?? '—'}</Td>
-                      <Td>{l.is_direct ? <Badge variant="success">direct</Badge> : <Badge variant="outline">indirect</Badge>}</Td>
-                      <Td className="text-right text-xs text-muted">{relTime(l.first_seen)}</Td>
-                      <Td className="text-right text-xs text-muted">{l.active ? 'now' : relTime(l.last_seen)}</Td>
-                    </Tr>
-                  ))}
-                </TBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
+        <ConnectionHistoryCard locations={data.locations} />
 
         {/* IP history */}
         <Card>

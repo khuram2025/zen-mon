@@ -10,7 +10,7 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import { udtApi } from './api'
 import type { Endpoint } from './types'
 import {
-  AuthBadge, ENDPOINT_TYPE_META, EndpointTypeIcon, OnlineDot, macCol, portLabel, relTime,
+  AuthBadge, EndpointTypeIcon, OnlineDot, endpointTypeMeta, macCol, portLabel, relTime,
 } from './helpers'
 
 const FLAG_TABS = [
@@ -70,6 +70,9 @@ export function EndpointSearchPage() {
     queryFn: () => udtApi.summary(),
     refetchInterval: 15_000,
   })
+
+  const typeInfo = useQuery({ queryKey: ['udt', 'types'], queryFn: () => udtApi.types() })
+  const typeChips = (typeInfo.data?.data || []).filter((t) => t.count > 0 || t.type === type)
 
   const queryParams: Record<string, any> = { skip: page * limit, limit }
   if (q) queryParams.q = q
@@ -145,17 +148,21 @@ export function EndpointSearchPage() {
           onClick={() => patch({ type: null })}
           className={`rounded-full border px-2.5 py-0.5 text-xs ${!type ? 'border-primary text-primary' : 'border-border text-muted hover:text-text'}`}
         >All</button>
-        {Object.entries(ENDPOINT_TYPE_META).map(([k, m]) => (
-          <button
-            key={k}
-            onClick={() => patch({ type: type === k ? null : k })}
-            className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs ${
-              type === k ? 'border-primary text-primary' : 'border-border text-muted hover:text-text'
-            }`}
-          >
-            <m.icon className="h-3 w-3" /> {m.label}
-          </button>
-        ))}
+        {typeChips.map((t) => {
+          const m = endpointTypeMeta(t.type)
+          return (
+            <button
+              key={t.type}
+              onClick={() => patch({ type: type === t.type ? null : t.type })}
+              className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs ${
+                type === t.type ? 'border-primary text-primary' : 'border-border text-muted hover:text-text'
+              }`}
+            >
+              <m.icon className="h-3 w-3" /> {m.label}
+              <span className="tabular-nums opacity-60">{t.count}</span>
+            </button>
+          )
+        })}
       </div>
 
       {/* Results table */}
@@ -192,7 +199,7 @@ export function EndpointSearchPage() {
                     <Td>
                       <div className="flex items-center gap-2">
                         <EndpointTypeIcon type={e.endpoint_type} className="h-4 w-4 text-muted" />
-                        <span className="font-medium">{e.hostname || ENDPOINT_TYPE_META[e.endpoint_type].label}</span>
+                        <span className="font-medium">{e.hostname || endpointTypeMeta(e.endpoint_type).label}</span>
                       </div>
                     </Td>
                     <Td>{macCol(e.mac)}</Td>

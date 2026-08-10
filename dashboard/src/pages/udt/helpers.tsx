@@ -1,11 +1,13 @@
 import {
-  Camera, Cpu, HelpCircle, Laptop, MonitorSmartphone, Network, Phone,
+  Boxes, Camera, Cpu, HelpCircle, Laptop, MonitorSmartphone, Network, Phone,
   Printer, Router, Server, Wifi,
 } from 'lucide-react'
 import { Badge } from '@/components/ui/Badge'
-import type { EndpointType } from './types'
+import type { EndpointType, TypeSource } from './types'
 
-export const ENDPOINT_TYPE_META: Record<EndpointType, { label: string; icon: React.ComponentType<{ className?: string }> }> = {
+type TypeMeta = { label: string; icon: React.ComponentType<{ className?: string }> }
+
+export const ENDPOINT_TYPE_META: Record<string, TypeMeta> = {
   workstation: { label: 'Workstation', icon: Laptop },
   server: { label: 'Server', icon: Server },
   phone: { label: 'IP Phone', icon: Phone },
@@ -18,9 +20,23 @@ export const ENDPOINT_TYPE_META: Record<EndpointType, { label: string; icon: Rea
   unknown: { label: 'Unknown', icon: HelpCircle },
 }
 
+// Custom groups get a prettified slug label and a generic icon.
+export function endpointTypeMeta(type: string | null | undefined): TypeMeta {
+  if (type && ENDPOINT_TYPE_META[type]) return ENDPOINT_TYPE_META[type]
+  if (!type) return ENDPOINT_TYPE_META.unknown
+  const label = type.replace(/[_-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+  return { label, icon: Boxes }
+}
+
 export function EndpointTypeIcon({ type, className }: { type: EndpointType; className?: string }) {
-  const Icon = (ENDPOINT_TYPE_META[type] || ENDPOINT_TYPE_META.unknown).icon
+  const Icon = endpointTypeMeta(type).icon
   return <Icon className={className} />
+}
+
+export function TypeSourceBadge({ source }: { source?: TypeSource }) {
+  if (source === 'manual') return <Badge variant="outline" title="Type pinned by an operator">manual</Badge>
+  if (source === 'rule') return <Badge variant="outline" title="Type set by a classification rule">rule</Badge>
+  return null
 }
 
 export function AuthBadge({ authorized, watched, randomized }: { authorized: boolean | null; watched?: boolean; randomized?: boolean }) {
@@ -53,6 +69,18 @@ export function relTime(iso: string | null | undefined): string {
 export function durationSince(iso: string | null | undefined): string {
   if (!iso) return '—'
   const s = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000))
+  const d = Math.floor(s / 86400)
+  const h = Math.floor((s % 86400) / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  if (d > 0) return `${d}d ${h}h`
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m`
+}
+
+export function durationBetween(a: string | null | undefined, b: string | null | undefined): string {
+  if (!a) return '—'
+  const end = b ? new Date(b).getTime() : Date.now()
+  const s = Math.max(0, Math.floor((end - new Date(a).getTime()) / 1000))
   const d = Math.floor(s / 86400)
   const h = Math.floor((s % 86400) / 3600)
   const m = Math.floor((s % 3600) / 60)

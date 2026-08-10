@@ -528,6 +528,52 @@ def scope_params(
     }
 
 
+ROLLUP_TABLE = "zenplus.flow_conversations_1h"
+# Below this span the rollup's hour-bucket edges would visibly skew the
+# numbers, and raw scans are fast enough anyway.
+ROLLUP_MIN_SECONDS = 72 * 3600
+
+
+def _rollup_eligible(start: datetime, end: datetime, scope: dict) -> bool:
+    """True when the hourly conversation rollup can serve this request.
+
+    Needs a long window (short ones stay on raw for exact edges and speed),
+    and no drill-down filter that requires per-flow columns the rollup does
+    not keep: ifIndex equality (only uniq-array states survive), DSCP (tos is
+    dropped), and TCP flag patterns (per-flow flags are OR-merged).
+    """
+    if _window_seconds(start, end) < ROLLUP_MIN_SECONDS:
+        return False
+    return (
+        scope.get("iface") is None
+        and scope.get("dscp_filter") is None
+        and scope.get("tcp_flag") is None
+    )
+
+
+def _floor_hour(dt: datetime) -> datetime:
+    """Widen a window edge to its hour bucket so the rollup drops no data."""
+    return dt.replace(minute=0, second=0, microsecond=0)
+
+
+QOS_ROLLUP_TABLE = "zenplus.flow_qos_1h"
+
+
+def _qos_rollup_eligible(start: datetime, end: datetime, scope: dict) -> bool:
+    """True when the hourly QoS rollup can serve this request.
+
+    That table keys on exporter/protocol/tos/tcp_flags only, so DSCP and
+    flag-pattern filters are fine, but any filter needing addresses, ports or
+    ifIndexes forces the raw path.
+    """
+    if _window_seconds(start, end) < ROLLUP_MIN_SECONDS:
+        return False
+    return all(
+        scope.get(k) is None
+        for k in ("iface", "talker", "application", "net_class", "group")
+    )
+
+
 def _scope(
     exporter: str | None = None,
     iface: int | None = None,
@@ -540,6 +586,7 @@ def _scope(
     hour: int | None = None,
     dow: int | None = None,
     group: str | None = None,
+    table: str = "flow_records",
 ) -> tuple[str, dict]:
     """Build a combined WHERE-clause fragment for every supported drill-down dimension."""
     # Defence in depth (BUG-01): a single corrupt/garbage flow with an
@@ -552,7 +599,11 @@ def _scope(
     # Stored bytes are sampling-adjusted (collector multiplies by the 1-in-N
     # rate), so the guard divides by sampling_interval to test the unsampled-
     # equivalent value — legitimate sampled flows are kept, corruption is not.
-    parts: list[str] = ["flow_records.bytes / greatest(flow_records.sampling_interval, 1) <= 1000000000000"]
+    # The rollup table has no sampling_interval and was ingested through the
+    # same guard (see migrate-071's MV), so it skips the predicate.
+    parts: list[str] = []
+    if table == "flow_records":
+        parts.append("flow_records.bytes / greatest(flow_records.sampling_interval, 1) <= 1000000000000")
     params: dict = {}
     if exporter:
         parts.append("exporter_ip = %(exporter)s"); params["exporter"] = exporter
@@ -633,32 +684,63 @@ async def netflow_overview(
 ):
     start, end = _resolve_window(hours, from_ts, to_ts, minutes)
     rate_window = min(300, _window_seconds(start, end))
-    extra_sql, extra_params = _scope(**scope)
-    params = {"start": start, "end": end, "rate_window": rate_window, **extra_params}
-    summary = (await _query(
-        f"""
-        SELECT
-            sum(bytes) AS total_bytes,
-            sum(packets) AS packets,
-            count() AS flows,
-            uniqExact(exporter_ip) AS exporters,
-            uniqExact(src_addr) AS src_hosts,
-            uniqExact(dst_addr) AS dst_hosts,
-            max(received_at) AS last_seen,
-            sumIf(bytes, timestamp >= %(end)s - toIntervalSecond(%(rate_window)s)) * 8 / %(rate_window)s AS current_bps
-        FROM zenplus.flow_records
-        WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
-        """,
-        params,
-    )).result_rows[0]
+    if _rollup_eligible(start, end, scope):
+        # Long windows: totals from the hourly rollup; the live-rate figure
+        # still comes from raw, but only over the last few minutes.
+        extra_sql, extra_params = _scope(**scope, table="flow_conversations_1h")
+        raw_extra_sql, raw_extra_params = _scope(**scope)
+        params = {"start": _floor_hour(start), "end": end, **extra_params}
+        summary = list((await _query(
+            f"""
+            SELECT
+                sum(bytes) AS total_bytes,
+                sum(packets) AS total_packets,
+                sum(flows) AS total_flows,
+                uniqExact(exporter_ip) AS exporters,
+                uniqExact(src_addr) AS src_hosts,
+                uniqExact(dst_addr) AS dst_hosts,
+                max(received_at) AS last_flow
+            FROM {ROLLUP_TABLE}
+            WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+            """,
+            params,
+        )).result_rows[0])
+        summary.append((await _query(
+            f"""
+            SELECT sum(bytes) * 8 / %(rate_window)s
+            FROM zenplus.flow_records
+            WHERE timestamp BETWEEN %(end)s - toIntervalSecond(%(rate_window)s) AND %(end)s{raw_extra_sql}
+            """,
+            {"end": end, "rate_window": rate_window, **raw_extra_params},
+        )).result_rows[0][0])
+    else:
+        extra_sql, extra_params = _scope(**scope)
+        params = {"start": start, "end": end, "rate_window": rate_window, **extra_params}
+        summary = (await _query(
+            f"""
+            SELECT
+                sum(bytes) AS total_bytes,
+                sum(packets) AS packets,
+                count() AS flows,
+                uniqExact(exporter_ip) AS exporters,
+                uniqExact(src_addr) AS src_hosts,
+                uniqExact(dst_addr) AS dst_hosts,
+                max(received_at) AS last_seen,
+                sumIf(bytes, timestamp >= %(end)s - toIntervalSecond(%(rate_window)s)) * 8 / %(rate_window)s AS current_bps
+            FROM zenplus.flow_records
+            WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+            """,
+            params,
+        )).result_rows[0]
 
+    proto_table = ROLLUP_TABLE if _rollup_eligible(start, end, scope) else "zenplus.flow_records"
     top_proto = (await _query(
         f"""
-        SELECT protocol, sum(bytes) AS bytes
-        FROM zenplus.flow_records
+        SELECT protocol, sum(bytes) AS total_bytes
+        FROM {proto_table}
         WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
         GROUP BY protocol
-        ORDER BY bytes DESC
+        ORDER BY total_bytes DESC
         LIMIT 1
         """,
         params,
@@ -692,22 +774,41 @@ async def netflow_timeseries(
     start, end = _resolve_window(hours, from_ts, to_ts, minutes)
     span_hours = _window_seconds(start, end) / 3600
     bucket = 60 if span_hours <= 6 else 300 if span_hours <= 48 else 1800 if span_hours <= 168 else 7200
-    extra_sql, extra_params = _scope(**scope)
-    res = await _query(
-        f"""
-        SELECT
-            toUnixTimestamp(toStartOfInterval(timestamp, INTERVAL {bucket} SECOND)) * 1000 AS ts,
-            sum(bytes) * 8 / {bucket} AS bps,
-            sum(bytes) AS total_bytes,
-            sum(packets) AS packets,
-            count() AS flows
-        FROM zenplus.flow_records
-        WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
-        GROUP BY ts
-        ORDER BY ts
-        """,
-        {"start": start, "end": end, **extra_params},
-    )
+    # Hour-aligned buckets on a long window can come from the hourly rollup.
+    if bucket % 3600 == 0 and _rollup_eligible(start, end, scope):
+        extra_sql, extra_params = _scope(**scope, table="flow_conversations_1h")
+        res = await _query(
+            f"""
+            SELECT
+                toUnixTimestamp(toStartOfInterval(timestamp, INTERVAL {bucket} SECOND)) * 1000 AS ts,
+                sum(bytes) * 8 / {bucket} AS bps,
+                sum(bytes) AS total_bytes,
+                sum(packets) AS total_packets,
+                sum(flows) AS total_flows
+            FROM {ROLLUP_TABLE}
+            WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+            GROUP BY ts
+            ORDER BY ts
+            """,
+            {"start": _floor_hour(start), "end": end, **extra_params},
+        )
+    else:
+        extra_sql, extra_params = _scope(**scope)
+        res = await _query(
+            f"""
+            SELECT
+                toUnixTimestamp(toStartOfInterval(timestamp, INTERVAL {bucket} SECOND)) * 1000 AS ts,
+                sum(bytes) * 8 / {bucket} AS bps,
+                sum(bytes) AS total_bytes,
+                sum(packets) AS packets,
+                count() AS flows
+            FROM zenplus.flow_records
+            WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+            GROUP BY ts
+            ORDER BY ts
+            """,
+            {"start": start, "end": end, **extra_params},
+        )
     return [
         {"ts": int(r[0]), "bps": float(r[1]), "bytes": int(r[2]), "packets": int(r[3]), "flows": int(r[4])}
         for r in res.result_rows
@@ -721,6 +822,7 @@ async def _top_ips_detail(
     extra_sql: str,
     extra_params: dict,
     rank: str = "bytes",
+    use_rollup: bool = False,
 ) -> list[dict]:
     """Two-phase top-N endpoint IPs.
 
@@ -728,19 +830,33 @@ async def _top_ips_detail(
     the expensive per-IP detail (uniq arrays, first/last seen) only for the
     winners. On a 7-day window this is ~5x faster than one pass that builds
     heavy aggregate states for every address on the network.
+
+    With use_rollup the same two phases run over the hourly conversation
+    rollup (caller must have checked _rollup_eligible and passed a matching
+    extra_sql): flow counts come from sum(flows) and seen-times from the
+    pre-aggregated first/last columns.
     """
     rank_expr = {
         "bytes": "sum(bytes)",
         "src_bytes": "sumIf(bytes, role.2 = 1)",
         "dst_bytes": "sumIf(bytes, role.2 = 0)",
     }[rank]
+    if use_rollup:
+        table, qual = ROLLUP_TABLE, "flow_conversations_1h"
+        flows_expr, flows_if = "sum(flows)", "sumIf(flows, role.2 = {r})"
+        first_expr, last_expr = "min(first_seen)", "max(last_seen)"
+        start = _floor_hour(start)
+    else:
+        table, qual = "zenplus.flow_records", "flow_records"
+        flows_expr, flows_if = "count()", "countIf(role.2 = {r})"
+        first_expr, last_expr = "min(timestamp)", "max(timestamp)"
     params = {"start": start, "end": end, "limit": limit, **extra_params}
     # ARRAY JOIN attributes each record to both its endpoints in ONE table scan
     # (the old UNION ALL form scanned the window twice).
     top = await _query(
         f"""
         SELECT toString(role.1) AS ip
-        FROM zenplus.flow_records
+        FROM {table}
         ARRAY JOIN [(src_addr, toUInt8(1)), (dst_addr, toUInt8(0))] AS role
         WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
         GROUP BY ip
@@ -753,26 +869,29 @@ async def _top_ips_detail(
     if not ips:
         return []
     detail_params = {**params, "ips": ips}
+    # role.1 is compared as native IPv4 — a toString() here would convert
+    # every expanded row in the window before filtering (see top-conversations
+    # for the latency cliff that caused).
     res = await _query(
         f"""
         SELECT
             toString(role.1) AS ip,
-            sum(flow_records.bytes) AS bytes,
-            sum(flow_records.packets) AS packets,
-            count() AS flows,
-            sumIf(flow_records.bytes, role.2 = 1) AS src_bytes,
-            sumIf(flow_records.bytes, role.2 = 0) AS dst_bytes,
-            countIf(role.2 = 1) AS src_flows,
-            countIf(role.2 = 0) AS dst_flows,
-            min(timestamp) AS first_seen,
-            max(timestamp) AS last_seen,
+            sum({qual}.bytes) AS total_bytes,
+            sum({qual}.packets) AS total_packets,
+            {flows_expr} AS total_flows,
+            sumIf({qual}.bytes, role.2 = 1) AS src_bytes,
+            sumIf({qual}.bytes, role.2 = 0) AS dst_bytes,
+            {flows_if.format(r=1)} AS src_flows,
+            {flows_if.format(r=0)} AS dst_flows,
+            {first_expr} AS agg_first_seen,
+            {last_expr} AS agg_last_seen,
             groupUniqArray(8)(toString(exporter_ip)) AS exporters,
             groupUniqArray(8)(protocol) AS protocols,
             groupUniqArray(8)(dst_port) AS ports
-        FROM zenplus.flow_records
+        FROM {table}
         ARRAY JOIN [(src_addr, toUInt8(1)), (dst_addr, toUInt8(0))] AS role
         WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
-          AND toString(role.1) IN %(ips)s
+          AND role.1 IN %(ips)s
         GROUP BY ip
         """,
         detail_params,
@@ -812,9 +931,10 @@ async def netflow_top_talkers(
     user: User = Depends(get_current_user),
 ):
     start, end = _resolve_window(hours, from_ts, to_ts, minutes)
-    extra_sql, extra_params = _scope(**scope)
+    use_rollup = _rollup_eligible(start, end, scope)
+    extra_sql, extra_params = _scope(**scope, table="flow_conversations_1h" if use_rollup else "flow_records")
     rank = {"total": "bytes", "src": "src_bytes", "dst": "dst_bytes"}[by]
-    rows = await _top_ips_detail(start, end, limit, extra_sql, extra_params, rank)
+    rows = await _top_ips_detail(start, end, limit, extra_sql, extra_params, rank, use_rollup=use_rollup)
     return await _enrich_hosts_async(rows, bool(resolve))
 
 
@@ -830,8 +950,9 @@ async def netflow_top_endpoints(
 ):
     """Top endpoint IPs with source/destination contribution split."""
     start, end = _resolve_window(hours, from_ts, to_ts)
-    extra_sql, extra_params = _scope(**scope)
-    rows = await _top_ips_detail(start, end, limit, extra_sql, extra_params, "bytes")
+    use_rollup = _rollup_eligible(start, end, scope)
+    extra_sql, extra_params = _scope(**scope, table="flow_conversations_1h" if use_rollup else "flow_records")
+    rows = await _top_ips_detail(start, end, limit, extra_sql, extra_params, "bytes", use_rollup=use_rollup)
     return await _enrich_hosts_async(rows, bool(resolve))
 
 
@@ -846,29 +967,54 @@ async def netflow_top_conversations(
     db: AsyncSession = Depends(get_db),
 ):
     start, end = _resolve_window(hours, from_ts, to_ts)
+    if _rollup_eligible(start, end, scope):
+        # Long windows read the hourly rollup: per-pair sums are precomputed
+        # and the detail arrays are merged from stored aggregate states.
+        extra_sql, extra_params = _scope(**scope, table="flow_conversations_1h")
+        res = await _query(
+            f"""
+            SELECT
+                toString(src_addr) AS src,
+                toString(dst_addr) AS dst,
+                protocol,
+                dst_port,
+                groupUniqArrayMerge(10)(src_ports) AS agg_src_ports,
+                sum(bytes) AS total_bytes,
+                sum(packets) AS total_packets,
+                sum(flows) AS total_flows,
+                groupUniqArray(10)(toString(exporter_ip)) AS agg_exporters,
+                groupUniqArrayMerge(10)(input_snmp) AS agg_input_snmp,
+                groupUniqArrayMerge(10)(output_snmp) AS agg_output_snmp,
+                min(first_seen) AS agg_first_seen,
+                max(last_seen) AS agg_last_seen,
+                max(received_at) AS agg_received_at,
+                sum(duration_ms) / sum(flows) AS avg_duration_ms,
+                groupBitOr(tcp_flags) AS agg_tcp_flags,
+                sum(bytes) / sum(flows) AS avg_bytes,
+                sum(packets) / sum(flows) AS avg_packets
+            FROM {ROLLUP_TABLE}
+            WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+              AND (src_addr, dst_addr, protocol, dst_port) IN (
+                SELECT src_addr, dst_addr, protocol, dst_port
+                FROM {ROLLUP_TABLE}
+                WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+                GROUP BY src_addr, dst_addr, protocol, dst_port
+                ORDER BY sum(bytes) DESC
+                LIMIT %(limit)s
+              )
+            GROUP BY src, dst, protocol, dst_port
+            ORDER BY total_bytes DESC
+            LIMIT %(limit)s
+            """,
+            {"start": _floor_hour(start), "end": end, "limit": limit, **extra_params},
+        )
+        return await _format_conversations(res, db)
     extra_sql, extra_params = _scope(**scope)
-    # Phase 1: rank conversation keys with sum-only aggregation, then compute
-    # the heavy detail (uniq arrays, flag ORs, interface joins) only for the
-    # winning pairs. Cuts 7-day latency from ~11s to a couple of seconds.
-    top = await _query(
-        f"""
-        SELECT toString(src_addr) AS src, toString(dst_addr) AS dst, protocol, dst_port
-        FROM zenplus.flow_records
-        WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
-        GROUP BY src, dst, protocol, dst_port
-        ORDER BY sum(bytes) DESC
-        LIMIT %(limit)s
-        """,
-        {"start": start, "end": end, "limit": limit, **extra_params},
-    )
-    pair_terms = []
-    for src_ip, dst_ip, proto_num, port_num in top.result_rows:
-        # Values came straight out of ClickHouse but validate anyway before inlining.
-        ipaddress.ip_address(str(src_ip)); ipaddress.ip_address(str(dst_ip))
-        pair_terms.append(f"('{src_ip}', '{dst_ip}', {int(proto_num)}, {int(port_num)})")
-    if not pair_terms:
-        return []
-    pair_sql = f" AND (toString(src_addr), toString(dst_addr), protocol, dst_port) IN ({', '.join(pair_terms)})"
+    # Rank conversation keys with sum-only aggregation (inner IN subquery),
+    # then compute the heavy detail (uniq arrays, flag ORs, interface joins)
+    # only for the winning pairs. The pair filter compares native IPv4 columns:
+    # a toString() on both sides forced a per-row string conversion across the
+    # whole window, which tripled the query time on 24h+ ranges.
     res = await _query(
         f"""
         SELECT
@@ -908,7 +1054,15 @@ async def netflow_top_conversations(
                 first_switched_ms,
                 tcp_flags
             FROM zenplus.flow_records
-            WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}{pair_sql}
+            WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+              AND (src_addr, dst_addr, protocol, dst_port) IN (
+                SELECT src_addr, dst_addr, protocol, dst_port
+                FROM zenplus.flow_records
+                WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+                GROUP BY src_addr, dst_addr, protocol, dst_port
+                ORDER BY sum(bytes) DESC
+                LIMIT %(limit)s
+              )
         )
         GROUP BY src, dst, protocol, dst_port
         ORDER BY bytes DESC
@@ -916,7 +1070,15 @@ async def netflow_top_conversations(
         """,
         {"start": start, "end": end, "limit": limit, **extra_params},
     )
+    return await _format_conversations(res, db)
 
+
+async def _format_conversations(res, db: AsyncSession) -> list[dict]:
+    """Resolve exporter/interface names and shape conversation rows for the UI.
+
+    Both the raw and the rollup query produce the same 18 columns in the same
+    order, so the enrichment is shared.
+    """
     exporter_ips = sorted({ip for row in res.result_rows for ip in (row[8] or [])})
     exporter_names: dict[str, str] = {}
     if exporter_ips:
@@ -991,28 +1153,36 @@ async def netflow_protocols(
     user: User = Depends(get_current_user),
 ):
     start, end = _resolve_window(hours, from_ts, to_ts, minutes)
-    extra_sql, extra_params = _scope(**scope)
+    if _rollup_eligible(start, end, scope):
+        table = ROLLUP_TABLE
+        extra_sql, extra_params = _scope(**scope, table="flow_conversations_1h")
+        flows_expr, first_expr, last_expr = "sum(flows)", "min(first_seen)", "max(last_seen)"
+        start = _floor_hour(start)
+    else:
+        table = "zenplus.flow_records"
+        extra_sql, extra_params = _scope(**scope)
+        flows_expr, first_expr, last_expr = "count()", "min(timestamp)", "max(timestamp)"
     res = await _query(
         f"""
-        SELECT protocol, sum(bytes) AS bytes, sum(packets) AS packets, count() AS flows,
-               min(timestamp) AS first_seen,
-               max(timestamp) AS last_seen
-        FROM zenplus.flow_records
+        SELECT protocol, sum(bytes) AS total_bytes, sum(packets) AS total_packets, {flows_expr} AS total_flows,
+               {first_expr} AS agg_first_seen,
+               {last_expr} AS agg_last_seen
+        FROM {table}
         WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
         GROUP BY protocol
-        ORDER BY bytes DESC
+        ORDER BY total_bytes DESC
         LIMIT 20
         """,
         {"start": start, "end": end, **extra_params},
     )
     port_res = await _query(
         f"""
-        SELECT protocol, dst_port, sum(bytes) AS bytes, sum(packets) AS packets, count() AS flows
-        FROM zenplus.flow_records
+        SELECT protocol, dst_port, sum(bytes) AS total_bytes, sum(packets) AS total_packets, {flows_expr} AS total_flows
+        FROM {table}
         WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
           AND dst_port != 0
         GROUP BY protocol, dst_port
-        ORDER BY bytes DESC
+        ORDER BY total_bytes DESC
         LIMIT 200
         """,
         {"start": start, "end": end, **extra_params},
@@ -1047,14 +1217,20 @@ async def netflow_ports(
     user: User = Depends(get_current_user),
 ):
     start, end = _resolve_window(hours, from_ts, to_ts)
-    extra_sql, extra_params = _scope(**scope)
+    if _rollup_eligible(start, end, scope):
+        table, flows_expr = ROLLUP_TABLE, "sum(flows)"
+        extra_sql, extra_params = _scope(**scope, table="flow_conversations_1h")
+        start = _floor_hour(start)
+    else:
+        table, flows_expr = "zenplus.flow_records", "count()"
+        extra_sql, extra_params = _scope(**scope)
     res = await _query(
         f"""
-        SELECT protocol, dst_port, sum(bytes) AS bytes, sum(packets) AS packets, count() AS flows
-        FROM zenplus.flow_records
+        SELECT protocol, dst_port, sum(bytes) AS total_bytes, sum(packets) AS total_packets, {flows_expr} AS total_flows
+        FROM {table}
         WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
         GROUP BY protocol, dst_port
-        ORDER BY bytes DESC
+        ORDER BY total_bytes DESC
         LIMIT %(limit)s
         """,
         {"start": start, "end": end, "limit": limit, **extra_params},
@@ -1086,11 +1262,17 @@ async def netflow_applications(
     # Always show all application buckets — pinning to a specific app would collapse
     # the donut to a single slice.
     scope_for_apps = {**scope, "application": None}
-    extra_sql, extra_params = _scope(**scope_for_apps)
+    if _rollup_eligible(start, end, scope_for_apps):
+        table, flows_expr = ROLLUP_TABLE, "sum(flows)"
+        extra_sql, extra_params = _scope(**scope_for_apps, table="flow_conversations_1h")
+        start = _floor_hour(start)
+    else:
+        table, flows_expr = "zenplus.flow_records", "count()"
+        extra_sql, extra_params = _scope(**scope_for_apps)
     res = await _query(
         f"""
-        SELECT dst_port, protocol, sum(bytes) AS bytes, sum(packets) AS packets, count() AS flows
-        FROM zenplus.flow_records
+        SELECT dst_port, protocol, sum(bytes) AS total_bytes, sum(packets) AS total_packets, {flows_expr} AS total_flows
+        FROM {table}
         WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
         GROUP BY dst_port, protocol
         """,
@@ -1121,23 +1303,42 @@ async def netflow_device_status(
     """Synthetic per-collector signals: latency proxy, packet-loss approximation, uptime."""
     start, end = _resolve_window(hours, from_ts, to_ts)
     span_seconds = _window_seconds(start, end)
-    extra_sql, extra_params = _scope(**scope)
-    res = (await _query(
-        f"""
-        SELECT
-            count() AS total_flows,
-            sum(packets) AS total_packets,
-            sum(bytes) AS total_bytes,
-            avg(toUInt64(last_switched_ms - first_switched_ms)) AS avg_duration_ms,
-            countIf(packets = 0) AS empty_flows,
-            countIf(bitAnd(toUInt8(tcp_flags), 4) = 4) AS rst_flows,
-            uniqExact(exporter_ip) AS exporter_count,
-            max(received_at) AS last_seen
-        FROM zenplus.flow_records
-        WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
-        """,
-        {"start": start, "end": end, **extra_params},
-    )).result_rows[0]
+    if _qos_rollup_eligible(start, end, scope):
+        extra_sql, extra_params = _scope(**scope, table="flow_qos_1h")
+        res = (await _query(
+            f"""
+            SELECT
+                sum(flows) AS total_flows,
+                sum(packets) AS total_packets,
+                sum(bytes) AS total_bytes,
+                sum(duration_ms) / sum(flows) AS avg_duration_ms,
+                sum(empty_flows) AS agg_empty_flows,
+                sumIf(flows, bitAnd(toUInt8(tcp_flags), 4) = 4) AS rst_flows,
+                uniqExact(exporter_ip) AS exporter_count,
+                max(received_at) AS last_flow
+            FROM {QOS_ROLLUP_TABLE}
+            WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+            """,
+            {"start": _floor_hour(start), "end": end, **extra_params},
+        )).result_rows[0]
+    else:
+        extra_sql, extra_params = _scope(**scope)
+        res = (await _query(
+            f"""
+            SELECT
+                count() AS total_flows,
+                sum(packets) AS total_packets,
+                sum(bytes) AS total_bytes,
+                avg(toUInt64(last_switched_ms - first_switched_ms)) AS avg_duration_ms,
+                countIf(packets = 0) AS empty_flows,
+                countIf(bitAnd(toUInt8(tcp_flags), 4) = 4) AS rst_flows,
+                uniqExact(exporter_ip) AS exporter_count,
+                max(received_at) AS last_seen
+            FROM zenplus.flow_records
+            WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
+            """,
+            {"start": start, "end": end, **extra_params},
+        )).result_rows[0]
 
     import math
     def _safe_num(v) -> float:
@@ -1449,14 +1650,20 @@ async def netflow_dscp(
     start, end = _resolve_window(hours, from_ts, to_ts)
     # Don't apply the dscp filter to itself, otherwise the chart collapses to one bar.
     scope_for_dscp = {**scope, "dscp_filter": None}
-    extra_sql, extra_params = _scope(**scope_for_dscp)
+    if _qos_rollup_eligible(start, end, scope_for_dscp):
+        table, flows_expr = QOS_ROLLUP_TABLE, "sum(flows)"
+        extra_sql, extra_params = _scope(**scope_for_dscp, table="flow_qos_1h")
+        start = _floor_hour(start)
+    else:
+        table, flows_expr = "zenplus.flow_records", "count()"
+        extra_sql, extra_params = _scope(**scope_for_dscp)
     res = await _query(
         f"""
-        SELECT bitShiftRight(tos, 2) AS dscp, sum(bytes) AS bytes, sum(packets) AS packets, count() AS flows
-        FROM zenplus.flow_records
+        SELECT bitShiftRight(tos, 2) AS dscp, sum(bytes) AS total_bytes, sum(packets) AS total_packets, {flows_expr} AS total_flows
+        FROM {table}
         WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
         GROUP BY dscp
-        ORDER BY bytes DESC
+        ORDER BY total_bytes DESC
         """,
         {"start": start, "end": end, **extra_params},
     )
@@ -1482,19 +1689,27 @@ async def netflow_tcp_flags(
     start, end = _resolve_window(hours, from_ts, to_ts)
     # Don't apply the tcp_flag filter to itself.
     scope_for_flags = {**scope, "tcp_flag": None, "protocol": None}
-    extra_sql, extra_params = _scope(**scope_for_flags)
+    if _qos_rollup_eligible(start, end, scope_for_flags):
+        table, cnt = QOS_ROLLUP_TABLE, "sumIf(flows, {c})"
+        total_expr = "sum(flows)"
+        extra_sql, extra_params = _scope(**scope_for_flags, table="flow_qos_1h")
+        start = _floor_hour(start)
+    else:
+        table, cnt = "zenplus.flow_records", "countIf({c})"
+        total_expr = "count()"
+        extra_sql, extra_params = _scope(**scope_for_flags)
     res = (await _query(
         f"""
         SELECT
-            countIf(bitAnd(tcp_flags, 2) != 0 AND bitAnd(tcp_flags, 16) = 0) AS syn_only,
-            countIf(bitAnd(tcp_flags, 16) != 0 AND bitAnd(tcp_flags, 2) = 0) AS ack_only,
-            countIf(bitAnd(tcp_flags, 4) != 0) AS rst,
-            countIf(bitAnd(tcp_flags, 1) != 0) AS fin,
-            countIf(bitAnd(tcp_flags, 8) != 0) AS psh,
-            countIf(bitAnd(tcp_flags, 32) != 0) AS urg,
-            countIf(tcp_flags = 0) AS no_flags,
-            count() AS total
-        FROM zenplus.flow_records
+            {cnt.format(c="bitAnd(tcp_flags, 2) != 0 AND bitAnd(tcp_flags, 16) = 0")} AS syn_only,
+            {cnt.format(c="bitAnd(tcp_flags, 16) != 0 AND bitAnd(tcp_flags, 2) = 0")} AS ack_only,
+            {cnt.format(c="bitAnd(tcp_flags, 4) != 0")} AS rst,
+            {cnt.format(c="bitAnd(tcp_flags, 1) != 0")} AS fin,
+            {cnt.format(c="bitAnd(tcp_flags, 8) != 0")} AS psh,
+            {cnt.format(c="bitAnd(tcp_flags, 32) != 0")} AS urg,
+            {cnt.format(c="tcp_flags = 0")} AS no_flags,
+            {total_expr} AS total
+        FROM {table}
         WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
           AND protocol = 6
         """,
@@ -1528,7 +1743,13 @@ async def netflow_network_classes(
     start, end = _resolve_window(hours, from_ts, to_ts)
     # Don't filter the breakdown by itself.
     scope_for_nc = {**scope, "net_class": None}
-    extra_sql, extra_params = _scope(**scope_for_nc)
+    if _rollup_eligible(start, end, scope_for_nc):
+        table, flows_expr = ROLLUP_TABLE, "flows"
+        extra_sql, extra_params = _scope(**scope_for_nc, table="flow_conversations_1h")
+        start = _floor_hour(start)
+    else:
+        table, flows_expr = "zenplus.flow_records", "1"
+        extra_sql, extra_params = _scope(**scope_for_nc)
 
     # One numeric multiIf per side, single table scan (the old version scanned
     # twice via UNION ALL and string-converted every address — ~7s on 7 days).
@@ -1545,17 +1766,18 @@ async def netflow_network_classes(
         f"""
         SELECT
             klass,
-            sum(bytes) AS bytes,
-            sum(packets) AS packets,
-            count() AS flows
+            sum(raw_bytes) AS total_bytes,
+            sum(raw_packets) AS total_packets,
+            sum(row_flows) AS total_flows
         FROM (
-            SELECT {_class_expr('src_addr')} AS sk, {_class_expr('dst_addr')} AS dk, bytes, packets
-            FROM zenplus.flow_records
+            SELECT {_class_expr('src_addr')} AS sk, {_class_expr('dst_addr')} AS dk,
+                   bytes AS raw_bytes, packets AS raw_packets, {flows_expr} AS row_flows
+            FROM {table}
             WHERE timestamp BETWEEN %(start)s AND %(end)s{extra_sql}
         )
         ARRAY JOIN [sk, dk] AS klass
         GROUP BY klass
-        ORDER BY bytes DESC
+        ORDER BY total_bytes DESC
         """,
         {"start": start, "end": end, **extra_params},
     )

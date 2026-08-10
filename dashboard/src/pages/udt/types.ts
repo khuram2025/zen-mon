@@ -1,6 +1,29 @@
+// Built-in types plus operator-defined custom groups (free-form slugs).
 export type EndpointType =
   | 'workstation' | 'server' | 'phone' | 'printer' | 'access_point'
   | 'camera' | 'virtual' | 'network' | 'iot' | 'unknown'
+  | (string & {})
+
+export type TypeSource = 'auto' | 'rule' | 'manual'
+
+export interface UdtTypeInfo {
+  type: string
+  builtin: boolean
+  count: number
+}
+
+export interface UdtClassRule {
+  id: string
+  priority: number
+  match_type: string
+  pattern: string
+  set_type: string
+  description: string | null
+  enabled: boolean
+  match_count: number
+  created_at: string
+  updated_at: string
+}
 
 export interface UdtSummary {
   total_endpoints: number
@@ -24,6 +47,7 @@ export interface Endpoint {
   hostname: string | null
   ip: string | null
   endpoint_type: EndpointType
+  type_source?: TypeSource
   is_randomized: boolean
   is_watched: boolean
   authorized: boolean | null

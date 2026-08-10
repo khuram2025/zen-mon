@@ -159,6 +159,9 @@ def create_app() -> FastAPI:
         # a release that shipped a new MSI is downloadable without a manual
         # publish step.
         app.state.agent_package_sync = asyncio.create_task(_sync_agent_packages_once())
+        # NetFlow: backfill/heal the hourly conversation rollup (advisory-locked).
+        from app.services.netflow_rollup import netflow_rollup_loop
+        app.state.netflow_rollup = asyncio.create_task(netflow_rollup_loop())
         # UDT: sessionize/classify/watch/rogue sweep (advisory-locked).
         from app.services.udt_sweeper import udt_sweeper_loop
         app.state.udt_sweeper = asyncio.create_task(udt_sweeper_loop())

@@ -313,7 +313,9 @@ func loadInfraSets(ctx context.Context, tx pgx.Tx) (map[string]bool, map[string]
 			rows.Close()
 			return nil, nil, err
 		}
-		hostnames[h] = true
+		if h != "" {
+			hostnames[h] = true
+		}
 	}
 	rows.Close()
 	if rows.Err() != nil {
@@ -334,6 +336,13 @@ func loadInfraSets(ctx context.Context, tx pgx.Tx) (map[string]bool, map[string]
 		if err := rows.Scan(&m, &id); err != nil {
 			rows.Close()
 			return nil, nil, err
+		}
+		// Loopbacks/SVIs/tunnels report zero or broadcast MACs; treating
+		// those as infrastructure identity makes any LLDP-speaking
+		// endpoint that advertises a zero chassis ID look like a switch,
+		// flagging its access port as an uplink.
+		if m == "00:00:00:00:00:00" || m == "ff:ff:ff:ff:ff:ff" {
+			continue
 		}
 		macs[m] = id
 	}
