@@ -168,6 +168,22 @@ def _callout(message: str, *, accent: str, tint: str) -> str:
   </td></tr>"""
 
 
+def _notice(text_: str) -> str:
+    """A quiet strip under the header for context about the message itself.
+
+    Used to say "this is a test" without dressing it up as alert content — a
+    row in the details table reads as data about the incident, which is exactly
+    the wrong place for a statement that the incident is not real.
+    """
+    if not text_:
+        return ""
+    return f"""  <tr><td style="padding:14px 28px 0;">
+    <div style="background:{_PANEL};border:1px dashed {_BORDER};border-radius:8px;padding:10px 14px;color:{_MUTED};font-size:12px;line-height:1.5;">
+      {_esc(text_)}
+    </div>
+  </td></tr>"""
+
+
 def _metric_block(metric: dict, *, accent: str, tint: str) -> str:
     """The one number the reader is opening the mail for.
 
@@ -322,6 +338,7 @@ def build_alert_email_html(ctx: dict) -> str:
     inner = (
         _header(product, chip_label=status, chip_color=accent)
         + _hero(title, subtitle, icon=icon, accent=accent)
+        + _notice(ctx.get("notice") or "")
         + _callout(message, accent=accent, tint=tint)
         + _metric_block(ctx.get("headline_metric") or {}, accent=accent, tint=tint)
         + _details_panel(detail_pairs, raw_labels=frozenset({"Host"}))

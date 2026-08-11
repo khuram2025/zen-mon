@@ -489,24 +489,22 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
     # Get templates from rule or use defaults
     if is_recovery:
         subject_tpl = rule_dict.get("recovery_email_subject") or "[{severity}] RESOLVED: {rule_name}"
+        # A sentence, not a field dump. This text is placed in the highlighted
+        # callout at the top of the email, above a table that already lists the
+        # rule, severity, device, metric and time — repeating them here is what
+        # made the mail look like a debug log pasted into a template. Rules with
+        # a custom body keep it; only this default changed.
         body_tpl = rule_dict.get("recovery_email_body") or rule_dict.get("email_body") or (
-            "{status_intro}\n\n"
-            "Rule: {rule_name}\nSeverity: {severity}\n"
-            "Device: {hostname} ({ip_address})\nStatus: {status}\n"
-            "Group: {group}\nLocation: {location}\nType: {device_type}\n"
-            "Metric: {metric} {operator} {threshold}\nTime: {timestamp}\n\n"
-            "--\nZenPlus Network Monitoring System"
+            "{hostname} ({ip_address}) has recovered and is now {status}. "
+            "The condition that triggered \"{rule_name}\" ({metric} {operator} {threshold}) "
+            "is no longer met, after {duration}."
         )
         sms_tpl = rule_dict.get("recovery_sms_template") or "[ZenPlus {severity}] {hostname} ({ip_address}) is {status}. RESOLVED: {rule_name}"
     else:
         subject_tpl = rule_dict.get("email_subject") or "[{severity}] {status}: {rule_name}"
         body_tpl = rule_dict.get("email_body") or (
-            "{status_intro}\n\n"
-            "Rule: {rule_name}\nSeverity: {severity}\n"
-            "Device: {hostname} ({ip_address})\nStatus: {status}\n"
-            "Group: {group}\nLocation: {location}\nType: {device_type}\n"
-            "Metric: {metric} {operator} {threshold}\nTime: {timestamp}\n\n"
-            "--\nZenPlus Network Monitoring System"
+            "{hostname} ({ip_address}) is {status}. "
+            "The condition for \"{rule_name}\" was met: {metric} {operator} {threshold}."
         )
         sms_tpl = rule_dict.get("sms_template") or "[ZenPlus {severity}] {hostname} ({ip_address}) is {status}. Rule: {rule_name}"
 
@@ -668,11 +666,48 @@ async def simulate_alert_rule(
                     continue
 
                 recipient_list = [r.strip() for r in recipients.split(",") if r.strip()]
-                msg = MIMEMultipart()
+
+                # Render the same styled email a real alert produces, so what
+                # the operator receives when testing is what their users will
+                # actually get. This used to send the raw template text as a
+                # plain-text part only, which arrived looking like a debug dump
+                # and told them nothing about how the real alert would look.
+                from app.services.email_render import (
+                    build_alert_email_html, build_alert_email_text,
+                )
+                sim_ctx = {
+                    "product_name": "ZenPlus",
+                    "severity": (rule.get("severity") or "warning"),
+                    "resolved": False,
+                    "status": f"TEST · {alert_msg['device_status']}",
+                    "title": rule.get("name") or "Alert rule test",
+                    "hostname": alert_msg["sim_hostname"],
+                    "ip_address": alert_msg["sim_ip"],
+                    "message": alert_msg["email_body"],
+                    # No headline value: a test has no measurement, and showing
+                    # the bare condition ("== 0") in the slot reserved for a
+                    # reading reads as a broken number rather than a threshold.
+                    "notice": "Test notification — this is what the alert will look like when it "
+                              "fires. The device and readings below are sample values; no alert "
+                              "has been raised.",
+                    "details": [
+                        ("Alert rule", rule.get("name")),
+                        ("Condition", " ".join(str(x) for x in (
+                            rule.get("metric"), rule.get("operator"), rule.get("threshold")) if x not in (None, ""))),
+                        ("Sample device", f"{alert_msg['sim_hostname']} ({alert_msg['sim_ip']})"),
+                    ],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                html_body = build_alert_email_html(sim_ctx)
+                text_body = build_alert_email_text(sim_ctx)
+
+                msg = MIMEMultipart("alternative")
                 msg["From"] = f"{gw_cfg.get('from_name', 'ZenPlus')} <{gw_cfg.get('from_email', '')}>"
                 msg["To"] = ", ".join(recipient_list)
-                msg["Subject"] = f"[SIMULATION] {alert_msg['subject']}"
-                msg.attach(MIMEText(f"*** THIS IS A SIMULATION ***\n\n{alert_msg['email_body']}", "plain"))
+                msg["Subject"] = f"[TEST] {alert_msg['subject']}"
+                # Plain part first: last attachment wins in multipart/alternative.
+                msg.attach(MIMEText(text_body, "plain"))
+                msg.attach(MIMEText(html_body, "html"))
 
                 enc = gw_cfg.get("encryption", "tls")
                 if enc == "ssl":
