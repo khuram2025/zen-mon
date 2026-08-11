@@ -168,6 +168,43 @@ def _callout(message: str, *, accent: str, tint: str) -> str:
   </td></tr>"""
 
 
+def _metric_block(metric: dict, *, accent: str, tint: str) -> str:
+    """The one number the reader is opening the mail for.
+
+    An alert mail is read on a phone, in a hurry, often at night. Burying the
+    measured value in a label/value list means the recipient has to parse the
+    whole message to learn how bad it is; showing it once, large, answers that
+    before they have finished reading the subject line.
+    """
+    if not metric:
+        return ""
+    value = metric.get("value")
+    if value in (None, ""):
+        return ""
+    label = _esc(metric.get("label") or "Value")
+    sec_label = metric.get("secondary_label")
+    sec_value = metric.get("secondary_value")
+
+    secondary = ""
+    if sec_value not in (None, ""):
+        secondary = f"""
+        <td align="right" valign="middle" style="padding-left:12px;">
+          <div style="font-size:10px;font-weight:700;letter-spacing:.7px;text-transform:uppercase;color:{_MUTED};">{_esc(sec_label or "")}</div>
+          <div style="margin-top:2px;font-size:17px;font-weight:700;color:{_INK};">{_esc(sec_value)}</div>
+        </td>"""
+
+    return f"""  <tr><td style="padding:16px 28px 0;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{tint};border:1px solid {_BORDER};border-radius:10px;">
+      <tr>
+        <td valign="middle" style="padding:16px 18px;">
+          <div style="font-size:10px;font-weight:700;letter-spacing:.7px;text-transform:uppercase;color:{_MUTED};">{label}</div>
+          <div style="margin-top:3px;font-size:30px;line-height:1.1;font-weight:800;color:{accent};">{_esc(value)}</div>
+        </td>{secondary}
+      </tr>
+    </table>
+  </td></tr>"""
+
+
 def _details_panel(pairs: list, *, raw_labels: frozenset = frozenset()) -> str:
     """Rounded soft panel with LABEL / value rows. Values in ``raw_labels`` rows
     are trusted pre-escaped HTML; everything else is escaped here."""
@@ -260,18 +297,33 @@ def build_alert_email_html(ctx: dict) -> str:
     subtitle_bits.append(_esc(ts))
     subtitle = " &middot; ".join(subtitle_bits)
 
+    # Anything already shown large in the headline block, or in the hero line
+    # under the title, is not repeated in the table — a reader who has to scan
+    # the same number three times stops trusting that the rows differ.
+    headline = ctx.get("headline_metric") or {}
+    shown_above = {
+        str(headline.get("label") or "").strip().lower(),
+        str(headline.get("secondary_label") or "").strip().lower(),
+    } - {""}
+
     detail_pairs = []
     if hostname:
         host_val = hostname + (f" &middot; {ip_address}" if ip_address else "")
         detail_pairs.append(("Host", host_val))
-    detail_pairs += list(ctx.get("details") or [])
-    detail_pairs.append(("Severity", sev_label))
+    for label, value in (ctx.get("details") or []):
+        if str(label).strip().lower() in shown_above:
+            continue
+        detail_pairs.append((label, value))
+    # Severity and time already appear in the status pill and the hero subtitle.
+    if not headline:
+        detail_pairs.append(("Severity", sev_label))
     detail_pairs.append(("Time", ts))
 
     inner = (
         _header(product, chip_label=status, chip_color=accent)
         + _hero(title, subtitle, icon=icon, accent=accent)
         + _callout(message, accent=accent, tint=tint)
+        + _metric_block(ctx.get("headline_metric") or {}, accent=accent, tint=tint)
         + _details_panel(detail_pairs, raw_labels=frozenset({"Host"}))
         + _button(ctx.get("action_url") or "", f"View in {ctx.get('product_name', 'ZenPlus')}", color=accent)
         + _footer(product,

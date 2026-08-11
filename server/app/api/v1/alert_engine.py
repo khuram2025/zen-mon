@@ -62,6 +62,67 @@ class ServiceStatusChangeEvent(BaseModel):
     target: Optional[str] = None
 
 
+async def _dashboard_url(db: AsyncSession, path: str = "/alerts") -> str:
+    """Absolute link back into the dashboard, or "" when it cannot be known.
+
+    Alert notifications run in background loops with no request to read a Host
+    header from, so this uses the same order as the agent installer: APP_BASE_URL
+    from .env, then the company `base_url` system setting. Returning "" simply
+    omits the button rather than emailing a link that goes nowhere.
+    """
+    from app.core.config import get_settings
+    base = (get_settings().APP_BASE_URL or "").strip()
+    if not base:
+        try:
+            row = (await db.execute(
+                text("SELECT value->>'base_url' FROM system_settings WHERE key = 'company'")
+            )).first()
+            base = (row[0] or "").strip() if row else ""
+        except Exception:
+            base = ""
+    if not base:
+        return ""
+    return base.rstrip("/") + path
+
+
+async def _smtp_gateway(db: AsyncSession, gw_id) -> Optional[dict]:
+    """Resolve the SMTP gateway for a channel, honouring the `enabled` column.
+
+    `enabled` is a column on notification_gateways — the Gateways page toggles
+    it and never touches config.enabled — so reading the JSON blob meant a
+    gateway disabled in the UI kept sending alerts.
+    """
+    if gw_id:
+        row = (await db.execute(
+            text("SELECT config, enabled FROM notification_gateways WHERE id = :id"),
+            {"id": gw_id})).first()
+    else:
+        row = (await db.execute(text(
+            "SELECT config, enabled FROM notification_gateways "
+            "WHERE type = 'smtp' AND is_default = true LIMIT 1"))).first()
+    if not row or not row.enabled:
+        return None
+    return dict(row.config)
+
+
+def _clean_details(pairs: list) -> list:
+    """Drop rows the alert had no value for.
+
+    The details panel was previously fed Group/Location/Device type verbatim;
+    on most appliances those are unset, so the panel rendered nearly empty and
+    the mail looked like a bare paragraph.
+    """
+    out = []
+    for label, value in pairs:
+        if value is None:
+            continue
+        text_value = str(value).strip()
+        if not text_value or text_value.lower() in ("none", "n/a", "unknown"):
+            continue
+        out.append((label, text_value))
+    return out
+
+
 def _render(template: str, variables: dict) -> str:
     result = template
     for key, value in variables.items():
@@ -700,13 +761,8 @@ async def evaluate_status_change(
                     if not recipients:
                         continue
 
-                    gw_id = ch.gateway_id or ch_config.get("gateway_id")
-                    if gw_id:
-                        gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})
-                    else:
-                        gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'smtp' AND is_default = true LIMIT 1"))
-                    gw_row = gw_res.first()
-                    if gw_row:
+                    gw_conf = await _smtp_gateway(db, ch.gateway_id or ch_config.get("gateway_id"))
+                    if gw_conf:
                         email_html = build_alert_email_html({
                             "severity": rule.severity or "warning",
                             "resolved": is_recovery,
@@ -715,14 +771,28 @@ async def evaluate_status_change(
                             "hostname": event.hostname,
                             "ip_address": event.ip_address,
                             "message": email_body,
-                            "details": [
+                            # Lead with what actually fired, then the context.
+                            "headline_metric": {
+                                "label": "Round-trip time",
+                                "value": variables.get("rtt"),
+                                "secondary_label": "Packet loss",
+                                "secondary_value": variables.get("packet_loss"),
+                            },
+                            "details": _clean_details([
+                                ("Alert rule", rule.name),
+                                ("Condition", " ".join(str(x) for x in (
+                                    variables.get("metric"), variables.get("operator"),
+                                    variables.get("threshold")) if x)),
+                                ("Round-trip time", variables.get("rtt")),
+                                ("Packet loss", variables.get("packet_loss")),
                                 ("Group", variables.get("group")),
                                 ("Location", variables.get("location")),
                                 ("Device type", variables.get("device_type")),
-                            ],
+                            ]),
+                            "action_url": await _dashboard_url(db, "/alerts"),
                             "timestamp": now.isoformat(),
                         })
-                        await _send_email(dict(gw_row.config), recipients, email_subject,
+                        await _send_email(gw_conf, recipients, email_subject,
                                           email_body, html_body=email_html)
                         notifications_sent += 1
 
@@ -1020,13 +1090,8 @@ async def evaluate_service_status_change(
                     recipients = ch_config.get("recipients", "")
                     if not recipients:
                         continue
-                    gw_id = ch.gateway_id or ch_config.get("gateway_id")
-                    if gw_id:
-                        gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})
-                    else:
-                        gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'smtp' AND is_default = true LIMIT 1"))
-                    gw_row = gw_res.first()
-                    if gw_row:
+                    gw_conf = await _smtp_gateway(db, ch.gateway_id or ch_config.get("gateway_id"))
+                    if gw_conf:
                         email_html = build_alert_email_html({
                             "severity": rule.severity or "warning",
                             "resolved": is_recovery,
@@ -1034,15 +1099,23 @@ async def evaluate_service_status_change(
                             "title": rule.name or "Service alert",
                             "hostname": variables.get("check_name") or variables.get("hostname"),
                             "message": email_body,
-                            "details": [
+                            "headline_metric": {
+                                "label": (variables.get("check_type") or "Check").upper(),
+                                "value": variables.get("status"),
+                                "secondary_label": "Target",
+                                "secondary_value": variables.get("target"),
+                            },
+                            "details": _clean_details([
+                                ("Alert rule", rule.name),
                                 ("Check", variables.get("check_name")),
                                 ("Type", variables.get("check_type")),
                                 ("Target", variables.get("target")),
                                 ("Error", variables.get("error")),
-                            ],
+                            ]),
+                            "action_url": await _dashboard_url(db, "/services"),
                             "timestamp": now.isoformat(),
                         })
-                        await _send_email(dict(gw_row.config), recipients, email_subject,
+                        await _send_email(gw_conf, recipients, email_subject,
                                           email_body, html_body=email_html)
                         notifications_sent += 1
 
