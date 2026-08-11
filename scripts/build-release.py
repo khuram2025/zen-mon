@@ -849,6 +849,17 @@ def build_package(version: str, changelog: str, severity: str,
             "timeout": 300,
         })
 
+    # Security tab (Settings -> General -> Security): install the root-owned
+    # TLS helper, sudoers grant, /etc/zenplus/tls and the staging directory.
+    # Idempotent — safe on every OTA, and required on appliances installed
+    # before the Security tab existed.
+    if (Path(build_dir) / "code" / "scripts" / "setup-security.sh").exists():
+        steps.append({
+            "type": "run_hook",
+            "script": "code/scripts/setup-security.sh",
+            "timeout": 120,
+        })
+
     # Best-effort GeoIP provisioning (Phase 2b). fetch-geoip.py always exits 0
     # and skips when the current month's DB is already present, so a download
     # failure (no route to db-ip.com) never fails or delays the OTA update.

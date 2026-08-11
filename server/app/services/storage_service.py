@@ -568,6 +568,10 @@ CONFIG_BACKUP_PATHS = [
     "/opt/zenplus/.env",
     "/opt/zenplus/poller/config.yaml",
     "/etc/nginx/sites-available/zenplus",
+    "/etc/nginx/conf.d/zenplus.conf",
+    "/etc/zenplus/tls/server.crt",
+    "/etc/zenplus/tls/chain.crt",
+    "/etc/zenplus/tls/state.json",
 ]
 CONFIG_BACKUP_GLOBS = [
     "/etc/systemd/system/zenplus-*.service",
