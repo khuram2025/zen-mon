@@ -1360,13 +1360,21 @@ function LinkAlertsSection({
   onEdit: (rule: AlertRule) => void
 }) {
   const qc = useQueryClient()
-  const { data, isLoading } = useQuery<{ data: AlertRule[] }>({
+  // Must return a bare array: this cache key is shared with AlertRulesPage and
+  // RoutingTab, which map over it directly. Caching the raw {data: [...]}
+  // envelope here meant that visiting Link Utilization first left an object
+  // under the key, and Alert Rules then died on "(rules || []).map is not a
+  // function". Every reader of ['alert-rules'] normalises the same way.
+  const { data, isLoading } = useQuery<AlertRule[]>({
     queryKey: ['alert-rules'],
-    queryFn: async () => (await api.get('/alert-rules')).data,
+    queryFn: async () => {
+      const r = (await api.get('/alert-rules')).data
+      return Array.isArray(r) ? r : r?.data || []
+    },
   })
 
   const rules = useMemo(
-    () => (data?.data || []).filter((r) => ruleMatchesLink(r, link)),
+    () => (data || []).filter((r) => ruleMatchesLink(r, link)),
     [data, link],
   )
 
