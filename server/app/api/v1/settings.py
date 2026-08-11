@@ -646,6 +646,22 @@ async def update_gateway(
             set_parts.append(f"{key} = :{key}")
             params[key] = value
 
+    # Mirror `enabled` into the config blob. The column is authoritative, but
+    # older rows and any external reader still look at config.enabled, and the
+    # two silently disagreeing is what made an enabled gateway report itself
+    # disabled. Only touch the key when config is not being rewritten wholesale.
+    if "enabled" in fields and "config" not in fields:
+        # The cast is required: asyncpg sends bare parameters as `unknown`, and
+        # to_jsonb() is polymorphic, so Postgres cannot resolve the overload.
+        set_parts.append(
+            "config = jsonb_set(COALESCE(config, '{}'::jsonb), '{enabled}', "
+            "to_jsonb(CAST(:enabled_flag AS boolean)))")
+        params["enabled_flag"] = bool(fields["enabled"])
+    elif "enabled" in fields and "config" in fields:
+        merged = dict(fields.get("config") or {})
+        merged["enabled"] = bool(fields["enabled"])
+        params["config"] = _json_dumps(merged)
+
     result = await db.execute(
         text(f"UPDATE notification_gateways SET {', '.join(set_parts)} WHERE id = :id "
              "RETURNING id, name, type, config, is_default, enabled, created_at, updated_at"),
@@ -881,11 +897,16 @@ async def test_channel(
             raise HTTPException(status_code=400, detail="SMS channel has no phone numbers configured")
 
         # Find the gateway (linked or default)
+        # As with SMTP below: `enabled` is the column the Gateways page writes.
         gw_id = row.gateway_id or config.get("gateway_id")
         if gw_id:
-            gw_result = await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})
+            gw_result = await db.execute(
+                text("SELECT config, enabled FROM notification_gateways WHERE id = :id"),
+                {"id": gw_id})
         else:
-            gw_result = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'sms' AND is_default = true LIMIT 1"))
+            gw_result = await db.execute(text(
+                "SELECT config, enabled FROM notification_gateways "
+                "WHERE type = 'sms' AND is_default = true LIMIT 1"))
         gw_row = gw_result.first()
 
         if not gw_row:
@@ -893,11 +914,13 @@ async def test_channel(
             gw_config = await _get_system_setting(db, "sms")
             if not gw_config:
                 raise HTTPException(status_code=400, detail="No SMS gateway configured")
+            gw_enabled = bool(gw_config.get("enabled", True))
         else:
             gw_config = gw_row.config
+            gw_enabled = bool(gw_row.enabled)
 
         sms_cfg = SmsConfig(**gw_config)
-        if not sms_cfg.enabled:
+        if not gw_enabled:
             raise HTTPException(status_code=400, detail="SMS gateway is disabled")
 
         if sms_cfg.provider == "custom_http":
@@ -954,23 +977,34 @@ async def test_channel(
         if not recipients:
             raise HTTPException(status_code=400, detail="Email channel has no recipients configured")
 
-        # Find SMTP gateway
+        # Find SMTP gateway. Select `enabled` too: it is a column on
+        # notification_gateways and the Gateways page toggles it there, while
+        # config.enabled is only whatever was in the blob when it was last
+        # saved. Reading the blob made an enabled gateway test as "disabled".
         gw_id = row.gateway_id or config.get("gateway_id")
         if gw_id:
-            gw_result = await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})
+            gw_result = await db.execute(
+                text("SELECT config, enabled FROM notification_gateways WHERE id = :id"),
+                {"id": gw_id})
         else:
-            gw_result = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'smtp' AND is_default = true LIMIT 1"))
+            gw_result = await db.execute(text(
+                "SELECT config, enabled FROM notification_gateways "
+                "WHERE type = 'smtp' AND is_default = true LIMIT 1"))
         gw_row = gw_result.first()
 
         if not gw_row:
             gw_config = await _get_system_setting(db, "smtp")
             if not gw_config:
                 raise HTTPException(status_code=400, detail="No SMTP gateway configured")
+            # Legacy system_settings has no column; absent means enabled, which
+            # is what the sending path assumes too.
+            gw_enabled = bool(gw_config.get("enabled", True))
         else:
             gw_config = gw_row.config
+            gw_enabled = bool(gw_row.enabled)
 
-        smtp_cfg = SmtpConfig(**gw_config)
-        if not smtp_cfg.enabled:
+        smtp_cfg = SmtpConfig(**_normalize_smtp_config(gw_config))
+        if not gw_enabled:
             raise HTTPException(status_code=400, detail="SMTP gateway is disabled")
         if not smtp_cfg.host:
             raise HTTPException(status_code=400, detail="SMTP gateway host not configured")

@@ -117,12 +117,18 @@ async def _resolve_smtp(db: AsyncSession, channel_row) -> dict | None:
     gw_id = channel_row.gateway_id or cfg.get("gateway_id")
     if gw_id:
         gw = (await db.execute(
-            text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id}
+            text("SELECT config, enabled FROM notification_gateways WHERE id = :id"), {"id": gw_id}
         )).first()
     else:
         gw = (await db.execute(
-            text("SELECT config FROM notification_gateways WHERE type='smtp' AND is_default=true LIMIT 1")
+            text("SELECT config, enabled FROM notification_gateways "
+                 "WHERE type='smtp' AND is_default=true LIMIT 1")
         )).first()
+    # The `enabled` column is authoritative — the Gateways page toggles it and
+    # never touches config.enabled, so a gateway disabled in the UI would
+    # otherwise keep sending.
+    if gw is not None and not gw.enabled:
+        return None
     gw_config = gw.config if gw else None
     if not gw_config:
         row = (await db.execute(

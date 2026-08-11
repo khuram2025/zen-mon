@@ -96,12 +96,22 @@ async def _servers(db: AsyncSession) -> dict[str, str]:
 async def _gateway_config(db: AsyncSession, ch, gw_type: str) -> dict | None:
     gw_id = ch.gateway_id or (ch.config or {}).get("gateway_id")
     if gw_id:
-        row = (await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})).first()
+        row = (await db.execute(
+            text("SELECT config, enabled FROM notification_gateways WHERE id = :id"),
+            {"id": gw_id})).first()
     else:
         row = (await db.execute(text(
-            "SELECT config FROM notification_gateways WHERE type = :t AND is_default = true LIMIT 1"
+            "SELECT config, enabled FROM notification_gateways "
+            "WHERE type = :t AND is_default = true LIMIT 1"
         ), {"t": gw_type})).first()
-    return dict(row.config) if row else None
+    if not row:
+        return None
+    # `enabled` is the column the Gateways page writes; config.enabled is only
+    # whatever was in the blob when it was last saved. Honouring the column is
+    # what makes "disable this gateway" actually stop delivery.
+    if not row.enabled:
+        return None
+    return dict(row.config)
 
 
 async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -> int:

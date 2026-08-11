@@ -291,14 +291,16 @@ function useSanState() {
 
 function SelfSignedForm() {
   const qc = useQueryClient()
-  const [cn, setCn] = useState(() => window.location.hostname)
+  // Not `cn` — that is the classname helper imported above, and shadowing it
+  // makes every cn(...) call in this component a TypeError at render time.
+  const [commonName, setCommonName] = useState(() => window.location.hostname)
   const { sanDns, setSanDns, sanIps, setSanIps, parse } = useSanState()
   const [days, setDays] = useState('1095')
   const [keyType, setKeyType] = useState('rsa2048')
 
   const generate = useMutation({
     mutationFn: async () => (await api.post('/system/security/tls/self-signed', {
-      common_name: cn,
+      common_name: commonName,
       san_dns: parse(sanDns),
       san_ips: parse(sanIps),
       days_valid: parseInt(days, 10) || 1095,
@@ -325,7 +327,7 @@ function SelfSignedForm() {
       </p>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <FormField label="Common name (hostname or IP)">
-          <Input value={cn} onChange={(e) => setCn(e.target.value)} required />
+          <Input value={commonName} onChange={(e) => setCommonName(e.target.value)} required />
         </FormField>
         <FormField label="Validity (days)">
           <Input type="number" min={1} max={3650} value={days} onChange={(e) => setDays(e.target.value)} />
@@ -358,7 +360,9 @@ function CsrFlow({ status }: { status: TlsStatus }) {
   const qc = useQueryClient()
   const pending = status.pending_csr
 
-  const [cn, setCn] = useState(() => window.location.hostname)
+  // Not `cn` — that is the classname helper imported above, and shadowing it
+  // makes every cn(...) call in this component a TypeError at render time.
+  const [commonName, setCommonName] = useState(() => window.location.hostname)
   const { sanDns, setSanDns, sanIps, setSanIps, parse } = useSanState()
   const [org, setOrg] = useState('')
   const [ou, setOu] = useState('')
@@ -372,7 +376,7 @@ function CsrFlow({ status }: { status: TlsStatus }) {
 
   const generateCsr = useMutation({
     mutationFn: async () => (await api.post('/system/security/tls/csr', {
-      common_name: cn,
+      common_name: commonName,
       san_dns: parse(sanDns),
       san_ips: parse(sanIps),
       organization: org,
@@ -451,7 +455,7 @@ function CsrFlow({ status }: { status: TlsStatus }) {
         </p>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <FormField label="Common name (FQDN)">
-            <Input value={cn} onChange={(e) => setCn(e.target.value)} required placeholder="zenplus.corp.local" />
+            <Input value={commonName} onChange={(e) => setCommonName(e.target.value)} required placeholder="zenplus.corp.local" />
           </FormField>
           <FormField label="Key type">
             <Select value={keyType} onValueChange={setKeyType}>
