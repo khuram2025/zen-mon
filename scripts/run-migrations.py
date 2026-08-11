@@ -153,11 +153,27 @@ def applied_migrations(cmd: list[str]) -> dict[str, str]:
     return out
 
 
+# Relations, columns, constraints and indexes in one round trip. Columns and
+# constraints matter because several migrations only widen an existing table —
+# they CREATE nothing, so without these a correct database still looks pending
+# and the migration gets re-applied.
 EXISTING_OBJECTS_SQL = """
 SELECT n.nspname || '.' || c.relname
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r', 'v', 'm', 'p', 'f')
-  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast');
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+UNION ALL
+SELECT 'column:' || c.table_name || '.' || c.column_name
+FROM information_schema.columns c
+WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema')
+UNION ALL
+SELECT 'constraint:' || con.conname
+FROM pg_constraint con JOIN pg_namespace n ON n.oid = con.connamespace
+WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+UNION ALL
+SELECT 'index:' || i.indexname
+FROM pg_indexes i
+WHERE i.schemaname NOT IN ('pg_catalog', 'information_schema');
 """
 
 
@@ -174,7 +190,14 @@ def existing_objects(cmd: list[str]) -> set[str]:
     objects: set[str] = set()
     for line in result.stdout.splitlines():
         line = line.strip().lower()
-        if not line or "." not in line or line.startswith("(") or line.startswith("-"):
+        if not line or line.startswith("(") or line.startswith("-"):
+            continue
+        # Tagged entries (column:/constraint:/index:) are stored verbatim; only
+        # bare relation names get the extra unqualified alias.
+        if line.startswith(("column:", "constraint:", "index:")):
+            objects.add(line)
+            continue
+        if "." not in line:
             continue
         objects.add(line)
         objects.add(line.split(".", 1)[1])
@@ -190,12 +213,24 @@ def evidence_of(migration: Migration, present: set[str], sql: str | None = None)
     database what it already has turns an unknowable "has this run?" into an
     answerable one.
     """
-    objects = migration_order.created_objects(
-        migration.path.read_text() if sql is None else sql
-    )
-    if not objects:
+    text = migration.path.read_text() if sql is None else sql
+    objects = migration_order.created_objects(text)
+    columns = migration_order.added_columns(text)
+    indexes = migration_order.created_indexes(text)
+
+    # Constraints are deliberately NOT used as evidence. Nine migrations drop
+    # and recreate alert_rules_metric_check under the same name, each widening
+    # the allowed list, so its presence says nothing about which of them ran —
+    # and a migration that failed midway leaves it dropped entirely, since these
+    # files carry no transaction wrapper. Tables, columns and indexes are
+    # additive and stable, so they are the only trustworthy evidence.
+    if not (objects or columns or indexes):
         return False
-    return all(obj.lower() in present for obj in objects)
+    return (
+        all(obj.lower() in present for obj in objects)
+        and all(f"column:{col}" in present for col in columns)
+        and all(f"index:{idx}" in present for idx in indexes)
+    )
 
 
 def record_migration(cmd: list[str], migration: Migration, duration_ms: int) -> None:

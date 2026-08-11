@@ -80,3 +80,4 @@ b80e67891402a89d78e2b92effd7f4cd013ec9c6aee445af3388dd3dc4d9e9da  migrate-067-ta
 a9a1cbc8bcdfff2059f0c4c893f1eb64ebc3c2f0ca43b2ddbb9fbd7cb74831c3  migrate-070-udt-classification.sql
 c9af7fa814105ae9f114b21bca95ec9eaab1a1e53c3f15056df4624ca807e85d  migrate-071-flow-conversations-rollup-clickhouse.sql
 b02dcaa74bfe12a1c81cdd2c06cfc1f662b18df06d54b2930c658324c685ea3a  migrate-072-flow-qos-rollup-clickhouse.sql
+bd0a6ac7db359c549a54cc673ce738ddb14453ed68cfd1d18f1e3f45657488a1  migrate-073-alert-metric-constraint-canonical.sql

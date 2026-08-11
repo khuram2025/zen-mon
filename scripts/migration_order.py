@@ -205,6 +205,56 @@ def created_objects(sql: str) -> list[str]:
     return objects
 
 
+_ADD_COLUMN_RE = re.compile(
+    r"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?([A-Za-z0-9_.\"`]+)\s+"
+    r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_\"`]+)",
+    re.IGNORECASE,
+)
+_ADD_CONSTRAINT_RE = re.compile(
+    r"\bADD\s+CONSTRAINT\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_\"`]+)",
+    re.IGNORECASE,
+)
+_CREATE_INDEX_RE = re.compile(
+    r"\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?"
+    r"(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_.\"`]+)",
+    re.IGNORECASE,
+)
+
+
+def _clean(name: str) -> str:
+    return name.strip('`"').lower()
+
+
+def added_columns(sql: str) -> set[str]:
+    """``table.column`` for every column a migration adds.
+
+    Some migrations only widen an existing table — no CREATE at all — so
+    created_objects() finds nothing to probe and the migration can never be
+    baselined. Re-running such a migration on an appliance that already has the
+    column is usually harmless, but not when the same file also rebuilds a CHECK
+    constraint that later migrations have since widened: the old, narrower list
+    is then violated by rows the later migrations inserted, and the schema gate
+    fails on a database that is in fact correct.
+    """
+    return {
+        f"{_clean(m.group(1)).split('.')[-1]}.{_clean(m.group(2))}"
+        for m in _ADD_COLUMN_RE.finditer(analyzable(sql))
+    }
+
+
+def added_constraints(sql: str) -> set[str]:
+    """Names of the constraints a migration adds."""
+    return {_clean(m.group(1)) for m in _ADD_CONSTRAINT_RE.finditer(analyzable(sql))}
+
+
+def created_indexes(sql: str) -> set[str]:
+    """Names of the indexes a migration creates."""
+    return {
+        _clean(m.group(1)).split(".")[-1]
+        for m in _CREATE_INDEX_RE.finditer(analyzable(sql))
+    }
+
+
 def temp_tables(sql: str) -> set[str]:
     """Names of the temporary tables a migration creates, lowercased.
 

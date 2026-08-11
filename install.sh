@@ -495,16 +495,31 @@ setup_databases() {
     # Update password in case it changed
     su - postgres -c "psql -c \"ALTER USER zenplus WITH PASSWORD '$DB_PASSWORD'\"" 2>/dev/null
 
-    # Run Postgres migrations only — skip the ClickHouse-targeted ones,
-    # which use MergeTree syntax that psql can't parse.
-    for migration in "$ZENPLUS_HOME"/scripts/init-postgres.sql "$ZENPLUS_HOME"/scripts/seed-devices.sql "$ZENPLUS_HOME"/scripts/migrate-*.sql; do
-        [[ -f "$migration" ]] || continue
-        case "$(basename "$migration")" in
-            *clickhouse*) continue ;;
-        esac
-        info "Running $(basename "$migration")..."
-        su - postgres -c "psql -d zenplus -f '$migration'" 2>/dev/null || true
+    # Base schema first: these two are not migrations and are not tracked.
+    for base in init-postgres.sql seed-devices.sql; do
+        [[ -f "$ZENPLUS_HOME/scripts/$base" ]] || continue
+        info "Running $base..."
+        runuser -u postgres -- psql -q -d zenplus -f "$ZENPLUS_HOME/scripts/$base" >/dev/null 2>&1 || true
     done
+
+    # Migrations go through the tracked runner — the single authoritative path,
+    # the same one the OTA updater uses.
+    #
+    # This used to be a blind `psql -f` loop over migrate-*.sql with errors
+    # discarded, which recorded nothing in the ledger. The tracked runner then
+    # ran a second time over an already-migrated database and re-applied every
+    # migration it could not probe, and the ones that rebuild
+    # alert_rules_metric_check failed against rows the later migrations had just
+    # inserted — leaving a fresh appliance reporting "schema does not match the
+    # installed version" on day one. Applying each migration exactly once, in
+    # lockfile order, cannot produce that.
+    info "Applying migrations via the tracked runner..."
+    if runuser -u postgres -- python3 "$ZENPLUS_HOME/scripts/run-migrations.py" \
+            --scripts-dir "$ZENPLUS_HOME/scripts"; then
+        log "Migrations applied and recorded"
+    else
+        warn "migration runner reported problems — see $ZENPLUS_HOME/.schema-status.json"
+    fi
 
     # Grant permissions
     su - postgres -c "psql -d zenplus -c 'GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO zenplus; GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO zenplus; ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO zenplus; ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO zenplus;'" 2>/dev/null
