@@ -56,7 +56,7 @@ from app.api.v1.settings import _get_system_setting, _upsert_system_setting
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from cryptography.hazmat.primitives.serialization import pkcs12
+from cryptography.hazmat.primitives.serialization import pkcs7, pkcs12
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 router = APIRouter(prefix="/system/security", tags=["Security Settings"])
@@ -514,17 +514,112 @@ def _parse_cert_chain(pem: bytes) -> list[x509.Certificate]:
                             detail="Could not parse PEM certificate data")
 
 
+def _armour_if_bare(text: str) -> bytes:
+    """Add PEM headers to a bare Base-64 body.
+
+    The AD CS web enrolment page shows the issued certificate as Base-64 with
+    no BEGIN/END lines, and operators paste exactly what they see. Wrapping it
+    here is the difference between "it worked" and a parse error they have no
+    way to interpret.
+    """
+    stripped = text.strip()
+    if not stripped or "-----BEGIN" in stripped:
+        return text.encode()
+    body = "".join(stripped.split())
+    if not re.fullmatch(r"[A-Za-z0-9+/=]+", body):
+        return text.encode()
+    lines = "\n".join(body[i:i + 64] for i in range(0, len(body), 64))
+    return f"-----BEGIN CERTIFICATE-----\n{lines}\n-----END CERTIFICATE-----\n".encode()
+
+
+def _load_any_certificates(data: bytes) -> list[x509.Certificate]:
+    """Parse certificates in any format a CA hands out.
+
+    Active Directory Certificate Services offers four download options and
+    operators use all of them: Base-64 X.509 (.cer, PEM), DER-encoded binary
+    X.509 (.cer), and "download certificate chain" which produces PKCS#7
+    (.p7b) in either encoding. Sniffing the container here means the UI can
+    accept whatever the CA produced instead of asking the operator to convert
+    it with openssl first.
+    """
+    if not data or not data.strip():
+        raise HTTPException(status_code=422, detail="The uploaded file is empty")
+
+    if b"-----BEGIN" in data:
+        # PEM-armoured: either raw certificates or a PKCS#7 bundle.
+        try:
+            certs = x509.load_pem_x509_certificates(data)
+            if certs:
+                return certs
+        except ValueError:
+            pass
+        try:
+            certs = pkcs7.load_pem_pkcs7_certificates(data)
+            if certs:
+                return certs
+        except Exception:
+            pass
+    else:
+        # Binary: a bare DER certificate, or a DER PKCS#7 bundle.
+        try:
+            return [x509.load_der_x509_certificate(data)]
+        except Exception:
+            pass
+        try:
+            certs = pkcs7.load_der_pkcs7_certificates(data)
+            if certs:
+                return certs
+        except Exception:
+            pass
+
+    raise HTTPException(
+        status_code=422,
+        detail="Unrecognised certificate file. Expected a .cer/.crt/.pem "
+               "certificate (Base-64 or DER) or a .p7b certificate chain.",
+    )
+
+
+def _split_leaf_and_chain(
+    certs: list[x509.Certificate], key=None
+) -> tuple[x509.Certificate, list[x509.Certificate]]:
+    """Pick the end-entity certificate out of a bundle, chain follows.
+
+    A .p7b from AD CS contains the issued certificate plus every CA above it,
+    in no guaranteed order, so the first element cannot be assumed to be the
+    leaf. Prefer the one matching our private key; otherwise take the one that
+    is not the issuer of any other certificate in the bundle.
+    """
+    if len(certs) == 1:
+        return certs[0], []
+
+    if key is not None:
+        for cert in certs:
+            if _public_keys_match(cert, key):
+                return cert, [c for c in certs if c is not cert]
+
+    issuers = {c.subject for c in certs}
+    leaves = [
+        c for c in certs
+        if c.subject != c.issuer and not any(
+            other is not c and other.issuer == c.subject for other in certs
+        )
+    ]
+    if len(leaves) == 1:
+        return leaves[0], [c for c in certs if c is not leaves[0]]
+    # Ambiguous bundle — fall back to declared order rather than guessing wrong.
+    _ = issuers
+    return certs[0], certs[1:]
+
+
 @router.post("/tls/certificate")
 async def install_certificate(
     upload: CertificateUpload,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_admin_user),
 ):
-    certs = _parse_cert_chain(upload.certificate_pem.encode())
+    certs = _load_any_certificates(_armour_if_bare(upload.certificate_pem))
     if not certs:
         raise HTTPException(status_code=422, detail="No certificate found in upload")
-    # If the leaf came bundled with its chain in one paste, split it apart.
-    cert, inline_chain = certs[0], certs[1:]
 
     if upload.private_key_pem.strip():
         key = _parse_private_key(upload.private_key_pem.encode(), upload.key_passphrase)
@@ -542,6 +637,10 @@ async def install_certificate(
             )
         source = "csr"
 
+    # Split only now: with the key in hand the leaf can be identified even when
+    # the paste contains a whole chain in arbitrary order.
+    cert, inline_chain = _split_leaf_and_chain(certs, key)
+
     if not _public_keys_match(cert, key):
         raise HTTPException(
             status_code=422,
@@ -552,7 +651,7 @@ async def install_certificate(
     chain_parts = [c.public_bytes(serialization.Encoding.PEM) for c in inline_chain]
     if upload.chain_pem.strip():
         chain_parts += [c.public_bytes(serialization.Encoding.PEM)
-                        for c in _parse_cert_chain(upload.chain_pem.encode())]
+                        for c in _load_any_certificates(_armour_if_bare(upload.chain_pem))]
     chain_pem = b"".join(chain_parts) if chain_parts else None
 
     await _install_staged_pair(
@@ -566,6 +665,77 @@ async def install_certificate(
         resource_id=(info or {}).get("subject"), metadata={"source": source},
     )
     return {"status": "installed", "certificate": info}
+
+
+@router.post("/tls/certificate/file")
+async def install_certificate_file(
+    file: UploadFile = File(...),
+    chain_file: Optional[UploadFile] = File(None),
+    key_file: Optional[UploadFile] = File(None),
+    key_passphrase: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_admin_user),
+):
+    """Install a CA-issued certificate from a file.
+
+    This is the normal end of the CSR workflow: the operator downloads the
+    issued certificate from the CA (for AD CS, the "Download certificate" or
+    "Download certificate chain" link) and uploads the file as-is. The private
+    key is the one held from the pending CSR unless a key file is supplied.
+    """
+    data = await file.read()
+    if len(data) > 512 * 1024:
+        raise HTTPException(status_code=422, detail="Certificate file too large")
+    certs = _load_any_certificates(data)
+
+    # Resolve the private key first — it identifies the leaf in a chain bundle.
+    if key_file is not None:
+        key_bytes = await key_file.read()
+        key = _parse_private_key(key_bytes, key_passphrase)
+        source = "uploaded"
+    else:
+        try:
+            with open(_stage_path("pending.key"), "rb") as f:
+                key = serialization.load_pem_private_key(f.read(), password=None)
+        except OSError:
+            raise HTTPException(
+                status_code=422,
+                detail="No pending CSR on this appliance and no key file supplied. "
+                       "Generate a CSR first, or upload the matching private key.",
+            )
+        source = "csr"
+
+    cert, chain = _split_leaf_and_chain(certs, key)
+
+    if not _public_keys_match(cert, key):
+        raise HTTPException(
+            status_code=422,
+            detail="The certificate does not match the private key"
+                   + (" from the pending CSR. Make sure this is the certificate "
+                      "issued for that request." if source == "csr" else "."),
+        )
+
+    if chain_file is not None:
+        extra = await chain_file.read()
+        if extra.strip():
+            chain += _load_any_certificates(extra)
+
+    chain_pem = b"".join(
+        c.public_bytes(serialization.Encoding.PEM) for c in chain) or None
+
+    await _install_staged_pair(
+        cert.public_bytes(serialization.Encoding.PEM), _key_pem(key), chain_pem)
+    if source == "csr":
+        _stage_clear("pending.key", "pending.csr", "pending.json")
+
+    info = _load_installed_cert()
+    await write_audit_log(
+        db, actor=user, action="security.tls.cert_installed", resource_type="certificate",
+        resource_id=(info or {}).get("subject"),
+        metadata={"source": f"{source}_file", "filename": file.filename,
+                  "chain_certs": len(chain)},
+    )
+    return {"status": "installed", "certificate": info, "chain_certificates": len(chain)}
 
 
 @router.post("/tls/pfx")

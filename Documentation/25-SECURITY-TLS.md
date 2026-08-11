@@ -9,7 +9,7 @@ to the controller URL — and harden the TLS posture.
 | Capability | Detail |
 | --- | --- |
 | Self-signed certificate | Generated on-appliance (RSA 2048/4096 or ECDSA P-256), installed and served immediately. Downloadable for distribution to trust stores (browser / AD GPO / agent hosts). |
-| Enterprise CA / AD CS | CSR workflow: the private key never leaves the appliance; the CSR is submitted to the CA (AD CS *Web Server* template), and the issued certificate + chain are pasted back and paired with the kept key. |
+| Enterprise CA / AD CS | CSR workflow: the private key never leaves the appliance; the CSR is submitted to the CA (AD CS *Web Server* template), and the issued certificate is **uploaded as a file or pasted**, then paired with the kept key. |
 | PEM upload | Install an existing certificate + private key (+ optional chain); encrypted keys supported via passphrase. |
 | PFX / P12 upload | Install a PKCS#12 bundle (the standard AD CS / Windows export format), including any bundled chain. |
 | HTTPS enable/disable | nginx serves :443 with the installed certificate. |
@@ -58,8 +58,31 @@ All under `/api/v1/system/security`, admin-only, audit-logged
 - `GET /tls` — status: helper installed, settings, applied state, cert details, pending CSR
 - `PUT /tls/config` — apply `{https_enabled, redirect_http, hsts_enabled, min_tls_version}`
 - `POST /tls/self-signed`, `POST /tls/csr`, `DELETE /tls/csr`
-- `POST /tls/certificate` (PEM; also accepts the CA answer to a pending CSR),
-  `POST /tls/pfx` (multipart), `DELETE /tls/certificate`
+- `POST /tls/certificate` (pasted text; also accepts the CA answer to a pending CSR),
+  `POST /tls/certificate/file` (multipart file upload), `POST /tls/pfx` (multipart),
+  `DELETE /tls/certificate`
+
+## Certificate formats accepted
+
+The CA-issued certificate can be uploaded exactly as the CA produced it. All four
+Active Directory Certificate Services download options work, detected by content
+rather than file extension:
+
+| Format | Typical name | Notes |
+| --- | --- | --- |
+| Base-64 X.509 | `.cer`, `.crt`, `.pem` | PEM armoured |
+| DER binary X.509 | `.cer`, `.der` | Binary — cannot be pasted, must be uploaded |
+| PKCS#7 chain | `.p7b`, `.p7c` | Leaf **and** intermediates; both encodings |
+| PKCS#12 bundle | `.pfx`, `.p12` | Certificate + key together, password protected |
+
+Pasting also tolerates a bare Base-64 body with no `BEGIN`/`END` lines, which is
+what the AD CS web enrolment page displays on screen.
+
+When a `.p7b` chain is uploaded, the end-entity certificate is identified by
+matching it against the held private key (falling back to "the certificate that
+issues nothing else"), so a bundle listing the CA first is handled correctly and
+the intermediates are installed as the chain automatically — no separate chain
+file needed.
 - `GET /tls/certificate/download` — public cert PEM (any authenticated user)
 
 ## Deployment

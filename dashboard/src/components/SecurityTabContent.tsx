@@ -10,6 +10,7 @@ import {
   RefreshCw,
   ShieldCheck,
   Trash2,
+  Upload,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, cn } from '@/lib/utils'
@@ -365,6 +366,9 @@ function CsrFlow({ status }: { status: TlsStatus }) {
   const [keyType, setKeyType] = useState('rsa2048')
   const [signedCert, setSignedCert] = useState('')
   const [chain, setChain] = useState('')
+  const [issuedMode, setIssuedMode] = useState<'file' | 'paste'>('file')
+  const certFileRef = useRef<HTMLInputElement>(null)
+  const chainFileRef = useRef<HTMLInputElement>(null)
 
   const generateCsr = useMutation({
     mutationFn: async () => (await api.post('/system/security/tls/csr', {
@@ -397,6 +401,29 @@ function CsrFlow({ status }: { status: TlsStatus }) {
     onSuccess: () => {
       toast.success('CA-issued certificate installed')
       setSignedCert(''); setChain('')
+      qc.invalidateQueries({ queryKey: ['security', 'tls'] })
+    },
+    onError: (e: any) => toast.error('Install failed', apiErrorMessage(e)),
+  })
+
+  const installFile = useMutation({
+    mutationFn: async () => {
+      const f = certFileRef.current?.files?.[0]
+      if (!f) throw new Error('Select the certificate file issued by your CA')
+      const fd = new FormData()
+      fd.append('file', f)
+      const cf = chainFileRef.current?.files?.[0]
+      if (cf) fd.append('chain_file', cf)
+      return (await api.post('/system/security/tls/certificate/file', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      })).data
+    },
+    onSuccess: (data: any) => {
+      const n = data?.chain_certificates ?? 0
+      toast.success('CA-issued certificate installed',
+        n > 0 ? `${n} chain certificate${n === 1 ? '' : 's'} included` : undefined)
+      if (certFileRef.current) certFileRef.current.value = ''
+      if (chainFileRef.current) chainFileRef.current.value = ''
       qc.invalidateQueries({ queryKey: ['security', 'tls'] })
     },
     onError: (e: any) => toast.error('Install failed', apiErrorMessage(e)),
@@ -490,32 +517,81 @@ function CsrFlow({ status }: { status: TlsStatus }) {
         </Button>
       </div>
       <hr className="border-border" />
-      <form onSubmit={(e) => { e.preventDefault(); installSigned.mutate() }} className="space-y-3">
-        <FormField label="Issued certificate (PEM)">
-          <Textarea
-            value={signedCert}
-            onChange={(e) => setSignedCert(e.target.value)}
-            rows={5}
-            required
-            placeholder="-----BEGIN CERTIFICATE-----"
-            className="font-mono text-xs"
-          />
-        </FormField>
-        <FormField label="CA chain / intermediates (PEM, optional)">
-          <Textarea
-            value={chain}
-            onChange={(e) => setChain(e.target.value)}
-            rows={4}
-            placeholder="-----BEGIN CERTIFICATE-----"
-            className="font-mono text-xs"
-          />
-        </FormField>
-        <Button type="submit" disabled={installSigned.isPending || !signedCert.trim()}>
-          {installSigned.isPending
-            ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> Installing…</>
-            : 'Install issued certificate'}
-        </Button>
-      </form>
+
+      <div>
+        <div className="text-sm font-medium">Step 2 — install the certificate issued by your CA</div>
+        <p className="mt-1 text-xs text-muted">
+          Upload the file exactly as the CA produced it, or paste the certificate text.
+        </p>
+      </div>
+
+      <div className="flex gap-1 rounded-lg bg-surface2/50 p-1 w-fit">
+        {(['file', 'paste'] as const).map((m) => (
+          <button
+            key={m}
+            type="button"
+            onClick={() => setIssuedMode(m)}
+            className={cn(
+              'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+              issuedMode === m ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text',
+            )}
+          >
+            {m === 'file' ? 'Upload file' : 'Paste text'}
+          </button>
+        ))}
+      </div>
+
+      {issuedMode === 'file' ? (
+        <form onSubmit={(e) => { e.preventDefault(); installFile.mutate() }} className="space-y-3">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <FormField label="Issued certificate file">
+              <Input ref={certFileRef} type="file" accept=".cer,.crt,.pem,.der,.p7b,.p7c,application/x-x509-ca-cert,application/pkcs7-mime" required />
+            </FormField>
+            <FormField label="CA chain file (optional)">
+              <Input ref={chainFileRef} type="file" accept=".cer,.crt,.pem,.der,.p7b,.p7c" />
+            </FormField>
+          </div>
+          <p className="text-xs text-muted">
+            Accepts <span className="font-mono">.cer</span> / <span className="font-mono">.crt</span> in
+            either Base-64 or DER encoding, and <span className="font-mono">.p7b</span> certificate
+            chains — all four of the download options Active Directory Certificate Services offers.
+            If you download the full chain, the intermediates are extracted automatically and no
+            separate chain file is needed.
+          </p>
+          <Button type="submit" disabled={installFile.isPending}>
+            {installFile.isPending
+              ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> Installing…</>
+              : <><Upload className="mr-1.5 h-3.5 w-3.5" /> Install issued certificate</>}
+          </Button>
+        </form>
+      ) : (
+        <form onSubmit={(e) => { e.preventDefault(); installSigned.mutate() }} className="space-y-3">
+          <FormField label="Issued certificate">
+            <Textarea
+              value={signedCert}
+              onChange={(e) => setSignedCert(e.target.value)}
+              rows={5}
+              required
+              placeholder="-----BEGIN CERTIFICATE-----"
+              className="font-mono text-xs"
+            />
+          </FormField>
+          <FormField label="CA chain / intermediates (optional)">
+            <Textarea
+              value={chain}
+              onChange={(e) => setChain(e.target.value)}
+              rows={4}
+              placeholder="-----BEGIN CERTIFICATE-----"
+              className="font-mono text-xs"
+            />
+          </FormField>
+          <Button type="submit" disabled={installSigned.isPending || !signedCert.trim()}>
+            {installSigned.isPending
+              ? <><Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> Installing…</>
+              : 'Install issued certificate'}
+          </Button>
+        </form>
+      )}
     </div>
   )
 }
