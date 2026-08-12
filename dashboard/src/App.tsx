@@ -40,8 +40,6 @@ import { WatchListsPage } from '@/pages/udt/WatchListsPage'
 import { ClassificationPage as UdtClassificationPage } from '@/pages/udt/ClassificationPage'
 import { ActivityPage as UdtActivityPage } from '@/pages/udt/ActivityPage'
 import { SettingsPage as UdtSettingsPage } from '@/pages/udt/SettingsPage'
-import { MibLibraryPage } from '@/pages/MibLibraryPage'
-import MonitoringTemplatesPage from '@/pages/MonitoringTemplatesPage'
 import { ManualMapsEntry } from '@/pages/ManualMapsEntry'
 import { ReportsPage } from '@/pages/ReportsPage'
 import { SensorsPage } from '@/pages/SensorsPage'
@@ -83,7 +81,6 @@ const ReportSchedulesPage = lazy(() => import('@/pages/reports/SchedulesPage'))
 function ReportTabFallback() {
   return <div className="py-10 text-center text-sm text-muted">Loading report…</div>
 }
-import { UsersPage } from '@/pages/UsersPage'
 import { ChannelsPage } from '@/pages/ChannelsPage'
 import { GatewaysPage } from '@/pages/GatewaysPage'
 import { CredentialsPage } from '@/pages/CredentialsPage'
@@ -102,7 +99,7 @@ const tabRedirects: Record<string, string> = {
   company: '/settings/general',
   channels: '/channels',
   gateways: '/gateways',
-  users: '/users',
+  users: '/settings/general?tab=users',
   sensors: '/sensors',
   snmp: '/credentials?tab=snmp',
   subscription: '/subscription',
@@ -183,8 +180,8 @@ export default function App() {
         <Route path="netflow/anomalies" element={<NetflowAnomaliesPage />} />
         <Route path="netflow/devices/:ip" element={<NetflowDevicePage />} />
         <Route path="netflow/:section" element={<NetflowSectionPage />} />
-        <Route path="mibs" element={<MibLibraryPage />} />
-        <Route path="templates" element={<MonitoringTemplatesPage />} />
+        <Route path="mibs" element={<Navigate to="/settings/general?tab=mibs" replace />} />
+        <Route path="templates" element={<Navigate to="/settings/general?tab=templates" replace />} />
         <Route path="sensors" element={<SensorsPage />} />
         <Route path="apm" element={<ApmLayout />}>
           <Route index element={<ApmOverviewPage />} />
@@ -219,7 +216,8 @@ export default function App() {
         </Route>
 
         {/* Broken-out settings pages */}
-        <Route path="users" element={<UsersPage />} />
+        {/* Users now lives in Settings → Users & Access */}
+        <Route path="users" element={<Navigate to="/settings/general?tab=users" replace />} />
         <Route path="channels" element={<ChannelsPage />} />
         <Route path="notifications" element={<Navigate to="/channels" replace />} />
         <Route path="gateways" element={<GatewaysPage />} />

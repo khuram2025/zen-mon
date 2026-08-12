@@ -84,16 +84,28 @@ async def _notify(db: AsyncSession, rule, message: str, device: dict | None) -> 
         pass
     try:
         from app.services.host_alert_service import dispatch_to_channels
+        from app.services import alert_phrasing as ap
+        sev = (rule["severity"] or "warning")
+        hostname = (device or {}).get("hostname") or ""
+        # UDT events already describe themselves ("Rogue endpoint: laptop-7
+        # (aa:bb:..) on sw-01 port 12"), so the message is the body. What was
+        # missing is a details table shaped like every other alert's — this used
+        # to hand the renderer a bare string where it expected label/value pairs.
         ctx = {
             "rule_name": rule["name"],
-            "severity": (rule["severity"] or "warning").upper(),
-            "status": "TRIGGERED",
-            "hostname": (device or {}).get("hostname") or "",
+            "severity": sev,
+            "status": "ALERT",
+            "hostname": hostname,
             "ip_address": str((device or {}).get("ip_address") or ""),
-            "message": message,
-            "subject": f"[ZenPlus] {rule['name']}: {message}",
-            "body": message,
-            "details": message,
+            "message": f"ZenPlus {sev.upper()} — {rule['name']}: {message}",
+            "subject": f"[{sev.upper()}] ALERT: {rule['name']}",
+            "body": message if message.endswith(".") else f"{message}.",
+            "details": [
+                ("Alert rule", rule["name"]),
+                ("Condition", ap.condition_label(rule["metric"], rule.get("operator"),
+                                                 rule.get("threshold"))),
+                ("Switch", hostname),
+            ],
             "triggered_at": datetime.now(timezone.utc).isoformat(),
         }
         channels = rule["notify_channels"] or []

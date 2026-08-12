@@ -9,7 +9,7 @@ CRUD validation/authorization.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 import sys
@@ -145,17 +145,22 @@ class _Result:
 class EvalFakeDB:
     """Scripted alert_rules + alerts store for evaluate_apm_rules."""
 
-    def __init__(self, rules, active_alert_id=None):
+    def __init__(self, rules, active_alert_id=None, active_since=None):
         self.rules = rules
         self.active_alert_id = active_alert_id
+        # The evaluator reads when the alert opened so its all-clear can say
+        # how long the service was breaching.
+        self.active_since = active_since or (
+            datetime.now(timezone.utc) - timedelta(minutes=12))
         self.inserted, self.resolved = [], []
 
     async def execute(self, statement, params=None):
         sql = " ".join(str(statement).split())
         if "FROM alert_rules" in sql:
             return _Result(rows=self.rules)
-        if "SELECT id FROM alerts" in sql:
-            row = (self.active_alert_id,) if self.active_alert_id else None
+        if "SELECT id, triggered_at FROM alerts" in sql:
+            row = ((self.active_alert_id, self.active_since)
+                   if self.active_alert_id else None)
             return _Result(row=row)
         if "INSERT INTO alerts" in sql:
             self.inserted.append(params)
@@ -175,7 +180,8 @@ def _rule(metric="apm_latency_p95", operator=">", threshold=800.0, target=None):
     return SimpleNamespace(
         id=uuid4(), name="High p95", metric=metric, operator=operator,
         threshold=threshold, severity="warning", min_duration=0,
-        notify_channels=[], target=target,
+        notify_channels=[], target=target, recovery_alert=True,
+        conditions=None, condition_logic="AND",
         schedule_start=None, schedule_end=None, schedule_days=None,
     )
 

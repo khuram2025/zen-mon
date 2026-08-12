@@ -33,6 +33,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services import alert_phrasing as ap
 from app.services.host_alert_service import dispatch_to_channels
 
 logger = logging.getLogger("zenplus.network_alerts")
@@ -280,14 +281,15 @@ def _iface_label(iface: dict) -> str:
 
 # ─── Alert raise / resolve (device-scoped rows in `alerts`) ──────────────────
 
-async def _active_alert_id(db: AsyncSession, rule_id, device_id: str, if_index):
+async def _active_alert(db: AsyncSession, rule_id, device_id: str, if_index):
+    """The open alert for this rule/device/interface: (id, triggered_at) or None."""
     row = (await db.execute(text(
-        "SELECT id FROM alerts "
+        "SELECT id, triggered_at FROM alerts "
         "WHERE rule_id = :rid AND device_id = :did AND status IN ('active','acknowledged') "
         "  AND COALESCE(metadata->>'if_index','') = :ifx "
         "ORDER BY triggered_at DESC LIMIT 1"
     ), {"rid": str(rule_id), "did": device_id, "ifx": "" if if_index is None else str(if_index)})).first()
-    return row[0] if row else None
+    return (row[0], row[1]) if row else None
 
 
 async def _raise(db: AsyncSession, rule, device_id: str, message: str,
@@ -364,27 +366,57 @@ def _message(rule, hostname: str, detail: str, iface_label: str | None) -> str:
     return f"{rule.name}: {where} — {detail}"
 
 
-async def _notify(db: AsyncSession, rule, hostname: str, message: str) -> None:
+async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
+                  iface_label: str | None = None, is_recovery: bool = False,
+                  duration: str = "") -> None:
+    """Send one metric alert — or its all-clear — to the rule's channels."""
     # Quiet hours: the alert row is already recorded; only the outbound
-    # notification is gated by the rule's schedule window.
+    # notification is gated by the rule's schedule window. A recovery notice is
+    # never suppressed, or an operator is left believing it is still breached.
     from app.services.alert_schedule import notifications_allowed, get_configured_timezone
     tz = await get_configured_timezone(db)
-    if not notifications_allowed(
+    if not is_recovery and not notifications_allowed(
         getattr(rule, "schedule_start", None), getattr(rule, "schedule_end", None),
         getattr(rule, "schedule_days", None), tz,
     ):
         return
     sev = (rule.severity or "warning")
+    # An interface rule is about the port, not the chassis, so the sentence
+    # names "core-router-01 / port14" and the details table repeats it.
+    where = f"{hostname} / {iface_label}" if iface_label else hostname
+    v = ap.rule_phrasing(rule, hostname=where, is_recovery=is_recovery,
+                         reading=reading, duration=duration)
+    v.update({"rule_name": rule.name or "Alert", "hostname": where,
+              "severity": sev.upper(),
+              "status": "RESOLVED" if is_recovery else "ALERT"})
+    body = _render(ap.DEFAULT_RECOVERY_EMAIL_BODY if is_recovery else ap.DEFAULT_EMAIL_BODY, v)
+    sms = _render(ap.DEFAULT_RECOVERY_SMS if is_recovery else ap.DEFAULT_SMS, v)
+    subject = _render(ap.DEFAULT_RECOVERY_EMAIL_SUBJECT if is_recovery
+                      else ap.DEFAULT_EMAIL_SUBJECT, v)
     await dispatch_to_channels(db, rule.notify_channels or [], {
-        "subject": f"[{sev.upper()}] {rule.name} — {hostname}",
-        "body": message, "message": message,
+        "subject": subject,
+        "body": body, "message": sms,
         "hostname": hostname, "ip_address": "",
-        "status": "ALERT", "severity": sev,
-        "details": [("Metric", rule.metric),
-                    ("Threshold", f"{rule.operator} {rule.threshold}")],
+        "status": "RESOLVED" if is_recovery else "ALERT", "severity": sev,
+        "resolved": is_recovery,
+        "rule_name": rule.name,
+        "headline_metric": {
+            "label": ap.metric_noun(rule.metric), "value": reading,
+            "secondary_label": "Threshold", "secondary_value": v.get("threshold_value"),
+        } if reading else None,
+        "details": [("Alert rule", rule.name),
+                    ("Interface", iface_label),
+                    ("Condition", v.get("condition_label")),
+                    ("Active for", duration if is_recovery else None)],
         "triggered_at": datetime.now(timezone.utc).isoformat(),
-        "rule_id": str(rule.id), "rule_name": rule.name,
+        "rule_id": str(rule.id),
     })
+
+
+def _render(template: str, variables: dict) -> str:
+    for key, value in variables.items():
+        template = template.replace(f"{{{key}}}", str(value))
+    return template
 
 
 # ─── Main evaluation pass ────────────────────────────────────────────────────
@@ -394,6 +426,7 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
     rules = (await db.execute(text(
         f"SELECT id, name, metric, operator, threshold, severity, min_duration, "
         f"notify_channels, device_id, group_id, device_type, location, target, "
+        f"recovery_alert, conditions, condition_logic, "
         f"schedule_start, schedule_end, schedule_days "
         f"FROM alert_rules WHERE enabled = true "
         f"AND (metric IN ({metric_list}) OR metric LIKE 'tpl\\_%')"
@@ -482,7 +515,8 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
                  breach, value, detail, extra, raised, resolved,
                  silences: set[tuple[str, str]] | None = None):
     """Raise (if breaching and not already open) or resolve one rule/device/iface."""
-    existing = await _active_alert_id(db, rule.id, device_id, if_index)
+    existing = await _active_alert(db, rule.id, device_id, if_index)
+    reading = ap.format_value(rule.metric, value)
     if breach:
         # An active snooze suppresses re-raising this exact condition; the
         # resolve branch below still runs so a snoozed condition that clears
@@ -495,10 +529,17 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
             if await _raise(db, rule, device_id, msg, value, if_index, extra):
                 raised += 1
                 await db.commit()
-                await _notify(db, rule, hostname, msg)
+                await _notify(db, rule, hostname, reading=reading, iface_label=iface_label)
     else:
         if existing is not None:
-            resolved += await _resolve(db, existing)
+            alert_id, started_at = existing
+            resolved += await _resolve(db, alert_id)
+            await db.commit()
+            # Metric rules used to close silently, so whoever got the 2am page
+            # never learned it had cleared — let alone after how long.
+            if getattr(rule, "recovery_alert", True):
+                await _notify(db, rule, hostname, reading=reading, iface_label=iface_label,
+                              is_recovery=True, duration=ap.duration_between(started_at))
     return raised, resolved
 
 

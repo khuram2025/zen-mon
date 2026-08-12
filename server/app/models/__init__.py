@@ -1,4 +1,5 @@
 from app.models.user import User
+from app.models.role import Role
 from app.models.device import Device, DeviceGroup
 from app.models.device_profile import DeviceProfile
 from app.models.device_interface import DeviceInterface

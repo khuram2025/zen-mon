@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services import alert_phrasing as ap
 from app.services.server_health_service import create_server_alert, resolve_server_alerts
 from app.services.filesystem_monitoring import pg_capacity_filter
 
@@ -132,18 +133,25 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
                 gw = await _gateway_config(db, ch, "smtp")
                 if rcpt and gw:
                     from app.services.email_render import build_alert_email_html
-                    html_body = build_alert_email_html({
+                    from app.api.v1.alert_engine import _clean_details
+                    mail_ctx = {
                         "severity": ctx.get("severity"),
                         "status": ctx.get("status"),
-                        "resolved": (ctx.get("status") == "RESOLVED"),
+                        "resolved": bool(ctx.get("resolved")) or (ctx.get("status") == "RESOLVED"),
                         "title": ctx.get("rule_name"),
                         "hostname": ctx.get("hostname"),
                         "ip_address": ctx.get("ip_address"),
-                        "message": ctx.get("message") or ctx.get("body"),
-                        "details": ctx.get("details"),
+                        # `body` is the prose written for mail; `message` is the
+                        # SMS line. Reading them the wrong way round put a 140-
+                        # character telegram in the callout of a full-width mail.
+                        "message": ctx.get("body") or ctx.get("message"),
+                        "details": _clean_details(ctx.get("details") or []),
+                        "headline_metric": ctx.get("headline_metric") or {},
+                        "action_url": ctx.get("action_url") or "",
                         "timestamp": ctx.get("triggered_at"),
-                    })
-                    await _send_email(gw, rcpt, ctx["subject"], ctx["body"], html_body=html_body)
+                    }
+                    await _send_email(gw, rcpt, ctx["subject"], mail_ctx["message"],
+                                      html_body=build_alert_email_html(mail_ctx))
                     sent += 1
             elif ch.type == "sms":
                 phones = cfg.get("phone_numbers", "")
@@ -208,10 +216,60 @@ def _message(rule, hostname: str, detail: str) -> str:
     return f"{rule.name}: {hostname} — {detail}"
 
 
+def _render(template: str, variables: dict) -> str:
+    for key, value in variables.items():
+        template = template.replace(f"{{{key}}}", str(value))
+    return template
+
+
+async def _open_alert_started(db: AsyncSession, server_id: str, dedupe: str):
+    """When the open alert with this dedupe key was raised, or None."""
+    return (await db.execute(text(
+        """SELECT MIN(triggered_at) FROM alerts
+           WHERE server_id = :sid AND status IN ('active', 'acknowledged')
+             AND metadata->>'dedupe' = :dedupe"""
+    ), {"sid": server_id, "dedupe": dedupe})).scalar()
+
+
+async def _notify_rule(db: AsyncSession, rule, hostname: str, *, reading: str = "",
+                       detail: str = "", is_recovery: bool = False,
+                       duration: str = "") -> None:
+    """Send a host metric alert, or its all-clear, in the shared house style."""
+    sev = rule.severity or "warning"
+    v = ap.rule_phrasing(rule, hostname=hostname, is_recovery=is_recovery,
+                         reading=reading, duration=duration)
+    v.update({"rule_name": rule.name or "Alert", "hostname": hostname,
+              "ip_address": "", "severity": sev.upper(),
+              "status": "RESOLVED" if is_recovery else "ALERT"})
+    await dispatch_to_channels(db, rule.notify_channels or [], {
+        "subject": _render(ap.DEFAULT_RECOVERY_EMAIL_SUBJECT if is_recovery
+                           else ap.DEFAULT_EMAIL_SUBJECT, v),
+        "body": _render(ap.DEFAULT_RECOVERY_EMAIL_BODY if is_recovery
+                        else ap.DEFAULT_EMAIL_BODY, v),
+        "message": _render(ap.DEFAULT_RECOVERY_SMS if is_recovery else ap.DEFAULT_SMS, v),
+        "hostname": hostname, "ip_address": "",
+        "status": "RESOLVED" if is_recovery else "ALERT",
+        "severity": sev, "resolved": is_recovery,
+        "headline_metric": {
+            "label": ap.metric_noun(rule.metric), "value": reading,
+            "secondary_label": "Threshold", "secondary_value": v.get("threshold_value"),
+        } if reading else None,
+        "details": [("Alert rule", rule.name),
+                    ("Condition", v.get("condition_label")),
+                    # `detail` carries what the evaluator measured — which
+                    # filesystem, which service — and nothing else knows it.
+                    ("Measured", detail),
+                    ("Active for", duration if is_recovery else None)],
+        "triggered_at": datetime.now(timezone.utc).isoformat(),
+        "rule_id": str(rule.id), "rule_name": rule.name,
+    })
+
+
 async def evaluate_host_rules(db: AsyncSession) -> dict[str, int]:
     rules = (await db.execute(text(
         "SELECT id, name, metric, operator, threshold, severity, min_duration, "
-        "notify_channels, server_id, target, schedule_start, schedule_end, schedule_days "
+        "notify_channels, server_id, target, recovery_alert, conditions, condition_logic, "
+        "schedule_start, schedule_end, schedule_days "
         "FROM alert_rules WHERE enabled = true AND metric LIKE 'host\\_%'"
     ))).all()
     if not rules:
@@ -239,6 +297,7 @@ async def evaluate_host_rules(db: AsyncSession) -> dict[str, int]:
                 continue
             breach, value, detail = res
             dedupe = f"rule:{rule.id}"
+            reading = ap.format_value(rule.metric, value)
             if breach:
                 created = await create_server_alert(
                     db, sid, severity=rule.severity or "warning",
@@ -257,18 +316,18 @@ async def evaluate_host_rules(db: AsyncSession) -> dict[str, int]:
                         getattr(rule, "schedule_days", None), _tz,
                     ):
                         continue
-                    msg = _message(rule, hostname, detail)
-                    await dispatch_to_channels(db, rule.notify_channels or [], {
-                        "subject": f"[{(rule.severity or 'warning').upper()}] {rule.name} — {hostname}",
-                        "body": msg, "message": msg,
-                        "hostname": hostname, "ip_address": "",
-                        "status": "ALERT", "severity": rule.severity or "warning",
-                        "triggered_at": datetime.now(timezone.utc).isoformat(),
-                        "rule_id": str(rule.id), "rule_name": rule.name,
-                    })
+                    await _notify_rule(db, rule, hostname, reading=reading, detail=detail)
             else:
+                # Read when it started before closing it, so the all-clear can
+                # say how long the host sat over the threshold.
+                started_at = await _open_alert_started(db, sid, dedupe)
                 n = await resolve_server_alerts(db, sid, dedupe)
                 resolved += n
+                if n and getattr(rule, "recovery_alert", True):
+                    await db.commit()
+                    await _notify_rule(db, rule, hostname, reading=reading, detail=detail,
+                                       is_recovery=True,
+                                       duration=ap.duration_between(started_at))
         await db.commit()
 
     if raised or resolved:

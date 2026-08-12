@@ -106,6 +106,7 @@ export interface User {
   full_name: string | null
   role: string
   is_active?: boolean
+  auth_source?: 'local' | 'ldap' | 'radius'
   last_login: string | null
   created_at?: string
   updated_at?: string
@@ -114,9 +115,17 @@ export interface User {
 export interface Role {
   id: string
   name: string
+  display_name: string
   description: string
   permissions: string[]
+  is_system: boolean
   user_count: number
+}
+
+export interface PermissionCatalogModule {
+  module: string
+  label: string
+  permissions: { id: string; label: string; description: string }[]
 }
 
 export interface SubscriptionInfo {

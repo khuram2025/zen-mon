@@ -128,11 +128,29 @@ const APM_METRICS = [
   { value: 'apm_apdex', label: 'Apdex (0–1)' },
 ] as const
 
+// Ordered by how often a template needs them. The phrasing variables at the
+// top render finished English ("Interface utilisation on core-router-01 rose
+// above 80%"); the raw ones below are the rule's stored values.
 const TEMPLATE_VARS = [
+  '{event_sentence}', '{condition}', '{condition_sentence}', '{reading}',
+  '{duration}', '{duration_sentence}', '{duration_suffix}',
   '{hostname}', '{ip_address}', '{status}', '{severity}', '{rule_name}',
-  '{group}', '{location}', '{device_type}', '{metric}', '{operator}',
-  '{threshold}', '{timestamp}', '{duration}', '{rtt}', '{packet_loss}', '{status_intro}',
+  '{group}', '{location}', '{device_type}', '{timestamp}',
+  '{metric_label}', '{threshold_value}', '{metric}', '{operator}', '{threshold}',
+  '{rtt}', '{packet_loss}',
 ]
+
+// Mirrors the defaults in server/app/services/alert_phrasing.py. Shown as
+// placeholders only — an empty field is stored as NULL and rendered by the
+// server, so these never go stale in the database.
+const DEFAULTS = {
+  email_subject: '[{severity}] {status}: {rule_name}',
+  email_body: '{event_sentence}',
+  sms_template: 'ZenPlus {severity} — {rule_name}: {event_sentence}',
+  recovery_email_subject: '[{severity}] Resolved: {rule_name}',
+  recovery_email_body: '{event_sentence}{duration_sentence}',
+  recovery_sms_template: 'ZenPlus resolved — {rule_name}: {event_sentence}{duration_suffix}',
+}
 
 const DEFAULT_STATE: WizardState = {
   name: '',
@@ -160,13 +178,16 @@ const DEFAULT_STATE: WizardState = {
   schedule_start: '',
   schedule_end: '',
   schedule_days: [],
-  email_subject: '[{severity}] {status}: {rule_name}',
-  email_body:
-    '{status_intro}\n\nRule: {rule_name}\nSeverity: {severity}\nDevice: {hostname} ({ip_address})\nStatus: {status}\nMetric: {metric} {operator} {threshold}\nTime: {timestamp}\n\n--\nZenPlus Network Monitoring',
-  sms_template: '[ZenPlus {severity}] {hostname} ({ip_address}) is {status}. Rule: {rule_name}',
-  recovery_email_subject: '[{severity}] RESOLVED: {rule_name}',
+  // Blank means "use the built-in default", which the server writes in the
+  // house style and keeps in step with the recovery/duration phrasing. Seeding
+  // these with a field dump baked a copy of it onto every rule ever created,
+  // and a stored template never picks up later improvements.
+  email_subject: '',
+  email_body: '',
+  sms_template: '',
+  recovery_email_subject: '',
   recovery_email_body: '',
-  recovery_sms_template: '[ZenPlus {severity}] {hostname} ({ip_address}) RECOVERED. Rule: {rule_name}',
+  recovery_sms_template: '',
 }
 
 function ruleToState(rule: any): WizardState {
@@ -212,12 +233,12 @@ function ruleToState(rule: any): WizardState {
     schedule_start: rule.schedule_start || '',
     schedule_end: rule.schedule_end || '',
     schedule_days: Array.isArray(rule.schedule_days) ? rule.schedule_days : [],
-    email_subject: rule.email_subject || DEFAULT_STATE.email_subject,
-    email_body: rule.email_body || DEFAULT_STATE.email_body,
-    sms_template: rule.sms_template || DEFAULT_STATE.sms_template,
+    email_subject: rule.email_subject || '',
+    email_body: rule.email_body || '',
+    sms_template: rule.sms_template || '',
     recovery_email_subject: rule.recovery_email_subject || DEFAULT_STATE.recovery_email_subject,
     recovery_email_body: rule.recovery_email_body || '',
-    recovery_sms_template: rule.recovery_sms_template || DEFAULT_STATE.recovery_sms_template,
+    recovery_sms_template: rule.recovery_sms_template || '',
   }
 }
 
@@ -414,8 +435,8 @@ export function AlertRuleWizardDialog({
     setS((st) => ({
       ...st,
       recovery_email_subject: st.recovery_email_subject || `RESOLVED: ${st.email_subject}`,
-      recovery_email_body: st.recovery_email_body || st.email_body.replace('{status_intro}', 'Device has recovered.'),
-      recovery_sms_template: st.recovery_sms_template || st.sms_template.replace('is {status}', 'RECOVERED'),
+      recovery_email_body: st.recovery_email_body || st.email_body,
+      recovery_sms_template: st.recovery_sms_template || st.sms_template,
     }))
     toast.success('Trigger templates copied to reset actions')
   }
@@ -843,14 +864,19 @@ export function AlertRuleWizardDialog({
                   </FormField>
                 </div>
                 <TemplateVars />
+                <p className="text-[11px] text-muted">
+                  Leave a field empty to use the built-in wording, which names the metric and
+                  threshold in plain English. Open <span className="text-text">Preview message</span> on
+                  the rule to see exactly what is sent.
+                </p>
                 <FormField label="Email subject">
-                  <Input value={s.email_subject} onChange={(e) => setS({ ...s, email_subject: e.target.value })} className="font-mono text-xs" />
+                  <Input value={s.email_subject} onChange={(e) => setS({ ...s, email_subject: e.target.value })} className="font-mono text-xs" placeholder={DEFAULTS.email_subject} />
                 </FormField>
                 <FormField label="Email body">
-                  <Textarea value={s.email_body} onChange={(e) => setS({ ...s, email_body: e.target.value })} rows={5} className="font-mono text-xs" />
+                  <Textarea value={s.email_body} onChange={(e) => setS({ ...s, email_body: e.target.value })} rows={5} className="font-mono text-xs" placeholder={DEFAULTS.email_body} />
                 </FormField>
                 <FormField label="SMS template">
-                  <Textarea value={s.sms_template} onChange={(e) => setS({ ...s, sms_template: e.target.value })} rows={2} className="font-mono text-xs" />
+                  <Textarea value={s.sms_template} onChange={(e) => setS({ ...s, sms_template: e.target.value })} rows={2} className="font-mono text-xs" placeholder={DEFAULTS.sms_template} />
                 </FormField>
               </div>
             )}
@@ -869,14 +895,19 @@ export function AlertRuleWizardDialog({
                   </p>
                 ) : (
                   <>
+                    <p className="text-[11px] text-muted">
+                      The built-in reset wording states how long the condition was active
+                      &mdash; <span className="text-text">{'{duration_sentence}'}</span> renders as
+                      &ldquo;The condition was active for 12 minutes.&rdquo;
+                    </p>
                     <FormField label="Recovery email subject">
-                      <Input value={s.recovery_email_subject} onChange={(e) => setS({ ...s, recovery_email_subject: e.target.value })} className="font-mono text-xs" />
+                      <Input value={s.recovery_email_subject} onChange={(e) => setS({ ...s, recovery_email_subject: e.target.value })} className="font-mono text-xs" placeholder={DEFAULTS.recovery_email_subject} />
                     </FormField>
                     <FormField label="Recovery email body">
-                      <Textarea value={s.recovery_email_body} onChange={(e) => setS({ ...s, recovery_email_body: e.target.value })} rows={4} className="font-mono text-xs" placeholder="Leave empty for default recovery template" />
+                      <Textarea value={s.recovery_email_body} onChange={(e) => setS({ ...s, recovery_email_body: e.target.value })} rows={4} className="font-mono text-xs" placeholder={DEFAULTS.recovery_email_body} />
                     </FormField>
                     <FormField label="Recovery SMS">
-                      <Textarea value={s.recovery_sms_template} onChange={(e) => setS({ ...s, recovery_sms_template: e.target.value })} rows={2} className="font-mono text-xs" />
+                      <Textarea value={s.recovery_sms_template} onChange={(e) => setS({ ...s, recovery_sms_template: e.target.value })} rows={2} className="font-mono text-xs" placeholder={DEFAULTS.recovery_sms_template} />
                     </FormField>
                   </>
                 )}
@@ -932,16 +963,15 @@ export function AlertRuleWizardDialog({
                   )}
                 </div>
                 {preview && (
-                  <div className="rounded-lg border border-border bg-surface2/40 p-4 text-xs">
-                    <div className="font-semibold text-text">Alert preview</div>
-                    <div className="mt-1 font-mono text-muted">Subject: {preview.alert?.subject}</div>
-                    <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-muted">{preview.alert?.email_body}</pre>
+                  <div className="space-y-3">
+                    <EmailPreviewCard title="Alert email" msg={preview.alert} />
                     {preview.recovery && (
-                      <>
-                        <div className="mt-3 font-semibold text-emerald-600">Recovery preview</div>
-                        <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-muted">{preview.recovery?.email_body}</pre>
-                      </>
+                      <EmailPreviewCard title="Recovery email" msg={preview.recovery} accent />
                     )}
+                    <p className="text-[11px] text-muted">
+                      Sample device and readings. Use the preview button on the alert list to edit
+                      these templates against a live preview.
+                    </p>
                   </div>
                 )}
               </div>
@@ -988,6 +1018,24 @@ function ReviewRow({ label, value }: { label: string; value: ReactNode }) {
     <div className="flex items-start justify-between gap-4 border-b border-border/50 py-2 text-sm">
       <span className="text-muted">{label}</span>
       <span className="max-w-[65%] text-right font-medium">{value}</span>
+    </div>
+  )
+}
+
+function EmailPreviewCard({ title, msg, accent }: { title: string; msg: any; accent?: boolean }) {
+  if (!msg) return null
+  return (
+    <div className="overflow-hidden rounded-lg border border-border">
+      <div className="border-b border-border bg-surface2/40 px-4 py-2.5">
+        <div className={cn('text-xs font-semibold', accent ? 'text-emerald-600' : 'text-text')}>{title}</div>
+        <div className="mt-0.5 break-words text-xs text-muted">Subject: {msg.subject}</div>
+      </div>
+      {/* The real HTML mail, sandboxed — scripts off, no navigation out. */}
+      {msg.email_html ? (
+        <iframe title={title} sandbox="" srcDoc={msg.email_html} className="h-72 w-full bg-white" />
+      ) : (
+        <pre className="max-h-48 overflow-auto whitespace-pre-wrap p-4 text-xs text-muted">{msg.email_body}</pre>
+      )}
     </div>
   )
 }

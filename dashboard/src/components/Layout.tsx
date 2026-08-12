@@ -1,61 +1,29 @@
-import { useState, useEffect, useRef } from 'react'
-import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom'
+import { useState, useEffect, useMemo, useRef } from 'react'
+import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import {
-  Activity,
   AlertCircle,
   AlertTriangle,
   Bell,
-  BellRing,
-  Bot,
   ChevronRight,
   CheckCircle2,
-  ClipboardCheck,
-  CreditCard,
-  FileCode,
-  FileText,
-  HardDrive,
-  Inbox,
   Info,
-  Gauge,
-  HeartPulse,
-  LayoutDashboard,
-  Layers,
-  LayoutTemplate,
-  GitBranch,
-  Boxes,
-  Bug,
   LogOut,
-  Key,
-  Mail,
-  MapPinned,
+  Menu,
   Moon,
-  Network,
-  Pin,
-  PinOff,
-  Radar,
-  Router,
-  ScanSearch,
   Search,
-  Server,
-  BarChart3,
-  Settings as SettingsIcon,
-  ShieldCheck,
-  SlidersHorizontal,
   Sun,
-  Target,
-  Upload,
   User,
-  Users,
-  Workflow,
 } from 'lucide-react'
 import { useAuth } from '@/stores/auth'
 import { useTheme } from '@/stores/theme'
 import { Button } from '@/components/ui/Button'
 import { api } from '@/lib/api'
-import { cn, relativeTime } from '@/lib/utils'
+import { relativeTime } from '@/lib/utils'
 import { UpdateNotificationBell } from '@/components/UpdateNotificationBell'
+import { Sidebar, SIDEBAR_RAIL, SIDEBAR_WIDE } from '@/components/layout/Sidebar'
+import { trailForLocation } from '@/components/layout/navigation'
 
 type HeaderAlert = {
   id: string
@@ -69,227 +37,37 @@ type HeaderAlert = {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Navigation structure                                               */
+/*  Breadcrumbs — derived from the same tree the sidebar renders       */
 /* ------------------------------------------------------------------ */
-
-type NavItem = {
-  to: string
-  label: string
-  icon: React.ComponentType<{ className?: string }>
-  end?: boolean
-}
-
-type NavSection = { label: string; items: NavItem[] }
-
-const sections: NavSection[] = [
-  {
-    label: 'Overview',
-    items: [
-      { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
-    ],
-  },
-  {
-    label: 'Monitoring',
-    items: [
-      { to: '/devices', label: 'Devices', icon: Router },
-      { to: '/link-utilization', label: 'Link Utilization', icon: Gauge },
-      { to: '/availability', label: 'Availability', icon: HeartPulse },
-      { to: '/services', label: 'Services', icon: Activity },
-      { to: '/netflow', label: 'NetFlow', icon: Network },
-      { to: '/discovery', label: 'Discovery', icon: Radar },
-      { to: '/udt', label: 'User Devices', icon: ScanSearch },
-    ],
-  },
-  {
-    label: 'Servers',
-    items: [
-      { to: '/servers', label: 'Dashboard', icon: Gauge, end: true },
-      { to: '/servers/inventory', label: 'Inventory', icon: Server },
-      { to: '/server-agents', label: 'Agent Fleet', icon: Bot },
-      { to: '/agent-policies', label: 'Agent Policies', icon: SlidersHorizontal },
-      { to: '/server-baselines', label: 'Baselines', icon: ClipboardCheck },
-    ],
-  },
-  {
-    label: 'APM',
-    items: [
-      { to: '/apm', label: 'Overview', icon: Layers, end: true },
-      { to: '/apm/services', label: 'Services', icon: Boxes },
-      { to: '/apm/service-map', label: 'Service Map', icon: Network },
-      { to: '/apm/slos', label: 'SLOs', icon: Target },
-      { to: '/apm/synthetics', label: 'Synthetics', icon: Workflow },
-      { to: '/apm/errors', label: 'Errors', icon: Bug },
-      { to: '/apm/traces', label: 'Traces', icon: GitBranch },
-      { to: '/apm/usage', label: 'Usage', icon: BarChart3 },
-      { to: '/apm/settings', label: 'Settings', icon: SlidersHorizontal },
-    ],
-  },
-  {
-    label: 'MAP',
-    items: [
-      { to: '/maps/manual', label: 'Manual Maps', icon: MapPinned },
-    ],
-  },
-  {
-    label: 'Alerting',
-    items: [
-      { to: '/alerts', label: 'Alerts', icon: AlertTriangle },
-      { to: '/alert-rules', label: 'Alert Rules', icon: Bell },
-      { to: '/traps', label: 'Traps', icon: Inbox },
-    ],
-  },
-  {
-    label: 'Configuration',
-    items: [
-      { to: '/channels', label: 'Channels', icon: BellRing },
-      { to: '/gateways', label: 'Gateways', icon: Mail },
-      { to: '/ncm', label: 'Config Backup', icon: FileCode },
-      { to: '/templates', label: 'Monitoring Templates', icon: LayoutTemplate },
-      { to: '/snmp-profiles', label: 'SNMP Credentials', icon: Key },
-      { to: '/windows-credentials', label: 'Windows Credentials', icon: ShieldCheck },
-      { to: '/mibs', label: 'MIB Library', icon: Upload },
-    ],
-  },
-  {
-    label: 'Administration',
-    items: [
-      { to: '/users', label: 'Users', icon: Users },
-      { to: '/settings/general', label: 'Settings', icon: SettingsIcon },
-      { to: '/reports', label: 'Reports', icon: FileText },
-      { to: '/subscription', label: 'Subscription', icon: CreditCard },
-    ],
-  },
-]
-
-/* ------------------------------------------------------------------ */
-/*  Breadcrumbs                                                        */
-/* ------------------------------------------------------------------ */
-
-const routeLabels: Record<string, string> = {
-  '/': 'Monitoring Overview',
-  '/devices': 'Devices',
-  '/link-utilization': 'Link Utilization',
-  '/availability': 'Availability Dashboard',
-  '/servers': 'Server Fleet',
-  '/servers/inventory': 'Server Inventory',
-  '/server-agents': 'Agent Fleet',
-  '/agent-policies': 'Agent Policies',
-  '/server-baselines': 'Baselines',
-  '/services': 'Services',
-  '/apm': 'Overview',
-  '/apm/services': 'Services',
-  '/apm/service-map': 'Service Map',
-  '/apm/slos': 'SLOs',
-  '/apm/synthetics': 'Synthetics',
-  '/apm/errors': 'Errors',
-  '/apm/traces': 'Traces',
-  '/apm/usage': 'Usage',
-  '/apm/settings': 'Settings',
-  '/maps': 'Maps',
-  '/maps/manual': 'Manual Maps',
-  '/netflow': 'NetFlow',
-  '/discovery': 'Discovery',
-  '/udt': 'User Device Tracker',
-  '/udt/ports': 'Switch Ports',
-  '/udt/watch-lists': 'Watch Lists',
-  '/udt/users': 'User Logins',
-  '/udt/activity': 'Activity',
-  '/udt/settings': 'UDT Settings',
-  '/alerts': 'Alerts',
-  '/alert-rules': 'Alert Rules',
-  '/traps': 'Traps',
-  '/channels': 'Channels',
-  '/notifications': 'Channels',
-  '/gateways': 'Gateways',
-  '/ncm': 'Config Backup',
-  '/templates': 'Monitoring Templates',
-  '/snmp-profiles': 'SNMP Credentials',
-  '/windows-credentials': 'Windows Credentials',
-  '/mibs': 'MIB Library',
-  '/users': 'Users',
-  '/settings/general': 'General Settings',
-  '/reports': 'Reports',
-  '/reports/executive': 'Executive',
-  '/reports/technical': 'Technical',
-  '/reports/business': 'Business',
-  '/reports/inventory': 'Inventory',
-  '/reports/apm': 'APM',
-  '/reports/schedules': 'Schedules',
-  '/reports/builder': 'Custom Report',
-  '/subscription': 'Subscription',
-}
-
-const routeSections: Record<string, string> = {
-  '/': 'Overview',
-  '/devices': 'Monitoring',
-  '/availability': 'Monitoring',
-  '/servers': 'Servers',
-  '/servers/inventory': 'Servers',
-  '/server-agents': 'Servers',
-  '/agent-policies': 'Servers',
-  '/server-baselines': 'Servers',
-  '/services': 'Monitoring',
-  '/apm': 'APM',
-  '/apm/services': 'APM',
-  '/apm/service-map': 'APM',
-  '/apm/slos': 'APM',
-  '/apm/synthetics': 'APM',
-  '/apm/errors': 'APM',
-  '/apm/traces': 'APM',
-  '/apm/usage': 'APM',
-  '/apm/settings': 'APM',
-  '/maps': 'MAP',
-  '/maps/manual': 'MAP',
-  '/netflow': 'Monitoring',
-  '/discovery': 'Monitoring',
-  '/udt': 'Monitoring',
-  '/udt/ports': 'Monitoring',
-  '/udt/watch-lists': 'Monitoring',
-  '/udt/users': 'Monitoring',
-  '/udt/activity': 'Monitoring',
-  '/udt/settings': 'Monitoring',
-  '/alerts': 'Alerting',
-  '/alert-rules': 'Alerting',
-  '/traps': 'Alerting',
-  '/channels': 'Configuration',
-  '/notifications': 'Configuration',
-  '/gateways': 'Configuration',
-  '/ncm': 'Configuration',
-  '/templates': 'Configuration',
-  '/snmp-profiles': 'Configuration',
-  '/windows-credentials': 'Configuration',
-  '/mibs': 'Configuration',
-  '/users': 'Administration',
-  '/settings/general': 'Administration',
-  '/reports': 'Administration',
-  '/reports/executive': 'Reports',
-  '/reports/technical': 'Reports',
-  '/reports/business': 'Reports',
-  '/reports/inventory': 'Reports',
-  '/reports/apm': 'Reports',
-  '/reports/schedules': 'Reports',
-  '/reports/builder': 'Reports',
-  '/subscription': 'Administration',
-}
 
 function Breadcrumbs() {
-  const { pathname } = useLocation()
-  const basePath = pathname.replace(/\/[a-f0-9-]{8,}$/, '')
-  const section = routeSections[basePath] || routeSections[pathname] || 'Overview'
-  const page = routeLabels[basePath] || routeLabels[pathname] || pathname.split('/').pop() || ''
-  const isDetail = basePath !== pathname && routeLabels[basePath]
+  const { pathname, search } = useLocation()
+  const params = useMemo(() => new URLSearchParams(search), [search])
+  const trail = trailForLocation(pathname, params)
+
+  if (!trail) {
+    return <span className="text-xs font-medium text-text">{pathname.split('/').pop() || 'ZenPlus'}</span>
+  }
+
+  const leaf = trail.child ?? trail.item
+  // A detail route sits below the deepest nav row that owns it.
+  const isDetail = pathname !== leaf.to.split('?')[0] && !leaf.to.includes('?')
+
+  const crumbs: { label: string; muted: boolean }[] = [
+    { label: trail.group.label, muted: true },
+    ...(trail.child ? [{ label: trail.item.label, muted: true }] : []),
+    { label: leaf.label, muted: isDetail },
+    ...(isDetail ? [{ label: 'Detail', muted: false }] : []),
+  ]
 
   return (
     <div className="flex items-center gap-1.5 text-xs">
-      <span className="text-muted">{section}</span>
-      <ChevronRight className="h-3 w-3 text-muted/40" />
-      <span className={isDetail ? 'text-muted' : 'font-medium text-text'}>{page}</span>
-      {isDetail && (
-        <>
-          <ChevronRight className="h-3 w-3 text-muted/40" />
-          <span className="font-medium text-text">Detail</span>
-        </>
-      )}
+      {crumbs.map((c, i) => (
+        <span key={`${c.label}-${i}`} className="flex items-center gap-1.5">
+          {i > 0 && <ChevronRight className="h-3 w-3 text-muted/40" />}
+          <span className={c.muted ? 'text-muted' : 'font-medium text-text'}>{c.label}</span>
+        </span>
+      ))}
     </div>
   )
 }
@@ -403,112 +181,6 @@ function HeaderAlertCenter() {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Sidebar                                                            */
-/* ------------------------------------------------------------------ */
-
-const W_COLLAPSED = 56
-const W_EXPANDED = 228
-
-function Sidebar({
-  expanded,
-  pinned,
-  onMouseEnter,
-  onMouseLeave,
-  onTogglePin,
-}: {
-  expanded: boolean
-  pinned: boolean
-  onMouseEnter: () => void
-  onMouseLeave: () => void
-  onTogglePin: () => void
-}) {
-  return (
-    <aside
-      onMouseEnter={onMouseEnter}
-      onMouseLeave={onMouseLeave}
-      className="sidebar-transition fixed inset-y-0 left-0 z-30 hidden flex-col border-r border-sidebar-border bg-sidebar-bg md:flex"
-      style={{ width: expanded ? W_EXPANDED : W_COLLAPSED }}
-    >
-      {/* Logo */}
-      <div className="flex h-12 items-center gap-2.5 overflow-hidden border-b border-sidebar-border px-3">
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/15">
-          <LayoutDashboard className="h-[18px] w-[18px] text-primary" />
-        </div>
-        <span
-          className="sidebar-label whitespace-nowrap text-[15px] font-bold tracking-tight text-sidebar-text"
-          style={{ opacity: expanded ? 1 : 0 }}
-        >
-          ZenPlus
-        </span>
-      </div>
-
-      {/* Nav */}
-      <nav className="flex-1 overflow-y-auto overflow-x-hidden py-2">
-        {sections.map((sec) => (
-          <div key={sec.label} className="mb-0.5">
-            <div
-              className="sidebar-label overflow-hidden whitespace-nowrap px-4 py-1"
-              style={{ opacity: expanded ? 1 : 0, height: expanded ? 22 : 0 }}
-            >
-              <span className="text-[10px] font-semibold uppercase tracking-[0.08em] text-sidebar-text-muted">
-                {sec.label}
-              </span>
-            </div>
-
-            {sec.items.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                title={expanded ? undefined : item.label}
-                className={({ isActive }) =>
-                  cn(
-                    'group relative mx-1.5 mb-px flex items-center rounded-md py-[7px] text-[13px] font-medium transition-colors',
-                    expanded ? 'gap-3 px-2.5' : 'justify-center px-0',
-                    isActive
-                      ? 'bg-primary/12 text-primary'
-                      : 'text-sidebar-text/70 hover:bg-sidebar-hover hover:text-sidebar-text',
-                  )
-                }
-              >
-                {({ isActive }) => (
-                  <>
-                    {isActive && (
-                      <div className="absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-primary" />
-                    )}
-                    <item.icon className="h-[18px] w-[18px] shrink-0" />
-                    <span
-                      className="sidebar-label whitespace-nowrap"
-                      style={{ opacity: expanded ? 1 : 0, width: expanded ? 'auto' : 0 }}
-                    >
-                      {item.label}
-                    </span>
-                  </>
-                )}
-              </NavLink>
-            ))}
-          </div>
-        ))}
-      </nav>
-
-      {/* Pin */}
-      <div
-        className="sidebar-label border-t border-sidebar-border p-2"
-        style={{ opacity: expanded ? 1 : 0, height: expanded ? 'auto' : 0, overflow: 'hidden' }}
-      >
-        <button
-          onClick={onTogglePin}
-          className="flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-sidebar-text-muted transition-colors hover:bg-sidebar-hover hover:text-sidebar-text"
-        >
-          {pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
-          <span className="text-xs">{pinned ? 'Unpin sidebar' : 'Pin sidebar'}</span>
-        </button>
-      </div>
-    </aside>
-  )
-}
-
-/* ------------------------------------------------------------------ */
 /*  Layout                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -518,38 +190,51 @@ export function Layout() {
   const navigate = useNavigate()
   const { pathname } = useLocation()
 
-  const [pinned, setPinned] = useState(() => {
-    try { return localStorage.getItem('zp-sidebar-pinned') === 'true' } catch { return false }
+  const [expanded, setExpanded] = useState(() => {
+    try { return localStorage.getItem('zp-sidebar-pinned') !== 'false' } catch { return true }
   })
-  const [hovered, setHovered] = useState(false)
-  const expanded = pinned || hovered
-
   useEffect(() => {
-    localStorage.setItem('zp-sidebar-pinned', String(pinned))
-  }, [pinned])
+    localStorage.setItem('zp-sidebar-pinned', String(expanded))
+  }, [expanded])
+
+  const [drawer, setDrawer] = useState(false)
+  useEffect(() => { setDrawer(false) }, [pathname])
 
   const [userMenu, setUserMenu] = useState(false)
 
   return (
     <div className="flex min-h-screen bg-bg">
-      <Sidebar
-        expanded={expanded}
-        pinned={pinned}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
-        onTogglePin={() => setPinned((p) => !p)}
-      />
+      <Sidebar expanded={expanded} onToggleExpanded={() => setExpanded((v) => !v)} />
+
+      {/* Mobile drawer */}
+      {drawer && (
+        <div className="fixed inset-0 z-50 flex md:hidden">
+          <div className="absolute inset-0 bg-black/60 animate-fade-in" onClick={() => setDrawer(false)} />
+          <div className="relative animate-fade-in">
+            <Sidebar
+              expanded
+              variant="drawer"
+              onToggleExpanded={() => setExpanded((v) => !v)}
+              onNavigate={() => setDrawer(false)}
+            />
+          </div>
+        </div>
+      )}
 
       <div
-        className="content-transition flex min-w-0 flex-1 flex-col"
-        style={{ marginLeft: expanded ? W_EXPANDED : W_COLLAPSED }}
+        className="content-transition flex min-w-0 flex-1 flex-col md:ml-[var(--sidebar-w)]"
+        style={{ ['--sidebar-w' as any]: `${expanded ? SIDEBAR_WIDE : SIDEBAR_RAIL}px` }}
       >
         {/* Header */}
         <header className="sticky top-0 z-20 flex h-11 items-center gap-3 border-b border-border bg-surface/95 px-4 backdrop-blur">
-          <div className="flex items-center gap-2 md:hidden">
-            <LayoutDashboard className="h-5 w-5 text-primary" />
-            <span className="font-semibold">ZenPlus</span>
-          </div>
+          <button
+            type="button"
+            onClick={() => setDrawer(true)}
+            aria-label="Open navigation"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-surface2 hover:text-text md:hidden"
+          >
+            <Menu className="h-4 w-4" />
+          </button>
 
           <div className="hidden md:block">
             <Breadcrumbs />
@@ -558,7 +243,7 @@ export function Layout() {
           <div className="relative ml-auto flex max-w-xs flex-1 items-center">
             <Search className="absolute left-2.5 h-3.5 w-3.5 text-muted" />
             <input
-              placeholder="Search..."
+              placeholder="Search devices..."
               className="h-7 w-full rounded-md border border-border bg-bg pl-8 pr-3 text-xs placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-primary/40"
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
@@ -603,7 +288,7 @@ export function Layout() {
                   <div className="py-1">
                     <button
                       className="flex w-full items-center gap-2.5 px-3 py-1.5 text-sm text-text2 hover:bg-surface2"
-                      onClick={() => { setUserMenu(false); navigate('/settings/general') }}
+                      onClick={() => { setUserMenu(false); navigate('/settings/general?tab=profile') }}
                     >
                       <User className="h-4 w-4" /> Profile & Settings
                     </button>

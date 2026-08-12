@@ -7,7 +7,9 @@ export type User = {
   username: string
   email: string
   full_name?: string
-  role: 'admin' | 'editor' | 'viewer'
+  role: string
+  auth_source?: 'local' | 'ldap' | 'radius'
+  permissions?: string[]
 }
 
 type AuthState = {
@@ -18,6 +20,21 @@ type AuthState = {
   login: (username: string, password: string) => Promise<void>
   logout: () => void
   hydrateUser: () => Promise<void>
+}
+
+/** True when the signed-in user's role grants `permission`.
+ * `system.admin` implies everything. Sessions persisted before RBAC have
+ * no permissions array; treat their legacy admin role as full access. */
+export function hasPermission(user: User | null, permission: string): boolean {
+  if (!user) return false
+  if (!user.permissions) return user.role === 'admin'
+  return user.permissions.includes('system.admin') || user.permissions.includes(permission)
+}
+
+/** Hook: `const can = useCan(); can('users.manage')` */
+export function useCan() {
+  const user = useAuth((s) => s.user)
+  return (permission: string) => hasPermission(user, permission)
 }
 
 export const useAuth = create<AuthState>()(

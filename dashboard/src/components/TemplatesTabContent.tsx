@@ -86,7 +86,7 @@ const typeBadge: Record<string, string> = {
 /*  Page                                                               */
 /* ------------------------------------------------------------------ */
 
-export default function MonitoringTemplatesPage() {
+export function TemplatesTabContent() {
   const qc = useQueryClient()
   const [search, setSearch] = useState('')
   const [detail, setDetail] = useState<Template | null>(null)
@@ -143,11 +143,8 @@ export default function MonitoringTemplatesPage() {
     <div className="space-y-5">
       {/* Header */}
       <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="flex items-center gap-2 text-xl font-bold">
-            <LayoutTemplate className="h-5 w-5 text-primary" /> Monitoring Templates
-          </h1>
-          <p className="mt-1 text-sm text-muted">
+        <div className="max-w-3xl">
+          <p className="text-sm text-muted">
             Vendor-specific SNMP insight packs. Attach a template to a device — or let
             auto-detection do it — to unlock deep monitoring beyond standard ping/CPU/interfaces:
             HA clusters, VPN tunnels, SD-WAN health, managed APs &amp; switches, hardware sensors.

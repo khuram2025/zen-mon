@@ -1100,7 +1100,7 @@ export function DevicesPage() {
                           <Td className="whitespace-nowrap">
                             {d.profile_name ? (
                               <Link
-                                to="/templates"
+                                to="/settings/general?tab=templates"
                                 onClick={(e) => e.stopPropagation()}
                                 className="inline-flex max-w-[150px] items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/20"
                                 title={d.profile_name}

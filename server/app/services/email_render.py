@@ -275,16 +275,22 @@ def build_alert_email_text(ctx: dict) -> str:
     ]
     if ctx.get("message"):
         lines += [str(ctx["message"]), ""]
+
+    rows: list[tuple[str, str]] = []
     if ctx.get("hostname"):
         host = str(ctx["hostname"])
         if ctx.get("ip_address"):
             host += f" ({ctx['ip_address']})"
-        lines.append(f"Host:      {host}")
-    lines.append(f"Severity:  {sev}")
-    for label, value in (ctx.get("details") or []):
-        if value not in (None, ""):
-            lines.append(f"{label + ':':<11}{value}")
-    lines.append(f"Time:      {_fmt_ts(ctx.get('timestamp'))}")
+        rows.append(("Host", host))
+    rows.append(("Severity", sev))
+    rows += [(str(label), str(value)) for label, value in (ctx.get("details") or [])
+             if value not in (None, "")]
+    rows.append(("Time", _fmt_ts(ctx.get("timestamp"))))
+
+    # Size the label column to the widest label actually present; a fixed width
+    # ran "Alert rule:" straight into its value.
+    width = max(len(label) for label, _ in rows) + 2
+    lines += [f"{label + ':':<{width}}{value}" for label, value in rows]
     if ctx.get("action_url"):
         lines += ["", f"View in dashboard: {ctx['action_url']}"]
     lines += ["", f"— {ctx.get('product_name', 'ZenPlus')} automated alert"]

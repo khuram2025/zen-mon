@@ -1,3 +1,4 @@
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
@@ -6,18 +7,72 @@ from passlib.exc import UnknownHashError
 from fastapi import Depends, HTTPException, Query, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.core.permissions import (
+    LEGACY_ROLE_PERMISSIONS,
+    SUPERUSER_PERMISSION,
+    has_permission,
+)
 from app.models.user import User
 
 settings = get_settings()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 security = HTTPBearer()
 
+# Legacy shortcuts, kept as a safety net for appliances whose roles table
+# has not landed yet (mid-update) and for test fixtures with fake users.
 ADMIN_ROLES = {"admin", "owner"}
 OPERATOR_ROLES = {"admin", "owner", "operator"}
+
+# ─────────────────────────────────────────────────────────────────
+# Role → permission resolution. Roles live in the `roles` table
+# (migrate-074); a short-lived cache keeps the per-request cost at
+# zero without letting role edits linger for more than a few seconds.
+# ─────────────────────────────────────────────────────────────────
+
+_ROLE_CACHE: dict[str, tuple[float, list[str]]] = {}
+_ROLE_CACHE_TTL = 15.0
+
+
+def invalidate_role_cache() -> None:
+    _ROLE_CACHE.clear()
+
+
+async def get_role_permissions(db: AsyncSession, role_name: str) -> list[str]:
+    now = time.monotonic()
+    hit = _ROLE_CACHE.get(role_name)
+    if hit and now - hit[0] < _ROLE_CACHE_TTL:
+        return hit[1]
+
+    perms: Optional[list[str]] = None
+    try:
+        row = (await db.execute(
+            text("SELECT permissions FROM roles WHERE name = :name"),
+            {"name": role_name},
+        )).first()
+        if row is not None and isinstance(row[0], list):
+            perms = [p for p in row[0] if isinstance(p, str)]
+    except Exception:
+        # Roles table missing (pre-migration) — recover the session and
+        # fall back to the hardcoded legacy vocabulary.
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+    if perms is None:
+        perms = LEGACY_ROLE_PERMISSIONS.get(role_name, [])
+
+    _ROLE_CACHE[role_name] = (now, perms)
+    return perms
+
+
+async def user_has_permission(db: AsyncSession, user: User, permission: str) -> bool:
+    perms = await get_role_permissions(db, user.role)
+    return has_permission(perms, permission)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -73,22 +128,53 @@ def require_roles(*roles: str):
     return dependency
 
 
-async def require_admin_user(user: User = Depends(get_current_user)) -> User:
-    if user.role not in ADMIN_ROLES:
+def require_permission(*permissions: str):
+    """Pass when the user's role grants any of the given permissions
+    (``system.admin`` always passes)."""
+
+    async def dependency(
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
+    ) -> User:
+        perms = await get_role_permissions(db, user.role)
+        if SUPERUSER_PERMISSION in perms or any(p in perms for p in permissions):
+            return user
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admin access required",
+            detail="Insufficient permissions",
         )
-    return user
+
+    return dependency
 
 
-async def require_operator_user(user: User = Depends(get_current_user)) -> User:
-    if user.role not in OPERATOR_ROLES:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Operator access required",
-        )
-    return user
+async def require_admin_user(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    if user.role in ADMIN_ROLES:
+        return user
+    perms = await get_role_permissions(db, user.role)
+    if SUPERUSER_PERMISSION in perms:
+        return user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Admin access required",
+    )
+
+
+async def require_operator_user(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    if user.role in OPERATOR_ROLES:
+        return user
+    perms = await get_role_permissions(db, user.role)
+    if SUPERUSER_PERMISSION in perms or "devices.manage" in perms:
+        return user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Operator access required",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -119,10 +205,16 @@ async def get_current_user_stream(
     return user
 
 
-async def require_operator_user_stream(user: User = Depends(get_current_user_stream)) -> User:
-    if user.role not in OPERATOR_ROLES:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Operator access required",
-        )
-    return user
+async def require_operator_user_stream(
+    user: User = Depends(get_current_user_stream),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    if user.role in OPERATOR_ROLES:
+        return user
+    perms = await get_role_permissions(db, user.role)
+    if SUPERUSER_PERMISSION in perms or "devices.manage" in perms:
+        return user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Operator access required",
+    )

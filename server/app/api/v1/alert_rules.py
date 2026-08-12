@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
+from app.services import alert_phrasing as ap
 
 router = APIRouter(prefix="/alert-rules", tags=["Alert Rules"])
 
@@ -142,6 +143,23 @@ class AlertRuleUpdate(BaseModel):
     schedule_days: Optional[list[int]] = None
 
     # Message templates
+    email_subject: Optional[str] = None
+    email_body: Optional[str] = None
+    sms_template: Optional[str] = None
+    recovery_email_subject: Optional[str] = None
+    recovery_email_body: Optional[str] = None
+    recovery_sms_template: Optional[str] = None
+
+
+# The six message templates, in the order the editor shows them.
+_TEMPLATE_FIELDS = (
+    "email_subject", "email_body", "sms_template",
+    "recovery_email_subject", "recovery_email_body", "recovery_sms_template",
+)
+
+
+class AlertRulePreview(BaseModel):
+    """Unsaved template edits to render the preview with (all optional)."""
     email_subject: Optional[str] = None
     email_body: Optional[str] = None
     sms_template: Optional[str] = None
@@ -457,8 +475,18 @@ def _render_template(template: str, variables: dict) -> str:
 
 
 def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
-    """Build a preview/simulation alert message from a rule."""
+    """Build a preview/simulation alert message from a rule.
+
+    Uses the same phrasing helpers and the same default templates as the live
+    evaluators, so what an operator approves in the preview dialog is what the
+    recipient gets.
+    """
+    now = datetime.now(timezone.utc)
     trigger = rule_dict.get("trigger_on", "any")
+    metric = rule_dict.get("metric") or "ping_status"
+    operator = rule_dict.get("operator") or "=="
+    threshold = rule_dict.get("threshold", 0)
+
     if is_recovery:
         device_status = "UP"
         status_intro = "The following alert has been resolved:"
@@ -466,47 +494,60 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
         device_status = "DOWN" if trigger == "down" else "DEGRADED" if trigger == "degraded" else "UP" if trigger == "up" else "ALERT"
         status_intro = "An alert has been triggered:"
 
-    # Template variables available to users
+    # Preview against something the rule could plausibly fire on: an APM rule
+    # previewed against "core-router-01" teaches the reader nothing about the
+    # mail their service team will get.
+    if metric.startswith("apm_"):
+        hostname = "checkout-api"
+    elif metric.startswith("host_"):
+        hostname = "app-server-01"
+    elif metric == "service_status" or rule_dict.get("service_check_id"):
+        hostname = "Dashboard HTTPS"
+    else:
+        hostname = "core-router-01"
+    reading = ap.sample_reading(metric, operator, threshold, recovered=is_recovery)
+    # A worked example beats a placeholder: the recovery preview has to show
+    # the "how long was it broken" line, so the sample carries a duration.
+    sample_duration = ap.humanize_duration(3 * 60 + 25) if is_recovery else ""
+
     variables = {
-        "severity": rule_dict.get("severity", "warning").upper(),
+        "severity": (rule_dict.get("severity") or "warning").upper(),
         "rule_name": rule_dict.get("name", "Alert Rule"),
-        "hostname": "core-router-01",
+        "hostname": hostname,
         "ip_address": "10.0.0.1",
         "status": device_status,
         "status_intro": status_intro,
         "device_type": rule_dict.get("device_type") or "router",
         "group": "Core Network",
         "location": rule_dict.get("location") or "DC-1 Rack A1",
-        "metric": rule_dict.get("metric", "ping_status"),
-        "operator": rule_dict.get("operator", "=="),
-        "threshold": str(rule_dict.get("threshold", 0)),
-        "timestamp": "2026-04-02 12:00:00 UTC",
-        "duration": "3m 25s",
+        # "Now" rather than a frozen date: a preview/test mail stamped months in
+        # the past reads as stale data rather than as a sample.
+        "timestamp": now.strftime("%H:%M UTC on %d %b %Y"),
         "rtt": "45.2ms",
         "packet_loss": "15%",
+        "check_name": rule_dict.get("name") or "Service check",
+        "check_type": "HTTP",
+        "target": "https://service.example.com",
+        "error": "" if is_recovery else "connection timed out after 5s",
+        "error_sentence": "" if is_recovery else " Connection timed out after 5s.",
+        **ap.rule_phrasing(rule_dict, hostname=hostname, is_recovery=is_recovery,
+                           reading=reading, duration=sample_duration),
     }
 
-    # Get templates from rule or use defaults
+    # `effective_template` also treats the wizard's old pre-filled templates as
+    # "no template", so a rule created before this wording existed previews
+    # (and sends) the current text rather than the field dump it was seeded with.
     if is_recovery:
-        subject_tpl = rule_dict.get("recovery_email_subject") or "[{severity}] RESOLVED: {rule_name}"
-        # A sentence, not a field dump. This text is placed in the highlighted
-        # callout at the top of the email, above a table that already lists the
-        # rule, severity, device, metric and time — repeating them here is what
-        # made the mail look like a debug log pasted into a template. Rules with
-        # a custom body keep it; only this default changed.
-        body_tpl = rule_dict.get("recovery_email_body") or rule_dict.get("email_body") or (
-            "{hostname} ({ip_address}) has recovered and is now {status}. "
-            "The condition that triggered \"{rule_name}\" ({metric} {operator} {threshold}) "
-            "is no longer met, after {duration}."
-        )
-        sms_tpl = rule_dict.get("recovery_sms_template") or "[ZenPlus {severity}] {hostname} ({ip_address}) is {status}. RESOLVED: {rule_name}"
+        subject_tpl = ap.effective_template(rule_dict.get("recovery_email_subject"),
+                                            ap.DEFAULT_RECOVERY_EMAIL_SUBJECT)
+        body_tpl = ap.effective_template(rule_dict.get("recovery_email_body"),
+                                         ap.DEFAULT_RECOVERY_EMAIL_BODY)
+        sms_tpl = ap.effective_template(rule_dict.get("recovery_sms_template"),
+                                        ap.DEFAULT_RECOVERY_SMS)
     else:
-        subject_tpl = rule_dict.get("email_subject") or "[{severity}] {status}: {rule_name}"
-        body_tpl = rule_dict.get("email_body") or (
-            "{hostname} ({ip_address}) is {status}. "
-            "The condition for \"{rule_name}\" was met: {metric} {operator} {threshold}."
-        )
-        sms_tpl = rule_dict.get("sms_template") or "[ZenPlus {severity}] {hostname} ({ip_address}) is {status}. Rule: {rule_name}"
+        subject_tpl = ap.effective_template(rule_dict.get("email_subject"), ap.DEFAULT_EMAIL_SUBJECT)
+        body_tpl = ap.effective_template(rule_dict.get("email_body"), ap.DEFAULT_EMAIL_BODY)
+        sms_tpl = ap.effective_template(rule_dict.get("sms_template"), ap.DEFAULT_SMS)
 
     return {
         "subject": _render_template(subject_tpl, variables),
@@ -520,15 +561,89 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
         "email_subject_template": subject_tpl,
         "email_body_template": body_tpl,
         "sms_template": sms_tpl,
+        # Sample values behind every {placeholder}, so the editor can show what
+        # each variable resolves to instead of just naming it.
+        "variables": variables,
+        "iso_timestamp": now.isoformat(),
     }
+
+
+# Rules whose readings the alert mail leads with (round-trip time / packet loss);
+# every other metric family has no sample reading worth inventing.
+_PING_METRICS = {"ping_status", "rtt", "packet_loss", "jitter"}
+
+
+def _preview_email_ctx(rule_dict: dict, msg: dict, is_recovery: bool,
+                       action_url: str = "") -> dict:
+    """Context for the *real* alert email, filled with the preview's samples.
+
+    Deliberately mirrors the ctx alert_engine builds when a rule actually
+    fires — same headline metric, same details rows — so the mail shown in the
+    preview dialog is the mail the recipient will get, not an approximation.
+    """
+    from app.api.v1.alert_engine import _clean_details
+
+    variables = msg.get("variables") or {}
+    metric = rule_dict.get("metric") or ""
+    is_ping = metric in _PING_METRICS
+
+    ctx = {
+        "product_name": "ZenPlus",
+        "severity": rule_dict.get("severity") or "warning",
+        "resolved": is_recovery,
+        "status": msg["device_status"],
+        "title": rule_dict.get("name") or "Alert",
+        "hostname": msg["sim_hostname"],
+        "ip_address": msg["sim_ip"],
+        "message": msg["email_body"],
+        "notice": "Preview — the device, readings and time below are sample "
+                  "values. No alert has been raised and nothing was sent.",
+        "details": _clean_details([
+            ("Alert rule", rule_dict.get("name")),
+            ("Condition", variables.get("condition_label")),
+            ("Active for", variables.get("duration") if is_recovery else None),
+            ("Round-trip time", variables.get("rtt") if is_ping else None),
+            ("Packet loss", variables.get("packet_loss") if is_ping else None),
+            ("Group", rule_dict.get("group_id") and variables.get("group")),
+            ("Location", rule_dict.get("location")),
+            ("Device type", rule_dict.get("device_type")),
+        ]),
+        "action_url": action_url,
+        "timestamp": msg.get("iso_timestamp"),
+    }
+    if is_ping:
+        ctx["headline_metric"] = {
+            "label": "Round-trip time",
+            "value": variables.get("rtt"),
+            "secondary_label": "Packet loss",
+            "secondary_value": variables.get("packet_loss"),
+        }
+    elif variables.get("reading"):
+        # Every other metric family leads with the reading that fired the rule,
+        # next to the threshold it crossed — the two numbers a reader compares.
+        ctx["headline_metric"] = {
+            "label": ap.metric_noun(metric),
+            "value": variables["reading"],
+            "secondary_label": "Threshold",
+            "secondary_value": variables.get("threshold_value"),
+        }
+    return ctx
 
 
 @router.post("/{rule_id}/preview")
 async def preview_alert_rule(
     rule_id: UUID,
+    overrides: Optional[AlertRulePreview] = None,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """Render what this rule's notifications will look like.
+
+    Returns the rendered HTML/plain-text email exactly as the alert engine
+    builds it, plus the SMS body and the raw templates. Any template supplied
+    in the body is used instead of the stored one, so the editor can preview
+    unsaved edits; a blank string means "fall back to the built-in default".
+    """
     result = await db.execute(
         text(f"SELECT {_RULE_COLUMNS} FROM alert_rules WHERE id = :id"),
         {"id": rule_id},
@@ -538,12 +653,43 @@ async def preview_alert_rule(
         raise HTTPException(status_code=404, detail="Alert rule not found")
 
     rule = _row_to_dict(row)
-    alert_msg = _build_alert_message(rule, is_recovery=False)
-    recovery_msg = _build_alert_message(rule, is_recovery=True) if rule.get("recovery_alert") else None
+    stored = {k: rule.get(k) for k in _TEMPLATE_FIELDS}
+    if overrides is not None:
+        for key, value in overrides.model_dump(exclude_unset=True).items():
+            rule[key] = value or None
+
+    from app.api.v1.alert_engine import _dashboard_url
+    from app.services.email_render import (
+        build_alert_email_html, build_alert_email_text,
+    )
+    action_url = await _dashboard_url(db, "/alerts")
+
+    def _render(is_recovery: bool) -> dict:
+        msg = _build_alert_message(rule, is_recovery=is_recovery)
+        ctx = _preview_email_ctx(rule, msg, is_recovery, action_url)
+        msg["email_html"] = build_alert_email_html(ctx)
+        msg["email_text"] = build_alert_email_text(ctx)
+        return msg
+
+    alert_msg = _render(False)
+    recovery_msg = _render(True) if rule.get("recovery_alert") else None
 
     return {
         "alert": alert_msg,
         "recovery": recovery_msg,
+        # What is stored on the rule (null = using the default) alongside the
+        # effective text, so the editor can tell "customised" from "default".
+        "templates": {
+            "stored": stored,
+            "effective": {
+                "email_subject": alert_msg["email_subject_template"],
+                "email_body": alert_msg["email_body_template"],
+                "sms_template": alert_msg["sms_template"],
+                "recovery_email_subject": recovery_msg["email_subject_template"] if recovery_msg else None,
+                "recovery_email_body": recovery_msg["email_body_template"] if recovery_msg else None,
+                "recovery_sms_template": recovery_msg["sms_template"] if recovery_msg else None,
+            },
+        },
     }
 
 

@@ -1656,7 +1656,7 @@ function InventoryConfigCard({
     {
       icon: Layers, label: 'Monitoring Template',
       value: device.profile_name
-        ? <Link to="/templates" className="text-primary hover:underline">{device.profile_name}</Link>
+        ? <Link to="/settings/general?tab=templates" className="text-primary hover:underline">{device.profile_name}</Link>
         : (snmp ? 'Default (auto-detect)' : '—'),
     },
     { icon: Wifi, label: 'Ping', value: device.ping_enabled ? `Enabled · ${device.ping_interval}s` : 'Disabled' },

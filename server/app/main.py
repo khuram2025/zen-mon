@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
-from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, report_schedules, discovery, discovery_v2, users, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, host_alert_rules, link_utilization, udt, tags
+from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, report_schedules, discovery, discovery_v2, users, roles, auth_settings, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, host_alert_rules, link_utilization, udt, tags
 from app.api.v1 import settings as settings_api
 from app.api.v1 import storage_management as storage_api
 from app.api.v1 import security_settings as security_api
@@ -67,6 +67,8 @@ def create_app() -> FastAPI:
     app.include_router(discovery.router, prefix="/api/v1")
     app.include_router(discovery_v2.router, prefix="/api/v1")
     app.include_router(users.router, prefix="/api/v1")
+    app.include_router(roles.router, prefix="/api/v1")
+    app.include_router(auth_settings.router, prefix="/api/v1")
     app.include_router(subscription.router, prefix="/api/v1")
     app.include_router(system_updates.router, prefix="/api/v1")
     app.include_router(storage_api.router, prefix="/api/v1")

@@ -18,6 +18,11 @@ from sqlalchemy import text
 from app.core.database import get_db
 from app.services.email_render import build_alert_email_html
 from app.services.alert_schedule import notifications_allowed, get_configured_timezone
+from app.services.alert_phrasing import (
+    DEFAULT_EMAIL_BODY, DEFAULT_EMAIL_SUBJECT, DEFAULT_RECOVERY_EMAIL_BODY,
+    DEFAULT_RECOVERY_EMAIL_SUBJECT, DEFAULT_RECOVERY_SMS, DEFAULT_SMS,
+    conditions_label, duration_between, effective_template, rule_phrasing,
+)
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/alert-engine", tags=["Alert Engine (Internal)"])
@@ -521,6 +526,8 @@ async def evaluate_status_change(
         "threshold": "0",
         "timestamp": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
         "duration": "",
+        "duration_sentence": "",
+        "duration_suffix": "",
         "rtt": f"{event.rtt_ms:.1f}ms",
         "packet_loss": f"{event.packet_loss:.0%}",
         "status_intro": "The following alert has been resolved:" if is_recovery else "An alert has been triggered:",
@@ -538,6 +545,21 @@ async def evaluate_status_change(
     # never resolved their alerts — one firewall accumulated 100+ permanently
     # "active" DEGRADED alerts, poisoning every alert counter in the UI.
     if is_recovery:
+        # How long was it down? Read the oldest open alert's start before the
+        # UPDATE below closes it — a recovery notice that cannot say "for how
+        # long" makes the reader go and look it up in the dashboard.
+        outage_start = (await db.execute(
+            text("""
+                SELECT MIN(triggered_at) FROM alerts
+                WHERE status IN ('active', 'acknowledged')
+                  AND device_id = :device_id
+                  AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
+                  AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded')
+            """),
+            {"device_id": event.device_id},
+        )).scalar()
+        variables["duration"] = duration_between(outage_start, now)
+
         resolved = await db.execute(
             text("""
                 UPDATE alerts
@@ -611,6 +633,13 @@ async def evaluate_status_change(
         # Rule matches! Send notifications
         variables["severity"] = (rule.severity or "warning").upper()
         variables["rule_name"] = rule.name or "Alert"
+        # Per-rule phrasing: the condition sentence depends on which rule
+        # matched, so it is rebuilt here rather than with the shared variables.
+        variables.update(rule_phrasing(
+            rule, hostname=event.hostname, is_recovery=is_recovery,
+            reading=variables["rtt"] if (rule.metric or "ping_status") == "rtt" else None,
+            duration=variables.get("duration", ""),
+        ))
 
         if suppressing_dependency and not is_recovery:
             await db.execute(
@@ -644,15 +673,21 @@ async def evaluate_status_change(
             suppressed_alerts += 1
             continue
 
-        # Build messages from templates
+        # Build messages from templates. A rule that stores no template falls
+        # back to the shared defaults in alert_phrasing, which is the same text
+        # the preview dialog renders — the two used to disagree, and the mail
+        # that actually landed was the worse of the two.
         if is_recovery:
-            email_subject = _render(rule.recovery_email_subject or "[{severity}] RESOLVED: {rule_name}", variables)
-            email_body = _render(rule.recovery_email_body or rule.email_body or variables["status_intro"], variables)
-            sms_body = _render(rule.recovery_sms_template or "[ZenPlus {severity}] {hostname} is {status}. RESOLVED: {rule_name}", variables)
+            # No falling back to the trigger body here: "core-router-01 is
+            # DOWN" is not a resolved notice, and that fallback is how it used
+            # to end up in one.
+            email_subject = _render(effective_template(rule.recovery_email_subject, DEFAULT_RECOVERY_EMAIL_SUBJECT), variables)
+            email_body = _render(effective_template(rule.recovery_email_body, DEFAULT_RECOVERY_EMAIL_BODY), variables)
+            sms_body = _render(effective_template(rule.recovery_sms_template, DEFAULT_RECOVERY_SMS), variables)
         else:
-            email_subject = _render(rule.email_subject or "[{severity}] {status}: {rule_name}", variables)
-            email_body = _render(rule.email_body or variables["status_intro"], variables)
-            sms_body = _render(rule.sms_template or "[ZenPlus {severity}] {hostname} ({ip_address}) is {status}. Rule: {rule_name}", variables)
+            email_subject = _render(effective_template(rule.email_subject, DEFAULT_EMAIL_SUBJECT), variables)
+            email_body = _render(effective_template(rule.email_body, DEFAULT_EMAIL_BODY), variables)
+            sms_body = _render(effective_template(rule.sms_template, DEFAULT_SMS), variables)
 
         if not is_recovery:
             # Respect an active snooze for this rule/device condition: the
@@ -780,9 +815,10 @@ async def evaluate_status_change(
                             },
                             "details": _clean_details([
                                 ("Alert rule", rule.name),
-                                ("Condition", " ".join(str(x) for x in (
-                                    variables.get("metric"), variables.get("operator"),
-                                    variables.get("threshold")) if x)),
+                                ("Condition", variables.get("condition_label")),
+                                # Only on the way back up, and the first thing
+                                # anyone asks about a resolved incident.
+                                ("Active for", variables.get("duration") if is_recovery else None),
                                 ("Round-trip time", variables.get("rtt")),
                                 ("Packet loss", variables.get("packet_loss")),
                                 ("Group", variables.get("group")),
@@ -917,12 +953,27 @@ async def evaluate_service_status_change(
         "threshold": "0",
         "timestamp": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
         "duration": "",
+        "duration_sentence": "",
+        "duration_suffix": "",
         "rtt": f"{event.response_ms:.1f}ms",
         "packet_loss": "",
         "error": event.error or "",
         "status_intro": "The following service alert has been resolved:"
             if is_recovery else "A service alert has been triggered:",
     }
+
+    if is_recovery:
+        # Same question as for a device: how long was the check failing?
+        outage_start = (await db.execute(
+            text("""
+                SELECT MIN(triggered_at) FROM alerts
+                WHERE status IN ('active', 'acknowledged')
+                  AND service_check_id = :scid
+                  AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
+            """),
+            {"scid": event.service_check_id},
+        )).scalar()
+        variables["duration"] = duration_between(outage_start, now)
 
     notifications_sent = 0
     resolved_alerts = 0
@@ -1019,14 +1070,29 @@ async def evaluate_service_status_change(
             )
             resolved_alerts += resolved.rowcount or 0
 
+        # A service check reports its own failure reason, so the phrasing leads
+        # with the check and the error rather than with a threshold.
+        variables["error_sentence"] = f" {event.error.strip().rstrip('.')}." if event.error else ""
         if is_recovery:
-            email_subject = _render(rule.recovery_email_subject or "[{severity}] RESOLVED: {rule_name}", variables)
-            email_body = _render(rule.recovery_email_body or rule.email_body or "Service {check_name} ({target}) recovered to {status}.", variables)
-            sms_body = _render(rule.recovery_sms_template or "[ZenPlus {severity}] {check_name} recovered: {status}. {rule_name}", variables)
+            email_subject = _render(effective_template(rule.recovery_email_subject, DEFAULT_RECOVERY_EMAIL_SUBJECT), variables)
+            email_body = _render(effective_template(
+                rule.recovery_email_body,
+                "The {check_type} check “{check_name}” on {target} is passing again."
+                "{duration_sentence}"), variables)
+            sms_body = _render(effective_template(
+                rule.recovery_sms_template,
+                "ZenPlus resolved — {rule_name}: {check_name} is passing again."
+                "{duration_suffix}"), variables)
         else:
-            email_subject = _render(rule.email_subject or "[{severity}] {status}: {check_name}", variables)
-            email_body = _render(rule.email_body or "Service {check_name} ({target}) is {status}.\nError: {error}\nRule: {rule_name}", variables)
-            sms_body = _render(rule.sms_template or "[ZenPlus {severity}] {check_name} is {status}. {error} Rule: {rule_name}", variables)
+            email_subject = _render(effective_template(rule.email_subject, "[{severity}] {status}: {check_name}"), variables)
+            email_body = _render(effective_template(
+                rule.email_body,
+                "The {check_type} check “{check_name}” on {target} is {status}."
+                "{error_sentence}"), variables)
+            sms_body = _render(effective_template(
+                rule.sms_template,
+                "ZenPlus {severity} — {rule_name}: {check_name} is {status} ({target})."),
+                variables)
 
         await db.execute(
             text("""
@@ -1110,6 +1176,7 @@ async def evaluate_service_status_change(
                                 ("Check", variables.get("check_name")),
                                 ("Type", variables.get("check_type")),
                                 ("Target", variables.get("target")),
+                                ("Failing for", variables.get("duration") if is_recovery else None),
                                 ("Error", variables.get("error")),
                             ]),
                             "action_url": await _dashboard_url(db, "/services"),

@@ -44,6 +44,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services import alert_phrasing as ap
 from app.services.apm_rollup import rollup_window
 from app.services.host_alert_service import dispatch_to_channels
 
@@ -152,14 +153,15 @@ def _message(rule, service: str, detail: str) -> str:
 
 # ─── Alert raise / resolve (service-scoped rows in `alerts`) ─────────────────
 
-async def _active_alert_id(db: AsyncSession, rule_id, service: str):
+async def _active_alert(db: AsyncSession, rule_id, service: str):
+    """The open alert for this rule/service: (id, triggered_at) or None."""
     row = (await db.execute(text(
-        "SELECT id FROM alerts "
+        "SELECT id, triggered_at FROM alerts "
         "WHERE rule_id = :rid AND status IN ('active','acknowledged') "
         "  AND metadata->>'service' = :svc "
         "ORDER BY triggered_at DESC LIMIT 1"
     ), {"rid": str(rule_id), "svc": service})).first()
-    return row[0] if row else None
+    return (row[0], row[1]) if row else None
 
 
 async def _raise(db: AsyncSession, rule, service: str, message: str, value: float) -> None:
@@ -188,24 +190,48 @@ async def _resolve(db: AsyncSession, alert_id) -> int:
     return res.rowcount or 0
 
 
-async def _notify(db: AsyncSession, rule, service: str, message: str, detail: str) -> None:
+def _render(template: str, variables: dict) -> str:
+    for key, value in variables.items():
+        template = template.replace(f"{{{key}}}", str(value))
+    return template
+
+
+async def _notify(db: AsyncSession, rule, service: str, value: float, *,
+                  is_recovery: bool = False, duration: str = "") -> None:
+    """Send an APM threshold alert, or its all-clear, in the shared house style."""
     # Quiet hours: the alert row is already recorded; only the outbound
-    # notification is gated by the rule's schedule window.
+    # notification is gated by the rule's schedule window. Recovery notices go
+    # out regardless — silence after a page reads as "still broken".
     from app.services.alert_schedule import notifications_allowed, get_configured_timezone
     tz = await get_configured_timezone(db)
-    if not notifications_allowed(
+    if not is_recovery and not notifications_allowed(
         getattr(rule, "schedule_start", None), getattr(rule, "schedule_end", None),
         getattr(rule, "schedule_days", None), tz,
     ):
         return
     sev = rule.severity or "warning"
+    reading = ap.format_value(rule.metric, value)
+    v = ap.rule_phrasing(rule, hostname=service, is_recovery=is_recovery,
+                         reading=reading, duration=duration)
+    v.update({"rule_name": rule.name or "Alert", "hostname": service,
+              "ip_address": "", "severity": sev.upper(),
+              "status": "RESOLVED" if is_recovery else "ALERT"})
     await dispatch_to_channels(db, rule.notify_channels or [], {
-        "subject": f"[{sev.upper()}] {rule.name} — {service}",
-        "body": message, "message": message,
+        "subject": _render(ap.DEFAULT_RECOVERY_EMAIL_SUBJECT if is_recovery
+                           else ap.DEFAULT_EMAIL_SUBJECT, v),
+        "body": _render(ap.DEFAULT_RECOVERY_EMAIL_BODY if is_recovery
+                        else ap.DEFAULT_EMAIL_BODY, v),
+        "message": _render(ap.DEFAULT_RECOVERY_SMS if is_recovery else ap.DEFAULT_SMS, v),
         "hostname": service, "ip_address": "",
-        "status": "ALERT", "severity": sev,
-        "details": [("Service", service), ("Metric", rule.metric),
-                    ("Value", detail), ("Threshold", f"{rule.operator} {rule.threshold}")],
+        "status": "RESOLVED" if is_recovery else "ALERT", "severity": sev,
+        "resolved": is_recovery,
+        "headline_metric": {
+            "label": ap.metric_noun(rule.metric), "value": reading,
+            "secondary_label": "Threshold", "secondary_value": v.get("threshold_value"),
+        },
+        "details": [("Alert rule", rule.name), ("Service", service),
+                    ("Condition", v.get("condition_label")),
+                    ("Active for", duration if is_recovery else None)],
         "triggered_at": datetime.now(timezone.utc).isoformat(),
         "rule_id": str(rule.id), "rule_name": rule.name,
     })
@@ -224,7 +250,8 @@ async def evaluate_apm_rules(db: AsyncSession) -> dict[str, int]:
     metric_list = ",".join(f"'{m}'" for m in sorted(APM_PULL_METRICS))
     rules = (await db.execute(text(
         f"SELECT id, name, metric, operator, threshold, severity, min_duration, "
-        f"notify_channels, target, schedule_start, schedule_end, schedule_days "
+        f"notify_channels, target, recovery_alert, conditions, condition_logic, "
+        f"schedule_start, schedule_end, schedule_days "
         f"FROM alert_rules WHERE enabled = true AND metric IN ({metric_list})"
     ))).all()
     if not rules:
@@ -240,17 +267,21 @@ async def evaluate_apm_rules(db: AsyncSession) -> dict[str, int]:
         for service in _services_in_scope(rule, fleet):
             value = fleet[service][rule.metric]
             breach = _cmp(value, rule.operator, float(rule.threshold or 0))
-            existing = await _active_alert_id(db, rule.id, service)
+            existing = await _active_alert(db, rule.id, service)
             if breach:
                 if existing is None:
-                    detail = _detail(rule.metric, value)
-                    msg = _message(rule, service, detail)
+                    msg = _message(rule, service, _detail(rule.metric, value))
                     await _raise(db, rule, service, msg, value)
                     raised += 1
                     await db.commit()
-                    await _notify(db, rule, service, msg, detail)
+                    await _notify(db, rule, service, value)
             elif existing is not None:
-                resolved += await _resolve(db, existing)
+                alert_id, started_at = existing
+                resolved += await _resolve(db, alert_id)
+                if getattr(rule, "recovery_alert", True):
+                    await db.commit()
+                    await _notify(db, rule, service, value, is_recovery=True,
+                                  duration=ap.duration_between(started_at))
         await db.commit()
 
     if raised or resolved:
