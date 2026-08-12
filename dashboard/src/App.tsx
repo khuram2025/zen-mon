@@ -4,6 +4,9 @@ import { useAuth } from '@/stores/auth'
 import { Layout } from '@/components/Layout'
 import { LoginPage } from '@/pages/LoginPage'
 import { DashboardPage } from '@/pages/DashboardPage'
+import { NetworkSecurityDashboard } from '@/pages/dashboards/NetworkSecurityDashboard'
+import { ServerTeamDashboard } from '@/pages/dashboards/ServerTeamDashboard'
+import { ApplicationTeamDashboard } from '@/pages/dashboards/ApplicationTeamDashboard'
 import { AvailabilityPage } from '@/pages/AvailabilityPage'
 import { DevicesPage } from '@/pages/DevicesPage'
 import { DeviceDetailPage } from '@/pages/DeviceDetailPage'
@@ -37,6 +40,8 @@ import { EndpointDetailPage } from '@/pages/udt/EndpointDetailPage'
 import { SwitchPortsPage } from '@/pages/udt/SwitchPortsPage'
 import { UserLoginsPage } from '@/pages/udt/UserLoginsPage'
 import { WatchListsPage } from '@/pages/udt/WatchListsPage'
+import { ProbesPage as NetPathProbesPage } from '@/pages/netpath/ProbesPage'
+import { PathDetailPage as NetPathDetailPage } from '@/pages/netpath/PathDetailPage'
 import { ClassificationPage as UdtClassificationPage } from '@/pages/udt/ClassificationPage'
 import { ActivityPage as UdtActivityPage } from '@/pages/udt/ActivityPage'
 import { SettingsPage as UdtSettingsPage } from '@/pages/udt/SettingsPage'
@@ -132,6 +137,9 @@ export default function App() {
         }
       >
         <Route index element={<DashboardPage />} />
+        <Route path="dashboards/network" element={<NetworkSecurityDashboard />} />
+        <Route path="dashboards/servers" element={<ServerTeamDashboard />} />
+        <Route path="dashboards/apps" element={<ApplicationTeamDashboard />} />
         <Route path="availability" element={<AvailabilityPage />} />
         <Route path="devices" element={<DevicesPage />} />
         <Route path="devices/:id" element={<DeviceDetailPage />} />
@@ -171,6 +179,8 @@ export default function App() {
           <Route path="settings" element={<UdtSettingsPage />} />
           <Route path="endpoints/:id" element={<EndpointDetailPage />} />
         </Route>
+        <Route path="netpath" element={<NetPathProbesPage />} />
+        <Route path="netpath/probes/:id" element={<NetPathDetailPage />} />
         <Route path="maps" element={<Navigate to="/maps/manual" replace />} />
         <Route path="maps/manual" element={<ManualMapsEntry />} />
         <Route path="netflow" element={<NetflowPage />} />

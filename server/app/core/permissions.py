@@ -41,6 +41,10 @@ PERMISSION_MODULES: list[tuple[str, str, list[tuple[str, str, str]]]] = [
         ("udt.view", "View", "View tracked endpoints and ports"),
         ("udt.manage", "Manage", "Manage UDT settings and classification rules"),
     ]),
+    ("netpath", "Network Path", [
+        ("netpath.view", "View", "View network path probes and hop-by-hop history"),
+        ("netpath.manage", "Manage", "Create, edit, and run network path probes"),
+    ]),
     ("ncm", "Config Backup (NCM)", [
         ("ncm.view", "View", "View device configuration backups"),
         ("ncm.manage", "Manage", "Run backups and manage NCM settings"),
@@ -91,7 +95,8 @@ _OPERATOR = [
     "dashboard.view", "devices.view", "devices.manage", "discovery.view",
     "discovery.run", "alerts.view", "alerts.acknowledge", "alerts.manage",
     "service_checks.view", "service_checks.manage", "netflow.view",
-    "udt.view", "udt.manage", "ncm.view", "ncm.manage", "apm.view",
+    "udt.view", "udt.manage", "netpath.view", "netpath.manage",
+    "ncm.view", "ncm.manage", "apm.view",
     "apm.manage", "reports.view", "reports.export", "maps.view",
     "maps.manage", "settings.view",
 ]
@@ -106,13 +111,13 @@ LEGACY_ROLE_PERMISSIONS: dict[str, list[str]] = {
     "viewer": [
         "dashboard.view", "devices.view", "discovery.view", "alerts.view",
         "alerts.acknowledge", "service_checks.view", "netflow.view",
-        "udt.view", "ncm.view", "apm.view", "reports.view", "reports.export",
-        "maps.view",
+        "udt.view", "netpath.view", "ncm.view", "apm.view", "reports.view",
+        "reports.export", "maps.view",
     ],
     "read_only": [
         "dashboard.view", "devices.view", "alerts.view",
-        "service_checks.view", "netflow.view", "udt.view", "apm.view",
-        "reports.view", "maps.view",
+        "service_checks.view", "netflow.view", "udt.view", "netpath.view",
+        "apm.view", "reports.view", "maps.view",
     ],
 }
 

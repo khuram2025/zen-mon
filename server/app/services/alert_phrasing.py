@@ -170,6 +170,23 @@ METRICS: dict[str, dict] = {
                            "state": {"down": "moves an endpoint to a different port",
                                      "up": "settles the endpoint back"}},
     "udt_port_capacity_pct": {"noun": "Switch port capacity", **_PERCENT},
+
+    # NetPath (WAN/Internet path)
+    "netpath_rtt": {"noun": "Path latency", "unit": "ms", "decimals": 0, "subject": "the path"},
+    "netpath_loss": {"noun": "Path packet loss", **_PERCENT, "subject": "the path"},
+    "netpath_hop_count": {"noun": "Path hop count", "unit": " hops", "decimals": 0, "subject": "the path"},
+    "netpath_path_change": {"noun": "Network path change", "subject": "the path",
+                            "narrative": {"down": "changed the route it takes to the target",
+                                          "up": "returned to a stable route"},
+                            "state": {"down": "takes a different route to the target",
+                                      "up": "is back on a stable route"},
+                            "state_label": {"down": "Route changed", "up": "Route stable"}},
+    "netpath_unreachable": {"noun": "Path unreachable", "subject": "the path",
+                            "narrative": {"down": "can no longer reach the target",
+                                          "up": "can reach the target again"},
+                            "state": {"down": "cannot reach the target",
+                                      "up": "can reach the target again"},
+                            "state_label": {"down": "Target unreachable", "up": "Target reachable"}},
 }
 
 # Rules are stored with either spelling depending on which screen created them

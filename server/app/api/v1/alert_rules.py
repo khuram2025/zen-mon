@@ -44,11 +44,20 @@ _UDT_METRICS = (
     "udt_new_endpoint|udt_rogue_endpoint|udt_watch_endpoint|"
     "udt_endpoint_moved|udt_port_capacity_pct"
 )
+# NetPath (WAN/Internet path) metric keys (migrate-076 CHECK), evaluated by
+# netpath_alert_service. netpath_rtt / netpath_loss / netpath_hop_count are
+# numeric with raise/resolve; netpath_path_change / netpath_unreachable are
+# event-driven (threshold acts as an on/off toggle). Scope: `target` = probe
+# name (empty = all probes).
+_NETPATH_METRICS = (
+    "netpath_rtt|netpath_loss|netpath_hop_count|"
+    "netpath_path_change|netpath_unreachable"
+)
 # Monitoring-template metric keys (migrate-062 CHECK allows the tpl_ prefix):
 # any series a template emits (tpl_<metric key>), evaluated per device by
 # network_alert_service._eval_template against ALL matching instance series.
 _TPL_METRICS = r"tpl_[a-z0-9_]{1,60}"
-_CONDITION_METRICS = f"ping_status|rtt|packet_loss|jitter|service_status|{_NETWORK_METRICS}|{_APM_METRICS}|{_UDT_METRICS}|{_TPL_METRICS}"
+_CONDITION_METRICS = f"ping_status|rtt|packet_loss|jitter|service_status|{_NETWORK_METRICS}|{_APM_METRICS}|{_UDT_METRICS}|{_NETPATH_METRICS}|{_TPL_METRICS}"
 
 
 class ConditionItem(BaseModel):

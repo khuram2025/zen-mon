@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zenplus/poller/internal/checker/netpath"
 	"github.com/zenplus/poller/internal/config"
 	"github.com/zenplus/poller/internal/pinger"
 	"github.com/zenplus/poller/internal/store"
@@ -83,6 +84,11 @@ func main() {
 	// Start the engine
 	sugar.Info("Starting ping engine...")
 	go engine.Run(ctx)
+
+	// Start the NetPath traceroute service (Paris-style hop-by-hop path
+	// monitoring). Shares the poller's CAP_NET_RAW; reads netpath_probes.
+	netpathSvc := netpath.NewService(pgStore, cfg.Poller.ID, sugar)
+	go netpathSvc.Run(ctx)
 
 	// Start health check server
 	go func() {

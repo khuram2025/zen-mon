@@ -35,6 +35,7 @@ import {
   PieChart,
   Plug,
   Radar,
+  Waypoints,
   Router,
   ScanSearch,
   Server,
@@ -104,6 +105,9 @@ export const NAV_GROUPS: NavGroup[] = [
     icon: LayoutDashboard,
     items: [
       { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true, hint: 'Network operations at a glance' },
+      { to: '/dashboards/network', label: 'Network & Security', icon: ShieldCheck, hint: 'Reachability, traffic, WAN paths and threat signals' },
+      { to: '/dashboards/servers', label: 'Server Team', icon: Server, hint: 'Fleet health, resource pressure and agents' },
+      { to: '/dashboards/apps', label: 'Application Team', icon: Layers, hint: 'Golden signals, SLOs and user journeys' },
     ],
   },
   {
@@ -154,6 +158,14 @@ export const NAV_GROUPS: NavGroup[] = [
           { to: '/udt/activity', label: 'Activity', icon: Activity },
           { to: '/udt/settings', label: 'UDT Settings', icon: SlidersHorizontal },
         ],
+      },
+      {
+        to: '/netpath',
+        label: 'NetPath',
+        icon: Waypoints,
+        hint: 'Hop-by-hop path monitoring, inside your network and across the internet',
+        permission: 'netpath.view',
+        end: false,
       },
       {
         to: '/discovery',
