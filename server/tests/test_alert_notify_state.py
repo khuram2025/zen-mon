@@ -89,25 +89,3 @@ async def test_pending_is_true_only_for_an_explicitly_suppressed_trigger():
     assert await ns.is_pending(FakeDB("false"), "alert-1") is True   # owed a send
     assert await ns.is_pending(FakeDB("true"), "alert-1") is False   # already sent
     assert await ns.is_pending(FakeDB(), "alert-1") is False         # legacy, leave alone
-
-
-@pytest.mark.asyncio
-async def test_last_trigger_notified_defaults_to_true_when_unknown():
-    assert await ns.last_trigger_notified(FakeDB(), "rule-1", "dev-1") is True
-    assert await ns.last_trigger_notified(FakeDB("false"), "rule-1", "dev-1") is False
-    assert await ns.last_trigger_notified(FakeDB("true"), "rule-1") is True
-
-
-@pytest.mark.asyncio
-async def test_recovery_rows_are_excluded_when_dating_the_trigger():
-    """The ping path writes a resolved row per event; it isn't the trigger."""
-    captured = {}
-
-    class SqlCapturingDB(FakeDB):
-        async def execute(self, statement, params=None):
-            captured["sql"] = str(statement)
-            return await super().execute(statement, params)
-
-    await ns.last_trigger_notified(SqlCapturingDB(), "rule-1", "dev-1")
-    assert "is_recovery" in captured["sql"]
-    assert "device_id = :did" in captured["sql"]

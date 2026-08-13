@@ -407,6 +407,37 @@ def _eval_one(metric: str, operator: str, threshold, values: dict) -> bool:
         return False
 
 
+def _recovery_map(closed_rows) -> dict:
+    """{rule_id: {"notified": bool, "since": datetime}} for the alert rows a
+    recovery just resolved.
+
+    Reset actions are gated on membership in this map: a reset only means
+    something for a rule whose own trigger this recovery closes. Without that,
+    every 'any'-scoped rule on the appliance — including metric rules that
+    belong to the periodic evaluators and never fired — ran its reset actions
+    on every device up-transition.
+
+    ``notified`` is True when any of the rule's closed rows had its trigger
+    dispatched; an absent flag predates tracking and counts as dispatched, so
+    upgrading never swallows the all-clear for an incident already in flight.
+    ``since`` is the oldest trigger time, which is what "active for" means.
+    """
+    out: dict = {}
+    for row in closed_rows:
+        if row.rule_id is None:
+            continue
+        rid = str(row.rule_id)
+        sent = row.notified is None or str(row.notified).lower() == "true"
+        entry = out.get(rid)
+        if entry is None:
+            out[rid] = {"notified": sent, "since": row.triggered_at}
+            continue
+        entry["notified"] = entry["notified"] or sent
+        if row.triggered_at and (entry["since"] is None or row.triggered_at < entry["since"]):
+            entry["since"] = row.triggered_at
+    return out
+
+
 def _conditions_match(rule, values: dict) -> bool:
     """
     E1: evaluate a rule's metric condition(s) against live metric values.
@@ -498,7 +529,10 @@ async def evaluate_status_change(
         gr_row = gr.first()
         group_name = gr_row.name if gr_row else ""
 
-    # Fetch all enabled alert rules
+    # Fetch all enabled alert rules. Service-check rules are excluded: their
+    # metric ('service_status') is treated as always-matching by the condition
+    # gate, so a device ping transition used to fire them — "HTTP health:
+    # SWITCH is DEGRADED" alerts about a check nobody ran.
     rules_result = await db.execute(
         text("""
             SELECT id, name, trigger_on, recovery_alert, severity,
@@ -510,6 +544,9 @@ async def evaluate_status_change(
                    schedule_start, schedule_end, schedule_days
             FROM alert_rules
             WHERE enabled = true
+              AND service_check_id IS NULL
+              AND service_check_group_id IS NULL
+              AND COALESCE(metric, '') <> 'service_status'
         """)
     )
     rules = rules_result.fetchall()
@@ -547,23 +584,12 @@ async def evaluate_status_change(
     # behind `rule.recovery_alert`, so rules without a recovery notification
     # never resolved their alerts — one firewall accumulated 100+ permanently
     # "active" DEGRADED alerts, poisoning every alert counter in the UI.
+    # Service-check alerts are deliberately NOT closed here: the device
+    # answering ping again says nothing about its HTTP check passing.
+    recovered: dict[str, dict] = {}
+    outage_duration = ""
     if is_recovery:
-        # How long was it down? Read the oldest open alert's start before the
-        # UPDATE below closes it — a recovery notice that cannot say "for how
-        # long" makes the reader go and look it up in the dashboard.
-        outage_start = (await db.execute(
-            text("""
-                SELECT MIN(triggered_at) FROM alerts
-                WHERE status IN ('active', 'acknowledged')
-                  AND device_id = :device_id
-                  AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
-                  AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded')
-            """),
-            {"device_id": event.device_id},
-        )).scalar()
-        variables["duration"] = duration_between(outage_start, now)
-
-        resolved = await db.execute(
+        closed = (await db.execute(
             text("""
                 UPDATE alerts
                 SET status = 'resolved',
@@ -571,8 +597,10 @@ async def evaluate_status_change(
                     metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:resolution_metadata AS jsonb)
                 WHERE status IN ('active', 'acknowledged')
                   AND device_id = :device_id
+                  AND service_check_id IS NULL
                   AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
                   AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded')
+                RETURNING rule_id, triggered_at, metadata->>'notified' AS notified
             """),
             {
                 "resolved_at": now,
@@ -583,8 +611,14 @@ async def evaluate_status_change(
                     "recovery_at": now.isoformat(),
                 }),
             },
-        )
-        resolved_alerts += resolved.rowcount or 0
+        )).fetchall()
+        resolved_alerts += len(closed)
+        recovered = _recovery_map(closed)
+        # How long was it down? A recovery notice that cannot say "for how
+        # long" makes the reader go and look it up in the dashboard.
+        outage_start = min((r.triggered_at for r in closed if r.triggered_at), default=None)
+        outage_duration = duration_between(outage_start, now)
+        variables["duration"] = outage_duration
 
     # E1: live metric values for condition evaluation. packet_loss arrives from
     # the poller as a fraction (0..1); rule thresholds are in percent, so scale.
@@ -595,22 +629,32 @@ async def evaluate_status_change(
     }
 
     for rule in rules:
-        # Check trigger_on match
         trigger = rule.trigger_on or "any"
-        if trigger == "down" and not is_down:
-            continue
-        if trigger == "up" and event.new_status != "up":
-            continue
-        if trigger == "degraded" and event.new_status != "degraded":
-            continue
-        # "any" matches everything
-
-        # Check if this is a recovery and rule has recovery_alert
-        if is_recovery and not rule.recovery_alert:
-            continue
-        if is_recovery and trigger != "any" and trigger != "up":
-            # Only fire recovery if trigger is 'any' or 'up'
-            pass
+        if is_recovery and trigger != "up":
+            # A reset belongs to the trigger it closes: only rules whose own
+            # alert this recovery just resolved run their reset actions. This
+            # also lets a 'down' rule send its reset — the trigger_on check
+            # below used to skip it, so Router-Down rules never announced the
+            # all-clear. ('up' rules are outside this: the up-transition IS
+            # their trigger, not a reset.)
+            if not rule.recovery_alert:
+                continue
+            if str(rule.id) not in recovered:
+                continue
+            variables["duration"] = duration_between(recovered[str(rule.id)]["since"], now)
+        else:
+            # Check trigger_on match
+            if trigger == "down" and not is_down:
+                continue
+            if trigger == "up" and event.new_status != "up":
+                continue
+            if trigger == "degraded" and event.new_status != "degraded":
+                continue
+            # "any" matches everything
+            if is_recovery:
+                if not rule.recovery_alert:
+                    continue
+                variables["duration"] = outage_duration
 
         # Check scope - device_id
         if rule.device_id and str(rule.device_id) != event.device_id:
@@ -770,7 +814,7 @@ async def evaluate_status_change(
                 continue
         # A recovery follows the trigger's fate: an all-clear for a page nobody
         # received is noise about an event they never heard of.
-        elif not await ns.last_trigger_notified(db, rule.id, event.device_id):
+        elif trigger != "up" and not recovered[str(rule.id)]["notified"]:
             continue
 
         # Send notifications to channels
@@ -979,36 +1023,68 @@ async def evaluate_service_status_change(
             if is_recovery else "A service alert has been triggered:",
     }
 
-    if is_recovery:
-        # Same question as for a device: how long was the check failing?
-        outage_start = (await db.execute(
-            text("""
-                SELECT MIN(triggered_at) FROM alerts
-                WHERE status IN ('active', 'acknowledged')
-                  AND service_check_id = :scid
-                  AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
-            """),
-            {"scid": event.service_check_id},
-        )).scalar()
-        variables["duration"] = duration_between(outage_start, now)
-
     notifications_sent = 0
     resolved_alerts = 0
     suppressed_alerts = 0
     _tz = await get_configured_timezone(db)
     suppressing_dependency = await _find_suppressing_dependency(db, event.device_id) if (is_down and event.device_id) else None
 
+    # Recovery closes every open alert on this check up front — this used to
+    # run per-rule after the trigger_on gate, so a 'down' rule's alerts (the
+    # common case) were never resolved by the recovery that ended them.
+    recovered: dict[str, dict] = {}
+    outage_duration = ""
+    if is_recovery:
+        closed = (await db.execute(
+            text("""
+                UPDATE alerts
+                SET status = 'resolved',
+                    resolved_at = :resolved_at,
+                    metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:resolution_metadata AS jsonb)
+                WHERE status IN ('active', 'acknowledged')
+                  AND service_check_id = :service_check_id
+                  AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
+                  AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded', 'warning')
+                RETURNING rule_id, triggered_at, metadata->>'notified' AS notified
+            """),
+            {
+                "resolved_at": now,
+                "service_check_id": event.service_check_id,
+                "resolution_metadata": json.dumps({
+                    "resolved_by_recovery": True,
+                    "recovery_status": event.new_status,
+                    "recovery_at": now.isoformat(),
+                }),
+            },
+        )).fetchall()
+        resolved_alerts += len(closed)
+        recovered = _recovery_map(closed)
+        # Same question as for a device: how long was the check failing?
+        outage_start = min((r.triggered_at for r in closed if r.triggered_at), default=None)
+        outage_duration = duration_between(outage_start, now)
+        variables["duration"] = outage_duration
+
     for rule in rules:
         trigger = rule.trigger_on or "any"
-        if trigger == "down" and not is_down:
-            continue
-        if trigger == "up" and event.new_status != "up":
-            continue
-        if trigger == "degraded" and event.new_status != "degraded":
-            continue
-
-        if is_recovery and not rule.recovery_alert:
-            continue
+        if is_recovery and trigger != "up":
+            # As on the device path: reset actions run only for the rule whose
+            # own alert this recovery just closed.
+            if not rule.recovery_alert:
+                continue
+            if str(rule.id) not in recovered:
+                continue
+            variables["duration"] = duration_between(recovered[str(rule.id)]["since"], now)
+        else:
+            if trigger == "down" and not is_down:
+                continue
+            if trigger == "up" and event.new_status != "up":
+                continue
+            if trigger == "degraded" and event.new_status != "degraded":
+                continue
+            if is_recovery:
+                if not rule.recovery_alert:
+                    continue
+                variables["duration"] = outage_duration
 
         # Scope: service_check_id
         if rule.service_check_id and str(rule.service_check_id) != event.service_check_id:
@@ -1060,32 +1136,6 @@ async def evaluate_service_status_change(
             )
             suppressed_alerts += 1
             continue
-
-        if is_recovery:
-            resolved = await db.execute(
-                text("""
-                    UPDATE alerts
-                    SET status = 'resolved',
-                        resolved_at = :resolved_at,
-                        metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:resolution_metadata AS jsonb)
-                    WHERE status IN ('active', 'acknowledged')
-                      AND service_check_id = :service_check_id
-                      AND rule_id = :rule_id
-                      AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
-                      AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded', 'warning')
-                """),
-                {
-                    "resolved_at": now,
-                    "service_check_id": event.service_check_id,
-                    "rule_id": str(rule.id),
-                    "resolution_metadata": json.dumps({
-                        "resolved_by_recovery": True,
-                        "recovery_status": event.new_status,
-                        "recovery_at": now.isoformat(),
-                    }),
-                },
-            )
-            resolved_alerts += resolved.rowcount or 0
 
         # A service check reports its own failure reason, so the phrasing leads
         # with the check and the error rather than with a threshold.
@@ -1146,7 +1196,7 @@ async def evaluate_service_status_change(
             await ns.stamp(db, svc_alert_id, allowed)
             if not allowed:
                 continue
-        elif not await ns.last_trigger_notified(db, rule.id):
+        elif trigger != "up" and not recovered[str(rule.id)]["notified"]:
             continue
 
         channel_ids = rule.notify_channels or []
