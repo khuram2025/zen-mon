@@ -75,6 +75,19 @@ def _since(window_s: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(seconds=window_s)).strftime("%Y-%m-%d %H:%M:%S")
 
 
+# SQL that is true for a sample which does NOT breach — the negation of each
+# operator. Used to find the most recent healthy sample, which is what dates
+# the start of a breach.
+_NOT_BREACH_SQL = {
+    "gt": "value <= %(t)s", ">": "value <= %(t)s",
+    "gte": "value < %(t)s", ">=": "value < %(t)s",
+    "lt": "value >= %(t)s", "<": "value >= %(t)s",
+    "lte": "value > %(t)s", "<=": "value > %(t)s",
+    "eq": "value != %(t)s", "==": "value != %(t)s",
+    "neq": "value = %(t)s", "!=": "value = %(t)s",
+}
+
+
 # ─── ClickHouse fetchers ────────────────────────────────────────────────────
 
 def _if_fleet(window_s: int) -> dict[tuple[str, int], dict]:
@@ -115,38 +128,76 @@ def _if_fleet(window_s: int) -> dict[tuple[str, int], dict]:
     return out
 
 
-def _scalar_fleet(window_s: int) -> dict[str, dict]:
-    """{device_id: {cpu, memory, temperature, sessions}} aggregated over window."""
+def _scalar_hold(metric: str, operator: str, threshold: float,
+                 min_duration: int) -> dict[str, dict]:
+    """{device_id: {"value": latest, "held_s": seconds the breach has lasted}}.
+
+    "Condition must exist for N seconds" means exactly that: continuously true
+    for N seconds. Averaging the window instead (the previous behaviour) let a
+    single high sample drag the mean over the threshold and fire long before N
+    elapsed — with ~90s polling and a 300s hold, a spike from 89% to 100% fired
+    on the very first breaching poll.
+
+    So instead of a mean, this dates the breach from the most recent healthy
+    sample and lets the caller compare that age against min_duration. The
+    lookback runs well past the hold time so that sample is still visible; when
+    every sample in it breaches, the breach is at least as old as the oldest
+    sample we can see.
+    """
     from app.core.database import get_clickhouse_client
+
+    not_breach = _NOT_BREACH_SQL.get((operator or "").strip())
+    if not not_breach:
+        return {}
+    # Far enough back to still see the last healthy sample, with a floor so
+    # short holds keep enough history to be meaningful.
+    lookback = max(min_duration * 3, 900)
 
     try:
         client = get_clickhouse_client()
         rows = client.query(
-            """
+            f"""
             SELECT device_id,
-                   avgIf(value, metric_key = 'cpu'),
-                   avgIf(value, metric_key = 'memory'),
-                   maxIf(value, metric_key LIKE 'temperature_%%'),
-                   argMaxIf(value, timestamp, metric_key = 'sessions')
+                   argMax(value, timestamp) AS last_v,
+                   countIf({not_breach}) AS n_ok,
+                   dateDiff('second',
+                            if(countIf({not_breach}) = 0,
+                               min(timestamp),
+                               maxIf(timestamp, {not_breach})),
+                            now()) AS held_s
             FROM zenplus.snmp_metrics
-            WHERE timestamp >= %(s)s
+            WHERE metric_key = %(m)s AND timestamp >= %(s)s
             GROUP BY device_id
             """,
-            parameters={"s": _since(window_s)},
+            parameters={"m": metric, "t": float(threshold), "s": _since(lookback)},
         ).result_rows
     except Exception as exc:
-        logger.warning("network alert: clickhouse scalar query failed: %s", exc)
+        logger.warning("network alert: clickhouse hold query failed (%s): %s", metric, exc)
         return {}
 
-    out: dict[str, dict] = {}
-    for r in rows:
-        out[str(r[0])] = {
-            "cpu": (None if r[1] is None else float(r[1])),
-            "memory": (None if r[2] is None else float(r[2])),
-            "temperature": (None if r[3] is None else float(r[3])),
-            "session_count": (None if r[4] is None else float(r[4])),
-        }
-    return out
+    return {
+        str(r[0]): {"value": float(r[1] or 0), "held_s": int(r[3] or 0)}
+        for r in rows
+    }
+
+
+def _eval_scalar_hold(rule, entry: dict | None) -> tuple[bool, float, str] | None:
+    """Breach only once the condition has genuinely held for min_duration."""
+    if not entry:
+        return None
+    value = entry["value"]
+    breaching = _cmp(value, rule.operator, float(rule.threshold or 0))
+    if not breaching:
+        return False, value, ap.format_value(rule.metric, value)
+    hold = int(rule.min_duration or 0)
+    if entry["held_s"] < hold:
+        # Breaching, but not for long enough yet. Reported as not-breaching so
+        # an already-open alert still resolves when the condition clears.
+        return False, value, ap.format_value(rule.metric, value)
+    detail = ap.format_value(rule.metric, value)
+    if hold:
+        detail += f" for {ap.humanize_duration(entry['held_s'])}"
+    return True, value, detail
 
 
 def _tpl_fleet(window_s: int) -> dict[str, dict[str, float]]:
@@ -351,20 +402,6 @@ def _eval_interface(rule, m: dict, iface: dict) -> tuple[bool, float, str] | Non
     return None
 
 
-def _eval_scalar(rule, vals: dict) -> tuple[bool, float, str] | None:
-    metric, op, thr = rule.metric, rule.operator, float(rule.threshold or 0)
-    v = vals.get(metric)
-    if v is None:
-        return None
-    if metric in ("cpu", "memory"):
-        return _cmp(v, op, thr), v, f"{v:.0f}%"
-    if metric == "temperature":
-        return _cmp(v, op, thr), v, f"{v:.0f}°"
-    if metric == "session_count":
-        return _cmp(v, op, thr), v, f"{int(v)} sessions"
-    return None
-
-
 def _message(rule, hostname: str, detail: str, iface_label: str | None) -> str:
     where = f"{hostname}" + (f" / {iface_label}" if iface_label else "")
     return f"{rule.name}: {where} — {detail}"
@@ -455,7 +492,16 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
     # Pre-fetch ClickHouse fleet data once per distinct window.
     windows = {max(r.min_duration or 0, DEFAULT_WINDOW_S) for r in rules}
     if_cache = {w: _if_fleet(w) for w in windows}
-    scalar_cache = {w: _scalar_fleet(w) for w in windows}
+    # Scalar rules are dated from their last healthy sample rather than
+    # averaged, so they cache per (metric, operator, threshold, hold) instead
+    # of per window — rules sharing all four share one query.
+    hold_cache: dict[tuple, dict[str, dict]] = {}
+    for r in rules:
+        if r.metric not in SCALAR_METRICS:
+            continue
+        key = (r.metric, (r.operator or "").strip(), float(r.threshold or 0), int(r.min_duration or 0))
+        if key not in hold_cache:
+            hold_cache[key] = _scalar_hold(*key)
     has_tpl = any(r.metric.startswith("tpl_") for r in rules)
     tpl_cache = {w: _tpl_fleet(w) for w in windows} if has_tpl else {}
     uptime_reset_ids = _uptime_resets() if any(r.metric == "uptime_reset" for r in rules) else set()
@@ -490,7 +536,9 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
         # Device-scalar / special metrics — one value per device.
         for did, dev in in_scope:
             if rule.metric in SCALAR_METRICS:
-                res = _eval_scalar(rule, scalar_cache[window].get(did, {}))
+                key = (rule.metric, (rule.operator or "").strip(),
+                       float(rule.threshold or 0), int(rule.min_duration or 0))
+                res = _eval_scalar_hold(rule, hold_cache.get(key, {}).get(did))
             elif rule.metric.startswith("tpl_"):
                 res = _eval_template(rule, tpl_cache.get(window, {}).get(did, {}))
             elif rule.metric == "uptime_reset":
