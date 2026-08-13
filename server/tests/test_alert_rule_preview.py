@@ -41,6 +41,7 @@ def _rule_row(**overrides):
         cooldown=300,
         device_type="router",
         location="DC-1",
+        scope_tag=None,
         trigger_on="down",
         recovery_alert=True,
         min_duration=0,

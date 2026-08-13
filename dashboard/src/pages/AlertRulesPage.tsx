@@ -26,6 +26,7 @@ function scopeLabel(r: any): string {
   if (r.group_id) return 'Group'
   if (r.device_type) return r.device_type
   if (r.location) return r.location
+  if (r.scope_tag) return `#${r.scope_tag}`
   if (r.device_id) return 'Device'
   if (r.metric === 'trap') return 'Traps'
   return 'All'

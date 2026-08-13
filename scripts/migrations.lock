@@ -84,3 +84,4 @@ bd0a6ac7db359c549a54cc673ce738ddb14453ed68cfd1d18f1e3f45657488a1  migrate-073-al
 87896f556902e3280a682d97bef3420aafec8ab6d5592deb432e4db7d5aeeb6d  migrate-074-rbac-roles.sql
 ef59901f97d97149a65c55a3162121f49f6a7aded9dafd8ba1d89467fb612ceb  migrate-075-netpath.sql
 286407b67a92b6dec3dd43be0e498eb79523c0431e922c6282e2eacbbecd6939  migrate-076-netpath-alert-metrics.sql
+b185b2639c360b8695cd75a8eff14478282a81c741d1081e25a06e895fea8fb3  migrate-077-alert-rule-tag-scope.sql

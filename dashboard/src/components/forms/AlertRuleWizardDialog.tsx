@@ -38,6 +38,7 @@ import {
   SelectValue,
 } from '@/components/ui/Select'
 import { toast } from '@/components/ui/Toast'
+import { useTags, tagColor, tagColorMap } from '@/hooks/useTags'
 
 type Cond = { metric: string; operator: string; threshold: number }
 
@@ -57,6 +58,7 @@ type WizardState = {
   group_id: string
   device_type: string
   location: string
+  scope_tag: string
   service_check_id: string
   service_check_group_id: string
   trap_oid: string
@@ -168,6 +170,7 @@ const DEFAULT_STATE: WizardState = {
   group_id: '',
   device_type: '',
   location: '',
+  scope_tag: '',
   service_check_id: '',
   service_check_group_id: '',
   trap_oid: '',
@@ -223,6 +226,7 @@ function ruleToState(rule: any): WizardState {
     group_id: rule.group_id || '',
     device_type: rule.device_type || '',
     location: rule.location || '',
+    scope_tag: rule.scope_tag || '',
     service_check_id: rule.service_check_id || '',
     service_check_group_id: rule.service_check_group_id || '',
     trap_oid: rule.trap_oid || '',
@@ -278,6 +282,7 @@ function stateToPayload(s: WizardState) {
     group_id: isService || isApm ? null : s.group_id || null,
     device_type: isService || isApm ? null : s.device_type || null,
     location: isService || isApm ? null : s.location || null,
+    scope_tag: isService || isApm ? null : s.scope_tag || null,
     service_check_id: isService ? s.service_check_id || null : null,
     service_check_group_id: isService ? s.service_check_group_id || null : null,
     notify_channels: s.notify_channels,
@@ -306,7 +311,7 @@ export function AlertRuleWizardDialog({
   const qc = useQueryClient()
   const [step, setStep] = useState<StepId>('properties')
   const [s, setS] = useState<WizardState>(DEFAULT_STATE)
-  const [scopeMode, setScopeMode] = useState<'all' | 'device' | 'group' | 'type' | 'location'>('all')
+  const [scopeMode, setScopeMode] = useState<'all' | 'device' | 'group' | 'type' | 'location' | 'tag'>('all')
   const [preview, setPreview] = useState<any>(null)
 
   const stepIdx = STEPS.findIndex((st) => st.id === step)
@@ -329,6 +334,9 @@ export function AlertRuleWizardDialog({
     queryFn: async () => (await api.get('/devices/locations')).data,
     enabled: open,
   })
+
+  const { data: tags = [] } = useTags(open)
+  const tagColors = useMemo(() => tagColorMap(tags), [tags])
 
   const { data: serviceChecksResp } = useQuery<any>({
     queryKey: ['service-checks', 'list-min'],
@@ -365,7 +373,8 @@ export function AlertRuleWizardDialog({
       const st = ruleToState(rule)
       setS(st)
       setScopeMode(
-        st.group_id ? 'group' : st.device_type ? 'type' : st.location ? 'location' : st.device_id ? 'device' : 'all',
+        st.group_id ? 'group' : st.device_type ? 'type' : st.location ? 'location'
+          : st.scope_tag ? 'tag' : st.device_id ? 'device' : 'all',
       )
     } else {
       setS(DEFAULT_STATE)
@@ -779,7 +788,7 @@ export function AlertRuleWizardDialog({
                     <FormField label="Apply to">
                       <Select value={scopeMode} onValueChange={(v: any) => {
                         setScopeMode(v)
-                        setS({ ...s, device_id: '', group_id: '', device_type: '', location: '' })
+                        setS({ ...s, device_id: '', group_id: '', device_type: '', location: '', scope_tag: '' })
                       }}>
                         <SelectTrigger><SelectValue /></SelectTrigger>
                         <SelectContent>
@@ -788,6 +797,7 @@ export function AlertRuleWizardDialog({
                           <SelectItem value="group">Device group</SelectItem>
                           <SelectItem value="type">Device type</SelectItem>
                           <SelectItem value="location">Location</SelectItem>
+                          <SelectItem value="tag">Tag</SelectItem>
                         </SelectContent>
                       </Select>
                     </FormField>
@@ -829,6 +839,29 @@ export function AlertRuleWizardDialog({
                           <SelectTrigger><SelectValue /></SelectTrigger>
                           <SelectContent>
                             {locations.map((l) => <SelectItem key={l} value={l}>{l}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                      </FormField>
+                    )}
+                    {scopeMode === 'tag' && (
+                      <FormField
+                        label="Tag"
+                        hint="Applies to every device carrying this tag — devices tagged later are covered automatically."
+                      >
+                        <Select value={s.scope_tag || '__pick__'} onValueChange={(v) => setS({ ...s, scope_tag: v === '__pick__' ? '' : v })}>
+                          <SelectTrigger><SelectValue placeholder="Select tag" /></SelectTrigger>
+                          <SelectContent>
+                            {tags.map((t) => (
+                              <SelectItem key={t.id} value={t.name}>
+                                <span className="inline-flex items-center gap-1.5">
+                                  <span
+                                    className="h-2 w-2 shrink-0 rounded-full"
+                                    style={{ background: tagColor(t.name, tagColors) }}
+                                  />
+                                  {t.name}
+                                </span>
+                              </SelectItem>
+                            ))}
                           </SelectContent>
                         </Select>
                       </FormField>

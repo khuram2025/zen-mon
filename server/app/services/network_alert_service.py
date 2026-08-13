@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import alert_phrasing as ap
 from app.services.host_alert_service import dispatch_to_channels
+from app.services.tag_service import tag_set as _tag_set
 
 logger = logging.getLogger("zenplus.network_alerts")
 
@@ -218,9 +219,9 @@ def _uptime_resets() -> set[str]:
 # ─── Postgres fetchers ──────────────────────────────────────────────────────
 
 async def _snmp_devices(db: AsyncSession) -> dict[str, dict]:
-    """{device_id: {hostname, device_type, location, group_id}} for SNMP devices."""
+    """{device_id: {hostname, device_type, location, group_id, tags}} for SNMP devices."""
     rows = (await db.execute(text(
-        "SELECT id, hostname, device_type, location, group_id FROM devices "
+        "SELECT id, hostname, device_type, location, group_id, tags FROM devices "
         "WHERE snmp_enabled = true AND status <> 'maintenance'"
     ))).all()
     return {
@@ -229,6 +230,7 @@ async def _snmp_devices(db: AsyncSession) -> dict[str, dict]:
             "device_type": r[2],
             "location": r[3],
             "group_id": str(r[4]) if r[4] else None,
+            "tags": _tag_set(r[5]),
         }
         for r in rows
     }
@@ -262,6 +264,8 @@ def _device_in_scope(rule, dev_id: str, dev: dict) -> bool:
     if rule.device_type and rule.device_type != dev["device_type"]:
         return False
     if rule.location and (not dev["location"] or rule.location.lower() not in dev["location"].lower()):
+        return False
+    if rule.scope_tag and rule.scope_tag.strip().lower() not in dev.get("tags", set()):
         return False
     return True
 
@@ -425,7 +429,7 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
     metric_list = ",".join(f"'{m}'" for m in sorted(NETWORK_METRICS))
     rules = (await db.execute(text(
         f"SELECT id, name, metric, operator, threshold, severity, min_duration, "
-        f"notify_channels, device_id, group_id, device_type, location, target, "
+        f"notify_channels, device_id, group_id, device_type, location, scope_tag, target, "
         f"recovery_alert, conditions, condition_logic, "
         f"schedule_start, schedule_end, schedule_days "
         f"FROM alert_rules WHERE enabled = true "

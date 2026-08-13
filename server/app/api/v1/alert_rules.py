@@ -97,6 +97,7 @@ class AlertRuleCreate(BaseModel):
     service_check_group_id: Optional[UUID] = None
     device_type: Optional[str] = None
     location: Optional[str] = None
+    scope_tag: Optional[str] = Field(default=None, max_length=120)
 
     severity: str = Field(default="warning", pattern="^(info|warning|critical)$")
     notify_channels: list[str] = Field(default_factory=list)
@@ -140,6 +141,7 @@ class AlertRuleUpdate(BaseModel):
     service_check_group_id: Optional[UUID] = None
     device_type: Optional[str] = None
     location: Optional[str] = None
+    scope_tag: Optional[str] = Field(default=None, max_length=120)
 
     severity: Optional[str] = Field(None, pattern="^(info|warning|critical)$")
     notify_channels: Optional[list[str]] = None
@@ -186,7 +188,7 @@ _RULE_COLUMNS = (
     "id, name, description, enabled, metric, operator, threshold, duration, "
     "device_id, group_id, service_check_id, service_check_group_id, "
     "severity, notify_channels, cooldown, "
-    "device_type, location, trigger_on, recovery_alert, "
+    "device_type, location, scope_tag, trigger_on, recovery_alert, "
     "min_duration, max_repeat, schedule_start, schedule_end, schedule_days, "
     "email_subject, email_body, sms_template, "
     "recovery_email_subject, recovery_email_body, recovery_sms_template, "
@@ -221,6 +223,7 @@ def _row_to_dict(row) -> dict:
         "cooldown": row.cooldown,
         "device_type": row.device_type,
         "location": row.location,
+        "scope_tag": row.scope_tag,
         "trigger_on": row.trigger_on,
         "recovery_alert": row.recovery_alert,
         "min_duration": row.min_duration,
@@ -299,6 +302,7 @@ async def create_alert_rule(
         "cooldown": data.cooldown,
         "device_type": data.device_type,
         "location": data.location,
+        "scope_tag": (data.scope_tag or "").strip() or None,
         "trigger_on": data.trigger_on,
         "recovery_alert": data.recovery_alert,
         "min_duration": data.min_duration,
@@ -324,7 +328,7 @@ async def create_alert_rule(
             "conditions, condition_logic, trap_oid, target, "
             "device_id, group_id, service_check_id, service_check_group_id, "
             "severity, notify_channels, cooldown, "
-            "device_type, location, trigger_on, recovery_alert, "
+            "device_type, location, scope_tag, trigger_on, recovery_alert, "
             "min_duration, max_repeat, schedule_start, schedule_end, schedule_days, "
             "email_subject, email_body, sms_template, "
             "recovery_email_subject, recovery_email_body, recovery_sms_template, "
@@ -334,7 +338,7 @@ async def create_alert_rule(
             "CAST(:conditions AS jsonb), :condition_logic, :trap_oid, :target, "
             ":device_id, :group_id, :service_check_id, :service_check_group_id, "
             ":severity, CAST(:notify_channels AS jsonb), :cooldown, "
-            ":device_type, :location, :trigger_on, :recovery_alert, "
+            ":device_type, :location, :scope_tag, :trigger_on, :recovery_alert, "
             ":min_duration, :max_repeat, CAST(:schedule_start AS time), CAST(:schedule_end AS time), "
             "CAST(:schedule_days AS jsonb), "
             ":email_subject, :email_body, :sms_template, "
@@ -406,6 +410,12 @@ async def update_alert_rule(
         elif key == "device_id" or key == "group_id":
             set_parts.append(f"{key} = :{key}")
             params[key] = value
+        elif key == "scope_tag":
+            # "" means the user cleared tag scope; store NULL so the engine's
+            # `if rule.scope_tag` guard treats it as unscoped rather than
+            # matching devices against an empty tag name.
+            set_parts.append(f"{key} = :{key}")
+            params[key] = (value or "").strip() or None
         else:
             set_parts.append(f"{key} = :{key}")
             params[key] = value
@@ -616,6 +626,7 @@ def _preview_email_ctx(rule_dict: dict, msg: dict, is_recovery: bool,
             ("Group", rule_dict.get("group_id") and variables.get("group")),
             ("Location", rule_dict.get("location")),
             ("Device type", rule_dict.get("device_type")),
+            ("Tag", rule_dict.get("scope_tag")),
         ]),
         "action_url": action_url,
         "timestamp": msg.get("iso_timestamp"),

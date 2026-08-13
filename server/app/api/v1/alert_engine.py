@@ -17,6 +17,7 @@ from sqlalchemy import text
 
 from app.core.database import get_db
 from app.services.email_render import build_alert_email_html
+from app.services.tag_service import tag_set as _tag_set
 from app.services.alert_schedule import notifications_allowed, get_configured_timezone
 from app.services.alert_phrasing import (
     DEFAULT_EMAIL_BODY, DEFAULT_EMAIL_SUBJECT, DEFAULT_RECOVERY_EMAIL_BODY,
@@ -475,13 +476,14 @@ async def evaluate_status_change(
 
     # Get device info for group/location/type matching
     dev_result = await db.execute(
-        text("SELECT device_type, group_id, location FROM devices WHERE id = :id"),
+        text("SELECT device_type, group_id, location, tags FROM devices WHERE id = :id"),
         {"id": event.device_id},
     )
     dev_row = dev_result.first()
     device_type = dev_row.device_type if dev_row else event.device_type
     group_id = str(dev_row.group_id) if dev_row and dev_row.group_id else event.group_id
     location = dev_row.location if dev_row else event.location
+    device_tags = _tag_set(dev_row.tags if dev_row else None)
 
     # Planned downtime: never raise alerts for a device in an active
     # maintenance window. Recovery events still pass so open alerts resolve.
@@ -499,7 +501,7 @@ async def evaluate_status_change(
     rules_result = await db.execute(
         text("""
             SELECT id, name, trigger_on, recovery_alert, severity,
-                   device_id, group_id, device_type, location,
+                   device_id, group_id, device_type, location, scope_tag,
                    notify_channels, cooldown,
                    metric, operator, threshold, conditions, condition_logic,
                    email_subject, email_body, sms_template,
@@ -623,6 +625,12 @@ async def evaluate_status_change(
 
         # Check scope - location
         if rule.location and location and rule.location.lower() not in location.lower():
+            continue
+
+        # Check scope - device tag. Tags are matched case-insensitively
+        # because the registry canonicalises spelling but older assignments
+        # in devices.tags may predate that.
+        if rule.scope_tag and rule.scope_tag.strip().lower() not in device_tags:
             continue
 
         # E1: metric-threshold gating. Recovery events are never gated (so they
@@ -1229,11 +1237,13 @@ async def evaluate_trap(
         did = None
 
     group_id = None
+    device_tags: set[str] = set()
     if did:
         dev = (await db.execute(
-            text("SELECT group_id FROM devices WHERE id = :id"), {"id": did}
+            text("SELECT group_id, tags FROM devices WHERE id = :id"), {"id": did}
         )).first()
         group_id = str(dev.group_id) if dev and dev.group_id else None
+        device_tags = _tag_set(dev.tags if dev else None)
 
         # Planned downtime: traps from a device in maintenance don't raise alerts.
         if await _device_in_maintenance(db, did):
@@ -1241,7 +1251,7 @@ async def evaluate_trap(
 
     rules = (await db.execute(
         text("""
-            SELECT id, name, severity, device_id, group_id, trap_oid
+            SELECT id, name, severity, device_id, group_id, scope_tag, trap_oid
             FROM alert_rules
             WHERE enabled = true AND metric = 'trap'
         """)
@@ -1252,6 +1262,10 @@ async def evaluate_trap(
         if rule.device_id and (not did or str(rule.device_id) != did):
             continue
         if rule.group_id and (not group_id or str(rule.group_id) != group_id):
+            continue
+        # A tag-scoped rule must not fall through to every device: a trap from
+        # an unidentified source (no device_id) has no tags to match.
+        if rule.scope_tag and rule.scope_tag.strip().lower() not in device_tags:
             continue
         if not _trap_oid_matches(rule.trap_oid, event.trap_oid):
             continue

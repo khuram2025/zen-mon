@@ -11,6 +11,8 @@ labels the registry has never seen auto-register instead of erroring —
 CSV imports and raw API clients keep working with zero ceremony.
 """
 
+import json
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,6 +44,29 @@ def clean_tags(raw) -> list[str]:
         seen.add(t.lower())
         out.append(t)
     return out
+
+
+def tag_set(raw) -> set[str]:
+    """Lowercased tag names from a devices.tags JSONB value, for scope matching.
+
+    Callers read the column straight out of raw SQL, where it can arrive as a
+    decoded list, as NULL for a device that has never been tagged, or as a JSON
+    string depending on the driver. Comparison is case-insensitive because the
+    registry canonicalises spelling but assignments written before it existed
+    may not match its casing.
+    """
+    if not raw:
+        return set()
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return set()
+    if not isinstance(raw, (list, tuple, set)):
+        return set()
+    # `if t` first: a None element would otherwise stringify to the literal
+    # tag "none" and match a rule scoped to a tag of that name.
+    return {str(t).strip().lower() for t in raw if t and str(t).strip()}
 
 
 async def canonicalize_tags(db: AsyncSession, raw) -> list[str]:
