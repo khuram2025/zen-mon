@@ -162,7 +162,6 @@ const HIDEABLE_COLUMNS = [
   'type',
   'group_location',
   'tags',
-  'template',
   'cpu',
   'memory',
   'uptime',
@@ -174,7 +173,6 @@ const DEFAULT_VISIBLE: Record<HideableCol, boolean> = {
   type: true,
   group_location: true,
   tags: true,
-  template: true,
   cpu: true,
   memory: true,
   uptime: true,
@@ -185,7 +183,6 @@ const COLUMN_LABELS: Record<HideableCol, string> = {
   type: 'Type',
   group_location: 'Group / Location',
   tags: 'Tags',
-  template: 'Template',
   cpu: 'CPU',
   memory: 'Memory',
   uptime: 'Uptime',
@@ -912,8 +909,16 @@ export function DevicesPage() {
                         onChange={toggleAll}
                       />
                     </Th>
-                    <SortableTh label="Device Name" col="hostname" current={sortKey} order={sortOrder} onClick={onSortClick} />
-                    <SortableTh label="IP Address" col="ip_address" current={sortKey} order={sortOrder} onClick={onSortClick} />
+                    {/* IP now sits under the hostname in one cell, so this
+                        header carries both sorts rather than losing IP sort
+                        along with the column. */}
+                    <Th>
+                      <span className="inline-flex items-center gap-1.5">
+                        <SortBtn label="Device Name" col="hostname" current={sortKey} order={sortOrder} onClick={onSortClick} />
+                        <span className="text-muted/40">/</span>
+                        <SortBtn label="IP" col="ip_address" current={sortKey} order={sortOrder} onClick={onSortClick} />
+                      </span>
+                    </Th>
                     {prefs.visible.type && (
                       <SortableTh label="Type" col="device_type" current={sortKey} order={sortOrder} onClick={onSortClick} />
                     )}
@@ -922,7 +927,6 @@ export function DevicesPage() {
                     )}
                     {prefs.visible.tags && <Th className="min-w-[130px]">Tags</Th>}
                     <SortableTh label="Status" col="status" current={sortKey} order={sortOrder} onClick={onSortClick} />
-                    {prefs.visible.template && <Th className="whitespace-nowrap">Template</Th>}
                     {prefs.visible.cpu && <Th className="min-w-[140px]">CPU</Th>}
                     {prefs.visible.memory && <Th className="min-w-[140px]">Memory</Th>}
                     {prefs.visible.uptime && (
@@ -939,14 +943,14 @@ export function DevicesPage() {
                 <TBody>
                   {isLoading && (
                     <Tr>
-                      <Td colSpan={13}>
+                      <Td colSpan={11}>
                         <SkeletonTable rows={6} cols={10} />
                       </Td>
                     </Tr>
                   )}
                   {!isLoading && pageRows.length === 0 && (
                     <Tr>
-                      <Td colSpan={13} className="py-14">
+                      <Td colSpan={11} className="py-14">
                         <div className="flex flex-col items-center gap-2 text-center text-muted">
                           <Server className="h-8 w-8 opacity-50" />
                           <div className="text-sm font-medium text-text">No devices match</div>
@@ -1008,7 +1012,10 @@ export function DevicesPage() {
                                 </span>
                               )}
                             </span>
-                            <div className="min-w-0">
+                            {/* Capped so long hostnames ellipsize instead of
+                                stretching the column — the full name stays in
+                                the link's title tooltip. */}
+                            <div className="min-w-0 max-w-[240px]">
                               <div className="flex items-center gap-1.5">
                                 <Link
                                   to={`/devices/${d.id}`}
@@ -1027,6 +1034,9 @@ export function DevicesPage() {
                                   </button>
                                 )}
                               </div>
+                              <div className="truncate font-mono text-[11px] text-muted">
+                                {d.ip_address || d.managed_ip || '—'}
+                              </div>
                               {d.managed_by_device_id && (
                                 <Link
                                   to={`/devices/${d.managed_by_device_id}`}
@@ -1038,9 +1048,6 @@ export function DevicesPage() {
                               )}
                             </div>
                           </div>
-                        </Td>
-                        <Td className="font-mono text-xs text-muted">
-                          {d.ip_address || d.managed_ip || '—'}
                         </Td>
                         {prefs.visible.type && (
                           <Td className="text-sm capitalize">
@@ -1096,24 +1103,6 @@ export function DevicesPage() {
                         <Td>
                           <HealthPill kind={health} />
                         </Td>
-                        {prefs.visible.template && (
-                          <Td className="whitespace-nowrap">
-                            {d.profile_name ? (
-                              <Link
-                                to="/settings/general?tab=templates"
-                                onClick={(e) => e.stopPropagation()}
-                                className="inline-flex max-w-[150px] items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary hover:bg-primary/20"
-                                title={d.profile_name}
-                              >
-                                <span className="truncate">{d.profile_name}</span>
-                              </Link>
-                            ) : d.snmp_enabled ? (
-                              <span className="text-[10px] text-muted">Default</span>
-                            ) : (
-                              <span className="text-muted">—</span>
-                            )}
-                          </Td>
-                        )}
                         {prefs.visible.cpu && (
                           <Td>
                             <MetricCell value={cpu} />
@@ -2549,6 +2538,32 @@ function UptimePctCell({ pct, fallback }: { pct: number | undefined; fallback: s
 // Sortable header
 // =========================================================================
 
+function SortBtn({
+  label, col, current, order, onClick,
+}: {
+  label: string
+  col: SortKey
+  current: SortKey
+  order: SortOrder
+  onClick: (c: SortKey) => void
+}) {
+  const isActive = current === col
+  return (
+    <button
+      type="button"
+      onClick={() => onClick(col)}
+      className={`inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wider transition-colors ${
+        isActive ? 'text-text' : 'text-muted hover:text-text'
+      }`}
+    >
+      {label}
+      {isActive ? (
+        order === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />
+      ) : null}
+    </button>
+  )
+}
+
 function SortableTh({
   label, col, current, order, onClick, className,
 }: {
@@ -2559,21 +2574,9 @@ function SortableTh({
   onClick: (c: SortKey) => void
   className?: string
 }) {
-  const isActive = current === col
   return (
     <Th className={className}>
-      <button
-        type="button"
-        onClick={() => onClick(col)}
-        className={`inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wider transition-colors ${
-          isActive ? 'text-text' : 'text-muted hover:text-text'
-        }`}
-      >
-        {label}
-        {isActive ? (
-          order === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />
-        ) : null}
-      </button>
+      <SortBtn label={label} col={col} current={current} order={order} onClick={onClick} />
     </Th>
   )
 }
