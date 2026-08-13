@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.services import alert_phrasing as ap
 from app.services.host_alert_service import dispatch_to_channels
 from app.services.tag_service import tag_set as _tag_set
+from app.services import alert_notify_state as ns
 
 logger = logging.getLogger("zenplus.network_alerts")
 
@@ -348,19 +349,20 @@ async def _active_alert(db: AsyncSession, rule_id, device_id: str, if_index):
 
 
 async def _raise(db: AsyncSession, rule, device_id: str, message: str,
-                 value: float, if_index, extra: dict) -> bool:
+                 value: float, if_index, extra: dict):
     now = datetime.now(timezone.utc)
     meta = {"rule_id": str(rule.id), "metric": rule.metric,
             "value": round(value, 2), "threshold": float(rule.threshold or 0)}
     if if_index is not None:
         meta["if_index"] = str(if_index)
     meta.update(extra)
-    await db.execute(text(
+    row = (await db.execute(text(
         "INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, metadata) "
-        "VALUES (:did, :rid, 'active', :sev, :msg, :ts, CAST(:meta AS jsonb))"
+        "VALUES (:did, :rid, 'active', :sev, :msg, :ts, CAST(:meta AS jsonb)) "
+        "RETURNING id"
     ), {"did": device_id, "rid": str(rule.id), "sev": rule.severity or "warning",
-        "msg": message, "ts": now, "meta": json.dumps(meta)})
-    return True
+        "msg": message, "ts": now, "meta": json.dumps(meta)})).first()
+    return row[0] if row else None
 
 
 async def _resolve(db: AsyncSession, alert_id) -> int:
@@ -409,8 +411,8 @@ def _message(rule, hostname: str, detail: str, iface_label: str | None) -> str:
 
 async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
                   iface_label: str | None = None, is_recovery: bool = False,
-                  duration: str = "") -> None:
-    """Send one metric alert — or its all-clear — to the rule's channels."""
+                  duration: str = "") -> bool:
+    """Send one metric alert — or its all-clear. True when it was dispatched."""
     # Quiet hours: the alert row is already recorded; only the outbound
     # notification is gated by the rule's schedule window. A recovery notice is
     # never suppressed, or an operator is left believing it is still breached.
@@ -420,7 +422,7 @@ async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
         getattr(rule, "schedule_start", None), getattr(rule, "schedule_end", None),
         getattr(rule, "schedule_days", None), tz,
     ):
-        return
+        return False
     sev = (rule.severity or "warning")
     # An interface rule is about the port, not the chassis, so the sentence
     # names "core-router-01 / port14" and the details table repeats it.
@@ -452,6 +454,7 @@ async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
         "triggered_at": datetime.now(timezone.utc).isoformat(),
         "rule_id": str(rule.id),
     })
+    return True
 
 
 def _render(template: str, variables: dict) -> str:
@@ -578,18 +581,32 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
             return raised, resolved
         if existing is None:
             msg = _message(rule, hostname, detail, iface_label)
-            if await _raise(db, rule, device_id, msg, value, if_index, extra):
+            alert_id = await _raise(db, rule, device_id, msg, value, if_index, extra)
+            if alert_id is not None:
                 raised += 1
                 await db.commit()
-                await _notify(db, rule, hostname, reading=reading, iface_label=iface_label)
+                sent = await _notify(db, rule, hostname, reading=reading, iface_label=iface_label)
+                await ns.stamp(db, alert_id, sent)
+                await db.commit()
+        elif await ns.is_pending(db, existing[0]):
+            # The trigger was suppressed by quiet hours and the condition is
+            # still breaching. Without this the breach is never announced at
+            # all: the alert row already exists, so the branch above never
+            # runs again, and the only mail ever sent is the all-clear.
+            if await _notify(db, rule, hostname, reading=reading, iface_label=iface_label):
+                await ns.stamp(db, existing[0], True)
+                await db.commit()
     else:
         if existing is not None:
             alert_id, started_at = existing
+            # An all-clear for a page nobody received is noise about an event
+            # they never heard of, so it follows the trigger's fate.
+            notified = await ns.was_notified(db, alert_id)
             resolved += await _resolve(db, alert_id)
             await db.commit()
             # Metric rules used to close silently, so whoever got the 2am page
             # never learned it had cleared — let alone after how long.
-            if getattr(rule, "recovery_alert", True):
+            if notified and getattr(rule, "recovery_alert", True):
                 await _notify(db, rule, hostname, reading=reading, iface_label=iface_label,
                               is_recovery=True, duration=ap.duration_between(started_at))
     return raised, resolved

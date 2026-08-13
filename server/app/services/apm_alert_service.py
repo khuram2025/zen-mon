@@ -45,6 +45,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import alert_phrasing as ap
+from app.services import alert_notify_state as ns
 from app.services.apm_rollup import rollup_window
 from app.services.host_alert_service import dispatch_to_channels
 
@@ -164,10 +165,10 @@ async def _active_alert(db: AsyncSession, rule_id, service: str):
     return (row[0], row[1]) if row else None
 
 
-async def _raise(db: AsyncSession, rule, service: str, message: str, value: float) -> None:
-    await db.execute(text(
+async def _raise(db: AsyncSession, rule, service: str, message: str, value: float):
+    row = (await db.execute(text(
         "INSERT INTO alerts (rule_id, status, severity, message, triggered_at, metadata) "
-        "VALUES (:rid, 'active', :sev, :msg, :ts, CAST(:meta AS jsonb))"
+        "VALUES (:rid, 'active', :sev, :msg, :ts, CAST(:meta AS jsonb)) RETURNING id"
     ), {
         "rid": str(rule.id), "sev": rule.severity or "warning",
         "msg": message, "ts": datetime.now(timezone.utc),
@@ -176,7 +177,8 @@ async def _raise(db: AsyncSession, rule, service: str, message: str, value: floa
             "rule_id": str(rule.id), "metric": rule.metric,
             "value": round(value, 4), "threshold": float(rule.threshold or 0),
         }),
-    })
+    })).first()
+    return row[0] if row else None
 
 
 async def _resolve(db: AsyncSession, alert_id) -> int:
@@ -197,8 +199,8 @@ def _render(template: str, variables: dict) -> str:
 
 
 async def _notify(db: AsyncSession, rule, service: str, value: float, *,
-                  is_recovery: bool = False, duration: str = "") -> None:
-    """Send an APM threshold alert, or its all-clear, in the shared house style."""
+                  is_recovery: bool = False, duration: str = "") -> bool:
+    """Send an APM threshold alert, or its all-clear. True when dispatched."""
     # Quiet hours: the alert row is already recorded; only the outbound
     # notification is gated by the rule's schedule window. Recovery notices go
     # out regardless — silence after a page reads as "still broken".
@@ -208,7 +210,7 @@ async def _notify(db: AsyncSession, rule, service: str, value: float, *,
         getattr(rule, "schedule_start", None), getattr(rule, "schedule_end", None),
         getattr(rule, "schedule_days", None), tz,
     ):
-        return
+        return False
     sev = rule.severity or "warning"
     reading = ap.format_value(rule.metric, value)
     v = ap.rule_phrasing(rule, hostname=service, is_recovery=is_recovery,
@@ -235,6 +237,7 @@ async def _notify(db: AsyncSession, rule, service: str, value: float, *,
         "triggered_at": datetime.now(timezone.utc).isoformat(),
         "rule_id": str(rule.id), "rule_name": rule.name,
     })
+    return True
 
 
 # ─── Main evaluation pass ────────────────────────────────────────────────────
@@ -271,14 +274,23 @@ async def evaluate_apm_rules(db: AsyncSession) -> dict[str, int]:
             if breach:
                 if existing is None:
                     msg = _message(rule, service, _detail(rule.metric, value))
-                    await _raise(db, rule, service, msg, value)
+                    alert_id = await _raise(db, rule, service, msg, value)
                     raised += 1
                     await db.commit()
-                    await _notify(db, rule, service, value)
+                    sent = await _notify(db, rule, service, value)
+                    await ns.stamp(db, alert_id, sent)
+                    await db.commit()
+                elif await ns.is_pending(db, existing[0]):
+                    # Quiet hours suppressed the trigger; the window is open
+                    # now and the service is still breaching.
+                    if await _notify(db, rule, service, value):
+                        await ns.stamp(db, existing[0], True)
+                        await db.commit()
             elif existing is not None:
                 alert_id, started_at = existing
+                notified = await ns.was_notified(db, alert_id)
                 resolved += await _resolve(db, alert_id)
-                if getattr(rule, "recovery_alert", True):
+                if notified and getattr(rule, "recovery_alert", True):
                     await db.commit()
                     await _notify(db, rule, service, value, is_recovery=True,
                                   duration=ap.duration_between(started_at))

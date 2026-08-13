@@ -18,6 +18,7 @@ from sqlalchemy import text
 from app.core.database import get_db
 from app.services.email_render import build_alert_email_html
 from app.services.tag_service import tag_set as _tag_set
+from app.services import alert_notify_state as ns
 from app.services.alert_schedule import notifications_allowed, get_configured_timezone
 from app.services.alert_phrasing import (
     DEFAULT_EMAIL_BODY, DEFAULT_EMAIL_SUBJECT, DEFAULT_RECOVERY_EMAIL_BODY,
@@ -733,10 +734,11 @@ async def evaluate_status_change(
         # sentence — the rendered SMS/email templates are transport payloads
         # only (persisting sms_body here put "[ZenPlus WARNING] ..." template
         # text all over the alert UIs).
-        await db.execute(
+        inserted = await db.execute(
             text("""
                 INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata)
                 VALUES (:device_id, :rule_id, :status, :severity, :message, :triggered_at, :resolved_at, CAST(:metadata AS jsonb))
+                RETURNING id
             """),
             {
                 "device_id": event.device_id,
@@ -754,14 +756,21 @@ async def evaluate_status_change(
             },
         )
 
+        new_alert_id = (inserted.first() or [None])[0]
+
         # Quiet hours: suppress outbound notifications outside the rule's
-        # schedule window. Recovery ("resolved") notices still go out so an
-        # operator isn't left thinking something is still down. The alert row
-        # above is always recorded regardless of schedule.
-        if not is_recovery and not notifications_allowed(
-            rule.schedule_start, rule.schedule_end,
-            getattr(rule, "schedule_days", None), _tz,
-        ):
+        # schedule window. The alert row above is always recorded regardless.
+        if not is_recovery:
+            allowed = notifications_allowed(
+                rule.schedule_start, rule.schedule_end,
+                getattr(rule, "schedule_days", None), _tz,
+            )
+            await ns.stamp(db, new_alert_id, allowed)
+            if not allowed:
+                continue
+        # A recovery follows the trigger's fate: an all-clear for a page nobody
+        # received is noise about an event they never heard of.
+        elif not await ns.last_trigger_notified(db, rule.id, event.device_id):
             continue
 
         # Send notifications to channels
@@ -1102,10 +1111,11 @@ async def evaluate_service_status_change(
                 "ZenPlus {severity} — {rule_name}: {check_name} is {status} ({target})."),
                 variables)
 
-        await db.execute(
+        inserted = await db.execute(
             text("""
                 INSERT INTO alerts (device_id, service_check_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata)
                 VALUES (:device_id, :service_check_id, :rule_id, :status, :severity, :message, :triggered_at, :resolved_at, CAST(:metadata AS jsonb))
+                RETURNING id
             """),
             {
                 "device_id": event.device_id,
@@ -1126,11 +1136,17 @@ async def evaluate_service_status_change(
             },
         )
 
-        # Quiet hours (see device path). Recovery notices are never suppressed.
-        if not is_recovery and not notifications_allowed(
-            rule.schedule_start, rule.schedule_end,
-            getattr(rule, "schedule_days", None), _tz,
-        ):
+        # Quiet hours, and a recovery follows its trigger's fate (see device path).
+        svc_alert_id = (inserted.first() or [None])[0]
+        if not is_recovery:
+            allowed = notifications_allowed(
+                rule.schedule_start, rule.schedule_end,
+                getattr(rule, "schedule_days", None), _tz,
+            )
+            await ns.stamp(db, svc_alert_id, allowed)
+            if not allowed:
+                continue
+        elif not await ns.last_trigger_notified(db, rule.id):
             continue
 
         channel_ids = rule.notify_channels or []

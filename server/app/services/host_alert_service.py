@@ -25,6 +25,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import alert_phrasing as ap
+from app.services import alert_notify_state as ns
 from app.services.server_health_service import create_server_alert, resolve_server_alerts
 from app.services.filesystem_monitoring import pg_capacity_filter
 
@@ -306,24 +307,36 @@ async def evaluate_host_rules(db: AsyncSession) -> dict[str, int]:
                     metadata={"rule_id": str(rule.id), "metric": rule.metric,
                               "value": round(value, 2), "threshold": float(rule.threshold or 0)},
                 )
+                allowed = notifications_allowed(
+                    getattr(rule, "schedule_start", None), getattr(rule, "schedule_end", None),
+                    getattr(rule, "schedule_days", None), _tz,
+                )
                 if created:
                     raised += 1
                     await db.commit()
                     # Quiet hours: alert is recorded above; only suppress the
                     # outbound notification when outside the rule's schedule.
-                    if not notifications_allowed(
-                        getattr(rule, "schedule_start", None), getattr(rule, "schedule_end", None),
-                        getattr(rule, "schedule_days", None), _tz,
-                    ):
-                        continue
-                    await _notify_rule(db, rule, hostname, reading=reading, detail=detail)
+                    if allowed:
+                        await _notify_rule(db, rule, hostname, reading=reading, detail=detail)
+                    await ns.stamp(db, await ns.open_alert_id(db, sid, dedupe), allowed)
+                    await db.commit()
+                elif allowed:
+                    # Trigger was suppressed by quiet hours and the host is
+                    # still breaching — announce it now the window has opened,
+                    # otherwise the breach is never reported at all.
+                    alert_id = await ns.open_alert_id(db, sid, dedupe)
+                    if await ns.is_pending(db, alert_id):
+                        await _notify_rule(db, rule, hostname, reading=reading, detail=detail)
+                        await ns.stamp(db, alert_id, True)
+                        await db.commit()
             else:
                 # Read when it started before closing it, so the all-clear can
                 # say how long the host sat over the threshold.
                 started_at = await _open_alert_started(db, sid, dedupe)
+                notified = await ns.was_notified(db, await ns.open_alert_id(db, sid, dedupe))
                 n = await resolve_server_alerts(db, sid, dedupe)
                 resolved += n
-                if n and getattr(rule, "recovery_alert", True):
+                if n and notified and getattr(rule, "recovery_alert", True):
                     await db.commit()
                     await _notify_rule(db, rule, hostname, reading=reading, detail=detail,
                                        is_recovery=True,
