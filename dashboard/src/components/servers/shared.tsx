@@ -4,6 +4,7 @@ import { AppWindow, Apple, Bot, CircleHelp, MonitorCog, Server, Terminal } from 
 import { Badge } from '@/components/ui/Badge'
 import { cn } from '@/lib/utils'
 import type { AgentStatus, OsType, ServerStatus } from '@/types/servers'
+import { TagBadge } from '@/components/tags/TagBadge'
 
 export const SERVER_STATUS_META: Record<ServerStatus, { label: string; variant: 'success' | 'warning' | 'danger' | 'info' | 'default' | 'outline'; dot: string }> = {
   healthy: { label: 'Healthy', variant: 'success', dot: 'bg-success' },
@@ -116,15 +117,34 @@ export function TagPill({ tag, onClick, active }: { tag: string; onClick?: (tag:
   )
 }
 
-export function TagList({ tags, max = 3, onTagClick, activeTag }: { tags: string[]; max?: number; onTagClick?: (tag: string) => void; activeTag?: string | null }) {
+export function TagList({ tags, max = 3, onTagClick, activeTag, colors }: {
+  tags: string[]
+  max?: number
+  onTagClick?: (tag: string) => void
+  activeTag?: string | null
+  /** Lowercased tag name -> registry colour, so a tag looks the same here as
+      it does on Devices and Link Utilization. Falls back to the local pill. */
+  colors?: Record<string, string>
+}) {
   if (!tags || tags.length === 0) return <span className="text-xs text-muted">—</span>
   const shown = tags.slice(0, max)
   const extra = tags.length - shown.length
   return (
     <div className="flex flex-wrap items-center gap-1">
-      {shown.map((t) => (
-        <TagPill key={t} tag={t} onClick={onTagClick} active={activeTag === t} />
-      ))}
+      {shown.map((t) =>
+        colors ? (
+          <TagBadge
+            key={t}
+            name={t}
+            color={colors[t.toLowerCase()]}
+            active={!!activeTag && activeTag.toLowerCase() === t.toLowerCase()}
+            onClick={onTagClick ? () => onTagClick(t) : undefined}
+            title={`Filter by \u201c${t}\u201d`}
+          />
+        ) : (
+          <TagPill key={t} tag={t} onClick={onTagClick} active={activeTag === t} />
+        ),
+      )}
       {extra > 0 && <span className="text-[10px] text-muted">+{extra}</span>}
     </div>
   )

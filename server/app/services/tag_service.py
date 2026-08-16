@@ -24,6 +24,17 @@ PALETTE = [
 
 MAX_TAG_LEN = 64
 
+# Every surface that stores tag assignments as a JSONB text array, and every
+# column that stores a single tag name as a scope. Declared once so a rename or
+# delete cannot silently miss one — see the note in api/v1/tags.py.
+TAG_ARRAY_TABLES: tuple[str, ...] = ("devices", "servers", "device_interfaces")
+
+TAG_SCOPE_COLUMNS: tuple[tuple[str, str, str | None], ...] = (
+    ("device_maintenance", "scope_tag", "scope_type = 'tag'"),
+    ("service_check_maintenance", "scope_tag", "scope_type = 'tag'"),
+    ("alert_rules", "scope_tag", None),
+)
+
 
 def auto_color(name: str) -> str:
     """Deterministic palette pick so a tag gets the same color everywhere."""
@@ -93,17 +104,20 @@ async def canonicalize_tags(db: AsyncSession, raw) -> list[str]:
 
 
 async def adopt_device_tags(db: AsyncSession, commit: bool = True) -> int:
-    """Register any labels found on devices that the registry doesn't know.
+    """Register any labels found on a tagged surface the registry doesn't know.
 
-    Covers fleets that tagged devices before the registry existed and rows
-    written by paths that bypass canonicalize_tags().
+    Covers fleets that tagged rows before the registry existed and rows written
+    by paths that bypass canonicalize_tags(). Named for devices for backwards
+    compatibility; it sweeps every table in TAG_ARRAY_TABLES.
     """
-    missing = (await db.execute(text("""
-        SELECT DISTINCT el
-        FROM devices d, jsonb_array_elements_text(COALESCE(d.tags, '[]'::jsonb)) el
-        WHERE btrim(el) <> ''
-          AND NOT EXISTS (SELECT 1 FROM tags x WHERE LOWER(x.name) = LOWER(el))
-    """))).scalars().all()
+    union = " UNION ".join(
+        f"""SELECT DISTINCT el
+            FROM {tbl} t, jsonb_array_elements_text(COALESCE(t.tags, '[]'::jsonb)) el
+            WHERE btrim(el) <> ''
+              AND NOT EXISTS (SELECT 1 FROM tags x WHERE LOWER(x.name) = LOWER(el))"""
+        for tbl in TAG_ARRAY_TABLES
+    )
+    missing = (await db.execute(text(union))).scalars().all()
     for name in missing:
         name = name.strip()[:MAX_TAG_LEN]
         await db.execute(

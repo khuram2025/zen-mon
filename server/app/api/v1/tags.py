@@ -1,10 +1,17 @@
 """Tag registry API.
 
 CRUD for the `tags` catalog plus the consistency work a registry owes its
-callers: renaming a tag rewrites it on every device and on tag-scoped
-maintenance windows; deleting strips it from devices. Assignments
-themselves live in devices.tags (JSONB) and are edited through the device
-endpoints and /devices/bulk-tag.
+callers: renaming a tag rewrites it everywhere it is used, deleting strips it
+everywhere. Assignments live as JSONB text arrays on the tagged rows and are
+edited through each surface's own endpoints.
+
+The set of places a tag can appear is declared once, in TAG_ARRAY_TABLES and
+TAG_SCOPE_COLUMNS below. That is deliberate: propagation used to be two
+hand-written UPDATEs, so when alert_rules.scope_tag (migrate-077) and
+service_check_maintenance.scope_tag were added nobody updated this file, and a
+rename silently pointed those scopes at a name nothing carried any more —
+matching no devices, with no error. Adding a tagged surface means adding a line
+here, not remembering to.
 """
 
 from typing import Optional
@@ -18,11 +25,52 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
-from app.services.tag_service import MAX_TAG_LEN, adopt_device_tags, auto_color
+from app.services.tag_service import (
+    MAX_TAG_LEN, TAG_ARRAY_TABLES, TAG_SCOPE_COLUMNS, adopt_device_tags, auto_color,
+)
 
 router = APIRouter(prefix="/tags", tags=["Tags"])
 
 COLOR_RE = r"^#[0-9a-fA-F]{6}$"
+
+async def _rename_everywhere(db: AsyncSession, old: str, new: str) -> None:
+    for table in TAG_ARRAY_TABLES:
+        await db.execute(text(f"""
+            UPDATE {table} SET tags = (
+                SELECT COALESCE(jsonb_agg(DISTINCT
+                           CASE WHEN LOWER(el) = LOWER(:old) THEN :new ELSE el END),
+                       '[]'::jsonb)
+                FROM jsonb_array_elements_text(COALESCE({table}.tags, '[]'::jsonb)) el
+            )
+            WHERE EXISTS (
+                SELECT 1 FROM jsonb_array_elements_text(COALESCE({table}.tags, '[]'::jsonb)) el
+                WHERE LOWER(el) = LOWER(:old))
+        """), {"old": old, "new": new})
+    for table, col, pred in TAG_SCOPE_COLUMNS:
+        where = f"LOWER({col}) = LOWER(:old)" + (f" AND {pred}" if pred else "")
+        await db.execute(
+            text(f"UPDATE {table} SET {col} = :new WHERE {where}"),
+            {"old": old, "new": new},
+        )
+
+
+async def _delete_everywhere(db: AsyncSession, name: str) -> None:
+    for table in TAG_ARRAY_TABLES:
+        await db.execute(text(f"""
+            UPDATE {table} SET tags = (
+                SELECT COALESCE(jsonb_agg(el), '[]'::jsonb)
+                FROM jsonb_array_elements_text(COALESCE({table}.tags, '[]'::jsonb)) el
+                WHERE LOWER(el) <> LOWER(:n)
+            )
+            WHERE EXISTS (
+                SELECT 1 FROM jsonb_array_elements_text(COALESCE({table}.tags, '[]'::jsonb)) el
+                WHERE LOWER(el) = LOWER(:n))
+        """), {"n": name})
+    # A scope pointing at a deleted tag would match nothing forever; clearing it
+    # makes the rule/window unscoped, which is visible in the UI.
+    for table, col, pred in TAG_SCOPE_COLUMNS:
+        where = f"LOWER({col}) = LOWER(:n)" + (f" AND {pred}" if pred else "")
+        await db.execute(text(f"UPDATE {table} SET {col} = NULL WHERE {where}"), {"n": name})
 
 
 class TagCreate(BaseModel):
@@ -141,23 +189,9 @@ async def update_tag(
     )
 
     if new_name != old_name:
-        # The registry is authoritative: a rename follows the tag onto every
-        # device and every tag-scoped maintenance window.
-        await db.execute(text("""
-            UPDATE devices SET tags = (
-                SELECT COALESCE(jsonb_agg(DISTINCT
-                           CASE WHEN LOWER(el) = LOWER(:old) THEN :new ELSE el END),
-                       '[]'::jsonb)
-                FROM jsonb_array_elements_text(COALESCE(devices.tags, '[]'::jsonb)) el
-            )
-            WHERE EXISTS (
-                SELECT 1 FROM jsonb_array_elements_text(COALESCE(devices.tags, '[]'::jsonb)) el
-                WHERE LOWER(el) = LOWER(:old))
-        """), {"old": old_name, "new": new_name})
-        await db.execute(text("""
-            UPDATE device_maintenance SET scope_tag = :new
-            WHERE scope_type = 'tag' AND LOWER(scope_tag) = LOWER(:old)
-        """), {"old": old_name, "new": new_name})
+        # The registry is authoritative: a rename follows the tag everywhere it
+        # is used — every tagged surface and every tag-scoped rule or window.
+        await _rename_everywhere(db, old_name, new_name)
 
     await db.commit()
     return await _tag_response(db, tag_id)
@@ -176,15 +210,6 @@ async def delete_tag(
         raise HTTPException(status_code=404, detail="Tag not found")
     name = cur[0]
 
-    await db.execute(text("""
-        UPDATE devices SET tags = (
-            SELECT COALESCE(jsonb_agg(el), '[]'::jsonb)
-            FROM jsonb_array_elements_text(COALESCE(devices.tags, '[]'::jsonb)) el
-            WHERE LOWER(el) <> LOWER(:n)
-        )
-        WHERE EXISTS (
-            SELECT 1 FROM jsonb_array_elements_text(COALESCE(devices.tags, '[]'::jsonb)) el
-            WHERE LOWER(el) = LOWER(:n))
-    """), {"n": name})
+    await _delete_everywhere(db, name)
     await db.execute(text("DELETE FROM tags WHERE id = :id"), {"id": tag_id})
     await db.commit()

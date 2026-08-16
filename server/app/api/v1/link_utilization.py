@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
+from app.services.audit_service import write_audit_log
+from app.services.tag_service import canonicalize_tags, clean_tags
 
 logger = logging.getLogger("zenplus.link_utilization")
 
@@ -290,6 +295,7 @@ async def list_links(
     favorites_only: bool = Query(
         default=False, description="Only links this user has starred"
     ),
+    tag: str | None = Query(default=None, description="Only links carrying this tag"),
     min_util: float | None = Query(default=None, ge=0, le=200),
     issue: str | None = Query(
         default=None,
@@ -426,7 +432,8 @@ async def list_links(
     inv_rows = (await db.execute(text("""
         SELECT di.device_id::text, di.if_index, di.if_name, di.if_descr, di.if_alias,
                di.if_speed, di.configured_speed_bps, di.oper_status, di.admin_status,
-               di.monitored, d.hostname, d.ip_address::text, d.id::text
+               di.monitored, d.hostname, d.ip_address::text, d.id::text,
+               COALESCE(di.tags, '[]'::jsonb) AS tags
         FROM device_interfaces di
         JOIN devices d ON d.id = di.device_id
         WHERE di.device_id = ANY(CAST(:device_ids AS uuid[]))
@@ -533,13 +540,21 @@ async def list_links(
             "peak_util_pct": peak_util,
             "has_netflow": has_nf,
             "is_favorite": (did, idx) in favorites,
+            "tags": clean_tags(row[13]),
             **health,
         }
         items.append(item)
 
+    # Counted before the tag filter narrows the set, so the picker keeps
+    # offering every tag rather than only the one already applied.
+    tag_facet = Counter(tg for i in items for tg in i["tags"])
+
     # Filters
     if favorites_only:
         items = [i for i in items if i["is_favorite"]]
+    if tag:
+        want = tag.strip().lower()
+        items = [i for i in items if want in {t.lower() for t in i["tags"]}]
     q = (search or "").strip().lower()
     if q:
         items = [
@@ -620,6 +635,7 @@ async def list_links(
         "unhealthy": sum(1 for i in items if i.get("issues")),
         "total_errors": sum(i.get("errors") or 0 for i in items),
         "total_discards": sum(i.get("discards") or 0 for i in items),
+        "tags": [{"value": n, "count": c} for n, c in tag_facet.most_common(100)],
     }
 
     items = items[:limit]
@@ -706,6 +722,96 @@ async def remove_favorite(
         WHERE user_id = :uid AND device_id = :did AND if_index = :idx
     """), {"uid": str(user.id), "did": device_id, "idx": if_index})
     await db.commit()
+
+
+class LinkRef(BaseModel):
+    device_id: UUID
+    if_index: int
+
+
+class LinkTagsUpdate(BaseModel):
+    """Full replacement of one link's tags."""
+    tags: list[str] = Field(default_factory=list, max_length=50)
+
+
+class LinkTagsBulk(BaseModel):
+    """Add and/or remove tags across a checkbox selection.
+
+    Mirrors /devices/bulk-tag: both lists in one call, other tags untouched.
+    """
+    links: list[LinkRef] = Field(..., min_length=1, max_length=1000)
+    add: list[str] = Field(default_factory=list, max_length=50)
+    remove: list[str] = Field(default_factory=list, max_length=50)
+
+
+@router.patch("/{device_id}/{if_index}/tags")
+async def set_link_tags(
+    device_id: UUID,
+    if_index: int,
+    payload: LinkTagsUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Replace the tags on one link.
+
+    Goes through canonicalize_tags so a link only ever carries registry
+    spellings and unknown labels auto-register, exactly as device tagging does.
+    """
+    names = await canonicalize_tags(db, payload.tags)
+    res = await db.execute(text("""
+        UPDATE device_interfaces SET tags = CAST(:tags AS jsonb)
+        WHERE device_id = :did AND if_index = :idx
+        RETURNING if_index
+    """), {"tags": json.dumps(names), "did": device_id, "idx": if_index})
+    if not res.first():
+        raise HTTPException(status_code=404, detail="Interface not found")
+    await write_audit_log(db, actor=user, action="link.tags.update",
+                          resource_type="device_interface",
+                          resource_id=f"{device_id}/{if_index}",
+                          metadata={"tags": names})
+    await db.commit()
+    return {"status": "ok", "tags": names}
+
+
+@router.post("/bulk-tag")
+async def bulk_tag_links(
+    payload: LinkTagsBulk,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Add and/or remove tags across a selection of links.
+
+    Add is a union and remove is a difference, both case-insensitive, so
+    re-applying a tag a link already carries is a no-op rather than a duplicate,
+    and tags outside the two lists are left alone.
+    """
+    add = await canonicalize_tags(db, payload.add)
+    remove_lower = [t.lower() for t in clean_tags(payload.remove)]
+    if not add and not remove_lower:
+        raise HTTPException(status_code=400, detail="nothing to add or remove")
+
+    pairs = [(str(l.device_id), l.if_index) for l in payload.links]
+    res = await db.execute(text("""
+        UPDATE device_interfaces di SET tags = (
+            SELECT COALESCE(jsonb_agg(DISTINCT el), '[]'::jsonb) FROM (
+                SELECT el FROM jsonb_array_elements_text(COALESCE(di.tags, '[]'::jsonb)) el
+                UNION
+                SELECT unnest(CAST(:add AS text[]))
+            ) s(el)
+            WHERE LOWER(el) <> ALL(CAST(:remove AS text[]))
+        )
+        WHERE (di.device_id::text, di.if_index) IN (
+            SELECT d, i FROM unnest(CAST(:dids AS text[]), CAST(:idxs AS int[])) AS u(d, i))
+    """), {
+        "add": add, "remove": remove_lower,
+        "dids": [p[0] for p in pairs], "idxs": [p[1] for p in pairs],
+    })
+    await write_audit_log(db, actor=user, action="link.tags.bulk",
+                          resource_type="device_interface",
+                          resource_id=f"{len(pairs)} links",
+                          metadata={"add": add, "remove": payload.remove})
+    await db.commit()
+    return {"status": "ok", "updated": res.rowcount}
 
 
 @router.get("/{device_id}/{if_index}")

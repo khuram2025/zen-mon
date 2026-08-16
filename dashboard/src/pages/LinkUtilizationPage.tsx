@@ -19,6 +19,7 @@ import {
   Plus,
   Search,
   Star,
+  Tags,
   Trash2,
   X,
   XCircle,
@@ -38,14 +39,17 @@ import { Card, CardContent } from '@/components/ui/Card'
 import { Input } from '@/components/ui/Input'
 import { Label } from '@/components/ui/Label'
 import {
-  Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/Dialog'
+import { FormField } from '@/components/ui/FormField'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/Select'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
 import { toast } from '@/components/ui/Toast'
+import { TagBadge } from '@/components/tags/TagBadge'
+import { TagPicker } from '@/components/tags/TagPicker'
 
 type LinkRow = {
   device_id: string
@@ -71,6 +75,8 @@ type LinkRow = {
   has_netflow: boolean
   /** Starred by the signed-in user; the server pins these to the top. */
   is_favorite: boolean
+  /** Operator tags on this link, from the shared tag registry. */
+  tags: string[]
   // Interface health — counter increases over the window, not raw readings.
   in_errors: number
   out_errors: number
@@ -133,6 +139,13 @@ function rowAvgUtil(row: LinkRow): number | null {
 }
 
 type LinkKey = { device_id: string; if_index: number }
+
+/** Stable key for checkbox selection — a link is a (device, ifIndex) pair. */
+const linkKey = (r: LinkKey) => `${r.device_id}:${r.if_index}`
+const parseLinkKey = (k: string): LinkKey => {
+  const i = k.lastIndexOf(':')
+  return { device_id: k.slice(0, i), if_index: Number(k.slice(i + 1)) }
+}
 
 type AlertRule = {
   id: string
@@ -419,13 +432,30 @@ export function LinkUtilizationPage() {
   const [minUtil, setMinUtil] = useState<string>('')
   const [issue, setIssue] = useState<string>('')
   const [favoritesOnly, setFavoritesOnly] = useState(false)
+  const [tagFilter, setTagFilter] = useState('')
   const [sort, setSort] = useState('util')
+  /** Checkbox selection for bulk tagging, keyed `${device_id}:${if_index}`. */
+  const [checked, setChecked] = useState<Set<string>>(new Set())
+  const [bulkTagOpen, setBulkTagOpen] = useState(false)
   const [selected, setSelected] = useState<LinkKey | null>(null)
   const [alertOpen, setAlertOpen] = useState(false)
   /** Rule being edited in the alert dialog; null = creating a new one. */
   const [editRule, setEditRule] = useState<AlertRule | null>(null)
 
   const debouncedSearch = useDebounced(search)
+
+  // Registry colours so a tag renders identically here, on Devices and on
+  // Servers. Shared query key, so the three pages hit the API once between them.
+  const { data: tagRegistry } = useQuery<{ name: string; color: string | null }[]>({
+    queryKey: ['tags'],
+    queryFn: async () => (await api.get('/tags')).data,
+    staleTime: 5 * 60_000,
+  })
+  const tagColors = useMemo(() => {
+    const m: Record<string, string> = {}
+    for (const t of tagRegistry || []) if (t.color) m[t.name.toLowerCase()] = t.color
+    return m
+  }, [tagRegistry])
 
   const qs = useMemo(() => {
     const p = new URLSearchParams({
@@ -444,8 +474,9 @@ export function LinkUtilizationPage() {
     if (minUtil) p.set('min_util', minUtil)
     if (issue) p.set('issue', issue)
     if (favoritesOnly) p.set('favorites_only', 'true')
+    if (tagFilter) p.set('tag', tagFilter)
     return p.toString()
-  }, [range.hours, range.isCustom, range.fromISO, range.toISO, debouncedSearch, status, minUtil, issue, favoritesOnly, sort])
+  }, [range.hours, range.isCustom, range.fromISO, range.toISO, debouncedSearch, status, minUtil, issue, favoritesOnly, tagFilter, sort])
 
   const { data, isLoading, isFetching } = useQuery<{
     items: LinkRow[]
@@ -468,6 +499,8 @@ export function LinkUtilizationPage() {
       unhealthy: number
       total_errors: number
       total_discards: number
+      /** Tag facet over the whole filtered set, before the tag filter. */
+      tags?: { value: string; count: number }[]
     }
   }>({
     queryKey: ['link-utilization', qs],
@@ -494,7 +527,7 @@ export function LinkUtilizationPage() {
 
   // Link, Status, In, Out, Utilization, Health (+ Errors, Discards, Flow when
   // the detail panel is closed and the table has the full row width).
-  const colCount = selectedRow ? 6 : 9
+  const colCount = selectedRow ? 7 : 10
 
   return (
     <div className="space-y-4">
@@ -666,12 +699,77 @@ export function LinkUtilizationPage() {
                 )}
                 <span className="text-xs font-normal text-muted">· click a row for drill-down</span>
               </div>
+
+              {/* Tag filter. Options come from the facet, which is counted over
+                  the whole filtered set before this filter narrows it, so the
+                  list does not collapse to the tag already chosen. */}
+              {(summary?.tags?.length || 0) > 0 && (
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  <Tags className="h-3.5 w-3.5 text-muted" />
+                  {summary!.tags!.map((tg) => (
+                    <TagBadge
+                      key={tg.value}
+                      name={`${tg.value} ${tg.count}`}
+                      color={tagColors[tg.value.toLowerCase()]}
+                      active={tagFilter.toLowerCase() === tg.value.toLowerCase()}
+                      onClick={() => setTagFilter(tagFilter.toLowerCase() === tg.value.toLowerCase() ? '' : tg.value)}
+                      title={`Show only links tagged \u201c${tg.value}\u201d`}
+                    />
+                  ))}
+                  {tagFilter && (
+                    <button
+                      type="button"
+                      onClick={() => setTagFilter('')}
+                      className="text-[11px] text-muted underline-offset-2 hover:underline"
+                    >
+                      clear
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {checked.size > 0 && (
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-2">
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="font-semibold text-primary">{checked.size}</span>
+                    <span className="text-muted">link{checked.size === 1 ? '' : 's'} selected</span>
+                    <button
+                      type="button"
+                      onClick={() => setChecked(new Set())}
+                      className="text-xs text-muted underline-offset-2 hover:underline"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={() => setBulkTagOpen(true)}>
+                    <Tags className="h-3.5 w-3.5" /> Tags
+                  </Button>
+                </div>
+              )}
             </div>
             <div className="max-h-[calc(100vh-22rem)] overflow-auto">
               <Table>
                 <THead className="sticky top-0 z-10 bg-surface2/95 backdrop-blur">
                   <Tr>
-                    <Th className="pl-4">Link</Th>
+                    <Th className="w-8 pl-4">
+                      <input
+                        type="checkbox"
+                        aria-label="Select all links on this page"
+                        className="h-3.5 w-3.5 cursor-pointer accent-[rgb(var(--primary))]"
+                        checked={items.length > 0 && items.every((r) => checked.has(linkKey(r)))}
+                        ref={(el) => {
+                          if (el) el.indeterminate =
+                            items.some((r) => checked.has(linkKey(r))) &&
+                            !items.every((r) => checked.has(linkKey(r)))
+                        }}
+                        onChange={(e) => {
+                          const n = new Set(checked)
+                          items.forEach((r) => e.target.checked ? n.add(linkKey(r)) : n.delete(linkKey(r)))
+                          setChecked(n)
+                        }}
+                      />
+                    </Th>
+                    <Th>Link</Th>
                     <Th>Status</Th>
                     <Th className="text-right">In</Th>
                     <Th className="text-right">Out</Th>
@@ -738,7 +836,21 @@ export function LinkUtilizationPage() {
                           !isUp && 'opacity-70',
                         )}
                       >
-                        <Td className="py-2.5 pl-4">
+                        <Td className="py-2.5 pl-4" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${label}`}
+                            className="h-3.5 w-3.5 cursor-pointer accent-[rgb(var(--primary))]"
+                            checked={checked.has(linkKey(row))}
+                            onChange={() => {
+                              const n = new Set(checked)
+                              const k = linkKey(row)
+                              n.has(k) ? n.delete(k) : n.add(k)
+                              setChecked(n)
+                            }}
+                          />
+                        </Td>
+                        <Td className="py-2.5">
                           <div className="flex items-center gap-1.5">
                             <FavoriteStar row={row} />
                             <ChevronRight className={cn('h-3.5 w-3.5 text-muted transition-transform', isSel && 'rotate-90 text-primary')} />
@@ -756,6 +868,26 @@ export function LinkUtilizationPage() {
                                   <span className="ml-1.5">· {formatBps(row.effective_speed_bps)}</span>
                                 )}
                               </div>
+                              {row.tags?.length > 0 && (
+                                <div className="mt-1 flex flex-wrap items-center gap-1">
+                                  {row.tags.slice(0, 3).map((tg) => (
+                                    <TagBadge
+                                      key={tg}
+                                      name={tg}
+                                      color={tagColors[tg.toLowerCase()]}
+                                      active={tagFilter.toLowerCase() === tg.toLowerCase()}
+                                      onClick={(e?: any) => {
+                                        e?.stopPropagation?.()
+                                        setTagFilter(tagFilter.toLowerCase() === tg.toLowerCase() ? '' : tg)
+                                      }}
+                                      title={`Filter by \u201c${tg}\u201d`}
+                                    />
+                                  ))}
+                                  {row.tags.length > 3 && (
+                                    <span className="text-[10px] text-muted">+{row.tags.length - 3}</span>
+                                  )}
+                                </div>
+                              )}
                             </div>
                           </div>
                         </Td>
@@ -859,6 +991,13 @@ export function LinkUtilizationPage() {
           rule={editRule}
         />
       )}
+
+      <LinkBulkTagDialog
+        open={bulkTagOpen}
+        onOpenChange={setBulkTagOpen}
+        links={Array.from(checked).map(parseLinkKey)}
+        onDone={() => setChecked(new Set())}
+      />
     </div>
   )
 }
@@ -1639,6 +1778,78 @@ function LinkAlertDialog({
             {create.isPending
               ? <Loader2 className="h-4 w-4 animate-spin" />
               : isEdit ? 'Save changes' : 'Create rule'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// =========================================================================
+// Bulk tagging — same shape as the devices page dialog, so the two surfaces
+// behave identically: add is a union, remove is a difference, everything else
+// on the link is left alone.
+// =========================================================================
+
+function LinkBulkTagDialog({
+  open, onOpenChange, links, onDone,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  links: LinkKey[]
+  onDone: () => void
+}) {
+  const qc = useQueryClient()
+  const [add, setAdd] = useState<string[]>([])
+  const [remove, setRemove] = useState<string[]>([])
+  useEffect(() => {
+    if (!open) { setAdd([]); setRemove([]) }
+  }, [open])
+
+  const run = useMutation({
+    mutationFn: async () =>
+      (await api.post('/link-utilization/bulk-tag', { links, add, remove }))
+        .data as { updated: number },
+    onSuccess: (res) => {
+      toast.success(`Tags updated on ${res.updated} link${res.updated === 1 ? '' : 's'}`)
+      qc.invalidateQueries({ queryKey: ['link-utilization'] })
+      qc.invalidateQueries({ queryKey: ['tags'] })
+      onOpenChange(false)
+      onDone()
+    },
+    onError: (e: any) => toast.error('Bulk tag failed', apiErrorMessage(e)),
+  })
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Tags className="h-5 w-5 text-primary" />
+            Tag {links.length} link{links.length === 1 ? '' : 's'}
+          </DialogTitle>
+          <DialogDescription>
+            Added tags are appended; removed tags are taken off. Other tags on each
+            link stay untouched.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <FormField label="Add tags">
+            <TagPicker value={add} onChange={setAdd} placeholder="Tags to add…" />
+          </FormField>
+          <FormField label="Remove tags">
+            <TagPicker value={remove} onChange={setRemove} placeholder="Tags to remove…" allowCreate={false} />
+          </FormField>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={run.isPending}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => run.mutate()}
+            disabled={run.isPending || (add.length === 0 && remove.length === 0)}
+          >
+            {run.isPending ? 'Applying…' : `Apply to ${links.length}`}
           </Button>
         </DialogFooter>
       </DialogContent>

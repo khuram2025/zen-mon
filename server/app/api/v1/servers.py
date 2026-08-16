@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.services.tag_service import canonicalize_tags
 from app.core.security import get_current_user, require_operator_user
 from app.services.filesystem_monitoring import pg_capacity_filter
 from app.models.user import User
@@ -362,12 +363,18 @@ async def bulk_server_action(
             text("SELECT id, tags FROM servers WHERE id = ANY(CAST(:ids AS uuid[]))"),
             {"ids": ids},
         )).all()
+        # Canonicalize on add so a server only ever carries registry spellings
+        # and new labels auto-register — same contract as devices and links.
+        # Both sides compare case-insensitively; "Prod" and "prod" are one tag.
+        add_names = await canonicalize_tags(db, data.tags) if data.action == "add_tags" else []
+        drop = {t.strip().lower() for t in data.tags}
         for sid, tags in rows:
             current = _json_list(tags)
+            have = {str(t).lower() for t in current}
             if data.action == "add_tags":
-                merged = current + [t for t in data.tags if t not in current]
+                merged = current + [t for t in add_names if t.lower() not in have]
             else:
-                merged = [t for t in current if t not in data.tags]
+                merged = [t for t in current if str(t).lower() not in drop]
             if merged != current:
                 await db.execute(
                     text("UPDATE servers SET tags = CAST(:tags AS jsonb), updated_at = NOW() WHERE id = :id"),
