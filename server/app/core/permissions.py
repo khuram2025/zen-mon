@@ -39,6 +39,8 @@ PERMISSION_MODULES: list[tuple[str, str, list[tuple[str, str, str]]]] = [
     ]),
     ("udt", "User Device Tracker", [
         ("udt.view", "View", "View tracked endpoints and ports"),
+        ("udt.view_users", "View user activity",
+         "See which Active Directory user logged in on which device and when"),
         ("udt.manage", "Manage", "Manage UDT settings and classification rules"),
     ]),
     ("netpath", "Network Path", [
@@ -95,7 +97,7 @@ _OPERATOR = [
     "dashboard.view", "devices.view", "devices.manage", "discovery.view",
     "discovery.run", "alerts.view", "alerts.acknowledge", "alerts.manage",
     "service_checks.view", "service_checks.manage", "netflow.view",
-    "udt.view", "udt.manage", "netpath.view", "netpath.manage",
+    "udt.view", "udt.view_users", "udt.manage", "netpath.view", "netpath.manage",
     "ncm.view", "ncm.manage", "apm.view",
     "apm.manage", "reports.view", "reports.export", "maps.view",
     "maps.manage", "settings.view",

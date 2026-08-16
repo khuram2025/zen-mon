@@ -190,6 +190,18 @@ async def poll_controller(db: AsyncSession, dc) -> dict:
     """Poll one DC. Returns a status dict; also updates the DC row."""
     from datetime import timedelta
 
+    # Basic auth puts the domain password on the wire base64-encoded, with no
+    # message-level protection — NTLM and Kerberos seal the payload even over
+    # plain HTTP, Basic does not. Refuse rather than leak it.
+    if (dc["auth_method"] or "").lower() == "basic" and (dc["transport"] or "http").lower() != "https":
+        await db.execute(text(
+            "UPDATE udt_domain_controllers SET last_poll_at = NOW(), last_status = 'error', "
+            "last_error = :e WHERE id = :id"
+        ), {"e": "credential uses Basic authentication over HTTP, which would send the "
+                 "password in the clear — switch the credential to NTLM/Kerberos, or to HTTPS",
+            "id": str(dc["id"])})
+        return {"status": "error", "error": "Basic auth over HTTP refused"}
+
     since = dc["last_event_time"] or (datetime.now(timezone.utc) - timedelta(minutes=DEFAULT_LOOKBACK_MIN))
     since_iso = since.astimezone(timezone.utc).isoformat()
     cred = {

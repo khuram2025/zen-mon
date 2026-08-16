@@ -17,6 +17,7 @@ import { apiErrorMessage } from '@/lib/utils'
 import { udtApi } from './api'
 import type { DomainController, UdtDeviceSettings } from './types'
 import { ENDPOINT_TYPE_META, relTime } from './helpers'
+import { KbLink } from '@/components/udt/KbLink'
 
 const DEVICE_CRED = '__device__' // sentinel: use the device's own SNMP settings
 
@@ -165,6 +166,7 @@ function DevicePolling() {
               Devices are enabled by default and use their own SNMP settings unless overridden here.
               Per-port exclusions live on the <Link to="/udt/ports" className="text-primary hover:underline">Switch Ports</Link> tab.
             </p>
+            <KbLink article="getting-started" variant="inline" label="Switch SNMP permissions guide" className="mt-1.5" />
           </div>
           <div className="flex items-center gap-2">
             {hiddenCount > 0 && (
@@ -309,6 +311,7 @@ function DomainControllers() {
               Agentless user-login correlation. ZenPlus reads each DC's Security event log over WinRM (events 4624 / 4768 / 4769)
               and maps logons to endpoints.
             </p>
+            <KbLink article="user-logins" variant="inline" label="Windows permissions required" className="mt-1.5" />
           </div>
           <Button size="sm" variant="outline" onClick={() => setAdding(true)}><Plus className="mr-1 h-4 w-4" />Add DC</Button>
         </div>

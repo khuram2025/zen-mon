@@ -11,6 +11,7 @@ import { toast } from '@/components/ui/Toast'
 import { apiErrorMessage } from '@/lib/utils'
 import { udtApi } from './api'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
+import { KbLink } from '@/components/udt/KbLink'
 import type { EndpointLocation } from './types'
 import {
   AuthBadge, EndpointTypeIcon, EventBadge, TypeSourceBadge, durationBetween,
@@ -169,6 +170,7 @@ export function EndpointDetailPage() {
             <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
               {e.hostname || meta.label}
               <AuthBadge authorized={e.authorized} watched={e.is_watched} randomized={e.is_randomized} />
+              <KbLink article="endpoints" label="Endpoint detail documentation" />
             </h1>
             <p className="mt-0.5 font-mono text-xs text-muted">{e.mac}{e.ip ? ` · ${e.ip}` : ''}</p>
           </div>

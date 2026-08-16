@@ -30,6 +30,7 @@ type WinCred = {
   transport: 'http' | 'https'
   port: number
   ssl_verify: boolean
+  dc_host: string | null
   description: string | null
   created_at: string
   updated_at: string
@@ -44,6 +45,7 @@ const DEFAULT_FORM = {
   transport: 'http' as WinCred['transport'],
   port: 5985,
   ssl_verify: false,
+  dc_host: '',
   description: '',
 }
 
@@ -117,6 +119,7 @@ export function WindowsCredentialsPage({ hideHeader = false }: { hideHeader?: bo
       transport: c.transport,
       port: c.port,
       ssl_verify: c.ssl_verify,
+      dc_host: c.dc_host || '',
       description: c.description || '',
     })
     setOpen(true)
@@ -178,6 +181,7 @@ export function WindowsCredentialsPage({ hideHeader = false }: { hideHeader?: bo
                 <Tr>
                   <Th>Name</Th>
                   <Th>Username</Th>
+                  <Th>Domain controller</Th>
                   <Th>Auth</Th>
                   <Th>Transport</Th>
                   <Th>Port</Th>
@@ -193,6 +197,9 @@ export function WindowsCredentialsPage({ hideHeader = false }: { hideHeader?: bo
                     </Td>
                     <Td className="font-mono text-xs">
                       {c.domain ? `${c.domain}\\${c.username}` : c.username}
+                    </Td>
+                    <Td className="font-mono text-xs">
+                      {c.dc_host || <span className="font-sans text-muted">Not set</span>}
                     </Td>
                     <Td><Badge variant="outline">{c.auth_method}</Badge></Td>
                     <Td>
@@ -210,10 +217,10 @@ export function WindowsCredentialsPage({ hideHeader = false }: { hideHeader?: bo
                         <Button variant="ghost" size="icon"
                                 onClick={() => {
                                   setEditing(c)
-                                  setTestIp('')
+                                  setTestIp(c.dc_host || '')
                                   setTestResult(null)
                                 }}
-                                className="h-8 w-8" title="Test against a host">
+                                className="h-8 w-8" title="Test the connection to the domain controller">
                           <Zap className="h-4 w-4" />
                         </Button>
                         <Button variant="ghost" size="icon"
@@ -302,6 +309,12 @@ export function WindowsCredentialsPage({ hideHeader = false }: { hideHeader?: bo
                 </div>
               </FormField>
             )}
+            <FormField label="Domain controller (optional)"
+                       hint="Hostname or IP this credential is used against. Sets the target for the connection test, and is required before UDT can correlate user logins.">
+              <Input value={form.dc_host}
+                     onChange={(e) => setForm({ ...form, dc_host: e.target.value })}
+                     placeholder="dc01.corp.local" />
+            </FormField>
             <FormField label="Description (optional)">
               <Input value={form.description}
                      onChange={(e) => setForm({ ...form, description: e.target.value })}
@@ -325,10 +338,12 @@ export function WindowsCredentialsPage({ hideHeader = false }: { hideHeader?: bo
           <DialogHeader>
             <DialogTitle>Test {editing?.name}</DialogTitle>
           </DialogHeader>
-          <FormField label="Target IP address"
-                     hint="Runs a WinRM probe and returns OS/hostname if the credential works">
+          <FormField label="Domain controller"
+                     hint={editing?.dc_host
+                       ? 'Runs a WinRM probe against this credential\u2019s domain controller and returns OS/hostname if it works.'
+                       : 'This credential has no domain controller set \u2014 add one on the credential first. Testing a different host is an administrator action.'}>
             <Input value={testIp} onChange={(e) => setTestIp(e.target.value)}
-                   placeholder="192.168.1.10" />
+                   placeholder="dc01.corp.local" />
           </FormField>
           {testResult && (
             <div className={`rounded-md border px-3 py-2 text-xs ${

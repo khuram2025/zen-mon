@@ -61,7 +61,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.hostnames import normalize_host
+from app.core.security import (
+    require_admin_user, require_operator_user, require_permission,
+    user_has_permission,
+)
 from app.models.user import User
 from app.services.audit_service import write_audit_log
 from app.services.udt_service import (
@@ -75,6 +79,43 @@ _BRIDGE_IFADMIN_OID = "1.3.6.1.2.1.2.2.1.7"  # ifAdminStatus.<ifIndex>
 
 # Must match the poller's udtIntervalFromEnv default (engine.go).
 _UDT_DEFAULT_INTERVAL_S = 300
+
+# Reading the endpoint/port inventory needs udt.view. Seeing *who* was on a
+# device is personal data (an employee movement record), so it is gated
+# separately: an explicit udt.view_users grant, or udt.manage which only
+# operator and admin roles carry. Viewer and read-only roles have neither.
+udt_reader = require_permission("udt.view")
+udt_user_reader = require_permission("udt.view_users", "udt.manage")
+
+def _validate_dc_host(host: str) -> str:
+    """A DC entry makes the appliance authenticate outbound with a stored
+    domain credential, so the target must be a bare host — see
+    app.core.hostnames."""
+    try:
+        return normalize_host(host)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"host {exc}") from exc
+
+
+async def _can_see_users(db: AsyncSession, user: User) -> bool:
+    """Whether this caller may see AD usernames attached to endpoints."""
+    return (await user_has_permission(db, user, "udt.view_users")
+            or await user_has_permission(db, user, "udt.manage"))
+
+
+def _scrub_event(row: dict, see_users: bool) -> dict:
+    """user_login events carry the username in their details blob."""
+    if see_users or row.get("event_type") != "user_login":
+        return row
+    details = row.get("details")
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except ValueError:
+            details = {}
+    if isinstance(details, dict):
+        row["details"] = {k: v for k, v in details.items() if k != "user"}
+    return row
 
 
 # ── Schemas ──────────────────────────────────────────────────────────
@@ -178,7 +219,7 @@ class PortBulkMonitor(BaseModel):
 # ── Summary ──────────────────────────────────────────────────────────
 
 @router.get("/summary")
-async def udt_summary(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+async def udt_summary(db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader)):
     row = (await db.execute(text(
         """SELECT
              (SELECT COUNT(*) FROM udt_endpoints WHERE NOT ignored) AS total_endpoints,
@@ -244,8 +285,9 @@ async def list_endpoints(
     skip: int = 0,
     limit: int = Query(default=50, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(udt_reader),
 ):
+    see_users = await _can_see_users(db, user)
     where = []
     params: dict = {}
     if not include_ignored:
@@ -257,7 +299,11 @@ async def list_endpoints(
             where.append("e.mac = CAST(:mac AS macaddr)")
             params["mac"] = mac
         else:
-            where.append("(e.hostname ILIKE :q OR e.vendor ILIKE :q OR e.user_name ILIKE :q "
+            # Searching user_name is itself a disclosure — it turns the list
+            # into an oracle for "does this person exist" — so callers who may
+            # not see usernames may not search them either.
+            user_clause = "OR e.user_name ILIKE :q " if see_users else ""
+            where.append(f"(e.hostname ILIKE :q OR e.vendor ILIKE :q {user_clause}"
                          "OR host(e.ip_address) ILIKE :q OR e.mac::text ILIKE :q "
                          "OR EXISTS (SELECT 1 FROM udt_ip_history h WHERE h.endpoint_id=e.id AND host(h.ip) ILIKE :q))")
             params["q"] = f"%{term}%"
@@ -311,17 +357,19 @@ async def list_endpoints(
             OFFSET :skip LIMIT :limit"""
     ), params)).mappings().all()
 
+    redact = {} if see_users else {"user_name": None, "user_domain": None}
     return {
         "data": [dict(r) | {"id": str(r["id"]),
                             "loc_device_id": str(r["loc_device_id"]) if r["loc_device_id"] else None,
                             "device_id": str(r["device_id"]) if r["device_id"] else None}
+                 | redact
                  for r in rows],
         "meta": {"total": total, "skip": skip, "limit": limit},
     }
 
 
 @router.get("/endpoints/{endpoint_id}")
-async def endpoint_detail(endpoint_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+async def endpoint_detail(endpoint_id: str, db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader)):
     e = (await db.execute(text(
         """SELECT e.id, e.mac::text AS mac, e.vendor, e.hostname, host(e.ip_address) AS ip,
                   e.endpoint_type, e.type_source, e.is_randomized, e.is_watched, e.authorized, e.ignored,
@@ -368,12 +416,14 @@ async def endpoint_detail(endpoint_id: str, db: AsyncSession = Depends(get_db), 
             out.append(d)
         return out
 
+    see_users = await _can_see_users(db, user)
+    redact = {} if see_users else {"user_name": None, "user_domain": None, "user_seen_at": None}
     return {
-        "endpoint": dict(e) | {"id": str(e["id"]), "device_id": str(e["device_id"]) if e["device_id"] else None},
+        "endpoint": dict(e) | {"id": str(e["id"]), "device_id": str(e["device_id"]) if e["device_id"] else None} | redact,
         "locations": _fix(locations),
         "ip_history": [dict(r) for r in ips],
-        "logins": [dict(r) for r in logins],
-        "events": _fix(events),
+        "logins": [dict(r) for r in logins] if see_users else [],
+        "events": [_scrub_event(r, see_users) for r in _fix(events)],
     }
 
 
@@ -437,7 +487,7 @@ async def update_endpoint(
 @router.get("/devices/{device_id}/ports")
 async def device_ports(
     device_id: str, include_empty: bool = True,
-    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader),
 ):
     dev = (await db.execute(text("SELECT id, hostname FROM devices WHERE id = :id"), {"id": device_id})).mappings().first()
     if not dev:
@@ -468,7 +518,7 @@ async def device_ports(
 @router.get("/devices/{device_id}/ports/{if_index}/endpoints")
 async def port_endpoints(
     device_id: str, if_index: int, active_only: bool = True,
-    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader),
 ):
     cond = "AND l.active" if active_only else ""
     rows = (await db.execute(text(
@@ -486,7 +536,7 @@ async def port_endpoints(
 async def list_ports(
     q: Optional[str] = None, only_uplinks: bool = False, only_used: bool = False,
     skip: int = 0, limit: int = Query(default=100, ge=1, le=1000),
-    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader),
 ):
     where = ["EXISTS (SELECT 1 FROM udt_port_state p WHERE p.device_id = di.device_id)"]
     params: dict = {"skip": skip, "limit": limit}
@@ -640,7 +690,7 @@ async def _snmpset_int(ip: str, settings: dict, oid: str, value: str) -> tuple[b
 # ── Settings ─────────────────────────────────────────────────────────
 
 @router.get("/settings")
-async def udt_settings(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+async def udt_settings(db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader)):
     val = (await db.execute(text(
         "SELECT value FROM system_settings WHERE key = 'udt'"
     ))).scalar()
@@ -681,7 +731,7 @@ async def update_udt_settings(
 
 
 @router.get("/settings/devices")
-async def udt_device_settings(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+async def udt_device_settings(db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader)):
     rows = (await db.execute(text(
         """SELECT d.id AS device_id, d.hostname, host(d.ip_address) AS ip,
                   d.vendor, d.model, d.device_type,
@@ -821,7 +871,7 @@ async def _close_port_sessions(db: AsyncSession, device_id: str, if_indexes: lis
 
 @router.get("/rules")
 async def list_rules(list_type: Optional[str] = None,
-                     db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+                     db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader)):
     where = "WHERE list_type = :lt" if list_type else ""
     params = {"lt": list_type} if list_type else {}
     rows = (await db.execute(text(
@@ -884,7 +934,7 @@ async def delete_rule(rule_id: str, db: AsyncSession = Depends(get_db),
 # ── Classification rules (vendor/MAC -> type/group overrides) ────────
 
 @router.get("/class-rules")
-async def list_class_rules(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+async def list_class_rules(db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader)):
     rows = (await db.execute(text(
         "SELECT id, priority, match_type, pattern, set_type, description, enabled, created_at, updated_at "
         "FROM udt_class_rules ORDER BY priority, created_at"
@@ -967,7 +1017,7 @@ async def delete_class_rule(rule_id: str, db: AsyncSession = Depends(get_db),
 
 
 @router.get("/types")
-async def list_types(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+async def list_types(db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader)):
     """Built-in endpoint types plus custom groups (from rules or manual
     assignment), each with its current non-ignored endpoint count."""
     rows = (await db.execute(text(
@@ -986,7 +1036,7 @@ async def list_types(db: AsyncSession = Depends(get_db), user: User = Depends(ge
 
 @router.get("/rogues")
 async def list_rogues(skip: int = 0, limit: int = Query(default=100, ge=1, le=500),
-                      db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+                      db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader)):
     total = (await db.execute(text(
         "SELECT COUNT(*) FROM udt_endpoints WHERE authorized = FALSE AND NOT ignored"))).scalar()
     rows = (await db.execute(text(
@@ -1006,7 +1056,13 @@ async def list_rogues(skip: int = 0, limit: int = Query(default=100, ge=1, le=50
 
 @router.get("/users")
 async def list_users(q: Optional[str] = None, skip: int = 0, limit: int = Query(default=50, ge=1, le=200),
-                     db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+                     db: AsyncSession = Depends(get_db), user: User = Depends(udt_user_reader)):
+    # Who-was-on-which-device is personal data; unlike the rest of UDT's reads
+    # it leaves an audit trail.
+    await write_audit_log(db, actor=user, action="udt.users.read",
+                          resource_type="udt_user_logins", resource_id=None,
+                          metadata={"query": q} if q else {})
+    await db.commit()
     where = "WHERE user_name ILIKE :q" if q else ""
     params = {"q": f"%{q.strip()}%"} if q else {}
     params.update({"skip": skip, "limit": limit})
@@ -1020,7 +1076,11 @@ async def list_users(q: Optional[str] = None, skip: int = 0, limit: int = Query(
 
 
 @router.get("/users/{user_name}")
-async def user_detail(user_name: str, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+async def user_detail(user_name: str, db: AsyncSession = Depends(get_db), user: User = Depends(udt_user_reader)):
+    await write_audit_log(db, actor=user, action="udt.users.read",
+                          resource_type="udt_user_logins", resource_id=user_name,
+                          metadata={})
+    await db.commit()
     logins = (await db.execute(text(
         """SELECT l.event_id, l.logon_type, host(l.ip) AS ip, l.hostname, l.event_time,
                   l.endpoint_id, e.mac::text AS mac, e.vendor
@@ -1045,7 +1105,7 @@ async def user_detail(user_name: str, db: AsyncSession = Depends(get_db), user: 
 async def list_events(
     event_type: Optional[str] = None, hours: int = Query(default=24, ge=1, le=720),
     skip: int = 0, limit: int = Query(default=100, ge=1, le=500),
-    db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader),
 ):
     where = [f"ev.created_at > NOW() - make_interval(hours => :h)"]
     params: dict = {"h": hours, "skip": skip, "limit": limit}
@@ -1060,14 +1120,16 @@ async def list_events(
             LEFT JOIN devices d ON d.id = ev.device_id
             WHERE {where_sql} ORDER BY ev.created_at DESC OFFSET :skip LIMIT :limit"""
     ), params)).mappings().all()
-    return {"data": [dict(r) | {"id": r["id"],
-                                "endpoint_id": str(r["endpoint_id"]) if r["endpoint_id"] else None,
-                                "device_id": str(r["device_id"]) if r["device_id"] else None}
+    see_users = await _can_see_users(db, user)
+    return {"data": [_scrub_event(dict(r) | {"id": r["id"],
+                                             "endpoint_id": str(r["endpoint_id"]) if r["endpoint_id"] else None,
+                                             "device_id": str(r["device_id"]) if r["device_id"] else None},
+                                  see_users)
                      for r in rows]}
 
 
 @router.get("/capacity")
-async def capacity(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+async def capacity(db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader)):
     devices = (await db.execute(text(
         """SELECT d.id, d.hostname, d.location,
                   COUNT(*) FILTER (WHERE di.if_type IS NULL OR di.if_type IN (6,117)) AS total,
@@ -1089,7 +1151,7 @@ async def capacity(db: AsyncSession = Depends(get_db), user: User = Depends(get_
 
 @router.get("/capacity/{device_id}/trend")
 async def capacity_trend(device_id: str, days: int = Query(default=30, ge=1, le=365),
-                         db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+                         db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader)):
     rows = (await db.execute(text(
         """SELECT day, total_ports, used_ports, active_ports, uplink_ports
            FROM udt_port_capacity_daily
@@ -1100,7 +1162,7 @@ async def capacity_trend(device_id: str, days: int = Query(default=30, ge=1, le=
 
 
 @router.get("/vendors")
-async def vendor_rollup(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+async def vendor_rollup(db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader)):
     rows = (await db.execute(text(
         """SELECT COALESCE(vendor, 'Unknown') AS vendor, endpoint_type, COUNT(*) AS count
            FROM udt_endpoints WHERE NOT ignored
@@ -1117,7 +1179,7 @@ async def vendor_rollup(db: AsyncSession = Depends(get_db), user: User = Depends
 # ── Domain controllers (AD user correlation) ─────────────────────────
 
 @router.get("/domain-controllers")
-async def list_dcs(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+async def list_dcs(db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader)):
     rows = (await db.execute(text(
         """SELECT dc.id, dc.name, dc.host, dc.windows_credential_id, wc.name AS credential_name,
                   dc.enabled, dc.poll_interval_s, dc.last_poll_at, dc.last_status, dc.last_error, dc.last_event_time
@@ -1131,11 +1193,15 @@ async def list_dcs(db: AsyncSession = Depends(get_db), user: User = Depends(get_
 
 @router.post("/domain-controllers")
 async def create_dc(payload: DCCreate, db: AsyncSession = Depends(get_db),
-                    user: User = Depends(require_operator_user)):
+                    user: User = Depends(require_admin_user)):
+    # Admin-only: polling a controller makes the appliance authenticate to that
+    # host with a stored domain credential, so whoever chooses the host can
+    # capture the credential's NTLM exchange by pointing it somewhere hostile.
+    host = _validate_dc_host(payload.host)
     row = (await db.execute(text(
         """INSERT INTO udt_domain_controllers (name, host, windows_credential_id, poll_interval_s, enabled)
            VALUES (:n, :h, :c, :p, :e) RETURNING id"""
-    ), {"n": payload.name, "h": payload.host, "c": payload.windows_credential_id,
+    ), {"n": payload.name, "h": host, "c": payload.windows_credential_id,
         "p": payload.poll_interval_s, "e": payload.enabled})).first()
     await write_audit_log(db, actor=user, action="udt.dc.create",
                           resource_type="udt_domain_controller", resource_id=str(row[0]),
@@ -1146,7 +1212,9 @@ async def create_dc(payload: DCCreate, db: AsyncSession = Depends(get_db),
 
 @router.patch("/domain-controllers/{dc_id}")
 async def update_dc(dc_id: str, payload: DCUpdate, db: AsyncSession = Depends(get_db),
-                    user: User = Depends(require_operator_user)):
+                    user: User = Depends(require_admin_user)):
+    if payload.host is not None:
+        payload.host = _validate_dc_host(payload.host)
     sets, params = [], {"id": dc_id}
     for field, col in (("name", "name"), ("host", "host"),
                        ("windows_credential_id", "windows_credential_id"),
@@ -1160,23 +1228,30 @@ async def update_dc(dc_id: str, payload: DCUpdate, db: AsyncSession = Depends(ge
     res = await db.execute(text(f"UPDATE udt_domain_controllers SET {', '.join(sets)} WHERE id = :id RETURNING id"), params)
     if not res.first():
         raise HTTPException(status_code=404, detail="Domain controller not found")
+    # Repointing an approved controller at a new host is the interesting edit,
+    # so it must leave a trail of its own.
+    await write_audit_log(db, actor=user, action="udt.dc.update",
+                          resource_type="udt_domain_controller", resource_id=dc_id,
+                          metadata=payload.model_dump(exclude_none=True))
     await db.commit()
     return {"status": "ok"}
 
 
 @router.delete("/domain-controllers/{dc_id}")
 async def delete_dc(dc_id: str, db: AsyncSession = Depends(get_db),
-                    user: User = Depends(require_operator_user)):
+                    user: User = Depends(require_admin_user)):
     res = await db.execute(text("DELETE FROM udt_domain_controllers WHERE id = :id RETURNING id"), {"id": dc_id})
     if not res.first():
         raise HTTPException(status_code=404, detail="Domain controller not found")
+    await write_audit_log(db, actor=user, action="udt.dc.delete",
+                          resource_type="udt_domain_controller", resource_id=dc_id, metadata={})
     await db.commit()
     return {"status": "ok"}
 
 
 @router.post("/domain-controllers/{dc_id}/poll")
 async def poll_dc_now(dc_id: str, db: AsyncSession = Depends(get_db),
-                      user: User = Depends(require_operator_user)):
+                      user: User = Depends(require_admin_user)):
     dc = (await db.execute(text(
         """SELECT dc.id, dc.name, dc.host, dc.poll_interval_s, dc.last_event_time,
                   wc.username, wc.domain, wc.password_enc, wc.auth_method, wc.transport,

@@ -13,13 +13,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import decrypt, encrypt
 from app.core.database import get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.hostnames import normalize_host
+from app.core.security import (
+    get_current_user, require_admin_user, require_operator_user,
+)
 from app.models.discovery_v2 import WindowsCredential
 from app.models.user import User
 from app.services.audit_service import write_audit_log
 
 
 router = APIRouter(prefix="/windows-credentials", tags=["Windows credentials"])
+
+
+def _host_or_400(value: str | None) -> str | None:
+    """Validate an optional target host, or raise 400."""
+    if value is None or not value.strip():
+        return None
+    try:
+        return normalize_host(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"dc_host {exc}") from exc
 
 
 AuthMethod = Literal["basic", "ntlm", "kerberos", "credssp", "certificate"]
@@ -35,6 +48,7 @@ class WinCredCreate(BaseModel):
     transport: Transport = "http"
     port: int = Field(default=5985, ge=1, le=65535)
     ssl_verify: bool = False
+    dc_host: Optional[str] = Field(default=None, max_length=255)
     description: Optional[str] = None
 
 
@@ -47,6 +61,7 @@ class WinCredUpdate(BaseModel):
     transport: Optional[Transport] = None
     port: Optional[int] = Field(default=None, ge=1, le=65535)
     ssl_verify: Optional[bool] = None
+    dc_host: Optional[str] = Field(default=None, max_length=255)
     description: Optional[str] = None
 
 
@@ -59,6 +74,7 @@ class WinCredResponse(BaseModel):
     transport: Transport
     port: int
     ssl_verify: bool
+    dc_host: Optional[str] = None
     description: Optional[str] = None
     created_at: datetime
     updated_at: datetime
@@ -98,6 +114,7 @@ async def create_cred(
         transport=payload.transport,
         port=payload.port,
         ssl_verify=payload.ssl_verify,
+        dc_host=_host_or_400(payload.dc_host),
         description=payload.description,
         created_by=user.id,
     )
@@ -124,6 +141,8 @@ async def update_cred(
     if not c:
         raise HTTPException(404, "Credential not found")
     fields = payload.model_dump(exclude_unset=True)
+    if "dc_host" in fields:
+        fields["dc_host"] = _host_or_400(fields["dc_host"])
     if "password" in fields:
         pwd = fields.pop("password")
         if pwd:
@@ -169,14 +188,37 @@ async def test_cred(
     db: AsyncSession = Depends(get_db),
     _user: User = Depends(require_operator_user),
 ):
-    """Run a WinRM connection test against a user-provided IP."""
+    """Run a WinRM connection test against this credential's target host.
+
+    The test authenticates outbound with the stored password, so an arbitrary
+    caller-supplied host would let an operator capture the NTLM exchange for an
+    account they were never given. The target therefore defaults to the
+    credential's own `dc_host`; overriding it is an admin action.
+    """
     from app.services.discovery_probes import winrm_probe
     c = await db.get(WindowsCredential, cred_id)
     if not c:
         raise HTTPException(404, "Credential not found")
-    ip = (payload.get("ip") or "").strip()
+
+    override = (payload.get("ip") or "").strip()
+    if override and override != (c.dc_host or ""):
+        await require_admin_user(user=_user, db=db)
+        ip = _host_or_400(override)
+    else:
+        ip = c.dc_host
     if not ip:
-        raise HTTPException(400, "ip is required")
+        raise HTTPException(
+            400,
+            "This credential has no domain controller set. Add the controller "
+            "name or IP to the credential, then test.",
+        )
+
+    await write_audit_log(
+        db, actor=_user, action="windows_credential.test",
+        resource_type="windows_credential", resource_id=str(c.id),
+        metadata={"host": ip, "override": bool(override and override != (c.dc_host or ""))},
+    )
+    await db.commit()
     try:
         password = decrypt(c.password_enc) if c.password_enc else ""
     except Exception:

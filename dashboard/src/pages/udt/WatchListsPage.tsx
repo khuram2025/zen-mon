@@ -18,6 +18,7 @@ import { apiErrorMessage } from '@/lib/utils'
 import { udtApi } from './api'
 import type { Endpoint, UdtRule } from './types'
 import { macCol, relTime } from './helpers'
+import { KbLink } from '@/components/udt/KbLink'
 
 const LIST_META = {
   allow: { label: 'Allow list', desc: 'Endpoints matching these rules are authorized. Anything else that appears becomes a rogue.', icon: ShieldCheck, tone: 'text-success' },
@@ -165,7 +166,10 @@ function RoguesCard() {
         {rogues.isLoading ? (
           <div className="space-y-2 p-4">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-8 w-full" />)}</div>
         ) : data.length === 0 ? (
-          <div className="py-8 text-center text-xs text-muted">No rogue endpoints. Configure an allow list to start detecting.</div>
+          <div className="flex flex-col items-center gap-2 py-8 text-center text-xs text-muted">
+            <span>No rogue endpoints. Configure an allow list to start detecting.</span>
+            <KbLink article="watch-lists" variant="inline" label="How rogue detection works" />
+          </div>
         ) : (
           <Table>
             <THead className="bg-surface2/40">
