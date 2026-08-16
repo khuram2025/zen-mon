@@ -15,6 +15,7 @@ The executor merges these into a single DiscoveryResult row.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import socket
@@ -491,6 +492,158 @@ async def winrm_probe(ip: str, credential: dict, timeout_s: float = 5.0) -> dict
     except Exception as e:
         return {"responsive": False, "protocol": "winrm", "data": {},
                 "error": str(e), "state": "invalid"}
+
+
+# ────────────────────────────────────────────────────────────────────
+# WinRM capability probe — which rights does this credential actually have?
+# ────────────────────────────────────────────────────────────────────
+
+# Reading a Windows host over WinRM passes two independent access checks, and
+# they fail in ways that look alike from the outside but need opposite fixes:
+#
+#   1. WinRM session   — the service's RootSDDL. Grants come from membership of
+#      "Remote Management Users" (or an explicit ACE via `winrm configsddl`).
+#      A refusal here is an HTTP 500 carrying a w:AccessDenied WSMan fault, and
+#      no PowerShell runs at all.
+#   2. Security log    — the log channel's own SDDL, granted by membership of
+#      "Event Log Readers". A refusal here happens *inside* a session that
+#      opened fine, and surfaces as an error from Get-WinEvent.
+#
+# Neither group implies the other, so a probe that reports a single pass/fail
+# sends operators to the wrong place half the time.
+_CAPABILITY_PS = r"""
+$out = [ordered]@{ host = $env:COMPUTERNAME; os = ''; log = $false; log_error = '' }
+try { $out.os = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption } catch { }
+try {
+  $null = Get-WinEvent -LogName Security -MaxEvents 1 -ErrorAction Stop
+  $out.log = $true
+} catch {
+  # An empty log is not an access failure — the account could read it, there
+  # was simply nothing there.
+  if ($_.Exception.Message -match 'No events were found') { $out.log = $true }
+  else { $out.log_error = $_.Exception.Message }
+}
+$out | ConvertTo-Json -Compress
+"""
+
+_WINRM_FIX = (
+    "The account authenticated but is not allowed to open a WinRM session. "
+    "Add it to \"Remote Management Users\" on the domain controller "
+    "(Add-ADGroupMember -Identity 'Remote Management Users' -Members '<account>'), "
+    "then Restart-Service WinRM."
+)
+_LOG_FIX = (
+    "The WinRM session opened, but the account cannot read the Security log. "
+    "Add it to \"Event Log Readers\" "
+    "(Add-ADGroupMember -Identity 'Event Log Readers' -Members '<account>')."
+)
+
+
+async def winrm_capability_probe(host: str, credential: dict, timeout_s: float = 8.0) -> dict[str, Any]:
+    """Check a Windows credential the way UDT actually uses it.
+
+    Returns a per-gate result so the caller can say *which* permission is
+    missing rather than a bare "access denied".
+    """
+    def _check(cid: str, label: str, ok: bool, detail: str = "", fix: str = "") -> dict:
+        return {"id": cid, "label": label, "ok": ok, "detail": detail, "fix": fix}
+
+    try:
+        import winrm  # provided by pywinrm
+        from winrm.exceptions import (
+            InvalidCredentialsError,
+            WinRMTransportError,
+            WinRMOperationTimeoutError,
+        )
+    except ImportError:
+        return {"ok": False, "state": "invalid", "info": None,
+                "checks": [_check("winrm", "WinRM session", False, "pywinrm is not installed on the appliance")]}
+
+    domain = credential.get("domain") or ""
+    full_user = f"{domain}\\{credential.get('username', '')}" if domain else credential.get("username", "")
+    transport_choice = credential.get("transport", "http")
+    port = credential.get("port") or (5985 if transport_choice == "http" else 5986)
+    endpoint = f"{transport_choice}://{host}:{port}/wsman"
+
+    def _run():
+        s = winrm.Session(
+            endpoint, auth=(full_user, credential.get("password", "")),
+            transport=credential.get("auth_method", "ntlm"),
+            server_cert_validation="ignore" if not credential.get("ssl_verify") else "validate",
+            operation_timeout_sec=int(timeout_s),
+            read_timeout_sec=int(timeout_s + 2),
+        )
+        return s.run_ps(_CAPABILITY_PS)
+
+    try:
+        loop = asyncio.get_event_loop()
+        result = await asyncio.wait_for(loop.run_in_executor(None, _run), timeout=timeout_s + 3)
+    except InvalidCredentialsError as e:
+        return {"ok": False, "state": "invalid", "info": None,
+                "checks": [_check("auth", "Authentication", False, str(e)[:300],
+                                  "Check the username, domain prefix, password and auth method.")]}
+    except (WinRMTransportError, WinRMOperationTimeoutError) as e:
+        msg = str(e)
+        denied = "accessdenied" in msg.lower().replace(" ", "") or "access is denied" in msg.lower()
+        if denied:
+            # Authentication succeeded; WinRM refused the shell.
+            return {"ok": False, "state": "winrm_denied", "info": None,
+                    "checks": [_check("auth", "Authentication", True, "Credential accepted by the domain controller"),
+                               _check("winrm", "WinRM session", False, msg[:300], _WINRM_FIX)]}
+        return {"ok": False, "state": "no_response", "info": None,
+                "checks": [_check("winrm", "WinRM session", False, msg[:300],
+                                  "Check that WinRM is listening and reachable on this port.")]}
+    except asyncio.TimeoutError:
+        return {"ok": False, "state": "no_response", "info": None,
+                "checks": [_check("winrm", "WinRM session", False, "Timed out",
+                                  "Check that WinRM is listening and reachable on this port.")]}
+    except Exception as e:  # noqa: BLE001
+        # requests raises its own connection errors, which are not WinRM faults
+        # — reporting those as "invalid" would read as a bad password when the
+        # host simply is not reachable.
+        msg = str(e)
+        low = msg.lower()
+        unreachable = any(s in low for s in (
+            "max retries exceeded", "connection refused", "failed to establish",
+            "name or service not known", "timed out", "no route to host",
+            "temporary failure in name resolution",
+        ))
+        if unreachable:
+            return {"ok": False, "state": "no_response", "info": None,
+                    "checks": [_check("winrm", "WinRM session", False, msg[:300],
+                                      "Could not reach WinRM on this host. Check the name or IP, that the "
+                                      "WinRM service is running, and that TCP 5985/5986 is open from the "
+                                      "appliance.")]}
+        return {"ok": False, "state": "invalid", "info": None,
+                "checks": [_check("winrm", "WinRM session", False, msg[:300])]}
+
+    checks = [_check("auth", "Authentication", True, "Credential accepted by the domain controller"),
+              _check("winrm", "WinRM session", True, "Remote session opened")]
+
+    if result.status_code != 0:
+        err = (result.std_err or b"").decode("utf-8", "ignore").strip()[:400]
+        checks.append(_check("security_log", "Security event log", False, err or "PowerShell exited non-zero"))
+        return {"ok": False, "state": "permission_issue", "info": None, "checks": checks}
+
+    out = (result.std_out or b"").decode("utf-8", "ignore").strip()
+    try:
+        info = json.loads(out) if out else {}
+    except ValueError:
+        info = {}
+
+    log_ok = bool(info.get("log"))
+    checks.append(_check(
+        "security_log", "Security event log", log_ok,
+        "Readable — UDT can correlate user logins" if log_ok else (info.get("log_error") or "")[:400],
+        "" if log_ok else _LOG_FIX,
+    ))
+
+    return {
+        "ok": log_ok,
+        "state": "valid" if log_ok else "permission_issue",
+        "info": {"hostname": info.get("host") or None, "os": info.get("os") or None},
+        "checks": checks,
+    }
 
 
 # ────────────────────────────────────────────────────────────────────

@@ -194,8 +194,13 @@ async def test_cred(
     caller-supplied host would let an operator capture the NTLM exchange for an
     account they were never given. The target therefore defaults to the
     credential's own `dc_host`; overriding it is an admin action.
+
+    The probe checks the two rights UDT actually needs — a WinRM session and
+    read access to the Security log — and reports them separately, because they
+    come from different groups and a single pass/fail sends people to the wrong
+    one. Inventory fields are best-effort extras, never a reason to fail.
     """
-    from app.services.discovery_probes import winrm_probe
+    from app.services.discovery_probes import winrm_capability_probe
     c = await db.get(WindowsCredential, cred_id)
     if not c:
         raise HTTPException(404, "Credential not found")
@@ -233,10 +238,17 @@ async def test_cred(
         "port": c.port,
         "ssl_verify": c.ssl_verify,
     }
-    r = await winrm_probe(ip, cred, timeout_s=6.0)
+    r = await winrm_capability_probe(ip, cred, timeout_s=8.0)
+    checks = r.get("checks") or []
+    failed = next((c for c in checks if not c.get("ok")), None)
     return {
-        "ok": bool(r.get("responsive")),
+        "ok": bool(r.get("ok")),
         "state": r.get("state"),
-        "error": r.get("error"),
-        "info": r.get("data") if r.get("responsive") else None,
+        "host": ip,
+        "checks": checks,
+        # First failing gate, so a caller that only shows one line shows the
+        # one the operator has to act on.
+        "error": (failed or {}).get("detail") or None,
+        "fix": (failed or {}).get("fix") or None,
+        "info": r.get("info"),
     }

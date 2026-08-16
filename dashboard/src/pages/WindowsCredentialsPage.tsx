@@ -97,8 +97,11 @@ export function WindowsCredentialsPage({ hideHeader = false }: { hideHeader?: bo
       (await api.post(`/windows-credentials/${id}/test`, { ip })).data,
     onSuccess: (r) => {
       setTestResult(r)
-      if (r.ok) toast.success('WinRM probe succeeded')
-      else toast.error('WinRM probe failed', r.error || r.state || 'unknown')
+      if (r.ok) toast.success('Credential verified', 'WinRM session and Security log access both OK')
+      else {
+        const failed = (r.checks || []).find((c: any) => !c.ok)
+        toast.error(failed ? `${failed.label} failed` : 'Test failed', r.error || r.state || 'unknown')
+      }
     },
     onError: (e: any) => toast.error('Test failed', apiErrorMessage(e)),
   })
@@ -340,23 +343,37 @@ export function WindowsCredentialsPage({ hideHeader = false }: { hideHeader?: bo
           </DialogHeader>
           <FormField label="Domain controller"
                      hint={editing?.dc_host
-                       ? 'Runs a WinRM probe against this credential\u2019s domain controller and returns OS/hostname if it works.'
+                       ? 'Checks the two rights UDT needs: a WinRM session, and read access to the Security event log.'
                        : 'This credential has no domain controller set \u2014 add one on the credential first. Testing a different host is an administrator action.'}>
             <Input value={testIp} onChange={(e) => setTestIp(e.target.value)}
                    placeholder="dc01.corp.local" />
           </FormField>
           {testResult && (
-            <div className={`rounded-md border px-3 py-2 text-xs ${
-              testResult.ok
-                ? 'border-success/30 bg-success/10 text-success'
-                : 'border-danger/30 bg-danger/10 text-danger'
-            }`}>
-              <div className="font-semibold mb-1">
-                {testResult.ok ? '✓ Connection succeeded' : `✗ ${testResult.state || 'failed'}`}
+            <div className="space-y-2">
+              {/* One row per access check. WinRM session and Security log access
+                  come from different groups, so a single verdict would send the
+                  operator to the wrong one. */}
+              <div className="divide-y divide-border rounded-md border border-border">
+                {(testResult.checks || []).map((c: any) => (
+                  <div key={c.id} className="flex items-start gap-2 px-3 py-2 text-xs">
+                    <span className={c.ok ? 'text-success' : 'text-danger'}>{c.ok ? '✓' : '✗'}</span>
+                    <div className="min-w-0 flex-1">
+                      <div className="font-medium text-text">{c.label}</div>
+                      {c.detail && <div className="mt-0.5 break-words text-muted">{c.detail}</div>}
+                      {!c.ok && c.fix && (
+                        <div className="mt-1 rounded border border-warning/30 bg-warning/10 px-2 py-1 text-warning">
+                          {c.fix}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
-              {testResult.error && <div>{testResult.error}</div>}
-              {testResult.info && (
-                <pre className="mt-2 whitespace-pre-wrap">{JSON.stringify(testResult.info, null, 2)}</pre>
+              {testResult.info?.hostname && (
+                <div className="text-xs text-muted">
+                  Reached <span className="font-mono text-text">{testResult.info.hostname}</span>
+                  {testResult.info.os ? ` · ${testResult.info.os}` : ''}
+                </div>
               )}
             </div>
           )}
