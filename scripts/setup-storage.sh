@@ -17,6 +17,8 @@ ZENPLUS_DIR="${ZENPLUS_DIR:-/opt/zenplus}"
 DATA_MOUNT="/data"
 CH_CONTAINER="zenplus-clickhouse"
 CH_UID=101   # clickhouse user inside the official image
+CH_NETWORK="zenplus_clickhouse"
+LEGACY_CH_NETWORK="zenplus_default"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -113,22 +115,35 @@ XMLEOF
     log "Restored missing ClickHouse backup-disk config"
 fi
 
-# Recreate the container only when it is not already carrying the mount, so a
-# routine OTA does not disturb a correctly-configured ClickHouse. Best-effort:
-# never fail the update over this.
+# Recreate the container when it is missing the backups mount or still uses
+# the legacy default bridge. Giving the replacement network a stable name lets
+# Compose create it before detaching ClickHouse from the old network.
 if command -v docker >/dev/null 2>&1 && docker inspect "$CH_CONTAINER" >/dev/null 2>&1; then
-    if docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$CH_CONTAINER" 2>/dev/null | grep -q '/backups'; then
-        log "ClickHouse already exposes the backups disk"
+    CH_NETWORKS="$(docker inspect -f '{{range $name, $network := .NetworkSettings.Networks}}{{$name}} {{end}}' "$CH_CONTAINER" 2>/dev/null || true)"
+    CH_MOUNTS="$(docker inspect -f '{{range .Mounts}}{{.Destination}} {{end}}' "$CH_CONTAINER" 2>/dev/null || true)"
+    if [[ " $CH_NETWORKS " == *" $CH_NETWORK "* && " $CH_MOUNTS " == *" /backups "* ]]; then
+        log "ClickHouse network and backups disk are current"
     else
-        log "Recreating ClickHouse to attach the backups disk ..."
-        if (cd "$ZENPLUS_DIR" && docker compose up -d clickhouse >/dev/null 2>&1); then
+        log "Recreating ClickHouse with the current storage and network configuration ..."
+        if (cd "$ZENPLUS_DIR" && docker compose up -d --force-recreate clickhouse >/dev/null 2>&1); then
             for _ in $(seq 1 24); do
                 [ "$(docker inspect -f '{{.State.Health.Status}}' "$CH_CONTAINER" 2>/dev/null)" = "healthy" ] && break
                 sleep 5
             done
-            log "ClickHouse recreated ($(docker inspect -f '{{.State.Health.Status}}' "$CH_CONTAINER" 2>/dev/null))"
+            CH_HEALTH="$(docker inspect -f '{{.State.Health.Status}}' "$CH_CONTAINER" 2>/dev/null || true)"
+            if [ "$CH_HEALTH" = "healthy" ]; then
+                if [ "$LEGACY_CH_NETWORK" != "$CH_NETWORK" ] && docker network inspect "$LEGACY_CH_NETWORK" >/dev/null 2>&1; then
+                    docker network rm "$LEGACY_CH_NETWORK" >/dev/null 2>&1 || \
+                        warn "Legacy Docker network $LEGACY_CH_NETWORK is still in use"
+                fi
+                log "ClickHouse recreated (healthy)"
+            else
+                warn "ClickHouse did not become healthy after recreation (status: ${CH_HEALTH:-unknown})"
+                exit 1
+            fi
         else
-            warn "Could not recreate ClickHouse — full backups will be unavailable until it is restarted"
+            warn "Could not recreate ClickHouse with the current configuration"
+            exit 1
         fi
     fi
 fi

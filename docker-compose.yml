@@ -33,6 +33,7 @@ services:
 
 networks:
   default:
+    name: zenplus_clickhouse
     ipam:
       config:
         - subnet: 198.120.20.64/28
