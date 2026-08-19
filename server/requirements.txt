@@ -13,6 +13,8 @@ redis[hiredis]==5.2.1
 httpx==0.28.1
 clickhouse-connect==0.8.9
 openpyxl==3.1.5
+opentelemetry-proto==1.30.0
+protobuf==5.29.3
 
 # DNS resolution (dns service checks)
 dnspython==2.7.0

@@ -1,11 +1,10 @@
 """APM OTLP receiver — FastAPI fallback ingest path.
 
-Implements the OTLP/HTTP **JSON** trace export (POST /v1/traces) as the
+Implements OTLP/HTTP JSON and protobuf trace export (POST /v1/traces) as the
 single-node fallback to the high-throughput Go collector. Decodes
-ExportTraceServiceRequest JSON into `apm_spans` rows, authenticates the `zpi_`
+ExportTraceServiceRequest payloads into `apm_spans` rows, authenticates the `zpi_`
 ingest key, and hands rows to a buffered async batch writer that flushes to
-ClickHouse by size/interval. Binary OTLP/protobuf is the Go collector's job
-(primary path); this router answers 415 for protobuf with a pointer to it.
+ClickHouse by size/interval.
 
 Mounted at ROOT prefix "" so the path is exactly `/v1/traces` (the OTLP default),
 not `/api/v1/v1/traces`.
@@ -25,6 +24,12 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from google.protobuf.json_format import MessageToDict
+from google.protobuf.message import DecodeError
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+    ExportTraceServiceRequest,
+    ExportTraceServiceResponse,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.apm import authenticate_ingest_key
@@ -81,6 +86,19 @@ _SPAN_KIND_STR = {0: "UNSPECIFIED", 1: "INTERNAL", 2: "SERVER", 3: "CLIENT",
                   4: "PRODUCER", 5: "CONSUMER"}
 _STATUS_STR = {0: "UNSET", 1: "OK", 2: "ERROR"}
 
+
+def _otlp_enum_number(value: object, prefix: str, names: dict[int, str]) -> int:
+    """Decode either the numeric or canonical string OTLP/JSON enum form."""
+    if value is None or value == "":
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        normalized = str(value).upper()
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix):]
+        return next((number for number, name in names.items() if name == normalized), 0)
+
 # observability counters (read by /v1/traces health + tests)
 STATS = {"accepted_spans": 0, "rejected_spans": 0, "dropped_spans": 0, "flushes": 0}
 
@@ -88,7 +106,39 @@ _queue: "asyncio.Queue | None" = None
 _writer_task: "asyncio.Task | None" = None
 
 
-# ── OTLP/JSON decoding ───────────────────────────────────────────────────────
+# ── OTLP decoding ────────────────────────────────────────────────────────────
+
+def decode_otlp_traces_protobuf(raw: bytes) -> dict:
+    """Decode an OTLP protobuf request into the canonical OTLP/JSON shape.
+
+    Reusing the JSON-to-row decoder keeps semantic-convention promotion,
+    exception grouping, validation, and resource fingerprints identical across
+    both wire encodings.
+    """
+    message = ExportTraceServiceRequest()
+    try:
+        message.ParseFromString(raw)
+    except DecodeError as exc:
+        raise ValueError("Invalid OTLP/protobuf body") from exc
+    return MessageToDict(
+        message,
+        preserving_proto_field_name=False,
+        use_integers_for_enums=True,
+    )
+
+
+def _protobuf_response(rejected: int = 0, message: str = "") -> Response:
+    payload = ExportTraceServiceResponse()
+    if rejected:
+        payload.partial_success.rejected_spans = rejected
+        payload.partial_success.error_message = message
+    return Response(
+        content=payload.SerializeToString(),
+        media_type="application/x-protobuf",
+    )
+
+
+# ── OTLP/JSON row decoding ───────────────────────────────────────────────────
 
 def _attr_list_to_maps(attrs: list) -> tuple[dict, dict, dict]:
     """Split an OTLP attribute list into typed (string, number, bool) maps."""
@@ -181,9 +231,13 @@ def decode_otlp_traces_json(payload: dict, default_env: str | None) -> tuple[lis
                         continue
                     dur = max(0, end_ns - start_ns)
                     a_s, a_n, a_b = _attr_list_to_maps(sp.get("attributes", []))
-                    kind = int(sp.get("kind", 0) or 0)
+                    kind = _otlp_enum_number(
+                        sp.get("kind", 0), "SPAN_KIND_", _SPAN_KIND_STR,
+                    )
                     status = sp.get("status") or {}
-                    scode = int(status.get("code", 0) or 0)
+                    scode = _otlp_enum_number(
+                        status.get("code", 0), "STATUS_CODE_", _STATUS_STR,
+                    )
                     ev = sp.get("events", []) or []
                     lk = sp.get("links", []) or []
                     http_sc = a_n.get("http.status_code") or a_n.get("http.response.status_code") or 0
@@ -347,19 +401,21 @@ async def otlp_traces(
 ):
     key = await authenticate_ingest_key(authorization or "", db, kind="sdk")
 
-    ct = (content_type or "").lower()
-    if "protobuf" in ct:
-        raise HTTPException(
-            415,
-            "OTLP/protobuf is served by the ZenPlus Go collector on :4317/:4318. "
-            "For the FastAPI fallback set OTEL_EXPORTER_OTLP_PROTOCOL=http/json.",
-        )
-
+    ct = (content_type or "application/json").split(";", 1)[0].strip().lower()
+    is_protobuf = ct in {"application/x-protobuf", "application/protobuf"}
+    if not is_protobuf and ct not in {"application/json", "application/x-json"}:
+        raise HTTPException(415, f"Unsupported OTLP content type: {ct}")
     raw = await request.body()
-    try:
-        payload = json.loads(raw or b"{}")
-    except json.JSONDecodeError:
-        raise HTTPException(400, "Invalid OTLP/JSON body")
+    if is_protobuf:
+        try:
+            payload = decode_otlp_traces_protobuf(raw)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    else:
+        try:
+            payload = json.loads(raw or b"{}")
+        except json.JSONDecodeError as exc:
+            raise HTTPException(400, "Invalid OTLP/JSON body") from exc
 
     span_rows, res_rows, exc_rows, rejected = decode_otlp_traces_json(payload, key.get("env_name"))
 
@@ -374,6 +430,11 @@ async def otlp_traces(
             raise HTTPException(503, "APM ingest backpressure; retry shortly")
 
     STATS["rejected_spans"] += rejected
+    if is_protobuf:
+        return _protobuf_response(
+            rejected,
+            "some spans failed to decode" if rejected else "",
+        )
     if rejected:
         return {"partialSuccess": {"rejectedSpans": rejected,
                                    "errorMessage": "some spans failed to decode"}}
