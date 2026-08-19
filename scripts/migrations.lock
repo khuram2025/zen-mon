@@ -88,3 +88,4 @@ b185b2639c360b8695cd75a8eff14478282a81c741d1081e25a06e895fea8fb3  migrate-077-al
 e283b7b3836668b28d38611e72e56e777e097b217e7d302d47875a855ff74784  migrate-078-windows-credential-dc-host.sql
 169df2e8cef9966a2aecfb442b54cf51bb5ef5843aa635e1c8d7e9cf82b4e63f  migrate-079-interface-tags.sql
 0d4eec1c3c666f768086b771457184d97b61c9e2ddb4e723c55fcd7e618e4c6b  migrate-080-snmp-network-device-coverage.sql
+6c2b688b788db97c5750ae5bf27dbd4ffe92e297b889a09f81728da3bf7f5804  migrate-081-preserve-mikrotik-monitoring-profile.sql
