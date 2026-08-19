@@ -54,6 +54,7 @@ CODE_IGNORE = [
     "__pycache__", "*.pyc", ".pytest_cache", "node_modules",
     ".mypy_cache", ".ruff_cache", "*.egg-info",
     "venv", ".venv", "dist", "build",
+    ".netpath-presync-backup",
     # Support-bundle runtime dirs — created by setup-support.sh on the
     # appliance, never part of a release. They're owned by zenplus/root and
     # unreadable by the build user, which crashes shutil.copytree.

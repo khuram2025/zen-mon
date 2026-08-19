@@ -95,6 +95,7 @@ int/
 .cache/
 go/
 docker-compose.yml.bak
+poller/internal/checker/.netpath-presync-backup/
 
 # ─── Working artifacts (per-VM, never commit) ───
 .playwright-mcp/
