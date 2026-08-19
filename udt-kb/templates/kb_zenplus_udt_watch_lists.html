@@ -1,0 +1,278 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/udt/udt-watch-allow-ignore-lists.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/udt/udt-watch-allow-ignore-lists.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "User Device Tracker", "item": "https://zentryc.com{% url 'core:kb_zenplus_udt' %}"},
+    {"@type": "ListItem", "position": 4, "name": "Watch lists and rogue detection", "item": "https://zentryc.com{% url 'core:kb_zenplus_udt_watch_lists' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Watch, allow and ignore lists: rogue device detection",
+  "description": "How to turn on rogue endpoint detection in ZenPlus UDT with an allow list, raise alerts when a watched MAC address appears, and suppress noise with ignore rules.",
+  "datePublished": "2026-08-16",
+  "dateModified": "2026-08-16",
+  "inLanguage": "en",
+  "url": "https://zentryc.com{% url 'core:kb_zenplus_udt_watch_lists' %}",
+  "author": {"@type": "Organization", "name": "Zentryc"},
+  "publisher": {"@type": "Organization", "name": "Zentryc"},
+  "about": {"@type": "SoftwareApplication", "name": "ZenPlus User Device Tracker", "applicationCategory": "Network Monitoring"}
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_udt' %}">UDT</a>
+        <span class="sep">/</span>
+        <span class="current">Watch lists and rogue detection</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus UDT</p>
+        <h1>Watch, allow and ignore lists: rogue device detection</h1>
+        <p class="lede">Three rule lists that decide what is authorised on your network, what should page you the moment
+        it appears, and what you never want to hear about again.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.14.3+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-08-16</span>
+            <span class="kb-pill"><strong>Audience</strong> Network + security operations</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~9 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#three-lists">The three lists</a></li>
+            <li><a href="#allow-list">The allow list turns rogue detection on</a></li>
+            <li><a href="#match-types">Match types</a></li>
+            <li><a href="#rolling-out">Rolling it out safely</a></li>
+            <li><a href="#watch-list">The watch list</a></li>
+            <li><a href="#ignore-list">The ignore list</a></li>
+            <li><a href="#alerting">Alerting on it</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="three-lists">
+            <h2><span class="num">01</span> The three lists <a class="kb-anchor" href="#three-lists">#</a></h2>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/udt/udt-watch-allow-ignore-lists.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="ZenPlus UDT Watch Lists tab showing the rogue endpoints panel and the allow list, watch list and ignore list rule cards">
+                <figcaption><strong>Watch Lists.</strong> Rogue endpoints at the top, then the three rule lists. With no
+                allow rules configured, rogue detection is dormant and the panel says so.</figcaption>
+            </figure>
+
+            <p>All three work the same way &mdash; a match condition against an endpoint &mdash; but they answer
+            different questions and have very different consequences.</p>
+
+            <div class="kb-deflist">
+                <div><dt>Allow list</dt><dd><strong>What is authorised.</strong> Anything that matches is authorised;
+                    anything that matches nothing becomes a rogue. Inverted logic, and the only list that can generate
+                    findings on its own.</dd></div>
+                <div><dt>Watch list</dt><dd><strong>What is interesting.</strong> Matching endpoints raise an event every
+                    time they appear on the network. Says nothing about whether they are allowed.</dd></div>
+                <div><dt>Ignore list</dt><dd><strong>What is noise.</strong> Matching endpoints disappear from every UDT
+                    view and are never flagged, counted or alerted on.</dd></div>
+            </div>
+        </section>
+
+        <section id="allow-list">
+            <h2><span class="num">02</span> The allow list turns rogue detection on <a class="kb-anchor" href="#allow-list">#</a></h2>
+
+            <div class="callout warn">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+                    &ldquo;Rogue: 0&rdquo; usually means &ldquo;not checked&rdquo;
+                </div>
+                <p>With no allow rules configured, every endpoint's authorisation state is <em>unclassified</em> &mdash;
+                neither authorised nor rogue &mdash; and the rogue counter sits at zero. That is not a clean bill of
+                health. Rogue detection does nothing until you tell UDT what &ldquo;allowed&rdquo; means.</p>
+            </div>
+
+            <p>Once at least one allow rule exists, the sweeper evaluates every non-ignored endpoint every 60 seconds:</p>
+
+            <ul>
+                <li>Matches any allow rule &rarr; <strong>authorised</strong>.</li>
+                <li>Matches none &rarr; <strong>rogue</strong>, and a <em>rogue detected</em> event is raised recording
+                    the switch and port it was on at the time.</li>
+                <li>An operator's manual <em>Flag rogue</em> or authorisation is <strong>pinned</strong> and is never
+                    overwritten by the rules.</li>
+            </ul>
+
+            <p>Deleting the last allow rule returns everything to unclassified rather than declaring the whole network
+            rogue.</p>
+        </section>
+
+        <section id="match-types">
+            <h2><span class="num">03</span> Match types <a class="kb-anchor" href="#match-types">#</a></h2>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/udt/udt-add-watch-rule.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="Add watch list rule dialog in ZenPlus UDT with a match-on selector, pattern field and optional description">
+                <figcaption><strong>Add rule.</strong> The same eight match types are available on all three lists.</figcaption>
+            </figure>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Match on</th><th>Pattern</th><th>Notes</th></tr></thead>
+                    <tbody>
+                        <tr><td>MAC address</td><td><code>00:1a:2b:3c:4d:5e</code></td><td>Any separator; normalised on save</td></tr>
+                        <tr><td>MAC / OUI prefix</td><td><code>00:1a:2b</code></td><td>Any length prefix, not just three octets</td></tr>
+                        <tr><td>IP address</td><td><code>10.20.4.31</code></td><td>Matches the current IP and active historical bindings</td></tr>
+                        <tr><td>IP range</td><td><code>10.20.4.10 - 10.20.4.60</code></td><td>Inclusive at both ends</td></tr>
+                        <tr><td>Subnet</td><td><code>10.20.0.0/16</code></td><td>CIDR; the most common allow-list rule</td></tr>
+                        <tr><td>Hostname</td><td><code>*-corp</code>, <code>lt??????</code></td><td><code>*</code> and <code>?</code> wildcards, case-insensitive</td></tr>
+                        <tr><td>Vendor</td><td><code>cisco</code></td><td>Substring match on the OUI vendor name</td></tr>
+                        <tr><td>User</td><td><code>svc-*</code></td><td>Requires <a href="{% url 'core:kb_zenplus_udt_user_logins' %}">AD correlation</a></td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>A pattern that cannot be parsed for its match type is rejected when you save it, so a malformed CIDR or a
+            MAC with the wrong number of octets never silently matches nothing.</p>
+        </section>
+
+        <section id="rolling-out">
+            <h2><span class="num">04</span> Rolling it out safely <a class="kb-anchor" href="#rolling-out">#</a></h2>
+
+            <p>Switching on rogue detection in one step on a mature network produces hundreds of findings and destroys
+            everyone's confidence in the feature. Stage it instead.</p>
+
+            <div class="step-list">
+                <div class="step"><div><h4>Do the ignore list first</h4>
+                    <p>Silence what you already know is noise &mdash; lab subnets, guest VLANs, randomised MACs, test
+                    gear. Every endpoint you ignore now is one you do not have to triage later.</p></div></div>
+                <div class="step"><div><h4>Write broad allow rules before narrow ones</h4>
+                    <p>Start with the subnets and vendors that account for the bulk of the estate: the corporate client
+                    subnets, the server VLANs, the phone OUI, the printer OUI. Aim to cover 90% with a handful of
+                    rules.</p></div></div>
+                <div class="step"><div><h4>Add the rules with alerting still off</h4>
+                    <p>Create no alert rule for <code>udt_rogue_endpoint</code> yet. The Watch Lists tab lists rogues on
+                    screen, which is all you need for the next step.</p></div></div>
+                <div class="step"><div><h4>Work the list to zero</h4>
+                    <p>Everything remaining is either a genuine gap in your allow rules or something that deserves
+                    attention. Either extend a rule or investigate the device.</p></div></div>
+                <div class="step"><div><h4>Only then turn on alerting</h4>
+                    <p>With a quiet baseline, an alert on <code>udt_rogue_endpoint</code> means something new and
+                    genuinely unexpected, and people will act on it.</p></div></div>
+            </div>
+
+            <div class="callout tip">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+                    Prefer subnets and OUIs over MAC lists
+                </div>
+                <p>An allow list of individual MAC addresses becomes a maintenance burden the day someone replaces a
+                laptop. Rules that describe policy &mdash; &ldquo;anything in the corporate client subnets&rdquo;,
+                &ldquo;any Polycom phone&rdquo; &mdash; keep working as hardware turns over.</p>
+            </div>
+        </section>
+
+        <section id="watch-list">
+            <h2><span class="num">05</span> The watch list <a class="kb-anchor" href="#watch-list">#</a></h2>
+
+            <p>The watch list is about attention, not permission. A matching endpoint raises a <em>watch seen</em> event
+            whenever it holds an active session, de-duplicated to at most one event per endpoint per hour so a device
+            that stays connected does not generate a stream.</p>
+
+            <p>What it is genuinely useful for:</p>
+
+            <ul>
+                <li><strong>Devices that should never move.</strong> A payment terminal, a controller, a piece of medical
+                    equipment &mdash; you want to know if it turns up on a different port.</li>
+                <li><strong>Equipment under investigation.</strong> A machine suspected of causing a problem, watched
+                    until it is resolved.</li>
+                <li><strong>Decommissioned hardware.</strong> Kit that was supposed to have left the building; a watch
+                    hit means it did not.</li>
+                <li><strong>Contractor or loan devices.</strong> Temporary equipment you want a record of.</li>
+            </ul>
+
+            <p>Individual endpoints can also be watched directly with the <strong>Watch</strong> button on the endpoint
+            page, without writing a rule.</p>
+        </section>
+
+        <section id="ignore-list">
+            <h2><span class="num">06</span> The ignore list <a class="kb-anchor" href="#ignore-list">#</a></h2>
+
+            <p>Ignored endpoints vanish completely: excluded from counters, from search results by default, from rogue
+            evaluation and from every alert. This makes the ignore list powerful and worth using carefully.</p>
+
+            <p>Reasonable candidates:</p>
+
+            <ul>
+                <li>The ZenPlus appliance's own interfaces and other management addresses.</li>
+                <li>Lab, test and staging subnets where churn is constant and meaningless.</li>
+                <li>Guest wireless ranges, if guests are not in scope for tracking.</li>
+                <li>Randomised MAC addresses, if privacy addressing makes them noise for you.</li>
+            </ul>
+
+            <div class="callout warn">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+                    An ignore rule is a blind spot
+                </div>
+                <p>Ignoring a broad subnet to quiet the rogue list also means nothing in that subnet will ever be
+                flagged, watched or counted again. If the goal is only to reduce noise, an allow rule is almost always
+                the better instrument &mdash; it keeps the devices visible while marking them expected.</p>
+            </div>
+
+            <p>Ignoring an endpoint by hand from its detail page is pinned and never undone by rule changes, in the same
+            way manual authorisation is.</p>
+        </section>
+
+        <section id="alerting">
+            <h2><span class="num">07</span> Alerting on it <a class="kb-anchor" href="#alerting">#</a></h2>
+
+            <p>Under <strong>Alerting &rarr; Alert Rules</strong>, three UDT metrics correspond to these lists:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Metric</th><th>Fires when</th><th>Good severity</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>udt_rogue_endpoint</code></td><td>An endpoint stops matching every allow rule</td><td>Warning, or Critical on sensitive segments</td></tr>
+                        <tr><td><code>udt_watch_endpoint</code></td><td>A watched endpoint appears (max once per hour each)</td><td>Warning</td></tr>
+                        <tr><td><code>udt_new_endpoint</code></td><td>Any MAC is seen for the first time</td><td>Info &mdash; noisy on a large network</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>These are event-driven, so the threshold field acts as an on/off switch rather than a number. Each alert
+            carries the endpoint's MAC, hostname, IP, switch and port, and de-duplicates per endpoint for the rule's
+            cooldown period.</p>
+
+            <p>Scope matters more than severity. A rule limited to one device group &mdash; the switches serving a
+            secure area, say &mdash; produces alerts someone will read. A global <code>udt_new_endpoint</code> rule on a
+            campus network produces an alert every few minutes and will be muted within a week.</p>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_udt_classification' %}">&larr; Device classification</a></span>
+        <span><a href="{% url 'core:kb_zenplus_udt_user_logins' %}">User logins &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

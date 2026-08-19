@@ -1,0 +1,292 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/udt/udt-endpoints-list.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/udt/udt-endpoints-list.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "User Device Tracker", "item": "https://zentryc.com{% url 'core:kb_zenplus_udt' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "User Device Tracker (UDT)",
+  "description": "How the ZenPlus User Device Tracker maps every MAC address, IP, user, switch and port on your network — what it collects over SNMP, how endpoints are classified, and how to find which switch port a device is plugged into.",
+  "datePublished": "2026-08-16",
+  "dateModified": "2026-08-16",
+  "inLanguage": "en",
+  "url": "https://zentryc.com{% url 'core:kb_zenplus_udt' %}",
+  "author": {"@type": "Organization", "name": "Zentryc"},
+  "publisher": {"@type": "Organization", "name": "Zentryc"},
+  "about": {"@type": "SoftwareApplication", "name": "ZenPlus User Device Tracker", "applicationCategory": "Network Monitoring"}
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <span class="current">User Device Tracker</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus UDT</p>
+        <h1>User Device Tracker (UDT)</h1>
+        <p class="lede">Every MAC address, IP, user, switch and port on your network &mdash; live and historically. This is
+        the overview: what UDT collects, what each screen answers, and where to start.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.14.3+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-08-16</span>
+            <span class="kb-pill"><strong>Audience</strong> Network operators</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~7 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#what-udt-answers">What UDT answers</a></li>
+            <li><a href="#the-screens">The screens</a></li>
+            <li><a href="#how-the-data-is-collected">How the data is collected</a></li>
+            <li><a href="#direct-versus-indirect">Direct versus indirect</a></li>
+            <li><a href="#retention-and-scale">Retention and scale</a></li>
+            <li><a href="#where-to-start">Where to start</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="what-udt-answers">
+            <h2><span class="num">01</span> What UDT answers <a class="kb-anchor" href="#what-udt-answers">#</a></h2>
+
+            <p>The ZenPlus <strong>User Device Tracker</strong> is a layer-2 endpoint tracker. It reads the forwarding
+            tables of your switches and the ARP tables of your routers and firewalls over SNMP, then stitches those
+            fragments into one identity per device: a MAC address, the IP addresses it has held, the switch port it is
+            plugged into, the VLAN it lives on, the vendor that made its network card, and &mdash; if you connect a
+            domain controller &mdash; the user who last logged in on it.</p>
+
+            <p>It exists to answer questions that are otherwise a manual hunt across a dozen CLI sessions:</p>
+
+            <ul>
+                <li><strong>Where is this device?</strong> Give it a MAC, IP or hostname and it returns the switch, the
+                    port and the VLAN &mdash; right now, or on any day in the last 90 days.</li>
+                <li><strong>What is on my network that should not be?</strong> Define what is authorised; everything else
+                    is flagged as a rogue endpoint the moment it appears.</li>
+                <li><strong>Who was using it?</strong> Active Directory logon events are correlated to endpoints, so a
+                    MAC becomes a person.</li>
+                <li><strong>Have I run out of switch ports?</strong> Per-switch used, free and uplink counts with a daily
+                    trend, so port exhaustion is a purchase decision rather than a surprise.</li>
+                <li><strong>What changed?</strong> New endpoints, endpoints that moved port, watched devices appearing
+                    and rogues detected all land in one activity feed and can raise alerts.</li>
+            </ul>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/udt/udt-endpoints-list.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="ZenPlus User Device Tracker endpoints list showing MAC address, IP address, vendor, connected switch and port, VLAN and last-seen time for each tracked endpoint">
+                <figcaption><strong>Endpoints.</strong> Every tracked device with its MAC, current IP, NIC vendor,
+                connected switch and port, VLAN and last-seen time. The counters across the top are also filters.</figcaption>
+            </figure>
+
+            <div class="pill-row">
+                <a href="{% url 'core:kb_zenplus_udt_getting_started' %}">Setup &amp; permissions</a>
+                <a href="{% url 'core:kb_zenplus_udt_endpoints' %}">Endpoints</a>
+                <a href="{% url 'core:kb_zenplus_udt_switch_ports' %}">Switch ports</a>
+                <a href="{% url 'core:kb_zenplus_udt_classification' %}">Classification</a>
+                <a href="{% url 'core:kb_zenplus_udt_watch_lists' %}">Watch lists</a>
+                <a href="{% url 'core:kb_zenplus_udt_user_logins' %}">User logins</a>
+                <a href="{% url 'core:kb_zenplus_udt_troubleshooting' %}">Troubleshooting</a>
+            </div>
+        </section>
+
+        <section id="the-screens">
+            <h2><span class="num">02</span> The screens, and what each one answers <a class="kb-anchor" href="#the-screens">#</a></h2>
+
+            <p>UDT lives under <strong>Monitoring &rarr; User Devices</strong> in the appliance. Seven tabs, each with a
+            single job.</p>
+
+            <dl class="kb-deflist">
+                <div><dt><a href="{% url 'core:kb_zenplus_udt_endpoints' %}">Endpoints</a></dt>
+                    <dd>Where is this device? Search by MAC, IP, hostname, user or vendor and open any endpoint for its
+                    full connection and IP history.</dd></div>
+                <div><dt><a href="{% url 'core:kb_zenplus_udt_switch_ports' %}">Switch Ports</a></dt>
+                    <dd>Which ports are used, free or uplinks? A per-switch port map with the endpoints on each port, plus
+                    remote shutdown and per-port UDT exclusion.</dd></div>
+                <div><dt><a href="{% url 'core:kb_zenplus_udt_user_logins' %}">User Logins</a></dt>
+                    <dd>Who used which machine? Active Directory logon events rolled up per user and linked to endpoints.</dd></div>
+                <div><dt><a href="{% url 'core:kb_zenplus_udt_classification' %}">Classification</a></dt>
+                    <dd>What kind of device is this? NIC-vendor rollups and override rules that put endpoints into
+                    built-in types or your own groups.</dd></div>
+                <div><dt><a href="{% url 'core:kb_zenplus_udt_watch_lists' %}">Watch Lists</a></dt>
+                    <dd>What is authorised? Allow, watch and ignore rules &mdash; the allow list is what turns rogue
+                    detection on.</dd></div>
+                <div><dt><a href="{% url 'core:kb_zenplus_udt_endpoints' %}#activity">Activity</a></dt>
+                    <dd>What changed? New endpoints, endpoint moves, watch hits, rogue detections and port actions over
+                    24&nbsp;hours, 7 days or 30 days.</dd></div>
+                <div><dt><a href="{% url 'core:kb_zenplus_udt_getting_started' %}">Settings</a></dt>
+                    <dd>Which devices does UDT poll, how often, with which credential &mdash; and which domain controllers
+                    supply user logins.</dd></div>
+            </dl>
+        </section>
+
+        <section id="how-the-data-is-collected">
+            <h2><span class="num">03</span> How the data is collected <a class="kb-anchor" href="#how-the-data-is-collected">#</a></h2>
+
+            <p>Understanding this pipeline explains almost every question people ask about UDT &mdash; why a switch shows
+            no endpoints, why a device appears on six ports at once, and why a change takes a few minutes to show up.</p>
+
+<pre><code>every switch / firewall you monitor with SNMP
+      │
+      │  ZenPlus poller, every 300s (configurable, globally or per device)
+      ▼
+  ┌─ BRIDGE-MIB / Q-BRIDGE-MIB  ──▶ MAC  →  switch port  (+ VLAN)
+  ├─ IP-MIB ARP + IPv6 neighbour ──▶ IP   →  MAC
+  ├─ LLDP-MIB / CDP cache       ──▶ neighbours, uplink detection
+  └─ VLAN inventory (Q-BRIDGE, Cisco VTP)
+      │
+      ▼
+  correlation: one endpoint identity per MAC, sessionised per port
+      │
+      │  UDT sweeper, every 60s
+      ▼
+  classify → apply allow / watch / ignore rules → reverse-DNS →
+  daily port-capacity snapshot → prune beyond 90 days
+      │
+      │  UDT alert evaluator, every 30s
+      ▼
+  udt_new_endpoint · udt_rogue_endpoint · udt_watch_endpoint
+  udt_endpoint_moved · udt_port_capacity_pct   →  your alert channels
+
+  (optional, separate) domain controller ──WinRM──▶ Security log
+  events 4624 / 4768 / 4769  →  user ↔ endpoint correlation
+</code></pre>
+
+            <p>Two SNMP sources do most of the work, and they answer different halves of the question. A
+            <strong>switch</strong> gives you <em>MAC&nbsp;&rarr;&nbsp;port</em>. A <strong>router or firewall</strong>
+            gives you <em>IP&nbsp;&rarr;&nbsp;MAC</em>. UDT joins them on the MAC. If you only monitor switches, you get
+            ports without IP addresses; if you only monitor firewalls, you get IP addresses with no port. Monitor both.</p>
+
+            <div class="callout tip">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+                    Why a change takes a few minutes
+                </div>
+                <p>A device that moves port is not seen instantly. The switch has to age its forwarding table, the poller
+                has to run (default every 5 minutes), and a session is only closed once the endpoint has been missing for
+                <strong>15 minutes</strong> &mdash; roughly three missed polls, so a single dropped poll does not tear
+                down a live session. Shorten the poll interval if you need tighter resolution.</p>
+            </div>
+        </section>
+
+        <section id="direct-versus-indirect">
+            <h2><span class="num">04</span> Direct versus indirect <a class="kb-anchor" href="#direct-versus-indirect">#</a></h2>
+
+            <p>This is the single most important concept in UDT, and the one that surprises people first.</p>
+
+            <p>A MAC address does not appear in the forwarding table of only one switch. It appears in the table of
+            <em>every</em> switch in its path &mdash; on the access port where the device is really plugged in, and on the
+            uplink or trunk port of every switch upstream of it. A laptop on one access port can legitimately show up on
+            fifteen ports across your estate.</p>
+
+            <p>UDT resolves this by classifying every port as <strong>access</strong> or <strong>uplink</strong>, and then
+            marking each sighting accordingly:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Sighting</th><th>Means</th><th>Shown as</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Direct</strong></td><td>Seen on a port classified as an access port &mdash; the device is physically plugged in here</td><td>The endpoint's location; drives &ldquo;Connected to&rdquo;</td></tr>
+                        <tr><td><strong>Indirect</strong></td><td>Seen on an uplink or trunk &mdash; the traffic merely passes through</td><td>Hidden behind <em>Show N uplink sightings</em> on the endpoint page</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>Uplinks are detected automatically, in this order, first match winning:</p>
+
+            <ol>
+                <li>An <strong>LLDP or CDP neighbour that is itself network infrastructure</strong> &mdash; another
+                    monitored device, or a neighbour whose system description looks like a switch, router, firewall or a
+                    network OS (IOS, NX-OS, JunOS, EOS, RouterOS&hellip;).</li>
+                <li><strong>Cisco VTP trunk status</strong> reporting the port as trunking.</li>
+                <li><strong>MAC count</strong> &mdash; eight or more distinct MACs learned on one port.</li>
+            </ol>
+
+            <p>You can override the verdict per port on the Switch Ports tab when the heuristics get it wrong &mdash; a
+            manual override always wins and is never recomputed. See
+            <a href="{% url 'core:kb_zenplus_udt_switch_ports' %}">Switch ports, uplinks and capacity</a>.</p>
+        </section>
+
+        <section id="retention-and-scale">
+            <h2><span class="num">05</span> Retention and scale <a class="kb-anchor" href="#retention-and-scale">#</a></h2>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Data</th><th>Kept for</th><th>Notes</th></tr></thead>
+                    <tbody>
+                        <tr><td>Endpoint identities</td><td>Indefinitely</td><td>One row per MAC ever seen; first-seen and last-seen are never pruned</td></tr>
+                        <tr><td>Port sessions (connection history)</td><td>90 days</td><td>Closed sessions only; the active session always survives</td></tr>
+                        <tr><td>IP history</td><td>90 days</td><td>A binding goes inactive after 24 hours unseen</td></tr>
+                        <tr><td>Activity events</td><td>90 days</td><td>New endpoint, moved, rogue, watch, port actions</td></tr>
+                        <tr><td>User logins</td><td>90 days</td><td>From domain controllers</td></tr>
+                        <tr><td>Port capacity</td><td>Indefinitely</td><td>One row per switch per day</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="callout">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+                    An endpoint is &ldquo;active&rdquo; if it was seen in the last 15 minutes
+                </div>
+                <p>Everywhere in UDT &mdash; the <em>Active now</em> counter, the green dot on a row, the Active filter
+                &mdash; &ldquo;active&rdquo; means <strong>last seen within 15 minutes</strong>. It does not mean the
+                device is powered on; it means a switch still had it in a forwarding table at the last poll.</p>
+            </div>
+        </section>
+
+        <section id="where-to-start">
+            <h2><span class="num">06</span> Where to start <a class="kb-anchor" href="#where-to-start">#</a></h2>
+
+            <div class="step-list">
+                <div class="step"><div><h4>Give UDT what it needs from the network</h4>
+                    <p>An SNMP credential that can read the bridge tables on your switches &mdash; on Cisco IOS that
+                    requires one extra command most read-only configurations are missing. See
+                    <a href="{% url 'core:kb_zenplus_udt_getting_started' %}">Setup and permissions</a>.</p></div></div>
+                <div class="step"><div><h4>Confirm endpoints are landing</h4>
+                    <p>Settings shows ports monitored, endpoints and last poll per device. A switch with a last poll but
+                    zero endpoints is the classic symptom &mdash;
+                    <a href="{% url 'core:kb_zenplus_udt_troubleshooting' %}">troubleshoot it here</a>.</p></div></div>
+                <div class="step"><div><h4>Tidy up classification</h4>
+                    <p>Turn the biggest blocks of &ldquo;Unknown&rdquo; into meaningful groups with one rule per vendor.
+                    See <a href="{% url 'core:kb_zenplus_udt_classification' %}">Classification</a>.</p></div></div>
+                <div class="step"><div><h4>Decide what is authorised</h4>
+                    <p>Until an allow rule exists, nothing is ever flagged rogue. See
+                    <a href="{% url 'core:kb_zenplus_udt_watch_lists' %}">Watch, allow and ignore lists</a>.</p></div></div>
+                <div class="step"><div><h4>Connect Active Directory</h4>
+                    <p>Turns MAC addresses into people. See
+                    <a href="{% url 'core:kb_zenplus_udt_user_logins' %}">User logins</a>.</p></div></div>
+            </div>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus' %}">&larr; ZenPlus documentation</a></span>
+        <span><a href="{% url 'core:kb_zenplus_udt_getting_started' %}">Setup and permissions &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

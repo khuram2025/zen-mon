@@ -1,0 +1,306 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/udt/udt-settings-layer2-polling.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/udt/udt-settings-layer2-polling.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "User Device Tracker", "item": "https://zentryc.com{% url 'core:kb_zenplus_udt' %}"},
+    {"@type": "ListItem", "position": 4, "name": "Troubleshooting", "item": "https://zentryc.com{% url 'core:kb_zenplus_udt_troubleshooting' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {"@type": "Question", "name": "Why does a switch show no endpoints in UDT?",
+     "acceptedAnswer": {"@type": "Answer", "text": "On Cisco IOS and IOS-XE the MAC forwarding table is only published per VLAN, not in the default SNMP context. With SNMPv3 the group must be granted the vlan- context prefix with 'snmp-server group GRP v3 priv context vlan- match prefix'. Without it every per-VLAN walk is refused and UDT sees zero MAC addresses even though interfaces and ARP poll normally."}},
+    {"@type": "Question", "name": "Why does an endpoint show an IP address but no switch port?",
+     "acceptedAnswer": {"@type": "Answer", "text": "The endpoint was learned from a router or firewall ARP table but has not been found in any switch forwarding table. Either the switch it is connected to is not monitored by ZenPlus, or that switch is not returning its bridge table to SNMP."}},
+    {"@type": "Question", "name": "Why does a device appear on many switch ports at once?",
+     "acceptedAnswer": {"@type": "Answer", "text": "A MAC address appears in the forwarding table of every switch along its path. UDT classifies ports as access or uplink and marks sightings on uplinks as indirect, hiding them behind a toggle. If a device shows as indirect everywhere, uplink detection has misclassified its access port, usually because of an unreliable LLDP neighbour identity."}},
+    {"@type": "Question", "name": "Why is the rogue endpoint count always zero?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Rogue detection is dormant until at least one allow rule exists. With no allow list every endpoint is unclassified rather than authorised or rogue, so the counter reads zero. Create allow rules on the Watch Lists tab to turn detection on."}},
+    {"@type": "Question", "name": "Why are all vendors Unknown in UDT?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Vendor names come from the IEEE OUI registry, which the appliance downloads automatically when the table is empty and retries every six hours. On an appliance without outbound internet access the download never succeeds and no vendor can be resolved."}},
+    {"@type": "Question", "name": "How long does UDT keep endpoint history?",
+     "acceptedAnswer": {"@type": "Answer", "text": "Endpoint identities are kept indefinitely. Port sessions, IP history, activity events and user logins are kept for 90 days. Daily port-capacity snapshots are kept indefinitely."}}
+  ]
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_udt' %}">UDT</a>
+        <span class="sep">/</span>
+        <span class="current">Troubleshooting</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus UDT</p>
+        <h1>Troubleshooting the User Device Tracker</h1>
+        <p class="lede">The symptoms operators actually hit, in order of how often they hit them &mdash; each with the
+        underlying cause and the command that proves it.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.14.3+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-08-16</span>
+            <span class="kb-pill"><strong>Audience</strong> Network operators</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~10 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#no-endpoints">A switch shows no endpoints</a></li>
+            <li><a href="#ip-no-port">An endpoint has an IP but no port</a></li>
+            <li><a href="#everything-indirect">Everything shows as indirect</a></li>
+            <li><a href="#stale">A device shows the wrong port</a></li>
+            <li><a href="#no-vendors">Vendors are all Unknown</a></li>
+            <li><a href="#rogue-zero">Rogue count stuck at zero</a></li>
+            <li><a href="#no-logins">No user logins</a></li>
+            <li><a href="#too-many">Too many endpoints</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="no-endpoints">
+            <h2><span class="num">01</span> A switch shows no endpoints <a class="kb-anchor" href="#no-endpoints">#</a></h2>
+
+            <p>By far the most common problem, and on Cisco IOS almost always the same cause. The switch polls fine,
+            interfaces and ARP are healthy, the Settings tab shows a recent <em>Last poll</em> &mdash; and
+            <em>Endpoints</em> is zero.</p>
+
+            <div class="callout warn">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+                    On a Cisco IOS switch, check the vlan- context grant first
+                </div>
+                <p>UDT may report <em>&ldquo;bridge MIB returned no MACs (check the SNMP view exposes
+                1.3.6.1.2.1.17)&rdquo;</em>. On Cisco IOS and IOS-XE the view is usually <strong>not</strong> the problem
+                &mdash; the per-VLAN context grant is. Cisco refuses the per-VLAN walk silently, so the generic message
+                appears even when the real cause is authorisation. Rule out the context grant before you touch the
+                view.</p>
+            </div>
+
+            <h3>Prove it in two commands</h3>
+
+            <p>Run these from any Linux host with the same credential ZenPlus uses. The first should return rows; the
+            second is the one that matters:</p>
+
+<pre><code># 1. Default context — bridge port to ifIndex map
+snmpwalk -v3 -l authPriv -u netmon -a SHA -A &lt;AUTH&gt; -x AES -X &lt;PRIV&gt; \
+         &lt;switch-ip&gt; 1.3.6.1.2.1.17.1.4.1.2
+
+# 2. VLAN 1 context — the forwarding table itself
+snmpwalk -v3 -l authPriv -u netmon -a SHA -A &lt;AUTH&gt; -x AES -X &lt;PRIV&gt; \
+         -n vlan-1 &lt;switch-ip&gt; 1.3.6.1.2.1.17.4.3.1.2
+</code></pre>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Result</th><th>Diagnosis</th><th>Fix</th></tr></thead>
+                    <tbody>
+                        <tr><td>#2 returns <code>authorizationError (access denied to that object)</code></td><td>The v3 group is not authorised for <code>vlan-</code> contexts</td><td>Add <code>snmp-server group GRP v3 priv context vlan- match prefix</code></td></tr>
+                        <tr><td>#1 is empty too</td><td>The read view excludes the bridge MIB</td><td>Include <code>1.3.6.1.2.1.17</code> in the view</td></tr>
+                        <tr><td>Both time out</td><td>Credential or ACL problem, not a UDT problem</td><td>Check the SNMP ACL permits the appliance</td></tr>
+                        <tr><td>Both return rows, UDT still empty</td><td>Genuine &mdash; the switch really has no learned MACs</td><td>Expected on a core or top-of-rack switch with only infrastructure ports</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>On SNMPv2c there is nothing to grant: ZenPlus uses <code>community@vlan</code> indexing, which IOS supports
+            natively. Verify with <code>snmpwalk -v2c -c &lt;community&gt;@1 &lt;switch-ip&gt;
+            1.3.6.1.2.1.17.4.3.1.2</code>.</p>
+
+            <p>On non-Cisco platforms, check the VLAN-aware table directly &mdash; if this returns rows, UDT will work:</p>
+
+<pre><code>snmpwalk -v2c -c &lt;community&gt; &lt;switch-ip&gt; 1.3.6.1.2.1.17.7.1.2.2.1.2</code></pre>
+
+            <p>Full configuration examples are in
+            <a href="{% url 'core:kb_zenplus_udt_getting_started' %}#cisco">Setup and permissions</a>.</p>
+        </section>
+
+        <section id="ip-no-port">
+            <h2><span class="num">02</span> An endpoint has an IP but no switch port <a class="kb-anchor" href="#ip-no-port">#</a></h2>
+
+            <p><em>Connected to</em> shows a dash while the IP and vendor are populated. The endpoint was learned from a
+            router or firewall ARP table, and no switch has reported that MAC.</p>
+
+            <ol>
+                <li><strong>Is the switch monitored at all?</strong> If the device sits behind an unmanaged switch, or a
+                    switch not yet added to ZenPlus, there is nothing to learn from. Add it.</li>
+                <li><strong>Is the switch returning its bridge table?</strong> Check the <em>Endpoints</em> column for
+                    that switch on the Settings tab &mdash; if it is zero, go back to
+                    <a href="#no-endpoints">section 1</a>.</li>
+                <li><strong>Is the port excluded from UDT?</strong> An excluded port keeps its capacity statistics but
+                    produces no endpoints. Check the UDT toggle on the Switch Ports tab.</li>
+            </ol>
+
+            <p>This is expected and harmless for anything that is not behind a monitored switch &mdash; VPN clients,
+            devices on a partner network, or hosts on a segment routed by a firewall you monitor but switched by hardware
+            you do not.</p>
+        </section>
+
+        <section id="everything-indirect">
+            <h2><span class="num">03</span> Every endpoint shows as indirect <a class="kb-anchor" href="#everything-indirect">#</a></h2>
+
+            <p>Endpoints are found, but they all carry an <em>indirect</em> badge and no access port is ever identified.
+            That means uplink detection has classified the access ports as uplinks.</p>
+
+            <p>Check the <strong>Role</strong> column on the Switch Ports tab and read the reason next to it:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Reason shown</th><th>What went wrong</th><th>Fix</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>lldp</code> / <code>cdp</code> on an access port</td><td>The neighbour advertises an identity that reads as infrastructure &mdash; docking stations and some laptops do this</td><td>Override the port to <em>access</em>; the override is permanent</td></tr>
+                        <tr><td><code>mac_count</code> on a real access port</td><td>Eight or more MACs behind one port &mdash; a desk switch, a hypervisor, or an access point</td><td>Override to <em>access</em> if you want its clients attributed there</td></tr>
+                        <tr><td><code>trunk</code></td><td>The switch genuinely reports the port as trunking</td><td>Correct &mdash; fix the switch configuration if it should not be a trunk</td></tr>
+                        <tr><td>Every port on the switch is uplink</td><td>Normal on a core or top-of-rack switch</td><td>Nothing to do &mdash; that switch has no access ports</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>Overrides take effect on the next poll and re-shape the endpoint list for everything behind that port. See
+            <a href="{% url 'core:kb_zenplus_udt_switch_ports' %}#overriding">overriding the verdict</a>.</p>
+        </section>
+
+        <section id="stale">
+            <h2><span class="num">04</span> A device shows the wrong or an old port <a class="kb-anchor" href="#stale">#</a></h2>
+
+            <p>Almost always timing rather than error. Three delays stack up:</p>
+
+            <div class="kb-deflist">
+                <div><dt>Switch MAC ageing</dt><dd>The switch keeps a learned MAC for its ageing time &mdash; commonly
+                    300 seconds &mdash; after the device stops sending. UDT cannot see a move the switch has not
+                    noticed.</dd></div>
+                <div><dt>Poll interval</dt><dd>UDT polls every 300 seconds by default. A move can be up to one interval
+                    old before it is read.</dd></div>
+                <div><dt>Session grace</dt><dd>A session is only closed after 15 minutes without a sighting, so the old
+                    port lingers briefly. This is deliberate &mdash; it stops one missed poll from tearing down every
+                    live session.</dd></div>
+            </div>
+
+            <p>Worst case is therefore roughly 15&ndash;20 minutes for a move to fully settle. If you need tighter
+            resolution, lower the poll interval on the
+            <a href="{% url 'core:kb_zenplus_udt_getting_started' %}#adding-devices">UDT Settings</a> tab &mdash;
+            globally or on the switches that matter. The cost is more SNMP load on those switches.</p>
+
+            <p>If a port is wrong by <em>hours</em>, that is not timing. Check that the switch is still polling
+            successfully at all.</p>
+        </section>
+
+        <section id="no-vendors">
+            <h2><span class="num">05</span> Vendors are all Unknown <a class="kb-anchor" href="#no-vendors">#</a></h2>
+
+            <p>If <em>every</em> endpoint has a blank vendor, the OUI table is empty. ZenPlus downloads the IEEE registry
+            automatically when it finds the table empty and retries every six hours, falling back to a secondary source
+            if the primary is unreachable.</p>
+
+            <p>On an air-gapped or restricted appliance that download never completes. Either permit outbound HTTPS from
+            the appliance, or ask Zentryc support for an offline OUI bundle. Once seeded, new endpoints resolve their
+            vendor as they are discovered and existing endpoints are backfilled.</p>
+
+            <p>If <em>most</em> vendors resolve and a few do not, that is normal: randomised privacy MACs have no real
+            OUI. See <a href="{% url 'core:kb_zenplus_udt_endpoints' %}#randomised-macs">randomised MAC addresses</a>.</p>
+        </section>
+
+        <section id="rogue-zero">
+            <h2><span class="num">06</span> The rogue count is stuck at zero <a class="kb-anchor" href="#rogue-zero">#</a></h2>
+
+            <p>This is configuration, not a fault. Rogue detection does nothing until an <strong>allow list</strong>
+            exists &mdash; with no allow rules, every endpoint is <em>unclassified</em>, which is neither authorised nor
+            rogue, and the tile reads zero.</p>
+
+            <p>Create allow rules on the Watch Lists tab. Read
+            <a href="{% url 'core:kb_zenplus_udt_watch_lists' %}#rolling-out">rolling it out safely</a> first &mdash;
+            enabling detection on a mature network in one step will produce a large first batch of findings.</p>
+        </section>
+
+        <section id="no-logins">
+            <h2><span class="num">07</span> No user logins appear <a class="kb-anchor" href="#no-logins">#</a></h2>
+
+            <p>Start on the Settings tab: the domain controller row carries the last poll, its status and the last error.
+            Use the poll action to run it immediately rather than waiting for the next interval &mdash; the error it
+            returns is the diagnosis.</p>
+
+            <p>The full matrix is in
+            <a href="{% url 'core:kb_zenplus_udt_user_logins' %}#troubleshooting">User logins</a>. The three that catch
+            people out:</p>
+
+            <ul>
+                <li><strong>Authentication succeeds but access to the log is denied</strong> &mdash; the account is in
+                    Remote Management Users but not Event Log Readers. Both are needed.</li>
+                <li><strong>Status OK, zero events</strong> &mdash; success auditing is not enabled for the Logon and
+                    Kerberos subcategories. Check with <code>auditpol /get</code>.</li>
+                <li><strong>Events recorded but nothing links to an endpoint</strong> &mdash; UDT has no IP data for the
+                    subnets those workstations live on. Add the router or firewall that serves them.</li>
+            </ul>
+
+            <p>Test WinRM reachability from the appliance shell. WinRM rejects a plain <code>GET</code>, so
+            <strong>405 is success</strong>:</p>
+
+<pre><code>curl -sk -o /dev/null -w '%{http_code}\n' http://dc01.corp.local:5985/wsman</code></pre>
+        </section>
+
+        <section id="too-many">
+            <h2><span class="num">08</span> Far more endpoints than you have devices <a class="kb-anchor" href="#too-many">#</a></h2>
+
+            <p>UDT counts every MAC address it has ever seen, which is legitimately larger than your device count. The
+            usual contributors, in order of size:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Source</th><th>Why</th><th>What to do</th></tr></thead>
+                    <tbody>
+                        <tr><td>Randomised MACs</td><td>Phones and laptops rotate a private address per network, creating a new endpoint each time</td><td>Filter with the <em>Random MAC</em> chip, or add an ignore rule</td></tr>
+                        <tr><td>Virtual machines</td><td>Every VM NIC is a real MAC on the wire</td><td>Expected &mdash; they classify as <em>virtual</em></td></tr>
+                        <tr><td>Guest and BYOD wireless</td><td>Every visitor device is tracked</td><td>Ignore the guest subnet if it is out of scope</td></tr>
+                        <tr><td>Lab and test networks</td><td>Constant churn</td><td>Ignore the subnet, or exclude the ports</td></tr>
+                        <tr><td>Historical devices</td><td>Endpoint identities are never pruned</td><td>Use the <em>Active</em> filter for what is on the network now</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>The number to trust for &ldquo;what is on my network right now&rdquo; is <strong>Active now</strong>, not
+            the total. The total is an historical inventory.</p>
+
+            <div class="callout tip">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+                    Still stuck?
+                </div>
+                <p>Collect the switch hostname, the output of the two <code>snmpwalk</code> commands in
+                <a href="#no-endpoints">section 1</a>, and the <em>Ports monitored</em> / <em>Endpoints</em> /
+                <em>Last poll</em> values from the UDT Settings tab, then
+                <a href="{% url 'core:contact' %}">contact Zentryc support</a>. Those four facts identify nearly every
+                collection problem without a further round trip.</p>
+            </div>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_udt_user_logins' %}">&larr; User logins</a></span>
+        <span><a href="{% url 'core:kb_zenplus_udt' %}">Back to UDT overview &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

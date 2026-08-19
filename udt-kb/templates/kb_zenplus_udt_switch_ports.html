@@ -1,0 +1,257 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/udt/udt-switch-ports-map.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/udt/udt-switch-ports-map.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "User Device Tracker", "item": "https://zentryc.com{% url 'core:kb_zenplus_udt' %}"},
+    {"@type": "ListItem", "position": 4, "name": "Switch ports and capacity", "item": "https://zentryc.com{% url 'core:kb_zenplus_udt_switch_ports' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Switch ports, uplinks and capacity",
+  "description": "How ZenPlus UDT maps switch ports to endpoints, how uplink and trunk ports are detected automatically, how to override that verdict, and how to plan switch port capacity from the daily trend.",
+  "datePublished": "2026-08-16",
+  "dateModified": "2026-08-16",
+  "inLanguage": "en",
+  "url": "https://zentryc.com{% url 'core:kb_zenplus_udt_switch_ports' %}",
+  "author": {"@type": "Organization", "name": "Zentryc"},
+  "publisher": {"@type": "Organization", "name": "Zentryc"},
+  "about": {"@type": "SoftwareApplication", "name": "ZenPlus User Device Tracker", "applicationCategory": "Network Monitoring"}
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_udt' %}">UDT</a>
+        <span class="sep">/</span>
+        <span class="current">Switch ports and capacity</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus UDT</p>
+        <h1>Switch ports, uplinks and capacity</h1>
+        <p class="lede">A live port map per switch: what is plugged into each port, which ports are uplinks, which are
+        free, and whether you are about to run out.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.14.3+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-08-16</span>
+            <span class="kb-pill"><strong>Audience</strong> Network operators</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~8 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#the-port-map">The port map</a></li>
+            <li><a href="#uplink-detection">How uplinks are detected</a></li>
+            <li><a href="#overriding">Overriding the verdict</a></li>
+            <li><a href="#excluding-ports">Excluding ports from UDT</a></li>
+            <li><a href="#port-actions">Shutting down a port</a></li>
+            <li><a href="#capacity">Capacity planning</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="the-port-map">
+            <h2><span class="num">01</span> The port map <a class="kb-anchor" href="#the-port-map">#</a></h2>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/udt/udt-switch-ports-map.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="ZenPlus UDT switch ports view with a switch list on the left showing used and free port counts, and a per-port table with status, speed, VLAN, endpoint count, access or uplink role and per-port UDT toggle">
+                <figcaption><strong>Switch Ports.</strong> The left rail ranks switches by utilisation; the table is the
+                selected switch, port by port. Colour on the capacity bar turns amber at 70% and red at 90%.</figcaption>
+            </figure>
+
+            <p>The rail on the left lists every switch UDT has port data for, each with a utilisation bar and three
+            counts: <strong>free</strong>, <strong>uplinks</strong> and <strong>active</strong> (ports that carried an
+            endpoint in the last 24 hours). Selecting one loads its ports.</p>
+
+            <div class="kb-deflist">
+                <div><dt>Port / Description</dt><dd>Interface name and the alias configured on the switch &mdash; the
+                    patch-panel label, if your team maintains descriptions.</dd></div>
+                <div><dt>Status</dt><dd><em>up</em>, <em>down</em>, or <em>admin down</em> for a port that is
+                    administratively shut.</dd></div>
+                <div><dt>Speed / VLAN</dt><dd>Negotiated speed and the VLAN the port's endpoints were learned in.</dd></div>
+                <div><dt>Endpoints</dt><dd>How many endpoints currently hold an active session on this port. Click the
+                    number to list them.</dd></div>
+                <div><dt>Role</dt><dd><em>access</em> or <em>uplink</em>, with the reason for the verdict.</dd></div>
+                <div><dt>UDT</dt><dd>Whether this port contributes endpoints at all &mdash; see
+                    <a href="#excluding-ports">excluding ports</a>.</dd></div>
+                <div><dt>Last device</dt><dd>When an endpoint was last seen here. This is the column that tells you a
+                    &ldquo;free&rdquo; port was in use last month.</dd></div>
+            </div>
+
+            <div class="callout tip">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+                    Finding a genuinely free port
+                </div>
+                <p>Sort by <em>Last device</em>. A port that is down <em>and</em> has never carried an endpoint is free.
+                A port that is down but had a device last week is probably a desk whose occupant is on leave &mdash;
+                reclaiming it will generate a ticket.</p>
+            </div>
+        </section>
+
+        <section id="uplink-detection">
+            <h2><span class="num">02</span> How uplinks are detected <a class="kb-anchor" href="#uplink-detection">#</a></h2>
+
+            <p>Separating access ports from uplinks is what makes UDT useful rather than noisy. Without it, every MAC in
+            the building appears on every trunk. UDT decides automatically on each poll, first match winning, and shows
+            you the reason:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Reason</th><th>Evidence</th><th>Reliability</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>lldp</code> / <code>cdp</code></td><td>The neighbour on this port is another monitored device, or advertises itself as a switch, router, firewall or a network OS</td><td>Highest &mdash; the port is talking to infrastructure</td></tr>
+                        <tr><td><code>trunk</code></td><td>Cisco VTP reports the port as trunking</td><td>High, Cisco only</td></tr>
+                        <tr><td><code>mac_count</code></td><td>Eight or more distinct MAC addresses learned on one port</td><td>Good, but see below</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>The MAC-count rule is the fallback and the one that occasionally misfires in both directions. A desk with
+            an IP phone, a laptop behind it and a docking station stays well under the threshold and is correctly access.
+            A port feeding an unmanaged desk switch, a virtualisation host with many VMs, or a wireless access point
+            serving a busy area will exceed it and be called an uplink &mdash; sometimes rightly, sometimes not.</p>
+
+            <div class="callout">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+                    Every port on a switch is an uplink
+                </div>
+                <p>On a core or top-of-rack switch whose every port faces other infrastructure, this is correct and
+                expected &mdash; the switch has no access ports, so it contributes topology rather than endpoints. On an
+                access switch it means the LLDP neighbour identity is being misread; check the neighbour data before
+                overriding ports one by one.</p>
+            </div>
+        </section>
+
+        <section id="overriding">
+            <h2><span class="num">03</span> Overriding the verdict <a class="kb-anchor" href="#overriding">#</a></h2>
+
+            <p>The arrow icon in the Actions column toggles a port between <strong>uplink</strong> and
+            <strong>access</strong>. An override is sticky: once set, the automatic classification never runs on that
+            port again, so a virtualisation host port you have marked as access stays access no matter how many VM MACs
+            appear on it.</p>
+
+            <p>Overrides change what UDT calls <em>direct</em>, so they take effect on the next poll and reshape the
+            endpoint list for every device behind that port. Two common cases:</p>
+
+            <ul>
+                <li><strong>Force to access</strong> &mdash; a hypervisor NIC, a port feeding a small unmanaged switch you
+                    do not monitor, or an access point whose clients you want attributed to that port.</li>
+                <li><strong>Force to uplink</strong> &mdash; a link to a switch you do not monitor, which has no LLDP
+                    neighbour to identify it and too few MACs to trip the count rule.</li>
+            </ul>
+        </section>
+
+        <section id="excluding-ports">
+            <h2><span class="num">04</span> Excluding ports from UDT <a class="kb-anchor" href="#excluding-ports">#</a></h2>
+
+            <p>The <strong>UDT</strong> toggle on each row controls whether that port produces endpoints. Turn it off and
+            the port keeps reporting its status, speed and MAC count &mdash; so it still counts toward capacity &mdash;
+            but it stops creating endpoints, sessions and events. Any active sessions on it are closed immediately
+            rather than waiting out the 15-minute grace period.</p>
+
+            <p>Select several ports with the checkboxes to apply <strong>Include in UDT</strong> or <strong>Exclude from
+            UDT</strong> in bulk.</p>
+
+            <p>Use it for ports whose endpoint churn is noise rather than signal: a lab segment, a guest VLAN uplink, a
+            span or monitor port, or a link to a third-party network you do not administer.</p>
+        </section>
+
+        <section id="port-actions">
+            <h2><span class="num">05</span> Shutting down a port <a class="kb-anchor" href="#port-actions">#</a></h2>
+
+            <p>The power icon shuts down or re-enables a port. It sends an SNMP SET to <code>ifAdminStatus</code> on the
+            switch, so it needs a <strong>write-capable</strong> SNMP credential &mdash; see
+            <a href="{% url 'core:kb_zenplus_udt_getting_started' %}#port-control">remote port control</a>. ZenPlus
+            confirms before sending, naming the switch and the port.</p>
+
+            <ul>
+                <li>Requires the <strong>operator</strong> role.</li>
+                <li>Success and failure are both written to the audit log with the operator's name and the SNMP error, if
+                    any.</li>
+                <li>A <em>port action</em> event appears in the UDT activity feed.</li>
+                <li>Without write access the action fails with an SNMP error &mdash; nothing on the switch changes.</li>
+            </ul>
+
+            <div class="callout warn">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+                    Check the role before you shut
+                </div>
+                <p>Shutting down a port marked <em>uplink</em> disconnects everything behind it. The role column is right
+                next to the action for exactly this reason.</p>
+            </div>
+        </section>
+
+        <section id="capacity">
+            <h2><span class="num">06</span> Capacity planning <a class="kb-anchor" href="#capacity">#</a></h2>
+
+            <p>UDT records a capacity snapshot per switch <strong>once a day</strong>, kept indefinitely, so port growth
+            is a trend rather than a guess. Each snapshot holds four numbers:</p>
+
+            <div class="kb-deflist">
+                <div><dt>Total ports</dt><dd>Physical Ethernet interfaces. Virtual interfaces, SVIs and aggregates are
+                    excluded so the count matches the sheet metal.</dd></div>
+                <div><dt>Used ports</dt><dd>Ports whose operational status is up. This is the number that drives
+                    utilisation.</dd></div>
+                <div><dt>Active ports</dt><dd>Ports that carried an endpoint in the last 24 hours &mdash; a stricter
+                    measure than &ldquo;up&rdquo;, since a port can be up with nothing behind it.</dd></div>
+                <div><dt>Uplink ports</dt><dd>Ports classified as uplinks, which are capacity you cannot sell to a
+                    desk.</dd></div>
+            </div>
+
+            <p>The gap between <em>used</em> and <em>active</em> is usually the interesting one. A switch at 80% used but
+            40% active has a lot of ports that are up with nothing on them &mdash; patched but unoccupied &mdash; and can
+            often be reclaimed without buying anything.</p>
+
+            <h3>Alerting on port exhaustion</h3>
+
+            <p>Create an alert rule with the metric <code>udt_port_capacity_pct</code> under <strong>Alerting &rarr;
+            Alert Rules</strong>. Unlike the other UDT metrics, this one is a genuine threshold with automatic recovery:
+            it raises when a switch crosses the percentage you set and resolves by itself when utilisation drops back.
+            Scope it to a device, a group, a device type or a location, or leave it global to cover the estate.</p>
+
+            <div class="callout tip">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+                    Pick a threshold you can act on
+                </div>
+                <p>90% of a 48-port switch is five free ports &mdash; enough warning to order hardware, not enough to
+                survive a floor move. If lead times are long, alert at 80%.</p>
+            </div>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_udt_endpoints' %}">&larr; Finding endpoints</a></span>
+        <span><a href="{% url 'core:kb_zenplus_udt_classification' %}">Classification &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}
