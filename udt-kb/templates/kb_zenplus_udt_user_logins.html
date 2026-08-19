@@ -1,0 +1,266 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/udt/udt-user-logins.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/udt/udt-user-logins.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "User Device Tracker", "item": "https://zentryc.com{% url 'core:kb_zenplus_udt' %}"},
+    {"@type": "ListItem", "position": 4, "name": "User logins", "item": "https://zentryc.com{% url 'core:kb_zenplus_udt_user_logins' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "User-to-device correlation with Active Directory",
+  "description": "How ZenPlus UDT reads domain controller Security logs over WinRM to map Active Directory users to MAC addresses and switch ports, with no agent installed on Windows.",
+  "datePublished": "2026-08-16",
+  "dateModified": "2026-08-16",
+  "inLanguage": "en",
+  "url": "https://zentryc.com{% url 'core:kb_zenplus_udt_user_logins' %}",
+  "author": {"@type": "Organization", "name": "Zentryc"},
+  "publisher": {"@type": "Organization", "name": "Zentryc"},
+  "about": {"@type": "SoftwareApplication", "name": "ZenPlus User Device Tracker", "applicationCategory": "Network Monitoring"}
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_udt' %}">UDT</a>
+        <span class="sep">/</span>
+        <span class="current">User logins</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus UDT</p>
+        <h1>User-to-device correlation with Active Directory</h1>
+        <p class="lede">Turning a MAC address into a person. Agentless, read-only, and driven entirely by logon events
+        the domain controllers are already writing.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.14.3+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-08-16</span>
+            <span class="kb-pill"><strong>Audience</strong> Windows + network admins</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~8 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#how-it-works">How it works</a></li>
+            <li><a href="#permissions">What Windows needs to allow</a></li>
+            <li><a href="#correlation">How a logon becomes an endpoint</a></li>
+            <li><a href="#reading-it">Reading the User Logins tab</a></li>
+            <li><a href="#limits">What it can and cannot tell you</a></li>
+            <li><a href="#troubleshooting">When no logins appear</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="how-it-works">
+            <h2><span class="num">01</span> How it works <a class="kb-anchor" href="#how-it-works">#</a></h2>
+
+            <p>Nothing is installed on any Windows machine. On a schedule &mdash; 300 seconds by default &mdash; ZenPlus
+            opens a WinRM session to each configured domain controller, runs a single read-only PowerShell query against
+            the Security event log, and closes the session.</p>
+
+<pre><code>ZenPlus appliance
+      │  WinRM (TCP 5985 / 5986), NTLM by default
+      ▼
+domain controller — Security event log
+      │  Get-WinEvent, events 4624 / 4768 / 4769, newest 500
+      ▼
+  user + workstation IP + workstation name
+      │  match on active IP binding, then hostname
+      ▼
+  UDT endpoint  ──▶  "Last user" on the endpoint, and the User Logins tab
+</code></pre>
+
+            <p>Each poll asks only for events newer than the last one already recorded, so a controller is never re-read
+            from the beginning. The very first poll looks back 30 minutes to seed the timeline.</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Event ID</th><th>What it records</th><th>Why UDT reads it</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>4624</code></td><td>An account was successfully logged on</td><td>Covers NTLM and any environment where Kerberos is not the whole story</td></tr>
+                        <tr><td><code>4768</code></td><td>A Kerberos TGT was requested</td><td>The workstation's IP at domain sign-in</td></tr>
+                        <tr><td><code>4769</code></td><td>A Kerberos service ticket was requested</td><td>Keeps the user-to-IP association fresh through the working day</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="callout tip">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+                    Broader than the SolarWinds equivalent
+                </div>
+                <p>SolarWinds UDT reads only the Kerberos events, 4768 and 4769. ZenPlus also consumes 4624, so NTLM-only
+                and mixed environments still attribute users to endpoints instead of showing an empty tab.</p>
+            </div>
+        </section>
+
+        <section id="permissions">
+            <h2><span class="num">02</span> What Windows needs to allow <a class="kb-anchor" href="#permissions">#</a></h2>
+
+            <p>One ordinary domain account, with no administrative rights, needs exactly two grants on each domain
+            controller. Full commands, audit-policy checks and connectivity tests are in
+            <a href="{% url 'core:kb_zenplus_udt_getting_started' %}#windows-permissions">Setup and permissions</a>;
+            in short:</p>
+
+            <ul class="req-list">
+                <li><span class="tick"><svg viewBox="0 0 24 24" class="icon-stroke"><path d="M20 6L9 17l-5-5"/></svg></span>
+                    <span><strong>Event Log Readers</strong>
+                    A built-in domain-local group that grants read access to the Security log. Add the service account
+                    with <code>Add-ADGroupMember</code>.</span></li>
+                <li><span class="tick"><svg viewBox="0 0 24 24" class="icon-stroke"><path d="M20 6L9 17l-5-5"/></svg></span>
+                    <span><strong>Remote Management Users</strong>
+                    Allows a WinRM session without making the account an administrator.</span></li>
+                <li><span class="tick"><svg viewBox="0 0 24 24" class="icon-stroke"><path d="M20 6L9 17l-5-5"/></svg></span>
+                    <span><strong>WinRM listening, and reachable</strong>
+                    TCP 5985 (HTTP, message-level encrypted) or 5986 (HTTPS) from the appliance.</span></li>
+                <li><span class="tick"><svg viewBox="0 0 24 24" class="icon-stroke"><path d="M20 6L9 17l-5-5"/></svg></span>
+                    <span><strong>Success auditing enabled</strong>
+                    For Logon, Kerberos Authentication Service and Kerberos Service Ticket Operations. Kerberos auditing
+                    is on by default on domain controllers; Logon sometimes is not.</span></li>
+            </ul>
+
+            <div class="callout security">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+                    What the account can and cannot do
+                </div>
+                <p>The account can read the Security event log and open a PowerShell session. It cannot change
+                configuration, read other logs, or access file shares by virtue of these grants. The credential is stored
+                encrypted on the appliance and is only ever used against the domain controllers you configure.</p>
+            </div>
+        </section>
+
+        <section id="correlation">
+            <h2><span class="num">03</span> How a logon becomes an endpoint <a class="kb-anchor" href="#correlation">#</a></h2>
+
+            <p>A logon event carries a username, a workstation IP address and sometimes a workstation name. UDT matches
+            it to an endpoint in two passes:</p>
+
+            <div class="step-list">
+                <div class="step"><div><h4>By IP address</h4>
+                    <p>The event's client IP is matched against endpoints' current IPs and their <em>active</em>
+                    historical bindings. This is the reliable path, because it uses the same ARP data that produced the
+                    endpoint in the first place.</p></div></div>
+                <div class="step"><div><h4>By workstation name</h4>
+                    <p>If no IP matched &mdash; the event had none, or the address is not one UDT knows &mdash; the
+                    workstation name is matched against endpoint hostnames, case-insensitively.</p></div></div>
+                <div class="step"><div><h4>Recorded either way</h4>
+                    <p>A logon that matches no endpoint is still stored and still appears under User Logins. It just has
+                    no device to link to, which is itself a useful signal: the machine is on a segment UDT cannot
+                    see.</p></div></div>
+            </div>
+
+            <p>When a match is found, the endpoint's <strong>Last user</strong> is updated &mdash; but only if the event
+            is newer than the one already recorded, so a batch of out-of-order events cannot make an old logon look
+            current. A <em>user login</em> entry is added to the endpoint's activity.</p>
+
+            <p>Machine accounts (names ending in <code>$</code>) and the <code>ANONYMOUS LOGON</code>,
+            <code>SYSTEM</code>, <code>LOCAL SERVICE</code> and <code>NETWORK SERVICE</code> principals are filtered out
+            on the domain controller itself, before anything is sent back &mdash; so the feed is real users only and the
+            volume stays manageable.</p>
+        </section>
+
+        <section id="reading-it">
+            <h2><span class="num">04</span> Reading the User Logins tab <a class="kb-anchor" href="#reading-it">#</a></h2>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/udt/udt-user-logins.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="ZenPlus UDT User Logins tab with a user search box and a detail pane, showing the empty state before a domain controller is configured">
+                <figcaption><strong>User Logins.</strong> Until a domain controller is added the tab is empty and links
+                straight to the setting that fills it.</figcaption>
+            </figure>
+
+            <p>The left pane rolls up every user seen, with their domain, total logon count, how many distinct endpoints
+            they have used and when they last signed in. Selecting a user shows their recent logons &mdash; event type,
+            logon type, IP, workstation and time &mdash; and the endpoints associated with them.</p>
+
+            <p>The same data appears from the other direction on any endpoint's detail page, under <em>User logins</em>,
+            which is usually where you meet it: you started from a port or an IP, and you want the person.</p>
+
+            <p>Once correlation is running, the <code>user</code> match type becomes available in
+            <a href="{% url 'core:kb_zenplus_udt_watch_lists' %}">watch, allow and ignore rules</a> and in
+            <a href="{% url 'core:kb_zenplus_udt_classification' %}">classification rules</a> &mdash; so you can, for
+            example, watch every endpoint a set of service accounts signs into.</p>
+        </section>
+
+        <section id="limits">
+            <h2><span class="num">05</span> What it can and cannot tell you <a class="kb-anchor" href="#limits">#</a></h2>
+
+            <p>This is authentication data, not session data, and the distinction matters when someone asks it to answer
+            a security question.</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>It can tell you</th><th>It cannot tell you</th></tr></thead>
+                    <tbody>
+                        <tr><td>Which account most recently authenticated from this device's IP</td><td>Who is physically sitting at the device now</td></tr>
+                        <tr><td>Which devices an account has signed in from</td><td>Whether the user is still logged on &mdash; logoffs are not tracked</td></tr>
+                        <tr><td>When a logon happened, to the second</td><td>Anything about local (non-domain) accounts</td></tr>
+                        <tr><td>That a machine authenticated from an unexpected subnet</td><td>Activity on devices that never authenticate to the domain</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>Shared workstations attribute to whoever most recently authenticated. Terminal servers and VDI hosts, where
+            many users authenticate from one IP, will show a rapidly changing last user on a single endpoint &mdash;
+            correct, but rarely useful. Consider ignoring those endpoints or reading them only through the per-user view.</p>
+        </section>
+
+        <section id="troubleshooting">
+            <h2><span class="num">06</span> When no logins appear <a class="kb-anchor" href="#troubleshooting">#</a></h2>
+
+            <p>The controller row on the Settings tab shows the last poll, its status and the last error. Work down this
+            list:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Status / error</th><th>Cause</th><th>Fix</th></tr></thead>
+                    <tbody>
+                        <tr><td>No status at all</td><td>Never polled</td><td>Use the poll action on the row to run it now and surface the real error</td></tr>
+                        <tr><td>Connection timed out</td><td>WinRM unreachable</td><td>Check TCP 5985/5986 and that the WinRM service is running</td></tr>
+                        <tr><td>Authentication failure</td><td>Wrong credential, or the account is not in Remote Management Users</td><td>Verify the domain prefix on the credential and the group membership</td></tr>
+                        <tr><td>Access denied on the log</td><td>Not in Event Log Readers</td><td><code>Add-ADGroupMember -Identity 'Event Log Readers'</code></td></tr>
+                        <tr><td>Status OK, zero events</td><td>Auditing disabled, or genuinely no logons in the window</td><td>Check <code>auditpol</code> for the three subcategories</td></tr>
+                        <tr><td>Events recorded, no endpoints linked</td><td>Correlation found nothing to match</td><td>Add the router or firewall for those subnets so UDT learns the IPs</td></tr>
+                        <tr><td>pywinrm not installed</td><td>Non-standard appliance build</td><td>Contact Zentryc support &mdash; it ships by default</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>The last row but one is the most common non-obvious case. Correlation is only as good as UDT's IP
+            knowledge: if no layer-3 device reports ARP for the subnet a workstation lives on, its logons arrive with an
+            IP that matches no endpoint. Adding that router or firewall to ZenPlus fixes the whole subnet at once &mdash;
+            see <a href="{% url 'core:kb_zenplus_udt_getting_started' %}#firewalls">firewalls and routers</a>.</p>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_udt_watch_lists' %}">&larr; Watch lists and rogue detection</a></span>
+        <span><a href="{% url 'core:kb_zenplus_udt_troubleshooting' %}">Troubleshooting &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

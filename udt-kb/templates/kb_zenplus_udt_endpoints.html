@@ -1,0 +1,315 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/udt/udt-endpoint-detail-history.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/udt/udt-endpoint-detail-history.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "User Device Tracker", "item": "https://zentryc.com{% url 'core:kb_zenplus_udt' %}"},
+    {"@type": "ListItem", "position": 4, "name": "Finding endpoints", "item": "https://zentryc.com{% url 'core:kb_zenplus_udt_endpoints' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Finding endpoints: search, detail and history",
+  "description": "How to find which switch port a MAC address or IP is plugged into with ZenPlus UDT, how to read an endpoint's connection and IP history, and what randomised MAC addresses mean for tracking.",
+  "datePublished": "2026-08-16",
+  "dateModified": "2026-08-16",
+  "inLanguage": "en",
+  "url": "https://zentryc.com{% url 'core:kb_zenplus_udt_endpoints' %}",
+  "author": {"@type": "Organization", "name": "Zentryc"},
+  "publisher": {"@type": "Organization", "name": "Zentryc"},
+  "about": {"@type": "SoftwareApplication", "name": "ZenPlus User Device Tracker", "applicationCategory": "Network Monitoring"}
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_udt' %}">UDT</a>
+        <span class="sep">/</span>
+        <span class="current">Finding endpoints</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus UDT</p>
+        <h1>Finding endpoints: search, detail and history</h1>
+        <p class="lede">The everyday task &mdash; someone gives you a MAC, an IP or a hostname and you need the switch,
+        the port and the VLAN. Plus how to read the history when the answer is &ldquo;where <em>was</em> it&rdquo;.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.14.3+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-08-16</span>
+            <span class="kb-pill"><strong>Audience</strong> Network operators + service desk</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~9 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#searching">Searching</a></li>
+            <li><a href="#filters">Filters and counters</a></li>
+            <li><a href="#the-columns">Reading the columns</a></li>
+            <li><a href="#endpoint-detail">Endpoint detail</a></li>
+            <li><a href="#connection-history">Connection history</a></li>
+            <li><a href="#randomised-macs">Randomised MAC addresses</a></li>
+            <li><a href="#activity">The activity feed</a></li>
+            <li><a href="#worked-example">A worked example</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="searching">
+            <h2><span class="num">01</span> Searching <a class="kb-anchor" href="#searching">#</a></h2>
+
+            <p>One search box, on <strong>Monitoring &rarr; User Devices &rarr; Endpoints</strong>, accepts whatever
+            identifier you happen to have.</p>
+
+            <div class="kb-deflist">
+                <div><dt>MAC address</dt><dd>Any format. <code>aa:bb:cc:dd:ee:ff</code>, <code>aa-bb-cc-dd-ee-ff</code>,
+                    <code>aabb.ccdd.eeff</code> and <code>aabbccddeeff</code> are all normalised to the same address, so
+                    you can paste straight from a Cisco CLI, a Windows <code>ipconfig</code> or a DHCP lease.</dd></div>
+                <div><dt>IP address</dt><dd>Matches the current IP <em>and</em> historical bindings. An IP that has since
+                    been reassigned still finds the device that used to hold it.</dd></div>
+                <div><dt>Hostname</dt><dd>Partial match. Hostnames come from reverse DNS or from a correlated Active
+                    Directory logon, so they are only present where one of those resolved.</dd></div>
+                <div><dt>Vendor</dt><dd>Partial match on the NIC manufacturer derived from the MAC prefix &mdash;
+                    <code>canon</code>, <code>hikvision</code>, <code>vmware</code>.</dd></div>
+                <div><dt>Username</dt><dd>Partial match, once <a href="{% url 'core:kb_zenplus_udt_user_logins' %}">Active
+                    Directory correlation</a> is configured.</dd></div>
+            </div>
+
+            <div class="callout tip">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+                    Searching a partial MAC
+                </div>
+                <p>A fragment that is not a complete MAC falls back to a text match, so typing an OUI like
+                <code>00:50:56</code> returns every VMware endpoint. A complete MAC is matched exactly, which is much
+                faster on a large estate.</p>
+            </div>
+        </section>
+
+        <section id="filters">
+            <h2><span class="num">02</span> Filters and counters <a class="kb-anchor" href="#filters">#</a></h2>
+
+            <p>The six tiles across the top are both a summary and a filter &mdash; click one to scope the list to it.</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Tile</th><th>Counts</th></tr></thead>
+                    <tbody>
+                        <tr><td><strong>Endpoints</strong></td><td>Every endpoint ever seen, excluding ignored ones</td></tr>
+                        <tr><td><strong>Active now</strong></td><td>Seen in the last 15 minutes</td></tr>
+                        <tr><td><strong>Rogue</strong></td><td>Matched no <a href="{% url 'core:kb_zenplus_udt_watch_lists' %}">allow rule</a>. Stays at zero until an allow list exists</td></tr>
+                        <tr><td><strong>Watched</strong></td><td>On the watch list, by rule or pinned by an operator</td></tr>
+                        <tr><td><strong>New (24h)</strong></td><td>First seen anywhere on the network in the last 24 hours</td></tr>
+                        <tr><td><strong>Logins (24h)</strong></td><td>Active Directory logon events correlated in the last 24 hours</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>Alongside them: quick filters for <strong>Active</strong>, <strong>Rogue</strong>,
+            <strong>Watched</strong>, <strong>New</strong> and <strong>Random MAC</strong>, and a row of
+            <strong>type chips</strong> with live counts. The type chips are generated from whatever types and custom
+            groups actually exist, so any group you create in
+            <a href="{% url 'core:kb_zenplus_udt_classification' %}">Classification</a> appears here as a filter
+            automatically.</p>
+
+            <p>Every column header re-sorts &mdash; last seen, first seen, MAC, IP, hostname, vendor or type &mdash; and
+            the list pages 50 at a time.</p>
+        </section>
+
+        <section id="the-columns">
+            <h2><span class="num">03</span> Reading the columns <a class="kb-anchor" href="#the-columns">#</a></h2>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/udt/udt-endpoints-list.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="UDT endpoints table with columns for endpoint type, MAC address, IP address, NIC vendor, connected switch and port, VLAN, user and last seen">
+                <figcaption><strong>The endpoints table.</strong> The green dot marks an endpoint seen in the last 15
+                minutes. <em>Connected to</em> shows the switch and port, with an <em>indirect</em> badge when the only
+                sighting is on an uplink.</figcaption>
+            </figure>
+
+            <div class="kb-deflist">
+                <div><dt>Endpoint</dt><dd>The device type icon and label, or the hostname when one is known. The dot to
+                    its left is the live indicator.</dd></div>
+                <div><dt>MAC</dt><dd>The endpoint's identity. This is the primary key &mdash; everything else about an
+                    endpoint can change, including its IP and its port.</dd></div>
+                <div><dt>IP address</dt><dd>The most recent binding learned from an ARP or neighbour table. A dash means
+                    no layer-3 device has reported this MAC.</dd></div>
+                <div><dt>Vendor</dt><dd>Derived from the MAC's OUI prefix against the IEEE registry.</dd></div>
+                <div><dt>Connected to</dt><dd>Switch and port. An <em>indirect</em> badge means the device has only been
+                    seen on an uplink &mdash; the port shown is a transit path, not where it is plugged in. A dash means
+                    no switch has reported it at all.</dd></div>
+                <div><dt>VLAN</dt><dd>The VLAN the MAC was learned in, where the switch reports a VLAN-aware table.</dd></div>
+                <div><dt>User</dt><dd>The last correlated Active Directory user.</dd></div>
+                <div><dt>Last seen</dt><dd>Time since the endpoint last appeared in any table.</dd></div>
+            </div>
+
+            <p>The chip at the end of each row carries the authorisation state: <em>Unclassified</em> until an allow list
+            exists, then <em>Authorised</em> or <em>Rogue</em>. <em>Random MAC</em> appears instead for privacy
+            addresses.</p>
+        </section>
+
+        <section id="endpoint-detail">
+            <h2><span class="num">04</span> Endpoint detail <a class="kb-anchor" href="#endpoint-detail">#</a></h2>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/udt/udt-endpoint-detail-history.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="ZenPlus UDT endpoint detail page showing current location, VLAN, connection history sessions per switch port, IP address history and correlated user logins">
+                <figcaption><strong>Endpoint detail.</strong> Current location and how long it has held it, the full
+                session history per port, every IP the device has used, and its activity.</figcaption>
+            </figure>
+
+            <p>Clicking any endpoint opens its full record. The summary strip answers the immediate question &mdash;
+            <em>Current location</em>, <em>VLAN</em>, <em>Last user</em>, <em>Connected for</em>, <em>First seen</em> and
+            <em>Last seen</em> &mdash; and the panels below give the history.</p>
+
+            <p>Three actions sit in the header, all requiring the <strong>operator</strong> role:</p>
+
+            <div class="kb-deflist">
+                <div><dt>Watch</dt><dd>Pins this endpoint to the watch list. Every time it reappears on the network an
+                    event is raised, which an alert rule can act on.</dd></div>
+                <div><dt>Flag rogue</dt><dd>Marks it unauthorised, and <em>pins</em> that decision &mdash; the rule
+                    engine will not overwrite a manual verdict on later sweeps.</dd></div>
+                <div><dt>Ignore</dt><dd>Hides it from every UDT view and excludes it from flagging. Use it for the
+                    appliance's own interfaces, test gear and anything else that is noise.</dd></div>
+            </div>
+
+            <p>The <strong>Type</strong> dropdown re-classifies the endpoint by hand. A manual type outranks both
+            classification rules and the automatic heuristics; setting it back to <em>Auto</em> returns the endpoint to
+            rule-and-heuristic control immediately.</p>
+        </section>
+
+        <section id="connection-history">
+            <h2><span class="num">05</span> Connection history <a class="kb-anchor" href="#connection-history">#</a></h2>
+
+            <p>Each entry is a <strong>session</strong>: a continuous period during which the endpoint was seen on one
+            port, with a start, an end and a duration. The newest sits at the top; an open session shows
+            <em>&rarr; now</em> and a <em>connected</em> badge.</p>
+
+            <p>By default only <strong>direct</strong> sessions are listed &mdash; the access ports where the device was
+            genuinely plugged in. Uplink sightings are collapsed behind <em>Show N uplink sightings</em>, because a
+            single device commonly appears on dozens of trunk ports and listing them inline would bury the answer. See
+            <a href="{% url 'core:kb_zenplus_udt' %}#direct-versus-indirect">direct versus indirect</a>.</p>
+
+            <div class="callout">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+                    Why one device has many short sessions on the same port
+                </div>
+                <p>A session closes when the endpoint has been unseen for 15 minutes and opens again when it comes back.
+                A laptop that sleeps, a phone that goes idle, or a device whose MAC ages out of the forwarding table
+                between polls will therefore show a run of sessions on the same port rather than one long one. The
+                pattern is normal; the port is what matters.</p>
+            </div>
+
+            <p><strong>IP address history</strong> alongside it lists every address the endpoint has held, with the
+            source (<code>ARP</code> for IPv4, <code>ND</code> for IPv6 neighbour discovery) and whether the binding is
+            still current. A binding goes <em>past</em> after 24 hours without being seen. This is the panel that
+            answers &ldquo;which device had 10.20.4.31 last Tuesday&rdquo;.</p>
+        </section>
+
+        <section id="randomised-macs">
+            <h2><span class="num">06</span> Randomised MAC addresses <a class="kb-anchor" href="#randomised-macs">#</a></h2>
+
+            <p>Modern phones and laptops rotate a private MAC per network by default. UDT detects these by the
+            <strong>locally administered bit</strong> in the first octet and tags them <em>Random MAC</em>.</p>
+
+            <p>Two consequences worth knowing:</p>
+
+            <ul>
+                <li><strong>No vendor.</strong> A randomised address has no real OUI, so the vendor column is empty and
+                    vendor-based classification cannot work on it.</li>
+                <li><strong>No continuity.</strong> The same physical device becomes a new endpoint each time it rotates,
+                    inflating the &ldquo;new endpoint&rdquo; count and making per-device history shorter than reality.</li>
+            </ul>
+
+            <p>If randomised addresses are noise for you, filter them out with the <em>Random MAC</em> chip, or add an
+            <a href="{% url 'core:kb_zenplus_udt_watch_lists' %}">ignore rule</a>. If they matter for compliance, the
+            durable fix is on the network side &mdash; require registered MACs, or disable private addressing through
+            device management policy.</p>
+        </section>
+
+        <section id="activity">
+            <h2><span class="num">07</span> The activity feed <a class="kb-anchor" href="#activity">#</a></h2>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/udt/udt-activity-feed.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="UDT activity feed listing new endpoint events with the VLAN, switch and port where each was first seen">
+                <figcaption><strong>Activity.</strong> Filter by event type across 24 hours, 7 days or 30 days. Every
+                row links back to the endpoint it concerns.</figcaption>
+            </figure>
+
+            <p>The <strong>Activity</strong> tab is the chronological view of everything UDT noticed:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Event</th><th>Raised when</th><th>Alert metric</th></tr></thead>
+                    <tbody>
+                        <tr><td>New endpoint</td><td>A MAC is seen for the first time anywhere</td><td><code>udt_new_endpoint</code></td></tr>
+                        <tr><td>Endpoint moved</td><td>An endpoint's direct port changes</td><td><code>udt_endpoint_moved</code></td></tr>
+                        <tr><td>Rogue detected</td><td>An endpoint stops matching every allow rule</td><td><code>udt_rogue_endpoint</code></td></tr>
+                        <tr><td>Watch seen</td><td>A watched endpoint appears (de-duplicated hourly)</td><td><code>udt_watch_endpoint</code></td></tr>
+                        <tr><td>User login</td><td>An AD logon is correlated to an endpoint</td><td>&mdash;</td></tr>
+                        <tr><td>Port action</td><td>An operator shut down or enabled a port</td><td>&mdash;</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>Each metric can back an alert rule under <strong>Alerting &rarr; Alert Rules</strong>, scoped globally or
+            to a device, group, device type or location, and routed to any notification channel. A sixth metric,
+            <code>udt_port_capacity_pct</code>, is threshold-based rather than event-driven &mdash; see
+            <a href="{% url 'core:kb_zenplus_udt_switch_ports' %}#capacity">port capacity</a>.</p>
+        </section>
+
+        <section id="worked-example">
+            <h2><span class="num">08</span> A worked example <a class="kb-anchor" href="#worked-example">#</a></h2>
+
+            <p>The service desk reports that a workstation at <code>172.20.30.40</code> keeps dropping off the network,
+            and the user says &ldquo;it was fine last week&rdquo;.</p>
+
+            <div class="step-list">
+                <div class="step"><div><h4>Search the IP</h4>
+                    <p>One result. The endpoint is a workstation, NIC vendor Wistron, currently on
+                    <code>ACC-SW-07</code> port <code>4/1/20</code>, VLAN 230, connected for 1 day 6 hours.</p></div></div>
+                <div class="step"><div><h4>Check whether it really is dropping</h4>
+                    <p>Connection history shows one long current session preceded by a run of 15-minute to 3-hour
+                    sessions on the <em>same</em> port. The port is stable; the device is going quiet &mdash; sleep or
+                    power management, not a cabling fault.</p></div></div>
+                <div class="step"><div><h4>Check whether the IP changed</h4>
+                    <p>IP history shows <code>172.20.30.40</code> active now and <code>172.20.98.234</code> as past,
+                    last seen six days ago. So it did move subnets last week, which explains &ldquo;it was fine
+                    then&rdquo; if anything was pinned to the old address.</p></div></div>
+                <div class="step"><div><h4>Confirm who uses it</h4>
+                    <p>With Active Directory connected, the user logins panel names the account, and you have a person
+                    to call rather than a MAC address.</p></div></div>
+            </div>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_udt_getting_started' %}">&larr; Setup and permissions</a></span>
+        <span><a href="{% url 'core:kb_zenplus_udt_switch_ports' %}">Switch ports and capacity &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

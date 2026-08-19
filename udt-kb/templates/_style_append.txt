@@ -1,0 +1,34 @@
+
+/* ----- UDT additions: screenshots, OID reference rows, compact key/value ----- */
+.kb-shot { margin: 0 0 26px; }
+.kb-shot img {
+    width: 100%; height: auto; display: block;
+    border: 1px solid var(--line-2);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+    background: #0b1020;
+}
+.kb-shot figcaption {
+    margin-top: 10px; font-size: 0.85rem; color: var(--slate-500); line-height: 1.55;
+}
+.kb-shot figcaption strong { color: var(--slate-600); font-weight: 700; }
+
+/* Monospace-first table for OID / MIB reference blocks. */
+.kb-table.mono td:first-child { white-space: nowrap; }
+.kb-table.mono td:first-child code { font-size: 0.8rem; }
+
+/* Requirement checklist used by the setup article. */
+.req-list { list-style: none; padding: 0; margin: 0 0 22px; display: flex; flex-direction: column; gap: 8px; }
+.req-list li {
+    display: grid; grid-template-columns: 22px 1fr; gap: 12px; align-items: start;
+    padding: 12px 15px; background: #fff; border: 1px solid var(--line); border-radius: var(--radius);
+    margin: 0; color: var(--slate-600); font-size: 0.93rem;
+}
+.req-list li::marker { content: none; }
+.req-list li .tick {
+    width: 20px; height: 20px; border-radius: 50%; background: var(--brand-tint);
+    border: 1px solid var(--brand-tint-2); display: flex; align-items: center; justify-content: center;
+    margin-top: 1px;
+}
+.req-list li .tick svg { width: 12px; height: 12px; color: var(--brand-800); }
+.req-list li strong { display: block; margin-bottom: 2px; }

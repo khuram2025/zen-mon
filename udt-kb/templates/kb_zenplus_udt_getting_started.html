@@ -1,0 +1,500 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/udt/udt-settings-layer2-polling.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/udt/udt-settings-layer2-polling.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "User Device Tracker", "item": "https://zentryc.com{% url 'core:kb_zenplus_udt' %}"},
+    {"@type": "ListItem", "position": 4, "name": "Setup and permissions", "item": "https://zentryc.com{% url 'core:kb_zenplus_udt_getting_started' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "HowTo",
+  "name": "Set up ZenPlus User Device Tracker",
+  "description": "Configure SNMP permissions on switches and Active Directory permissions on domain controllers so ZenPlus UDT can map MAC addresses to switch ports and users.",
+  "totalTime": "PT30M",
+  "step": [
+    {"@type": "HowToStep", "name": "Grant SNMP read access to the bridge tables", "url": "https://zentryc.com{% url 'core:kb_zenplus_udt_getting_started' %}#snmp-permissions"},
+    {"@type": "HowToStep", "name": "Configure Cisco per-VLAN access", "url": "https://zentryc.com{% url 'core:kb_zenplus_udt_getting_started' %}#cisco"},
+    {"@type": "HowToStep", "name": "Add the credential and the devices in ZenPlus", "url": "https://zentryc.com{% url 'core:kb_zenplus_udt_getting_started' %}#adding-devices"},
+    {"@type": "HowToStep", "name": "Verify endpoints are landing", "url": "https://zentryc.com{% url 'core:kb_zenplus_udt_getting_started' %}#verify"},
+    {"@type": "HowToStep", "name": "Grant Windows permissions for user correlation", "url": "https://zentryc.com{% url 'core:kb_zenplus_udt_getting_started' %}#windows-permissions"}
+  ]
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_udt' %}">UDT</a>
+        <span class="sep">/</span>
+        <span class="current">Setup and permissions</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus UDT</p>
+        <h1>Setup and permissions: switches, firewalls and Active Directory</h1>
+        <p class="lede">Exactly which SNMP objects UDT reads, the one Cisco command that read-only configurations almost
+        always miss, and the Windows rights a domain controller needs for agentless user correlation.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.14.3+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-08-16</span>
+            <span class="kb-pill"><strong>Audience</strong> Network + Windows admins</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~14 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#what-you-need">What you need</a></li>
+            <li><a href="#snmp-permissions">SNMP objects UDT reads</a></li>
+            <li><a href="#cisco">Cisco: the per-VLAN requirement</a></li>
+            <li><a href="#other-vendors">Other switch vendors</a></li>
+            <li><a href="#firewalls">Firewalls and routers</a></li>
+            <li><a href="#adding-devices">Adding devices to UDT</a></li>
+            <li><a href="#verify">Verifying collection</a></li>
+            <li><a href="#windows-permissions">Windows and Active Directory</a></li>
+            <li><a href="#adding-a-dc">Adding a domain controller</a></li>
+            <li><a href="#port-control">Optional: remote port control</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="what-you-need">
+            <h2><span class="num">01</span> What you need <a class="kb-anchor" href="#what-you-need">#</a></h2>
+
+            <p>UDT is agentless in both directions. Nothing is installed on switches, and nothing is installed on Windows
+            hosts or domain controllers. Everything is read over SNMP and WinRM.</p>
+
+            <ul class="req-list">
+                <li><span class="tick"><svg viewBox="0 0 24 24" class="icon-stroke"><path d="M20 6L9 17l-5-5"/></svg></span>
+                    <span><strong>SNMP read access to your switches</strong>
+                    v2c community or v3 user, able to read the bridge forwarding tables. Read-only is enough for
+                    everything except remote port shutdown.</span></li>
+                <li><span class="tick"><svg viewBox="0 0 24 24" class="icon-stroke"><path d="M20 6L9 17l-5-5"/></svg></span>
+                    <span><strong>SNMP read access to a router or firewall</strong>
+                    This is what supplies IP addresses. Without it you get switch ports with no IPs.</span></li>
+                <li><span class="tick"><svg viewBox="0 0 24 24" class="icon-stroke"><path d="M20 6L9 17l-5-5"/></svg></span>
+                    <span><strong>UDP 161 from the appliance to each device</strong>
+                    Plus the device's SNMP ACL permitting the appliance's IP.</span></li>
+                <li><span class="tick"><svg viewBox="0 0 24 24" class="icon-stroke"><path d="M20 6L9 17l-5-5"/></svg></span>
+                    <span><strong>Optional &mdash; a domain service account</strong>
+                    For user correlation: read access to the Security event log and WinRM access on each domain
+                    controller. TCP 5985 or 5986 from the appliance.</span></li>
+            </ul>
+
+            <div class="callout security">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+                    Least privilege
+                </div>
+                <p>Everything UDT does by itself is <strong>read-only</strong>. Write access is needed only if you want
+                to shut down or re-enable a switch port from the ZenPlus UI, which is an explicitly separate, audited
+                action &mdash; see <a href="#port-control">remote port control</a>. Give the monitoring account a
+                read-only community or a v3 user with a read view and no write view.</p>
+            </div>
+        </section>
+
+        <section id="snmp-permissions">
+            <h2><span class="num">02</span> The SNMP objects UDT reads <a class="kb-anchor" href="#snmp-permissions">#</a></h2>
+
+            <p>If your SNMP view is restricted rather than &ldquo;everything under <code>iso</code>&rdquo;, these are the
+            subtrees that must be included. UDT degrades gracefully: a switch that exposes only some of them still
+            produces partial data.</p>
+
+            <div class="kb-table-wrap scroll">
+                <table class="kb-table mono">
+                    <thead><tr><th>OID</th><th>Object</th><th>What UDT gets from it</th><th>Needed</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>1.3.6.1.2.1.17.1.4.1.2</code></td><td>BRIDGE-MIB <code>dot1dBasePortIfIndex</code></td><td>Maps bridge port numbers to interface indexes &mdash; without it, ports cannot be named</td><td>Required</td></tr>
+                        <tr><td><code>1.3.6.1.2.1.17.7.1.2.2.1.2</code></td><td>Q-BRIDGE-MIB <code>dot1qTpFdbPort</code></td><td>VLAN-aware MAC&nbsp;&rarr;&nbsp;port. Tried first; gives the VLAN for free</td><td>Preferred</td></tr>
+                        <tr><td><code>1.3.6.1.2.1.17.4.3.1.2</code></td><td>BRIDGE-MIB <code>dot1dTpFdbPort</code></td><td>Classic MAC&nbsp;&rarr;&nbsp;port. Used when Q-BRIDGE is absent</td><td>Fallback</td></tr>
+                        <tr><td><code>1.3.6.1.2.1.17.7.1.4.3.1.1</code></td><td><code>dot1qVlanStaticName</code></td><td>VLAN names</td><td>Optional</td></tr>
+                        <tr><td><code>1.3.6.1.2.1.17.7.1.4.5.1.1</code></td><td><code>dot1qPvid</code></td><td>Untagged VLAN per port</td><td>Optional</td></tr>
+                        <tr><td><code>1.3.6.1.2.1.4.22.1.2</code></td><td>IP-MIB <code>ipNetToMediaPhysAddress</code></td><td>IPv4 ARP: IP&nbsp;&rarr;&nbsp;MAC</td><td>Required for IPs</td></tr>
+                        <tr><td><code>1.3.6.1.2.1.4.35.1.4</code></td><td>IP-MIB <code>ipNetToPhysicalPhysAddress</code></td><td>IPv4 and IPv6 neighbour bindings</td><td>Optional</td></tr>
+                        <tr><td><code>1.0.8802.1.1.2</code></td><td>LLDP-MIB</td><td>Neighbours, and the primary signal for uplink detection</td><td>Recommended</td></tr>
+                        <tr><td><code>1.3.6.1.2.1.2</code>, <code>1.3.6.1.2.1.31</code></td><td>IF-MIB</td><td>Port names, aliases, admin/oper status, speed, type</td><td>Required</td></tr>
+                        <tr><td><code>1.3.6.1.4.1.9.9.23</code></td><td>CISCO-CDP-MIB</td><td>CDP neighbours</td><td>Cisco only</td></tr>
+                        <tr><td><code>1.3.6.1.4.1.9.9.46.1.3.1.1</code></td><td>CISCO-VTP-MIB <code>vtpVlanState</code>/<code>Name</code></td><td>VLAN inventory used to drive the per-VLAN walk</td><td>Cisco only</td></tr>
+                        <tr><td><code>1.3.6.1.4.1.9.9.46.1.6.1.1.14</code></td><td><code>vlanTrunkPortDynamicStatus</code></td><td>Trunk detection for uplink classification</td><td>Cisco only</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>In practice one line covers the standard subtrees, because everything above except the Cisco enterprise
+            objects lives under <code>iso</code>. If your security policy allows a full read view, use it &mdash; the
+            monitoring account still cannot write anything.</p>
+        </section>
+
+        <section id="cisco">
+            <h2><span class="num">03</span> Cisco: the per-VLAN requirement <a class="kb-anchor" href="#cisco">#</a></h2>
+
+            <div class="callout warn">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+                    This is the number one reason a Cisco switch shows zero endpoints
+                </div>
+                <p>Cisco IOS and IOS-XE do <strong>not</strong> publish the MAC forwarding table in the default SNMP
+                context. Each VLAN has its own instance. A perfectly good read-only credential that returns interfaces,
+                CPU and ARP will return <em>nothing at all</em> from the bridge tables until per-VLAN access is granted.</p>
+            </div>
+
+            <h3>SNMPv2c &mdash; community string indexing</h3>
+
+            <p>With v1/v2c, IOS supports community indexing natively: querying with <code>&lt;community&gt;@&lt;vlan&gt;</code>
+            returns that VLAN's bridge table. ZenPlus does this automatically &mdash; it enumerates VLANs from VTP, then
+            walks the bridge table once per VLAN using the suffixed community. <strong>No extra switch configuration is
+            required</strong>, beyond a working read-only community:</p>
+
+<pre><code>snmp-server community ZpReadOnly RO 20
+!
+ip access-list standard 20
+ permit 10.12.50.81
+</code></pre>
+
+            <h3>SNMPv3 &mdash; the <code>context vlan-</code> grant</h3>
+
+            <p>SNMPv3 has no community string, so the per-VLAN instances are reached through named
+            <strong>contexts</strong>: <code>vlan-1</code>, <code>vlan-20</code>, <code>vlan-221</code> and so on. The
+            group must be authorised for that context prefix. Without the second <code>snmp-server group</code> line
+            below, every per-VLAN walk is refused with <code>authorizationError</code> and UDT sees no MAC addresses:</p>
+
+<pre><code>! Read view — the standard MIBs plus the Cisco enterprise tree
+snmp-server view ZP_VIEW iso included
+!
+! The group, granted BOTH the default context and every vlan-* context
+snmp-server group ZP_GRP v3 priv read ZP_VIEW
+snmp-server group ZP_GRP v3 priv context vlan- match prefix read ZP_VIEW
+!
+! The user
+snmp-server user netmon ZP_GRP v3 auth sha &lt;AUTH_PASSWORD&gt; priv aes 128 &lt;PRIV_PASSWORD&gt;
+</code></pre>
+
+            <p>Verify it from any Linux host that can reach the switch. The first walk should return rows; the second is
+            the one that matters:</p>
+
+<pre><code># Default context — bridge port to ifIndex map (should return rows)
+snmpwalk -v3 -l authPriv -u netmon -a SHA -A &lt;AUTH&gt; -x AES -X &lt;PRIV&gt; \
+         10.10.10.221 1.3.6.1.2.1.17.1.4.1.2
+
+# VLAN 1 context — the forwarding table itself
+snmpwalk -v3 -l authPriv -u netmon -a SHA -A &lt;AUTH&gt; -x AES -X &lt;PRIV&gt; \
+         -n vlan-1 10.10.10.221 1.3.6.1.2.1.17.4.3.1.2
+</code></pre>
+
+            <p>If the second command answers <code>authorizationError (access denied to that object)</code>, the
+            <code>context vlan- match prefix</code> line is missing or the view does not include
+            <code>1.3.6.1.2.1.17</code>.</p>
+
+            <div class="callout tip">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+                    Nexus and Meraki behave differently
+                </div>
+                <p>Cisco <strong>NX-OS</strong> publishes the forwarding table in the default context and needs none of
+                this &mdash; a plain read-only v3 user is enough. Cloud-managed <strong>Meraki</strong> switches do not
+                expose per-port bridge tables over SNMP at all and cannot be tracked by UDT.</p>
+            </div>
+        </section>
+
+        <section id="other-vendors">
+            <h2><span class="num">04</span> Other switch vendors <a class="kb-anchor" href="#other-vendors">#</a></h2>
+
+            <p>Most non-Cisco switches implement the VLAN-aware Q-BRIDGE table in the default context, which means a
+            single ordinary read-only credential is all UDT needs. The rule of thumb: <strong>if a plain
+            <code>snmpwalk</code> of <code>1.3.6.1.2.1.17.7.1.2.2.1.2</code> returns rows, UDT will work.</strong></p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Platform</th><th>Forwarding table</th><th>What to configure</th></tr></thead>
+                    <tbody>
+                        <tr><td>Aruba / HPE (ArubaOS-CX, ArubaOS-Switch)</td><td>Q-BRIDGE in the default context</td><td>A standard SNMPv3 user with a read view covering <code>iso</code>. Nothing special.</td></tr>
+                        <tr><td>Cisco NX-OS</td><td>Q-BRIDGE in the default context</td><td>Standard read-only v3 user or v2c community.</td></tr>
+                        <tr><td>Juniper EX / QFX</td><td>Both bridge tables in the default context</td><td>Standard read-only v3 user; ensure the view includes <code>.1.3.6.1.2.1.17</code>.</td></tr>
+                        <tr><td>Extreme (EXOS)</td><td>Q-BRIDGE in the default context</td><td>Standard read-only credential.</td></tr>
+                        <tr><td>FortiSwitch (managed)</td><td>Via the managing FortiGate</td><td>Poll the FortiGate for ARP; managed-switch port data depends on firmware.</td></tr>
+                        <tr><td>Cisco IOS / IOS-XE</td><td>Per-VLAN only</td><td><a href="#cisco">See above</a> &mdash; community indexing or a <code>vlan-</code> context grant.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="callout">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+                    Check before you file a bug
+                </div>
+                <p>Vendor behaviour varies by firmware release far more than by vendor. Before assuming ZenPlus is at
+                fault, run the <code>snmpwalk</code> above against the switch with the same credential ZenPlus uses. If
+                the walk is empty from the command line, it is empty for UDT too, and the fix is on the switch.</p>
+            </div>
+        </section>
+
+        <section id="firewalls">
+            <h2><span class="num">05</span> Firewalls and routers &mdash; where IP addresses come from <a class="kb-anchor" href="#firewalls">#</a></h2>
+
+            <p>Switches know MAC addresses and ports. They rarely know IP addresses. The IP half of every endpoint comes
+            from the <strong>ARP and IPv6 neighbour tables</strong> of the layer-3 devices that route those VLANs &mdash;
+            typically a firewall pair or a core switch doing inter-VLAN routing.</p>
+
+            <p>Nothing special is needed: add the device to ZenPlus with SNMP read access and leave UDT enabled for it.
+            It contributes no ports and no endpoints of its own, but it fills in the IP addresses for everything the
+            switches found. A single busy firewall commonly supplies more than a thousand IP-to-MAC bindings per poll.</p>
+
+            <div class="callout tip">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+                    Endpoints with an IP but no port
+                </div>
+                <p>An endpoint showing an IP address and a dash under <em>Connected to</em> was learned from an ARP table
+                but has not been found in any switch forwarding table. Either it sits behind a switch you are not
+                monitoring, or that switch is not returning its bridge table &mdash; which is nearly always the
+                <a href="#cisco">Cisco per-VLAN</a> problem.</p>
+            </div>
+        </section>
+
+        <section id="adding-devices">
+            <h2><span class="num">06</span> Adding devices to UDT <a class="kb-anchor" href="#adding-devices">#</a></h2>
+
+            <p>UDT has no device inventory of its own. It reuses the devices ZenPlus already monitors, and it is
+            <strong>on by default</strong> for every SNMP-enabled device &mdash; so in most deployments there is nothing
+            to add.</p>
+
+            <div class="step-list">
+                <div class="step"><div><h4>Create the SNMP credential</h4>
+                    <p>Go to <strong>Administration &rarr; Credentials &rarr; SNMP</strong> and add the community or v3
+                    user. One credential is normally shared by a whole switch estate.</p></div></div>
+                <div class="step"><div><h4>Add the devices</h4>
+                    <p><strong>Monitoring &rarr; Devices</strong> to add them by IP, or use
+                    <strong>Discovery</strong> to sweep a subnet and import what answers SNMP. Assign the credential
+                    during import.</p></div></div>
+                <div class="step"><div><h4>Confirm UDT is enabled for them</h4>
+                    <p><strong>Monitoring &rarr; User Devices &rarr; Settings</strong> lists every SNMP device with a
+                    UDT toggle. Layer-2 devices are listed first; use <em>Show all SNMP devices</em> to reveal the
+                    rest.</p></div></div>
+                <div class="step"><div><h4>Tune the interval if you need to</h4>
+                    <p>The default is 300 seconds for everything. Set a global default at the top of the card, or
+                    override it per device in the Interval column. Select several rows to apply a change in bulk.</p></div></div>
+            </div>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/udt/udt-snmp-credentials.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="ZenPlus Credentials page listing reusable SNMP v2c and v3 credentials with their authentication method and the number of devices assigned">
+                <figcaption><strong>Administration &rarr; Credentials.</strong> SNMP credentials are reusable and shared
+                across devices; the Windows tab on the same page holds the WinRM accounts used for
+                <a href="{% url 'core:kb_zenplus_udt_user_logins' %}">user correlation</a>.</figcaption>
+            </figure>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/udt/udt-settings-layer2-polling.webp' %}" width="1600" height="2128" loading="lazy"
+                     alt="ZenPlus UDT Settings page showing the Layer-2 polling table with per-device UDT credential, poll interval, ports monitored, endpoint count and last poll time">
+                <figcaption><strong>UDT Settings.</strong> Per-device polling control. <em>Ports monitored</em>,
+                <em>Endpoints</em> and <em>Last poll</em> are the three columns that tell you whether a device is
+                actually contributing data.</figcaption>
+            </figure>
+
+            <h3>Using a different credential for UDT</h3>
+
+            <p>Each device can poll UDT with a credential different from its normal SNMP settings &mdash; useful when the
+            bridge tables sit behind a v3 user with per-VLAN context rights while general monitoring uses a plain
+            community. Pick it in the <strong>UDT credential</strong> column; <em>Device SNMP settings</em> means
+            &ldquo;inherit whatever the device already uses&rdquo;.</p>
+        </section>
+
+        <section id="verify">
+            <h2><span class="num">07</span> Verifying collection <a class="kb-anchor" href="#verify">#</a></h2>
+
+            <p>Give it two poll cycles (about ten minutes at defaults), then read the Settings table left to right:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>What you see</th><th>What it means</th><th>Do this</th></tr></thead>
+                    <tbody>
+                        <tr><td><em>Last poll</em> is a dash</td><td>UDT has never completed a poll for this device</td><td>Check SNMP reachability and that the device is not disabled</td></tr>
+                        <tr><td>Last poll recent, <em>Ports monitored</em> is a dash</td><td>SNMP works but no bridge ports were found</td><td>The read view is missing <code>1.3.6.1.2.1.17</code></td></tr>
+                        <tr><td>Ports monitored fine, <em>Endpoints</em> is 0</td><td>Port map found, forwarding table empty</td><td>Almost always the <a href="#cisco">Cisco per-VLAN</a> grant</td></tr>
+                        <tr><td>Endpoints present, no IP addresses</td><td>No ARP source</td><td>Add the routing device for those VLANs</td></tr>
+                        <tr><td>Everything populated</td><td>Working</td><td>Move on to <a href="{% url 'core:kb_zenplus_udt_classification' %}">classification</a></td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>A firewall or router legitimately shows zero ports and zero endpoints while still doing its job &mdash; its
+            contribution is IP bindings, which appear on the endpoints other devices discovered.</p>
+        </section>
+
+        <section id="windows-permissions">
+            <h2><span class="num">08</span> Windows and Active Directory permissions <a class="kb-anchor" href="#windows-permissions">#</a></h2>
+
+            <p>User correlation is optional and entirely agentless. ZenPlus opens a WinRM session to each domain
+            controller on a schedule, runs a read-only PowerShell query against the Security event log, and closes the
+            session. Nothing is installed, nothing is written, and no other log is touched.</p>
+
+            <h3>Which events are read</h3>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Event ID</th><th>Meaning</th><th>Why UDT wants it</th></tr></thead>
+                    <tbody>
+                        <tr><td><code>4624</code></td><td>An account was successfully logged on</td><td>Covers NTLM and non-Kerberos environments</td></tr>
+                        <tr><td><code>4768</code></td><td>A Kerberos authentication ticket (TGT) was requested</td><td>Workstation IP at domain sign-in</td></tr>
+                        <tr><td><code>4769</code></td><td>A Kerberos service ticket was requested</td><td>Ongoing user-to-IP association</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>Machine accounts (names ending in <code>$</code>) and the <code>ANONYMOUS LOGON</code>,
+            <code>SYSTEM</code>, <code>LOCAL SERVICE</code> and <code>NETWORK SERVICE</code> principals are discarded
+            before anything is stored, so the feed contains real users only.</p>
+
+            <h3>The service account</h3>
+
+            <p>Create one ordinary domain user &mdash; no administrative rights &mdash; and grant it exactly two things
+            on the domain controllers. On a DC these are built-in <em>domain-local</em> groups in Active Directory, so
+            add members with <code>Add-ADGroupMember</code>, not the local-group cmdlets:</p>
+
+<pre><code># Run once, on any domain controller, as a Domain Admin
+
+# 1. Read access to the Security event log
+Add-ADGroupMember -Identity 'Event Log Readers'       -Members 'svc-zenplus-udt'
+
+# 2. Permission to connect over WinRM without being an administrator
+Add-ADGroupMember -Identity 'Remote Management Users' -Members 'svc-zenplus-udt'
+</code></pre>
+
+            <p>Then make sure WinRM is listening on each DC. On most domain controllers it already is:</p>
+
+<pre><code>Get-Service WinRM                      # should be Running
+winrm enumerate winrm/config/listener  # should show a listener on 5985 or 5986
+
+# If not enabled yet:
+Enable-PSRemoting -Force
+</code></pre>
+
+            <h3>Audit policy</h3>
+
+            <p>The events must actually be logged. Kerberos auditing is on by default in the Default Domain Controllers
+            Policy; logon auditing sometimes is not. Check and, if needed, enable success auditing for these three
+            subcategories:</p>
+
+<pre><code>auditpol /get /subcategory:"Logon","Kerberos Authentication Service","Kerberos Service Ticket Operations"
+
+auditpol /set /subcategory:"Logon" /success:enable
+auditpol /set /subcategory:"Kerberos Authentication Service" /success:enable
+auditpol /set /subcategory:"Kerberos Service Ticket Operations" /success:enable
+</code></pre>
+
+            <div class="callout warn">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>
+                    Keep the Security log big enough
+                </div>
+                <p>UDT reads at most <strong>500 events per poll</strong> and resumes from the newest event it has
+                already seen. On a busy domain controller a small, fast-rolling Security log combined with a long poll
+                interval will lose logons between polls. Either shorten the interval or raise the log size.</p>
+            </div>
+
+            <h3>Network</h3>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>From</th><th>To</th><th>Port</th><th>Purpose</th></tr></thead>
+                    <tbody>
+                        <tr><td>ZenPlus appliance</td><td>Each domain controller</td><td>TCP 5985</td><td>WinRM over HTTP (message-level encrypted with NTLM or Kerberos)</td></tr>
+                        <tr><td>ZenPlus appliance</td><td>Each domain controller</td><td>TCP 5986</td><td>WinRM over HTTPS, if you prefer transport encryption</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>Test reachability from the appliance shell before configuring anything. WinRM rejects a plain
+            <code>GET</code>, so <strong>HTTP 405 is the success case</strong> &mdash; it proves a listener is there:</p>
+
+<pre><code>curl -sk -o /dev/null -w '%{http_code}\n' http://dc01.corp.local:5985/wsman
+# 405  → WinRM is listening (good)
+# 000  → blocked or not listening
+</code></pre>
+        </section>
+
+        <section id="adding-a-dc">
+            <h2><span class="num">09</span> Adding a domain controller <a class="kb-anchor" href="#adding-a-dc">#</a></h2>
+
+            <div class="step-list">
+                <div class="step"><div><h4>Store the Windows credential</h4>
+                    <p><strong>Administration &rarr; Credentials &rarr; Windows</strong>. Enter the service account with
+                    its domain, and choose the authentication method &mdash; NTLM is the default and works in almost
+                    every environment. The password is encrypted at rest.</p></div></div>
+                <div class="step"><div><h4>Add the controller</h4>
+                    <p><strong>User Devices &rarr; Settings &rarr; Active Directory controllers &rarr; Add DC</strong>.
+                    Give it a name, the hostname or IP, the credential, and a poll interval (300 seconds by default,
+                    minimum 60).</p></div></div>
+                <div class="step"><div><h4>Poll it once, immediately</h4>
+                    <p>Use the poll action on the row rather than waiting. The first poll looks back 30 minutes; after
+                    that each poll resumes from the newest event already recorded.</p></div></div>
+                <div class="step"><div><h4>Read the status</h4>
+                    <p>The row shows last poll, status and the last error. Add every DC that authenticates users &mdash;
+                    a user is only seen by the controller that served their logon.</p></div></div>
+            </div>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/udt/udt-add-domain-controller.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="Add domain controller dialog in ZenPlus UDT settings with fields for name, WinRM host, Windows credential and poll interval">
+                <figcaption><strong>Add DC.</strong> If the credential list is empty, the dialog links straight to the
+                Credentials page &mdash; the Windows credential has to exist first.</figcaption>
+            </figure>
+
+            <p>What happens next, and how logons are matched back to endpoints, is covered in
+            <a href="{% url 'core:kb_zenplus_udt_user_logins' %}">User-to-device correlation</a>.</p>
+        </section>
+
+        <section id="port-control">
+            <h2><span class="num">10</span> Optional: remote port control <a class="kb-anchor" href="#port-control">#</a></h2>
+
+            <p>The Switch Ports tab can shut down or re-enable a port directly. This is the one UDT feature that needs
+            SNMP <strong>write</strong> access, because it performs an SNMP SET on
+            <code>ifAdminStatus</code> (<code>1.3.6.1.2.1.2.2.1.7</code>).</p>
+
+            <ul>
+                <li>With v2c, the device needs a read-write community.</li>
+                <li>With v3, the user's group needs a write view that includes <code>1.3.6.1.2.1.2.2.1.7</code>.</li>
+                <li>Every attempt is written to the ZenPlus audit log with the operator, the outcome and any SNMP error,
+                    and appears in the UDT activity feed as a <em>port action</em>.</li>
+                <li>The action requires the <strong>operator</strong> role or higher.</li>
+            </ul>
+
+            <div class="callout security">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+                    Leave it off unless you want it
+                </div>
+                <p>If you never grant write access, the rest of UDT is unaffected &mdash; the shutdown action simply
+                fails with an SNMP error and is logged as such. Most deployments run UDT entirely read-only.</p>
+            </div>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_udt' %}">&larr; User Device Tracker</a></span>
+        <span><a href="{% url 'core:kb_zenplus_udt_endpoints' %}">Endpoints &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}
