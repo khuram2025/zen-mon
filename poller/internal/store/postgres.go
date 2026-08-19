@@ -181,7 +181,7 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 // stall the whole sync).
 func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT d.id, d.hostname, host(d.ip_address)::text,
+		SELECT d.id, d.hostname, COALESCE(d.device_type, 'other'), host(d.ip_address)::text,
 		       d.snmp_version, d.snmp_port, COALESCE(d.snmp_community, ''),
 		       COALESCE(d.snmp_v3_username, ''), COALESCE(d.snmp_v3_context, ''),
 		       COALESCE(d.snmp_auth_protocol, ''), d.snmp_auth_passphrase,
@@ -230,7 +230,7 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 		var hasUdtCred bool
 		var uc snmp.UdtCredential
 		err := rows.Scan(
-			&d.ID, &d.Hostname, &ipStr,
+			&d.ID, &d.Hostname, &d.DeviceType, &ipStr,
 			&d.Version, &d.Port, &d.Community,
 			&d.V3Username, &d.V3Context,
 			&d.AuthProtocol, &authBlob,
@@ -260,6 +260,9 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 			// Parse errors are non-fatal: a bad template entry must not
 			// take standard monitoring down with it.
 			d.OidGroups, _ = snmp.ParseOidGroups(json.RawMessage(oidGroupsJSON))
+		}
+		if snmp.IsNetworkDeviceType(d.DeviceType) {
+			d.OidGroups = snmp.MergeStandardNetworkOidGroups(d.OidGroups)
 		}
 
 		if len(authBlob) > 0 {

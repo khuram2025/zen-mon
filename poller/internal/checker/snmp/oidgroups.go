@@ -50,6 +50,9 @@ type OidGroupTable struct {
 type OidGroup struct {
 	Key  string `json:"key"`
 	Name string `json:"name"`
+	// IntervalSeconds optionally gives expensive/slow-changing tables their
+	// own cadence. Zero means every device poll.
+	IntervalSeconds int `json:"interval_seconds,omitempty"`
 	// Kind: "scalar" | "table".
 	Kind    string         `json:"kind"`
 	Table   *OidGroupTable `json:"table,omitempty"`
@@ -93,6 +96,10 @@ func ParseOidGroups(raw json.RawMessage) ([]OidGroup, []error) {
 		}
 		if gr.Kind != "scalar" && gr.Kind != "table" {
 			errs = append(errs, fmt.Errorf("group %s: invalid kind %q", gr.Key, gr.Kind))
+			continue
+		}
+		if gr.IntervalSeconds < 0 || gr.IntervalSeconds > 86400 {
+			errs = append(errs, fmt.Errorf("group %s: interval_seconds out of range", gr.Key))
 			continue
 		}
 		metrics := make([]OidMetric, 0, len(gr.Metrics))
