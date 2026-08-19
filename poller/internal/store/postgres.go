@@ -363,9 +363,14 @@ func (s *PostgresStore) AssignProfileIfUnset(ctx context.Context, deviceID, prof
 	return err
 }
 
-// UpsertProfile upserts a Profile into device_profiles by (name, version).
-// The returned profile has its ID populated. Used at poller startup to
-// seed built-in profiles.
+// UpsertProfile inserts a bootstrap Profile into device_profiles by
+// (name, version). Existing rows are authoritative: migrations and operator
+// edits may have added monitoring groups after an old JSON bootstrap file was
+// installed, so startup must never replace their contents.
+//
+// The no-op conflict update is intentional. Unlike DO NOTHING it reliably
+// returns the existing row ID even when another process inserted it
+// concurrently, without changing any profile fields.
 func (s *PostgresStore) UpsertProfile(ctx context.Context, p *snmp.Profile) error {
 	matchJSON, err := json.Marshal(p.Match)
 	if err != nil {
@@ -380,12 +385,7 @@ func (s *PostgresStore) UpsertProfile(ctx context.Context, p *snmp.Profile) erro
 		INSERT INTO device_profiles (name, vendor, match_rules, oid_groups, version, builtin, description)
 		VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6, $7)
 		ON CONFLICT (name, version) DO UPDATE SET
-		    vendor      = EXCLUDED.vendor,
-		    match_rules = EXCLUDED.match_rules,
-		    oid_groups  = EXCLUDED.oid_groups,
-		    builtin     = EXCLUDED.builtin,
-		    description = EXCLUDED.description,
-		    updated_at  = NOW()
+		    name = device_profiles.name
 		RETURNING id
 	`, p.Name, p.Vendor, string(matchJSON), string(oidGroups), p.Version, p.Builtin, p.Description).Scan(&id)
 	if err != nil {
