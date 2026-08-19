@@ -4,27 +4,33 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
   AlertOctagon,
   ArrowDownRight,
   ArrowUpRight,
+  Building2,
   CheckCircle2,
   Clock,
+  Cpu,
+  HardDrive,
   HeartPulse,
   Layers,
   Loader2,
   MapPin,
   Maximize2,
+  MemoryStick,
   Minimize2,
   Radio,
   Server,
   Shield,
   Sparkles,
   Target,
+  Timer,
   TrendingUp,
+  TriangleAlert,
   Wrench,
   Zap,
 } from 'lucide-react'
@@ -46,8 +52,9 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import { RingGauge } from '@/components/dashboard/RingGauge'
 import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
 import { useExecutiveReport, useTechnicalReport, useBusinessReport } from '@/hooks/useReports'
+import type { BusinessData } from '@/hooks/useReports'
 import { useSSE } from '@/hooks/useSSE'
-import type { ServerMonitoringOverview } from '@/types/servers'
+import type { ServerMonitoringOverview, TopPressureItem } from '@/types/servers'
 
 /* ── Types ──────────────────────────────────────────────────────────────── */
 
@@ -92,6 +99,13 @@ type AvailSegment = {
 type RingColor = 'success' | 'warning' | 'danger' | 'info' | 'primary' | 'accent'
 
 type FleetDomain = 'devices' | 'services' | 'servers'
+
+type CountSegment = {
+  key: string
+  label: string
+  value: number
+  tone?: 'success' | 'warning' | 'danger' | 'info' | 'muted'
+}
 
 const FLEET_DOMAINS: Array<{ key: FleetDomain; label: string; icon: typeof Server }> = [
   { key: 'devices', label: 'Devices', icon: Server },
@@ -232,14 +246,60 @@ function buildSegments(
     .sort((a, b) => b.total - a.total)
 }
 
+function buildServiceSegments(
+  rows: Array<{
+    type: string
+    group_name: string
+    status: string
+    availability_pct: number | null
+    checks_total: number
+  }>,
+  keyOf: (row: typeof rows[number]) => string,
+): AvailSegment[] {
+  const grouped = new Map<string, { weighted: number; weight: number; measured: number; up: number; total: number }>()
+  for (const row of rows) {
+    const key = keyOf(row) || 'Unassigned'
+    const current = grouped.get(key) || { weighted: 0, weight: 0, measured: 0, up: 0, total: 0 }
+    current.total += 1
+    if (row.status === 'up') current.up += 1
+    if (row.availability_pct != null) {
+      const sampleWeight = Math.max(1, row.checks_total || 0)
+      current.weighted += row.availability_pct * sampleWeight
+      current.weight += sampleWeight
+      current.measured += 1
+    }
+    grouped.set(key, current)
+  }
+  return Array.from(grouped.entries())
+    .map(([key, value]) => ({
+      key,
+      label: titleCase(key),
+      pct: value.measured ? value.weighted / value.weight : null,
+      up: value.up,
+      total: value.total,
+    }))
+    .sort((a, b) => b.total - a.total)
+}
+
 /* ── Page ───────────────────────────────────────────────────────────────── */
 
 export function AvailabilityPage() {
   const qc = useQueryClient()
   const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
+  const [viewParams, setViewParams] = useSearchParams()
   const [noc, setNoc] = useState(false)
-  const [fleetDomain, setFleetDomain] = useState<FleetDomain>('devices')
   const [clock, setClock] = useState(() => new Date())
+
+  const requestedDomain = viewParams.get('view')
+  const fleetDomain: FleetDomain = requestedDomain === 'services' || requestedDomain === 'servers'
+    ? requestedDomain
+    : 'devices'
+  const setFleetDomain = (domain: FleetDomain) => {
+    const next = new URLSearchParams(viewParams)
+    if (domain === 'devices') next.delete('view')
+    else next.set('view', domain)
+    setViewParams(next, { replace: true })
+  }
 
   const liveInterval = 15_000
   const histInterval = 60_000
@@ -460,6 +520,102 @@ export function AvailabilityPage() {
     [serviceAvail],
   )
 
+  const serviceByType = useMemo(
+    () => buildServiceSegments(serviceAvail, (row) => row.type || 'other'),
+    [serviceAvail],
+  )
+  const serviceByGroup = useMemo(
+    () => buildServiceSegments(serviceAvail, (row) => row.group_name || 'Unassigned'),
+    [serviceAvail],
+  )
+  const atRiskServices = useMemo(
+    () => serviceAvail
+      .filter((row) => row.status !== 'up' || (row.availability_pct != null && row.availability_pct < 99.9))
+      .sort((a, b) => (a.availability_pct ?? -1) - (b.availability_pct ?? -1)),
+    [serviceAvail],
+  )
+  const responseByService = useMemo(
+    () => new Map((business?.response_time_quantiles || []).map((row) => [row.service_check_id, row])),
+    [business],
+  )
+
+  const serverStatusSegments = useMemo<CountSegment[]>(() => {
+    const counts = servers?.status_counts || {}
+    const rows: CountSegment[] = [
+      { key: 'healthy', label: 'Healthy', value: counts.healthy ?? 0, tone: 'success' },
+      { key: 'warning', label: 'Warning', value: counts.warning ?? 0, tone: 'warning' },
+      { key: 'critical', label: 'Critical', value: counts.critical ?? 0, tone: 'danger' },
+      { key: 'stale', label: 'Stale', value: counts.stale ?? 0, tone: 'warning' },
+      { key: 'unknown', label: 'Unknown', value: counts.unknown ?? 0, tone: 'muted' },
+    ]
+    return rows.filter((row) => row.value > 0)
+  }, [servers])
+  const serverOsSegments = useMemo<CountSegment[]>(() =>
+    Object.entries(servers?.os_counts || {})
+      .map(([key, value]) => ({ key, label: titleCase(key), value: value ?? 0, tone: 'info' as const }))
+      .filter((row) => row.value > 0)
+      .sort((a, b) => b.value - a.value),
+  [servers])
+  const serverAgentSegments = useMemo<CountSegment[]>(() =>
+    Object.entries(servers?.agent_counts || {})
+      .map(([key, value]) => ({
+        key,
+        label: titleCase(key),
+        value: value ?? 0,
+        tone: key === 'online' ? 'success' as const : key === 'error' || key === 'offline' ? 'danger' as const : 'warning' as const,
+      }))
+      .filter((row) => row.value > 0)
+      .sort((a, b) => b.value - a.value),
+  [servers])
+
+  const executiveBrief = useMemo(() => {
+    if (fleetDomain === 'services') {
+      const down = services?.down ?? 0
+      const impact = business?.customer_impact_minutes ?? 0
+      return {
+        eyebrow: 'Business service continuity',
+        title: down > 0
+          ? `${down} customer-facing service${down === 1 ? '' : 's'} require attention`
+          : 'Business services are operating normally',
+        detail: impact > 0
+          ? `${fmtMin(impact)} of customer-impact time was recorded in ${range.label.toLowerCase()}. Prioritize the lowest-availability services below.`
+          : `No customer-impact time is recorded in ${range.label.toLowerCase()}. Service checks continue to validate reachability and response quality.`,
+        tone: down > 0 || atRiskServices.length > 0 ? 'warning' as const : 'success' as const,
+        action: 'Open service operations',
+        to: '/services',
+      }
+    }
+    if (fleetDomain === 'servers') {
+      const critical = servers?.status_counts?.critical ?? 0
+      const warning = (servers?.status_counts?.warning ?? 0) + (servers?.status_counts?.stale ?? 0)
+      return {
+        eyebrow: 'Workload resilience',
+        title: critical > 0
+          ? `${critical} critical server${critical === 1 ? '' : 's'} may affect business operations`
+          : warning > 0
+            ? `${warning} server${warning === 1 ? '' : 's'} show elevated operational risk`
+            : 'Server capacity and health are within normal bounds',
+        detail: serverTotal
+          ? `${serverHealthy} of ${serverTotal} monitored servers are healthy. Capacity pressure and agent coverage are summarized below.`
+          : 'No server agents or agentless workloads are currently enrolled.',
+        tone: critical > 0 ? 'danger' as const : warning > 0 ? 'warning' as const : 'success' as const,
+        action: 'Open server estate',
+        to: '/servers',
+      }
+    }
+    return {
+      eyebrow: 'Enterprise availability posture',
+      title: slaMet ? 'Network availability is meeting the committed SLA' : 'Network availability is below the committed SLA',
+      detail: `${fmtPct(fleetPct)} availability across ${k?.devices_monitored ?? summary?.total ?? 0} monitored devices, with ${fmtMin(k?.mttr_minutes)} mean time to restore.`,
+      tone: slaMet ? 'success' as const : 'danger' as const,
+      action: 'Open device estate',
+      to: '/devices',
+    }
+  }, [
+    fleetDomain, services, business, range.label, atRiskServices.length, servers,
+    serverTotal, serverHealthy, slaMet, fleetPct, k, summary,
+  ])
+
   const activeFleet = useMemo(() => {
     const views = {
       devices: {
@@ -545,7 +701,7 @@ export function AvailabilityPage() {
             <div>
               <div className="flex flex-wrap items-center gap-3">
                 <h1 className={cn('font-bold tracking-tight text-text', noc ? 'text-3xl' : 'text-2xl')}>
-                  Availability Command Center
+                  Availability & Business Continuity
                 </h1>
                 <LiveBadge />
                 {rangeFetching && (
@@ -556,7 +712,7 @@ export function AvailabilityPage() {
                 )}
               </div>
               <p className="mt-1 text-xs text-muted">
-                Live fleet health · {range.label} analytics · planned maintenance excluded from SLA
+                Executive service resilience · {range.label} performance · live operational risk
               </p>
               {/* A window is only as long as the data under it. Without this,
                 * a 30-day view on an appliance holding eight days of samples
@@ -608,7 +764,7 @@ export function AvailabilityPage() {
               ) : (
                 <div className={cn(
                   'mt-2 bg-gradient-to-r bg-clip-text font-black tabular-nums tracking-tight text-transparent',
-                  heroGradient(heroPct ?? 0),
+                  heroPct == null ? 'from-slate-500 to-slate-400 dark:from-slate-300 dark:to-slate-500' : heroGradient(heroPct),
                   noc ? 'text-7xl' : 'text-6xl',
                 )}>
                   {fmtPct(heroPct)}
@@ -674,7 +830,7 @@ export function AvailabilityPage() {
                   value={heroPct ?? 0}
                   size={noc ? 190 : 160}
                   stroke={noc ? 15 : 13}
-                  color={availColor(heroPct ?? 0)}
+                  color={heroPct == null ? 'info' : availColor(heroPct)}
                   sub={activeFleet.sub}
                   label={activeFleet.ringLabel}
                 />
@@ -733,7 +889,11 @@ export function AvailabilityPage() {
           </div>
         </GlassPanel>
 
-        {/* Trend + live */}
+        <ExecutiveBriefPanel {...executiveBrief} rangeLabel={range.label} />
+
+        {fleetDomain === 'devices' && (
+          <>
+        {/* Device trend + live */}
         <div className="grid gap-4 lg:grid-cols-12">
           <GlassPanel className="lg:col-span-8">
             <PanelHeader
@@ -914,7 +1074,7 @@ export function AvailabilityPage() {
             title="Site Health Matrix"
             icon={<MapPin className="h-4 w-4 text-emerald-500" />}
             hint={range.label}
-            loading={initialLoading && !(exec?.location_summary?.length)}
+            loading={execLoading && !exec}
             empty="No location data"
             columns={['Location', 'Devices', 'Down', 'Availability']}
             rows={(exec?.location_summary || []).map((row) => ({
@@ -928,21 +1088,21 @@ export function AvailabilityPage() {
             }))}
           />
           <DataTablePanel
-            title="Service Availability"
-            icon={<Shield className="h-4 w-4 text-violet-500" />}
+            title="Top Availability Risks"
+            icon={<TriangleAlert className="h-4 w-4 text-amber-500" />}
             hint={range.label}
-            loading={bizFetching && !serviceAvail.length}
-            empty="No service checks configured"
-            columns={['Service', 'Type', 'Status', 'Uptime']}
-            rows={serviceAvail.slice(0, 14).map((svc) => ({
-              key: svc.service_check_id,
+            loading={execLoading && !exec}
+            empty="No material device risks in this window"
+            emptyTone="success"
+            columns={['Risk', 'Device', 'Alerts', 'Duration', 'Severity']}
+            rows={(exec?.top_issues || []).slice(0, 14).map((issue, index) => ({
+              key: `${issue.device_id}-${index}`,
               cells: [
-                <span className="max-w-[160px] truncate font-medium" title={svc.name}>{svc.name}</span>,
-                <span className="text-[10px] font-bold uppercase tracking-wider text-muted">{svc.type}</span>,
-                <Badge variant={svc.status === 'up' ? 'success' : svc.status === 'down' ? 'danger' : 'warning'} className="capitalize">
-                  {svc.status}
-                </Badge>,
-                <GradientBar pct={svc.availability_pct ?? 0} />,
+                <span className="max-w-[190px] truncate font-medium" title={issue.issue}>{issue.issue}</span>,
+                <Link to={`/devices/${issue.device_id}`} className="font-semibold text-primary hover:underline">{issue.hostname}</Link>,
+                <span className="tabular-nums">{issue.alert_count}</span>,
+                <span className="tabular-nums text-muted">{fmtMin(issue.duration_minutes)}</span>,
+                <Badge variant={issue.severity === 'critical' ? 'danger' : 'warning'} className="capitalize">{issue.severity}</Badge>,
               ],
             }))}
           />
@@ -975,7 +1135,7 @@ export function AvailabilityPage() {
             title="Recent Outage Timeline"
             icon={<Clock className="h-4 w-4 text-rose-500" />}
             hint={range.label}
-            loading={initialLoading && !(exec?.outage_timeline?.length)}
+            loading={execLoading && !exec}
             empty={
               (summary?.down ?? 0) > 0
                 ? `No status changes in this window — ${summary!.down} device${summary!.down === 1 ? ' is' : 's are'} still down from an earlier outage`
@@ -993,6 +1153,317 @@ export function AvailabilityPage() {
             }))}
           />
         </div>
+          </>
+        )}
+
+        {fleetDomain === 'services' && (
+          <ServiceExecutiveView
+            rangeLabel={range.label}
+            summary={services}
+            availability={avgServicePct}
+            serviceRows={serviceAvail}
+            byType={serviceByType}
+            byGroup={serviceByGroup}
+            atRisk={atRiskServices}
+            failedChecks={serviceFailedChecks}
+            impactMinutes={business?.customer_impact_minutes ?? 0}
+            outages={business?.service_outages || []}
+            tlsWarnings={business?.tls_warnings || []}
+            responseByService={responseByService}
+            loading={bizFetching && !business}
+            large={noc}
+          />
+        )}
+
+        {fleetDomain === 'servers' && (
+          <ServerExecutiveView
+            rangeLabel={range.label}
+            overview={servers}
+            statusSegments={serverStatusSegments}
+            osSegments={serverOsSegments}
+            agentSegments={serverAgentSegments}
+            large={noc}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ExecutiveBriefPanel({
+  eyebrow, title, detail, tone, action, to, rangeLabel,
+}: {
+  eyebrow: string
+  title: string
+  detail: string
+  tone: 'success' | 'warning' | 'danger'
+  action: string
+  to: string
+  rangeLabel: string
+}) {
+  const toneClass = tone === 'success'
+    ? 'border-emerald-500/30 bg-gradient-to-r from-emerald-500/12 via-surface to-teal-500/8'
+    : tone === 'warning'
+      ? 'border-amber-500/30 bg-gradient-to-r from-amber-500/12 via-surface to-orange-500/8'
+      : 'border-rose-500/30 bg-gradient-to-r from-rose-500/12 via-surface to-red-500/8'
+  const iconClass = tone === 'success' ? 'bg-success/12 text-success' : tone === 'warning' ? 'bg-warning/12 text-warning' : 'bg-danger/12 text-danger'
+  const Icon = tone === 'success' ? CheckCircle2 : tone === 'warning' ? TriangleAlert : AlertOctagon
+  return (
+    <GlassPanel className={cn('border', toneClass)}>
+      <div className="flex flex-col gap-4 p-5 md:flex-row md:items-center md:justify-between md:px-6">
+        <div className="flex min-w-0 items-start gap-4">
+          <span className={cn('flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl', iconClass)}>
+            <Icon className="h-5 w-5" />
+          </span>
+          <div>
+            <div className="text-[10px] font-black uppercase tracking-[0.2em] text-muted">{eyebrow} · {rangeLabel}</div>
+            <h2 className="mt-1 text-lg font-bold tracking-tight text-text">{title}</h2>
+            <p className="mt-1 max-w-4xl text-sm leading-6 text-muted">{detail}</p>
+          </div>
+        </div>
+        <Link
+          to={to}
+          className="inline-flex shrink-0 items-center justify-center rounded-xl border border-border bg-surface px-4 py-2 text-xs font-bold text-text shadow-sm transition hover:-translate-y-0.5 hover:border-primary/40 hover:text-primary hover:shadow-md"
+        >
+          {action}
+          <ArrowUpRight className="ml-1.5 h-3.5 w-3.5" />
+        </Link>
+      </div>
+    </GlassPanel>
+  )
+}
+
+function ServiceExecutiveView({
+  rangeLabel,
+  summary,
+  availability,
+  serviceRows,
+  byType,
+  byGroup,
+  atRisk,
+  failedChecks,
+  impactMinutes,
+  outages,
+  tlsWarnings,
+  responseByService,
+  loading,
+  large,
+}: {
+  rangeLabel: string
+  summary?: ServiceSummary
+  availability: number | null
+  serviceRows: BusinessData['service_availability']
+  byType: AvailSegment[]
+  byGroup: AvailSegment[]
+  atRisk: BusinessData['service_availability']
+  failedChecks: number
+  impactMinutes: number
+  outages: BusinessData['service_outages']
+  tlsWarnings: BusinessData['tls_warnings']
+  responseByService: Map<string, BusinessData['response_time_quantiles'][number]>
+  loading: boolean
+  large?: boolean
+}) {
+  const total = summary?.total ?? serviceRows.length
+  const up = summary?.up ?? serviceRows.filter((row) => row.status === 'up').length
+  const serviceStatusRows: CountSegment[] = [
+    { key: 'up', label: 'Operating', value: summary?.up ?? 0, tone: 'success' },
+    { key: 'warning', label: 'Warning', value: (summary?.warning ?? 0) + (summary?.degraded ?? 0), tone: 'warning' },
+    { key: 'down', label: 'Down', value: summary?.down ?? 0, tone: 'danger' },
+    { key: 'unknown', label: 'Unknown', value: summary?.unknown ?? 0, tone: 'muted' },
+  ]
+  const serviceStatus = serviceStatusRows.filter((row) => row.value > 0)
+  const riskProfileRows: CountSegment[] = [
+    { key: 'committed', label: 'At or above 99.9%', value: serviceRows.filter((row) => (row.availability_pct ?? -1) >= 99.9).length, tone: 'success' },
+    { key: 'watch', label: '95% to 99.9%', value: serviceRows.filter((row) => row.availability_pct != null && row.availability_pct >= 95 && row.availability_pct < 99.9).length, tone: 'warning' },
+    { key: 'breach', label: 'Below 95%', value: serviceRows.filter((row) => row.availability_pct != null && row.availability_pct < 95).length, tone: 'danger' },
+    { key: 'unmeasured', label: 'No window data', value: serviceRows.filter((row) => row.availability_pct == null).length, tone: 'muted' },
+  ]
+  const riskProfile = riskProfileRows.filter((row) => row.value > 0)
+
+  return (
+    <div className="space-y-5 animate-fade-in">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <ExecutiveMetricCard icon={Shield} label="Portfolio availability" value={fmtPct(availability)} detail={`${rangeLabel} weighted by validation volume`} tone={availability != null && availability >= 99.9 ? 'success' : 'warning'} />
+        <ExecutiveMetricCard icon={CheckCircle2} label="Services operating" value={total ? `${up} / ${total}` : '—'} detail={total ? `${Math.max(0, total - up)} require review` : 'No service checks configured'} tone={total > 0 && up === total ? 'success' : 'warning'} />
+        <ExecutiveMetricCard icon={Timer} label="Customer impact" value={fmtMin(impactMinutes)} detail={`${outages.length} outage event${outages.length === 1 ? '' : 's'} in the selected window`} tone={impactMinutes > 0 ? 'danger' : 'success'} />
+        <ExecutiveMetricCard icon={Target} label="Failed validations" value={failedChecks.toLocaleString()} detail={`${atRisk.length} service${atRisk.length === 1 ? '' : 's'} outside the target`} tone={failedChecks > 0 ? 'warning' : 'success'} />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-12">
+        <AvailabilityPortfolioPanel rows={serviceRows} rangeLabel={rangeLabel} loading={loading} large={large} />
+        <div className="grid gap-4 lg:col-span-4">
+          <DistributionPanel title="Live Service State" icon={<Radio className="h-4 w-4 text-violet-500" />} segments={serviceStatus} total={total} hint="real-time" />
+          <DistributionPanel title="SLA Risk Profile" icon={<Target className="h-4 w-4 text-amber-500" />} segments={riskProfile} total={serviceRows.length} hint={rangeLabel} />
+        </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <BreakdownPanel title="Availability by Service Type" icon={<Shield className="h-4 w-4" />} segments={byType} hint={rangeLabel} loading={loading && !byType.length} large={large} accent="violet" />
+        <BreakdownPanel title="Availability by Business Group" icon={<Building2 className="h-4 w-4" />} segments={byGroup} hint={rangeLabel} loading={loading && !byGroup.length} large={large} accent="emerald" />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <DataTablePanel
+          title="Services Requiring Attention"
+          icon={<TriangleAlert className="h-4 w-4 text-amber-500" />}
+          hint={rangeLabel}
+          loading={loading && !atRisk.length}
+          empty="All measured services are meeting the target"
+          emptyTone="success"
+          columns={['Service', 'Group', 'Failed', 'P95', 'Availability']}
+          rows={atRisk.slice(0, 15).map((row) => {
+            const response = responseByService.get(row.service_check_id)
+            return {
+              key: row.service_check_id,
+              cells: [
+                <Link to={`/services/${row.service_check_id}`} className="font-semibold text-primary hover:underline">{row.name}</Link>,
+                <span className="text-xs text-muted">{row.group_name || 'Unassigned'}</span>,
+                <span className={cn('tabular-nums', row.checks_failed > 0 && 'font-bold text-danger')}>{row.checks_failed}</span>,
+                <span className="tabular-nums text-muted">{response?.p95_ms != null ? `${response.p95_ms.toFixed(0)} ms` : '—'}</span>,
+                <GradientBar pct={row.availability_pct} />,
+              ],
+            }
+          })}
+        />
+        <DataTablePanel
+          title="Business Service Portfolio"
+          icon={<Building2 className="h-4 w-4 text-violet-500" />}
+          hint={rangeLabel}
+          loading={loading && !serviceRows.length}
+          empty="No service checks configured"
+          columns={['Service', 'Type', 'State', 'Availability']}
+          rows={[...serviceRows]
+            .sort((a, b) => (a.availability_pct ?? -1) - (b.availability_pct ?? -1))
+            .slice(0, 15)
+            .map((row) => ({
+              key: row.service_check_id,
+              cells: [
+                <Link to={`/services/${row.service_check_id}`} className="font-semibold text-primary hover:underline">{row.name}</Link>,
+                <span className="text-[10px] font-bold uppercase tracking-wider text-muted">{row.type}</span>,
+                <Badge variant={row.status === 'up' ? 'success' : row.status === 'down' ? 'danger' : 'warning'} className="capitalize">{row.status}</Badge>,
+                <GradientBar pct={row.availability_pct} />,
+              ],
+            }))}
+        />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <DataTablePanel
+          title="Customer-impact Timeline"
+          icon={<Clock className="h-4 w-4 text-rose-500" />}
+          hint={rangeLabel}
+          loading={loading && !outages.length}
+          empty="No customer-impacting service outages recorded"
+          emptyTone="success"
+          columns={['Started', 'Service', 'Duration']}
+          rows={outages.slice(0, 12).map((row, index) => ({
+            key: `${row.service_check_id}-${index}`,
+            cells: [
+              <span className="text-xs text-muted">{row.started_at ? relativeTime(row.started_at) : '—'}</span>,
+              <Link to={`/services/${row.service_check_id}`} className="font-medium text-primary hover:underline">{row.name}</Link>,
+              <span className="font-semibold tabular-nums">{fmtMin(row.duration_minutes)}</span>,
+            ],
+          }))}
+        />
+        <DataTablePanel
+          title="Certificate Continuity Risk"
+          icon={<Shield className="h-4 w-4 text-sky-500" />}
+          hint="TLS"
+          loading={loading && !tlsWarnings.length}
+          empty="No certificate expiry risks detected"
+          emptyTone="success"
+          columns={['Service', 'Expires', 'Days', 'Risk']}
+          rows={tlsWarnings.slice(0, 12).map((row) => ({
+            key: row.service_check_id,
+            cells: [
+              <Link to={`/services/${row.service_check_id}`} className="font-medium text-primary hover:underline">{row.name}</Link>,
+              <span className="text-xs text-muted">{row.tls_expiry_date ? new Date(row.tls_expiry_date).toLocaleDateString() : '—'}</span>,
+              <span className="font-semibold tabular-nums">{row.days_remaining}</span>,
+              <Badge variant={row.severity === 'critical' ? 'danger' : 'warning'} className="capitalize">{row.severity}</Badge>,
+            ],
+          }))}
+        />
+      </div>
+    </div>
+  )
+}
+
+function ServerExecutiveView({
+  rangeLabel,
+  overview,
+  statusSegments,
+  osSegments,
+  agentSegments,
+  large,
+}: {
+  rangeLabel: string
+  overview?: ServerMonitoringOverview
+  statusSegments: CountSegment[]
+  osSegments: CountSegment[]
+  agentSegments: CountSegment[]
+  large?: boolean
+}) {
+  const total = overview?.total ?? 0
+  const healthy = overview?.status_counts?.healthy ?? 0
+  const critical = overview?.status_counts?.critical ?? 0
+  const warnings = (overview?.status_counts?.warning ?? 0) + (overview?.status_counts?.stale ?? 0)
+  const online = overview?.agent_counts?.online ?? 0
+  const peakCpu = overview?.top_cpu?.[0]?.value
+  const peakMemory = overview?.top_memory?.[0]?.value
+  const peakDisk = overview?.top_disk?.[0]?.value
+
+  return (
+    <div className="space-y-5 animate-fade-in">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <ExecutiveMetricCard icon={Activity} label="Healthy server estate" value={total ? fmtPct((healthy / total) * 100, 1) : '—'} detail={total ? `${healthy} of ${total} workloads healthy now` : 'No servers enrolled'} tone={total > 0 && healthy === total ? 'success' : critical > 0 ? 'danger' : 'warning'} />
+        <ExecutiveMetricCard icon={AlertOctagon} label="Operational risk" value={String(critical + warnings)} detail={`${critical} critical · ${warnings} warning or stale`} tone={critical > 0 ? 'danger' : warnings > 0 ? 'warning' : 'success'} />
+        <ExecutiveMetricCard icon={Radio} label="Agents online" value={total ? `${online} / ${total}` : '—'} detail="Live telemetry and inventory coverage" tone={total > 0 && online >= total ? 'success' : 'warning'} />
+        <ExecutiveMetricCard icon={Cpu} label="Peak resource pressure" value={peakCpu != null ? `${peakCpu.toFixed(1)}%` : '—'} detail={`Memory ${peakMemory != null ? `${peakMemory.toFixed(1)}%` : '—'} · Disk ${peakDisk != null ? `${peakDisk.toFixed(1)}%` : '—'}`} tone={Math.max(peakCpu ?? 0, peakMemory ?? 0, peakDisk ?? 0) >= 90 ? 'danger' : Math.max(peakCpu ?? 0, peakMemory ?? 0, peakDisk ?? 0) >= 75 ? 'warning' : 'success'} />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <DistributionPanel title="Server Health" icon={<Activity className="h-4 w-4 text-sky-500" />} segments={statusSegments} total={total} hint="real-time" />
+        <DistributionPanel title="Operating Systems" icon={<Server className="h-4 w-4 text-violet-500" />} segments={osSegments} total={total} hint="estate mix" />
+        <DistributionPanel title="Telemetry Coverage" icon={<Radio className="h-4 w-4 text-emerald-500" />} segments={agentSegments} total={Math.max(total, agentSegments.reduce((sum, row) => sum + row.value, 0))} hint="agents" />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <PressurePanel title="CPU Pressure" icon={<Cpu className="h-4 w-4 text-sky-500" />} items={overview?.top_cpu || []} empty="No CPU pressure data" />
+        <PressurePanel title="Memory Pressure" icon={<MemoryStick className="h-4 w-4 text-violet-500" />} items={overview?.top_memory || []} empty="No memory pressure data" />
+        <PressurePanel title="Storage Pressure" icon={<HardDrive className="h-4 w-4 text-amber-500" />} items={overview?.top_disk || []} empty="No storage pressure data" />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <PressurePanel title="Highest Network Demand" icon={<TrendingUp className="h-4 w-4 text-emerald-500" />} items={overview?.top_network || []} empty="No network demand data" unit="bps" large={large} />
+        <GlassPanel>
+          <PanelHeader icon={<Building2 className="h-4 w-4 text-violet-500" />} title="Workload Distribution by Site" hint={rangeLabel} />
+          <div className="grid gap-3 p-4 sm:grid-cols-2">
+            {(overview?.sites || []).length === 0 ? (
+              <EmptyPanel icon={<MapPin className="h-7 w-7" />} text="No site assignments available" />
+            ) : (overview?.sites || []).slice(0, 10).map((site) => (
+              <div key={site.id} className="rounded-xl border border-border/60 bg-surface2/35 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-bold text-text">{site.name}</div>
+                    <div className="mt-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Business site</div>
+                  </div>
+                  <span className="text-2xl font-black tabular-nums text-primary">{site.server_count}</span>
+                </div>
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-surface2">
+                  <div className="h-full rounded-full bg-gradient-to-r from-violet-500 to-primary" style={{ width: `${total ? Math.max(4, (site.server_count / total) * 100) : 0}%` }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </GlassPanel>
+      </div>
+
+      <div className="flex justify-end">
+        <Link to="/servers" className="inline-flex items-center rounded-xl bg-primary px-4 py-2 text-xs font-bold text-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
+          Review complete server estate
+          <ArrowUpRight className="ml-1.5 h-3.5 w-3.5" />
+        </Link>
       </div>
     </div>
   )
@@ -1035,6 +1506,186 @@ function PanelHeader({
         )}
       </div>
     </div>
+  )
+}
+
+function ExecutiveMetricCard({
+  icon: Icon, label, value, detail, tone,
+}: {
+  icon: typeof Activity
+  label: string
+  value: string
+  detail: string
+  tone: 'success' | 'warning' | 'danger' | 'info'
+}) {
+  const styles = {
+    success: { border: 'border-emerald-500/25', bg: 'from-emerald-500/12 to-teal-500/4', icon: 'bg-success/12 text-success' },
+    warning: { border: 'border-amber-500/25', bg: 'from-amber-500/12 to-orange-500/4', icon: 'bg-warning/12 text-warning' },
+    danger: { border: 'border-rose-500/25', bg: 'from-rose-500/12 to-red-500/4', icon: 'bg-danger/12 text-danger' },
+    info: { border: 'border-sky-500/25', bg: 'from-sky-500/12 to-blue-500/4', icon: 'bg-info/12 text-info' },
+  }[tone]
+  return (
+    <div className={cn('relative overflow-hidden rounded-2xl border bg-gradient-to-br p-4 shadow-sm', styles.border, styles.bg)}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[10px] font-black uppercase tracking-[0.16em] text-muted">{label}</div>
+          <div className="mt-2 text-3xl font-black tabular-nums tracking-tight text-text">{value}</div>
+        </div>
+        <span className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-xl', styles.icon)}>
+          <Icon className="h-5 w-5" />
+        </span>
+      </div>
+      <p className="mt-3 text-xs leading-5 text-muted">{detail}</p>
+    </div>
+  )
+}
+
+function AvailabilityPortfolioPanel({
+  rows, rangeLabel, loading, large,
+}: {
+  rows: BusinessData['service_availability']
+  rangeLabel: string
+  loading?: boolean
+  large?: boolean
+}) {
+  const ranked = [...rows]
+    .filter((row) => row.availability_pct != null)
+    .sort((a, b) => (a.availability_pct ?? 0) - (b.availability_pct ?? 0))
+    .slice(0, large ? 14 : 10)
+  return (
+    <GlassPanel className="lg:col-span-8">
+      <PanelHeader icon={<TrendingUp className="h-4 w-4 text-violet-500" />} title="Service Availability Portfolio" hint={rangeLabel} accent="border-violet-500/30" />
+      <div className="p-4">
+        {loading && !ranked.length ? (
+          <div className="space-y-3">{Array.from({ length: 7 }).map((_, index) => <Skeleton key={index} className="h-9 w-full" />)}</div>
+        ) : ranked.length === 0 ? (
+          <EmptyPanel icon={<Shield className="h-8 w-8" />} text="No measured service availability in this window" />
+        ) : (
+          <div className="space-y-3">
+            {ranked.map((row) => {
+              const pct = row.availability_pct ?? 0
+              return (
+                <div key={row.service_check_id} className="grid items-center gap-3 sm:grid-cols-[minmax(140px,1.2fr)_minmax(180px,3fr)_70px]">
+                  <div className="min-w-0">
+                    <Link to={`/services/${row.service_check_id}`} className="block truncate text-sm font-semibold text-text hover:text-primary" title={row.name}>{row.name}</Link>
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">{row.group_name || row.type}</span>
+                  </div>
+                  <div className="relative h-3 overflow-hidden rounded-full bg-surface2 ring-1 ring-border/50">
+                    <div className={cn('h-full rounded-full bg-gradient-to-r shadow-sm', availBarGradient(pct))} style={{ width: `${Math.max(1, pct)}%` }} />
+                    {pct < 99.9 && <span className="absolute right-[0.1%] top-0 h-full w-px bg-text/25" title="99.9% target" />}
+                  </div>
+                  <div className={cn('text-right text-sm font-black tabular-nums', availText(pct))}>{pct.toFixed(2)}%</div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    </GlassPanel>
+  )
+}
+
+function DistributionPanel({
+  title, icon, segments, total, hint,
+}: {
+  title: string
+  icon: React.ReactNode
+  segments: CountSegment[]
+  total: number
+  hint?: string
+}) {
+  const tone = {
+    success: { bar: 'bg-success', text: 'text-success', dot: 'bg-success' },
+    warning: { bar: 'bg-warning', text: 'text-warning', dot: 'bg-warning' },
+    danger: { bar: 'bg-danger', text: 'text-danger', dot: 'bg-danger' },
+    info: { bar: 'bg-info', text: 'text-info', dot: 'bg-info' },
+    muted: { bar: 'bg-muted', text: 'text-muted', dot: 'bg-muted' },
+  }
+  return (
+    <GlassPanel>
+      <PanelHeader icon={icon} title={title} hint={hint} />
+      <div className="space-y-4 p-4">
+        <div className="flex h-3 overflow-hidden rounded-full bg-surface2 ring-1 ring-border/50">
+          {total > 0 && segments.map((segment) => (
+            <div
+              key={segment.key}
+              className={cn('h-full transition-all', tone[segment.tone || 'muted'].bar)}
+              style={{ width: `${(segment.value / total) * 100}%` }}
+              title={`${segment.label}: ${segment.value}`}
+            />
+          ))}
+        </div>
+        {segments.length === 0 ? (
+          <div className="py-5 text-center text-sm text-muted">No portfolio data available</div>
+        ) : (
+          <div className="space-y-2.5">
+            {segments.map((segment) => (
+              <div key={segment.key} className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className={cn('h-2.5 w-2.5 shrink-0 rounded-full', tone[segment.tone || 'muted'].dot)} />
+                  <span className="truncate text-xs font-semibold text-muted">{segment.label}</span>
+                </div>
+                <div className="flex items-baseline gap-2">
+                  <span className={cn('text-sm font-black tabular-nums', tone[segment.tone || 'muted'].text)}>{segment.value}</span>
+                  <span className="w-10 text-right text-[10px] tabular-nums text-muted">{total ? `${((segment.value / total) * 100).toFixed(0)}%` : '—'}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </GlassPanel>
+  )
+}
+
+function PressurePanel({
+  title, icon, items, empty, unit = 'pct', large,
+}: {
+  title: string
+  icon: React.ReactNode
+  items: TopPressureItem[]
+  empty: string
+  unit?: 'pct' | 'bps'
+  large?: boolean
+}) {
+  const max = Math.max(1, ...items.map((item) => item.value))
+  const fmtBps = (value: number) => {
+    const units = ['B/s', 'KB/s', 'MB/s', 'GB/s', 'TB/s']
+    let scaled = value
+    let index = 0
+    while (scaled >= 1024 && index < units.length - 1) { scaled /= 1024; index += 1 }
+    return `${scaled.toFixed(1)} ${units[index]}`
+  }
+  return (
+    <GlassPanel>
+      <PanelHeader icon={icon} title={title} hint="live pressure" />
+      <div className="space-y-3 p-4">
+        {items.length === 0 ? (
+          <EmptyPanel icon={icon} text={empty} />
+        ) : items.slice(0, large ? 8 : 6).map((item, index) => {
+          const relative = unit === 'pct' ? Math.min(100, item.value) : (item.value / max) * 100
+          const risk = unit === 'pct' && item.value >= 90 ? 'danger' : unit === 'pct' && item.value >= 75 ? 'warning' : 'success'
+          return (
+            <Link key={item.server_id} to={`/servers/${item.server_id}`} className="group block rounded-xl border border-transparent p-2 transition hover:border-border hover:bg-surface2/50">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-black tabular-nums text-muted">{String(index + 1).padStart(2, '0')}</span>
+                    <span className="truncate text-sm font-semibold text-text group-hover:text-primary">{item.display_name || item.hostname || item.server_id.slice(0, 8)}</span>
+                  </div>
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface2">
+                    <div className={cn('h-full rounded-full bg-gradient-to-r', risk === 'danger' ? 'from-rose-500 to-red-500' : risk === 'warning' ? 'from-amber-500 to-orange-500' : 'from-emerald-500 to-teal-500')} style={{ width: `${Math.max(2, relative)}%` }} />
+                  </div>
+                </div>
+                <span className={cn('w-20 text-right text-sm font-black tabular-nums', risk === 'danger' ? 'text-danger' : risk === 'warning' ? 'text-warning' : 'text-success')}>
+                  {unit === 'pct' ? `${item.value.toFixed(1)}%` : fmtBps(item.value)}
+                </span>
+              </div>
+            </Link>
+          )
+        })}
+      </div>
+    </GlassPanel>
   )
 }
 
