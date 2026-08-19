@@ -14,6 +14,21 @@ import (
 	g "github.com/gosnmp/gosnmp"
 )
 
+// Vendor utilization scalars that are authoritative for the fleet-level
+// CPU/memory headline. Aruba's .13/.15 WLSX nodes are table roots; controller
+// utilization is exposed by the .30/.31 scalar objects instead.
+const (
+	oidArubaControllerCPU = "1.3.6.1.4.1.14823.2.2.1.2.1.30.0" // wlsxSysExtCpuUsedPercent
+	oidArubaControllerMem = "1.3.6.1.4.1.14823.2.2.1.2.1.31.0" // wlsxSysExtMemoryUsedPercent
+
+	oidF5TMMCPU       = "1.3.6.1.4.1.3375.2.1.1.2.21.35.0"
+	oidF5HostCPU      = "1.3.6.1.4.1.3375.2.1.1.2.20.29.0"
+	oidF5TMMMemTotal  = "1.3.6.1.4.1.3375.2.1.1.2.1.44.0"
+	oidF5TMMMemUsed   = "1.3.6.1.4.1.3375.2.1.1.2.1.45.0"
+	oidF5HostMemTotal = "1.3.6.1.4.1.3375.2.1.1.2.20.44.0"
+	oidF5HostMemUsed  = "1.3.6.1.4.1.3375.2.1.1.2.20.45.0"
+)
+
 // Collector executes one full SNMP poll for a Device and returns a
 // Result. It is stateless except for an in-memory cache of previous
 // interface-counter snapshots, used to compute bps.
@@ -105,7 +120,11 @@ func (c *Collector) Collect(ctx context.Context, d *Device, r *Result) {
 		tplSamples, tplValues, tplGroups := c.collectTemplateMetrics(ctx, client, d, start)
 		if len(tplValues) > 0 || len(tplGroups) > 0 {
 			r.Mu.Lock()
-			r.Scalars = append(r.Scalars, tplSamples...)
+			r.Scalars = upsertMetricSamples(r.Scalars, tplSamples)
+			// Keep detailed template metrics under tpl_* and also map
+			// authoritative vendor utilization to the canonical keys used
+			// by the device list and detail pages.
+			r.Scalars = upsertMetricSamples(r.Scalars, canonicalVendorMetrics(tplSamples))
 			r.TplValues = append(r.TplValues, tplValues...)
 			r.TplGroups = append(r.TplGroups, tplGroups...)
 			r.Mu.Unlock()
@@ -288,11 +307,18 @@ func (c *Collector) collectHostResources(
 		break
 	}
 
-	// 3) Vendor-specific fallbacks when standard MIBs return nothing.
+	// 3) Vendor-specific metrics. Aruba controllers and F5 BIG-IP expose
+	// authoritative utilization outside HOST-RESOURCES-MIB, so prefer their
+	// vendor metrics even when the generic agent returned a value. BIG-IP's
+	// hrStorageRam includes Linux cache and can otherwise appear near 100%.
 	cleanOID := strings.TrimPrefix(sysObjectID, ".")
-	if !hasCPU || !hasMem {
-		vendorMetrics := c.collectVendorMetrics(s, deviceID, ts, cleanOID, hasCPU, hasMem)
-		out = append(out, vendorMetrics...)
+	preferVendor := strings.HasPrefix(cleanOID, "1.3.6.1.4.1.14823.") ||
+		strings.HasPrefix(cleanOID, "1.3.6.1.4.1.3375.")
+	if !hasCPU || !hasMem || preferVendor {
+		vendorMetrics := c.collectVendorMetrics(
+			s, deviceID, ts, cleanOID, hasCPU && !preferVendor, hasMem && !preferVendor,
+		)
+		out = upsertMetricSamples(out, vendorMetrics)
 	}
 
 	return out, nil
@@ -312,6 +338,7 @@ func (c *Collector) collectVendorMetrics(
 	isPAN := strings.HasPrefix(sysOID, "1.3.6.1.4.1.25461.")
 	isJuniper := strings.HasPrefix(sysOID, "1.3.6.1.4.1.2636.")
 	isAruba := strings.HasPrefix(sysOID, "1.3.6.1.4.1.14823.")
+	isF5 := strings.HasPrefix(sysOID, "1.3.6.1.4.1.3375.")
 
 	mk := func(key string, val float64, unit string) MetricSample {
 		return MetricSample{DeviceID: deviceID, Key: key, Value: val, Unit: unit, Timestamp: ts, PollerID: c.pollerID}
@@ -417,8 +444,42 @@ func (c *Collector) collectVendorMetrics(
 	// ── Aruba / HPE ──
 	if isAruba {
 		if !hasCPU {
-			if v := getScalar(s, OIDArubaAPCPU); v >= 0 {
+			if v := getScalar(s, oidArubaControllerCPU); v >= 0 {
 				out = append(out, mk("cpu", v, "percent"))
+			}
+		}
+		if !hasMem {
+			if v := getScalar(s, oidArubaControllerMem); v >= 0 {
+				out = append(out, mk("memory", v, "percent"))
+			}
+		}
+	}
+
+	// ── F5 BIG-IP ──
+	if isF5 {
+		if !hasCPU {
+			cpu := maxValid(getScalar(s, oidF5TMMCPU), getScalar(s, oidF5HostCPU))
+			if cpu >= 0 {
+				out = append(out, mk("cpu", cpu, "percent"))
+			}
+		}
+		if !hasMem {
+			domain, tmmPct, hostPct := selectF5MemoryDomain(
+				getScalar(s, oidF5TMMMemUsed), getScalar(s, oidF5TMMMemTotal),
+				getScalar(s, oidF5HostMemUsed), getScalar(s, oidF5HostMemTotal),
+			)
+			if tmmPct >= 0 {
+				out = append(out, mk("f5_tmm_memory_pct", tmmPct, "percent"))
+			}
+			if hostPct >= 0 {
+				out = append(out, mk("f5_host_memory_pct", hostPct, "percent"))
+			}
+			if domain.valid {
+				out = append(out,
+					mk("memory_total_bytes", domain.total, "bytes"),
+					mk("memory_used_bytes", domain.used, "bytes"),
+					mk("memory", domain.pct, "percent"),
+				)
 			}
 		}
 	}
@@ -446,6 +507,156 @@ func getScalar(s *g.GoSNMP, oid string) float64 {
 		}
 	}
 	return val
+}
+
+type f5MemoryDomain struct {
+	used  float64
+	total float64
+	pct   float64
+	valid bool
+}
+
+func utilizationPct(used, total float64) float64 {
+	if used < 0 || total <= 0 {
+		return -1
+	}
+	return used / total * 100
+}
+
+func maxValid(values ...float64) float64 {
+	best := -1.0
+	for _, value := range values {
+		if value >= 0 && value > best {
+			best = value
+		}
+	}
+	return best
+}
+
+// selectF5MemoryDomain calculates TMM and host/Other percentages separately.
+// These domains overlap conceptually and must never be summed. The more
+// utilized valid domain becomes the fleet-level headline.
+func selectF5MemoryDomain(tmmUsed, tmmTotal, hostUsed, hostTotal float64) (f5MemoryDomain, float64, float64) {
+	tmmPct := utilizationPct(tmmUsed, tmmTotal)
+	hostPct := utilizationPct(hostUsed, hostTotal)
+
+	selected := f5MemoryDomain{}
+	if tmmPct >= 0 {
+		selected = f5MemoryDomain{used: tmmUsed, total: tmmTotal, pct: tmmPct, valid: true}
+	}
+	if hostPct >= 0 && (!selected.valid || hostPct > selected.pct) {
+		selected = f5MemoryDomain{used: hostUsed, total: hostTotal, pct: hostPct, valid: true}
+	}
+	return selected, tmmPct, hostPct
+}
+
+// upsertMetricSamples guarantees one sample per metric key in each poll.
+// Later authoritative vendor values replace earlier generic values.
+func upsertMetricSamples(dst, src []MetricSample) []MetricSample {
+	positions := make(map[string]int, len(dst)+len(src))
+	out := make([]MetricSample, 0, len(dst)+len(src))
+	for _, sample := range dst {
+		if pos, exists := positions[sample.Key]; exists {
+			out[pos] = sample
+			continue
+		}
+		positions[sample.Key] = len(out)
+		out = append(out, sample)
+	}
+	for _, sample := range src {
+		if pos, exists := positions[sample.Key]; exists {
+			out[pos] = sample
+			continue
+		}
+		positions[sample.Key] = len(out)
+		out = append(out, sample)
+	}
+	return out
+}
+
+// canonicalVendorMetrics maps vendor template series into the stable keys
+// consumed by device list/detail views while preserving every tpl_* sample.
+func canonicalVendorMetrics(samples []MetricSample) []MetricSample {
+	byKey := make(map[string]MetricSample, len(samples))
+	for _, sample := range samples {
+		byKey[sample.Key] = sample
+	}
+
+	var out []MetricSample
+	clone := func(base MetricSample, key string, value float64, unit string) MetricSample {
+		base.Key = key
+		base.Value = value
+		base.Unit = unit
+		return base
+	}
+
+	if cpu, ok := byKey["tpl_aruba_cpu"]; ok {
+		out = append(out, clone(cpu, "cpu", cpu.Value, "percent"))
+	}
+	if memory, ok := byKey["tpl_aruba_mem"]; ok {
+		out = append(out, clone(memory, "memory", memory.Value, "percent"))
+	}
+
+	tmmCPU, hasTMMCPU := byKey["tpl_f5_tmm_cpu"]
+	hostCPU, hasHostCPU := byKey["tpl_f5_host_cpu"]
+	if hasTMMCPU || hasHostCPU {
+		base := tmmCPU
+		cpu := -1.0
+		if hasTMMCPU {
+			cpu = tmmCPU.Value
+		}
+		if hasHostCPU {
+			if !hasTMMCPU || hostCPU.Value > cpu {
+				base = hostCPU
+			}
+			cpu = maxValid(cpu, hostCPU.Value)
+		}
+		if cpu >= 0 {
+			out = append(out, clone(base, "cpu", cpu, "percent"))
+		}
+	}
+
+	tmmUsed, hasTMMUsed := byKey["tpl_f5_tmm_mem_used"]
+	tmmTotal, hasTMMTotal := byKey["tpl_f5_tmm_mem_total"]
+	hostUsed, hasHostUsed := byKey["tpl_f5_other_mem_used"]
+	hostTotal, hasHostTotal := byKey["tpl_f5_other_mem_total"]
+	if (hasTMMUsed && hasTMMTotal) || (hasHostUsed && hasHostTotal) {
+		tu, tt, hu, ht := -1.0, -1.0, -1.0, -1.0
+		base := tmmUsed
+		if hasTMMUsed {
+			tu = tmmUsed.Value
+			base = tmmUsed
+		}
+		if hasTMMTotal {
+			tt = tmmTotal.Value
+		}
+		if hasHostUsed {
+			hu = hostUsed.Value
+			if !hasTMMUsed {
+				base = hostUsed
+			}
+		}
+		if hasHostTotal {
+			ht = hostTotal.Value
+		}
+
+		domain, tmmPct, hostPct := selectF5MemoryDomain(tu, tt, hu, ht)
+		if tmmPct >= 0 {
+			out = append(out, clone(base, "f5_tmm_memory_pct", tmmPct, "percent"))
+		}
+		if hostPct >= 0 {
+			out = append(out, clone(base, "f5_host_memory_pct", hostPct, "percent"))
+		}
+		if domain.valid {
+			out = append(out,
+				clone(base, "memory_total_bytes", domain.total, "bytes"),
+				clone(base, "memory_used_bytes", domain.used, "bytes"),
+				clone(base, "memory", domain.pct, "percent"),
+			)
+		}
+	}
+
+	return out
 }
 
 func (c *Collector) collectInterfaces(ctx context.Context, s *g.GoSNMP) ([]Interface, error) {

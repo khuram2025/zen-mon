@@ -1,6 +1,7 @@
 package snmp
 
 import (
+	"math"
 	"testing"
 	"unicode/utf8"
 
@@ -161,3 +162,90 @@ func TestIsAuthzError(t *testing.T) {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+func TestArubaControllerUtilizationOIDsAreScalars(t *testing.T) {
+	if got, want := oidArubaControllerCPU, "1.3.6.1.4.1.14823.2.2.1.2.1.30.0"; got != want {
+		t.Fatalf("Aruba controller CPU OID = %s, want %s", got, want)
+	}
+	if got, want := oidArubaControllerMem, "1.3.6.1.4.1.14823.2.2.1.2.1.31.0"; got != want {
+		t.Fatalf("Aruba controller memory OID = %s, want %s", got, want)
+	}
+}
+
+func TestCanonicalVendorMetricsMapsArubaTemplateValues(t *testing.T) {
+	got := canonicalVendorMetrics([]MetricSample{
+		{Key: "tpl_aruba_cpu", Value: 23, Unit: "%"},
+		{Key: "tpl_aruba_mem", Value: 61, Unit: "%"},
+	})
+
+	values := metricValues(got)
+	if values["cpu"] != 23 {
+		t.Errorf("canonical CPU = %v, want 23", values["cpu"])
+	}
+	if values["memory"] != 61 {
+		t.Errorf("canonical memory = %v, want 61", values["memory"])
+	}
+}
+
+func TestF5MemoryDomainsUseWorstPercentageWithoutSumming(t *testing.T) {
+	const gib = 1024 * 1024 * 1024
+	domain, tmmPct, hostPct := selectF5MemoryDomain(
+		1.7*gib, 13.3*gib,
+		13.9*gib, 18.1*gib,
+	)
+
+	assertClose(t, "TMM memory", tmmPct, 12.7819548872)
+	assertClose(t, "host memory", hostPct, 76.7955801105)
+	assertClose(t, "canonical memory", domain.pct, 76.7955801105)
+	if domain.used != 13.9*gib || domain.total != 18.1*gib {
+		t.Errorf("canonical bytes = %v/%v, want host domain %v/%v", domain.used, domain.total, 13.9*gib, 18.1*gib)
+	}
+	if domain.pct == 99 {
+		t.Fatal("canonical memory retained misleading HOST-RESOURCES value")
+	}
+}
+
+func TestF5TemplateMetricsReplaceGenericMemory(t *testing.T) {
+	const gib = 1024 * 1024 * 1024
+	generic := []MetricSample{{Key: "memory", Value: 99, Unit: "percent"}}
+	template := []MetricSample{
+		{Key: "tpl_f5_tmm_mem_used", Value: 1.7 * gib, Unit: "bytes"},
+		{Key: "tpl_f5_tmm_mem_total", Value: 13.3 * gib, Unit: "bytes"},
+		{Key: "tpl_f5_other_mem_used", Value: 13.9 * gib, Unit: "bytes"},
+		{Key: "tpl_f5_other_mem_total", Value: 18.1 * gib, Unit: "bytes"},
+	}
+	got := upsertMetricSamples(generic, canonicalVendorMetrics(template))
+	values := metricValues(got)
+
+	assertClose(t, "canonical memory", values["memory"], 76.7955801105)
+	assertClose(t, "TMM diagnostic", values["f5_tmm_memory_pct"], 12.7819548872)
+	assertClose(t, "host diagnostic", values["f5_host_memory_pct"], 76.7955801105)
+	if values["memory_used_bytes"] != 13.9*gib || values["memory_total_bytes"] != 18.1*gib {
+		t.Error("canonical numerator and denominator do not match selected host domain")
+	}
+
+	count := 0
+	for _, sample := range got {
+		if sample.Key == "memory" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("memory sample count = %d, want 1", count)
+	}
+}
+
+func metricValues(samples []MetricSample) map[string]float64 {
+	values := make(map[string]float64, len(samples))
+	for _, sample := range samples {
+		values[sample.Key] = sample.Value
+	}
+	return values
+}
+
+func assertClose(t *testing.T, name string, got, want float64) {
+	t.Helper()
+	if math.Abs(got-want) > 0.000001 {
+		t.Errorf("%s = %.10f, want %.10f", name, got, want)
+	}
+}
