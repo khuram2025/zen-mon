@@ -6,6 +6,7 @@ const appPath = path.join(root, 'src/App.tsx')
 const layoutPath = path.join(root, 'src/components/Layout.tsx')
 const legacySidebarPath = path.join(root, 'src/components/layout/Sidebar.tsx')
 const networkCapturePath = path.join(root, 'src/components/servers/NetworkCapture.tsx')
+const availabilityPath = path.join(root, 'src/pages/AvailabilityPage.tsx')
 
 const read = (file) => fs.readFileSync(file, 'utf8')
 
@@ -13,6 +14,7 @@ const app = read(appPath)
 const layout = read(layoutPath)
 const legacySidebar = read(legacySidebarPath)
 const networkCapture = read(networkCapturePath)
+const availability = read(availabilityPath)
 
 function fail(message) {
   console.error(`route smoke failed: ${message}`)
@@ -150,6 +152,23 @@ for (const marker of [
 if (!/const \[scope, setScope\] = useState\('applications'\)/.test(networkCapture)
     || !/const \[kind, setKind\] = useState\('all'\)/.test(networkCapture)) {
   fail('network capture defaults must reduce system noise without hiding record kinds')
+}
+
+// The Availability page has three executive domains. A previous regression
+// changed only the hero KPI while leaving every chart/table device-specific.
+// Keep each selected tab URL-addressable and require a dedicated detail view.
+for (const domain of ['devices', 'services', 'servers']) {
+  if (!availability.includes(`fleetDomain === '${domain}'`)) {
+    fail(`availability is missing the ${domain} detail view`)
+  }
+}
+for (const component of ['ExecutiveBriefPanel', 'ServiceExecutiveView', 'ServerExecutiveView']) {
+  if (!availability.includes(component)) {
+    fail(`availability executive component is missing: ${component}`)
+  }
+}
+if (!availability.includes("viewParams.get('view')") || !availability.includes("next.set('view', domain)")) {
+  fail('availability domain selection must persist in the URL')
 }
 
 if (!process.exitCode) {
