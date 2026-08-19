@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	g "github.com/gosnmp/gosnmp"
 )
 
@@ -43,6 +44,9 @@ func (c *Collector) collectTemplateMetrics(
 			break
 		}
 		gr := &d.OidGroups[gi]
+		if !c.templateGroupDue(d.ID, gr, ts) {
+			continue
+		}
 		var (
 			grSamples []MetricSample
 			grValues  []TemplateValue
@@ -53,6 +57,10 @@ func (c *Collector) collectTemplateMetrics(
 		} else {
 			grSamples, grValues, ok = c.collectTemplateScalars(ctx, s, d, gr, ts)
 		}
+		// Rate-limit both successful and unsupported/failed capability probes.
+		// Otherwise a device without (for example) OSPF would retry that walk
+		// on every base poll instead of the group's bounded cadence.
+		c.markTemplateGroupPolled(d.ID, gr, ts)
 		samples = append(samples, grSamples...)
 		values = append(values, grValues...)
 		if ok {
@@ -60,6 +68,30 @@ func (c *Collector) collectTemplateMetrics(
 		}
 	}
 	return samples, values, polled
+}
+
+func (c *Collector) templateGroupDue(deviceID uuid.UUID, gr *OidGroup, ts time.Time) bool {
+	if gr.IntervalSeconds <= 0 {
+		return true
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	last := c.lastTplGroup[deviceID][gr.Key]
+	return last.IsZero() || ts.Sub(last) >= time.Duration(gr.IntervalSeconds)*time.Second
+}
+
+func (c *Collector) markTemplateGroupPolled(deviceID uuid.UUID, gr *OidGroup, ts time.Time) {
+	if gr.IntervalSeconds <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	groups := c.lastTplGroup[deviceID]
+	if groups == nil {
+		groups = make(map[string]time.Time)
+		c.lastTplGroup[deviceID] = groups
+	}
+	groups[gr.Key] = ts
 }
 
 // collectTemplateScalars GETs all metrics of a scalar group in chunks.

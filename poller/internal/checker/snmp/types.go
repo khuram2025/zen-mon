@@ -12,9 +12,10 @@ import (
 // Passphrases are stored as plaintext here ONLY in memory, after
 // crypto.Decrypt. They never hit disk in the poller process.
 type Device struct {
-	ID        uuid.UUID
-	Hostname  string
-	IPAddress net.IP
+	ID         uuid.UUID
+	Hostname   string
+	DeviceType string
+	IPAddress  net.IP
 
 	Enabled        bool
 	Version        string // "1" | "2c" | "3"
@@ -106,24 +107,24 @@ type SystemInfo struct {
 
 // Interface is one row from IF-MIB / IF-MIB-extensions.
 type Interface struct {
-	IfIndex       int
-	IfName        string
-	IfDescr       string
-	IfAlias       string
-	IfType        int
-	IfSpeed       uint64
-	MACAddress    string
-	AdminStatus   string
-	OperStatus    string
-	InOctets      uint64
-	OutOctets     uint64
-	InUcastPkts   uint64
-	OutUcastPkts  uint64
-	InErrors      uint64
-	OutErrors     uint64
-	InDiscards    uint64
-	OutDiscards   uint64
-	HasHC         bool // true if 64-bit HC counters were available
+	IfIndex      int
+	IfName       string
+	IfDescr      string
+	IfAlias      string
+	IfType       int
+	IfSpeed      uint64
+	MACAddress   string
+	AdminStatus  string
+	OperStatus   string
+	InOctets     uint64
+	OutOctets    uint64
+	InUcastPkts  uint64
+	OutUcastPkts uint64
+	InErrors     uint64
+	OutErrors    uint64
+	InDiscards   uint64
+	OutDiscards  uint64
+	HasHC        bool // true if 64-bit HC counters were available
 }
 
 // Entity is one row from ENTITY-MIB::entPhysicalTable.

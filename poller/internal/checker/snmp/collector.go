@@ -36,9 +36,10 @@ type Collector struct {
 	sessions *SessionCache
 	pollerID string
 
-	mu      sync.Mutex
-	prevIfs map[uuid.UUID]map[uint32]ifSnapshot
-	prevTpl map[uuid.UUID]map[string]tplSnap
+	mu           sync.Mutex
+	prevIfs      map[uuid.UUID]map[uint32]ifSnapshot
+	prevTpl      map[uuid.UUID]map[string]tplSnap
+	lastTplGroup map[uuid.UUID]map[string]time.Time
 }
 
 type ifSnapshot struct {
@@ -50,10 +51,11 @@ type ifSnapshot struct {
 
 func NewCollector(pollerID string, sessions *SessionCache) *Collector {
 	return &Collector{
-		sessions: sessions,
-		pollerID: pollerID,
-		prevIfs:  make(map[uuid.UUID]map[uint32]ifSnapshot),
-		prevTpl:  make(map[uuid.UUID]map[string]tplSnap),
+		sessions:     sessions,
+		pollerID:     pollerID,
+		prevIfs:      make(map[uuid.UUID]map[uint32]ifSnapshot),
+		prevTpl:      make(map[uuid.UUID]map[string]tplSnap),
+		lastTplGroup: make(map[uuid.UUID]map[string]time.Time),
 	}
 }
 
@@ -335,7 +337,6 @@ func (c *Collector) collectVendorMetrics(
 	// Detect vendor from sysObjectID prefix
 	isCisco := strings.HasPrefix(sysOID, "1.3.6.1.4.1.9.")
 	isForti := strings.HasPrefix(sysOID, "1.3.6.1.4.1.12356.")
-	isPAN := strings.HasPrefix(sysOID, "1.3.6.1.4.1.25461.")
 	isJuniper := strings.HasPrefix(sysOID, "1.3.6.1.4.1.2636.")
 	isAruba := strings.HasPrefix(sysOID, "1.3.6.1.4.1.14823.")
 	isF5 := strings.HasPrefix(sysOID, "1.3.6.1.4.1.3375.")
@@ -358,26 +359,17 @@ func (c *Collector) collectVendorMetrics(
 			}
 		}
 		if !hasMem {
-			// CISCO-MEMORY-POOL-MIB — walk used+free, sum processor pools
-			usedVals, _ := s.BulkWalkAll(OIDCiscoMemPoolUsed)
-			freeVals, _ := s.BulkWalkAll(OIDCiscoMemPoolFree)
-			if len(usedVals) > 0 && len(freeVals) > 0 {
-				var totalUsed, totalFree float64
-				for _, v := range usedVals {
-					totalUsed += float64(asUint(v))
-				}
-				for _, v := range freeVals {
-					totalFree += float64(asUint(v))
-				}
-				total := totalUsed + totalFree
-				if total > 0 {
-					pct := totalUsed / total * 100.0
-					out = append(out,
-						mk("memory_total_bytes", total, "bytes"),
-						mk("memory_used_bytes", totalUsed, "bytes"),
-						mk("memory", pct, "percent"),
-					)
-				}
+			// Prefer 64-bit enhanced pools, then the legacy Gauge32 table.
+			pool, ok := collectPrimaryMemoryPool(s, OIDCiscoEnhMemUsed, OIDCiscoEnhMemFree)
+			if !ok {
+				pool, ok = collectPrimaryMemoryPool(s, OIDCiscoMemPoolUsed, OIDCiscoMemPoolFree)
+			}
+			if ok {
+				out = append(out,
+					mk("memory_total_bytes", pool.used+pool.free, "bytes"),
+					mk("memory_used_bytes", pool.used, "bytes"),
+					mk("memory", pool.pct, "percent"),
+				)
 			}
 		}
 	}
@@ -400,43 +392,32 @@ func (c *Collector) collectVendorMetrics(
 		}
 	}
 
-	// ── Palo Alto ──
-	if isPAN {
-		if !hasCPU {
-			if v := getScalar(s, OIDPanSysCPU); v >= 0 {
-				out = append(out, mk("cpu", v, "percent"))
-			} else if v := getScalar(s, OIDPanCPU); v >= 0 {
-				out = append(out, mk("cpu", v, "percent"))
-			}
-		}
-		if !hasMem {
-			if v := getScalar(s, OIDPanSysMem); v >= 0 {
-				out = append(out, mk("memory", v, "percent"))
-			}
-		}
-	}
+	// PAN-OS CPU and memory are intentionally collected only from
+	// HOST-RESOURCES-MIB above/template rows. PAN-COMMON-MIB .1/.2 are
+	// software/hardware version strings, not utilization counters.
 
 	// ── Juniper ──
 	if isJuniper {
 		if !hasCPU {
-			// Walk jnxOperatingCPU, average across routing engines
+			// Use the hottest routing engine/component; an average hides a
+			// saturated member in multi-RE chassis.
 			cpuVals, _ := s.BulkWalkAll(OIDJnxCPU)
 			if len(cpuVals) > 0 {
-				var sum float64
+				value := -1.0
 				for _, v := range cpuVals {
-					sum += float64(asInt(v))
+					value = maxValid(value, float64(asInt(v)))
 				}
-				out = append(out, mk("cpu", sum/float64(len(cpuVals)), "percent"))
+				out = append(out, mk("cpu", value, "percent"))
 			}
 		}
 		if !hasMem {
 			memVals, _ := s.BulkWalkAll(OIDJnxMem)
 			if len(memVals) > 0 {
-				var sum float64
+				value := -1.0
 				for _, v := range memVals {
-					sum += float64(asInt(v))
+					value = maxValid(value, float64(asInt(v)))
 				}
-				out = append(out, mk("memory", sum/float64(len(memVals)), "percent"))
+				out = append(out, mk("memory", value, "percent"))
 			}
 		}
 	}
@@ -497,6 +478,22 @@ func getScalar(s *g.GoSNMP, oid string) float64 {
 	switch v.Type {
 	case g.NoSuchObject, g.NoSuchInstance, g.EndOfMibView:
 		return -1
+	}
+	// OctetString is commonly used for version/model text. Only accept it
+	// when the agent explicitly returned a numeric string.
+	switch raw := v.Value.(type) {
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+		if err != nil {
+			return -1
+		}
+		return parsed
+	case []byte:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(string(raw)), 64)
+		if err != nil {
+			return -1
+		}
+		return parsed
 	}
 	val := float64(asInt(v))
 	if val == 0 {
@@ -597,6 +594,56 @@ func canonicalVendorMetrics(samples []MetricSample) []MetricSample {
 		out = append(out, clone(memory, "memory", memory.Value, "percent"))
 	}
 
+	// For chassis/table metrics the fleet headline intentionally uses the
+	// hottest component. An average can hide one saturated route processor,
+	// dataplane, stack member, or memory subsystem.
+	for _, prefixes := range []struct {
+		key      string
+		prefixes []string
+	}{
+		{"cpu", []string{"tpl_aruba_cx_cpu_5min_", "tpl_aruba_cx_cpu_current_", "tpl_dell_cpu_load_", "tpl_cisco_cpu_5min_", "tpl_asa_cpu_5min_", "tpl_pan_cpu_", "tpl_jnx_cpu_", "tpl_fgt_core_usage_"}},
+		{"memory", []string{"tpl_aruba_cx_memory_", "tpl_jnx_mem_util_"}},
+	} {
+		if sample, ok := maxSampleWithPrefixes(samples, prefixes.prefixes...); ok {
+			out = append(out, clone(sample, prefixes.key, sample.Value, "percent"))
+		}
+	}
+
+	if cpu, ok := maxSampleWithPrefixes(samples, "tpl_fgt_cpu", "tpl_fgt_data_cpu"); ok {
+		out = append(out, clone(cpu, "cpu", cpu.Value, "percent"))
+	}
+	if memory, ok := maxSampleWithPrefixes(samples, "tpl_fgt_mem", "tpl_fgt_data_mem"); ok {
+		out = append(out, clone(memory, "memory", memory.Value, "percent"))
+	}
+
+	// OS10 exposes available memory so Linux page cache is not misreported as
+	// consumed memory. Use the matching total/available domain in bytes.
+	dellTotal, hasDellTotal := byKey["tpl_dell_total_mem_kb"]
+	dellAvailable, hasDellAvailable := byKey["tpl_dell_available_mem_kb"]
+	if hasDellTotal && hasDellAvailable && dellTotal.Value > 0 && dellAvailable.Value >= 0 && dellAvailable.Value <= dellTotal.Value {
+		total := dellTotal.Value * 1024
+		used := (dellTotal.Value - dellAvailable.Value) * 1024
+		pct := used / total * 100
+		out = append(out,
+			clone(dellTotal, "memory_total_bytes", total, "bytes"),
+			clone(dellTotal, "memory_used_bytes", used, "bytes"),
+			clone(dellTotal, "memory", pct, "percent"),
+		)
+	}
+
+	// Cisco memory pools are independent allocation domains. Select the largest
+	// valid system pool; never sum unrelated or intentionally-full small pools.
+	if pool, ok := primaryMemoryPool(samples,
+		[]string{"tpl_cisco_mem_used_", "tpl_asa_mem_used_", "tpl_cisco_enh_mem_used_", "tpl_asa_enh_mem_used_"},
+		[]string{"tpl_cisco_mem_free_", "tpl_asa_mem_free_", "tpl_cisco_enh_mem_free_", "tpl_asa_enh_mem_free_"},
+	); ok {
+		out = append(out,
+			clone(pool.base, "memory_total_bytes", pool.used+pool.free, "bytes"),
+			clone(pool.base, "memory_used_bytes", pool.used, "bytes"),
+			clone(pool.base, "memory", pool.pct, "percent"),
+		)
+	}
+
 	tmmCPU, hasTMMCPU := byKey["tpl_f5_tmm_cpu"]
 	hostCPU, hasHostCPU := byKey["tpl_f5_host_cpu"]
 	if hasTMMCPU || hasHostCPU {
@@ -657,6 +704,80 @@ func canonicalVendorMetrics(samples []MetricSample) []MetricSample {
 	}
 
 	return out
+}
+
+func maxSampleWithPrefixes(samples []MetricSample, prefixes ...string) (MetricSample, bool) {
+	var selected MetricSample
+	found := false
+	for _, sample := range samples {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(sample.Key, prefix) && sample.Value >= 0 && (!found || sample.Value > selected.Value) {
+				selected, found = sample, true
+			}
+		}
+	}
+	return selected, found
+}
+
+type memoryPool struct {
+	base       MetricSample
+	used, free float64
+	pct        float64
+}
+
+func primaryMemoryPool(samples []MetricSample, usedPrefixes, freePrefixes []string) (memoryPool, bool) {
+	usedBySuffix := make(map[string]MetricSample)
+	freeBySuffix := make(map[string]MetricSample)
+	for _, sample := range samples {
+		for _, prefix := range usedPrefixes {
+			if strings.HasPrefix(sample.Key, prefix) {
+				usedBySuffix[strings.TrimPrefix(sample.Key, prefix)] = sample
+			}
+		}
+		for _, prefix := range freePrefixes {
+			if strings.HasPrefix(sample.Key, prefix) {
+				freeBySuffix[strings.TrimPrefix(sample.Key, prefix)] = sample
+			}
+		}
+	}
+	var selected memoryPool
+	found := false
+	for suffix, used := range usedBySuffix {
+		free, ok := freeBySuffix[suffix]
+		if !ok || used.Value < 0 || free.Value < 0 || used.Value+free.Value <= 0 {
+			continue
+		}
+		pool := memoryPool{base: used, used: used.Value, free: free.Value}
+		pool.pct = pool.used / (pool.used + pool.free) * 100
+		// The largest allocation domain represents system/processor memory and
+		// avoids tiny intentionally-full pools (for example Cisco lsmpi_io).
+		poolTotal := pool.used + pool.free
+		selectedTotal := selected.used + selected.free
+		if !found || poolTotal > selectedTotal || (poolTotal == selectedTotal && pool.pct > selected.pct) {
+			selected, found = pool, true
+		}
+	}
+	return selected, found
+}
+
+func collectPrimaryMemoryPool(s *g.GoSNMP, usedOID, freeOID string) (memoryPool, bool) {
+	usedPDUs, usedErr := walkAll(s, usedOID)
+	freePDUs, freeErr := walkAll(s, freeOID)
+	if usedErr != nil || freeErr != nil {
+		return memoryPool{}, false
+	}
+	samples := make([]MetricSample, 0, len(usedPDUs)+len(freePDUs))
+	for _, pdu := range usedPDUs {
+		if suffix := oidSuffix(pdu.Name, usedOID); suffix != "" {
+			samples = append(samples, MetricSample{Key: "used_" + suffix, Value: float64(asUint(pdu))})
+		}
+	}
+	for _, pdu := range freePDUs {
+		if suffix := oidSuffix(pdu.Name, freeOID); suffix != "" {
+			samples = append(samples, MetricSample{Key: "free_" + suffix, Value: float64(asUint(pdu))})
+		}
+	}
+	return primaryMemoryPool(samples, []string{"used_"}, []string{"free_"})
 }
 
 func (c *Collector) collectInterfaces(ctx context.Context, s *g.GoSNMP) ([]Interface, error) {
@@ -851,11 +972,13 @@ func (c *Collector) collectSensors(
 	scaleV, _ := s.BulkWalkAll(OIDEntPhySensorScale)
 	precV, _ := s.BulkWalkAll(OIDEntPhySensorPrecision)
 	valueV, _ := s.BulkWalkAll(OIDEntPhySensorValue)
+	statusV, _ := s.BulkWalkAll(OIDEntPhySensorOperStatus)
 	unitV, _ := s.BulkWalkAll(OIDEntPhySensorUnitsDisplay)
 
 	scaleByIdx := indexMap(scaleV)
 	precByIdx := indexMap(precV)
 	valueByIdx := indexMap(valueV)
+	statusByIdx := indexMap(statusV)
 	unitByIdx := indexMap(unitV)
 
 	sensors := make([]Sensor, 0, len(typeV))
@@ -879,6 +1002,19 @@ func (c *Collector) collectSensors(
 			Unit:        unit,
 			Value:       val,
 		})
+		if statusPDU, ok := statusByIdx[idx]; ok {
+			status := int(asInt(statusPDU))
+			samples = append(samples, MetricSample{
+				DeviceID: deviceID, Key: fmt.Sprintf("sensor_oper_status_%d", idx), Value: float64(status),
+				Unit: "enum", Timestamp: ts, PollerID: c.pollerID,
+			})
+			// ENTITY-SENSOR-MIB: 1=ok, 2=unavailable, 3=nonoperational.
+			// Preserve inventory/status but do not chart a stale or invalid
+			// measurement as though it were healthy.
+			if status != 1 {
+				continue
+			}
+		}
 
 		// Emit a normalized scalar for thresholding. Only types with
 		// a clear meaning get mapped; others are left out.

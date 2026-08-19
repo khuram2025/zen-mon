@@ -24,6 +24,17 @@ from typing import Any, Optional
 # ────────────────────────────────────────────────────────────────────
 _SYS_OBJECT_PREFIXES: list[tuple[str, str, str]] = [
     # prefix, vendor, default_device_type
+    # Keep specific product trees before broad enterprise prefixes.
+    ("1.3.6.1.4.1.674.11000.5000.100.", "Dell Technologies", "switch"),
+    ("1.3.6.1.4.1.47196.",    "Aruba",    "switch"),
+    ("1.3.6.1.4.1.30065.",    "Arista",   "switch"),
+    ("1.3.6.1.4.1.3375.",     "F5 Networks", "other"),
+    ("1.3.6.1.4.1.2011.",     "Huawei",   "router"),
+    ("1.3.6.1.4.1.2620.",     "Check Point", "firewall"),
+    ("1.3.6.1.4.1.22610.",    "A10 Networks", "other"),
+    ("1.3.6.1.4.1.5951.",     "Citrix",   "other"),
+    ("1.3.6.1.4.1.1916.",     "Extreme Networks", "switch"),
+    ("1.3.6.1.4.1.25053.",    "Ruckus",   "access_point"),
     ("1.3.6.1.4.1.9.",        "Cisco",    "router"),
     ("1.3.6.1.4.1.2636.",     "Juniper",  "router"),
     ("1.3.6.1.4.1.12356.",    "Fortinet", "firewall"),
@@ -55,7 +66,11 @@ _SYS_DESCR_PATTERNS: list[tuple[re.Pattern, dict[str, str]]] = [
     (re.compile(r"Junos", re.I),              {"vendor": "Juniper", "os": "Junos"}),
     (re.compile(r"FortiGate", re.I),          {"vendor": "Fortinet", "os": "FortiOS", "device_type": "firewall"}),
     (re.compile(r"RouterOS", re.I),           {"vendor": "MikroTik", "os": "RouterOS", "device_type": "router"}),
+    (re.compile(r"ArubaOS-CX|AOS-CX", re.I),  {"vendor": "Aruba", "os": "AOS-CX", "device_type": "switch"}),
     (re.compile(r"ArubaOS", re.I),            {"vendor": "Aruba", "os": "ArubaOS"}),
+    (re.compile(r"SmartFabric OS10|OS10 Enterprise", re.I), {"vendor": "Dell Technologies", "os": "OS10", "device_type": "switch"}),
+    (re.compile(r"Arista Networks EOS|Arista EOS", re.I), {"vendor": "Arista", "os": "EOS", "device_type": "switch"}),
+    (re.compile(r"BIG-IP", re.I),              {"vendor": "F5 Networks", "os": "BIG-IP", "device_type": "other"}),
     (re.compile(r"UniFi", re.I),              {"vendor": "Ubiquiti", "os": "UniFi"}),
     (re.compile(r"HP ETHERNET", re.I),        {"vendor": "HP", "device_type": "printer"}),
     (re.compile(r"Linux", re.I),              {"os": "Linux", "device_type": "server"}),

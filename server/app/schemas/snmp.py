@@ -165,6 +165,7 @@ class OidGroupChildren(BaseModel):
 class OidGroup(BaseModel):
     key: str = Field(..., pattern=_KEY_PATTERN)
     name: str = Field(..., min_length=1, max_length=120)
+    interval_seconds: int = Field(default=0, ge=0, le=86400)
     kind: str = Field(default="scalar", description="scalar | table")
     description: Optional[str] = None
     table: Optional[OidGroupTable] = None
