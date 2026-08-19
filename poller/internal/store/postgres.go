@@ -97,22 +97,27 @@ func (s *PostgresStore) UpdateDeviceStatus(ctx context.Context, deviceID uuid.UU
 // LoadServiceChecks returns all enabled service checks.
 func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.ServiceCheck, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id, device_id, name, check_type, enabled,
-		       target_host, COALESCE(target_port, 0), COALESCE(target_url, ''),
-		       COALESCE(http_method, 'GET'), COALESCE(http_headers::text, '{}'),
-		       COALESCE(http_body, ''), COALESCE(http_expected_status, 200),
-		       COALESCE(http_expected_statuses, ''),
-		       COALESCE(http_content_match, ''), COALESCE(http_follow_redirects, true),
-		       COALESCE(tls_warn_days, 30), COALESCE(tls_critical_days, 7),
-		       check_interval, timeout, status,
-		       COALESCE(level, 1),
-		       COALESCE(config::text, '{}'),
-		       COALESCE(tags, ARRAY[]::text[]),
-		       group_id, parent_check_id,
-		       COALESCE(retry_count, 1), COALESCE(retry_delay_s, 30)
-		FROM service_checks
-		WHERE enabled = TRUE
-		ORDER BY name
+		SELECT sc.id, sc.device_id, sc.name, sc.check_type, sc.enabled,
+		       sc.target_host, COALESCE(sc.target_port, 0), COALESCE(sc.target_url, ''),
+		       COALESCE(sc.http_method, 'GET'), COALESCE(sc.http_headers::text, '{}'),
+		       COALESCE(sc.http_body, ''), COALESCE(sc.http_expected_status, 200),
+		       COALESCE(sc.http_expected_statuses, ''),
+		       COALESCE(sc.http_content_match, ''), COALESCE(sc.http_follow_redirects, true),
+		       COALESCE(sc.tls_warn_days, 30), COALESCE(sc.tls_critical_days, 7),
+		       sc.check_interval, sc.timeout, sc.status,
+		       COALESCE(sc.level, 1),
+		       COALESCE(sc.config::text, '{}'),
+		       COALESCE(sc.tags, ARRAY[]::text[]),
+		       sc.group_id, sc.parent_check_id,
+		       COALESCE(sc.retry_count, 1), COALESCE(sc.retry_delay_s, 30),
+		       sc.credential_id, COALESCE(sc.workflow_operator, 'all'),
+		       COALESCE(sc.workflow_steps::text, '[]'),
+		       COALESCE(cred.name, ''), COALESCE(cred.auth_type, ''),
+		       COALESCE(cred.username, ''), cred.secret_cipher
+		FROM service_checks sc
+		LEFT JOIN service_credentials cred ON cred.id = sc.credential_id
+		WHERE sc.enabled = TRUE
+		ORDER BY sc.name
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("query service checks: %w", err)
@@ -122,12 +127,14 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 	var checks []*checker.ServiceCheck
 	for rows.Next() {
 		var sc checker.ServiceCheck
-		var deviceID, groupID, parentID *uuid.UUID
+		var deviceID, groupID, parentID, credentialID *uuid.UUID
 		var intervalSec, timeoutSec int
 		var retryCount, retryDelaySec int
 		var headersJSON string
 		var configJSON string
+		var workflowJSON string
 		var tags []string
+		var credentialSecret []byte
 
 		err := rows.Scan(
 			&sc.ID, &deviceID, &sc.Name, &sc.CheckType, &sc.Enabled,
@@ -140,6 +147,9 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 			&intervalSec, &timeoutSec, &sc.Status,
 			&sc.Level, &configJSON, &tags,
 			&groupID, &parentID, &retryCount, &retryDelaySec,
+			&credentialID, &sc.WorkflowOperator, &workflowJSON,
+			&sc.CredentialName, &sc.CredentialAuthType,
+			&sc.CredentialUsername, &credentialSecret,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan service check: %w", err)
@@ -148,6 +158,7 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 		sc.DeviceID = deviceID
 		sc.GroupID = groupID
 		sc.ParentCheckID = parentID
+		sc.CredentialID = credentialID
 		sc.CheckInterval = time.Duration(intervalSec) * time.Second
 		sc.Timeout = time.Duration(timeoutSec) * time.Second
 		sc.RetryCount = retryCount
@@ -164,6 +175,20 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 		sc.Config = make(map[string]any)
 		if configJSON != "" && configJSON != "{}" {
 			json.Unmarshal([]byte(configJSON), &sc.Config)
+		}
+
+		if workflowJSON != "" && workflowJSON != "[]" {
+			if err := json.Unmarshal([]byte(workflowJSON), &sc.WorkflowSteps); err != nil {
+				sc.CredentialError = fmt.Sprintf("invalid workflow configuration: %v", err)
+			}
+		}
+		if credentialID != nil {
+			secret, err := snmp.Decrypt(credentialSecret)
+			if err != nil {
+				sc.CredentialError = fmt.Sprintf("service credential could not be decrypted: %v", err)
+			} else {
+				sc.CredentialSecret = secret
+			}
 		}
 
 		checks = append(checks, &sc)

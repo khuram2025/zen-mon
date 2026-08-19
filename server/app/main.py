@@ -61,6 +61,7 @@ def create_app() -> FastAPI:
     app.include_router(service_checks.groups_router, prefix="/api/v1")
     app.include_router(service_checks.maintenance_router, prefix="/api/v1")
     app.include_router(service_checks.templates_router, prefix="/api/v1")
+    app.include_router(service_checks.credentials_router, prefix="/api/v1")
     app.include_router(reports.router, prefix="/api/v1")
     app.include_router(report_schedules.router, prefix="/api/v1")
     app.include_router(realtime.router, prefix="/api/v1")

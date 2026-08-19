@@ -6,6 +6,19 @@ import (
 	"github.com/google/uuid"
 )
 
+// HTTPWorkflowStep is one request in a cookie-preserving service journey.
+// Secret placeholders are expanded only in memory immediately before send.
+type HTTPWorkflowStep struct {
+	Name             string            `json:"name"`
+	URL              string            `json:"url"`
+	Method           string            `json:"method"`
+	Headers          map[string]string `json:"headers"`
+	Body             string            `json:"body"`
+	ExpectedStatuses string            `json:"expected_statuses"`
+	ContentMatch     string            `json:"content_match"`
+	FollowRedirects  bool              `json:"follow_redirects"`
+}
+
 // ServiceCheck represents a configured service check loaded from PostgreSQL.
 type ServiceCheck struct {
 	ID                   uuid.UUID
@@ -34,6 +47,14 @@ type ServiceCheck struct {
 	Timeout              time.Duration
 	RetryCount           int
 	RetryDelay           time.Duration
+	CredentialID         *uuid.UUID
+	CredentialName       string
+	CredentialAuthType   string
+	CredentialUsername   string
+	CredentialSecret     string
+	CredentialError      string
+	WorkflowOperator     string
+	WorkflowSteps        []HTTPWorkflowStep
 	Status               string
 	DownCount            int // runtime state
 	LastCheckAt          time.Time

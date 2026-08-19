@@ -159,6 +159,29 @@ export type ServiceCheckType = 'http' | 'tcp' | 'tls' | 'icmp' | 'dns'
 export type ServiceStatus = 'up' | 'down' | 'degraded' | 'warning' | 'unknown'
 export type ServiceLevel = 1 | 2 | 3
 
+export interface ServiceCredential {
+  id: string
+  name: string
+  auth_type: 'basic' | 'bearer' | 'form'
+  username: string | null
+  description: string | null
+  has_secret: boolean
+  used_by: number
+  created_at: string
+  updated_at: string | null
+}
+
+export interface ServiceWorkflowStep {
+  name: string
+  url: string
+  method: 'GET' | 'POST' | 'HEAD' | 'PUT'
+  headers: Record<string, string>
+  body: string | null
+  expected_statuses: string
+  content_match: string | null
+  follow_redirects: boolean
+}
+
 export interface ServiceCheckGroup {
   id: string
   name: string
@@ -223,6 +246,11 @@ export interface ServiceCheck {
   tags: string[]
   retry_count?: number
   retry_delay_s?: number
+  credential_id?: string | null
+  credential_name?: string | null
+  credential_auth_type?: 'basic' | 'bearer' | 'form' | null
+  workflow_operator?: 'all' | 'any'
+  workflow_steps?: ServiceWorkflowStep[]
   in_maintenance?: boolean
   enabled: boolean
   target_host: string
