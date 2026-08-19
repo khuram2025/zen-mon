@@ -7,6 +7,8 @@ const layoutPath = path.join(root, 'src/components/Layout.tsx')
 const legacySidebarPath = path.join(root, 'src/components/layout/Sidebar.tsx')
 const networkCapturePath = path.join(root, 'src/components/servers/NetworkCapture.tsx')
 const availabilityPath = path.join(root, 'src/pages/AvailabilityPage.tsx')
+const serviceFormPath = path.join(root, 'src/components/forms/ServiceCheckFormDialog.tsx')
+const serviceWorkflowPath = path.join(root, 'src/components/forms/ServiceWorkflowFields.tsx')
 
 const read = (file) => fs.readFileSync(file, 'utf8')
 
@@ -15,6 +17,8 @@ const layout = read(layoutPath)
 const legacySidebar = read(legacySidebarPath)
 const networkCapture = read(networkCapturePath)
 const availability = read(availabilityPath)
+const serviceForm = read(serviceFormPath)
+const serviceWorkflow = read(serviceWorkflowPath)
 
 function fail(message) {
   console.error(`route smoke failed: ${message}`)
@@ -169,6 +173,17 @@ for (const component of ['ExecutiveBriefPanel', 'ServiceExecutiveView', 'ServerE
 }
 if (!availability.includes("viewParams.get('view')") || !availability.includes("next.set('view', domain)")) {
   fail('availability domain selection must persist in the URL')
+}
+
+// Authenticated service monitoring must remain a first-class configuration,
+// not a hidden JSON field. Require the secure vault and workflow builder.
+if (!serviceForm.includes('ServiceWorkflowFields')) {
+  fail('service check form is missing the authenticated workflow builder')
+}
+for (const marker of ['/service-credentials', 'Multi-step service journey', 'workflow_operator', '{{username}}', '{{password}}']) {
+  if (!serviceWorkflow.includes(marker) && !serviceForm.includes(marker)) {
+    fail(`authenticated service workflow is missing: ${marker}`)
+  }
 }
 
 if (!process.exitCode) {

@@ -4,10 +4,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_admin_user, require_operator_user
 from app.models.user import User
 from app.schemas.service_check import (
     ServiceCheckCreate,
@@ -25,8 +26,11 @@ from app.schemas.service_check import (
     ServiceCheckTemplateResponse,
     ServiceCheckTemplateApply,
     ServiceCheckTemplateApplyResult,
+    ServiceCredentialCreate,
+    ServiceCredentialUpdate,
+    ServiceCredentialResponse,
 )
-from app.services import service_check_service, service_metric_service
+from app.services import audit_service, service_check_service, service_metric_service
 
 def _status_matches(code: int, patterns: str) -> bool:
     """Match an HTTP status against a comma list of patterns: 200, 2xx, 200-299."""
@@ -63,6 +67,85 @@ router = APIRouter(prefix="/service-checks", tags=["Service Checks"])
 groups_router = APIRouter(prefix="/service-check-groups", tags=["Service Check Groups"])
 maintenance_router = APIRouter(prefix="/service-check-maintenance", tags=["Service Check Maintenance"])
 templates_router = APIRouter(prefix="/service-check-templates", tags=["Service Check Templates"])
+credentials_router = APIRouter(prefix="/service-credentials", tags=["Service Credentials"])
+
+
+@credentials_router.get("", response_model=list[ServiceCredentialResponse])
+async def list_service_credentials(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List safe credential metadata. Secret material is never returned."""
+    return await service_check_service.list_service_credentials(db)
+
+
+@credentials_router.post("", response_model=ServiceCredentialResponse, status_code=201)
+async def create_service_credential(
+    data: ServiceCredentialCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin_user),
+):
+    try:
+        credential = await service_check_service.create_service_credential(db, data, current_user.id)
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="A service credential with this name already exists")
+    await audit_service.write_audit_log(
+        db,
+        actor=current_user,
+        action="create",
+        resource_type="service_credential",
+        resource_id=str(credential.id),
+        metadata={"name": credential.name, "auth_type": credential.auth_type},
+    )
+    await db.commit()
+    return credential
+
+
+@credentials_router.put("/{credential_id}", response_model=ServiceCredentialResponse)
+async def update_service_credential(
+    credential_id: UUID,
+    data: ServiceCredentialUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin_user),
+):
+    try:
+        credential = await service_check_service.update_service_credential(db, credential_id, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="A service credential with this name already exists")
+    if not credential:
+        raise HTTPException(status_code=404, detail="Service credential not found")
+    await audit_service.write_audit_log(
+        db,
+        actor=current_user,
+        action="update",
+        resource_type="service_credential",
+        resource_id=str(credential.id),
+        metadata={"name": credential.name, "auth_type": credential.auth_type, "secret_rotated": data.secret is not None},
+    )
+    await db.commit()
+    return credential
+
+
+@credentials_router.delete("/{credential_id}", status_code=204)
+async def delete_service_credential(
+    credential_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin_user),
+):
+    if not await service_check_service.delete_service_credential(db, credential_id):
+        raise HTTPException(status_code=404, detail="Service credential not found")
+    await audit_service.write_audit_log(
+        db,
+        actor=current_user,
+        action="delete",
+        resource_type="service_credential",
+        resource_id=str(credential_id),
+    )
+    await db.commit()
 
 
 @templates_router.get("", response_model=list[ServiceCheckTemplateResponse])
@@ -306,7 +389,10 @@ async def create_service_check(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_operator_user),
 ):
-    return await service_check_service.create_service_check(db, data, current_user.id)
+    try:
+        return await service_check_service.create_service_check(db, data, current_user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/{check_id}", response_model=ServiceCheckResponse)
@@ -328,7 +414,10 @@ async def update_service_check(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_operator_user),
 ):
-    sc = await service_check_service.update_service_check(db, check_id, data)
+    try:
+        sc = await service_check_service.update_service_check(db, check_id, data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if not sc:
         raise HTTPException(status_code=404, detail="Service check not found")
     return sc
@@ -434,7 +523,10 @@ async def test_service_check(
     import time
     import httpx
 
-    check = await service_check_service.get_service_check(db, check_id)
+    try:
+        check, runtime_credential = await service_check_service.get_runtime_service_check(db, check_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     if not check:
         raise HTTPException(status_code=404, detail="Service check not found")
 
@@ -452,49 +544,9 @@ async def test_service_check(
 
     try:
         if check.check_type == "http":
-            url = check.target_url or f"http://{check.target_host}:{check.target_port or 80}"
-            async with httpx.AsyncClient(
-                timeout=check.timeout,
-                follow_redirects=check.http_follow_redirects,
-                verify=False,
-            ) as client:
-                method = (check.http_method or "GET").upper()
-                resp = await client.request(method, url)
-
-            elapsed = (time.monotonic() - start) * 1000
-            result["response_time_ms"] = round(elapsed, 1)
-            result["details"]["status_code"] = resp.status_code
-            result["details"]["headers"] = dict(resp.headers)
-            result["details"]["body_length"] = len(resp.content)
-
-            patterns = (check.http_expected_statuses or "").strip()
-            if patterns:
-                if _status_matches(resp.status_code, patterns):
-                    result["status"] = "up"
-                else:
-                    result["status"] = "down"
-                    result["error"] = (
-                        f"expected status {patterns}, got {resp.status_code}"
-                    )
-            else:
-                expected = check.http_expected_status or 200
-                if resp.status_code == expected:
-                    result["status"] = "up"
-                else:
-                    result["status"] = "down"
-                    result["error"] = (
-                        f"expected status {expected}, got {resp.status_code}"
-                    )
-
-            # Content match
-            if check.http_content_match:
-                body = resp.text
-                if check.http_content_match in body:
-                    result["details"]["content_match"] = True
-                else:
-                    result["status"] = "down"
-                    result["error"] = f"Content match failed: '{check.http_content_match}' not found"
-                    result["details"]["content_match"] = False
+            from app.services.service_workflow import execute_http_workflow
+            workflow_result = await execute_http_workflow(check, runtime_credential)
+            result.update(workflow_result)
 
         elif check.check_type == "tcp":
             host = check.target_host

@@ -17,6 +17,7 @@ import {
   Plug,
   Plus,
   Radar,
+  Route,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -153,10 +154,11 @@ export function ServicesPage() {
     onSuccess: (data: any) => {
       const up = data?.status === 'up' || data?.is_up
       const ms = data?.response_time_ms ?? data?.response_ms
-      toast.success(
-        'Test complete',
-        up ? `Up${ms != null ? ` • ${Math.round(ms)} ms` : ''}` : `Down: ${data?.error || 'no response'}`,
-      )
+      const stepSummary = data?.details?.steps_total
+        ? ` • ${data.details.steps_passed}/${data.details.steps_total} steps passed`
+        : ''
+      if (up) toast.success('Test complete', `Up${ms != null ? ` • ${Math.round(ms)} ms` : ''}${stepSummary}`)
+      else toast.error('Test detected a failure', `${data?.error || 'No response'}${stepSummary}`)
       qc.invalidateQueries({ queryKey: ['service-checks'] })
     },
     onError: (e: any) => toast.error('Test failed', apiErrorMessage(e)),
@@ -528,6 +530,20 @@ export function ServicesPage() {
                     </Td>
                     <Td>
                       <TypePill type={c.check_type} />
+                      {(c.credential_id || (c.workflow_steps?.length || 0) > 0) && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {c.credential_id && (
+                            <span className="inline-flex items-center gap-1 rounded bg-success/10 px-1.5 py-0.5 text-[10px] text-success" title={`Encrypted ${c.credential_auth_type || ''} credential`}>
+                              <ShieldCheck className="h-2.5 w-2.5" /> Auth
+                            </span>
+                          )}
+                          {(c.workflow_steps?.length || 0) > 0 && (
+                            <span className="inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary" title={`${c.workflow_operator === 'any' ? 'ANY' : 'ALL'} step health rule`}>
+                              <Route className="h-2.5 w-2.5" /> {c.workflow_steps?.length} steps
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </Td>
                     <Td>
                       <LevelBadge level={c.level} />

@@ -25,6 +25,7 @@ import {
   Globe,
   Info,
   Network,
+  LockKeyhole,
   Pause,
   Play,
   Plug,
@@ -39,6 +40,7 @@ import {
   Radar,
   Settings as SettingsIcon,
   RotateCcw,
+  Route,
   TrendingUp,
 } from 'lucide-react'
 import {
@@ -638,10 +640,14 @@ export function ServiceCheckDetailPage() {
         enabled={check.enabled}
         probeInfo={
           check.check_type === 'http'
-            ? `HTTP(S) · Status + Body`
+            ? (check.workflow_steps?.length || 0) > 0
+              ? `HTTP journey · ${check.workflow_steps?.length} steps · ${(check.workflow_operator || 'all').toUpperCase()}`
+              : `HTTP(S) · Status + Body`
             : check.check_type.toUpperCase()
         }
       />
+
+      {(check.workflow_steps?.length || 0) > 0 && <WorkflowOverview check={check} />}
 
       {/* ── Maintenance banner ───────────────────────────────────────── */}
       {check.in_maintenance && (
@@ -2338,6 +2344,16 @@ function InlineConfig({
           <CfgRow label="URL" value={check.target_url || check.target_host || '—'} mono onEdit={onEdit} />
           <CfgRow label="Method" value={check.http_method || '—'} onEdit={onEdit} />
           <CfgRow
+            label="Authentication"
+            value={check.credential_name ? `${check.credential_name} (${check.credential_auth_type})` : 'None'}
+            onEdit={onEdit}
+          />
+          <CfgRow
+            label="Journey"
+            value={(check.workflow_steps?.length || 0) > 0 ? `${check.workflow_steps?.length} steps · ${(check.workflow_operator || 'all').toUpperCase()}` : 'Single request'}
+            onEdit={onEdit}
+          />
+          <CfgRow
             label="Expected Status"
             value={check.http_expected_statuses || String(check.http_expected_status || '—')}
             onEdit={onEdit}
@@ -2357,6 +2373,45 @@ function InlineConfig({
           />
         </div>
       )}
+    </div>
+  )
+}
+
+function WorkflowOverview({ check }: { check: ServiceCheck }) {
+  const C = useC()
+  const steps = check.workflow_steps || []
+  return (
+    <div className="rounded-xl p-4" style={{ background: C.panel, border: `1px solid ${C.border}` }}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Route className="h-4 w-4" style={{ color: C.primary }} />
+          <div>
+            <div className="text-xs font-semibold">Authenticated service journey</div>
+            <div className="text-[11px]" style={{ color: C.textMuted }}>
+              Cookie-preserving navigation · {(check.workflow_operator || 'all').toUpperCase()} rule
+            </div>
+          </div>
+        </div>
+        {check.credential_name && (
+          <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold" style={{ background: `${C.up}18`, color: C.up }}>
+            <LockKeyhole className="h-3 w-3" /> {check.credential_name} · {check.credential_auth_type}
+          </span>
+        )}
+      </div>
+      <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+        {steps.map((step, index) => (
+          <div key={`${step.name}-${index}`} className="rounded-lg p-3" style={{ background: C.panelLift, border: `1px solid ${C.borderSoft}` }}>
+            <div className="flex items-center gap-2">
+              <span className="flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold" style={{ background: `${C.primary}20`, color: C.primary }}>{index + 1}</span>
+              <span className="truncate text-xs font-semibold">{step.name}</span>
+            </div>
+            <div className="mt-2 truncate font-mono text-[10px]" style={{ color: C.textDim }} title={step.url}>{step.method} {step.url}</div>
+            <div className="mt-1 text-[10px]" style={{ color: C.textMuted }}>
+              Expect {step.expected_statuses || '200'}{step.content_match ? ' + content validation' : ''}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2, X } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
-import type { ServiceCheckGroup } from '@/types'
+import type { ServiceCheckGroup, ServiceWorkflowStep } from '@/types'
 import {
   Dialog,
   DialogContent,
@@ -24,6 +24,7 @@ import {
 } from '@/components/ui/Select'
 import { toast } from '@/components/ui/Toast'
 import { ExpectedStatusInput } from '@/components/forms/ExpectedStatusInput'
+import { ServiceWorkflowFields } from '@/components/forms/ServiceWorkflowFields'
 
 type State = {
   name: string
@@ -41,6 +42,10 @@ type State = {
   http_expected_statuses: string
   http_content_match: string
   http_follow_redirects: boolean
+  credential_id: string
+  workflow_enabled: boolean
+  workflow_operator: 'all' | 'any'
+  workflow_steps: ServiceWorkflowStep[]
   tls_warn_days: number
   tls_critical_days: number
   // icmp
@@ -78,6 +83,10 @@ const empty: State = {
   http_expected_statuses: '200',
   http_content_match: '',
   http_follow_redirects: true,
+  credential_id: '',
+  workflow_enabled: false,
+  workflow_operator: 'all',
+  workflow_steps: [],
   tls_warn_days: 30,
   tls_critical_days: 7,
   icmp_count: 3,
@@ -136,6 +145,10 @@ export function ServiceCheckFormDialog({
           check.http_expected_statuses || String(check.http_expected_status || 200),
         http_content_match: check.http_content_match || '',
         http_follow_redirects: check.http_follow_redirects ?? true,
+        credential_id: check.credential_id || '',
+        workflow_enabled: Array.isArray(check.workflow_steps) && check.workflow_steps.length > 0,
+        workflow_operator: check.workflow_operator === 'any' ? 'any' : 'all',
+        workflow_steps: Array.isArray(check.workflow_steps) ? check.workflow_steps : [],
         tls_warn_days: check.tls_warn_days ?? 30,
         tls_critical_days: check.tls_critical_days ?? 7,
         icmp_count: Number(cfg.count) || 3,
@@ -203,6 +216,9 @@ export function ServiceCheckFormDialog({
       base.http_expected_statuses = s.http_expected_statuses.trim() || null
       base.http_content_match = s.http_content_match || null
       base.http_follow_redirects = s.http_follow_redirects
+      base.credential_id = s.credential_id || null
+      base.workflow_operator = s.workflow_operator
+      base.workflow_steps = s.workflow_enabled ? s.workflow_steps : []
     } else if (s.check_type === 'tcp' || s.check_type === 'tls') {
       base.target_port = s.target_port || null
     }
@@ -224,7 +240,7 @@ export function ServiceCheckFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl">
+      <DialogContent className="max-h-[92vh] max-w-3xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{isEdit ? 'Edit service check' : 'New service check'}</DialogTitle>
         </DialogHeader>
@@ -316,6 +332,17 @@ export function ServiceCheckFormDialog({
                   onCheckedChange={(v) => setS({ ...s, http_follow_redirects: v })}
                 />
               </div>
+              <ServiceWorkflowFields
+                targetUrl={s.target_url}
+                credentialId={s.credential_id}
+                onCredentialIdChange={(credential_id) => setS((current) => ({ ...current, credential_id }))}
+                enabled={s.workflow_enabled}
+                onEnabledChange={(workflow_enabled) => setS((current) => ({ ...current, workflow_enabled }))}
+                operator={s.workflow_operator}
+                onOperatorChange={(workflow_operator) => setS((current) => ({ ...current, workflow_operator }))}
+                steps={s.workflow_steps}
+                onStepsChange={(workflow_steps) => setS((current) => ({ ...current, workflow_steps }))}
+              />
             </div>
           )}
 
