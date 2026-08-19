@@ -25,6 +25,7 @@
 | 17 | [**Product Enhancement Assessment**](17-PRODUCT-ENHANCEMENT-ASSESSMENT.md) | **Market comparison, product gaps, target architecture, and Phase 1 stabilization plan.** |
 | 18 | [**Migration Runner**](18-MIGRATION-RUNNER.md) | **Tracked PostgreSQL migration runner, schema_migrations table, commands, and updater integration.** |
 | 19 | [**Production Remote Sensors**](19-PRODUCTION-REMOTE-SENSORS.md) | **Market assessment and OVA/OVF remote sensor appliance design.** |
+| 26 | [**GitHub, Multi-Machine & Publishing Runbook**](26-GITHUB-MULTI-MACHINE-AND-PUBLISHING-RUNBOOK.md) | **Two-appliance development, GitHub synchronization, safe merges, signed OTA releases, and zentryc.com KB publishing.** |
 
 ## Quick Start (Phase 1)
 
