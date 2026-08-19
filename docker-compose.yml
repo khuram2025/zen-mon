@@ -31,3 +31,10 @@ services:
         max-size: "10m"
         max-file: "3"
 
+networks:
+  default:
+    name: zenplus_clickhouse
+    ipam:
+      config:
+        - subnet: 198.120.20.64/28
+          gateway: 198.120.20.65

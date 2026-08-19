@@ -1,11 +1,10 @@
 """APM OTLP receiver — FastAPI fallback ingest path.
 
-Implements the OTLP/HTTP **JSON** trace export (POST /v1/traces) as the
+Implements OTLP/HTTP JSON and protobuf trace export (POST /v1/traces) as the
 single-node fallback to the high-throughput Go collector. Decodes
-ExportTraceServiceRequest JSON into `apm_spans` rows, authenticates the `zpi_`
+ExportTraceServiceRequest payloads into `apm_spans` rows, authenticates the `zpi_`
 ingest key, and hands rows to a buffered async batch writer that flushes to
-ClickHouse by size/interval. Binary OTLP/protobuf is the Go collector's job
-(primary path); this router answers 415 for protobuf with a pointer to it.
+ClickHouse by size/interval.
 
 Mounted at ROOT prefix "" so the path is exactly `/v1/traces` (the OTLP default),
 not `/api/v1/v1/traces`.
@@ -25,6 +24,12 @@ import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from google.protobuf.json_format import MessageToDict
+from google.protobuf.message import DecodeError
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+    ExportTraceServiceRequest,
+    ExportTraceServiceResponse,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.apm import authenticate_ingest_key
@@ -114,7 +119,39 @@ _queue: "asyncio.Queue | None" = None
 _writer_task: "asyncio.Task | None" = None
 
 
-# ── OTLP/JSON decoding ───────────────────────────────────────────────────────
+# ── OTLP decoding ────────────────────────────────────────────────────────────
+
+def decode_otlp_traces_protobuf(raw: bytes) -> dict:
+    """Decode an OTLP protobuf request into the canonical OTLP/JSON shape.
+
+    Reusing the JSON-to-row decoder keeps semantic-convention promotion,
+    exception grouping, validation, and resource fingerprints identical across
+    both wire encodings.
+    """
+    message = ExportTraceServiceRequest()
+    try:
+        message.ParseFromString(raw)
+    except DecodeError as exc:
+        raise ValueError("Invalid OTLP/protobuf body") from exc
+    return MessageToDict(
+        message,
+        preserving_proto_field_name=False,
+        use_integers_for_enums=True,
+    )
+
+
+def _protobuf_response(rejected: int = 0, message: str = "") -> Response:
+    payload = ExportTraceServiceResponse()
+    if rejected:
+        payload.partial_success.rejected_spans = rejected
+        payload.partial_success.error_message = message
+    return Response(
+        content=payload.SerializeToString(),
+        media_type="application/x-protobuf",
+    )
+
+
+# ── OTLP/JSON row decoding ───────────────────────────────────────────────────
 
 def _attr_list_to_maps(attrs: list) -> tuple[dict, dict, dict]:
     """Split an OTLP attribute list into typed (string, number, bool) maps."""
@@ -410,19 +447,21 @@ async def otlp_traces(
 ):
     key = await authenticate_ingest_key(authorization or "", db, kind="sdk")
 
-    ct = (content_type or "").lower()
-    if "protobuf" in ct:
-        raise HTTPException(
-            415,
-            "OTLP/protobuf is served by the ZenPlus Go collector on :4317/:4318. "
-            "For the FastAPI fallback set OTEL_EXPORTER_OTLP_PROTOCOL=http/json.",
-        )
-
+    ct = (content_type or "application/json").split(";", 1)[0].strip().lower()
+    is_protobuf = ct in {"application/x-protobuf", "application/protobuf"}
+    if not is_protobuf and ct not in {"application/json", "application/x-json"}:
+        raise HTTPException(415, f"Unsupported OTLP content type: {ct}")
     raw = await request.body()
-    try:
-        payload = json.loads(raw or b"{}")
-    except json.JSONDecodeError:
-        raise HTTPException(400, "Invalid OTLP/JSON body")
+    if is_protobuf:
+        try:
+            payload = decode_otlp_traces_protobuf(raw)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    else:
+        try:
+            payload = json.loads(raw or b"{}")
+        except json.JSONDecodeError as exc:
+            raise HTTPException(400, "Invalid OTLP/JSON body") from exc
 
     span_rows, res_rows, exc_rows, rejected, skewed = decode_otlp_traces_json(payload, key.get("env_name"))
 
@@ -441,6 +480,18 @@ async def otlp_traces(
     STATS["skewed_spans"] += skewed
     _PENDING_STATS["rejected"] += rejected
     _PENDING_STATS["skewed"] += skewed
+    if is_protobuf:
+        message = "some spans failed to decode" if rejected else ""
+        if skewed:
+            message = (
+                f"{skewed} span(s) rejected for clock skew "
+                f"(timestamp beyond ±{CLOCK_SKEW_MAX_FUTURE_S}s future / "
+                f"{CLOCK_SKEW_MAX_PAST_S // 86400}d past); check the producer's clock"
+            )
+        return _protobuf_response(
+            rejected,
+            message,
+        )
     if rejected:
         msg = "some spans failed to decode"
         if skewed:
