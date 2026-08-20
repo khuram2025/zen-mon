@@ -127,3 +127,27 @@ func TestHTTPWorkflowRejectsCrossOriginCredentialUse(t *testing.T) {
 		t.Fatalf("expected same-origin rejection, got up=%v error=%q", result.IsUp, result.Error)
 	}
 }
+
+func TestHTTPWorkflowCanExplicitlyIgnoreUntrustedCertificate(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		io.WriteString(w, "Service healthy")
+	}))
+	defer server.Close()
+
+	check := workflowCheck(server.URL)
+	checker := NewHTTPChecker(zap.NewNop().Sugar())
+	failed := checker.Check(context.Background(), check, "test")
+	if failed.IsUp {
+		t.Fatal("expected certificate verification to reject the untrusted test certificate")
+	}
+
+	check.HTTPIgnoreTLSErrors = true
+	result := checker.Check(context.Background(), check, "test")
+	if !result.IsUp {
+		t.Fatalf("expected explicit TLS bypass to allow workflow, got error: %s", result.Error)
+	}
+}

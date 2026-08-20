@@ -149,6 +149,7 @@ class ServiceCheckCreate(BaseModel):
     http_expected_statuses: Optional[str] = Field(default=None, max_length=255)
     http_content_match: Optional[str] = None
     http_follow_redirects: bool = True
+    http_ignore_tls_errors: bool = False
     tls_warn_days: int = Field(default=30, ge=1, le=365)
     tls_critical_days: int = Field(default=7, ge=1, le=365)
     check_interval: int = Field(default=60, ge=10, le=3600)
@@ -191,6 +192,7 @@ class ServiceCheckUpdate(BaseModel):
     http_expected_statuses: Optional[str] = Field(default=None, max_length=255)
     http_content_match: Optional[str] = None
     http_follow_redirects: Optional[bool] = None
+    http_ignore_tls_errors: Optional[bool] = None
     tls_warn_days: Optional[int] = Field(default=None, ge=1, le=365)
     tls_critical_days: Optional[int] = Field(default=None, ge=1, le=365)
     check_interval: Optional[int] = Field(default=None, ge=10, le=3600)
@@ -233,6 +235,7 @@ class ServiceCheckResponse(BaseModel):
     http_expected_statuses: Optional[str] = None
     http_content_match: Optional[str] = None
     http_follow_redirects: bool
+    http_ignore_tls_errors: bool = False
     tls_warn_days: int
     tls_critical_days: int
     check_interval: int

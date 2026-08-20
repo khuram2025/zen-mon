@@ -47,6 +47,7 @@ class ServiceCheck(Base):
     http_expected_statuses: Mapped[str] = mapped_column(Text, nullable=True)
     http_content_match: Mapped[str] = mapped_column(String(1024), nullable=True)
     http_follow_redirects: Mapped[bool] = mapped_column(Boolean, default=True)
+    http_ignore_tls_errors: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     tls_warn_days: Mapped[int] = mapped_column(Integer, default=30)
     tls_critical_days: Mapped[int] = mapped_column(Integer, default=7)

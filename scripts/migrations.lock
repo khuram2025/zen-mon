@@ -90,3 +90,4 @@ e283b7b3836668b28d38611e72e56e777e097b217e7d302d47875a855ff74784  migrate-078-wi
 0d4eec1c3c666f768086b771457184d97b61c9e2ddb4e723c55fcd7e618e4c6b  migrate-080-snmp-network-device-coverage.sql
 6c2b688b788db97c5750ae5bf27dbd4ffe92e297b889a09f81728da3bf7f5804  migrate-081-preserve-mikrotik-monitoring-profile.sql
 3c25065cf1c66aceace4876a6a40576a3340ea48f9a06afca108e056e3773948  migrate-082-service-auth-workflows.sql
+734710126e5ee7acdc9aa47ce5f39bb6004ad98d269e356ad3cf92ff6cf1a2ae  migrate-083-service-http-tls-policy.sql

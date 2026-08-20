@@ -117,6 +117,7 @@ async def execute_http_workflow(
     configured_steps = list(getattr(check, "workflow_steps", None) or [])
     steps = configured_steps or [_single_step(check)]
     operator = (getattr(check, "workflow_operator", None) or "all").lower()
+    ignore_tls_errors = bool(getattr(check, "http_ignore_tls_errors", False))
     timeout = max(1, min(int(check.timeout or 10), 60))
     values = {
         "username": (credential or {}).get("username", ""),
@@ -140,7 +141,7 @@ async def execute_http_workflow(
     async with httpx.AsyncClient(
         timeout=timeout,
         follow_redirects=False,
-        verify=credential is not None,
+        verify=not ignore_tls_errors,
         auth=client_auth,
         transport=_transport,
     ) as client:
@@ -233,6 +234,7 @@ async def execute_http_workflow(
         "diagnosis": None if healthy else (first_failure or {}).get("diagnosis") or "workflow",
         "details": {
             "workflow_operator": operator,
+            "tls_verification_disabled": ignore_tls_errors,
             "steps_total": len(results),
             "steps_passed": passed,
             "status_code": results[-1]["status_code"] if results else None,

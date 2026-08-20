@@ -191,3 +191,80 @@ def test_on_demand_workflow_identifies_connection_refused():
     assert result["status"] == "down"
     assert result["diagnosis"] == "connection_refused"
     assert "refused" in result["error"]
+
+
+def test_tls_verification_can_be_explicitly_disabled(monkeypatch):
+    observed_verify: list[bool] = []
+    real_client = httpx.AsyncClient
+
+    def client_factory(*args, **kwargs):
+        observed_verify.append(kwargs.get("verify"))
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client_factory)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="Operational")
+
+    check = SimpleNamespace(
+        timeout=5,
+        workflow_operator="all",
+        workflow_steps=[],
+        target_url="https://internal.example.com/health",
+        target_host="internal.example.com",
+        target_port=443,
+        http_method="GET",
+        http_headers={},
+        http_body=None,
+        http_expected_statuses="200",
+        http_expected_status=200,
+        http_content_match="Operational",
+        http_follow_redirects=True,
+        http_ignore_tls_errors=True,
+    )
+
+    result = asyncio.run(
+        execute_http_workflow(check, _transport=httpx.MockTransport(handler))
+    )
+
+    assert observed_verify == [False]
+    assert result["status"] == "up"
+    assert result["details"]["tls_verification_disabled"] is True
+
+
+def test_tls_verification_remains_enabled_by_default(monkeypatch):
+    observed_verify: list[bool] = []
+    real_client = httpx.AsyncClient
+
+    def client_factory(*args, **kwargs):
+        observed_verify.append(kwargs.get("verify"))
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client_factory)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200)
+
+    check = SimpleNamespace(
+        timeout=5,
+        workflow_operator="all",
+        workflow_steps=[],
+        target_url="https://internal.example.com/health",
+        target_host="internal.example.com",
+        target_port=443,
+        http_method="GET",
+        http_headers={},
+        http_body=None,
+        http_expected_statuses="200",
+        http_expected_status=200,
+        http_content_match=None,
+        http_follow_redirects=True,
+    )
+
+    result = asyncio.run(
+        execute_http_workflow(check, _transport=httpx.MockTransport(handler))
+    )
+
+    assert observed_verify == [True]
+    assert result["status"] == "up"
+    assert result["details"]["tls_verification_disabled"] is False

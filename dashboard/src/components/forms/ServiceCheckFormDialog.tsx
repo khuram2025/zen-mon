@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertCircle, CheckCircle2, Loader2, Play, X } from 'lucide-react'
+import { AlertCircle, AlertTriangle, CheckCircle2, Loader2, Play, X } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
 import type { ServiceCheckGroup, ServiceWorkflowStep } from '@/types'
@@ -42,6 +42,7 @@ type State = {
   http_expected_statuses: string
   http_content_match: string
   http_follow_redirects: boolean
+  http_ignore_tls_errors: boolean
   credential_id: string
   workflow_enabled: boolean
   workflow_operator: 'all' | 'any'
@@ -82,6 +83,7 @@ type ServiceTestResult = {
     steps_total?: number
     steps_passed?: number
     steps?: ServiceTestStep[]
+    tls_verification_disabled?: boolean
   }
 }
 
@@ -133,6 +135,7 @@ const empty: State = {
   http_expected_statuses: '200',
   http_content_match: '',
   http_follow_redirects: true,
+  http_ignore_tls_errors: false,
   credential_id: '',
   workflow_enabled: false,
   workflow_operator: 'all',
@@ -176,6 +179,13 @@ function ServiceTestResultPanel({ result }: { result: ServiceTestResult }) {
           </span>
         )}
       </div>
+
+      {result.details.tls_verification_disabled && (
+        <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-[11px] text-warning">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>TLS certificate verification was bypassed for this test. Connectivity was tested, but certificate identity and trust were not validated.</span>
+        </div>
+      )}
 
       {steps.length > 0 && (
         <div className="space-y-2">
@@ -254,6 +264,7 @@ export function ServiceCheckFormDialog({
           check.http_expected_statuses || String(check.http_expected_status || 200),
         http_content_match: check.http_content_match || '',
         http_follow_redirects: check.http_follow_redirects ?? true,
+        http_ignore_tls_errors: check.http_ignore_tls_errors ?? false,
         credential_id: check.credential_id || '',
         workflow_enabled: Array.isArray(check.workflow_steps) && check.workflow_steps.length > 0,
         workflow_operator: check.workflow_operator === 'any' ? 'any' : 'all',
@@ -329,6 +340,7 @@ export function ServiceCheckFormDialog({
       base.http_expected_statuses = s.http_expected_statuses.trim() || null
       base.http_content_match = s.http_content_match || null
       base.http_follow_redirects = s.http_follow_redirects
+      base.http_ignore_tls_errors = s.http_ignore_tls_errors
       base.credential_id = s.credential_id || null
       base.workflow_operator = s.workflow_operator
       base.workflow_steps = s.workflow_enabled ? s.workflow_steps : []
@@ -488,6 +500,22 @@ export function ServiceCheckFormDialog({
                   onCheckedChange={(v) => setS({ ...s, http_follow_redirects: v })}
                 />
               </div>
+              <div className="flex items-center justify-between rounded-md border border-border px-3 py-2">
+                <div>
+                  <div className="text-xs font-medium uppercase tracking-wider text-muted">Ignore TLS/certificate errors</div>
+                  <div className="mt-0.5 text-[11px] text-muted">Allow self-signed, expired, or hostname-mismatched certificates.</div>
+                </div>
+                <Switch
+                  checked={s.http_ignore_tls_errors}
+                  onCheckedChange={(v) => setS({ ...s, http_ignore_tls_errors: v })}
+                />
+              </div>
+              {s.http_ignore_tls_errors && (
+                <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-[11px] text-warning">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>TLS verification is disabled. Use this only for trusted internal services; the certificate identity and chain will not be checked.</span>
+                </div>
+              )}
               <ServiceWorkflowFields
                 targetUrl={s.target_url}
                 credentialId={s.credential_id}

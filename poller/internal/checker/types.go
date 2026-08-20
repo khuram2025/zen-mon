@@ -41,6 +41,7 @@ type ServiceCheck struct {
 	HTTPExpectedStatuses string // comma-separated patterns: "200,2xx,200-299". Empty = use HTTPExpectedStatus.
 	HTTPContentMatch     string
 	HTTPFollowRedirects  bool
+	HTTPIgnoreTLSErrors  bool
 	TLSWarnDays          int
 	TLSCriticalDays      int
 	CheckInterval        time.Duration

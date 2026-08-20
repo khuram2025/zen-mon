@@ -261,6 +261,7 @@ export interface ServiceCheck {
   http_expected_statuses: string | null
   http_content_match: string | null
   http_follow_redirects: boolean
+  http_ignore_tls_errors: boolean
   tls_warn_days: number
   tls_critical_days: number
   check_interval: number

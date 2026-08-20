@@ -89,7 +89,7 @@ func (c *HTTPChecker) Check(ctx context.Context, sc *ServiceCheck, pollerID stri
 	}
 
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: sc.CredentialID == nil, RootCAs: c.rootCAs},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: sc.HTTPIgnoreTLSErrors, RootCAs: c.rootCAs},
 	}
 	client := &http.Client{
 		Timeout:   sc.Timeout,
@@ -218,7 +218,7 @@ func (c *HTTPChecker) checkWorkflow(ctx context.Context, sc *ServiceCheck, polle
 
 	jar, _ := cookiejar.New(nil)
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: sc.CredentialID == nil, RootCAs: c.rootCAs},
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: sc.HTTPIgnoreTLSErrors, RootCAs: c.rootCAs},
 	}
 	started := time.Now()
 	stepResults := make([]workflowStepResult, 0, len(sc.WorkflowSteps))
