@@ -21,6 +21,33 @@ def _origin(url: str) -> tuple[str, str | None, int | None]:
     return parsed.scheme.lower(), parsed.hostname, port
 
 
+def _safe_response_url(url: httpx.URL) -> str:
+    """Return useful redirect information without query strings or user info."""
+    port = f":{url.port}" if url.port and url.port not in {80, 443} else ""
+    return f"{url.scheme}://{url.host}{port}{url.path or '/'}"
+
+
+def _request_diagnosis(exc: httpx.HTTPError) -> tuple[str, str]:
+    """Map httpx failures to stable, user-facing diagnostic categories."""
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout", "The service did not respond before the configured timeout"
+
+    text = " ".join(str(item) for item in (exc, exc.__cause__, exc.__context__) if item).lower()
+    if isinstance(exc, httpx.ConnectError):
+        if any(marker in text for marker in ("name or service not known", "nodename nor servname", "getaddrinfo", "temporary failure in name resolution")):
+            return "dns", "The hostname could not be resolved"
+        if any(marker in text for marker in ("connection refused", "errno 111", "errno 61")):
+            return "connection_refused", "The host is reachable but refused the connection"
+        if any(marker in text for marker in ("certificate verify failed", "ssl", "tls")):
+            return "tls", "The TLS connection or certificate validation failed"
+        if any(marker in text for marker in ("network is unreachable", "no route to host")):
+            return "unreachable", "No network route to the service is available"
+        return "connectivity", "A connection to the service could not be established"
+    if isinstance(exc, httpx.TooManyRedirects):
+        return "redirect", "The service returned too many redirects"
+    return "request", "The HTTP request failed before a valid response was received"
+
+
 def _inject(template: str | None, values: dict[str, str], content_type: str = "") -> str | None:
     if template is None:
         return None
@@ -109,6 +136,7 @@ async def execute_http_workflow(
 
     started = time.monotonic()
     results: list[dict[str, Any]] = []
+    login_path = urlsplit(steps[0]["url"]).path or "/" if auth_type == "form" else None
     async with httpx.AsyncClient(
         timeout=timeout,
         follow_redirects=False,
@@ -137,6 +165,11 @@ async def execute_http_workflow(
                 "response_time_ms": 0.0,
                 "content_matched": None,
                 "error": "",
+                "diagnosis": None,
+                "response_url": None,
+                "content_type": None,
+                "response_size_bytes": None,
+                "redirect_count": 0,
             }
             try:
                 response = await client.request(
@@ -148,13 +181,30 @@ async def execute_http_workflow(
                 )
                 item["response_time_ms"] = round((time.monotonic() - step_started) * 1000, 1)
                 item["status_code"] = response.status_code
+                item["response_url"] = _safe_response_url(response.url)
+                item["content_type"] = response.headers.get("content-type", "").split(";", 1)[0] or None
+                item["response_size_bytes"] = len(response.content)
+                item["redirect_count"] = len(response.history)
                 if credential and _origin(str(response.url)) != base_origin:
                     item["error"] = "Authenticated redirect left the configured origin"
+                    item["diagnosis"] = "redirect"
+                elif credential and response.status_code in {401, 403}:
+                    item["error"] = f"The service rejected the configured credentials (HTTP {response.status_code})"
+                    item["diagnosis"] = "authentication"
+                elif (
+                    auth_type == "form"
+                    and index > 0
+                    and login_path
+                    and (response.url.path or "/") == login_path
+                ):
+                    item["error"] = "The service returned to the sign-in page; the credentials or login request were rejected"
+                    item["diagnosis"] = "authentication"
                 elif not _status_matches(response.status_code, step.get("expected_statuses") or "200"):
                     item["error"] = (
                         f"expected status {step.get('expected_statuses') or '200'}, "
                         f"got {response.status_code}"
                     )
+                    item["diagnosis"] = "http_status"
                 elif step.get("content_match"):
                     matched = str(step["content_match"]) in response.text[:1_048_576]
                     item["content_matched"] = matched
@@ -162,20 +212,25 @@ async def execute_http_workflow(
                         item["status"] = "up"
                     else:
                         item["error"] = "required response content was not found"
+                        item["diagnosis"] = "content"
                 else:
                     item["status"] = "up"
             except httpx.HTTPError as exc:
                 item["response_time_ms"] = round((time.monotonic() - step_started) * 1000, 1)
-                item["error"] = f"request failed: {exc.__class__.__name__}"
+                item["diagnosis"], item["error"] = _request_diagnosis(exc)
             results.append(item)
 
     passed = sum(1 for item in results if item["status"] == "up")
     healthy = passed == len(results) if operator == "all" else passed > 0
-    failing = [item["name"] for item in results if item["status"] != "up"]
+    first_failure = next((item for item in results if item["status"] != "up"), None)
+    failure_message = ""
+    if first_failure:
+        failure_message = f"{first_failure['name']}: {first_failure['error'] or 'step failed'}"
     return {
         "status": "up" if healthy else "down",
         "response_time_ms": round((time.monotonic() - started) * 1000, 1),
-        "error": "" if healthy else f"Failed workflow step(s): {', '.join(failing)}",
+        "error": "" if healthy else failure_message,
+        "diagnosis": None if healthy else (first_failure or {}).get("diagnosis") or "workflow",
         "details": {
             "workflow_operator": operator,
             "steps_total": len(results),

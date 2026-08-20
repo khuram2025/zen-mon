@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronDown, ChevronUp, KeyRound, Loader2, Plus, Route, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
+import { hasPermission, useAuth } from '@/stores/auth'
 import type { ServiceCredential, ServiceWorkflowStep } from '@/types'
 import { Button } from '@/components/ui/Button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
@@ -38,6 +39,8 @@ const emptyStep = (url: string, index: number): ServiceWorkflowStep => ({
 
 export function ServiceWorkflowFields(props: Props) {
   const qc = useQueryClient()
+  const user = useAuth((state) => state.user)
+  const canManageCredentials = user?.role === 'owner' || hasPermission(user, 'system.admin')
   const [credentialOpen, setCredentialOpen] = useState(false)
   const [credentialDraft, setCredentialDraft] = useState({
     name: '',
@@ -67,12 +70,35 @@ export function ServiceWorkflowFields(props: Props) {
   })
 
   function enableWorkflow(authType = selectedCredential?.auth_type) {
+    try {
+      const parsed = new URL(props.targetUrl)
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('invalid protocol')
+    } catch {
+      toast.error('Enter the service URL first', 'A complete HTTP(S) URL is required before adding navigation steps.')
+      return
+    }
     const first = emptyStep(props.targetUrl, 0)
     if (authType === 'form') {
       first.name = 'Sign in'
       first.method = 'POST'
       first.headers = { 'Content-Type': 'application/x-www-form-urlencoded' }
       first.body = 'username={{username}}&password={{password}}'
+      const protectedPage = emptyStep(props.targetUrl, 1)
+      protectedPage.name = 'Open protected page'
+      const steps = props.steps.length >= 2
+        ? props.steps
+        : props.steps.length === 1
+          ? [{
+              ...props.steps[0],
+              name: 'Sign in',
+              method: 'POST',
+              headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              body: 'username={{username}}&password={{password}}',
+            }, protectedPage]
+          : [first, protectedPage]
+      props.onStepsChange(steps)
+      props.onEnabledChange(true)
+      return
     }
     props.onStepsChange(props.steps.length > 0 ? props.steps : [first])
     props.onEnabledChange(true)
@@ -82,7 +108,7 @@ export function ServiceWorkflowFields(props: Props) {
     const id = value === 'none' ? '' : value
     props.onCredentialIdChange(id)
     const credential = credentials.find((item) => item.id === id)
-    if (credential?.auth_type === 'form' && !props.enabled) enableWorkflow('form')
+    if (credential?.auth_type === 'form' && (!props.enabled || props.steps.length < 2)) enableWorkflow('form')
   }
 
   function updateStep(index: number, patch: Partial<ServiceWorkflowStep>) {
@@ -133,7 +159,14 @@ export function ServiceWorkflowFields(props: Props) {
             <div className="text-[11px] text-muted">Secrets are encrypted and injected only at probe time.</div>
           </div>
         </div>
-        <Button type="button" variant="outline" size="sm" onClick={() => setCredentialOpen(true)}>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={!canManageCredentials}
+          title={canManageCredentials ? 'Save a new encrypted credential' : 'Administrator permission is required to add credentials'}
+          onClick={() => setCredentialOpen(true)}
+        >
           <Plus className="h-3.5 w-3.5" /> New credential
         </Button>
       </div>
@@ -145,7 +178,7 @@ export function ServiceWorkflowFields(props: Props) {
             <SelectItem value="none">No authentication</SelectItem>
             {credentials.map((credential) => (
               <SelectItem key={credential.id} value={credential.id}>
-                {credential.name} · {credential.auth_type === 'form' ? 'Form login' : credential.auth_type}
+                {credential.name} · {credential.auth_type === 'form' ? 'Form login' : credential.auth_type === 'basic' ? 'HTTP Basic' : 'Bearer token'}
               </SelectItem>
             ))}
           </SelectContent>
@@ -155,7 +188,10 @@ export function ServiceWorkflowFields(props: Props) {
       {props.credentialId && (
         <div className="rounded-md border border-success/25 bg-success/5 px-3 py-2 text-[11px] text-muted">
           <span className="font-semibold text-success">Protected credential linked.</span>{' '}
-          The password or token is never returned to this browser or written into the service definition.
+          {selectedCredential?.auth_type === 'basic' && 'The username and password will be sent with HTTP Basic authentication. '}
+          {selectedCredential?.auth_type === 'bearer' && 'The token will be sent in the Authorization header. '}
+          {selectedCredential?.auth_type === 'form' && 'The sign-in step will inject the username and password and retain its session cookies. '}
+          The secret is never returned to this browser or written into the service definition.
         </div>
       )}
 
@@ -164,7 +200,7 @@ export function ServiceWorkflowFields(props: Props) {
           <Route className="h-4 w-4 text-primary" />
           <div>
             <div className="text-xs font-medium">Multi-step service journey</div>
-            <div className="text-[11px] text-muted">Share cookies across login and two or more navigation checks.</div>
+            <div className="text-[11px] text-muted">Sign in once, retain cookies, then test protected pages in order.</div>
           </div>
         </div>
         <Switch
@@ -216,7 +252,14 @@ export function ServiceWorkflowFields(props: Props) {
                   <Button type="button" variant="ghost" size="icon" className="h-7 w-7" disabled={index === props.steps.length - 1} onClick={() => move(index, 1)}>
                     <ChevronDown className="h-3.5 w-3.5" />
                   </Button>
-                  <Button type="button" variant="ghost" size="icon" className="h-7 w-7 text-danger" disabled={props.steps.length === 1} onClick={() => props.onStepsChange(props.steps.filter((_, i) => i !== index))}>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-danger"
+                    disabled={props.steps.length <= (selectedCredential?.auth_type === 'form' ? 2 : 1)}
+                    onClick={() => props.onStepsChange(props.steps.filter((_, i) => i !== index))}
+                  >
                     <Trash2 className="h-3.5 w-3.5" />
                   </Button>
                 </div>
@@ -276,7 +319,7 @@ export function ServiceWorkflowFields(props: Props) {
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="form">Web form / session login</SelectItem>
-                  <SelectItem value="basic">HTTP Basic</SelectItem>
+                  <SelectItem value="basic">HTTP Basic (username + password)</SelectItem>
                   <SelectItem value="bearer">Bearer / API token</SelectItem>
                 </SelectContent>
               </Select>

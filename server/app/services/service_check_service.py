@@ -174,17 +174,21 @@ async def get_runtime_service_check(db: AsyncSession, check_id: UUID):
     sc = await db.get(ServiceCheck, check_id)
     if not sc:
         return None, None
-    runtime_credential = None
-    if sc.credential_id:
-        credential = await db.get(ServiceCredential, sc.credential_id)
-        if not credential:
-            raise ValueError("Linked service credential no longer exists")
-        runtime_credential = {
-            "auth_type": credential.auth_type,
-            "username": credential.username or "",
-            "secret": decrypt(credential.secret_cipher) or "",
-        }
-    return sc, runtime_credential
+    return sc, await get_runtime_service_credential(db, sc.credential_id)
+
+
+async def get_runtime_service_credential(db: AsyncSession, credential_id: UUID | None):
+    """Resolve a credential for a probe without attaching its secret to a model."""
+    if not credential_id:
+        return None
+    credential = await db.get(ServiceCredential, credential_id)
+    if not credential:
+        raise ValueError("Linked service credential no longer exists")
+    return {
+        "auth_type": credential.auth_type,
+        "username": credential.username or "",
+        "secret": decrypt(credential.secret_cipher) or "",
+    }
 
 
 async def create_service_check(db: AsyncSession, data: ServiceCheckCreate, user_id: UUID):
@@ -259,8 +263,8 @@ def _credential_to_response(credential: ServiceCredential, used_by: int = 0) -> 
 def _validate_credential_workflow(credential: ServiceCredential | None, steps: list) -> None:
     if not credential or credential.auth_type != "form":
         return
-    if not steps:
-        raise ValueError("Form authentication requires a multi-step workflow")
+    if len(steps) < 2:
+        raise ValueError("Form authentication requires a sign-in step followed by a protected-page navigation step")
     first = steps[0]
     body = first.body if isinstance(first, ServiceWorkflowStep) else (first.get("body") or "")
     headers = first.headers if isinstance(first, ServiceWorkflowStep) else (first.get("headers") or {})

@@ -131,3 +131,63 @@ def test_on_demand_workflow_keeps_cookie_and_redacts_secret():
     assert result["status"] == "up"
     assert result["details"]["steps_passed"] == 2
     assert credential["secret"] not in str(result)
+
+
+def test_on_demand_workflow_identifies_rejected_credentials():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, text="Unauthorized")
+
+    check = SimpleNamespace(
+        timeout=5,
+        workflow_operator="all",
+        workflow_steps=[],
+        target_url="https://portal.example.com/private",
+        target_host="portal.example.com",
+        target_port=443,
+        http_method="GET",
+        http_headers={},
+        http_body=None,
+        http_expected_statuses="200",
+        http_expected_status=200,
+        http_content_match=None,
+        http_follow_redirects=True,
+    )
+    credential = {"auth_type": "basic", "username": "ops", "secret": "wrong"}
+
+    result = asyncio.run(
+        execute_http_workflow(check, credential, _transport=httpx.MockTransport(handler))
+    )
+
+    assert result["status"] == "down"
+    assert result["diagnosis"] == "authentication"
+    assert "rejected" in result["error"]
+    assert result["details"]["steps"][0]["status_code"] == 401
+    assert result["details"]["steps"][0]["content_type"] == "text/plain"
+    assert credential["secret"] not in str(result)
+
+
+def test_on_demand_workflow_identifies_connection_refused():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("[Errno 111] Connection refused", request=request)
+
+    check = SimpleNamespace(
+        timeout=5,
+        workflow_operator="all",
+        workflow_steps=[],
+        target_url="https://portal.example.com/health",
+        target_host="portal.example.com",
+        target_port=443,
+        http_method="GET",
+        http_headers={},
+        http_body=None,
+        http_expected_statuses="200",
+        http_expected_status=200,
+        http_content_match=None,
+        http_follow_redirects=True,
+    )
+
+    result = asyncio.run(execute_http_workflow(check, _transport=httpx.MockTransport(handler)))
+
+    assert result["status"] == "down"
+    assert result["diagnosis"] == "connection_refused"
+    assert "refused" in result["error"]

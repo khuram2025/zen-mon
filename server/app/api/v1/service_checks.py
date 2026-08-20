@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -395,6 +396,38 @@ async def create_service_check(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@router.post("/test-config")
+async def test_service_check_configuration(
+    data: ServiceCheckCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_operator_user),
+):
+    """Test an unsaved HTTP configuration without persisting it or its response body."""
+    if data.check_type != "http":
+        raise HTTPException(status_code=400, detail="Pre-save testing currently supports HTTP(S) checks")
+    try:
+        runtime_credential = await service_check_service.get_runtime_service_credential(
+            db, data.credential_id
+        )
+        if runtime_credential and runtime_credential.get("auth_type") == "form" and len(data.workflow_steps) < 2:
+            raise ValueError("Form authentication requires a sign-in step followed by a protected-page navigation step")
+        from app.services.service_workflow import execute_http_workflow
+
+        # The workflow runner consumes the same dict-shaped steps stored in JSONB.
+        check = SimpleNamespace(**data.model_dump(mode="python"))
+        result = await execute_http_workflow(check, runtime_credential)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    result.update({
+        "check_id": None,
+        "check_type": "http",
+        "target": data.target_url,
+        "preview": True,
+    })
+    return result
+
+
 @router.get("/{check_id}", response_model=ServiceCheckResponse)
 async def get_service_check(
     check_id: UUID,
@@ -537,6 +570,7 @@ async def test_service_check(
         "status": "unknown",
         "response_time_ms": 0,
         "error": "",
+        "diagnosis": None,
         "details": {},
     }
 
@@ -646,21 +680,31 @@ async def test_service_check(
         result["response_time_ms"] = round(elapsed, 1)
         result["status"] = "down"
         result["error"] = f"Connection timed out after {check.timeout}s"
+        result["diagnosis"] = "timeout"
     except ConnectionRefusedError:
         elapsed = (time.monotonic() - start) * 1000
         result["response_time_ms"] = round(elapsed, 1)
         result["status"] = "down"
         result["error"] = "Connection refused"
+        result["diagnosis"] = "connection_refused"
+    except socket.gaierror:
+        elapsed = (time.monotonic() - start) * 1000
+        result["response_time_ms"] = round(elapsed, 1)
+        result["status"] = "down"
+        result["error"] = "The hostname could not be resolved"
+        result["diagnosis"] = "dns"
     except ssl.SSLError as e:
         elapsed = (time.monotonic() - start) * 1000
         result["response_time_ms"] = round(elapsed, 1)
         result["status"] = "down"
         result["error"] = f"TLS error: {e}"
+        result["diagnosis"] = "tls"
     except Exception as e:
         elapsed = (time.monotonic() - start) * 1000
         result["response_time_ms"] = round(elapsed, 1)
         result["status"] = "down"
         result["error"] = str(e)
+        result["diagnosis"] = "unreachable" if isinstance(e, OSError) else "request"
 
     # Update the service check status in PostgreSQL so the UI reflects the test result
     from sqlalchemy import update as sql_update

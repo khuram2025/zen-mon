@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Loader2, X } from 'lucide-react'
+import { AlertCircle, CheckCircle2, Loader2, Play, X } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
 import type { ServiceCheckGroup, ServiceWorkflowStep } from '@/types'
@@ -58,6 +58,56 @@ type State = {
   description: string
 }
 
+type ServiceTestStep = {
+  index: number
+  name: string
+  status: 'up' | 'down'
+  status_code: number | null
+  response_time_ms: number
+  content_matched: boolean | null
+  error: string
+  diagnosis: string | null
+  response_url: string | null
+  content_type: string | null
+  response_size_bytes: number | null
+  redirect_count: number
+}
+
+type ServiceTestResult = {
+  status: 'up' | 'down'
+  response_time_ms: number
+  error: string
+  diagnosis: string | null
+  details: {
+    steps_total?: number
+    steps_passed?: number
+    steps?: ServiceTestStep[]
+  }
+}
+
+const DIAGNOSIS_LABELS: Record<string, string> = {
+  authentication: 'Credentials rejected',
+  dns: 'DNS resolution failed',
+  timeout: 'Connection timed out',
+  connection_refused: 'Connection refused',
+  unreachable: 'Service unreachable',
+  connectivity: 'Connection failed',
+  tls: 'TLS / certificate problem',
+  redirect: 'Redirect problem',
+  http_status: 'Unexpected HTTP response',
+  content: 'Required content missing',
+  request: 'Request failed',
+  workflow: 'Navigation failed',
+}
+
+function hostFromUrl(value: string): string {
+  try {
+    return new URL(value).hostname
+  } catch {
+    return ''
+  }
+}
+
 // Map check_type -> monitoring level (display only; backend also stores this).
 const LEVEL_BY_TYPE: Record<State['check_type'], 1 | 2 | 3> = {
   icmp: 1,
@@ -78,7 +128,7 @@ const empty: State = {
   tags: [],
   target_host: '',
   target_port: '',
-  target_url: 'https://example.com',
+  target_url: '',
   http_method: 'GET',
   http_expected_statuses: '200',
   http_content_match: '',
@@ -97,6 +147,63 @@ const empty: State = {
   description: '',
 }
 
+function ServiceTestResultPanel({ result }: { result: ServiceTestResult }) {
+  const passed = result.status === 'up'
+  const diagnosis = result.diagnosis ? DIAGNOSIS_LABELS[result.diagnosis] || result.diagnosis : null
+  const steps = result.details.steps || []
+
+  return (
+    <div className={`space-y-3 rounded-md border p-3 ${passed ? 'border-success/30 bg-success/5' : 'border-danger/30 bg-danger/5'}`}>
+      <div className="flex items-start gap-2">
+        {passed ? (
+          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-success" />
+        ) : (
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
+        )}
+        <div className="min-w-0 flex-1">
+          <div className={`text-sm font-semibold ${passed ? 'text-success' : 'text-danger'}`}>
+            {passed ? 'URL and authentication test passed' : diagnosis || 'Test failed'}
+          </div>
+          <div className="mt-0.5 text-xs text-muted">
+            {passed
+              ? `The service responded successfully in ${Math.round(result.response_time_ms)} ms.`
+              : result.error || 'The service did not return an acceptable response.'}
+          </div>
+        </div>
+        {result.details.steps_total != null && (
+          <span className="shrink-0 rounded-full border border-border px-2 py-0.5 text-[10px] text-muted">
+            {result.details.steps_passed}/{result.details.steps_total} steps
+          </span>
+        )}
+      </div>
+
+      {steps.length > 0 && (
+        <div className="space-y-2">
+          {steps.map((step) => (
+            <div key={step.index} className="rounded-md border border-border bg-surface px-3 py-2">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                <span className={step.status === 'up' ? 'font-semibold text-success' : 'font-semibold text-danger'}>
+                  Step {step.index}: {step.name}
+                </span>
+                {step.status_code != null && <span className="font-mono text-text">HTTP {step.status_code}</span>}
+                <span className="text-muted">{Math.round(step.response_time_ms)} ms</span>
+                {step.redirect_count > 0 && <span className="text-muted">{step.redirect_count} redirect{step.redirect_count === 1 ? '' : 's'}</span>}
+              </div>
+              {step.response_url && <div className="mt-1 truncate font-mono text-[10px] text-muted">Response: {step.response_url}</div>}
+              <div className="mt-1 flex flex-wrap gap-x-3 text-[10px] text-muted">
+                {step.content_type && <span>{step.content_type}</span>}
+                {step.response_size_bytes != null && <span>{step.response_size_bytes.toLocaleString()} bytes</span>}
+                {step.content_matched != null && <span>Content match: {step.content_matched ? 'yes' : 'no'}</span>}
+              </div>
+              {step.error && <div className="mt-1 text-[11px] text-danger">{step.error}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function ServiceCheckFormDialog({
   open,
   onOpenChange,
@@ -109,6 +216,7 @@ export function ServiceCheckFormDialog({
   const isEdit = !!check?.id
   const qc = useQueryClient()
   const [s, setS] = useState<State>(empty)
+  const [testResult, setTestResult] = useState<ServiceTestResult | null>(null)
 
   const { data: groups = [] } = useQuery<ServiceCheckGroup[]>({
     queryKey: ['service-check-groups'],
@@ -125,6 +233,7 @@ export function ServiceCheckFormDialog({
 
   useEffect(() => {
     if (!open) return
+    setTestResult(null)
     if (check) {
       const cfg = (check.config as Record<string, any>) || {}
       setS({
@@ -163,6 +272,10 @@ export function ServiceCheckFormDialog({
     }
   }, [open, check])
 
+  useEffect(() => {
+    setTestResult(null)
+  }, [s])
+
   const [tagDraft, setTagDraft] = useState('')
   function addTag(raw: string) {
     const t = raw.trim().toLowerCase()
@@ -192,10 +305,10 @@ export function ServiceCheckFormDialog({
     onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
   })
 
-  function submit(e: FormEvent) {
-    e.preventDefault()
+  function buildPayload() {
+    const httpHost = hostFromUrl(s.target_url)
     const base: any = {
-      name: s.name,
+      name: s.name.trim(),
       check_type: s.check_type,
       level: LEVEL_BY_TYPE[s.check_type],
       enabled: s.enabled,
@@ -204,7 +317,7 @@ export function ServiceCheckFormDialog({
       retry_count: s.retry_count,
       retry_delay_s: s.retry_delay_s,
       tags: s.tags,
-      target_host: s.target_host,
+      target_host: s.check_type === 'http' ? httpHost : s.target_host.trim(),
       check_interval: s.check_interval,
       timeout: s.timeout,
       description: s.description || null,
@@ -235,7 +348,30 @@ export function ServiceCheckFormDialog({
         ...(s.dns_expected ? { expected: s.dns_expected } : {}),
       }
     }
-    save.mutate(base)
+    return base
+  }
+
+  const testConfig = useMutation({
+    mutationFn: async () =>
+      (await api.post('/service-checks/test-config', buildPayload())).data as ServiceTestResult,
+    onSuccess: (result) => setTestResult(result),
+    onError: (e: any) => {
+      setTestResult(null)
+      toast.error('Configuration test could not run', apiErrorMessage(e))
+    },
+  })
+
+  function submit(e: FormEvent) {
+    e.preventDefault()
+    if (s.check_type === 'http' && !hostFromUrl(s.target_url)) {
+      toast.error('Invalid URL', 'Enter a complete URL beginning with http:// or https://')
+      return
+    }
+    if (s.check_type === 'http' && s.credential_id && s.target_url.toLowerCase().startsWith('http://')) {
+      toast.error('HTTPS required for authentication', 'Change the service URL to HTTPS before linking credentials.')
+      return
+    }
+    save.mutate(buildPayload())
   }
 
   return (
@@ -274,24 +410,44 @@ export function ServiceCheckFormDialog({
             </div>
           </div>
 
-          <FormField label="Target host" required>
-            <Input
-              required
-              value={s.target_host}
-              onChange={(e) => setS({ ...s, target_host: e.target.value })}
-              placeholder="api.example.com"
-            />
-          </FormField>
+          {s.check_type !== 'http' && (
+            <FormField label="Target host" required>
+              <Input
+                required
+                value={s.target_host}
+                onChange={(e) => setS({ ...s, target_host: e.target.value })}
+                placeholder="api.example.com"
+              />
+            </FormField>
+          )}
 
           {s.check_type === 'http' && (
             <div className="space-y-3 rounded-md border border-border p-3">
               <div className="text-xs font-semibold uppercase tracking-wider text-muted">HTTP options</div>
-              <FormField label="URL">
+              <FormField label="URL" required>
                 <Input
+                  required
+                  type="url"
                   value={s.target_url}
-                  onChange={(e) => setS({ ...s, target_url: e.target.value })}
+                  onChange={(e) => {
+                    const target_url = e.target.value
+                    setTestResult(null)
+                    setS((current) => ({
+                      ...current,
+                      target_url,
+                      target_host: hostFromUrl(target_url),
+                      workflow_steps: current.workflow_steps.map((step, index) =>
+                        index === 0 && (!step.url || step.url === current.target_url)
+                          ? { ...step, url: target_url }
+                          : step,
+                      ),
+                    }))
+                  }}
                   placeholder="https://api.example.com/health"
                 />
+                {hostFromUrl(s.target_url) && (
+                  <div className="mt-1 text-[11px] text-muted">Host detected automatically: {hostFromUrl(s.target_url)}</div>
+                )}
               </FormField>
               <div className="grid grid-cols-2 gap-3">
                 <FormField label="Method">
@@ -343,6 +499,11 @@ export function ServiceCheckFormDialog({
                 steps={s.workflow_steps}
                 onStepsChange={(workflow_steps) => setS((current) => ({ ...current, workflow_steps }))}
               />
+              {s.credential_id && s.target_url.toLowerCase().startsWith('http://') && (
+                <div className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-[11px] text-warning">
+                  Authenticated checks require HTTPS so usernames, passwords, and tokens are not sent in clear text.
+                </div>
+              )}
             </div>
           )}
 
@@ -568,7 +729,31 @@ export function ServiceCheckFormDialog({
             </div>
           </div>
 
-          <DialogFooter>
+          {testResult && <ServiceTestResultPanel result={testResult} />}
+
+          <DialogFooter className="justify-between">
+            <div>
+              {s.check_type === 'http' && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={
+                    testConfig.isPending ||
+                    !s.name.trim() ||
+                    !hostFromUrl(s.target_url) ||
+                    (s.credential_id !== '' && s.target_url.toLowerCase().startsWith('http://'))
+                  }
+                  onClick={() => {
+                    setTestResult(null)
+                    testConfig.mutate()
+                  }}
+                >
+                  {testConfig.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                  {testConfig.isPending ? 'Testing…' : 'Test URL & authentication'}
+                </Button>
+              )}
+            </div>
+            <div className="flex gap-2">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
               Cancel
             </Button>
@@ -576,6 +761,7 @@ export function ServiceCheckFormDialog({
               {save.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
               {isEdit ? 'Save changes' : 'Create check'}
             </Button>
+            </div>
           </DialogFooter>
         </form>
       </DialogContent>
