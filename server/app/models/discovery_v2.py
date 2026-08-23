@@ -300,6 +300,9 @@ class WindowsCredential(Base):
     transport: Mapped[str] = mapped_column(String(10), default="http")
     port: Mapped[int] = mapped_column(Integer, default=5985)
     ssl_verify: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Domain controller this credential targets; the trusted default for the
+    # connection test, so testing never needs a caller-supplied host.
+    dc_host: Mapped[str | None] = mapped_column(String(255), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True

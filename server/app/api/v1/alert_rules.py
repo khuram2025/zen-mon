@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
+from app.services import alert_phrasing as ap
 
 router = APIRouter(prefix="/alert-rules", tags=["Alert Rules"])
 
@@ -25,7 +26,38 @@ _NETWORK_METRICS = (
     "if_in_bps|if_out_bps|if_util_pct|if_errors|if_discards|if_oper_status|"
     "session_count|vpn_tunnel_state|ha_state|bgp_neighbor_down"
 )
-_CONDITION_METRICS = f"ping_status|rtt|packet_loss|jitter|service_status|{_NETWORK_METRICS}"
+# APM metric keys (AM-E6/F8), in lockstep with the migrate-039 CHECK. The six
+# RED keys are evaluated by apm_alert_service against the ClickHouse rollups
+# (scope: `target` = APM service name, empty = all services; latency in ms,
+# error_rate/apdex as fractions, throughput in req/s). slo_burn/synthetic/
+# anomaly are accepted but their evaluators land with F7-adjacent/AM-E9/E12.
+_APM_METRICS = (
+    "apm_latency_p50|apm_latency_p95|apm_latency_p99|"
+    "apm_error_rate|apm_throughput|apm_apdex|"
+    "apm_slo_burn|apm_synthetic_down|apm_anomaly"
+)
+# User Device Tracker metric keys (migrate-060 CHECK), evaluated by
+# udt_alert_service. The first four are event-driven (threshold acts as an
+# on/off toggle); udt_port_capacity_pct is a numeric percentage with
+# raise/resolve.
+_UDT_METRICS = (
+    "udt_new_endpoint|udt_rogue_endpoint|udt_watch_endpoint|"
+    "udt_endpoint_moved|udt_port_capacity_pct"
+)
+# NetPath (WAN/Internet path) metric keys (migrate-076 CHECK), evaluated by
+# netpath_alert_service. netpath_rtt / netpath_loss / netpath_hop_count are
+# numeric with raise/resolve; netpath_path_change / netpath_unreachable are
+# event-driven (threshold acts as an on/off toggle). Scope: `target` = probe
+# name (empty = all probes).
+_NETPATH_METRICS = (
+    "netpath_rtt|netpath_loss|netpath_hop_count|"
+    "netpath_path_change|netpath_unreachable"
+)
+# Monitoring-template metric keys (migrate-062 CHECK allows the tpl_ prefix):
+# any series a template emits (tpl_<metric key>), evaluated per device by
+# network_alert_service._eval_template against ALL matching instance series.
+_TPL_METRICS = r"tpl_[a-z0-9_]{1,60}"
+_CONDITION_METRICS = f"ping_status|rtt|packet_loss|jitter|service_status|{_NETWORK_METRICS}|{_APM_METRICS}|{_UDT_METRICS}|{_NETPATH_METRICS}|{_TPL_METRICS}"
 
 
 class ConditionItem(BaseModel):
@@ -65,6 +97,7 @@ class AlertRuleCreate(BaseModel):
     service_check_group_id: Optional[UUID] = None
     device_type: Optional[str] = None
     location: Optional[str] = None
+    scope_tag: Optional[str] = Field(default=None, max_length=120)
 
     severity: str = Field(default="warning", pattern="^(info|warning|critical)$")
     notify_channels: list[str] = Field(default_factory=list)
@@ -108,6 +141,7 @@ class AlertRuleUpdate(BaseModel):
     service_check_group_id: Optional[UUID] = None
     device_type: Optional[str] = None
     location: Optional[str] = None
+    scope_tag: Optional[str] = Field(default=None, max_length=120)
 
     severity: Optional[str] = Field(None, pattern="^(info|warning|critical)$")
     notify_channels: Optional[list[str]] = None
@@ -128,6 +162,23 @@ class AlertRuleUpdate(BaseModel):
     recovery_sms_template: Optional[str] = None
 
 
+# The six message templates, in the order the editor shows them.
+_TEMPLATE_FIELDS = (
+    "email_subject", "email_body", "sms_template",
+    "recovery_email_subject", "recovery_email_body", "recovery_sms_template",
+)
+
+
+class AlertRulePreview(BaseModel):
+    """Unsaved template edits to render the preview with (all optional)."""
+    email_subject: Optional[str] = None
+    email_body: Optional[str] = None
+    sms_template: Optional[str] = None
+    recovery_email_subject: Optional[str] = None
+    recovery_email_body: Optional[str] = None
+    recovery_sms_template: Optional[str] = None
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -137,7 +188,7 @@ _RULE_COLUMNS = (
     "id, name, description, enabled, metric, operator, threshold, duration, "
     "device_id, group_id, service_check_id, service_check_group_id, "
     "severity, notify_channels, cooldown, "
-    "device_type, location, trigger_on, recovery_alert, "
+    "device_type, location, scope_tag, trigger_on, recovery_alert, "
     "min_duration, max_repeat, schedule_start, schedule_end, schedule_days, "
     "email_subject, email_body, sms_template, "
     "recovery_email_subject, recovery_email_body, recovery_sms_template, "
@@ -172,6 +223,7 @@ def _row_to_dict(row) -> dict:
         "cooldown": row.cooldown,
         "device_type": row.device_type,
         "location": row.location,
+        "scope_tag": row.scope_tag,
         "trigger_on": row.trigger_on,
         "recovery_alert": row.recovery_alert,
         "min_duration": row.min_duration,
@@ -250,6 +302,7 @@ async def create_alert_rule(
         "cooldown": data.cooldown,
         "device_type": data.device_type,
         "location": data.location,
+        "scope_tag": (data.scope_tag or "").strip() or None,
         "trigger_on": data.trigger_on,
         "recovery_alert": data.recovery_alert,
         "min_duration": data.min_duration,
@@ -275,7 +328,7 @@ async def create_alert_rule(
             "conditions, condition_logic, trap_oid, target, "
             "device_id, group_id, service_check_id, service_check_group_id, "
             "severity, notify_channels, cooldown, "
-            "device_type, location, trigger_on, recovery_alert, "
+            "device_type, location, scope_tag, trigger_on, recovery_alert, "
             "min_duration, max_repeat, schedule_start, schedule_end, schedule_days, "
             "email_subject, email_body, sms_template, "
             "recovery_email_subject, recovery_email_body, recovery_sms_template, "
@@ -285,7 +338,7 @@ async def create_alert_rule(
             "CAST(:conditions AS jsonb), :condition_logic, :trap_oid, :target, "
             ":device_id, :group_id, :service_check_id, :service_check_group_id, "
             ":severity, CAST(:notify_channels AS jsonb), :cooldown, "
-            ":device_type, :location, :trigger_on, :recovery_alert, "
+            ":device_type, :location, :scope_tag, :trigger_on, :recovery_alert, "
             ":min_duration, :max_repeat, CAST(:schedule_start AS time), CAST(:schedule_end AS time), "
             "CAST(:schedule_days AS jsonb), "
             ":email_subject, :email_body, :sms_template, "
@@ -357,6 +410,12 @@ async def update_alert_rule(
         elif key == "device_id" or key == "group_id":
             set_parts.append(f"{key} = :{key}")
             params[key] = value
+        elif key == "scope_tag":
+            # "" means the user cleared tag scope; store NULL so the engine's
+            # `if rule.scope_tag` guard treats it as unscoped rather than
+            # matching devices against an empty tag name.
+            set_parts.append(f"{key} = :{key}")
+            params[key] = (value or "").strip() or None
         else:
             set_parts.append(f"{key} = :{key}")
             params[key] = value
@@ -435,8 +494,18 @@ def _render_template(template: str, variables: dict) -> str:
 
 
 def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
-    """Build a preview/simulation alert message from a rule."""
+    """Build a preview/simulation alert message from a rule.
+
+    Uses the same phrasing helpers and the same default templates as the live
+    evaluators, so what an operator approves in the preview dialog is what the
+    recipient gets.
+    """
+    now = datetime.now(timezone.utc)
     trigger = rule_dict.get("trigger_on", "any")
+    metric = rule_dict.get("metric") or "ping_status"
+    operator = rule_dict.get("operator") or "=="
+    threshold = rule_dict.get("threshold", 0)
+
     if is_recovery:
         device_status = "UP"
         status_intro = "The following alert has been resolved:"
@@ -444,49 +513,60 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
         device_status = "DOWN" if trigger == "down" else "DEGRADED" if trigger == "degraded" else "UP" if trigger == "up" else "ALERT"
         status_intro = "An alert has been triggered:"
 
-    # Template variables available to users
+    # Preview against something the rule could plausibly fire on: an APM rule
+    # previewed against "core-router-01" teaches the reader nothing about the
+    # mail their service team will get.
+    if metric.startswith("apm_"):
+        hostname = "checkout-api"
+    elif metric.startswith("host_"):
+        hostname = "app-server-01"
+    elif metric == "service_status" or rule_dict.get("service_check_id"):
+        hostname = "Dashboard HTTPS"
+    else:
+        hostname = "core-router-01"
+    reading = ap.sample_reading(metric, operator, threshold, recovered=is_recovery)
+    # A worked example beats a placeholder: the recovery preview has to show
+    # the "how long was it broken" line, so the sample carries a duration.
+    sample_duration = ap.humanize_duration(3 * 60 + 25) if is_recovery else ""
+
     variables = {
-        "severity": rule_dict.get("severity", "warning").upper(),
+        "severity": (rule_dict.get("severity") or "warning").upper(),
         "rule_name": rule_dict.get("name", "Alert Rule"),
-        "hostname": "core-router-01",
+        "hostname": hostname,
         "ip_address": "10.0.0.1",
         "status": device_status,
         "status_intro": status_intro,
         "device_type": rule_dict.get("device_type") or "router",
         "group": "Core Network",
         "location": rule_dict.get("location") or "DC-1 Rack A1",
-        "metric": rule_dict.get("metric", "ping_status"),
-        "operator": rule_dict.get("operator", "=="),
-        "threshold": str(rule_dict.get("threshold", 0)),
-        "timestamp": "2026-04-02 12:00:00 UTC",
-        "duration": "3m 25s",
+        # "Now" rather than a frozen date: a preview/test mail stamped months in
+        # the past reads as stale data rather than as a sample.
+        "timestamp": now.strftime("%H:%M UTC on %d %b %Y"),
         "rtt": "45.2ms",
         "packet_loss": "15%",
+        "check_name": rule_dict.get("name") or "Service check",
+        "check_type": "HTTP",
+        "target": "https://service.example.com",
+        "error": "" if is_recovery else "connection timed out after 5s",
+        "error_sentence": "" if is_recovery else " Connection timed out after 5s.",
+        **ap.rule_phrasing(rule_dict, hostname=hostname, is_recovery=is_recovery,
+                           reading=reading, duration=sample_duration),
     }
 
-    # Get templates from rule or use defaults
+    # `effective_template` also treats the wizard's old pre-filled templates as
+    # "no template", so a rule created before this wording existed previews
+    # (and sends) the current text rather than the field dump it was seeded with.
     if is_recovery:
-        subject_tpl = rule_dict.get("recovery_email_subject") or "[{severity}] RESOLVED: {rule_name}"
-        body_tpl = rule_dict.get("recovery_email_body") or rule_dict.get("email_body") or (
-            "{status_intro}\n\n"
-            "Rule: {rule_name}\nSeverity: {severity}\n"
-            "Device: {hostname} ({ip_address})\nStatus: {status}\n"
-            "Group: {group}\nLocation: {location}\nType: {device_type}\n"
-            "Metric: {metric} {operator} {threshold}\nTime: {timestamp}\n\n"
-            "--\nZenPlus Network Monitoring System"
-        )
-        sms_tpl = rule_dict.get("recovery_sms_template") or "[ZenPlus {severity}] {hostname} ({ip_address}) is {status}. RESOLVED: {rule_name}"
+        subject_tpl = ap.effective_template(rule_dict.get("recovery_email_subject"),
+                                            ap.DEFAULT_RECOVERY_EMAIL_SUBJECT)
+        body_tpl = ap.effective_template(rule_dict.get("recovery_email_body"),
+                                         ap.DEFAULT_RECOVERY_EMAIL_BODY)
+        sms_tpl = ap.effective_template(rule_dict.get("recovery_sms_template"),
+                                        ap.DEFAULT_RECOVERY_SMS)
     else:
-        subject_tpl = rule_dict.get("email_subject") or "[{severity}] {status}: {rule_name}"
-        body_tpl = rule_dict.get("email_body") or (
-            "{status_intro}\n\n"
-            "Rule: {rule_name}\nSeverity: {severity}\n"
-            "Device: {hostname} ({ip_address})\nStatus: {status}\n"
-            "Group: {group}\nLocation: {location}\nType: {device_type}\n"
-            "Metric: {metric} {operator} {threshold}\nTime: {timestamp}\n\n"
-            "--\nZenPlus Network Monitoring System"
-        )
-        sms_tpl = rule_dict.get("sms_template") or "[ZenPlus {severity}] {hostname} ({ip_address}) is {status}. Rule: {rule_name}"
+        subject_tpl = ap.effective_template(rule_dict.get("email_subject"), ap.DEFAULT_EMAIL_SUBJECT)
+        body_tpl = ap.effective_template(rule_dict.get("email_body"), ap.DEFAULT_EMAIL_BODY)
+        sms_tpl = ap.effective_template(rule_dict.get("sms_template"), ap.DEFAULT_SMS)
 
     return {
         "subject": _render_template(subject_tpl, variables),
@@ -500,15 +580,90 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
         "email_subject_template": subject_tpl,
         "email_body_template": body_tpl,
         "sms_template": sms_tpl,
+        # Sample values behind every {placeholder}, so the editor can show what
+        # each variable resolves to instead of just naming it.
+        "variables": variables,
+        "iso_timestamp": now.isoformat(),
     }
+
+
+# Rules whose readings the alert mail leads with (round-trip time / packet loss);
+# every other metric family has no sample reading worth inventing.
+_PING_METRICS = {"ping_status", "rtt", "packet_loss", "jitter"}
+
+
+def _preview_email_ctx(rule_dict: dict, msg: dict, is_recovery: bool,
+                       action_url: str = "") -> dict:
+    """Context for the *real* alert email, filled with the preview's samples.
+
+    Deliberately mirrors the ctx alert_engine builds when a rule actually
+    fires — same headline metric, same details rows — so the mail shown in the
+    preview dialog is the mail the recipient will get, not an approximation.
+    """
+    from app.api.v1.alert_engine import _clean_details
+
+    variables = msg.get("variables") or {}
+    metric = rule_dict.get("metric") or ""
+    is_ping = metric in _PING_METRICS
+
+    ctx = {
+        "product_name": "ZenPlus",
+        "severity": rule_dict.get("severity") or "warning",
+        "resolved": is_recovery,
+        "status": msg["device_status"],
+        "title": rule_dict.get("name") or "Alert",
+        "hostname": msg["sim_hostname"],
+        "ip_address": msg["sim_ip"],
+        "message": msg["email_body"],
+        "notice": "Preview — the device, readings and time below are sample "
+                  "values. No alert has been raised and nothing was sent.",
+        "details": _clean_details([
+            ("Alert rule", rule_dict.get("name")),
+            ("Condition", variables.get("condition_label")),
+            ("Active for", variables.get("duration") if is_recovery else None),
+            ("Round-trip time", variables.get("rtt") if is_ping else None),
+            ("Packet loss", variables.get("packet_loss") if is_ping else None),
+            ("Group", rule_dict.get("group_id") and variables.get("group")),
+            ("Location", rule_dict.get("location")),
+            ("Device type", rule_dict.get("device_type")),
+            ("Tag", rule_dict.get("scope_tag")),
+        ]),
+        "action_url": action_url,
+        "timestamp": msg.get("iso_timestamp"),
+    }
+    if is_ping:
+        ctx["headline_metric"] = {
+            "label": "Round-trip time",
+            "value": variables.get("rtt"),
+            "secondary_label": "Packet loss",
+            "secondary_value": variables.get("packet_loss"),
+        }
+    elif variables.get("reading"):
+        # Every other metric family leads with the reading that fired the rule,
+        # next to the threshold it crossed — the two numbers a reader compares.
+        ctx["headline_metric"] = {
+            "label": ap.metric_noun(metric),
+            "value": variables["reading"],
+            "secondary_label": "Threshold",
+            "secondary_value": variables.get("threshold_value"),
+        }
+    return ctx
 
 
 @router.post("/{rule_id}/preview")
 async def preview_alert_rule(
     rule_id: UUID,
+    overrides: Optional[AlertRulePreview] = None,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """Render what this rule's notifications will look like.
+
+    Returns the rendered HTML/plain-text email exactly as the alert engine
+    builds it, plus the SMS body and the raw templates. Any template supplied
+    in the body is used instead of the stored one, so the editor can preview
+    unsaved edits; a blank string means "fall back to the built-in default".
+    """
     result = await db.execute(
         text(f"SELECT {_RULE_COLUMNS} FROM alert_rules WHERE id = :id"),
         {"id": rule_id},
@@ -518,12 +673,43 @@ async def preview_alert_rule(
         raise HTTPException(status_code=404, detail="Alert rule not found")
 
     rule = _row_to_dict(row)
-    alert_msg = _build_alert_message(rule, is_recovery=False)
-    recovery_msg = _build_alert_message(rule, is_recovery=True) if rule.get("recovery_alert") else None
+    stored = {k: rule.get(k) for k in _TEMPLATE_FIELDS}
+    if overrides is not None:
+        for key, value in overrides.model_dump(exclude_unset=True).items():
+            rule[key] = value or None
+
+    from app.api.v1.alert_engine import _dashboard_url
+    from app.services.email_render import (
+        build_alert_email_html, build_alert_email_text,
+    )
+    action_url = await _dashboard_url(db, "/alerts")
+
+    def _render(is_recovery: bool) -> dict:
+        msg = _build_alert_message(rule, is_recovery=is_recovery)
+        ctx = _preview_email_ctx(rule, msg, is_recovery, action_url)
+        msg["email_html"] = build_alert_email_html(ctx)
+        msg["email_text"] = build_alert_email_text(ctx)
+        return msg
+
+    alert_msg = _render(False)
+    recovery_msg = _render(True) if rule.get("recovery_alert") else None
 
     return {
         "alert": alert_msg,
         "recovery": recovery_msg,
+        # What is stored on the rule (null = using the default) alongside the
+        # effective text, so the editor can tell "customised" from "default".
+        "templates": {
+            "stored": stored,
+            "effective": {
+                "email_subject": alert_msg["email_subject_template"],
+                "email_body": alert_msg["email_body_template"],
+                "sms_template": alert_msg["sms_template"],
+                "recovery_email_subject": recovery_msg["email_subject_template"] if recovery_msg else None,
+                "recovery_email_body": recovery_msg["email_body_template"] if recovery_msg else None,
+                "recovery_sms_template": recovery_msg["sms_template"] if recovery_msg else None,
+            },
+        },
     }
 
 
@@ -646,11 +832,48 @@ async def simulate_alert_rule(
                     continue
 
                 recipient_list = [r.strip() for r in recipients.split(",") if r.strip()]
-                msg = MIMEMultipart()
+
+                # Render the same styled email a real alert produces, so what
+                # the operator receives when testing is what their users will
+                # actually get. This used to send the raw template text as a
+                # plain-text part only, which arrived looking like a debug dump
+                # and told them nothing about how the real alert would look.
+                from app.services.email_render import (
+                    build_alert_email_html, build_alert_email_text,
+                )
+                sim_ctx = {
+                    "product_name": "ZenPlus",
+                    "severity": (rule.get("severity") or "warning"),
+                    "resolved": False,
+                    "status": f"TEST · {alert_msg['device_status']}",
+                    "title": rule.get("name") or "Alert rule test",
+                    "hostname": alert_msg["sim_hostname"],
+                    "ip_address": alert_msg["sim_ip"],
+                    "message": alert_msg["email_body"],
+                    # No headline value: a test has no measurement, and showing
+                    # the bare condition ("== 0") in the slot reserved for a
+                    # reading reads as a broken number rather than a threshold.
+                    "notice": "Test notification — this is what the alert will look like when it "
+                              "fires. The device and readings below are sample values; no alert "
+                              "has been raised.",
+                    "details": [
+                        ("Alert rule", rule.get("name")),
+                        ("Condition", " ".join(str(x) for x in (
+                            rule.get("metric"), rule.get("operator"), rule.get("threshold")) if x not in (None, ""))),
+                        ("Sample device", f"{alert_msg['sim_hostname']} ({alert_msg['sim_ip']})"),
+                    ],
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                html_body = build_alert_email_html(sim_ctx)
+                text_body = build_alert_email_text(sim_ctx)
+
+                msg = MIMEMultipart("alternative")
                 msg["From"] = f"{gw_cfg.get('from_name', 'ZenPlus')} <{gw_cfg.get('from_email', '')}>"
                 msg["To"] = ", ".join(recipient_list)
-                msg["Subject"] = f"[SIMULATION] {alert_msg['subject']}"
-                msg.attach(MIMEText(f"*** THIS IS A SIMULATION ***\n\n{alert_msg['email_body']}", "plain"))
+                msg["Subject"] = f"[TEST] {alert_msg['subject']}"
+                # Plain part first: last attachment wins in multipart/alternative.
+                msg.attach(MIMEText(text_body, "plain"))
+                msg.attach(MIMEText(html_body, "html"))
 
                 enc = gw_cfg.get("encryption", "tls")
                 if enc == "ssl":

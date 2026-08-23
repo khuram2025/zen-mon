@@ -214,6 +214,7 @@ class ConfigServiceCheck(BaseModel):
     http_expected_statuses: Optional[str] = None
     http_content_match: Optional[str] = None
     http_follow_redirects: Optional[bool] = None
+    http_ignore_tls_errors: bool = False
     tls_warn_days: Optional[int] = None
     tls_critical_days: Optional[int] = None
     check_interval: int = 60

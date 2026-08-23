@@ -4,27 +4,34 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
   AlertOctagon,
   ArrowDownRight,
   ArrowUpRight,
+  Building2,
   CheckCircle2,
   Clock,
+  Cpu,
+  HardDrive,
   HeartPulse,
   Layers,
   Loader2,
   MapPin,
   Maximize2,
+  MemoryStick,
   Minimize2,
   Radio,
   Server,
   Shield,
   Sparkles,
   Target,
+  Timer,
   TrendingUp,
+  TriangleAlert,
+  Wrench,
   Zap,
 } from 'lucide-react'
 import {
@@ -45,8 +52,9 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import { RingGauge } from '@/components/dashboard/RingGauge'
 import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
 import { useExecutiveReport, useTechnicalReport, useBusinessReport } from '@/hooks/useReports'
+import type { BusinessData } from '@/hooks/useReports'
 import { useSSE } from '@/hooks/useSSE'
-import type { ServerMonitoringOverview } from '@/types/servers'
+import type { ServerMonitoringOverview, TopPressureItem } from '@/types/servers'
 
 /* ── Types ──────────────────────────────────────────────────────────────── */
 
@@ -81,7 +89,9 @@ type ServiceSummary = {
 type AvailSegment = {
   key: string
   label: string
-  pct: number
+  /** Window availability averaged over devices with uptime data; null when
+   *  no device in the segment reported any SLA-relevant samples. */
+  pct: number | null
   up: number
   total: number
 }
@@ -89,6 +99,13 @@ type AvailSegment = {
 type RingColor = 'success' | 'warning' | 'danger' | 'info' | 'primary' | 'accent'
 
 type FleetDomain = 'devices' | 'services' | 'servers'
+
+type CountSegment = {
+  key: string
+  label: string
+  value: number
+  tone?: 'success' | 'warning' | 'danger' | 'info' | 'muted'
+}
 
 const FLEET_DOMAINS: Array<{ key: FleetDomain; label: string; icon: typeof Server }> = [
   { key: 'devices', label: 'Devices', icon: Server },
@@ -105,14 +122,21 @@ type TileAccent = {
 
 /* ── Theme tokens ───────────────────────────────────────────────────────── */
 
-const TILE_ACCENTS: TileAccent[] = [
-  { bar: 'bg-emerald-500', bg: 'from-emerald-500/10 to-teal-500/5', glow: 'group-hover:shadow-emerald-500/15', ring: 'success' },
-  { bar: 'bg-sky-500', bg: 'from-sky-500/10 to-blue-500/5', glow: 'group-hover:shadow-sky-500/15', ring: 'info' },
-  { bar: 'bg-violet-500', bg: 'from-violet-500/10 to-purple-500/5', glow: 'group-hover:shadow-violet-500/15', ring: 'accent' },
-  { bar: 'bg-amber-500', bg: 'from-amber-500/10 to-orange-500/5', glow: 'group-hover:shadow-amber-500/15', ring: 'warning' },
-  { bar: 'bg-rose-500', bg: 'from-rose-500/10 to-pink-500/5', glow: 'group-hover:shadow-rose-500/15', ring: 'danger' },
-  { bar: 'bg-cyan-500', bg: 'from-cyan-500/10 to-teal-500/5', glow: 'group-hover:shadow-cyan-500/15', ring: 'info' },
-]
+/** Tile chrome follows the tile's own health — color always encodes data,
+ *  never the tile's position in the grid. */
+const HEALTH_TILE_ACCENTS: Record<'success' | 'warning' | 'danger' | 'none', TileAccent> = {
+  success: { bar: 'bg-emerald-500', bg: 'from-emerald-500/10 to-teal-500/5', glow: 'group-hover:shadow-emerald-500/15', ring: 'success' },
+  warning: { bar: 'bg-amber-500', bg: 'from-amber-500/10 to-orange-500/5', glow: 'group-hover:shadow-amber-500/15', ring: 'warning' },
+  danger: { bar: 'bg-rose-500', bg: 'from-rose-500/10 to-pink-500/5', glow: 'group-hover:shadow-rose-500/15', ring: 'danger' },
+  none: { bar: 'bg-slate-400', bg: 'from-slate-500/10 to-slate-500/5', glow: 'group-hover:shadow-slate-500/10', ring: 'info' },
+}
+
+function tileAccent(pct: number | null): TileAccent {
+  if (pct == null) return HEALTH_TILE_ACCENTS.none
+  if (pct >= 99.9) return HEALTH_TILE_ACCENTS.success
+  if (pct >= 95) return HEALTH_TILE_ACCENTS.warning
+  return HEALTH_TILE_ACCENTS.danger
+}
 
 const KPI_THEMES = {
   devices: {
@@ -143,23 +167,27 @@ const keepPrev = <T,>(prev: T | undefined) => prev
 
 function availColor(pct: number): RingColor {
   if (pct >= 99.9) return 'success'
-  if (pct >= 99) return 'warning'
   if (pct >= 95) return 'warning'
   return 'danger'
 }
 
 function availText(pct: number) {
   if (pct >= 99.9) return 'text-success'
-  if (pct >= 99) return 'text-warning'
   if (pct >= 95) return 'text-warning'
   return 'text-danger'
 }
 
 function availBarGradient(pct: number) {
   if (pct >= 99.9) return 'from-emerald-400 to-teal-500'
-  if (pct >= 99) return 'from-amber-400 to-orange-500'
   if (pct >= 95) return 'from-amber-400 to-orange-500'
   return 'from-rose-400 to-red-500'
+}
+
+/** Hero figure gradient follows the health of the number, never a fixed hue. */
+function heroGradient(pct: number) {
+  if (pct >= 99.9) return 'from-emerald-600 via-teal-600 to-cyan-600 dark:from-emerald-300 dark:via-teal-300 dark:to-cyan-300'
+  if (pct >= 95) return 'from-amber-600 via-orange-600 to-amber-600 dark:from-amber-300 dark:via-orange-300 dark:to-amber-300'
+  return 'from-rose-600 via-red-600 to-rose-600 dark:from-rose-300 dark:via-red-300 dark:to-rose-300'
 }
 
 function fmtPct(v: number | null | undefined, digits = 2) {
@@ -174,6 +202,14 @@ function fmtMin(v: number | null | undefined) {
   return `${(v / 60).toFixed(1)}h`
 }
 
+/** Coarse span label for coverage notes — "6d", "18h", "45m". */
+function fmtSpan(ms: number) {
+  const hours = ms / 3_600_000
+  if (hours >= 48) return `${(hours / 24).toFixed(hours / 24 >= 10 ? 0 : 1)}d`
+  if (hours >= 1) return `${hours.toFixed(hours >= 10 ? 0 : 1)}h`
+  return `${Math.max(1, Math.round(hours * 60))}m`
+}
+
 function titleCase(s: string) {
   return s.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
 }
@@ -184,22 +220,63 @@ function buildSegments(
   getKey: (d: Device) => string,
   labelOf: (key: string) => string,
 ): AvailSegment[] {
-  const grouped = new Map<string, { score: number; up: number; total: number }>()
+  const grouped = new Map<string, { score: number; counted: number; up: number; total: number }>()
   for (const d of devices) {
     const key = getKey(d) || 'Unassigned'
-    const cur = grouped.get(key) || { score: 0, up: 0, total: 0 }
+    const cur = grouped.get(key) || { score: 0, counted: 0, up: 0, total: 0 }
     cur.total += 1
     if (d.status === 'up') cur.up += 1
-    cur.score += uptime[d.id] ?? (d.status === 'up' ? 100 : d.status === 'degraded' ? 75 : 0)
+    // Only measured uptime counts — never invent a number for a device that
+    // has no samples in the window (e.g. fully in maintenance, or brand new).
+    const pct = uptime[d.id]
+    if (pct !== undefined) {
+      cur.score += pct
+      cur.counted += 1
+    }
     grouped.set(key, cur)
   }
   return Array.from(grouped.entries())
     .map(([key, v]) => ({
       key,
       label: labelOf(key),
-      pct: v.total ? v.score / v.total : 0,
+      pct: v.counted ? v.score / v.counted : null,
       up: v.up,
       total: v.total,
+    }))
+    .sort((a, b) => b.total - a.total)
+}
+
+function buildServiceSegments(
+  rows: Array<{
+    type: string
+    group_name: string
+    status: string
+    availability_pct: number | null
+    checks_total: number
+  }>,
+  keyOf: (row: typeof rows[number]) => string,
+): AvailSegment[] {
+  const grouped = new Map<string, { weighted: number; weight: number; measured: number; up: number; total: number }>()
+  for (const row of rows) {
+    const key = keyOf(row) || 'Unassigned'
+    const current = grouped.get(key) || { weighted: 0, weight: 0, measured: 0, up: 0, total: 0 }
+    current.total += 1
+    if (row.status === 'up') current.up += 1
+    if (row.availability_pct != null) {
+      const sampleWeight = Math.max(1, row.checks_total || 0)
+      current.weighted += row.availability_pct * sampleWeight
+      current.weight += sampleWeight
+      current.measured += 1
+    }
+    grouped.set(key, current)
+  }
+  return Array.from(grouped.entries())
+    .map(([key, value]) => ({
+      key,
+      label: titleCase(key),
+      pct: value.measured ? value.weighted / value.weight : null,
+      up: value.up,
+      total: value.total,
     }))
     .sort((a, b) => b.total - a.total)
 }
@@ -209,9 +286,20 @@ function buildSegments(
 export function AvailabilityPage() {
   const qc = useQueryClient()
   const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
+  const [viewParams, setViewParams] = useSearchParams()
   const [noc, setNoc] = useState(false)
-  const [fleetDomain, setFleetDomain] = useState<FleetDomain>('devices')
   const [clock, setClock] = useState(() => new Date())
+
+  const requestedDomain = viewParams.get('view')
+  const fleetDomain: FleetDomain = requestedDomain === 'services' || requestedDomain === 'servers'
+    ? requestedDomain
+    : 'devices'
+  const setFleetDomain = (domain: FleetDomain) => {
+    const next = new URLSearchParams(viewParams)
+    if (domain === 'devices') next.delete('view')
+    else next.set('view', domain)
+    setViewParams(next, { replace: true })
+  }
 
   const liveInterval = 15_000
   const histInterval = 60_000
@@ -221,9 +309,17 @@ export function AvailabilityPage() {
     return () => clearInterval(id)
   }, [])
 
+  // A status change only moves the live counters. Invalidating all of ['avail']
+  // would also re-run the windowed uptime-stats query on every flap, so scope
+  // the refresh to the live queries and let the historical ones keep their
+  // own polling cadence.
   useSSE('/api/v1/stream/status', {
     enabled: true,
-    onMessage: () => qc.invalidateQueries({ queryKey: ['avail'] }),
+    onMessage: () => {
+      for (const k of [['avail', 'summary'], ['avail', 'devices'], ['avail', 'services'], ['avail', 'servers']]) {
+        qc.invalidateQueries({ queryKey: k })
+      }
+    },
   })
 
   useEffect(() => {
@@ -309,7 +405,6 @@ export function AvailabilityPage() {
   const segmentsLoading = (devicesLoading && !devices.length) || (uptimeFetching && !uptime)
 
   const ut = uptime?.devices || {}
-  const failedChecks = uptime?.failed_checks || {}
   const k = exec?.kpis
   const fleetPct = k?.availability_pct ?? 0
   const slaMet = k ? k.sla_attained_pct >= k.sla_target_pct : true
@@ -337,53 +432,197 @@ export function AvailabilityPage() {
     [devices],
   )
 
-  /** Devices below 100% uptime — failed checks align with ping-sample uptime math. */
+  const maintDevices = useMemo(
+    () => devices.filter((d) => d.status === 'maintenance').slice(0, 6),
+    [devices],
+  )
+
+  /** Devices below 100% uptime in the window.
+   *  Preferred source: the technical report (server-side, maintenance-aware,
+   *  includes outage counts and latency). Falls back to the uptime map. */
   const worstDevices = useMemo(() => {
-    const sampleEst = Math.max(1, Math.round(range.hours * 12))
+    if (technical?.worst_devices?.length) {
+      return technical.worst_devices
+        .filter((d) => d.availability_pct < 100)
+        .slice(0, 12)
+    }
     return devices
       .map((d) => {
         const pct = ut[d.id]
         if (pct === undefined || pct >= 100) return null
-        const failed =
-          failedChecks[d.id] ??
-          Math.max(1, Math.round(sampleEst * (100 - pct) / 100))
         return {
           device_id: d.id,
           hostname: d.hostname,
           ip: d.ip_address,
           availability_pct: pct,
-          failed_checks: failed,
+          outage_count: null as number | null,
+          avg_rtt_ms: null as number | null,
+          p95_rtt_ms: null as number | null,
         }
       })
       .filter((row): row is NonNullable<typeof row> => row !== null)
       .sort((a, b) => a.availability_pct - b.availability_pct)
       .slice(0, 12)
-  }, [devices, ut, failedChecks, range.hours])
+  }, [technical, devices, ut])
 
   const serverTotal = servers?.total ?? 0
   const serverHealthy = servers?.status_counts?.healthy ?? 0
-  const serverPct = serverTotal > 0 ? (serverHealthy / serverTotal) * 100 : 100
+  const serverPct = serverTotal > 0 ? (serverHealthy / serverTotal) * 100 : null
 
   const serviceAvail = business?.service_availability || []
-  const avgServicePct = serviceAvail.length
-    ? serviceAvail.reduce((s, r) => s + (r.availability_pct ?? 0), 0) / serviceAvail.length
-    : services && services.total > 0 ? (services.up / services.total) * 100 : 100
+  // Weight by check volume so a busy check counts more than a rarely-run one.
+  const avgServicePct = useMemo(() => {
+    const withData = serviceAvail.filter((r) => r.availability_pct != null)
+    const weight = withData.reduce((s, r) => s + (r.checks_total ?? 0), 0)
+    if (weight > 0) {
+      return withData.reduce(
+        (s, r) => s + (r.availability_pct ?? 0) * (r.checks_total ?? 0), 0) / weight
+    }
+    if (withData.length) {
+      return withData.reduce((s, r) => s + (r.availability_pct ?? 0), 0) / withData.length
+    }
+    return services && services.total > 0 ? (services.up / services.total) * 100 : null
+  }, [serviceAvail, services])
 
   const trendData = exec?.availability_trend || []
+
+  /** Honest, tidy Y axis: zoom to the healthy band only when the data allows. */
+  const { trendYDomain, trendYTicks } = useMemo(() => {
+    const vals = trendData
+      .map((p) => p.availability_pct)
+      .filter((v): v is number => v != null)
+    const min = vals.length ? Math.min(...vals) : 100
+    if (min >= 95) return { trendYDomain: [95, 100] as [number, number], trendYTicks: [95, 96, 97, 98, 99, 100] }
+    if (min >= 70) return { trendYDomain: [70, 100] as [number, number], trendYTicks: [70, 80, 90, 100] }
+    return { trendYDomain: [0, 100] as [number, number], trendYTicks: [0, 25, 50, 75, 100] }
+  }, [trendData])
+
+  /** Non-null when the report covers materially less than the window asked
+   *  for — retention, or an appliance younger than the range. 10% slack keeps
+   *  the badge off for the normal case where the first sample simply lands a
+   *  poll interval after the window opens. */
+  const coverageGap = useMemo(() => {
+    const first = exec?.coverage?.from
+    if (!first || !exec?.from) return null
+    const requestedMs = Date.parse(range.toISO) - Date.parse(exec.from)
+    const measuredMs = Date.parse(range.toISO) - Date.parse(first)
+    if (!(requestedMs > 0) || !(measuredMs > 0)) return null
+    if (measuredMs >= requestedMs * 0.9) return null
+    return {
+      measuredLabel: fmtSpan(measuredMs),
+      requestedLabel: fmtSpan(requestedMs),
+      startsLabel: new Date(first).toLocaleDateString([], { month: 'short', day: 'numeric' }),
+    }
+  }, [exec, range.toISO])
 
   const serviceFailedChecks = useMemo(
     () => serviceAvail.reduce((s, r) => s + (r.checks_failed ?? 0), 0),
     [serviceAvail],
   )
 
+  const serviceByType = useMemo(
+    () => buildServiceSegments(serviceAvail, (row) => row.type || 'other'),
+    [serviceAvail],
+  )
+  const serviceByGroup = useMemo(
+    () => buildServiceSegments(serviceAvail, (row) => row.group_name || 'Unassigned'),
+    [serviceAvail],
+  )
+  const atRiskServices = useMemo(
+    () => serviceAvail
+      .filter((row) => row.status !== 'up' || (row.availability_pct != null && row.availability_pct < 99.9))
+      .sort((a, b) => (a.availability_pct ?? -1) - (b.availability_pct ?? -1)),
+    [serviceAvail],
+  )
+  const responseByService = useMemo(
+    () => new Map((business?.response_time_quantiles || []).map((row) => [row.service_check_id, row])),
+    [business],
+  )
+
+  const serverStatusSegments = useMemo<CountSegment[]>(() => {
+    const counts = servers?.status_counts || {}
+    const rows: CountSegment[] = [
+      { key: 'healthy', label: 'Healthy', value: counts.healthy ?? 0, tone: 'success' },
+      { key: 'warning', label: 'Warning', value: counts.warning ?? 0, tone: 'warning' },
+      { key: 'critical', label: 'Critical', value: counts.critical ?? 0, tone: 'danger' },
+      { key: 'stale', label: 'Stale', value: counts.stale ?? 0, tone: 'warning' },
+      { key: 'unknown', label: 'Unknown', value: counts.unknown ?? 0, tone: 'muted' },
+    ]
+    return rows.filter((row) => row.value > 0)
+  }, [servers])
+  const serverOsSegments = useMemo<CountSegment[]>(() =>
+    Object.entries(servers?.os_counts || {})
+      .map(([key, value]) => ({ key, label: titleCase(key), value: value ?? 0, tone: 'info' as const }))
+      .filter((row) => row.value > 0)
+      .sort((a, b) => b.value - a.value),
+  [servers])
+  const serverAgentSegments = useMemo<CountSegment[]>(() =>
+    Object.entries(servers?.agent_counts || {})
+      .map(([key, value]) => ({
+        key,
+        label: titleCase(key),
+        value: value ?? 0,
+        tone: key === 'online' ? 'success' as const : key === 'error' || key === 'offline' ? 'danger' as const : 'warning' as const,
+      }))
+      .filter((row) => row.value > 0)
+      .sort((a, b) => b.value - a.value),
+  [servers])
+
+  const executiveBrief = useMemo(() => {
+    if (fleetDomain === 'services') {
+      const down = services?.down ?? 0
+      const impact = business?.customer_impact_minutes ?? 0
+      return {
+        eyebrow: 'Business service continuity',
+        title: down > 0
+          ? `${down} customer-facing service${down === 1 ? '' : 's'} require attention`
+          : 'Business services are operating normally',
+        detail: impact > 0
+          ? `${fmtMin(impact)} of customer-impact time was recorded in ${range.label.toLowerCase()}. Prioritize the lowest-availability services below.`
+          : `No customer-impact time is recorded in ${range.label.toLowerCase()}. Service checks continue to validate reachability and response quality.`,
+        tone: down > 0 || atRiskServices.length > 0 ? 'warning' as const : 'success' as const,
+        action: 'Open service operations',
+        to: '/services',
+      }
+    }
+    if (fleetDomain === 'servers') {
+      const critical = servers?.status_counts?.critical ?? 0
+      const warning = (servers?.status_counts?.warning ?? 0) + (servers?.status_counts?.stale ?? 0)
+      return {
+        eyebrow: 'Workload resilience',
+        title: critical > 0
+          ? `${critical} critical server${critical === 1 ? '' : 's'} may affect business operations`
+          : warning > 0
+            ? `${warning} server${warning === 1 ? '' : 's'} show elevated operational risk`
+            : 'Server capacity and health are within normal bounds',
+        detail: serverTotal
+          ? `${serverHealthy} of ${serverTotal} monitored servers are healthy. Capacity pressure and agent coverage are summarized below.`
+          : 'No server agents or agentless workloads are currently enrolled.',
+        tone: critical > 0 ? 'danger' as const : warning > 0 ? 'warning' as const : 'success' as const,
+        action: 'Open server estate',
+        to: '/servers',
+      }
+    }
+    return {
+      eyebrow: 'Enterprise availability posture',
+      title: slaMet ? 'Network availability is meeting the committed SLA' : 'Network availability is below the committed SLA',
+      detail: `${fmtPct(fleetPct)} availability across ${k?.devices_monitored ?? summary?.total ?? 0} monitored devices, with ${fmtMin(k?.mttr_minutes)} mean time to restore.`,
+      tone: slaMet ? 'success' as const : 'danger' as const,
+      action: 'Open device estate',
+      to: '/devices',
+    }
+  }, [
+    fleetDomain, services, business, range.label, atRiskServices.length, servers,
+    serverTotal, serverHealthy, slaMet, fleetPct, k, summary,
+  ])
+
   const activeFleet = useMemo(() => {
     const views = {
       devices: {
         title: 'Device Availability',
-        pct: fleetPct,
+        pct: fleetPct as number | null,
         sub: `${summary?.up ?? 0}/${summary?.total ?? 0} UP`,
         ringLabel: 'Network Devices',
-        gradient: 'from-emerald-600 via-teal-600 to-cyan-600 dark:from-emerald-300 dark:via-teal-300 dark:to-cyan-300',
         labelAccent: 'text-emerald-600 dark:text-emerald-400',
         metrics: [
           { icon: <Server className="h-3.5 w-3.5" />, label: 'Monitored', value: String(k?.devices_monitored ?? summary?.total ?? '—') },
@@ -397,7 +636,6 @@ export function AvailabilityPage() {
         pct: avgServicePct,
         sub: `${services?.up ?? 0}/${services?.total ?? 0} UP`,
         ringLabel: 'Service Checks',
-        gradient: 'from-violet-600 via-purple-600 to-fuchsia-600 dark:from-violet-300 dark:via-purple-300 dark:to-fuchsia-300',
         labelAccent: 'text-violet-600 dark:text-violet-400',
         metrics: [
           { icon: <Shield className="h-3.5 w-3.5" />, label: 'Checks', value: String(services?.total ?? '—') },
@@ -409,9 +647,8 @@ export function AvailabilityPage() {
       servers: {
         title: 'Server Availability',
         pct: serverPct,
-        sub: `${serverHealthy}/${serverTotal} healthy`,
+        sub: serverTotal ? `${serverHealthy}/${serverTotal} healthy` : 'No agents',
         ringLabel: 'Server Fleet',
-        gradient: 'from-sky-600 via-blue-600 to-indigo-600 dark:from-sky-300 dark:via-blue-300 dark:to-indigo-300',
         labelAccent: 'text-sky-600 dark:text-sky-400',
         metrics: [
           { icon: <Activity className="h-3.5 w-3.5" />, label: 'Total', value: String(serverTotal || '—') },
@@ -428,6 +665,7 @@ export function AvailabilityPage() {
   ])
 
   const heroPct = activeFleet.pct
+  const maintMinutes = k?.maintenance_minutes ?? 0
 
   return (
     <div className={cn('relative', noc && 'fixed inset-0 z-40 overflow-y-auto p-4 md:p-6')}>
@@ -463,7 +701,7 @@ export function AvailabilityPage() {
             <div>
               <div className="flex flex-wrap items-center gap-3">
                 <h1 className={cn('font-bold tracking-tight text-text', noc ? 'text-3xl' : 'text-2xl')}>
-                  Availability Command Center
+                  Availability & Business Continuity
                 </h1>
                 <LiveBadge />
                 {rangeFetching && (
@@ -474,8 +712,17 @@ export function AvailabilityPage() {
                 )}
               </div>
               <p className="mt-1 text-xs text-muted">
-                Real-time fleet health · {range.label} analytics · SSE push + 15s polling
+                Executive service resilience · {range.label} performance · live operational risk
               </p>
+              {/* A window is only as long as the data under it. Without this,
+                * a 30-day view on an appliance holding eight days of samples
+                * shows eight days of numbers under a "1M" heading. */}
+              {coverageGap && (
+                <p className="mt-1 inline-flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-400">
+                  <Clock className="h-3 w-3" />
+                  Measured over {coverageGap.measuredLabel} of the {coverageGap.requestedLabel} window — data starts {coverageGap.startsLabel}
+                </p>
+              )}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -517,7 +764,7 @@ export function AvailabilityPage() {
               ) : (
                 <div className={cn(
                   'mt-2 bg-gradient-to-r bg-clip-text font-black tabular-nums tracking-tight text-transparent',
-                  activeFleet.gradient,
+                  heroPct == null ? 'from-slate-500 to-slate-400 dark:from-slate-300 dark:to-slate-500' : heroGradient(heroPct),
                   noc ? 'text-7xl' : 'text-6xl',
                 )}>
                   {fmtPct(heroPct)}
@@ -536,7 +783,16 @@ export function AvailabilityPage() {
                       : <ArrowDownRight className="h-3.5 w-3.5" />}
                     {(k.availability_delta_pct ?? 0) >= 0 ? '+' : ''}{fmtPct(k.availability_delta_pct, 2)} vs prior window
                   </span>
-                  <SlaChip met={slaMet} attained={k.sla_attained_pct} target={k.sla_target_pct} />
+                  <SlaChip met={slaMet} target={k.sla_target_pct} />
+                  {maintMinutes > 0 && (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-lg border border-info/40 bg-info/10 px-2.5 py-1 text-xs font-semibold text-info"
+                      title="Samples inside planned maintenance windows are excluded from every availability figure on this page"
+                    >
+                      <Wrench className="h-3 w-3" />
+                      {fmtMin(maintMinutes)} maintenance excluded
+                    </span>
+                  )}
                 </div>
               )}
               {fleetDomain === 'services' && (services?.down ?? 0) > 0 && (
@@ -566,15 +822,15 @@ export function AvailabilityPage() {
               <div className="relative">
                 <div className={cn(
                   'absolute inset-0 rounded-full blur-2xl',
-                  heroPct >= 99.9 ? 'bg-emerald-400/30 dark:bg-emerald-500/20' : heroPct >= 99 ? 'bg-amber-400/30' : 'bg-rose-400/30',
-                  fleetDomain === 'services' && 'bg-violet-400/25 dark:bg-violet-500/15',
-                  fleetDomain === 'servers' && 'bg-sky-400/25 dark:bg-sky-500/15',
+                  heroPct == null ? 'bg-slate-400/20'
+                    : heroPct >= 99.9 ? 'bg-emerald-400/30 dark:bg-emerald-500/20'
+                    : heroPct >= 95 ? 'bg-amber-400/30' : 'bg-rose-400/30',
                 )} />
                 <RingGauge
-                  value={heroPct}
+                  value={heroPct ?? 0}
                   size={noc ? 190 : 160}
                   stroke={noc ? 15 : 13}
-                  color={availColor(heroPct)}
+                  color={heroPct == null ? 'info' : availColor(heroPct)}
                   sub={activeFleet.sub}
                   label={activeFleet.ringLabel}
                 />
@@ -586,7 +842,13 @@ export function AvailabilityPage() {
                 theme={KPI_THEMES.devices}
                 label="Devices"
                 value={summary ? `${summary.up}/${summary.total}` : '—'}
-                pct={summary && summary.total ? (summary.up / summary.total) * 100 : 100}
+                // Devices under planned maintenance leave the denominator, the
+                // same rule the headline SLA follows. Counting them as "not up"
+                // put a 97.3% on this tile next to a 100% hero figure, 0 DOWN
+                // and "all devices reachable".
+                pct={summary && summary.total - summary.maintenance > 0
+                  ? (summary.up / (summary.total - summary.maintenance)) * 100
+                  : 100}
                 icon={<Server className="h-4 w-4" />}
                 to="/devices"
                 issue={summary?.down}
@@ -596,8 +858,8 @@ export function AvailabilityPage() {
               <DomainKpi
                 theme={KPI_THEMES.services}
                 label="Services"
-                value={services ? `${services.up}/${services.total}` : '—'}
-                pct={avgServicePct}
+                value={services && services.total > 0 ? `${services.up}/${services.total}` : '—'}
+                pct={services && services.total > 0 ? avgServicePct : null}
                 icon={<Shield className="h-4 w-4" />}
                 to="/services"
                 issue={services?.down}
@@ -618,6 +880,7 @@ export function AvailabilityPage() {
                 label="Critical Alerts"
                 value={String(k?.active_critical_count ?? 0)}
                 pct={k?.active_critical_count ? 0 : 100}
+                barClass={k?.active_critical_count ? 'from-rose-400 to-red-500' : 'from-emerald-400 to-teal-500'}
                 icon={<AlertOctagon className="h-4 w-4" />}
                 to="/alerts"
                 large={noc}
@@ -626,7 +889,11 @@ export function AvailabilityPage() {
           </div>
         </GlassPanel>
 
-        {/* Trend + live */}
+        <ExecutiveBriefPanel {...executiveBrief} rangeLabel={range.label} />
+
+        {fleetDomain === 'devices' && (
+          <>
+        {/* Device trend + live */}
         <div className="grid gap-4 lg:grid-cols-12">
           <GlassPanel className="lg:col-span-8">
             <PanelHeader
@@ -642,19 +909,14 @@ export function AvailabilityPage() {
                 <EmptyPanel icon={<TrendingUp className="h-8 w-8" />} text="No trend data for this window" />
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={trendData} margin={{ top: 16, right: 20, left: -4, bottom: 0 }}>
+                  <AreaChart data={trendData} margin={{ top: 16, right: 16, left: -4, bottom: 0 }}>
                     <defs>
                       <linearGradient id="availTrendFill2" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="rgb(var(--success))" stopOpacity={0.45} />
+                        <stop offset="0%" stopColor="rgb(var(--success))" stopOpacity={0.35} />
                         <stop offset="100%" stopColor="rgb(var(--success))" stopOpacity={0} />
                       </linearGradient>
-                      <linearGradient id="availTrendStroke" x1="0" y1="0" x2="1" y2="0">
-                        <stop offset="0%" stopColor="#10b981" />
-                        <stop offset="50%" stopColor="#06b6d4" />
-                        <stop offset="100%" stopColor="#8b5cf6" />
-                      </linearGradient>
                     </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgb(var(--border))" strokeOpacity={0.6} vertical={false} />
+                    <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.5} vertical={false} />
                     <XAxis
                       dataKey="ts"
                       tickFormatter={(v) => {
@@ -669,7 +931,8 @@ export function AvailabilityPage() {
                       minTickGap={36}
                     />
                     <YAxis
-                      domain={[(min: number) => Math.max(0, Math.floor(min - 2)), 100]}
+                      domain={trendYDomain}
+                      ticks={trendYTicks}
                       tickFormatter={(v) => `${v}%`}
                       tick={{ fontSize: 11, fill: 'rgb(var(--muted))' }}
                       axisLine={false}
@@ -683,18 +946,18 @@ export function AvailabilityPage() {
                         stroke="rgb(var(--success))"
                         strokeDasharray="5 5"
                         strokeOpacity={0.8}
-                        label={{ value: `SLA ${k.sla_target_pct}%`, position: 'right', fill: 'rgb(var(--success))', fontSize: 10 }}
+                        label={{ value: `SLA ${k.sla_target_pct}%`, position: 'insideBottomRight', fill: 'rgb(var(--success))', fontSize: 10, dy: 12 }}
                       />
                     )}
                     <Area
                       type="monotone"
                       dataKey="availability_pct"
-                      stroke="url(#availTrendStroke)"
-                      strokeWidth={3}
+                      stroke="rgb(var(--success))"
+                      strokeWidth={2.5}
                       fill="url(#availTrendFill2)"
                       isAnimationActive={false}
                       dot={false}
-                      activeDot={{ r: 5, fill: '#10b981', stroke: '#fff', strokeWidth: 2 }}
+                      activeDot={{ r: 5, fill: 'rgb(var(--success))', stroke: '#fff', strokeWidth: 2 }}
                     />
                   </AreaChart>
                 </ResponsiveContainer>
@@ -750,6 +1013,25 @@ export function AvailabilityPage() {
                     ))}
                   </div>
                 )}
+                {maintDevices.length > 0 && (
+                  <div className="mt-2 border-t border-border/60 pt-2">
+                    <div className="mb-1 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-info">
+                      <Wrench className="h-3 w-3" />
+                      Planned maintenance — excluded from SLA
+                    </div>
+                    {maintDevices.map((d) => (
+                      <Link
+                        key={d.id}
+                        to={`/devices/${d.id}`}
+                        className="flex items-center gap-2 rounded-lg px-2 py-1.5 transition hover:bg-surface/80"
+                      >
+                        <span className="h-2 w-2 shrink-0 rounded-full bg-info" />
+                        <span className="min-w-0 flex-1 truncate text-xs font-medium text-muted">{d.hostname}</span>
+                        <Badge variant="info">Maint</Badge>
+                      </Link>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           </GlassPanel>
@@ -792,7 +1074,7 @@ export function AvailabilityPage() {
             title="Site Health Matrix"
             icon={<MapPin className="h-4 w-4 text-emerald-500" />}
             hint={range.label}
-            loading={initialLoading && !(exec?.location_summary?.length)}
+            loading={execLoading && !exec}
             empty="No location data"
             columns={['Location', 'Devices', 'Down', 'Availability']}
             rows={(exec?.location_summary || []).map((row) => ({
@@ -806,21 +1088,21 @@ export function AvailabilityPage() {
             }))}
           />
           <DataTablePanel
-            title="Service Availability"
-            icon={<Shield className="h-4 w-4 text-violet-500" />}
+            title="Top Availability Risks"
+            icon={<TriangleAlert className="h-4 w-4 text-amber-500" />}
             hint={range.label}
-            loading={bizFetching && !serviceAvail.length}
-            empty="No service checks configured"
-            columns={['Service', 'Type', 'Status', 'Uptime']}
-            rows={serviceAvail.slice(0, 14).map((svc) => ({
-              key: svc.service_check_id,
+            loading={execLoading && !exec}
+            empty="No material device risks in this window"
+            emptyTone="success"
+            columns={['Risk', 'Device', 'Alerts', 'Duration', 'Severity']}
+            rows={(exec?.top_issues || []).slice(0, 14).map((issue, index) => ({
+              key: `${issue.device_id}-${index}`,
               cells: [
-                <span className="max-w-[160px] truncate font-medium" title={svc.name}>{svc.name}</span>,
-                <span className="text-[10px] font-bold uppercase tracking-wider text-muted">{svc.type}</span>,
-                <Badge variant={svc.status === 'up' ? 'success' : svc.status === 'down' ? 'danger' : 'warning'} className="capitalize">
-                  {svc.status}
-                </Badge>,
-                <GradientBar pct={svc.availability_pct ?? 0} />,
+                <span className="max-w-[190px] truncate font-medium" title={issue.issue}>{issue.issue}</span>,
+                <Link to={`/devices/${issue.device_id}`} className="font-semibold text-primary hover:underline">{issue.hostname}</Link>,
+                <span className="tabular-nums">{issue.alert_count}</span>,
+                <span className="tabular-nums text-muted">{fmtMin(issue.duration_minutes)}</span>,
+                <Badge variant={issue.severity === 'critical' ? 'danger' : 'warning'} className="capitalize">{issue.severity}</Badge>,
               ],
             }))}
           />
@@ -831,19 +1113,19 @@ export function AvailabilityPage() {
             title="Lowest Availability Devices"
             icon={<Target className="h-4 w-4 text-amber-500" />}
             hint={range.label}
-            loading={segmentsLoading && !worstDevices.length}
+            loading={(techFetching || segmentsLoading) && !worstDevices.length}
             empty="No device issues in this window"
-            columns={['Device', 'IP', 'Failed checks', 'Uptime']}
+            columns={['Device', 'IP', 'Outages', 'P95 RTT', 'Uptime']}
             rows={worstDevices.map((d) => ({
               key: d.device_id,
               cells: [
                 <Link to={`/devices/${d.device_id}`} className="font-medium text-primary hover:underline">{d.hostname}</Link>,
                 <span className="font-mono text-xs text-muted">{d.ip}</span>,
-                <span
-                  className="tabular-nums"
-                  title="Ping samples that did not respond in this window (same source as uptime %)"
-                >
-                  {d.failed_checks}
+                <span className="tabular-nums" title="Distinct outage episodes in this window (maintenance excluded)">
+                  {d.outage_count ?? '—'}
+                </span>,
+                <span className="tabular-nums text-muted">
+                  {d.p95_rtt_ms != null ? `${d.p95_rtt_ms.toFixed(0)} ms` : '—'}
                 </span>,
                 <GradientBar pct={d.availability_pct} />,
               ],
@@ -853,9 +1135,13 @@ export function AvailabilityPage() {
             title="Recent Outage Timeline"
             icon={<Clock className="h-4 w-4 text-rose-500" />}
             hint={range.label}
-            loading={initialLoading && !(exec?.outage_timeline?.length)}
-            empty="No outages recorded — fleet is healthy"
-            emptyTone="success"
+            loading={execLoading && !exec}
+            empty={
+              (summary?.down ?? 0) > 0
+                ? `No status changes in this window — ${summary!.down} device${summary!.down === 1 ? ' is' : 's are'} still down from an earlier outage`
+                : 'No outages recorded — fleet is healthy'
+            }
+            emptyTone={(summary?.down ?? 0) > 0 ? 'muted' : 'success'}
             columns={['Started', 'Device', 'Duration']}
             rows={(exec?.outage_timeline || []).slice(0, 12).map((o, i) => ({
               key: `${o.device_id}-${i}`,
@@ -867,6 +1153,317 @@ export function AvailabilityPage() {
             }))}
           />
         </div>
+          </>
+        )}
+
+        {fleetDomain === 'services' && (
+          <ServiceExecutiveView
+            rangeLabel={range.label}
+            summary={services}
+            availability={avgServicePct}
+            serviceRows={serviceAvail}
+            byType={serviceByType}
+            byGroup={serviceByGroup}
+            atRisk={atRiskServices}
+            failedChecks={serviceFailedChecks}
+            impactMinutes={business?.customer_impact_minutes ?? 0}
+            outages={business?.service_outages || []}
+            tlsWarnings={business?.tls_warnings || []}
+            responseByService={responseByService}
+            loading={bizFetching && !business}
+            large={noc}
+          />
+        )}
+
+        {fleetDomain === 'servers' && (
+          <ServerExecutiveView
+            rangeLabel={range.label}
+            overview={servers}
+            statusSegments={serverStatusSegments}
+            osSegments={serverOsSegments}
+            agentSegments={serverAgentSegments}
+            large={noc}
+          />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ExecutiveBriefPanel({
+  eyebrow, title, detail, tone, action, to, rangeLabel,
+}: {
+  eyebrow: string
+  title: string
+  detail: string
+  tone: 'success' | 'warning' | 'danger'
+  action: string
+  to: string
+  rangeLabel: string
+}) {
+  const toneClass = tone === 'success'
+    ? 'border-emerald-500/30 bg-gradient-to-r from-emerald-500/12 via-surface to-teal-500/8'
+    : tone === 'warning'
+      ? 'border-amber-500/30 bg-gradient-to-r from-amber-500/12 via-surface to-orange-500/8'
+      : 'border-rose-500/30 bg-gradient-to-r from-rose-500/12 via-surface to-red-500/8'
+  const iconClass = tone === 'success' ? 'bg-success/12 text-success' : tone === 'warning' ? 'bg-warning/12 text-warning' : 'bg-danger/12 text-danger'
+  const Icon = tone === 'success' ? CheckCircle2 : tone === 'warning' ? TriangleAlert : AlertOctagon
+  return (
+    <GlassPanel className={cn('border', toneClass)}>
+      <div className="flex flex-col gap-4 p-5 md:flex-row md:items-center md:justify-between md:px-6">
+        <div className="flex min-w-0 items-start gap-4">
+          <span className={cn('flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl', iconClass)}>
+            <Icon className="h-5 w-5" />
+          </span>
+          <div>
+            <div className="text-[10px] font-black uppercase tracking-[0.2em] text-muted">{eyebrow} · {rangeLabel}</div>
+            <h2 className="mt-1 text-lg font-bold tracking-tight text-text">{title}</h2>
+            <p className="mt-1 max-w-4xl text-sm leading-6 text-muted">{detail}</p>
+          </div>
+        </div>
+        <Link
+          to={to}
+          className="inline-flex shrink-0 items-center justify-center rounded-xl border border-border bg-surface px-4 py-2 text-xs font-bold text-text shadow-sm transition hover:-translate-y-0.5 hover:border-primary/40 hover:text-primary hover:shadow-md"
+        >
+          {action}
+          <ArrowUpRight className="ml-1.5 h-3.5 w-3.5" />
+        </Link>
+      </div>
+    </GlassPanel>
+  )
+}
+
+function ServiceExecutiveView({
+  rangeLabel,
+  summary,
+  availability,
+  serviceRows,
+  byType,
+  byGroup,
+  atRisk,
+  failedChecks,
+  impactMinutes,
+  outages,
+  tlsWarnings,
+  responseByService,
+  loading,
+  large,
+}: {
+  rangeLabel: string
+  summary?: ServiceSummary
+  availability: number | null
+  serviceRows: BusinessData['service_availability']
+  byType: AvailSegment[]
+  byGroup: AvailSegment[]
+  atRisk: BusinessData['service_availability']
+  failedChecks: number
+  impactMinutes: number
+  outages: BusinessData['service_outages']
+  tlsWarnings: BusinessData['tls_warnings']
+  responseByService: Map<string, BusinessData['response_time_quantiles'][number]>
+  loading: boolean
+  large?: boolean
+}) {
+  const total = summary?.total ?? serviceRows.length
+  const up = summary?.up ?? serviceRows.filter((row) => row.status === 'up').length
+  const serviceStatusRows: CountSegment[] = [
+    { key: 'up', label: 'Operating', value: summary?.up ?? 0, tone: 'success' },
+    { key: 'warning', label: 'Warning', value: (summary?.warning ?? 0) + (summary?.degraded ?? 0), tone: 'warning' },
+    { key: 'down', label: 'Down', value: summary?.down ?? 0, tone: 'danger' },
+    { key: 'unknown', label: 'Unknown', value: summary?.unknown ?? 0, tone: 'muted' },
+  ]
+  const serviceStatus = serviceStatusRows.filter((row) => row.value > 0)
+  const riskProfileRows: CountSegment[] = [
+    { key: 'committed', label: 'At or above 99.9%', value: serviceRows.filter((row) => (row.availability_pct ?? -1) >= 99.9).length, tone: 'success' },
+    { key: 'watch', label: '95% to 99.9%', value: serviceRows.filter((row) => row.availability_pct != null && row.availability_pct >= 95 && row.availability_pct < 99.9).length, tone: 'warning' },
+    { key: 'breach', label: 'Below 95%', value: serviceRows.filter((row) => row.availability_pct != null && row.availability_pct < 95).length, tone: 'danger' },
+    { key: 'unmeasured', label: 'No window data', value: serviceRows.filter((row) => row.availability_pct == null).length, tone: 'muted' },
+  ]
+  const riskProfile = riskProfileRows.filter((row) => row.value > 0)
+
+  return (
+    <div className="space-y-5 animate-fade-in">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <ExecutiveMetricCard icon={Shield} label="Portfolio availability" value={fmtPct(availability)} detail={`${rangeLabel} weighted by validation volume`} tone={availability != null && availability >= 99.9 ? 'success' : 'warning'} />
+        <ExecutiveMetricCard icon={CheckCircle2} label="Services operating" value={total ? `${up} / ${total}` : '—'} detail={total ? `${Math.max(0, total - up)} require review` : 'No service checks configured'} tone={total > 0 && up === total ? 'success' : 'warning'} />
+        <ExecutiveMetricCard icon={Timer} label="Customer impact" value={fmtMin(impactMinutes)} detail={`${outages.length} outage event${outages.length === 1 ? '' : 's'} in the selected window`} tone={impactMinutes > 0 ? 'danger' : 'success'} />
+        <ExecutiveMetricCard icon={Target} label="Failed validations" value={failedChecks.toLocaleString()} detail={`${atRisk.length} service${atRisk.length === 1 ? '' : 's'} outside the target`} tone={failedChecks > 0 ? 'warning' : 'success'} />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-12">
+        <AvailabilityPortfolioPanel rows={serviceRows} rangeLabel={rangeLabel} loading={loading} large={large} />
+        <div className="grid gap-4 lg:col-span-4">
+          <DistributionPanel title="Live Service State" icon={<Radio className="h-4 w-4 text-violet-500" />} segments={serviceStatus} total={total} hint="real-time" />
+          <DistributionPanel title="SLA Risk Profile" icon={<Target className="h-4 w-4 text-amber-500" />} segments={riskProfile} total={serviceRows.length} hint={rangeLabel} />
+        </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <BreakdownPanel title="Availability by Service Type" icon={<Shield className="h-4 w-4" />} segments={byType} hint={rangeLabel} loading={loading && !byType.length} large={large} accent="violet" />
+        <BreakdownPanel title="Availability by Business Group" icon={<Building2 className="h-4 w-4" />} segments={byGroup} hint={rangeLabel} loading={loading && !byGroup.length} large={large} accent="emerald" />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <DataTablePanel
+          title="Services Requiring Attention"
+          icon={<TriangleAlert className="h-4 w-4 text-amber-500" />}
+          hint={rangeLabel}
+          loading={loading && !atRisk.length}
+          empty="All measured services are meeting the target"
+          emptyTone="success"
+          columns={['Service', 'Group', 'Failed', 'P95', 'Availability']}
+          rows={atRisk.slice(0, 15).map((row) => {
+            const response = responseByService.get(row.service_check_id)
+            return {
+              key: row.service_check_id,
+              cells: [
+                <Link to={`/services/${row.service_check_id}`} className="font-semibold text-primary hover:underline">{row.name}</Link>,
+                <span className="text-xs text-muted">{row.group_name || 'Unassigned'}</span>,
+                <span className={cn('tabular-nums', row.checks_failed > 0 && 'font-bold text-danger')}>{row.checks_failed}</span>,
+                <span className="tabular-nums text-muted">{response?.p95_ms != null ? `${response.p95_ms.toFixed(0)} ms` : '—'}</span>,
+                <GradientBar pct={row.availability_pct} />,
+              ],
+            }
+          })}
+        />
+        <DataTablePanel
+          title="Business Service Portfolio"
+          icon={<Building2 className="h-4 w-4 text-violet-500" />}
+          hint={rangeLabel}
+          loading={loading && !serviceRows.length}
+          empty="No service checks configured"
+          columns={['Service', 'Type', 'State', 'Availability']}
+          rows={[...serviceRows]
+            .sort((a, b) => (a.availability_pct ?? -1) - (b.availability_pct ?? -1))
+            .slice(0, 15)
+            .map((row) => ({
+              key: row.service_check_id,
+              cells: [
+                <Link to={`/services/${row.service_check_id}`} className="font-semibold text-primary hover:underline">{row.name}</Link>,
+                <span className="text-[10px] font-bold uppercase tracking-wider text-muted">{row.type}</span>,
+                <Badge variant={row.status === 'up' ? 'success' : row.status === 'down' ? 'danger' : 'warning'} className="capitalize">{row.status}</Badge>,
+                <GradientBar pct={row.availability_pct} />,
+              ],
+            }))}
+        />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <DataTablePanel
+          title="Customer-impact Timeline"
+          icon={<Clock className="h-4 w-4 text-rose-500" />}
+          hint={rangeLabel}
+          loading={loading && !outages.length}
+          empty="No customer-impacting service outages recorded"
+          emptyTone="success"
+          columns={['Started', 'Service', 'Duration']}
+          rows={outages.slice(0, 12).map((row, index) => ({
+            key: `${row.service_check_id}-${index}`,
+            cells: [
+              <span className="text-xs text-muted">{row.started_at ? relativeTime(row.started_at) : '—'}</span>,
+              <Link to={`/services/${row.service_check_id}`} className="font-medium text-primary hover:underline">{row.name}</Link>,
+              <span className="font-semibold tabular-nums">{fmtMin(row.duration_minutes)}</span>,
+            ],
+          }))}
+        />
+        <DataTablePanel
+          title="Certificate Continuity Risk"
+          icon={<Shield className="h-4 w-4 text-sky-500" />}
+          hint="TLS"
+          loading={loading && !tlsWarnings.length}
+          empty="No certificate expiry risks detected"
+          emptyTone="success"
+          columns={['Service', 'Expires', 'Days', 'Risk']}
+          rows={tlsWarnings.slice(0, 12).map((row) => ({
+            key: row.service_check_id,
+            cells: [
+              <Link to={`/services/${row.service_check_id}`} className="font-medium text-primary hover:underline">{row.name}</Link>,
+              <span className="text-xs text-muted">{row.tls_expiry_date ? new Date(row.tls_expiry_date).toLocaleDateString() : '—'}</span>,
+              <span className="font-semibold tabular-nums">{row.days_remaining}</span>,
+              <Badge variant={row.severity === 'critical' ? 'danger' : 'warning'} className="capitalize">{row.severity}</Badge>,
+            ],
+          }))}
+        />
+      </div>
+    </div>
+  )
+}
+
+function ServerExecutiveView({
+  rangeLabel,
+  overview,
+  statusSegments,
+  osSegments,
+  agentSegments,
+  large,
+}: {
+  rangeLabel: string
+  overview?: ServerMonitoringOverview
+  statusSegments: CountSegment[]
+  osSegments: CountSegment[]
+  agentSegments: CountSegment[]
+  large?: boolean
+}) {
+  const total = overview?.total ?? 0
+  const healthy = overview?.status_counts?.healthy ?? 0
+  const critical = overview?.status_counts?.critical ?? 0
+  const warnings = (overview?.status_counts?.warning ?? 0) + (overview?.status_counts?.stale ?? 0)
+  const online = overview?.agent_counts?.online ?? 0
+  const peakCpu = overview?.top_cpu?.[0]?.value
+  const peakMemory = overview?.top_memory?.[0]?.value
+  const peakDisk = overview?.top_disk?.[0]?.value
+
+  return (
+    <div className="space-y-5 animate-fade-in">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <ExecutiveMetricCard icon={Activity} label="Healthy server estate" value={total ? fmtPct((healthy / total) * 100, 1) : '—'} detail={total ? `${healthy} of ${total} workloads healthy now` : 'No servers enrolled'} tone={total > 0 && healthy === total ? 'success' : critical > 0 ? 'danger' : 'warning'} />
+        <ExecutiveMetricCard icon={AlertOctagon} label="Operational risk" value={String(critical + warnings)} detail={`${critical} critical · ${warnings} warning or stale`} tone={critical > 0 ? 'danger' : warnings > 0 ? 'warning' : 'success'} />
+        <ExecutiveMetricCard icon={Radio} label="Agents online" value={total ? `${online} / ${total}` : '—'} detail="Live telemetry and inventory coverage" tone={total > 0 && online >= total ? 'success' : 'warning'} />
+        <ExecutiveMetricCard icon={Cpu} label="Peak resource pressure" value={peakCpu != null ? `${peakCpu.toFixed(1)}%` : '—'} detail={`Memory ${peakMemory != null ? `${peakMemory.toFixed(1)}%` : '—'} · Disk ${peakDisk != null ? `${peakDisk.toFixed(1)}%` : '—'}`} tone={Math.max(peakCpu ?? 0, peakMemory ?? 0, peakDisk ?? 0) >= 90 ? 'danger' : Math.max(peakCpu ?? 0, peakMemory ?? 0, peakDisk ?? 0) >= 75 ? 'warning' : 'success'} />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <DistributionPanel title="Server Health" icon={<Activity className="h-4 w-4 text-sky-500" />} segments={statusSegments} total={total} hint="real-time" />
+        <DistributionPanel title="Operating Systems" icon={<Server className="h-4 w-4 text-violet-500" />} segments={osSegments} total={total} hint="estate mix" />
+        <DistributionPanel title="Telemetry Coverage" icon={<Radio className="h-4 w-4 text-emerald-500" />} segments={agentSegments} total={Math.max(total, agentSegments.reduce((sum, row) => sum + row.value, 0))} hint="agents" />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <PressurePanel title="CPU Pressure" icon={<Cpu className="h-4 w-4 text-sky-500" />} items={overview?.top_cpu || []} empty="No CPU pressure data" />
+        <PressurePanel title="Memory Pressure" icon={<MemoryStick className="h-4 w-4 text-violet-500" />} items={overview?.top_memory || []} empty="No memory pressure data" />
+        <PressurePanel title="Storage Pressure" icon={<HardDrive className="h-4 w-4 text-amber-500" />} items={overview?.top_disk || []} empty="No storage pressure data" />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <PressurePanel title="Highest Network Demand" icon={<TrendingUp className="h-4 w-4 text-emerald-500" />} items={overview?.top_network || []} empty="No network demand data" unit="bps" large={large} />
+        <GlassPanel>
+          <PanelHeader icon={<Building2 className="h-4 w-4 text-violet-500" />} title="Workload Distribution by Site" hint={rangeLabel} />
+          <div className="grid gap-3 p-4 sm:grid-cols-2">
+            {(overview?.sites || []).length === 0 ? (
+              <EmptyPanel icon={<MapPin className="h-7 w-7" />} text="No site assignments available" />
+            ) : (overview?.sites || []).slice(0, 10).map((site) => (
+              <div key={site.id} className="rounded-xl border border-border/60 bg-surface2/35 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-bold text-text">{site.name}</div>
+                    <div className="mt-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Business site</div>
+                  </div>
+                  <span className="text-2xl font-black tabular-nums text-primary">{site.server_count}</span>
+                </div>
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-surface2">
+                  <div className="h-full rounded-full bg-gradient-to-r from-violet-500 to-primary" style={{ width: `${total ? Math.max(4, (site.server_count / total) * 100) : 0}%` }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </GlassPanel>
+      </div>
+
+      <div className="flex justify-end">
+        <Link to="/servers" className="inline-flex items-center rounded-xl bg-primary px-4 py-2 text-xs font-bold text-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
+          Review complete server estate
+          <ArrowUpRight className="ml-1.5 h-3.5 w-3.5" />
+        </Link>
       </div>
     </div>
   )
@@ -912,6 +1509,186 @@ function PanelHeader({
   )
 }
 
+function ExecutiveMetricCard({
+  icon: Icon, label, value, detail, tone,
+}: {
+  icon: typeof Activity
+  label: string
+  value: string
+  detail: string
+  tone: 'success' | 'warning' | 'danger' | 'info'
+}) {
+  const styles = {
+    success: { border: 'border-emerald-500/25', bg: 'from-emerald-500/12 to-teal-500/4', icon: 'bg-success/12 text-success' },
+    warning: { border: 'border-amber-500/25', bg: 'from-amber-500/12 to-orange-500/4', icon: 'bg-warning/12 text-warning' },
+    danger: { border: 'border-rose-500/25', bg: 'from-rose-500/12 to-red-500/4', icon: 'bg-danger/12 text-danger' },
+    info: { border: 'border-sky-500/25', bg: 'from-sky-500/12 to-blue-500/4', icon: 'bg-info/12 text-info' },
+  }[tone]
+  return (
+    <div className={cn('relative overflow-hidden rounded-2xl border bg-gradient-to-br p-4 shadow-sm', styles.border, styles.bg)}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[10px] font-black uppercase tracking-[0.16em] text-muted">{label}</div>
+          <div className="mt-2 text-3xl font-black tabular-nums tracking-tight text-text">{value}</div>
+        </div>
+        <span className={cn('flex h-10 w-10 shrink-0 items-center justify-center rounded-xl', styles.icon)}>
+          <Icon className="h-5 w-5" />
+        </span>
+      </div>
+      <p className="mt-3 text-xs leading-5 text-muted">{detail}</p>
+    </div>
+  )
+}
+
+function AvailabilityPortfolioPanel({
+  rows, rangeLabel, loading, large,
+}: {
+  rows: BusinessData['service_availability']
+  rangeLabel: string
+  loading?: boolean
+  large?: boolean
+}) {
+  const ranked = [...rows]
+    .filter((row) => row.availability_pct != null)
+    .sort((a, b) => (a.availability_pct ?? 0) - (b.availability_pct ?? 0))
+    .slice(0, large ? 14 : 10)
+  return (
+    <GlassPanel className="lg:col-span-8">
+      <PanelHeader icon={<TrendingUp className="h-4 w-4 text-violet-500" />} title="Service Availability Portfolio" hint={rangeLabel} accent="border-violet-500/30" />
+      <div className="p-4">
+        {loading && !ranked.length ? (
+          <div className="space-y-3">{Array.from({ length: 7 }).map((_, index) => <Skeleton key={index} className="h-9 w-full" />)}</div>
+        ) : ranked.length === 0 ? (
+          <EmptyPanel icon={<Shield className="h-8 w-8" />} text="No measured service availability in this window" />
+        ) : (
+          <div className="space-y-3">
+            {ranked.map((row) => {
+              const pct = row.availability_pct ?? 0
+              return (
+                <div key={row.service_check_id} className="grid items-center gap-3 sm:grid-cols-[minmax(140px,1.2fr)_minmax(180px,3fr)_70px]">
+                  <div className="min-w-0">
+                    <Link to={`/services/${row.service_check_id}`} className="block truncate text-sm font-semibold text-text hover:text-primary" title={row.name}>{row.name}</Link>
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">{row.group_name || row.type}</span>
+                  </div>
+                  <div className="relative h-3 overflow-hidden rounded-full bg-surface2 ring-1 ring-border/50">
+                    <div className={cn('h-full rounded-full bg-gradient-to-r shadow-sm', availBarGradient(pct))} style={{ width: `${Math.max(1, pct)}%` }} />
+                    {pct < 99.9 && <span className="absolute right-[0.1%] top-0 h-full w-px bg-text/25" title="99.9% target" />}
+                  </div>
+                  <div className={cn('text-right text-sm font-black tabular-nums', availText(pct))}>{pct.toFixed(2)}%</div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    </GlassPanel>
+  )
+}
+
+function DistributionPanel({
+  title, icon, segments, total, hint,
+}: {
+  title: string
+  icon: React.ReactNode
+  segments: CountSegment[]
+  total: number
+  hint?: string
+}) {
+  const tone = {
+    success: { bar: 'bg-success', text: 'text-success', dot: 'bg-success' },
+    warning: { bar: 'bg-warning', text: 'text-warning', dot: 'bg-warning' },
+    danger: { bar: 'bg-danger', text: 'text-danger', dot: 'bg-danger' },
+    info: { bar: 'bg-info', text: 'text-info', dot: 'bg-info' },
+    muted: { bar: 'bg-muted', text: 'text-muted', dot: 'bg-muted' },
+  }
+  return (
+    <GlassPanel>
+      <PanelHeader icon={icon} title={title} hint={hint} />
+      <div className="space-y-4 p-4">
+        <div className="flex h-3 overflow-hidden rounded-full bg-surface2 ring-1 ring-border/50">
+          {total > 0 && segments.map((segment) => (
+            <div
+              key={segment.key}
+              className={cn('h-full transition-all', tone[segment.tone || 'muted'].bar)}
+              style={{ width: `${(segment.value / total) * 100}%` }}
+              title={`${segment.label}: ${segment.value}`}
+            />
+          ))}
+        </div>
+        {segments.length === 0 ? (
+          <div className="py-5 text-center text-sm text-muted">No portfolio data available</div>
+        ) : (
+          <div className="space-y-2.5">
+            {segments.map((segment) => (
+              <div key={segment.key} className="flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className={cn('h-2.5 w-2.5 shrink-0 rounded-full', tone[segment.tone || 'muted'].dot)} />
+                  <span className="truncate text-xs font-semibold text-muted">{segment.label}</span>
+                </div>
+                <div className="flex items-baseline gap-2">
+                  <span className={cn('text-sm font-black tabular-nums', tone[segment.tone || 'muted'].text)}>{segment.value}</span>
+                  <span className="w-10 text-right text-[10px] tabular-nums text-muted">{total ? `${((segment.value / total) * 100).toFixed(0)}%` : '—'}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </GlassPanel>
+  )
+}
+
+function PressurePanel({
+  title, icon, items, empty, unit = 'pct', large,
+}: {
+  title: string
+  icon: React.ReactNode
+  items: TopPressureItem[]
+  empty: string
+  unit?: 'pct' | 'bps'
+  large?: boolean
+}) {
+  const max = Math.max(1, ...items.map((item) => item.value))
+  const fmtBps = (value: number) => {
+    const units = ['B/s', 'KB/s', 'MB/s', 'GB/s', 'TB/s']
+    let scaled = value
+    let index = 0
+    while (scaled >= 1024 && index < units.length - 1) { scaled /= 1024; index += 1 }
+    return `${scaled.toFixed(1)} ${units[index]}`
+  }
+  return (
+    <GlassPanel>
+      <PanelHeader icon={icon} title={title} hint="live pressure" />
+      <div className="space-y-3 p-4">
+        {items.length === 0 ? (
+          <EmptyPanel icon={icon} text={empty} />
+        ) : items.slice(0, large ? 8 : 6).map((item, index) => {
+          const relative = unit === 'pct' ? Math.min(100, item.value) : (item.value / max) * 100
+          const risk = unit === 'pct' && item.value >= 90 ? 'danger' : unit === 'pct' && item.value >= 75 ? 'warning' : 'success'
+          return (
+            <Link key={item.server_id} to={`/servers/${item.server_id}`} className="group block rounded-xl border border-transparent p-2 transition hover:border-border hover:bg-surface2/50">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-black tabular-nums text-muted">{String(index + 1).padStart(2, '0')}</span>
+                    <span className="truncate text-sm font-semibold text-text group-hover:text-primary">{item.display_name || item.hostname || item.server_id.slice(0, 8)}</span>
+                  </div>
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface2">
+                    <div className={cn('h-full rounded-full bg-gradient-to-r', risk === 'danger' ? 'from-rose-500 to-red-500' : risk === 'warning' ? 'from-amber-500 to-orange-500' : 'from-emerald-500 to-teal-500')} style={{ width: `${Math.max(2, relative)}%` }} />
+                  </div>
+                </div>
+                <span className={cn('w-20 text-right text-sm font-black tabular-nums', risk === 'danger' ? 'text-danger' : risk === 'warning' ? 'text-warning' : 'text-success')}>
+                  {unit === 'pct' ? `${item.value.toFixed(1)}%` : fmtBps(item.value)}
+                </span>
+              </div>
+            </Link>
+          )
+        })}
+      </div>
+    </GlassPanel>
+  )
+}
+
 function FleetDomainTabs({
   value,
   onChange,
@@ -936,7 +1713,7 @@ function FleetDomainTabs({
             className={cn(
               'inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-semibold transition-colors',
               active
-                ? 'bg-primary text-black shadow-sm'
+                ? 'bg-primary text-white shadow-sm'
                 : 'text-muted hover:bg-surface2 hover:text-text',
             )}
           >
@@ -975,14 +1752,17 @@ function ClockDisplay({ date, large }: { date: Date; large?: boolean }) {
   )
 }
 
-function SlaChip({ met, attained, target }: { met: boolean; attained: number; target: number }) {
+function SlaChip({ met, target }: { met: boolean; target: number }) {
   return (
-    <span className={cn(
-      'inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold',
-      met ? 'border-success/40 bg-success/10 text-success' : 'border-danger/40 bg-danger/10 text-danger',
-    )}>
+    <span
+      className={cn(
+        'inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-xs font-semibold',
+        met ? 'border-success/40 bg-success/10 text-success' : 'border-danger/40 bg-danger/10 text-danger',
+      )}
+      title="Availability for the selected window vs the SLA target (planned maintenance excluded)"
+    >
       <Target className="h-3 w-3" />
-      SLA {fmtPct(attained, 2)} / {target}%
+      {met ? 'SLA met' : 'Below SLA'} · target {target}%
     </span>
   )
 }
@@ -1000,17 +1780,18 @@ function MetricChip({ icon, label, value }: { icon: React.ReactNode; label: stri
 }
 
 function DomainKpi({
-  theme, label, value, pct, icon, to, issue, loading, large,
+  theme, label, value, pct, icon, to, issue, loading, large, barClass,
 }: {
   theme: (typeof KPI_THEMES)[keyof typeof KPI_THEMES]
   label: string
   value: string
-  pct: number
+  pct: number | null
   icon: React.ReactNode
   to: string
   issue?: number
   loading?: boolean
   large?: boolean
+  barClass?: string
 }) {
   return (
     <Link
@@ -1039,7 +1820,7 @@ function DomainKpi({
         </span>
       </div>
       <div className="mt-3">
-        <GradientBar pct={pct} compact barClass={theme.bar} />
+        <GradientBar pct={pct} compact barClass={barClass ?? theme.bar} />
       </div>
     </Link>
   )
@@ -1107,8 +1888,8 @@ function BreakdownPanel({
         {!loading && segments.length === 0 && (
           <EmptyPanel icon={icon} text="No data for this window" />
         )}
-        {!loading && segments.slice(0, large ? 9 : 6).map((seg, i) => {
-          const accentStyle = TILE_ACCENTS[i % TILE_ACCENTS.length]
+        {!loading && segments.slice(0, large ? 9 : 6).map((seg) => {
+          const accentStyle = tileAccent(seg.pct)
           return (
             <div
               key={seg.key}
@@ -1121,18 +1902,27 @@ function BreakdownPanel({
             >
               <div className={cn('absolute left-0 top-0 h-full w-1', accentStyle.bar)} />
               <div className="flex items-center gap-3 pl-2">
-                <RingGauge
-                  value={seg.pct}
-                  size={large ? 72 : 64}
-                  stroke={large ? 7 : 6}
-                  color={accentStyle.ring}
-                />
+                {seg.pct == null ? (
+                  <div
+                    className={cn(
+                      'flex shrink-0 items-center justify-center rounded-full border-4 border-dashed border-border text-xs font-bold text-muted',
+                    )}
+                    style={{ width: large ? 72 : 64, height: large ? 72 : 64 }}
+                    title="No SLA-relevant samples in this window"
+                  >
+                    —
+                  </div>
+                ) : (
+                  <RingGauge
+                    value={seg.pct}
+                    size={large ? 72 : 64}
+                    stroke={large ? 7 : 6}
+                    color={accentStyle.ring}
+                  />
+                )}
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-bold text-text" title={seg.label}>{seg.label}</div>
-                  <div className="text-[10px] font-medium text-muted">{seg.up}/{seg.total} up</div>
-                  <div className={cn('mt-0.5 text-lg font-black tabular-nums', availText(seg.pct))}>
-                    {seg.pct.toFixed(1)}%
-                  </div>
+                  <div className="text-[10px] font-medium text-muted">{seg.up}/{seg.total} up now</div>
                   <GradientBar pct={seg.pct} compact className="mt-2" />
                 </div>
               </div>
@@ -1202,11 +1992,21 @@ function DataTablePanel({
 function GradientBar({
   pct, compact, barClass, className,
 }: {
-  pct: number
+  pct: number | null
   compact?: boolean
   barClass?: string
   className?: string
 }) {
+  if (pct == null) {
+    return (
+      <div className={cn('flex items-center gap-2', compact ? '' : 'justify-end', className)}>
+        <div className={cn(compact ? 'h-2 flex-1' : 'h-2 w-20', 'overflow-hidden rounded-full bg-surface2 ring-1 ring-border/40')} />
+        <span className={cn('shrink-0 text-xs font-bold tabular-nums text-muted', compact ? '' : 'min-w-[52px] text-right')}>
+          —
+        </span>
+      </div>
+    )
+  }
   const grad = barClass || availBarGradient(pct)
   return (
     <div className={cn('flex items-center gap-2', compact ? '' : 'justify-end', className)}>

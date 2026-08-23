@@ -22,6 +22,8 @@ class UserResponse(BaseModel):
     email: str
     full_name: Optional[str]
     role: str
+    auth_source: str = "local"
+    permissions: list[str] = []
     last_login: Optional[datetime]
 
     model_config = {"from_attributes": True}

@@ -31,11 +31,12 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
 from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal, get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
 from app.schemas.snmp import (
     DiscoveryImportRequest,
@@ -840,8 +841,8 @@ async def create_profile(
             "name": data.name,
             "vendor": data.vendor,
             "desc": data.description,
-            "match_rules": json.dumps(data.match_rules.model_dump()),
-            "oid_groups": json.dumps([g.model_dump() for g in data.oid_groups]),
+            "match_rules": json.dumps(data.match_rules.model_dump(exclude_none=True)),
+            "oid_groups": json.dumps([g.model_dump(exclude_none=True) for g in data.oid_groups]),
         },
     )).mappings().first()
     await db.commit()
@@ -862,6 +863,11 @@ async def update_profile(
     )).mappings().first()
     if existing is None:
         raise HTTPException(status_code=404, detail="Profile not found")
+    if existing["builtin"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Built-in templates are read-only — clone it to customize",
+        )
 
     sets = ["updated_at = NOW()"]
     params: dict = {"id": profile_id}
@@ -877,10 +883,10 @@ async def update_profile(
         params["desc"] = data.description
     if data.match_rules is not None:
         sets.append("match_rules = CAST(:match_rules AS jsonb)")
-        params["match_rules"] = json.dumps(data.match_rules.model_dump())
+        params["match_rules"] = json.dumps(data.match_rules.model_dump(exclude_none=True))
     if data.oid_groups is not None:
         sets.append("oid_groups = CAST(:oid_groups AS jsonb)")
-        params["oid_groups"] = json.dumps([g.model_dump() for g in data.oid_groups])
+        params["oid_groups"] = json.dumps([g.model_dump(exclude_none=True) for g in data.oid_groups])
 
     await db.execute(
         text(f"UPDATE device_profiles SET {', '.join(sets)} WHERE id = :id"),
@@ -915,6 +921,113 @@ async def delete_profile(
         {"id": profile_id},
     )
     await db.commit()
+
+
+@router.post("/profiles/{profile_id}/clone", response_model=ProfileResponse, status_code=201)
+async def clone_profile(
+    profile_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Copy a template (builtin or custom) into a new editable custom template."""
+    src = (await db.execute(
+        text("SELECT name, vendor, description, match_rules, oid_groups FROM device_profiles WHERE id = :id"),
+        {"id": profile_id},
+    )).mappings().first()
+    if src is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    base = f"{src['name']} (copy)"
+    name = base
+    for n in range(2, 20):
+        taken = (await db.execute(
+            text("SELECT 1 FROM device_profiles WHERE name = :n AND version = 1"),
+            {"n": name},
+        )).first()
+        if not taken:
+            break
+        name = f"{base} {n}"
+
+    row = (await db.execute(
+        text("""
+            INSERT INTO device_profiles (name, vendor, description, match_rules, oid_groups, builtin)
+            SELECT :new_name, vendor, description, match_rules, oid_groups, FALSE
+            FROM device_profiles WHERE id = :id
+            RETURNING id, name, vendor, version, builtin, description,
+                      match_rules, oid_groups, created_at, updated_at
+        """),
+        {"new_name": name, "id": profile_id},
+    )).mappings().first()
+    await db.commit()
+    return ProfileResponse(**dict(row), device_count=0)
+
+
+class ProfileAssignRequest(BaseModel):
+    device_ids: list[uuid.UUID]
+
+
+@router.post("/profiles/{profile_id}/assign")
+async def assign_profile(
+    profile_id: uuid.UUID,
+    data: ProfileAssignRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Attach a template to the given devices (operator override — sticks
+    even if auto-classification would pick something else)."""
+    existing = (await db.execute(
+        text("SELECT id FROM device_profiles WHERE id = :id"), {"id": profile_id}
+    )).first()
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    if not data.device_ids:
+        return {"assigned": 0}
+    res = await db.execute(
+        text("UPDATE devices SET profile_id = :pid WHERE id = ANY(:ids)"),
+        {"pid": profile_id, "ids": data.device_ids},
+    )
+    await db.commit()
+    return {"assigned": res.rowcount}
+
+
+@router.post("/profiles/unassign")
+async def unassign_profile(
+    data: ProfileAssignRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Detach any template from the given devices (back to Default monitoring).
+    Old template metric values are removed so stale vendor data doesn't linger."""
+    if not data.device_ids:
+        return {"unassigned": 0}
+    res = await db.execute(
+        text("UPDATE devices SET profile_id = NULL WHERE id = ANY(:ids)"),
+        {"ids": data.device_ids},
+    )
+    await db.execute(
+        text("DELETE FROM device_template_values WHERE device_id = ANY(:ids)"),
+        {"ids": data.device_ids},
+    )
+    await db.commit()
+    return {"unassigned": res.rowcount}
+
+
+@router.get("/profiles/{profile_id}/devices")
+async def list_profile_devices(
+    profile_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Devices currently attached to a template."""
+    rows = (await db.execute(
+        text("""
+            SELECT id, hostname, host(ip_address)::text AS ip_address,
+                   device_type, status, vendor, model
+            FROM devices WHERE profile_id = :id ORDER BY hostname
+        """),
+        {"id": profile_id},
+    )).mappings().all()
+    return {"data": [dict(r) for r in rows]}
 
 
 @router.get("/traps")

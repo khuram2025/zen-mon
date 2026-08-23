@@ -343,15 +343,27 @@ def _do_smtp_test(raw_config: dict, recipient: str) -> dict:
     from email.mime.multipart import MIMEMultipart
 
     try:
-        msg = MIMEMultipart()
+        from app.services.email_render import (
+            build_notification_email_html, build_notification_email_text,
+        )
+        test_ctx = {
+            "status": "TEST",
+            "title": "SMTP configuration verified",
+            "message": "This is a test email from ZenPlus. If you are reading it, "
+                       "this SMTP gateway can deliver mail to your inbox and is "
+                       "ready to carry alerts, reports, and notifications.",
+            "details": [
+                ("Gateway", config.host + (f":{config.port}" if config.port else "")),
+                ("Encryption", (config.encryption or "none").upper()),
+                ("From", f"{config.from_name or 'ZenPlus'} <{config.from_email}>"),
+            ],
+        }
+        msg = MIMEMultipart("alternative")
         msg["From"] = f"{config.from_name or 'ZenPlus'} <{config.from_email}>"
         msg["To"] = ", ".join(recipients)
-        msg["Subject"] = "ZenPlus SMTP Test"
-        msg.attach(MIMEText(
-            "This is a test email from ZenPlus Monitoring System.\n\n"
-            "If you received this, your SMTP configuration is working correctly.",
-            "plain",
-        ))
+        msg["Subject"] = "ZenPlus SMTP Test — configuration verified"
+        msg.attach(MIMEText(build_notification_email_text(test_ctx), "plain"))
+        msg.attach(MIMEText(build_notification_email_html(test_ctx), "html"))
 
         if config.encryption == "ssl":
             server = smtplib.SMTP_SSL(config.host, config.port or 465, timeout=15)
@@ -634,6 +646,22 @@ async def update_gateway(
             set_parts.append(f"{key} = :{key}")
             params[key] = value
 
+    # Mirror `enabled` into the config blob. The column is authoritative, but
+    # older rows and any external reader still look at config.enabled, and the
+    # two silently disagreeing is what made an enabled gateway report itself
+    # disabled. Only touch the key when config is not being rewritten wholesale.
+    if "enabled" in fields and "config" not in fields:
+        # The cast is required: asyncpg sends bare parameters as `unknown`, and
+        # to_jsonb() is polymorphic, so Postgres cannot resolve the overload.
+        set_parts.append(
+            "config = jsonb_set(COALESCE(config, '{}'::jsonb), '{enabled}', "
+            "to_jsonb(CAST(:enabled_flag AS boolean)))")
+        params["enabled_flag"] = bool(fields["enabled"])
+    elif "enabled" in fields and "config" in fields:
+        merged = dict(fields.get("config") or {})
+        merged["enabled"] = bool(fields["enabled"])
+        params["config"] = _json_dumps(merged)
+
     result = await db.execute(
         text(f"UPDATE notification_gateways SET {', '.join(set_parts)} WHERE id = :id "
              "RETURNING id, name, type, config, is_default, enabled, created_at, updated_at"),
@@ -869,11 +897,16 @@ async def test_channel(
             raise HTTPException(status_code=400, detail="SMS channel has no phone numbers configured")
 
         # Find the gateway (linked or default)
+        # As with SMTP below: `enabled` is the column the Gateways page writes.
         gw_id = row.gateway_id or config.get("gateway_id")
         if gw_id:
-            gw_result = await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})
+            gw_result = await db.execute(
+                text("SELECT config, enabled FROM notification_gateways WHERE id = :id"),
+                {"id": gw_id})
         else:
-            gw_result = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'sms' AND is_default = true LIMIT 1"))
+            gw_result = await db.execute(text(
+                "SELECT config, enabled FROM notification_gateways "
+                "WHERE type = 'sms' AND is_default = true LIMIT 1"))
         gw_row = gw_result.first()
 
         if not gw_row:
@@ -881,11 +914,13 @@ async def test_channel(
             gw_config = await _get_system_setting(db, "sms")
             if not gw_config:
                 raise HTTPException(status_code=400, detail="No SMS gateway configured")
+            gw_enabled = bool(gw_config.get("enabled", True))
         else:
             gw_config = gw_row.config
+            gw_enabled = bool(gw_row.enabled)
 
         sms_cfg = SmsConfig(**gw_config)
-        if not sms_cfg.enabled:
+        if not gw_enabled:
             raise HTTPException(status_code=400, detail="SMS gateway is disabled")
 
         if sms_cfg.provider == "custom_http":
@@ -942,45 +977,57 @@ async def test_channel(
         if not recipients:
             raise HTTPException(status_code=400, detail="Email channel has no recipients configured")
 
-        # Find SMTP gateway
+        # Find SMTP gateway. Select `enabled` too: it is a column on
+        # notification_gateways and the Gateways page toggles it there, while
+        # config.enabled is only whatever was in the blob when it was last
+        # saved. Reading the blob made an enabled gateway test as "disabled".
         gw_id = row.gateway_id or config.get("gateway_id")
         if gw_id:
-            gw_result = await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})
+            gw_result = await db.execute(
+                text("SELECT config, enabled FROM notification_gateways WHERE id = :id"),
+                {"id": gw_id})
         else:
-            gw_result = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'smtp' AND is_default = true LIMIT 1"))
+            gw_result = await db.execute(text(
+                "SELECT config, enabled FROM notification_gateways "
+                "WHERE type = 'smtp' AND is_default = true LIMIT 1"))
         gw_row = gw_result.first()
 
         if not gw_row:
             gw_config = await _get_system_setting(db, "smtp")
             if not gw_config:
                 raise HTTPException(status_code=400, detail="No SMTP gateway configured")
+            # Legacy system_settings has no column; absent means enabled, which
+            # is what the sending path assumes too.
+            gw_enabled = bool(gw_config.get("enabled", True))
         else:
             gw_config = gw_row.config
+            gw_enabled = bool(gw_row.enabled)
 
-        smtp_cfg = SmtpConfig(**gw_config)
-        if not smtp_cfg.enabled:
+        smtp_cfg = SmtpConfig(**_normalize_smtp_config(gw_config))
+        if not gw_enabled:
             raise HTTPException(status_code=400, detail="SMTP gateway is disabled")
         if not smtp_cfg.host:
             raise HTTPException(status_code=400, detail="SMTP gateway host not configured")
 
         recipient_list = [r.strip() for r in recipients.split(",") if r.strip()]
         try:
-            from app.services.email_render import build_alert_email_html, build_alert_email_text
+            from app.services.email_render import (
+                build_notification_email_html, build_notification_email_text,
+            )
             test_ctx = {
-                "severity": "info",
                 "status": "TEST",
-                "title": "Test notification",
-                "hostname": row.name,
-                "message": "This is a test email from ZenPlus. If you received it, "
-                           "this notification channel is configured correctly.",
+                "title": "Notification channel verified",
+                "message": "This is a test email from ZenPlus. If you are reading it, "
+                           f"the '{row.name}' notification channel is configured "
+                           "correctly and will deliver alerts to these recipients.",
                 "details": [("Channel", row.name), ("Recipients", recipients)],
             }
             msg = MIMEMultipart("alternative")
             msg["From"] = f"{smtp_cfg.from_name} <{smtp_cfg.from_email}>"
             msg["To"] = ", ".join(recipient_list)
-            msg["Subject"] = "ZenPlus Test Notification"
-            msg.attach(MIMEText(build_alert_email_text(test_ctx), "plain"))
-            msg.attach(MIMEText(build_alert_email_html(test_ctx), "html"))
+            msg["Subject"] = f"ZenPlus Test Notification — {row.name}"
+            msg.attach(MIMEText(build_notification_email_text(test_ctx), "plain"))
+            msg.attach(MIMEText(build_notification_email_html(test_ctx), "html"))
 
             if smtp_cfg.encryption == "ssl":
                 server = smtplib.SMTP_SSL(smtp_cfg.host, smtp_cfg.port, timeout=10)

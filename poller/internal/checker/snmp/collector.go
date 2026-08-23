@@ -8,9 +8,25 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	g "github.com/gosnmp/gosnmp"
+)
+
+// Vendor utilization scalars that are authoritative for the fleet-level
+// CPU/memory headline. Aruba's .13/.15 WLSX nodes are table roots; controller
+// utilization is exposed by the .30/.31 scalar objects instead.
+const (
+	oidArubaControllerCPU = "1.3.6.1.4.1.14823.2.2.1.2.1.30.0" // wlsxSysExtCpuUsedPercent
+	oidArubaControllerMem = "1.3.6.1.4.1.14823.2.2.1.2.1.31.0" // wlsxSysExtMemoryUsedPercent
+
+	oidF5TMMCPU       = "1.3.6.1.4.1.3375.2.1.1.2.21.35.0"
+	oidF5HostCPU      = "1.3.6.1.4.1.3375.2.1.1.2.20.29.0"
+	oidF5TMMMemTotal  = "1.3.6.1.4.1.3375.2.1.1.2.1.44.0"
+	oidF5TMMMemUsed   = "1.3.6.1.4.1.3375.2.1.1.2.1.45.0"
+	oidF5HostMemTotal = "1.3.6.1.4.1.3375.2.1.1.2.20.44.0"
+	oidF5HostMemUsed  = "1.3.6.1.4.1.3375.2.1.1.2.20.45.0"
 )
 
 // Collector executes one full SNMP poll for a Device and returns a
@@ -20,8 +36,10 @@ type Collector struct {
 	sessions *SessionCache
 	pollerID string
 
-	mu      sync.Mutex
-	prevIfs map[uuid.UUID]map[uint32]ifSnapshot
+	mu           sync.Mutex
+	prevIfs      map[uuid.UUID]map[uint32]ifSnapshot
+	prevTpl      map[uuid.UUID]map[string]tplSnap
+	lastTplGroup map[uuid.UUID]map[string]time.Time
 }
 
 type ifSnapshot struct {
@@ -33,9 +51,11 @@ type ifSnapshot struct {
 
 func NewCollector(pollerID string, sessions *SessionCache) *Collector {
 	return &Collector{
-		sessions: sessions,
-		pollerID: pollerID,
-		prevIfs:  make(map[uuid.UUID]map[uint32]ifSnapshot),
+		sessions:     sessions,
+		pollerID:     pollerID,
+		prevIfs:      make(map[uuid.UUID]map[uint32]ifSnapshot),
+		prevTpl:      make(map[uuid.UUID]map[string]tplSnap),
+		lastTplGroup: make(map[uuid.UUID]map[string]time.Time),
 	}
 }
 
@@ -95,6 +115,24 @@ func (c *Collector) Collect(ctx context.Context, d *Device, r *Result) {
 		r.Mu.Unlock()
 	}
 
+	// 2.5) Monitoring template — vendor-specific OID groups declared by
+	// the device's profile. Runs early so the high-value vendor insights
+	// survive a budget kill during the (much heavier) interface walk.
+	if len(d.OidGroups) > 0 && ctx.Err() == nil {
+		tplSamples, tplValues, tplGroups := c.collectTemplateMetrics(ctx, client, d, start)
+		if len(tplValues) > 0 || len(tplGroups) > 0 {
+			r.Mu.Lock()
+			r.Scalars = upsertMetricSamples(r.Scalars, tplSamples)
+			// Keep detailed template metrics under tpl_* and also map
+			// authoritative vendor utilization to the canonical keys used
+			// by the device list and detail pages.
+			r.Scalars = upsertMetricSamples(r.Scalars, canonicalVendorMetrics(tplSamples))
+			r.TplValues = append(r.TplValues, tplValues...)
+			r.TplGroups = append(r.TplGroups, tplGroups...)
+			r.Mu.Unlock()
+		}
+	}
+
 	// 3) Interfaces — the big one. Skip if we're already cancelled.
 	var ifErr error
 	if ctx.Err() == nil {
@@ -126,6 +164,43 @@ func (c *Collector) Collect(ctx context.Context, d *Device, r *Result) {
 			r.Mu.Lock()
 			r.Sensors = sensors
 			r.Scalars = append(r.Scalars, sensorScalars...)
+			r.Mu.Unlock()
+		}
+	}
+
+	// 6) UDT — bridge FDB, ARP/ND, LLDP/CDP, VLANs. Runs on its own
+	// cadence (engine sets WantUdt); partial output is still persisted.
+	r.Mu.Lock()
+	wantUdt := r.WantUdt
+	ifsForUdt := r.Interfaces
+	r.Mu.Unlock()
+	if wantUdt && ctx.Err() == nil {
+		d2 := *d
+		if sysOID != "" {
+			d2.SysObjectID = sysOID
+		}
+		// A UDT credential override gets its own short-lived session;
+		// CollectUDT's Cisco per-VLAN fallback derives community@vlan /
+		// v3 contexts from d2's fields, so the override must be applied
+		// to the device copy as well, not just the socket.
+		udtClient := client
+		if d.UdtCredential != nil {
+			d.UdtCredential.ApplyTo(&d2)
+			if s, err := NewSession(&d2); err == nil {
+				if err := s.Connect(); err == nil {
+					udtClient = s
+					defer s.Conn.Close()
+				}
+			}
+		}
+		udt, _ := c.CollectUDT(ctx, &d2, udtClient, ifsForUdt)
+		if udt != nil {
+			r.Mu.Lock()
+			r.Udt = udt
+			r.Scalars = append(r.Scalars, MetricSample{
+				DeviceID: d.ID, Key: "udt_mac_count",
+				Value: float64(len(udt.Fdb)), Unit: "count", Timestamp: start, PollerID: c.pollerID,
+			})
 			r.Mu.Unlock()
 		}
 	}
@@ -234,11 +309,18 @@ func (c *Collector) collectHostResources(
 		break
 	}
 
-	// 3) Vendor-specific fallbacks when standard MIBs return nothing.
+	// 3) Vendor-specific metrics. Aruba controllers and F5 BIG-IP expose
+	// authoritative utilization outside HOST-RESOURCES-MIB, so prefer their
+	// vendor metrics even when the generic agent returned a value. BIG-IP's
+	// hrStorageRam includes Linux cache and can otherwise appear near 100%.
 	cleanOID := strings.TrimPrefix(sysObjectID, ".")
-	if !hasCPU || !hasMem {
-		vendorMetrics := c.collectVendorMetrics(s, deviceID, ts, cleanOID, hasCPU, hasMem)
-		out = append(out, vendorMetrics...)
+	preferVendor := strings.HasPrefix(cleanOID, "1.3.6.1.4.1.14823.") ||
+		strings.HasPrefix(cleanOID, "1.3.6.1.4.1.3375.")
+	if !hasCPU || !hasMem || preferVendor {
+		vendorMetrics := c.collectVendorMetrics(
+			s, deviceID, ts, cleanOID, hasCPU && !preferVendor, hasMem && !preferVendor,
+		)
+		out = upsertMetricSamples(out, vendorMetrics)
 	}
 
 	return out, nil
@@ -255,9 +337,9 @@ func (c *Collector) collectVendorMetrics(
 	// Detect vendor from sysObjectID prefix
 	isCisco := strings.HasPrefix(sysOID, "1.3.6.1.4.1.9.")
 	isForti := strings.HasPrefix(sysOID, "1.3.6.1.4.1.12356.")
-	isPAN := strings.HasPrefix(sysOID, "1.3.6.1.4.1.25461.")
 	isJuniper := strings.HasPrefix(sysOID, "1.3.6.1.4.1.2636.")
 	isAruba := strings.HasPrefix(sysOID, "1.3.6.1.4.1.14823.")
+	isF5 := strings.HasPrefix(sysOID, "1.3.6.1.4.1.3375.")
 
 	mk := func(key string, val float64, unit string) MetricSample {
 		return MetricSample{DeviceID: deviceID, Key: key, Value: val, Unit: unit, Timestamp: ts, PollerID: c.pollerID}
@@ -277,26 +359,17 @@ func (c *Collector) collectVendorMetrics(
 			}
 		}
 		if !hasMem {
-			// CISCO-MEMORY-POOL-MIB — walk used+free, sum processor pools
-			usedVals, _ := s.BulkWalkAll(OIDCiscoMemPoolUsed)
-			freeVals, _ := s.BulkWalkAll(OIDCiscoMemPoolFree)
-			if len(usedVals) > 0 && len(freeVals) > 0 {
-				var totalUsed, totalFree float64
-				for _, v := range usedVals {
-					totalUsed += float64(asUint(v))
-				}
-				for _, v := range freeVals {
-					totalFree += float64(asUint(v))
-				}
-				total := totalUsed + totalFree
-				if total > 0 {
-					pct := totalUsed / total * 100.0
-					out = append(out,
-						mk("memory_total_bytes", total, "bytes"),
-						mk("memory_used_bytes", totalUsed, "bytes"),
-						mk("memory", pct, "percent"),
-					)
-				}
+			// Prefer 64-bit enhanced pools, then the legacy Gauge32 table.
+			pool, ok := collectPrimaryMemoryPool(s, OIDCiscoEnhMemUsed, OIDCiscoEnhMemFree)
+			if !ok {
+				pool, ok = collectPrimaryMemoryPool(s, OIDCiscoMemPoolUsed, OIDCiscoMemPoolFree)
+			}
+			if ok {
+				out = append(out,
+					mk("memory_total_bytes", pool.used+pool.free, "bytes"),
+					mk("memory_used_bytes", pool.used, "bytes"),
+					mk("memory", pool.pct, "percent"),
+				)
 			}
 		}
 	}
@@ -319,43 +392,32 @@ func (c *Collector) collectVendorMetrics(
 		}
 	}
 
-	// ── Palo Alto ──
-	if isPAN {
-		if !hasCPU {
-			if v := getScalar(s, OIDPanSysCPU); v >= 0 {
-				out = append(out, mk("cpu", v, "percent"))
-			} else if v := getScalar(s, OIDPanCPU); v >= 0 {
-				out = append(out, mk("cpu", v, "percent"))
-			}
-		}
-		if !hasMem {
-			if v := getScalar(s, OIDPanSysMem); v >= 0 {
-				out = append(out, mk("memory", v, "percent"))
-			}
-		}
-	}
+	// PAN-OS CPU and memory are intentionally collected only from
+	// HOST-RESOURCES-MIB above/template rows. PAN-COMMON-MIB .1/.2 are
+	// software/hardware version strings, not utilization counters.
 
 	// ── Juniper ──
 	if isJuniper {
 		if !hasCPU {
-			// Walk jnxOperatingCPU, average across routing engines
+			// Use the hottest routing engine/component; an average hides a
+			// saturated member in multi-RE chassis.
 			cpuVals, _ := s.BulkWalkAll(OIDJnxCPU)
 			if len(cpuVals) > 0 {
-				var sum float64
+				value := -1.0
 				for _, v := range cpuVals {
-					sum += float64(asInt(v))
+					value = maxValid(value, float64(asInt(v)))
 				}
-				out = append(out, mk("cpu", sum/float64(len(cpuVals)), "percent"))
+				out = append(out, mk("cpu", value, "percent"))
 			}
 		}
 		if !hasMem {
 			memVals, _ := s.BulkWalkAll(OIDJnxMem)
 			if len(memVals) > 0 {
-				var sum float64
+				value := -1.0
 				for _, v := range memVals {
-					sum += float64(asInt(v))
+					value = maxValid(value, float64(asInt(v)))
 				}
-				out = append(out, mk("memory", sum/float64(len(memVals)), "percent"))
+				out = append(out, mk("memory", value, "percent"))
 			}
 		}
 	}
@@ -363,8 +425,42 @@ func (c *Collector) collectVendorMetrics(
 	// ── Aruba / HPE ──
 	if isAruba {
 		if !hasCPU {
-			if v := getScalar(s, OIDArubaAPCPU); v >= 0 {
+			if v := getScalar(s, oidArubaControllerCPU); v >= 0 {
 				out = append(out, mk("cpu", v, "percent"))
+			}
+		}
+		if !hasMem {
+			if v := getScalar(s, oidArubaControllerMem); v >= 0 {
+				out = append(out, mk("memory", v, "percent"))
+			}
+		}
+	}
+
+	// ── F5 BIG-IP ──
+	if isF5 {
+		if !hasCPU {
+			cpu := maxValid(getScalar(s, oidF5TMMCPU), getScalar(s, oidF5HostCPU))
+			if cpu >= 0 {
+				out = append(out, mk("cpu", cpu, "percent"))
+			}
+		}
+		if !hasMem {
+			domain, tmmPct, hostPct := selectF5MemoryDomain(
+				getScalar(s, oidF5TMMMemUsed), getScalar(s, oidF5TMMMemTotal),
+				getScalar(s, oidF5HostMemUsed), getScalar(s, oidF5HostMemTotal),
+			)
+			if tmmPct >= 0 {
+				out = append(out, mk("f5_tmm_memory_pct", tmmPct, "percent"))
+			}
+			if hostPct >= 0 {
+				out = append(out, mk("f5_host_memory_pct", hostPct, "percent"))
+			}
+			if domain.valid {
+				out = append(out,
+					mk("memory_total_bytes", domain.total, "bytes"),
+					mk("memory_used_bytes", domain.used, "bytes"),
+					mk("memory", domain.pct, "percent"),
+				)
 			}
 		}
 	}
@@ -383,6 +479,22 @@ func getScalar(s *g.GoSNMP, oid string) float64 {
 	case g.NoSuchObject, g.NoSuchInstance, g.EndOfMibView:
 		return -1
 	}
+	// OctetString is commonly used for version/model text. Only accept it
+	// when the agent explicitly returned a numeric string.
+	switch raw := v.Value.(type) {
+	case string:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
+		if err != nil {
+			return -1
+		}
+		return parsed
+	case []byte:
+		parsed, err := strconv.ParseFloat(strings.TrimSpace(string(raw)), 64)
+		if err != nil {
+			return -1
+		}
+		return parsed
+	}
 	val := float64(asInt(v))
 	if val == 0 {
 		// Could be genuine 0% or a non-numeric — check unsigned too
@@ -392,6 +504,280 @@ func getScalar(s *g.GoSNMP, oid string) float64 {
 		}
 	}
 	return val
+}
+
+type f5MemoryDomain struct {
+	used  float64
+	total float64
+	pct   float64
+	valid bool
+}
+
+func utilizationPct(used, total float64) float64 {
+	if used < 0 || total <= 0 {
+		return -1
+	}
+	return used / total * 100
+}
+
+func maxValid(values ...float64) float64 {
+	best := -1.0
+	for _, value := range values {
+		if value >= 0 && value > best {
+			best = value
+		}
+	}
+	return best
+}
+
+// selectF5MemoryDomain calculates TMM and host/Other percentages separately.
+// These domains overlap conceptually and must never be summed. The more
+// utilized valid domain becomes the fleet-level headline.
+func selectF5MemoryDomain(tmmUsed, tmmTotal, hostUsed, hostTotal float64) (f5MemoryDomain, float64, float64) {
+	tmmPct := utilizationPct(tmmUsed, tmmTotal)
+	hostPct := utilizationPct(hostUsed, hostTotal)
+
+	selected := f5MemoryDomain{}
+	if tmmPct >= 0 {
+		selected = f5MemoryDomain{used: tmmUsed, total: tmmTotal, pct: tmmPct, valid: true}
+	}
+	if hostPct >= 0 && (!selected.valid || hostPct > selected.pct) {
+		selected = f5MemoryDomain{used: hostUsed, total: hostTotal, pct: hostPct, valid: true}
+	}
+	return selected, tmmPct, hostPct
+}
+
+// upsertMetricSamples guarantees one sample per metric key in each poll.
+// Later authoritative vendor values replace earlier generic values.
+func upsertMetricSamples(dst, src []MetricSample) []MetricSample {
+	positions := make(map[string]int, len(dst)+len(src))
+	out := make([]MetricSample, 0, len(dst)+len(src))
+	for _, sample := range dst {
+		if pos, exists := positions[sample.Key]; exists {
+			out[pos] = sample
+			continue
+		}
+		positions[sample.Key] = len(out)
+		out = append(out, sample)
+	}
+	for _, sample := range src {
+		if pos, exists := positions[sample.Key]; exists {
+			out[pos] = sample
+			continue
+		}
+		positions[sample.Key] = len(out)
+		out = append(out, sample)
+	}
+	return out
+}
+
+// canonicalVendorMetrics maps vendor template series into the stable keys
+// consumed by device list/detail views while preserving every tpl_* sample.
+func canonicalVendorMetrics(samples []MetricSample) []MetricSample {
+	byKey := make(map[string]MetricSample, len(samples))
+	for _, sample := range samples {
+		byKey[sample.Key] = sample
+	}
+
+	var out []MetricSample
+	clone := func(base MetricSample, key string, value float64, unit string) MetricSample {
+		base.Key = key
+		base.Value = value
+		base.Unit = unit
+		return base
+	}
+
+	if cpu, ok := byKey["tpl_aruba_cpu"]; ok {
+		out = append(out, clone(cpu, "cpu", cpu.Value, "percent"))
+	}
+	if memory, ok := byKey["tpl_aruba_mem"]; ok {
+		out = append(out, clone(memory, "memory", memory.Value, "percent"))
+	}
+
+	// For chassis/table metrics the fleet headline intentionally uses the
+	// hottest component. An average can hide one saturated route processor,
+	// dataplane, stack member, or memory subsystem.
+	for _, prefixes := range []struct {
+		key      string
+		prefixes []string
+	}{
+		{"cpu", []string{"tpl_aruba_cx_cpu_5min_", "tpl_aruba_cx_cpu_current_", "tpl_dell_cpu_load_", "tpl_cisco_cpu_5min_", "tpl_asa_cpu_5min_", "tpl_pan_cpu_", "tpl_jnx_cpu_", "tpl_fgt_core_usage_"}},
+		{"memory", []string{"tpl_aruba_cx_memory_", "tpl_jnx_mem_util_"}},
+	} {
+		if sample, ok := maxSampleWithPrefixes(samples, prefixes.prefixes...); ok {
+			out = append(out, clone(sample, prefixes.key, sample.Value, "percent"))
+		}
+	}
+
+	if cpu, ok := maxSampleWithPrefixes(samples, "tpl_fgt_cpu", "tpl_fgt_data_cpu"); ok {
+		out = append(out, clone(cpu, "cpu", cpu.Value, "percent"))
+	}
+	if memory, ok := maxSampleWithPrefixes(samples, "tpl_fgt_mem", "tpl_fgt_data_mem"); ok {
+		out = append(out, clone(memory, "memory", memory.Value, "percent"))
+	}
+
+	// OS10 exposes available memory so Linux page cache is not misreported as
+	// consumed memory. Use the matching total/available domain in bytes.
+	dellTotal, hasDellTotal := byKey["tpl_dell_total_mem_kb"]
+	dellAvailable, hasDellAvailable := byKey["tpl_dell_available_mem_kb"]
+	if hasDellTotal && hasDellAvailable && dellTotal.Value > 0 && dellAvailable.Value >= 0 && dellAvailable.Value <= dellTotal.Value {
+		total := dellTotal.Value * 1024
+		used := (dellTotal.Value - dellAvailable.Value) * 1024
+		pct := used / total * 100
+		out = append(out,
+			clone(dellTotal, "memory_total_bytes", total, "bytes"),
+			clone(dellTotal, "memory_used_bytes", used, "bytes"),
+			clone(dellTotal, "memory", pct, "percent"),
+		)
+	}
+
+	// Cisco memory pools are independent allocation domains. Select the largest
+	// valid system pool; never sum unrelated or intentionally-full small pools.
+	if pool, ok := primaryMemoryPool(samples,
+		[]string{"tpl_cisco_mem_used_", "tpl_asa_mem_used_", "tpl_cisco_enh_mem_used_", "tpl_asa_enh_mem_used_"},
+		[]string{"tpl_cisco_mem_free_", "tpl_asa_mem_free_", "tpl_cisco_enh_mem_free_", "tpl_asa_enh_mem_free_"},
+	); ok {
+		out = append(out,
+			clone(pool.base, "memory_total_bytes", pool.used+pool.free, "bytes"),
+			clone(pool.base, "memory_used_bytes", pool.used, "bytes"),
+			clone(pool.base, "memory", pool.pct, "percent"),
+		)
+	}
+
+	tmmCPU, hasTMMCPU := byKey["tpl_f5_tmm_cpu"]
+	hostCPU, hasHostCPU := byKey["tpl_f5_host_cpu"]
+	if hasTMMCPU || hasHostCPU {
+		base := tmmCPU
+		cpu := -1.0
+		if hasTMMCPU {
+			cpu = tmmCPU.Value
+		}
+		if hasHostCPU {
+			if !hasTMMCPU || hostCPU.Value > cpu {
+				base = hostCPU
+			}
+			cpu = maxValid(cpu, hostCPU.Value)
+		}
+		if cpu >= 0 {
+			out = append(out, clone(base, "cpu", cpu, "percent"))
+		}
+	}
+
+	tmmUsed, hasTMMUsed := byKey["tpl_f5_tmm_mem_used"]
+	tmmTotal, hasTMMTotal := byKey["tpl_f5_tmm_mem_total"]
+	hostUsed, hasHostUsed := byKey["tpl_f5_other_mem_used"]
+	hostTotal, hasHostTotal := byKey["tpl_f5_other_mem_total"]
+	if (hasTMMUsed && hasTMMTotal) || (hasHostUsed && hasHostTotal) {
+		tu, tt, hu, ht := -1.0, -1.0, -1.0, -1.0
+		base := tmmUsed
+		if hasTMMUsed {
+			tu = tmmUsed.Value
+			base = tmmUsed
+		}
+		if hasTMMTotal {
+			tt = tmmTotal.Value
+		}
+		if hasHostUsed {
+			hu = hostUsed.Value
+			if !hasTMMUsed {
+				base = hostUsed
+			}
+		}
+		if hasHostTotal {
+			ht = hostTotal.Value
+		}
+
+		domain, tmmPct, hostPct := selectF5MemoryDomain(tu, tt, hu, ht)
+		if tmmPct >= 0 {
+			out = append(out, clone(base, "f5_tmm_memory_pct", tmmPct, "percent"))
+		}
+		if hostPct >= 0 {
+			out = append(out, clone(base, "f5_host_memory_pct", hostPct, "percent"))
+		}
+		if domain.valid {
+			out = append(out,
+				clone(base, "memory_total_bytes", domain.total, "bytes"),
+				clone(base, "memory_used_bytes", domain.used, "bytes"),
+				clone(base, "memory", domain.pct, "percent"),
+			)
+		}
+	}
+
+	return out
+}
+
+func maxSampleWithPrefixes(samples []MetricSample, prefixes ...string) (MetricSample, bool) {
+	var selected MetricSample
+	found := false
+	for _, sample := range samples {
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(sample.Key, prefix) && sample.Value >= 0 && (!found || sample.Value > selected.Value) {
+				selected, found = sample, true
+			}
+		}
+	}
+	return selected, found
+}
+
+type memoryPool struct {
+	base       MetricSample
+	used, free float64
+	pct        float64
+}
+
+func primaryMemoryPool(samples []MetricSample, usedPrefixes, freePrefixes []string) (memoryPool, bool) {
+	usedBySuffix := make(map[string]MetricSample)
+	freeBySuffix := make(map[string]MetricSample)
+	for _, sample := range samples {
+		for _, prefix := range usedPrefixes {
+			if strings.HasPrefix(sample.Key, prefix) {
+				usedBySuffix[strings.TrimPrefix(sample.Key, prefix)] = sample
+			}
+		}
+		for _, prefix := range freePrefixes {
+			if strings.HasPrefix(sample.Key, prefix) {
+				freeBySuffix[strings.TrimPrefix(sample.Key, prefix)] = sample
+			}
+		}
+	}
+	var selected memoryPool
+	found := false
+	for suffix, used := range usedBySuffix {
+		free, ok := freeBySuffix[suffix]
+		if !ok || used.Value < 0 || free.Value < 0 || used.Value+free.Value <= 0 {
+			continue
+		}
+		pool := memoryPool{base: used, used: used.Value, free: free.Value}
+		pool.pct = pool.used / (pool.used + pool.free) * 100
+		// The largest allocation domain represents system/processor memory and
+		// avoids tiny intentionally-full pools (for example Cisco lsmpi_io).
+		poolTotal := pool.used + pool.free
+		selectedTotal := selected.used + selected.free
+		if !found || poolTotal > selectedTotal || (poolTotal == selectedTotal && pool.pct > selected.pct) {
+			selected, found = pool, true
+		}
+	}
+	return selected, found
+}
+
+func collectPrimaryMemoryPool(s *g.GoSNMP, usedOID, freeOID string) (memoryPool, bool) {
+	usedPDUs, usedErr := walkAll(s, usedOID)
+	freePDUs, freeErr := walkAll(s, freeOID)
+	if usedErr != nil || freeErr != nil {
+		return memoryPool{}, false
+	}
+	samples := make([]MetricSample, 0, len(usedPDUs)+len(freePDUs))
+	for _, pdu := range usedPDUs {
+		if suffix := oidSuffix(pdu.Name, usedOID); suffix != "" {
+			samples = append(samples, MetricSample{Key: "used_" + suffix, Value: float64(asUint(pdu))})
+		}
+	}
+	for _, pdu := range freePDUs {
+		if suffix := oidSuffix(pdu.Name, freeOID); suffix != "" {
+			samples = append(samples, MetricSample{Key: "free_" + suffix, Value: float64(asUint(pdu))})
+		}
+	}
+	return primaryMemoryPool(samples, []string{"used_"}, []string{"free_"})
 }
 
 func (c *Collector) collectInterfaces(ctx context.Context, s *g.GoSNMP) ([]Interface, error) {
@@ -586,11 +972,13 @@ func (c *Collector) collectSensors(
 	scaleV, _ := s.BulkWalkAll(OIDEntPhySensorScale)
 	precV, _ := s.BulkWalkAll(OIDEntPhySensorPrecision)
 	valueV, _ := s.BulkWalkAll(OIDEntPhySensorValue)
+	statusV, _ := s.BulkWalkAll(OIDEntPhySensorOperStatus)
 	unitV, _ := s.BulkWalkAll(OIDEntPhySensorUnitsDisplay)
 
 	scaleByIdx := indexMap(scaleV)
 	precByIdx := indexMap(precV)
 	valueByIdx := indexMap(valueV)
+	statusByIdx := indexMap(statusV)
 	unitByIdx := indexMap(unitV)
 
 	sensors := make([]Sensor, 0, len(typeV))
@@ -614,6 +1002,19 @@ func (c *Collector) collectSensors(
 			Unit:        unit,
 			Value:       val,
 		})
+		if statusPDU, ok := statusByIdx[idx]; ok {
+			status := int(asInt(statusPDU))
+			samples = append(samples, MetricSample{
+				DeviceID: deviceID, Key: fmt.Sprintf("sensor_oper_status_%d", idx), Value: float64(status),
+				Unit: "enum", Timestamp: ts, PollerID: c.pollerID,
+			})
+			// ENTITY-SENSOR-MIB: 1=ok, 2=unavailable, 3=nonoperational.
+			// Preserve inventory/status but do not chart a stale or invalid
+			// measurement as though it were healthy.
+			if status != 1 {
+				continue
+			}
+		}
 
 		// Emit a normalized scalar for thresholding. Only types with
 		// a clear meaning get mapped; others are left out.
@@ -713,14 +1114,70 @@ func rateBps(cur, prev uint64, dtSec float64, hc bool) float64 {
 func asString(v g.SnmpPDU) string {
 	switch x := v.Value.(type) {
 	case string:
-		return x
+		return cleanText(x)
 	case []byte:
-		return string(x)
+		return cleanText(string(x))
 	case nil:
 		return ""
 	default:
 		return fmt.Sprint(x)
 	}
+}
+
+// cleanText makes an SNMP OctetString safe to store in a Postgres text
+// column. Agents routinely return values that are not text at all —
+// NUL-padded fixed-width fields, binary chassis/port IDs, Latin-1
+// descriptions. Postgres rejects both NUL bytes and invalid UTF-8 with
+// SQLSTATE 22021, which aborts the entire poll transaction and silently
+// discards everything else collected for that device.
+//
+// Invalid bytes and C0 control characters are dropped rather than
+// replaced so a NUL-padded string collapses to its printable prefix.
+func cleanText(s string) string {
+	if utf8.ValidString(s) && strings.IndexFunc(s, isDiscardedRune) < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		// RuneError from a decode failure is a single invalid byte.
+		if r == utf8.RuneError || isDiscardedRune(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// isDiscardedRune reports whether r is a control character that has no
+// business in a stored description (tab/newline are kept).
+func isDiscardedRune(r rune) bool {
+	if r == '\t' || r == '\n' || r == '\r' {
+		return false
+	}
+	return r < 0x20 || r == 0x7f
+}
+
+// bytesOf returns the raw octets behind a PDU value, or nil when the
+// value is not an OctetString. Needed for LLDP identifiers, which are
+// typed by a companion subtype rather than by SNMP.
+func bytesOf(v g.SnmpPDU) []byte {
+	switch x := v.Value.(type) {
+	case []byte:
+		return x
+	case string:
+		return []byte(x)
+	default:
+		return nil
+	}
+}
+
+// macOf formats 6 raw octets as a lowercase colon-separated MAC.
+func macOf(b []byte) string {
+	if len(b) != 6 {
+		return ""
+	}
+	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", b[0], b[1], b[2], b[3], b[4], b[5])
 }
 
 func asInt(v g.SnmpPDU) int64 {

@@ -61,6 +61,10 @@ func (f *fakeDeviceLoader) UpdateDeviceStatus(ctx context.Context, deviceID uuid
 	return nil
 }
 
+func (f *fakeDeviceLoader) LoadActiveMaintenanceDeviceIDs(ctx context.Context) (map[uuid.UUID]struct{}, error) {
+	return map[uuid.UUID]struct{}{}, nil
+}
+
 type fakeMetricWriter struct {
 	mu            sync.Mutex
 	statusChanges []*StatusChange

@@ -1,8 +1,9 @@
 import { FormEvent, useEffect, useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Loader2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
+import type { Role } from '@/types'
 import {
   Dialog,
   DialogContent,
@@ -33,7 +34,14 @@ export function UserFormDialog({
   user?: any
 }) {
   const isEdit = !!user?.id
+  const isExternal = isEdit && user?.auth_source && user.auth_source !== 'local'
   const qc = useQueryClient()
+
+  const { data: roles } = useQuery<Role[]>({
+    queryKey: ['roles'],
+    queryFn: async () => (await api.get('/roles')).data,
+    enabled: open,
+  })
 
   const [username, setUsername] = useState('')
   const [email, setEmail] = useState('')
@@ -80,6 +88,7 @@ export function UserFormDialog({
     onSuccess: () => {
       toast.success(isEdit ? 'User updated' : 'User created')
       qc.invalidateQueries({ queryKey: ['users'] })
+      qc.invalidateQueries({ queryKey: ['roles'] })
       onOpenChange(false)
     },
     onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
@@ -134,15 +143,23 @@ export function UserFormDialog({
             </FormField>
           )}
           <div className="grid grid-cols-2 gap-3">
-            <FormField label="Role">
+            <FormField label="Role" hint={isExternal ? `Managed by ${user.auth_source.toUpperCase()} mapping on each sign-in` : undefined}>
               <Select value={role} onValueChange={setRole}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="admin">Admin</SelectItem>
-                  <SelectItem value="editor">Editor</SelectItem>
-                  <SelectItem value="viewer">Viewer</SelectItem>
+                  {(roles && roles.length > 0
+                    ? roles.map((r) => ({ value: r.name, label: r.display_name }))
+                    : [
+                        { value: 'admin', label: 'Administrator' },
+                        { value: 'operator', label: 'Operator' },
+                        { value: 'viewer', label: 'Viewer' },
+                        { value: 'read_only', label: 'Read Only' },
+                      ]
+                  ).map((r) => (
+                    <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
             </FormField>

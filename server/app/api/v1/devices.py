@@ -12,6 +12,7 @@ from app.models.user import User
 from app.schemas.device import (
     DeviceCreate, DeviceUpdate, DeviceResponse, DeviceSummary, DeviceGroupResponse,
     BulkImportRequest, BulkImportResult,
+    DeviceMaintenanceCreate, DeviceMaintenanceResponse,
 )
 from app.schemas.metric import MetricResponse, StatusChangeEvent
 from app.services import device_service, metric_service
@@ -24,6 +25,7 @@ from app.api.v1.snmp import (
     SYS_NAME_OID,
 )
 from app.core.crypto import decrypt, decrypt_secret
+from app.services.ping_rollups import ping_table_for_hours, uptime_agg_sql
 from sqlalchemy import text
 import time
 import asyncio
@@ -94,16 +96,23 @@ async def list_devices(
     device_type: str | None = None,
     location: str | None = None,
     search: str | None = None,
+    tags: str | None = Query(default=None, description="Comma-separated tag names"),
+    tags_match: str = Query(default="any", pattern="^(any|all)$"),
+    managed_by: UUID | None = Query(default=None, description="Only children of this controller"),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
     devices, total = await device_service.get_devices(
-        db, status, group_id, device_type, location, search, skip, limit
+        db, status, group_id, device_type, location, search, skip, limit,
+        tags=tag_list, tags_match=tags_match, managed_by=managed_by,
     )
+    profile_names = await _profile_name_map(db)
+    parent_names, child_counts = await _managed_maps(db, devices)
     return {
-        "data": [_device_to_response(d) for d in devices],
+        "data": [_device_to_response(d, profile_names, parent_names, child_counts) for d in devices],
         "meta": {"total": total, "skip": skip, "limit": limit},
     }
 
@@ -116,6 +125,23 @@ async def device_summary(
     return await device_service.get_device_summary(db)
 
 
+
+
+def _ping_uptime_sql(table: str, where: str) -> str:
+    """`SELECT device_id, up_samples, total_samples` over a ping table.
+
+    Counting `is_up` against the 5m/1h rollups raises UNKNOWN_IDENTIFIER — the
+    column does not exist there — which the callers below swallow as "no data"
+    and silently retry on raw `ping_metrics`. Every long window was therefore
+    answered from raw retention instead of the rollup history it asked for.
+    See app.services.ping_rollups for the column shapes.
+    """
+    return f"""
+        SELECT device_id, {uptime_agg_sql(table)}
+        FROM zenplus.{table}
+        WHERE {where}
+        GROUP BY device_id
+    """
 
 
 @router.get("/dashboard/uptime-stats")
@@ -131,40 +157,84 @@ async def dashboard_uptime_stats(
     to_time = datetime.utcnow()
     from_time = to_time - timedelta(hours=hours)
 
-    # Try rollup tables first, fall back to raw
-    tables_to_try = []
-    if hours <= 6:
-        tables_to_try = ["ping_metrics"]
-    elif hours <= 168:
-        tables_to_try = ["ping_metrics_5m", "ping_metrics"]
-    else:
-        tables_to_try = ["ping_metrics_1h", "ping_metrics_5m", "ping_metrics"]
+    # Coarsest-but-longest-lived table that covers the window, then finer ones
+    # as a fallback for installs whose rollups have not caught up yet.
+    preferred = ping_table_for_hours(hours)
+    tables_to_try = [preferred] + [
+        t for t in ("ping_metrics_5m", "ping_metrics") if t != preferred
+    ]
 
-    uptime_map: dict[str, float] = {}
-    failed_map: dict[str, int] = {}
+    # (up, down, total) per device from the chosen table, in *samples*.
+    counts: dict[str, list[float]] = {}
+    chosen_table: str | None = None
     for table in tables_to_try:
-        query = f"""
-            SELECT device_id,
-                   countIf(is_up = 1) AS up_count,
-                   countIf(is_up = 0) AS down_count,
-                   count() AS total_count
-            FROM zenplus.{table}
-            WHERE timestamp >= %(from)s AND timestamp <= %(to)s
-            GROUP BY device_id
-        """
         try:
-            result = client.query(query, parameters={"from": from_time, "to": to_time})
+            result = client.query(
+                _ping_uptime_sql(table, "timestamp >= %(from)s AND timestamp <= %(to)s"),
+                parameters={"from": from_time, "to": to_time},
+            )
             if len(result.result_rows) > 0:
                 for row in result.result_rows:
-                    device_id = str(row[0])
-                    up = row[1]
-                    down = int(row[2] or 0)
-                    total = row[3]
-                    uptime_map[device_id] = round((up / total * 100) if total > 0 else 0, 2)
-                    failed_map[device_id] = down
+                    up, total = float(row[1] or 0), float(row[2] or 0)
+                    counts[str(row[0])] = [up, max(0.0, total - up), total]
+                chosen_table = table
                 break
         except Exception:
             continue
+
+    # Maintenance-aware SLA: samples that fall inside a device_maintenance
+    # window are excluded from numerator AND denominator, so planned downtime
+    # never dents availability. Windows are clamped to the query range.
+    if counts and chosen_table:
+        try:
+            win_rows = (await db.execute(
+                text(f"""
+                    SELECT d.id AS device_id,
+                           GREATEST(m.starts_at, :from_ts) AS s,
+                           LEAST(m.ends_at, :to_ts) AS e
+                    FROM device_maintenance m
+                    JOIN devices d ON {MAINT_COVERS_DEVICE_SQL}
+                    WHERE m.starts_at < :to_ts AND m.ends_at > :from_ts
+                    LIMIT 500
+                """),
+                {"from_ts": from_time.replace(tzinfo=timezone.utc),
+                 "to_ts": to_time.replace(tzinfo=timezone.utc)},
+            )).all()
+        except Exception:
+            win_rows = []
+        if win_rows:
+            conds, params = [], {}
+            for i, r in enumerate(win_rows):
+                conds.append(
+                    f"(device_id = %(d{i})s AND timestamp >= %(s{i})s AND timestamp <= %(e{i})s)"
+                )
+                params[f"d{i}"] = str(r.device_id)
+                params[f"s{i}"] = r.s.astimezone(timezone.utc).replace(tzinfo=None)
+                params[f"e{i}"] = r.e.astimezone(timezone.utc).replace(tzinfo=None)
+            try:
+                mres = client.query(
+                    _ping_uptime_sql(chosen_table, " OR ".join(conds)),
+                    parameters=params,
+                )
+                for row in mres.result_rows:
+                    did = str(row[0])
+                    if did in counts:
+                        up, total = float(row[1] or 0), float(row[2] or 0)
+                        counts[did][0] = max(0.0, counts[did][0] - up)
+                        counts[did][1] = max(0.0, counts[did][1] - (total - up))
+                        counts[did][2] = max(0.0, counts[did][2] - total)
+            except Exception:
+                pass
+
+    uptime_map: dict[str, float] = {}
+    failed_map: dict[str, int] = {}
+    for did, (up, down, total) in counts.items():
+        # A device whose entire window was maintenance has no SLA-relevant
+        # samples — omit it so the UI shows "—" rather than 0% or 100%.
+        if total <= 0:
+            continue
+        uptime_map[did] = round(up / total * 100, 2)
+        failed_map[did] = int(round(down))
 
     return {
         "hours": hours,
@@ -172,6 +242,9 @@ async def dashboard_uptime_stats(
         "to": to_time.isoformat(),
         "devices": uptime_map,
         "failed_checks": failed_map,
+        # Which resolution actually answered — a caller asking for 30 days off
+        # the 5-minute rollup is looking at a shorter window than it thinks.
+        "source_table": chosen_table,
     }
 
 
@@ -329,6 +402,26 @@ async def bulk_delete_devices(
     return {"deleted": deleted}
 
 
+class BulkTagRequest(BaseModel):
+    device_ids: list[UUID]
+    add: list[str] = Field(default_factory=list)
+    remove: list[str] = Field(default_factory=list)
+
+
+@router.post("/bulk-tag")
+async def bulk_tag_devices(
+    data: BulkTagRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    if not data.device_ids:
+        raise HTTPException(status_code=400, detail="No device IDs provided")
+    if not data.add and not data.remove:
+        raise HTTPException(status_code=400, detail="Provide tags to add and/or remove")
+    updated = await device_service.bulk_tag_devices(db, data.device_ids, data.add, data.remove)
+    return {"updated": updated}
+
+
 @router.post("", response_model=DeviceResponse, status_code=201)
 async def create_device(
     data: DeviceCreate,
@@ -366,7 +459,8 @@ async def get_device(
     device = await device_service.get_device(db, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
-    return _device_to_response(device)
+    parent_names, child_counts = await _managed_maps(db, [device])
+    return _device_to_response(device, await _profile_name_map(db), parent_names, child_counts)
 
 
 @router.put("/{device_id}", response_model=DeviceResponse)
@@ -376,10 +470,35 @@ async def update_device(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_operator_user),
 ):
+    current = await device_service.get_device(db, device_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    # Controller-reported children can be IP-less; direct polling needs one.
+    new_ip = data.ip_address if data.ip_address is not None else (
+        str(current.ip_address) if current.ip_address else None)
+    wants_ping = data.ping_enabled if data.ping_enabled is not None else current.ping_enabled
+    wants_snmp = data.snmp_enabled if data.snmp_enabled is not None else current.snmp_enabled
+    if (wants_ping or wants_snmp) and not new_ip:
+        raise HTTPException(
+            status_code=400,
+            detail="This device has no IP address (it is monitored via its "
+                   "controller). Set an IP address before enabling direct polling.",
+        )
+
+    promote_was = bool(current.promote_managed)
     device = await device_service.update_device(db, device_id, data)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
-    return _device_to_response(device)
+
+    # Turning promotion on materializes children immediately so the UI
+    # doesn't wait a sweeper interval to show them.
+    if data.promote_managed and not promote_was:
+        from app.services.managed_device_service import sync_controller_now
+        await sync_controller_now(device_id)
+
+    parent_names, child_counts = await _managed_maps(db, [device])
+    return _device_to_response(device, await _profile_name_map(db), parent_names, child_counts)
 
 
 @router.delete("/{device_id}", status_code=204)
@@ -792,18 +911,46 @@ async def get_interface_detail_metrics(
     client = get_clickhouse_client()
 
     # Bucket from the raw 30-day-retention table; rollups are unreliable.
+    #
+    # in_errors/out_errors/in_discards/out_discards and the packet counters are
+    # cumulative SNMP counters. Plotting the reading draws a rising staircase,
+    # and summing readings across a bucket multiplies the running total by the
+    # sample count — this endpoint reported error totals millions of times the
+    # real value and disagreed with /link-utilization for the same interface.
+    # Difference consecutive samples instead, keeping only the positive step so
+    # an agent restart or counter wrap doesn't register as a burst of errors.
+    lag_cols = """
+                       lagInFrame(in_errors)     OVER w AS p_ie,
+                       lagInFrame(out_errors)    OVER w AS p_oe,
+                       lagInFrame(in_discards)   OVER w AS p_id,
+                       lagInFrame(out_discards)  OVER w AS p_od,
+                       lagInFrame(in_ucast_pkts) OVER w AS p_ip,
+                       lagInFrame(out_ucast_pkts) OVER w AS p_op,
+                       row_number() OVER w AS rn"""
+
+    def _delta(col: str, prev: str) -> str:
+        return f"if(rn > 1, greatest(toInt64({col}) - toInt64({prev}), 0), 0)"
+
     if hours <= 6:
-        sql = """
-            SELECT toUnixTimestamp64Milli(timestamp) AS ts_ms,
-                   in_bps, out_bps,
-                   in_errors, out_errors,
-                   in_discards, out_discards,
-                   in_ucast_pkts, out_ucast_pkts,
-                   in_octets, out_octets
-            FROM zenplus.snmp_if_metrics
-            WHERE device_id = %(id)s AND if_index = %(if)s
-              AND timestamp >= now() - INTERVAL %(hours)s HOUR
-            ORDER BY timestamp
+        sql = f"""
+            SELECT ts_ms, in_bps, out_bps,
+                   {_delta('in_errors', 'p_ie')} AS in_errors,
+                   {_delta('out_errors', 'p_oe')} AS out_errors,
+                   {_delta('in_discards', 'p_id')} AS in_discards,
+                   {_delta('out_discards', 'p_od')} AS out_discards,
+                   {_delta('in_ucast_pkts', 'p_ip')} AS in_ucast_pkts,
+                   {_delta('out_ucast_pkts', 'p_op')} AS out_ucast_pkts
+            FROM (
+                SELECT toUnixTimestamp64Milli(timestamp) AS ts_ms, timestamp,
+                       in_bps, out_bps, in_errors, out_errors,
+                       in_discards, out_discards, in_ucast_pkts, out_ucast_pkts,
+                       {lag_cols}
+                FROM zenplus.snmp_if_metrics
+                WHERE device_id = %(id)s AND if_index = %(if)s
+                  AND timestamp >= now() - INTERVAL %(hours)s HOUR
+                WINDOW w AS (ORDER BY timestamp)
+            )
+            ORDER BY ts_ms
         """
     else:
         bucket_seconds = 300 if hours <= 24 else (1800 if hours <= 24 * 7 else 7200)
@@ -813,17 +960,21 @@ async def get_interface_detail_metrics(
                    ) * 1000 AS ts_ms,
                    avg(in_bps) AS in_bps,
                    avg(out_bps) AS out_bps,
-                   sum(in_errors) AS in_errors,
-                   sum(out_errors) AS out_errors,
-                   sum(in_discards) AS in_discards,
-                   sum(out_discards) AS out_discards,
-                   sum(in_ucast_pkts) AS in_ucast_pkts,
-                   sum(out_ucast_pkts) AS out_ucast_pkts,
-                   sum(in_octets) AS in_octets,
-                   sum(out_octets) AS out_octets
-            FROM zenplus.snmp_if_metrics
-            WHERE device_id = %(id)s AND if_index = %(if)s
-              AND timestamp >= now() - INTERVAL %(hours)s HOUR
+                   sum({_delta('in_errors', 'p_ie')}) AS in_errors,
+                   sum({_delta('out_errors', 'p_oe')}) AS out_errors,
+                   sum({_delta('in_discards', 'p_id')}) AS in_discards,
+                   sum({_delta('out_discards', 'p_od')}) AS out_discards,
+                   sum({_delta('in_ucast_pkts', 'p_ip')}) AS in_ucast_pkts,
+                   sum({_delta('out_ucast_pkts', 'p_op')}) AS out_ucast_pkts
+            FROM (
+                SELECT timestamp, in_bps, out_bps, in_errors, out_errors,
+                       in_discards, out_discards, in_ucast_pkts, out_ucast_pkts,
+                       {lag_cols}
+                FROM zenplus.snmp_if_metrics
+                WHERE device_id = %(id)s AND if_index = %(if)s
+                  AND timestamp >= now() - INTERVAL %(hours)s HOUR
+                WINDOW w AS (ORDER BY timestamp)
+            )
             GROUP BY ts_ms
             ORDER BY ts_ms
         """
@@ -910,6 +1061,184 @@ async def get_device_traps(
     ]
 
 
+async def _record_test_run(
+    db: AsyncSession,
+    device_id: UUID,
+    kind: str,
+    ok: bool,
+    summary: str | None,
+    detail: dict,
+    user_id,
+) -> None:
+    """Persist the latest on-demand test for a device so every operator sees
+    it, not just the browser that ran it. One row per (device, kind) — the UI
+    only shows the most recent run, so we overwrite rather than append.
+
+    Never lets a bookkeeping failure break the probe response the caller
+    actually asked for.
+    """
+    import json
+    try:
+        await db.execute(
+            text("""
+                INSERT INTO device_test_runs (device_id, kind, ok, summary, detail, ran_at, ran_by)
+                VALUES (:device_id, :kind, :ok, :summary, CAST(:detail AS JSONB), NOW(), :ran_by)
+                ON CONFLICT (device_id, kind) DO UPDATE
+                   SET ok = EXCLUDED.ok,
+                       summary = EXCLUDED.summary,
+                       detail = EXCLUDED.detail,
+                       ran_at = EXCLUDED.ran_at,
+                       ran_by = EXCLUDED.ran_by
+            """),
+            {
+                "device_id": str(device_id),
+                "kind": kind,
+                "ok": ok,
+                "summary": (summary or "")[:500] or None,
+                "detail": json.dumps(detail, default=str),
+                "ran_by": str(user_id) if user_id else None,
+            },
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+
+
+async def _passive_snmp_evidence(device_id: UUID) -> dict | None:
+    """When was this device last successfully polled over SNMP?
+
+    A manual SNMP test proves the same thing the poller proves every cycle, so
+    a device nobody has ever clicked "SNMP Test" on is not untested — it is
+    continuously tested. Read the most recent write in either SNMP metrics
+    table and report that as passive evidence.
+    """
+    # Thread-local client: this runs in the threadpool alongside the other
+    # ClickHouse-backed device endpoints the page fires at the same time, and a
+    # single clickhouse_connect session rejects concurrent queries.
+    from app.core.database import get_ch_client
+    sql = """
+        SELECT max(ts) FROM (
+            SELECT max(timestamp) AS ts FROM zenplus.snmp_if_metrics
+             WHERE device_id = %(id)s AND timestamp >= now() - INTERVAL 7 DAY
+            UNION ALL
+            SELECT max(timestamp) AS ts FROM zenplus.snmp_metrics
+             WHERE device_id = %(id)s AND timestamp >= now() - INTERVAL 7 DAY
+        )
+    """
+    def _run():
+        # Resolve the client *inside* the worker thread — get_ch_client is
+        # thread-local, so calling it on the event loop would hand this query
+        # the loop thread's client and reintroduce the sharing it avoids.
+        return get_ch_client().query(sql, parameters={"id": str(device_id)})
+
+    try:
+        res = await asyncio.to_thread(_run)
+    except Exception:
+        return None
+    if not res.result_rows:
+        return None
+    ts = res.result_rows[0][0]
+    if not ts or getattr(ts, "year", 1970) <= 1970:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return {
+        "at": ts.isoformat(),
+        "ok": True,
+        "summary": "polled by the SNMP collector",
+        "source": "poller",
+    }
+
+
+@router.get("/{device_id}/test-runs")
+async def get_device_test_runs(
+    device_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Last-known result for each device test, from both available sources.
+
+    * `source: "manual"` — somebody pressed the button (shared across users).
+    * `source: "poller"` — no manual run on record, but the background
+      collector proves the same path works: recent SNMP samples in ClickHouse,
+      or the ping poller's own `last_seen`/`last_rtt_ms` on the device row.
+
+    The manual record wins only when it is newer than the passive evidence;
+    otherwise a two-day-old click would misrepresent a device being polled
+    right now.
+    """
+    device = await device_service.get_device(db, device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    rows = (await db.execute(
+        text("""
+            SELECT r.kind, r.ok, r.summary, r.ran_at, u.username
+              FROM device_test_runs r
+              LEFT JOIN users u ON u.id = r.ran_by
+             WHERE r.device_id = :device_id
+        """),
+        {"device_id": str(device_id)},
+    )).all()
+
+    manual: dict[str, dict] = {}
+    for kind, ok, summary, ran_at, username in rows:
+        if ran_at is not None and ran_at.tzinfo is None:
+            ran_at = ran_at.replace(tzinfo=timezone.utc)
+        manual[kind] = {
+            "at": ran_at.isoformat() if ran_at else None,
+            "ok": bool(ok),
+            "summary": summary or "",
+            "source": "manual",
+            "by": username,
+        }
+
+    passive: dict[str, dict] = {}
+    if device.snmp_enabled:
+        snmp_evidence = await _passive_snmp_evidence(device_id)
+        if snmp_evidence:
+            passive["snmp"] = snmp_evidence
+    if device.ping_enabled and device.last_seen:
+        last_seen = device.last_seen
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+        rtt = device.last_rtt_ms
+        passive["ping"] = {
+            "at": last_seen.isoformat(),
+            "ok": device.status != "down",
+            "summary": (
+                f"polled by the ICMP monitor · {rtt:.1f} ms" if rtt is not None
+                else "polled by the ICMP monitor"
+            ),
+            "source": "poller",
+        }
+
+    now = datetime.now(timezone.utc)
+
+    def _preferred(kind: str) -> dict | None:
+        m, p = manual.get(kind), passive.get(kind)
+        if not (m and m.get("at")):
+            return p if p and p.get("at") else None
+        if not (p and p.get("at")):
+            return m
+        # A test somebody just ran stays on screen for a while — otherwise the
+        # result you asked for is replaced by "the poller polled it" seconds
+        # later, and a *failed* manual probe would be the first thing hidden.
+        # Past that window the freshest evidence is the honest one.
+        if now - datetime.fromisoformat(m["at"]) <= timedelta(minutes=15):
+            return m
+        return max((m, p), key=lambda c: c["at"])
+
+    return {
+        "ping": _preferred("ping"),
+        "snmp": _preferred("snmp"),
+        # Both sources verbatim, so the UI can show "polling now" alongside
+        # "last manual test" without a second request.
+        "manual": manual,
+        "passive": passive,
+    }
+
+
 @router.get("/{device_id}/status-history", response_model=list[StatusChangeEvent])
 async def get_status_history(
     device_id: UUID,
@@ -967,7 +1296,7 @@ async def test_device_ping(
 
         ok = received > 0
         loss_pct = ((transmitted - received) / transmitted * 100) if transmitted else 100
-        return {
+        result = {
             "ok": ok,
             "reachable": ok,
             "transmitted": transmitted,
@@ -977,8 +1306,15 @@ async def test_device_ping(
             "duration_ms": duration_ms,
             "reason": None if ok else "Host did not reply to ICMP echo",
         }
+        summary = (
+            f"{received}/{transmitted} · {rtt_avg_ms:.1f} ms" if ok and rtt_avg_ms is not None
+            else f"{received}/{transmitted}" if ok
+            else result["reason"]
+        )
+        await _record_test_run(db, device_id, "ping", ok, summary, result, user.id)
+        return result
     except Exception as e:
-        return {
+        result = {
             "ok": False,
             "reachable": False,
             "transmitted": 0,
@@ -988,6 +1324,8 @@ async def test_device_ping(
             "duration_ms": int((time.monotonic() - started) * 1000),
             "reason": f"ping failed: {e}",
         }
+        await _record_test_run(db, device_id, "ping", False, result["reason"], result, user.id)
+        return result
 
 
 @router.post("/{device_id}/snmp-test")
@@ -1003,13 +1341,15 @@ async def test_device_snmp(
         raise HTTPException(status_code=404, detail="Device not found")
 
     if not device.snmp_enabled:
-        return {
+        result = {
             "ok": False,
             "reason": "SNMP monitoring is disabled for this device",
             "snmp_responded": False,
             "reachable": None,
             "duration_ms": 0,
         }
+        await _record_test_run(db, device_id, "snmp", False, result["reason"], result, user.id)
+        return result
 
     cfg = await _device_snmp_settings(db, device)
 
@@ -1056,7 +1396,7 @@ async def test_device_snmp(
             reason = snmp_err
         else:
             reason = "SNMP probe failed for an unknown reason"
-        return {
+        result = {
             "ok": False,
             "snmp_responded": False,
             "reachable": reachable,
@@ -1069,6 +1409,8 @@ async def test_device_snmp(
                 "timeout_ms": cfg["timeout_ms"],
             },
         }
+        await _record_test_run(db, device_id, "snmp", False, reason, result, user.id)
+        return result
 
     # Parse uptime (timeticks: "(12345) 0:02:03.45")
     uptime_raw = result.get(SYS_UPTIME_OID, "")
@@ -1082,7 +1424,7 @@ async def test_device_snmp(
     except Exception:
         pass
 
-    return {
+    response = {
         "ok": True,
         "snmp_responded": True,
         "reachable": reachable,
@@ -1098,13 +1440,248 @@ async def test_device_snmp(
             "timeout_ms": cfg["timeout_ms"],
         },
     }
+    await _record_test_run(
+        db, device_id, "snmp", True,
+        f"responded in {duration_ms} ms (v{cfg['version']})",
+        response, user.id,
+    )
+    return response
 
 
-def _device_to_response(device) -> DeviceResponse:
+async def _managed_maps(db, devices) -> tuple[dict, dict]:
+    """(parent_id -> hostname, controller_id -> child count) for one page of
+    devices — powers the 'via <controller>' badge and children counts."""
+    parent_names: dict = {}
+    child_counts: dict = {}
+    ids = [str(d.id) for d in devices]
+    parent_ids = list({str(d.managed_by_device_id) for d in devices if d.managed_by_device_id})
+    if parent_ids:
+        rows = (await db.execute(
+            text("SELECT id, hostname FROM devices WHERE id = ANY(:ids)"),
+            {"ids": parent_ids},
+        )).all()
+        parent_names = {r.id: r.hostname for r in rows}
+    if ids:
+        rows = (await db.execute(
+            text("""
+                SELECT managed_by_device_id AS pid, count(*) AS n
+                FROM devices WHERE managed_by_device_id = ANY(:ids)
+                GROUP BY managed_by_device_id
+            """),
+            {"ids": ids},
+        )).all()
+        child_counts = {r.pid: r.n for r in rows}
+    return parent_names, child_counts
+
+
+async def _profile_name_map(db) -> dict:
+    """profile_id -> template name (tiny table, one query)."""
+    rows = (await db.execute(text("SELECT id, name FROM device_profiles"))).all()
+    return {r[0]: r[1] for r in rows}
+
+
+_SEV_RANK = {"ok": 0, "info": 0, "warn": 1, "crit": 2}
+
+
+def _metric_status(metric: dict, value_num, value_text: str) -> str:
+    """Evaluate a template metric's status from its enum labels or thresholds."""
+    labels = metric.get("labels") or {}
+    if labels and value_num is not None:
+        code = str(int(value_num)) if float(value_num).is_integer() else str(value_num)
+        lab = labels.get(code)
+        if lab:
+            return lab.get("sev", "info")
+    th = metric.get("thresholds") or {}
+    if value_num is None or (th.get("warn") is None and th.get("crit") is None):
+        return "none"
+    op = th.get("op", ">=")
+    v = float(value_num)
+    if op == "<=":
+        if th.get("crit") is not None and v <= th["crit"]:
+            return "crit"
+        if th.get("warn") is not None and v <= th["warn"]:
+            return "warn"
+    else:
+        if th.get("crit") is not None and v >= th["crit"]:
+            return "crit"
+        if th.get("warn") is not None and v >= th["warn"]:
+            return "warn"
+    return "ok"
+
+
+def _metric_display(metric: dict, value_num, value_text: str) -> str:
+    """Human display string for enum metrics (label text beats raw text/code)."""
+    labels = metric.get("labels") or {}
+    if value_num is not None and labels:
+        code = str(int(value_num)) if float(value_num).is_integer() else str(value_num)
+        lab = labels.get(code)
+        if lab and lab.get("text"):
+            return lab["text"]
+    return value_text or ""
+
+
+@router.get("/{device_id}/template-insights")
+async def device_template_insights(
+    device_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Vendor-template metrics for one device, shaped for direct rendering:
+    the attached template's groups with the latest collected values, per-row
+    labels for tables, evaluated statuses and ClickHouse series keys for
+    charting via /devices/{id}/snmp-metrics."""
+    import json as _json
+
+    dev = (await db.execute(
+        text("""
+            SELECT d.profile_id, d.promote_managed, p.name, p.vendor, p.description,
+                   p.builtin, p.oid_groups
+            FROM devices d
+            LEFT JOIN device_profiles p ON p.id = d.profile_id
+            WHERE d.id = :id
+        """),
+        {"id": device_id},
+    )).mappings().first()
+    if dev is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if dev["profile_id"] is None:
+        return {"template": None, "groups": [], "updated_at": None,
+                "children_capable": False, "promote_managed": False}
+
+    oid_groups = dev["oid_groups"] or []
+    if isinstance(oid_groups, str):
+        oid_groups = _json.loads(oid_groups)
+
+    # Groups whose rows are controller-managed devices: map (group, instance)
+    # to the materialized child so the UI can link each row to its device.
+    children_capable = any(
+        gr.get("kind") == "table" and isinstance(gr.get("children"), dict)
+        for gr in oid_groups
+    )
+    child_ids: dict = {}
+    if children_capable:
+        child_rows = (await db.execute(
+            text("""
+                SELECT id, managed_source, managed_instance
+                FROM devices WHERE managed_by_device_id = :id
+            """),
+            {"id": device_id},
+        )).all()
+        child_ids = {(r.managed_source, r.managed_instance): str(r.id) for r in child_rows}
+
+    vals = (await db.execute(
+        text("""
+            SELECT group_key, metric_key, instance, series_key, label, unit,
+                   value_num, value_text, updated_at
+            FROM device_template_values WHERE device_id = :id
+        """),
+        {"id": device_id},
+    )).mappings().all()
+
+    by_group: dict = {}
+    latest_ts = None
+    for v in vals:
+        by_group.setdefault(v["group_key"], []).append(v)
+        if latest_ts is None or v["updated_at"] > latest_ts:
+            latest_ts = v["updated_at"]
+
+    groups_out = []
+    for gr in oid_groups:
+        gkey = gr.get("key")
+        metrics_def = {m["key"]: m for m in gr.get("metrics", [])}
+        rows_for_group = by_group.get(gkey, [])
+        worst = "none"
+
+        def bump(status: str):
+            nonlocal worst
+            if _SEV_RANK.get(status, -1) > _SEV_RANK.get(worst, -1):
+                worst = status
+
+        if gr.get("kind") == "table":
+            # rows keyed by instance
+            by_inst: dict = {}
+            for v in rows_for_group:
+                by_inst.setdefault(v["instance"], {"label": v["label"], "cells": {}})
+                inst = by_inst[v["instance"]]
+                if v["label"]:
+                    inst["label"] = v["label"]
+                m = metrics_def.get(v["metric_key"], {})
+                status = _metric_status(m, v["value_num"], v["value_text"])
+                bump(status)
+                inst["cells"][v["metric_key"]] = {
+                    "value": v["value_num"],
+                    "text": _metric_display(m, v["value_num"], v["value_text"]),
+                    "status": status,
+                    "series_key": v["series_key"],
+                }
+            has_children = isinstance(gr.get("children"), dict)
+            rows = [
+                {"instance": inst, "label": data["label"] or inst, "cells": data["cells"],
+                 **({"child_device_id": child_ids.get((gkey, inst))} if has_children else {})}
+                for inst, data in sorted(by_inst.items(), key=lambda kv: (kv[1]["label"] or kv[0]).lower())
+            ]
+            groups_out.append({
+                "key": gkey, "name": gr.get("name"), "kind": "table",
+                "description": gr.get("description"),
+                "children_capable": has_children,
+                "status": worst,
+                "columns": [
+                    {"key": m["key"], "name": m.get("name"), "unit": m.get("unit"),
+                     "type": m.get("type", "gauge")}
+                    for m in gr.get("metrics", [])
+                ],
+                "rows": rows,
+            })
+        else:
+            by_metric = {v["metric_key"]: v for v in rows_for_group}
+            metrics_out = []
+            for m in gr.get("metrics", []):
+                v = by_metric.get(m["key"])
+                status = _metric_status(m, v["value_num"], v["value_text"]) if v else "none"
+                if v:
+                    bump(status)
+                metrics_out.append({
+                    "key": m["key"], "name": m.get("name"),
+                    "type": m.get("type", "gauge"), "unit": m.get("unit"),
+                    "thresholds": m.get("thresholds"),
+                    "value": v["value_num"] if v else None,
+                    "text": _metric_display(m, v["value_num"], v["value_text"]) if v else "",
+                    "status": status,
+                    "series_key": v["series_key"] if v else f"tpl_{m['key']}",
+                    "has_data": v is not None,
+                })
+            groups_out.append({
+                "key": gkey, "name": gr.get("name"), "kind": "scalar",
+                "description": gr.get("description"),
+                "status": worst,
+                "metrics": metrics_out,
+            })
+
+    return {
+        "template": {
+            "id": str(dev["profile_id"]),
+            "name": dev["name"],
+            "vendor": dev["vendor"],
+            "description": dev["description"],
+            "builtin": dev["builtin"],
+        },
+        "updated_at": latest_ts.isoformat() if latest_ts else None,
+        "groups": groups_out,
+        "children_capable": children_capable,
+        "promote_managed": bool(dev["promote_managed"]),
+    }
+
+
+def _device_to_response(
+    device,
+    profile_names: dict | None = None,
+    parent_names: dict | None = None,
+    child_counts: dict | None = None,
+) -> DeviceResponse:
     return DeviceResponse(
         id=device.id,
         hostname=device.hostname,
-        ip_address=str(device.ip_address),
+        ip_address=str(device.ip_address) if device.ip_address else None,
         device_type=device.device_type,
         location=device.location,
         group_id=device.group_id,
@@ -1136,7 +1713,263 @@ def _device_to_response(device) -> DeviceResponse:
         model=device.model,
         os_version=device.os_version,
         profile_id=device.profile_id,
+        profile_name=(profile_names or {}).get(device.profile_id),
         snmp_credential_id=device.snmp_credential_id,
         snmp_auth_configured=device.snmp_auth_passphrase is not None,
         snmp_priv_configured=device.snmp_priv_passphrase is not None,
+        poll_mode=device.poll_mode or "direct",
+        managed_by_device_id=device.managed_by_device_id,
+        managed_by_hostname=(parent_names or {}).get(device.managed_by_device_id),
+        serial_number=device.serial_number,
+        managed_ip=str(device.managed_ip) if device.managed_ip else None,
+        managed_source=device.managed_source,
+        managed_last_seen=device.managed_last_seen,
+        promote_managed=bool(device.promote_managed),
+        managed_children_count=(child_counts or {}).get(device.id, 0),
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Device maintenance windows (planned downtime)
+#
+# Mirrors the service-check maintenance feature (migrate-006): while a window
+# is active the poller keeps collecting metrics but suppresses status
+# transitions + alerting, the device shows status 'maintenance', and
+# SLA/uptime calculations exclude samples inside the window.
+# ═══════════════════════════════════════════════════════════════════════════
+
+maintenance_router = APIRouter(prefix="/device-maintenance", tags=["Device Maintenance"])
+
+# "Window m covers device d" — shared by every maintenance query. devices.tags
+# is a JSONB string array, so tag scope uses jsonb_exists().
+MAINT_COVERS_DEVICE_SQL = """(
+       (m.scope_type = 'device' AND m.scope_device_id = d.id)
+    OR (m.scope_type = 'group'  AND m.scope_group_id = d.group_id)
+    OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
+    OR (m.scope_type = 'all')
+)"""
+
+
+def _maint_response(m, label: str) -> DeviceMaintenanceResponse:
+    now = datetime.now(timezone.utc)
+    starts = m.starts_at if m.starts_at.tzinfo else m.starts_at.replace(tzinfo=timezone.utc)
+    ends = m.ends_at if m.ends_at.tzinfo else m.ends_at.replace(tzinfo=timezone.utc)
+    return DeviceMaintenanceResponse(
+        id=m.id,
+        scope_type=m.scope_type,
+        scope_device_id=m.scope_device_id,
+        scope_group_id=m.scope_group_id,
+        scope_tag=m.scope_tag,
+        scope_label=label,
+        starts_at=m.starts_at,
+        ends_at=m.ends_at,
+        reason=m.reason,
+        created_by=m.created_by,
+        created_at=m.created_at,
+        active=starts <= now <= ends,
+    )
+
+
+async def _maint_labels(db: AsyncSession, rows) -> dict:
+    """id -> human label for a batch of maintenance rows."""
+    from app.models.device import Device as DeviceModel, DeviceGroup as GroupModel
+    device_ids = [m.scope_device_id for m in rows if m.scope_device_id]
+    group_ids = [m.scope_group_id for m in rows if m.scope_group_id]
+    device_names: dict = {}
+    group_names: dict = {}
+    if device_ids:
+        res = await db.execute(
+            text("SELECT id, hostname FROM devices WHERE id = ANY(:ids)"), {"ids": device_ids}
+        )
+        device_names = {r.id: r.hostname for r in res}
+    if group_ids:
+        res = await db.execute(
+            text("SELECT id, name FROM device_groups WHERE id = ANY(:ids)"), {"ids": group_ids}
+        )
+        group_names = {r.id: r.name for r in res}
+    labels = {}
+    for m in rows:
+        if m.scope_type == "device":
+            labels[m.id] = device_names.get(m.scope_device_id, "(deleted device)")
+        elif m.scope_type == "group":
+            labels[m.id] = group_names.get(m.scope_group_id, "(deleted group)")
+        elif m.scope_type == "tag":
+            labels[m.id] = f"tag:{m.scope_tag}"
+        else:
+            labels[m.id] = "All devices"
+    return labels
+
+
+async def _covered_device_ids(db: AsyncSession, m) -> list:
+    """Device ids covered by one maintenance window."""
+    res = await db.execute(
+        text(f"""
+            SELECT d.id FROM devices d
+            JOIN device_maintenance m ON m.id = :mid
+            WHERE {MAINT_COVERS_DEVICE_SQL}
+        """),
+        {"mid": str(m.id)},
+    )
+    return [r.id for r in res]
+
+
+@maintenance_router.get("", response_model=list[DeviceMaintenanceResponse])
+async def list_device_maintenance(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    from sqlalchemy import select
+    from app.models.device import DeviceMaintenance
+    rows = (await db.execute(
+        select(DeviceMaintenance).order_by(DeviceMaintenance.starts_at.desc()).limit(500)
+    )).scalars().all()
+    labels = await _maint_labels(db, rows)
+    return [_maint_response(m, labels[m.id]) for m in rows]
+
+
+@maintenance_router.post("", response_model=DeviceMaintenanceResponse, status_code=201)
+async def create_device_maintenance(
+    data: DeviceMaintenanceCreate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    from app.models.device import DeviceMaintenance
+    from app.services.audit_service import write_audit_log
+
+    m = DeviceMaintenance(
+        scope_type=data.scope_type,
+        scope_device_id=data.scope_device_id if data.scope_type == "device" else None,
+        scope_group_id=data.scope_group_id if data.scope_type == "group" else None,
+        scope_tag=data.scope_tag.strip() if data.scope_type == "tag" and data.scope_tag else None,
+        starts_at=data.starts_at,
+        ends_at=data.ends_at,
+        reason=data.reason,
+        created_by=user.id,
+    )
+    db.add(m)
+    await db.flush()
+
+    now = datetime.now(timezone.utc)
+    starts = m.starts_at if m.starts_at.tzinfo else m.starts_at.replace(tzinfo=timezone.utc)
+    ends = m.ends_at if m.ends_at.tzinfo else m.ends_at.replace(tzinfo=timezone.utc)
+    if starts <= now <= ends:
+        # Window is active right now: flip covered devices to 'maintenance'
+        # immediately (the poller would do it within one poll anyway) and
+        # auto-resolve their open alerts so the alert list reflects planned
+        # downtime, not an incident.
+        covered = await _covered_device_ids(db, m)
+        if covered:
+            await db.execute(
+                text("""
+                    UPDATE devices SET status = 'maintenance', updated_at = now()
+                    WHERE id = ANY(:ids)
+                """),
+                {"ids": covered},
+            )
+            await db.execute(
+                text("""
+                    UPDATE alerts SET status = 'resolved', resolved_at = now(),
+                        metadata = COALESCE(metadata, '{}'::jsonb)
+                                   || jsonb_build_object('resolved_by', 'maintenance',
+                                                         'maintenance_id', CAST(:mid AS text))
+                    WHERE status = 'active' AND device_id = ANY(:ids)
+                """),
+                {"mid": str(m.id), "ids": covered},
+            )
+
+    await write_audit_log(
+        db, actor=user, action="create", resource_type="device_maintenance",
+        resource_id=str(m.id),
+        metadata={"scope_type": m.scope_type, "starts_at": str(m.starts_at),
+                  "ends_at": str(m.ends_at), "reason": m.reason},
+    )
+    await db.commit()
+    await db.refresh(m)
+    labels = await _maint_labels(db, [m])
+    return _maint_response(m, labels[m.id])
+
+
+@maintenance_router.delete("/{maintenance_id}", status_code=204)
+async def delete_device_maintenance(
+    maintenance_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    from sqlalchemy import select
+    from app.models.device import DeviceMaintenance
+    from app.services.audit_service import write_audit_log
+
+    m = (await db.execute(
+        select(DeviceMaintenance).where(DeviceMaintenance.id == maintenance_id)
+    )).scalar_one_or_none()
+    if not m:
+        raise HTTPException(status_code=404, detail="Maintenance window not found")
+
+    now = datetime.now(timezone.utc)
+    starts = m.starts_at if m.starts_at.tzinfo else m.starts_at.replace(tzinfo=timezone.utc)
+    ends = m.ends_at if m.ends_at.tzinfo else m.ends_at.replace(tzinfo=timezone.utc)
+    was_active = starts <= now <= ends
+    covered = await _covered_device_ids(db, m) if was_active else []
+
+    await db.execute(
+        text("DELETE FROM device_maintenance WHERE id = :mid"), {"mid": str(maintenance_id)}
+    )
+
+    if covered:
+        # Devices the poller pings recover their real status within one poll
+        # cycle. Ping-disabled devices have no status writer, so reset any
+        # that are no longer covered by another active window.
+        await db.execute(
+            text(f"""
+                UPDATE devices SET status = 'unknown', updated_at = now()
+                WHERE id = ANY(:ids) AND status = 'maintenance' AND ping_enabled = false
+                  AND NOT EXISTS (
+                      SELECT 1 FROM device_maintenance m
+                      JOIN devices d ON d.id = devices.id AND {MAINT_COVERS_DEVICE_SQL}
+                      WHERE m.starts_at <= now() AND m.ends_at >= now()
+                  )
+            """),
+            {"ids": covered},
+        )
+
+    await write_audit_log(
+        db, actor=user, action="delete", resource_type="device_maintenance",
+        resource_id=str(maintenance_id),
+        metadata={"scope_type": m.scope_type, "was_active": was_active},
+    )
+    await db.commit()
+
+
+@router.get("/{device_id}/maintenance")
+async def get_device_maintenance(
+    device_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Active + upcoming maintenance windows covering one device."""
+    from app.models.device import DeviceMaintenance
+    from sqlalchemy import select
+
+    res = await db.execute(
+        text(f"""
+            SELECT m.id FROM device_maintenance m
+            JOIN devices d ON d.id = :did AND {MAINT_COVERS_DEVICE_SQL}
+            WHERE m.ends_at >= now()
+            ORDER BY m.starts_at ASC
+            LIMIT 100
+        """),
+        {"did": str(device_id)},
+    )
+    ids = [r.id for r in res]
+    if not ids:
+        return {"active": [], "upcoming": []}
+    rows = (await db.execute(
+        select(DeviceMaintenance).where(DeviceMaintenance.id.in_(ids))
+        .order_by(DeviceMaintenance.starts_at.asc())
+    )).scalars().all()
+    labels = await _maint_labels(db, rows)
+    out = [_maint_response(m, labels[m.id]) for m in rows]
+    return {
+        "active": [o for o in out if o.active],
+        "upcoming": [o for o in out if not o.active],
+    }

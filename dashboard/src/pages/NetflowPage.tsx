@@ -1,6 +1,6 @@
-import { Fragment, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Area,
   AreaChart,
@@ -23,6 +23,7 @@ import {
   Cable,
   Database,
   Gauge,
+  Info,
   Layers,
   Loader2,
   Network,
@@ -43,8 +44,11 @@ import { api } from '@/lib/api'
 import { apiErrorMessage, formatBps, formatBytes, relativeTime, timeAxisTickFormatter, timeTooltipLabelFormatter } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
+import { toast } from '@/components/ui/Toast'
 import { Table, TBody, THead, Td, Th, Tr } from '@/components/ui/Table'
-import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
+import { TIME_RANGE_OPTIONS, TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
 
 type Overview = {
   bytes: number
@@ -102,6 +106,16 @@ type Application = { name: string; bytes: number; packets: number; flows: number
 type Exporter = { exporter_ip: string; bytes: number; packets: number; flows: number; last_seen: string }
 type DeviceStatus = { latency_ms: number; packet_loss_pct: number; uptime_pct: number; flows: number; packets: number; exporters: number; last_seen: string | null }
 type Heatmap = { max_bytes: number; cells: { dow: number; hour: number; bytes: number; flows: number }[] }
+type ExporterDevice = {
+  exporter_ip: string
+  flows: number
+  last_seen: string | null
+  device_id: string | null
+  device_hostname: string | null
+  /** 'ip-match' = exporter IP is a device's management IP, 'mapped' = linked by an
+   *  operator, null = unresolved, so its interfaces can only show raw ifIndex. */
+  source: 'ip-match' | 'mapped' | null
+}
 type Interface = {
   exporter_ip: string
   ifindex: number
@@ -122,9 +136,15 @@ type Interface = {
   flows: number
 }
 
+type Country = { country: string | null; country_name: string | null; bytes: number; packets: number; flows: number }
 type DscpClass = { dscp: number; label: string; bytes: number; packets: number; flows: number }
 type TcpFlagSummary = { total_tcp: number; syn_only: number; ack_only: number; rst: number; fin: number; psh: number; urg: number; no_flags: number }
 type NetClass = { name: string; bytes: number; packets: number; flows: number }
+
+// The traffic heatmap is always a 7-day hour×day grid. Any "When" (hour/dow)
+// filter picked from it therefore needs a page range at least this wide to
+// match anything — see the onSelect handler and the range guard below.
+const HEATMAP_HOURS = 168
 
 const TALKER_COLORS = ['#22d3ee', '#a78bfa', '#f472b6', '#34d399', '#facc15', '#fb923c']
 const APP_COLORS = ['#22d3ee', '#34d399', '#facc15', '#fb7185', '#a78bfa', '#f59e0b', '#10b981', '#ef4444']
@@ -191,7 +211,7 @@ export function NetflowSectionPage() {
   const { data = [], isLoading, error } = useQuery<any[]>({
     queryKey: ['netflow', 'section', section, qs],
     queryFn: async () => (await api.get(`/netflow/${meta.endpoint}?${qs}`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    refetchInterval: isCustom ? false : pollMs(range.hours),
   })
 
   const Icon = meta.icon
@@ -244,6 +264,13 @@ export function NetflowSectionPage() {
       </Card>
     </div>
   )
+}
+
+// Auto-refresh cadence scaled to the window: multi-day windows run multi-second
+// ClickHouse scans — re-polling those every 15s just burns the database.
+function pollMs(hours: number, floor = 15_000): number | false {
+  const ms = hours <= 6 ? 15_000 : hours <= 48 ? 60_000 : 300_000
+  return Math.max(ms, floor)
 }
 
 export function NetflowPage({ exporter }: { exporter?: string } = {}) {
@@ -300,6 +327,37 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
     for (const k of ['talker', 'protocol', 'dscp', 'app', 'netclass', 'tcpflag', 'hour', 'dow', 'iface']) next.delete(k)
     setSearchParams(next, { replace: true })
   }
+
+  // A shared link like ?hour=19&dow=7 carries no range, so it would fall back
+  // to the 1h default and render an empty page: a weekday+hour filter only
+  // matches over a multi-day window. Give those links the heatmap's own 7-day
+  // window. An explicit ?range= is always respected, so this never fights a
+  // range the user chose.
+  useEffect(() => {
+    if ((filterHour || filterDow) && !searchParams.get('range')) {
+      const next = new URLSearchParams(searchParams)
+      next.set('range', '7d')
+      setSearchParams(next, { replace: true })
+    }
+  }, [filterHour, filterDow, searchParams, setSearchParams])
+
+  // A "When" filter that the current range cannot possibly satisfy: surfaced
+  // in the UI instead of silently rendering zeros everywhere.
+  const whenFilterOutOfRange = !!(filterHour || filterDow) && !isCustom && hours < HEATMAP_HOURS
+
+  // Exporters whose flows cannot be resolved to interface names, because the
+  // address they export from is not any device's management IP and no mapping
+  // has been set. Their interfaces can only render as raw "ifIndex N".
+  const [mapOpen, setMapOpen] = useState(false)
+  const exporterDevices = useQuery<ExporterDevice[]>({
+    queryKey: ['netflow', 'exporter-devices'],
+    queryFn: async () => (await api.get('/netflow/exporter-devices')).data,
+    staleTime: 60_000,
+  })
+  const unmappedExporters = useMemo(
+    () => (exporterDevices.data || []).filter((e) => !e.source),
+    [exporterDevices.data],
+  )
   const anyExtraFilter = !!(filterTalker || filterProtocol || filterDscp || filterApp || filterNetClass || filterTcpFlag || filterHour || filterDow || isIfaceFiltered)
 
   // Build prior-window QS by shifting back exactly one window length.
@@ -354,12 +412,12 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
   const overview = useQuery<Overview>({
     queryKey: ['netflow', 'overview', rangeKey],
     queryFn: async () => (await api.get(`/netflow/overview?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    refetchInterval: isCustom ? false : pollMs(hours),
   })
   const timeseries = useQuery<SeriesPoint[]>({
     queryKey: ['netflow', 'timeseries', rangeKey],
     queryFn: async () => (await api.get(`/netflow/timeseries?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    refetchInterval: isCustom ? false : pollMs(hours),
   })
   const timeseriesPrior = useQuery<SeriesPoint[]>({
     queryKey: ['netflow', 'timeseries-prior', priorQS],
@@ -369,63 +427,75 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
   })
   const talkers = useQuery<Talker[]>({
     queryKey: ['netflow', 'talkers', rangeKey],
-    queryFn: async () => (await api.get(`/netflow/top-talkers?${rangeQS}&limit=6`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    queryFn: async () => (await api.get(`/netflow/top-talkers?${rangeQS}&limit=6&by=src`)).data,
+    refetchInterval: isCustom ? false : pollMs(hours),
   })
   const endpoints = useQuery<Endpoint[]>({
     queryKey: ['netflow', 'endpoints', rangeKey],
     queryFn: async () => (await api.get(`/netflow/top-endpoints?${rangeQS}&limit=6`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    refetchInterval: isCustom ? false : pollMs(hours),
   })
   const conversations = useQuery<Conversation[]>({
     queryKey: ['netflow', 'conversations', rangeKey],
     queryFn: async () => (await api.get(`/netflow/top-conversations?${rangeQS}&limit=10`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    refetchInterval: isCustom ? false : pollMs(hours),
   })
   const protocols = useQuery<Protocol[]>({
     queryKey: ['netflow', 'protocols', rangeKey],
     queryFn: async () => (await api.get(`/netflow/protocols?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    refetchInterval: isCustom ? false : pollMs(hours),
   })
   const applications = useQuery<Application[]>({
     queryKey: ['netflow', 'applications', rangeKey],
     queryFn: async () => (await api.get(`/netflow/applications?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    refetchInterval: isCustom ? false : pollMs(hours),
   })
   const exporters = useQuery<Exporter[]>({
     queryKey: ['netflow', 'exporters', rangeKey],
     queryFn: async () => (await api.get(`/netflow/exporters?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 15_000,
+    refetchInterval: isCustom ? false : pollMs(hours),
   })
   const deviceStatus = useQuery<DeviceStatus>({
     queryKey: ['netflow', 'device-status', rangeKey],
     queryFn: async () => (await api.get(`/netflow/device-status?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 30_000,
+    refetchInterval: isCustom ? false : pollMs(hours, 30_000),
   })
+  // The heatmap is a 7-day hour×day picker — pin it to a week (or the custom
+  // window) instead of the page range, otherwise a 1h range leaves it empty.
+  const heatmapQS = useMemo(() => {
+    const params = new URLSearchParams(rangeQS)
+    if (!isCustom) params.set('hours', String(HEATMAP_HOURS))
+    return params.toString()
+  }, [rangeQS, isCustom])
   const heatmap = useQuery<Heatmap>({
-    queryKey: ['netflow', 'heatmap', rangeKey],
-    queryFn: async () => (await api.get(`/netflow/heatmap?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 60_000,
+    queryKey: ['netflow', 'heatmap', `${rangeKey}|7d`],
+    queryFn: async () => (await api.get(`/netflow/heatmap?${heatmapQS}`)).data,
+    refetchInterval: isCustom ? false : pollMs(hours, 60_000),
   })
   const interfaces = useQuery<Interface[]>({
     queryKey: ['netflow', 'interfaces', `${isCustom ? `c:${range.fromISO}|${range.toISO}` : `p:${hours}h`}|${exporter || 'all'}`],
     queryFn: async () => (await api.get(`/netflow/interfaces?${interfacesQS}`)).data,
-    refetchInterval: isCustom ? false : 60_000,
+    refetchInterval: isCustom ? false : pollMs(hours, 60_000),
   })
   const dscp = useQuery<DscpClass[]>({
     queryKey: ['netflow', 'dscp', rangeKey],
     queryFn: async () => (await api.get(`/netflow/dscp?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 30_000,
+    refetchInterval: isCustom ? false : pollMs(hours, 30_000),
   })
   const tcpFlags = useQuery<TcpFlagSummary>({
     queryKey: ['netflow', 'tcp-flags', rangeKey],
     queryFn: async () => (await api.get(`/netflow/tcp-flags?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 30_000,
+    refetchInterval: isCustom ? false : pollMs(hours, 30_000),
   })
   const netClasses = useQuery<NetClass[]>({
     queryKey: ['netflow', 'network-classes', rangeKey],
     queryFn: async () => (await api.get(`/netflow/network-classes?${rangeQS}`)).data,
-    refetchInterval: isCustom ? false : 60_000,
+    refetchInterval: isCustom ? false : pollMs(hours, 60_000),
+  })
+  const countries = useQuery<Country[]>({
+    queryKey: ['netflow', 'countries', rangeKey],
+    queryFn: async () => (await api.get(`/netflow/countries?${rangeQS}`)).data,
+    refetchInterval: isCustom ? false : pollMs(hours, 60_000),
   })
 
   const loading = overview.isLoading || timeseries.isLoading
@@ -545,6 +615,27 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
               </button>
             </div>
           )}
+          {whenFilterOutOfRange && (
+            <div className="mt-2 flex flex-wrap items-center gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-[11px] text-warning">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+              <span>
+                The <b>When</b> filter picks one hour of one weekday, which the <b>{range.label}</b> range cannot
+                contain — that is why the panels below are empty.
+              </span>
+              <button
+                onClick={() => setPreset(TIME_RANGE_OPTIONS.findIndex((r) => r.key === '7d'))}
+                className="rounded-full border border-warning/40 px-2 py-0.5 font-medium hover:bg-warning/20"
+              >
+                Switch to 7d
+              </button>
+              <button
+                onClick={() => setParams([['hour', null], ['dow', null]])}
+                className="rounded-full border border-warning/40 px-2 py-0.5 font-medium hover:bg-warning/20"
+              >
+                Clear When
+              </button>
+            </div>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <div className="relative hidden md:block">
@@ -552,7 +643,7 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search devices, applications, interfaces..."
+              placeholder="Filter flow records (IP, service, protocol)…"
               className="h-8 w-80 rounded-md border border-border bg-surface2/60 pl-7 pr-3 text-xs placeholder:text-muted focus:border-primary focus:outline-none"
             />
           </div>
@@ -579,30 +670,30 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
         <KpiCard
           icon={Wifi}
           tone="violet"
-          label="Active Flows"
+          label="Flows in Window"
           value={(overview.data?.flows || 0).toLocaleString()}
           sub={`${formatBps(overview.data?.current_bps || 0)} current rate`}
         />
         <KpiCard
           icon={RadioTower}
           tone="amber"
-          label="Top Devices"
+          label="Exporters"
           value={(overview.data?.exporters || 0).toLocaleString()}
           sub={<Badge variant={health.variant}>{health.label}</Badge>}
         />
         <KpiCard
           icon={Layers}
           tone="emerald"
-          label="Top Applications"
+          label="Applications"
           value={applicationData.length.toLocaleString()}
-          sub={applicationData[0]?.name || '—'}
+          sub={applicationData[0] ? `top: ${applicationData[0].name}` : '—'}
         />
         <KpiCard
           icon={Smartphone}
           tone="pink"
-          label="Active Sessions"
+          label="Unique Hosts"
           value={`${(overview.data?.src_hosts || 0).toLocaleString()} / ${(overview.data?.dst_hosts || 0).toLocaleString()}`}
-          sub="src / dst hosts"
+          sub="sources / destinations"
         />
       </div>
 
@@ -615,8 +706,7 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
               <p className="text-xs text-muted">{range.label}{compareEnabled ? ' · vs prior period' : ''}</p>
             </div>
             <div className="flex items-center gap-2 text-xs">
-              <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-cyan-400" />Inbound</span>
-              <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-violet-400" />Outbound</span>
+              <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-cyan-400" />Throughput</span>
               {compareEnabled && <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-amber-400 opacity-70" />Prior</span>}
               <button
                 onClick={toggleCompare}
@@ -649,24 +739,19 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
                         <stop offset="5%" stopColor="#22d3ee" stopOpacity={0.55} />
                         <stop offset="95%" stopColor="#22d3ee" stopOpacity={0.02} />
                       </linearGradient>
-                      <linearGradient id="netflowOut" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#a78bfa" stopOpacity={0.45} />
-                        <stop offset="95%" stopColor="#a78bfa" stopOpacity={0.02} />
-                      </linearGradient>
                     </defs>
                     <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.4} vertical={false} />
                     <XAxis dataKey="ts" tickFormatter={timeAxisTickFormatter(hours)} tick={{ fontSize: 11, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
                     <YAxis tickFormatter={formatBps} tick={{ fontSize: 11, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} width={72} />
                     <Tooltip
                       labelFormatter={timeTooltipLabelFormatter}
-                      formatter={(value: any, name: string) => [formatBps(Number(value)), name === 'prior_bps' ? 'Prior' : 'Rate']}
+                      formatter={(value: any, name: string) => [formatBps(Number(value)), name === 'prior_bps' ? 'Prior' : 'Throughput']}
                       contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8 }}
                     />
                     {compareEnabled && (
                       <Area type="monotone" dataKey="prior_bps" stroke="#fbbf24" strokeWidth={1.5} strokeDasharray="4 3" fill="none" connectNulls />
                     )}
                     <Area type="monotone" dataKey="bps" stroke="#22d3ee" strokeWidth={2} fill="url(#netflowIn)" />
-                    <Area type="monotone" dataKey="packets" stroke="#a78bfa" strokeWidth={1.4} fill="url(#netflowOut)" />
                   </AreaChart>
                 </ResponsiveContainer>
               )}
@@ -680,7 +765,17 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
           activeDow={filterDow ? Number(filterDow) : null}
           onSelect={(dow, hour) => {
             const sameCell = filterHour === String(hour) && filterDow === String(dow)
-            setParams([['hour', sameCell ? null : String(hour)], ['dow', sameCell ? null : String(dow)]])
+            const entries: [string, string | null][] = [
+              ['hour', sameCell ? null : String(hour)],
+              ['dow', sameCell ? null : String(dow)],
+            ]
+            // The heatmap always covers 7 days, but the page range does not.
+            // Picking "Sun 19:00" while the page is on 1h asks for flows that
+            // are both in the last hour and on a Sunday evening — empty unless
+            // it happens to be Sunday 19:xx right now. Widen to the window the
+            // user is actually looking at; a custom range is left alone.
+            if (!sameCell && !isCustom && hours < HEATMAP_HOURS) entries.push(['range', '7d'])
+            setParams(entries)
           }}
         />
         <DeviceStatusCard status={deviceStatus.data} exporters={exporterData} deviceView={isDeviceView} />
@@ -690,8 +785,8 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
       <div className="grid grid-cols-1 items-stretch gap-4 md:grid-cols-2 xl:grid-cols-5">
         <DonutCard
           title="Top Talkers"
-          subtitle="By bytes — click to filter"
-          data={talkerData.map((t) => ({ name: t.ip, value: t.bytes }))}
+          subtitle="By bytes sent — click to filter"
+          data={talkerData.map((t: any) => ({ name: t.ip, value: t.src_bytes ?? t.bytes }))}
           colors={TALKER_COLORS}
           labelMode="ip"
           activeName={filterTalker || null}
@@ -769,9 +864,12 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
             activeIface={iface}
             onSelect={setIfaceFilter}
             showExporter={!isDeviceView}
+            unmappedExporters={unmappedExporters}
+            onMapExporters={() => setMapOpen(true)}
             compact
           />
           <AlertsPanel alerts={alerts} />
+          <CountriesCard data={countries.data || []} />
         </div>
       </div>
 
@@ -794,7 +892,142 @@ export function NetflowPage({ exporter }: { exporter?: string } = {}) {
           Saved Views
         </Link>
       </div>
+
+      <ExporterDeviceDialog
+        open={mapOpen}
+        onOpenChange={setMapOpen}
+        exporters={exporterDevices.data || []}
+      />
     </div>
+  )
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Exporter → device mapping
+
+   Flow records identify interfaces only by (exporter IP, ifIndex). Names come
+   from SNMP, keyed on the device's management IP, so an exporter that sources
+   flows from a loopback or WAN address resolves to nothing and the UI falls
+   back to "ifIndex 16". This links the two so real names appear.
+   ───────────────────────────────────────────────────────────────── */
+
+function ExporterDeviceDialog({
+  open, onOpenChange, exporters,
+}: {
+  open: boolean
+  onOpenChange: (v: boolean) => void
+  exporters: ExporterDevice[]
+}) {
+  const qc = useQueryClient()
+  const [picked, setPicked] = useState<Record<string, string>>({})
+
+  const devices = useQuery<{ data: { id: string; hostname: string; ip_address: string }[] }>({
+    queryKey: ['devices', 'for-exporter-map'],
+    queryFn: async () => (await api.get('/devices?limit=200')).data,
+    enabled: open,
+  })
+
+  const save = useMutation({
+    mutationFn: async ({ ip, deviceId }: { ip: string; deviceId: string }) =>
+      api.put(`/netflow/exporter-devices/${ip}`, { device_id: deviceId }),
+    onSuccess: (_d, v) => {
+      toast.success('Exporter linked', `Interface names for ${v.ip} will resolve from now on.`)
+      qc.invalidateQueries({ queryKey: ['netflow'] })
+    },
+    onError: (e: any) => toast.error('Could not link exporter', apiErrorMessage(e)),
+  })
+
+  const unlink = useMutation({
+    mutationFn: async (ip: string) => api.delete(`/netflow/exporter-devices/${ip}`),
+    onSuccess: () => {
+      toast.success('Mapping removed')
+      qc.invalidateQueries({ queryKey: ['netflow'] })
+    },
+    onError: (e: any) => toast.error('Could not remove mapping', apiErrorMessage(e)),
+  })
+
+  const deviceList = devices.data?.data || []
+  const selectCls =
+    'h-8 min-w-[200px] rounded-md border border-border bg-surface px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40'
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Cable className="h-4 w-4 text-primary" />
+            Flow exporters
+          </DialogTitle>
+          <DialogDescription>
+            Interface names come from SNMP and are matched to flows by the exporter's IP. A device
+            that exports from a loopback or WAN address will not match its own management IP — link
+            it here so its ifIndex values resolve to real names.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-1.5">
+          {exporters.length === 0 && (
+            <p className="text-xs text-muted">No exporters have sent flows in the last 7 days.</p>
+          )}
+          {exporters.map((e) => (
+            <div
+              key={e.exporter_ip}
+              className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-surface px-3 py-2 text-xs"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="font-mono font-medium">{e.exporter_ip}</div>
+                <div className="text-[11px] text-muted">
+                  {e.flows.toLocaleString()} flows
+                  {e.source === 'ip-match' && ` · matches ${e.device_hostname} by management IP`}
+                  {e.source === 'mapped' && ` · linked to ${e.device_hostname}`}
+                  {!e.source && ' · not matched to any device — shows raw ifIndex'}
+                </div>
+              </div>
+
+              {e.source === 'ip-match' ? (
+                <span className="rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-[11px] text-success">
+                  Resolved
+                </span>
+              ) : e.source === 'mapped' ? (
+                <Button
+                  variant="outline" size="sm" className="h-8"
+                  disabled={unlink.isPending}
+                  onClick={() => unlink.mutate(e.exporter_ip)}
+                >
+                  Unlink
+                </Button>
+              ) : (
+                <>
+                  <select
+                    className={selectCls}
+                    value={picked[e.exporter_ip] || ''}
+                    onChange={(ev) => setPicked((p) => ({ ...p, [e.exporter_ip]: ev.target.value }))}
+                  >
+                    <option value="">Select device…</option>
+                    {deviceList.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.hostname} ({d.ip_address})
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    size="sm" className="h-8"
+                    disabled={!picked[e.exporter_ip] || save.isPending}
+                    onClick={() => save.mutate({ ip: e.exporter_ip, deviceId: picked[e.exporter_ip] })}
+                  >
+                    Link
+                  </Button>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -1572,7 +1805,7 @@ function DonutCard({
                   {...(onSelect ? { onClick: () => onSelect(d.name), type: 'button' as const } : {})}
                   className={`flex w-full items-center justify-between gap-2 rounded px-1 py-0.5 text-left transition-colors ${onSelect ? 'cursor-pointer hover:bg-primary/5' : ''} ${active ? 'bg-primary/10 ring-1 ring-primary/40' : ''}`}
                 >
-                  <span className="flex min-w-0 items-center gap-1.5 truncate">
+                  <span className="flex min-w-0 items-center gap-1.5 truncate" title={d.name}>
                     <span className="h-2 w-2 shrink-0 rounded-sm" style={{ backgroundColor: colors[i % colors.length] }} />
                     <span className={`truncate ${labelMode === 'ip' || compactNames ? 'font-mono text-[10px]' : ''}`}>{d.name}</span>
                   </span>
@@ -1650,10 +1883,10 @@ function buildAlerts(overview?: Overview, exporters: Exporter[] = [], device?: D
   }
   if (device && device.packet_loss_pct >= 5) {
     list.push({
-      id: 'loss',
-      title: 'Elevated Packet Loss',
-      body: `${device.packet_loss_pct.toFixed(2)}% RST/abort flows`,
-      severity: 'critical',
+      id: 'rst-ratio',
+      title: 'High TCP RST Ratio',
+      body: `${device.packet_loss_pct.toFixed(2)}% of TCP flows carried RST (aborts/probes)`,
+      severity: 'warning',
       icon: ShieldAlert,
     })
   }
@@ -1687,7 +1920,7 @@ function AlertsPanel({ alerts }: { alerts: Alert[] }) {
           <Bell className="h-4 w-4 text-warning" />
           <div>
             <CardTitle>Alerts / Incidents</CardTitle>
-            <p className="text-xs text-muted">Live signals from the collector</p>
+            <p className="text-xs text-muted">Derived from flow telemetry in this window</p>
           </div>
         </div>
         <Badge variant={alerts.some((a) => a.severity === 'critical') ? 'danger' : alerts.length ? 'warning' : 'success'}>{alerts.length}</Badge>
@@ -1734,18 +1967,20 @@ function AlertsPanel({ alerts }: { alerts: Alert[] }) {
 // ─────────────────────────────────────────────────────────────────
 
 function DeviceStatusCard({ status, exporters, deviceView }: { status?: DeviceStatus; exporters: Exporter[]; deviceView?: boolean }) {
-  const latency = status?.latency_ms ?? 0
-  const loss = status?.packet_loss_pct ?? 0
+  // These are flow-derived heuristics (avg flow duration, TCP RST ratio) —
+  // NOT real latency / packet-loss measurements. Label them honestly.
+  const flowDuration = status?.latency_ms ?? 0
+  const rstRatio = status?.packet_loss_pct ?? 0
   return (
     <Card className="shrink-0">
       <CardHeader className="pb-2">
-        <CardTitle className="text-sm">Device Status</CardTitle>
-        <p className="text-[11px] text-muted">Health from flow telemetry</p>
+        <CardTitle className="text-sm">Exporter Health</CardTitle>
+        <p className="text-[11px] text-muted">Flow-derived signals (not ICMP/SNMP probes)</p>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="grid grid-cols-2 gap-2">
-          <MiniStat icon={Gauge} label="Latency" value={`${latency} ms`} tone="cyan" />
-          <MiniStat icon={Database} label="Packet Loss" value={`${loss.toFixed(2)}%`} tone={loss >= 5 ? 'rose' : 'emerald'} />
+          <MiniStat icon={Gauge} label="Avg Flow Duration" value={`${flowDuration} ms`} tone="cyan" />
+          <MiniStat icon={Database} label="TCP RST Ratio" value={`${rstRatio.toFixed(2)}%`} tone={rstRatio >= 5 ? 'rose' : 'emerald'} />
         </div>
         <div className="rounded-md border border-border bg-surface2/30 p-2.5">
           <div className="mb-1.5 flex items-center justify-between text-[11px]">
@@ -1812,6 +2047,7 @@ type SortKey = 'src' | 'dst' | 'service' | 'protocol_name' | 'bytes' | 'packets'
 function ConversationTable({ conversations, lastSeen, label }: { conversations: Conversation[]; lastSeen?: string | null; label?: string }) {
   const [sortKey, setSortKey] = useState<SortKey>('bytes')
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+  const [expanded, setExpanded] = useState<string | null>(null)
 
   const sorted = useMemo(() => {
     const out = [...conversations]
@@ -1843,34 +2079,111 @@ function ConversationTable({ conversations, lastSeen, label }: { conversations: 
         <Table>
           <THead>
             <Tr>
+              <Th className="w-6" />
               <Th><button className="flex items-center gap-1 hover:text-text" onClick={() => toggle('src')}>Source{arrow('src')}</button></Th>
               <Th><button className="flex items-center gap-1 hover:text-text" onClick={() => toggle('dst')}>Destination{arrow('dst')}</button></Th>
-              <Th><button className="flex items-center gap-1 hover:text-text" onClick={() => toggle('service')}>Application{arrow('service')}</button></Th>
+              <Th><button className="flex items-center gap-1 hover:text-text" onClick={() => toggle('service')}>Service{arrow('service')}</button></Th>
               <Th><button className="flex items-center gap-1 hover:text-text" onClick={() => toggle('protocol_name')}>Protocol{arrow('protocol_name')}</button></Th>
               <Th className="text-right"><button className="ml-auto flex items-center gap-1 hover:text-text" onClick={() => toggle('bytes')}>Bytes{arrow('bytes')}</button></Th>
               <Th className="text-right"><button className="ml-auto flex items-center gap-1 hover:text-text" onClick={() => toggle('packets')}>Packets{arrow('packets')}</button></Th>
-              <Th>Status</Th>
+              <Th className="text-right">Flows</Th>
             </Tr>
           </THead>
           <TBody>
             {sorted.length === 0 && (
-              <Tr><Td colSpan={7} className="py-8 text-center text-xs text-muted">No flow conversations match.</Td></Tr>
+              <Tr><Td colSpan={8} className="py-8 text-center text-xs text-muted">No flow conversations match.</Td></Tr>
             )}
-            {sorted.map((c) => (
-              <Tr key={`${c.src}-${c.dst}-${c.protocol_name}-${c.dst_port}`}>
-                <Td className="font-mono text-xs">{c.src}</Td>
-                <Td className="font-mono text-xs">{c.dst}</Td>
-                <Td>{c.service}</Td>
-                <Td><Badge variant="outline">{c.protocol_name}</Badge></Td>
-                <Td className="text-right text-sm">{formatBytes(c.bytes)}</Td>
-                <Td className="text-right text-sm">{c.packets.toLocaleString()}</Td>
-                <Td><span className="inline-flex items-center gap-1.5 text-xs text-success"><span className="h-1.5 w-1.5 rounded-full bg-success" />Allowed</span></Td>
-              </Tr>
-            ))}
+            {sorted.map((c) => {
+              const key = `${c.src}-${c.dst}-${c.protocol_name}-${c.dst_port}`
+              const open = expanded === key
+              return (
+                <Fragment key={key}>
+                  <Tr
+                    className="cursor-pointer"
+                    onClick={() => setExpanded(open ? null : key)}
+                    title={open ? 'Collapse' : 'Expand to see where this flow was recorded'}
+                  >
+                    <Td className="w-6 pr-0"><ChevronRight className={`h-3.5 w-3.5 text-muted transition-transform ${open ? 'rotate-90' : ''}`} /></Td>
+                    <Td className="font-mono text-xs">{c.src}</Td>
+                    <Td className="font-mono text-xs">{c.dst}</Td>
+                    <Td>{c.service}</Td>
+                    <Td><Badge variant="outline">{c.protocol_name}</Badge></Td>
+                    <Td className="text-right text-sm">{formatBytes(c.bytes)}</Td>
+                    <Td className="text-right text-sm">{c.packets.toLocaleString()}</Td>
+                    <Td className="text-right text-sm">{c.flows.toLocaleString()}</Td>
+                  </Tr>
+                  {open && (
+                    <Tr>
+                      <Td colSpan={8} className="bg-surface2/20 py-3">
+                        <ConversationRecordedOn conversation={c} />
+                      </Td>
+                    </Tr>
+                  )}
+                </Fragment>
+              )
+            })}
           </TBody>
         </Table>
       </CardContent>
     </Card>
+  )
+}
+
+function ConversationRecordedOn({ conversation: c }: { conversation: Conversation }) {
+  const exporters = c.exporters || []
+  const inputs = normalizeInterfaceRefs(c.input_interfaces, c.input_snmp)
+  const outputs = normalizeInterfaceRefs(c.output_interfaces, c.output_snmp)
+  const multiExporter = exporters.length > 1
+  const chip = (iface: NetflowInterfaceRef) => (
+    <span key={`${iface.exporter_ip}-${iface.ifindex}`} className="inline-flex items-center gap-1 rounded border border-border bg-surface px-2 py-1 text-[11px]">
+      <Cable className="h-3 w-3 text-muted" />
+      <span className="font-medium">{interfaceLabel(iface)}</span>
+      {iface.if_alias && iface.if_alias !== interfaceLabel(iface) && <span className="text-muted">({iface.if_alias})</span>}
+      {(multiExporter || !iface.if_name) && iface.exporter_ip && (
+        <span className="font-mono text-muted">@ {iface.device_hostname || iface.exporter_ip}</span>
+      )}
+      <span className="font-mono text-muted">#{iface.ifindex}</span>
+    </span>
+  )
+  return (
+    <div className="space-y-2 px-1">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="w-24 shrink-0 text-[10px] font-semibold uppercase tracking-wider text-muted">Recorded by</span>
+        {exporters.length ? (
+          exporters.map((e) => (
+            <Link
+              key={e.ip}
+              to={`/netflow/devices/${encodeURIComponent(e.ip)}`}
+              onClick={(ev) => ev.stopPropagation()}
+              className="inline-flex items-center gap-1 rounded border border-border bg-surface px-2 py-1 text-[11px] transition-colors hover:border-primary/60 hover:bg-primary/5"
+            >
+              <Router className="h-3 w-3 text-muted" />
+              <span className="font-medium">{e.hostname || e.ip}</span>
+              {e.hostname && <span className="font-mono text-muted">{e.ip}</span>}
+            </Link>
+          ))
+        ) : (
+          <span className="text-xs text-muted">No exporter recorded</span>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="w-24 shrink-0 text-[10px] font-semibold uppercase tracking-wider text-muted">In on port</span>
+        {inputs.length ? inputs.map(chip) : <span className="text-xs text-muted">Not reported</span>}
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="w-24 shrink-0 text-[10px] font-semibold uppercase tracking-wider text-muted">Out on port</span>
+        {outputs.length ? outputs.map(chip) : <span className="text-xs text-muted">Not reported</span>}
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1 pt-1 text-[11px] text-muted">
+        {c.first_seen && <span>First seen {relativeTime(c.first_seen)}</span>}
+        {c.last_seen && <span>Last seen {relativeTime(c.last_seen)}</span>}
+        {c.src_ports && c.src_ports.length > 0 && (
+          <span>
+            Source ports: <span className="font-mono">{c.src_ports.slice(0, 6).join(', ')}{c.src_ports.length > 6 ? '…' : ''}</span>
+          </span>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -2123,6 +2436,8 @@ function TopInterfacesCard({
   activeIface,
   onSelect,
   showExporter,
+  unmappedExporters = [],
+  onMapExporters,
   compact = false,
 }: {
   interfaces: Interface[]
@@ -2130,9 +2445,15 @@ function TopInterfacesCard({
   activeIface: number | null
   onSelect: (val: number | null) => void
   showExporter: boolean
+  unmappedExporters?: ExporterDevice[]
+  onMapExporters?: () => void
   compact?: boolean
 }) {
   const max = Math.max(1, ...interfaces.map((i) => i.bytes))
+  // Only nag when an unresolved exporter is actually represented in this list.
+  const unresolvedHere = unmappedExporters.filter((e) =>
+    interfaces.some((i) => i.exporter_ip === e.exporter_ip),
+  )
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
@@ -2148,6 +2469,20 @@ function TopInterfacesCard({
         {loading && <Loader2 className="h-4 w-4 animate-spin text-muted" />}
       </CardHeader>
       <CardContent>
+        {unresolvedHere.length > 0 && onMapExporters && (
+          <button
+            onClick={onMapExporters}
+            className="mb-2 flex w-full items-start gap-2 rounded-md border border-border bg-surface2/50 px-2.5 py-2 text-left text-[11px] text-muted transition-colors hover:border-primary/40 hover:text-text"
+          >
+            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+            <span>
+              {unresolvedHere.map((e) => e.exporter_ip).join(', ')} export
+              {unresolvedHere.length === 1 ? 's' : ''} from an address that is not a monitored device's
+              management IP, so its interfaces show raw ifIndex numbers.{' '}
+              <span className="font-medium text-primary">Link it to a device →</span>
+            </span>
+          </button>
+        )}
         {interfaces.length === 0 ? (
           <EmptyState compact />
         ) : (
@@ -2249,6 +2584,48 @@ function TopInterfacesCard({
             })}
           </div>
         )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function flagEmoji(cc: string | null): string {
+  if (!cc || cc.length !== 2) return '🌐'
+  const base = 0x1f1e6
+  const a = 'A'.charCodeAt(0)
+  return String.fromCodePoint(base + cc.charCodeAt(0) - a, base + cc.charCodeAt(1) - a)
+}
+
+function CountriesCard({ data }: { data: Country[] }) {
+  // Endpoint returns [] when no GeoIP database is provisioned — hide entirely.
+  if (data.length === 0) return null
+  const top = data.slice(0, 6)
+  const max = Math.max(1, ...top.map((c) => c.bytes))
+  const total = Math.max(1, data.reduce((a, b) => a + b.bytes, 0))
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center gap-2 pb-2">
+        <RadioTower className="h-4 w-4 text-primary" />
+        <div>
+          <CardTitle className="text-sm">Top Countries</CardTitle>
+          <p className="text-[11px] text-muted">GeoIP on top endpoint IPs · src + dst bytes</p>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {top.map((c) => (
+          <div key={c.country || 'unknown'}>
+            <div className="flex items-center justify-between gap-2 text-[11px]">
+              <span className="flex min-w-0 items-center gap-1.5 truncate">
+                <span>{flagEmoji(c.country)}</span>
+                <span className="truncate">{c.country_name || 'Private / Unknown'}</span>
+              </span>
+              <span className="shrink-0 text-muted">{formatBytes(c.bytes)} · {((c.bytes / total) * 100).toFixed(1)}%</span>
+            </div>
+            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface">
+              <div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(3, (c.bytes / max) * 100)}%` }} />
+            </div>
+          </div>
+        ))}
       </CardContent>
     </Card>
   )

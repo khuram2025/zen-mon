@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/Button'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { formatBytes, relativeTime } from '@/lib/utils'
 
-export function MibLibraryPage() {
+export function MibsTabContent() {
   const qc = useQueryClient()
   const fileInput = useRef<HTMLInputElement>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
@@ -48,20 +48,16 @@ export function MibLibraryPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
-          <Upload className="h-6 w-6 text-primary" />
-          MIB Library
-        </h1>
-        <p className="text-sm text-muted">
-          Upload vendor MIB files. Files are stored on disk; runtime compilation lands in a later update.
-        </p>
-      </div>
-
+    <div className="space-y-5">
       <Card>
         <CardHeader>
-          <CardTitle>Upload MIB</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <Upload className="h-4 w-4 text-primary" />
+            Upload MIB
+          </CardTitle>
+          <p className="text-xs text-muted">
+            Upload vendor MIB files. Files are stored on disk; runtime compilation lands in a later update.
+          </p>
         </CardHeader>
         <CardContent>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">

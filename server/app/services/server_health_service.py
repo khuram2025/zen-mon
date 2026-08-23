@@ -327,10 +327,35 @@ async def sweep_stale(db: AsyncSession) -> dict[str, int]:
             metadata={"agent_id": str(agent_id)},
         )
 
+    # Device maintenance fallback: ping-enabled devices leave 'maintenance'
+    # via the poller's next poll, but ping-disabled devices have no status
+    # writer — reset any whose windows have all ended. Tolerates the
+    # device_maintenance table not existing yet (pre-migrate-053).
+    maint_reset_n = 0
+    try:
+        maint_reset = await db.execute(
+            text("""
+                UPDATE devices SET status = 'unknown', updated_at = NOW()
+                WHERE status = 'maintenance' AND ping_enabled = false
+                  AND NOT EXISTS (
+                      SELECT 1 FROM device_maintenance m
+                      WHERE m.starts_at <= NOW() AND m.ends_at >= NOW()
+                        AND (   (m.scope_type = 'device' AND m.scope_device_id = devices.id)
+                             OR (m.scope_type = 'group'  AND m.scope_group_id = devices.group_id)
+                             OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(devices.tags, '[]'::jsonb), m.scope_tag))
+                             OR (m.scope_type = 'all'))
+                  )
+                RETURNING id
+            """),
+        )
+        maint_reset_n = len(maint_reset.fetchall())
+    except Exception:
+        logger.debug("device maintenance fallback sweep skipped", exc_info=True)
+
     await db.commit()
-    if stale_n or offline_rows or servers_n:
-        logger.info("sweep: %d agents stale, %d offline, %d servers stale",
-                    stale_n, len(offline_rows), servers_n)
+    if stale_n or offline_rows or servers_n or maint_reset_n:
+        logger.info("sweep: %d agents stale, %d offline, %d servers stale, %d devices left maintenance",
+                    stale_n, len(offline_rows), servers_n, maint_reset_n)
     return {"agents_stale": stale_n, "agents_offline": len(offline_rows), "servers_stale": servers_n}
 
 

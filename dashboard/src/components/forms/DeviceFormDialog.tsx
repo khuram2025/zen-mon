@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Key, Loader2 } from 'lucide-react'
+import { Key, Layers, Loader2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
 import {
@@ -17,6 +17,7 @@ import {
 } from '@/components/ui/Select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { toast } from '@/components/ui/Toast'
+import { TagPicker } from '@/components/tags/TagPicker'
 
 type Credential = {
   id: string; name: string; snmp_version: string;
@@ -28,6 +29,7 @@ type Credential = {
 type DeviceState = {
   hostname: string; ip_address: string; device_type: string;
   location: string; description: string; group_id: string;
+  tags: string[];
   ping_enabled: boolean; ping_interval: number;
   snmp_enabled: boolean; snmp_credential_mode: 'saved' | 'manual';
   snmp_credential_id: string;
@@ -37,11 +39,13 @@ type DeviceState = {
   snmp_priv_protocol: string; snmp_priv_passphrase: string;
   snmp_timeout_ms: number; snmp_retries: number;
   snmp_poll_interval: number; snmp_max_repetitions: number;
+  profile_id: string;
 }
 
 const empty: DeviceState = {
   hostname: '', ip_address: '', device_type: 'other',
   location: '', description: '', group_id: '',
+  tags: [],
   ping_enabled: true, ping_interval: 60,
   snmp_enabled: false, snmp_credential_mode: 'saved', snmp_credential_id: '',
   snmp_version: '2c', snmp_port: 161, snmp_community: 'public',
@@ -50,6 +54,7 @@ const empty: DeviceState = {
   snmp_priv_protocol: '', snmp_priv_passphrase: '',
   snmp_timeout_ms: 2000, snmp_retries: 2,
   snmp_poll_interval: 60, snmp_max_repetitions: 25,
+  profile_id: '',
 }
 
 export function DeviceFormDialog({
@@ -73,6 +78,12 @@ export function DeviceFormDialog({
     enabled: open,
   })
 
+  const { data: templates } = useQuery<any[]>({
+    queryKey: ['snmp-profiles'],
+    queryFn: async () => (await api.get('/snmp/profiles')).data,
+    enabled: open,
+  })
+
   const defaultCred = credentials?.find((c) => c.is_default)
 
   useEffect(() => {
@@ -86,6 +97,7 @@ export function DeviceFormDialog({
         location: device.location || '',
         description: device.description || '',
         group_id: device.group_id || '',
+        tags: Array.isArray(device.tags) ? device.tags : [],
         ping_enabled: device.ping_enabled ?? true,
         ping_interval: device.ping_interval || 60,
         snmp_enabled: device.snmp_enabled ?? false,
@@ -104,6 +116,7 @@ export function DeviceFormDialog({
         snmp_retries: device.snmp_retries ?? 2,
         snmp_poll_interval: device.snmp_poll_interval || 60,
         snmp_max_repetitions: device.snmp_max_repetitions || 25,
+        profile_id: device.profile_id || '',
       })
     } else {
       setState({
@@ -131,11 +144,16 @@ export function DeviceFormDialog({
   function submit(e: FormEvent) {
     e.preventDefault()
     const payload: any = {
-      hostname: state.hostname, ip_address: state.ip_address,
+      hostname: state.hostname,
+      // Controller-managed children may legitimately have no IP; omitting the
+      // field on edit leaves it unchanged instead of writing ''.
+      ...(state.ip_address || !isEdit ? { ip_address: state.ip_address } : {}),
       device_type: state.device_type, location: state.location || null,
       description: state.description || null, group_id: state.group_id || null,
+      tags: state.tags,
       ping_enabled: state.ping_enabled, ping_interval: state.ping_interval,
       snmp_enabled: state.snmp_enabled, snmp_poll_interval: state.snmp_poll_interval,
+      profile_id: state.profile_id || null,
     }
 
     if (state.snmp_enabled) {
@@ -198,8 +216,8 @@ export function DeviceFormDialog({
               <FormField label="Hostname" required className="col-span-2">
                 <Input required value={state.hostname} onChange={(e) => setState({ ...state, hostname: e.target.value })} placeholder="core-router-01" />
               </FormField>
-              <FormField label="IP address" required>
-                <Input required value={state.ip_address} onChange={(e) => setState({ ...state, ip_address: e.target.value })} placeholder="192.168.1.1" />
+              <FormField label={isEdit && !device?.ip_address ? 'IP address (managed via controller)' : 'IP address'} required={!isEdit || !!device?.ip_address}>
+                <Input required={!isEdit || !!device?.ip_address} value={state.ip_address} onChange={(e) => setState({ ...state, ip_address: e.target.value })} placeholder="192.168.1.1" />
               </FormField>
               <FormField label="Device type">
                 <Select value={state.device_type} onValueChange={(v) => setState({ ...state, device_type: v })}>
@@ -222,6 +240,9 @@ export function DeviceFormDialog({
                     {(groups || []).map((g: any) => <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>)}
                   </SelectContent>
                 </Select>
+              </FormField>
+              <FormField label="Tags" className="col-span-2" hint="Used for filtering, dashboards and reports">
+                <TagPicker value={state.tags} onChange={(tags) => setState({ ...state, tags })} />
               </FormField>
               <FormField label="Description" className="col-span-2">
                 <Textarea value={state.description} onChange={(e) => setState({ ...state, description: e.target.value })} placeholder="Optional notes" />
@@ -371,6 +392,29 @@ export function DeviceFormDialog({
                   <FormField label="Poll interval (seconds)" hint="How often to collect SNMP data">
                     <Input type="number" min={30} max={3600} value={state.snmp_poll_interval} onChange={(e) => setState({ ...state, snmp_poll_interval: Number(e.target.value) })} />
                   </FormField>
+
+                  {/* Monitoring template */}
+                  <div className="rounded-lg border border-border p-4">
+                    <div className="mb-1 flex items-center gap-1.5 text-sm font-semibold">
+                      <Layers className="h-3.5 w-3.5 text-primary" /> Monitoring Template
+                    </div>
+                    <p className="mb-3 text-xs text-muted">
+                      Vendor templates collect deep, device-specific insights (HA, VPN tunnels, SD-WAN,
+                      managed APs/switches…) on top of standard monitoring. Leave on Default to
+                      auto-detect from the device's SNMP identity.
+                    </p>
+                    <Select value={state.profile_id || '__default__'} onValueChange={(v) => setState({ ...state, profile_id: v === '__default__' ? '' : v })}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__default__">Default (auto-detect)</SelectItem>
+                        {(templates || []).map((t: any) => (
+                          <SelectItem key={t.id} value={t.id}>
+                            {t.name}{t.vendor ? <span className="text-muted"> · {t.vendor}</span> : null}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </>
               )}
             </TabsContent>

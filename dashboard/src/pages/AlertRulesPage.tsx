@@ -10,6 +10,7 @@ import { Switch } from '@/components/ui/Switch'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { AlertRuleWizardDialog } from '@/components/forms/AlertRuleWizardDialog'
+import { AlertMessagePreviewDialog } from '@/components/alerts/AlertMessagePreviewDialog'
 import { toast } from '@/components/ui/Toast'
 
 const TRIGGER_LABELS: Record<string, string> = {
@@ -25,6 +26,7 @@ function scopeLabel(r: any): string {
   if (r.group_id) return 'Group'
   if (r.device_type) return r.device_type
   if (r.location) return r.location
+  if (r.scope_tag) return `#${r.scope_tag}`
   if (r.device_id) return 'Device'
   if (r.metric === 'trap') return 'Traps'
   return 'All'
@@ -35,6 +37,7 @@ export function AlertRulesPage() {
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<any>(null)
   const [deleting, setDeleting] = useState<any>(null)
+  const [previewing, setPreviewing] = useState<any>(null)
 
   const { data: rules, isError, error } = useQuery<any[]>({
     queryKey: ['alert-rules'],
@@ -83,15 +86,6 @@ export function AlertRulesPage() {
       toast.success(data.message || 'Test notification sent', details)
     },
     onError: (e: any) => toast.error('Test failed', apiErrorMessage(e)),
-  })
-
-  const preview = useMutation({
-    mutationFn: async (id: string) => (await api.post(`/alert-rules/${id}/preview`)).data,
-    onSuccess: (data: any) => {
-      const subj = data?.alert?.subject || 'Preview'
-      toast.success('Message preview', `${subj}\n\n${(data?.alert?.email_body || '').slice(0, 200)}…`)
-    },
-    onError: (e: any) => toast.error('Preview failed', apiErrorMessage(e)),
   })
 
   return (
@@ -178,8 +172,8 @@ export function AlertRulesPage() {
                     <Td className="text-xs text-muted">{relativeTime(r.created_at)}</Td>
                     <Td>
                       <div className="flex justify-end gap-0.5">
-                        <Button variant="ghost" size="icon" className="h-7 w-7" title="Preview message"
-                          onClick={() => preview.mutate(r.id)}>
+                        <Button variant="ghost" size="icon" className="h-7 w-7" title="Preview & edit message"
+                          onClick={() => setPreviewing(r)}>
                           <Eye className="h-3.5 w-3.5" />
                         </Button>
                         <Button variant="ghost" size="icon" className="h-7 w-7" title="Send test notification"
@@ -218,6 +212,11 @@ export function AlertRulesPage() {
       </Card>
 
       <AlertRuleWizardDialog open={formOpen} onOpenChange={setFormOpen} rule={editing} />
+      <AlertMessagePreviewDialog
+        open={!!previewing}
+        onOpenChange={(o) => !o && setPreviewing(null)}
+        rule={previewing}
+      />
       <ConfirmDialog
         open={!!deleting}
         onOpenChange={(o) => !o && setDeleting(null)}

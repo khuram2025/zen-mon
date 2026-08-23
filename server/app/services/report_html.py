@@ -246,10 +246,16 @@ def _header_block(meta: dict, *, status_chip: str | None = None) -> str:
     sub = f"{company} &middot; {plabel}" if company else plabel
     return (
         f'<tr><td style="height:6px;background:{_BRAND};font-size:0;line-height:0;">&nbsp;</td></tr>'
-        f'<tr><td style="padding:22px 28px 4px;">'
+        f'<tr><td style="padding:20px 28px 4px;">'
         f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
-        f'<td style="font-size:16px;font-weight:700;color:{_INK};letter-spacing:.2px;">{product}</td>'
-        f'<td align="right">{chip}</td></tr></table></td></tr>'
+        f'<td width="36" valign="middle">'
+        f'<div style="width:32px;height:32px;background:{_BRAND};border-radius:8px;color:#ffffff;'
+        f'font-size:17px;font-weight:800;text-align:center;line-height:32px;">Z</div></td>'
+        f'<td valign="middle" style="padding-left:10px;">'
+        f'<div style="font-size:16px;font-weight:700;color:{_INK};letter-spacing:.2px;">{product}</div>'
+        f'<div style="font-size:10px;font-weight:600;color:{_MUTED};letter-spacing:.8px;'
+        f'text-transform:uppercase;">Network Monitoring</div></td>'
+        f'<td align="right" valign="middle">{chip}</td></tr></table></td></tr>'
         f'<tr><td style="padding:8px 28px 2px;">'
         f'<div style="font-size:22px;line-height:1.25;font-weight:700;color:{_INK};">{title}</div>'
         f'<div style="margin-top:4px;font-size:13px;color:{_MUTED};">{sub} &middot; generated {_esc(gen)}</div>'
@@ -268,18 +274,23 @@ def _footer_block(meta: dict, *, email: bool) -> str:
     return (
         f'<tr><td style="padding:18px 28px 26px;">'
         f'<div style="border-top:1px solid {_BORDER};padding-top:14px;color:{_MUTED};font-size:12px;line-height:1.5;">'
-        f'{note}<br>&copy; {datetime.now(timezone.utc).year} {product}.</div>'
+        f'{note}<br>&copy; {datetime.now(timezone.utc).year} {product} &middot; This mailbox is not monitored.</div>'
         f'</td></tr>'
     )
 
 
-def _shell(inner: str, *, title: str, width: int = 720) -> str:
+def _shell(inner: str, *, title: str, width: int = 720, preheader: str = "") -> str:
+    pre = ""
+    if preheader:
+        pre = (f'<div style="display:none;max-height:0;overflow:hidden;opacity:0;">'
+               f'{_esc(preheader)}&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;</div>')
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <meta name="x-apple-disable-message-reformatting">
 <title>{_esc(title)}</title></head>
 <body style="margin:0;padding:0;background:{_BG};">
+{pre}
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:{_BG};padding:24px 12px;">
 <tr><td align="center">
 <table role="presentation" width="{width}" cellpadding="0" cellspacing="0" style="max-width:{width}px;width:100%;background:{_CARD};border:1px solid {_BORDER};border-radius:14px;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
@@ -323,6 +334,14 @@ def build_report_email_html(meta: dict, data: dict, view_url: str | None = None,
             f'<div style="font-size:12px;color:{_MUTED};">The full report is attached to this email.</div>'
             f'</td></tr>'
         )
+    k = (data or {}).get("kpis", {}) or {}
+    pre_bits = []
+    if k.get("availability_pct") is not None:
+        pre_bits.append(f"Availability {_num(k.get('availability_pct'), '%')}")
+    if k.get("incidents_count") is not None:
+        pre_bits.append(f"{_num(k.get('incidents_count'))} incidents")
+    if k.get("mttr_minutes") is not None:
+        pre_bits.append(f"MTTR {_num(k.get('mttr_minutes'), 'm')}")
     inner = (
         _header_block(meta, status_chip="SCHEDULED REPORT")
         + f'<tr><td style="padding:16px 22px 0;">{_kpi_grid_html(data)}</td></tr>'
@@ -331,7 +350,8 @@ def build_report_email_html(meta: dict, data: dict, view_url: str | None = None,
         + attach_note
         + _footer_block(meta, email=True)
     )
-    return _shell(inner, title=meta.get("title") or report_title(meta.get("report_type", "")), width=640)
+    return _shell(inner, title=meta.get("title") or report_title(meta.get("report_type", "")),
+                  width=640, preheader=" · ".join(pre_bits))
 
 
 def build_report_email_text(meta: dict, data: dict, view_url: str | None = None) -> str:

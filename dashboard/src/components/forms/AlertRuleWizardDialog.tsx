@@ -38,6 +38,7 @@ import {
   SelectValue,
 } from '@/components/ui/Select'
 import { toast } from '@/components/ui/Toast'
+import { useTags, tagColor, tagColorMap } from '@/hooks/useTags'
 
 type Cond = { metric: string; operator: string; threshold: number }
 
@@ -46,7 +47,7 @@ type WizardState = {
   description: string
   enabled: boolean
   severity: 'info' | 'warning' | 'critical'
-  source: 'device' | 'service' | 'trap'
+  source: 'device' | 'service' | 'trap' | 'apm'
   conditions: Cond[]
   condition_logic: 'AND' | 'OR'
   trigger_on: 'any' | 'down' | 'up' | 'degraded'
@@ -57,6 +58,7 @@ type WizardState = {
   group_id: string
   device_type: string
   location: string
+  scope_tag: string
   service_check_id: string
   service_check_group_id: string
   trap_oid: string
@@ -114,11 +116,43 @@ const NETWORK_METRICS = [
 
 const INTERFACE_METRICS = new Set(NETWORK_METRICS.filter((m) => m.iface).map((m) => m.value))
 
+// APM (application) metrics, evaluated per-service every minute by the APM
+// alert evaluator against the RED rollups. Latency is milliseconds; error
+// rate and apdex are fractions in 0–1; throughput is requests/second.
+// Scope: the service picker on the Scope step (stored in `target`; empty =
+// every reporting service).
+const APM_METRICS = [
+  { value: 'apm_latency_p95', label: 'p95 latency (ms)' },
+  { value: 'apm_latency_p99', label: 'p99 latency (ms)' },
+  { value: 'apm_latency_p50', label: 'p50 latency (ms)' },
+  { value: 'apm_error_rate', label: 'Error rate (0.02 = 2%)' },
+  { value: 'apm_throughput', label: 'Throughput (req/s)' },
+  { value: 'apm_apdex', label: 'Apdex (0–1)' },
+] as const
+
+// Ordered by how often a template needs them. The phrasing variables at the
+// top render finished English ("Interface utilisation on core-router-01 rose
+// above 80%"); the raw ones below are the rule's stored values.
 const TEMPLATE_VARS = [
+  '{event_sentence}', '{condition}', '{condition_sentence}', '{reading}',
+  '{duration}', '{duration_sentence}', '{duration_suffix}',
   '{hostname}', '{ip_address}', '{status}', '{severity}', '{rule_name}',
-  '{group}', '{location}', '{device_type}', '{metric}', '{operator}',
-  '{threshold}', '{timestamp}', '{duration}', '{rtt}', '{packet_loss}', '{status_intro}',
+  '{group}', '{location}', '{device_type}', '{timestamp}',
+  '{metric_label}', '{threshold_value}', '{metric}', '{operator}', '{threshold}',
+  '{rtt}', '{packet_loss}',
 ]
+
+// Mirrors the defaults in server/app/services/alert_phrasing.py. Shown as
+// placeholders only — an empty field is stored as NULL and rendered by the
+// server, so these never go stale in the database.
+const DEFAULTS = {
+  email_subject: '[{severity}] {status}: {rule_name}',
+  email_body: '{event_sentence}',
+  sms_template: 'ZenPlus {severity} — {rule_name}: {event_sentence}',
+  recovery_email_subject: '[{severity}] Resolved: {rule_name}',
+  recovery_email_body: '{event_sentence}{duration_sentence}',
+  recovery_sms_template: 'ZenPlus resolved — {rule_name}: {event_sentence}{duration_suffix}',
+}
 
 const DEFAULT_STATE: WizardState = {
   name: '',
@@ -136,6 +170,7 @@ const DEFAULT_STATE: WizardState = {
   group_id: '',
   device_type: '',
   location: '',
+  scope_tag: '',
   service_check_id: '',
   service_check_group_id: '',
   trap_oid: '',
@@ -146,19 +181,24 @@ const DEFAULT_STATE: WizardState = {
   schedule_start: '',
   schedule_end: '',
   schedule_days: [],
-  email_subject: '[{severity}] {status}: {rule_name}',
-  email_body:
-    '{status_intro}\n\nRule: {rule_name}\nSeverity: {severity}\nDevice: {hostname} ({ip_address})\nStatus: {status}\nMetric: {metric} {operator} {threshold}\nTime: {timestamp}\n\n--\nZenPlus Network Monitoring',
-  sms_template: '[ZenPlus {severity}] {hostname} ({ip_address}) is {status}. Rule: {rule_name}',
-  recovery_email_subject: '[{severity}] RESOLVED: {rule_name}',
+  // Blank means "use the built-in default", which the server writes in the
+  // house style and keeps in step with the recovery/duration phrasing. Seeding
+  // these with a field dump baked a copy of it onto every rule ever created,
+  // and a stored template never picks up later improvements.
+  email_subject: '',
+  email_body: '',
+  sms_template: '',
+  recovery_email_subject: '',
   recovery_email_body: '',
-  recovery_sms_template: '[ZenPlus {severity}] {hostname} ({ip_address}) RECOVERED. Rule: {rule_name}',
+  recovery_sms_template: '',
 }
 
 function ruleToState(rule: any): WizardState {
   const source =
     rule.metric === 'trap'
       ? 'trap'
+      : String(rule.metric || '').startsWith('apm_')
+      ? 'apm'
       : rule.service_check_id || rule.service_check_group_id || rule.metric === 'service_status'
       ? 'service'
       : 'device'
@@ -186,6 +226,7 @@ function ruleToState(rule: any): WizardState {
     group_id: rule.group_id || '',
     device_type: rule.device_type || '',
     location: rule.location || '',
+    scope_tag: rule.scope_tag || '',
     service_check_id: rule.service_check_id || '',
     service_check_group_id: rule.service_check_group_id || '',
     trap_oid: rule.trap_oid || '',
@@ -196,12 +237,12 @@ function ruleToState(rule: any): WizardState {
     schedule_start: rule.schedule_start || '',
     schedule_end: rule.schedule_end || '',
     schedule_days: Array.isArray(rule.schedule_days) ? rule.schedule_days : [],
-    email_subject: rule.email_subject || DEFAULT_STATE.email_subject,
-    email_body: rule.email_body || DEFAULT_STATE.email_body,
-    sms_template: rule.sms_template || DEFAULT_STATE.sms_template,
+    email_subject: rule.email_subject || '',
+    email_body: rule.email_body || '',
+    sms_template: rule.sms_template || '',
     recovery_email_subject: rule.recovery_email_subject || DEFAULT_STATE.recovery_email_subject,
     recovery_email_body: rule.recovery_email_body || '',
-    recovery_sms_template: rule.recovery_sms_template || DEFAULT_STATE.recovery_sms_template,
+    recovery_sms_template: rule.recovery_sms_template || '',
   }
 }
 
@@ -209,6 +250,7 @@ function stateToPayload(s: WizardState) {
   const isService = s.source === 'service'
   const isTrap = s.source === 'trap'
   const isDevice = s.source === 'device'
+  const isApm = s.source === 'apm'
   const first = s.conditions[0]
   const conditions = isDevice && s.conditions.length > 1 ? s.conditions : null
   const recovery = s.reset_mode === 'auto'
@@ -218,22 +260,29 @@ function stateToPayload(s: WizardState) {
     description: s.description || null,
     enabled: s.enabled,
     metric: isService ? 'service_status' : isTrap ? 'trap' : first.metric,
-    operator: isDevice ? first.operator : '==',
-    threshold: isDevice ? first.threshold : 0,
+    operator: isDevice || isApm ? first.operator : '==',
+    threshold: isDevice || isApm ? first.threshold : 0,
     conditions,
     condition_logic: s.condition_logic,
     trigger_on: isService ? s.trigger_on : isDevice && first.metric === 'ping_status' ? s.trigger_on : 'any',
     recovery_alert: recovery,
     trap_oid: isTrap ? s.trap_oid.trim() || null : null,
-    target: isDevice && s.conditions.some((c) => INTERFACE_METRICS.has(c.metric)) ? s.target.trim() || null : null,
+    // target: interface filter for device interface metrics; APM service name
+    // for APM rules (empty = every reporting service).
+    target: isApm
+      ? s.target.trim() || null
+      : isDevice && s.conditions.some((c) => INTERFACE_METRICS.has(c.metric))
+      ? s.target.trim() || null
+      : null,
     min_duration: s.min_duration,
     severity: s.severity,
     cooldown: s.cooldown,
     max_repeat: s.max_repeat,
-    device_id: isService ? null : s.device_id || null,
-    group_id: isService ? null : s.group_id || null,
-    device_type: isService ? null : s.device_type || null,
-    location: isService ? null : s.location || null,
+    device_id: isService || isApm ? null : s.device_id || null,
+    group_id: isService || isApm ? null : s.group_id || null,
+    device_type: isService || isApm ? null : s.device_type || null,
+    location: isService || isApm ? null : s.location || null,
+    scope_tag: isService || isApm ? null : s.scope_tag || null,
     service_check_id: isService ? s.service_check_id || null : null,
     service_check_group_id: isService ? s.service_check_group_id || null : null,
     notify_channels: s.notify_channels,
@@ -262,7 +311,7 @@ export function AlertRuleWizardDialog({
   const qc = useQueryClient()
   const [step, setStep] = useState<StepId>('properties')
   const [s, setS] = useState<WizardState>(DEFAULT_STATE)
-  const [scopeMode, setScopeMode] = useState<'all' | 'device' | 'group' | 'type' | 'location'>('all')
+  const [scopeMode, setScopeMode] = useState<'all' | 'device' | 'group' | 'type' | 'location' | 'tag'>('all')
   const [preview, setPreview] = useState<any>(null)
 
   const stepIdx = STEPS.findIndex((st) => st.id === step)
@@ -286,6 +335,9 @@ export function AlertRuleWizardDialog({
     enabled: open,
   })
 
+  const { data: tags = [] } = useTags(open)
+  const tagColors = useMemo(() => tagColorMap(tags), [tags])
+
   const { data: serviceChecksResp } = useQuery<any>({
     queryKey: ['service-checks', 'list-min'],
     queryFn: async () => (await api.get('/service-checks?limit=200')).data,
@@ -306,6 +358,13 @@ export function AlertRuleWizardDialog({
   })
   const channels: any[] = Array.isArray(channelsResp) ? channelsResp : channelsResp?.data || []
 
+  const { data: apmServicesResp } = useQuery<any>({
+    queryKey: ['apm', 'services', 'list-min'],
+    queryFn: async () => (await api.get('/apm/services?range=24h')).data,
+    enabled: open && s.source === 'apm',
+  })
+  const apmServices: string[] = (apmServicesResp?.services || []).map((x: any) => x.name)
+
   useEffect(() => {
     if (!open) return
     setStep('properties')
@@ -314,7 +373,8 @@ export function AlertRuleWizardDialog({
       const st = ruleToState(rule)
       setS(st)
       setScopeMode(
-        st.group_id ? 'group' : st.device_type ? 'type' : st.location ? 'location' : st.device_id ? 'device' : 'all',
+        st.group_id ? 'group' : st.device_type ? 'type' : st.location ? 'location'
+          : st.scope_tag ? 'tag' : st.device_id ? 'device' : 'all',
       )
     } else {
       setS(DEFAULT_STATE)
@@ -384,8 +444,8 @@ export function AlertRuleWizardDialog({
     setS((st) => ({
       ...st,
       recovery_email_subject: st.recovery_email_subject || `RESOLVED: ${st.email_subject}`,
-      recovery_email_body: st.recovery_email_body || st.email_body.replace('{status_intro}', 'Device has recovered.'),
-      recovery_sms_template: st.recovery_sms_template || st.sms_template.replace('is {status}', 'RECOVERED'),
+      recovery_email_body: st.recovery_email_body || st.email_body,
+      recovery_sms_template: st.recovery_sms_template || st.sms_template,
     }))
     toast.success('Trigger templates copied to reset actions')
   }
@@ -498,14 +558,25 @@ export function AlertRuleWizardDialog({
               <div className="space-y-4">
                 <SectionTitle title="Trigger Conditions" hint="Define when this alert fires. Add multiple child conditions with AND/OR logic." />
                 <div className="flex rounded-lg border border-border bg-surface2 p-1 text-xs">
-                  {(['device', 'service', 'trap'] as const).map((src) => (
+                  {(['device', 'service', 'trap', 'apm'] as const).map((src) => (
                     <button
                       key={src}
                       type="button"
-                      onClick={() => setS({ ...s, source: src })}
+                      onClick={() => {
+                        if (src === s.source) return
+                        // Entering/leaving APM swaps the condition metric domain,
+                        // and `target` changes meaning (service name vs interface).
+                        if (src === 'apm') {
+                          setS({ ...s, source: src, target: '', conditions: [{ metric: 'apm_latency_p95', operator: '>', threshold: 800 }] })
+                        } else if (s.source === 'apm') {
+                          setS({ ...s, source: src, target: '', conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }] })
+                        } else {
+                          setS({ ...s, source: src })
+                        }
+                      }}
                       className={cn('flex-1 rounded-md py-2 font-medium', s.source === src ? 'bg-primary text-white' : 'text-muted')}
                     >
-                      {src === 'device' ? 'Device / SNMP' : src === 'service' ? 'Service Check' : 'SNMP Trap'}
+                      {src === 'device' ? 'Device / SNMP' : src === 'service' ? 'Service Check' : src === 'trap' ? 'SNMP Trap' : 'APM Service'}
                     </button>
                   ))}
                 </div>
@@ -603,6 +674,36 @@ export function AlertRuleWizardDialog({
                   </>
                 )}
 
+                {s.source === 'apm' && (
+                  <div className="flex items-end gap-2 rounded-lg border border-border/60 bg-surface2/30 p-3">
+                    <div className="grid flex-1 grid-cols-3 gap-2">
+                      <FormField label="Metric">
+                        <Select value={s.conditions[0]?.metric} onValueChange={(v) => updateCond(0, { metric: v })}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            {APM_METRICS.map((m) => (
+                              <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </FormField>
+                      <FormField label="Operator">
+                        <Select value={s.conditions[0]?.operator} onValueChange={(v) => updateCond(0, { operator: v })}>
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            {['>', '>=', '<', '<=', '==', '!='].map((op) => (
+                              <SelectItem key={op} value={op}>{op}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </FormField>
+                      <FormField label="Threshold">
+                        <Input type="number" step="any" value={s.conditions[0]?.threshold} onChange={(e) => updateCond(0, { threshold: Number(e.target.value) })} />
+                      </FormField>
+                    </div>
+                  </div>
+                )}
+
                 <FormField label="Condition must exist for" hint="Hold time before firing — prevents flapping alerts (SolarWinds 'condition must exist for more than').">
                   <div className="flex items-center gap-3">
                     <Input type="number" min={0} value={s.min_duration} onChange={(e) => setS({ ...s, min_duration: Number(e.target.value) })} className="w-28" />
@@ -643,7 +744,25 @@ export function AlertRuleWizardDialog({
             {step === 'scope' && (
               <div className="space-y-4">
                 <SectionTitle title="Scope" hint="Which objects this alert monitors." />
-                {s.source === 'service' ? (
+                {s.source === 'apm' ? (
+                  <FormField
+                    label="Application service"
+                    hint="Empty = every service reporting traces. Evaluated per service every minute against the RED rollups."
+                  >
+                    <Select
+                      value={s.target || '__all__'}
+                      onValueChange={(v) => setS({ ...s, target: v === '__all__' ? '' : v })}
+                    >
+                      <SelectTrigger><SelectValue placeholder="All services" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__all__">All services</SelectItem>
+                        {apmServices.map((name) => (
+                          <SelectItem key={name} value={name}>{name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </FormField>
+                ) : s.source === 'service' ? (
                   <div className="grid grid-cols-2 gap-3">
                     <FormField label="Service check">
                       <Select value={s.service_check_id || '__all__'} onValueChange={(v) => setS({ ...s, service_check_id: v === '__all__' ? '' : v, service_check_group_id: '' })}>
@@ -669,7 +788,7 @@ export function AlertRuleWizardDialog({
                     <FormField label="Apply to">
                       <Select value={scopeMode} onValueChange={(v: any) => {
                         setScopeMode(v)
-                        setS({ ...s, device_id: '', group_id: '', device_type: '', location: '' })
+                        setS({ ...s, device_id: '', group_id: '', device_type: '', location: '', scope_tag: '' })
                       }}>
                         <SelectTrigger><SelectValue /></SelectTrigger>
                         <SelectContent>
@@ -678,6 +797,7 @@ export function AlertRuleWizardDialog({
                           <SelectItem value="group">Device group</SelectItem>
                           <SelectItem value="type">Device type</SelectItem>
                           <SelectItem value="location">Location</SelectItem>
+                          <SelectItem value="tag">Tag</SelectItem>
                         </SelectContent>
                       </Select>
                     </FormField>
@@ -723,6 +843,29 @@ export function AlertRuleWizardDialog({
                         </Select>
                       </FormField>
                     )}
+                    {scopeMode === 'tag' && (
+                      <FormField
+                        label="Tag"
+                        hint="Applies to every device carrying this tag — devices tagged later are covered automatically."
+                      >
+                        <Select value={s.scope_tag || '__pick__'} onValueChange={(v) => setS({ ...s, scope_tag: v === '__pick__' ? '' : v })}>
+                          <SelectTrigger><SelectValue placeholder="Select tag" /></SelectTrigger>
+                          <SelectContent>
+                            {tags.map((t) => (
+                              <SelectItem key={t.id} value={t.name}>
+                                <span className="inline-flex items-center gap-1.5">
+                                  <span
+                                    className="h-2 w-2 shrink-0 rounded-full"
+                                    style={{ background: tagColor(t.name, tagColors) }}
+                                  />
+                                  {t.name}
+                                </span>
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </FormField>
+                    )}
                   </>
                 )}
               </div>
@@ -754,14 +897,19 @@ export function AlertRuleWizardDialog({
                   </FormField>
                 </div>
                 <TemplateVars />
+                <p className="text-[11px] text-muted">
+                  Leave a field empty to use the built-in wording, which names the metric and
+                  threshold in plain English. Open <span className="text-text">Preview message</span> on
+                  the rule to see exactly what is sent.
+                </p>
                 <FormField label="Email subject">
-                  <Input value={s.email_subject} onChange={(e) => setS({ ...s, email_subject: e.target.value })} className="font-mono text-xs" />
+                  <Input value={s.email_subject} onChange={(e) => setS({ ...s, email_subject: e.target.value })} className="font-mono text-xs" placeholder={DEFAULTS.email_subject} />
                 </FormField>
                 <FormField label="Email body">
-                  <Textarea value={s.email_body} onChange={(e) => setS({ ...s, email_body: e.target.value })} rows={5} className="font-mono text-xs" />
+                  <Textarea value={s.email_body} onChange={(e) => setS({ ...s, email_body: e.target.value })} rows={5} className="font-mono text-xs" placeholder={DEFAULTS.email_body} />
                 </FormField>
                 <FormField label="SMS template">
-                  <Textarea value={s.sms_template} onChange={(e) => setS({ ...s, sms_template: e.target.value })} rows={2} className="font-mono text-xs" />
+                  <Textarea value={s.sms_template} onChange={(e) => setS({ ...s, sms_template: e.target.value })} rows={2} className="font-mono text-xs" placeholder={DEFAULTS.sms_template} />
                 </FormField>
               </div>
             )}
@@ -780,14 +928,19 @@ export function AlertRuleWizardDialog({
                   </p>
                 ) : (
                   <>
+                    <p className="text-[11px] text-muted">
+                      The built-in reset wording states how long the condition was active
+                      &mdash; <span className="text-text">{'{duration_sentence}'}</span> renders as
+                      &ldquo;The condition was active for 12 minutes.&rdquo;
+                    </p>
                     <FormField label="Recovery email subject">
-                      <Input value={s.recovery_email_subject} onChange={(e) => setS({ ...s, recovery_email_subject: e.target.value })} className="font-mono text-xs" />
+                      <Input value={s.recovery_email_subject} onChange={(e) => setS({ ...s, recovery_email_subject: e.target.value })} className="font-mono text-xs" placeholder={DEFAULTS.recovery_email_subject} />
                     </FormField>
                     <FormField label="Recovery email body">
-                      <Textarea value={s.recovery_email_body} onChange={(e) => setS({ ...s, recovery_email_body: e.target.value })} rows={4} className="font-mono text-xs" placeholder="Leave empty for default recovery template" />
+                      <Textarea value={s.recovery_email_body} onChange={(e) => setS({ ...s, recovery_email_body: e.target.value })} rows={4} className="font-mono text-xs" placeholder={DEFAULTS.recovery_email_body} />
                     </FormField>
                     <FormField label="Recovery SMS">
-                      <Textarea value={s.recovery_sms_template} onChange={(e) => setS({ ...s, recovery_sms_template: e.target.value })} rows={2} className="font-mono text-xs" />
+                      <Textarea value={s.recovery_sms_template} onChange={(e) => setS({ ...s, recovery_sms_template: e.target.value })} rows={2} className="font-mono text-xs" placeholder={DEFAULTS.recovery_sms_template} />
                     </FormField>
                   </>
                 )}
@@ -843,16 +996,15 @@ export function AlertRuleWizardDialog({
                   )}
                 </div>
                 {preview && (
-                  <div className="rounded-lg border border-border bg-surface2/40 p-4 text-xs">
-                    <div className="font-semibold text-text">Alert preview</div>
-                    <div className="mt-1 font-mono text-muted">Subject: {preview.alert?.subject}</div>
-                    <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-muted">{preview.alert?.email_body}</pre>
+                  <div className="space-y-3">
+                    <EmailPreviewCard title="Alert email" msg={preview.alert} />
                     {preview.recovery && (
-                      <>
-                        <div className="mt-3 font-semibold text-emerald-600">Recovery preview</div>
-                        <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-muted">{preview.recovery?.email_body}</pre>
-                      </>
+                      <EmailPreviewCard title="Recovery email" msg={preview.recovery} accent />
                     )}
+                    <p className="text-[11px] text-muted">
+                      Sample device and readings. Use the preview button on the alert list to edit
+                      these templates against a live preview.
+                    </p>
                   </div>
                 )}
               </div>
@@ -899,6 +1051,24 @@ function ReviewRow({ label, value }: { label: string; value: ReactNode }) {
     <div className="flex items-start justify-between gap-4 border-b border-border/50 py-2 text-sm">
       <span className="text-muted">{label}</span>
       <span className="max-w-[65%] text-right font-medium">{value}</span>
+    </div>
+  )
+}
+
+function EmailPreviewCard({ title, msg, accent }: { title: string; msg: any; accent?: boolean }) {
+  if (!msg) return null
+  return (
+    <div className="overflow-hidden rounded-lg border border-border">
+      <div className="border-b border-border bg-surface2/40 px-4 py-2.5">
+        <div className={cn('text-xs font-semibold', accent ? 'text-emerald-600' : 'text-text')}>{title}</div>
+        <div className="mt-0.5 break-words text-xs text-muted">Subject: {msg.subject}</div>
+      </div>
+      {/* The real HTML mail, sandboxed — scripts off, no navigation out. */}
+      {msg.email_html ? (
+        <iframe title={title} sandbox="" srcDoc={msg.email_html} className="h-72 w-full bg-white" />
+      ) : (
+        <pre className="max-h-48 overflow-auto whitespace-pre-wrap p-4 text-xs text-muted">{msg.email_body}</pre>
+      )}
     </div>
   )
 }

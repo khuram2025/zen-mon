@@ -212,7 +212,7 @@ export default function ExecutiveReport() {
         <ReportSection
           title="Health by Location"
           icon={<MapPin className="h-4 w-4" />}
-          description="Per-site device count and current availability"
+          description="Per-site device count and availability over the report window"
           padded={false}
         >
           {data.location_summary.length === 0 ? (
@@ -236,6 +236,8 @@ export default function ExecutiveReport() {
                   header: 'Availability',
                   align: 'right',
                   render: (r) => {
+                    // Null when the site reported no samples in the window.
+                    if (r.availability_pct == null) return <span className="text-muted">—</span>
                     const ok = r.availability_pct >= 99
                     return <span className={ok ? 'text-emerald-400' : 'text-amber-400'}>{r.availability_pct.toFixed(1)}%</span>
                   },

@@ -1,0 +1,276 @@
+{% extends "core/base.html" %}
+{% load static %}
+
+{% block og_image %}{% static 'img/zenplus/udt/udt-classification-rules.webp' %}{% endblock %}
+{% block twitter_image %}{% static 'img/zenplus/udt/udt-classification-rules.webp' %}{% endblock %}
+
+{% block extra_head %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    {"@type": "ListItem", "position": 1, "name": "Knowledge Base", "item": "https://zentryc.com{% url 'core:kb' %}"},
+    {"@type": "ListItem", "position": 2, "name": "ZenPlus", "item": "https://zentryc.com{% url 'core:kb_zenplus' %}"},
+    {"@type": "ListItem", "position": 3, "name": "User Device Tracker", "item": "https://zentryc.com{% url 'core:kb_zenplus_udt' %}"},
+    {"@type": "ListItem", "position": 4, "name": "Device classification", "item": "https://zentryc.com{% url 'core:kb_zenplus_udt_classification' %}"}
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "Device classification and vendor groups",
+  "description": "How ZenPlus UDT decides whether an endpoint is a workstation, phone, printer, camera or access point from its MAC vendor and hostname, and how to override that with classification rules and custom device groups.",
+  "datePublished": "2026-08-16",
+  "dateModified": "2026-08-16",
+  "inLanguage": "en",
+  "url": "https://zentryc.com{% url 'core:kb_zenplus_udt_classification' %}",
+  "author": {"@type": "Organization", "name": "Zentryc"},
+  "publisher": {"@type": "Organization", "name": "Zentryc"},
+  "about": {"@type": "SoftwareApplication", "name": "ZenPlus User Device Tracker", "applicationCategory": "Network Monitoring"}
+}
+</script>
+{% include "core/_kb_article_style.html" %}
+{% endblock %}
+
+{% block content %}
+<div class="kb-shell">
+
+    <nav class="kb-crumbs" aria-label="Breadcrumb">
+        <a href="{% url 'core:kb' %}">Knowledge Base</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus' %}">ZenPlus</a>
+        <span class="sep">/</span>
+        <a href="{% url 'core:kb_zenplus_udt' %}">UDT</a>
+        <span class="sep">/</span>
+        <span class="current">Device classification</span>
+    </nav>
+
+    <header class="kb-header">
+        <p class="eyebrow">ZenPlus UDT</p>
+        <h1>Device classification and vendor groups</h1>
+        <p class="lede">Turning 1,700 MAC addresses into an inventory you can reason about &mdash; how the automatic
+        classifier works, why it says &ldquo;Unknown&rdquo;, and how one rule per vendor fixes it.</p>
+        <div class="kb-meta">
+            <span class="kb-pill ver"><strong>Applies to</strong> ZenPlus 1.14.3+</span>
+            <span class="kb-pill"><strong>Updated</strong> 2026-08-16</span>
+            <span class="kb-pill"><strong>Audience</strong> Network operators</span>
+            <span class="kb-pill"><strong>Reading time</strong> ~8 min</span>
+        </div>
+    </header>
+
+    <aside class="kb-toc" aria-label="Table of contents">
+        <h4>On this page</h4>
+        <ol>
+            <li><a href="#why-it-matters">Why classification matters</a></li>
+            <li><a href="#how-it-decides">How the classifier decides</a></li>
+            <li><a href="#precedence">Precedence</a></li>
+            <li><a href="#vendor-rollup">The vendor rollup</a></li>
+            <li><a href="#writing-rules">Writing a classification rule</a></li>
+            <li><a href="#custom-groups">Custom groups</a></li>
+            <li><a href="#unknown">When everything is Unknown</a></li>
+        </ol>
+    </aside>
+
+    <article class="kb-body">
+
+        <section id="why-it-matters">
+            <h2><span class="num">01</span> Why classification matters <a class="kb-anchor" href="#why-it-matters">#</a></h2>
+
+            <p>An endpoint's <strong>type</strong> is not cosmetic. It is a filter on every UDT screen, it shapes the
+            vendor and capacity reporting, and it is how you separate the 400 workstations you expect from the four
+            things you do not. A network where everything is &ldquo;Unknown&rdquo; is a list; a network where everything
+            is typed is an inventory.</p>
+
+            <p>UDT ships with ten built-in types &mdash; <em>workstation</em>, <em>server</em>, <em>phone</em>,
+            <em>printer</em>, <em>access point</em>, <em>camera</em>, <em>virtual</em>, <em>network</em>, <em>IoT</em>
+            and <em>unknown</em> &mdash; and lets you add as many groups of your own as you like.</p>
+        </section>
+
+        <section id="how-it-decides">
+            <h2><span class="num">02</span> How the classifier decides <a class="kb-anchor" href="#how-it-decides">#</a></h2>
+
+            <p>Every 60 seconds the UDT sweeper re-types any endpoint still sitting at <em>Unknown</em> under automatic
+            control. It has three signals, checked in this order:</p>
+
+            <div class="step-list">
+                <div class="step"><div><h4>Is the endpoint a device ZenPlus already monitors?</h4>
+                    <p>If the MAC belongs to a device in your inventory, its type comes straight from there &mdash; a
+                    monitored switch becomes <em>network</em>, a monitored server becomes <em>server</em>. This is the
+                    strongest signal because it is not a guess.</p></div></div>
+                <div class="step"><div><h4>Does the hostname say what it is?</h4>
+                    <p>Naming conventions are matched next: <code>SEP&lt;mac&gt;</code> and anything containing
+                    <em>phone</em>; <code>prn-</code>, <code>-prt</code> and <em>printer</em>; <code>cam-</code>,
+                    <em>camera</em>, <em>ipcam</em>; <code>ap-</code> and <em>accesspoint</em>; <code>srv-</code>,
+                    <code>esxi</code>, <code>nas-</code> and <em>server</em>.</p></div></div>
+                <div class="step"><div><h4>What does the NIC vendor suggest?</h4>
+                    <p>Finally the OUI vendor is matched against a built-in list &mdash; Polycom and Yealink are phones,
+                    Hikvision and Axis are cameras, Ubiquiti and Aruba are access points, VMware and Proxmox are virtual,
+                    Canon and Lexmark are printers, and so on.</p></div></div>
+            </div>
+
+            <div class="callout">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></svg>
+                    Vendor is a hint, not a fact
+                </div>
+                <p>The OUI identifies who made the <em>network chip</em>, not the product. Intel makes the NIC in most
+                corporate laptops but also in servers and appliances; Wistron and Compal build laptops for several
+                brands. The vendor heuristic is deliberately conservative &mdash; when it is not confident, it leaves the
+                endpoint <em>Unknown</em> rather than guessing wrong, which is what
+                <a href="#writing-rules">classification rules</a> are for.</p>
+            </div>
+        </section>
+
+        <section id="precedence">
+            <h2><span class="num">03</span> Precedence <a class="kb-anchor" href="#precedence">#</a></h2>
+
+            <p>Three sources can set a type. They rank strictly, and the rank is visible on the endpoint as its
+            <em>type source</em>:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Rank</th><th>Source</th><th>Set by</th><th>Can be overwritten by the sweeper?</th></tr></thead>
+                    <tbody>
+                        <tr><td>1 &mdash; highest</td><td><code>manual</code></td><td>An operator choosing a type on the endpoint page</td><td>Never</td></tr>
+                        <tr><td>2</td><td><code>rule</code></td><td>A classification rule; lowest priority number wins</td><td>Only by another rule, or when no rule matches any more</td></tr>
+                        <tr><td>3 &mdash; lowest</td><td><code>auto</code></td><td>The built-in heuristics above</td><td>Freely, on every sweep</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>The practical consequence: rules are safe to experiment with. Editing or deleting a rule re-evaluates
+            every endpoint immediately and tells you how many changed, and anything a human pinned by hand is untouched.
+            An endpoint that stops matching any rule falls back to automatic control rather than being stranded on a
+            stale type.</p>
+
+            <p>To un-pin a manual decision, set the type back to <strong>Auto</strong> on the endpoint page &mdash; the
+            rules and heuristics re-run on that endpoint straight away.</p>
+        </section>
+
+        <section id="vendor-rollup">
+            <h2><span class="num">04</span> The vendor rollup <a class="kb-anchor" href="#vendor-rollup">#</a></h2>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/udt/udt-classification-rules.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="ZenPlus UDT classification tab showing device type chips with counts, a classification rules table matching a MAC OUI prefix to the IP Phone group, and a NIC vendor rollup listing endpoints per manufacturer">
+                <figcaption><strong>Classification.</strong> The rules table on top, the NIC vendor rollup below. The
+                <em>Current groups</em> column shows how each vendor's endpoints are typed today, and <em>Rule</em>
+                creates a rule for that vendor in one click.</figcaption>
+            </figure>
+
+            <p>The lower half of the tab lists every NIC vendor on your network with its endpoint count and how those
+            endpoints are currently typed. It is the fastest way to find classification work worth doing: scan the
+            <em>Current groups</em> column for large blocks sitting in <em>Unknown</em>.</p>
+
+            <p>A vendor with 144 endpoints all marked Unknown is one rule away from being 144 correctly-typed devices.
+            The <strong>Rule</strong> button on the row opens the rule dialog pre-filled with that vendor, so you only
+            have to choose the group.</p>
+        </section>
+
+        <section id="writing-rules">
+            <h2><span class="num">05</span> Writing a classification rule <a class="kb-anchor" href="#writing-rules">#</a></h2>
+
+            <figure class="kb-shot">
+                <img src="{% static 'img/zenplus/udt/udt-classification-rule-from-vendor.webp' %}" width="1600" height="1000" loading="lazy"
+                     alt="Classification rule dialog in ZenPlus UDT with fields for match type, pattern, target group, priority and description">
+                <figcaption><strong>Add rule.</strong> Match type, pattern, target group and a priority. Lower priority
+                numbers are evaluated first.</figcaption>
+            </figure>
+
+            <p>A rule is a match condition plus the group to assign. Seven match types are available, and they are the
+            same set used by <a href="{% url 'core:kb_zenplus_udt_watch_lists' %}">watch, allow and ignore rules</a>:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Match on</th><th>Pattern</th><th>Typical use</th></tr></thead>
+                    <tbody>
+                        <tr><td>MAC address</td><td><code>00:1a:2b:3c:4d:5e</code>, any separator</td><td>One specific device</td></tr>
+                        <tr><td>MAC / OUI prefix</td><td><code>70:c9:c6</code> or <code>70c9c6</code></td><td>Everything from one manufacturer &mdash; the workhorse</td></tr>
+                        <tr><td>Vendor</td><td><code>hikvision</code>, substring match</td><td>Vendors with many OUI blocks</td></tr>
+                        <tr><td>Hostname</td><td><code>prn-*</code>, <code>*-cam??</code></td><td>Naming conventions; <code>*</code> and <code>?</code> are wildcards</td></tr>
+                        <tr><td>IP address</td><td><code>10.20.4.31</code></td><td>A pinned device</td></tr>
+                        <tr><td>IP range</td><td><code>10.20.4.1 - 10.20.4.254</code></td><td>A DHCP scope reserved for one device class</td></tr>
+                        <tr><td>Subnet</td><td><code>10.20.4.0/24</code></td><td>A whole VLAN of one kind of device</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p><strong>Priority</strong> resolves overlap: the lowest number that matches wins. Leave the default of 100
+            for broad vendor rules, and use a lower number such as 10 for narrow exceptions that must beat them &mdash;
+            for example a whole OUI mapped to <em>Camera</em> at priority 100, with one subnet of the same vendor's
+            encoders mapped to <em>Server</em> at priority 10.</p>
+
+            <p>The <strong>Matches</strong> column on the rules table shows how many endpoints each rule currently
+            catches, which is the quickest way to spot a rule whose pattern never fires.</p>
+
+            <div class="callout tip">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+                    Rules apply instantly
+                </div>
+                <p>Creating, editing or deleting a rule re-evaluates the whole endpoint table on the spot and reports how
+                many endpoints changed. You do not wait for the next sweep, and you can undo by deleting the rule.</p>
+            </div>
+        </section>
+
+        <section id="custom-groups">
+            <h2><span class="num">06</span> Custom groups <a class="kb-anchor" href="#custom-groups">#</a></h2>
+
+            <p>The built-in types rarely describe a real estate exactly. Type any lowercase slug into a rule's group
+            field &mdash; <code>door-access</code>, <code>ups</code>, <code>medical</code>, <code>pos-terminal</code>,
+            <code>timeclock</code> &mdash; and the group is created on use.</p>
+
+            <p>Custom groups behave exactly like built-in types everywhere: they get a chip with a live count on the
+            Classification and Endpoints tabs, they filter the endpoint list, and they can be assigned by hand on an
+            individual endpoint. A group with no endpoints and no rules simply stops appearing.</p>
+
+            <p>Slugs are lowercase letters, digits, hyphens and underscores, up to 30 characters, and must start with a
+            letter or digit.</p>
+
+            <div class="callout tip">
+                <div class="label">
+                    <svg viewBox="0 0 24 24" class="icon-stroke"><path d="M9 18h6M10 22h4"/><path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"/></svg>
+                    Group by who owns it, not just what it is
+                </div>
+                <p>The most useful custom groups often follow responsibility rather than hardware &mdash;
+                <code>facilities</code>, <code>security-team</code>, <code>clinical</code>. When something appears on a
+                port that should not, knowing which team owns that class of device is worth more than knowing its model.</p>
+            </div>
+        </section>
+
+        <section id="unknown">
+            <h2><span class="num">07</span> When everything is Unknown <a class="kb-anchor" href="#unknown">#</a></h2>
+
+            <p>If <em>every</em> endpoint has no vendor and everything is Unknown, the problem is not the classifier
+            &mdash; it is the OUI database. UDT resolves vendors from the IEEE registry, which the appliance downloads
+            automatically when the table is empty, retrying every six hours.</p>
+
+            <p>On an appliance with no outbound internet access that download never succeeds, and without vendors the
+            heuristics have nothing to work with. Symptoms and fixes:</p>
+
+            <div class="kb-table-wrap">
+                <table class="kb-table">
+                    <thead><tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr></thead>
+                    <tbody>
+                        <tr><td>Every vendor blank, everything Unknown</td><td>OUI table empty &mdash; no internet access</td><td>Allow outbound HTTPS, or ask Zentryc support for an offline OUI bundle</td></tr>
+                        <tr><td>Most vendors resolve, a few blank</td><td>Genuinely unregistered or randomised MACs</td><td>Normal &mdash; see <a href="{% url 'core:kb_zenplus_udt_endpoints' %}#randomised-macs">randomised MACs</a></td></tr>
+                        <tr><td>Vendors resolve, types still Unknown</td><td>Vendor not in the built-in heuristic list</td><td>Write a <a href="#writing-rules">classification rule</a> &mdash; this is the expected workflow</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <p>The third row is normal and not a defect. The built-in list covers common vendors of obviously-typed
+            hardware; specialised equipment &mdash; access-control readers, UPS management cards, radios, medical devices
+            &mdash; is meant to be classified by you, because only you know what it is.</p>
+        </section>
+    </article>
+
+    <div class="kb-foot">
+        <span><a href="{% url 'core:kb_zenplus_udt_switch_ports' %}">&larr; Switch ports and capacity</a></span>
+        <span><a href="{% url 'core:kb_zenplus_udt_watch_lists' %}">Watch lists and rogue detection &rarr;</a></span>
+    </div>
+</div>
+{% endblock %}

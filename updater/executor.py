@@ -109,6 +109,22 @@ def execute_manifest(
     logger.info("All %d steps completed successfully", len(steps))
 
 
+def rollback_manifest(
+    manifest: dict, extract_dir: str, cfg: AgentConfig
+) -> None:
+    """Roll back a manifest that already executed cleanly.
+
+    Needed for failures detected *after* the last step — notably the schema
+    gate, which can only judge the appliance once every migration has run.
+    """
+    _load_step_handlers()
+    rollback_steps = manifest.get("rollback_steps", [])
+    if not rollback_steps:
+        logger.warning("No rollback steps defined in manifest")
+        return
+    _execute_rollback(rollback_steps, extract_dir, cfg)
+
+
 def _execute_rollback(
     rollback_steps: list[dict], extract_dir: str, cfg: AgentConfig
 ) -> None:

@@ -366,7 +366,7 @@ async def get_config(
         text("""SELECT sc.id, sc.name, sc.check_type,
                        sc.target_host, sc.target_port, sc.target_url,
                        sc.http_method, sc.http_expected_statuses, sc.http_content_match,
-                       sc.http_follow_redirects,
+                       sc.http_follow_redirects, sc.http_ignore_tls_errors,
                        sc.tls_warn_days, sc.tls_critical_days,
                        sc.check_interval, sc.timeout, sc.retry_count, sc.enabled
                 FROM service_checks sc
@@ -402,6 +402,7 @@ async def get_config(
                 http_expected_statuses=sc.get("http_expected_statuses"),
                 http_content_match=sc.get("http_content_match"),
                 http_follow_redirects=sc.get("http_follow_redirects"),
+                http_ignore_tls_errors=bool(sc.get("http_ignore_tls_errors", False)),
                 tls_warn_days=sc.get("tls_warn_days"),
                 tls_critical_days=sc.get("tls_critical_days"),
                 check_interval=sc.get("check_interval") or 60,

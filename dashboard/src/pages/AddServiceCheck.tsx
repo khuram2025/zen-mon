@@ -20,6 +20,7 @@ interface ServiceCheckPayload {
   http_expected_statuses: string | null;
   http_content_match: string | null;
   http_follow_redirects: boolean;
+  http_ignore_tls_errors: boolean;
   tls_warn_days: number;
   tls_critical_days: number;
   check_interval: number;
@@ -78,6 +79,7 @@ export function AddServiceCheckPage() {
   const [expectedStatuses, setExpectedStatuses] = useState('200');
   const [contentMatch, setContentMatch] = useState('');
   const [followRedirects, setFollowRedirects] = useState(true);
+  const [ignoreTlsErrors, setIgnoreTlsErrors] = useState(false);
 
   // TCP fields
   const [tcpHost, setTcpHost] = useState('');
@@ -117,6 +119,7 @@ export function AddServiceCheckPage() {
         );
         setContentMatch((cloneSource.http_content_match as string) || '');
         setFollowRedirects(cloneSource.http_follow_redirects !== false);
+        setIgnoreTlsErrors(Boolean(cloneSource.http_ignore_tls_errors));
       }
 
       // TCP fields
@@ -205,6 +208,7 @@ export function AddServiceCheckPage() {
         http_expected_statuses: expectedStatuses.trim() || null,
         http_content_match: contentMatch.trim() || null,
         http_follow_redirects: followRedirects,
+        http_ignore_tls_errors: ignoreTlsErrors,
         tls_warn_days: warnDays,
         tls_critical_days: criticalDays,
         check_interval: checkInterval,
@@ -217,7 +221,7 @@ export function AddServiceCheckPage() {
     },
     [
       name, checkType, url, tcpHost, tcpPort, tlsHost, tlsPort, deviceId,
-      httpMethod, expectedStatuses, contentMatch, followRedirects,
+      httpMethod, expectedStatuses, contentMatch, followRedirects, ignoreTlsErrors,
       warnDays, criticalDays, checkInterval, timeout, description, mutation,
     ],
   );
@@ -479,6 +483,35 @@ export function AddServiceCheckPage() {
                     />
                   </button>
                 </div>
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <label htmlFor="ignore_tls_errors" className="text-sm text-[var(--text-secondary)]">
+                      Ignore TLS/certificate errors
+                    </label>
+                    <p className="mt-1 text-xs text-[var(--text-muted)]">For trusted internal services using self-signed or invalid certificates.</p>
+                  </div>
+                  <button
+                    id="ignore_tls_errors"
+                    type="button"
+                    role="switch"
+                    aria-checked={ignoreTlsErrors}
+                    onClick={() => setIgnoreTlsErrors(!ignoreTlsErrors)}
+                    className={`relative w-11 h-6 shrink-0 rounded-full transition-colors ${
+                      ignoreTlsErrors ? 'bg-amber-500' : 'bg-[var(--bg-elevated)]'
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform ${
+                        ignoreTlsErrors ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+                {ignoreTlsErrors && (
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+                    TLS certificate identity and trust will not be validated.
+                  </div>
+                )}
               </div>
             </div>
           )}

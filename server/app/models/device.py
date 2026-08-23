@@ -34,7 +34,9 @@ class Device(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     hostname: Mapped[str] = mapped_column(String(255), nullable=False)
-    ip_address: Mapped[str] = mapped_column(INET, unique=True, nullable=False)
+    # Nullable since migrate-069: controller-reported children (thin APs,
+    # FortiLink switches) may have no reachable IP of their own.
+    ip_address: Mapped[str] = mapped_column(INET, unique=True, nullable=True)
     device_type: Mapped[str] = mapped_column(String(50), default="other")
     location: Mapped[str] = mapped_column(String(255), nullable=True)
     group_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("device_groups.id"), nullable=True)
@@ -75,6 +77,21 @@ class Device(Base):
         nullable=True,
     )
 
+    # Controller-managed children (migrate-069). poll_mode 'via_controller'
+    # means state comes from the parent's template tables, never the poller.
+    managed_by_device_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("devices.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    poll_mode: Mapped[str] = mapped_column(String(20), default="direct")
+    serial_number: Mapped[str] = mapped_column(String(128), nullable=True)
+    managed_ip: Mapped[str] = mapped_column(INET, nullable=True)
+    managed_source: Mapped[str] = mapped_column(String(64), nullable=True)
+    managed_instance: Mapped[str] = mapped_column(String(160), nullable=True)
+    managed_last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    promote_managed: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # Current state
     status: Mapped[str] = mapped_column(String(20), default="unknown")
     last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -88,3 +105,25 @@ class Device(Base):
 
     # Relationships
     group: Mapped["DeviceGroup"] = relationship("DeviceGroup", lazy="selectin")
+
+
+class DeviceMaintenance(Base):
+    """Planned-downtime window for devices (mirrors ServiceCheckMaintenance).
+
+    While a window is active the poller suppresses status transitions and
+    alerting for covered devices; SLA/uptime calculations exclude samples
+    inside the window. Scope: one device, a group, a tag, or all devices.
+    """
+
+    __tablename__ = "device_maintenance"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    scope_type: Mapped[str] = mapped_column(String(20), nullable=False)  # device|group|tag|all
+    scope_device_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("devices.id", ondelete="CASCADE"), nullable=True)
+    scope_group_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("device_groups.id", ondelete="CASCADE"), nullable=True)
+    scope_tag: Mapped[str] = mapped_column(String(120), nullable=True)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=True)
+    created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

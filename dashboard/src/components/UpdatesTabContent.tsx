@@ -47,8 +47,17 @@ interface RemoteSubscription {
   days_remaining: number | null
 }
 
+interface SchemaHealth {
+  ok: boolean | null
+  checked_at: string
+  problem_count: number
+  problems: string[]
+  summary: string
+}
+
 interface UpdateStatus {
   current_version: string
+  schema_health: SchemaHealth | null
   installed_at: string
   appliance_id: string
   server_url: string
@@ -292,6 +301,48 @@ export function UpdatesTabContent() {
         </div>
       )}
 
+      {/* Schema drift. A version number on its own is not proof the appliance
+          can run that version — this appliance reported a successful update
+          while its ClickHouse SNMP tables were missing, so CPU and memory read
+          as "—" indefinitely with nothing on this page to say why. */}
+      {status?.schema_health?.ok === false && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-5">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-400" />
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-amber-300">
+                Database schema does not match the installed version
+              </p>
+              <p className="mt-1 text-xs text-amber-200/80">
+                The appliance is running v{status.current_version}, but{' '}
+                {status.schema_health.problem_count} migration problem
+                {status.schema_health.problem_count === 1 ? '' : 's'} remain unresolved.
+                Metrics that depend on the missing tables will not be stored.
+              </p>
+              <ul className="mt-2 space-y-1 rounded-lg bg-amber-500/5 p-2.5">
+                {status.schema_health.problems.map((problem, i) => (
+                  <li key={i} className="break-all font-mono text-[11px] text-amber-200/80">
+                    {problem}
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-2 text-[11px] text-amber-200/70">
+                The next update retries automatically. To fix it now, run{' '}
+                <code className="rounded bg-amber-500/10 px-1">
+                  sudo /opt/zenplus/scripts/sync-schema.py
+                </code>{' '}
+                on the appliance.
+              </p>
+              {status.schema_health.checked_at && (
+                <p className="mt-2 text-[10px] text-muted">
+                  Checked {fmtDate(status.schema_health.checked_at)}
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* System status grid */}
       <div className="rounded-xl border border-border bg-surface p-6">
         <div className="mb-6 flex items-center justify-between">
@@ -325,6 +376,25 @@ export function UpdatesTabContent() {
             <p className="text-lg font-bold text-primary">{status?.current_version || 'Unknown'}</p>
             {status?.installed_at && (
               <p className="mt-0.5 text-[10px] text-muted">Installed {fmtDate(status.installed_at)}</p>
+            )}
+            {status?.schema_health && (
+              <p
+                className={cn(
+                  'mt-1 flex items-center gap-1 text-[10px]',
+                  status.schema_health.ok === true && 'text-emerald-400',
+                  status.schema_health.ok === false && 'text-amber-400',
+                  status.schema_health.ok === null && 'text-muted',
+                )}
+                title={status.schema_health.summary}
+              >
+                {status.schema_health.ok === true && <Check className="h-3 w-3" />}
+                {status.schema_health.ok === false && <AlertTriangle className="h-3 w-3" />}
+                {status.schema_health.ok === true
+                  ? 'Schema verified'
+                  : status.schema_health.ok === false
+                    ? 'Schema drift'
+                    : 'Schema not verified'}
+              </p>
             )}
           </div>
           <div className="rounded-lg bg-surface2 p-4">

@@ -39,10 +39,10 @@ def test_stage_agent_artifacts_requires_windows_installer_matching_source(tmp_pa
     build = tmp_path / "build"
     build.mkdir()
     _write_agent_source(repo, "1.3.0")
-    _write_sparse_package(artifacts / "windows" / "zenplus-agent-1.2.0.exe")
+    _write_sparse_package(artifacts / "windows" / "zenplus-agent-1.2.0.msi")
     monkeypatch.setattr(builder, "ZENPLUS_DIR", repo)
 
-    with pytest.raises(RuntimeError, match="Expected .*zenplus-agent-1.3.0.exe"):
+    with pytest.raises(RuntimeError, match="Expected .*zenplus-agent-1.3.0.msi"):
         builder.stage_agent_artifacts(build, artifacts)
 
 
@@ -53,7 +53,7 @@ def test_stage_agent_artifacts_copies_current_installer_and_writes_manifest(tmp_
     build = tmp_path / "build"
     build.mkdir()
     _write_agent_source(repo, "1.3.0")
-    package = artifacts / "windows" / "zenplus-agent-1.3.0.exe"
+    package = artifacts / "windows" / "zenplus-agent-1.3.0.msi"
     _write_sparse_package(package)
     monkeypatch.setattr(builder, "ZENPLUS_DIR", repo)
 
@@ -80,7 +80,7 @@ def test_stage_agent_artifacts_rejects_truncated_installer(tmp_path, monkeypatch
     build = tmp_path / "build"
     build.mkdir()
     _write_agent_source(repo, "1.3.0")
-    package = artifacts / "windows" / "zenplus-agent-1.3.0.exe"
+    package = artifacts / "windows" / "zenplus-agent-1.3.0.msi"
     package.parent.mkdir(parents=True)
     package.write_bytes(b"not an installer")
     monkeypatch.setattr(builder, "ZENPLUS_DIR", repo)

@@ -1,22 +1,37 @@
 #!/usr/bin/env bash
-# ╔══════════════════════════════════════════════════════════════════╗
-# ║  ZenPlus Network Monitoring System — Installer / Updater       ║
-# ║  https://github.com/khuram2025/zen-mon                        ║
-# ║                                                                ║
-# ║  Usage:                                                        ║
-# ║    Fresh install:  curl -fsSL <url>/install.sh | sudo bash     ║
-# ║    Update:         sudo zenplus update                         ║
-# ║    Status:         sudo zenplus status                         ║
-# ╚══════════════════════════════════════════════════════════════════╝
+# ╔════════════════════════════════════════════════════════════════════╗
+# ║  ZenPlus Network Monitoring Appliance — Installer                  ║
+# ║  https://github.com/khuram2025/zen-mon                             ║
+# ║                                                                    ║
+# ║  Fresh install:  curl -fsSL https://zentryc.com/install.sh | sudo bash
+# ║  Update:         sudo zenplus update                               ║
+# ║  Status:         sudo zenplus status                               ║
+# ╚════════════════════════════════════════════════════════════════════╝
+#
+# Every phase runs as a numbered, verified step: the step's own output goes
+# to the install log, and the console shows a single checked line only after
+# the step's post-conditions actually hold. A failed critical step aborts the
+# install with the relevant log tail rather than continuing half-configured.
 
 set -uo pipefail
 
-# ─── Configuration ────────────────────────────────────────────────
-ZENPLUS_HOME="/opt/zenplus"
-ZENPLUS_USER="zenplus"
-ZENPLUS_REPO="https://github.com/khuram2025/zen-mon.git"
-ZENPLUS_BRANCH="main"
+# ─── Configuration (all env-overridable) ──────────────────────────
+ZENPLUS_HOME="${ZENPLUS_HOME:-/opt/zenplus}"
+ZENPLUS_USER="${ZENPLUS_USER:-zenplus}"
+ZENPLUS_REPO="${ZENPLUS_REPO:-https://github.com/khuram2025/zen-mon.git}"
+ZENPLUS_BRANCH="${ZENPLUS_BRANCH:-main}"
 ZENPLUS_VERSION_FILE="$ZENPLUS_HOME/.version"
+INSTALL_LOG="${INSTALL_LOG:-/var/log/zenplus-install.log}"
+
+# Trial licence seeded on a fresh install (see seed_trial_licence).
+TRIAL_DAYS="${TRIAL_DAYS:-30}"
+TRIAL_MAX_DEVICES=50
+TRIAL_MAX_CHECKS=20
+TRIAL_MAX_USERS=5
+
+# Minimum host requirements enforced by preflight_checks.
+MIN_RAM_MB="${MIN_RAM_MB:-3500}"
+MIN_DISK_GB="${MIN_DISK_GB:-20}"
 
 # Database defaults (overridden by .env if exists)
 DB_PASSWORD=$(openssl rand -hex 16 2>/dev/null || echo "zenplus_$(date +%s)")
@@ -25,17 +40,25 @@ REDIS_PASSWORD=$(openssl rand -hex 16 2>/dev/null || echo "redis_$(date +%s)")
 JWT_SECRET=$(openssl rand -hex 32 2>/dev/null || echo "jwt_$(date +%s)_secret")
 SNMP_ENC_KEY=$(openssl rand -hex 32 2>/dev/null || python3 -c 'import secrets; print(secrets.token_hex(32))' 2>/dev/null || echo "")
 
-# Colors
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'; BOLD='\033[1m'
+# ─── Presentation ─────────────────────────────────────────────────
+# Colours only when attached to a terminal, so piped/CI logs stay clean.
+if [[ -t 1 ]]; then
+    RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'
+    BLUE=$'\033[0;34m'; CYAN=$'\033[0;36m'; DIM=$'\033[2m'
+    NC=$'\033[0m'; BOLD=$'\033[1m'; IS_TTY=1
+else
+    RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; DIM=''; NC=''; BOLD=''; IS_TTY=0
+fi
 
-log()   { echo -e "${GREEN}[✓]${NC} $*"; }
-warn()  { echo -e "${YELLOW}[!]${NC} $*"; }
-err()   { echo -e "${RED}[✗]${NC} $*"; exit 1; }
-info()  { echo -e "${BLUE}[i]${NC} $*"; }
-step()  { echo -e "\n${CYAN}${BOLD}━━━ $* ━━━${NC}\n"; }
+# These write into the per-step log, not the console — the console shows the
+# step checklist. They are kept because the whole script narrates through them.
+log()   { echo "[ok]   $*"; }
+warn()  { echo "[warn] $*"; STEP_WARNING="${STEP_WARNING:+$STEP_WARNING; }$*"; }
+err()   { echo "[fail] $*"; exit 1; }
+info()  { echo "[info] $*"; }
+step()  { echo "--- $* ---"; }
 
-check_root() { [[ $EUID -ne 0 ]] && err "This script must be run as root (use sudo)"; }
+check_root() { [[ $EUID -ne 0 ]] && { echo "This installer must be run as root (use sudo)." >&2; exit 1; }; return 0; }
 get_ip() { ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1; }
 mark_git_safe() {
     git config --global --add safe.directory "$ZENPLUS_HOME" 2>/dev/null || true
@@ -44,13 +67,231 @@ mark_git_safe() {
     fi
 }
 
+# ─── Step framework ───────────────────────────────────────────────
+TOTAL_STEPS=16
+STEP_NO=0
+STEP_WARNING=""
+STEP_TITLES=()
+STEP_RESULTS=()
+STEP_NOTES=()
+FAILED_COUNT=0
+WARNED_COUNT=0
+INSTALL_STARTED=$SECONDS
+CURRENT_STEP_TITLE=""
+STEP_IN_FLIGHT=0
+
+# Reserve the real console on fd 9. Each step's stdout/stderr is redirected
+# into the install log, and a trap firing from inside a step inherits that
+# redirection — so anything the operator must see is written to >&9 explicitly.
+# Without this, an err()-triggered abort scrolls silently into the log file.
+exec 9>&1
+
+# State published by steps and rendered by print_summary.
+RESOLVED_VERSION=""
+LICENCE_PLAN=""
+LICENCE_EXPIRES=""
+ADMIN_PASSWORD_IS_DEFAULT="yes"
+
+# Several long-standing helpers abort via err() → `exit 1`. That would skip the
+# step framework's reporting entirely, so catch it here and render the same
+# failure context the framework would have shown.
+_on_exit() {
+    local rc=$?
+    if (( rc != 0 )) && (( STEP_IN_FLIGHT == 1 )); then
+        # Snapshot the tail first: writing to the log below would otherwise
+        # make the report quote itself.
+        local tail_text; tail_text=$(tail -n 25 "$INSTALL_LOG" 2>/dev/null)
+        {
+            [[ $IS_TTY -eq 1 ]] && printf '\r'
+            printf '%s %s✗%s\n' "$(_step_label "$CURRENT_STEP_TITLE")" "$RED" "$NC"
+            echo ""
+            echo "${RED}${BOLD}  Installation aborted during: ${CURRENT_STEP_TITLE}${NC}"
+            echo "${DIM}  Last lines of ${INSTALL_LOG}:${NC}"
+            echo ""
+            echo "$tail_text" | sed 's/^/    /'
+            echo ""
+            echo "  Full log: ${BOLD}${INSTALL_LOG}${NC}"
+            echo "  Fix the issue above and re-run the installer — it is idempotent."
+            echo ""
+        } >&9 2>&9
+    fi
+}
+trap _on_exit EXIT
+
+fmt_dur() {
+    local s=$1
+    if (( s < 60 )); then printf '%ds' "$s"; else printf '%dm%02ds' $((s / 60)) $((s % 60)); fi
+}
+
+_step_label() { printf '  %s[%02d/%02d]%s %-42s' "$DIM" "$STEP_NO" "$TOTAL_STEPS" "$NC" "$1"; }
+
+# run_step <title> <function> [args…]   — abort the install if it fails
+# run_soft_step <title> <function> …    — degrade to a warning if it fails
+_run_step() {
+    local critical="$1" title="$2"; shift 2
+    STEP_NO=$((STEP_NO + 1))
+    STEP_WARNING=""
+    local label; label=$(_step_label "$title")
+    [[ $IS_TTY -eq 1 ]] && printf '%s%s…%s' "$label" "$DIM" "$NC"
+    local start=$SECONDS rc=0
+    {
+        echo ""
+        echo "===== [$STEP_NO/$TOTAL_STEPS] $title — $(date -Iseconds) ====="
+    } >> "$INSTALL_LOG"
+    CURRENT_STEP_TITLE="$title"; STEP_IN_FLIGHT=1
+    "$@" >> "$INSTALL_LOG" 2>&1 || rc=$?
+    STEP_IN_FLIGHT=0
+    local dur=$((SECONDS - start))
+    [[ $IS_TTY -eq 1 ]] && printf '\r'
+    STEP_TITLES+=("$title")
+
+    if [[ $rc -eq 0 ]]; then
+        if [[ -n "$STEP_WARNING" ]]; then
+            printf '%s %s!%s %s(%s)%s\n' "$label" "$YELLOW" "$NC" "$DIM" "$(fmt_dur "$dur")" "$NC"
+            printf '           %s%s%s\n' "$YELLOW" "$STEP_WARNING" "$NC"
+            STEP_RESULTS+=("warn"); STEP_NOTES+=("$STEP_WARNING"); WARNED_COUNT=$((WARNED_COUNT + 1))
+        else
+            printf '%s %s✓%s %s(%s)%s\n' "$label" "$GREEN" "$NC" "$DIM" "$(fmt_dur "$dur")" "$NC"
+            STEP_RESULTS+=("ok"); STEP_NOTES+=("")
+        fi
+        return 0
+    fi
+
+    printf '%s %s✗%s %s(%s)%s\n' "$label" "$RED" "$NC" "$DIM" "$(fmt_dur "$dur")" "$NC"
+    STEP_RESULTS+=("fail"); STEP_NOTES+=("exit code $rc"); FAILED_COUNT=$((FAILED_COUNT + 1))
+
+    if [[ "$critical" == "critical" ]]; then
+        echo ""
+        echo "${RED}${BOLD}  Installation failed at step ${STEP_NO}: ${title}${NC}"
+        echo "${DIM}  Last lines of ${INSTALL_LOG}:${NC}"
+        echo ""
+        tail -n 25 "$INSTALL_LOG" | sed 's/^/    /'
+        echo ""
+        echo "  Full log: ${BOLD}${INSTALL_LOG}${NC}"
+        echo "  Re-running the installer is safe — completed steps are skipped or repeated idempotently."
+        echo ""
+        exit 1
+    fi
+    printf '           %s%s%s\n' "$YELLOW" "continuing — this component will be unavailable" "$NC"
+    return 0
+}
+run_step()      { _run_step critical "$@"; }
+run_soft_step() { _run_step soft "$@"; }
+
 show_banner() {
-    echo -e "${CYAN}"
-    echo "  ╔══════════════════════════════════════════════════╗"
-    echo "  ║        ZenPlus Network Monitoring System         ║"
-    echo "  ║        Full-Stack Installer v2.0                 ║"
-    echo "  ╚══════════════════════════════════════════════════╝"
-    echo -e "${NC}"
+    echo ""
+    echo "${CYAN}${BOLD}  ╔══════════════════════════════════════════════════════════╗${NC}"
+    echo "${CYAN}${BOLD}  ║   ZenPlus — Network Monitoring Appliance                  ║${NC}"
+    echo "${CYAN}${BOLD}  ║   Automated Installer                                    ║${NC}"
+    echo "${CYAN}${BOLD}  ╚══════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo "  ${DIM}Host      ${NC}$(hostname) ${DIM}($(get_ip 2>/dev/null || echo 'no address'))${NC}"
+    echo "  ${DIM}Source    ${NC}${ZENPLUS_REPO##*/} ${DIM}branch${NC} ${ZENPLUS_BRANCH}"
+    echo "  ${DIM}Target    ${NC}${ZENPLUS_HOME}"
+    echo "  ${DIM}Log       ${NC}${INSTALL_LOG}"
+    echo ""
+    echo "  ${DIM}This takes 8–15 minutes on a fresh server. Safe to re-run.${NC}"
+    echo ""
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Preflight: fail fast on hosts that cannot run the appliance
+# ═══════════════════════════════════════════════════════════════
+# Every check here is cheap and happens before anything is written, so an
+# unsuitable host is rejected in seconds rather than 10 minutes into a build.
+preflight_checks() {
+    step "Validating host"
+    local fatal=0
+
+    # --- OS family and release ---
+    if [[ ! -r /etc/os-release ]]; then
+        echo "[fail] /etc/os-release missing — cannot identify the operating system"
+        fatal=1
+    else
+        . /etc/os-release
+        info "Detected: ${PRETTY_NAME:-unknown}"
+        case "${ID:-}" in
+            ubuntu)
+                local major="${VERSION_ID%%.*}"
+                if (( major < 20 )); then
+                    echo "[fail] Ubuntu ${VERSION_ID} is not supported — 20.04 LTS or newer required"
+                    fatal=1
+                elif [[ "$VERSION_ID" != "20.04" && "$VERSION_ID" != "22.04" && "$VERSION_ID" != "24.04" ]]; then
+                    warn "Ubuntu ${VERSION_ID} is untested; 22.04 or 24.04 LTS recommended"
+                fi
+                ;;
+            debian) warn "Debian ${VERSION_ID:-?} is untested — Ubuntu LTS is the supported platform" ;;
+            *)
+                echo "[fail] ${PRETTY_NAME:-this OS} is not supported — Ubuntu 20.04/22.04/24.04 LTS required"
+                fatal=1
+                ;;
+        esac
+    fi
+
+    # --- CPU architecture ---
+    local arch; arch=$(dpkg --print-architecture 2>/dev/null || uname -m)
+    if [[ "$arch" != "amd64" && "$arch" != "x86_64" ]]; then
+        echo "[fail] Architecture '${arch}' is not supported — x86_64/amd64 required"
+        fatal=1
+    else
+        info "Architecture: ${arch}"
+    fi
+
+    # --- Memory ---
+    local ram_mb; ram_mb=$(( $(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0) / 1024 ))
+    if (( ram_mb > 0 && ram_mb < MIN_RAM_MB )); then
+        echo "[fail] ${ram_mb} MB RAM detected — at least ${MIN_RAM_MB} MB (4 GB) required"
+        echo "       ClickHouse and the build toolchain will fail or thrash below this."
+        fatal=1
+    else
+        info "Memory: ${ram_mb} MB"
+    fi
+
+    # --- Disk on the target filesystem ---
+    local target_fs="$ZENPLUS_HOME"
+    [[ -d "$target_fs" ]] || target_fs="$(dirname "$ZENPLUS_HOME")"
+    local free_gb; free_gb=$(df -BG --output=avail "$target_fs" 2>/dev/null | tail -1 | tr -dc '0-9')
+    if [[ -n "$free_gb" ]] && (( free_gb < MIN_DISK_GB )); then
+        echo "[fail] ${free_gb} GB free on ${target_fs} — at least ${MIN_DISK_GB} GB required"
+        fatal=1
+    else
+        info "Disk free: ${free_gb:-unknown} GB on ${target_fs}"
+    fi
+
+    # --- Port availability (only flag ports not already ours) ---
+    local busy=""
+    for port in 80 8000 5432 6379 8123 9000; do
+        if ss -ltnH "sport = :$port" 2>/dev/null | grep -q .; then
+            local owner; owner=$(ss -ltnpH "sport = :$port" 2>/dev/null | grep -oP 'users:\(\("\K[^"]+' | head -1)
+            case "$owner" in
+                nginx|postgres|redis-server|docker-proxy|python3|uvicorn|clickhouse*) : ;;
+                *) busy="${busy}${busy:+, }${port}${owner:+ ($owner)}" ;;
+            esac
+        fi
+    done
+    [[ -n "$busy" ]] && warn "Ports already in use by other software: ${busy}"
+
+    # --- Outbound reachability for the things we must download ---
+    local unreachable=""
+    for host in github.com go.dev deb.nodesource.com download.docker.com; do
+        curl -fsS --max-time 8 -o /dev/null "https://${host}" 2>/dev/null || \
+            unreachable="${unreachable}${unreachable:+, }${host}"
+    done
+    if [[ -n "$unreachable" ]]; then
+        echo "[fail] Cannot reach: ${unreachable}"
+        echo "       The installer downloads Docker, Go, Node.js and the application source."
+        echo "       Configure DNS/proxy/firewall egress, then re-run."
+        fatal=1
+    else
+        info "Outbound HTTPS reachable"
+    fi
+
+    if (( fatal )); then
+        echo "[fail] Host does not meet the requirements above"
+        return 1
+    fi
+    log "Host validated"
+    return 0
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -142,27 +383,43 @@ setup_user() {
 fetch_code() {
     step "Fetching ZenPlus source code"
     if [[ -d "$ZENPLUS_HOME/.git" ]]; then
-        info "Pulling latest changes..."
-        cd "$ZENPLUS_HOME"
+        info "Existing checkout found — updating in place"
+        cd "$ZENPLUS_HOME" || { echo "[fail] cannot enter $ZENPLUS_HOME"; return 1; }
         mark_git_safe
-        git fetch origin && git reset --hard "origin/$ZENPLUS_BRANCH"
-        log "Updated to $(git rev-parse --short HEAD)"
+        git fetch origin || { echo "[fail] git fetch failed — check network access to $ZENPLUS_REPO"; return 1; }
+        git reset --hard "origin/$ZENPLUS_BRANCH" || { echo "[fail] cannot reset to origin/$ZENPLUS_BRANCH"; return 1; }
     else
-        info "Cloning repository..."
-        ENV_BACKUP=""
-        [[ -f "$ZENPLUS_HOME/.env" ]] && ENV_BACKUP=$(cat "$ZENPLUS_HOME/.env")
-        for dir in data logs backups bin; do
-            [[ -d "$ZENPLUS_HOME/$dir" ]] && mv "$ZENPLUS_HOME/$dir" "/tmp/zenplus-save-$dir" 2>/dev/null || true
-        done
-        rm -rf "$ZENPLUS_HOME"
-        git clone -b "$ZENPLUS_BRANCH" "$ZENPLUS_REPO" "$ZENPLUS_HOME"
-        for dir in data logs backups bin; do
-            [[ -d "/tmp/zenplus-save-$dir" ]] && mv "/tmp/zenplus-save-$dir" "$ZENPLUS_HOME/$dir"
-        done
+        # Clone into a staging path and move it in. The previous implementation
+        # did `rm -rf $ZENPLUS_HOME` first, which destroyed venv/, updater keys
+        # and OTA registration on any appliance whose .git had gone missing —
+        # and left the box unrecoverable if the clone then failed.
+        info "Cloning $ZENPLUS_REPO ($ZENPLUS_BRANCH)"
+        local staging; staging=$(mktemp -d /tmp/zenplus-clone-XXXXXX)
+        if ! git clone --depth 1 -b "$ZENPLUS_BRANCH" "$ZENPLUS_REPO" "$staging/repo"; then
+            rm -rf "$staging"
+            echo "[fail] git clone failed — check network access to $ZENPLUS_REPO"
+            return 1
+        fi
+        mkdir -p "$ZENPLUS_HOME"
+        # Copy the tree over the existing home, preserving runtime state
+        # (.env, data/, logs/, backups/, venv/, updater/config, artifacts/).
+        cp -a "$staging/repo/." "$ZENPLUS_HOME/"
+        rm -rf "$staging"
         mkdir -p "$ZENPLUS_HOME"/{data,logs,backups,bin}
-        [[ -n "$ENV_BACKUP" ]] && echo "$ENV_BACKUP" > "$ZENPLUS_HOME/.env"
-        log "Cloned version $(cd "$ZENPLUS_HOME" && git rev-parse --short HEAD)"
+        cd "$ZENPLUS_HOME" || return 1
+        mark_git_safe
     fi
+
+    local sha ver
+    sha=$(git -C "$ZENPLUS_HOME" rev-parse --short HEAD 2>/dev/null || echo unknown)
+    ver=$(head -1 "$ZENPLUS_VERSION_FILE" 2>/dev/null || echo unknown)
+    info "Source at ${sha} (version ${ver})"
+    # Surface the stale-branch trap loudly: if the branch we cloned does not
+    # carry a semantic version, OTA update matching upstream will not work.
+    if [[ ! "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        warn "branch '$ZENPLUS_BRANCH' has no semantic .version — OTA updates may not match"
+    fi
+    RESOLVED_VERSION="$ver"
     chown -R "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME"
     mark_git_safe
 }
@@ -238,29 +495,61 @@ setup_databases() {
     # Update password in case it changed
     su - postgres -c "psql -c \"ALTER USER zenplus WITH PASSWORD '$DB_PASSWORD'\"" 2>/dev/null
 
-    # Run Postgres migrations only — skip the ClickHouse-targeted ones,
-    # which use MergeTree syntax that psql can't parse.
-    for migration in "$ZENPLUS_HOME"/scripts/init-postgres.sql "$ZENPLUS_HOME"/scripts/seed-devices.sql "$ZENPLUS_HOME"/scripts/migrate-*.sql; do
-        [[ -f "$migration" ]] || continue
-        case "$(basename "$migration")" in
-            *clickhouse*) continue ;;
-        esac
-        info "Running $(basename "$migration")..."
-        su - postgres -c "psql -d zenplus -f '$migration'" 2>/dev/null || true
+    # Base schema first: these two are not migrations and are not tracked.
+    for base in init-postgres.sql seed-devices.sql; do
+        [[ -f "$ZENPLUS_HOME/scripts/$base" ]] || continue
+        info "Running $base..."
+        runuser -u postgres -- psql -q -d zenplus -f "$ZENPLUS_HOME/scripts/$base" >/dev/null 2>&1 || true
     done
+
+    # Migrations go through the tracked runner — the single authoritative path,
+    # the same one the OTA updater uses.
+    #
+    # This used to be a blind `psql -f` loop over migrate-*.sql with errors
+    # discarded, which recorded nothing in the ledger. The tracked runner then
+    # ran a second time over an already-migrated database and re-applied every
+    # migration it could not probe, and the ones that rebuild
+    # alert_rules_metric_check failed against rows the later migrations had just
+    # inserted — leaving a fresh appliance reporting "schema does not match the
+    # installed version" on day one. Applying each migration exactly once, in
+    # lockfile order, cannot produce that.
+    info "Applying migrations via the tracked runner..."
+    if runuser -u postgres -- python3 "$ZENPLUS_HOME/scripts/run-migrations.py" \
+            --scripts-dir "$ZENPLUS_HOME/scripts"; then
+        log "Migrations applied and recorded"
+    else
+        warn "migration runner reported problems — see $ZENPLUS_HOME/.schema-status.json"
+    fi
 
     # Grant permissions
     su - postgres -c "psql -d zenplus -c 'GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO zenplus; GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO zenplus; ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO zenplus; ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO zenplus;'" 2>/dev/null
     log "PostgreSQL configured"
 
-    # Set admin password
-    ADMIN_HASH=$("$ZENPLUS_HOME/venv/bin/python3" -c "
+    # Repair the admin password hash only when it is missing or corrupt.
+    # Historically this ran unconditionally, which silently reset a customer's
+    # chosen password back to admin123 on every re-run of the installer.
+    local stored
+    stored=$(runuser -u postgres -- psql -d zenplus -tAc \
+        "SELECT COALESCE(password_hash,'') FROM users WHERE username='admin';" 2>/dev/null | head -1)
+    if [[ -z "$stored" ]]; then
+        info "No admin user row found — init-postgres.sql seeds it; skipping hash repair"
+    elif [[ "$stored" == '$2'*'$'* ]]; then
+        ADMIN_PASSWORD_IS_DEFAULT=$( [[ "$stored" == '$2b$12$vjHI8XBgL.dCyn.sgl41VufIFkQGcEzjt78GJdB66AwG9e9MZasai' ]] && echo yes || echo no )
+        info "Admin password hash present and well-formed — left untouched"
+    else
+        # A malformed hash makes every login return HTTP 500 (passlib
+        # UnknownHashError). Rewrite it via runuser so the shell cannot expand
+        # the '$2b$' prefix, which is what corrupted it in the first place.
+        warn "admin password hash was corrupt — reset to the default 'admin123'"
+        ADMIN_HASH=$("$ZENPLUS_HOME/venv/bin/python3" -c "
 from passlib.context import CryptContext
 print(CryptContext(schemes=['bcrypt'], deprecated='auto').hash('admin123'))
 " 2>/dev/null || echo "")
-    if [[ -n "$ADMIN_HASH" ]]; then
-        runuser -u postgres -- psql -d zenplus -c "UPDATE users SET password_hash = '$ADMIN_HASH' WHERE username = 'admin';" >/dev/null 2>&1
-        log "Admin password set (admin123)"
+        if [[ -n "$ADMIN_HASH" ]]; then
+            runuser -u postgres -- psql -d zenplus -c \
+                "UPDATE users SET password_hash = '$ADMIN_HASH', is_active = true WHERE username = 'admin';" >/dev/null 2>&1
+            ADMIN_PASSWORD_IS_DEFAULT=yes
+        fi
     fi
 
     # --- Redis ---
@@ -303,6 +592,90 @@ CREATE TABLE IF NOT EXISTS zenplus.service_metrics_5m (service_check_id UUID, de
 CREATE TABLE IF NOT EXISTS zenplus.service_status_log (service_check_id UUID, device_id Nullable(UUID), timestamp DateTime64(3, 'UTC'), check_type LowCardinality(String), old_status String, new_status String, reason String, duration_sec UInt64) ENGINE = MergeTree() PARTITION BY toYYYYMM(timestamp) ORDER BY (service_check_id, timestamp) TTL toDateTime(timestamp) + INTERVAL 365 DAY DELETE;
 CHSQL
     log "ClickHouse configured"
+
+    # Seed the migration ledgers. The loops above apply every migration but
+    # record nothing, so without this a freshly installed appliance looks
+    # untracked to the first OTA update. sync-schema.py probes what actually
+    # exists and baselines accordingly, then applies anything genuinely
+    # missing. Non-fatal: a fresh install must not abort here, and the same
+    # script runs again on the first update.
+    if [[ -x "$ZENPLUS_HOME/scripts/sync-schema.py" ]]; then
+        info "Recording applied migrations..."
+        CLICKHOUSE_PASSWORD="$CH_PASSWORD" \
+            python3 "$ZENPLUS_HOME/scripts/sync-schema.py" \
+            --scripts-dir "$ZENPLUS_HOME/scripts" \
+            && log "Migration ledgers seeded" \
+            || warn "Schema ledger incomplete — see $ZENPLUS_HOME/.schema-status.json"
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Trial licence
+# ═══════════════════════════════════════════════════════════════
+# The API lazily creates a 30-day trial the first time someone opens the
+# Subscription page, but that leaves a brand-new appliance reporting no plan
+# at all until then. Seed the row here so the appliance is licensed the
+# moment it boots, and so `zenplus status` can show the trial immediately.
+#
+# This is deliberately local: license keys are issued by zentryc.com and are
+# single-use, so there is no API an appliance can call to mint its own trial.
+# The trial gates nothing — it is the evaluation entitlement, and a key is
+# only needed to unlock OTA updates.
+seed_trial_licence() {
+    step "Provisioning trial licence"
+
+    if ! runuser -u postgres -- psql -d zenplus -tAc \
+        "SELECT to_regclass('public.subscriptions');" 2>/dev/null | grep -q subscriptions; then
+        warn "subscriptions table missing — the API will create a trial on first use"
+        return 0
+    fi
+
+    local existing
+    existing=$(runuser -u postgres -- psql -d zenplus -tAc \
+        "SELECT count(*) FROM subscriptions;" 2>/dev/null | tr -dc '0-9')
+    if [[ "${existing:-0}" != "0" ]]; then
+        local plan expires
+        plan=$(runuser -u postgres -- psql -d zenplus -tAc \
+            "SELECT plan FROM subscriptions ORDER BY created_at DESC LIMIT 1;" 2>/dev/null | tr -d ' ')
+        expires=$(runuser -u postgres -- psql -d zenplus -tAc \
+            "SELECT to_char(expires_at,'YYYY-MM-DD') FROM subscriptions ORDER BY created_at DESC LIMIT 1;" 2>/dev/null | tr -d ' ')
+        info "Existing subscription preserved: plan=${plan:-?} expires=${expires:-?}"
+        LICENCE_PLAN="${plan:-unknown}"; LICENCE_EXPIRES="${expires:-unknown}"
+        return 0
+    fi
+
+    runuser -u postgres -- psql -d zenplus -v ON_ERROR_STOP=1 -c \
+        "INSERT INTO subscriptions (plan, status, started_at, expires_at,
+                                    max_devices, max_service_checks, max_users,
+                                    license_key, activated_by)
+         VALUES ('trial', 'active', now(), now() + INTERVAL '${TRIAL_DAYS} days',
+                 ${TRIAL_MAX_DEVICES}, ${TRIAL_MAX_CHECKS}, ${TRIAL_MAX_USERS}, NULL, 'installer');" \
+        >/dev/null || { echo "[fail] could not seed the trial subscription"; return 1; }
+
+    runuser -u postgres -- psql -d zenplus -c \
+        "GRANT ALL ON subscriptions TO zenplus;" >/dev/null 2>&1 || true
+
+    LICENCE_PLAN="trial"
+    LICENCE_EXPIRES=$(date -u -d "+${TRIAL_DAYS} days" +%Y-%m-%d 2>/dev/null || echo "+${TRIAL_DAYS}d")
+    log "Trial licence active for ${TRIAL_DAYS} days (${TRIAL_MAX_DEVICES} devices, ${TRIAL_MAX_CHECKS} service checks, ${TRIAL_MAX_USERS} users)"
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Security hardening helpers
+# ═══════════════════════════════════════════════════════════════
+# Installs the root-owned TLS helper + sudoers grant that back
+# Settings → General → Security. Without this the Security tab cannot install
+# certificates or switch the appliance to HTTPS.
+setup_security_hardening() {
+    step "Installing TLS/security helpers"
+    if [[ -f "$ZENPLUS_HOME/scripts/setup-security.sh" ]]; then
+        bash "$ZENPLUS_HOME/scripts/setup-security.sh" || {
+            echo "[fail] setup-security.sh failed"; return 1; }
+        log "TLS certificate store and privileged helper installed"
+    else
+        warn "scripts/setup-security.sh missing — Settings → Security will be unavailable"
+    fi
+    return 0
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -498,6 +871,21 @@ server {
         proxy_read_timeout 86400;
     }
 
+    # OTLP ingest lives at the appliance ROOT (/v1/traces) per the OTel
+    # endpoint convention, not under /api/. Without this location an
+    # instrumented app POSTing traces gets the SPA's index.html back.
+    location /v1/ {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_cache off;
+        client_max_body_size 32m;
+        proxy_read_timeout 120s;
+    }
+
     location ~* \.(js|css|png|jpg|ico|svg|woff2?)$ {
         expires 30d;
         add_header Cache-Control "public, no-transform";
@@ -638,6 +1026,18 @@ SUDOEOF
         rm -f /etc/sudoers.d/zenplus-updater
     fi
 
+    # Storage management (Settings -> Storage): root-owned helper scripts,
+    # sudoers grant, backup dirs, and the ClickHouse backups-disk config.
+    # Same script the OTA updater runs as a hook, so fresh installs and
+    # updated appliances converge on an identical layout.
+    if [ -f /opt/zenplus/scripts/setup-storage.sh ]; then
+        if bash /opt/zenplus/scripts/setup-storage.sh; then
+            log "Storage management configured"
+        else
+            warn "storage management setup failed — Settings > Storage will be limited"
+        fi
+    fi
+
     # Reload + enable + arm the timer.
     systemctl daemon-reload
     systemctl enable zenplus-updater.timer 2>/dev/null || true
@@ -662,7 +1062,7 @@ setup_support_bundles() {
     if [[ -x "$ZENPLUS_HOME/scripts/setup-support.sh" ]]; then
         bash "$ZENPLUS_HOME/scripts/setup-support.sh"
     else
-        echo "  ! setup-support.sh missing — skipping"
+        warn "setup-support.sh missing — Settings → Support will be unavailable"
     fi
 }
 
@@ -680,10 +1080,20 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC
 get_ip() { ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1; }
 
 run_migrations() {
-    # Apply any pending migrate-*.sql files. Postgres migrations are
-    # expected to be idempotent (CREATE TABLE IF NOT EXISTS, etc.).
+    # Converge both databases through the same tracked path the OTA updater
+    # uses, so an appliance updated by hand and one updated over the air end up
+    # with identical schema. The old loop re-ran every file blind and discarded
+    # every error, which recorded nothing and hid failures.
     set +e
     [[ -f "$ZENPLUS_HOME/.env" ]] && set -a && . "$ZENPLUS_HOME/.env" && set +a
+    if [[ -x "$ZENPLUS_HOME/scripts/sync-schema.py" ]]; then
+        python3 "$ZENPLUS_HOME/scripts/sync-schema.py" --scripts-dir "$ZENPLUS_HOME/scripts"
+        local rc=$?
+        [[ $rc -eq 0 ]] || echo -e "${YELLOW}  Schema drift remains — see $ZENPLUS_HOME/.schema-status.json${NC}"
+        return $rc
+    fi
+
+    # Fallback for an appliance that predates sync-schema.py.
     for sql in "$ZENPLUS_HOME"/scripts/migrate-*.sql; do
         [[ -f "$sql" ]] || continue
         case "$(basename "$sql")" in *clickhouse*) continue ;; esac
@@ -781,13 +1191,23 @@ EOF
         echo "  building dashboard..."
         ( cd "$ZENPLUS_HOME/dashboard" && npm install --silent 2>/dev/null && npx vite build 2>/dev/null )
         echo "  running migrations..."
-        run_migrations
+        MIGRATION_RC=0
+        run_migrations || MIGRATION_RC=$?
         echo "  reloading systemd..."
         reinstall_units
         chown -R "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME" 2>/dev/null
         echo "  restarting services..."
         systemctl restart zenplus-api zenplus-poller nginx
         systemctl restart zenplus-updater.timer 2>/dev/null || true
+        # Stamp the version only if the schema actually matches this code. A
+        # version marker that outruns the schema is what made two appliances
+        # reporting the same version behave differently.
+        if [[ $MIGRATION_RC -ne 0 ]]; then
+            echo -e "${RED}Schema drift — version not stamped. Code is at $NEW, schema is not.${NC}"
+            echo -e "${YELLOW}Details: $ZENPLUS_HOME/.schema-status.json${NC}"
+            echo -e "${YELLOW}Re-run after fixing: zenplus update${NC}"
+            exit 1
+        fi
         echo "$NEW" > "$ZENPLUS_HOME/.version"
         date -Iseconds >> "$ZENPLUS_HOME/.version"
         echo -e "${GREEN}Updated to $NEW${NC}"
@@ -810,43 +1230,137 @@ CLIEOF
 # ═══════════════════════════════════════════════════════════════
 finalize() {
     step "Finalizing installation"
-    cd "$ZENPLUS_HOME"
-    echo "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" > "$ZENPLUS_VERSION_FILE"
-    echo "$(date -Iseconds)" >> "$ZENPLUS_VERSION_FILE"
-    chown -R "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME"
+    cd "$ZENPLUS_HOME" || return 1
 
-    local IP=$(get_ip)
-    info "Waiting for API..."
-    local retries=15
-    while [[ $retries -gt 0 ]]; do
-        curl -sf http://localhost:8000/api/v1/system/health > /dev/null 2>&1 && break
+    # Stamp the semantic version, NOT a git SHA. updater/inventory.py sends
+    # line 1 of this file to zentryc.com as current_version, and the release
+    # server matches on semver — a SHA here silently breaks OTA matching.
+    local ver
+    ver=$(git show HEAD:.version 2>/dev/null | head -1)
+    [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || ver="${RESOLVED_VERSION:-0.0.0}"
+    {
+        echo "$ver"
+        date -Iseconds
+    } > "$ZENPLUS_VERSION_FILE"
+    RESOLVED_VERSION="$ver"
+    chown -R "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME"
+    log "Version stamped: $ver"
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Verification — assert the appliance actually came up
+# ═══════════════════════════════════════════════════════════════
+# The installer previously printed "Installation Complete!" regardless of
+# whether anything worked. This step fails loudly instead.
+verify_installation() {
+    step "Verifying appliance health"
+    local failures=0
+
+    info "Waiting for the API to answer..."
+    local retries=30 up=0
+    while (( retries > 0 )); do
+        if curl -sf --max-time 5 http://127.0.0.1:8000/api/v1/system/health >/dev/null 2>&1; then
+            up=1; break
+        fi
         sleep 2; retries=$((retries - 1))
     done
+    if (( up )); then log "API healthy on :8000"; else
+        echo "[fail] API did not become healthy — journalctl -u zenplus-api -n 100"
+        failures=$((failures + 1))
+    fi
+
+    # Dashboard must be served by nginx, not just built.
+    if curl -sfI --max-time 5 http://127.0.0.1/ >/dev/null 2>&1; then
+        log "Dashboard served on :80"
+    else
+        echo "[fail] nginx is not serving the dashboard on port 80"
+        failures=$((failures + 1))
+    fi
+
+    for unit in zenplus-api zenplus-poller nginx postgresql redis-server; do
+        if systemctl is-active --quiet "$unit"; then
+            log "service active: $unit"
+        else
+            warn "service not active: $unit"
+        fi
+    done
+
+    if docker ps --filter name=zenplus-clickhouse --format '{{.Status}}' 2>/dev/null | grep -qi up; then
+        log "ClickHouse container up"
+    else
+        warn "ClickHouse container is not running — metrics history will be unavailable"
+    fi
+
+    (( failures == 0 )) || { echo "[fail] ${failures} core check(s) failed"; return 1; }
+    return 0
+}
+
+# ═══════════════════════════════════════════════════════════════
+# Completion report
+# ═══════════════════════════════════════════════════════════════
+print_summary() {
+    local ip; ip=$(get_ip)
+    local total=$((SECONDS - INSTALL_STARTED))
+    local i
 
     echo ""
-    echo -e "${GREEN}${BOLD}"
-    echo "  ╔══════════════════════════════════════════════════╗"
-    echo "  ║        ZenPlus Installation Complete!            ║"
-    echo "  ╚══════════════════════════════════════════════════╝"
-    echo -e "${NC}"
-    echo -e "  ${BOLD}Dashboard:${NC}  http://${IP}"
-    echo -e "  ${BOLD}API Docs:${NC}   http://${IP}/docs"
-    echo -e "  ${BOLD}Login:${NC}      admin / admin123"
+    echo "  ${BOLD}Installation summary${NC}"
+    echo "  ${DIM}──────────────────────────────────────────────────────────${NC}"
+    for i in "${!STEP_TITLES[@]}"; do
+        local mark colour
+        case "${STEP_RESULTS[$i]}" in
+            ok)   mark="✓"; colour="$GREEN"  ;;
+            warn) mark="!"; colour="$YELLOW" ;;
+            *)    mark="✗"; colour="$RED"    ;;
+        esac
+        printf '   %s%s%s  %-44s%s%s\n' "$colour" "$mark" "$NC" "${STEP_TITLES[$i]}" \
+            "$DIM" "${STEP_NOTES[$i]:+${STEP_NOTES[$i]}}${NC}"
+    done
+    echo "  ${DIM}──────────────────────────────────────────────────────────${NC}"
+    printf '   %d steps · %d warning(s) · completed in %s\n' \
+        "${#STEP_TITLES[@]}" "$WARNED_COUNT" "$(fmt_dur "$total")"
+
     echo ""
-    echo -e "  ${BOLD}Features:${NC}"
-    echo -e "    - Device Monitoring (ICMP Ping)"
-    echo -e "    - Service Checks (HTTP, TCP, TLS/SSL)"
-    echo -e "    - Alert Rules & Notifications (Email, SMS, Webhook)"
-    echo -e "    - PDF Reporting System"
-    echo -e "    - Real-time Dashboard with SSE"
+    if (( FAILED_COUNT > 0 )); then
+        echo "  ${YELLOW}${BOLD}Appliance installed with ${FAILED_COUNT} degraded component(s).${NC}"
+    else
+        echo "  ${GREEN}${BOLD}✓ ZenPlus ${RESOLVED_VERSION:-} is installed and running.${NC}"
+    fi
     echo ""
-    echo -e "  ${BOLD}Management:${NC}"
-    echo -e "    sudo zenplus status     Show status"
-    echo -e "    sudo zenplus update     Update to latest"
-    echo -e "    sudo zenplus restart    Restart services"
-    echo -e "    sudo zenplus logs api   View API logs"
+    echo "  ${BOLD}Access${NC}"
+    echo "    Dashboard    ${BOLD}http://${ip}${NC}"
+    echo "    API docs     http://${ip}/docs"
+    if [[ "${ADMIN_PASSWORD_IS_DEFAULT:-yes}" == "yes" ]]; then
+        echo "    Sign in      ${BOLD}admin${NC} / ${BOLD}admin123${NC}   ${YELLOW}(change this immediately)${NC}"
+    else
+        echo "    Sign in      ${BOLD}admin${NC} / ${DIM}(your existing password — unchanged)${NC}"
+    fi
     echo ""
-    echo -e "  ${YELLOW}Change the default password after first login!${NC}"
+    echo "  ${BOLD}Licence${NC}"
+    if [[ "${LICENCE_PLAN:-}" == "trial" ]]; then
+        echo "    ${GREEN}Trial active${NC} — expires ${BOLD}${LICENCE_EXPIRES:-?}${NC}"
+        echo "    ${DIM}${TRIAL_MAX_DEVICES} devices · ${TRIAL_MAX_CHECKS} service checks · ${TRIAL_MAX_USERS} users${NC}"
+        echo "    ${DIM}All features are usable during the trial. A licence key is only${NC}"
+        echo "    ${DIM}required to receive over-the-air updates.${NC}"
+    else
+        echo "    Plan: ${LICENCE_PLAN:-unknown}${LICENCE_EXPIRES:+ (expires ${LICENCE_EXPIRES})}"
+    fi
+    echo ""
+    echo "  ${BOLD}Recommended next steps${NC}"
+    echo "    1. Sign in and change the admin password"
+    echo "    2. Enable HTTPS — Settings → General → Security"
+    echo "       ${DIM}(generate a self-signed certificate, or issue one from your CA)${NC}"
+    echo "    3. Register for updates — Settings → General → Licenses"
+    echo "       ${DIM}(paste the licence key supplied with your subscription)${NC}"
+    echo "    4. Add devices — Discovery, or Devices → Add Device"
+    echo ""
+    echo "  ${BOLD}Management${NC}"
+    echo "    sudo zenplus status      Service and registration status"
+    echo "    sudo zenplus update      Apply the latest release"
+    echo "    sudo zenplus restart     Restart all services"
+    echo "    sudo zenplus logs api    Tail the API log"
+    echo ""
+    echo "  ${DIM}Install log: ${INSTALL_LOG}${NC}"
     echo ""
 }
 
@@ -855,18 +1369,53 @@ finalize() {
 # ═══════════════════════════════════════════════════════════════
 main() {
     check_root
+
+    # Start a fresh log for this run; everything each step prints lands here.
+    : > "$INSTALL_LOG" 2>/dev/null || INSTALL_LOG=/tmp/zenplus-install.log
+    : > "$INSTALL_LOG"
+    chmod 0640 "$INSTALL_LOG" 2>/dev/null || true
+    echo "ZenPlus install started $(date -Iseconds)" >> "$INSTALL_LOG"
+
     show_banner
-    install_prerequisites
-    setup_user
-    fetch_code
-    configure_env
-    build_components
-    setup_databases
-    create_services
-    setup_updater
-    setup_support_bundles
-    create_cli
-    finalize
+
+    # Order note: build_components must precede setup_databases — the admin
+    # hash repair and the trial seed both need the Python venv it creates.
+    run_step      "Validating host"              preflight_checks
+    run_step      "Installing system packages"   install_prerequisites
+    run_step      "Creating service account"     setup_user
+    run_step      "Fetching application source"  fetch_code
+    run_step      "Generating configuration"     configure_env
+    run_step      "Building application"         build_components
+    run_step      "Initialising databases"       setup_databases
+    run_step      "Provisioning trial licence"   seed_trial_licence
+    run_step      "Configuring services"         create_services
+    run_soft_step "Installing TLS/security tools" setup_security_hardening
+    run_soft_step "Configuring OTA updater"      setup_updater
+    run_soft_step "Installing support tooling"   setup_support_bundles
+    run_step      "Installing management CLI"    create_cli
+    run_step      "Finalising installation"      finalize
+    run_step      "Verifying appliance health"   verify_installation
+    run_soft_step "Collecting system report"     collect_report
+
+    print_summary
+    (( FAILED_COUNT > 0 )) && exit 1
+    return 0
+}
+
+# A tiny post-install snapshot in the log, so a support bundle taken later
+# still shows what the box looked like the moment it was built.
+collect_report() {
+    step "Recording install report"
+    echo "--- versions ---"
+    cat "$ZENPLUS_VERSION_FILE" 2>/dev/null
+    git -C "$ZENPLUS_HOME" rev-parse HEAD 2>/dev/null
+    echo "--- services ---"
+    systemctl is-active zenplus-api zenplus-poller nginx postgresql redis-server 2>&1 | paste -sd' '
+    echo "--- containers ---"
+    docker ps --format '{{.Names}} {{.Status}}' 2>/dev/null
+    echo "--- disk ---"
+    df -h "$ZENPLUS_HOME" 2>/dev/null | tail -1
+    log "Report recorded"
 }
 
 main "$@"

@@ -132,7 +132,7 @@ The platform has **no application-observability primitives whatsoever**. The fol
 | Gap (absent today) | Evidence from audit | Closed by |
 |---|---|---|
 | **No distributed tracing / span data model** | No trace/span/parent_id schema in PG or CH anywhere; no waterfall UI primitive | `apm_spans` + `apm_traces_resource` CH tables; `TraceExplorerPage`/`TraceWaterfallPage` (F2 / AM-E2) |
-| **No OTLP receiver** | "No OTLP receiver at all (no opentelemetry/OTLP/gRPC anywhere in `server/app`)"; transport is agent-pull JSON batches | Go collector on 4317/4318 + FastAPI OTLP/HTTP fallback (F1 / AM-E1); see `05-…` |
+| **No OTLP receiver** *(closed 2026-06: `apm_ingest.py` now serves `POST /v1/traces`, OTLP/HTTP **JSON only** — gRPC/protobuf/metrics/logs still open, see 09 §2)* | ~~"No OTLP receiver at all"~~; transport was agent-pull JSON batches | Go collector on 4317/4318 + FastAPI OTLP/HTTP fallback (F1 / AM-E1); see `05-…` |
 | **No service map / topology** | No node-link graph component; `ManualMapsPage` is a bespoke canvas, not reusable; no dependency-edge store | `apm_service_graph` (SummingMergeTree, servicegraph connector) + `ServiceMapPage` (F4 / AM-E3) |
 | **No RUM** | No browser/mobile telemetry, no Core Web Vitals, no session model; no public origin-scoped ingest key | `apm_rum_events`/`apm_rum_vitals_5m` + public `zpr_` beacon `/api/v1/apm/rum/ingest` (F15 / AM-E10) |
 | **No continuous profiling** | No pprof storage, no span→flamegraph link; Playwright exists only as an MCP tool | `apm_profiles` + OTLP profiles endpoint `/v1development/profiles` (F18 / AM-E11) |

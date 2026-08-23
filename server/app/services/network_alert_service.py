@@ -33,7 +33,10 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services import alert_phrasing as ap
 from app.services.host_alert_service import dispatch_to_channels
+from app.services.tag_service import tag_set as _tag_set
+from app.services import alert_notify_state as ns
 
 logger = logging.getLogger("zenplus.network_alerts")
 
@@ -71,6 +74,19 @@ def _cmp(value: float, operator: str, threshold: float) -> bool:
 
 def _since(window_s: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(seconds=window_s)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+# SQL that is true for a sample which does NOT breach — the negation of each
+# operator. Used to find the most recent healthy sample, which is what dates
+# the start of a breach.
+_NOT_BREACH_SQL = {
+    "gt": "value <= %(t)s", ">": "value <= %(t)s",
+    "gte": "value < %(t)s", ">=": "value < %(t)s",
+    "lt": "value >= %(t)s", "<": "value >= %(t)s",
+    "lte": "value > %(t)s", "<=": "value > %(t)s",
+    "eq": "value != %(t)s", "==": "value != %(t)s",
+    "neq": "value = %(t)s", "!=": "value = %(t)s",
+}
 
 
 # ─── ClickHouse fetchers ────────────────────────────────────────────────────
@@ -113,38 +129,120 @@ def _if_fleet(window_s: int) -> dict[tuple[str, int], dict]:
     return out
 
 
-def _scalar_fleet(window_s: int) -> dict[str, dict]:
-    """{device_id: {cpu, memory, temperature, sessions}} aggregated over window."""
+def _scalar_hold(metric: str, operator: str, threshold: float,
+                 min_duration: int) -> dict[str, dict]:
+    """{device_id: {"value": latest, "held_s": seconds the breach has lasted}}.
+
+    "Condition must exist for N seconds" means exactly that: continuously true
+    for N seconds. Averaging the window instead (the previous behaviour) let a
+    single high sample drag the mean over the threshold and fire long before N
+    elapsed — with ~90s polling and a 300s hold, a spike from 89% to 100% fired
+    on the very first breaching poll.
+
+    So instead of a mean, this dates the breach from the most recent healthy
+    sample and lets the caller compare that age against min_duration. The
+    lookback runs well past the hold time so that sample is still visible; when
+    every sample in it breaches, the breach is at least as old as the oldest
+    sample we can see.
+    """
+    from app.core.database import get_clickhouse_client
+
+    not_breach = _NOT_BREACH_SQL.get((operator or "").strip())
+    if not not_breach:
+        return {}
+    # Far enough back to still see the last healthy sample, with a floor so
+    # short holds keep enough history to be meaningful.
+    lookback = max(min_duration * 3, 900)
+
+    try:
+        client = get_clickhouse_client()
+        rows = client.query(
+            f"""
+            SELECT device_id,
+                   argMax(value, timestamp) AS last_v,
+                   countIf({not_breach}) AS n_ok,
+                   dateDiff('second',
+                            if(countIf({not_breach}) = 0,
+                               min(timestamp),
+                               maxIf(timestamp, {not_breach})),
+                            now()) AS held_s
+            FROM zenplus.snmp_metrics
+            WHERE metric_key = %(m)s AND timestamp >= %(s)s
+            GROUP BY device_id
+            """,
+            parameters={"m": metric, "t": float(threshold), "s": _since(lookback)},
+        ).result_rows
+    except Exception as exc:
+        logger.warning("network alert: clickhouse hold query failed (%s): %s", metric, exc)
+        return {}
+
+    return {
+        str(r[0]): {"value": float(r[1] or 0), "held_s": int(r[3] or 0)}
+        for r in rows
+    }
+
+
+def _eval_scalar_hold(rule, entry: dict | None) -> tuple[bool, float, str] | None:
+    """Breach only once the condition has genuinely held for min_duration."""
+    if not entry:
+        return None
+    value = entry["value"]
+    breaching = _cmp(value, rule.operator, float(rule.threshold or 0))
+    if not breaching:
+        return False, value, ap.format_value(rule.metric, value)
+    hold = int(rule.min_duration or 0)
+    if entry["held_s"] < hold:
+        # Breaching, but not for long enough yet. Reported as not-breaching so
+        # an already-open alert still resolves when the condition clears.
+        return False, value, ap.format_value(rule.metric, value)
+    detail = ap.format_value(rule.metric, value)
+    if hold:
+        detail += f" for {ap.humanize_duration(entry['held_s'])}"
+    return True, value, detail
+
+
+def _tpl_fleet(window_s: int) -> dict[str, dict[str, float]]:
+    """{device_id: {series_key: latest_value}} for monitoring-template metrics
+    (series keys 'tpl_*', written by the poller's template collector)."""
     from app.core.database import get_clickhouse_client
 
     try:
         client = get_clickhouse_client()
         rows = client.query(
             """
-            SELECT device_id,
-                   avgIf(value, metric_key = 'cpu'),
-                   avgIf(value, metric_key = 'memory'),
-                   maxIf(value, metric_key LIKE 'temperature_%%'),
-                   argMaxIf(value, timestamp, metric_key = 'sessions')
+            SELECT device_id, metric_key, argMax(value, timestamp)
             FROM zenplus.snmp_metrics
-            WHERE timestamp >= %(s)s
-            GROUP BY device_id
+            WHERE metric_key LIKE 'tpl\\_%%' AND timestamp >= %(s)s
+            GROUP BY device_id, metric_key
             """,
             parameters={"s": _since(window_s)},
         ).result_rows
     except Exception as exc:
-        logger.warning("network alert: clickhouse scalar query failed: %s", exc)
+        logger.warning("network alert: clickhouse template query failed: %s", exc)
         return {}
 
-    out: dict[str, dict] = {}
+    out: dict[str, dict[str, float]] = {}
     for r in rows:
-        out[str(r[0])] = {
-            "cpu": (None if r[1] is None else float(r[1])),
-            "memory": (None if r[2] is None else float(r[2])),
-            "temperature": (None if r[3] is None else float(r[3])),
-            "session_count": (None if r[4] is None else float(r[4])),
-        }
+        out.setdefault(str(r[0]), {})[str(r[1])] = float(r[2] or 0)
     return out
+
+
+def _eval_template(rule, series: dict[str, float]) -> tuple[bool, float, str] | None:
+    """Evaluate a tpl_* rule for one device. A rule on 'tpl_fgt_tun_status'
+    matches the scalar series of that key AND every per-row instance series
+    ('tpl_fgt_tun_status_<inst>'); the rule breaches when ANY matching series
+    does — e.g. 'any tunnel down', 'any AP above 90% CPU'."""
+    key = rule.metric
+    matches = {k: v for k, v in series.items() if k == key or k.startswith(key + "_")}
+    if not matches:
+        return None
+    op, thr = rule.operator, float(rule.threshold or 0)
+    breaching = {k: v for k, v in matches.items() if _cmp(v, op, thr)}
+    if breaching:
+        pick = max if (op or "").strip() in ("gt", ">", "gte", ">=") else min
+        worst = pick(breaching.values())
+        return True, worst, f"{len(breaching)}/{len(matches)} series breach (worst {worst:g})"
+    return False, next(iter(matches.values())), f"0/{len(matches)} series breach"
 
 
 def _uptime_resets() -> set[str]:
@@ -173,9 +271,9 @@ def _uptime_resets() -> set[str]:
 # ─── Postgres fetchers ──────────────────────────────────────────────────────
 
 async def _snmp_devices(db: AsyncSession) -> dict[str, dict]:
-    """{device_id: {hostname, device_type, location, group_id}} for SNMP devices."""
+    """{device_id: {hostname, device_type, location, group_id, tags}} for SNMP devices."""
     rows = (await db.execute(text(
-        "SELECT id, hostname, device_type, location, group_id FROM devices "
+        "SELECT id, hostname, device_type, location, group_id, tags FROM devices "
         "WHERE snmp_enabled = true AND status <> 'maintenance'"
     ))).all()
     return {
@@ -184,6 +282,7 @@ async def _snmp_devices(db: AsyncSession) -> dict[str, dict]:
             "device_type": r[2],
             "location": r[3],
             "group_id": str(r[4]) if r[4] else None,
+            "tags": _tag_set(r[5]),
         }
         for r in rows
     }
@@ -218,6 +317,8 @@ def _device_in_scope(rule, dev_id: str, dev: dict) -> bool:
         return False
     if rule.location and (not dev["location"] or rule.location.lower() not in dev["location"].lower()):
         return False
+    if rule.scope_tag and rule.scope_tag.strip().lower() not in dev.get("tags", set()):
+        return False
     return True
 
 
@@ -236,30 +337,32 @@ def _iface_label(iface: dict) -> str:
 
 # ─── Alert raise / resolve (device-scoped rows in `alerts`) ──────────────────
 
-async def _active_alert_id(db: AsyncSession, rule_id, device_id: str, if_index):
+async def _active_alert(db: AsyncSession, rule_id, device_id: str, if_index):
+    """The open alert for this rule/device/interface: (id, triggered_at) or None."""
     row = (await db.execute(text(
-        "SELECT id FROM alerts "
+        "SELECT id, triggered_at FROM alerts "
         "WHERE rule_id = :rid AND device_id = :did AND status IN ('active','acknowledged') "
         "  AND COALESCE(metadata->>'if_index','') = :ifx "
         "ORDER BY triggered_at DESC LIMIT 1"
     ), {"rid": str(rule_id), "did": device_id, "ifx": "" if if_index is None else str(if_index)})).first()
-    return row[0] if row else None
+    return (row[0], row[1]) if row else None
 
 
 async def _raise(db: AsyncSession, rule, device_id: str, message: str,
-                 value: float, if_index, extra: dict) -> bool:
+                 value: float, if_index, extra: dict):
     now = datetime.now(timezone.utc)
     meta = {"rule_id": str(rule.id), "metric": rule.metric,
             "value": round(value, 2), "threshold": float(rule.threshold or 0)}
     if if_index is not None:
         meta["if_index"] = str(if_index)
     meta.update(extra)
-    await db.execute(text(
+    row = (await db.execute(text(
         "INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, metadata) "
-        "VALUES (:did, :rid, 'active', :sev, :msg, :ts, CAST(:meta AS jsonb))"
+        "VALUES (:did, :rid, 'active', :sev, :msg, :ts, CAST(:meta AS jsonb)) "
+        "RETURNING id"
     ), {"did": device_id, "rid": str(rule.id), "sev": rule.severity or "warning",
-        "msg": message, "ts": now, "meta": json.dumps(meta)})
-    return True
+        "msg": message, "ts": now, "meta": json.dumps(meta)})).first()
+    return row[0] if row else None
 
 
 async def _resolve(db: AsyncSession, alert_id) -> int:
@@ -301,46 +404,63 @@ def _eval_interface(rule, m: dict, iface: dict) -> tuple[bool, float, str] | Non
     return None
 
 
-def _eval_scalar(rule, vals: dict) -> tuple[bool, float, str] | None:
-    metric, op, thr = rule.metric, rule.operator, float(rule.threshold or 0)
-    v = vals.get(metric)
-    if v is None:
-        return None
-    if metric in ("cpu", "memory"):
-        return _cmp(v, op, thr), v, f"{v:.0f}%"
-    if metric == "temperature":
-        return _cmp(v, op, thr), v, f"{v:.0f}°"
-    if metric == "session_count":
-        return _cmp(v, op, thr), v, f"{int(v)} sessions"
-    return None
-
-
 def _message(rule, hostname: str, detail: str, iface_label: str | None) -> str:
     where = f"{hostname}" + (f" / {iface_label}" if iface_label else "")
     return f"{rule.name}: {where} — {detail}"
 
 
-async def _notify(db: AsyncSession, rule, hostname: str, message: str) -> None:
+async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
+                  iface_label: str | None = None, is_recovery: bool = False,
+                  duration: str = "") -> bool:
+    """Send one metric alert — or its all-clear. True when it was dispatched."""
     # Quiet hours: the alert row is already recorded; only the outbound
-    # notification is gated by the rule's schedule window.
+    # notification is gated by the rule's schedule window. A recovery notice is
+    # never suppressed, or an operator is left believing it is still breached.
     from app.services.alert_schedule import notifications_allowed, get_configured_timezone
     tz = await get_configured_timezone(db)
-    if not notifications_allowed(
+    if not is_recovery and not notifications_allowed(
         getattr(rule, "schedule_start", None), getattr(rule, "schedule_end", None),
         getattr(rule, "schedule_days", None), tz,
     ):
-        return
+        return False
     sev = (rule.severity or "warning")
+    # An interface rule is about the port, not the chassis, so the sentence
+    # names "core-router-01 / port14" and the details table repeats it.
+    where = f"{hostname} / {iface_label}" if iface_label else hostname
+    v = ap.rule_phrasing(rule, hostname=where, is_recovery=is_recovery,
+                         reading=reading, duration=duration)
+    v.update({"rule_name": rule.name or "Alert", "hostname": where,
+              "severity": sev.upper(),
+              "status": "RESOLVED" if is_recovery else "ALERT"})
+    body = _render(ap.DEFAULT_RECOVERY_EMAIL_BODY if is_recovery else ap.DEFAULT_EMAIL_BODY, v)
+    sms = _render(ap.DEFAULT_RECOVERY_SMS if is_recovery else ap.DEFAULT_SMS, v)
+    subject = _render(ap.DEFAULT_RECOVERY_EMAIL_SUBJECT if is_recovery
+                      else ap.DEFAULT_EMAIL_SUBJECT, v)
     await dispatch_to_channels(db, rule.notify_channels or [], {
-        "subject": f"[{sev.upper()}] {rule.name} — {hostname}",
-        "body": message, "message": message,
+        "subject": subject,
+        "body": body, "message": sms,
         "hostname": hostname, "ip_address": "",
-        "status": "ALERT", "severity": sev,
-        "details": [("Metric", rule.metric),
-                    ("Threshold", f"{rule.operator} {rule.threshold}")],
+        "status": "RESOLVED" if is_recovery else "ALERT", "severity": sev,
+        "resolved": is_recovery,
+        "rule_name": rule.name,
+        "headline_metric": {
+            "label": ap.metric_noun(rule.metric), "value": reading,
+            "secondary_label": "Threshold", "secondary_value": v.get("threshold_value"),
+        } if reading else None,
+        "details": [("Alert rule", rule.name),
+                    ("Interface", iface_label),
+                    ("Condition", v.get("condition_label")),
+                    ("Active for", duration if is_recovery else None)],
         "triggered_at": datetime.now(timezone.utc).isoformat(),
-        "rule_id": str(rule.id), "rule_name": rule.name,
+        "rule_id": str(rule.id),
     })
+    return True
+
+
+def _render(template: str, variables: dict) -> str:
+    for key, value in variables.items():
+        template = template.replace(f"{{{key}}}", str(value))
+    return template
 
 
 # ─── Main evaluation pass ────────────────────────────────────────────────────
@@ -349,9 +469,11 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
     metric_list = ",".join(f"'{m}'" for m in sorted(NETWORK_METRICS))
     rules = (await db.execute(text(
         f"SELECT id, name, metric, operator, threshold, severity, min_duration, "
-        f"notify_channels, device_id, group_id, device_type, location, target, "
+        f"notify_channels, device_id, group_id, device_type, location, scope_tag, target, "
+        f"recovery_alert, conditions, condition_logic, "
         f"schedule_start, schedule_end, schedule_days "
-        f"FROM alert_rules WHERE enabled = true AND metric IN ({metric_list})"
+        f"FROM alert_rules WHERE enabled = true "
+        f"AND (metric IN ({metric_list}) OR metric LIKE 'tpl\\_%')"
     ))).all()
     if not rules:
         return {"rules": 0, "raised": 0, "resolved": 0}
@@ -373,7 +495,18 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
     # Pre-fetch ClickHouse fleet data once per distinct window.
     windows = {max(r.min_duration or 0, DEFAULT_WINDOW_S) for r in rules}
     if_cache = {w: _if_fleet(w) for w in windows}
-    scalar_cache = {w: _scalar_fleet(w) for w in windows}
+    # Scalar rules are dated from their last healthy sample rather than
+    # averaged, so they cache per (metric, operator, threshold, hold) instead
+    # of per window — rules sharing all four share one query.
+    hold_cache: dict[tuple, dict[str, dict]] = {}
+    for r in rules:
+        if r.metric not in SCALAR_METRICS:
+            continue
+        key = (r.metric, (r.operator or "").strip(), float(r.threshold or 0), int(r.min_duration or 0))
+        if key not in hold_cache:
+            hold_cache[key] = _scalar_hold(*key)
+    has_tpl = any(r.metric.startswith("tpl_") for r in rules)
+    tpl_cache = {w: _tpl_fleet(w) for w in windows} if has_tpl else {}
     uptime_reset_ids = _uptime_resets() if any(r.metric == "uptime_reset" for r in rules) else set()
 
     raised = resolved = 0
@@ -406,7 +539,11 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
         # Device-scalar / special metrics — one value per device.
         for did, dev in in_scope:
             if rule.metric in SCALAR_METRICS:
-                res = _eval_scalar(rule, scalar_cache[window].get(did, {}))
+                key = (rule.metric, (rule.operator or "").strip(),
+                       float(rule.threshold or 0), int(rule.min_duration or 0))
+                res = _eval_scalar_hold(rule, hold_cache.get(key, {}).get(did))
+            elif rule.metric.startswith("tpl_"):
+                res = _eval_template(rule, tpl_cache.get(window, {}).get(did, {}))
             elif rule.metric == "uptime_reset":
                 is_reset = did in uptime_reset_ids
                 res = (_cmp(1.0 if is_reset else 0.0, rule.operator, float(rule.threshold or 0)),
@@ -433,7 +570,8 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
                  breach, value, detail, extra, raised, resolved,
                  silences: set[tuple[str, str]] | None = None):
     """Raise (if breaching and not already open) or resolve one rule/device/iface."""
-    existing = await _active_alert_id(db, rule.id, device_id, if_index)
+    existing = await _active_alert(db, rule.id, device_id, if_index)
+    reading = ap.format_value(rule.metric, value)
     if breach:
         # An active snooze suppresses re-raising this exact condition; the
         # resolve branch below still runs so a snoozed condition that clears
@@ -443,13 +581,34 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
             return raised, resolved
         if existing is None:
             msg = _message(rule, hostname, detail, iface_label)
-            if await _raise(db, rule, device_id, msg, value, if_index, extra):
+            alert_id = await _raise(db, rule, device_id, msg, value, if_index, extra)
+            if alert_id is not None:
                 raised += 1
                 await db.commit()
-                await _notify(db, rule, hostname, msg)
+                sent = await _notify(db, rule, hostname, reading=reading, iface_label=iface_label)
+                await ns.stamp(db, alert_id, sent)
+                await db.commit()
+        elif await ns.is_pending(db, existing[0]):
+            # The trigger was suppressed by quiet hours and the condition is
+            # still breaching. Without this the breach is never announced at
+            # all: the alert row already exists, so the branch above never
+            # runs again, and the only mail ever sent is the all-clear.
+            if await _notify(db, rule, hostname, reading=reading, iface_label=iface_label):
+                await ns.stamp(db, existing[0], True)
+                await db.commit()
     else:
         if existing is not None:
-            resolved += await _resolve(db, existing)
+            alert_id, started_at = existing
+            # An all-clear for a page nobody received is noise about an event
+            # they never heard of, so it follows the trigger's fate.
+            notified = await ns.was_notified(db, alert_id)
+            resolved += await _resolve(db, alert_id)
+            await db.commit()
+            # Metric rules used to close silently, so whoever got the 2am page
+            # never learned it had cleared — let alone after how long.
+            if notified and getattr(rule, "recovery_alert", True):
+                await _notify(db, rule, hostname, reading=reading, iface_label=iface_label,
+                              is_recovery=True, duration=ap.duration_between(started_at))
     return raised, resolved
 
 

@@ -117,12 +117,18 @@ async def _resolve_smtp(db: AsyncSession, channel_row) -> dict | None:
     gw_id = channel_row.gateway_id or cfg.get("gateway_id")
     if gw_id:
         gw = (await db.execute(
-            text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id}
+            text("SELECT config, enabled FROM notification_gateways WHERE id = :id"), {"id": gw_id}
         )).first()
     else:
         gw = (await db.execute(
-            text("SELECT config FROM notification_gateways WHERE type='smtp' AND is_default=true LIMIT 1")
+            text("SELECT config, enabled FROM notification_gateways "
+                 "WHERE type='smtp' AND is_default=true LIMIT 1")
         )).first()
+    # The `enabled` column is authoritative — the Gateways page toggles it and
+    # never touches config.enabled, so a gateway disabled in the UI would
+    # otherwise keep sending.
+    if gw is not None and not gw.enabled:
+        return None
     gw_config = gw.config if gw else None
     if not gw_config:
         row = (await db.execute(
@@ -192,8 +198,8 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
 
     start, end, plabel = _resolve_period(period, None, None)
 
-    # Build the executive dataset (universal KPI summary for the HTML/email).
-    data = await build_executive(db, start, end)
+    from app.services import report_sections as _sections
+    is_sections = report_type == "custom" or report_type in _sections.REPORT_PRESETS
 
     company_row = (await db.execute(
         text("SELECT value FROM system_settings WHERE key='company'")
@@ -201,8 +207,31 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
     company = company_row[0] if company_row and isinstance(company_row[0], dict) else {}
     company_name = company.get("company_name") or company.get("name") or "ZenPlus"
 
+    data = None
+    secs: list[dict] = []
+    sec_meta: dict = {}
+    if is_sections:
+        # Section-engine report types (availability/performance/traffic/…/custom).
+        custom_id = schedule.get("custom_report_id")
+        preset_title, _desc, section_ids = await _sections.resolve_report(
+            db, "custom" if report_type == "custom" else report_type,
+            str(custom_id) if custom_id else None)
+        title = schedule.get("name") or preset_title
+        secs = await _sections.build_sections(db, section_ids, start, end, filters or None)
+        cat = (_sections.REPORT_PRESETS.get(report_type) or {}).get("category") or \
+            ("Custom Report" if report_type == "custom" else "")
+        dev_filter = (filters or {}).get("device_ids")
+        sec_meta = await _sections.build_report_meta(
+            db, title, start, end, description=_desc, category=cat,
+            scope_label=(f"{len(dev_filter)} selected device(s)" if dev_filter
+                         else "All monitored infrastructure"))
+    else:
+        # Legacy types: executive dataset drives the universal HTML/email summary.
+        data = await build_executive(db, start, end)
+        title = schedule.get("name") or report_html.report_title(report_type)
+
     meta = {
-        "title": schedule.get("name") or report_html.report_title(report_type),
+        "title": title,
         "report_type": report_type,
         "period": period,
         "period_label": plabel,
@@ -213,7 +242,10 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
 
     # Persist a shareable HTML artifact.
     token = secrets.token_urlsafe(24)
-    html_page = report_html.build_report_html(meta, data)
+    if is_sections:
+        html_page = _sections.render_html(sec_meta, secs)
+    else:
+        html_page = report_html.build_report_html(meta, data)
     run_row = (await db.execute(
         text("""INSERT INTO report_runs
                 (schedule_id, report_type, period, title, token, html, status, generated_at)
@@ -232,33 +264,59 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
     attachment = None
     if fmt != "none":
         try:
-            common = dict(db=db, report_type=report_type, period=period,
-                          from_time=None, to_time=None,
-                          device_ids=filters.get("device_ids"),
-                          group_ids=filters.get("group_ids"),
-                          locations=filters.get("locations"),
-                          device_types=filters.get("device_types"))
             ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
             safe = (meta["title"] or "Report").replace(" ", "-")[:40]
-            if fmt == "excel":
-                payload = await generate_excel_report(**common)
-                attachment = (f"ZenPlus-{safe}-{ts}.xlsx", bytes(payload),
-                              "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            elif fmt == "csv":
-                payload = await generate_csv_report(**common)
-                if isinstance(payload, str):
-                    payload = payload.encode("utf-8")
-                attachment = (f"ZenPlus-{safe}-{ts}.csv", bytes(payload), "csv")
+            if is_sections:
+                # Section reports ship as PDF (excel/csv are legacy-only formats).
+                if fmt == "pdf":
+                    attachment = (f"ZenPlus-{safe}-{ts}.pdf",
+                                  bytes(_sections.render_pdf(sec_meta, secs)), "pdf")
             else:
-                attachment = (f"ZenPlus-{safe}-{ts}.pdf",
-                              bytes(await generate_report(**common)), "pdf")
+                common = dict(db=db, report_type=report_type, period=period,
+                              from_time=None, to_time=None,
+                              device_ids=filters.get("device_ids"),
+                              group_ids=filters.get("group_ids"),
+                              locations=filters.get("locations"),
+                              device_types=filters.get("device_types"))
+                if fmt == "excel":
+                    payload = await generate_excel_report(**common)
+                    attachment = (f"ZenPlus-{safe}-{ts}.xlsx", bytes(payload),
+                                  "vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                elif fmt == "csv":
+                    payload = await generate_csv_report(**common)
+                    if isinstance(payload, str):
+                        payload = payload.encode("utf-8")
+                    attachment = (f"ZenPlus-{safe}-{ts}.csv", bytes(payload), "csv")
+                else:
+                    attachment = (f"ZenPlus-{safe}-{ts}.pdf",
+                                  bytes(await generate_report(**common)), "pdf")
         except Exception:
             logger.exception("report attachment generation failed (schedule %s)", schedule.get("id"))
             attachment = None
 
-    email_html = report_html.build_report_email_html(meta, data, view_url, attached=attachment is not None)
-    email_text = report_html.build_report_email_text(meta, data, view_url)
+    if is_sections:
+        email_html = _sections.email_summary_html(sec_meta, secs, view_url,
+                                                  attached=attachment is not None)
+        email_text = _sections.email_summary_text(sec_meta, secs, view_url)
+    else:
+        email_html = report_html.build_report_email_html(meta, data, view_url, attached=attachment is not None)
+        email_text = report_html.build_report_email_text(meta, data, view_url)
     subject = f"[Report] {meta['title']} — {plabel}"
+
+    # Compact KPI pairs for non-email channel payloads.
+    kpi_pairs: list[tuple[str, str]] = []
+    if is_sections:
+        for s in secs:
+            for k in (s.get("kpis") or []):
+                kpi_pairs.append((str(k.get("label") or ""), str(k.get("value") or "")))
+            if len(kpi_pairs) >= 6:
+                break
+    elif data:
+        k = data.get("kpis") or {}
+        if k.get("availability_pct") is not None:
+            kpi_pairs.append(("Availability", f"{k['availability_pct']:.2f}%"))
+        kpi_pairs.append(("Incidents", str(k.get("incidents_count") or 0)))
+        kpi_pairs.append(("Devices monitored", str(k.get("devices_monitored") or 0)))
 
     # Deliver to each linked channel.
     channel_ids = schedule.get("notify_channels") or []
@@ -273,20 +331,52 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
             if not ch or not ch.enabled:
                 errors.append(f"{cid}: channel missing/disabled")
                 continue
-            if ch.type != "email":
-                # Reports are HTML/PDF — only email channels carry them.
-                errors.append(f"{ch.name}: not an email channel")
+            cfg = ch.config or {}
+
+            if ch.type == "email":
+                # Email carries the full report as an attachment.
+                recipients = [r.strip() for r in cfg.get("recipients", "").split(",") if r.strip()]
+                if not recipients:
+                    errors.append(f"{ch.name}: no recipients")
+                    continue
+                gw = await _resolve_smtp(db, ch)
+                if not gw:
+                    errors.append(f"{ch.name}: no SMTP gateway")
+                    continue
+                _send_email_with_attachment(gw, recipients, subject, email_text, email_html, attachment)
+                delivered.append(ch.name)
                 continue
-            recipients = [r.strip() for r in (ch.config or {}).get("recipients", "").split(",") if r.strip()]
-            if not recipients:
-                errors.append(f"{ch.name}: no recipients")
-                continue
-            gw = await _resolve_smtp(db, ch)
-            if not gw:
-                errors.append(f"{ch.name}: no SMTP gateway")
-                continue
-            _send_email_with_attachment(gw, recipients, subject, email_text, email_html, attachment)
-            delivered.append(ch.name)
+
+            # Every other channel gets a KPI summary plus the share link.
+            body_msg = f"{meta['title']} — {plabel}"
+            if kpi_pairs:
+                body_msg += "\n" + " · ".join(f"{l}: {v}" for l, v in kpi_pairs[:4])
+            if view_url:
+                body_msg += f"\n{view_url}"
+            ctx = {
+                "subject": subject, "message": body_msg, "body": body_msg,
+                "hostname": company_name, "ip_address": "",
+                "status": "REPORT", "severity": "info",
+                "details": kpi_pairs + ([("View report", view_url)] if view_url else []),
+                "triggered_at": datetime.now(timezone.utc).isoformat(),
+                "rule_id": str(schedule.get("id") or ""), "rule_name": meta["title"],
+            }
+            if ch.type == "sms":
+                from app.api.v1.alert_engine import _send_sms
+                from app.services.host_alert_service import _gateway_config
+                phones = cfg.get("phone_numbers", "")
+                gw = await _gateway_config(db, ch, "sms")
+                if phones and gw:
+                    await _send_sms(gw, phones, body_msg)
+                    delivered.append(ch.name)
+                else:
+                    errors.append(f"{ch.name}: no phone numbers or SMS gateway")
+            else:
+                from app.api.v1.alert_engine import _dispatch_channel
+                if await _dispatch_channel(ch.type, cfg, ctx):
+                    delivered.append(ch.name)
+                else:
+                    errors.append(f"{ch.name}: unsupported channel type '{ch.type}'")
         except Exception as exc:
             logger.exception("report delivery to channel %s failed", cid)
             errors.append(f"{cid}: {exc}")

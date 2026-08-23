@@ -75,8 +75,12 @@ update-<version>.zup
 ├── go-binaries/             # compiled poller, netflow-collector
 ├── sensor-artifacts/        # remote-sensor binary + its own manifest
 ├── requirements.txt         # pip deps installed during update
-└── migrations/              # ONLY when --include-migrations is passed
+└── migrations/              # ONLY when --migration FILE names one explicitly
 ```
+
+> The complete migration set (`scripts/migrate-*.sql` + `migrations.lock`) rides in
+> `code/scripts/` on **every** release. The `migrations/` directory above only adds an
+> explicit per-file manifest step; it is not how migrations reach an appliance.
 
 ### What gets included / excluded (important)
 - **Included code dirs**: `server`, `poller`, `scripts`, `support`, plus `updater/` and root files
@@ -87,9 +91,12 @@ update-<version>.zup
   api_key, `subscription.json` is per-appliance), `keys/` (private key!), `logs/`, `backups/`.
   > ⚠️ This exclusion is what stops the **private signing key and one appliance's api_key from
   > leaking into every other appliance**. Preserve it exactly when you copy this for Logs.
-- **Migrations are opt-in.** Historical migrations are not all safe to re-run, so a normal
-  code-only release ships **no** migrations. You must pass `--include-migrations --migration FILE`
-  explicitly (see §5).
+- **Every release ships every migration.** `code/scripts/` carries the full `migrate-*.sql` set
+  plus `migrations.lock`. Shipping a migration is not running one — the runners keep a ledger per
+  engine and apply only what an appliance is missing, so an appliance that skipped releases catches
+  up in one pass. This replaced the opt-in scheme, under which a release that forgot
+  `--migration FILE` left appliances permanently short of a schema change with no way to recover
+  (see `Documentation/18-MIGRATION-RUNNER.md`).
 
 ## 3. The manifest = the update recipe
 
@@ -102,21 +109,27 @@ appliance executor runs them in order. The current ZenPlus recipe is:
 4. `apply_code` — replace `/opt/zenplus` code from `code/`
 5. `run_hook` — `setup-support.sh`, `fetch-geoip.py` (idempotent, best-effort)
 6. `pip_install` — from `requirements.txt`
-7. `run_migration` (per migration, only if packaged) — then `install_config` to drop the `.sql`
-   into `/opt/zenplus/scripts/`
-8. `build_dashboard` — extract the prebuilt `dashboard-dist.tar.gz`
-9. `install_binary` / `install_systemd` — Go poller, netflow collector + its unit, remote sensor
-10. `start_services` — api, poller, netflow, nginx, etc.
-11. `health_check` — `GET http://localhost:8000/api/v1/system/health` (30s)
+7. `run_migration` (per explicitly named migration, if any) — then `install_config` to drop the
+   `.sql` into `/opt/zenplus/scripts/`
+8. **`run_hook` — `scripts/sync-schema.py`, the schema gate. Emitted on every release.** Converges
+   PostgreSQL and ClickHouse with the full migration set `apply_code` just landed, heals a ledger
+   entry that claims a migration ran when it did not, and **exits non-zero on unresolved drift**,
+   which fails the step and rolls the appliance back.
+9. `build_dashboard` — extract the prebuilt `dashboard-dist.tar.gz`
+10. `install_binary` / `install_systemd` — Go poller, netflow collector + its unit, remote sensor
+11. `start_services` — api, poller, netflow, nginx, etc.
+12. `health_check` — `GET http://localhost:8000/api/v1/system/health` (30s)
 
 `rollback_steps` = `restore_backup` then `start_services`, so a failed update self-heals to the
 previous version.
 
-> **Note on migrations** — ClickHouse migrations also auto-apply on every update via
-> `updater/clickhouse_sync.py` (it keeps a `zenplus.schema_migrations` ledger). But that only runs
-> from the *already-installed* updater, so the release that **first introduces** a CH migration must
-> still package it explicitly. Postgres migrations are always opt-in per release. See
-> `docs`/memory notes on `clickhouse-migrations-auto-apply`.
+> **Why step 8 is a hook and not updater code** — `run_hook` executes the script from the freshly
+> extracted payload, so the *new* gate runs on the very first update that carries it, even though
+> the updater process itself is still the old one. `agent.run_update` runs the same gate again
+> after the manifest and refuses to write `.version` unless it comes back clean: an appliance on an
+> older version with a consistent schema is a working appliance, a half-migrated one is not.
+> A passing `health_check` proves the API process started — it proves nothing about the schema,
+> which is how an appliance once ran a whole release with its ClickHouse SNMP tables missing.
 
 ## 4. Build & publish — the commands
 
@@ -158,25 +171,38 @@ scripts/build-release.py rollout --version 1.2.28 --stage canary --pct 10
 |------|---------|
 | `--skip-dashboard` | Don't rebuild the Vite bundle (faster code-only Go/py release) |
 | `--skip-go` | Don't rebuild Go binaries |
-| `--include-migrations` + `--migration FILE` (repeatable) | Package schema migrations |
+| `--migration FILE` (repeatable) | Add an explicit `run_migration` step. Optional — all migrations ship regardless |
 | `--min-version` | Refuse to apply on appliances older than this |
 | `--severity` | `normal` / `security` / `critical` (drives appliance urgency) |
 
 ## 5. Shipping a schema migration
 
-Migrations are **append-only once released** and tracked in `scripts/migrations.lock` (a sha256 of
-every migration that has ever shipped). The build **lints** migrations against this lock and fails
-if a previously-shipped file changed.
+Migrations are **append-only once released** and tracked in `scripts/migrations.lock`, which is
+both a sha256 ledger of every migration that has ever shipped **and the authoritative apply order**
+— its line order is release order. Filename sort is not a sequence: numbers are reused (two 016s,
+two 030s, two 031s, two 039s, two 043s) and one file is date-stamped.
 
 ```bash
-# 1) Register a brand-new migrate-*.sql in the lockfile
+# 1) Register the new migrate-*.sql in the lockfile, then commit both together
 sudo -u zenplus python3 scripts/build-release.py lint-migrations --update-lock
 
-# 2) Build/publish WITH the migration explicitly listed
-sudo -u zenplus python3 scripts/build-release.py build --version 1.2.28 \
-  --include-migrations --migration migrate-013-foo.sql
+# 2) Build. No migration flags needed — the full set ships either way.
+sudo -u zenplus python3 scripts/build-release.py build --version 1.2.28
 ```
+
 Engine is auto-detected per file (`*-clickhouse.sql` → ClickHouse, else Postgres).
+
+The lint fails the build on: an edit to a released migration, a reused sequence number, a deleted
+migration, or a new ClickHouse migration that is not replay-safe (guarded DDL, no bare `INSERT`) —
+the updater heals a false ledger entry by re-running the file, so it must be safe to re-run.
+
+Verify an appliance at any time:
+
+```bash
+sudo /opt/zenplus/scripts/sync-schema.py --check   # exit 2 = drift, details in .schema-status.json
+```
+
+Full design: `Documentation/18-MIGRATION-RUNNER.md`.
 
 ## 6. The known gotchas (learned the hard way)
 
@@ -355,12 +381,17 @@ publish, confirm with the platform team:
 | Path | Role |
 |------|------|
 | `scripts/build-release.py` | Builder + publisher CLI (`build`/`publish`/`list`/`rollout`/`lint-migrations`) |
-| `scripts/migrations.lock` | Append-only sha256 ledger of shipped migrations |
+| `scripts/migrations.lock` | Append-only sha256 ledger of shipped migrations — line order IS apply order |
+| `scripts/migration_order.py` | Ordering + SQL static analysis, shared by builder/runners/updater |
+| `scripts/run-migrations.py` | PostgreSQL runner (ledger: `schema_migrations`) |
+| `scripts/ch_migrate.py` | ClickHouse runner (ledger: `zenplus.schema_migrations`) |
+| `scripts/sync-schema.py` | Schema gate — converges both engines, exits non-zero on drift |
 | `updater/keys/zentryc-release.key` | **Private** signing key (build box only, 0400) |
 | `updater/keys/zentryc-release.pub` | **Public** verify key (ships in appliance) |
 | `updater/agent.py` | Register / check-in / download+verify / apply / report |
 | `updater/config.py` + `config/agent.conf` | Agent config (server url, api_key, public key path) |
 | `updater/executor.py`, `updater/steps/` | Manifest step handlers |
-| `updater/clickhouse_sync.py` | Auto-applies pending ClickHouse migrations on update |
+| `updater/schema_gate.py` | Runs the gate post-manifest; its verdict decides if `.version` moves |
+| `updater/clickhouse_sync.py` | Adapter onto `ch_migrate.py`, kept so old updaters heal too |
 | `updater/systemd/zenplus-updater.{service,timer}` | The 4-hourly check-in driver |
 | `.version` | Current installed version (compared on check-in) |

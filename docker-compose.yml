@@ -15,6 +15,8 @@ services:
       - "127.0.0.1:9000:9000"
     volumes:
       - /data/clickhouse:/var/lib/clickhouse
+      - /data/backups/clickhouse:/backups
+      - ./docker/clickhouse/backup_disk.xml:/etc/clickhouse-server/config.d/backup_disk.xml:ro
       - ./scripts/init-clickhouse.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
       test: ["CMD", "clickhouse-client", "--password", "${CLICKHOUSE_PASSWORD:-clickhouse_dev}", "--query", "SELECT 1"]
@@ -29,3 +31,10 @@ services:
         max-size: "10m"
         max-file: "3"
 
+networks:
+  default:
+    name: zenplus_clickhouse
+    ipam:
+      config:
+        - subnet: 198.120.20.64/28
+          gateway: 198.120.20.65

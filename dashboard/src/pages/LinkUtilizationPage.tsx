@@ -18,6 +18,8 @@ import {
   Pencil,
   Plus,
   Search,
+  Star,
+  Tags,
   Trash2,
   X,
   XCircle,
@@ -37,14 +39,17 @@ import { Card, CardContent } from '@/components/ui/Card'
 import { Input } from '@/components/ui/Input'
 import { Label } from '@/components/ui/Label'
 import {
-  Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle,
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/Dialog'
+import { FormField } from '@/components/ui/FormField'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/Select'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
 import { toast } from '@/components/ui/Toast'
+import { TagBadge } from '@/components/tags/TagBadge'
+import { TagPicker } from '@/components/tags/TagPicker'
 
 type LinkRow = {
   device_id: string
@@ -68,6 +73,63 @@ type LinkRow = {
   util_pct: number | null
   peak_util_pct: number | null
   has_netflow: boolean
+  /** Starred by the signed-in user; the server pins these to the top. */
+  is_favorite: boolean
+  /** Operator tags on this link, from the shared tag registry. */
+  tags: string[]
+  // Interface health — counter increases over the window, not raw readings.
+  in_errors: number
+  out_errors: number
+  in_discards: number
+  out_discards: number
+  errors: number
+  discards: number
+  in_pkts: number
+  out_pkts: number
+  in_pps: number
+  out_pps: number
+  /** Errors per million frames. null when the device reports no packet counters. */
+  error_ppm: number | null
+  discard_ppm: number | null
+  /** ifOperStatus transitions in the window. */
+  flaps: number
+  availability_pct: number | null
+  health: 'ok' | 'warning' | 'critical'
+  issues: string[]
+  /** false on SPAN/mirror ports, where ifOperStatus contradicts the traffic. */
+  oper_status_reliable?: boolean
+}
+
+const ISSUE_META: Record<string, { short: string; label: string }> = {
+  errors: { short: 'ERR', label: 'Errored frames' },
+  discards: { short: 'DSC', label: 'Discarded frames' },
+  flapping: { short: 'FLAP', label: 'Link flapping' },
+}
+
+/** Compact count: 397823 → 397.8k. Error counts run to seven figures and the
+ *  table column is ~70px, so the raw number would wrap or truncate.
+ *  Tolerates undefined so a dashboard built ahead of the API doesn't print
+ *  "NaNM" while the older backend is still serving. */
+function formatCount(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return '—'
+  if (n < 1000) return String(n)
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`
+  return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`
+}
+
+/** Errors-per-million as a percentage when it's large enough to read that way. */
+function formatPpm(ppm: number | null): string {
+  if (ppm == null) return 'no packet counters'
+  if (ppm >= 10_000) return `${(ppm / 10_000).toFixed(1)}% of frames`
+  if (ppm >= 1) return `${Math.round(ppm)} per million`
+  if (ppm > 0) return '<1 per million'
+  return 'none'
+}
+
+function healthTone(h: string | undefined): string {
+  if (h === 'critical') return 'text-danger'
+  if (h === 'warning') return 'text-warning'
+  return 'text-muted'
 }
 
 /** Window-average utilisation for a row, in percent. */
@@ -77,6 +139,13 @@ function rowAvgUtil(row: LinkRow): number | null {
 }
 
 type LinkKey = { device_id: string; if_index: number }
+
+/** Stable key for checkbox selection — a link is a (device, ifIndex) pair. */
+const linkKey = (r: LinkKey) => `${r.device_id}:${r.if_index}`
+const parseLinkKey = (k: string): LinkKey => {
+  const i = k.lastIndexOf(':')
+  return { device_id: k.slice(0, i), if_index: Number(k.slice(i + 1)) }
+}
 
 type AlertRule = {
   id: string
@@ -143,6 +212,42 @@ const SORT_LABELS: Record<string, string> = {
   in: 'inbound',
   out: 'outbound',
   name: 'name',
+  errors: 'error count',
+  discards: 'discard count',
+  error_rate: 'error rate',
+  flaps: 'flap count',
+}
+
+/** Health chips for the table. Renders nothing for a clean link rather than a
+ *  green "OK" badge on 3,000 rows, so the eye lands on the exceptions. */
+function HealthChips({ row }: { row: LinkRow }) {
+  if (!row.issues?.length) {
+    return <span className="text-[11px] text-muted">—</span>
+  }
+  const tone = row.health === 'critical'
+    ? 'border-danger/40 bg-danger/10 text-danger'
+    : 'border-warning/40 bg-warning/10 text-warning'
+  return (
+    <div className="flex flex-wrap gap-1">
+      {row.issues.map((key) => {
+        const meta = ISSUE_META[key]
+        if (!meta) return null
+        const detail =
+          key === 'errors' ? `${row.errors.toLocaleString()} errored frames · ${formatPpm(row.error_ppm)}`
+          : key === 'discards' ? `${row.discards.toLocaleString()} discarded frames · ${formatPpm(row.discard_ppm)}`
+          : `${row.flaps} link-state change${row.flaps === 1 ? '' : 's'}${row.availability_pct != null ? ` · ${row.availability_pct}% up` : ''}`
+        return (
+          <span
+            key={key}
+            title={`${meta.label}: ${detail}`}
+            className={cn('rounded border px-1 py-px text-[9px] font-semibold tracking-wide', tone)}
+          >
+            {meta.short}
+          </span>
+        )
+      })}
+    </div>
+  )
 }
 
 const PROTO_NAMES: Record<number, string> = {
@@ -210,13 +315,109 @@ function UtilBar({ pct, avg, peak, className }: {
   )
 }
 
-function KpiCard({
-  label, value, sub, tone,
-}: { label: string; value: string; sub?: string; tone?: string }) {
+/** Star/unstar a link for the signed-in user.
+ *
+ *  Updates the cached rows before the request lands: the list query is a
+ *  fleet-wide aggregate over ClickHouse, so waiting for a refetch would leave
+ *  the star visibly dead for a second. The refetch in `onSettled` is what
+ *  actually re-pins the row to the top and refreshes the favourites count. */
+function useFavoriteToggle() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: async ({ link, next }: { link: LinkKey; next: boolean }) => {
+      const path = `/link-utilization/favorites/${link.device_id}/${link.if_index}`
+      await (next ? api.put(path) : api.delete(path))
+      return next
+    },
+    onMutate: async ({ link, next }) => {
+      await qc.cancelQueries({ queryKey: ['link-utilization'] })
+      const prev = qc.getQueriesData({ queryKey: ['link-utilization'] })
+      // The drill-down query shares the ['link-utilization'] prefix and has no
+      // `items`, so leave anything without a row list untouched.
+      qc.setQueriesData({ queryKey: ['link-utilization'] }, (old: any) => {
+        if (!old?.items) return old
+        return {
+          ...old,
+          items: old.items.map((i: LinkRow) =>
+            i.device_id === link.device_id && i.if_index === link.if_index
+              ? { ...i, is_favorite: next }
+              : i,
+          ),
+        }
+      })
+      return { prev }
+    },
+    onError: (e, _vars, ctx) => {
+      ctx?.prev?.forEach(([key, data]) => qc.setQueryData(key, data))
+      toast.error(apiErrorMessage(e))
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['link-utilization'] }),
+  })
+}
+
+function FavoriteStar({ row, className }: { row: LinkRow; className?: string }) {
+  const toggle = useFavoriteToggle()
+  const on = !!row.is_favorite
   return (
-    <Card>
+    <button
+      type="button"
+      aria-pressed={on}
+      aria-label={on ? 'Remove from favorites' : 'Add to favorites'}
+      title={on ? 'Favorite — pinned to the top. Click to unpin.' : 'Add to favorites — pins this link to the top'}
+      disabled={toggle.isPending}
+      // Rows are clickable (they open the drill-down), so the star must not
+      // also select the link.
+      onClick={(e) => {
+        e.stopPropagation()
+        toggle.mutate({ link: { device_id: row.device_id, if_index: row.if_index }, next: !on })
+      }}
+      className={cn(
+        'rounded p-0.5 transition-colors',
+        // Kept faint until hovered: at 200 rows a column of bright outlines
+        // would compete with the health chips for attention.
+        on ? 'text-warning' : 'text-muted/40 hover:text-warning',
+        className,
+      )}
+    >
+      <Star className={cn('h-3.5 w-3.5', on && 'fill-current')} />
+    </button>
+  )
+}
+
+function KpiCard({
+  label, value, sub, tone, onClick, active,
+}: {
+  label: string
+  value: string
+  sub?: string
+  tone?: string
+  /** Makes the tile a filter toggle. */
+  onClick?: () => void
+  active?: boolean
+}) {
+  return (
+    <Card
+      className={cn(
+        onClick && 'cursor-pointer transition-colors hover:border-primary/50',
+        active && 'border-primary bg-primary/5',
+      )}
+      {...(onClick
+        ? {
+            onClick,
+            role: 'button' as const,
+            tabIndex: 0,
+            'aria-pressed': !!active,
+            onKeyDown: (e: React.KeyboardEvent) => {
+              if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() }
+            },
+          }
+        : {})}
+    >
       <CardContent className="p-4">
-        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
+        <div className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-muted">
+          {label}
+          {active && <X className="h-3 w-3 text-primary" />}
+        </div>
         <div className={cn('mt-1 text-2xl font-bold tabular-nums', tone)}>{value}</div>
         {sub && <div className="mt-0.5 text-[11px] text-muted">{sub}</div>}
       </CardContent>
@@ -229,13 +430,32 @@ export function LinkUtilizationPage() {
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState<'all' | 'up' | 'down'>('all')
   const [minUtil, setMinUtil] = useState<string>('')
+  const [issue, setIssue] = useState<string>('')
+  const [favoritesOnly, setFavoritesOnly] = useState(false)
+  const [tagFilter, setTagFilter] = useState('')
   const [sort, setSort] = useState('util')
+  /** Checkbox selection for bulk tagging, keyed `${device_id}:${if_index}`. */
+  const [checked, setChecked] = useState<Set<string>>(new Set())
+  const [bulkTagOpen, setBulkTagOpen] = useState(false)
   const [selected, setSelected] = useState<LinkKey | null>(null)
   const [alertOpen, setAlertOpen] = useState(false)
   /** Rule being edited in the alert dialog; null = creating a new one. */
   const [editRule, setEditRule] = useState<AlertRule | null>(null)
 
   const debouncedSearch = useDebounced(search)
+
+  // Registry colours so a tag renders identically here, on Devices and on
+  // Servers. Shared query key, so the three pages hit the API once between them.
+  const { data: tagRegistry } = useQuery<{ name: string; color: string | null }[]>({
+    queryKey: ['tags'],
+    queryFn: async () => (await api.get('/tags')).data,
+    staleTime: 5 * 60_000,
+  })
+  const tagColors = useMemo(() => {
+    const m: Record<string, string> = {}
+    for (const t of tagRegistry || []) if (t.color) m[t.name.toLowerCase()] = t.color
+    return m
+  }, [tagRegistry])
 
   const qs = useMemo(() => {
     const p = new URLSearchParams({
@@ -252,8 +472,11 @@ export function LinkUtilizationPage() {
     if (debouncedSearch.trim()) p.set('search', debouncedSearch.trim())
     if (status !== 'all') p.set('status', status)
     if (minUtil) p.set('min_util', minUtil)
+    if (issue) p.set('issue', issue)
+    if (favoritesOnly) p.set('favorites_only', 'true')
+    if (tagFilter) p.set('tag', tagFilter)
     return p.toString()
-  }, [range.hours, range.isCustom, range.fromISO, range.toISO, debouncedSearch, status, minUtil, sort])
+  }, [range.hours, range.isCustom, range.fromISO, range.toISO, debouncedSearch, status, minUtil, issue, favoritesOnly, tagFilter, sort])
 
   const { data, isLoading, isFetching } = useQuery<{
     items: LinkRow[]
@@ -262,9 +485,22 @@ export function LinkUtilizationPage() {
       high_util: number
       warning_util: number
       with_netflow: number
+      /** Favourites present in the current result set. */
+      favorites: number
+      /** Every star this user holds, whether or not it reported in the window. */
+      total_favorites: number
       avg_util: number | null
       /** How many of `total` are actually in `items` (server caps at 200). */
       returned?: number
+      with_errors: number
+      with_discards: number
+      flapping: number
+      critical_health: number
+      unhealthy: number
+      total_errors: number
+      total_discards: number
+      /** Tag facet over the whole filtered set, before the tag filter. */
+      tags?: { value: string; count: number }[]
     }
   }>({
     queryKey: ['link-utilization', qs],
@@ -288,6 +524,10 @@ export function LinkUtilizationPage() {
   useEffect(() => {
     if (selected && data && !isFetching && !selectedRow) setSelected(null)
   }, [selected, data, isFetching, selectedRow])
+
+  // Link, Status, In, Out, Utilization, Health (+ Errors, Discards, Flow when
+  // the detail panel is closed and the table has the full row width).
+  const colCount = selectedRow ? 7 : 10
 
   return (
     <div className="space-y-4">
@@ -313,25 +553,46 @@ export function LinkUtilizationPage() {
         />
       </div>
 
-      {/* KPI strip */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-5">
-        <KpiCard label="Monitored links" value={String(summary?.total ?? '—')} sub={range.label} />
+      {/* KPI strip — capacity on the left, health on the right. The health
+          tiles double as filters: clicking one scopes the table to those links
+          (and clicking again clears it), since "19 links discarding" is only
+          useful if you can get to them. */}
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+        <KpiCard
+          label="Monitored links"
+          value={String(summary?.total ?? '—')}
+          sub={summary ? `${range.label} · ${summary.with_netflow} with NetFlow` : range.label}
+        />
         <KpiCard
           label="High util (≥80%)"
           value={String(summary?.high_util ?? '—')}
+          sub={summary ? `${summary.warning_util} elevated (50–79%)` : undefined}
           tone={(summary?.high_util || 0) > 0 ? 'text-danger' : undefined}
-        />
-        <KpiCard
-          label="Elevated (50–79%)"
-          value={String(summary?.warning_util ?? '—')}
-          tone={(summary?.warning_util || 0) > 0 ? 'text-warning' : undefined}
         />
         <KpiCard label="Fleet avg util" value={summary?.avg_util != null ? `${summary.avg_util}%` : '—'} />
         <KpiCard
-          label="NetFlow enabled"
-          value={String(summary?.with_netflow ?? '—')}
-          sub="interfaces with flow data"
-          tone="text-info"
+          label="Links with errors"
+          value={String(summary?.with_errors ?? '—')}
+          sub={summary ? `${formatCount(summary.total_errors)} errored frames` : undefined}
+          tone={(summary?.with_errors || 0) > 0 ? 'text-danger' : undefined}
+          active={issue === 'errors'}
+          onClick={() => setIssue(issue === 'errors' ? '' : 'errors')}
+        />
+        <KpiCard
+          label="Links discarding"
+          value={String(summary?.with_discards ?? '—')}
+          sub={summary ? `${formatCount(summary.total_discards)} dropped frames` : undefined}
+          tone={(summary?.with_discards || 0) > 0 ? 'text-warning' : undefined}
+          active={issue === 'discards'}
+          onClick={() => setIssue(issue === 'discards' ? '' : 'discards')}
+        />
+        <KpiCard
+          label="Flapping links"
+          value={String(summary?.flapping ?? '—')}
+          sub="link-state changes"
+          tone={(summary?.flapping || 0) > 0 ? 'text-warning' : undefined}
+          active={issue === 'flapping'}
+          onClick={() => setIssue(issue === 'flapping' ? '' : 'flapping')}
         />
       </div>
 
@@ -347,6 +608,23 @@ export function LinkUtilizationPage() {
               onChange={(e) => setSearch(e.target.value)}
             />
           </div>
+          {/* Favourites are already pinned to the top of every sort; this
+              narrows the table to just them. */}
+          <Button
+            variant={favoritesOnly ? 'default' : 'outline'}
+            className="h-9"
+            aria-pressed={favoritesOnly}
+            title={favoritesOnly ? 'Show all links' : 'Show only your favorites'}
+            onClick={() => setFavoritesOnly((v) => !v)}
+          >
+            <Star className={cn('h-3.5 w-3.5', favoritesOnly && 'fill-current')} />
+            Favorites
+            {summary?.total_favorites != null && summary.total_favorites > 0 && (
+              <span className={cn('text-xs', favoritesOnly ? 'text-white/80' : 'text-muted')}>
+                {summary.total_favorites}
+              </span>
+            )}
+          </Button>
           <Select value={status} onValueChange={(v) => setStatus(v as typeof status)}>
             <SelectTrigger className="h-9 w-[130px]"><SelectValue /></SelectTrigger>
             <SelectContent>
@@ -355,8 +633,18 @@ export function LinkUtilizationPage() {
               <SelectItem value="down">Down only</SelectItem>
             </SelectContent>
           </Select>
-          <Select value={sort} onValueChange={setSort}>
+          <Select value={issue || 'all'} onValueChange={(v) => setIssue(v === 'all' ? '' : v)}>
             <SelectTrigger className="h-9 w-[150px]"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All health</SelectItem>
+              <SelectItem value="any">Any issue</SelectItem>
+              <SelectItem value="errors">Errors only</SelectItem>
+              <SelectItem value="discards">Discards only</SelectItem>
+              <SelectItem value="flapping">Flapping only</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={sort} onValueChange={setSort}>
+            <SelectTrigger className="h-9 w-[160px]"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="util">Sort: Utilization</SelectItem>
               <SelectItem value="peak">Sort: Peak util</SelectItem>
@@ -364,6 +652,10 @@ export function LinkUtilizationPage() {
               <SelectItem value="in">Sort: Inbound</SelectItem>
               <SelectItem value="out">Sort: Outbound</SelectItem>
               <SelectItem value="name">Sort: Name</SelectItem>
+              <SelectItem value="error_rate">Sort: Error rate</SelectItem>
+              <SelectItem value="errors">Sort: Error count</SelectItem>
+              <SelectItem value="discards">Sort: Discard count</SelectItem>
+              <SelectItem value="flaps">Sort: Flap count</SelectItem>
             </SelectContent>
           </Select>
           <Select value={minUtil || 'any'} onValueChange={(v) => setMinUtil(v === 'any' ? '' : v)}>
@@ -400,14 +692,84 @@ export function LinkUtilizationPage() {
                     · showing top {summary.returned.toLocaleString()} of {summary.total.toLocaleString()} by {SORT_LABELS[sort] ?? sort}
                   </span>
                 )}
+                {!favoritesOnly && (summary?.favorites || 0) > 0 && (
+                  <span className="inline-flex items-center gap-1 text-xs font-normal text-muted">
+                    · <Star className="h-3 w-3 fill-current text-warning" /> favorites pinned to the top
+                  </span>
+                )}
                 <span className="text-xs font-normal text-muted">· click a row for drill-down</span>
               </div>
+
+              {/* Tag filter. Options come from the facet, which is counted over
+                  the whole filtered set before this filter narrows it, so the
+                  list does not collapse to the tag already chosen. */}
+              {(summary?.tags?.length || 0) > 0 && (
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  <Tags className="h-3.5 w-3.5 text-muted" />
+                  {summary!.tags!.map((tg) => (
+                    <TagBadge
+                      key={tg.value}
+                      name={`${tg.value} ${tg.count}`}
+                      color={tagColors[tg.value.toLowerCase()]}
+                      active={tagFilter.toLowerCase() === tg.value.toLowerCase()}
+                      onClick={() => setTagFilter(tagFilter.toLowerCase() === tg.value.toLowerCase() ? '' : tg.value)}
+                      title={`Show only links tagged \u201c${tg.value}\u201d`}
+                    />
+                  ))}
+                  {tagFilter && (
+                    <button
+                      type="button"
+                      onClick={() => setTagFilter('')}
+                      className="text-[11px] text-muted underline-offset-2 hover:underline"
+                    >
+                      clear
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {checked.size > 0 && (
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-2">
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="font-semibold text-primary">{checked.size}</span>
+                    <span className="text-muted">link{checked.size === 1 ? '' : 's'} selected</span>
+                    <button
+                      type="button"
+                      onClick={() => setChecked(new Set())}
+                      className="text-xs text-muted underline-offset-2 hover:underline"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={() => setBulkTagOpen(true)}>
+                    <Tags className="h-3.5 w-3.5" /> Tags
+                  </Button>
+                </div>
+              )}
             </div>
             <div className="max-h-[calc(100vh-22rem)] overflow-auto">
               <Table>
                 <THead className="sticky top-0 z-10 bg-surface2/95 backdrop-blur">
                   <Tr>
-                    <Th className="pl-4">Link</Th>
+                    <Th className="w-8 pl-4">
+                      <input
+                        type="checkbox"
+                        aria-label="Select all links on this page"
+                        className="h-3.5 w-3.5 cursor-pointer accent-[rgb(var(--primary))]"
+                        checked={items.length > 0 && items.every((r) => checked.has(linkKey(r)))}
+                        ref={(el) => {
+                          if (el) el.indeterminate =
+                            items.some((r) => checked.has(linkKey(r))) &&
+                            !items.every((r) => checked.has(linkKey(r)))
+                        }}
+                        onChange={(e) => {
+                          const n = new Set(checked)
+                          items.forEach((r) => e.target.checked ? n.add(linkKey(r)) : n.delete(linkKey(r)))
+                          setChecked(n)
+                        }}
+                      />
+                    </Th>
+                    <Th>Link</Th>
                     <Th>Status</Th>
                     <Th className="text-right">In</Th>
                     <Th className="text-right">Out</Th>
@@ -416,18 +778,48 @@ export function LinkUtilizationPage() {
                         Utilization
                       </span>
                     </Th>
-                    <Th className="pr-4">Flow</Th>
+                    {/* The detail panel takes 3/5 of the row; drop the numeric
+                        health columns there and keep only the compact chips. */}
+                    {!selectedRow && (
+                      <>
+                        <Th className="text-right">
+                          <span title="Errored frames in the window, and the rate per million frames. Counter increase, not the raw counter.">
+                            Errors
+                          </span>
+                        </Th>
+                        <Th className="text-right">
+                          <span title="Discarded frames in the window — usually congestion or policing rather than a fault.">
+                            Discards
+                          </span>
+                        </Th>
+                      </>
+                    )}
+                    <Th className={selectedRow ? 'pr-4' : undefined}>
+                      <span title="ERR = errored frames · DSC = discards · FLAP = link-state changes. Hover a chip for detail.">
+                        Health
+                      </span>
+                    </Th>
+                    {/* Flow is a one-word badge and the open panel already
+                        shows it in its header — drop it before the link name
+                        is squeezed into a six-line wrap. */}
+                    {!selectedRow && <Th className="pr-4">Flow</Th>}
                   </Tr>
                 </THead>
                 <TBody>
                   {isLoading && (
-                    <Tr><Td colSpan={6} className="py-12 text-center text-sm text-muted">
+                    <Tr><Td colSpan={colCount} className="py-12 text-center text-sm text-muted">
                       <Loader2 className="mx-auto mb-2 h-5 w-5 animate-spin" /> Loading links…
                     </Td></Tr>
                   )}
                   {!isLoading && items.length === 0 && (
-                    <Tr><Td colSpan={6} className="py-12 text-center text-sm text-muted">
-                      No interfaces match — ensure SNMP polling is active and interfaces are monitored.
+                    <Tr><Td colSpan={colCount} className="py-12 text-center text-sm text-muted">
+                      {favoritesOnly
+                        ? (summary?.total_favorites
+                            ? 'None of your favorites reported traffic in the selected window or match the other filters.'
+                            : 'No favorites yet — click the ☆ next to a link to pin it to the top of this table.')
+                        : issue
+                          ? 'No links with this health problem in the selected window.'
+                          : 'No interfaces match — ensure SNMP polling is active and interfaces are monitored.'}
                     </Td></Tr>
                   )}
                   {items.map((row) => {
@@ -444,8 +836,23 @@ export function LinkUtilizationPage() {
                           !isUp && 'opacity-70',
                         )}
                       >
-                        <Td className="py-2.5 pl-4">
+                        <Td className="py-2.5 pl-4" onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${label}`}
+                            className="h-3.5 w-3.5 cursor-pointer accent-[rgb(var(--primary))]"
+                            checked={checked.has(linkKey(row))}
+                            onChange={() => {
+                              const n = new Set(checked)
+                              const k = linkKey(row)
+                              n.has(k) ? n.delete(k) : n.add(k)
+                              setChecked(n)
+                            }}
+                          />
+                        </Td>
+                        <Td className="py-2.5">
                           <div className="flex items-center gap-1.5">
+                            <FavoriteStar row={row} />
                             <ChevronRight className={cn('h-3.5 w-3.5 text-muted transition-transform', isSel && 'rotate-90 text-primary')} />
                             <div>
                               <div className="text-sm font-medium">{label}</div>
@@ -461,6 +868,26 @@ export function LinkUtilizationPage() {
                                   <span className="ml-1.5">· {formatBps(row.effective_speed_bps)}</span>
                                 )}
                               </div>
+                              {row.tags?.length > 0 && (
+                                <div className="mt-1 flex flex-wrap items-center gap-1">
+                                  {row.tags.slice(0, 3).map((tg) => (
+                                    <TagBadge
+                                      key={tg}
+                                      name={tg}
+                                      color={tagColors[tg.toLowerCase()]}
+                                      active={tagFilter.toLowerCase() === tg.toLowerCase()}
+                                      onClick={(e?: any) => {
+                                        e?.stopPropagation?.()
+                                        setTagFilter(tagFilter.toLowerCase() === tg.toLowerCase() ? '' : tg)
+                                      }}
+                                      title={`Filter by \u201c${tg}\u201d`}
+                                    />
+                                  ))}
+                                  {row.tags.length > 3 && (
+                                    <span className="text-[10px] text-muted">+{row.tags.length - 3}</span>
+                                  )}
+                                </div>
+                              )}
                             </div>
                           </div>
                         </Td>
@@ -494,13 +921,44 @@ export function LinkUtilizationPage() {
                             <span className="text-xs text-muted">—</span>
                           )}
                         </Td>
-                        <Td className="pr-4">
-                          {row.has_netflow ? (
-                            <Badge variant="info" className="text-[10px]">NetFlow</Badge>
-                          ) : (
-                            <span className="text-xs text-muted">SNMP</span>
-                          )}
-                        </Td>
+                        {!selectedRow && (
+                          <>
+                            <Td className="text-right font-mono text-xs tabular-nums">
+                              {row.errors > 0 ? (
+                                <span
+                                  className={row.issues?.includes('errors') ? 'text-danger' : 'text-muted'}
+                                  title={`${row.errors.toLocaleString()} errored frames · ${formatPpm(row.error_ppm)}`}
+                                >
+                                  {formatCount(row.errors)}
+                                </span>
+                              ) : (
+                                <span className="text-muted">—</span>
+                              )}
+                            </Td>
+                            <Td className="text-right font-mono text-xs tabular-nums">
+                              {row.discards > 0 ? (
+                                <span
+                                  className={row.issues?.includes('discards') ? 'text-warning' : 'text-muted'}
+                                  title={`${row.discards.toLocaleString()} discarded frames · ${formatPpm(row.discard_ppm)}`}
+                                >
+                                  {formatCount(row.discards)}
+                                </span>
+                              ) : (
+                                <span className="text-muted">—</span>
+                              )}
+                            </Td>
+                          </>
+                        )}
+                        <Td className={selectedRow ? 'pr-4' : undefined}><HealthChips row={row} /></Td>
+                        {!selectedRow && (
+                          <Td className="pr-4">
+                            {row.has_netflow ? (
+                              <Badge variant="info" className="text-[10px]">NetFlow</Badge>
+                            ) : (
+                              <span className="text-xs text-muted">SNMP</span>
+                            )}
+                          </Td>
+                        )}
                       </Tr>
                     )
                   })}
@@ -533,6 +991,13 @@ export function LinkUtilizationPage() {
           rule={editRule}
         />
       )}
+
+      <LinkBulkTagDialog
+        open={bulkTagOpen}
+        onOpenChange={setBulkTagOpen}
+        links={Array.from(checked).map(parseLinkKey)}
+        onDone={() => setChecked(new Set())}
+      />
     </div>
   )
 }
@@ -562,7 +1027,19 @@ function LinkDetailPanel({
 
   const { data, isLoading } = useQuery<{
     traffic: { ts: number; in_bps: number; out_bps: number; in_peak_bps?: number; out_peak_bps?: number }[]
+    /** Per-sample/per-bucket counter increases — not the raw counter readings. */
+    errors: { ts: number; in_errors: number; out_errors: number; in_discards: number; out_discards: number }[]
     summary: Record<string, number>
+    health?: {
+      errors: number; discards: number
+      in_errors: number; out_errors: number; in_discards: number; out_discards: number
+      error_ppm: number | null; discard_ppm: number | null
+      in_pps: number; out_pps: number
+      flaps: number; availability_pct: number | null
+      health: 'ok' | 'warning' | 'critical'; issues: string[]
+      /** false on SPAN/mirror ports, where ifOperStatus contradicts the traffic. */
+      oper_status_reliable?: boolean
+    }
     /** 0 = raw samples; otherwise the plotted line is a per-bucket average. */
     bucket_seconds?: number
     netflow: {
@@ -585,7 +1062,17 @@ function LinkDetailPanel({
   const traffic = data?.traffic || []
   const nf = data?.netflow
   const sum = data?.summary || {}
+  const health = data?.health
   const speed = link.effective_speed_bps
+
+  /* Errors and discards per bucket. Kept separate from the bandwidth series so
+     a flat-zero error line doesn't imply "no data" on a link that simply has
+     no faults — the section states that explicitly instead. */
+  const errorSeries = data?.errors || []
+  const hasErrorEvents = useMemo(
+    () => errorSeries.some((p) => p.in_errors || p.out_errors || p.in_discards || p.out_discards),
+    [errorSeries],
+  )
   // HH:mm alone repeats itself once the window spans more than a day.
   const tickFormatter = useMemo(() => timeAxisTickFormatter(hours), [hours])
   const ticks = useMemo(() => timeTicks(fromTs, toTs, hours), [fromTs, toTs, hours])
@@ -647,6 +1134,7 @@ function LinkDetailPanel({
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div>
             <div className="flex items-center gap-2">
+              <FavoriteStar row={link} className="p-0" />
               <h2 className="text-lg font-semibold">{label}</h2>
               {link.has_netflow && <Badge variant="info">NetFlow</Badge>}
               {link.oper_status === 'up' ? (
@@ -687,12 +1175,106 @@ function LinkDetailPanel({
             value={sum.out_max_bps ? formatBps(sum.out_max_bps) : '—'}
             sub={sum.out_avg_bps != null ? `avg ${formatBps(sum.out_avg_bps)}` : undefined}
           />
+          {/* Unicast only — ifInUcastPkts excludes broadcast/multicast, and a
+              frame that errored or was discarded never reaches this counter.
+              Saying so keeps "0 pps" next to live bandwidth from reading as a
+              bug: on a fully-errored port that is exactly the right answer. */}
           <MiniStat
-            label="Errors"
-            value={String(sum.total_errors ?? '—')}
-            sub={sum.total_discards != null ? `${sum.total_discards} discards` : undefined}
-            tone={(sum.total_errors || 0) > 0 || (sum.total_discards || 0) > 0 ? 'text-danger' : undefined}
+            label="Unicast rate"
+            value={health ? `${Math.round(health.in_pps + health.out_pps).toLocaleString()} pps` : '—'}
+            sub={health ? `${Math.round(health.in_pps).toLocaleString()} in · ${Math.round(health.out_pps).toLocaleString()} out` : undefined}
           />
+        </div>
+
+        {/* Interface health */}
+        <div>
+          <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3">
+            <h3 className="text-sm font-medium">Interface health · {rangeLabel}</h3>
+            <span className="text-[11px] text-muted">
+              counter increase over the window, reset-safe
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <MiniStat
+              label="Errored frames"
+              value={health ? health.errors.toLocaleString() : '—'}
+              sub={health
+                ? (health.errors > 0
+                    ? `${formatPpm(health.error_ppm)} · ${health.in_errors.toLocaleString()} in / ${health.out_errors.toLocaleString()} out`
+                    : 'clean')
+                : undefined}
+              tone={health?.issues?.includes('errors') ? healthTone(health.health) : undefined}
+            />
+            <MiniStat
+              label="Discarded frames"
+              value={health ? health.discards.toLocaleString() : '—'}
+              sub={health
+                ? (health.discards > 0
+                    ? `${formatPpm(health.discard_ppm)} · ${health.in_discards.toLocaleString()} in / ${health.out_discards.toLocaleString()} out`
+                    : 'clean')
+                : undefined}
+              tone={health?.issues?.includes('discards') ? 'text-warning' : undefined}
+            />
+            {/* On a SPAN/mirror port the agent reports ifOperStatus=down while
+                the port forwards, so availability and flap counts are noise —
+                say that rather than print a contradictory "Up · 0% available". */}
+            <MiniStat
+              label="Link stability"
+              value={
+                !health ? '—'
+                : health.oper_status_reliable === false ? 'n/a'
+                : `${health.availability_pct}%`
+              }
+              sub={
+                !health ? undefined
+                : health.oper_status_reliable === false
+                  ? 'port reports down while forwarding'
+                  : health.flaps > 0
+                    ? `${health.flaps} state change${health.flaps === 1 ? '' : 's'}`
+                    : 'no state changes'
+              }
+              tone={health?.issues?.includes('flapping') ? 'text-warning' : undefined}
+            />
+          </div>
+
+          {/* Only draw the chart when something actually happened — an all-zero
+              plot reads as a broken chart rather than a healthy link. */}
+          {hasErrorEvents ? (
+            <div className="mt-2 h-40 rounded-lg border border-border/60 bg-surface2/20 p-2">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={errorSeries} margin={{ top: 8, right: axisRightPad(hours), bottom: 0, left: 0 }}>
+                  <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.4} strokeDasharray="3 3" vertical={false} />
+                  <XAxis
+                    dataKey="ts" type="number" scale="time" domain={[fromTs, toTs]}
+                    ticks={ticks} interval={0} tickFormatter={tickFormatter}
+                    tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false}
+                  />
+                  <YAxis
+                    width={52} allowDecimals={false}
+                    tickFormatter={(v) => formatCount(Number(v))}
+                    tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false}
+                  />
+                  <Tooltip
+                    contentStyle={{ background: 'rgb(var(--surface))', border: '1px solid rgb(var(--border))', borderRadius: 8, fontSize: 12 }}
+                    labelFormatter={timeTooltipLabelFormatter}
+                    formatter={(v: number, name: string) => [Number(v).toLocaleString(), name]}
+                  />
+                  <Legend verticalAlign="top" align="right" iconSize={8} wrapperStyle={{ fontSize: 11 }} />
+                  <Area type="monotone" dataKey="in_errors" name="In errors" stroke="rgb(var(--danger))" fill="rgb(var(--danger))" fillOpacity={0.2} strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                  <Area type="monotone" dataKey="out_errors" name="Out errors" stroke="rgb(var(--warning))" fill="rgb(var(--warning))" fillOpacity={0.15} strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                  <Area type="monotone" dataKey="in_discards" name="In discards" stroke="rgb(var(--info))" fill="none" strokeWidth={1.5} strokeDasharray="4 3" dot={false} isAnimationActive={false} />
+                  <Area type="monotone" dataKey="out_discards" name="Out discards" stroke="rgb(var(--accent))" fill="none" strokeWidth={1.5} strokeDasharray="4 3" dot={false} isAnimationActive={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          ) : (
+            <div className="mt-2 rounded-lg border border-border/60 bg-surface2/20 px-3 py-2.5 text-[11px] text-muted">
+              {isLoading
+                ? 'Loading…'
+                : 'No errors or discards recorded on this interface in the selected window.'}
+            </div>
+          )}
         </div>
 
         {/* Bandwidth chart */}
@@ -917,13 +1499,21 @@ function LinkAlertsSection({
   onEdit: (rule: AlertRule) => void
 }) {
   const qc = useQueryClient()
-  const { data, isLoading } = useQuery<{ data: AlertRule[] }>({
+  // Must return a bare array: this cache key is shared with AlertRulesPage and
+  // RoutingTab, which map over it directly. Caching the raw {data: [...]}
+  // envelope here meant that visiting Link Utilization first left an object
+  // under the key, and Alert Rules then died on "(rules || []).map is not a
+  // function". Every reader of ['alert-rules'] normalises the same way.
+  const { data, isLoading } = useQuery<AlertRule[]>({
     queryKey: ['alert-rules'],
-    queryFn: async () => (await api.get('/alert-rules')).data,
+    queryFn: async () => {
+      const r = (await api.get('/alert-rules')).data
+      return Array.isArray(r) ? r : r?.data || []
+    },
   })
 
   const rules = useMemo(
-    () => (data?.data || []).filter((r) => ruleMatchesLink(r, link)),
+    () => (data || []).filter((r) => ruleMatchesLink(r, link)),
     [data, link],
   )
 
@@ -1188,6 +1778,78 @@ function LinkAlertDialog({
             {create.isPending
               ? <Loader2 className="h-4 w-4 animate-spin" />
               : isEdit ? 'Save changes' : 'Create rule'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// =========================================================================
+// Bulk tagging — same shape as the devices page dialog, so the two surfaces
+// behave identically: add is a union, remove is a difference, everything else
+// on the link is left alone.
+// =========================================================================
+
+function LinkBulkTagDialog({
+  open, onOpenChange, links, onDone,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  links: LinkKey[]
+  onDone: () => void
+}) {
+  const qc = useQueryClient()
+  const [add, setAdd] = useState<string[]>([])
+  const [remove, setRemove] = useState<string[]>([])
+  useEffect(() => {
+    if (!open) { setAdd([]); setRemove([]) }
+  }, [open])
+
+  const run = useMutation({
+    mutationFn: async () =>
+      (await api.post('/link-utilization/bulk-tag', { links, add, remove }))
+        .data as { updated: number },
+    onSuccess: (res) => {
+      toast.success(`Tags updated on ${res.updated} link${res.updated === 1 ? '' : 's'}`)
+      qc.invalidateQueries({ queryKey: ['link-utilization'] })
+      qc.invalidateQueries({ queryKey: ['tags'] })
+      onOpenChange(false)
+      onDone()
+    },
+    onError: (e: any) => toast.error('Bulk tag failed', apiErrorMessage(e)),
+  })
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Tags className="h-5 w-5 text-primary" />
+            Tag {links.length} link{links.length === 1 ? '' : 's'}
+          </DialogTitle>
+          <DialogDescription>
+            Added tags are appended; removed tags are taken off. Other tags on each
+            link stay untouched.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <FormField label="Add tags">
+            <TagPicker value={add} onChange={setAdd} placeholder="Tags to add…" />
+          </FormField>
+          <FormField label="Remove tags">
+            <TagPicker value={remove} onChange={setRemove} placeholder="Tags to remove…" allowCreate={false} />
+          </FormField>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={run.isPending}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => run.mutate()}
+            disabled={run.isPending || (add.length === 0 && remove.length === 0)}
+          >
+            {run.isPending ? 'Applying…' : `Apply to ${links.length}`}
           </Button>
         </DialogFooter>
       </DialogContent>

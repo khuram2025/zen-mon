@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 type DeviceLoader interface {
 	LoadDevices(ctx context.Context) ([]*Device, error)
 	UpdateDeviceStatus(ctx context.Context, deviceID uuid.UUID, status string, lastSeen time.Time, rttMs float64) error
+	LoadActiveMaintenanceDeviceIDs(ctx context.Context) (map[uuid.UUID]struct{}, error)
 }
 
 // MetricWriter writes ping results to the metrics store.
@@ -66,7 +68,11 @@ type SNMPLoader interface {
 	UpsertEntities(ctx context.Context, deviceID uuid.UUID, ents []snmp.Entity) error
 	UpsertSensors(ctx context.Context, deviceID uuid.UUID, sensors []snmp.Sensor) error
 	UpsertProfile(ctx context.Context, p *snmp.Profile) error
+	LoadProfiles(ctx context.Context) ([]*snmp.Profile, error)
 	AssignProfileIfUnset(ctx context.Context, deviceID, profileID uuid.UUID) error
+	UpsertUdtData(ctx context.Context, deviceID uuid.UUID, u *snmp.UdtData) error
+	LoadUdtGlobalInterval(ctx context.Context) (int, error)
+	UpsertTemplateValues(ctx context.Context, deviceID uuid.UUID, vals []snmp.TemplateValue, polledGroups []string) error
 }
 
 // SNMPMetricWriter persists SNMP metrics to the time-series store.
@@ -110,10 +116,13 @@ type Engine struct {
 
 	mu            sync.RWMutex
 	devices       map[uuid.UUID]*Device
+	deviceMaint   map[uuid.UUID]struct{} // devices inside an active maintenance window
 	serviceChecks map[uuid.UUID]*checker.ServiceCheck
 	snmpDevices   map[uuid.UUID]*snmp.Device
 	lastPingAt    map[uuid.UUID]time.Time
 	lastServiceAt map[uuid.UUID]time.Time
+	lastUdtAt     map[uuid.UUID]time.Time
+	udtInterval   time.Duration
 	startTime     time.Time
 	lastCycleMs   int64
 	activePings   int
@@ -169,8 +178,22 @@ func NewEngine(
 		snmpDevices:    make(map[uuid.UUID]*snmp.Device),
 		lastPingAt:     make(map[uuid.UUID]time.Time),
 		lastServiceAt:  make(map[uuid.UUID]time.Time),
+		lastUdtAt:      make(map[uuid.UUID]time.Time),
+		udtInterval:    udtIntervalFromEnv(),
 		startTime:      time.Now(),
 	}, nil
+}
+
+// udtIntervalFromEnv returns the UDT (MAC/ARP/LLDP) collection cadence.
+// Default 5 minutes — an order of magnitude fresher than the 30-minute
+// industry norm, while staying gentle on switch CPUs.
+func udtIntervalFromEnv() time.Duration {
+	if v := os.Getenv("UDT_POLL_INTERVAL"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 30 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 5 * time.Minute
 }
 
 // Run starts the main monitoring loop.
@@ -335,6 +358,17 @@ func (e *Engine) runPingCycle(ctx context.Context) {
 		return
 	}
 
+	// Active device maintenance windows — processStatusChange uses this set
+	// to mute transitions/alerting while metrics keep flowing. On error the
+	// previous set is kept rather than clobbered with an empty one.
+	if maint, err := e.loader.LoadActiveMaintenanceDeviceIDs(ctx); err != nil {
+		e.logger.Warnf("Failed to load device maintenance ids: %v", err)
+	} else {
+		e.mu.Lock()
+		e.deviceMaint = maint
+		e.mu.Unlock()
+	}
+
 	e.logger.Infof("Starting ping cycle for %d devices", len(deviceList))
 	start := time.Now()
 
@@ -380,6 +414,8 @@ func (e *Engine) processStatusChange(ctx context.Context, result *PingResult) {
 		return
 	}
 
+	_, inMaint := e.deviceMaint[result.DeviceID]
+
 	oldStatus := device.Status
 	var newStatus string
 
@@ -388,6 +424,11 @@ func (e *Engine) processStatusChange(ctx context.Context, result *PingResult) {
 		if device.DownCount >= e.cfg.Poller.DownThreshold {
 			newStatus = "down"
 		} else {
+			// Not confirmed down yet — but still flag a freshly opened
+			// maintenance window so the UI shows it immediately.
+			if inMaint && oldStatus != "maintenance" {
+				e.enterMaintenance(ctx, device, oldStatus, result)
+			}
 			return
 		}
 	} else {
@@ -403,13 +444,33 @@ func (e *Engine) processStatusChange(ctx context.Context, result *PingResult) {
 		device.LastSeen = result.Timestamp
 		device.LastRTT = rttMs
 
+		// While a maintenance window is active the stored status stays
+		// pinned to 'maintenance'; last_seen/rtt still refresh.
+		statusForPG := newStatus
+		if inMaint {
+			statusForPG = "maintenance"
+		}
 		go func() {
-			if err := e.loader.UpdateDeviceStatus(ctx, device.ID, newStatus, result.Timestamp, rttMs); err != nil {
+			if err := e.loader.UpdateDeviceStatus(ctx, device.ID, statusForPG, result.Timestamp, rttMs); err != nil {
 				e.logger.Errorf("Failed to update device last_seen in PG: %v", err)
 			}
 		}()
 	}
 
+	if inMaint {
+		// Maintenance mute (mirrors the service-check behavior): metrics were
+		// already written above, DownCount keeps counting so the post-window
+		// state is confirmed immediately, but there are no transitions and no
+		// alert evaluation while the window is active.
+		if oldStatus != "maintenance" {
+			e.enterMaintenance(ctx, device, oldStatus, result)
+		}
+		return
+	}
+
+	// Note: when a window ends, oldStatus is 'maintenance' and the normal
+	// path below transitions to the real status — including alerting, so a
+	// device that is still down after maintenance pages right away.
 	if newStatus != oldStatus {
 		device.Status = newStatus
 
@@ -457,6 +518,43 @@ func (e *Engine) processStatusChange(ctx context.Context, result *PingResult) {
 			}
 		}()
 	}
+}
+
+// enterMaintenance transitions a device into 'maintenance': one status-log
+// row, a PG status write and a realtime publish — and deliberately NO alert
+// evaluation. Caller must hold e.mu.
+func (e *Engine) enterMaintenance(ctx context.Context, device *Device, oldStatus string, result *PingResult) {
+	device.Status = "maintenance"
+
+	sc := &StatusChange{
+		DeviceID:  device.ID,
+		OldStatus: oldStatus,
+		NewStatus: "maintenance",
+		Reason:    "Maintenance window active",
+		Timestamp: time.Now().UTC(),
+	}
+
+	e.logger.Infof("Status change: %s (%s) %s → maintenance (alerting muted)",
+		device.Hostname, device.IPAddress, oldStatus)
+
+	rttMs := float64(result.RTT.Microseconds()) / 1000.0
+	go func() {
+		if err := e.loader.UpdateDeviceStatus(ctx, device.ID, "maintenance", result.Timestamp, rttMs); err != nil {
+			e.logger.Errorf("Failed to update device status in PG: %v", err)
+		}
+	}()
+
+	go func() {
+		if err := e.writer.WriteStatusChange(ctx, sc, 0); err != nil {
+			e.logger.Errorf("Failed to write status change to CH: %v", err)
+		}
+	}()
+
+	go func() {
+		if err := e.publisher.PublishStatusChange(ctx, sc); err != nil {
+			e.logger.Errorf("Failed to publish status change: %v", err)
+		}
+	}()
 }
 
 func (e *Engine) evaluateAlerts(ctx context.Context, device *Device, oldStatus, newStatus string, result *PingResult) {
@@ -856,14 +954,43 @@ func (e *Engine) processServiceStatusChange(ctx context.Context, result *checker
 
 // --- SNMP Logic ---
 
+// syncSNMPProfiles refreshes the classifier from device_profiles. The
+// DB is the template source of truth (builtins arrive via SQL
+// migration, custom templates via the API), so this runs on the same
+// cadence as the device sync — template edits go live within a minute
+// without a poller restart.
+func (e *Engine) syncSNMPProfiles(ctx context.Context) error {
+	profiles, err := e.snmpLoader.LoadProfiles(ctx)
+	if err != nil {
+		return err
+	}
+	for _, cerr := range e.snmpClassifier.SetProfiles(profiles) {
+		e.logger.Warnf("profile compile: %v", cerr)
+	}
+	return nil
+}
+
 func (e *Engine) syncSNMPDevices(ctx context.Context) error {
+	if err := e.syncSNMPProfiles(ctx); err != nil {
+		e.logger.Warnf("SNMP profile sync failed: %v", err)
+	}
 	devices, err := e.snmpLoader.LoadSNMPDevices(ctx)
 	if err != nil {
 		return err
 	}
 
+	// Operator-configured global UDT cadence (Settings → UDT). Falls
+	// back to the UDT_POLL_INTERVAL env var / 5m default when unset.
+	udtGlobal := udtIntervalFromEnv()
+	if n, err := e.snmpLoader.LoadUdtGlobalInterval(ctx); err != nil {
+		e.logger.Warnf("UDT global interval load failed: %v", err)
+	} else if n > 0 {
+		udtGlobal = time.Duration(n) * time.Second
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.udtInterval = udtGlobal
 
 	seen := make(map[uuid.UUID]bool, len(devices))
 	for _, d := range devices {
@@ -895,10 +1022,17 @@ func (e *Engine) runSNMPCycle(ctx context.Context) {
 		return
 	}
 	e.snmpRunning = true
+	now := time.Now()
 	devices := make([]*snmp.Device, 0, len(e.snmpDevices))
+	udtDue := make(map[uuid.UUID]bool, len(e.snmpDevices))
 	for _, d := range e.snmpDevices {
 		if d.Enabled {
 			devices = append(devices, d)
+			ival := e.udtInterval
+			if d.UdtInterval > 0 {
+				ival = d.UdtInterval
+			}
+			udtDue[d.ID] = d.UdtEnabled && now.Sub(e.lastUdtAt[d.ID]) >= ival
 		}
 	}
 	e.mu.Unlock()
@@ -931,8 +1065,10 @@ func (e *Engine) runSNMPCycle(ctx context.Context) {
 	var countMu sync.Mutex
 
 	// Hard per-device budget — no single unreachable device can stall
-	// the cycle longer than this.
-	const devBudget = 20 * time.Second
+	// the cycle longer than this. UDT cycles walk large FDB/ARP tables
+	// (plus per-VLAN sessions on Cisco), so they get a bigger budget.
+	const devBudgetBase = 20 * time.Second
+	const devBudgetUdt = 75 * time.Second
 
 	for _, d := range devices {
 		select {
@@ -945,11 +1081,15 @@ func (e *Engine) runSNMPCycle(ctx context.Context) {
 		go func(d *snmp.Device) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			devBudget := devBudgetBase
+			if udtDue[d.ID] {
+				devBudget = devBudgetUdt
+			}
 			// Pre-allocate the Result so the collector can write into
 			// it progressively. If the per-device budget fires mid-poll
 			// we still have whatever was collected so far (at minimum
 			// the System info — enough to populate vendor/model/OS).
-			res := &snmp.Result{DeviceID: d.ID, Timestamp: time.Now().UTC()}
+			res := &snmp.Result{DeviceID: d.ID, Timestamp: time.Now().UTC(), WantUdt: udtDue[d.ID]}
 
 			// Cancel the collector's context if budget expires so any
 			// in-flight walk stops as soon as it checks ctx.
@@ -1017,6 +1157,9 @@ func (e *Engine) handleSNMPResult(ctx context.Context, d *snmp.Device, r *snmp.R
 	rSens := r.Sensors
 	rScal := r.Scalars
 	rIfSamp := r.IfSamples
+	rUdt := r.Udt
+	rTplVals := r.TplValues
+	rTplGroups := r.TplGroups
 	r.Mu.Unlock()
 
 	// IMPORTANT: even when the poll cycle errored (e.g. per-device budget
@@ -1060,6 +1203,26 @@ func (e *Engine) handleSNMPResult(ctx context.Context, d *snmp.Device, r *snmp.R
 			e.logger.Warnf("UpsertSensors %s (%d rows): %v", d.Hostname, len(rSens), err)
 		}
 	}
+	if len(rTplVals) > 0 || len(rTplGroups) > 0 {
+		if err := e.snmpLoader.UpsertTemplateValues(ctx, d.ID, rTplVals, rTplGroups); err != nil {
+			e.logger.Warnf("UpsertTemplateValues %s (%d rows): %v", d.Hostname, len(rTplVals), err)
+		}
+	}
+	if rUdt != nil {
+		if err := e.snmpLoader.UpsertUdtData(ctx, d.ID, rUdt); err != nil {
+			e.logger.Warnf("UpsertUdtData %s (%d fdb, %d arp, %d nbrs): %v",
+				d.Hostname, len(rUdt.Fdb), len(rUdt.Arp), len(rUdt.Neighbors), err)
+		} else {
+			e.logger.Infof("UDT %s: %d fdb, %d arp, %d neighbors, %d vlans",
+				d.Hostname, len(rUdt.Fdb), len(rUdt.Arp), len(rUdt.Neighbors), len(rUdt.Vlans))
+		}
+		if rUdt.FdbNote != "" {
+			e.logger.Warnf("UDT %s: no switch-port data — %s", d.Hostname, rUdt.FdbNote)
+		}
+		e.mu.Lock()
+		e.lastUdtAt[d.ID] = time.Now()
+		e.mu.Unlock()
+	}
 
 	// 2) ClickHouse time-series writes — skip when the poll errored so we
 	// don't write a partial / inconsistent counter diff.
@@ -1073,27 +1236,34 @@ func (e *Engine) handleSNMPResult(ctx context.Context, d *snmp.Device, r *snmp.R
 	}
 }
 
-// seedSNMPProfiles loads built-in profile packs from disk and upserts
-// them into device_profiles. Runs once at startup. The directory can
-// be overridden via SNMP_PROFILES_DIR for dev / testing.
+// seedSNMPProfiles optionally imports profile packs from disk (a dev /
+// air-gapped bootstrap path), then loads the authoritative profile set
+// from the database into the classifier. Builtin templates normally
+// arrive via SQL migration, so a missing directory is not an error.
 func (e *Engine) seedSNMPProfiles(ctx context.Context) error {
 	dir := os.Getenv("SNMP_PROFILES_DIR")
 	if dir == "" {
 		dir = "/opt/zenplus/data/profiles"
 	}
-	profiles, loadErrs := e.snmpClassifier.LoadFromDir(dir)
-	for _, le := range loadErrs {
-		e.logger.Warnf("profile load: %v", le)
-	}
-	if len(profiles) == 0 {
-		return fmt.Errorf("no profiles loaded from %s", dir)
-	}
-	for _, p := range profiles {
-		if err := e.snmpLoader.UpsertProfile(ctx, p); err != nil {
-			e.logger.Warnf("upsert profile %s: %v", p.Name, err)
-			continue
+	if _, statErr := os.Stat(dir); statErr == nil {
+		profiles, loadErrs := e.snmpClassifier.LoadFromDir(dir)
+		for _, le := range loadErrs {
+			e.logger.Warnf("profile load: %v", le)
+		}
+		for _, p := range profiles {
+			if err := e.snmpLoader.UpsertProfile(ctx, p); err != nil {
+				e.logger.Warnf("upsert profile %s: %v", p.Name, err)
+				continue
+			}
+		}
+		if len(profiles) > 0 {
+			e.logger.Infof("SNMP profile file seed: %d profiles from %s", len(profiles), dir)
 		}
 	}
-	e.logger.Infof("SNMP profile seed complete: %d profiles from %s", len(profiles), dir)
+	// DB is the source of truth — always finish by (re)loading from it,
+	// which also replaces whatever LoadFromDir put in the classifier.
+	if err := e.syncSNMPProfiles(ctx); err != nil {
+		return err
+	}
 	return nil
 }

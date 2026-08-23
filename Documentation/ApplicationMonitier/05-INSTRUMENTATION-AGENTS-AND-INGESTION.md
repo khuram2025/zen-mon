@@ -31,6 +31,7 @@ Every supported path terminates at one of three front doors, all of which write 
 | Browser RUM SDK | HTTPS beacon (POST) | FastAPI `/api/v1/apm/rum/ingest` | `zpr_` public + CORS origin allowlist | RUM events, web vitals, JS errors | AM-E10 |
 | Synthetic probes | internal (poller → CH) | Go poller `engine.go` cycle | n/a (server-internal) | synthetic results | AM-E9 |
 | DB-monitoring agent | OTLP (as above) | Go collector | `zpi_` bearer | spans w/ `db_*` promoted cols | AM-E11 |
+| **ZenPlus agent gateway** *(added 2026-08-04 — see [`10-AGENT-APM-INTEGRATION-SPEC.md`](10-AGENT-APM-INTEGRATION-SPEC.md))* | local OTLP `127.0.0.1:4317/:4318` → controller | agent forwards to FastAPI/collector | agent-scoped `zpi_` (minted via agent enrollment) | traces, logs, runtime metrics + discovery/instrumentation lifecycle | E-7 (09 §4) |
 
 ```
                        OTLP (gRPC 4317 / HTTP 4318), W3C traceparent, Bearer zpi_

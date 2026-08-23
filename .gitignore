@@ -96,6 +96,7 @@ int/
 .cache/
 go/
 docker-compose.yml.bak
+poller/internal/checker/.netpath-presync-backup/
 
 # ─── Working artifacts (per-VM, never commit) ───
 .playwright-mcp/
@@ -111,3 +112,6 @@ zenplus-support-*/
 # ─── OTA updater per-migration backups & binary backups ───
 *.pre-update
 bin/*.bak
+
+# ─── Per-appliance schema verdict, written by scripts/sync-schema.py ───
+.schema-status.json

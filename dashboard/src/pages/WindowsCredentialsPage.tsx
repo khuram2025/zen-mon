@@ -30,6 +30,7 @@ type WinCred = {
   transport: 'http' | 'https'
   port: number
   ssl_verify: boolean
+  dc_host: string | null
   description: string | null
   created_at: string
   updated_at: string
@@ -44,6 +45,7 @@ const DEFAULT_FORM = {
   transport: 'http' as WinCred['transport'],
   port: 5985,
   ssl_verify: false,
+  dc_host: '',
   description: '',
 }
 
@@ -95,8 +97,11 @@ export function WindowsCredentialsPage({ hideHeader = false }: { hideHeader?: bo
       (await api.post(`/windows-credentials/${id}/test`, { ip })).data,
     onSuccess: (r) => {
       setTestResult(r)
-      if (r.ok) toast.success('WinRM probe succeeded')
-      else toast.error('WinRM probe failed', r.error || r.state || 'unknown')
+      if (r.ok) toast.success('Credential verified', 'WinRM session and Security log access both OK')
+      else {
+        const failed = (r.checks || []).find((c: any) => !c.ok)
+        toast.error(failed ? `${failed.label} failed` : 'Test failed', r.error || r.state || 'unknown')
+      }
     },
     onError: (e: any) => toast.error('Test failed', apiErrorMessage(e)),
   })
@@ -117,6 +122,7 @@ export function WindowsCredentialsPage({ hideHeader = false }: { hideHeader?: bo
       transport: c.transport,
       port: c.port,
       ssl_verify: c.ssl_verify,
+      dc_host: c.dc_host || '',
       description: c.description || '',
     })
     setOpen(true)
@@ -178,6 +184,7 @@ export function WindowsCredentialsPage({ hideHeader = false }: { hideHeader?: bo
                 <Tr>
                   <Th>Name</Th>
                   <Th>Username</Th>
+                  <Th>Domain controller</Th>
                   <Th>Auth</Th>
                   <Th>Transport</Th>
                   <Th>Port</Th>
@@ -193,6 +200,9 @@ export function WindowsCredentialsPage({ hideHeader = false }: { hideHeader?: bo
                     </Td>
                     <Td className="font-mono text-xs">
                       {c.domain ? `${c.domain}\\${c.username}` : c.username}
+                    </Td>
+                    <Td className="font-mono text-xs">
+                      {c.dc_host || <span className="font-sans text-muted">Not set</span>}
                     </Td>
                     <Td><Badge variant="outline">{c.auth_method}</Badge></Td>
                     <Td>
@@ -210,10 +220,10 @@ export function WindowsCredentialsPage({ hideHeader = false }: { hideHeader?: bo
                         <Button variant="ghost" size="icon"
                                 onClick={() => {
                                   setEditing(c)
-                                  setTestIp('')
+                                  setTestIp(c.dc_host || '')
                                   setTestResult(null)
                                 }}
-                                className="h-8 w-8" title="Test against a host">
+                                className="h-8 w-8" title="Test the connection to the domain controller">
                           <Zap className="h-4 w-4" />
                         </Button>
                         <Button variant="ghost" size="icon"
@@ -302,6 +312,12 @@ export function WindowsCredentialsPage({ hideHeader = false }: { hideHeader?: bo
                 </div>
               </FormField>
             )}
+            <FormField label="Domain controller (optional)"
+                       hint="Hostname or IP this credential is used against. Sets the target for the connection test, and is required before UDT can correlate user logins.">
+              <Input value={form.dc_host}
+                     onChange={(e) => setForm({ ...form, dc_host: e.target.value })}
+                     placeholder="dc01.corp.local" />
+            </FormField>
             <FormField label="Description (optional)">
               <Input value={form.description}
                      onChange={(e) => setForm({ ...form, description: e.target.value })}
@@ -325,23 +341,39 @@ export function WindowsCredentialsPage({ hideHeader = false }: { hideHeader?: bo
           <DialogHeader>
             <DialogTitle>Test {editing?.name}</DialogTitle>
           </DialogHeader>
-          <FormField label="Target IP address"
-                     hint="Runs a WinRM probe and returns OS/hostname if the credential works">
+          <FormField label="Domain controller"
+                     hint={editing?.dc_host
+                       ? 'Checks the two rights UDT needs: a WinRM session, and read access to the Security event log.'
+                       : 'This credential has no domain controller set \u2014 add one on the credential first. Testing a different host is an administrator action.'}>
             <Input value={testIp} onChange={(e) => setTestIp(e.target.value)}
-                   placeholder="192.168.1.10" />
+                   placeholder="dc01.corp.local" />
           </FormField>
           {testResult && (
-            <div className={`rounded-md border px-3 py-2 text-xs ${
-              testResult.ok
-                ? 'border-success/30 bg-success/10 text-success'
-                : 'border-danger/30 bg-danger/10 text-danger'
-            }`}>
-              <div className="font-semibold mb-1">
-                {testResult.ok ? '✓ Connection succeeded' : `✗ ${testResult.state || 'failed'}`}
+            <div className="space-y-2">
+              {/* One row per access check. WinRM session and Security log access
+                  come from different groups, so a single verdict would send the
+                  operator to the wrong one. */}
+              <div className="divide-y divide-border rounded-md border border-border">
+                {(testResult.checks || []).map((c: any) => (
+                  <div key={c.id} className="flex items-start gap-2 px-3 py-2 text-xs">
+                    <span className={c.ok ? 'text-success' : 'text-danger'}>{c.ok ? '✓' : '✗'}</span>
+                    <div className="min-w-0 flex-1">
+                      <div className="font-medium text-text">{c.label}</div>
+                      {c.detail && <div className="mt-0.5 break-words text-muted">{c.detail}</div>}
+                      {!c.ok && c.fix && (
+                        <div className="mt-1 rounded border border-warning/30 bg-warning/10 px-2 py-1 text-warning">
+                          {c.fix}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
-              {testResult.error && <div>{testResult.error}</div>}
-              {testResult.info && (
-                <pre className="mt-2 whitespace-pre-wrap">{JSON.stringify(testResult.info, null, 2)}</pre>
+              {testResult.info?.hostname && (
+                <div className="text-xs text-muted">
+                  Reached <span className="font-mono text-text">{testResult.info.hostname}</span>
+                  {testResult.info.os ? ` · ${testResult.info.os}` : ''}
+                </div>
               )}
             </div>
           )}

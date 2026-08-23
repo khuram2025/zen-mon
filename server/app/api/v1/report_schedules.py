@@ -26,8 +26,10 @@ from app.services.report_scheduler import compute_next_run, generate_and_deliver
 
 router = APIRouter(prefix="/report-schedules", tags=["Report Schedules"])
 
-_REPORT_TYPES = "executive_summary|device_health|service_health|alert_analysis|full_report"
-_PERIODS = "last_24h|last_7d|last_30d"
+_REPORT_TYPES = ("executive_summary|device_health|service_health|alert_analysis|full_report"
+                 "|availability|performance|traffic|usage|apm_performance"
+                 "|capacity|alerts|inventory|custom")
+_PERIODS = "last_24h|last_7d|last_30d|last_90d"
 _FORMATS = "pdf|excel|csv|none"
 _FREQS = "daily|weekly|monthly"
 
@@ -46,6 +48,7 @@ class ReportScheduleCreate(BaseModel):
     day_of_week: Optional[int] = Field(None, ge=1, le=7)
     day_of_month: Optional[int] = Field(None, ge=1, le=31)
     notify_channels: list[str] = Field(default_factory=list)
+    custom_report_id: Optional[str] = None
 
 
 class ReportScheduleUpdate(BaseModel):
@@ -62,6 +65,7 @@ class ReportScheduleUpdate(BaseModel):
     day_of_week: Optional[int] = Field(None, ge=1, le=7)
     day_of_month: Optional[int] = Field(None, ge=1, le=31)
     notify_channels: Optional[list[str]] = None
+    custom_report_id: Optional[str] = None
 
 
 def _row_to_dict(row) -> dict:
@@ -80,6 +84,7 @@ def _row_to_dict(row) -> dict:
         "day_of_week": row.day_of_week,
         "day_of_month": row.day_of_month,
         "notify_channels": row.notify_channels or [],
+        "custom_report_id": str(row.custom_report_id) if getattr(row, "custom_report_id", None) else None,
         "last_run_at": row.last_run_at.isoformat() if row.last_run_at else None,
         "last_status": row.last_status,
         "last_error": row.last_error,
@@ -114,16 +119,17 @@ async def create_report_schedule(
         text("""INSERT INTO report_schedules
                 (name, description, enabled, report_type, period, format, filters,
                  frequency, hour, minute, day_of_week, day_of_month, notify_channels,
-                 next_run_at, created_by, created_at, updated_at)
+                 custom_report_id, next_run_at, created_by, created_at, updated_at)
                 VALUES (:name, :description, :enabled, :report_type, :period, :format,
                         CAST(:filters AS jsonb), :frequency, :hour, :minute,
                         :day_of_week, :day_of_month, CAST(:notify_channels AS jsonb),
-                        :next_run_at, :created_by, NOW(), NOW())
+                        :custom_report_id, :next_run_at, :created_by, NOW(), NOW())
                 RETURNING *"""),
         {
             "name": data.name, "description": data.description, "enabled": data.enabled,
             "report_type": data.report_type, "period": data.period, "format": data.format,
             "filters": json.dumps(data.filters or {}), "frequency": data.frequency,
+            "custom_report_id": data.custom_report_id,
             "hour": data.hour, "minute": data.minute, "day_of_week": data.day_of_week,
             "day_of_month": data.day_of_month,
             "notify_channels": json.dumps(data.notify_channels or []),

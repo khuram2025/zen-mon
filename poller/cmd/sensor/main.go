@@ -65,6 +65,7 @@ type configServiceCheck struct {
 	HTTPExpectedStatuses string `json:"http_expected_statuses"`
 	HTTPContentMatch     string `json:"http_content_match"`
 	HTTPFollowRedirects  *bool  `json:"http_follow_redirects"`
+	HTTPIgnoreTLSErrors  bool   `json:"http_ignore_tls_errors"`
 	TLSWarnDays          int    `json:"tls_warn_days"`
 	TLSCriticalDays      int    `json:"tls_critical_days"`
 	CheckInterval        int    `json:"check_interval"`
@@ -469,6 +470,7 @@ func runServiceChecks(ctx context.Context, c *checker.Checker, cfg *runtimeConfi
 			HTTPExpectedStatuses: sc.HTTPExpectedStatuses,
 			HTTPContentMatch:     sc.HTTPContentMatch,
 			HTTPFollowRedirects:  followRedirects,
+			HTTPIgnoreTLSErrors:  sc.HTTPIgnoreTLSErrors,
 			TLSWarnDays:          sc.TLSWarnDays,
 			TLSCriticalDays:      sc.TLSCriticalDays,
 			CheckInterval:        interval,

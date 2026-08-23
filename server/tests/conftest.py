@@ -75,6 +75,7 @@ class FakeDB:
                     cooldown=params["cooldown"],
                     device_type=params["device_type"],
                     location=params["location"],
+                    scope_tag=params["scope_tag"],
                     trigger_on=params["trigger_on"],
                     recovery_alert=params["recovery_alert"],
                     min_duration=params["min_duration"],

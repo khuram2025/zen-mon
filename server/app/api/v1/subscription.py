@@ -201,7 +201,11 @@ async def get_subscription(
         await db.refresh(sub)
 
     # Get usage stats
-    device_count = (await db.execute(select(func.count(Device.id)))).scalar() or 0
+    # Controller-reported children don't consume device licenses — one WLC
+    # promoting 300 APs must not eat a 500-device plan.
+    device_count = (await db.execute(
+        select(func.count(Device.id)).where(Device.poll_mode != "via_controller")
+    )).scalar() or 0
     check_count = (await db.execute(select(func.count(ServiceCheck.id)))).scalar() or 0
     user_count = (await db.execute(select(func.count(User.id)).where(User.is_active == True))).scalar() or 0
 

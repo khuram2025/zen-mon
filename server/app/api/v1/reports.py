@@ -237,3 +237,233 @@ async def list_report_types(
             {"id": "custom", "label": "Custom Range"},
         ],
     }
+
+
+# ─── Section-engine reports (availability/performance/traffic/usage/…) ──────
+#
+# The section-based engine (services/report_sections.py) serves the newer
+# report types and user-defined custom reports in three formats: JSON for the
+# dashboard's generic viewer, self-contained HTML, and PDF.
+
+import uuid as _uuid
+
+from app.services import report_sections as _rs
+
+
+def _window_from_query(
+    from_: Optional[datetime], to: Optional[datetime], hours: int
+) -> tuple[datetime, datetime]:
+    end = to or datetime.utcnow()
+    start = from_ or (end - timedelta(hours=max(1, min(hours, 24 * 92))))
+    if end.tzinfo is not None:
+        end = end.astimezone(tz=None).replace(tzinfo=None)
+    if start.tzinfo is not None:
+        start = start.astimezone(tz=None).replace(tzinfo=None)
+    return start, end
+
+
+@router.get("/catalog")
+async def report_catalog(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Everything the report library needs: built-in types (legacy + section
+    presets), the section library for the custom builder, and saved custom
+    reports."""
+    legacy = [
+        {"key": "executive_summary", "title": "Executive Summary",
+         "description": "Leadership view: availability, SLA, incidents and MTTR.",
+         "category": "Personas", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
+        {"key": "device_health", "title": "Device Health",
+         "description": "Per-device uptime, latency and status changes.",
+         "category": "Personas", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
+        {"key": "service_health", "title": "Service Health",
+         "description": "Service checks, response times and TLS expiry.",
+         "category": "Personas", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
+        {"key": "alert_analysis", "title": "Alert Analysis",
+         "description": "Alert volumes, severity mix and MTTR breakdown.",
+         "category": "Personas", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
+        {"key": "full_report", "title": "Full Report",
+         "description": "All legacy sections in a single document.",
+         "category": "Personas", "engine": "legacy", "formats": ["pdf", "excel", "csv"]},
+    ]
+    presets = [
+        {"key": k, "title": p["title"], "description": p["description"],
+         "category": p["category"], "engine": "sections",
+         "formats": ["html", "pdf"], "sections": p["sections"],
+         # Reports whose sections honour the device filter.
+         "filterable": (["devices"] if k == "availability" else [])}
+        for k, p in _rs.REPORT_PRESETS.items()
+    ]
+    sections = [
+        {"id": sid, "title": s["title"], "description": s["description"],
+         "category": s["category"]}
+        for sid, s in _rs.SECTION_REGISTRY.items()
+    ]
+    custom_rows = (await db.execute(text(
+        "SELECT id::text, name, description, sections, created_at "
+        "FROM custom_reports ORDER BY created_at DESC"))).fetchall()
+    custom = [
+        {"id": r[0], "name": r[1], "description": r[2] or "",
+         "sections": list(r[3] or []), "created_at": r[4].isoformat() if r[4] else None}
+        for r in custom_rows
+    ]
+    return {"types": legacy + presets, "sections": sections, "custom": custom}
+
+
+@router.get("/render/{key}")
+async def render_section_report(
+    key: str,
+    format: str = Query("json", pattern="^(json|html|pdf)$"),
+    from_: Optional[datetime] = Query(None, alias="from"),
+    to: Optional[datetime] = Query(None),
+    hours: int = Query(24, ge=1, le=24 * 92),
+    custom_id: Optional[str] = None,
+    device_ids: Optional[str] = Query(None, description="Comma-separated device UUIDs to scope node-aware sections"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Render a section-engine report (preset key, or key='custom' +
+    custom_id) for an arbitrary window."""
+    try:
+        title, description, section_ids = await _rs.resolve_report(db, key, custom_id)
+    except KeyError:
+        raise HTTPException(404, f"Unknown report: {key}")
+
+    filters = None
+    if device_ids:
+        ids = [i.strip() for i in device_ids.split(",") if i.strip()]
+        try:
+            for i in ids:
+                _uuid.UUID(i)
+        except ValueError:
+            raise HTTPException(400, "device_ids must be UUIDs")
+        if len(ids) > 500:
+            raise HTTPException(400, "Too many device ids (max 500)")
+        filters = {"device_ids": ids}
+
+    start, end = _window_from_query(from_, to, hours)
+    sections = await _rs.build_sections(db, section_ids, start, end, filters)
+    category = (_rs.REPORT_PRESETS.get(key) or {}).get("category") or \
+        ("Custom Report" if key == "custom" else "")
+    scope_label = (f"{len(filters['device_ids'])} selected device(s)"
+                   if filters else "All monitored infrastructure")
+    meta = await _rs.build_report_meta(db, title, start, end,
+                                      description=description,
+                                      category=category,
+                                      scope_label=scope_label)
+
+    if format == "json":
+        return {
+            "key": key, "title": title, "description": description,
+            "from": start.isoformat(), "to": end.isoformat(),
+            "period_label": meta["period_label"],
+            "generated_label": meta["generated_label"],
+            "company_name": meta["company_name"],
+            "sections": _rs.sections_to_json(sections),
+        }
+
+    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    safe = title.replace(" ", "-")[:48]
+    if format == "html":
+        html = _rs.render_html(meta, sections)
+        return Response(
+            content=html, media_type="text/html",
+            headers={"Content-Disposition": f'attachment; filename="ZenPlus-{safe}-{ts}.html"'},
+        )
+    pdf = _rs.render_pdf(meta, sections)
+    return Response(
+        content=bytes(pdf), media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="ZenPlus-{safe}-{ts}.pdf"'},
+    )
+
+
+# ─── Custom reports CRUD ────────────────────────────────────────────────────
+
+class CustomReportBody(BaseModel):
+    name: str
+    description: Optional[str] = None
+    sections: list[str]
+
+
+def _validate_custom(body: CustomReportBody) -> None:
+    if not body.name.strip():
+        raise HTTPException(400, "Name is required")
+    if not body.sections:
+        raise HTTPException(400, "Pick at least one section")
+    unknown = [s for s in body.sections if s not in _rs.SECTION_REGISTRY]
+    if unknown:
+        raise HTTPException(400, f"Unknown sections: {unknown}")
+
+
+@router.post("/custom", status_code=201)
+async def create_custom_report(
+    body: CustomReportBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _validate_custom(body)
+    import json as _json
+    row = (await db.execute(text(
+        "INSERT INTO custom_reports (name, description, sections, created_by) "
+        "VALUES (:n, :d, CAST(:s AS jsonb), :u) RETURNING id::text"),
+        {"n": body.name.strip(), "d": body.description,
+         "s": _json.dumps(body.sections), "u": str(current_user.id)})).first()
+    await db.commit()
+    return {"id": row[0], "message": f"Custom report '{body.name}' saved"}
+
+
+@router.put("/custom/{report_id}")
+async def update_custom_report(
+    report_id: _uuid.UUID,
+    body: CustomReportBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _validate_custom(body)
+    import json as _json
+    res = await db.execute(text(
+        "UPDATE custom_reports SET name=:n, description=:d, "
+        "sections=CAST(:s AS jsonb), updated_at=NOW() WHERE id=:id"),
+        {"n": body.name.strip(), "d": body.description,
+         "s": _json.dumps(body.sections), "id": str(report_id)})
+    if not res.rowcount:
+        raise HTTPException(404, "Custom report not found")
+    await db.commit()
+    return {"message": "Custom report updated"}
+
+
+@router.delete("/custom/{report_id}")
+async def delete_custom_report(
+    report_id: _uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    res = await db.execute(text(
+        "DELETE FROM custom_reports WHERE id=:id"), {"id": str(report_id)})
+    if not res.rowcount:
+        raise HTTPException(404, "Custom report not found")
+    await db.commit()
+    return {"message": "Custom report deleted"}
+
+
+@router.get("/runs")
+async def recent_report_runs(
+    limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Recent generated reports across all schedules (for the library page)."""
+    rows = (await db.execute(text(
+        """SELECT r.id::text, r.title, r.report_type, r.period, r.token,
+                  r.status, r.delivered_to, r.generated_at, s.name AS schedule_name
+           FROM report_runs r
+           LEFT JOIN report_schedules s ON s.id = r.schedule_id
+           ORDER BY r.generated_at DESC LIMIT :lim"""), {"lim": limit})).fetchall()
+    return [
+        {"id": r[0], "title": r[1], "report_type": r[2], "period": r[3],
+         "token": r[4], "status": r[5], "delivered_to": r[6] or [],
+         "generated_at": r[7].isoformat() if r[7] else None,
+         "schedule_name": r[8]}
+        for r in rows
+    ]

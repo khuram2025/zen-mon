@@ -46,9 +46,9 @@ export function fmtPct(v: number | null | undefined): string {
 
 export function KpiTile({ label, value, accent }: { label: string; value: React.ReactNode; accent?: string }) {
   return (
-    <div className="rounded-lg border border-[var(--bg-elevated)] bg-[var(--bg-secondary)] px-4 py-3">
-      <div className="text-xs text-[var(--text-muted)]">{label}</div>
-      <div className="text-xl font-semibold mt-0.5" style={{ color: accent || 'var(--text-primary)' }}>{value}</div>
+    <div className="rounded-lg border border-border bg-surface px-4 py-3">
+      <div className="text-xs text-muted">{label}</div>
+      <div className="text-xl font-semibold mt-0.5 text-text" style={accent ? { color: accent } : undefined}>{value}</div>
     </div>
   )
 }

@@ -31,6 +31,7 @@ import {
   Shield,
   ShieldAlert,
   Sparkles,
+  Tags,
   Trash2,
   Upload,
   Wifi,
@@ -65,6 +66,10 @@ import {
 } from '@/components/ui/Select'
 import { DeviceFormDialog } from '@/components/forms/DeviceFormDialog'
 import { toast } from '@/components/ui/Toast'
+import { TagBadge } from '@/components/tags/TagBadge'
+import { TagPicker } from '@/components/tags/TagPicker'
+import { ManageTagsDialog } from '@/components/tags/ManageTagsDialog'
+import { tagColor, tagColorMap, useTags } from '@/hooks/useTags'
 
 // -------------------------------------------------------------------------
 // Types
@@ -78,6 +83,7 @@ type Device = {
   location: string | null
   group_id: string | null
   group_name?: string | null
+  tags?: string[]
   status: string
   last_seen: string | null
   last_rtt_ms: number | null
@@ -93,6 +99,8 @@ type Device = {
   vendor: string | null
   model: string | null
   os_version: string | null
+  profile_id?: string | null
+  profile_name?: string | null
 }
 
 type Group = { id: string; name: string; color?: string | null; device_count?: number }
@@ -119,7 +127,7 @@ type SortKey =
   | 'last_seen'
 type SortOrder = 'asc' | 'desc'
 
-type HealthKind = 'healthy' | 'warning' | 'critical' | 'offline'
+type HealthKind = 'healthy' | 'warning' | 'critical' | 'offline' | 'maintenance'
 type AvailabilityRow = {
   key: string
   label: string
@@ -153,6 +161,7 @@ const DEVICE_TYPES = [
 const HIDEABLE_COLUMNS = [
   'type',
   'group_location',
+  'tags',
   'cpu',
   'memory',
   'uptime',
@@ -163,6 +172,7 @@ type HideableCol = (typeof HIDEABLE_COLUMNS)[number]
 const DEFAULT_VISIBLE: Record<HideableCol, boolean> = {
   type: true,
   group_location: true,
+  tags: true,
   cpu: true,
   memory: true,
   uptime: true,
@@ -172,6 +182,7 @@ const DEFAULT_VISIBLE: Record<HideableCol, boolean> = {
 const COLUMN_LABELS: Record<HideableCol, string> = {
   type: 'Type',
   group_location: 'Group / Location',
+  tags: 'Tags',
   cpu: 'CPU',
   memory: 'Memory',
   uptime: 'Uptime',
@@ -180,7 +191,7 @@ const COLUMN_LABELS: Record<HideableCol, string> = {
 
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100]
 
-const PREFS_KEY = 'zp-devices-prefs-v2'
+const PREFS_KEY = 'zp-devices-prefs-v3'
 type Prefs = { visible: Record<HideableCol, boolean>; pageSize: number }
 function loadPrefs(): Prefs {
   try {
@@ -219,6 +230,14 @@ export function DevicesPage() {
   const typeFilter = params.get('type') || ''
   const locationFilter = params.get('loc') || ''
   const groupFilter = params.get('group') || ''
+  const tagParam = params.get('tag') || ''
+  const tagFilter = useMemo(
+    () => tagParam.split(',').map((t) => t.trim()).filter(Boolean),
+    [tagParam],
+  )
+  const tagMode: 'any' | 'all' = params.get('tagmode') === 'all' ? 'all' : 'any'
+  // Set when navigating from a controller's "managed devices" link.
+  const managedByFilter = params.get('managed_by') || ''
   const sortKey = (params.get('sort') as SortKey) || 'hostname'
   const sortOrder = (params.get('order') as SortOrder) || 'asc'
   const page = Math.max(1, Number(params.get('page') || '1') || 1)
@@ -254,8 +273,11 @@ export function DevicesPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false)
   const [bulkEditOpen, setBulkEditOpen] = useState(false)
+  const [bulkTagOpen, setBulkTagOpen] = useState(false)
   const [columnsOpen, setColumnsOpen] = useState(false)
   const [filtersOpen, setFiltersOpen] = useState(false)
+  const [manageTagsOpen, setManageTagsOpen] = useState(false)
+  const [tagEditDevice, setTagEditDevice] = useState<Device | null>(null)
 
   const { data, isLoading, isFetching, refetch } = useQuery<{
     data: Device[]
@@ -282,6 +304,8 @@ export function DevicesPage() {
     queryKey: ['devices', 'types'],
     queryFn: async () => (await api.get('/devices/device-types')).data,
   })
+  const { data: tagDefs } = useTags()
+  const tagColors = useMemo(() => tagColorMap(tagDefs), [tagDefs])
 
   // Real continuous uptime per device (seconds) — refreshed every 30s.
   const { data: uptimeData } = useQuery<{ devices: Record<string, number> }>({
@@ -366,15 +390,25 @@ export function DevicesPage() {
       if (typeFilter && d.device_type !== typeFilter) return false
       if (groupFilter && d.group_id !== groupFilter) return false
       if (locationFilter && (d.location || '') !== locationFilter) return false
+      if (managedByFilter && d.managed_by_device_id !== managedByFilter) return false
+      if (tagFilter.length > 0) {
+        const devTags = (d.tags || []).map((t) => t.toLowerCase())
+        const wanted = tagFilter.map((t) => t.toLowerCase())
+        const ok = tagMode === 'all'
+          ? wanted.every((t) => devTags.includes(t))
+          : wanted.some((t) => devTags.includes(t))
+        if (!ok) return false
+      }
       if (statusFilter) {
         if (statusFilter === 'healthy' && health !== 'healthy') return false
         if (statusFilter === 'warning' && health !== 'warning') return false
         if (statusFilter === 'critical' && health !== 'critical') return false
         if (statusFilter === 'offline' && health !== 'offline') return false
+        if (statusFilter === 'maintenance' && health !== 'maintenance') return false
       }
       return true
     })
-  }, [enriched, typeFilter, groupFilter, locationFilter, statusFilter])
+  }, [enriched, typeFilter, groupFilter, locationFilter, managedByFilter, statusFilter, tagFilter, tagMode])
 
   const sorted = useMemo(() => {
     const arr = [...filtered]
@@ -407,7 +441,7 @@ export function DevicesPage() {
   // -----------------------------------------------------------------------
 
   const agg = useMemo(() => {
-    const counts = { healthy: 0, warning: 0, critical: 0, offline: 0 }
+    const counts = { healthy: 0, warning: 0, critical: 0, offline: 0, maintenance: 0 }
     const byCategory: Record<string, number> = {
       Server: 0, Network: 0, Security: 0, Wireless: 0, Other: 0,
     }
@@ -445,7 +479,23 @@ export function DevicesPage() {
     (typeFilter ? 1 : 0) +
     (groupFilter ? 1 : 0) +
     (locationFilter ? 1 : 0) +
-    (statusFilter ? 1 : 0)
+    (statusFilter ? 1 : 0) +
+    (managedByFilter ? 1 : 0) +
+    (tagFilter.length > 0 ? 1 : 0)
+
+  const managedByName = useMemo(() => {
+    if (!managedByFilter) return ''
+    const ctrl = enriched.find(({ device }) => device.id === managedByFilter)
+    return ctrl?.device.hostname || 'controller'
+  }, [enriched, managedByFilter])
+
+  function toggleTag(name: string) {
+    const has = tagFilter.some((t) => t.toLowerCase() === name.toLowerCase())
+    const next = has
+      ? tagFilter.filter((t) => t.toLowerCase() !== name.toLowerCase())
+      : [...tagFilter, name]
+    patchParams({ tag: next.length ? next.join(',') : null, page: '1' })
+  }
 
   // -----------------------------------------------------------------------
   // Selection
@@ -537,16 +587,19 @@ export function DevicesPage() {
   }
 
   function clearFilters() {
-    patchParams({ type: null, group: null, loc: null, status: null })
+    patchParams({ type: null, group: null, loc: null, status: null, tag: null, tagmode: null, managed_by: null })
   }
 
   function exportCsv() {
     const cols: Array<[string, (row: (typeof sorted)[number]) => string]> = [
       ['hostname', (r) => r.device.hostname],
-      ['ip_address', (r) => r.device.ip_address],
+      ['ip_address', (r) => r.device.ip_address || r.device.managed_ip || ''],
+      ['managed_via', (r) => r.device.managed_by_hostname || ''],
+      ['serial_number', (r) => r.device.serial_number || ''],
       ['device_type', (r) => r.device.device_type],
       ['group', (r) => r.device.group_name || ''],
       ['location', (r) => r.device.location || ''],
+      ['tags', (r) => (r.device.tags || []).join('; ')],
       ['status', (r) => r.health],
       ['cpu_pct', (r) => r.cpu == null ? '' : String(r.cpu)],
       ['memory_pct', (r) => r.mem == null ? '' : String(r.mem)],
@@ -638,6 +691,7 @@ export function DevicesPage() {
               { value: 'warning', label: 'Warning' },
               { value: 'critical', label: 'Critical' },
               { value: 'offline', label: 'Offline' },
+              { value: 'maintenance', label: 'Maintenance' },
             ]}
           />
           <FilterInline
@@ -654,6 +708,14 @@ export function DevicesPage() {
             value={locationFilter}
             onChange={(v) => patchParams({ loc: v || null, page: '1' })}
             options={(locations || []).map((l) => ({ value: l, label: l }))}
+          />
+          <TagsFilter
+            selected={tagFilter}
+            mode={tagMode}
+            onToggle={toggleTag}
+            onMode={(m) => patchParams({ tagmode: m === 'all' ? 'all' : null })}
+            onClear={() => patchParams({ tag: null, tagmode: null, page: '1' })}
+            onManage={() => setManageTagsOpen(true)}
           />
           <Button variant="outline" size="default" className="h-10" onClick={exportCsv}>
             <Download className="h-4 w-4" />
@@ -787,6 +849,22 @@ export function DevicesPage() {
               </div>
             )}
 
+            {managedByFilter && (
+              <div className="flex items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-1.5 text-sm">
+                <span className="text-muted">Showing devices managed by</span>
+                <Link to={`/devices/${managedByFilter}`} className="font-medium text-primary hover:underline">
+                  {managedByName}
+                </Link>
+                <button
+                  className="ml-auto text-muted hover:text-text"
+                  aria-label="Clear managed-by filter"
+                  onClick={() => patchParams({ managed_by: null, page: '1' })}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+
             {/* Bulk bar */}
             {selected.size > 0 && (
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-2">
@@ -804,6 +882,9 @@ export function DevicesPage() {
                 <div className="flex gap-2">
                   <Button variant="outline" size="sm" onClick={() => setBulkEditOpen(true)}>
                     <Pencil className="h-3.5 w-3.5" /> Edit
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => setBulkTagOpen(true)}>
+                    <Tags className="h-3.5 w-3.5" /> Tags
                   </Button>
                   <Button variant="destructive" size="sm" onClick={() => setBulkDeleteOpen(true)}>
                     <Trash2 className="h-3.5 w-3.5" /> Delete
@@ -828,14 +909,23 @@ export function DevicesPage() {
                         onChange={toggleAll}
                       />
                     </Th>
-                    <SortableTh label="Device Name" col="hostname" current={sortKey} order={sortOrder} onClick={onSortClick} />
-                    <SortableTh label="IP Address" col="ip_address" current={sortKey} order={sortOrder} onClick={onSortClick} />
+                    {/* IP now sits under the hostname in one cell, so this
+                        header carries both sorts rather than losing IP sort
+                        along with the column. */}
+                    <Th>
+                      <span className="inline-flex items-center gap-1.5">
+                        <SortBtn label="Device Name" col="hostname" current={sortKey} order={sortOrder} onClick={onSortClick} />
+                        <span className="text-muted/40">/</span>
+                        <SortBtn label="IP" col="ip_address" current={sortKey} order={sortOrder} onClick={onSortClick} />
+                      </span>
+                    </Th>
                     {prefs.visible.type && (
                       <SortableTh label="Type" col="device_type" current={sortKey} order={sortOrder} onClick={onSortClick} />
                     )}
                     {prefs.visible.group_location && (
                       <SortableTh label="Group / Location" col="group_name" current={sortKey} order={sortOrder} onClick={onSortClick} />
                     )}
+                    {prefs.visible.tags && <Th className="min-w-[130px]">Tags</Th>}
                     <SortableTh label="Status" col="status" current={sortKey} order={sortOrder} onClick={onSortClick} />
                     {prefs.visible.cpu && <Th className="min-w-[140px]">CPU</Th>}
                     {prefs.visible.memory && <Th className="min-w-[140px]">Memory</Th>}
@@ -853,14 +943,14 @@ export function DevicesPage() {
                 <TBody>
                   {isLoading && (
                     <Tr>
-                      <Td colSpan={12}>
+                      <Td colSpan={11}>
                         <SkeletonTable rows={6} cols={10} />
                       </Td>
                     </Tr>
                   )}
                   {!isLoading && pageRows.length === 0 && (
                     <Tr>
-                      <Td colSpan={12} className="py-14">
+                      <Td colSpan={11} className="py-14">
                         <div className="flex flex-col items-center gap-2 text-center text-muted">
                           <Server className="h-8 w-8 opacity-50" />
                           <div className="text-sm font-medium text-text">No devices match</div>
@@ -922,16 +1012,43 @@ export function DevicesPage() {
                                 </span>
                               )}
                             </span>
-                            <Link
-                              to={`/devices/${d.id}`}
-                              className="truncate font-medium text-text hover:text-primary hover:underline"
-                              title={d.hostname}
-                            >
-                              {d.hostname}
-                            </Link>
+                            {/* Capped so long hostnames ellipsize instead of
+                                stretching the column — the full name stays in
+                                the link's title tooltip. */}
+                            <div className="min-w-0 max-w-[240px]">
+                              <div className="flex items-center gap-1.5">
+                                <Link
+                                  to={`/devices/${d.id}`}
+                                  className="truncate font-medium text-text hover:text-primary hover:underline"
+                                  title={d.hostname}
+                                >
+                                  {d.hostname}
+                                </Link>
+                                {(d.managed_children_count ?? 0) > 0 && (
+                                  <button
+                                    className="shrink-0 rounded-full border border-primary/30 bg-primary/10 px-1.5 text-[10px] font-medium leading-[16px] text-primary hover:bg-primary/20"
+                                    title="Show the devices this controller manages"
+                                    onClick={() => patchParams({ managed_by: d.id, page: '1' })}
+                                  >
+                                    {d.managed_children_count} managed
+                                  </button>
+                                )}
+                              </div>
+                              <div className="truncate font-mono text-[11px] text-muted">
+                                {d.ip_address || d.managed_ip || '—'}
+                              </div>
+                              {d.managed_by_device_id && (
+                                <Link
+                                  to={`/devices/${d.managed_by_device_id}`}
+                                  className="block truncate text-[11px] text-muted hover:text-primary"
+                                  title={`Managed via ${d.managed_by_hostname || 'controller'}`}
+                                >
+                                  via {d.managed_by_hostname || 'controller'}
+                                </Link>
+                              )}
+                            </div>
                           </div>
                         </Td>
-                        <Td className="font-mono text-xs text-muted">{d.ip_address}</Td>
                         {prefs.visible.type && (
                           <Td className="text-sm capitalize">
                             {titleCase(d.device_type.replace('_', ' '))}
@@ -949,6 +1066,38 @@ export function DevicesPage() {
                             ) : (
                               <span className="text-muted">—</span>
                             )}
+                          </Td>
+                        )}
+                        {prefs.visible.tags && (
+                          <Td className="py-2.5">
+                            <div className="flex max-w-[230px] flex-wrap items-center gap-1">
+                              {(d.tags || []).slice(0, 3).map((t) => (
+                                <TagBadge
+                                  key={t}
+                                  name={t}
+                                  color={tagColor(t, tagColors)}
+                                  active={tagFilter.some((f) => f.toLowerCase() === t.toLowerCase())}
+                                  onClick={() => toggleTag(t)}
+                                  title={`Filter by “${t}”`}
+                                />
+                              ))}
+                              {(d.tags || []).length > 3 && (
+                                <span
+                                  className="rounded-full bg-surface2 px-1.5 py-0.5 text-[10px] font-medium text-muted"
+                                  title={(d.tags || []).slice(3).join(', ')}
+                                >
+                                  +{(d.tags || []).length - 3}
+                                </span>
+                              )}
+                              <button
+                                type="button"
+                                title="Edit tags"
+                                onClick={() => setTagEditDevice(d)}
+                                className="rounded-full border border-dashed border-border p-0.5 text-muted opacity-50 transition-all hover:border-primary hover:text-primary hover:opacity-100"
+                              >
+                                <Plus className="h-3 w-3" />
+                              </button>
+                            </div>
                           </Td>
                         )}
                         <Td>
@@ -1046,6 +1195,7 @@ export function DevicesPage() {
             warning={agg.warning}
             critical={agg.critical}
             offline={agg.offline}
+            maintenance={(agg as any).maintenance}
             onPickStatus={(s) => patchParams({ status: statusFilter === s ? null : s, page: '1' })}
           />
           <RecentActivityCard alerts={recentAlerts?.data || []} />
@@ -1114,6 +1264,17 @@ export function DevicesPage() {
         visible={prefs.visible}
         onChange={(visible) => setPrefs({ ...prefs, visible })}
       />
+      <EditTagsDialog
+        device={tagEditDevice}
+        onOpenChange={(o) => { if (!o) setTagEditDevice(null) }}
+      />
+      <BulkTagDialog
+        open={bulkTagOpen}
+        onOpenChange={setBulkTagOpen}
+        deviceIds={Array.from(selected)}
+        onDone={() => setSelected(new Set())}
+      />
+      <ManageTagsDialog open={manageTagsOpen} onOpenChange={setManageTagsOpen} />
     </div>
   )
 }
@@ -1214,6 +1375,7 @@ function HealthPill({ kind }: { kind: HealthKind }) {
     warning:  { label: 'Warning',  className: 'border-warning/30 bg-warning/10 text-warning', dot: 'bg-warning' },
     critical: { label: 'Critical', className: 'border-danger/30 bg-danger/10 text-danger',    dot: 'bg-danger' },
     offline:  { label: 'Offline',  className: 'border-border bg-surface2 text-muted',         dot: 'bg-muted' },
+    maintenance: { label: 'Maintenance', className: 'border-primary/30 bg-primary/10 text-primary', dot: 'bg-primary' },
   }
   const v = map[kind]
   return (
@@ -1260,6 +1422,248 @@ function FilterInline({
         </SelectContent>
       </Select>
     </div>
+  )
+}
+
+// =========================================================================
+// Tags: filter dropdown + per-device editor + bulk dialog
+// =========================================================================
+
+function TagsFilter({
+  selected, mode, onToggle, onMode, onClear, onManage,
+}: {
+  selected: string[]
+  mode: 'any' | 'all'
+  onToggle: (name: string) => void
+  onMode: (m: 'any' | 'all') => void
+  onClear: () => void
+  onManage: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [q, setQ] = useState('')
+  const ref = useRef<HTMLDivElement>(null)
+  const { data: defs } = useTags()
+  const colors = useMemo(() => tagColorMap(defs), [defs])
+
+  useEffect(() => {
+    if (!open) return
+    function onDocClick(e: MouseEvent) {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [open])
+
+  const options = (defs || []).filter((d) =>
+    d.name.toLowerCase().includes(q.trim().toLowerCase()),
+  )
+
+  return (
+    <div ref={ref} className="relative flex-none">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className={`flex h-10 items-center gap-2 rounded-md border px-3 text-sm transition-colors ${
+          selected.length > 0 ? 'border-primary/40 bg-primary/5' : 'border-border bg-surface hover:border-border-strong'
+        }`}
+      >
+        <span className="text-muted">Tags</span>
+        <span className="font-medium">
+          {selected.length > 0 ? `${selected.length} selected` : 'All'}
+        </span>
+        <ChevronDown className="h-3 w-3 opacity-60" />
+      </button>
+
+      {open && (
+        <div className="absolute right-0 z-30 mt-1 w-72 rounded-md border border-border bg-surface p-2 shadow-lg">
+          <div className="flex items-center gap-2">
+            <Input
+              placeholder="Filter tags…"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              className="h-8 flex-1 text-xs"
+            />
+            {selected.length > 1 && (
+              <div className="flex flex-none items-center rounded-md bg-surface2 p-0.5 text-[10px] font-medium">
+                <button
+                  type="button"
+                  onClick={() => onMode('any')}
+                  className={`rounded px-2 py-1 ${mode === 'any' ? 'bg-surface text-text shadow-sm' : 'text-muted'}`}
+                  title="Match devices having any selected tag"
+                >
+                  Any
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onMode('all')}
+                  className={`rounded px-2 py-1 ${mode === 'all' ? 'bg-surface text-text shadow-sm' : 'text-muted'}`}
+                  title="Match devices having every selected tag"
+                >
+                  All
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-2 max-h-56 space-y-0.5 overflow-y-auto">
+            {options.length === 0 && (
+              <div className="px-2 py-3 text-center text-xs text-muted">
+                {q ? 'No tags match' : 'No tags yet — create one below'}
+              </div>
+            )}
+            {options.map((d) => {
+              const isSel = selected.some((t) => t.toLowerCase() === d.name.toLowerCase())
+              return (
+                <button
+                  key={d.id}
+                  type="button"
+                  onClick={() => onToggle(d.name)}
+                  className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-surface2"
+                >
+                  <input type="checkbox" readOnly checked={isSel} className="pointer-events-none" />
+                  <TagBadge name={d.name} color={tagColor(d.name, colors)} />
+                  <span className="ml-auto text-[10px] text-muted">{d.device_count}</span>
+                </button>
+              )
+            })}
+          </div>
+
+          <div className="mt-2 flex items-center justify-between border-t border-border pt-2">
+            <button
+              type="button"
+              onClick={() => { setOpen(false); onManage() }}
+              className="text-xs text-primary hover:underline"
+            >
+              Manage tags…
+            </button>
+            {selected.length > 0 && (
+              <button
+                type="button"
+                onClick={onClear}
+                className="text-xs text-muted hover:text-text"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function EditTagsDialog({
+  device, onOpenChange,
+}: {
+  device: Device | null
+  onOpenChange: (o: boolean) => void
+}) {
+  const qc = useQueryClient()
+  const [tags, setTags] = useState<string[]>([])
+  useEffect(() => {
+    if (device) setTags(device.tags || [])
+  }, [device])
+
+  const save = useMutation({
+    mutationFn: async () => api.put(`/devices/${device!.id}`, { tags }),
+    onSuccess: () => {
+      toast.success('Tags updated')
+      qc.invalidateQueries({ queryKey: ['devices'] })
+      qc.invalidateQueries({ queryKey: ['tags'] })
+      onOpenChange(false)
+    },
+    onError: (e: any) => toast.error('Update failed', apiErrorMessage(e)),
+  })
+
+  return (
+    <Dialog open={!!device} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Tags className="h-5 w-5 text-primary" />
+            Tags — {device?.hostname}
+          </DialogTitle>
+          <DialogDescription>
+            Pick existing tags or type a new name to create one.
+          </DialogDescription>
+        </DialogHeader>
+        <TagPicker value={tags} onChange={setTags} autoFocus />
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={save.isPending}>
+            Cancel
+          </Button>
+          <Button onClick={() => save.mutate()} disabled={save.isPending}>
+            {save.isPending ? 'Saving…' : 'Save'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function BulkTagDialog({
+  open, onOpenChange, deviceIds, onDone,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  deviceIds: string[]
+  onDone: () => void
+}) {
+  const qc = useQueryClient()
+  const [add, setAdd] = useState<string[]>([])
+  const [remove, setRemove] = useState<string[]>([])
+  useEffect(() => {
+    if (!open) { setAdd([]); setRemove([]) }
+  }, [open])
+
+  const run = useMutation({
+    mutationFn: async () =>
+      (await api.post('/devices/bulk-tag', { device_ids: deviceIds, add, remove }))
+        .data as { updated: number },
+    onSuccess: (res) => {
+      toast.success(`Tags updated on ${res.updated} device${res.updated === 1 ? '' : 's'}`)
+      qc.invalidateQueries({ queryKey: ['devices'] })
+      qc.invalidateQueries({ queryKey: ['tags'] })
+      onOpenChange(false)
+      onDone()
+    },
+    onError: (e: any) => toast.error('Bulk tag failed', apiErrorMessage(e)),
+  })
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Tags className="h-5 w-5 text-primary" />
+            Tag {deviceIds.length} device{deviceIds.length === 1 ? '' : 's'}
+          </DialogTitle>
+          <DialogDescription>
+            Added tags are appended; removed tags are taken off. Other tags on each
+            device stay untouched.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <FormField label="Add tags">
+            <TagPicker value={add} onChange={setAdd} placeholder="Tags to add…" />
+          </FormField>
+          <FormField label="Remove tags">
+            <TagPicker value={remove} onChange={setRemove} placeholder="Tags to remove…" allowCreate={false} />
+          </FormField>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={run.isPending}>
+            Cancel
+          </Button>
+          <Button
+            onClick={() => run.mutate()}
+            disabled={run.isPending || (add.length === 0 && remove.length === 0)}
+          >
+            {run.isPending ? 'Applying…' : `Apply to ${deviceIds.length}`}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -1433,9 +1837,10 @@ function Donut({
 // =========================================================================
 
 function StatusBreakdownCard({
-  healthy, warning, critical, offline, onPickStatus,
+  healthy, warning, critical, offline, maintenance = 0, onPickStatus,
 }: {
   healthy: number; warning: number; critical: number; offline: number
+  maintenance?: number
   onPickStatus: (s: string) => void
 }) {
   const items = [
@@ -1443,6 +1848,7 @@ function StatusBreakdownCard({
     { key: 'warning',  label: 'Warning',  value: warning,  color: 'rgb(var(--warning))' },
     { key: 'critical', label: 'Critical', value: critical, color: 'rgb(var(--danger))' },
     { key: 'offline',  label: 'Offline',  value: offline,  color: 'rgb(var(--muted))' },
+    { key: 'maintenance', label: 'Maintenance', value: maintenance, color: 'rgb(var(--primary))' },
   ]
   const max = Math.max(1, ...items.map((i) => i.value))
   const ticks = [0, Math.round(max / 4), Math.round(max / 2), Math.round((max * 3) / 4), max]
@@ -2132,6 +2538,32 @@ function UptimePctCell({ pct, fallback }: { pct: number | undefined; fallback: s
 // Sortable header
 // =========================================================================
 
+function SortBtn({
+  label, col, current, order, onClick,
+}: {
+  label: string
+  col: SortKey
+  current: SortKey
+  order: SortOrder
+  onClick: (c: SortKey) => void
+}) {
+  const isActive = current === col
+  return (
+    <button
+      type="button"
+      onClick={() => onClick(col)}
+      className={`inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wider transition-colors ${
+        isActive ? 'text-text' : 'text-muted hover:text-text'
+      }`}
+    >
+      {label}
+      {isActive ? (
+        order === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />
+      ) : null}
+    </button>
+  )
+}
+
 function SortableTh({
   label, col, current, order, onClick, className,
 }: {
@@ -2142,21 +2574,9 @@ function SortableTh({
   onClick: (c: SortKey) => void
   className?: string
 }) {
-  const isActive = current === col
   return (
     <Th className={className}>
-      <button
-        type="button"
-        onClick={() => onClick(col)}
-        className={`inline-flex items-center gap-1 text-xs font-medium uppercase tracking-wider transition-colors ${
-          isActive ? 'text-text' : 'text-muted hover:text-text'
-        }`}
-      >
-        {label}
-        {isActive ? (
-          order === 'asc' ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />
-        ) : null}
-      </button>
+      <SortBtn label={label} col={col} current={current} order={order} onClick={onClick} />
     </Th>
   )
 }
@@ -2201,6 +2621,7 @@ function healthOf(d: Device): HealthKind {
   if (d.status === 'up') return 'healthy'
   if (d.status === 'degraded') return 'warning'
   if (d.status === 'down') return 'critical'
+  if (d.status === 'maintenance') return 'maintenance'
   return 'offline'
 }
 

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class DiscoveryJobCreate(BaseModel):
@@ -78,17 +78,106 @@ class MibUploadResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-# ---- Device Profiles CRUD ----
+# ---- Device Profiles (Monitoring Templates) CRUD ----
+#
+# The oid_groups JSON shape is shared with the poller (oidgroups.go) and the
+# migrate-062 builtin seeds. Poller-side fields: key/oid/type/unit/scale/
+# value_map. UI/alerting-side fields: labels (enum code -> {text, sev}) and
+# thresholds ({warn, crit, op}).
 
-class OidItem(BaseModel):
-    oid: str = Field(..., description="SNMP OID, e.g. 1.3.6.1.2.1.1.3.0")
-    name: str = Field(..., description="Human-friendly metric name")
-    type: str = Field(default="gauge", description="gauge | counter | string")
-    description: str = Field(default="")
+_KEY_PATTERN = r"^[a-z0-9][a-z0-9_]{0,62}$"
+_OID_PATTERN = r"^\.?\d+(\.\d+)+$"
+
+
+class MetricThresholds(BaseModel):
+    warn: Optional[float] = None
+    crit: Optional[float] = None
+    op: str = Field(default=">=", description=">= | <=")
+
+
+class MetricLabel(BaseModel):
+    text: str
+    sev: str = Field(default="info", description="ok | warn | crit | info")
+
+
+class OidMetric(BaseModel):
+    key: str = Field(..., pattern=_KEY_PATTERN,
+                     description="Metric key, unique within the template (series = tpl_<key>)")
+    name: str = Field(..., min_length=1, max_length=120)
+    oid: str = Field(..., pattern=_OID_PATTERN)
+    type: str = Field(default="gauge", description="gauge | counter | enum | string")
+    unit: Optional[str] = Field(default=None, max_length=32)
+    scale: Optional[float] = None
+    value_map: Optional[dict[str, float]] = Field(
+        default=None, description="Coerce string agent values to numeric codes")
+    labels: Optional[dict[str, MetricLabel]] = Field(
+        default=None, description="Enum code -> display label + severity")
+    thresholds: Optional[MetricThresholds] = None
+
+    @field_validator("type")
+    @classmethod
+    def _type_ok(cls, v: str) -> str:
+        if v not in ("gauge", "counter", "enum", "string"):
+            raise ValueError("type must be gauge|counter|enum|string")
+        return v
+
+
+class OidGroupTable(BaseModel):
+    label_oid: Optional[str] = Field(default=None, pattern=_OID_PATTERN,
+                                     description="Column walked for per-row labels")
+
+
+class OidGroupChildren(BaseModel):
+    """Declares that rows of a table group are controller-managed devices
+    (FortiGate's FortiAPs/FortiSwitches, a WLC's thin APs). The managed-device
+    sync service materializes each row as a child device of the polled
+    controller when the controller has promote_managed enabled."""
+    device_type: str = Field(default="access_point")
+    vendor: Optional[str] = Field(default=None, max_length=100)
+    status_key: Optional[str] = Field(
+        default=None, pattern=_KEY_PATTERN,
+        description="Metric key whose enum code drives the child's status")
+    status_map: dict[str, str] = Field(
+        default_factory=dict,
+        description="Enum code -> up|down|degraded; unmapped codes -> unknown")
+    model_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
+    os_version_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
+    serial_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
+    ip_key: Optional[str] = Field(default=None, pattern=_KEY_PATTERN)
+
+    @field_validator("device_type")
+    @classmethod
+    def _dtype_ok(cls, v: str) -> str:
+        allowed = ("router", "switch", "firewall", "server", "access_point", "printer", "other")
+        if v not in allowed:
+            raise ValueError(f"device_type must be one of {allowed}")
+        return v
+
+    @field_validator("status_map")
+    @classmethod
+    def _map_ok(cls, v: dict[str, str]) -> dict[str, str]:
+        for code, status in v.items():
+            if status not in ("up", "down", "degraded"):
+                raise ValueError(f"status_map[{code}] must be up|down|degraded")
+        return v
+
 
 class OidGroup(BaseModel):
-    name: str = Field(..., description="Group name, e.g. System, CPU, Memory")
-    oids: list[OidItem] = Field(default_factory=list)
+    key: str = Field(..., pattern=_KEY_PATTERN)
+    name: str = Field(..., min_length=1, max_length=120)
+    interval_seconds: int = Field(default=0, ge=0, le=86400)
+    kind: str = Field(default="scalar", description="scalar | table")
+    description: Optional[str] = None
+    table: Optional[OidGroupTable] = None
+    metrics: list[OidMetric] = Field(default_factory=list)
+    children: Optional[OidGroupChildren] = None
+
+    @field_validator("kind")
+    @classmethod
+    def _kind_ok(cls, v: str) -> str:
+        if v not in ("scalar", "table"):
+            raise ValueError("kind must be scalar|table")
+        return v
 
 class MatchRules(BaseModel):
     sys_object_id_prefixes: list[str] = Field(default_factory=list)

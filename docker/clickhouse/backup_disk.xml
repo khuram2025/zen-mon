@@ -1,0 +1,17 @@
+<!-- ZenPlus: expose a 'backups' disk so BACKUP/RESTORE DATABASE statements can
+     write to the host at /data/backups/clickhouse (bind-mounted to /backups).
+     Used by the Settings -> Storage backup feature. -->
+<clickhouse>
+    <storage_configuration>
+        <disks>
+            <backups>
+                <type>local</type>
+                <path>/backups/</path>
+            </backups>
+        </disks>
+    </storage_configuration>
+    <backups>
+        <allowed_disk>backups</allowed_disk>
+        <allowed_path>/backups/</allowed_path>
+    </backups>
+</clickhouse>

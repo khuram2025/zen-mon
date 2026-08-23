@@ -350,12 +350,58 @@ def download_and_extract(
     return extract_dir, manifest
 
 
+def _version_key(v: str) -> tuple:
+    """Sortable key for a semantic version, tolerant of junk.
+
+    A fresh install used to stamp a git SHA here, and old appliances may still
+    carry one, so anything unparseable sorts lowest rather than raising.
+    """
+    chunks = str(v or "").strip().split(".")
+    # Anything that is not purely numeric sorts lowest, so it reads as "older
+    # than every release" and the appliance updates. Extracting digits instead
+    # would turn the git SHA a pre-1.11 install stamped here (e.g. "1148ffa")
+    # into version 1148 — newer than anything we will ever publish, and the
+    # appliance would never update again.
+    if not chunks or not all(c.isdigit() for c in chunks if c != ""):
+        return (0, 0, 0)
+    parts = [int(c) for c in chunks if c != ""]
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts[:3])
+
+
+def _is_newer(candidate: str, current: str) -> bool:
+    return _version_key(candidate) > _version_key(current)
+
+
+def check_min_version(release: dict, current: str) -> str:
+    """Return an error string when this release may not be applied yet.
+
+    Releases can declare `min_version` — the version an appliance must already
+    be on before this one is safe to apply, because something in between does
+    work that this package no longer carries. Nothing enforced it, so an
+    appliance could jump over a release that was a required stepping stone and
+    silently skip its one-off work. Refusing here is what makes such a release
+    a real gate rather than a note in the changelog.
+    """
+    min_v = (release.get("min_version") or "").strip()
+    if not min_v:
+        return ""
+    if _version_key(current) >= _version_key(min_v):
+        return ""
+    return (
+        f"release {release.get('version')} requires the appliance to be on "
+        f"{min_v} or later (currently {current}); apply the intermediate "
+        f"release first"
+    )
+
+
 def run_update(cfg: AgentConfig, release: dict) -> bool:
     """Execute the full update lifecycle.
 
     Returns True on success, False on failure (with rollback).
     """
-    from .executor import execute_manifest, ExecutionError
+    from .executor import execute_manifest, rollback_manifest, ExecutionError
 
     version = release["version"]
     release_id = release.get("id", release.get("update_id", ""))
@@ -399,19 +445,34 @@ def run_update(cfg: AgentConfig, release: dict) -> bool:
         )
         return False
 
-    # Apply any ClickHouse migrations shipped with this release but not yet in
-    # the schema ledger. The code (scripts/migrate-*-clickhouse.sql) has just
-    # landed via apply_code; this guarantees schema keeps up with code even when
-    # a release did not explicitly package a run_migration step. Best-effort: a
-    # ClickHouse problem is logged but must not roll back an otherwise-good code
-    # update.
+    # Schema gate. Every migrate-*.sql on disk has just been refreshed by
+    # apply_code; converge both databases with it and refuse to stamp the new
+    # version unless the result is clean. A passing HTTP health check is not
+    # evidence that the schema matches the code — an appliance once ran a whole
+    # release with its ClickHouse SNMP tables missing and reported healthy.
     try:
-        from .clickhouse_sync import sync_clickhouse_migrations
-        sync_clickhouse_migrations()
+        from .schema_gate import sync_and_verify
+        schema_status = sync_and_verify()
     except Exception as e:
-        logger.error("ClickHouse migration sync raised (continuing): %s", e)
+        logger.exception("Schema gate raised: %s", e)
+        schema_status = {"ok": False, "problems": [f"schema gate error: {e}"]}
 
-    # Update version file
+    if not schema_status.get("ok"):
+        problems = schema_status.get("problems", [])
+        detail = "; ".join(problems[:10]) or "unknown schema drift"
+        logger.error(
+            "Schema does not match the installed code after update — rolling back. %s",
+            detail,
+        )
+        rollback_manifest(manifest, extract_dir, cfg)
+        report_status(
+            cfg, release_id, "failed", from_version, version,
+            error_message=f"Schema verification failed: {detail}",
+            changelog=changelog, severity=severity,
+        )
+        return False
+
+    # Update version file — only now, with code and schema proven consistent.
     version_file = ZENPLUS_DIR / ".version"
     version_file.write_text(
         f"{version}\n{datetime.now(timezone.utc).isoformat()}\n"
@@ -477,9 +538,41 @@ def main(config_path: str | None = None, check_only: bool = False) -> int:
             print(f"  Severity: {release.get('severity', 'normal')}")
             return 0
 
-        # Apply update
-        success = run_update(cfg, release)
-        return 0 if success else 1
+        # Apply updates one release at a time, re-checking after each so an
+        # appliance that is several versions behind walks forward instead of
+        # taking a single leap. The server decides what to offer next; this
+        # loop is what lets it hand back an intermediate release and have the
+        # appliance keep going rather than stopping one step short.
+        applied = []
+        while True:
+            current = get_current_version()
+
+            gate = check_min_version(release, current)
+            if gate:
+                logger.error("Refusing update: %s", gate)
+                print(f"Update blocked: {gate}")
+                return 1
+
+            if not run_update(cfg, release):
+                return 1
+            applied.append(release["version"])
+
+            after = get_current_version()
+            if not _is_newer(after, current):
+                # The version marker did not move — stop rather than loop.
+                logger.warning("Version did not advance past %s; stopping", current)
+                break
+
+            release = check_for_update(cfg)
+            if not release:
+                break
+            if not _is_newer(release["version"], after):
+                break
+            logger.info("Continuing to next release: %s → %s", after, release["version"])
+
+        if len(applied) > 1:
+            print(f"Applied {len(applied)} releases in order: {' → '.join(applied)}")
+        return 0
 
     except Exception as e:
         logger.exception("Unexpected error: %s", e)

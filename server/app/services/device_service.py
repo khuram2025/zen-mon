@@ -1,11 +1,12 @@
 from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete, text, cast, String
+from sqlalchemy import select, func, delete, text, cast, String, or_, and_
 from sqlalchemy.orm import selectinload
 
 from app.core import crypto
 from app.models.device import Device, DeviceGroup
 from app.schemas.device import DeviceCreate, DeviceUpdate, DeviceSummary, DeviceBulkImportItem, BulkImportResult
+from app.services import tag_service
 
 
 async def _apply_credential(db: AsyncSession, device: Device, credential_id: UUID) -> None:
@@ -89,11 +90,16 @@ async def get_devices(
     search: str | None = None,
     skip: int = 0,
     limit: int = 50,
+    tags: list[str] | None = None,
+    tags_match: str = "any",
+    managed_by: UUID | None = None,
 ) -> tuple[list[Device], int]:
     query = select(Device).options(selectinload(Device.group))
 
     if status:
         query = query.where(Device.status == status)
+    if managed_by:
+        query = query.where(Device.managed_by_device_id == managed_by)
     if group_id:
         query = query.where(Device.group_id == group_id)
     if device_type:
@@ -102,8 +108,22 @@ async def get_devices(
         query = query.where(Device.location.ilike(f"%{location}%"))
     if search:
         query = query.where(
-            Device.hostname.ilike(f"%{search}%") | cast(Device.ip_address, String).ilike(f"%{search}%")
+            Device.hostname.ilike(f"%{search}%")
+            | cast(Device.ip_address, String).ilike(f"%{search}%")
+            | cast(Device.tags, String).ilike(f"%{search}%")
         )
+    if tags:
+        # Case-insensitive element match; jsonb_exists()/@> would miss rows
+        # written before spellings were canonicalized against the registry.
+        conds = [
+            text(
+                "EXISTS (SELECT 1 FROM jsonb_array_elements_text("
+                "COALESCE(devices.tags, '[]'::jsonb)) el "
+                f"WHERE LOWER(el) = LOWER(:tag_{i}))"
+            ).bindparams(**{f"tag_{i}": t})
+            for i, t in enumerate(tags)
+        ]
+        query = query.where(and_(*conds) if tags_match == "all" else or_(*conds))
 
     # Count
     count_query = select(func.count()).select_from(query.subquery())
@@ -147,6 +167,33 @@ async def bulk_delete_devices(db: AsyncSession, device_ids: list[UUID]) -> int:
     return result.rowcount
 
 
+async def bulk_tag_devices(
+    db: AsyncSession,
+    device_ids: list[UUID],
+    add: list[str],
+    remove: list[str],
+) -> int:
+    """Add/remove tags across devices without touching their other tags."""
+    add = await tag_service.canonicalize_tags(db, add)
+    remove_lower = {t.strip().lower() for t in (remove or []) if t and t.strip()}
+
+    result = await db.execute(select(Device).where(Device.id.in_(device_ids)))
+    updated = 0
+    for device in result.scalars().all():
+        current = [t for t in (device.tags or []) if isinstance(t, str)]
+        next_tags = [t for t in current if t.lower() not in remove_lower]
+        have = {t.lower() for t in next_tags}
+        for t in add:
+            if t.lower() not in have:
+                next_tags.append(t)
+                have.add(t.lower())
+        if next_tags != current:
+            device.tags = next_tags
+            updated += 1
+    await db.commit()
+    return updated
+
+
 async def get_device(db: AsyncSession, device_id: UUID) -> Device | None:
     result = await db.execute(
         select(Device).options(selectinload(Device.group)).where(Device.id == device_id)
@@ -161,7 +208,7 @@ async def create_device(db: AsyncSession, data: DeviceCreate, user_id: UUID | No
         device_type=data.device_type,
         location=data.location,
         group_id=data.group_id,
-        tags=data.tags,
+        tags=await tag_service.canonicalize_tags(db, data.tags),
         ping_enabled=data.ping_enabled,
         ping_interval=data.ping_interval,
         description=data.description,
@@ -189,6 +236,8 @@ async def update_device(db: AsyncSession, device_id: UUID, data: DeviceUpdate) -
         return None
 
     update_data = data.model_dump(exclude_unset=True)
+    if "tags" in update_data:
+        update_data["tags"] = await tag_service.canonicalize_tags(db, update_data["tags"] or [])
     # Passphrases are write-only: encrypt then remove from the plain setattr loop.
     if "snmp_auth_passphrase" in update_data:
         raw = update_data.pop("snmp_auth_passphrase")
@@ -272,7 +321,7 @@ async def bulk_import_devices(
                 device_type=item.device_type,
                 location=item.location,
                 group_id=group_id,
-                tags=item.tags,
+                tags=await tag_service.canonicalize_tags(db, item.tags),
                 ping_enabled=item.ping_enabled,
                 ping_interval=item.ping_interval,
                 description=item.description,

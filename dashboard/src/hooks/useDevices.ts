@@ -8,6 +8,7 @@ export function useDevices(params?: {
   device_type?: string
   location?: string
   search?: string
+  managed_by?: string
   skip?: number
   limit?: number
 }) {
@@ -17,6 +18,7 @@ export function useDevices(params?: {
   if (params?.device_type) searchParams.set('device_type', params.device_type)
   if (params?.location) searchParams.set('location', params.location)
   if (params?.search) searchParams.set('search', params.search)
+  if (params?.managed_by) searchParams.set('managed_by', params.managed_by)
   if (params?.skip !== undefined) searchParams.set('skip', String(params.skip))
   if (params?.limit !== undefined) searchParams.set('limit', String(params.limit))
 

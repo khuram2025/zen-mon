@@ -17,7 +17,14 @@ from sqlalchemy import text
 
 from app.core.database import get_db
 from app.services.email_render import build_alert_email_html
+from app.services.tag_service import tag_set as _tag_set
+from app.services import alert_notify_state as ns
 from app.services.alert_schedule import notifications_allowed, get_configured_timezone
+from app.services.alert_phrasing import (
+    DEFAULT_EMAIL_BODY, DEFAULT_EMAIL_SUBJECT, DEFAULT_RECOVERY_EMAIL_BODY,
+    DEFAULT_RECOVERY_EMAIL_SUBJECT, DEFAULT_RECOVERY_SMS, DEFAULT_SMS,
+    conditions_label, duration_between, effective_template, rule_phrasing,
+)
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/alert-engine", tags=["Alert Engine (Internal)"])
@@ -60,6 +67,67 @@ class ServiceStatusChangeEvent(BaseModel):
     response_ms: float = 0
     error: Optional[str] = None
     target: Optional[str] = None
+
+
+async def _dashboard_url(db: AsyncSession, path: str = "/alerts") -> str:
+    """Absolute link back into the dashboard, or "" when it cannot be known.
+
+    Alert notifications run in background loops with no request to read a Host
+    header from, so this uses the same order as the agent installer: APP_BASE_URL
+    from .env, then the company `base_url` system setting. Returning "" simply
+    omits the button rather than emailing a link that goes nowhere.
+    """
+    from app.core.config import get_settings
+    base = (get_settings().APP_BASE_URL or "").strip()
+    if not base:
+        try:
+            row = (await db.execute(
+                text("SELECT value->>'base_url' FROM system_settings WHERE key = 'company'")
+            )).first()
+            base = (row[0] or "").strip() if row else ""
+        except Exception:
+            base = ""
+    if not base:
+        return ""
+    return base.rstrip("/") + path
+
+
+async def _smtp_gateway(db: AsyncSession, gw_id) -> Optional[dict]:
+    """Resolve the SMTP gateway for a channel, honouring the `enabled` column.
+
+    `enabled` is a column on notification_gateways — the Gateways page toggles
+    it and never touches config.enabled — so reading the JSON blob meant a
+    gateway disabled in the UI kept sending alerts.
+    """
+    if gw_id:
+        row = (await db.execute(
+            text("SELECT config, enabled FROM notification_gateways WHERE id = :id"),
+            {"id": gw_id})).first()
+    else:
+        row = (await db.execute(text(
+            "SELECT config, enabled FROM notification_gateways "
+            "WHERE type = 'smtp' AND is_default = true LIMIT 1"))).first()
+    if not row or not row.enabled:
+        return None
+    return dict(row.config)
+
+
+def _clean_details(pairs: list) -> list:
+    """Drop rows the alert had no value for.
+
+    The details panel was previously fed Group/Location/Device type verbatim;
+    on most appliances those are unset, so the panel rendered nearly empty and
+    the mail looked like a bare paragraph.
+    """
+    out = []
+    for label, value in pairs:
+        if value is None:
+            continue
+        text_value = str(value).strip()
+        if not text_value or text_value.lower() in ("none", "n/a", "unknown"):
+            continue
+        out.append((label, text_value))
+    return out
 
 
 def _render(template: str, variables: dict) -> str:
@@ -339,6 +407,37 @@ def _eval_one(metric: str, operator: str, threshold, values: dict) -> bool:
         return False
 
 
+def _recovery_map(closed_rows) -> dict:
+    """{rule_id: {"notified": bool, "since": datetime}} for the alert rows a
+    recovery just resolved.
+
+    Reset actions are gated on membership in this map: a reset only means
+    something for a rule whose own trigger this recovery closes. Without that,
+    every 'any'-scoped rule on the appliance — including metric rules that
+    belong to the periodic evaluators and never fired — ran its reset actions
+    on every device up-transition.
+
+    ``notified`` is True when any of the rule's closed rows had its trigger
+    dispatched; an absent flag predates tracking and counts as dispatched, so
+    upgrading never swallows the all-clear for an incident already in flight.
+    ``since`` is the oldest trigger time, which is what "active for" means.
+    """
+    out: dict = {}
+    for row in closed_rows:
+        if row.rule_id is None:
+            continue
+        rid = str(row.rule_id)
+        sent = row.notified is None or str(row.notified).lower() == "true"
+        entry = out.get(rid)
+        if entry is None:
+            out[rid] = {"notified": sent, "since": row.triggered_at}
+            continue
+        entry["notified"] = entry["notified"] or sent
+        if row.triggered_at and (entry["since"] is None or row.triggered_at < entry["since"]):
+            entry["since"] = row.triggered_at
+    return out
+
+
 def _conditions_match(rule, values: dict) -> bool:
     """
     E1: evaluate a rule's metric condition(s) against live metric values.
@@ -364,6 +463,35 @@ def _conditions_match(rule, values: dict) -> bool:
     return _eval_one(metric, getattr(rule, "operator", None), getattr(rule, "threshold", None), values)
 
 
+async def _device_in_maintenance(db: AsyncSession, device_id: str) -> bool:
+    """True when the device is inside an active device_maintenance window.
+
+    Defense in depth: the poller already suppresses transitions for devices in
+    maintenance, but this also covers events raised while a window was being
+    created, and traps. Tolerates the table not existing yet (rolling upgrade
+    before migrate-053 has run).
+    """
+    try:
+        row = await db.execute(
+            text("""
+                SELECT 1
+                FROM device_maintenance m
+                JOIN devices d ON d.id = :did AND (
+                       (m.scope_type = 'device' AND m.scope_device_id = d.id)
+                    OR (m.scope_type = 'group'  AND m.scope_group_id = d.group_id)
+                    OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
+                    OR (m.scope_type = 'all')
+                )
+                WHERE m.starts_at <= now() AND m.ends_at >= now()
+                LIMIT 1
+            """),
+            {"did": device_id},
+        )
+        return row.first() is not None
+    except Exception:
+        return False
+
+
 @router.post("/evaluate")
 async def evaluate_status_change(
     event: StatusChangeEvent,
@@ -380,13 +508,19 @@ async def evaluate_status_change(
 
     # Get device info for group/location/type matching
     dev_result = await db.execute(
-        text("SELECT device_type, group_id, location FROM devices WHERE id = :id"),
+        text("SELECT device_type, group_id, location, tags FROM devices WHERE id = :id"),
         {"id": event.device_id},
     )
     dev_row = dev_result.first()
     device_type = dev_row.device_type if dev_row else event.device_type
     group_id = str(dev_row.group_id) if dev_row and dev_row.group_id else event.group_id
     location = dev_row.location if dev_row else event.location
+    device_tags = _tag_set(dev_row.tags if dev_row else None)
+
+    # Planned downtime: never raise alerts for a device in an active
+    # maintenance window. Recovery events still pass so open alerts resolve.
+    if not is_recovery and await _device_in_maintenance(db, event.device_id):
+        return {"evaluated": 0, "matched": 0, "suppressed": "maintenance"}
 
     # Get group name
     group_name = ""
@@ -395,11 +529,14 @@ async def evaluate_status_change(
         gr_row = gr.first()
         group_name = gr_row.name if gr_row else ""
 
-    # Fetch all enabled alert rules
+    # Fetch all enabled alert rules. Service-check rules are excluded: their
+    # metric ('service_status') is treated as always-matching by the condition
+    # gate, so a device ping transition used to fire them — "HTTP health:
+    # SWITCH is DEGRADED" alerts about a check nobody ran.
     rules_result = await db.execute(
         text("""
             SELECT id, name, trigger_on, recovery_alert, severity,
-                   device_id, group_id, device_type, location,
+                   device_id, group_id, device_type, location, scope_tag,
                    notify_channels, cooldown,
                    metric, operator, threshold, conditions, condition_logic,
                    email_subject, email_body, sms_template,
@@ -407,6 +544,9 @@ async def evaluate_status_change(
                    schedule_start, schedule_end, schedule_days
             FROM alert_rules
             WHERE enabled = true
+              AND service_check_id IS NULL
+              AND service_check_group_id IS NULL
+              AND COALESCE(metric, '') <> 'service_status'
         """)
     )
     rules = rules_result.fetchall()
@@ -426,6 +566,8 @@ async def evaluate_status_change(
         "threshold": "0",
         "timestamp": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
         "duration": "",
+        "duration_sentence": "",
+        "duration_suffix": "",
         "rtt": f"{event.rtt_ms:.1f}ms",
         "packet_loss": f"{event.packet_loss:.0%}",
         "status_intro": "The following alert has been resolved:" if is_recovery else "An alert has been triggered:",
@@ -442,8 +584,12 @@ async def evaluate_status_change(
     # behind `rule.recovery_alert`, so rules without a recovery notification
     # never resolved their alerts — one firewall accumulated 100+ permanently
     # "active" DEGRADED alerts, poisoning every alert counter in the UI.
+    # Service-check alerts are deliberately NOT closed here: the device
+    # answering ping again says nothing about its HTTP check passing.
+    recovered: dict[str, dict] = {}
+    outage_duration = ""
     if is_recovery:
-        resolved = await db.execute(
+        closed = (await db.execute(
             text("""
                 UPDATE alerts
                 SET status = 'resolved',
@@ -451,8 +597,10 @@ async def evaluate_status_change(
                     metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:resolution_metadata AS jsonb)
                 WHERE status IN ('active', 'acknowledged')
                   AND device_id = :device_id
+                  AND service_check_id IS NULL
                   AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
                   AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded')
+                RETURNING rule_id, triggered_at, metadata->>'notified' AS notified
             """),
             {
                 "resolved_at": now,
@@ -463,8 +611,14 @@ async def evaluate_status_change(
                     "recovery_at": now.isoformat(),
                 }),
             },
-        )
-        resolved_alerts += resolved.rowcount or 0
+        )).fetchall()
+        resolved_alerts += len(closed)
+        recovered = _recovery_map(closed)
+        # How long was it down? A recovery notice that cannot say "for how
+        # long" makes the reader go and look it up in the dashboard.
+        outage_start = min((r.triggered_at for r in closed if r.triggered_at), default=None)
+        outage_duration = duration_between(outage_start, now)
+        variables["duration"] = outage_duration
 
     # E1: live metric values for condition evaluation. packet_loss arrives from
     # the poller as a fraction (0..1); rule thresholds are in percent, so scale.
@@ -475,22 +629,32 @@ async def evaluate_status_change(
     }
 
     for rule in rules:
-        # Check trigger_on match
         trigger = rule.trigger_on or "any"
-        if trigger == "down" and not is_down:
-            continue
-        if trigger == "up" and event.new_status != "up":
-            continue
-        if trigger == "degraded" and event.new_status != "degraded":
-            continue
-        # "any" matches everything
-
-        # Check if this is a recovery and rule has recovery_alert
-        if is_recovery and not rule.recovery_alert:
-            continue
-        if is_recovery and trigger != "any" and trigger != "up":
-            # Only fire recovery if trigger is 'any' or 'up'
-            pass
+        if is_recovery and trigger != "up":
+            # A reset belongs to the trigger it closes: only rules whose own
+            # alert this recovery just resolved run their reset actions. This
+            # also lets a 'down' rule send its reset — the trigger_on check
+            # below used to skip it, so Router-Down rules never announced the
+            # all-clear. ('up' rules are outside this: the up-transition IS
+            # their trigger, not a reset.)
+            if not rule.recovery_alert:
+                continue
+            if str(rule.id) not in recovered:
+                continue
+            variables["duration"] = duration_between(recovered[str(rule.id)]["since"], now)
+        else:
+            # Check trigger_on match
+            if trigger == "down" and not is_down:
+                continue
+            if trigger == "up" and event.new_status != "up":
+                continue
+            if trigger == "degraded" and event.new_status != "degraded":
+                continue
+            # "any" matches everything
+            if is_recovery:
+                if not rule.recovery_alert:
+                    continue
+                variables["duration"] = outage_duration
 
         # Check scope - device_id
         if rule.device_id and str(rule.device_id) != event.device_id:
@@ -508,6 +672,12 @@ async def evaluate_status_change(
         if rule.location and location and rule.location.lower() not in location.lower():
             continue
 
+        # Check scope - device tag. Tags are matched case-insensitively
+        # because the registry canonicalises spelling but older assignments
+        # in devices.tags may predate that.
+        if rule.scope_tag and rule.scope_tag.strip().lower() not in device_tags:
+            continue
+
         # E1: metric-threshold gating. Recovery events are never gated (so they
         # can still resolve open alerts); pure status rules always pass.
         if not is_recovery and not _conditions_match(rule, metric_values):
@@ -516,6 +686,13 @@ async def evaluate_status_change(
         # Rule matches! Send notifications
         variables["severity"] = (rule.severity or "warning").upper()
         variables["rule_name"] = rule.name or "Alert"
+        # Per-rule phrasing: the condition sentence depends on which rule
+        # matched, so it is rebuilt here rather than with the shared variables.
+        variables.update(rule_phrasing(
+            rule, hostname=event.hostname, is_recovery=is_recovery,
+            reading=variables["rtt"] if (rule.metric or "ping_status") == "rtt" else None,
+            duration=variables.get("duration", ""),
+        ))
 
         if suppressing_dependency and not is_recovery:
             await db.execute(
@@ -549,15 +726,21 @@ async def evaluate_status_change(
             suppressed_alerts += 1
             continue
 
-        # Build messages from templates
+        # Build messages from templates. A rule that stores no template falls
+        # back to the shared defaults in alert_phrasing, which is the same text
+        # the preview dialog renders — the two used to disagree, and the mail
+        # that actually landed was the worse of the two.
         if is_recovery:
-            email_subject = _render(rule.recovery_email_subject or "[{severity}] RESOLVED: {rule_name}", variables)
-            email_body = _render(rule.recovery_email_body or rule.email_body or variables["status_intro"], variables)
-            sms_body = _render(rule.recovery_sms_template or "[ZenPlus {severity}] {hostname} is {status}. RESOLVED: {rule_name}", variables)
+            # No falling back to the trigger body here: "core-router-01 is
+            # DOWN" is not a resolved notice, and that fallback is how it used
+            # to end up in one.
+            email_subject = _render(effective_template(rule.recovery_email_subject, DEFAULT_RECOVERY_EMAIL_SUBJECT), variables)
+            email_body = _render(effective_template(rule.recovery_email_body, DEFAULT_RECOVERY_EMAIL_BODY), variables)
+            sms_body = _render(effective_template(rule.recovery_sms_template, DEFAULT_RECOVERY_SMS), variables)
         else:
-            email_subject = _render(rule.email_subject or "[{severity}] {status}: {rule_name}", variables)
-            email_body = _render(rule.email_body or variables["status_intro"], variables)
-            sms_body = _render(rule.sms_template or "[ZenPlus {severity}] {hostname} ({ip_address}) is {status}. Rule: {rule_name}", variables)
+            email_subject = _render(effective_template(rule.email_subject, DEFAULT_EMAIL_SUBJECT), variables)
+            email_body = _render(effective_template(rule.email_body, DEFAULT_EMAIL_BODY), variables)
+            sms_body = _render(effective_template(rule.sms_template, DEFAULT_SMS), variables)
 
         if not is_recovery:
             # Respect an active snooze for this rule/device condition: the
@@ -595,10 +778,11 @@ async def evaluate_status_change(
         # sentence — the rendered SMS/email templates are transport payloads
         # only (persisting sms_body here put "[ZenPlus WARNING] ..." template
         # text all over the alert UIs).
-        await db.execute(
+        inserted = await db.execute(
             text("""
                 INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata)
                 VALUES (:device_id, :rule_id, :status, :severity, :message, :triggered_at, :resolved_at, CAST(:metadata AS jsonb))
+                RETURNING id
             """),
             {
                 "device_id": event.device_id,
@@ -616,14 +800,21 @@ async def evaluate_status_change(
             },
         )
 
+        new_alert_id = (inserted.first() or [None])[0]
+
         # Quiet hours: suppress outbound notifications outside the rule's
-        # schedule window. Recovery ("resolved") notices still go out so an
-        # operator isn't left thinking something is still down. The alert row
-        # above is always recorded regardless of schedule.
-        if not is_recovery and not notifications_allowed(
-            rule.schedule_start, rule.schedule_end,
-            getattr(rule, "schedule_days", None), _tz,
-        ):
+        # schedule window. The alert row above is always recorded regardless.
+        if not is_recovery:
+            allowed = notifications_allowed(
+                rule.schedule_start, rule.schedule_end,
+                getattr(rule, "schedule_days", None), _tz,
+            )
+            await ns.stamp(db, new_alert_id, allowed)
+            if not allowed:
+                continue
+        # A recovery follows the trigger's fate: an all-clear for a page nobody
+        # received is noise about an event they never heard of.
+        elif trigger != "up" and not recovered[str(rule.id)]["notified"]:
             continue
 
         # Send notifications to channels
@@ -666,13 +857,8 @@ async def evaluate_status_change(
                     if not recipients:
                         continue
 
-                    gw_id = ch.gateway_id or ch_config.get("gateway_id")
-                    if gw_id:
-                        gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})
-                    else:
-                        gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'smtp' AND is_default = true LIMIT 1"))
-                    gw_row = gw_res.first()
-                    if gw_row:
+                    gw_conf = await _smtp_gateway(db, ch.gateway_id or ch_config.get("gateway_id"))
+                    if gw_conf:
                         email_html = build_alert_email_html({
                             "severity": rule.severity or "warning",
                             "resolved": is_recovery,
@@ -681,14 +867,29 @@ async def evaluate_status_change(
                             "hostname": event.hostname,
                             "ip_address": event.ip_address,
                             "message": email_body,
-                            "details": [
+                            # Lead with what actually fired, then the context.
+                            "headline_metric": {
+                                "label": "Round-trip time",
+                                "value": variables.get("rtt"),
+                                "secondary_label": "Packet loss",
+                                "secondary_value": variables.get("packet_loss"),
+                            },
+                            "details": _clean_details([
+                                ("Alert rule", rule.name),
+                                ("Condition", variables.get("condition_label")),
+                                # Only on the way back up, and the first thing
+                                # anyone asks about a resolved incident.
+                                ("Active for", variables.get("duration") if is_recovery else None),
+                                ("Round-trip time", variables.get("rtt")),
+                                ("Packet loss", variables.get("packet_loss")),
                                 ("Group", variables.get("group")),
                                 ("Location", variables.get("location")),
                                 ("Device type", variables.get("device_type")),
-                            ],
+                            ]),
+                            "action_url": await _dashboard_url(db, "/alerts"),
                             "timestamp": now.isoformat(),
                         })
-                        await _send_email(dict(gw_row.config), recipients, email_subject,
+                        await _send_email(gw_conf, recipients, email_subject,
                                           email_body, html_body=email_html)
                         notifications_sent += 1
 
@@ -813,6 +1014,8 @@ async def evaluate_service_status_change(
         "threshold": "0",
         "timestamp": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
         "duration": "",
+        "duration_sentence": "",
+        "duration_suffix": "",
         "rtt": f"{event.response_ms:.1f}ms",
         "packet_loss": "",
         "error": event.error or "",
@@ -826,17 +1029,62 @@ async def evaluate_service_status_change(
     _tz = await get_configured_timezone(db)
     suppressing_dependency = await _find_suppressing_dependency(db, event.device_id) if (is_down and event.device_id) else None
 
+    # Recovery closes every open alert on this check up front — this used to
+    # run per-rule after the trigger_on gate, so a 'down' rule's alerts (the
+    # common case) were never resolved by the recovery that ended them.
+    recovered: dict[str, dict] = {}
+    outage_duration = ""
+    if is_recovery:
+        closed = (await db.execute(
+            text("""
+                UPDATE alerts
+                SET status = 'resolved',
+                    resolved_at = :resolved_at,
+                    metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:resolution_metadata AS jsonb)
+                WHERE status IN ('active', 'acknowledged')
+                  AND service_check_id = :service_check_id
+                  AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
+                  AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded', 'warning')
+                RETURNING rule_id, triggered_at, metadata->>'notified' AS notified
+            """),
+            {
+                "resolved_at": now,
+                "service_check_id": event.service_check_id,
+                "resolution_metadata": json.dumps({
+                    "resolved_by_recovery": True,
+                    "recovery_status": event.new_status,
+                    "recovery_at": now.isoformat(),
+                }),
+            },
+        )).fetchall()
+        resolved_alerts += len(closed)
+        recovered = _recovery_map(closed)
+        # Same question as for a device: how long was the check failing?
+        outage_start = min((r.triggered_at for r in closed if r.triggered_at), default=None)
+        outage_duration = duration_between(outage_start, now)
+        variables["duration"] = outage_duration
+
     for rule in rules:
         trigger = rule.trigger_on or "any"
-        if trigger == "down" and not is_down:
-            continue
-        if trigger == "up" and event.new_status != "up":
-            continue
-        if trigger == "degraded" and event.new_status != "degraded":
-            continue
-
-        if is_recovery and not rule.recovery_alert:
-            continue
+        if is_recovery and trigger != "up":
+            # As on the device path: reset actions run only for the rule whose
+            # own alert this recovery just closed.
+            if not rule.recovery_alert:
+                continue
+            if str(rule.id) not in recovered:
+                continue
+            variables["duration"] = duration_between(recovered[str(rule.id)]["since"], now)
+        else:
+            if trigger == "down" and not is_down:
+                continue
+            if trigger == "up" and event.new_status != "up":
+                continue
+            if trigger == "degraded" and event.new_status != "degraded":
+                continue
+            if is_recovery:
+                if not rule.recovery_alert:
+                    continue
+                variables["duration"] = outage_duration
 
         # Scope: service_check_id
         if rule.service_check_id and str(rule.service_check_id) != event.service_check_id:
@@ -889,45 +1137,35 @@ async def evaluate_service_status_change(
             suppressed_alerts += 1
             continue
 
+        # A service check reports its own failure reason, so the phrasing leads
+        # with the check and the error rather than with a threshold.
+        variables["error_sentence"] = f" {event.error.strip().rstrip('.')}." if event.error else ""
         if is_recovery:
-            resolved = await db.execute(
-                text("""
-                    UPDATE alerts
-                    SET status = 'resolved',
-                        resolved_at = :resolved_at,
-                        metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:resolution_metadata AS jsonb)
-                    WHERE status IN ('active', 'acknowledged')
-                      AND service_check_id = :service_check_id
-                      AND rule_id = :rule_id
-                      AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
-                      AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded', 'warning')
-                """),
-                {
-                    "resolved_at": now,
-                    "service_check_id": event.service_check_id,
-                    "rule_id": str(rule.id),
-                    "resolution_metadata": json.dumps({
-                        "resolved_by_recovery": True,
-                        "recovery_status": event.new_status,
-                        "recovery_at": now.isoformat(),
-                    }),
-                },
-            )
-            resolved_alerts += resolved.rowcount or 0
-
-        if is_recovery:
-            email_subject = _render(rule.recovery_email_subject or "[{severity}] RESOLVED: {rule_name}", variables)
-            email_body = _render(rule.recovery_email_body or rule.email_body or "Service {check_name} ({target}) recovered to {status}.", variables)
-            sms_body = _render(rule.recovery_sms_template or "[ZenPlus {severity}] {check_name} recovered: {status}. {rule_name}", variables)
+            email_subject = _render(effective_template(rule.recovery_email_subject, DEFAULT_RECOVERY_EMAIL_SUBJECT), variables)
+            email_body = _render(effective_template(
+                rule.recovery_email_body,
+                "The {check_type} check “{check_name}” on {target} is passing again."
+                "{duration_sentence}"), variables)
+            sms_body = _render(effective_template(
+                rule.recovery_sms_template,
+                "ZenPlus resolved — {rule_name}: {check_name} is passing again."
+                "{duration_suffix}"), variables)
         else:
-            email_subject = _render(rule.email_subject or "[{severity}] {status}: {check_name}", variables)
-            email_body = _render(rule.email_body or "Service {check_name} ({target}) is {status}.\nError: {error}\nRule: {rule_name}", variables)
-            sms_body = _render(rule.sms_template or "[ZenPlus {severity}] {check_name} is {status}. {error} Rule: {rule_name}", variables)
+            email_subject = _render(effective_template(rule.email_subject, "[{severity}] {status}: {check_name}"), variables)
+            email_body = _render(effective_template(
+                rule.email_body,
+                "The {check_type} check “{check_name}” on {target} is {status}."
+                "{error_sentence}"), variables)
+            sms_body = _render(effective_template(
+                rule.sms_template,
+                "ZenPlus {severity} — {rule_name}: {check_name} is {status} ({target})."),
+                variables)
 
-        await db.execute(
+        inserted = await db.execute(
             text("""
                 INSERT INTO alerts (device_id, service_check_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata)
                 VALUES (:device_id, :service_check_id, :rule_id, :status, :severity, :message, :triggered_at, :resolved_at, CAST(:metadata AS jsonb))
+                RETURNING id
             """),
             {
                 "device_id": event.device_id,
@@ -948,11 +1186,17 @@ async def evaluate_service_status_change(
             },
         )
 
-        # Quiet hours (see device path). Recovery notices are never suppressed.
-        if not is_recovery and not notifications_allowed(
-            rule.schedule_start, rule.schedule_end,
-            getattr(rule, "schedule_days", None), _tz,
-        ):
+        # Quiet hours, and a recovery follows its trigger's fate (see device path).
+        svc_alert_id = (inserted.first() or [None])[0]
+        if not is_recovery:
+            allowed = notifications_allowed(
+                rule.schedule_start, rule.schedule_end,
+                getattr(rule, "schedule_days", None), _tz,
+            )
+            await ns.stamp(db, svc_alert_id, allowed)
+            if not allowed:
+                continue
+        elif trigger != "up" and not recovered[str(rule.id)]["notified"]:
             continue
 
         channel_ids = rule.notify_channels or []
@@ -986,13 +1230,8 @@ async def evaluate_service_status_change(
                     recipients = ch_config.get("recipients", "")
                     if not recipients:
                         continue
-                    gw_id = ch.gateway_id or ch_config.get("gateway_id")
-                    if gw_id:
-                        gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})
-                    else:
-                        gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'smtp' AND is_default = true LIMIT 1"))
-                    gw_row = gw_res.first()
-                    if gw_row:
+                    gw_conf = await _smtp_gateway(db, ch.gateway_id or ch_config.get("gateway_id"))
+                    if gw_conf:
                         email_html = build_alert_email_html({
                             "severity": rule.severity or "warning",
                             "resolved": is_recovery,
@@ -1000,15 +1239,24 @@ async def evaluate_service_status_change(
                             "title": rule.name or "Service alert",
                             "hostname": variables.get("check_name") or variables.get("hostname"),
                             "message": email_body,
-                            "details": [
+                            "headline_metric": {
+                                "label": (variables.get("check_type") or "Check").upper(),
+                                "value": variables.get("status"),
+                                "secondary_label": "Target",
+                                "secondary_value": variables.get("target"),
+                            },
+                            "details": _clean_details([
+                                ("Alert rule", rule.name),
                                 ("Check", variables.get("check_name")),
                                 ("Type", variables.get("check_type")),
                                 ("Target", variables.get("target")),
+                                ("Failing for", variables.get("duration") if is_recovery else None),
                                 ("Error", variables.get("error")),
-                            ],
+                            ]),
+                            "action_url": await _dashboard_url(db, "/services"),
                             "timestamp": now.isoformat(),
                         })
-                        await _send_email(dict(gw_row.config), recipients, email_subject,
+                        await _send_email(gw_conf, recipients, email_subject,
                                           email_body, html_body=email_html)
                         notifications_sent += 1
 
@@ -1055,15 +1303,21 @@ async def evaluate_trap(
         did = None
 
     group_id = None
+    device_tags: set[str] = set()
     if did:
         dev = (await db.execute(
-            text("SELECT group_id FROM devices WHERE id = :id"), {"id": did}
+            text("SELECT group_id, tags FROM devices WHERE id = :id"), {"id": did}
         )).first()
         group_id = str(dev.group_id) if dev and dev.group_id else None
+        device_tags = _tag_set(dev.tags if dev else None)
+
+        # Planned downtime: traps from a device in maintenance don't raise alerts.
+        if await _device_in_maintenance(db, did):
+            return {"alerts_created": 0, "suppressed": "maintenance"}
 
     rules = (await db.execute(
         text("""
-            SELECT id, name, severity, device_id, group_id, trap_oid
+            SELECT id, name, severity, device_id, group_id, scope_tag, trap_oid
             FROM alert_rules
             WHERE enabled = true AND metric = 'trap'
         """)
@@ -1074,6 +1328,10 @@ async def evaluate_trap(
         if rule.device_id and (not did or str(rule.device_id) != did):
             continue
         if rule.group_id and (not group_id or str(rule.group_id) != group_id):
+            continue
+        # A tag-scoped rule must not fall through to every device: a trap from
+        # an unidentified source (no device_id) has no tags to match.
+        if rule.scope_tag and rule.scope_tag.strip().lower() not in device_tags:
             continue
         if not _trap_oid_matches(rule.trap_oid, event.trap_oid):
             continue

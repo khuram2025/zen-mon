@@ -25,6 +25,7 @@ export function EditServiceCheckPage() {
   const [httpExpectedStatuses, setHttpExpectedStatuses] = useState('200')
   const [httpContentMatch, setHttpContentMatch] = useState('')
   const [httpFollowRedirects, setHttpFollowRedirects] = useState(true)
+  const [httpIgnoreTlsErrors, setHttpIgnoreTlsErrors] = useState(false)
   const [tlsWarnDays, setTlsWarnDays] = useState(30)
   const [tlsCriticalDays, setTlsCriticalDays] = useState(7)
   const [description, setDescription] = useState('')
@@ -43,6 +44,7 @@ export function EditServiceCheckPage() {
       setHttpExpectedStatuses(check.http_expected_statuses || String(check.http_expected_status || 200))
       setHttpContentMatch(check.http_content_match || '')
       setHttpFollowRedirects(check.http_follow_redirects)
+      setHttpIgnoreTlsErrors(check.http_ignore_tls_errors ?? false)
       setTlsWarnDays(check.tls_warn_days)
       setTlsCriticalDays(check.tls_critical_days)
       setDescription(check.description || '')
@@ -85,6 +87,7 @@ export function EditServiceCheckPage() {
       data.http_expected_statuses = httpExpectedStatuses.trim() || null
       data.http_content_match = httpContentMatch || null
       data.http_follow_redirects = httpFollowRedirects
+      data.http_ignore_tls_errors = httpIgnoreTlsErrors
     }
     if (check?.check_type === 'tls') {
       data.tls_warn_days = tlsWarnDays
@@ -174,6 +177,21 @@ export function EditServiceCheckPage() {
                 <div className={`w-4 h-4 rounded-full bg-white transition-transform mx-1 ${httpFollowRedirects ? 'translate-x-4' : ''}`} />
               </button>
             </div>
+            <div className="flex items-center justify-between gap-4 rounded-lg border border-[var(--bg-elevated)] px-3 py-2">
+              <div>
+                <label className="text-xs text-[var(--text-muted)] uppercase tracking-wider">Ignore TLS/certificate errors</label>
+                <p className="mt-1 text-xs text-[var(--text-muted)]">For trusted internal services using self-signed or invalid certificates.</p>
+              </div>
+              <button type="button" role="switch" aria-checked={httpIgnoreTlsErrors} onClick={() => setHttpIgnoreTlsErrors(!httpIgnoreTlsErrors)}
+                className={`w-10 h-6 shrink-0 rounded-full transition-colors ${httpIgnoreTlsErrors ? 'bg-amber-500' : 'bg-[var(--bg-elevated)]'}`}>
+                <div className={`w-4 h-4 rounded-full bg-white transition-transform mx-1 ${httpIgnoreTlsErrors ? 'translate-x-4' : ''}`} />
+              </button>
+            </div>
+            {httpIgnoreTlsErrors && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+                TLS certificate identity and trust will not be validated.
+              </div>
+            )}
           </div>
         )}
 
