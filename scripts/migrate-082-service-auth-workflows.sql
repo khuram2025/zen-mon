@@ -41,3 +41,4 @@ DO $$ BEGIN
     GRANT SELECT, INSERT, UPDATE, DELETE ON service_credentials TO zenplus;
 EXCEPTION WHEN undefined_object THEN NULL;
 END $$;
+
