@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Boolean, Integer, Float, SmallInteger, Text, DateTime, ForeignKey
+from sqlalchemy import String, Boolean, Integer, Float, SmallInteger, Text, DateTime, ForeignKey, LargeBinary
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -47,6 +47,8 @@ class ServiceCheck(Base):
     http_expected_statuses: Mapped[str] = mapped_column(Text, nullable=True)
     http_content_match: Mapped[str] = mapped_column(String(1024), nullable=True)
     http_follow_redirects: Mapped[bool] = mapped_column(Boolean, default=True)
+    http_ignore_tls_errors: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    http_allow_insecure_auth: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     tls_warn_days: Mapped[int] = mapped_column(Integer, default=30)
     tls_critical_days: Mapped[int] = mapped_column(Integer, default=7)
@@ -56,6 +58,9 @@ class ServiceCheck(Base):
     retry_count: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1)
     retry_delay_s: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=30)
     parent_check_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("service_checks.id", ondelete="SET NULL"), nullable=True)
+    credential_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("service_credentials.id", ondelete="SET NULL"), nullable=True)
+    workflow_operator: Mapped[str] = mapped_column(String(8), nullable=False, default="all")
+    workflow_steps: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
     status: Mapped[str] = mapped_column(String(20), default="unknown")
     last_check_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -74,6 +79,25 @@ class ServiceCheck(Base):
 
     device = relationship("Device", lazy="selectin")
     group = relationship("ServiceCheckGroup", lazy="selectin")
+    credential = relationship("ServiceCredential", lazy="selectin")
+
+
+class ServiceCredential(Base):
+    __tablename__ = "service_credentials"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True)
+    auth_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    username: Mapped[str] = mapped_column(String(255), nullable=True)
+    secret_cipher: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=True)
+    created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
 
 class ServiceCheckTemplate(Base):

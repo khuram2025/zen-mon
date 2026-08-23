@@ -37,6 +37,8 @@ export interface ServerItem {
   agent_id: string | null
   agent_status: AgentStatus | null
   agent_version: string | null
+  /** Feature flags advertised by the installed agent. */
+  agent_capabilities?: string[]
   agent_last_heartbeat_at: string | null
   agent_last_metric_at?: string | null
   /** Agent clock offset from the controller, in seconds. A non-zero value
@@ -101,6 +103,11 @@ export interface AgentItem {
   version: string | null
   status: AgentStatus
   api_key_prefix: string | null
+  authorization_state: 'pending' | 'authorized' | 'revoked'
+  authorization_source: string | null
+  enrollment_token_prefix: string | null
+  authorized_at: string | null
+  revoked_at: string | null
   last_heartbeat_at: string | null
   last_metric_at: string | null
   last_config_hash: string | null
@@ -115,6 +122,12 @@ export interface AgentItem {
   policy_id: string | null
   policy_name: string | null
   config_apply_error: string | null
+  apm_status?: {
+    enabled?: boolean
+    gateway?: { listening?: boolean; grpc_port?: number; http_port?: number }
+    checked_at?: string | null
+    last_error?: string | null
+  }
   tags: string[]
   created_at: string
   updated_at: string

@@ -9,6 +9,9 @@ tools/
 # /api/v1/agent-fleet/packages/publish, not tracked here.
 dist/
 
+# Local Go compiler cache used by release builds.
+.gotmp/
+
 # Per-machine runtime state written by a running agent: enrolled identity,
 # metric spool, and logs. Machine-specific and not reproducible; committing it
 # would also leak the enrolled host's identity into the repo.

@@ -16,6 +16,7 @@ import (
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
 
+	"zenplus-agent/internal/config"
 	"zenplus-agent/internal/model"
 )
 
@@ -42,22 +43,22 @@ type setupWindow struct {
 	opts     options
 	elevated bool
 
-	window        *walk.MainWindow
-	userScope     *walk.RadioButton
-	machineScope  *walk.RadioButton
-	controllerURL *walk.LineEdit
-	token         *walk.LineEdit
-	siteID        *walk.LineEdit
-	policyID      *walk.LineEdit
-	noStartMenu   *walk.CheckBox
-	launchAfter   *walk.CheckBox
-	accept        *walk.CheckBox
-	progress      *walk.ProgressBar
-	status        *walk.Label
-	logs          *walk.TextEdit
-	installButton *walk.PushButton
-	cancelButton  *walk.PushButton
-	finished      bool
+	window                *walk.MainWindow
+	userScope             *walk.RadioButton
+	machineScope          *walk.RadioButton
+	controllerURL         *walk.LineEdit
+	profileInfrastructure *walk.RadioButton
+	profileAPM            *walk.RadioButton
+	profileCombined       *walk.RadioButton
+	noStartMenu           *walk.CheckBox
+	launchAfter           *walk.CheckBox
+	accept                *walk.CheckBox
+	progress              *walk.ProgressBar
+	status                *walk.Label
+	logs                  *walk.TextEdit
+	installButton         *walk.PushButton
+	cancelButton          *walk.PushButton
+	finished              bool
 }
 
 type uninstallWindow struct {
@@ -95,8 +96,8 @@ func (u *setupWindow) run() error {
 		Title:      productName + " Setup",
 		Icon:       icon,
 		Background: SolidColorBrush{Color: setupBG},
-		Size:       Size{Width: 650, Height: 650},
-		MinSize:    Size{Width: 620, Height: 590},
+		Size:       Size{Width: 670, Height: 730},
+		MinSize:    Size{Width: 640, Height: 680},
 		Layout:     VBox{MarginsZero: true, Spacing: 0},
 		Children: []Widget{
 			setupHeader("Install "+productName, "Version "+model.AgentVersion+" | Guided Windows setup"),
@@ -121,6 +122,15 @@ func (u *setupWindow) run() error {
 	}
 	if u.machineScope != nil {
 		u.machineScope.SetChecked(defaultMachine)
+	}
+	if u.profileCombined != nil {
+		u.profileCombined.SetChecked(u.opts.profile == "" || u.opts.profile == "combined")
+	}
+	if u.profileInfrastructure != nil {
+		u.profileInfrastructure.SetChecked(u.opts.profile == "infrastructure")
+	}
+	if u.profileAPM != nil {
+		u.profileAPM.SetChecked(u.opts.profile == "apm")
 	}
 	u.updateInstallEnabled()
 	u.window.Run()
@@ -153,19 +163,32 @@ func (u *setupWindow) scopePanel(defaultUser, defaultMachine bool) Widget {
 }
 
 func (u *setupWindow) settingsPanel() Widget {
+	controllerValue := strings.TrimSpace(u.opts.controllerURL)
+	if controllerValue == "" {
+		controllerValue = config.Default().ControllerURL
+	}
+	profile := u.opts.profile
+	if profile == "" {
+		if u.opts.apmMode == "disabled" {
+			profile = "infrastructure"
+		} else {
+			profile = "combined"
+		}
+	}
+	u.opts.profile = profile
 	return GroupBox{
-		Title:      "Controller Settings",
+		Title:      "Connect to ZenPlus",
 		Background: SolidColorBrush{Color: setupPanel},
-		Layout:     Grid{Margins: Margins{Left: 12, Top: 10, Right: 12, Bottom: 10}, Spacing: 8, Columns: 2},
+		Layout:     VBox{Margins: Margins{Left: 12, Top: 10, Right: 12, Bottom: 10}, Spacing: 8},
 		Children: []Widget{
-			Label{Text: "Controller URL", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9}, MinSize: Size{Width: 120}},
-			LineEdit{AssignTo: &u.controllerURL, CueBanner: "http://192.168.8.152", Text: u.opts.controllerURL, Background: SolidColorBrush{Color: setupField}, TextColor: setupText, MinSize: Size{Height: 28}},
-			Label{Text: "Enrollment Token", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9}},
-			LineEdit{AssignTo: &u.token, CueBanner: "Optional", Text: u.opts.enrollmentToken, PasswordMode: true, Background: SolidColorBrush{Color: setupField}, TextColor: setupText, MinSize: Size{Height: 28}},
-			Label{Text: "Site ID", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9}},
-			LineEdit{AssignTo: &u.siteID, CueBanner: "Optional", Text: u.opts.siteID, Background: SolidColorBrush{Color: setupField}, TextColor: setupText, MinSize: Size{Height: 28}},
-			Label{Text: "Policy ID", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9}},
-			LineEdit{AssignTo: &u.policyID, CueBanner: "Optional", Text: u.opts.policyID, Background: SolidColorBrush{Color: setupField}, TextColor: setupText, MinSize: Size{Height: 28}},
+			Label{Text: "Controller URL or IP address", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9, Bold: true}},
+			LineEdit{AssignTo: &u.controllerURL, CueBanner: "https://192.168.8.221", Text: controllerValue, Background: SolidColorBrush{Color: setupField}, TextColor: setupText, MinSize: Size{Height: 30}},
+			Label{Text: "Monitoring profile", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9, Bold: true}},
+			RadioButton{AssignTo: &u.profileCombined, Text: "Server monitoring + APM (recommended)"},
+			RadioButton{AssignTo: &u.profileInfrastructure, Text: "Server monitoring only"},
+			RadioButton{AssignTo: &u.profileAPM, Text: "APM only (keeps agent health and inventory)"},
+			TextLabel{Text: "The APM profile installs a ZenPlus-managed local OpenTelemetry gateway and offline runtime packages. Runtime instrumentation is configured after installation; ingest keys remain on the appliance.", MinSize: Size{Width: 560, Height: 34}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
+			TextLabel{Text: "After installation, this computer registers with the appliance as Pending authorization. An administrator approves it in Agent Fleet; the appliance then issues and manages its protected credential and policy.", MinSize: Size{Width: 560, Height: 46}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
 		},
 	}
 }
@@ -273,7 +296,7 @@ func (u *setupWindow) install() {
 				u.appendLog("ZenPlus Agent dashboard launched.")
 			}
 		}
-		u.complete("ZenPlus Agent is installed and ready.", true)
+		u.complete("ZenPlus Agent is installed. Its authorization request will appear in Agent Fleet.", true)
 	}()
 }
 
@@ -284,9 +307,14 @@ func (u *setupWindow) optionsFromUI() options {
 	opts.machine = !opts.user
 	opts.noStartMenu = u.noStartMenu != nil && !u.noStartMenu.Checked()
 	opts.controllerURL = strings.TrimSpace(textOf(u.controllerURL))
-	opts.enrollmentToken = strings.TrimSpace(textOf(u.token))
-	opts.siteID = strings.TrimSpace(textOf(u.siteID))
-	opts.policyID = strings.TrimSpace(textOf(u.policyID))
+	switch {
+	case u.profileInfrastructure != nil && u.profileInfrastructure.Checked():
+		opts.profile, opts.apmMode = "infrastructure", "disabled"
+	case u.profileAPM != nil && u.profileAPM.Checked():
+		opts.profile, opts.apmMode = "apm", "enabled"
+	default:
+		opts.profile, opts.apmMode = "combined", "enabled"
+	}
 	return opts
 }
 
@@ -299,7 +327,7 @@ func (u *setupWindow) updateInstallEnabled() {
 func (u *setupWindow) setWorking(working bool) {
 	u.withUI(func() {
 		for _, w := range []interface{ SetEnabled(bool) }{
-			u.userScope, u.machineScope, u.controllerURL, u.token, u.siteID, u.policyID, u.noStartMenu, u.launchAfter, u.accept,
+			u.userScope, u.machineScope, u.controllerURL, u.profileInfrastructure, u.profileAPM, u.profileCombined, u.noStartMenu, u.launchAfter, u.accept,
 		} {
 			if w != nil {
 				w.SetEnabled(!working)
@@ -761,14 +789,13 @@ func commandArgsFromOptions(opts options, uninstall bool, quiet bool) []string {
 	if opts.controllerURL != "" {
 		args = append(args, "CONTROLLER_URL="+opts.controllerURL)
 	}
-	if opts.enrollmentToken != "" {
-		args = append(args, "ENROLLMENT_TOKEN="+opts.enrollmentToken)
+	if opts.apmMode == "enabled" {
+		args = append(args, "APM_ENABLED=1")
+	} else if opts.apmMode == "disabled" {
+		args = append(args, "APM_ENABLED=0")
 	}
-	if opts.siteID != "" {
-		args = append(args, "SITE_ID="+opts.siteID)
-	}
-	if opts.policyID != "" {
-		args = append(args, "POLICY_ID="+opts.policyID)
+	if opts.profile != "" {
+		args = append(args, "INSTALL_PROFILE="+opts.profile)
 	}
 	return args
 }

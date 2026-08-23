@@ -71,6 +71,7 @@ poller/poller
 
 # ─── Credentials & secrets (NEVER commit) ───
 .credentials
+cred.txt
 .bash_logout
 .bashrc
 .profile

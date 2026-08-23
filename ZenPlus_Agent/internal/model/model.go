@@ -2,7 +2,19 @@ package model
 
 import "time"
 
-const AgentVersion = "1.2.0"
+const AgentVersion = "1.11.2"
+
+var AgentCapabilities = []string{
+	"network_capture_v1",
+	"capture_stop_v1",
+	"interface_traffic_v1",
+	"apm_status_v1",
+	"apm_gateway_v1",
+	"apm_runtime_discovery_v1",
+	"apm_iis_instrumentation_v1",
+	"apm_windows_service_instrumentation_v1",
+	"apm_runtime_health_v1",
+}
 
 type Metric struct {
 	Kind      string         `json:"kind"`
@@ -47,12 +59,44 @@ type Health struct {
 }
 
 type Heartbeat struct {
-	Version          string `json:"version"`
-	UptimeSeconds    int64  `json:"uptime_seconds,omitempty"`
-	QueueDepth       int    `json:"queue_depth,omitempty"`
-	SpoolBytes       int64  `json:"spool_bytes,omitempty"`
-	ConfigHash       string `json:"config_hash,omitempty"`
-	ConfigApplyError string `json:"config_apply_error,omitempty"`
+	Version          string             `json:"version"`
+	Capabilities     []string           `json:"capabilities,omitempty"`
+	UptimeSeconds    int64              `json:"uptime_seconds,omitempty"`
+	QueueDepth       int                `json:"queue_depth,omitempty"`
+	SpoolBytes       int64              `json:"spool_bytes,omitempty"`
+	ConfigHash       string             `json:"config_hash,omitempty"`
+	ConfigApplyError string             `json:"config_apply_error,omitempty"`
+	APM              *AgentAPMHeartbeat `json:"apm,omitempty"`
+}
+
+type APMGatewayStatus struct {
+	Listening bool   `json:"listening"`
+	Healthy   bool   `json:"healthy"`
+	Managed   bool   `json:"managed"`
+	Version   string `json:"version,omitempty"`
+	GRPCPort  int    `json:"grpc_port"`
+	HTTPPort  int    `json:"http_port"`
+}
+
+// AgentAPMHeartbeat is local, endpoint-observed APM state sent to the
+// appliance. It contains status only—never an ingest key or token.
+type AgentAPMHeartbeat struct {
+	Enabled           bool              `json:"enabled"`
+	Profile           string            `json:"profile,omitempty"`
+	Environment       string            `json:"environment,omitempty"`
+	State             string            `json:"state,omitempty"`
+	Gateway           APMGatewayStatus  `json:"gateway"`
+	Discovered        int               `json:"discovered"`
+	Instrumented      int               `json:"instrumented"`
+	Failed            int               `json:"failed"`
+	SpansForwarded1M  int               `json:"spans_forwarded_1m"`
+	ExportErrors1M    int               `json:"export_errors_1m"`
+	SpoolDepthSpans   int               `json:"spool_depth_spans"`
+	SpoolBytes        int64             `json:"spool_bytes"`
+	DroppedSpansTotal int64             `json:"dropped_spans_total"`
+	Bundles           map[string]string `json:"bundles,omitempty"`
+	LastError         string            `json:"last_error,omitempty"`
+	CheckedAt         time.Time         `json:"checked_at"`
 }
 
 type HeartbeatResponse struct {
@@ -62,6 +106,24 @@ type HeartbeatResponse struct {
 	HasCommands    bool          `json:"has_commands"`
 	DesiredVersion *string       `json:"desired_version"`
 	Backpressure   *Backpressure `json:"backpressure"`
+	APM            *APMStatus    `json:"apm,omitempty"`
+}
+
+// APMStatus is a read-only appliance health snapshot. The local APM monitoring
+// switch is separate and never changes appliance availability.
+type APMStatus struct {
+	Available          bool       `json:"available"`
+	State              string     `json:"state"`
+	ManagedBy          string     `json:"managed_by"`
+	IngestPath         string     `json:"ingest_path"`
+	QueueDepth         int        `json:"queue_depth"`
+	QueueCapacity      int        `json:"queue_capacity"`
+	AcceptedSpansTotal int64      `json:"accepted_spans_total"`
+	RejectedSpansTotal int64      `json:"rejected_spans_total"`
+	DroppedSpansTotal  int64      `json:"dropped_spans_total"`
+	LastReceivedAt     *time.Time `json:"last_received_at,omitempty"`
+	Message            string     `json:"message,omitempty"`
+	CheckedAt          time.Time  `json:"checked_at"`
 }
 
 type Backpressure struct {
@@ -70,27 +132,29 @@ type Backpressure struct {
 }
 
 type EnrollmentRequest struct {
-	EnrollmentToken string         `json:"enrollment_token"`
-	AgentUID        string         `json:"agent_uid"`
-	Hostname        string         `json:"hostname"`
-	Platform        string         `json:"platform"`
-	Version         string         `json:"version"`
-	SiteID          string         `json:"site_id,omitempty"`
-	PolicyID        string         `json:"policy_id,omitempty"`
-	FQDN            string         `json:"fqdn,omitempty"`
-	PrimaryIP       string         `json:"primary_ip,omitempty"`
-	OSName          string         `json:"os_name,omitempty"`
-	OSVersion       string         `json:"os_version,omitempty"`
-	KernelOrBuild   string         `json:"kernel_or_build,omitempty"`
-	Architecture    string         `json:"architecture"`
-	InstallID       string         `json:"install_id,omitempty"`
-	Inventory       map[string]any `json:"inventory,omitempty"`
+	// PendingSecret proves that repeated tokenless registration polls come
+	// from the same installation. It is generated locally and protected by
+	// the operating system before being stored on disk.
+	PendingSecret string         `json:"pending_secret"`
+	AgentUID      string         `json:"agent_uid"`
+	Hostname      string         `json:"hostname"`
+	Platform      string         `json:"platform"`
+	Version       string         `json:"version"`
+	FQDN          string         `json:"fqdn,omitempty"`
+	PrimaryIP     string         `json:"primary_ip,omitempty"`
+	OSName        string         `json:"os_name,omitempty"`
+	OSVersion     string         `json:"os_version,omitempty"`
+	KernelOrBuild string         `json:"kernel_or_build,omitempty"`
+	Architecture  string         `json:"architecture"`
+	InstallID     string         `json:"install_id,omitempty"`
+	Inventory     map[string]any `json:"inventory,omitempty"`
 }
 
 type EnrollmentResponse struct {
 	AgentID                   string `json:"agent_id"`
 	ServerID                  string `json:"server_id"`
 	APIKey                    string `json:"api_key"`
+	AuthorizationState        string `json:"authorization_state"`
 	HeartbeatIntervalSeconds  int    `json:"heartbeat_interval_s"`
 	ConfigPollIntervalSeconds int    `json:"config_poll_interval_s"`
 	UploadIntervalSeconds     int    `json:"upload_interval_s"`
@@ -152,23 +216,26 @@ type CommandResult struct {
 
 // NetworkCaptureUpload streams flows from an in-progress or finished capture.
 type NetworkCaptureUpload struct {
-	CaptureID      string        `json:"capture_id"`
-	AgentID        string        `json:"agent_id"`
-	ServerID       string        `json:"server_id"`
-	Status         string        `json:"status"` // running | completed | failed
-	Interface      string        `json:"interface,omitempty"`
-	StartedAt      time.Time     `json:"started_at"`
-	EndsAt         time.Time     `json:"ends_at"`
-	Samples        int           `json:"samples"`
-	Truncated      bool          `json:"truncated"`
-	BytesAvailable bool          `json:"bytes_available"`
-	Note           string        `json:"note,omitempty"`
-	ErrorMessage   string        `json:"error_message,omitempty"`
-	Flows          []NetworkFlow `json:"flows"`
+	CaptureID      string                    `json:"capture_id"`
+	AgentID        string                    `json:"agent_id"`
+	ServerID       string                    `json:"server_id"`
+	Status         string                    `json:"status"` // running | completed | cancelled | failed
+	Interface      string                    `json:"interface,omitempty"`
+	StartedAt      time.Time                 `json:"started_at"`
+	EndsAt         time.Time                 `json:"ends_at"`
+	Samples        int                       `json:"samples"`
+	Truncated      bool                      `json:"truncated"`
+	BytesAvailable bool                      `json:"bytes_available"`
+	Note           string                    `json:"note,omitempty"`
+	ErrorMessage   string                    `json:"error_message,omitempty"`
+	Flows          []NetworkFlow             `json:"flows"`
+	Interfaces     []NetworkInterfaceTraffic `json:"interfaces,omitempty"`
 }
 
 type NetworkFlow struct {
 	Protocol      string    `json:"protocol"`
+	Kind          string    `json:"kind"`
+	Direction     string    `json:"direction"`
 	LocalIP       string    `json:"local_ip"`
 	LocalPort     uint32    `json:"local_port"`
 	RemoteIP      string    `json:"remote_ip"`
@@ -185,6 +252,26 @@ type NetworkFlow struct {
 	Samples       int       `json:"samples"`
 }
 
+// NetworkInterfaceTraffic is total interface traffic observed during a
+// capture window. Flow rows remain local/remote socket observations; these
+// counters are the authoritative all-protocol totals for interface usage.
+type NetworkInterfaceTraffic struct {
+	Interface            string    `json:"interface"`
+	InterfaceIndex       uint32    `json:"interface_index,omitempty"`
+	Timestamp            time.Time `json:"timestamp"`
+	RXBytes              uint64    `json:"rx_bytes"`
+	TXBytes              uint64    `json:"tx_bytes"`
+	RXBPS                float64   `json:"rx_bps"`
+	TXBPS                float64   `json:"tx_bps"`
+	PeakRXBPS            float64   `json:"peak_rx_bps"`
+	PeakTXBPS            float64   `json:"peak_tx_bps"`
+	LinkSpeedBPS         uint64    `json:"link_speed_bps,omitempty"`
+	ReceiveLinkSpeedBPS  uint64    `json:"receive_link_speed_bps,omitempty"`
+	TransmitLinkSpeedBPS uint64    `json:"transmit_link_speed_bps,omitempty"`
+	RXUtilizationPct     float64   `json:"rx_utilization_pct,omitempty"`
+	TXUtilizationPct     float64   `json:"tx_utilization_pct,omitempty"`
+}
+
 type DiagnosticsRequest struct {
 	AgentID      string `json:"agent_id"`
 	FileName     string `json:"file_name"`
@@ -195,24 +282,26 @@ type DiagnosticsRequest struct {
 }
 
 type Status struct {
-	AgentID            string            `json:"agent_id"`
-	ServerID           string            `json:"server_id"`
-	ControllerURL      string            `json:"controller_url"`
-	AgentVersion       string            `json:"agent_version"`
-	StartedAt          time.Time         `json:"started_at"`
-	LastCollection     *time.Time        `json:"last_collection,omitempty"`
-	LastHeartbeat      *time.Time        `json:"last_heartbeat,omitempty"`
-	LastHeartbeatError string            `json:"last_heartbeat_error,omitempty"`
-	LastUpload         *time.Time        `json:"last_upload,omitempty"`
-	LastUploadError    string            `json:"last_upload_error,omitempty"`
-	LastConfigPoll     *time.Time        `json:"last_config_poll,omitempty"`
-	LastConfigError    string            `json:"last_config_error,omitempty"`
-	QueueDepth         int               `json:"queue_depth"`
-	SpoolBytes         int64             `json:"spool_bytes"`
-	CollectorErrors    map[string]string `json:"collector_errors,omitempty"`
-	Enrolled           bool              `json:"enrolled"`
-	AuthState          string            `json:"auth_state,omitempty"` // ok | unenrolled | unauthorized
-	ClockSkewSeconds   float64           `json:"clock_skew_seconds,omitempty"`
-	NextRetryAt        *time.Time        `json:"next_retry_at,omitempty"`
-	UpgradeState       string            `json:"upgrade_state,omitempty"`
+	AgentID            string             `json:"agent_id"`
+	ServerID           string             `json:"server_id"`
+	ControllerURL      string             `json:"controller_url"`
+	AgentVersion       string             `json:"agent_version"`
+	StartedAt          time.Time          `json:"started_at"`
+	LastCollection     *time.Time         `json:"last_collection,omitempty"`
+	LastHeartbeat      *time.Time         `json:"last_heartbeat,omitempty"`
+	LastHeartbeatError string             `json:"last_heartbeat_error,omitempty"`
+	LastUpload         *time.Time         `json:"last_upload,omitempty"`
+	LastUploadError    string             `json:"last_upload_error,omitempty"`
+	LastConfigPoll     *time.Time         `json:"last_config_poll,omitempty"`
+	LastConfigError    string             `json:"last_config_error,omitempty"`
+	QueueDepth         int                `json:"queue_depth"`
+	SpoolBytes         int64              `json:"spool_bytes"`
+	CollectorErrors    map[string]string  `json:"collector_errors,omitempty"`
+	Enrolled           bool               `json:"enrolled"`
+	AuthState          string             `json:"auth_state,omitempty"` // ok | unenrolled | unauthorized
+	ClockSkewSeconds   float64            `json:"clock_skew_seconds,omitempty"`
+	NextRetryAt        *time.Time         `json:"next_retry_at,omitempty"`
+	UpgradeState       string             `json:"upgrade_state,omitempty"`
+	APM                *APMStatus         `json:"apm,omitempty"`
+	LocalAPM           *AgentAPMHeartbeat `json:"local_apm,omitempty"`
 }

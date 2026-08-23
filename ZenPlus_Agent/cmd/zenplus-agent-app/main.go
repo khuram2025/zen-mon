@@ -20,9 +20,11 @@ import (
 
 	"zenplus-agent/internal/agent"
 	"zenplus-agent/internal/appstate"
+	"zenplus-agent/internal/client"
 	"zenplus-agent/internal/config"
+	"zenplus-agent/internal/model"
 	"zenplus-agent/internal/runtime"
-	"zenplus-agent/internal/secrets"
+	"zenplus-agent/internal/selfupdate"
 )
 
 var (
@@ -44,6 +46,8 @@ type appUI struct {
 	configPath      string
 	closing         bool
 	refreshInFlight atomic.Bool
+	updateInFlight  atomic.Bool
+	notifiedVersion string
 
 	window *walk.MainWindow
 	tray   *walk.NotifyIcon
@@ -58,8 +62,15 @@ type appUI struct {
 	controllerURL  *walk.Label
 	queueDepth     *walk.Label
 	lastCollection *walk.Label
+	apmService     *walk.Label
+	apmActivity    *walk.Label
+	apmEndpoint    *walk.Label
+	apmQueue       *walk.Label
+	versionStatus  *walk.Label
+	updateStatus   *walk.Label
 	actionStatus   *walk.Label
 	collectButton  *walk.PushButton
+	updateButton   *walk.PushButton
 	settingsButton *walk.PushButton
 	logsButton     *walk.PushButton
 }
@@ -106,6 +117,7 @@ func run() error {
 	}
 	ui.refresh()
 	go ui.refreshLoop()
+	go ui.updateLoop()
 	ui.window.Run()
 	if ui.tray != nil {
 		_ = ui.tray.Dispose()
@@ -120,8 +132,8 @@ func (a *appUI) create(startHidden bool) error {
 		Title:      "ZenPlus Agent",
 		Icon:       icon,
 		Background: SolidColorBrush{Color: bg},
-		Size:       Size{Width: 600, Height: 330},
-		MinSize:    Size{Width: 560, Height: 320},
+		Size:       Size{Width: 780, Height: 465},
+		MinSize:    Size{Width: 720, Height: 440},
 		Layout:     VBox{Margins: Margins{Left: 12, Top: 10, Right: 12, Bottom: 12}, Spacing: 8},
 		Children: []Widget{
 			a.header(),
@@ -193,7 +205,14 @@ func (a *appUI) header() Widget {
 				StretchFactor: 1,
 				Layout:        VBox{Margins: Margins{Left: 2, Top: 3, Right: 0, Bottom: 1}, Spacing: 3},
 				Children: []Widget{
-					Label{Text: "ZenPlus Agent", TextColor: text, Font: Font{Family: "Segoe UI", PointSize: 14, Bold: true}},
+					Composite{
+						Background: SolidColorBrush{Color: bg},
+						Layout:     HBox{MarginsZero: true, Spacing: 8},
+						Children: []Widget{
+							Label{Text: "ZenPlus Agent", TextColor: text, Font: Font{Family: "Segoe UI", PointSize: 14, Bold: true}},
+							Label{Text: "v" + model.AgentVersion, TextColor: muted, Font: Font{Family: "Segoe UI", PointSize: 9, Bold: true}},
+						},
+					},
 					Composite{
 						Background: SolidColorBrush{Color: bg},
 						Layout:     HBox{MarginsZero: true, Spacing: 8},
@@ -212,6 +231,7 @@ func (a *appUI) header() Widget {
 				Children: []Widget{
 					PushButton{Text: "Refresh", MinSize: Size{Width: 68, Height: 28}, OnClicked: a.refresh},
 					PushButton{AssignTo: &a.collectButton, Text: "Collect", MinSize: Size{Width: 66, Height: 28}, OnClicked: a.collectNow},
+					PushButton{AssignTo: &a.updateButton, Text: "Updates", MinSize: Size{Width: 72, Height: 28}, OnClicked: func() { a.checkForUpdates(true) }},
 					PushButton{AssignTo: &a.logsButton, Text: "Logs", MinSize: Size{Width: 56, Height: 28}, OnClicked: a.showLogs},
 					PushButton{AssignTo: &a.settingsButton, Text: "Settings", MinSize: Size{Width: 72, Height: 28}, ToolTipText: "Settings", OnClicked: a.showSettings},
 				},
@@ -269,7 +289,8 @@ func (a *appUI) detailsCard() Widget {
 				Children: []Widget{
 					a.detailTile("Agent ID", &a.agentID),
 					a.detailTile("Controller", &a.controllerURL),
-					a.detailTile("Queue", &a.queueDepth),
+					a.detailTile("Version", &a.versionStatus),
+					a.detailTile("Updates", &a.updateStatus),
 				},
 			},
 			Composite{
@@ -278,7 +299,18 @@ func (a *appUI) detailsCard() Widget {
 				Children: []Widget{
 					a.detailTile("Policy", &a.policyID),
 					a.detailTile("Service", &a.serviceStatus),
+					a.detailTile("Queue", &a.queueDepth),
 					a.detailTile("Collection", &a.lastCollection),
+				},
+			},
+			Composite{
+				Background: SolidColorBrush{Color: surface},
+				Layout:     HBox{MarginsZero: true, Spacing: 8},
+				Children: []Widget{
+					a.detailTile("Local APM", &a.apmService),
+					a.detailTile("APM activity", &a.apmActivity),
+					a.detailTile("Ingest endpoint", &a.apmEndpoint),
+					a.detailTile("Appliance APM", &a.apmQueue),
 				},
 			},
 		},
@@ -314,6 +346,9 @@ func (a *appUI) setupTray(icon *walk.Icon) error {
 	collectAction := walk.NewAction()
 	_ = collectAction.SetText("Collect now")
 	collectAction.Triggered().Attach(a.collectNow)
+	updateAction := walk.NewAction()
+	_ = updateAction.SetText("Check for updates")
+	updateAction.Triggered().Attach(func() { a.checkForUpdates(true) })
 	hideAction := walk.NewAction()
 	_ = hideAction.SetText("Hide")
 	hideAction.Triggered().Attach(func() { a.window.Hide() })
@@ -325,6 +360,7 @@ func (a *appUI) setupTray(icon *walk.Icon) error {
 	})
 	_ = ni.ContextMenu().Actions().Add(openAction)
 	_ = ni.ContextMenu().Actions().Add(collectAction)
+	_ = ni.ContextMenu().Actions().Add(updateAction)
 	_ = ni.ContextMenu().Actions().Add(hideAction)
 	_ = ni.ContextMenu().Actions().Add(walk.NewSeparatorAction())
 	_ = ni.ContextMenu().Actions().Add(quitAction)
@@ -351,6 +387,147 @@ func (a *appUI) refreshLoop() {
 		}
 		a.refresh()
 	}
+}
+
+func (a *appUI) updateLoop() {
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-timer.C:
+			if a.window == nil || a.window.IsDisposed() {
+				return
+			}
+			a.checkForUpdates(false)
+			timer.Reset(6 * time.Hour)
+		}
+	}
+}
+
+func (a *appUI) checkForUpdates(interactive bool) {
+	if !a.updateInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	if a.updateButton != nil {
+		a.updateButton.SetEnabled(false)
+	}
+	a.set(a.updateStatus, "Checking...")
+	a.color(a.updateStatus, muted)
+	go func() {
+		defer a.updateInFlight.Store(false)
+		cfg, err := config.Load(a.configPath)
+		if err != nil {
+			cfg = config.Default()
+		}
+		updateClient, clientErr := client.New(selfupdate.PublicUpdateBaseURL(), cfg.ProxyURL, true, "", "")
+		var manifest selfupdate.Manifest
+		if clientErr == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			manifest, err = selfupdate.FetchPublicManifest(ctx, updateClient, cfg.UpdateRing)
+			cancel()
+		} else {
+			err = clientErr
+		}
+		if a.window == nil || a.window.IsDisposed() {
+			return
+		}
+		a.window.Synchronize(func() {
+			if a.updateButton != nil {
+				a.updateButton.SetEnabled(true)
+			}
+			if err != nil {
+				a.set(a.updateStatus, "Unavailable")
+				a.color(a.updateStatus, amber)
+				if interactive {
+					a.showUpdateResult(selfupdate.Manifest{}, err)
+				}
+				return
+			}
+			if selfupdate.IsNewer(manifest.LatestVersion, model.AgentVersion) {
+				a.set(a.updateStatus, "v"+manifest.LatestVersion+" available")
+				if strings.EqualFold(manifest.SignatureStatus, "Valid") {
+					a.color(a.updateStatus, blue)
+					if a.tray != nil && a.notifiedVersion != manifest.LatestVersion {
+						_ = a.tray.ShowInfo("ZenPlus Agent update available", "Version "+manifest.LatestVersion+" is ready to download from Zentryc.")
+						a.notifiedVersion = manifest.LatestVersion
+					}
+				} else {
+					a.set(a.updateStatus, "v"+manifest.LatestVersion+" blocked")
+					a.color(a.updateStatus, red)
+				}
+			} else if !strings.EqualFold(manifest.SignatureStatus, "Valid") {
+				a.set(a.updateStatus, "Signing pending")
+				a.color(a.updateStatus, red)
+			} else {
+				a.set(a.updateStatus, "Up to date")
+				a.color(a.updateStatus, green)
+			}
+			if interactive {
+				a.showUpdateResult(manifest, nil)
+			}
+		})
+	}()
+}
+
+func (a *appUI) showUpdateResult(manifest selfupdate.Manifest, updateErr error) {
+	var dlg *walk.Dialog
+	var closeButton *walk.PushButton
+	var downloadButton *walk.PushButton
+	statusText := "The Zentryc update channel could not be reached.\r\n\r\n" + compactMiddle(updateErr.Error(), 180)
+	canDownload := false
+	if updateErr == nil {
+		signed := strings.EqualFold(manifest.SignatureStatus, "Valid")
+		signatureText := "Publisher signature: verified"
+		if !signed {
+			signatureText = "Publisher signature: not verified (automatic installation is blocked)"
+		}
+		if selfupdate.IsNewer(manifest.LatestVersion, model.AgentVersion) {
+			channel := manifest.Channel
+			if channel == "" {
+				channel = "stable"
+			}
+			statusText = fmt.Sprintf("Version %s is available.\r\n\r\nCurrent version: %s\r\n%s\r\nChannel: %s", manifest.LatestVersion, model.AgentVersion, signatureText, channel)
+			canDownload = signed && manifest.DownloadURL != ""
+		} else {
+			statusText = fmt.Sprintf("ZenPlus Agent is up to date.\r\n\r\nInstalled version: %s\r\nPublished version: %s\r\n%s", model.AgentVersion, manifest.LatestVersion, signatureText)
+		}
+	}
+	err := Dialog{
+		AssignTo:     &dlg,
+		Title:        "ZenPlus Agent Updates",
+		Icon:         loadAppIcon(),
+		Background:   SolidColorBrush{Color: bg},
+		Size:         Size{Width: 520, Height: 250},
+		MinSize:      Size{Width: 500, Height: 230},
+		CancelButton: &closeButton,
+		Layout:       VBox{Margins: Margins{Left: 16, Top: 16, Right: 16, Bottom: 14}, Spacing: 12},
+		Children: []Widget{
+			Label{Text: "Software updates", TextColor: text, Font: Font{Family: "Segoe UI", PointSize: 14, Bold: true}},
+			TextLabel{Text: statusText, TextColor: muted, MinSize: Size{Height: 100}},
+			Composite{Background: SolidColorBrush{Color: bg}, Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
+				HSpacer{},
+				PushButton{AssignTo: &downloadButton, Text: "Download update", Enabled: canDownload, MinSize: Size{Width: 118, Height: 30}, OnClicked: func() {
+					if err := openURL(manifest.DownloadURL); err != nil {
+						a.set(a.actionStatus, "Unable to open update: "+compactMiddle(err.Error(), 90))
+						a.color(a.actionStatus, red)
+						return
+					}
+					dlg.Close(walk.DlgCmdOK)
+				}},
+				PushButton{AssignTo: &closeButton, Text: "Close", MinSize: Size{Width: 86, Height: 30}, OnClicked: func() { dlg.Close(walk.DlgCmdClose) }},
+			}},
+		},
+	}.Create(a.window)
+	if err == nil {
+		dlg.Run()
+	}
+}
+
+func openURL(raw string) error {
+	if !strings.HasPrefix(strings.ToLower(raw), "https://") {
+		return fmt.Errorf("update URL is not HTTPS")
+	}
+	return windows.ShellExecute(0, nil, windows.StringToUTF16Ptr(raw), nil, nil, windows.SW_SHOWNORMAL)
 }
 
 func (a *appUI) collectNow() {
@@ -388,19 +565,15 @@ func (a *appUI) showSettings() {
 	}
 	var dlg *walk.Dialog
 	var remoteURL *walk.LineEdit
-	var siteID *walk.LineEdit
-	var policyID *walk.LineEdit
-	var enrollmentToken *walk.LineEdit
+	var apmEnabled *walk.CheckBox
 	var status *walk.Label
-	var enrollButton *walk.PushButton
 	var saveButton *walk.PushButton
 	var cancelButton *walk.PushButton
-	credentialCfg := cfg
-	if resolved, err := config.Load(a.configPath); err == nil {
-		credentialCfg = resolved
+	registrationLabel := "Starting registration"
+	if current, readErr := agent.ReadStatus(a.configPath); readErr == nil {
+		registrationLabel = registrationStateLabel(current.AuthState)
 	}
-	tokenLabel := enrollmentTokenLabel(cfg)
-	credentialLabel := storedCredentialLabel(credentialCfg)
+	credentialLabel := storedCredentialState(cfg)
 	saveSettings := func() (config.Config, error) {
 		next := cfg
 		normalized, err := config.NormalizeControllerURL(remoteURL.Text())
@@ -408,8 +581,7 @@ func (a *appUI) showSettings() {
 			return next, fmt.Errorf("invalid controller URL")
 		}
 		next.ControllerURL = normalized
-		next.SiteID = strings.TrimSpace(siteID.Text())
-		next.PolicyID = strings.TrimSpace(policyID.Text())
+		next.APM.Enabled = apmEnabled != nil && apmEnabled.Checked()
 		if err := next.Validate(); err != nil {
 			return next, fmt.Errorf("invalid settings")
 		}
@@ -423,82 +595,46 @@ func (a *appUI) showSettings() {
 		Title:         "ZenPlus Agent Settings",
 		Icon:          loadAppIcon(),
 		Background:    SolidColorBrush{Color: bg},
-		Size:          Size{Width: 580, Height: 370},
-		MinSize:       Size{Width: 550, Height: 350},
+		Size:          Size{Width: 580, Height: 405},
+		MinSize:       Size{Width: 550, Height: 385},
 		DefaultButton: &saveButton,
 		CancelButton:  &cancelButton,
 		Layout:        VBox{Margins: Margins{Left: 14, Top: 14, Right: 14, Bottom: 12}, Spacing: 10},
 		Children: []Widget{
 			GroupBox{
-				Title:      "Remote Server",
+				Title:      "ZenPlus Appliance",
 				Background: SolidColorBrush{Color: surface},
 				Layout:     Grid{Margins: Margins{Left: 12, Top: 10, Right: 12, Bottom: 10}, Spacing: 8, Columns: 2},
 				Children: []Widget{
-					Label{Text: "Controller URL", TextColor: text, MinSize: Size{Width: 118}},
-					LineEdit{AssignTo: &remoteURL, Text: cfg.ControllerURL, CueBanner: "http://192.168.8.152", Background: SolidColorBrush{Color: fieldBg}, TextColor: text, MinSize: Size{Height: 28}},
-					Label{Text: "Site ID", TextColor: text},
-					LineEdit{AssignTo: &siteID, Text: cfg.SiteID, CueBanner: "Optional", Background: SolidColorBrush{Color: fieldBg}, TextColor: text, MinSize: Size{Height: 28}},
-					Label{Text: "Policy ID", TextColor: text},
-					LineEdit{AssignTo: &policyID, Text: cfg.PolicyID, CueBanner: "Optional", Background: SolidColorBrush{Color: fieldBg}, TextColor: text, MinSize: Size{Height: 28}},
-					Label{Text: "Current Token", TextColor: text},
-					TextLabel{Text: tokenLabel, TextColor: muted, MinSize: Size{Height: 24}},
-					Label{Text: "Stored API Key", TextColor: text},
+					Label{Text: "Controller URL or IP", TextColor: text, MinSize: Size{Width: 140}},
+					LineEdit{AssignTo: &remoteURL, Text: cfg.ControllerURL, CueBanner: "https://192.168.8.221", Background: SolidColorBrush{Color: fieldBg}, TextColor: text, MinSize: Size{Height: 28}},
+					Label{Text: "Authorization", TextColor: text},
+					TextLabel{Text: registrationLabel, TextColor: muted, MinSize: Size{Height: 24}},
+					Label{Text: "Appliance credential", TextColor: text},
 					TextLabel{Text: credentialLabel, TextColor: muted, MinSize: Size{Height: 24}},
-					Label{Text: "Enrollment Token", TextColor: text},
-					LineEdit{AssignTo: &enrollmentToken, CueBanner: "Paste new token to enroll", PasswordMode: true, Background: SolidColorBrush{Color: fieldBg}, TextColor: text, MinSize: Size{Height: 28}},
 				},
 			},
+			GroupBox{
+				Title:      "Managed Application Performance Monitoring",
+				Background: SolidColorBrush{Color: surface},
+				Layout:     Grid{Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 9}, Spacing: 7, Columns: 2},
+				Children: []Widget{
+					Label{Text: "Local gateway", TextColor: text, MinSize: Size{Width: 140}},
+					CheckBox{AssignTo: &apmEnabled, Text: "Enable APM on this server", Checked: cfg.APM.Enabled},
+					Label{Text: "Install profile", TextColor: text},
+					TextLabel{Text: friendlyProfile(cfg.APM.Profile), TextColor: muted, MinSize: Size{Height: 24}},
+					Label{Text: "Local OTLP endpoints", TextColor: text},
+					TextLabel{Text: "127.0.0.1:4317 (gRPC) · 127.0.0.1:4318 (HTTP)", TextColor: muted, MinSize: Size{Height: 24}},
+					HSpacer{},
+					TextLabel{Text: "The agent starts and monitors the bundled telemetry gateway. Its ingest credential is issued by the appliance after authorization and is never shown or stored in this window.", TextColor: muted, MinSize: Size{Width: 350, Height: 43}, Font: Font{Family: "Segoe UI", PointSize: 9}},
+				},
+			},
+			TextLabel{Text: "New installations appear in Agent Fleet as Pending authorization. An appliance operator must approve them before monitoring data is accepted.", TextColor: muted, MinSize: Size{Width: 500, Height: 28}, Font: Font{Family: "Segoe UI", PointSize: 9}},
 			Label{AssignTo: &status, Text: "", TextColor: muted, Font: Font{Family: "Segoe UI", PointSize: 9}},
 			Composite{
 				Background: SolidColorBrush{Color: bg},
 				Layout:     HBox{MarginsZero: true, Spacing: 8},
 				Children: []Widget{
-					PushButton{AssignTo: &enrollButton, Text: "Enroll", MinSize: Size{Width: 92, Height: 30}, OnClicked: func() {
-						token := strings.TrimSpace(enrollmentToken.Text())
-						if token == "" {
-							_ = status.SetText("Enter enrollment token")
-							status.SetTextColor(red)
-							return
-						}
-						if _, err := saveSettings(); err != nil {
-							_ = status.SetText(err.Error())
-							status.SetTextColor(red)
-							return
-						}
-						_ = status.SetText("Enrolling...")
-						status.SetTextColor(muted)
-						enrollButton.SetEnabled(false)
-						saveButton.SetEnabled(false)
-						cancelButton.SetEnabled(false)
-						go func() {
-							ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-							defer cancel()
-							result, err := agent.EnrollNow(ctx, a.configPath, token)
-							if a.window == nil || a.window.IsDisposed() {
-								return
-							}
-							a.window.Synchronize(func() {
-								enrollButton.SetEnabled(true)
-								saveButton.SetEnabled(true)
-								cancelButton.SetEnabled(true)
-								if err != nil {
-									_ = status.SetText("Enroll failed: " + compactMiddle(err.Error(), 80))
-									status.SetTextColor(red)
-									a.set(a.actionStatus, "Enrollment failed.")
-									a.color(a.actionStatus, red)
-									return
-								}
-								_ = enrollmentToken.SetText("")
-								msg := fmt.Sprintf("Enrolled agent %s using %s", compactMiddle(result.Identity.AgentID, 30), secrets.Mask(result.APIKey))
-								_ = status.SetText(msg)
-								status.SetTextColor(green)
-								a.set(a.actionStatus, msg)
-								a.color(a.actionStatus, green)
-								dlg.Close(walk.DlgCmdOK)
-								a.refresh()
-							})
-						}()
-					}},
 					HSpacer{},
 					PushButton{AssignTo: &cancelButton, Text: "Cancel", MinSize: Size{Width: 86, Height: 30}, OnClicked: func() { dlg.Close(walk.DlgCmdCancel) }},
 					PushButton{AssignTo: &saveButton, Text: "Save", MinSize: Size{Width: 92, Height: 30}, OnClicked: func() {
@@ -627,7 +763,7 @@ func (a *appUI) refresh() {
 func (a *appUI) applySnapshot(snap appstate.Snapshot) {
 	health, healthTone := appstate.HealthText(snap)
 	healthColor := toneColor(healthTone)
-	controllerText, controllerColor := controllerState(snap)
+	controllerText, controllerColor := connectionState(snap)
 
 	hostname := "Windows host"
 	if snap.Identity != nil && snap.Identity.Hostname != "" {
@@ -662,7 +798,7 @@ func (a *appUI) applySnapshot(snap appstate.Snapshot) {
 	}
 	serviceLine := serviceText(snap.Service)
 
-	a.set(a.statusBadge, badgeText(healthTone))
+	a.set(a.statusBadge, badgeText(health, healthTone))
 	a.color(a.statusBadge, healthColor)
 	a.set(a.topStatus, health)
 	a.color(a.topStatus, healthColor)
@@ -675,10 +811,98 @@ func (a *appUI) applySnapshot(snap appstate.Snapshot) {
 	a.set(a.controllerURL, controllerLine)
 	a.set(a.queueDepth, queue)
 	a.set(a.lastCollection, lastCollection)
-	a.set(a.actionStatus, fmt.Sprintf("Started %s | %s", started, compactMiddle(statusDetail, 90)))
+	apmService, apmActivity, apmEndpoint, apmQueue, apmColor := apmSummary(snap.Status)
+	if strings.HasPrefix(apmEndpoint, "/") && snap.Config.ControllerURL != "" {
+		apmEndpoint = strings.TrimRight(snap.Config.ControllerURL, "/") + apmEndpoint
+	}
+	a.set(a.apmService, apmService)
+	a.color(a.apmService, apmColor)
+	a.set(a.apmActivity, apmActivity)
+	a.set(a.apmEndpoint, compactMiddle(apmEndpoint, 32))
+	a.set(a.apmQueue, apmQueue)
+	if snap.Status != nil && snap.Status.APM != nil {
+		switch snap.Status.APM.State {
+		case "active":
+			a.color(a.apmQueue, green)
+		case "starting", "degraded":
+			a.color(a.apmQueue, amber)
+		default:
+			a.color(a.apmQueue, red)
+		}
+	}
+	a.set(a.versionStatus, "v"+model.AgentVersion+" stable")
+	if a.updateStatus != nil && (a.updateStatus.Text() == "" || a.updateStatus.Text() == "-") {
+		a.set(a.updateStatus, "Not checked")
+		a.color(a.updateStatus, muted)
+	}
+	a.set(a.actionStatus, statusSummary(snap, started, statusDetail))
 	a.color(a.actionStatus, muted)
 	if a.tray != nil {
 		_ = a.tray.SetToolTip(compactMiddle("ZenPlus Agent - "+health+" - "+serviceLine, 120))
+	}
+}
+
+func apmSummary(status *model.Status) (local, activity, endpoint, appliance string, localColor walk.Color) {
+	local = "Checking local host"
+	localColor = muted
+	if status != nil && status.LocalAPM != nil {
+		profile := friendlyProfile(status.LocalAPM.Profile)
+		switch {
+		case !status.LocalAPM.Enabled:
+			local = "Disabled · " + profile
+		case status.LocalAPM.State == "waiting_authorization":
+			local = "Waiting for approval"
+			localColor = amber
+		case status.LocalAPM.Gateway.Managed && status.LocalAPM.Gateway.Healthy:
+			local = "Active · managed gateway"
+			localColor = green
+		case status.LocalAPM.State == "failed" || status.LocalAPM.State == "credential_error" || status.LocalAPM.State == "configuration_error":
+			local = "APM needs attention"
+			localColor = red
+		case status.LocalAPM.Gateway.Listening:
+			local = "Starting · OTLP listening"
+			localColor = amber
+		default:
+			local = "Starting managed gateway"
+			localColor = amber
+		}
+	}
+	if status == nil || status.APM == nil {
+		return local, "No status received", "/v1/traces", "Waiting for appliance", localColor
+	}
+	apm := status.APM
+	endpoint = apm.IngestPath
+	if endpoint == "" {
+		endpoint = "/v1/traces"
+	}
+	if apm.LastReceivedAt != nil {
+		activity = fmt.Sprintf("%s ago · %d spans", appstate.TimeAgo(apm.LastReceivedAt), apm.AcceptedSpansTotal)
+	} else if apm.AcceptedSpansTotal > 0 {
+		activity = fmt.Sprintf("%d spans accepted", apm.AcceptedSpansTotal)
+	} else {
+		activity = "No telemetry received"
+	}
+	switch apm.State {
+	case "active":
+		appliance = fmt.Sprintf("Active · queue %d/%d", apm.QueueDepth, apm.QueueCapacity)
+	case "starting":
+		appliance = "Starting"
+	case "degraded":
+		appliance = "Degraded"
+	default:
+		appliance = "Unavailable"
+	}
+	return local, activity, endpoint, appliance, localColor
+}
+
+func friendlyProfile(profile string) string {
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "apm":
+		return "APM only"
+	case "infrastructure":
+		return "Server monitoring only"
+	default:
+		return "Server monitoring + APM"
 	}
 }
 
@@ -706,11 +930,48 @@ func (a *appUI) setTextEdit(edit *walk.TextEdit, text string) {
 	edit.SendMessage(win.WM_HSCROLL, uintptr(win.SB_LEFT), 0)
 }
 
-func controllerState(s appstate.Snapshot) (string, walk.Color) {
-	if s.Controller.Reachable {
-		return "Controller online", green
+func connectionState(s appstate.Snapshot) (string, walk.Color) {
+	if s.Status != nil {
+		switch s.Status.AuthState {
+		case "pending", "unenrolled":
+			return "Awaiting appliance approval", amber
+		case "revoked", "unauthorized":
+			return "Authorization required", red
+		}
 	}
-	return "Controller offline", red
+	if !s.Controller.Reachable {
+		return "Controller unreachable", red
+	}
+	if s.Status != nil && s.Status.LastHeartbeat != nil && s.Status.LastHeartbeatError == "" {
+		return "Connected and reporting", green
+	}
+	return "Controller reachable", blue
+}
+
+func statusSummary(s appstate.Snapshot, started string, controllerDetail string) string {
+	if s.Status != nil {
+		switch s.Status.AuthState {
+		case "pending", "unenrolled":
+			return "Waiting for approval in ZenPlus Agent Fleet. Monitoring data is being buffered locally."
+		case "revoked":
+			return "Authorization was revoked by the appliance. Monitoring data is being buffered locally."
+		case "unauthorized":
+			return "The appliance rejected this credential. Approve the agent again in Agent Fleet."
+		}
+		if s.Status.LastHeartbeat != nil && s.Status.LastHeartbeatError == "" {
+			return fmt.Sprintf("Monitoring active | Last heartbeat %s | Started %s", appstate.TimeAgo(s.Status.LastHeartbeat), started)
+		}
+		if s.Status.LastHeartbeatError != "" {
+			return "Connection problem: " + compactMiddle(s.Status.LastHeartbeatError, 92)
+		}
+	}
+	if !s.Controller.Reachable {
+		if s.Controller.Message != "" {
+			return "Cannot reach the controller: " + compactMiddle(s.Controller.Message, 88)
+		}
+		return "Cannot reach the configured ZenPlus controller."
+	}
+	return fmt.Sprintf("Starting secure registration | %s", compactMiddle(controllerDetail, 80))
 }
 
 func toneColor(tone string) walk.Color {
@@ -724,7 +985,15 @@ func toneColor(tone string) walk.Color {
 	}
 }
 
-func badgeText(tone string) string {
+func badgeText(health string, tone string) string {
+	switch health {
+	case "Pending authorization":
+		return "WAIT"
+	case "Authorization revoked", "Authorization required":
+		return "AUTH"
+	case "Connecting":
+		return "SYNC"
+	}
 	switch tone {
 	case "ok":
 		return "OK"
@@ -824,27 +1093,27 @@ func value(s string) string {
 	return s
 }
 
-func enrollmentTokenLabel(cfg config.Config) string {
-	if cfg.EnrollmentToken == "" {
-		return "Not stored"
+func storedCredentialState(cfg config.Config) string {
+	paths := runtime.NewPaths(cfg.DataDir)
+	if _, err := os.Stat(paths.CredentialFile); err == nil {
+		return "Issued by appliance and protected by Windows"
 	}
-	return secrets.Mask(cfg.EnrollmentToken)
+	return "Not issued yet"
 }
 
-func storedCredentialLabel(cfg config.Config) string {
-	paths := runtime.NewPaths(cfg.DataDir)
-	if meta, err := secrets.ReadMetadata(paths.CredentialMeta); err == nil {
-		if label := meta.Label(); label != "" {
-			return label
-		}
+func registrationStateLabel(state string) string {
+	switch state {
+	case "ok":
+		return "Authorized"
+	case "pending", "unenrolled":
+		return "Pending appliance approval"
+	case "revoked":
+		return "Revoked by appliance"
+	case "unauthorized":
+		return "Authorization required"
+	default:
+		return "Starting registration"
 	}
-	if plain, err := secrets.UnprotectFromFile(paths.CredentialFile); err == nil && len(plain) > 0 {
-		return secrets.NewMetadata(plain).Label()
-	}
-	if _, err := os.Stat(paths.CredentialFile); err == nil {
-		return "Stored, protected by another Windows account"
-	}
-	return "Not stored"
 }
 
 func plural(n int) string {

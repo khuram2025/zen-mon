@@ -1,0 +1,9 @@
+{
+  "name": "zenplus-apm-node-runtime-pack",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@opentelemetry/api": "1.9.0",
+    "@opentelemetry/auto-instrumentations-node": "0.79.0"
+  }
+}

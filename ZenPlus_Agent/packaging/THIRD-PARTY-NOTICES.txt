@@ -1,0 +1,36 @@
+ZenPlus Agent APM profile includes unmodified or minimally configured open-source
+telemetry components. Their inclusion does not transfer ownership of those
+projects to Zentryc.
+
+OpenTelemetry Collector
+Copyright The OpenTelemetry Authors
+License: Apache License 2.0
+Source: https://github.com/open-telemetry/opentelemetry-collector
+
+OpenTelemetry Collector Contrib components
+Copyright The OpenTelemetry Authors
+License: Apache License 2.0
+Source: https://github.com/open-telemetry/opentelemetry-collector-contrib
+
+OpenTelemetry .NET Automatic Instrumentation
+Copyright The OpenTelemetry Authors
+License: Apache License 2.0
+Source: https://github.com/open-telemetry/opentelemetry-dotnet-instrumentation
+
+OpenTelemetry Java Instrumentation
+Copyright The OpenTelemetry Authors
+License: Apache License 2.0
+Source: https://github.com/open-telemetry/opentelemetry-java-instrumentation
+
+OpenTelemetry JavaScript automatic instrumentations
+Copyright The OpenTelemetry Authors
+License: Apache License 2.0
+Source: https://github.com/open-telemetry/opentelemetry-js-contrib
+
+OpenTelemetry Python instrumentation packages
+Copyright The OpenTelemetry Authors
+License: Apache License 2.0
+Source: https://github.com/open-telemetry/opentelemetry-python-contrib
+
+The exact component versions, source URLs, SHA-256 digests, and generated SBOM
+are recorded in the release manifest produced by scripts/build.ps1.

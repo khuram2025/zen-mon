@@ -7,23 +7,29 @@ import (
 	"io/fs"
 )
 
-//go:embed payload/zenplus-agent.exe payload/zenplus-agentctl.exe payload/zenplus-agent-app.exe payload/zenplus-agent-user.exe
+//go:embed payload
 var payloadFS embed.FS
 
 func embeddedPayloads() ([]payloadFile, error) {
-	names := []string{
-		"zenplus-agent.exe",
-		"zenplus-agentctl.exe",
-		"zenplus-agent-app.exe",
-		"zenplus-agent-user.exe",
-	}
-	payloads := make([]payloadFile, 0, len(names))
-	for _, name := range names {
-		data, err := payloadFS.ReadFile("payload/" + name)
-		if err != nil {
-			return nil, err
+	payloads := make([]payloadFile, 0, 16)
+	err := fs.WalkDir(payloadFS, "payload", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
-		payloads = append(payloads, payloadFile{Name: name, Data: data, Mode: fs.FileMode(0o755)})
-	}
-	return payloads, nil
+		if entry.IsDir() {
+			return nil
+		}
+		data, err := payloadFS.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		name := path[len("payload/"):]
+		mode := fs.FileMode(0o644)
+		if len(name) >= 4 && name[len(name)-4:] == ".exe" {
+			mode = 0o755
+		}
+		payloads = append(payloads, payloadFile{Name: name, Data: data, Mode: mode})
+		return nil
+	})
+	return payloads, err
 }

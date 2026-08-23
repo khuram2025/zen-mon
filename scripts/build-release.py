@@ -20,10 +20,12 @@ Usage:
 """
 
 import argparse
+import ast
 import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -32,6 +34,9 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import migration_order  # noqa: E402
 
 ZENPLUS_DIR = Path(os.getenv("ZENPLUS_DIR", "/opt/zenplus"))
 RELEASE_DIR = Path(os.getenv("ZENPLUS_RELEASE_DIR", "/tmp/zenplus-releases"))
@@ -42,26 +47,33 @@ SERVER_URL = os.getenv("ZENPLUS_RELEASE_SERVER_URL", "https://zentryc.com")
 GO_BIN = shutil.which("go") or "/usr/local/go/bin/go"
 
 # Directories to include in the code update
-CODE_DIRS = ["server", "poller", "scripts", "support"]
+# Ship dashboard source/config as well as the prebuilt dist archive.  The
+# appliance's dashboard/nginx.conf owns the root OTLP proxy routes, so omitting
+# dashboard/ can leave an upgraded appliance with new APM code but stale ingress
+# behavior.  node_modules, dist, and build remain excluded by CODE_IGNORE.
+CODE_DIRS = ["server", "poller", "scripts", "support", "docker", "dashboard"]
 # Files to include at root level
 CODE_FILES = [".version", "docker-compose.yml"]
 CODE_IGNORE = [
     "__pycache__", "*.pyc", ".pytest_cache", "node_modules",
     ".mypy_cache", ".ruff_cache", "*.egg-info",
     "venv", ".venv", "dist", "build",
+    ".netpath-presync-backup",
     # Support-bundle runtime dirs — created by setup-support.sh on the
     # appliance, never part of a release. They're owned by zenplus/root and
     # unreadable by the build user, which crashes shutil.copytree.
     "requests", "jobs", "bundles",
 ]
+# Every release carries the COMPLETE migration set plus the lockfile that
+# orders it. Shipping a migration is not the same as running one: the runners
+# keep a per-engine ledger and apply only what is missing. Shipping only the
+# migrations a release "introduced" is what let an appliance that skipped a
+# release stay permanently short of a schema change with no way to catch up.
+# init-postgres.sql / seed-devices.sql stay out — they are install-time only.
 SCRIPT_CODE_IGNORE = [
     *CODE_IGNORE,
-    "migrate-*.sql",
     "init-postgres.sql",
     "seed-devices.sql",
-    "init-clickhouse.sql",
-    "fix-clickhouse.sql",
-    "migrations.lock",
 ]
 
 # Lockfile recording the SHA256 of every migrate-*.sql that has ever shipped.
@@ -86,26 +98,330 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+AGENT_PACKAGE_PATTERNS = {
+    "windows": re.compile(r"^zenplus-agent-(\d+\.\d+\.\d+)\.msi$"),
+    "linux": re.compile(r"^zenplus-agent-(\d+\.\d+\.\d+)\.tar\.gz$"),
+    "macos": re.compile(r"^zenplus-agent-(\d+\.\d+\.\d+)\.(?:pkg|tar\.gz)$"),
+}
+
+
+def _version_key(version: str) -> tuple[int, int, int]:
+    return tuple(int(part) for part in version.split("."))
+
+
+def _agent_source_version() -> str | None:
+    """Return the Windows agent version declared by the vendored source.
+
+    Returns None when the agent source is not vendored here. The agent is built
+    and versioned in its own repository; when its source is absent this builder
+    has no opinion about which version is current and defers to the newest
+    package in the artifact store.
+    """
+    model_file = ZENPLUS_DIR / "ZenPlus_Agent" / "internal" / "model" / "model.go"
+    if not model_file.is_file():
+        return None
+    match = re.search(
+        r'AgentVersion\s*=\s*"(\d+\.\d+\.\d+)"',
+        model_file.read_text(encoding="utf-8"),
+    )
+    if not match:
+        raise RuntimeError(f"Could not read AgentVersion from {model_file}")
+    return match.group(1)
+
+
+def stage_agent_artifacts(
+    build_dir: Path,
+    artifact_dir: Path | None = None,
+    *,
+    required: bool = True,
+) -> list[dict]:
+    """Validate and stage one current package per supported agent platform.
+
+    Agent installers are produced on their native build runners, not by this
+    Linux release builder.  A portal release must nevertheless carry the
+    current Windows MSI, otherwise an upgraded appliance regresses to the
+    misleading "no package published" state.
+
+    Which MSI is "current" has two possible authorities:
+
+    * **Vendored source present** — ``AgentVersion`` in the agent source is the
+      contract, and a stale MSI fails the release.
+    * **Vendored source absent** (the agent lives in its own repo) — the newest
+      package in the artifact store is shipped as-is. There is nothing here to
+      check it against, and blocking every appliance release on an agent this
+      tree no longer contains would be the wrong trade.
+    """
+    source = artifact_dir or Path(
+        os.getenv(
+            "ZENPLUS_AGENT_ARTIFACT_DIR",
+            str(ZENPLUS_DIR / "artifacts" / "agents"),
+        )
+    )
+    expected_windows = _agent_source_version()
+
+    if expected_windows is None:
+        if not any((source / "windows").glob("zenplus-agent-*.msi")):
+            message = (
+                f"No Windows agent MSI in {source / 'windows'}. Appliances will "
+                "show 'no package published' until one is added."
+            )
+            if required:
+                raise RuntimeError(message)
+            print(f"  WARNING: {message}")
+            return []
+    else:
+        expected_msi = source / "windows" / f"zenplus-agent-{expected_windows}.msi"
+        if not expected_msi.is_file():
+            message = (
+                f"Required Windows agent MSI is missing or stale. Expected {expected_msi} "
+                f"for vendored AgentVersion {expected_windows}. Build the agent on Windows "
+                "and place the MSI in the artifact store before creating a release."
+            )
+            if required:
+                raise RuntimeError(message)
+            print(f"  WARNING: {message}")
+            return []
+
+    staged: list[dict] = []
+    output_root = build_dir / "agent-artifacts"
+    for platform, pattern in AGENT_PACKAGE_PATTERNS.items():
+        platform_dir = source / platform
+        candidates: list[tuple[tuple[int, int, int], str, Path]] = []
+        if platform_dir.is_dir():
+            for package in platform_dir.iterdir():
+                if not package.is_file() or package.is_symlink():
+                    continue
+                match = pattern.fullmatch(package.name)
+                if match:
+                    candidates.append((_version_key(match.group(1)), match.group(1), package))
+        if not candidates:
+            continue
+        _, version, package = max(candidates, key=lambda item: item[0])
+        if platform == "windows" and expected_windows and version != expected_windows:
+            # The exact file check above normally catches this; keep the
+            # assertion beside selection so future naming changes stay safe.
+            raise RuntimeError(
+                f"Latest Windows MSI is {version}, but vendored AgentVersion is {expected_windows}"
+            )
+        if package.stat().st_size < 1_000_000:
+            raise RuntimeError(f"Agent package looks truncated ({package.stat().st_size} bytes): {package}")
+
+        destination = output_root / platform / package.name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(package, destination)
+        staged.append({
+            "platform": platform,
+            "version": version,
+            "file_name": package.name,
+            "file_size": package.stat().st_size,
+            "sha256": sha256_file(str(package)),
+        })
+
+    windows_staged = next(
+        (p["version"] for p in staged if p["platform"] == "windows"), None
+    )
+    manifest = {
+        "format_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "required_windows_version": expected_windows or windows_staged,
+        "packages": staged,
+    }
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / "manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return staged
+
+
 # ─── Migration lint ───────────────────────────────────────────────────────────
 
 def _load_migrations_lock(lock_path: Path) -> dict[str, str]:
-    if not lock_path.exists():
-        return {}
-    locked: dict[str, str] = {}
-    for line in lock_path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(None, 1)
-        if len(parts) == 2:
-            digest, name = parts
-            locked[name.strip()] = digest.strip()
-    return locked
+    return dict(migration_order.load_lock(lock_path))
 
 
 def _write_migrations_lock(lock_path: Path, entries: dict[str, str]) -> None:
-    lines = [f"{entries[name]}  {name}" for name in sorted(entries)]
-    lock_path.write_text("\n".join(lines) + "\n")
+    """Write the lockfile preserving existing order, appending new entries.
+
+    Line order in the lockfile IS the order appliances apply migrations in, so
+    it must never be re-sorted. Migration numbers are not unique (two 016s, two
+    030s, a date-stamped file), which is precisely why filename sort cannot be
+    the sequence.
+    """
+    existing = migration_order.load_lock(lock_path)
+    ordered = [(name, entries[name]) for name, _ in existing if name in entries]
+    known = {name for name, _ in ordered}
+    ordered.extend(
+        (name, entries[name]) for name in sorted(entries) if name not in known
+    )
+    migration_order.write_lock(lock_path, ordered)
+
+
+def _superseded_checksums() -> dict[str, set[str]]:
+    """The reconciliation table run-migrations.py carries, read from its source.
+
+    Read rather than duplicated: the runner is the authority on which historical
+    checksums an appliance may legitimately be carrying, and two copies would
+    drift apart exactly when it matters. Parsed with ast rather than imported —
+    the runner is a script, not a library, and the lint has no business running
+    its module body.
+    """
+    runner = Path(__file__).resolve().parent / "run-migrations.py"
+    if not runner.exists():
+        return {}
+    try:
+        tree = ast.parse(runner.read_text())
+    except (OSError, SyntaxError):
+        return {}
+
+    for node in tree.body:
+        targets = (
+            [node.target] if isinstance(node, ast.AnnAssign)
+            else node.targets if isinstance(node, ast.Assign)
+            else []
+        )
+        if not any(isinstance(t, ast.Name) and t.id == "SUPERSEDED_CHECKSUMS" for t in targets):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except ValueError:
+            return {}
+        return {name: set(checksums) for name, checksums in value.items()}
+    return {}
+
+
+def _git_prefix(scripts_dir: Path) -> str | None:
+    """The migration directory's path from the repo root, or None if not in one.
+
+    ``git show COMMIT:PATH`` resolves PATH from the repo root, not from -C, so
+    the audit needs this to address historical blobs at all.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(scripts_dir), "rev-parse", "--show-prefix"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _git_history_checksums(scripts_dir: Path, prefix: str, name: str) -> dict[str, str]:
+    """Every distinct sha256 this migration has ever had, → newest commit."""
+    log = subprocess.run(
+        ["git", "-C", str(scripts_dir), "log", "--follow", "--format=%H", "--", name],
+        capture_output=True, text=True,
+    )
+    if log.returncode != 0:
+        return {}
+
+    history: dict[str, str] = {}
+    for commit in log.stdout.split():
+        blob = subprocess.run(
+            ["git", "-C", str(scripts_dir), "show", f"{commit}:{prefix}{name}"],
+            capture_output=True,
+        )
+        if blob.returncode != 0:
+            # The file was added under a different name in this commit;
+            # --follow found it, `show` at this path cannot.
+            continue
+        # git log lists newest first, so the first commit to show a given
+        # checksum is the newest one carrying it.
+        history.setdefault(hashlib.sha256(blob.stdout).hexdigest(), commit[:7])
+    return history
+
+
+def _lint_migration_history(scripts_dir: Path, on_disk: dict[str, str]) -> list[str]:
+    """Reject a migration whose git history holds an unreconciled checksum.
+
+    Appliances record the sha256 of each migration as they apply it, and since
+    v1.7.0 the OTA schema gate fails the update on any mismatch. So *every*
+    revision a migration has ever had is a checksum some appliance in the field
+    may be carrying — not just the current one.
+
+    migrations.lock only guards edits made after it existed (2026-05-20).
+    migrate-004-snmp.sql and migrate-006-services-v2.sql were rewritten before
+    that, went unnoticed for three months, and then stranded part of the fleet
+    on 1.6.0 the moment the gate shipped. Git remembers what the lockfile
+    cannot, so ask git.
+
+    An unreconciled historical checksum is a build failure, not a field
+    failure: either restore the file's shipped bytes, or record the superseded
+    checksum in run-migrations.py so the runner heals the ledger row.
+
+    PostgreSQL only. The ClickHouse ledger (ch_migrate.py) keys on filename and
+    object presence and never compares checksums, so a rewritten ClickHouse
+    migration cannot strand anyone.
+    """
+    prefix = _git_prefix(scripts_dir)
+    if prefix is None:
+        return []
+
+    superseded = _superseded_checksums()
+    errors: list[str] = []
+
+    for name, current in on_disk.items():
+        if migration_order.engine_of(name) != "postgres":
+            continue
+        reconciled = superseded.get(name, frozenset())
+        for checksum, commit in _git_history_checksums(scripts_dir, prefix, name).items():
+            if checksum == current or checksum in reconciled:
+                continue
+            errors.append(
+                f"{name}: shipped as {checksum} in commit {commit}, now {current}. "
+                f"Appliances that applied the old bytes will fail the schema gate. "
+                f"Add {checksum!r} to SUPERSEDED_CHECKSUMS in scripts/run-migrations.py "
+                f"(only if the rewrite left already-migrated appliances nothing to do), "
+                f"or restore the file and put the change in a new migration."
+            )
+    return errors
+
+
+def _lint_new_migrations(scripts_dir: Path, new_files: list[str]) -> list[str]:
+    """Reject new migrations that would be unsafe or ambiguous in the field.
+
+    Two rules, both learned the hard way:
+
+    * A duplicate sequence number makes the relative order of two migrations
+      depend on the rest of the filename. Fine until one of them has to come
+      first.
+    * A new ClickHouse migration must be replay-safe (guarded DDL, no blind
+      backfill INSERT). The updater heals an appliance whose ledger claims a
+      migration ran when it did not — it can only do that by re-running the
+      file, and it will refuse to re-run one that would duplicate rows.
+    """
+    errors: list[str] = []
+
+    locked_seqs: dict[str, str] = {}
+    for f in sorted(scripts_dir.glob("migrate-*.sql")):
+        if f.name in new_files:
+            continue
+        seq = migration_order.sequence_of(f.name)
+        if seq:
+            locked_seqs.setdefault(seq, f.name)
+
+    seen_new: dict[str, str] = {}
+    for name in new_files:
+        seq = migration_order.sequence_of(name)
+        if not seq:
+            errors.append(f"{name}: expected migrate-NNN-description.sql")
+            continue
+        clash = locked_seqs.get(seq) or seen_new.get(seq)
+        if clash:
+            errors.append(
+                f"{name}: sequence {seq} is already taken by {clash} — "
+                f"pick the next free number"
+            )
+        seen_new[seq] = name
+
+        if migration_order.engine_of(name) == "clickhouse":
+            sql = (scripts_dir / name).read_text()
+            if not migration_order.is_replay_safe(sql):
+                errors.append(
+                    f"{name}: ClickHouse migrations must be replay-safe — use "
+                    f"CREATE ... IF NOT EXISTS and no backfill INSERT, so the "
+                    f"updater can heal an appliance that never received it"
+                )
+    return errors
 
 
 def lint_migrations(
@@ -142,6 +458,23 @@ def lint_migrations(
         else:
             new_files.append(name)
 
+    missing = [name for name in locked if name not in on_disk]
+    if missing:
+        print("\nERROR: migrations recorded in the lockfile are missing from disk.")
+        print("Every release ships the complete migration set; deleting a shipped")
+        print("migration would leave appliances that never applied it stranded.")
+        for name in missing:
+            print(f"  - {name}")
+        sys.exit(1)
+
+    if new_files:
+        errors = _lint_new_migrations(scripts_dir, new_files)
+        if errors:
+            print("\nERROR: new migrations rejected.")
+            for err in errors:
+                print(f"  {err}")
+            sys.exit(1)
+
     if drift:
         print("\nERROR: migrate-*.sql checksum drift detected.")
         print("Migrations are append-only after they ship in a release. Add a new")
@@ -153,6 +486,16 @@ def lint_migrations(
             print(f"  {name}")
             print(f"    locked:  {old}")
             print(f"    on disk: {new_digest}")
+        sys.exit(1)
+
+    history = _lint_migration_history(scripts_dir, on_disk)
+    if history:
+        print("\nERROR: a migration was edited after it shipped.")
+        print("Appliances checksum each migration as they apply it, so every past")
+        print("revision is a checksum some appliance is still carrying. The lockfile")
+        print("only guards edits made since it existed; git history goes back further.")
+        for err in history:
+            print(f"  {err}")
         sys.exit(1)
 
     if new_files and not update_lock:
@@ -173,10 +516,7 @@ def lint_migrations(
 
 
 def _migration_engine(path: Path) -> str:
-    name = path.name.lower()
-    if "clickhouse" in name or name.startswith("ch-"):
-        return "clickhouse"
-    return "postgres"
+    return migration_order.engine_of(path)
 
 
 def _select_migrations(
@@ -184,20 +524,19 @@ def _select_migrations(
     include_migrations: bool,
     requested_migrations: list[str] | None,
 ) -> list[Path]:
-    """Return the explicit migration files to package for this release.
+    """Return migrations to call out with their own manifest step.
 
-    Historical migrations are not safe to bundle opportunistically: appliances
-    store the checksum they applied and will reject a same-named file with
-    different bytes. Requiring a release-specific list keeps old migration
-    drift from blocking unrelated appliance updates.
+    This is now emphasis, not delivery. Every release ships the complete
+    migration set in code/scripts/, and scripts/sync-schema.py applies whatever
+    an appliance is missing on every update. Naming files here just makes them
+    explicit in the manifest — useful for a schema-heavy release, never
+    required, and forgetting it can no longer strand an appliance.
     """
     requested_migrations = requested_migrations or []
     if include_migrations and not requested_migrations:
-        print("\nERROR: --include-migrations now requires one or more --migration FILE values.")
-        print("Package only the migrations introduced by this release, for example:")
-        print("  --migration migrate-017-discovery-v2.sql")
-        print("  --migration migrate-018-discovery-windows-creds.sql")
-        sys.exit(1)
+        selected = migration_order.ordered_migrations(scripts_dir)
+        print(f"  --include-migrations: naming all {len(selected)} migration(s) explicitly")
+        return selected
 
     if not requested_migrations:
         return []
@@ -221,7 +560,8 @@ def _select_migrations(
             sys.exit(1)
         selected.append(candidate)
 
-    return sorted(selected, key=lambda p: p.name)
+    order = {p.name: i for i, p in enumerate(migration_order.ordered_migrations(scripts_dir))}
+    return sorted(selected, key=lambda p: (order.get(p.name, len(order)), p.name))
 
 
 # ─── Admin Auth ───────────────────────────────────────────────────────────────
@@ -262,7 +602,9 @@ def get_admin_token() -> str:
 def build_package(version: str, changelog: str, severity: str,
                   min_version: str | None, skip_dashboard: bool,
                   skip_go: bool, include_migrations: bool,
-                  migration_files: list[str] | None = None) -> Path:
+                  migration_files: list[str] | None = None,
+                  agent_artifact_dir: Path | None = None,
+                  skip_agent_artifacts: bool = False) -> Path:
     """Build a .zup release package from the current codebase."""
 
     print(f"\n{'='*60}")
@@ -334,6 +676,27 @@ def build_package(version: str, changelog: str, severity: str,
     else:
         print("[2/7] Skipping dashboard build (--skip-dashboard)")
 
+    # Windows installers come from the native Windows build.  Validate them
+    # independently from the Linux Go binaries so --skip-go remains safe and
+    # so a missing artifact can never silently disappear from a portal OTA.
+    print("[2a/7] Validating agent release artifacts ...")
+    if skip_agent_artifacts:
+        print("  Skipping agent artifacts (--skip-agent-artifacts)")
+        agent_staged = []
+    else:
+        agent_staged = stage_agent_artifacts(
+            build_dir,
+            artifact_dir=agent_artifact_dir,
+            required=True,
+        )
+        for package in agent_staged:
+            size_mb = package["file_size"] / 1024 / 1024
+            print(
+                f"  + {package['platform']}/{package['file_name']} "
+                f"v{package['version']} ({size_mb:.1f} MB, "
+                f"{package['sha256'][:12]}…)"
+            )
+
     # 3. Build Go binaries
     if not skip_go:
         print("[3/7] Building Go poller and remote sensor ...")
@@ -341,24 +704,6 @@ def build_package(version: str, changelog: str, severity: str,
         go_dir.mkdir()
         sensor_dir = build_dir / "sensor-artifacts" / "bin" / "linux-amd64"
         sensor_dir.mkdir(parents=True)
-
-    # Agent installers are built on Windows, not here, so the release carries
-    # whatever is currently published in the artifact store. Without this a
-    # freshly updated appliance reports "no package published" until someone
-    # copies an MSI across by hand.
-    agent_src = Path("/opt/zenplus/artifacts/agents")
-    agent_staged = []
-    if agent_src.is_dir():
-        for plat_dir in sorted(p for p in agent_src.iterdir() if p.is_dir()):
-            for pkg in sorted(plat_dir.glob("zenplus-agent-*")):
-                if not pkg.is_file():
-                    continue
-                dest_dir = build_dir / "agent-artifacts" / plat_dir.name
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(pkg, dest_dir / pkg.name)
-                agent_staged.append((plat_dir.name, pkg.name))
-        if agent_staged:
-            print(f"      bundled {len(agent_staged)} agent package(s)")
         poller_src = ZENPLUS_DIR / "poller"
         commit = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
@@ -461,10 +806,10 @@ def build_package(version: str, changelog: str, severity: str,
     if migration_count == 0:
         if migrate_dir.exists():
             shutil.rmtree(migrate_dir)
-        if include_migrations:
-            print("  No migrations found")
-        else:
-            print("  Skipping migrations (use --include-migrations for schema releases)")
+        print("  No migrations named explicitly")
+    shipped = len(list((build_dir / "code" / "scripts").glob("migrate-*.sql")))
+    print(f"  {shipped} migration(s) shipped in code/scripts/ — sync-schema.py "
+          f"applies whatever each appliance is missing")
 
     # 6. Create manifest.json
     print("[6/7] Creating manifest ...")
@@ -498,6 +843,28 @@ def build_package(version: str, changelog: str, severity: str,
             "timeout": 120,
         })
 
+    # Storage management (Settings -> Storage): install the root-owned helper
+    # scripts, sudoers grant, backup dirs, and ClickHouse backups-disk config.
+    # Idempotent — safe on every OTA, and required on appliances installed
+    # before the Storage tab existed.
+    if (Path(build_dir) / "code" / "scripts" / "setup-storage.sh").exists():
+        steps.append({
+            "type": "run_hook",
+            "script": "code/scripts/setup-storage.sh",
+            "timeout": 300,
+        })
+
+    # Security tab (Settings -> General -> Security): install the root-owned
+    # TLS helper, sudoers grant, /etc/zenplus/tls and the staging directory.
+    # Idempotent — safe on every OTA, and required on appliances installed
+    # before the Security tab existed.
+    if (Path(build_dir) / "code" / "scripts" / "setup-security.sh").exists():
+        steps.append({
+            "type": "run_hook",
+            "script": "code/scripts/setup-security.sh",
+            "timeout": 120,
+        })
+
     # Best-effort GeoIP provisioning (Phase 2b). fetch-geoip.py always exits 0
     # and skips when the current month's DB is already present, so a download
     # failure (no route to db-ip.com) never fails or delays the OTA update.
@@ -513,13 +880,29 @@ def build_package(version: str, changelog: str, severity: str,
         steps.append({"type": "pip_install", "requirements": "requirements.txt"})
 
     if (build_dir / "migrations").exists():
-        for f in sorted((build_dir / "migrations").iterdir()):
+        named = [build_dir / "migrations" / f.name for f in selected_migrations]
+        for f in named:
             engine = _migration_engine(f)
             steps.append({"type": "run_migration", "engine": engine, "file": f"migrations/{f.name}"})
-        for f in sorted((build_dir / "migrations").iterdir()):
+        for f in named:
             steps.append({"type": "install_config",
                           "source": f"migrations/{f.name}",
                           "dest": f"/opt/zenplus/scripts/{f.name}"})
+
+    # The schema gate. Emitted on EVERY release, not only schema releases:
+    # it converges both databases with the complete migration set that
+    # apply_code just landed, heals a ledger that claims a migration ran when
+    # it did not, and exits non-zero on anything it cannot resolve — which
+    # fails this step and rolls the appliance back rather than leaving it
+    # stamped with a version its schema does not support.
+    if (Path(build_dir) / "code" / "scripts" / "sync-schema.py").exists():
+        steps.append({
+            "type": "run_hook",
+            "script": "code/scripts/sync-schema.py",
+            "timeout": 1800,
+        })
+    else:
+        print("  WARNING: scripts/sync-schema.py missing — release has no schema gate!")
 
     if (build_dir / "dashboard-dist.tar.gz").exists():
         steps.append({"type": "build_dashboard", "prebuilt": True, "source": "dashboard-dist.tar.gz"})
@@ -545,6 +928,10 @@ def build_package(version: str, changelog: str, severity: str,
                 steps.append({"type": "install_config",
                               "source": f"agent-artifacts/{plat_dir.name}/{pkg.name}",
                               "dest": f"/opt/zenplus/artifacts/agents/{plat_dir.name}/{pkg.name}"})
+        if (agent_artifact_dir / "manifest.json").is_file():
+            steps.append({"type": "install_config",
+                          "source": "agent-artifacts/manifest.json",
+                          "dest": "/opt/zenplus/artifacts/agents/manifest.json"})
 
     sensor_artifact_dir = build_dir / "sensor-artifacts" / "bin" / "linux-amd64"
     if (sensor_artifact_dir / "zenplus-sensor").exists():
@@ -575,6 +962,7 @@ def build_package(version: str, changelog: str, severity: str,
         "severity": severity,
         "arch": "amd64",
         "os_min": "ubuntu-22.04",
+        "agent_packages": agent_staged,
         "steps": steps,
         "rollback_steps": [
             {"type": "restore_backup"},
@@ -639,6 +1027,7 @@ def build_package(version: str, changelog: str, severity: str,
         "package_size": pkg_size,
         "built_at": datetime.now(timezone.utc).isoformat(),
         "migrations": [p.name for p in selected_migrations],
+        "agent_packages": agent_staged,
     }
     meta_path = RELEASE_DIR / f"update-{version}.meta.json"
     meta_path.write_text(json.dumps(meta, indent=2))
@@ -836,6 +1225,16 @@ Examples:
     build_p.add_argument("--min-version", default=None, help="Minimum version to upgrade from")
     build_p.add_argument("--skip-dashboard", action="store_true", help="Skip dashboard build")
     build_p.add_argument("--skip-go", action="store_true", help="Skip Go binary build")
+    build_p.add_argument(
+        "--agent-artifact-dir",
+        default=None,
+        help="Agent artifact root containing windows/, linux/, macos/ (default: <ZENPLUS_DIR>/artifacts/agents)",
+    )
+    build_p.add_argument(
+        "--skip-agent-artifacts",
+        action="store_true",
+        help="Emergency override: build without an agent installer",
+    )
     build_p.add_argument("--include-migrations", action="store_true",
                          help="Require explicit --migration values for schema releases")
     build_p.add_argument("--migration", action="append", default=[],
@@ -851,6 +1250,8 @@ Examples:
     pub_p.add_argument("--file", "-f", default=None, help="Use existing .zup file instead of building")
     pub_p.add_argument("--skip-dashboard", action="store_true")
     pub_p.add_argument("--skip-go", action="store_true")
+    pub_p.add_argument("--agent-artifact-dir", default=None)
+    pub_p.add_argument("--skip-agent-artifacts", action="store_true")
     pub_p.add_argument("--include-migrations", action="store_true",
                        help="Require explicit --migration values for schema releases")
     pub_p.add_argument("--migration", action="append", default=[],
@@ -882,7 +1283,9 @@ Examples:
     if args.command == "build":
         build_package(args.version, args.changelog, args.severity,
                       args.min_version, args.skip_dashboard, args.skip_go,
-                      args.include_migrations, args.migration)
+                      args.include_migrations, args.migration,
+                      Path(args.agent_artifact_dir) if args.agent_artifact_dir else None,
+                      args.skip_agent_artifacts)
 
     elif args.command == "publish":
         if args.file:
@@ -893,7 +1296,9 @@ Examples:
         else:
             zup_path = build_package(args.version, args.changelog, args.severity,
                                      args.min_version, args.skip_dashboard, args.skip_go,
-                                     args.include_migrations, args.migration)
+                                     args.include_migrations, args.migration,
+                                     Path(args.agent_artifact_dir) if args.agent_artifact_dir else None,
+                                     args.skip_agent_artifacts)
         publish_package(zup_path, args.version, args.changelog,
                         args.severity, args.min_version)
 

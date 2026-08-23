@@ -8,6 +8,7 @@ All routes require an authenticated dashboard user (JWT bearer).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -19,13 +20,16 @@ from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.services.tag_service import canonicalize_tags
 from app.core.security import get_current_user, require_operator_user
 from app.services.filesystem_monitoring import pg_capacity_filter
 from app.models.user import User
@@ -56,6 +60,16 @@ from app.services.host_metric_service import (
     query_server_memory_total,
     query_server_metrics,
     query_top_pressure,
+)
+from app.services.network_capture_service import (
+    ACTIVE_CAPTURE_STATUSES,
+    CAPTURE_COMMAND_TTL_S,
+    CAPTURE_RETENTION_MAX_S,
+    CAPTURE_RETENTION_MIN_S,
+    CAPTURE_RETENTION_S,
+    CAPTURE_STOP_COMMAND_TTL_S,
+    TERMINAL_CAPTURE_STATUSES,
+    delete_capture_clickhouse_data,
 )
 
 router = APIRouter(prefix="/servers", tags=["Servers"])
@@ -114,6 +128,18 @@ def _json_list(v: Any) -> list:
     return []
 
 
+def _json_object(v: Any) -> dict:
+    if isinstance(v, dict):
+        return dict(v)
+    if isinstance(v, str):
+        try:
+            parsed = json.loads(v)
+            return dict(parsed) if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
 def _server_row_to_response(row: dict) -> ServerResponse:
     tags = _json_list(row.get("tags"))
     return ServerResponse(
@@ -146,6 +172,7 @@ def _server_row_to_response(row: dict) -> ServerResponse:
         agent_status=row.get("agent_status"),
         agent_version=row.get("agent_version"),
         agent_last_heartbeat_at=row.get("agent_last_heartbeat_at"),
+        agent_capabilities=[str(v) for v in _json_list(row.get("agent_capabilities"))],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -262,11 +289,12 @@ async def list_servers(
     sql = f"""
         SELECT s.*, st.name AS site_name,
                a.id AS agent_id, a.status AS agent_status, a.version AS agent_version,
-               a.last_heartbeat_at AS agent_last_heartbeat_at
+               a.last_heartbeat_at AS agent_last_heartbeat_at,
+               a.capabilities AS agent_capabilities
         FROM servers s
         LEFT JOIN sites st ON st.id = s.site_id
         LEFT JOIN LATERAL (
-            SELECT id, status, version, last_heartbeat_at FROM agents
+            SELECT id, status, version, last_heartbeat_at, capabilities FROM agents
             WHERE server_id = s.id
             ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 1
         ) a ON TRUE
@@ -347,12 +375,18 @@ async def bulk_server_action(
             text("SELECT id, tags FROM servers WHERE id = ANY(CAST(:ids AS uuid[]))"),
             {"ids": ids},
         )).all()
+        # Canonicalize on add so a server only ever carries registry spellings
+        # and new labels auto-register — same contract as devices and links.
+        # Both sides compare case-insensitively; "Prod" and "prod" are one tag.
+        add_names = await canonicalize_tags(db, data.tags) if data.action == "add_tags" else []
+        drop = {t.strip().lower() for t in data.tags}
         for sid, tags in rows:
             current = _json_list(tags)
+            have = {str(t).lower() for t in current}
             if data.action == "add_tags":
-                merged = current + [t for t in data.tags if t not in current]
+                merged = current + [t for t in add_names if t.lower() not in have]
             else:
-                merged = [t for t in current if t not in data.tags]
+                merged = [t for t in current if str(t).lower() not in drop]
             if merged != current:
                 await db.execute(
                     text("UPDATE servers SET tags = CAST(:tags AS jsonb), updated_at = NOW() WHERE id = :id"),
@@ -442,12 +476,13 @@ async def get_server(
                        a.id AS agent_id, a.status AS agent_status, a.version AS agent_version,
                        a.last_heartbeat_at AS agent_last_heartbeat_at,
                        a.last_metric_at AS agent_last_metric_at,
-                       a.clock_skew_s AS agent_clock_skew_s
+                       a.clock_skew_s AS agent_clock_skew_s,
+                       a.capabilities AS agent_capabilities
                 FROM servers s
                 LEFT JOIN sites st ON st.id = s.site_id
                 LEFT JOIN LATERAL (
                     SELECT id, status, version, last_heartbeat_at, last_metric_at,
-                           clock_skew_s
+                           clock_skew_s, capabilities
                     FROM agents
                     WHERE server_id = s.id
                     ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 1
@@ -819,6 +854,15 @@ def _agent_response(row: dict) -> AgentResponse:
         version=row.get("version"),
         status=row["status"],
         api_key_prefix=row.get("api_key_prefix"),
+        authorization_state=(
+            "revoked" if row.get("revoked_at") is not None
+            else "authorized" if row.get("authorized_at") is not None or row.get("api_key_hash")
+            else "pending"
+        ),
+        authorization_source=row.get("authorization_source"),
+        enrollment_token_prefix=row.get("enrollment_token_prefix"),
+        authorized_at=row.get("authorized_at"),
+        revoked_at=row.get("revoked_at"),
         last_heartbeat_at=row.get("last_heartbeat_at"),
         last_metric_at=row.get("last_metric_at"),
         last_config_hash=row.get("last_config_hash"),
@@ -833,6 +877,8 @@ def _agent_response(row: dict) -> AgentResponse:
         policy_id=str(row["policy_id"]) if row.get("policy_id") else None,
         policy_name=row.get("policy_name"),
         config_apply_error=row.get("config_apply_error"),
+        capabilities=[str(v) for v in _json_list(row.get("capabilities"))],
+        apm_status=_json_object(row.get("apm_status")),
         tags=list(tags) if isinstance(tags, (list, tuple)) else [],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -849,13 +895,81 @@ def _agent_response(row: dict) -> AgentResponse:
 # control record so the UI can follow a run in progress.
 
 CAPTURE_MAX_DURATION_S = 3600
+CAPTURE_AGENT_HEARTBEAT_MAX_AGE_S = 120
+CAPABILITY_MIN_AGENT_VERSION = {
+    "network_capture_v1": (1, 2, 0),
+    "capture_stop_v1": (1, 3, 0),
+    "interface_traffic_v1": (1, 3, 0),
+}
+
+
+def _semver_tuple(value: Any) -> tuple[int, int, int]:
+    match = re.match(r"^\s*v?(\d+)\.(\d+)\.(\d+)", str(value or ""))
+    if not match:
+        return (0, 0, 0)
+    return tuple(int(part) for part in match.groups())
+
+
+def _agent_supports(agent: dict, capability: str) -> bool:
+    """Prefer explicit capability advertisement, with legacy semver fallback."""
+    capabilities = {str(v).strip().lower() for v in _json_list(agent.get("capabilities"))}
+    if capabilities:
+        return capability in capabilities
+    minimum = CAPABILITY_MIN_AGENT_VERSION.get(capability)
+    return bool(minimum and _semver_tuple(agent.get("version")) >= minimum)
 
 
 class NetworkCaptureStart(BaseModel):
     duration_s: int = Field(300, ge=30, le=CAPTURE_MAX_DURATION_S)
-    interface: Optional[str] = None
+    interface: Optional[str] = Field(None, max_length=255)
     sample_interval_s: int = Field(2, ge=1, le=30)
-    max_flows: int = Field(5000, ge=100, le=50000)
+    max_flows: int = Field(5000, ge=100, le=10000)
+    retention_s: int = Field(
+        CAPTURE_RETENTION_S,
+        ge=CAPTURE_RETENTION_MIN_S,
+        le=CAPTURE_RETENTION_MAX_S,
+    )
+
+
+async def _authorize_agents(ids: list[UUID], user_id: UUID, db: AsyncSession) -> int:
+    result = await db.execute(
+        text("""UPDATE agents SET
+                  authorized_at = NOW(), authorized_by = :user,
+                  revoked_at = NULL, revoked_by = NULL,
+                  authorization_source = 'admin',
+                  status = 'enrolling', updated_at = NOW()
+                WHERE id = ANY(:ids)
+                RETURNING id"""),
+        {"ids": ids, "user": user_id},
+    )
+    return len(result.fetchall())
+
+
+async def _revoke_agents(ids: list[UUID], user_id: UUID, db: AsyncSession) -> int:
+    # Revoke the APM key first while its provenance mapping is still present.
+    await db.execute(
+        text("""UPDATE apm_ingest_keys AS key SET
+                  enabled = FALSE, revoked_at = NOW(), rotated_at = NOW()
+                FROM agent_apm_credentials AS credential
+                WHERE credential.key_id = key.id
+                  AND credential.agent_id = ANY(:ids)
+                  AND key.revoked_at IS NULL"""),
+        {"ids": ids},
+    )
+    await db.execute(
+        text("DELETE FROM agent_apm_credentials WHERE agent_id = ANY(:ids)"),
+        {"ids": ids},
+    )
+    result = await db.execute(
+        text("""UPDATE agents SET
+                  api_key_hash = NULL, api_key_prefix = NULL,
+                  revoked_at = NOW(), revoked_by = :user,
+                  status = 'disabled', updated_at = NOW()
+                WHERE id = ANY(:ids)
+                RETURNING id"""),
+        {"ids": ids, "user": user_id},
+    )
+    return len(result.fetchall())
 
 
 @router.post("/{server_id}/network-capture")
@@ -866,48 +980,74 @@ async def start_network_capture(
     user: User = Depends(require_operator_user),
 ):
     """Queue a capture on this server's agent."""
+    interface = data.interface.strip() if data.interface else None
+    if interface == "":
+        interface = None
     agent = (await db.execute(
-        text("""SELECT id, status FROM agents WHERE server_id = :sid
+        text("""SELECT id, status, version, capabilities, last_heartbeat_at
+                FROM agents WHERE server_id = :sid
                 ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 1"""),
         {"sid": server_id},
     )).mappings().first()
     if not agent:
         raise HTTPException(404, "No agent is enrolled on this server")
-    if agent["status"] in ("disabled", "offline"):
+    if agent["status"] != "online":
         raise HTTPException(
             409,
             f"Agent is {agent['status']}; it cannot start a capture until it checks in again",
+        )
+    heartbeat_at = agent.get("last_heartbeat_at")
+    if heartbeat_at is None:
+        raise HTTPException(409, "Agent has not sent a heartbeat yet")
+    if heartbeat_at.tzinfo is None:
+        heartbeat_at = heartbeat_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - heartbeat_at > timedelta(
+        seconds=CAPTURE_AGENT_HEARTBEAT_MAX_AGE_S
+    ):
+        raise HTTPException(409, "Agent heartbeat is too old to start a capture safely")
+    if not _agent_supports(dict(agent), "network_capture_v1"):
+        raise HTTPException(
+            409,
+            "Agent does not advertise network_capture_v1; upgrade the host agent first",
         )
 
     # One at a time per server: the agent refuses a second concurrent run, and
     # a queued-but-unstarted capture would otherwise pile up behind it.
     active = (await db.execute(
         text("""SELECT id FROM network_captures
-                WHERE server_id = :sid AND status IN ('queued','running') LIMIT 1"""),
+                WHERE server_id = :sid AND status IN ('queued','running','stopping') LIMIT 1"""),
         {"sid": server_id},
     )).first()
     if active:
         raise HTTPException(409, "A capture is already running on this server")
 
-    row = (await db.execute(
-        text("""INSERT INTO network_captures
-                  (server_id, agent_id, status, interface, duration_s,
-                   sample_interval_s, requested_by)
-                VALUES (:sid, :aid, 'queued', :iface, :dur, :si, :uid)
-                RETURNING id, requested_at"""),
-        {"sid": server_id, "aid": agent["id"], "iface": data.interface,
-         "dur": data.duration_s, "si": data.sample_interval_s, "uid": user.id},
-    )).first()
+    try:
+        row = (await db.execute(
+            text("""INSERT INTO network_captures
+                      (server_id, agent_id, status, interface, duration_s,
+                       sample_interval_s, retention_s, requested_by)
+                    VALUES (:sid, :aid, 'queued', :iface, :dur, :si, :ret, :uid)
+                    RETURNING id, requested_at"""),
+            {"sid": server_id, "aid": agent["id"], "iface": interface,
+             "dur": data.duration_s, "si": data.sample_interval_s,
+             "ret": data.retention_s, "uid": user.id},
+        )).first()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(409, "A capture is already active on this server")
     capture_id = str(row[0])
 
     await db.execute(
-        text("""INSERT INTO agent_commands (agent_id, command, params, requested_by)
-                VALUES (:aid, 'start_network_capture', :p, :uid)"""),
-        {"aid": agent["id"], "uid": user.id, "p": json.dumps({
+        text("""INSERT INTO agent_commands
+                  (agent_id, command, params, expires_at, requested_by)
+                VALUES (:aid, 'start_network_capture', :p,
+                        NOW() + make_interval(secs => :ttl), :uid)"""),
+        {"aid": agent["id"], "uid": user.id, "ttl": CAPTURE_COMMAND_TTL_S,
+         "p": json.dumps({
             "capture_id": capture_id,
             "duration_s": data.duration_s,
             "sample_interval_s": data.sample_interval_s,
-            "interface": data.interface or "",
+            "interface": interface or "",
             "max_flows": data.max_flows,
         })},
     )
@@ -915,6 +1055,7 @@ async def start_network_capture(
     logger.info("network capture %s queued for server=%s by user=%s",
                 capture_id, server_id, user.id)
     return {"id": capture_id, "status": "queued", "duration_s": data.duration_s,
+            "retention_s": data.retention_s, "purge_after": None,
             "requested_at": row[1],
             "detail": "The agent starts the capture on its next command poll (within ~30s)."}
 
@@ -937,58 +1078,322 @@ async def list_network_captures(
     return {"items": [dict(r) | {"id": str(r["id"]),
                                  "server_id": str(r["server_id"]),
                                  "agent_id": str(r["agent_id"]) if r["agent_id"] else None,
-                                 "requested_by": None} for r in rows]}
+                                 "requested_by": None,
+                                 "archived": r.get("archived_at") is not None}
+                      for r in rows]}
+
+
+@router.post("/network-captures/{capture_id}/archive")
+async def archive_network_capture(
+    capture_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Retain a capture until an operator unarchives or purges it."""
+    row = (await db.execute(
+        text("""SELECT id, status, retention_s, archived_at, purge_after
+                FROM network_captures WHERE id = :id FOR UPDATE"""),
+        {"id": capture_id},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(404, "Capture not found")
+
+    archived = (await db.execute(
+        text("""UPDATE network_captures SET
+                  archived_at = COALESCE(archived_at, NOW()),
+                  archived_by = COALESCE(archived_by, :uid),
+                  purge_after = NULL,
+                  updated_at = NOW()
+                WHERE id = :id
+                RETURNING status, retention_s, archived_at, purge_after"""),
+        {"id": capture_id, "uid": user.id},
+    )).mappings().first()
+    await db.commit()
+    return {
+        "ok": True,
+        "id": str(capture_id),
+        "status": archived["status"],
+        "retention_s": archived["retention_s"],
+        "archived": True,
+        "archived_at": archived["archived_at"],
+        "purge_after": None,
+    }
+
+
+@router.post("/network-captures/{capture_id}/unarchive")
+async def unarchive_network_capture(
+    capture_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Resume normal retention, granting a fresh window if already terminal."""
+    row = (await db.execute(
+        text("""SELECT id, status, retention_s, archived_at, purge_after
+                FROM network_captures WHERE id = :id FOR UPDATE"""),
+        {"id": capture_id},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(404, "Capture not found")
+
+    if row["archived_at"] is None:
+        await db.commit()
+        return {
+            "ok": True,
+            "id": str(capture_id),
+            "status": row["status"],
+            "retention_s": row["retention_s"],
+            "archived": False,
+            "archived_at": None,
+            "purge_after": row["purge_after"],
+        }
+
+    unarchived = (await db.execute(
+        text("""UPDATE network_captures SET
+                  archived_at = NULL,
+                  archived_by = NULL,
+                  purge_after = CASE
+                    WHEN status IN ('completed','failed','expired','cancelled')
+                    THEN NOW() + make_interval(secs => retention_s)
+                    ELSE NULL
+                  END,
+                  updated_at = NOW()
+                WHERE id = :id
+                RETURNING status, retention_s, archived_at, purge_after"""),
+        {"id": capture_id},
+    )).mappings().first()
+    await db.commit()
+    return {
+        "ok": True,
+        "id": str(capture_id),
+        "status": unarchived["status"],
+        "retention_s": unarchived["retention_s"],
+        "archived": False,
+        "archived_at": None,
+        "purge_after": unarchived["purge_after"],
+    }
+
+
+@router.delete("/network-captures/{capture_id}/purge")
+async def purge_network_capture(
+    capture_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Permanently remove one terminal capture and all of its flow data."""
+    row = (await db.execute(
+        text("""SELECT id, status, archived_at
+                FROM network_captures WHERE id = :id FOR UPDATE"""),
+        {"id": capture_id},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(404, "Capture not found")
+    if row["status"] in ACTIVE_CAPTURE_STATUSES:
+        raise HTTPException(409, "Stop the active capture before purging it")
+    if row["status"] not in TERMINAL_CAPTURE_STATUSES:
+        raise HTTPException(409, f"Capture status {row['status']} cannot be purged")
+
+    try:
+        await asyncio.to_thread(delete_capture_clickhouse_data, capture_id)
+    except Exception as exc:
+        await db.rollback()
+        logger.exception("explicit capture purge failed in ClickHouse: id=%s", capture_id)
+        raise HTTPException(
+            503,
+            "Capture data store cleanup failed; metadata was retained for a safe retry.",
+        ) from exc
+
+    deleted = await db.execute(
+        text("""DELETE FROM network_captures
+                WHERE id = :id
+                  AND status IN ('completed','failed','expired','cancelled')
+                RETURNING id"""),
+        {"id": capture_id},
+    )
+    if not deleted.first():
+        await db.rollback()
+        raise HTTPException(409, "Capture changed while it was being purged")
+    await db.commit()
+    return {
+        "ok": True,
+        "id": str(capture_id),
+        "status": "purged",
+        "was_archived": row["archived_at"] is not None,
+    }
 
 
 @router.delete("/network-captures/{capture_id}")
+@router.post("/network-captures/{capture_id}/stop")
 async def cancel_network_capture(
     capture_id: UUID,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_operator_user),
 ):
-    """Stop following a capture. The agent's run is bounded by its own
-    duration, so this marks the record rather than interrupting the host."""
-    res = await db.execute(
-        text("""UPDATE network_captures
-                SET status = 'expired', completed_at = NOW(), updated_at = NOW()
-                WHERE id = :id AND status IN ('queued','running')
+    """Idempotently stop an active capture on the host agent."""
+    capture = (await db.execute(
+        text("""SELECT c.id, c.agent_id, c.status,
+                       a.version AS agent_version,
+                       a.capabilities AS agent_capabilities
+                FROM network_captures c
+                LEFT JOIN agents a ON a.id = c.agent_id
+                WHERE c.id = :id FOR UPDATE OF c"""),
+        {"id": capture_id},
+    )).mappings().first()
+    if not capture:
+        raise HTTPException(404, "Capture not found")
+
+    terminal = {"completed", "failed", "expired", "cancelled"}
+    if capture["status"] in terminal or capture["status"] == "stopping":
+        # Repeated clicks and client retries return the current state without
+        # creating duplicate stop commands.
+        return {"ok": True, "status": capture["status"]}
+
+    # If start is still queued, cancelling it is sufficient and avoids sending
+    # a stop for a run that never began. A sent command may already be active,
+    # so it must be followed by an explicit stop command below.
+    cancelled_start = (await db.execute(
+        text("""UPDATE agent_commands SET
+                  status = 'cancelled', completed_at = NOW()
+                WHERE agent_id = :aid AND command = 'start_network_capture'
+                  AND status = 'queued' AND params->>'capture_id' = :cid
                 RETURNING id"""),
+        {"aid": capture["agent_id"], "cid": str(capture_id)},
+    )).first()
+    if cancelled_start:
+        await db.execute(
+            text("""UPDATE network_captures SET
+                      status = 'cancelled', completed_at = NOW(),
+                      note = COALESCE(NULLIF(note, ''),
+                                      'Capture cancelled before the agent started it.'),
+                      updated_at = NOW()
+                    WHERE id = :id"""),
+            {"id": capture_id},
+        )
+        await db.commit()
+        return {"ok": True, "status": "cancelled"}
+
+    if not capture.get("agent_id"):
+        await db.execute(
+            text("""UPDATE network_captures SET
+                      status = 'cancelled', completed_at = NOW(),
+                      note = COALESCE(NULLIF(note, ''),
+                                      'Capture cancelled after its agent was removed.'),
+                      updated_at = NOW() WHERE id = :id"""),
+            {"id": capture_id},
+        )
+        await db.commit()
+        return {"ok": True, "status": "cancelled"}
+
+    if not _agent_supports(
+        {"version": capture.get("agent_version"),
+         "capabilities": capture.get("agent_capabilities")},
+        "capture_stop_v1",
+    ):
+        raise HTTPException(
+            409,
+            "This agent cannot stop a running capture on demand. The capture "
+            "will end at its bounded end time; upgrade the agent for capture_stop_v1.",
+        )
+
+    await db.execute(
+        text("""UPDATE network_captures SET status = 'stopping', updated_at = NOW()
+                WHERE id = :id"""),
         {"id": capture_id},
     )
-    if not res.first():
-        raise HTTPException(404, "No active capture with that id")
+    await db.execute(
+        text("""INSERT INTO agent_commands
+                  (agent_id, command, params, expires_at, requested_by)
+                VALUES (:aid, 'stop_network_capture', :params,
+                        NOW() + make_interval(secs => :ttl), :uid)"""),
+        {"aid": capture["agent_id"], "params": json.dumps({"capture_id": str(capture_id)}),
+         "ttl": CAPTURE_STOP_COMMAND_TTL_S, "uid": user.id},
+    )
     await db.commit()
-    return {"ok": True}
+    return {"ok": True, "status": "stopping"}
+
+
+def _run_clickhouse_query(sql: str, parameters: dict[str, Any]) -> list:
+    """Run a synchronous ClickHouse query in a worker thread."""
+    from app.core.database import get_ch_client
+    return get_ch_client().query(sql, parameters=parameters).result_rows
+
+
+_NETWORK_FLOW_LATEST_SQL = """SELECT protocol, local_ip, local_port,
+                                      remote_ip, remote_port, pid,
+                                      ifNull(nullIf(argMax(direction, observed_at), ''),
+                                             'unknown') AS direction,
+                                      ifNull(nullIf(argMax(kind, observed_at), ''),
+                                             'connection') AS kind,
+                                      argMax(process_name, observed_at) AS process_name,
+                                      argMax(service_name, observed_at) AS service_name,
+                                      argMax(state, observed_at) AS state,
+                                      argMax(bytes_sent, observed_at) AS bytes_sent,
+                                      argMax(bytes_received, observed_at) AS bytes_received,
+                                      argMax(bytes_known, observed_at) AS bytes_known,
+                                      argMax(first_seen, observed_at) AS first_seen,
+                                      argMax(last_seen, observed_at) AS last_seen,
+                                      argMax(samples, observed_at) AS samples
+                               FROM zenplus.host_network_flows
+                               WHERE capture_id = %(cid)s
+                               GROUP BY protocol, local_ip, local_port,
+                                        remote_ip, remote_port, pid"""
 
 
 @router.get("/network-captures/{capture_id}/flows")
 async def network_capture_flows(
     capture_id: UUID,
     q: Optional[str] = Query(None, max_length=200),
-    protocol: Optional[str] = Query(None, regex="^(tcp|udp)$"),
+    protocol: str = Query("all", pattern="^(tcp|udp|all)$"),
+    direction: str = Query(
+        "all", pattern="^(inbound|outbound|local|unknown|all)$"
+    ),
+    kind: str = Query(
+        "all", pattern="^(connection|listener|endpoint|unknown|all)$"
+    ),
+    scope: str = Query("applications", pattern="^(applications|system|all)$"),
+    bytes_known: Optional[bool] = Query(None),
     sort: str = Query("bytes_total", regex="^(bytes_total|bytes_sent|bytes_received|process_name|remote_ip|last_seen)$"),
     order: str = Query("desc", regex="^(asc|desc)$"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=500),
+    page_size: int = Query(50, ge=1, le=5000),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """Flows for one capture, searchable by IP, port, process or service."""
-    from app.core.database import get_clickhouse_client
-
     meta = (await db.execute(
-        text("SELECT id, server_id, status, bytes_available FROM network_captures WHERE id = :id"),
+        text("""SELECT id, server_id, status, flow_count, bytes_available,
+                       archived_at, purge_after
+                FROM network_captures WHERE id = :id"""),
         {"id": capture_id},
     )).mappings().first()
     if not meta:
         raise HTTPException(404, "Capture not found")
 
-    conditions = ["capture_id = %(cid)s"]
+    # First collapse the cumulative snapshots for every connection identity.
+    # Filters are deliberately applied outside that subquery: searching an
+    # old process/service value must not resurrect an obsolete snapshot.
+    conditions = ["1"]
     params: dict[str, Any] = {"cid": str(capture_id),
                               "lim": page_size, "off": (page - 1) * page_size}
-    if protocol:
+    if protocol != "all":
         conditions.append("protocol = %(proto)s")
         params["proto"] = protocol
+    if direction != "all":
+        conditions.append("direction = %(direction)s")
+        params["direction"] = direction
+    if kind != "all":
+        conditions.append("kind = %(kind)s")
+        params["kind"] = kind
+    if bytes_known is not None:
+        conditions.append("bytes_known = %(bytes_known)s")
+        params["bytes_known"] = 1 if bytes_known else 0
+    # PID 0/4 and unattributed rows are OS/kernel traffic. Everything with a
+    # concrete user-mode process is application traffic. This definition is
+    # stable across old agents that do not yet send direction/kind.
+    system_scope = "(pid <= 4 OR empty(trimBoth(process_name)))"
+    if scope == "system":
+        conditions.append(system_scope)
+    elif scope == "applications":
+        conditions.append(f"NOT {system_scope}")
     if q:
         needle = q.strip()
         # One box for the four things an operator actually searches by. Port
@@ -1000,60 +1405,292 @@ async def network_capture_flows(
             "positionCaseInsensitive(service_name, %(q)s) > 0",
         ]
         params["q"] = needle
-        if needle.isdigit():
+        if needle.isdigit() and int(needle) <= 65535:
             clauses += ["local_port = %(qport)s", "remote_port = %(qport)s"]
             params["qport"] = int(needle)
         conditions.append("(" + " OR ".join(clauses) + ")")
 
     where = " AND ".join(conditions)
-    # Rows are grouped by the 5-tuple, so ordering must use the aggregate
-    # form of each column, not the raw one.
     sort_expr = {
-        "bytes_total": "(max(bytes_sent) + max(bytes_received))",
-        "bytes_sent": "max(bytes_sent)",
-        "bytes_received": "max(bytes_received)",
-        "process_name": "any(process_name)",
-        "last_seen": "max(last_seen)",
+        "bytes_total": "(bytes_sent + bytes_received)",
+        "bytes_sent": "bytes_sent",
+        "bytes_received": "bytes_received",
+        "process_name": "process_name",
+        "last_seen": "last_seen",
         "remote_ip": "remote_ip",
     }[sort]
-    direction = "DESC" if order == "desc" else "ASC"
+    sort_direction = "DESC" if order == "desc" else "ASC"
 
-    client = get_clickhouse_client()
+    count_sql = f"SELECT count() FROM ({_NETWORK_FLOW_LATEST_SQL}) AS latest WHERE {where}"
+    rows_sql = f"""SELECT protocol, direction, kind, local_ip, local_port,
+                           remote_ip, remote_port, pid, process_name, service_name,
+                           state, bytes_sent, bytes_received,
+                           bytes_known, first_seen, last_seen, samples
+                    FROM ({_NETWORK_FLOW_LATEST_SQL}) AS latest
+                    WHERE {where}
+                    ORDER BY {sort_expr} {sort_direction}
+                    LIMIT %(lim)s OFFSET %(off)s"""
     try:
-        total = client.query(
-            f"SELECT count() FROM (SELECT capture_id FROM zenplus.host_network_flows "
-            f"WHERE {where} GROUP BY capture_id, protocol, local_ip, local_port, "
-            f"remote_ip, remote_port, pid)",
-            parameters=params,
-        ).result_rows[0][0]
-        rows = client.query(
-            f"""SELECT protocol, local_ip, local_port, remote_ip, remote_port, pid,
-                       any(process_name), any(service_name), argMax(state, observed_at),
-                       max(bytes_sent), max(bytes_received), max(bytes_known),
-                       min(first_seen), max(last_seen), max(samples)
-                FROM zenplus.host_network_flows
-                WHERE {where}
-                GROUP BY protocol, local_ip, local_port, remote_ip, remote_port, pid
-                ORDER BY {sort_expr} {direction}
-                LIMIT %(lim)s OFFSET %(off)s""".replace(
-                "bytes_sent)", "bytes_sent)", 1),
-            parameters=params,
-        ).result_rows
+        count_rows, rows = await asyncio.gather(
+            asyncio.to_thread(_run_clickhouse_query, count_sql, params),
+            asyncio.to_thread(_run_clickhouse_query, rows_sql, params),
+        )
+        total = count_rows[0][0]
     except Exception as exc:
         logger.warning("network flow query failed: %s", exc)
         raise HTTPException(503, f"Flow store unavailable: {exc}")
 
     items = [{
-        "protocol": r[0], "local_ip": r[1], "local_port": int(r[2]),
-        "remote_ip": r[3], "remote_port": int(r[4]), "pid": int(r[5]),
-        "process_name": r[6], "service_name": r[7], "state": r[8],
-        "bytes_sent": int(r[9]), "bytes_received": int(r[10]),
-        "bytes_known": bool(r[11]),
-        "first_seen": r[12], "last_seen": r[13], "samples": int(r[14]),
+        "protocol": r[0], "direction": r[1], "kind": r[2],
+        "local_ip": r[3], "local_port": int(r[4]),
+        "remote_ip": r[5], "remote_port": int(r[6]), "pid": int(r[7]),
+        "process_name": r[8], "service_name": r[9], "state": r[10],
+        "bytes_sent": int(r[11]), "bytes_received": int(r[12]),
+        "bytes_known": bool(r[13]),
+        "first_seen": r[14], "last_seen": r[15], "samples": int(r[16]),
+        "scope": (
+            "system" if int(r[7]) <= 4 or not str(r[8] or "").strip()
+            else "applications"
+        ),
     } for r in rows]
 
     return {"items": items, "total": int(total), "page": page, "page_size": page_size,
-            "capture_status": meta["status"], "bytes_available": meta["bytes_available"]}
+            "capture_status": meta["status"], "bytes_available": meta["bytes_available"],
+            "capture": {
+                "id": str(meta["id"]),
+                "status": meta["status"],
+                "flow_count": int(meta["flow_count"] or 0),
+                "bytes_available": bool(meta["bytes_available"]),
+                "archived": meta["archived_at"] is not None,
+                "purge_after": meta["purge_after"],
+            }}
+
+
+def _percentile(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * percentile
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
+def _interface_utilization(
+    rx_bps: float,
+    tx_bps: float,
+    receive_speed_bps: int,
+    transmit_speed_bps: int,
+    fallback_rx: Optional[float] = None,
+    fallback_tx: Optional[float] = None,
+) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """Compute full-duplex utilization from bit rates.
+
+    The agent converts byte deltas to bits/sec (delta * 8 / elapsed) before
+    upload. For a full-duplex link, receive and transmit share neither
+    direction's capacity, so overall utilization is max(rx%, tx%), never the
+    sum of both directions.
+    """
+    rx_util = (
+        float(rx_bps) * 100.0 / receive_speed_bps
+        if receive_speed_bps > 0 else fallback_rx
+    )
+    tx_util = (
+        float(tx_bps) * 100.0 / transmit_speed_bps
+        if transmit_speed_bps > 0 else fallback_tx
+    )
+    rx_util = min(100.0, max(0.0, float(rx_util))) if rx_util is not None else None
+    tx_util = min(100.0, max(0.0, float(tx_util))) if tx_util is not None else None
+    known = [float(value) for value in (rx_util, tx_util) if value is not None]
+    total = max(known) if known else None
+    return rx_util, tx_util, total
+
+
+def _traffic_stats(samples: list[dict]) -> dict:
+    if not samples:
+        empty = {"rx_bps": 0.0, "tx_bps": 0.0,
+                 "rx_utilization_pct": None, "tx_utilization_pct": None,
+                 "utilization_pct": None}
+        return {"current": dict(empty), "avg": dict(empty),
+                "peak": dict(empty), "p95": dict(empty)}
+
+    fields = ("rx_bps", "tx_bps", "rx_utilization_pct",
+              "tx_utilization_pct", "utilization_pct")
+
+    def aggregate(kind: str) -> dict:
+        result: dict[str, Optional[float]] = {}
+        for field in fields:
+            values = [float(s[field]) for s in samples if s.get(field) is not None]
+            if not values:
+                result[field] = None if "utilization" in field else 0.0
+            elif kind == "avg":
+                result[field] = sum(values) / len(values)
+            elif kind == "p95":
+                result[field] = _percentile(values, 0.95)
+            else:
+                result[field] = max(values)
+        if kind == "peak":
+            result["rx_bps"] = max(
+                max(float(s.get("rx_bps") or 0) for s in samples),
+                max(float(s.get("peak_rx_bps") or 0) for s in samples),
+            )
+            result["tx_bps"] = max(
+                max(float(s.get("tx_bps") or 0) for s in samples),
+                max(float(s.get("peak_tx_bps") or 0) for s in samples),
+            )
+        return {key: round(value, 4) if value is not None else None
+                for key, value in result.items()}
+
+    current = {key: samples[-1].get(key) for key in fields}
+    current.update({
+        "timestamp": samples[-1]["timestamp"],
+        "rx_bytes": samples[-1]["rx_bytes"],
+        "tx_bytes": samples[-1]["tx_bytes"],
+    })
+    return {
+        "current": current,
+        "avg": aggregate("avg"),
+        "peak": aggregate("peak"),
+        "p95": aggregate("p95"),
+    }
+
+
+def _query_capture_traffic(capture_id: str) -> list:
+    from app.core.database import get_ch_client
+
+    return get_ch_client().query(
+        """SELECT interface, argMax(interface_index, ingested_at), observed_at,
+                  argMax(rx_bytes, ingested_at), argMax(tx_bytes, ingested_at),
+                  argMax(rx_bps, ingested_at), argMax(tx_bps, ingested_at),
+                  argMax(peak_rx_bps, ingested_at), argMax(peak_tx_bps, ingested_at),
+                  argMax(link_speed_bps, ingested_at),
+                  argMax(receive_link_speed_bps, ingested_at),
+                  argMax(transmit_link_speed_bps, ingested_at),
+                  argMax(rx_utilization_pct, ingested_at),
+                  argMax(tx_utilization_pct, ingested_at)
+           FROM zenplus.host_network_traffic_samples
+           WHERE capture_id = %(cid)s
+           GROUP BY interface, observed_at
+           ORDER BY interface, observed_at
+           LIMIT 250000""",
+        parameters={"cid": capture_id},
+    ).result_rows
+
+
+@router.get("/network-captures/{capture_id}/traffic")
+async def network_capture_traffic(
+    capture_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Interface traffic series and current/avg/peak/p95 utilization."""
+    meta = (await db.execute(
+        text("""SELECT id, server_id, status, started_at, ends_at, completed_at
+                FROM network_captures WHERE id = :id"""),
+        {"id": capture_id},
+    )).mappings().first()
+    if not meta:
+        raise HTTPException(404, "Capture not found")
+
+    try:
+        rows = await asyncio.to_thread(_query_capture_traffic, str(capture_id))
+    except Exception as exc:
+        logger.warning("network capture traffic query failed: %s", exc)
+        raise HTTPException(503, f"Traffic sample store unavailable: {exc}")
+
+    grouped: dict[str, dict] = {}
+    aggregate_by_time: dict[Any, dict] = {}
+    for row in rows:
+        interface = str(row[0])
+        link_speed = int(row[9] or 0)
+        receive_speed = int(row[10] or link_speed)
+        transmit_speed = int(row[11] or link_speed)
+        rx_bps, tx_bps = float(row[5] or 0), float(row[6] or 0)
+        rx_util, tx_util, utilization = _interface_utilization(
+            rx_bps, tx_bps, receive_speed, transmit_speed,
+            float(row[12]) if row[12] is not None else None,
+            float(row[13]) if row[13] is not None else None,
+        )
+        sample = {
+            "timestamp": row[2],
+            "rx_bytes": int(row[3] or 0),
+            "tx_bytes": int(row[4] or 0),
+            "rx_bps": rx_bps,
+            "tx_bps": tx_bps,
+            "peak_rx_bps": float(row[7] or 0),
+            "peak_tx_bps": float(row[8] or 0),
+            "rx_utilization_pct": rx_util,
+            "tx_utilization_pct": tx_util,
+            "utilization_pct": utilization,
+        }
+        entry = grouped.setdefault(interface, {
+            "interface": interface,
+            "interface_index": int(row[1] or 0),
+            "link_speed_bps": link_speed,
+            "receive_link_speed_bps": receive_speed,
+            "transmit_link_speed_bps": transmit_speed,
+            "samples": [],
+        })
+        entry["interface_index"] = int(row[1] or entry["interface_index"])
+        entry["link_speed_bps"] = link_speed or entry["link_speed_bps"]
+        entry["receive_link_speed_bps"] = receive_speed or entry["receive_link_speed_bps"]
+        entry["transmit_link_speed_bps"] = transmit_speed or entry["transmit_link_speed_bps"]
+        entry["samples"].append(sample)
+
+        aggregate = aggregate_by_time.setdefault(row[2], {
+            "timestamp": row[2], "rx_bytes": 0, "tx_bytes": 0,
+            "rx_bps": 0.0, "tx_bps": 0.0, "peak_rx_bps": 0.0,
+            "peak_tx_bps": 0.0, "receive_speed_bps": 0,
+            "transmit_speed_bps": 0,
+        })
+        for field in ("rx_bytes", "tx_bytes", "rx_bps", "tx_bps",
+                      "peak_rx_bps", "peak_tx_bps"):
+            aggregate[field] += sample[field]
+        aggregate["receive_speed_bps"] += receive_speed
+        aggregate["transmit_speed_bps"] += transmit_speed
+
+    interfaces = []
+    for entry in grouped.values():
+        entry.update(_traffic_stats(entry["samples"]))
+        interfaces.append(entry)
+
+    aggregate_samples = []
+    for sample in sorted(aggregate_by_time.values(), key=lambda value: value["timestamp"]):
+        rx_util, tx_util, utilization = _interface_utilization(
+            sample["rx_bps"], sample["tx_bps"],
+            sample["receive_speed_bps"], sample["transmit_speed_bps"],
+        )
+        sample.update({"rx_utilization_pct": rx_util,
+                       "tx_utilization_pct": tx_util,
+                       "utilization_pct": utilization})
+        aggregate_samples.append(sample)
+    aggregate = {
+        "interface": "all",
+        "link_speed_bps": max(
+            aggregate_samples[-1]["receive_speed_bps"],
+            aggregate_samples[-1]["transmit_speed_bps"],
+        ) if aggregate_samples else 0,
+        "receive_link_speed_bps": aggregate_samples[-1]["receive_speed_bps"]
+            if aggregate_samples else 0,
+        "transmit_link_speed_bps": aggregate_samples[-1]["transmit_speed_bps"]
+            if aggregate_samples else 0,
+        "samples": aggregate_samples,
+    }
+    aggregate.update(_traffic_stats(aggregate_samples))
+
+    return {
+        "capture_id": str(meta["id"]),
+        "server_id": str(meta["server_id"]),
+        "status": meta["status"],
+        "started_at": meta["started_at"],
+        "ends_at": meta["ends_at"],
+        "completed_at": meta["completed_at"],
+        "interfaces": interfaces,
+        "aggregate": aggregate,
+    }
 
 
 @router.get("/network-captures/{capture_id}/summary")
@@ -1063,8 +1700,6 @@ async def network_capture_summary(
     user: User = Depends(get_current_user),
 ):
     """Top talkers and per-process totals for a capture."""
-    from app.core.database import get_clickhouse_client
-
     meta = (await db.execute(
         text("""SELECT c.*, u.username AS requested_by_name
                 FROM network_captures c
@@ -1075,28 +1710,22 @@ async def network_capture_summary(
     if not meta:
         raise HTTPException(404, "Capture not found")
 
-    client = get_clickhouse_client()
     params = {"cid": str(capture_id)}
+    process_sql = f"""SELECT process_name, service_name,
+                            sum(bytes_sent) AS sent, sum(bytes_received) AS recv,
+                            count() AS flows
+                     FROM ({_NETWORK_FLOW_LATEST_SQL}) AS latest
+                     GROUP BY process_name, service_name
+                     ORDER BY (sent + recv) DESC LIMIT 15"""
+    peer_sql = f"""SELECT remote_ip, sum(bytes_sent) AS sent,
+                         sum(bytes_received) AS recv, count() AS flows
+                  FROM ({_NETWORK_FLOW_LATEST_SQL}) AS latest
+                  GROUP BY remote_ip ORDER BY (sent + recv) DESC LIMIT 15"""
     try:
-        by_process = client.query(
-            """SELECT process_name, service_name,
-                      sum(s) AS sent, sum(r) AS recv, count() AS flows
-               FROM (SELECT process_name, any(service_name) AS service_name,
-                            max(bytes_sent) AS s, max(bytes_received) AS r
-                     FROM zenplus.host_network_flows WHERE capture_id = %(cid)s
-                     GROUP BY process_name, local_ip, local_port, remote_ip, remote_port, pid, protocol)
-               GROUP BY process_name, service_name
-               ORDER BY (sent + recv) DESC LIMIT 15""",
-            parameters=params,
-        ).result_rows
-        by_peer = client.query(
-            """SELECT remote_ip, sum(s) AS sent, sum(r) AS recv, count() AS flows
-               FROM (SELECT remote_ip, max(bytes_sent) AS s, max(bytes_received) AS r
-                     FROM zenplus.host_network_flows WHERE capture_id = %(cid)s
-                     GROUP BY remote_ip, local_ip, local_port, remote_port, pid, protocol)
-               GROUP BY remote_ip ORDER BY (sent + recv) DESC LIMIT 15""",
-            parameters=params,
-        ).result_rows
+        by_process, by_peer = await asyncio.gather(
+            asyncio.to_thread(_run_clickhouse_query, process_sql, params),
+            asyncio.to_thread(_run_clickhouse_query, peer_sql, params),
+        )
     except Exception as exc:
         logger.warning("network capture summary failed: %s", exc)
         raise HTTPException(503, f"Flow store unavailable: {exc}")
@@ -1106,6 +1735,7 @@ async def network_capture_summary(
         "server_id": str(meta["server_id"]),
         "agent_id": str(meta["agent_id"]) if meta["agent_id"] else None,
         "requested_by": None,
+        "archived": meta.get("archived_at") is not None,
     }
     return {
         "capture": capture,
@@ -1273,7 +1903,11 @@ async def list_enrollment_tokens(
     user: User = Depends(get_current_user),
 ):
     """Recent enrollment tokens (prefix only — raw tokens are never stored)."""
-    where = "1=1" if include_expired else "(t.expires_at > NOW() AND t.revoked_at IS NULL AND t.uses < t.max_uses)"
+    where = (
+        "1=1" if include_expired else
+        "(t.expires_at > NOW() AND t.revoked_at IS NULL "
+        "AND (t.max_uses = 0 OR t.uses < t.max_uses))"
+    )
     rows = (await db.execute(
         text(f"""SELECT t.id, t.token_prefix, t.platform, t.hostname_hint, t.tags,
                         t.expires_at, t.max_uses, t.uses, t.consumed_at, t.consumed_ip,
@@ -1297,6 +1931,9 @@ async def list_enrollment_tokens(
         "expires_at": r["expires_at"],
         "max_uses": r["max_uses"],
         "uses": r["uses"],
+        "unlimited": r["max_uses"] == 0,
+        "remaining_uses": None if r["max_uses"] == 0
+                          else max(0, r["max_uses"] - r["uses"]),
         "consumed_at": r["consumed_at"],
         "consumed_ip": str(r["consumed_ip"]) if r["consumed_ip"] else None,
         "revoked_at": r["revoked_at"],
@@ -1475,6 +2112,7 @@ async def list_fleet(
     site_id: Optional[UUID] = None,
     policy_id: Optional[UUID] = None,
     update_ring: Optional[str] = None,
+    authorization: Optional[str] = None,
     q: Optional[str] = None,
     sort: str = "last_heartbeat_at",
     order: str = "desc",
@@ -1511,6 +2149,12 @@ async def list_fleet(
         where.append("a.policy_id = :pol"); params["pol"] = policy_id
     if update_ring:
         where.append("a.update_ring = :ur"); params["ur"] = update_ring
+    if authorization == "pending":
+        where.append("a.authorized_at IS NULL AND a.revoked_at IS NULL")
+    elif authorization == "authorized":
+        where.append("a.authorized_at IS NOT NULL AND a.revoked_at IS NULL")
+    elif authorization == "revoked":
+        where.append("a.revoked_at IS NOT NULL")
     if q:
         where.append("(a.hostname ILIKE :q OR a.agent_uid ILIKE :q OR a.version ILIKE :q)")
         params["q"] = f"%{q}%"
@@ -1535,6 +2179,8 @@ async def list_fleet(
                   COUNT(*) FILTER (WHERE status = 'stale')    AS stale,
                   COUNT(*) FILTER (WHERE status = 'offline')  AS offline,
                   COUNT(*) FILTER (WHERE status = 'disabled') AS disabled,
+                  COUNT(*) FILTER (WHERE authorized_at IS NULL
+                                     AND revoked_at IS NULL)   AS pending_authorization,
                   COUNT(*)                                    AS total,
                   COALESCE(SUM(queue_depth), 0)               AS queue_depth,
                   COALESCE(SUM(spool_bytes), 0)               AS spool_bytes
@@ -1559,7 +2205,7 @@ async def list_fleet(
 # it so dropping a file in is all that is required.
 
 _PKG_NAME_RE = re.compile(
-    r"^zenplus-agent[-_](\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+)?)\.(msi|exe|tar\.gz)$"
+    r"^zenplus-agent[-_](\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+)?)\.(msi|exe|pkg|tar\.gz)$"
 )
 
 
@@ -1567,61 +2213,86 @@ def _version_key(v: str):
     return [int(p) if p.isdigit() else 0 for p in v.split("-")[0].split(".")]
 
 
+def _sha256_file(path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 async def sync_agent_packages(db: AsyncSession) -> dict:
     """Reconcile agent_packages with the files in the artifact store.
 
-    Hashing is skipped when a registered row already matches the file's size,
-    so this is cheap enough to run on every read; a 40 MB MSI is only digested
-    when it is new or has changed.
+    Content is hashed even when name and size match. Published
+    platform/version bytes are immutable: hash drift quarantines the row by
+    clearing ``is_latest`` and is never accepted as a replacement checksum.
     """
     from app.api.v1.agents import AGENT_PKG_DIR
 
     registered = {
         (r["platform"], r["arch"], r["version"], r["channel"]): r
         for r in (await db.execute(
-            text("""SELECT platform, arch, version, channel, file_name, file_size
+            text("""SELECT platform, arch, version, channel, file_name, file_size, sha256
                     FROM agent_packages""")
         )).mappings().all()
     }
 
     seen: set[tuple] = set()
-    added, updated, removed = [], [], []
+    added, updated, removed, quarantined, repaired = [], [], [], [], []
 
     for platform in ("windows", "linux", "macos"):
         pdir = AGENT_PKG_DIR / platform
         if not pdir.is_dir():
             continue
-        found: list[tuple[str, str, int]] = []
+        found: list[tuple[str, str, int, str]] = []
         for f in sorted(pdir.iterdir()):
             if not f.is_file():
                 continue
             m = _PKG_NAME_RE.match(f.name)
             if not m:
                 continue
-            found.append((m.group(1), f.name, f.stat().st_size))
+            found.append((m.group(1), f.name, f.stat().st_size, _sha256_file(f)))
 
         if not found:
             continue
-        latest_version = max((v for v, _, _ in found), key=_version_key)
+        latest_version = max((v for v, _, _, _ in found), key=_version_key)
 
-        for version, fname, fsize in found:
+        for version, fname, fsize, digest in found:
             key = (platform, "amd64", version, "stable")
             seen.add(key)
             existing = registered.get(key)
             is_latest = version == latest_version
-            if existing and existing["file_size"] == fsize and existing["file_name"] == fname:
-                # Content unchanged; only the latest flag may need moving.
+            if existing and existing["sha256"].lower() != digest:
                 await db.execute(
+                    text("""UPDATE agent_packages SET is_latest = FALSE
+                            WHERE platform = :pl AND arch = 'amd64'
+                              AND version = :v AND channel = 'stable'"""),
+                    {"pl": platform, "v": version},
+                )
+                quarantined.append(f"{platform}/{fname}")
+                logger.error(
+                    "agent package hash drift quarantined: platform=%s version=%s "
+                    "file=%s expected_sha=%s actual_sha=%s",
+                    platform, version, fname, existing["sha256"], digest,
+                )
+                continue
+            if (existing and existing["file_size"] == fsize
+                    and existing["file_name"] == fname
+                    and existing["sha256"] == digest):
+                # Content unchanged; only the latest flag may need moving.
+                repair = await db.execute(
                     text("""UPDATE agent_packages SET is_latest = :latest
                             WHERE platform = :pl AND arch = 'amd64'
                               AND version = :v AND channel = 'stable'
                               AND is_latest IS DISTINCT FROM :latest"""),
                     {"pl": platform, "v": version, "latest": is_latest},
                 )
+                if repair.rowcount:
+                    repaired.append(f"{platform}/{fname}")
                 continue
 
-            digest = hashlib.sha256((pdir / fname).read_bytes()).hexdigest()
-            await db.execute(
+            accepted = (await db.execute(
                 text("""INSERT INTO agent_packages
                           (platform, arch, version, channel, file_name, file_size,
                            sha256, download_path, is_latest)
@@ -1629,13 +2300,23 @@ async def sync_agent_packages(db: AsyncSession) -> dict:
                         ON CONFLICT (platform, arch, version, channel) DO UPDATE SET
                           file_name = EXCLUDED.file_name,
                           file_size = EXCLUDED.file_size,
-                          sha256 = EXCLUDED.sha256,
                           download_path = EXCLUDED.download_path,
-                          is_latest = EXCLUDED.is_latest"""),
+                          is_latest = EXCLUDED.is_latest
+                        WHERE agent_packages.sha256 = EXCLUDED.sha256
+                        RETURNING id"""),
                 {"pl": platform, "v": version, "fn": fname, "fs": fsize, "sha": digest,
                  "dp": f"/api/v1/agents/packages/{platform}/latest", "latest": is_latest},
-            )
-            (updated if existing else added).append(f"{platform}/{fname}")
+            )).first()
+            if accepted:
+                (updated if existing else added).append(f"{platform}/{fname}")
+            else:
+                await db.execute(
+                    text("""UPDATE agent_packages SET is_latest = FALSE
+                            WHERE platform = :pl AND arch = 'amd64'
+                              AND version = :v AND channel = 'stable'"""),
+                    {"pl": platform, "v": version},
+                )
+                quarantined.append(f"{platform}/{fname}")
 
     # Rows whose file is gone would otherwise be offered for download and then
     # 410 at the last moment.
@@ -1649,11 +2330,15 @@ async def sync_agent_packages(db: AsyncSession) -> dict:
         )
         removed.append(f"{key[0]}/{row['file_name']}")
 
-    if added or updated or removed:
+    if added or updated or removed or quarantined or repaired:
         await db.commit()
-        logger.info("agent package store synced: added=%s updated=%s removed=%s",
-                    added, updated, removed)
-    return {"added": added, "updated": updated, "removed": removed}
+        logger.info(
+            "agent package store synced: added=%s updated=%s removed=%s "
+            "quarantined=%s repaired=%s",
+            added, updated, removed, quarantined, repaired,
+        )
+    return {"added": added, "updated": updated, "removed": removed,
+            "quarantined": quarantined, "repaired": repaired}
 
 
 @fleet_router.get("/packages")
@@ -1683,17 +2368,22 @@ async def publish_agent_packages(
     downloaded; this endpoint is for reconciling immediately after a release.
 
     Layout: /opt/zenplus/artifacts/agents/<platform>/zenplus-agent-<version>.<ext>
-    (.msi for windows, .tar.gz for linux/macos). The newest version per
+    (.msi/.exe for Windows, .tar.gz for Linux, .pkg/.tar.gz for macOS). The newest version per
     platform is flagged is_latest and served by the download endpoint.
     """
     from app.api.v1.agents import AGENT_PKG_DIR
 
     def _parse_version(name: str) -> Optional[str]:
         import re
-        m = re.match(r"^zenplus-agent[-_](\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+)?)\.(msi|tar\.gz)$", name)
+        m = re.match(
+            r"^zenplus-agent[-_](\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+)?)\."
+            r"(msi|exe|pkg|tar\.gz)$",
+            name,
+        )
         return m.group(1) if m else None
 
     published: list[dict] = []
+    quarantined: list[dict] = []
     skipped: list[str] = []
     for platform in ("windows", "linux", "macos"):
         pdir = AGENT_PKG_DIR / platform
@@ -1707,7 +2397,7 @@ async def publish_agent_packages(
             if not version:
                 skipped.append(f"{platform}/{f.name}")
                 continue
-            digest = hashlib.sha256(f.read_bytes()).hexdigest()
+            digest = _sha256_file(f)
             candidates.append((version, f.name, f.stat().st_size, digest))
         if not candidates:
             continue
@@ -1717,7 +2407,7 @@ async def publish_agent_packages(
         candidates.sort(key=lambda c: _vkey(c[0]))
         latest_version = candidates[-1][0]
         for version, fname, fsize, digest in candidates:
-            await db.execute(
+            accepted = (await db.execute(
                 text("""INSERT INTO agent_packages
                           (platform, arch, version, channel, file_name, file_size, sha256,
                            download_path, is_latest)
@@ -1725,60 +2415,41 @@ async def publish_agent_packages(
                         ON CONFLICT (platform, arch, version, channel) DO UPDATE SET
                           file_name = EXCLUDED.file_name,
                           file_size = EXCLUDED.file_size,
-                          sha256 = EXCLUDED.sha256,
                           download_path = EXCLUDED.download_path,
-                          is_latest = EXCLUDED.is_latest"""),
+                          is_latest = EXCLUDED.is_latest
+                        WHERE agent_packages.sha256 = EXCLUDED.sha256
+                        RETURNING id"""),
                 {"pl": platform, "v": version, "fn": fname, "fs": fsize, "sha": digest,
                  "dp": f"/api/v1/agents/packages/{platform}/latest",
                  "latest": version == latest_version},
-            )
-            published.append({"platform": platform, "version": version, "file_name": fname,
-                              "is_latest": version == latest_version})
+            )).first()
+            item = {"platform": platform, "version": version, "file_name": fname,
+                    "is_latest": version == latest_version}
+            if accepted:
+                published.append(item)
+            else:
+                await db.execute(
+                    text("""UPDATE agent_packages SET is_latest = FALSE
+                            WHERE platform = :pl AND arch = 'amd64'
+                              AND version = :v AND channel = 'stable'"""),
+                    {"pl": platform, "v": version},
+                )
+                quarantined.append(item)
         await db.execute(
             text("""UPDATE agent_packages SET is_latest = FALSE
                     WHERE platform = :pl AND channel = 'stable' AND version != :v"""),
             {"pl": platform, "v": latest_version},
         )
     await db.commit()
-    return {"published": published, "skipped": skipped,
+    return {"published": published, "quarantined": quarantined, "skipped": skipped,
             "package_dir": str(AGENT_PKG_DIR)}
 
 
-# ── Pre-configured package download ─────────────────────────────────
+# ── Agent package download ───────────────────────────────────────────
 #
-# The published MSI ships with a fixed-width placeholder as the default value
-# of its ENROLLMENT_TOKEN property. Because every enrollment token is exactly
-# the same length ("zpa_enr_" + 32 chars), the placeholder can be rewritten
-# byte-for-byte in the packaged file: the compound-file layout, stream sizes
-# and string-pool offsets all stay valid, so no MSI rebuild is needed and the
-# operator gets a package that installs on N hosts with nothing to type.
-
-# Must match config.PlaceholderEnrollmentToken in the agent source.
-PKG_TOKEN_PLACEHOLDER = b"zpa_enr_PLACEHOLDERTOKENPLACEHOLDERTOKEN"
-
-
-def _stamp_enrollment_token(blob: bytes, raw_token: str) -> bytes:
-    """Rewrite the package's placeholder token in place.
-
-    Length equality is what makes this safe; it is asserted rather than
-    assumed, because a mismatch would silently corrupt the package.
-    """
-    token = raw_token.encode()
-    if len(token) != len(PKG_TOKEN_PLACEHOLDER):
-        raise HTTPException(
-            500,
-            f"Enrollment token is {len(token)} bytes but the package placeholder is "
-            f"{len(PKG_TOKEN_PLACEHOLDER)}; refusing to produce a corrupt package.",
-        )
-    occurrences = blob.count(PKG_TOKEN_PLACEHOLDER)
-    if occurrences == 0:
-        raise HTTPException(
-            409,
-            "The published package predates pre-configured downloads (no token "
-            "placeholder found). Rebuild and republish the agent package.",
-        )
-    return blob.replace(PKG_TOKEN_PLACEHOLDER, token)
-
+# The artifact is never rewritten after publication: doing so invalidates an
+# MSI's Authenticode signature and its manifest SHA. New agents register as
+# pending and receive their credential only after appliance approval.
 
 @fleet_router.post("/packages/download")
 async def download_preconfigured_package(
@@ -1787,13 +2458,12 @@ async def download_preconfigured_package(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_operator_user),
 ):
-    """Return the published package with a freshly minted token stamped in.
-
-    The token's max_uses equals the requested server count, so one download
-    covers exactly that many hosts. The raw token is never persisted — only
-    its hash is stored, and the only copy leaves in the response body.
-    """
-    from app.api.v1.agents import AGENT_PKG_DIR
+    """Stream the immutable package without creating an enrollment secret."""
+    from app.api.v1.agents import (
+        AGENT_PKG_DIR,
+        _package_media_type,
+        _verified_package_path,
+    )
 
     await sync_agent_packages(db)
     pkg = await _latest_package_for_download(data.platform, db)
@@ -1803,60 +2473,29 @@ async def download_preconfigured_package(
             f"No {data.platform} agent package is published yet. Drop the package into "
             f"{AGENT_PKG_DIR}/{data.platform}/ and publish it from this page.",
         )
-    file_path = (AGENT_PKG_DIR / data.platform / pkg["file_name"]).resolve()
-    if not str(file_path).startswith(str(AGENT_PKG_DIR)) or not file_path.is_file():
-        raise HTTPException(410, "Published package file is missing on disk")
+    file_path = await asyncio.to_thread(_verified_package_path, data.platform, pkg)
+    package_sha256 = str(pkg["sha256"]).lower()
 
-    raw, hashed, prefix = _new_enrollment_token()
-    expires = datetime.now(timezone.utc) + timedelta(hours=data.ttl_hours)
-    tags = list(data.tags or [])
-    if data.label:
-        tags.append(data.label)
+    controller_url = await _server_url(request, db)
 
-    blob = _stamp_enrollment_token(file_path.read_bytes(), raw)
-
-    row = (await db.execute(
-        text("""INSERT INTO agent_enrollment_tokens
-                  (token_hash, token_prefix, platform, site_id, policy_id,
-                   hostname_hint, tags, expires_at, max_uses, created_by)
-                VALUES (:h, :p, :pl, :site, :pol, :hint, :tags, :exp, :mu, :cb)
-                RETURNING id, expires_at"""),
-        {
-            "h": hashed, "p": prefix,
-            # 'any' lets one package cover mixed hosts; the package itself is
-            # already platform-specific.
-            "pl": "any",
-            "site": data.site_id, "pol": data.policy_id,
-            "hint": data.label or f"pre-configured {data.platform} package",
-            "tags": json.dumps(tags), "exp": expires,
-            "mu": data.server_count, "cb": user.id,
-        },
-    )).first()
-    await db.commit()
-
-    logger.info(
-        "pre-configured %s package downloaded by user=%s token=%s max_uses=%d",
-        data.platform, user.id, prefix, data.server_count,
-    )
+    logger.info("agent %s package downloaded by user=%s", data.platform, user.id)
 
     filename = pkg["file_name"]
-    media = "application/x-msi" if filename.endswith(".msi") else "application/octet-stream"
-    return Response(
-        content=blob,
+    media = _package_media_type(filename)
+    return FileResponse(
+        path=file_path,
+        filename=filename,
         media_type=media,
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "Content-Length": str(len(blob)),
-            # Read by the dashboard to show what the download is good for.
-            # Deliberately no raw token here — it lives only inside the file.
-            "X-Token-Id": str(row[0]),
-            "X-Token-Prefix": prefix,
-            "X-Token-Expires-At": row[1].isoformat(),
-            "X-Token-Max-Uses": str(data.server_count),
+            "X-Controller-URL": controller_url,
             "X-Package-Version": pkg["version"],
+            "X-Package-Sha256": package_sha256,
+            "Cache-Control": "no-store, private",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
             "Access-Control-Expose-Headers": (
-                "Content-Disposition,X-Token-Id,X-Token-Prefix,"
-                "X-Token-Expires-At,X-Token-Max-Uses,X-Package-Version"
+                "Content-Disposition,X-Controller-URL,"
+                "X-Package-Version,X-Package-Sha256"
             ),
         },
     )
@@ -1891,6 +2530,32 @@ async def get_agent(
     if not row:
         raise HTTPException(404, "Agent not found")
     return _agent_response(dict(row))
+
+
+@fleet_router.post("/{agent_id}/authorize")
+async def authorize_agent(
+    agent_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    affected = await _authorize_agents([agent_id], user.id, db)
+    await db.commit()
+    if not affected:
+        raise HTTPException(404, "Agent not found")
+    return {"ok": True, "authorization_state": "authorized"}
+
+
+@fleet_router.post("/{agent_id}/revoke")
+async def revoke_agent(
+    agent_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    affected = await _revoke_agents([agent_id], user.id, db)
+    await db.commit()
+    if not affected:
+        raise HTTPException(404, "Agent not found")
+    return {"ok": True, "authorization_state": "revoked"}
 
 
 @fleet_router.post("/{agent_id}/rotate-certificate")
@@ -2026,7 +2691,12 @@ async def fleet_bulk_action(
     if not data.agent_ids:
         return {"ok": True, "affected": 0}
     ids = list(data.agent_ids)
-    if data.action == "change_policy":
+    affected = len(ids)
+    if data.action == "authorize":
+        affected = await _authorize_agents(ids, user.id, db)
+    elif data.action == "revoke":
+        affected = await _revoke_agents(ids, user.id, db)
+    elif data.action == "change_policy":
         if not data.policy_id:
             raise HTTPException(400, "policy_id required")
         await db.execute(
@@ -2085,7 +2755,7 @@ async def fleet_bulk_action(
     else:
         raise HTTPException(400, "Unknown action")
     await db.commit()
-    return {"ok": True, "affected": len(ids)}
+    return {"ok": True, "affected": affected}
 
 
 # ── Server monitoring overview KPIs ─────────────────────────────────

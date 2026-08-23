@@ -61,3 +61,15 @@ func TestTransportErrorIsNotUnauthorized(t *testing.T) {
 		t.Fatal("a connection failure must not be classified as unauthorized")
 	}
 }
+
+func TestResolvePreservesQueryParameters(t *testing.T) {
+	c, err := New("https://appliance.example/base", "", true, "agent-1", "key-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := c.resolve("/api/v1/agents/packages/manifest?platform=windows&channel=stable")
+	want := "https://appliance.example/api/v1/agents/packages/manifest?platform=windows&channel=stable"
+	if got != want {
+		t.Fatalf("resolve() = %q, want %q", got, want)
+	}
+}

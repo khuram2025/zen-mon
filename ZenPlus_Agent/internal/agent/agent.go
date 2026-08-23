@@ -6,15 +6,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
+	apmruntime "zenplus-agent/internal/apm"
 	"zenplus-agent/internal/backoff"
 	"zenplus-agent/internal/client"
 	"zenplus-agent/internal/collectors"
@@ -31,7 +31,7 @@ import (
 
 // supervisor gates all controller traffic: exponential backoff with jitter
 // during outages, a hard stop on rejected credentials (with automatic
-// re-enrollment when a token is available), and controller backpressure.
+// return to appliance-managed authorization), and controller backpressure.
 type supervisor struct {
 	comm            *backoff.Backoff
 	enrollBO        *backoff.Backoff
@@ -40,6 +40,8 @@ type supervisor struct {
 	authFailed      bool
 	lastSkewLogged  time.Duration
 }
+
+const pendingAuthorizationPollInterval = 30 * time.Second
 
 func newSupervisor() *supervisor {
 	return &supervisor{
@@ -104,12 +106,10 @@ type Options struct {
 }
 
 type localSettings struct {
-	ControllerURL   string `json:"controller_url"`
-	EnrollmentToken string `json:"enrollment_token"`
-	SiteID          string `json:"site_id"`
-	PolicyID        string `json:"policy_id"`
-	ProxyURL        string `json:"proxy_url"`
-	VerifyTLS       bool   `json:"verify_tls"`
+	ControllerURL string `json:"controller_url"`
+	ProxyURL      string `json:"proxy_url"`
+	VerifyTLS     bool   `json:"verify_tls"`
+	APMEnabled    bool   `json:"apm_enabled"`
 }
 
 func Run(ctx context.Context, opts Options) error {
@@ -141,18 +141,6 @@ func Run(ctx context.Context, opts Options) error {
 		log.Printf("enrollment error: %v", err)
 	}
 	applyEnrollment(&cfg, enrollment)
-	if enrollment.Fresh && cfg.EnrollmentToken != "" {
-		if err := config.ClearEnrollmentToken(opts.ConfigPath); err != nil {
-			log.Printf("unable to clear enrollment token from config: %v", err)
-		} else {
-			if config.HasEmbeddedEnrollmentToken() {
-				log.Printf("enrollment token removed from bootstrap config; this build keeps a compiled-in token as a re-enrollment fallback")
-			} else {
-				log.Printf("enrollment token cleared from bootstrap config")
-			}
-			cfg.EnrollmentToken = ""
-		}
-	}
 
 	up, poller, err := newRuntimeClients(cfg, paths, store, enrollment)
 	if err != nil {
@@ -165,7 +153,10 @@ func Run(ctx context.Context, opts Options) error {
 		AgentVersion:    model.AgentVersion,
 		StartedAt:       time.Now().UTC(),
 		CollectorErrors: map[string]string{},
+		LocalAPM:        probeLocalAPM(cfg),
 	}
+	apmManager := apmruntime.New(paths, log.Printf)
+	defer apmManager.Close()
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
 	defer stop()
@@ -174,10 +165,19 @@ func Run(ctx context.Context, opts Options) error {
 		ctx, timeout = context.WithTimeout(ctx, opts.Duration)
 		defer timeout()
 	}
+	if enrollment.Enrolled {
+		apmManager.Reconcile(ctx, cfg, enrollment.Identity.AgentID, enrollment.Identity.ServerID, up.Client())
+		status.LocalAPM = apmManager.Snapshot()
+	}
 
 	sup := newSupervisor()
+	if !enrollment.Enrolled && enrollment.AuthorizationState != "" {
+		sup.enrollNotBefore = time.Now().UTC().Add(pendingAuthorizationPollInterval)
+		next := sup.enrollNotBefore
+		status.NextRetryAt = &next
+	}
 	runCollection(ctx, cfg, paths, store, &status, enrollment, log.Printf)
-	tickHeartbeat(ctx, opts.ConfigPath, &cfg, paths, store, &up, &poller, &status, &enrollment, sup, log.Printf)
+	tickHeartbeat(ctx, opts.ConfigPath, &cfg, paths, store, &up, &poller, &status, &enrollment, apmManager, sup, log.Printf)
 	tickUpload(ctx, store, up, &status, &enrollment, sup, log.Printf)
 	syncAuthStatus(&status, enrollment, sup)
 	_ = writeStatus(paths.StatusFile, status)
@@ -195,11 +195,13 @@ func Run(ctx context.Context, opts Options) error {
 	uploadTicker := time.NewTicker(uploadInterval)
 	configTicker := time.NewTicker(configInterval)
 	localConfigTicker := time.NewTicker(5 * time.Second)
+	apmTicker := time.NewTicker(10 * time.Second)
 	defer collectTicker.Stop()
 	defer heartbeatTicker.Stop()
 	defer uploadTicker.Stop()
 	defer configTicker.Stop()
 	defer localConfigTicker.Stop()
+	defer apmTicker.Stop()
 	localHash := localSettingsFingerprint(cfg)
 	authStamp := authFileStamp(paths)
 	syncTickers := func() {
@@ -233,7 +235,7 @@ func Run(ctx context.Context, opts Options) error {
 		case <-collectTicker.C:
 			runCollection(ctx, cfg, paths, store, &status, enrollment, log.Printf)
 		case <-heartbeatTicker.C:
-			tickHeartbeat(ctx, opts.ConfigPath, &cfg, paths, store, &up, &poller, &status, &enrollment, sup, log.Printf)
+			tickHeartbeat(ctx, opts.ConfigPath, &cfg, paths, store, &up, &poller, &status, &enrollment, apmManager, sup, log.Printf)
 		case <-uploadTicker.C:
 			tickUpload(ctx, store, up, &status, &enrollment, sup, log.Printf)
 		case <-configTicker.C:
@@ -243,11 +245,18 @@ func Run(ctx context.Context, opts Options) error {
 		case <-localConfigTicker.C:
 			rebuilt := refreshLocalRuntime(ctx, opts.ConfigPath, &cfg, paths, store, &enrollment, &up, &poller, &status, &localHash, &authStamp, log.Printf)
 			if rebuilt && enrollment.Enrolled && sup.authFailed {
-				// Operator supplied new credentials or a token: resume traffic.
+				// The appliance issued a new credential: resume traffic.
 				sup.authFailed = false
 				sup.enrollBO.Reset()
 				sup.onSuccess(&status)
 			}
+		case <-apmTicker.C:
+			var apmClient *client.Client
+			if enrollment.Enrolled && up != nil {
+				apmClient = up.Client()
+			}
+			apmManager.Reconcile(ctx, cfg, enrollment.Identity.AgentID, enrollment.Identity.ServerID, apmClient)
+			status.LocalAPM = apmManager.Snapshot()
 		}
 		syncTickers()
 		status.ControllerURL = cfg.ControllerURL
@@ -289,42 +298,24 @@ func refreshLocalRuntime(ctx context.Context, configPath string, cfg *config.Con
 		}
 		connectionChanged := cfg.ControllerURL != diskCfg.ControllerURL || cfg.ProxyURL != diskCfg.ProxyURL || cfg.VerifyTLS != diskCfg.VerifyTLS
 		cfg.ControllerURL = diskCfg.ControllerURL
-		cfg.EnrollmentToken = diskCfg.EnrollmentToken
-		cfg.SiteID = diskCfg.SiteID
-		cfg.PolicyID = diskCfg.PolicyID
 		cfg.ProxyURL = diskCfg.ProxyURL
 		cfg.VerifyTLS = diskCfg.VerifyTLS
+		cfg.APM.Enabled = diskCfg.APM.Enabled
 		if connectionChanged {
 			cfg.ConfigETag = ""
 			cfg.ConfigVersion = 0
 		}
 		*localHash = nextLocalHash
-		logf("local settings applied: controller=%s site_id=%s policy_id=%s token_configured=%t", cfg.ControllerURL, cfg.SiteID, cfg.PolicyID, cfg.EnrollmentToken != "")
+		logf("local connection settings applied: controller=%s", cfg.ControllerURL)
 	}
 
-	var (
-		enrollCtx context.Context
-		cancel    context.CancelFunc
-	)
-	if cfg.EnrollmentToken != "" {
-		enrollCtx, cancel = enroll.ContextWithEnrollmentTimeout(ctx)
-	} else {
-		enrollCtx, cancel = context.WithTimeout(ctx, 15*time.Second)
-	}
+	enrollCtx, cancel := enroll.ContextWithEnrollmentTimeout(ctx)
 	nextEnrollment, err := enroll.Ensure(enrollCtx, *cfg, paths, logf)
 	cancel()
 	if err != nil {
 		status.LastConfigError = "local enrollment refresh failed: " + err.Error()
 		logf("%s", status.LastConfigError)
 		return false
-	}
-	if nextEnrollment.Fresh && cfg.EnrollmentToken != "" {
-		if err := config.ClearEnrollmentToken(configPath); err != nil {
-			logf("unable to clear enrollment token from config: %v", err)
-		} else {
-			cfg.EnrollmentToken = ""
-			*localHash = localSettingsFingerprint(*cfg)
-		}
 	}
 	applyEnrollment(cfg, nextEnrollment)
 	enrollmentChanged := !sameEnrollment(*enrollment, nextEnrollment)
@@ -379,19 +370,10 @@ func CollectNow(ctx context.Context, configPath string) error {
 	return writeStatus(paths.StatusFile, status)
 }
 
-func EnrollNow(ctx context.Context, configPath string, token string) (enroll.Result, error) {
+func RegisterNow(ctx context.Context, configPath string) (enroll.Result, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return enroll.Result{}, err
-	}
-	if token != "" {
-		cfg.EnrollmentToken = strings.TrimSpace(token)
-		if err := cfg.Validate(); err != nil {
-			return enroll.Result{}, err
-		}
-	}
-	if cfg.EnrollmentToken == "" {
-		return enroll.Result{}, fmt.Errorf("enrollment_token is required; pass --token or set enrollment_token in %s", configPath)
 	}
 	paths := runtime.NewPaths(cfg.DataDir)
 	if err := paths.Ensure(); err != nil {
@@ -408,12 +390,7 @@ func EnrollNow(ctx context.Context, configPath string, token string) (enroll.Res
 		return enrollment, err
 	}
 	if !enrollment.Enrolled {
-		return enrollment, fmt.Errorf("enrollment was not accepted by the controller")
-	}
-	if enrollment.Fresh {
-		if err := config.ClearEnrollmentToken(configPath); err != nil {
-			return enrollment, err
-		}
+		return enrollment, nil
 	}
 	return enrollment, nil
 }
@@ -490,7 +467,7 @@ func runCollection(ctx context.Context, cfg config.Config, paths runtime.Paths, 
 // credentials (never enrolled, or the controller rejected the key) it does
 // not touch the controller at all except for a backoff-gated enrollment
 // attempt — no more unauthenticated 401 storms.
-func tickHeartbeat(ctx context.Context, configPath string, cfg *config.Config, paths runtime.Paths, store *spool.Store, up **uploader.Uploader, poller **configpoller.Poller, status *model.Status, enrollment *enroll.Result, sup *supervisor, logf func(string, ...any)) {
+func tickHeartbeat(ctx context.Context, configPath string, cfg *config.Config, paths runtime.Paths, store *spool.Store, up **uploader.Uploader, poller **configpoller.Poller, status *model.Status, enrollment *enroll.Result, apmManager *apmruntime.Manager, sup *supervisor, logf func(string, ...any)) {
 	now := time.Now().UTC()
 	if !enrollment.Enrolled || sup.authFailed {
 		tryRecoverAuth(ctx, configPath, cfg, paths, store, up, poller, status, enrollment, sup, logf)
@@ -505,7 +482,7 @@ func tickHeartbeat(ctx context.Context, configPath string, cfg *config.Config, p
 		return
 	}
 	sup.onSuccess(status)
-	handleHeartbeatResponse(ctx, hb, cfg, *poller, paths, store, *up, status, *enrollment, sup, logf)
+	handleHeartbeatResponse(ctx, hb, cfg, *poller, paths, store, *up, status, *enrollment, apmManager, sup, logf)
 }
 
 func tickUpload(ctx context.Context, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment *enroll.Result, sup *supervisor, logf func(string, ...any)) {
@@ -519,20 +496,11 @@ func tickUpload(ctx context.Context, store *spool.Store, up *uploader.Uploader, 
 	}
 }
 
-// tryRecoverAuth attempts (re-)enrollment, gated by exponential backoff.
+// tryRecoverAuth polls the controller-managed authorization state, gated by
+// exponential backoff. The agent never needs an operator-supplied token.
 func tryRecoverAuth(ctx context.Context, configPath string, cfg *config.Config, paths runtime.Paths, store *spool.Store, up **uploader.Uploader, poller **configpoller.Poller, status *model.Status, enrollment *enroll.Result, sup *supervisor, logf func(string, ...any)) {
 	now := time.Now().UTC()
 	if now.Before(sup.enrollNotBefore) {
-		return
-	}
-	if cfg.EnrollmentToken == "" {
-		// Nothing to enroll with; wait quietly until an operator supplies a
-		// token or fresh credentials (picked up by the local config watcher).
-		wait := sup.enrollBO.Next()
-		sup.enrollNotBefore = now.Add(wait)
-		if sup.enrollBO.Attempts() == 1 {
-			logf("no credentials and no enrollment token; agent will spool locally until re-enrolled")
-		}
 		return
 	}
 	enrollCtx, cancel := enroll.ContextWithEnrollmentTimeout(ctx)
@@ -546,7 +514,7 @@ func tryRecoverAuth(ctx context.Context, configPath string, cfg *config.Config, 
 		res, err = enroll.Ensure(enrollCtx, *cfg, paths, logf)
 	}
 	cancel()
-	if err != nil || !res.Enrolled {
+	if err != nil {
 		wait := sup.enrollBO.Next()
 		sup.enrollNotBefore = now.Add(wait)
 		next := sup.enrollNotBefore
@@ -559,11 +527,6 @@ func tryRecoverAuth(ctx context.Context, configPath string, cfg *config.Config, 
 		}
 		return
 	}
-	if res.Fresh && cfg.EnrollmentToken != "" {
-		if err := config.ClearEnrollmentToken(configPath); err != nil {
-			logf("unable to clear enrollment token from config: %v", err)
-		}
-	}
 	applyEnrollment(cfg, res)
 	nextUp, nextPoller, cerr := newRuntimeClients(*cfg, paths, store, res)
 	if cerr != nil {
@@ -574,23 +537,38 @@ func tryRecoverAuth(ctx context.Context, configPath string, cfg *config.Config, 
 	*enrollment = res
 	*up = nextUp
 	*poller = nextPoller
+	status.AgentID = res.Identity.AgentID
+	status.ServerID = res.Identity.ServerID
+	if !res.Enrolled {
+		// Pending is a valid controller response, not an outage. Poll on a
+		// predictable cadence so an administrator's approval is picked up
+		// promptly without turning into a request storm.
+		wait := pendingAuthorizationPollInterval
+		sup.enrollBO.Reset()
+		sup.enrollNotBefore = now.Add(wait)
+		next := sup.enrollNotBefore
+		status.NextRetryAt = &next
+		status.LastHeartbeatError = ""
+		syncAuthStatus(status, res, sup)
+		return
+	}
 	sup.authFailed = false
 	sup.enrollBO.Reset()
 	sup.enrollNotBefore = time.Time{}
 	sup.onSuccess(status)
 	status.LastHeartbeatError = ""
-	status.AgentID = res.Identity.AgentID
-	status.ServerID = res.Identity.ServerID
 	logf("enrollment recovered: agent_id=%s server_id=%s", res.Identity.AgentID, res.Identity.ServerID)
 }
 
 func syncAuthStatus(status *model.Status, enrollment enroll.Result, sup *supervisor) {
 	status.Enrolled = enrollment.Enrolled
 	switch {
+	case enrollment.AuthorizationState == "revoked":
+		status.AuthState = "revoked"
 	case sup.authFailed:
 		status.AuthState = "unauthorized"
 	case !enrollment.Enrolled:
-		status.AuthState = "unenrolled"
+		status.AuthState = "pending"
 	default:
 		status.AuthState = "ok"
 	}
@@ -599,14 +577,21 @@ func syncAuthStatus(status *model.Status, enrollment enroll.Result, sup *supervi
 func sendHeartbeat(ctx context.Context, cfg config.Config, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, sup *supervisor, logf func(string, ...any)) (*model.HeartbeatResponse, error) {
 	st, _ := store.Stats()
 	now := time.Now().UTC()
+	localAPM := status.LocalAPM
+	if localAPM == nil {
+		localAPM = probeLocalAPM(cfg)
+	}
 	hb := model.Heartbeat{
 		Version:          model.AgentVersion,
+		Capabilities:     append([]string(nil), model.AgentCapabilities...),
 		UptimeSeconds:    uptimeSeconds(enrollment.Identity.BootTime, now),
 		QueueDepth:       st.Depth,
 		SpoolBytes:       st.Bytes,
 		ConfigHash:       config.Hash(cfg),
 		ConfigApplyError: status.LastConfigError,
+		APM:              localAPM,
 	}
+	status.LocalAPM = hb.APM
 	resp, err := up.SendHeartbeat(ctx, hb)
 	status.LastHeartbeat = &now
 	if err != nil {
@@ -628,6 +613,40 @@ func sendHeartbeat(ctx context.Context, cfg config.Config, store *spool.Store, u
 		}
 	}
 	return &resp, nil
+}
+
+func probeLocalAPM(cfg config.Config) *model.AgentAPMHeartbeat {
+	now := time.Now().UTC()
+	result := &model.AgentAPMHeartbeat{
+		Enabled:   cfg.APM.Enabled,
+		Gateway:   model.APMGatewayStatus{GRPCPort: 4317, HTTPPort: 4318},
+		CheckedAt: now,
+	}
+	if !cfg.APM.Enabled {
+		return result
+	}
+	grpc := localPortListening(4317)
+	http := localPortListening(4318)
+	result.Gateway.Listening = grpc || http
+	if grpc {
+		result.Bundles = map[string]string{"otlp_grpc": "listening"}
+	}
+	if http {
+		if result.Bundles == nil {
+			result.Bundles = map[string]string{}
+		}
+		result.Bundles["otlp_http"] = "listening"
+	}
+	return result
+}
+
+func localPortListening(port int) bool {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 250*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func drain(ctx context.Context, store *spool.Store, up *uploader.Uploader, status *model.Status, logf func(string, ...any)) error {
@@ -682,8 +701,11 @@ func pollConfigWithForce(ctx context.Context, cfg *config.Config, poller *config
 	}
 }
 
-func handleHeartbeatResponse(ctx context.Context, hb *model.HeartbeatResponse, cfg *config.Config, poller *configpoller.Poller, paths runtime.Paths, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, sup *supervisor, logf func(string, ...any)) {
+func handleHeartbeatResponse(ctx context.Context, hb *model.HeartbeatResponse, cfg *config.Config, poller *configpoller.Poller, paths runtime.Paths, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, apmManager *apmruntime.Manager, sup *supervisor, logf func(string, ...any)) {
 	sup.applyBackpressure(hb.Backpressure, status, logf)
+	if hb.APM != nil {
+		status.APM = hb.APM
+	}
 	if hb.ConfigETag != "" && hb.ConfigETag != cfg.ConfigETag {
 		pollConfig(ctx, cfg, poller, status, logf)
 	}
@@ -693,7 +715,7 @@ func handleHeartbeatResponse(ctx context.Context, hb *model.HeartbeatResponse, c
 		startSelfUpdate(ctx, up, cfg.UpdateRing, logf)
 	}
 	if hb.HasCommands {
-		handleCommands(ctx, cfg, poller, paths, store, up, status, enrollment, logf)
+		handleCommands(ctx, cfg, poller, paths, store, up, status, enrollment, apmManager, logf)
 	}
 }
 
@@ -702,7 +724,7 @@ func handleHeartbeatResponse(ctx context.Context, hb *model.HeartbeatResponse, c
 // selfupdate itself serializes attempts and enforces a per-version cooldown.
 func startSelfUpdate(ctx context.Context, up *uploader.Uploader, channel string, logf func(string, ...any)) {
 	go func() {
-		m, err := selfupdate.FetchManifest(ctx, up.Client(), channel)
+		m, err := selfupdate.FetchPublishedManifest(ctx, up.Client(), channel)
 		if err != nil {
 			logf("self-update: manifest fetch failed: %v", err)
 			return
@@ -717,21 +739,21 @@ func startSelfUpdate(ctx context.Context, up *uploader.Uploader, channel string,
 	}()
 }
 
-func handleCommands(ctx context.Context, cfg *config.Config, poller *configpoller.Poller, paths runtime.Paths, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, logf func(string, ...any)) {
+func handleCommands(ctx context.Context, cfg *config.Config, poller *configpoller.Poller, paths runtime.Paths, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, apmManager *apmruntime.Manager, logf func(string, ...any)) {
 	commands, err := up.PollCommands(ctx)
 	if err != nil {
 		logf("command poll failed: %v", err)
 		return
 	}
 	for _, cmd := range commands {
-		result := executeCommand(ctx, cmd, cfg, poller, paths, store, up, status, enrollment, logf)
+		result := executeCommand(ctx, cmd, cfg, poller, paths, store, up, status, enrollment, apmManager, logf)
 		if err := up.SendCommandResult(ctx, cmd.ID, result); err != nil {
 			logf("command result failed command_id=%s: %v", cmd.ID, err)
 		}
 	}
 }
 
-func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, poller *configpoller.Poller, paths runtime.Paths, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, logf func(string, ...any)) model.CommandResult {
+func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, poller *configpoller.Poller, paths runtime.Paths, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, apmManager *apmruntime.Manager, logf func(string, ...any)) model.CommandResult {
 	if cmd.ExpiresAt != nil && time.Now().UTC().After(*cmd.ExpiresAt) {
 		return model.CommandResult{Success: false, ErrorMessage: "command expired before execution"}
 	}
@@ -774,37 +796,72 @@ func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, 
 		if captureID == "" {
 			captureID = cmd.ID
 		}
-		if !captureMu.TryLock() {
-			return model.CommandResult{Success: false,
-				ErrorMessage: "a network capture is already running on this host"}
-		}
-		opts := netcapture.Options{
+		opts := netcapture.NormalizeOptions(netcapture.Options{
 			Duration:       time.Duration(paramInt(cmd.Params, "duration_s", 300)) * time.Second,
 			SampleInterval: time.Duration(paramInt(cmd.Params, "sample_interval_s", 2)) * time.Second,
+			FlushInterval:  time.Duration(paramInt(cmd.Params, "flush_interval_s", 10)) * time.Second,
 			MaxFlows:       paramInt(cmd.Params, "max_flows", 5000),
-		}
+		})
 		if iface, ok := cmd.Params["interface"].(string); ok {
-			opts.Interface = iface
+			opts.Interface = strings.TrimSpace(iface)
 		}
-		// The capture outlives this command result: the controller marks the
-		// command succeeded once the run starts, then follows progress through
-		// the streamed uploads.
-		go func() {
-			defer captureMu.Unlock()
-			runNetworkCapture(context.Background(), captureID, opts, up, logf)
-		}()
+		if err := netcapture.ValidateInterface(opts.Interface); err != nil {
+			return model.CommandResult{Success: false, ErrorMessage: err.Error()}
+		}
+		started, err := networkCaptures.Start(ctx, captureID, opts, up, logf)
+		if err != nil {
+			return model.CommandResult{Success: false, ErrorMessage: err.Error()}
+		}
 		return model.CommandResult{Success: true, Output: map[string]any{
-			"capture_id": captureID,
+			"capture_id": started.CaptureID,
 			"duration_s": int(opts.Duration.Seconds()),
 			"interface":  opts.Interface,
-			"status":     "running",
+			"status":     started.Status,
+			"duplicate":  started.Duplicate,
 		}}
+	case "stop_network_capture":
+		captureID, _ := cmd.Params["capture_id"].(string)
+		stopped, err := networkCaptures.Stop(ctx, captureID)
+		if err != nil {
+			return model.CommandResult{Success: false, ErrorMessage: err.Error()}
+		}
+		return model.CommandResult{Success: true, Output: map[string]any{
+			"capture_id": stopped.CaptureID,
+			"status":     stopped.Status,
+			"duplicate":  stopped.Duplicate,
+		}}
+	case "apm_instrument", "apm_uninstrument", "apm_restart_target":
+		if apmManager == nil {
+			return model.CommandResult{Success: false, ErrorMessage: "local APM manager is unavailable"}
+		}
+		enabled := cmd.Command != "apm_uninstrument"
+		restart := paramBool(cmd.Params, "restart", false) || cmd.Command == "apm_restart_target"
+		result, err := apmManager.Instrument(ctx, apmruntime.InstrumentationRequest{
+			Enabled: enabled, Runtime: paramString(cmd.Params, "runtime"),
+			ProcessKey: paramString(cmd.Params, "process_key"),
+			TargetKind: paramString(cmd.Params, "target_kind"), TargetName: paramString(cmd.Params, "target_name"),
+			ServiceName: paramString(cmd.Params, "service_name"), Environment: paramString(cmd.Params, "environment"),
+			Restart: restart,
+		})
+		if err != nil {
+			return model.CommandResult{Success: false, ErrorMessage: err.Error(), Output: map[string]any{
+				"process_key": paramString(cmd.Params, "process_key"), "target_name": paramString(cmd.Params, "target_name"),
+				"instrumentation_state": "failed",
+			}}
+		}
+		encoded, _ := json.Marshal(result)
+		output := map[string]any{}
+		_ = json.Unmarshal(encoded, &output)
+		output["process_key"] = paramString(cmd.Params, "process_key")
+		return model.CommandResult{Success: true, Output: output}
+	case "apm_set_config":
+		return model.CommandResult{Success: false, ErrorMessage: "per-process APM sampling and log-source controls are planned for P2"}
 	case "rotate_certificate":
 		return model.CommandResult{Success: false, ErrorMessage: "rotate_certificate is reserved for the future mTLS contract and is not enabled in this build"}
 	case "restart_agent":
 		return model.CommandResult{Success: false, ErrorMessage: "restart_agent requires service-manager integration and is not enabled in this foreground command handler"}
 	case "upgrade_agent":
-		manifest, err := selfupdate.FetchManifest(ctx, up.Client(), cfg.UpdateRing)
+		manifest, err := selfupdate.FetchPublishedManifest(ctx, up.Client(), cfg.UpdateRing)
 		if err != nil {
 			return model.CommandResult{Success: false, ErrorMessage: "package manifest unavailable: " + err.Error()}
 		}
@@ -834,10 +891,6 @@ func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, 
 	}
 }
 
-// Only one capture at a time: concurrent runs would double the sampling cost
-// and interleave ESTATS enablement on the same connections.
-var captureMu sync.Mutex
-
 func paramInt(params map[string]any, key string, fallback int) int {
 	switch v := params[key].(type) {
 	case float64: // JSON numbers decode as float64
@@ -852,11 +905,25 @@ func paramInt(params map[string]any, key string, fallback int) int {
 	return fallback
 }
 
+func paramString(params map[string]any, key string) string {
+	value, _ := params[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func paramBool(params map[string]any, key string, fallback bool) bool {
+	value, ok := params[key].(bool)
+	if !ok {
+		return fallback
+	}
+	return value
+}
+
 func toModelFlows(flows []netcapture.Flow) []model.NetworkFlow {
 	out := make([]model.NetworkFlow, 0, len(flows))
 	for _, f := range flows {
 		out = append(out, model.NetworkFlow{
-			Protocol: f.Protocol, LocalIP: f.LocalIP, LocalPort: f.LocalPort,
+			Protocol: f.Protocol, Kind: f.Kind, Direction: f.Direction,
+			LocalIP: f.LocalIP, LocalPort: f.LocalPort,
 			RemoteIP: f.RemoteIP, RemotePort: f.RemotePort,
 			PID: f.PID, ProcessName: f.ProcessName, ServiceName: f.ServiceName,
 			State: f.State, BytesSent: f.BytesSent, BytesReceived: f.BytesReceived,
@@ -867,7 +934,25 @@ func toModelFlows(flows []netcapture.Flow) []model.NetworkFlow {
 	return out
 }
 
-func runNetworkCapture(ctx context.Context, captureID string, opts netcapture.Options, up *uploader.Uploader, logf func(string, ...any)) {
+func toModelInterfaces(samples []netcapture.InterfaceTraffic) []model.NetworkInterfaceTraffic {
+	out := make([]model.NetworkInterfaceTraffic, 0, len(samples))
+	for _, sample := range samples {
+		out = append(out, model.NetworkInterfaceTraffic{
+			Interface: sample.Interface, InterfaceIndex: sample.InterfaceIndex,
+			Timestamp: sample.Timestamp, RXBytes: sample.RXBytes, TXBytes: sample.TXBytes,
+			RXBPS: sample.RXBPS, TXBPS: sample.TXBPS,
+			PeakRXBPS: sample.PeakRXBPS, PeakTXBPS: sample.PeakTXBPS,
+			LinkSpeedBPS:         sample.LinkSpeedBPS,
+			ReceiveLinkSpeedBPS:  sample.ReceiveLinkSpeedBPS,
+			TransmitLinkSpeedBPS: sample.TransmitLinkSpeedBPS,
+			RXUtilizationPct:     sample.RXUtilizationPct,
+			TXUtilizationPct:     sample.TXUtilizationPct,
+		})
+	}
+	return out
+}
+
+func runNetworkCapture(ctx context.Context, captureID string, opts netcapture.Options, up captureSender, logf func(string, ...any)) string {
 	logf("network capture %s starting: duration=%s interval=%s interface=%q",
 		captureID, opts.Duration, opts.SampleInterval, opts.Interface)
 
@@ -875,6 +960,9 @@ func runNetworkCapture(ctx context.Context, captureID string, opts netcapture.Op
 		status := "running"
 		if final {
 			status = "completed"
+		}
+		if final && ctx.Err() != nil {
+			status = "cancelled"
 		}
 		if errMsg != "" {
 			status = "failed"
@@ -884,8 +972,15 @@ func runNetworkCapture(ctx context.Context, captureID string, opts netcapture.Op
 			StartedAt: st.StartedAt, EndsAt: st.EndsAt, Samples: st.Samples,
 			Truncated: st.Truncated, BytesAvailable: st.BytesAvailable,
 			Note: st.Note, ErrorMessage: errMsg, Flows: toModelFlows(flows),
+			Interfaces: toModelInterfaces(st.Interfaces),
 		}
-		sendCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		// A final cancelled status still has to leave the host after the capture
+		// context is cancelled, so uploads use a short independent deadline.
+		baseCtx := ctx
+		if final && ctx.Err() != nil {
+			baseCtx = context.WithoutCancel(ctx)
+		}
+		sendCtx, cancel := context.WithTimeout(baseCtx, 30*time.Second)
 		defer cancel()
 		if err := up.SendNetworkCapture(sendCtx, payload); err != nil {
 			logf("network capture %s upload failed: %v", captureID, err)
@@ -895,12 +990,17 @@ func runNetworkCapture(ctx context.Context, captureID string, opts netcapture.Op
 	stats, err := netcapture.Run(ctx, opts, func(flows []netcapture.Flow, final bool, st netcapture.Stats) {
 		send(flows, final, st, "")
 	}, logf)
-	if err != nil && !errors.Is(err, context.Canceled) {
+	if err != nil && ctx.Err() == nil {
 		logf("network capture %s failed: %v", captureID, err)
 		send(nil, true, stats, err.Error())
-		return
+		return "failed"
+	}
+	if err != nil && ctx.Err() != nil {
+		logf("network capture %s cancelled: %d samples, %d flows", captureID, stats.Samples, stats.FlowCount)
+		return "cancelled"
 	}
 	logf("network capture %s finished: %d samples, %d flows", captureID, stats.Samples, stats.FlowCount)
+	return "completed"
 }
 
 func diagnosticsRequest(paths runtime.Paths, enrollment enroll.Result, cmd model.Command) (model.DiagnosticsRequest, error) {
@@ -986,9 +1086,13 @@ func PrintConfig(configPath string) error {
 	if err != nil {
 		return err
 	}
-	b, _ := json.MarshalIndent(cfg, "", "  ")
+	b, _ := json.MarshalIndent(printableConfig(cfg), "", "  ")
 	fmt.Println(string(b))
 	return nil
+}
+
+func printableConfig(cfg config.Config) config.Config {
+	return cfg
 }
 
 func ResetEnrollment(configPath string) error {
@@ -1002,19 +1106,20 @@ func ResetEnrollment(configPath string) error {
 
 func localSettingsFingerprint(cfg config.Config) string {
 	b, _ := json.Marshal(localSettings{
-		ControllerURL:   cfg.ControllerURL,
-		EnrollmentToken: strings.TrimSpace(cfg.EnrollmentToken),
-		SiteID:          cfg.SiteID,
-		PolicyID:        cfg.PolicyID,
-		ProxyURL:        cfg.ProxyURL,
-		VerifyTLS:       cfg.VerifyTLS,
+		ControllerURL: cfg.ControllerURL,
+		ProxyURL:      cfg.ProxyURL,
+		VerifyTLS:     cfg.VerifyTLS,
+		APMEnabled:    cfg.APM.Enabled,
 	})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
 
 func authFileStamp(paths runtime.Paths) string {
-	return fileStamp(paths.IdentityFile) + "|" + fileStamp(paths.CredentialFile) + "|" + fileStamp(paths.CredentialMeta)
+	// Registration polling refreshes identity inventory on disk. Identity
+	// mtime alone must not trigger a second enrollment request from the local
+	// settings watcher; credential state changes still trigger immediately.
+	return fileStamp(paths.CredentialFile) + "|" + fileStamp(paths.CredentialMeta) + "|" + fileStamp(paths.PendingSecret)
 }
 
 func fileStamp(path string) string {

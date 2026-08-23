@@ -1,15 +1,11 @@
-/** "Deploy agent" dialog: generates an enrollment token and shows the
- *  copy-paste install command (PowerShell bootstrap for Windows, curl|bash
- *  for Linux), with single-server and bulk-rollout presets plus live
- *  enrollment verification. */
+/** Controller-only agent deployment. New hosts register as pending and the
+ * appliance issues their protected credential only after operator approval. */
 
-import { useEffect, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import {
-  AlertTriangle, Check, CheckCircle2, Copy, Download, KeyRound, Loader2, RefreshCw,
-} from 'lucide-react'
+import { Bot, Check, Copy, Download, Loader2, ShieldCheck, Terminal, UserCheck } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage, cn } from '@/lib/utils'
+import { apiErrorMessage } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -18,17 +14,51 @@ import { Label } from '@/components/ui/Label'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/Select'
-import { Input } from '@/components/ui/Input'
 import { toast } from '@/components/ui/Toast'
-import type { AgentPolicy, InstallToken } from '@/types/servers'
 
-type DeployMode = 'single' | 'bulk'
+type Platform = 'windows' | 'linux'
+type WindowsShell = 'powershell' | 'cmd'
 
-interface TokenUsage {
+interface AgentPackage {
   id: string
-  uses: number
-  max_uses: number
-  revoked_at: string | null
+  platform: string
+  version: string
+  file_name: string
+  file_size: number
+  sha256?: string | null
+  is_latest: boolean
+}
+
+function shellValue(value: string) {
+  return `'${value.replace(/'/g, `'"'"'`)}'`
+}
+
+function deploymentCommand(
+  platform: Platform,
+  controllerUrl: string,
+  installProfile: 'infrastructure' | 'apm' | 'combined',
+  windowsShell: WindowsShell,
+) {
+  const controller = controllerUrl.replace(/\/$/, '')
+  if (platform === 'windows') {
+    const script = `${controller}/api/v1/agents/install.ps1`
+    const direct = `$s=Join-Path $env:TEMP 'zenplus-agent-install.ps1'; Invoke-WebRequest -UseBasicParsing -Uri '${script}' -OutFile $s; & $s -ControllerUrl '${controller}' -InstallProfile '${installProfile}'`
+    return windowsShell === 'cmd'
+      ? `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "${direct}"`
+      : direct
+  }
+  const installerUrl = `${controller}/api/v1/agents/install.sh`
+  return `curl -fsSL ${shellValue(installerUrl)} | sudo env ZENPLUS_CONTROLLER_URL=${shellValue(controller)} bash`
+}
+
+function fmtSize(bytes: number) {
+  return bytes ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : ''
+}
+
+function filenameFrom(disposition: unknown, fallback: string) {
+  if (typeof disposition !== 'string') return fallback
+  const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(disposition)
+  return match?.[1] ? decodeURIComponent(match[1]) : fallback
 }
 
 export function InstallTokenDialog({
@@ -36,263 +66,180 @@ export function InstallTokenDialog({
   onOpenChange,
   serverId,
   serverName,
+  installProfile = 'combined',
 }: {
   open: boolean
   onOpenChange: (open: boolean) => void
-  /** When set, the token is bound to this server; otherwise enrollment creates a new server. */
   serverId?: string
   serverName?: string
+  installProfile?: 'infrastructure' | 'apm' | 'combined'
 }) {
-  const [mode, setMode] = useState<DeployMode>('single')
-  const [platform, setPlatform] = useState<'windows' | 'linux'>('windows')
-  const [policyId, setPolicyId] = useState<string>('')
-  const [tags, setTags] = useState('')
-  const [ttlHours, setTtlHours] = useState('24')
-  const [maxUses, setMaxUses] = useState('1')
-  const [token, setToken] = useState<InstallToken | null>(null)
-  const [copied, setCopied] = useState<string | null>(null)
+  const [platform, setPlatform] = useState<Platform>('windows')
+  const [windowsShell, setWindowsShell] = useState<WindowsShell>('powershell')
+  const [copied, setCopied] = useState(false)
+  const [controllerUrl, setControllerUrl] = useState(() => window.location.origin)
 
-  const { data: policies } = useQuery<AgentPolicy[]>({
-    queryKey: ['agent-policies'],
-    queryFn: async () => (await api.get('/agent-policies')).data.items,
+  const { data: packages, isLoading } = useQuery<{ items: AgentPackage[] }>({
+    queryKey: ['agent-packages'],
+    queryFn: async () => (await api.get('/agent-fleet/packages')).data,
     enabled: open,
   })
+  const published = (packages?.items ?? []).find(
+    (item) => item.platform === platform && item.is_latest,
+  )
+  const command = useMemo(
+    () => deploymentCommand(platform, controllerUrl, installProfile, windowsShell),
+    [platform, controllerUrl, installProfile, windowsShell],
+  )
 
-  // Bulk rollout preset: shared token, many uses, longer validity.
-  const applyMode = (m: DeployMode) => {
-    setMode(m)
-    if (m === 'single') { setMaxUses('1'); setTtlHours('24') }
-    else { setMaxUses('100'); setTtlHours('72') }
-  }
-
-  const generate = useMutation({
-    mutationFn: async () => {
-      const body = {
-        platform,
-        policy_id: policyId || null,
-        tags: tags.split(',').map((t) => t.trim()).filter(Boolean),
-        ttl_hours: Math.max(1, Math.min(720, Number(ttlHours) || 24)),
-        max_uses: Math.max(1, Math.min(100, Number(maxUses) || 1)),
+  const download = useMutation({
+    mutationFn: async () => api.post(
+      '/agent-fleet/packages/download',
+      { platform },
+      { responseType: 'blob', timeout: 10 * 60_000 },
+    ),
+    onSuccess: (response) => {
+      const nextController = String(response.headers['x-controller-url'] ?? controllerUrl)
+      setControllerUrl(nextController)
+      const fallback = published?.file_name ?? `zenplus-agent.${platform === 'windows' ? 'msi' : 'tar.gz'}`
+      const fileName = filenameFrom(response.headers['content-disposition'], fallback)
+      const url = URL.createObjectURL(response.data as Blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = fileName
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 60_000)
+      toast.success('Agent package downloaded', 'Install it with the controller address only')
+    },
+    onError: async (error: unknown) => {
+      const response = (error as { response?: { data?: unknown } })?.response
+      if (response?.data instanceof Blob) {
+        try {
+          const parsed = JSON.parse(await response.data.text())
+          toast.error('Download failed', parsed.detail)
+          return
+        } catch {
+          // Use the shared formatter below.
+        }
       }
-      const url = serverId ? `/servers/${serverId}/install-token` : '/servers/install-token'
-      return (await api.post(url, body)).data as InstallToken
+      toast.error('Download failed', apiErrorMessage(error))
     },
-    onSuccess: (t) => setToken(t),
-    onError: (e) => toast.error('Token generation failed', apiErrorMessage(e)),
   })
 
-  // Live verification: poll token usage so the operator sees enrollments
-  // land without leaving the dialog.
-  const { data: usage } = useQuery<TokenUsage | null>({
-    queryKey: ['enrollment-token-usage', token?.token_id],
-    queryFn: async () => {
-      const r = await api.get('/servers/enrollment-tokens/list', { params: { include_expired: true, limit: 100 } })
-      return (r.data.items as TokenUsage[]).find((t) => t.id === token?.token_id) ?? null
-    },
-    enabled: open && Boolean(token),
-    refetchInterval: 5_000,
-  })
-  const enrollments = usage?.uses ?? 0
-
-  const copy = async (text: string, which: string) => {
+  const copyCommand = async () => {
     try {
-      await navigator.clipboard.writeText(text)
-      setCopied(which)
-      setTimeout(() => setCopied(null), 1500)
+      await navigator.clipboard.writeText(command)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
     } catch {
       toast.error('Copy failed', 'Clipboard access was denied by the browser')
     }
   }
-
-  const reset = () => {
-    setToken(null)
-    generate.reset()
-  }
-
-  // Changing platform after generation would show a stale command.
-  useEffect(() => {
-    if (!open) reset()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open])
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <KeyRound className="h-4 w-4 text-primary" />
-            Deploy agent{serverName ? ` to ${serverName}` : ''}
+            <Bot className="h-4 w-4 text-primary" />
+            Install ZenPlus Agent{installProfile === 'apm' ? ' for APM' : ''}{serverName ? ` on ${serverName}` : ''}
           </DialogTitle>
           <DialogDescription>
-            Generate an enrollment token and run the install command on the target server
-            {mode === 'bulk' ? 's (one shared token for the whole rollout)' : ''}.
-            The agent enrolls itself and starts reporting within a minute.
+            No enrollment token, site ID, policy ID, or APM ingest key is placed on the endpoint. The appliance
+            approves the installation and issues protected credentials centrally.
           </DialogDescription>
         </DialogHeader>
 
-        {!token ? (
-          <div className="grid grid-cols-2 gap-4">
-            <div className="col-span-2 space-y-1.5">
-              <Label>Deployment mode</Label>
-              <div className="grid grid-cols-2 gap-2">
-                {([
-                  ['single', 'Single server', 'One-time token · 24 h validity'],
-                  ['bulk', 'Bulk rollout', 'Shared token · up to 100 hosts · 72 h'],
-                ] as const).map(([value, label, hint]) => (
-                  <button
-                    key={value}
-                    type="button"
-                    onClick={() => applyMode(value)}
-                    className={cn(
-                      'rounded-md border px-3 py-2 text-left text-sm transition',
-                      mode === value
-                        ? 'border-primary/50 bg-primary/10'
-                        : 'border-border bg-surface2/30 hover:border-primary/30',
-                    )}
-                  >
-                    <div className="font-medium">{label}</div>
-                    <div className="text-[11px] text-muted">{hint}</div>
-                  </button>
-                ))}
+        <div className="space-y-4 py-1">
+          <div className="grid gap-2 sm:grid-cols-3">
+            {[
+              [Download, '1. Install', 'Use only the ZenPlus controller address.'],
+              [Bot, '2. Registration', 'The host appears as Pending authorization.'],
+              [UserCheck, '3. Approve', 'An operator authorizes monitoring in Agent Fleet.'],
+            ].map(([Icon, title, detail]) => (
+              <div key={String(title)} className="rounded-lg border border-border bg-surface2/30 p-3">
+                <Icon className="mb-2 h-4 w-4 text-primary" />
+                <div className="text-xs font-semibold text-text">{String(title)}</div>
+                <div className="mt-1 text-[11px] leading-relaxed text-muted">{String(detail)}</div>
               </div>
-            </div>
+            ))}
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-3">
             <div className="space-y-1.5">
-              <Label>Platform</Label>
-              <Select value={platform} onValueChange={(v) => setPlatform(v as 'windows' | 'linux')}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
+              <Label htmlFor="agent-platform">Platform</Label>
+              <Select value={platform} onValueChange={(value) => setPlatform(value as Platform)}>
+                <SelectTrigger id="agent-platform"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="windows">Windows</SelectItem>
                   <SelectItem value="linux">Linux</SelectItem>
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-1.5">
-              <Label>Agent policy</Label>
-              <Select value={policyId || 'auto'} onValueChange={(v) => setPolicyId(v === 'auto' ? '' : v)}>
-                <SelectTrigger><SelectValue placeholder="Platform default" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="auto">Platform default</SelectItem>
-                  {(policies || [])
-                    .filter((p) => p.platform === platform || p.platform === 'any')
-                    .map((p) => <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="col-span-2 space-y-1.5">
-              <Label>Tags (comma-separated, applied to the enrolled server{mode === 'bulk' ? 's' : ''})</Label>
-              <Input value={tags} onChange={(e) => setTags(e.target.value)} placeholder="prod, web-tier, dc1" />
-            </div>
-            <div className="space-y-1.5">
-              <Label>Token validity (hours)</Label>
-              <Input type="number" min={1} max={720} value={ttlHours} onChange={(e) => setTtlHours(e.target.value)} />
-            </div>
-            <div className="space-y-1.5">
-              <Label>Max uses</Label>
-              <Input type="number" min={1} max={100} value={maxUses} onChange={(e) => setMaxUses(e.target.value)} />
-            </div>
-          </div>
-        ) : (
-          <div className="space-y-4">
-            <div className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
-              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
-              <span>
-                This token is shown <strong>only once</strong> — copy the command before closing.
-                You can revoke or audit issued tokens from the token list API.
-              </span>
-            </div>
-            <div className="space-y-1.5">
-              <Label>
-                Enrollment token{' '}
-                <span className="font-normal text-muted">
-                  (expires {new Date(token.expires_at).toLocaleString()} · {token.max_uses} use{token.max_uses === 1 ? '' : 's'})
-                </span>
-              </Label>
-              <div className="flex items-center gap-2">
-                <code className="flex-1 break-all rounded-md border border-border bg-bg px-3 py-2 font-mono text-xs">
-                  {token.enrollment_token}
-                </code>
-                <Button variant="outline" size="sm" onClick={() => copy(token.enrollment_token, 'token')}>
-                  {copied === 'token' ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
-                </Button>
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Install command ({token.platform})</Label>
-              <div className="relative">
-                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md border border-border bg-bg p-3 pr-12 font-mono text-xs leading-relaxed">
-                  {token.install_command}
-                </pre>
-                <Button
-                  variant="outline" size="sm" className="absolute right-2 top-2"
-                  onClick={() => copy(token.install_command, 'cmd')}
-                >
-                  {copied === 'cmd' ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
-                </Button>
-              </div>
-              <p className="text-[11px] text-muted">
-                {token.platform === 'windows'
-                  ? 'Run in an elevated (Administrator) PowerShell or push via GPO/Intune/RMM with the same command.'
-                  : 'Run as a user with sudo. For fleets, push the same command via Ansible/SSH.'}
-                {' '}Already installed? Re-running with a fresh token re-enrolls the same host without creating a duplicate.
-              </p>
-            </div>
-            {!token.msi_download_url && (
-              <div className="flex items-start gap-2 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-xs">
-                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-danger" />
-                <span>
-                  No {token.platform} agent package is published yet, so the install command will
-                  fail to download. Place the package in{' '}
-                  <code className="font-mono">/opt/zenplus/artifacts/agents/{token.platform}/</code>{' '}
-                  (e.g. <code className="font-mono">zenplus-agent-1.0.0{token.platform === 'windows' ? '.msi' : '.tar.gz'}</code>)
-                  and publish it via <code className="font-mono">POST /api/v1/agent-fleet/packages/publish</code>.
-                </span>
+            {platform === 'windows' && (
+              <div className="space-y-1.5">
+                <Label htmlFor="agent-command-shell">Run command in</Label>
+                <Select value={windowsShell} onValueChange={(value) => setWindowsShell(value as WindowsShell)}>
+                  <SelectTrigger id="agent-command-shell"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="powershell">PowerShell (recommended)</SelectItem>
+                    <SelectItem value="cmd">Command Prompt</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             )}
-            {token.msi_download_url && (
-              <a
-                href={token.msi_download_url}
-                download
-                rel="noopener"
-                className="inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:underline"
-              >
-                <Download className="h-3.5 w-3.5" /> Download installer package
-              </a>
-            )}
-            <div className="flex items-center gap-2 rounded-md border border-border bg-surface2/30 px-3 py-2 text-xs">
-              {enrollments > 0 ? (
-                <>
-                  <CheckCircle2 className="h-4 w-4 text-success" />
-                  <span className="font-medium text-success">
-                    {enrollments} host{enrollments === 1 ? '' : 's'} enrolled with this token
-                  </span>
-                  <span className="text-muted">— check the Agent Fleet page for details</span>
-                </>
-              ) : (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin text-muted" />
-                  <span className="text-muted">Waiting for the first enrollment…</span>
-                </>
-              )}
+            <div className={`space-y-1.5 ${platform === 'linux' ? 'sm:col-span-2' : ''}`}>
+              <Label>Published package</Label>
+              <div className="flex h-10 items-center rounded-md border border-border bg-bg px-3 text-xs">
+                {isLoading ? (
+                  <><Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> Checking package…</>
+                ) : published ? (
+                  <><ShieldCheck className="mr-2 h-3.5 w-3.5 text-success" /> {published.file_name} · v{published.version}{published.file_size ? ` · ${fmtSize(published.file_size)}` : ''}</>
+                ) : (
+                  <span className="text-danger">No published {platform} package</span>
+                )}
+              </div>
             </div>
           </div>
-        )}
+
+          <div className="space-y-1.5">
+            <Label htmlFor="agent-install-command">Controller-only deployment command</Label>
+            <div className="flex items-start gap-2">
+              <code id="agent-install-command" className="min-w-0 flex-1 select-all break-all rounded-md border border-border bg-bg px-3 py-2 font-mono text-[11px] leading-relaxed text-text">
+                {command}
+              </code>
+              <Button size="sm" variant="outline" onClick={copyCommand}>
+                {copied ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
+                {copied ? 'Copied' : 'Copy'}
+              </Button>
+            </div>
+            {platform === 'windows' && (
+              <div className="flex items-start gap-2 rounded-md border border-info/25 bg-info/5 px-3 py-2 text-[11px] leading-relaxed text-muted">
+                <Terminal className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />
+                {windowsShell === 'powershell' ? (
+                  <span>Open <strong className="text-text">PowerShell as Administrator</strong> and paste this command directly. Do not wrap it inside another <code>powershell -Command</code>.</span>
+                ) : (
+                  <span>Open <strong className="text-text">Command Prompt as Administrator</strong> and paste this command. This option intentionally launches PowerShell once.</span>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-muted">
+            After installation, open <strong className="text-text">Agent Fleet</strong>, locate the
+            pending host, and select <strong className="text-text">Authorize monitoring</strong>.
+            {serverId && ' ZenPlus will associate it with this server when the reported hostname matches.'}
+          </div>
+        </div>
 
         <DialogFooter>
-          {token ? (
-            <>
-              <Button variant="outline" onClick={reset}>
-                <RefreshCw className="h-3.5 w-3.5" /> New token
-              </Button>
-              <Button onClick={() => onOpenChange(false)}>Done</Button>
-            </>
-          ) : (
-            <>
-              <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-              <Button onClick={() => generate.mutate()} disabled={generate.isPending}>
-                {generate.isPending ? 'Generating…' : 'Generate token'}
-              </Button>
-            </>
-          )}
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>Close</Button>
+          <Button onClick={() => download.mutate()} disabled={download.isPending || !published}>
+            {download.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+            {download.isPending ? 'Downloading…' : 'Download installer'}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

@@ -95,6 +95,7 @@ class ServerResponse(BaseModel):
     agent_status: Optional[str] = None
     agent_version: Optional[str] = None
     agent_last_heartbeat_at: Optional[datetime] = None
+    agent_capabilities: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -207,6 +208,11 @@ class AgentResponse(BaseModel):
     version: Optional[str]
     status: str
     api_key_prefix: Optional[str]
+    authorization_state: Literal["pending", "authorized", "revoked"] = "pending"
+    authorization_source: Optional[str] = None
+    enrollment_token_prefix: Optional[str] = None
+    authorized_at: Optional[datetime] = None
+    revoked_at: Optional[datetime] = None
     last_heartbeat_at: Optional[datetime]
     last_metric_at: Optional[datetime]
     last_config_hash: Optional[str]
@@ -221,6 +227,8 @@ class AgentResponse(BaseModel):
     policy_id: Optional[str]
     policy_name: Optional[str] = None
     config_apply_error: Optional[str]
+    capabilities: List[str] = Field(default_factory=list)
+    apm_status: Dict[str, Any] = Field(default_factory=dict)
     tags: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
@@ -229,7 +237,8 @@ class AgentResponse(BaseModel):
 class AgentBulkAction(BaseModel):
     agent_ids: List[UUID] = Field(default_factory=list)
     action: Literal["change_policy", "change_update_ring", "request_diagnostics",
-                    "rotate_certificate", "trigger_upgrade", "disable", "enable"]
+                    "rotate_certificate", "trigger_upgrade", "disable", "enable",
+                    "authorize", "revoke"]
     policy_id: Optional[UUID] = None
     update_ring: Optional[UpdateRing] = None
     target_version: Optional[str] = None
@@ -238,7 +247,8 @@ class AgentBulkAction(BaseModel):
 # ── Agent-facing API ─────────────────────────────────────────────────
 
 class AgentEnrollRequest(BaseModel):
-    enrollment_token: str
+    enrollment_token: Optional[str] = None
+    pending_secret: Optional[str] = Field(default=None, min_length=32, max_length=256)
     agent_uid: str = Field(..., min_length=8, max_length=128)
     hostname: str
     platform: AgentPlatform = "windows"
@@ -254,12 +264,51 @@ class AgentEnrollRequest(BaseModel):
 
 class AgentEnrollResponse(BaseModel):
     agent_id: str
-    server_id: str
-    api_key: str
+    server_id: Optional[str] = None
+    api_key: Optional[str] = None
+    authorization_state: Literal["pending", "authorized", "revoked"] = "authorized"
     heartbeat_interval_s: int = 30
     config_poll_interval_s: int = 60
     upload_interval_s: int = 60
     policy_id: Optional[str] = None
+
+
+class AgentAPMGatewayStatus(BaseModel):
+    listening: bool = False
+    grpc_port: int = Field(default=4317, ge=0, le=65535)
+    http_port: int = Field(default=4318, ge=0, le=65535)
+
+
+class AgentAPMHeartbeat(BaseModel):
+    enabled: bool = True
+    gateway: AgentAPMGatewayStatus = Field(default_factory=AgentAPMGatewayStatus)
+    instrumented: int = Field(default=0, ge=0)
+    failed: int = Field(default=0, ge=0)
+    spans_forwarded_1m: int = Field(default=0, ge=0)
+    export_errors_1m: int = Field(default=0, ge=0)
+    spool_depth_spans: int = Field(default=0, ge=0)
+    spool_bytes: int = Field(default=0, ge=0)
+    dropped_spans_total: int = Field(default=0, ge=0)
+    bundles: Dict[str, str] = Field(default_factory=dict)
+    last_error: Optional[str] = None
+    checked_at: Optional[datetime] = None
+
+
+class ApplianceAPMStatus(BaseModel):
+    """Read-only appliance APM health returned to enrolled host agents."""
+
+    available: bool = False
+    state: Literal["active", "starting", "degraded", "unavailable"] = "unavailable"
+    managed_by: Literal["appliance"] = "appliance"
+    ingest_path: str = "/v1/traces"
+    queue_depth: int = Field(default=0, ge=0)
+    queue_capacity: int = Field(default=0, ge=0)
+    accepted_spans_total: int = Field(default=0, ge=0)
+    rejected_spans_total: int = Field(default=0, ge=0)
+    dropped_spans_total: int = Field(default=0, ge=0)
+    last_received_at: Optional[datetime] = None
+    message: str = ""
+    checked_at: datetime
 
 
 class AgentHeartbeatRequest(BaseModel):
@@ -269,6 +318,12 @@ class AgentHeartbeatRequest(BaseModel):
     spool_bytes: int = 0
     config_hash: Optional[str] = None
     config_apply_error: Optional[str] = None
+    # Optional preserves capabilities last advertised by a newer agent when
+    # an older binary briefly checks in during rollback/recovery.
+    capabilities: Optional[List[str]] = None
+    # Optional for rollback compatibility; APM-capable agents always send the
+    # complete block, including zero-valued counters.
+    apm: Optional[AgentAPMHeartbeat] = None
 
 
 class AgentHeartbeatResponse(BaseModel):
@@ -278,6 +333,8 @@ class AgentHeartbeatResponse(BaseModel):
     has_commands: bool = False
     desired_version: Optional[str] = None
     backpressure: Optional[Dict[str, Any]] = None
+    capabilities: List[str] = Field(default_factory=list)
+    apm: Optional[ApplianceAPMStatus] = None
 
 
 class AgentConfigResponse(BaseModel):
@@ -366,6 +423,65 @@ class AgentCommandResult(BaseModel):
     success: bool
     output: Dict[str, Any] = Field(default_factory=dict)
     error_message: Optional[str] = None
+
+
+class NetworkCaptureFlow(BaseModel):
+    protocol: str = Field("tcp", max_length=8)
+    direction: Literal["inbound", "outbound", "local", "unknown"] = "unknown"
+    kind: Literal["connection", "listener", "endpoint", "unknown"] = "unknown"
+    local_ip: str = Field("", max_length=64)
+    local_port: int = Field(0, ge=0, le=65535)
+    remote_ip: str = Field("", max_length=64)
+    remote_port: int = Field(0, ge=0, le=65535)
+    pid: int = Field(0, ge=0)
+    process_name: str = Field("", max_length=255)
+    service_name: str = Field("", max_length=255)
+    state: str = Field("", max_length=32)
+    bytes_sent: int = Field(0, ge=0)
+    bytes_received: int = Field(0, ge=0)
+    bytes_known: bool = False
+    first_seen: Optional[datetime] = None
+    last_seen: Optional[datetime] = None
+    samples: int = Field(0, ge=0)
+
+
+class NetworkCaptureInterfaceSample(BaseModel):
+    """One interface rate sample collected during an on-demand capture.
+
+    ``*_bps`` values are bits per second.  The byte counters are cumulative
+    within this capture (they reset when the capture starts).
+    """
+
+    interface: str = Field(..., min_length=1, max_length=255)
+    interface_index: int = Field(0, ge=0)
+    timestamp: datetime
+    rx_bytes: int = Field(0, ge=0)
+    tx_bytes: int = Field(0, ge=0)
+    rx_bps: float = Field(0, ge=0)
+    tx_bps: float = Field(0, ge=0)
+    peak_rx_bps: float = Field(0, ge=0)
+    peak_tx_bps: float = Field(0, ge=0)
+    link_speed_bps: int = Field(0, ge=0)
+    receive_link_speed_bps: int = Field(0, ge=0)
+    transmit_link_speed_bps: int = Field(0, ge=0)
+    rx_utilization_pct: Optional[float] = Field(None, ge=0)
+    tx_utilization_pct: Optional[float] = Field(None, ge=0)
+
+
+class NetworkCaptureUpload(BaseModel):
+    capture_id: UUID
+    status: Literal["running", "completed", "failed", "cancelled"] = "running"
+    started_at: Optional[datetime] = None
+    ends_at: Optional[datetime] = None
+    samples: int = Field(0, ge=0)
+    flows: List[NetworkCaptureFlow] = Field(default_factory=list, max_length=50000)
+    interfaces: List[NetworkCaptureInterfaceSample] = Field(
+        default_factory=list, max_length=256
+    )
+    bytes_available: bool = False
+    truncated: bool = False
+    note: Optional[str] = Field(None, max_length=4000)
+    error_message: Optional[str] = Field(None, max_length=4000)
 
 
 # ── Software baselines (compliance) ──────────────────────────────────
@@ -458,21 +574,8 @@ class ServerMetricsResponse(BaseModel):
         populate_by_name = True
 
 
-# ── Pre-configured package download ─────────────────────────────────
+# ── Agent package download ──────────────────────────────────────────
 
 class AgentPackageDownloadRequest(BaseModel):
-    """Mint an enrollment token sized to a rollout and stamp it into the MSI.
-
-    server_count becomes the token's max_uses: one use is consumed per host
-    that enrolls, so the same downloaded package can be installed on exactly
-    that many servers.
-    """
+    """Select an immutable package; authorization is appliance-managed."""
     platform: Literal["windows", "linux", "macos"] = "windows"
-    # 0 = reusable on any number of hosts until the token expires. A fixed
-    # count is available for tightly-scoped rollouts.
-    server_count: int = Field(0, ge=0, le=100000)
-    ttl_hours: int = Field(72, ge=1, le=8760)
-    site_id: Optional[UUID] = None
-    policy_id: Optional[UUID] = None
-    tags: List[str] = Field(default_factory=list)
-    label: Optional[str] = None

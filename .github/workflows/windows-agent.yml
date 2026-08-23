@@ -1,0 +1,286 @@
+name: Windows agent release
+
+on:
+  push:
+    paths:
+      - "ZenPlus_Agent/**"
+      - "server/app/api/v1/agents.py"
+      - "server/app/api/v1/servers.py"
+      - "scripts/build-release.py"
+      - ".github/workflows/windows-agent.yml"
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-msi:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ZenPlus_Agent/go.mod
+          cache-dependency-path: ZenPlus_Agent/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Require portal publishing configuration
+        shell: pwsh
+        env:
+          AUTO_PUBLISH: ${{ vars.ZENPLUS_AGENT_AUTO_PUBLISH }}
+          PORTAL_HOST: ${{ vars.ZENPLUS_AGENT_HOST }}
+          PORTAL_USER: ${{ vars.ZENPLUS_AGENT_USER }}
+          DEPLOYMENT_KEY: ${{ secrets.ZENPLUS_AGENT_SSH_PRIVATE_KEY }}
+          PUBLIC_HOST: ${{ vars.ZENTRYC_AGENT_RELEASE_HOST }}
+          PUBLIC_USER: ${{ vars.ZENTRYC_AGENT_RELEASE_USER }}
+          PUBLIC_DEPLOYMENT_KEY: ${{ secrets.ZENTRYC_AGENT_RELEASE_SSH_PRIVATE_KEY }}
+          SIGNING_PFX: ${{ secrets.ZENPLUS_CODE_SIGNING_PFX_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.ZENPLUS_CODE_SIGNING_PFX_PASSWORD }}
+        run: |
+          if ($env:AUTO_PUBLISH -ne 'true' -or
+              [string]::IsNullOrWhiteSpace($env:PORTAL_HOST) -or
+              [string]::IsNullOrWhiteSpace($env:PORTAL_USER) -or
+              [string]::IsNullOrWhiteSpace($env:DEPLOYMENT_KEY) -or
+              [string]::IsNullOrWhiteSpace($env:PUBLIC_HOST) -or
+              [string]::IsNullOrWhiteSpace($env:PUBLIC_USER) -or
+              [string]::IsNullOrWhiteSpace($env:PUBLIC_DEPLOYMENT_KEY) -or
+              [string]::IsNullOrWhiteSpace($env:SIGNING_PFX) -or
+              [string]::IsNullOrWhiteSpace($env:SIGNING_PASSWORD)) {
+            throw "Production agent builds require portal/public publishing configuration and an Authenticode PFX. Configure the ZENPLUS_AGENT_*, ZENTRYC_AGENT_RELEASE_*, and ZENPLUS_CODE_SIGNING_* repository variables/secrets."
+          }
+
+      - name: Import Authenticode certificate
+        shell: pwsh
+        env:
+          SIGNING_PFX: ${{ secrets.ZENPLUS_CODE_SIGNING_PFX_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.ZENPLUS_CODE_SIGNING_PFX_PASSWORD }}
+        run: |
+          $pfxPath = Join-Path $env:RUNNER_TEMP "zenplus-codesign.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:SIGNING_PFX))
+          try {
+            $password = ConvertTo-SecureString $env:SIGNING_PASSWORD -AsPlainText -Force
+            $certificate = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+            if (-not $certificate.HasPrivateKey) { throw "Imported code-signing certificate has no private key" }
+            "ZENPLUS_SIGNING_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+          finally {
+            Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Build and test immutable x64 release
+        shell: pwsh
+        working-directory: ZenPlus_Agent
+        run: |
+          $python = (Get-Command python).Source
+          $env:ZENPLUS_BUILD_PYTHON = $python
+          ./scripts/build.ps1 -RequireSigning
+
+      - name: Verify release outputs
+        shell: pwsh
+        working-directory: ZenPlus_Agent
+        run: |
+          $manifest = Get-Content ./dist/agent-manifest.json -Raw | ConvertFrom-Json
+          $setup = Get-Item (Join-Path ./dist $manifest.file_name)
+          if ($setup.Length -ne $manifest.size_bytes) {
+            throw "Setup size does not match agent-manifest.json"
+          }
+          $sha = (Get-FileHash -Algorithm SHA256 $setup.FullName).Hash.ToLowerInvariant()
+          if ($sha -ne $manifest.sha256) {
+            throw "Setup SHA-256 does not match agent-manifest.json"
+          }
+          if ($setup.Name -ne "zenplus-agent-$($manifest.version).exe") {
+            throw "Setup filename/version mismatch"
+          }
+          $msi = Get-Item (Join-Path ./dist $manifest.msi_file_name)
+          if ((Get-FileHash -Algorithm SHA256 $msi.FullName).Hash.ToLowerInvariant() -ne $manifest.msi_sha256) {
+            throw "MSI SHA-256 does not match agent-manifest.json"
+          }
+          foreach ($package in @($msi, $setup)) {
+            $signature = Get-AuthenticodeSignature $package.FullName
+            if ($signature.Status -ne 'Valid') { throw "$($package.Name) is not Authenticode trusted: $($signature.Status)" }
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zenplus-agent-windows
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            ZenPlus_Agent/dist/zenplus-agent-*.msi
+            ZenPlus_Agent/dist/zenplus-agent-*.exe
+            ZenPlus_Agent/dist/agent-manifest.json
+
+      - name: Attach Windows packages to GitHub release
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: >-
+          gh release upload $env:RELEASE_TAG
+          ZenPlus_Agent/dist/zenplus-agent-*.msi
+          ZenPlus_Agent/dist/zenplus-agent-*.exe
+          ZenPlus_Agent/dist/agent-manifest.json
+          --clobber
+
+  publish-to-portal:
+    # The build job fails closed unless these repository variables and the
+    # deployment-key secret are configured, so a successful agent commit or
+    # release cannot silently omit the MSI from the portal.
+    # Agent-source commits publish the rebuilt package immediately; a GitHub
+    # release publishes the exact same verified artifact as a second path.
+    # The portal reconciles its package table from this directory on startup
+    # and whenever the fleet package list is opened; no manual publish call is
+    # required after the copy.
+    if: >-
+      vars.ZENPLUS_AGENT_AUTO_PUBLISH == 'true' &&
+      (github.event_name == 'push' || github.event_name == 'release' ||
+       github.event_name == 'workflow_dispatch')
+    needs: build-msi
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: zenplus-agent-windows
+          path: agent-artifact
+
+      - name: Configure deployment key
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.ZENPLUS_AGENT_SSH_PRIVATE_KEY }}
+          ZENPLUS_AGENT_HOST: ${{ vars.ZENPLUS_AGENT_HOST }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/zenplus-agent-release
+          chmod 0600 ~/.ssh/zenplus-agent-release
+          ssh-keyscan -H "$ZENPLUS_AGENT_HOST" >> ~/.ssh/known_hosts
+
+      - name: Publish MSI to portal artifact store
+        shell: bash
+        env:
+          ZENPLUS_AGENT_HOST: ${{ vars.ZENPLUS_AGENT_HOST }}
+          ZENPLUS_AGENT_USER: ${{ vars.ZENPLUS_AGENT_USER }}
+        run: |
+          set -euo pipefail
+          msi="$(find agent-artifact -maxdepth 1 -type f -name 'zenplus-agent-*.msi' -print -quit)"
+          test -n "$msi"
+          name="$(basename "$msi")"
+          sha="$(sha256sum "$msi" | awk '{print $1}')"
+          incoming="/tmp/${name}.${sha}.incoming"
+          scp -i ~/.ssh/zenplus-agent-release "$msi" \
+            "$ZENPLUS_AGENT_USER@$ZENPLUS_AGENT_HOST:$incoming"
+          ssh -i ~/.ssh/zenplus-agent-release \
+            "$ZENPLUS_AGENT_USER@$ZENPLUS_AGENT_HOST" \
+            bash -s -- "$name" "$sha" <<'REMOTE'
+          set -euo pipefail
+          name="$1"
+          expected_sha="$2"
+          incoming="/tmp/${name}.${expected_sha}.incoming"
+          destination="/opt/zenplus/artifacts/agents/windows/${name}"
+          trap 'rm -f -- "$incoming"' EXIT
+
+          [[ "$name" =~ ^zenplus-agent-[0-9]+\.[0-9]+\.[0-9]+\.msi$ ]]
+          [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]]
+          install -d -m 0755 /opt/zenplus/artifacts/agents/windows
+
+          if [[ -e "$destination" ]]; then
+            existing_sha="$(sha256sum "$destination" | awk '{print $1}')"
+            if [[ "$existing_sha" != "$expected_sha" ]]; then
+              echo "Refusing to replace immutable package $name ($existing_sha != $expected_sha). Bump AgentVersion and publish a new filename." >&2
+              exit 1
+            fi
+          else
+            install -m 0644 "$incoming" "$destination"
+          fi
+
+          actual_sha="$(sha256sum "$destination" | awk '{print $1}')"
+          [[ "$actual_sha" == "$expected_sha" ]]
+          REMOTE
+
+  publish-to-zentryc:
+    if: >-
+      vars.ZENPLUS_AGENT_AUTO_PUBLISH == 'true' &&
+      (github.event_name == 'push' || github.event_name == 'release' ||
+       github.event_name == 'workflow_dispatch')
+    needs: build-msi
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: zenplus-agent-windows
+          path: agent-artifact
+
+      - name: Configure public release key
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.ZENTRYC_AGENT_RELEASE_SSH_PRIVATE_KEY }}
+          RELEASE_HOST: ${{ vars.ZENTRYC_AGENT_RELEASE_HOST }}
+        run: |
+          set -euo pipefail
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/zentryc-agent-release
+          chmod 0600 ~/.ssh/zentryc-agent-release
+          ssh-keyscan -H "$RELEASE_HOST" >> ~/.ssh/known_hosts
+
+      - name: Publish signed MSI, EXE, and manifest atomically
+        shell: bash
+        env:
+          RELEASE_HOST: ${{ vars.ZENTRYC_AGENT_RELEASE_HOST }}
+          RELEASE_USER: ${{ vars.ZENTRYC_AGENT_RELEASE_USER }}
+        run: |
+          set -euo pipefail
+          manifest="agent-artifact/agent-manifest.json"
+          msi="agent-artifact/$(jq -r .msi_file_name "$manifest")"
+          setup="agent-artifact/$(jq -r .file_name "$manifest")"
+          test "$(jq -r .signature_status "$manifest")" = "Valid"
+          test "$(jq -r .msi_signature_status "$manifest")" = "Valid"
+          remote_root="agent-releases/stable"
+          ssh -i ~/.ssh/zentryc-agent-release "$RELEASE_USER@$RELEASE_HOST" \
+            "install -d -m 0755 '$remote_root'"
+          msi_name="$(basename "$msi")"
+          setup_name="$(basename "$setup")"
+          scp -i ~/.ssh/zentryc-agent-release "$msi" \
+            "$RELEASE_USER@$RELEASE_HOST:$remote_root/$msi_name.incoming"
+          scp -i ~/.ssh/zentryc-agent-release "$setup" \
+            "$RELEASE_USER@$RELEASE_HOST:$remote_root/$setup_name.incoming"
+          scp -i ~/.ssh/zentryc-agent-release "$manifest" \
+            "$RELEASE_USER@$RELEASE_HOST:$remote_root/manifest.json.incoming"
+          ssh -i ~/.ssh/zentryc-agent-release "$RELEASE_USER@$RELEASE_HOST" bash -s <<'REMOTE'
+          set -euo pipefail
+          cd agent-releases/stable
+          msi="$(jq -r .msi_file_name manifest.json.incoming)"
+          setup="$(jq -r .file_name manifest.json.incoming)"
+          msi_sha="$(jq -r .msi_sha256 manifest.json.incoming)"
+          setup_sha="$(jq -r .sha256 manifest.json.incoming)"
+          trap 'rm -f -- "$msi.incoming" "$setup.incoming" manifest.json.incoming' EXIT
+          test "$(sha256sum "$msi.incoming" | awk '{print $1}')" = "$msi_sha"
+          test "$(sha256sum "$setup.incoming" | awk '{print $1}')" = "$setup_sha"
+          if test -e "$msi"; then
+            test "$(sha256sum "$msi" | awk '{print $1}')" = "$msi_sha"
+          else
+            mv "$msi.incoming" "$msi"
+          fi
+          if test -e "$setup"; then
+            test "$(sha256sum "$setup" | awk '{print $1}')" = "$setup_sha"
+          else
+            mv "$setup.incoming" "$setup"
+          fi
+          chmod 0644 "$msi" "$setup" manifest.json.incoming
+          ln -sfn "$msi" ZenPlusAgent-latest.msi
+          ln -sfn "$setup" ZenPlusAgentSetup-latest.exe
+          mv -f manifest.json.incoming manifest.json
+          REMOTE

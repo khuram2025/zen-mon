@@ -4,6 +4,7 @@ package netcapture
 
 import (
 	"context"
+	stdnet "net"
 	"strings"
 	"time"
 
@@ -13,6 +14,8 @@ import (
 
 type rawConn struct {
 	Protocol      string
+	Kind          string
+	Direction     string
 	LocalIP       string
 	LocalPort     uint32
 	RemoteIP      string
@@ -27,7 +30,7 @@ type rawConn struct {
 }
 
 type source interface {
-	Sample() ([]rawConn, error)
+	Sample(context.Context) ([]rawConn, error)
 	Close()
 }
 
@@ -46,8 +49,8 @@ func newSource() (source, string, bool) {
 
 func (s *posixSource) Close() {}
 
-func (s *posixSource) Sample() ([]rawConn, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+func (s *posixSource) Sample(parent context.Context) ([]rawConn, error) {
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	defer cancel()
 
 	conns, err := net.ConnectionsWithContext(ctx, "inet")
@@ -58,6 +61,9 @@ func (s *posixSource) Sample() ([]rawConn, error) {
 		if procs, err := process.ProcessesWithContext(ctx); err == nil {
 			next := make(map[int32]string, len(procs))
 			for _, p := range procs {
+				if p.Pid <= 0 {
+					continue
+				}
 				if name, err := p.NameWithContext(ctx); err == nil && name != "" {
 					next[p.Pid] = name
 				}
@@ -69,23 +75,56 @@ func (s *posixSource) Sample() ([]rawConn, error) {
 
 	out := make([]rawConn, 0, len(conns))
 	for _, c := range conns {
-		if c.Raddr.IP == "" || c.Raddr.Port == 0 {
-			continue
-		}
 		proto := "tcp"
 		if c.Type == 2 {
 			proto = "udp"
 		}
+		hasPeer := c.Raddr.Port > 0 && !posixUnspecifiedIP(c.Raddr.IP)
+		kind := "connection"
+		direction := "unknown"
+		state := strings.ToLower(strings.TrimSpace(c.Status))
+		if proto == "udp" {
+			kind = "endpoint"
+			direction = "local"
+			if state == "" {
+				state = "bound"
+			}
+		} else if state == "listen" {
+			kind = "listener"
+			direction = "inbound"
+		} else if !hasPeer {
+			kind = "endpoint"
+			direction = "local"
+		} else if ip := stdnet.ParseIP(c.Raddr.IP); ip != nil && ip.IsLoopback() {
+			direction = "local"
+		}
+		remoteIP := ""
+		remotePort := uint32(0)
+		if hasPeer {
+			remoteIP = c.Raddr.IP
+			remotePort = c.Raddr.Port
+		}
 		out = append(out, rawConn{
 			Protocol:    proto,
+			Kind:        kind,
+			Direction:   direction,
 			LocalIP:     c.Laddr.IP,
 			LocalPort:   c.Laddr.Port,
-			RemoteIP:    c.Raddr.IP,
-			RemotePort:  c.Raddr.Port,
+			RemoteIP:    remoteIP,
+			RemotePort:  remotePort,
 			PID:         c.Pid,
-			State:       strings.ToLower(c.Status),
+			State:       state,
 			ProcessName: s.procNames[c.Pid],
 		})
 	}
 	return out, nil
+}
+
+func posixUnspecifiedIP(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return true
+	}
+	ip := stdnet.ParseIP(value)
+	return ip != nil && ip.IsUnspecified()
 }

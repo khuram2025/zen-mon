@@ -21,6 +21,7 @@ import (
 
 	"zenplus-agent/internal/config"
 	"zenplus-agent/internal/model"
+	"zenplus-agent/internal/netiface"
 )
 
 type Result struct {
@@ -316,6 +317,11 @@ func collectDiskIO(ctx context.Context, add func(string, map[string]any), errs m
 }
 
 func collectNetwork(ctx context.Context, ignore []string, add func(string, map[string]any), errs map[string]string, inv map[string]any) {
+	nativeCounters, nativeErr := netiface.Snapshot(ctx)
+	nativeByName := make(map[string]netiface.Counter, len(nativeCounters))
+	for _, counter := range nativeCounters {
+		nativeByName[strings.ToLower(counter.Name)] = counter
+	}
 	ifaces, err := gnet.InterfacesWithContext(ctx)
 	if err == nil {
 		items := make([]map[string]any, 0, len(ifaces))
@@ -329,17 +335,34 @@ func collectNetwork(ctx context.Context, ignore []string, add func(string, map[s
 					ips = append(ips, addr.Addr)
 				}
 			}
-			items = append(items, map[string]any{
+			item := map[string]any{
 				"if_name":      iface.Name,
 				"mac_address":  iface.HardwareAddr,
 				"ip_addresses": ips,
 				"is_up":        hasFlag(iface.Flags, "up"),
 				"mtu":          iface.MTU,
-			})
+			}
+			if native, ok := nativeByName[strings.ToLower(iface.Name)]; ok {
+				linkSpeed := native.ReceiveLinkSpeedBPS
+				if native.TransmitLinkSpeedBPS > linkSpeed {
+					linkSpeed = native.TransmitLinkSpeedBPS
+				}
+				item["interface_index"] = native.InterfaceIndex
+				item["interface_id"] = native.InterfaceID
+				item["description"] = native.Description
+				item["receive_link_speed_bps"] = native.ReceiveLinkSpeedBPS
+				item["transmit_link_speed_bps"] = native.TransmitLinkSpeedBPS
+				item["speed_mbps"] = netiface.SpeedMbps(linkSpeed)
+				item["is_up"] = native.IsUp
+			}
+			items = append(items, item)
 		}
 		if len(items) > 0 {
 			inv["network_interfaces"] = items
 		}
+	}
+	if nativeErr != nil {
+		errs["network_interface_details"] = nativeErr.Error()
 	}
 	counters, err := gnet.IOCountersWithContext(ctx, true)
 	if err != nil {

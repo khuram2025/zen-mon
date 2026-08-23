@@ -23,8 +23,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
+from app.services.audit_service import write_audit_log
 
 router = APIRouter(prefix="/apm", tags=["APM control plane"])
 
@@ -66,9 +67,32 @@ def _client_ip(request: Request) -> Optional[str]:
 _KEY_CACHE: dict[str, tuple[float, dict]] = {}
 _KEY_CACHE_TTL = 30.0
 
+# `last_used_at` is what tells an operator a key is live vs. abandoned, but the
+# ingest path runs per batch — writing it on every call would put a Postgres
+# UPDATE in front of the hot loop. Stamp it at most once per key per interval.
+_LAST_USED_TTL = 60.0
+_LAST_USED_SEEN: dict[str, float] = {}
+
 
 def invalidate_ingest_key_cache() -> None:
     _KEY_CACHE.clear()
+    _LAST_USED_SEEN.clear()
+
+
+async def _touch_last_used(db: AsyncSession, key_id, key_hash: str) -> None:
+    """Best-effort `last_used_at` stamp, throttled to one write per minute."""
+    now = time.monotonic()
+    if _LAST_USED_SEEN.get(key_hash, 0.0) > now:
+        return
+    _LAST_USED_SEEN[key_hash] = now + _LAST_USED_TTL
+    try:
+        await db.execute(
+            text("UPDATE apm_ingest_keys SET last_used_at = NOW() WHERE id = :id"),
+            {"id": key_id},
+        )
+        await db.commit()
+    except Exception:  # never fail an ingest because bookkeeping failed
+        await db.rollback()
 
 
 async def authenticate_ingest_key(
@@ -113,6 +137,7 @@ async def authenticate_ingest_key(
 
     if kind is not None and row["kind"] != kind:
         raise HTTPException(401, f"Ingest key is not of kind '{kind}'")
+    await _touch_last_used(db, row["id"], key_hash)
     return row
 
 
@@ -222,8 +247,25 @@ async def list_ingest_keys(
 async def create_ingest_key(
     body: IngestKeyCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
+    if body.kind == "rum":
+        if not body.origin_allowlist:
+            raise HTTPException(400, "Browser RUM keys require at least one allowed origin")
+        from urllib.parse import urlsplit
+        for origin in body.origin_allowlist:
+            try:
+                parsed = urlsplit(origin)
+                invalid = (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                           or parsed.username is not None or parsed.password is not None
+                           or parsed.path not in {"", "/"} or parsed.query
+                           or parsed.fragment or "*" in origin)
+            except (TypeError, ValueError):
+                invalid = True
+            if invalid:
+                raise HTTPException(400, f"Invalid RUM origin '{origin}'; use an exact http(s) origin without a path or wildcard")
+    elif body.origin_allowlist:
+        raise HTTPException(400, "Origin allowlists are only valid for browser RUM keys")
     plaintext, key_hash, key_prefix = _new_ingest_key(body.kind)
     env_id = await _resolve_env_id(db, body.env)
     import json
@@ -248,6 +290,13 @@ async def create_ingest_key(
     await db.commit()
     invalidate_ingest_key_cache()
     resp = _key_row_to_response({**dict(row), "env_name": body.env})
+    await write_audit_log(
+        db, actor=user, action="apm.ingest_key.create",
+        resource_type="apm_ingest_key", resource_id=str(row["id"]),
+        metadata={"name": body.name, "kind": body.kind, "env": body.env,
+                  "key_prefix": key_prefix},
+    )
+    await db.commit()
     return IngestKeyCreated(**resp.model_dump(), key=plaintext)
 
 
@@ -255,7 +304,7 @@ async def create_ingest_key(
 async def revoke_ingest_key(
     key_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     res = await db.execute(
         text("UPDATE apm_ingest_keys SET revoked_at = NOW(), enabled = FALSE "
@@ -266,6 +315,11 @@ async def revoke_ingest_key(
     invalidate_ingest_key_cache()
     if res.rowcount == 0:
         raise HTTPException(404, "Ingest key not found or already revoked")
+    await write_audit_log(
+        db, actor=user, action="apm.ingest_key.revoke",
+        resource_type="apm_ingest_key", resource_id=str(key_id),
+    )
+    await db.commit()
     return None
 
 
@@ -300,7 +354,7 @@ class EnrollmentTokenCreated(EnrollmentTokenResponse):
 async def create_enrollment_token(
     body: EnrollmentTokenCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     prefix = RUM_KEY_PREFIX if body.kind == "rum" else SDK_KEY_PREFIX
     raw = prefix + "enroll_" + secrets.token_urlsafe(24)
@@ -326,6 +380,13 @@ async def create_enrollment_token(
         },
     )).mappings().first()
     await db.commit()
+    await write_audit_log(
+        db, actor=user, action="apm.enrollment_token.create",
+        resource_type="apm_enrollment_token", resource_id=str(row["id"]),
+        metadata={"kind": body.kind, "env": body.env,
+                  "max_uses": body.max_uses, "expires_in_hours": body.expires_in_hours},
+    )
+    await db.commit()
     return EnrollmentTokenCreated(
         id=row["id"], token_prefix=row["token_prefix"], kind=row["kind"], env=body.env,
         max_uses=row["max_uses"], uses=row["uses"], expires_at=row["expires_at"],
@@ -337,7 +398,7 @@ async def create_enrollment_token(
 async def revoke_enrollment_token(
     token_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     res = await db.execute(
         text("UPDATE apm_enrollment_tokens SET revoked_at = NOW() "
@@ -347,4 +408,112 @@ async def revoke_enrollment_token(
     await db.commit()
     if res.rowcount == 0:
         raise HTTPException(404, "Enrollment token not found or already revoked")
+    await write_audit_log(
+        db, actor=user, action="apm.enrollment_token.revoke",
+        resource_type="apm_enrollment_token", resource_id=str(token_id),
+    )
+    await db.commit()
     return None
+
+
+# ── Data quality (ingest health, service freshness, agent forwarders) ────────
+
+@router.get("/data-quality")
+async def data_quality(
+    hours: int = 24,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Monitor the *quality* of ingested APM data: cluster-wide ingest
+    counters (accepted / rejected / clock-skewed / dropped, persisted across
+    restarts), per-service reporting freshness, and the health of agent-side
+    APM forwarders. This is how operators catch unacceptable data — skewed
+    clocks, silently dying producers, flush failures — before it corrupts
+    dashboards."""
+    import asyncio as _asyncio
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    hours = max(1, min(hours, 720))
+
+    def _ingest() -> dict:
+        from app.core.database import get_ch_client
+        since = (_dt.now(_tz.utc) - _td(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+        client = get_ch_client()
+        totals = client.query(
+            "SELECT sum(accepted), sum(rejected), sum(dropped), sum(skewed), sum(flushes) "
+            "FROM zenplus.apm_ingest_stats WHERE timestamp >= %(s)s",
+            parameters={"s": since},
+        ).result_rows[0]
+        series = client.query(
+            "SELECT toStartOfInterval(timestamp, INTERVAL 300 SECOND) AS t, "
+            "       sum(accepted), sum(rejected) + sum(skewed), sum(dropped) "
+            "FROM zenplus.apm_ingest_stats WHERE timestamp >= %(s)s "
+            "GROUP BY t ORDER BY t",
+            parameters={"s": since},
+        ).result_rows
+        accepted = int(totals[0] or 0)
+        rejected = int(totals[1] or 0)
+        return {
+            "accepted": accepted, "rejected": rejected,
+            "dropped": int(totals[2] or 0), "skewed": int(totals[3] or 0),
+            "flushes": int(totals[4] or 0),
+            "reject_rate": round(rejected / (accepted + rejected), 5)
+                           if (accepted + rejected) else 0.0,
+            "series": [{"t": r[0].isoformat(), "accepted": int(r[1]),
+                        "rejected": int(r[2]), "dropped": int(r[3])} for r in series],
+        }
+
+    ingest = await _asyncio.to_thread(_ingest)
+
+    # Live queue depth for THIS worker (indicative; counters above are global).
+    from app.api.v1 import apm_ingest as _ingest_mod
+    ingest["queue_depth"] = _ingest_mod._queue.qsize() if _ingest_mod._queue else None
+
+    services = [
+        {
+            "name": r["name"], "health": r["health"],
+            "last_seen_at": r["last_seen_at"].isoformat() if r["last_seen_at"] else None,
+            "silent_for_s": int(r["silent_s"]) if r["silent_s"] is not None else None,
+            "reporting": (r["silent_s"] or 0) < 600 if r["silent_s"] is not None else False,
+        }
+        for r in (await db.execute(text("""
+            SELECT name, health, last_seen_at,
+                   EXTRACT(EPOCH FROM (NOW() - last_seen_at)) AS silent_s
+            FROM apm_services ORDER BY last_seen_at DESC NULLS LAST
+        """))).mappings().all()
+    ]
+
+    forwarders = [
+        {
+            "agent_id": str(r["id"]), "hostname": r["hostname"],
+            "agent_status": r["status"], "clock_skew_s": r["clock_skew_s"],
+            **{k: (r["apm_status"] or {}).get(k) for k in
+               ("enabled", "failed", "spans_forwarded_1m", "export_errors_1m",
+                "spool_depth_spans", "dropped_spans_total", "last_error")},
+        }
+        for r in (await db.execute(text("""
+            SELECT id, hostname, status, clock_skew_s, apm_status
+            FROM agents WHERE apm_status IS NOT NULL ORDER BY hostname
+        """))).mappings().all()
+    ]
+
+    silent = sum(1 for s in services if not s["reporting"])
+    issues = []
+    if ingest["dropped"]:
+        issues.append(f"{ingest['dropped']} span(s) dropped on ClickHouse flush failures")
+    if ingest["skewed"]:
+        issues.append(f"{ingest['skewed']} span(s) rejected for clock skew")
+    if silent:
+        issues.append(f"{silent} registered service(s) not reporting")
+    failing_fwd = [f["hostname"] for f in forwarders
+                   if f.get("failed") or (f.get("export_errors_1m") or 0) > 0]
+    if failing_fwd:
+        issues.append(f"agent forwarder issues on: {', '.join(failing_fwd[:5])}")
+
+    return {
+        "ingest": ingest,
+        "services": services,
+        "agent_forwarders": forwarders,
+        "health": "issues" if issues else "ok",
+        "issues": issues,
+    }

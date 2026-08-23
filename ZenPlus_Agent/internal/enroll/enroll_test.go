@@ -10,12 +10,11 @@ import (
 	"testing"
 
 	"zenplus-agent/internal/config"
-	"zenplus-agent/internal/identity"
 	"zenplus-agent/internal/model"
 	"zenplus-agent/internal/runtime"
 )
 
-func TestEnrollSendsSiteAndPolicy(t *testing.T) {
+func TestEnsureCreatesPendingRegistrationWithoutOperatorToken(t *testing.T) {
 	var got model.EnrollmentRequest
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/agents/enroll" {
@@ -25,10 +24,7 @@ func TestEnrollSendsSiteAndPolicy(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = json.NewEncoder(w).Encode(model.EnrollmentResponse{
-			AgentID:  "agent-1",
-			ServerID: "server-1",
-			APIKey:   "zpa_key_AbC123dEf456GhI789jKl012MnO345pQr678",
-			PolicyID: "policy-response",
+			AgentID: "00000000-0000-4000-8000-000000000001", AuthorizationState: "pending",
 		})
 	}))
 	defer server.Close()
@@ -39,30 +35,24 @@ func TestEnrollSendsSiteAndPolicy(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.ControllerURL = server.URL
-	cfg.EnrollmentToken = "zp_enroll_test"
-	cfg.SiteID = "site-123"
-	cfg.PolicyID = "policy-456"
-	id := identity.Identity{
-		AgentUID:     "win-test-agent",
-		Hostname:     "WIN-TEST",
-		Platform:     "windows",
-		Architecture: "amd64",
-	}
 
-	result, err := Enroll(context.Background(), cfg, paths, id, func(string, ...any) {})
+	result, err := Ensure(context.Background(), cfg, paths, func(string, ...any) {})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Enrolled || !result.Fresh {
-		t.Fatalf("expected fresh enrollment, got %+v", result)
+	if result.Enrolled || result.AuthorizationState != "pending" {
+		t.Fatalf("expected pending registration, got %+v", result)
 	}
-	if got.SiteID != "site-123" {
-		t.Fatalf("site_id not sent: %+v", got)
+	if result.Identity.AgentID != "00000000-0000-4000-8000-000000000001" {
+		t.Fatalf("controller agent id was not persisted: %+v", result.Identity)
 	}
-	if got.PolicyID != "policy-456" {
-		t.Fatalf("policy_id not sent: %+v", got)
+	if len(got.PendingSecret) < 32 {
+		t.Fatalf("protected continuity secret was not sent: %+v", got)
 	}
-	if _, err := os.Stat(paths.CredentialMeta); err != nil {
-		t.Fatalf("credential metadata was not written: %v", err)
+	if _, err := os.Stat(paths.PendingSecret); err != nil {
+		t.Fatalf("pending secret was not persisted: %v", err)
+	}
+	if _, err := os.Stat(paths.CredentialFile); !os.IsNotExist(err) {
+		t.Fatalf("pending registration must not receive an API credential: %v", err)
 	}
 }

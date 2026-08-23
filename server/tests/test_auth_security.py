@@ -65,6 +65,28 @@ def test_viewer_cannot_access_operator_mutation_surfaces(client, as_viewer):
         assert response.status_code == 403, path
 
 
+def test_viewer_cannot_mutate_apm_security_or_triage(client, as_viewer):
+    key_id = uuid4()
+    token_id = uuid4()
+    protected_requests = [
+        ("post", "/api/v1/apm/ingest-keys", {"name": "blocked", "kind": "sdk"}),
+        ("delete", f"/api/v1/apm/ingest-keys/{key_id}", None),
+        ("post", "/api/v1/apm/enrollment-tokens", {"kind": "sdk", "max_uses": 1}),
+        ("delete", f"/api/v1/apm/enrollment-tokens/{token_id}", None),
+        ("patch", "/api/v1/apm/errors/example-group", {"status": "resolved"}),
+        ("post", f"/api/v1/apm/agent-processes/{uuid4()}/instrumentation", {"enabled": True, "restart": True}),
+    ]
+
+    for method, path, payload in protected_requests:
+        response = client.request(
+            method.upper(),
+            path,
+            headers={"Authorization": "Bearer test"},
+            json=payload,
+        )
+        assert response.status_code == 403, path
+
+
 @pytest.mark.asyncio
 async def test_operator_dependency_allows_operator_and_admin():
     operator = await require_operator_user(make_user("operator"))

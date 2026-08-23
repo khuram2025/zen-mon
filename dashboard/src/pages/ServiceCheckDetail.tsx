@@ -24,8 +24,8 @@ import {
   Gauge,
   Globe,
   Info,
-  MapPin,
   Network,
+  LockKeyhole,
   Pause,
   Play,
   Plug,
@@ -40,6 +40,7 @@ import {
   Radar,
   Settings as SettingsIcon,
   RotateCcw,
+  Route,
   TrendingUp,
 } from 'lucide-react'
 import {
@@ -183,6 +184,38 @@ function pct(n: number | null | undefined, digits = 2): string {
   return `${n.toFixed(digits)}%`
 }
 
+type ProbeEvidenceStep = {
+  index: number
+  name: string
+  status: 'up' | 'down'
+  status_code: number | null
+  response_time_ms: number
+  content_matched: boolean | null
+  error: string
+  diagnosis: string | null
+  response_url: string | null
+  response_reason?: string | null
+  content_type: string | null
+  response_size_bytes: number | null
+  redirect_count: number
+  authentication_challenges?: string[]
+}
+
+type ProbeEvidenceResult = {
+  status: 'up' | 'down' | 'unknown'
+  response_time_ms: number
+  error: string
+  diagnosis: string | null
+  details?: {
+    status_code?: number | null
+    authentication?: string
+    transport_security?: string
+    steps_total?: number
+    steps_passed?: number
+    steps?: ProbeEvidenceStep[]
+  }
+}
+
 /* ─── Page ──────────────────────────────────────────────────────────────── */
 
 export function ServiceCheckDetailPage() {
@@ -219,6 +252,7 @@ export function ServiceCheckDetailPage() {
   const [nowTick, setNowTick] = useState(() => Date.now())
   const [hsOpen, setHsOpen] = useState(false)
   const [hsConfig, setHsConfig] = useState<HealthScoreConfig>(() => loadHealthScoreConfig())
+  const [manualProbe, setManualProbe] = useState<{ result: ProbeEvidenceResult; observedAt: string } | null>(null)
 
   // Tick every second for the "Next poll in" countdown.
   useEffect(() => {
@@ -368,11 +402,13 @@ export function ServiceCheckDetailPage() {
   const runNow = useMutation({
     mutationFn: async () => (await api.post(`/service-checks/${id}/test`, {})).data,
     onSuccess: (d: any) => {
+      setManualProbe({ result: d as ProbeEvidenceResult, observedAt: new Date().toISOString() })
       toast.success('Probe complete', d?.status === 'up' ? `Up · ${Math.round(d.response_time_ms || 0)} ms` : `Down: ${d?.error || ''}`)
       qc.invalidateQueries({ queryKey: ['service-check', id] })
       qc.invalidateQueries({ queryKey: ['service-check-metrics', id] })
       qc.invalidateQueries({ queryKey: ['service-sla', id] })
     },
+    onError: (e: any) => toast.error('Probe failed to run', apiErrorMessage(e)),
   })
 
   const togglePause = useMutation({
@@ -393,6 +429,7 @@ export function ServiceCheckDetailPage() {
       return (await api.post(`/service-checks/${id}/test`, {})).data
     },
     onSuccess: (d: any) => {
+      setManualProbe({ result: d as ProbeEvidenceResult, observedAt: new Date().toISOString() })
       toast.success(
         'Re-validation complete',
         d?.status === 'up'
@@ -561,11 +598,14 @@ export function ServiceCheckDetailPage() {
   return (
     <PaletteContext.Provider value={C}>
     <div
-      className="space-y-4 p-0"
-      style={{ background: C.bg, color: C.text }}
+      className="space-y-5 pb-8"
+      style={{ color: C.text }}
     >
       {/* Page header */}
-      <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+      <div
+        className="flex flex-col gap-4 rounded-2xl p-4 shadow-sm xl:flex-row xl:items-center xl:justify-between"
+        style={{ background: C.panel, border: `1px solid ${C.border}` }}
+      >
         <div className="flex items-start gap-2">
           <button
             onClick={() => navigate('/services')}
@@ -575,9 +615,12 @@ export function ServiceCheckDetailPage() {
             <ArrowLeft className="h-4 w-4" />
           </button>
           <div>
-            <h1 className="text-xl font-semibold tracking-tight">Service Details</h1>
-            <p className="text-[11px] text-muted">
-              Real-time health, uptime, incidents, and configuration overview
+            <div className="mb-1 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wider text-muted">
+              Monitoring <ChevronRight className="h-3 w-3" /> Service overview
+            </div>
+            <h1 className="text-2xl font-semibold tracking-tight">Service operations</h1>
+            <p className="mt-0.5 text-sm text-muted">
+              Live health, response evidence, reliability, and configuration in one workspace.
             </p>
           </div>
         </div>
@@ -639,10 +682,14 @@ export function ServiceCheckDetailPage() {
         enabled={check.enabled}
         probeInfo={
           check.check_type === 'http'
-            ? `HTTP(S) · Status + Body`
+            ? (check.workflow_steps?.length || 0) > 0
+              ? `HTTP journey · ${check.workflow_steps?.length} steps · ${(check.workflow_operator || 'all').toUpperCase()}`
+              : `HTTP(S) · Status + Body`
             : check.check_type.toUpperCase()
         }
       />
+
+      {(check.workflow_steps?.length || 0) > 0 && <WorkflowOverview check={check} />}
 
       {/* ── Maintenance banner ───────────────────────────────────────── */}
       {check.in_maintenance && (
@@ -669,13 +716,20 @@ export function ServiceCheckDetailPage() {
         />
       )}
 
+      <ProbeEvidenceCard
+        check={check}
+        latestMetric={points.length > 0 ? points[points.length - 1] : null}
+        recentMetrics={points.slice(-8).reverse()}
+        manualProbe={manualProbe}
+      />
+
       {/* ── Live Probe Strip ─────────────────────────────────────────── */}
-      <Card>
-        <div className="mb-2 flex items-center justify-between">
+      <Card className="p-4">
+        <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-2">
             <Activity className="h-3.5 w-3.5" style={{ color: C.cyan }} />
-            <span className="text-xs font-semibold">Live Probe Strip</span>
-            <span className="text-[11px] text-muted">(last 60 checks)</span>
+            <span className="text-sm font-semibold">Live availability stream</span>
+            <span className="text-xs text-muted">Last 60 checks</span>
             {check.in_maintenance && (
               <span
                 className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider"
@@ -695,7 +749,7 @@ export function ServiceCheckDetailPage() {
               </span>
             )}
           </div>
-          <div className="flex items-center gap-3 text-[10px]">
+          <div className="flex flex-wrap items-center gap-3 text-xs">
             <Legend color={C.up} label="Up" />
             <Legend color={C.warn} label="Warn" />
             <Legend color={C.down} label="Down" />
@@ -718,8 +772,8 @@ export function ServiceCheckDetailPage() {
 
       {/* ── KPI row + health ring ───────────────────────────────────── */}
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
-        <div className="lg:col-span-9">
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="lg:col-span-8">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
             <Kpi
               label="Availability"
               value={pct(sla?.uptime_pct ?? null, 2)}
@@ -788,7 +842,7 @@ export function ServiceCheckDetailPage() {
         </div>
 
         {/* Health score ring */}
-        <div className="lg:col-span-3">
+        <div className="lg:col-span-4">
           <HealthScoreRing
             score={healthScore.score}
             tint={healthScore.tint}
@@ -801,7 +855,7 @@ export function ServiceCheckDetailPage() {
 
       {/* ── Performance + Region columns ─────────────────────────────── */}
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
-        <div className="lg:col-span-9 space-y-3">
+        <div className="space-y-3 lg:col-span-8">
           <PerformanceChart
             points={points}
             statusHistory={statusHistory}
@@ -827,8 +881,7 @@ export function ServiceCheckDetailPage() {
         </div>
 
         {/* ── Right sidebar ───────────────────────────────────────── */}
-        <div className="lg:col-span-3 space-y-3">
-          <RegionStatus />
+        <div className="space-y-3 lg:col-span-4">
           <CurrentChecksSummary points={points} />
           <div className="grid grid-cols-2 gap-3">
             <QuickActions
@@ -1214,6 +1267,146 @@ function Card({ children, className = '', ...rest }: React.HTMLAttributes<HTMLDi
   )
 }
 
+function ProbeEvidenceCard({
+  check,
+  latestMetric,
+  recentMetrics,
+  manualProbe,
+}: {
+  check: ServiceCheck
+  latestMetric: ServiceMetricPoint | null
+  recentMetrics: ServiceMetricPoint[]
+  manualProbe: { result: ProbeEvidenceResult; observedAt: string } | null
+}) {
+  const C = useC()
+  const steps = manualProbe?.result.details?.steps || []
+  const finalStep = steps.length > 0 ? steps[steps.length - 1] : null
+  const manualStatusCode = finalStep?.status_code ?? manualProbe?.result.details?.status_code ?? null
+  const expected = check.http_expected_statuses || String(check.http_expected_status || 200)
+  const authLabel = check.credential_name
+    ? `${check.credential_name} · ${check.credential_auth_type === 'ntlm' ? 'Windows Integrated' : check.credential_auth_type}`
+    : check.check_type === 'http' && latestMetric?.status_code === 401
+      ? 'Anonymous authentication boundary'
+      : 'No saved credential'
+  const byteLabel = finalStep?.response_size_bytes == null
+    ? null
+    : finalStep.response_size_bytes < 1024
+      ? `${finalStep.response_size_bytes} B`
+      : `${(finalStep.response_size_bytes / 1024).toFixed(1)} KB`
+
+  return (
+    <Card className="overflow-hidden p-0 shadow-sm">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border p-4">
+        <div className="flex items-start gap-2">
+          <div className="rounded-lg bg-info/10 p-2 text-info"><Terminal className="h-4 w-4" /></div>
+          <div>
+            <div className="text-sm font-semibold">Latest probe evidence</div>
+            <div className="mt-0.5 text-xs text-muted">
+              Exact response metadata is retained; response bodies, cookies, and credential secrets are never displayed or stored.
+            </div>
+          </div>
+        </div>
+        <span className="rounded-full border border-border bg-surface2/50 px-2.5 py-1 text-xs text-muted">
+          Expected HTTP {expected}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
+        <EvidenceValue
+          label="Scheduled result"
+          value={latestMetric?.is_up == null ? 'No data' : latestMetric.is_up ? 'UP' : 'DOWN'}
+          tint={latestMetric?.is_up == null ? C.textDim : latestMetric.is_up ? C.up : C.down}
+          sub={latestMetric?.timestamp ? new Date(latestMetric.timestamp).toLocaleString() : 'Waiting for poller'}
+        />
+        <EvidenceValue
+          label="HTTP response"
+          value={latestMetric?.status_code == null ? '—' : `${latestMetric.status_code}`}
+          tint={latestMetric?.is_up === false ? C.down : C.text}
+          sub={latestMetric?.error_message || `Accepted: ${expected}`}
+        />
+        <EvidenceValue
+          label="Response time"
+          value={formatMs(latestMetric?.response_ms)}
+          tint={C.cyan}
+          sub="End-to-end from appliance"
+        />
+        <EvidenceValue
+          label="Authentication"
+          value={check.credential_auth_type === 'ntlm' ? 'NTLM' : check.credential_id ? 'Credentialed' : 'Boundary only'}
+          tint={check.credential_id ? C.violet : C.warn}
+          sub={authLabel}
+        />
+      </div>
+
+      {manualProbe && (
+        <div className="mx-4 mb-4 rounded-lg border border-border bg-surface2/40 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-semibold">
+              <Play className="h-3.5 w-3.5" style={{ color: manualProbe.result.status === 'up' ? C.up : C.down }} />
+              Last manual probe
+              <span style={{ color: manualProbe.result.status === 'up' ? C.up : C.down }}>
+                {manualProbe.result.status.toUpperCase()}
+              </span>
+            </div>
+            <span className="text-[10px] text-muted">{new Date(manualProbe.observedAt).toLocaleString()}</span>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted">
+            {manualStatusCode != null && <span><span className="text-text">HTTP {manualStatusCode}</span>{finalStep?.response_reason ? ` ${finalStep.response_reason}` : ''}</span>}
+            <span>{formatMs(manualProbe.result.response_time_ms)}</span>
+            {finalStep?.content_type && <span>{finalStep.content_type}</span>}
+            {byteLabel && <span>{byteLabel}</span>}
+            {finalStep?.redirect_count != null && <span>{finalStep.redirect_count} redirect{finalStep.redirect_count === 1 ? '' : 's'}</span>}
+            {finalStep?.authentication_challenges?.length ? <span>Challenge: {finalStep.authentication_challenges.join(' / ').toUpperCase()}</span> : null}
+            {finalStep?.content_matched != null && <span>Content match: {finalStep.content_matched ? 'passed' : 'failed'}</span>}
+          </div>
+          {finalStep?.response_url && <div className="mt-1 truncate font-mono text-[10px] text-muted">Response URL: {finalStep.response_url}</div>}
+          {(manualProbe.result.error || finalStep?.error) && (
+            <div className="mt-2 text-[11px]" style={{ color: C.down }}>{manualProbe.result.error || finalStep?.error}</div>
+          )}
+        </div>
+      )}
+
+      {recentMetrics.length > 0 && (
+        <div className="overflow-x-auto border-t border-border">
+          <div className="border-b border-border bg-surface2/30 px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Recent scheduled responses</div>
+          <table className="w-full min-w-[620px] text-left text-xs">
+            <thead className="bg-surface2/20 text-[10px] uppercase tracking-wider text-muted">
+              <tr className="border-b border-border">
+                <th className="px-4 py-2.5 font-medium">Received</th>
+                <th className="px-4 py-2.5 font-medium">Result</th>
+                <th className="px-4 py-2.5 font-medium">HTTP</th>
+                <th className="px-4 py-2.5 font-medium">Response</th>
+                <th className="px-4 py-2.5 font-medium">Evidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recentMetrics.map((point, index) => (
+                <tr key={`${point.timestamp}-${index}`} className="border-b border-border/60 transition-colors last:border-0 hover:bg-surface2/25">
+                  <td className="whitespace-nowrap px-4 py-2.5 text-muted">{new Date(point.timestamp).toLocaleString()}</td>
+                  <td className="px-4 py-2.5 font-semibold" style={{ color: point.is_up ? C.up : C.down }}>{point.is_up ? 'UP' : 'DOWN'}</td>
+                  <td className="px-4 py-2.5 font-mono">{point.status_code ?? '—'}</td>
+                  <td className="whitespace-nowrap px-4 py-2.5">{formatMs(point.response_ms)}</td>
+                  <td className="max-w-[360px] truncate px-4 py-2.5 text-muted" title={point.error_message || undefined}>{point.error_message || 'Accepted at collection time'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+function EvidenceValue({ label, value, tint, sub }: { label: string; value: string; tint: string; sub: string }) {
+  return (
+    <div className="min-w-0 rounded-xl border border-border bg-surface2/25 px-3.5 py-3">
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
+      <div className="mt-1 truncate text-lg font-semibold" style={{ color: tint }}>{value}</div>
+      <div className="mt-1 truncate text-xs text-muted" title={sub}>{sub}</div>
+    </div>
+  )
+}
+
 function Legend({ color, label }: { color: string; label: string }) {
   return (
     <span className="inline-flex items-center gap-1">
@@ -1253,103 +1446,91 @@ function HeroCard(props: {
   const t = typeMeta[props.type] || typeMeta.http
   const TypeIcon = t.Icon
   return (
-    <Card>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
-          <div
-            className="flex h-12 w-12 items-center justify-center rounded-lg"
-            style={{ background: `${t.tint}20`, color: t.tint }}
-          >
-            <TypeIcon className="h-6 w-6" />
-          </div>
-          <div>
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-xl font-semibold">{props.name}</h2>
-              <span
-                className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                style={{ background: `${sm.color}20`, color: sm.color }}
-              >
-                <span className="h-1.5 w-1.5 rounded-full" style={{ background: sm.color }} />
-                {sm.label}
-              </span>
-              {props.inMaintenance && (
-                <span
-                  className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
-                  style={{ background: `${C.violet}20`, color: C.violet, border: `1px solid ${C.violet}40` }}
-                  title="This service is currently in maintenance — alerts are suppressed."
-                >
-                  <Wrench className="h-2.5 w-2.5" />
-                  Maintenance
-                </span>
-              )}
-              {!props.enabled && (
-                <span
-                  className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
-                  style={{ background: `${C.warn}20`, color: C.warn, border: `1px solid ${C.warn}40` }}
-                  title="Checks are paused — the poller is not scheduling probes."
-                >
-                  <Pause className="h-2.5 w-2.5" />
-                  Paused
-                </span>
-              )}
-              {props.tags.some((x) => x.toLowerCase() === 'critical') && (
-                <span
-                  className="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider"
-                  style={{ background: `${C.down}20`, color: C.down }}
-                >
-                  ● Critical
-                </span>
-              )}
+    <Card className="overflow-hidden p-0 shadow-sm">
+      <div className="h-1" style={{ background: sm.color }} />
+      <div className="grid gap-5 p-5 xl:grid-cols-[minmax(0,1fr)_340px]">
+        <div className="min-w-0">
+          <div className="flex items-start gap-4">
+            <div
+              className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl shadow-sm"
+              style={{ background: `${t.tint}18`, color: t.tint, border: `1px solid ${t.tint}30` }}
+            >
+              <TypeIcon className="h-7 w-7" />
             </div>
-            <p className="mt-0.5 text-xs text-muted">
-              {props.deviceHostname || 'Service'} · v{props.type.toUpperCase()}
-            </p>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-2xl font-semibold tracking-tight">{props.name}</h2>
+                <span
+                  className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold"
+                  style={{ background: `${sm.color}15`, color: sm.color, border: `1px solid ${sm.color}30` }}
+                >
+                  <span className="h-2 w-2 rounded-full" style={{ background: sm.color }} />
+                  {sm.label}
+                </span>
+                {props.inMaintenance && <StateBadge icon={Wrench} label="Maintenance" color={C.violet} />}
+                {!props.enabled && <StateBadge icon={Pause} label="Paused" color={C.warn} />}
+              </div>
+              <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted">
+                <span>{props.deviceHostname || 'Synthetic service'}</span>
+                <span>·</span>
+                <span>{t.label} monitor</span>
+                <span>·</span>
+                <span>{props.probeInfo}</span>
+              </div>
+              <div className="mt-3 inline-flex max-w-full items-center gap-2 rounded-lg border border-border bg-surface2/50 px-3 py-2 font-mono text-xs">
+                <Globe className="h-3.5 w-3.5 shrink-0 text-primary" />
+                <span className="truncate" title={props.target}>{props.target}</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-5 grid gap-3 border-t pt-4 sm:grid-cols-2 xl:grid-cols-4" style={{ borderColor: C.borderSoft }}>
+            <Meta label="Environment" value={props.environment} />
+            <Meta label="Group / owner" value={props.group || 'Unassigned'} />
+            <Meta label="Primary region" value="Appliance local" />
+            <Meta label="Tags" value={props.tags.length ? props.tags.join(', ') : 'No tags'} />
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-border bg-surface2/45 p-4">
+          <div className="flex items-center justify-between">
+            <div className="text-xs font-semibold uppercase tracking-wider text-muted">Polling status</div>
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium" style={{ color: props.enabled ? C.up : C.warn }}>
+              <span className="h-2 w-2 rounded-full" style={{ background: props.enabled ? C.up : C.warn }} />
+              {props.enabled ? 'Active' : 'Paused'}
+            </span>
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-3">
+            <OperationalValue label="Last checked" value={props.lastCheckAt ? relativeTime(props.lastCheckAt) : 'Waiting'} sub={props.lastCheckAt ? new Date(props.lastCheckAt).toLocaleTimeString() : 'No result'} />
+            <OperationalValue label="Next probe" value={props.secsToNext == null ? '—' : `${String(Math.floor(props.secsToNext / 60)).padStart(2, '0')}:${String(props.secsToNext % 60).padStart(2, '0')}`} sub={`Every ${props.checkInterval}s`} mono />
+          </div>
+          <div className="mt-3 rounded-lg border border-border bg-surface px-3 py-2.5">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Monitoring policy</div>
+            <div className="mt-1 text-sm font-medium">{props.inMaintenance ? 'Alerts suppressed during maintenance' : props.enabled ? 'Probes and alerting enabled' : 'Probe scheduling paused'}</div>
           </div>
         </div>
       </div>
-      {/* Row 1 — identity pills */}
-      <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2 border-t pt-3 text-[11px] sm:grid-cols-4" style={{ borderColor: C.borderSoft }}>
-        <Meta label="URL / Endpoint" value={props.target} mono />
-        <Meta label="Environment" value={props.environment} />
-        <Meta label="Group" value={props.group || '—'} />
-        <Meta
-          label="Tags"
-          value={
-            props.tags.length === 0
-              ? '—'
-              : props.tags.slice(0, 3).join(', ') + (props.tags.length > 3 ? ` +${props.tags.length - 3}` : '')
-          }
-        />
-      </div>
-      {/* Row 2 — operational pills */}
-      <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-2 text-[11px] sm:grid-cols-3 lg:grid-cols-6">
-        <Meta label="Owner / Team" value={props.group || '—'} />
-        <Meta label="Check Interval" value={`${props.checkInterval} sec`} />
-        <Meta label="Region Primary" value="us-east-1" />
-        <Meta
-          label="Last Checked"
-          value={props.lastCheckAt ? new Date(props.lastCheckAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'}
-        />
-        <Meta
-          label="Next Poll"
-          value={props.secsToNext == null ? '—' : `${String(Math.floor(props.secsToNext / 60)).padStart(2, '0')}:${String(props.secsToNext % 60).padStart(2, '0')}`}
-          mono
-        />
-        <Meta label="Probe Type" value={props.probeInfo} />
-      </div>
     </Card>
   )
+}
+
+function StateBadge({ icon: Icon, label, color }: { icon: typeof Pause; label: string; color: string }) {
+  return <span className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-wider" style={{ background: `${color}15`, color, border: `1px solid ${color}30` }}><Icon className="h-3 w-3" />{label}</span>
+}
+
+function OperationalValue({ label, value, sub, mono }: { label: string; value: string; sub: string; mono?: boolean }) {
+  return <div><div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div><div className={`mt-1 text-lg font-semibold ${mono ? 'font-mono' : ''}`}>{value}</div><div className="mt-0.5 text-[10px] text-muted">{sub}</div></div>
 }
 
 function Meta({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   const C = useC()
   return (
     <div className="min-w-0">
-      <div className="text-[10px] uppercase tracking-wider" style={{ color: C.textMuted }}>
+      <div className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: C.textMuted }}>
         {label}
       </div>
       <div
-        className={`truncate ${mono ? 'font-mono' : ''}`}
+        className={`mt-1 truncate text-sm font-medium ${mono ? 'font-mono' : ''}`}
         style={{ color: C.text }}
         title={value}
       >
@@ -1401,14 +1582,14 @@ function Kpi({
   const gid = `kpi-${label.replace(/\s+/g, '-')}`
   return (
     <div
-      className="flex h-full min-h-[170px] flex-col rounded-xl p-3"
+      className="flex h-full min-h-[152px] flex-col rounded-xl p-4 shadow-sm"
       style={{ background: C.panel, border: `1px solid ${C.border}` }}
     >
-      <div className="text-[10px] uppercase tracking-wider" style={{ color: C.textMuted }}>
+      <div className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: C.textMuted }}>
         {label}
       </div>
       <div
-        className="mt-0.5 text-2xl font-semibold tabular-nums"
+        className="mt-1 text-2xl font-semibold tabular-nums"
         style={{ color: tint }}
       >
         {value}
@@ -1418,7 +1599,7 @@ function Kpi({
         <span>{delta}</span>
         <span className="ml-1 truncate" style={{ color: C.textMuted }} title={windowLabel}>{windowLabel || 'window'}</span>
       </div>
-      <div className="mt-auto pt-2" style={{ minHeight: 52 }}>
+      <div className="mt-auto pt-3" style={{ minHeight: 48 }}>
         {series.length > 1 ? (
           <ResponsiveContainer width="100%" height={52}>
             <AreaChart data={series} margin={{ top: 2, right: 0, left: 0, bottom: 0 }}>
@@ -1463,11 +1644,11 @@ function HealthScoreRing({
   const offset = circ - (score / 100) * circ
   return (
     <div
-      className="flex h-full min-h-[170px] flex-col rounded-xl p-3"
+      className="flex h-full min-h-[170px] flex-col rounded-xl p-4 shadow-sm"
       style={{ background: C.panel, border: `1px solid ${C.border}` }}
     >
       <div className="mb-2 flex items-center justify-between">
-        <span className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: C.textMuted }}>
+        <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: C.textMuted }}>
           Health Score
         </span>
         <button
@@ -2308,44 +2489,6 @@ function RecentActivityTable({
   )
 }
 
-function RegionStatus() {
-  const C = useC()
-  const regions = [
-    { name: 'us-east-1', status: 'up' },
-    { name: 'eu-west-1', status: 'up' },
-    { name: 'ap-southeast-1', status: 'up' },
-  ]
-  return (
-    <div className="rounded-xl p-3" style={{ background: C.panel, border: `1px solid ${C.border}` }}>
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs font-semibold">Region Status</span>
-        <button className="text-[10px] hover:underline" style={{ color: C.primary }}>View all regions</button>
-      </div>
-      <div className="space-y-1.5">
-        {regions.map((r) => {
-          const sm = statusMeta[r.status] || statusMeta.unknown
-          return (
-            <div
-              key={r.name}
-              className="flex items-center justify-between rounded-md px-2 py-1.5 text-[11px]"
-              style={{ background: C.borderSoft }}
-            >
-              <div className="flex items-center gap-2">
-                <MapPin className="h-3 w-3" style={{ color: C.textMuted }} />
-                <span>{r.name}</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span style={{ color: sm.color }}>● {sm.label}</span>
-                <span className="text-[9px]" style={{ color: C.textMuted }}>▁▂▃▂▁▂▁</span>
-              </div>
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
 function InlineConfig({
   check, onEdit,
 }: { check: ServiceCheck; onEdit: () => void }) {
@@ -2378,6 +2521,16 @@ function InlineConfig({
           <CfgRow label="URL" value={check.target_url || check.target_host || '—'} mono onEdit={onEdit} />
           <CfgRow label="Method" value={check.http_method || '—'} onEdit={onEdit} />
           <CfgRow
+            label="Authentication"
+            value={check.credential_name ? `${check.credential_name} (${check.credential_auth_type})` : 'None'}
+            onEdit={onEdit}
+          />
+          <CfgRow
+            label="Journey"
+            value={(check.workflow_steps?.length || 0) > 0 ? `${check.workflow_steps?.length} steps · ${(check.workflow_operator || 'all').toUpperCase()}` : 'Single request'}
+            onEdit={onEdit}
+          />
+          <CfgRow
             label="Expected Status"
             value={check.http_expected_statuses || String(check.http_expected_status || '—')}
             onEdit={onEdit}
@@ -2397,6 +2550,45 @@ function InlineConfig({
           />
         </div>
       )}
+    </div>
+  )
+}
+
+function WorkflowOverview({ check }: { check: ServiceCheck }) {
+  const C = useC()
+  const steps = check.workflow_steps || []
+  return (
+    <div className="rounded-xl p-4" style={{ background: C.panel, border: `1px solid ${C.border}` }}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <Route className="h-4 w-4" style={{ color: C.primary }} />
+          <div>
+            <div className="text-xs font-semibold">Authenticated service journey</div>
+            <div className="text-[11px]" style={{ color: C.textMuted }}>
+              Cookie-preserving navigation · {(check.workflow_operator || 'all').toUpperCase()} rule
+            </div>
+          </div>
+        </div>
+        {check.credential_name && (
+          <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold" style={{ background: `${C.up}18`, color: C.up }}>
+            <LockKeyhole className="h-3 w-3" /> {check.credential_name} · {check.credential_auth_type}
+          </span>
+        )}
+      </div>
+      <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+        {steps.map((step, index) => (
+          <div key={`${step.name}-${index}`} className="rounded-lg p-3" style={{ background: C.panelLift, border: `1px solid ${C.borderSoft}` }}>
+            <div className="flex items-center gap-2">
+              <span className="flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold" style={{ background: `${C.primary}20`, color: C.primary }}>{index + 1}</span>
+              <span className="truncate text-xs font-semibold">{step.name}</span>
+            </div>
+            <div className="mt-2 truncate font-mono text-[10px]" style={{ color: C.textDim }} title={step.url}>{step.method} {step.url}</div>
+            <div className="mt-1 text-[10px]" style={{ color: C.textMuted }}>
+              Expect {step.expected_statuses || '200'}{step.content_match ? ' + content validation' : ''}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

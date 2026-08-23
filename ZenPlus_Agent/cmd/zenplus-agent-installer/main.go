@@ -26,7 +26,7 @@ import (
 
 const (
 	productName   = "ZenPlus Agent"
-	publisherName = "ZenPlus"
+	publisherName = "Zentryc"
 	serviceName   = "ZenPlusAgent"
 )
 
@@ -37,19 +37,19 @@ type payloadFile struct {
 }
 
 type options struct {
-	quiet           bool
-	uninstall       bool
-	purge           bool
-	noStartMenu     bool
-	noRestart       bool
-	machine         bool
-	user            bool
-	fromTemp        bool
-	autoUninstall   bool
-	controllerURL   string
-	enrollmentToken string
-	siteID          string
-	policyID        string
+	quiet         bool
+	uninstall     bool
+	purge         bool
+	noStartMenu   bool
+	noRestart     bool
+	machine       bool
+	user          bool
+	fromTemp      bool
+	autoUninstall bool
+	managedByMSI  bool
+	controllerURL string
+	apmMode       string
+	profile       string
 }
 
 func main() {
@@ -106,12 +106,10 @@ func parseOptions(args []string) (options, error) {
 			switch strings.ToUpper(strings.TrimSpace(key)) {
 			case "CONTROLLER_URL":
 				normalized = append(normalized, "-controller-url", value)
-			case "ENROLLMENT_TOKEN":
-				normalized = append(normalized, "-enrollment-token", value)
-			case "SITE_ID":
-				normalized = append(normalized, "-site-id", value)
-			case "POLICY_ID":
-				normalized = append(normalized, "-policy-id", value)
+			case "APM_ENABLED":
+				normalized = append(normalized, "-apm-enabled", value)
+			case "INSTALL_PROFILE":
+				normalized = append(normalized, "-profile", value)
 			case "PURGE":
 				if value == "1" || strings.EqualFold(value, "true") {
 					normalized = append(normalized, "-purge")
@@ -135,13 +133,29 @@ func parseOptions(args []string) (options, error) {
 	fs.BoolVar(&opts.user, "user", false, "install for the current user without elevation")
 	fs.BoolVar(&opts.fromTemp, "from-temp", false, "internal uninstall continuation")
 	fs.BoolVar(&opts.autoUninstall, "auto-uninstall", false, "internal UI uninstall continuation")
+	fs.BoolVar(&opts.managedByMSI, "managed-by-msi", false, "let Windows Installer own Apps and Features registration")
 	fs.StringVar(&opts.controllerURL, "controller-url", "", "controller URL")
-	fs.StringVar(&opts.enrollmentToken, "enrollment-token", "", "enrollment token")
-	fs.StringVar(&opts.siteID, "site-id", "", "site ID")
-	fs.StringVar(&opts.policyID, "policy-id", "", "policy ID")
+	fs.StringVar(&opts.apmMode, "apm-enabled", "", "enable or disable local APM monitoring")
+	fs.StringVar(&opts.profile, "profile", "", "installation profile: infrastructure, apm, or combined")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(normalized); err != nil {
 		return opts, err
+	}
+	if opts.apmMode != "" {
+		switch strings.ToLower(strings.TrimSpace(opts.apmMode)) {
+		case "1", "true", "yes", "enabled":
+			opts.apmMode = "enabled"
+		case "0", "false", "no", "disabled":
+			opts.apmMode = "disabled"
+		default:
+			return opts, fmt.Errorf("apm-enabled must be true or false")
+		}
+	}
+	if opts.profile != "" {
+		opts.profile = strings.ToLower(strings.TrimSpace(opts.profile))
+		if opts.profile != "infrastructure" && opts.profile != "apm" && opts.profile != "combined" {
+			return opts, fmt.Errorf("profile must be infrastructure, apm, or combined")
+		}
 	}
 	return opts, nil
 }
@@ -238,6 +252,19 @@ func install(l layout, opts options) error {
 		}
 	}
 	terminateZenPlusProcesses(15 * time.Second)
+	iisStopped := false
+	if _, err := os.Stat(filepath.Join(l.InstallDir, "apm", "instrumentation")); err == nil &&
+		len(findProcesses(map[string]bool{"w3wp.exe": true}, uint32(os.Getpid()))) > 0 {
+		if err := runCommand("iisreset.exe", "/stop"); err != nil {
+			return fmt.Errorf("stop IIS for profiler upgrade: %w", err)
+		}
+		iisStopped = true
+		defer func() {
+			if iisStopped {
+				_ = runCommandAllowFailure("iisreset.exe", "/start")
+			}
+		}()
+	}
 	removeLegacyRuntime(l)
 	removeOppositeScopeShortcuts(l)
 	if err := os.MkdirAll(l.InstallDir, 0o755); err != nil {
@@ -253,6 +280,9 @@ func install(l layout, opts options) error {
 	}
 	for _, payload := range payloads {
 		target := filepath.Join(l.InstallDir, payload.Name)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return fmt.Errorf("create payload directory for %s: %w", target, err)
+		}
 		if err := os.WriteFile(target, payload.Data, payload.Mode); err != nil {
 			return fmt.Errorf("write %s: %w", target, err)
 		}
@@ -280,8 +310,20 @@ func install(l layout, opts options) error {
 	if err := createStartupShortcut(l); err != nil {
 		return err
 	}
-	if err := writeUninstallRegistry(l); err != nil {
-		return err
+	if iisStopped {
+		if err := runCommand("iisreset.exe", "/start"); err != nil {
+			return fmt.Errorf("restart IIS after profiler upgrade: %w", err)
+		}
+		iisStopped = false
+	}
+	if opts.managedByMSI {
+		// Remove the legacy EXE registration when upgrading into the MSI-owned
+		// product so Apps & Features shows one authoritative entry.
+		_ = removeUninstallRegistry(l)
+	} else {
+		if err := writeUninstallRegistry(l); err != nil {
+			return err
+		}
 	}
 	logStep(opts, "%s installed successfully.", productName)
 	if !opts.quiet {
@@ -317,9 +359,10 @@ func uninstall(l layout, opts options) error {
 
 func terminateZenPlusProcesses(timeout time.Duration) {
 	names := map[string]bool{
-		"zenplus-agent-app.exe":  true,
-		"zenplus-agent.exe":      true,
-		"zenplus-agent-user.exe": true,
+		"zenplus-agent-app.exe":         true,
+		"zenplus-agent.exe":             true,
+		"zenplus-agent-user.exe":        true,
+		"zenplus-telemetry-gateway.exe": true,
 	}
 	currentPID := uint32(os.Getpid())
 	deadline := time.Now().Add(timeout)
@@ -424,17 +467,28 @@ func writeInstalledConfig(l layout, opts options) error {
 		}
 		cfg.ControllerURL = normalized
 	}
-	// Discards the MSI's un-substituted placeholder, so a package pulled
-	// outside the controller's download flow installs without a bogus token.
-	if token := config.NormalizeEnrollmentToken(opts.enrollmentToken); token != "" {
-		cfg.EnrollmentToken = token
+	if opts.apmMode != "" {
+		cfg.APM.Enabled = opts.apmMode == "enabled"
 	}
-	if opts.siteID != "" {
-		cfg.SiteID = opts.siteID
+	if opts.profile != "" {
+		cfg.APM.Profile = opts.profile
+		cfg.APM.Enabled = opts.profile != "infrastructure"
+		if opts.profile == "apm" {
+			cfg.Collectors.CPU.Enabled = false
+			cfg.Collectors.Memory.Enabled = false
+			cfg.Collectors.Filesystem.Enabled = false
+			cfg.Collectors.DiskIO.Enabled = false
+			cfg.Collectors.Network.Enabled = false
+			cfg.Collectors.Processes.Enabled = false
+			cfg.Collectors.Services.Enabled = false
+			cfg.Collectors.EventLog.Enabled = false
+			cfg.Collectors.Inventory.Enabled = true
+		}
 	}
-	if opts.policyID != "" {
-		cfg.PolicyID = opts.policyID
-	}
+	// Authorization, site placement, and policy assignment are controlled by
+	// the appliance. Clear legacy bootstrap values during upgrades so the
+	// endpoint stores only its controller connection setting.
+	cfg.PolicyID = ""
 	return config.Save(l.ConfigPath, cfg)
 }
 

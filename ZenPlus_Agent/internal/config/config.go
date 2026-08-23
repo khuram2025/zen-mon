@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,38 +17,16 @@ import (
 )
 
 const (
-	DefaultControllerURL = "http://192.168.8.221"
+	DefaultControllerURL = "https://192.168.8.221"
 	DefaultConfigPath    = "config/agent.yaml"
 )
 
 // Baked in at build time via
 //
-//	-ldflags "-X zenplus-agent/internal/config.embeddedControllerURL=... \
-//	          -X zenplus-agent/internal/config.embeddedEnrollmentToken=..."
+//	-ldflags "-X zenplus-agent/internal/config.embeddedControllerURL=..."
 //
-// so the published MSI installs and enrolls with zero operator input. Both
-// remain overridable afterwards through agent.yaml or MSI properties.
-var (
-	embeddedControllerURL   string
-	embeddedEnrollmentToken string
-)
-
-// PlaceholderEnrollmentToken is the fixed-width default carried by the MSI's
-// ENROLLMENT_TOKEN property. The controller rewrites it in place when an
-// operator downloads the package. If it survives to the agent, the package
-// was fetched without going through that flow, so it is treated as "no token"
-// rather than attempted (and rejected) as a real one.
-const PlaceholderEnrollmentToken = "zpa_enr_PLACEHOLDERTOKENPLACEHOLDERTOKEN"
-
-// NormalizeEnrollmentToken trims a configured token and discards the
-// un-substituted MSI placeholder.
-func NormalizeEnrollmentToken(token string) string {
-	token = strings.TrimSpace(token)
-	if token == PlaceholderEnrollmentToken {
-		return ""
-	}
-	return token
-}
+// The controller URL remains overridable through agent.yaml or MSI properties.
+var embeddedControllerURL string
 
 type Config struct {
 	Version                  int               `yaml:"version" json:"version"`
@@ -57,8 +36,6 @@ type Config struct {
 	ServerID                 string            `yaml:"server_id,omitempty" json:"server_id,omitempty"`
 	AgentName                string            `yaml:"agent_name,omitempty" json:"agent_name,omitempty"`
 	ControllerURL            string            `yaml:"controller_url" json:"controller_url"`
-	EnrollmentToken          string            `yaml:"enrollment_token,omitempty" json:"enrollment_token,omitempty"`
-	SiteID                   string            `yaml:"site_id,omitempty" json:"site_id,omitempty"`
 	PolicyID                 string            `yaml:"policy_id,omitempty" json:"policy_id,omitempty"`
 	ProxyURL                 string            `yaml:"proxy_url,omitempty" json:"proxy_url,omitempty"`
 	VerifyTLS                bool              `yaml:"verify_tls" json:"verify_tls"`
@@ -72,12 +49,22 @@ type Config struct {
 	DiskIgnore               []string          `yaml:"disk_ignore,omitempty" json:"disk_ignore,omitempty"`
 	NetworkIgnore            []string          `yaml:"network_ignore,omitempty" json:"network_ignore,omitempty"`
 	CompressUploads          bool              `yaml:"compress_uploads,omitempty" json:"compress_uploads,omitempty"`
+	APM                      APMConfig         `yaml:"apm" json:"apm"`
 	Collectors               CollectorConfig   `yaml:"collectors" json:"collectors"`
 	Spool                    SpoolConfig       `yaml:"spool" json:"spool"`
 	Security                 SecurityConfig    `yaml:"security" json:"security"`
 	Limits                   LimitsConfig      `yaml:"limits" json:"limits"`
 	Labels                   map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`
 	Extra                    map[string]any    `yaml:"extra,omitempty" json:"extra,omitempty"`
+}
+
+type APMConfig struct {
+	// Enabled controls the managed local telemetry gateway. The appliance
+	// remains the authority for authorization and its scoped ingest credential.
+	Enabled     bool   `yaml:"enabled" json:"enabled"`
+	Profile     string `yaml:"profile,omitempty" json:"profile,omitempty"`
+	Environment string `yaml:"environment,omitempty" json:"environment,omitempty"`
+	BindAddress string `yaml:"bind_address,omitempty" json:"bind_address,omitempty"`
 }
 
 type CollectorConfig struct {
@@ -124,8 +111,9 @@ type SpoolConfig struct {
 }
 
 type SecurityConfig struct {
-	RequireSignedConfig bool   `yaml:"require_signed_config" json:"require_signed_config"`
-	ConfigPublicKey     string `yaml:"config_public_key,omitempty" json:"config_public_key,omitempty"`
+	RequireSignedConfig    bool   `yaml:"require_signed_config" json:"require_signed_config"`
+	ConfigPublicKey        string `yaml:"config_public_key,omitempty" json:"config_public_key,omitempty"`
+	AllowInsecureTransport bool   `yaml:"allow_insecure_transport,omitempty" json:"allow_insecure_transport,omitempty"`
 }
 
 type LimitsConfig struct {
@@ -143,7 +131,6 @@ func Default() Config {
 	return Config{
 		Version:                  1,
 		ControllerURL:            controllerURL,
-		EnrollmentToken:          NormalizeEnrollmentToken(embeddedEnrollmentToken),
 		VerifyTLS:                true,
 		DataDir:                  "data",
 		HeartbeatIntervalSeconds: 30,
@@ -153,6 +140,9 @@ func Default() Config {
 		CollectorTimeoutSeconds:  20,
 		UpdateRing:               "stable",
 		CompressUploads:          false,
+		APM: APMConfig{
+			Enabled: true, Profile: "combined", Environment: "prod", BindAddress: "127.0.0.1",
+		},
 		Collectors: CollectorConfig{
 			CPU:        CollectorSwitch{Enabled: true, IntervalSeconds: 60},
 			Memory:     CollectorSwitch{Enabled: true, IntervalSeconds: 60},
@@ -185,41 +175,6 @@ func Default() Config {
 	}
 }
 
-// HasEmbeddedEnrollmentToken reports whether this build carries a compiled-in
-// bootstrap token. Such a build can re-enroll itself after losing its
-// credential file, so the token is never fully "cleared" — only removed from
-// the on-disk config.
-func HasEmbeddedEnrollmentToken() bool {
-	return NormalizeEnrollmentToken(embeddedEnrollmentToken) != ""
-}
-
-func ClearEnrollmentToken(path string) error {
-	cfg, err := LoadForEdit(path)
-	if err != nil {
-		return err
-	}
-	if cfg.EnrollmentToken == "" {
-		return nil
-	}
-	cfg.EnrollmentToken = ""
-	return Save(path, cfg)
-}
-
-func SetEnrollmentToken(path string, token string) (Config, error) {
-	cfg, err := LoadForEdit(path)
-	if err != nil {
-		return Config{}, err
-	}
-	cfg.EnrollmentToken = strings.TrimSpace(token)
-	if cfg.EnrollmentToken == "" {
-		return Config{}, errors.New("enrollment token is required")
-	}
-	if err := cfg.Validate(); err != nil {
-		return Config{}, err
-	}
-	return cfg, Save(path, cfg)
-}
-
 func Load(path string) (Config, error) {
 	if path == "" {
 		path = DefaultConfigPath
@@ -250,7 +205,6 @@ func LoadForEdit(path string) (Config, error) {
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
-	cfg.EnrollmentToken = NormalizeEnrollmentToken(cfg.EnrollmentToken)
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -279,7 +233,7 @@ func NormalizeControllerURL(rawURL string) (string, error) {
 		return "", errors.New("controller URL is required")
 	}
 	if !strings.Contains(rawURL, "://") {
-		rawURL = "http://" + rawURL
+		rawURL = "https://" + rawURL
 	}
 	parsed, err := url.ParseRequestURI(rawURL)
 	if err != nil {
@@ -316,8 +270,25 @@ func (c Config) Validate() error {
 	if c.ControllerURL == "" {
 		return errors.New("controller_url is required")
 	}
-	if _, err := url.ParseRequestURI(c.ControllerURL); err != nil {
+	parsed, err := url.ParseRequestURI(c.ControllerURL)
+	if err != nil {
 		return fmt.Errorf("invalid controller_url: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return errors.New("controller_url must use http or https")
+	}
+	if parsed.Host == "" {
+		return errors.New("controller_url must include a host")
+	}
+	isLoopback := strings.EqualFold(parsed.Hostname(), "localhost")
+	if ip := net.ParseIP(parsed.Hostname()); ip != nil {
+		isLoopback = ip.IsLoopback()
+	}
+	if parsed.Scheme == "http" && !isLoopback && !c.Security.AllowInsecureTransport {
+		return errors.New("controller_url must use https for non-loopback connections")
+	}
+	if parsed.Scheme == "https" && !c.VerifyTLS && !c.Security.AllowInsecureTransport {
+		return errors.New("verify_tls cannot be disabled unless security.allow_insecure_transport is explicitly enabled")
 	}
 	if c.HeartbeatIntervalSeconds <= 0 {
 		return errors.New("heartbeat_interval_seconds must be positive")
@@ -330,6 +301,12 @@ func (c Config) Validate() error {
 	}
 	if c.CollectorTimeoutSeconds <= 0 {
 		return errors.New("collector_timeout_seconds must be positive")
+	}
+	if c.APM.Profile != "" && c.APM.Profile != "infrastructure" && c.APM.Profile != "apm" && c.APM.Profile != "combined" {
+		return errors.New("apm.profile must be infrastructure, apm, or combined")
+	}
+	if c.APM.BindAddress != "" && c.APM.BindAddress != "127.0.0.1" && c.APM.BindAddress != "::1" {
+		return errors.New("apm.bind_address must be a loopback address")
 	}
 	if c.Spool.MaxBytes <= 0 {
 		return errors.New("spool.max_bytes must be positive")

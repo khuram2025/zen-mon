@@ -1,4 +1,5 @@
 from uuid import UUID
+from urllib.parse import urlsplit
 from sqlalchemy import select, func, delete, distinct
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -6,10 +7,12 @@ from datetime import datetime, timezone
 
 from app.models.service_check import (
     ServiceCheck,
+    ServiceCredential,
     ServiceCheckGroup,
     ServiceCheckMaintenance,
     ServiceCheckTemplate,
 )
+from app.core.crypto import decrypt, encrypt
 from app.schemas.service_check import (
     ServiceCheckCreate,
     ServiceCheckUpdate,
@@ -25,6 +28,11 @@ from app.schemas.service_check import (
     ServiceCheckTemplateResponse,
     ServiceCheckTemplateApply,
     ServiceCheckTemplateApplyResult,
+    ServiceCredentialCreate,
+    ServiceCredentialUpdate,
+    ServiceCredentialResponse,
+    ServiceWorkflowStep,
+    _validate_workflow_origin,
 )
 
 
@@ -44,6 +52,11 @@ def _to_response(sc: ServiceCheck, in_maintenance: bool = False, parent_name: st
         tags=list(sc.tags or []),
         retry_count=sc.retry_count or 1,
         retry_delay_s=sc.retry_delay_s or 30,
+        credential_id=sc.credential_id,
+        credential_name=sc.credential.name if getattr(sc, "credential", None) else None,
+        credential_auth_type=sc.credential.auth_type if getattr(sc, "credential", None) else None,
+        workflow_operator=sc.workflow_operator or "all",
+        workflow_steps=list(sc.workflow_steps or []),
         in_maintenance=in_maintenance,
         enabled=sc.enabled,
         target_host=sc.target_host,
@@ -54,6 +67,8 @@ def _to_response(sc: ServiceCheck, in_maintenance: bool = False, parent_name: st
         http_expected_statuses=sc.http_expected_statuses,
         http_content_match=sc.http_content_match,
         http_follow_redirects=sc.http_follow_redirects if sc.http_follow_redirects is not None else True,
+        http_ignore_tls_errors=bool(sc.http_ignore_tls_errors),
+        http_allow_insecure_auth=bool(sc.http_allow_insecure_auth),
         tls_warn_days=sc.tls_warn_days or 30,
         tls_critical_days=sc.tls_critical_days or 7,
         check_interval=sc.check_interval or 60,
@@ -152,11 +167,52 @@ async def get_service_check(db: AsyncSession, check_id: UUID):
     return _to_response(sc, in_maintenance=sc.id in maint_ids, parent_name=parent_name)
 
 
+async def get_runtime_service_check(db: AsyncSession, check_id: UUID):
+    """Return the ORM check and an in-memory credential for probe execution.
+
+    The decrypted secret is never attached to the ORM model or a response
+    schema, which keeps accidental serialization and audit logging out of the
+    secret path.
+    """
+    sc = await db.get(ServiceCheck, check_id)
+    if not sc:
+        return None, None
+    return sc, await get_runtime_service_credential(db, sc.credential_id)
+
+
+async def get_runtime_service_credential(db: AsyncSession, credential_id: UUID | None):
+    """Resolve a credential for a probe without attaching its secret to a model."""
+    if not credential_id:
+        return None
+    credential = await db.get(ServiceCredential, credential_id)
+    if not credential:
+        raise ValueError("Linked service credential no longer exists")
+    return {
+        "auth_type": credential.auth_type,
+        "username": credential.username or "",
+        "secret": decrypt(credential.secret_cipher) or "",
+    }
+
+
 async def create_service_check(db: AsyncSession, data: ServiceCheckCreate, user_id: UUID):
+    credential = None
+    if data.credential_id:
+        credential = await db.get(ServiceCredential, data.credential_id)
+        if not credential:
+            raise ValueError("Service credential not found")
+    _validate_credential_workflow(credential, data.workflow_steps)
+    _validate_credential_transport(
+        credential,
+        data.target_url,
+        data.workflow_steps,
+        data.http_allow_insecure_auth,
+    )
     sc = ServiceCheck(
         **data.model_dump(),
         created_by=user_id,
     )
+    if credential:
+        sc.credential = credential
     db.add(sc)
     await db.commit()
     await db.refresh(sc)
@@ -170,12 +226,144 @@ async def update_service_check(db: AsyncSession, check_id: UUID, data: ServiceCh
         return None
 
     update_data = data.model_dump(exclude_unset=True)
+    effective_credential_id = update_data.get("credential_id", sc.credential_id)
+    credential = None
+    if effective_credential_id:
+        credential = await db.get(ServiceCredential, effective_credential_id)
+        if not credential:
+            raise ValueError("Service credential not found")
+    effective_steps = [
+        step if isinstance(step, ServiceWorkflowStep) else ServiceWorkflowStep.model_validate(step)
+        for step in update_data.get("workflow_steps", sc.workflow_steps or [])
+    ]
+    effective_type = update_data.get("check_type", sc.check_type)
+    if effective_steps and effective_type != "http":
+        raise ValueError("Multi-step workflows are supported only for HTTP checks")
+    _validate_workflow_origin(
+        update_data.get("target_url", sc.target_url),
+        effective_steps,
+        effective_credential_id,
+    )
+    _validate_credential_workflow(credential, effective_steps)
+    _validate_credential_transport(
+        credential,
+        update_data.get("target_url", sc.target_url),
+        effective_steps,
+        bool(update_data.get("http_allow_insecure_auth", sc.http_allow_insecure_auth)),
+    )
     for key, value in update_data.items():
         setattr(sc, key, value)
+    if "credential_id" in update_data:
+        sc.credential = credential
 
     await db.commit()
     await db.refresh(sc)
     return _to_response(sc)
+
+
+def _credential_to_response(credential: ServiceCredential, used_by: int = 0) -> ServiceCredentialResponse:
+    return ServiceCredentialResponse(
+        id=credential.id,
+        name=credential.name,
+        auth_type=credential.auth_type,
+        username=credential.username,
+        description=credential.description,
+        has_secret=bool(credential.secret_cipher),
+        used_by=used_by,
+        created_at=credential.created_at,
+        updated_at=credential.updated_at,
+    )
+
+
+def _validate_credential_workflow(credential: ServiceCredential | None, steps: list) -> None:
+    if not credential or credential.auth_type != "form":
+        return
+    if len(steps) < 2:
+        raise ValueError("Form authentication requires a sign-in step followed by a protected-page navigation step")
+    first = steps[0]
+    body = first.body if isinstance(first, ServiceWorkflowStep) else (first.get("body") or "")
+    headers = first.headers if isinstance(first, ServiceWorkflowStep) else (first.get("headers") or {})
+    template = body + "\n" + "\n".join(str(value) for value in headers.values())
+    if "{{username}}" not in template or "{{password}}" not in template:
+        raise ValueError("The form login step must inject {{username}} and {{password}}")
+
+
+def _validate_credential_transport(
+    credential: ServiceCredential | None,
+    target_url: str | None,
+    steps: list,
+    allow_insecure_http_auth: bool = False,
+) -> None:
+    """Keep reusable secrets off clear-text HTTP except NTLM challenge-response.
+
+    NTLM is allowed for explicitly selected trusted intranet targets because the
+    password itself is not transmitted. HTTPS is still preferred because plain
+    HTTP remains exposed to tampering and credential-relay attacks.
+    """
+    if not credential:
+        return
+    first_url = (steps[0].url if isinstance(steps[0], ServiceWorkflowStep) else steps[0].get("url")) if steps else target_url
+    scheme = urlsplit(first_url or "").scheme.lower()
+    if scheme == "https" or credential.auth_type == "ntlm" or allow_insecure_http_auth:
+        return
+    raise ValueError("Basic, bearer, and form credentials require HTTPS unless trusted HTTP credential transmission is explicitly enabled")
+
+
+async def list_service_credentials(db: AsyncSession) -> list[ServiceCredentialResponse]:
+    rows = (await db.execute(
+        select(ServiceCredential, func.count(ServiceCheck.id))
+        .outerjoin(ServiceCheck, ServiceCheck.credential_id == ServiceCredential.id)
+        .group_by(ServiceCredential.id)
+        .order_by(ServiceCredential.name)
+    )).all()
+    return [_credential_to_response(credential, int(used_by or 0)) for credential, used_by in rows]
+
+
+async def create_service_credential(
+    db: AsyncSession, data: ServiceCredentialCreate, user_id: UUID
+) -> ServiceCredentialResponse:
+    credential = ServiceCredential(
+        name=data.name.strip(),
+        auth_type=data.auth_type,
+        username=(data.username or "").strip() or None,
+        secret_cipher=encrypt(data.secret),
+        description=data.description,
+        created_by=user_id,
+    )
+    db.add(credential)
+    await db.commit()
+    await db.refresh(credential)
+    return _credential_to_response(credential)
+
+
+async def update_service_credential(
+    db: AsyncSession, credential_id: UUID, data: ServiceCredentialUpdate
+) -> ServiceCredentialResponse | None:
+    credential = await db.get(ServiceCredential, credential_id)
+    if not credential:
+        return None
+    changes = data.model_dump(exclude_unset=True)
+    secret = changes.pop("secret", None)
+    for key, value in changes.items():
+        if key in {"name", "username"} and isinstance(value, str):
+            value = value.strip() or None
+        setattr(credential, key, value)
+    if secret:
+        credential.secret_cipher = encrypt(secret)
+    if credential.auth_type in {"basic", "form", "ntlm"} and not credential.username:
+        raise ValueError("Username is required for Basic, form, and Windows Integrated authentication")
+    await db.commit()
+    await db.refresh(credential)
+    used_by = (await db.execute(
+        select(func.count()).select_from(ServiceCheck).where(ServiceCheck.credential_id == credential_id)
+    )).scalar() or 0
+    return _credential_to_response(credential, int(used_by))
+
+
+async def delete_service_credential(db: AsyncSession, credential_id: UUID) -> bool:
+    result = await db.execute(delete(ServiceCredential).where(ServiceCredential.id == credential_id))
+    await db.commit()
+    return bool(result.rowcount)
 
 
 async def delete_service_check(db: AsyncSession, check_id: UUID) -> bool:
@@ -236,6 +424,12 @@ async def export_service_checks(db: AsyncSession) -> list[dict]:
             "http_expected_statuses": sc.http_expected_statuses,
             "http_content_match": sc.http_content_match,
             "http_follow_redirects": sc.http_follow_redirects,
+            "http_ignore_tls_errors": bool(sc.http_ignore_tls_errors),
+            "http_allow_insecure_auth": bool(sc.http_allow_insecure_auth),
+            "credential_name": sc.credential.name if getattr(sc, "credential", None) else None,
+            "credential_auth_type": sc.credential.auth_type if getattr(sc, "credential", None) else None,
+            "workflow_operator": sc.workflow_operator or "all",
+            "workflow_steps": list(sc.workflow_steps or []),
             "tls_warn_days": sc.tls_warn_days,
             "tls_critical_days": sc.tls_critical_days,
             "check_interval": sc.check_interval,

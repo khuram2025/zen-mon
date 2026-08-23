@@ -19,11 +19,16 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"zenplus-agent/internal/netiface"
 )
 
-// Flow is one observed conversation over the capture window.
+// Flow is one observed connection, listener, or local datagram endpoint over
+// the capture window. Process/service ownership always refers to the local PID.
 type Flow struct {
 	Protocol      string `json:"protocol"`
+	Kind          string `json:"kind"`
+	Direction     string `json:"direction"`
 	LocalIP       string `json:"local_ip"`
 	LocalPort     uint32 `json:"local_port"`
 	RemoteIP      string `json:"remote_ip"`
@@ -64,12 +69,32 @@ func (o *Options) applyDefaults() {
 	if o.SampleInterval <= 0 {
 		o.SampleInterval = 2 * time.Second
 	}
+	if o.SampleInterval < time.Second {
+		o.SampleInterval = time.Second
+	}
 	if o.FlushInterval <= 0 {
 		o.FlushInterval = 10 * time.Second
 	}
 	if o.MaxFlows <= 0 {
 		o.MaxFlows = 5000
 	}
+	if o.MaxFlows > 10000 {
+		o.MaxFlows = 10000
+	}
+	o.Interface = strings.TrimSpace(o.Interface)
+}
+
+// NormalizeOptions applies the resource and duration bounds used by Run.
+func NormalizeOptions(opts Options) Options {
+	opts.applyDefaults()
+	return opts
+}
+
+// ValidateInterface checks an operator-supplied interface name before a
+// background capture is accepted. Empty means all interfaces.
+func ValidateInterface(name string) error {
+	_, err := localAddrsForInterface(strings.TrimSpace(name))
+	return err
 }
 
 type flowKey struct {
@@ -86,13 +111,34 @@ type flowKey struct {
 type FlushFunc func(flows []Flow, final bool, stats Stats)
 
 type Stats struct {
-	StartedAt      time.Time `json:"started_at"`
-	EndsAt         time.Time `json:"ends_at"`
-	Samples        int       `json:"samples"`
-	FlowCount      int       `json:"flow_count"`
-	Truncated      bool      `json:"truncated"`
-	BytesAvailable bool      `json:"bytes_available"`
-	Note           string    `json:"note,omitempty"`
+	StartedAt      time.Time          `json:"started_at"`
+	EndsAt         time.Time          `json:"ends_at"`
+	Samples        int                `json:"samples"`
+	FlowCount      int                `json:"flow_count"`
+	Truncated      bool               `json:"truncated"`
+	BytesAvailable bool               `json:"bytes_available"`
+	Note           string             `json:"note,omitempty"`
+	Interfaces     []InterfaceTraffic `json:"interfaces,omitempty"`
+}
+
+// InterfaceTraffic uses native interface counters, so it includes TCP, UDP,
+// ICMP, IPv4, IPv6, and traffic too short-lived to appear in a socket sample.
+// RXBytes/TXBytes are cumulative since this capture began; rates are bits/s.
+type InterfaceTraffic struct {
+	Interface            string
+	InterfaceIndex       uint32
+	Timestamp            time.Time
+	RXBytes              uint64
+	TXBytes              uint64
+	RXBPS                float64
+	TXBPS                float64
+	PeakRXBPS            float64
+	PeakTXBPS            float64
+	LinkSpeedBPS         uint64
+	ReceiveLinkSpeedBPS  uint64
+	TransmitLinkSpeedBPS uint64
+	RXUtilizationPct     float64
+	TXUtilizationPct     float64
 }
 
 type collector struct {
@@ -107,7 +153,7 @@ type collector struct {
 
 // Run executes a capture until the duration elapses or ctx is cancelled.
 func Run(ctx context.Context, opts Options, flush FlushFunc, logf func(string, ...any)) (Stats, error) {
-	opts.applyDefaults()
+	opts = NormalizeOptions(opts)
 
 	local, err := localAddrsForInterface(opts.Interface)
 	if err != nil {
@@ -121,13 +167,13 @@ func Run(ctx context.Context, opts Options, flush FlushFunc, logf func(string, .
 	stats := Stats{StartedAt: time.Now().UTC()}
 	stats.EndsAt = stats.StartedAt.Add(opts.Duration)
 
-	src, note, bytesOK := newSource()
-	stats.BytesAvailable = bytesOK
+	src, note, _ := newSource()
 	stats.Note = note
 	if note != "" {
 		logf("network capture: %s", note)
 	}
 	defer src.Close()
+	interfaces := newInterfaceTracker(opts.Interface, netiface.Snapshot)
 
 	deadline := time.NewTimer(opts.Duration)
 	defer deadline.Stop()
@@ -137,19 +183,30 @@ func Run(ctx context.Context, opts Options, flush FlushFunc, logf func(string, .
 	defer flushTick.Stop()
 
 	sample := func() {
-		conns, err := src.Sample()
+		now := time.Now().UTC()
+		conns, err := src.Sample(ctx)
 		if err != nil {
-			logf("network capture sample failed: %v", err)
-			return
+			if ctx.Err() == nil {
+				logf("network capture sample failed: %v", err)
+			}
+		} else {
+			c.merge(conns, local, opts.MaxFlows)
+			stats.Samples++
 		}
-		c.merge(conns, local, opts.MaxFlows)
-		stats.Samples++
+		if samples, err := interfaces.sample(ctx, now); err != nil {
+			if ctx.Err() == nil {
+				logf("network interface sample failed: %v", err)
+			}
+		} else {
+			stats.Interfaces = samples
+		}
 	}
 
 	emit := func(final bool) {
-		snapshot, count, truncated := c.snapshot()
+		snapshot, count, truncated, bytesAvailable := c.snapshot()
 		stats.FlowCount = count
 		stats.Truncated = truncated
+		stats.BytesAvailable = bytesAvailable
 		flush(snapshot, final, stats)
 	}
 
@@ -157,10 +214,12 @@ func Run(ctx context.Context, opts Options, flush FlushFunc, logf func(string, .
 	for {
 		select {
 		case <-ctx.Done():
+			stats.EndsAt = time.Now().UTC()
 			emit(true)
 			return stats, ctx.Err()
 		case <-deadline.C:
 			sample()
+			stats.EndsAt = time.Now().UTC()
 			emit(true)
 			return stats, nil
 		case <-sampleTick.C:
@@ -176,7 +235,7 @@ func (c *collector) merge(conns []rawConn, local map[string]bool, maxFlows int) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, rc := range conns {
-		if len(local) > 0 && rc.LocalIP != "" && !local[rc.LocalIP] {
+		if len(local) > 0 && rc.LocalIP != "" && !isUnspecifiedLocalIP(rc.LocalIP) && !local[rc.LocalIP] {
 			continue
 		}
 		k := flowKey{
@@ -195,6 +254,8 @@ func (c *collector) merge(conns []rawConn, local map[string]bool, maxFlows int) 
 			}
 			f = &Flow{
 				Protocol:    rc.Protocol,
+				Kind:        rc.Kind,
+				Direction:   rc.Direction,
 				LocalIP:     rc.LocalIP,
 				LocalPort:   rc.LocalPort,
 				RemoteIP:    rc.RemoteIP,
@@ -211,6 +272,12 @@ func (c *collector) merge(conns []rawConn, local map[string]bool, maxFlows int) 
 		}
 		f.LastSeen = now
 		f.State = rc.State
+		if rc.Kind != "" {
+			f.Kind = rc.Kind
+		}
+		if rc.Direction != "" {
+			f.Direction = rc.Direction
+		}
 		f.Samples++
 		if rc.ProcessName != "" {
 			f.ProcessName = rc.ProcessName
@@ -234,7 +301,12 @@ func (c *collector) merge(conns []rawConn, local map[string]bool, maxFlows int) 
 	}
 }
 
-func (c *collector) snapshot() ([]Flow, int, bool) {
+func isUnspecifiedLocalIP(value string) bool {
+	ip := net.ParseIP(strings.TrimSpace(value))
+	return ip != nil && ip.IsUnspecified()
+}
+
+func (c *collector) snapshot() ([]Flow, int, bool, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := make([]Flow, 0, len(c.flows))
@@ -250,7 +322,123 @@ func (c *collector) snapshot() ([]Flow, int, bool) {
 		}
 		return out[i].LastSeen.After(out[j].LastSeen)
 	})
-	return out, len(out), c.truncated
+	bytesAvailable := false
+	for i := range out {
+		if out[i].BytesKnown {
+			bytesAvailable = true
+			break
+		}
+	}
+	return out, len(out), c.truncated, bytesAvailable
+}
+
+type interfaceSnapshotFunc func(context.Context) ([]netiface.Counter, error)
+
+type interfacePoint struct {
+	baseline netiface.Counter
+	previous netiface.Counter
+	lastAt   time.Time
+	peakRX   float64
+	peakTX   float64
+}
+
+type interfaceTracker struct {
+	selected string
+	snapshot interfaceSnapshotFunc
+	points   map[string]*interfacePoint
+}
+
+func newInterfaceTracker(selected string, snapshot interfaceSnapshotFunc) *interfaceTracker {
+	return &interfaceTracker{
+		selected: strings.TrimSpace(selected),
+		snapshot: snapshot,
+		points:   map[string]*interfacePoint{},
+	}
+}
+
+func (t *interfaceTracker) sample(ctx context.Context, now time.Time) ([]InterfaceTraffic, error) {
+	counters, err := t.snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]InterfaceTraffic, 0, len(counters))
+	for _, counter := range counters {
+		if t.selected != "" && !strings.EqualFold(counter.Name, t.selected) &&
+			!strings.EqualFold(counter.Description, t.selected) {
+			continue
+		}
+		key := fmt.Sprintf("%d", counter.InterfaceIndex)
+		if counter.InterfaceIndex == 0 {
+			key = strings.ToLower(counter.Name)
+		}
+		point, ok := t.points[key]
+		if !ok {
+			point = &interfacePoint{baseline: counter, previous: counter, lastAt: now}
+			t.points[key] = point
+		}
+		dt := now.Sub(point.lastAt).Seconds()
+		var rxBPS, txBPS float64
+		if counter.BytesReceived < point.previous.BytesReceived {
+			point.baseline.BytesReceived = counter.BytesReceived
+		}
+		if counter.BytesSent < point.previous.BytesSent {
+			point.baseline.BytesSent = counter.BytesSent
+		}
+		if dt > 0 {
+			rxBPS = float64(counterDelta(counter.BytesReceived, point.previous.BytesReceived)) * 8 / dt
+			txBPS = float64(counterDelta(counter.BytesSent, point.previous.BytesSent)) * 8 / dt
+		}
+		if rxBPS > point.peakRX {
+			point.peakRX = rxBPS
+		}
+		if txBPS > point.peakTX {
+			point.peakTX = txBPS
+		}
+		linkSpeed := counter.ReceiveLinkSpeedBPS
+		if counter.TransmitLinkSpeedBPS > linkSpeed {
+			linkSpeed = counter.TransmitLinkSpeedBPS
+		}
+		out = append(out, InterfaceTraffic{
+			Interface:            counter.Name,
+			InterfaceIndex:       counter.InterfaceIndex,
+			Timestamp:            now,
+			RXBytes:              counterDelta(counter.BytesReceived, point.baseline.BytesReceived),
+			TXBytes:              counterDelta(counter.BytesSent, point.baseline.BytesSent),
+			RXBPS:                rxBPS,
+			TXBPS:                txBPS,
+			PeakRXBPS:            point.peakRX,
+			PeakTXBPS:            point.peakTX,
+			LinkSpeedBPS:         linkSpeed,
+			ReceiveLinkSpeedBPS:  counter.ReceiveLinkSpeedBPS,
+			TransmitLinkSpeedBPS: counter.TransmitLinkSpeedBPS,
+			RXUtilizationPct:     utilizationPct(rxBPS, counter.ReceiveLinkSpeedBPS),
+			TXUtilizationPct:     utilizationPct(txBPS, counter.TransmitLinkSpeedBPS),
+		})
+		point.previous = counter
+		point.lastAt = now
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].Interface) < strings.ToLower(out[j].Interface)
+	})
+	return out, nil
+}
+
+func counterDelta(current, before uint64) uint64 {
+	if current < before {
+		return 0
+	}
+	return current - before
+}
+
+func utilizationPct(bitsPerSecond float64, linkSpeed uint64) float64 {
+	if bitsPerSecond <= 0 || linkSpeed == 0 {
+		return 0
+	}
+	pct := bitsPerSecond / float64(linkSpeed) * 100
+	if pct > 100 {
+		return 100
+	}
+	return pct
 }
 
 // localAddrsForInterface returns the set of local IPs bound to name. An empty

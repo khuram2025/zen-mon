@@ -3,7 +3,7 @@
  *
  * Step 1: choose collection mode (Windows Agent, Agentless WMI/WinRM, SNMP, Linux Agent, Linux SSH).
  * Step 2: capture identity (display name, hostname, site, policy).
- * Step 3: agent path → generate enrollment token + copyable install command;
+ * Step 3: agent path → controller-only install and appliance authorization;
  *         agentless path → reminder to assign sensor credentials.
  */
 import { useState } from 'react'
@@ -14,8 +14,6 @@ import {
   ArrowLeft,
   ArrowRight,
   CheckCircle2,
-  Copy,
-  Download,
   Loader2,
   Server as ServerIcon,
   Shield,
@@ -27,13 +25,12 @@ import { apiErrorMessage } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Input } from '@/components/ui/Input'
-import { Label } from '@/components/ui/Label'
 import { FormField } from '@/components/ui/FormField'
-import { Textarea } from '@/components/ui/Textarea'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
 import { Badge } from '@/components/ui/Badge'
 import { toast } from '@/components/ui/Toast'
-import type { AgentPolicy, InstallToken, Server } from '@/types/server'
+import { InstallTokenDialog } from '@/components/servers/InstallTokenDialog'
+import type { Server } from '@/types/server'
 
 type Mode = 'agent_windows' | 'agentless_wmi' | 'agentless_winrm' | 'snmp' | 'agent_linux' | 'ssh'
 
@@ -122,14 +119,8 @@ export default function AddServer() {
   const [environment, setEnvironment] = useState('')
   const [owner, setOwner] = useState('')
   const [siteId, setSiteId] = useState<string>('')
-  const [policyId, setPolicyId] = useState<string>('')
   const [createdServerId, setCreatedServerId] = useState<string | null>(null)
-  const [installToken, setInstallToken] = useState<InstallToken | null>(null)
-
-  const policiesQ = useQuery<{ items: AgentPolicy[] }>({
-    queryKey: ['agent-policies'],
-    queryFn: async () => (await api.get('/agent-policies')).data,
-  })
+  const [installOpen, setInstallOpen] = useState(false)
 
   const sitesQ = useQuery<Array<{ id: string; name: string }>>({
     queryKey: ['sites'],
@@ -152,43 +143,12 @@ export default function AddServer() {
       const r = await api.post('/servers', body)
       return r.data as Server
     },
-    onSuccess: async (server) => {
+    onSuccess: (server) => {
       setCreatedServerId(server.id)
-      // For agent modes, also fetch an install token right away
-      if (mode === 'agent_windows' || mode === 'agent_linux') {
-        const platform = mode === 'agent_windows' ? 'windows' : 'linux'
-        const tok = (
-          await api.post(`/servers/${server.id}/install-token`, {
-            platform,
-            policy_id: policyId || null,
-            site_id: siteId || null,
-            ttl_hours: 24,
-            max_uses: 1,
-          })
-        ).data as InstallToken
-        setInstallToken(tok)
-      }
       setStep(3)
     },
     onError: (err) => toast.error(apiErrorMessage(err)),
   })
-
-  const policies = policiesQ.data?.items ?? []
-  const filteredPolicies = policies.filter(
-    (p) =>
-      p.platform === 'any' ||
-      (mode === 'agent_windows' && p.platform === 'windows') ||
-      (mode === 'agent_linux' && p.platform === 'linux'),
-  )
-
-  const copyText = async (text: string, label: string) => {
-    try {
-      await navigator.clipboard.writeText(text)
-      toast.success(`${label} copied to clipboard`)
-    } catch {
-      toast.error('Copy failed — select the text manually')
-    }
-  }
 
   return (
     <div className="mx-auto max-w-3xl space-y-5">
@@ -316,23 +276,6 @@ export default function AddServer() {
                   </SelectContent>
                 </Select>
               </FormField>
-              {(mode === 'agent_windows' || mode === 'agent_linux') ? (
-                <FormField label="Agent policy">
-                  <Select value={policyId || '__default'} onValueChange={(v) => setPolicyId(v === '__default' ? '' : v)}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Default policy" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__default">Default policy (auto)</SelectItem>
-                      {filteredPolicies.map((p) => (
-                        <SelectItem key={p.id} value={p.id}>
-                          {p.name} {p.is_builtin ? '(built-in)' : ''}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </FormField>
-              ) : null}
             </div>
             <div className="flex items-center justify-between pt-2">
               <Button variant="ghost" onClick={() => setStep(1)}>
@@ -341,9 +284,7 @@ export default function AddServer() {
               </Button>
               <Button onClick={() => createServerM.mutate()} disabled={!displayName || createServerM.isPending}>
                 {createServerM.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-                {mode === 'agent_windows' || mode === 'agent_linux'
-                  ? 'Create & generate token'
-                  : 'Create server'}
+                Create server
                 <ArrowRight className="h-3.5 w-3.5" />
               </Button>
             </div>
@@ -362,76 +303,21 @@ export default function AddServer() {
                 <h2 className="text-base font-semibold">Server created</h2>
                 <p className="text-xs text-muted">
                   {mode === 'agent_windows' || mode === 'agent_linux'
-                    ? 'Run the install command on the host below. The agent will enroll itself and start sending metrics within a minute.'
+                    ? 'Install the agent using only the controller address. It will appear in Agent Fleet for appliance approval before monitoring begins.'
                     : 'Next, assign agentless credentials to a remote sensor so it can probe this host.'}
                 </p>
               </div>
             </div>
 
-            {installToken ? (
-              <div className="space-y-3 rounded-md border border-border bg-surface2 p-4">
-                <div>
-                  <Label className="text-xs uppercase tracking-wide text-muted">
-                    Enrollment token (shown once)
-                  </Label>
-                  <div className="mt-1 flex items-center gap-2">
-                    <code className="block flex-1 truncate rounded bg-bg px-2 py-1.5 font-mono text-xs">
-                      {installToken.enrollment_token}
-                    </code>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => copyText(installToken.enrollment_token, 'Token')}
-                    >
-                      <Copy className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                  <p className="mt-1 text-[11px] text-muted">
-                    Expires {new Date(installToken.expires_at).toLocaleString()} · single-use.
-                  </p>
+            {mode === 'agent_windows' || mode === 'agent_linux' ? (
+              <div className="flex items-center justify-between gap-3 rounded-md border border-primary/30 bg-primary/5 p-4">
+                <div className="text-xs text-text2">
+                  Download the signed installer and use the controller-only deployment command.
+                  No endpoint enrollment secret is required.
                 </div>
-
-                <div>
-                  <Label className="text-xs uppercase tracking-wide text-muted">
-                    Install command
-                  </Label>
-                  <Textarea
-                    readOnly
-                    value={installToken.install_command}
-                    className="mt-1 h-24 font-mono text-xs"
-                  />
-                  <div className="mt-1 flex items-center justify-between text-[11px] text-muted">
-                    <span>
-                      {mode === 'agent_windows'
-                        ? 'Run from an elevated PowerShell on the Windows host.'
-                        : 'Run as root on the Linux host.'}
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => copyText(installToken.install_command, 'Install command')}
-                      >
-                        <Copy className="h-3.5 w-3.5" />
-                        Copy
-                      </Button>
-                      {installToken.msi_download_url ? (
-                        <a
-                          href={installToken.msi_download_url}
-                          download
-                          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-surface px-3 py-1 text-xs hover:bg-surface2"
-                        >
-                          <Download className="h-3.5 w-3.5" />
-                          Download MSI
-                        </a>
-                      ) : null}
-                    </div>
-                  </div>
-                </div>
+                <Button onClick={() => setInstallOpen(true)}>Install agent</Button>
               </div>
-            ) : null}
-
-            {!installToken ? (
+            ) : (
               <div className="flex items-start gap-3 rounded-md border border-warning/30 bg-warning/5 p-4">
                 <AlertCircle className="mt-0.5 h-4 w-4 text-warning" />
                 <div className="text-xs text-text2">
@@ -439,7 +325,7 @@ export default function AddServer() {
                   configuration on the Sensors page to assign credentials for this server.
                 </div>
               </div>
-            ) : null}
+            )}
 
             <div className="flex items-center justify-end gap-2 pt-2">
               {createdServerId ? (
@@ -452,6 +338,13 @@ export default function AddServer() {
           </CardContent>
         </Card>
       ) : null}
+
+      <InstallTokenDialog
+        open={installOpen}
+        onOpenChange={setInstallOpen}
+        serverId={createdServerId ?? undefined}
+        serverName={displayName || undefined}
+      />
     </div>
   )
 }

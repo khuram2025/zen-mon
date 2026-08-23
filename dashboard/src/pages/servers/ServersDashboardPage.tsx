@@ -223,7 +223,7 @@ export function ServersDashboardPage() {
             <Plus className="h-3.5 w-3.5" /> Register server
           </Button>
           <Button size="sm" onClick={() => setDeployOpen(true)}>
-            <KeyRound className="h-3.5 w-3.5" /> Deploy agent
+            <KeyRound className="h-3.5 w-3.5" /> Install agent
           </Button>
         </div>
       </div>

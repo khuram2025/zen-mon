@@ -5,12 +5,14 @@ const root = process.cwd()
 const appPath = path.join(root, 'src/App.tsx')
 const layoutPath = path.join(root, 'src/components/Layout.tsx')
 const legacySidebarPath = path.join(root, 'src/components/layout/Sidebar.tsx')
+const networkCapturePath = path.join(root, 'src/components/servers/NetworkCapture.tsx')
 
 const read = (file) => fs.readFileSync(file, 'utf8')
 
 const app = read(appPath)
 const layout = read(layoutPath)
 const legacySidebar = read(legacySidebarPath)
+const networkCapture = read(networkCapturePath)
 
 function fail(message) {
   console.error(`route smoke failed: ${message}`)
@@ -62,9 +64,7 @@ const requiredRoutes = [
   '/services/:id',
   '/services/:id/incidents',
   '/maps',
-  '/maps/automated',
   '/maps/manual',
-  '/topology',
   '/discovery',
   '/mibs',
   '/alerts',
@@ -81,6 +81,12 @@ const requiredRoutes = [
   '/snmp-profiles',
   '/subscription',
   '/settings/general',
+  '/servers',
+  '/servers/inventory',
+  '/servers/:id',
+  '/server-agents',
+  '/agent-policies',
+  '/server-baselines',
 ]
 
 for (const route of requiredRoutes) {
@@ -117,6 +123,33 @@ assertNavigationLinks('legacy Sidebar', legacySidebar)
 
 if (legacySidebar.includes('/service-checks')) {
   fail('legacy Sidebar still links to /service-checks instead of /services')
+}
+
+if (!/return capture\.samples > 0 \|\| capture\.flow_count > 0/.test(networkCapture)) {
+  fail('network capture telemetry guard must require samples or flows')
+}
+
+if (!/!capture\.bytes_available && hasCaptureTelemetry\(capture\)/.test(networkCapture)) {
+  fail('network capture byte-counter warning is not guarded by received telemetry')
+}
+
+for (const marker of [
+  'retention_s: Number(retention)',
+  'Archive capture',
+  'Purge now',
+  'Application owners',
+  'TCP listeners',
+  'UDP endpoints',
+  'Traffic records',
+]) {
+  if (!networkCapture.includes(marker)) {
+    fail(`network capture lifecycle/table control is missing: ${marker}`)
+  }
+}
+
+if (!/const \[scope, setScope\] = useState\('applications'\)/.test(networkCapture)
+    || !/const \[kind, setKind\] = useState\('all'\)/.test(networkCapture)) {
+  fail('network capture defaults must reduce system noise without hiding record kinds')
 }
 
 if (!process.exitCode) {

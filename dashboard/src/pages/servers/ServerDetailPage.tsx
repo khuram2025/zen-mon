@@ -452,7 +452,7 @@ export function ServerDetailPage() {
             <Pencil className="h-3.5 w-3.5" /> Edit
           </Button>
           <Button size="sm" onClick={() => setDeployOpen(true)}>
-            <KeyRound className="h-3.5 w-3.5" /> Deploy agent
+            <KeyRound className="h-3.5 w-3.5" /> Install agent
           </Button>
         </div>
       </div>
@@ -603,7 +603,7 @@ function InventoryTab({
         <StorageTab items={filesystems} />
       )}
       {active === 'network' && (
-        <NetworkTab serverId={server.id} serverName={server.display_name} />
+        <NetworkTab server={server} />
       )}
     </div>
   )
@@ -972,7 +972,7 @@ function OverviewTab({
                   <YAxis domain={[0, 100]} width={36} tickFormatter={(v) => `${v}%`} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
                   <ReferenceLine y={85} stroke="rgb(var(--warning))" strokeDasharray="4 4" strokeOpacity={0.55} />
                   <ReferenceLine y={95} stroke="rgb(var(--danger))" strokeDasharray="4 4" strokeOpacity={0.55} />
-                  <Tooltip {...ttStyle()} formatter={(v: number, n: string) => [`${Number(v).toFixed(1)}%`, n === 'cpu' ? 'CPU' : 'Memory']} />
+                  <Tooltip {...ttStyle()} formatter={(v: number, n: string) => [`${Number(v).toFixed(1)}%`, n]} />
                   <Legend
                     verticalAlign="top" align="right" iconType="circle" iconSize={8}
                     wrapperStyle={{ fontSize: 11, paddingBottom: 4 }}
@@ -1215,7 +1215,7 @@ function PerformanceTab({ serverId }: { serverId: string }) {
             <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.45} strokeDasharray="3 3" vertical={false} />
             <XAxis {...axis} />
             <YAxis width={48} tickFormatter={(v) => formatBps(Number(v) * 8)} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
-            <Tooltip {...ttStyle()} formatter={(v: number, n: string) => [formatBps(Number(v) * 8), n === 'rx' ? 'Receive' : 'Transmit']} />
+            <Tooltip {...ttStyle()} formatter={(v: number, n: string) => [formatBps(Number(v) * 8), n]} />
             <Legend verticalAlign="top" align="right" iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11, paddingBottom: 4 }} />
             <Area type="monotone" dataKey="rx" name="Receive" stroke="rgb(var(--primary))" strokeWidth={2} fill="url(#perfRx)" dot={false} isAnimationActive={false} activeDot={{ r: 3.5, strokeWidth: 0 }} connectNulls />
             <Area type="monotone" dataKey="tx" name="Transmit" stroke="rgb(var(--success))" strokeWidth={2} fill="url(#perfTx)" dot={false} isAnimationActive={false} activeDot={{ r: 3.5, strokeWidth: 0 }} connectNulls />
@@ -1249,7 +1249,7 @@ function PerformanceTab({ serverId }: { serverId: string }) {
             <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.45} strokeDasharray="3 3" vertical={false} />
             <XAxis {...axis} />
             <YAxis width={52} tickFormatter={(v) => `${formatBytes(Number(v))}/s`} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
-            <Tooltip {...ttStyle()} formatter={(v: number, n: string) => [`${formatBytes(Number(v))}/s`, n === 'read' ? 'Read' : 'Write']} />
+            <Tooltip {...ttStyle()} formatter={(v: number, n: string) => [`${formatBytes(Number(v))}/s`, n]} />
             <Legend verticalAlign="top" align="right" iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11, paddingBottom: 4 }} />
             <Area type="monotone" dataKey="read" name="Read" stroke="rgb(var(--info))" strokeWidth={2} fill="url(#perfRead)" dot={false} isAnimationActive={false} activeDot={{ r: 3.5, strokeWidth: 0 }} connectNulls />
             <Area type="monotone" dataKey="write" name="Write" stroke="rgb(var(--warning))" strokeWidth={2} fill="url(#perfWrite)" dot={false} isAnimationActive={false} activeDot={{ r: 3.5, strokeWidth: 0 }} connectNulls />
@@ -1874,38 +1874,75 @@ const NETWORK_CSV = [
   { header: 'Updated', value: (n: ServerNetworkInterface) => n.updated_at },
 ]
 
-function NetworkTab({ serverId, serverName }: { serverId: string; serverName: string }) {
+/** Loopback and pseudo adapters report nonsense the table used to render as
+ *  fact — a 1073 Mbps "link" with an MTU of -1. They are hidden by default so
+ *  the counts describe real NICs, with a toggle for when they matter. */
+function isPseudoInterface(nic: ServerNetworkInterface): boolean {
+  const name = (nic.if_name || '').toLowerCase()
+  return /loopback|pseudo-interface|isatap|teredo|6to4/.test(name)
+    || (nic.mtu != null && nic.mtu <= 0)
+}
+
+/** 1000 Mbps reads better as 1 Gbps, and link speed is reported in Mbps. */
+function formatLinkSpeed(mbps: number | null): string {
+  if (mbps == null || mbps <= 0) return '—'
+  if (mbps >= 1000) {
+    const gbps = mbps / 1000
+    return `${Number.isInteger(gbps) ? gbps : gbps.toFixed(1)} Gbps`
+  }
+  return `${mbps} Mbps`
+}
+
+function NetworkTab({ server }: { server: ServerItem }) {
+  const [showPseudo, setShowPseudo] = useState(false)
   const { data, isLoading, isError, error, refetch } = useQuery<{ items: ServerNetworkInterface[] }>({
-    queryKey: ['servers', serverId, 'network'],
-    queryFn: async () => (await api.get(`/servers/${serverId}/network`)).data,
+    queryKey: ['servers', server.id, 'network'],
+    queryFn: async () => (await api.get(`/servers/${server.id}/network`)).data,
     refetchInterval: 60_000,
   })
-  const items = data?.items || []
+  const allItems = data?.items || []
+  const pseudoCount = allItems.filter(isPseudoInterface).length
+  const items = showPseudo ? allItems : allItems.filter((n) => !isPseudoInterface(n))
   const upCount = items.filter((n) => n.is_up).length
-  // Link speed is not part of the agent's interface inventory, so the column
-  // was permanently "—". Show it only if some host actually reports it.
-  const hasSpeed = items.some((n) => n.speed_mbps != null)
+  // Agents from 1.3 report link speed; older ones do not, so the column
+  // appears only when some interface actually carries a value.
+  const hasSpeed = items.some((n) => n.speed_mbps != null && n.speed_mbps > 0)
   const cols = hasSpeed ? 7 : 6
 
   return (
     <div className="space-y-4">
     <NetworkCapturePanel
-      serverId={serverId}
-      serverName={serverName}
-      interfaces={items.map((n) => n.if_name)}
+      serverId={server.id}
+      serverName={server.display_name}
+      interfaces={items}
+      agentStatus={server.agent_status}
+      agentVersion={server.agent_version}
+      platform={server.os_type}
+      agentCapabilities={server.agent_capabilities ?? []}
     />
     <TablePanel
       icon={<NetworkIcon className="h-3.5 w-3.5" />}
       title="Network interfaces"
       hint={items.length ? `${upCount}/${items.length} up` : undefined}
-      toolbar={items.length > 0 ? (
+      toolbar={allItems.length > 0 ? (
         <div className="flex flex-wrap items-center gap-2">
           <div className="grid flex-1 grid-cols-2 gap-2 sm:grid-cols-3">
             <PanelMiniStat label="Interfaces" value={String(items.length)} />
             <PanelMiniStat label="Up" value={String(upCount)} tone="text-success" />
             <PanelMiniStat label="Down" value={String(items.length - upCount)} tone={items.length - upCount > 0 ? 'text-danger' : undefined} />
           </div>
-          <ExportCsvButton rows={items} columns={NETWORK_CSV} filename={`${serverName}-interfaces.csv`} />
+          {pseudoCount > 0 && (
+            <Button
+              size="sm"
+              variant={showPseudo ? 'default' : 'outline'}
+              className="h-8"
+              onClick={() => setShowPseudo((v) => !v)}
+              title="Loopback, ISATAP, Teredo and similar pseudo adapters"
+            >
+              {showPseudo ? 'Hide' : 'Show'} virtual ({pseudoCount})
+            </Button>
+          )}
+          <ExportCsvButton rows={items} columns={NETWORK_CSV} filename={`${server.display_name}-interfaces.csv`} />
         </div>
       ) : undefined}
     >
@@ -1928,8 +1965,12 @@ function NetworkTab({ serverId, serverName }: { serverId: string; serverName: st
               <TableStateRow colSpan={cols}>
                 <EmptyState
                   icon={<NetworkIcon className="h-7 w-7" />}
-                  title="No interfaces reported"
-                  hint="The agent reports network interfaces with its inventory snapshot."
+                  title={pseudoCount > 0
+                    ? 'Only virtual adapters on this host'
+                    : 'No interfaces reported'}
+                  hint={pseudoCount > 0
+                    ? `${pseudoCount} loopback or pseudo adapter${pseudoCount === 1 ? '' : 's'} hidden — use “Show virtual” to list them.`
+                    : 'The agent reports network interfaces with its inventory snapshot.'}
                 />
               </TableStateRow>
             ) : items.map((nic, i) => (
@@ -1943,9 +1984,12 @@ function NetworkTab({ serverId, serverName }: { serverId: string; serverName: st
                 </Td>
                 <Td className="font-mono text-xs text-muted">{nic.mac_address || '—'}</Td>
                 {hasSpeed && (
-                  <Td className="text-right text-xs tabular-nums">{nic.speed_mbps ? `${nic.speed_mbps} Mbps` : '—'}</Td>
+                  <Td className="text-right text-xs tabular-nums">{formatLinkSpeed(nic.speed_mbps)}</Td>
                 )}
-                <Td className="text-right text-xs tabular-nums">{nic.mtu || '—'}</Td>
+                {/* Pseudo adapters report -1; that is "not applicable". */}
+                <Td className="text-right text-xs tabular-nums">
+                  {nic.mtu != null && nic.mtu > 0 ? nic.mtu : '—'}
+                </Td>
                 <Td className="pr-4 text-xs text-muted">{relativeTime(nic.updated_at)}</Td>
               </Tr>
             ))}
@@ -2877,11 +2921,11 @@ function AgentTab({
           </div>
           <div className="text-sm font-medium">No agent enrolled on this server</div>
           <div className="max-w-md text-xs text-muted">
-            Use “Deploy agent” above to generate an enrollment token, or switch the server to an
-            agentless collection mode in Settings.
+            Install the agent with this appliance's controller address, then approve its pending
+            authorization request in Agent Fleet. No endpoint token is required.
           </div>
           <Button size="sm" onClick={onDeployAgent}>
-            <KeyRound className="h-3.5 w-3.5" /> Deploy agent
+            <KeyRound className="h-3.5 w-3.5" /> Install agent
           </Button>
         </CardContent>
       </Card>

@@ -25,9 +25,9 @@ func newPaths(t *testing.T) runtime.Paths {
 	return paths
 }
 
-// An already-enrolled agent must reuse its stored key rather than spending an
-// enrollment-token use on every restart.
-func TestEnsurePrefersStoredCredentialOverToken(t *testing.T) {
+// An already-authorized agent reuses its appliance-issued key and does not
+// create another registration request on every restart.
+func TestEnsurePrefersStoredCredential(t *testing.T) {
 	var enrollCalls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&enrollCalls, 1)
@@ -43,7 +43,6 @@ func TestEnsurePrefersStoredCredentialOverToken(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.ControllerURL = server.URL
-	cfg.EnrollmentToken = "zpa_enr_token"
 
 	res, err := Ensure(context.Background(), cfg, paths, func(string, ...any) {})
 	if err != nil {
@@ -57,11 +56,13 @@ func TestEnsurePrefersStoredCredentialOverToken(t *testing.T) {
 	}
 }
 
-// Recover discards the rejected key and enrols again with the token.
+// Recover discards the rejected key and returns to the same protected
+// controller-managed registration channel.
 func TestRecoverReplacesRejectedCredential(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(model.EnrollmentResponse{
 			AgentID: "agent-2", ServerID: "server-2", APIKey: "zpa_key_fresh",
+			AuthorizationState: "authorized",
 		})
 	}))
 	defer server.Close()
@@ -72,7 +73,6 @@ func TestRecoverReplacesRejectedCredential(t *testing.T) {
 	}
 	cfg := config.Default()
 	cfg.ControllerURL = server.URL
-	cfg.EnrollmentToken = "zpa_enr_token"
 
 	res, err := Recover(context.Background(), cfg, paths, func(string, ...any) {})
 	if err != nil {
@@ -87,20 +87,25 @@ func TestRecoverReplacesRejectedCredential(t *testing.T) {
 	}
 }
 
-// With no token there is nothing to re-enrol with; Recover must report that
-// clearly instead of leaving the agent retrying a dead key.
-func TestRecoverWithoutTokenReportsUnenrolled(t *testing.T) {
+// A controller can keep an installation pending without ever handing a
+// secret to the endpoint operator.
+func TestRecoverReturnsPendingAuthorization(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(model.EnrollmentResponse{
+			AgentID: "agent-pending", AuthorizationState: "pending",
+		})
+	}))
+	defer server.Close()
 	paths := newPaths(t)
 	cfg := config.Default()
-	cfg.ControllerURL = "http://127.0.0.1:1"
-	cfg.EnrollmentToken = ""
+	cfg.ControllerURL = server.URL
 
 	res, err := Recover(context.Background(), cfg, paths, func(string, ...any) {})
-	if err == nil {
-		t.Fatal("expected an error explaining that re-enrollment is impossible")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if res.Enrolled {
-		t.Fatal("agent must not report itself enrolled")
+	if res.Enrolled || res.AuthorizationState != "pending" {
+		t.Fatalf("expected pending authorization, got %+v", res)
 	}
 }
 
@@ -109,6 +114,9 @@ func TestRecoverWithoutTokenReportsUnenrolled(t *testing.T) {
 func TestClonedMachineDropsInheritedCredentials(t *testing.T) {
 	paths := newPaths(t)
 	if err := secrets.ProtectToFile(paths.CredentialFile, []byte("zpa_key_from_image")); err != nil {
+		t.Fatal(err)
+	}
+	if err := secrets.ProtectToFile(paths.PendingSecret, []byte("zpa_pending_inherited_secret_that_must_be_replaced")); err != nil {
 		t.Fatal(err)
 	}
 	// Identity captured on a different machine.
@@ -121,7 +129,6 @@ func TestClonedMachineDropsInheritedCredentials(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.ControllerURL = "http://127.0.0.1:1"
-	cfg.EnrollmentToken = ""
 
 	res, _ := Ensure(context.Background(), cfg, paths, func(string, ...any) {})
 	if res.Identity.AgentUID == "win-old" {
@@ -132,5 +139,12 @@ func TestClonedMachineDropsInheritedCredentials(t *testing.T) {
 	}
 	if _, err := os.Stat(paths.CredentialFile); !os.IsNotExist(err) {
 		t.Fatal("inherited credential file was not removed on clone detection")
+	}
+	secret, err := secrets.UnprotectFromFile(paths.PendingSecret)
+	if err != nil {
+		t.Fatalf("replacement pending secret was not created: %v", err)
+	}
+	if string(secret) == "zpa_pending_inherited_secret_that_must_be_replaced" {
+		t.Fatal("cloned host kept the inherited pending secret")
 	}
 }

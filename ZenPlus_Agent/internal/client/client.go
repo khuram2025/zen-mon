@@ -222,9 +222,17 @@ func (c *Client) resolve(endpoint string) string {
 	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
 		return endpoint
 	}
-	u, _ := url.Parse(c.baseURL)
-	u.Path = path.Join(u.Path, endpoint)
-	return u.String()
+	base, _ := url.Parse(c.baseURL)
+	relative, err := url.Parse(endpoint)
+	if err != nil {
+		base.Path = path.Join(base.Path, endpoint)
+		return base.String()
+	}
+	if strings.HasPrefix(endpoint, "/") {
+		base.Path = ""
+		base.RawPath = ""
+	}
+	return base.ResolveReference(relative).String()
 }
 
 func trimBody(b []byte) string {

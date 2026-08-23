@@ -40,6 +40,7 @@ import { ServerFormDialog } from '@/components/servers/ServerFormDialog'
 import {
   AgentStatusBadge, OsIcon, ServerStatusBadge, TagList,
 } from '@/components/servers/shared'
+import { TagPicker } from '@/components/tags/TagPicker'
 import type {
   ServerFacets, ServerItem, ServerListResponse, ServerLiveMetrics, ServerStatus,
 } from '@/types/servers'
@@ -117,7 +118,7 @@ export function ServerInventoryPage() {
   const [formOpen, setFormOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<ServerItem | null>(null)
   const [bulkConfirm, setBulkConfirm] = useState<'delete' | 'decommission' | null>(null)
-  const [bulkTags, setBulkTags] = useState('')
+  const [bulkTags, setBulkTags] = useState<string[]>([])
   const [view, setView] = useState<'table' | 'cards'>('table')
 
   // Multi-key setter: consecutive setParam calls in one handler share a
@@ -185,7 +186,7 @@ export function ServerInventoryPage() {
     onSuccess: (r) => {
       toast.success(`Updated ${r.affected} server${r.affected === 1 ? '' : 's'}`)
       setSelected(new Set())
-      setBulkTags('')
+      setBulkTags([])
       qc.invalidateQueries({ queryKey: ['servers'] })
       qc.invalidateQueries({ queryKey: ['server-monitoring'] })
     },
@@ -235,6 +236,19 @@ export function ServerInventoryPage() {
 
   const filtersActive = Boolean(status || osType || mode || tag || search)
   const tagOptions = useMemo(() => facets?.tags || [], [facets])
+
+  // Registry colours so a tag renders identically on Devices, Servers and
+  // Link Utilization. Shared query key — one fetch between the three pages.
+  const { data: tagRegistry } = useQuery<{ name: string; color: string | null }[]>({
+    queryKey: ['tags'],
+    queryFn: async () => (await api.get('/tags')).data,
+    staleTime: 5 * 60_000,
+  })
+  const tagColors = useMemo(() => {
+    const m: Record<string, string> = {}
+    for (const t of tagRegistry || []) if (t.color) m[t.name.toLowerCase()] = t.color
+    return m
+  }, [tagRegistry])
 
   const statusCount = (key: string) =>
     facets?.status?.find((f) => f.value === key)?.count
@@ -287,7 +301,7 @@ export function ServerInventoryPage() {
             <Plus className="h-3.5 w-3.5" /> Register
           </Button>
           <Button size="sm" onClick={() => setDeployOpen(true)}>
-            <KeyRound className="h-3.5 w-3.5" /> Deploy agent
+            <KeyRound className="h-3.5 w-3.5" /> Install agent
           </Button>
         </div>
       </div>
@@ -377,23 +391,20 @@ export function ServerInventoryPage() {
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2">
           <span className="text-sm font-medium">{selected.size} selected</span>
           <div className="ml-auto flex flex-wrap items-center gap-2">
-            <Input
-              className="h-8 w-44"
-              placeholder="tag1, tag2"
-              value={bulkTags}
-              onChange={(e) => setBulkTags(e.target.value)}
-            />
+            <div className="w-56">
+              <TagPicker value={bulkTags} onChange={setBulkTags} placeholder="Pick tags…" />
+            </div>
             <Button
               variant="outline" size="sm"
-              disabled={!bulkTags.trim() || bulk.isPending}
-              onClick={() => bulk.mutate({ action: 'add_tags', tags: bulkTags.split(',').map((t) => t.trim()).filter(Boolean) })}
+              disabled={bulkTags.length === 0 || bulk.isPending}
+              onClick={() => bulk.mutate({ action: 'add_tags', tags: bulkTags })}
             >
               <Tags className="h-3.5 w-3.5" /> Add tags
             </Button>
             <Button
               variant="outline" size="sm"
-              disabled={!bulkTags.trim() || bulk.isPending}
-              onClick={() => bulk.mutate({ action: 'remove_tags', tags: bulkTags.split(',').map((t) => t.trim()).filter(Boolean) })}
+              disabled={bulkTags.length === 0 || bulk.isPending}
+              onClick={() => bulk.mutate({ action: 'remove_tags', tags: bulkTags })}
             >
               Remove tags
             </Button>
@@ -469,7 +480,7 @@ export function ServerInventoryPage() {
                           </div>
                           {!filtersActive && (
                             <Button size="sm" className="mt-1" onClick={() => setDeployOpen(true)}>
-                              <KeyRound className="h-3.5 w-3.5" /> Deploy agent
+                              <KeyRound className="h-3.5 w-3.5" /> Install agent
                             </Button>
                           )}
                         </div>
@@ -524,7 +535,7 @@ export function ServerInventoryPage() {
                           </div>
                         </Td>
                         <Td onClick={(e) => e.stopPropagation()}>
-                          <TagList tags={s.tags} onTagClick={(t) => setParam('tag', t === tag ? '' : t)} activeTag={tag} />
+                          <TagList tags={s.tags} colors={tagColors} onTagClick={(t) => setParam('tag', t === tag ? '' : t)} activeTag={tag} />
                         </Td>
                         <Td><span className="text-xs text-muted">{relativeTime(s.last_seen)}</span></Td>
                         <Td className="pr-4" onClick={(e) => e.stopPropagation()}>

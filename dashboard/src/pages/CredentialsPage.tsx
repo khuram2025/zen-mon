@@ -1,11 +1,12 @@
 import { useSearchParams } from 'react-router-dom'
-import { Key, ShieldCheck } from 'lucide-react'
+import { Globe2, Key, ShieldCheck } from 'lucide-react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { SnmpProfilesPage } from './SnmpProfilesPage'
 import { WindowsCredentialsPage } from './WindowsCredentialsPage'
+import { ServiceCredentialsPage } from './ServiceCredentialsPage'
 
 /**
- * Unified Credentials page hosting SNMP and Windows credential management
+ * Unified Credentials page hosting SNMP, Windows, and URL/service credential management
  * as tabs. Each tab embeds the original page component with `hideHeader`
  * so the per-page h1/description doesn't double up under this page's
  * heading. Tab selection is reflected in the URL via ?tab= so deep links
@@ -16,6 +17,7 @@ import { WindowsCredentialsPage } from './WindowsCredentialsPage'
 const TABS = [
   { value: 'snmp', label: 'SNMP', icon: Key },
   { value: 'windows', label: 'Windows', icon: ShieldCheck },
+  { value: 'services', label: 'URLs / Services', icon: Globe2 },
 ] as const
 
 type TabValue = typeof TABS[number]['value']
@@ -40,8 +42,8 @@ export function CredentialsPage() {
         </h1>
         <p className="text-xs text-muted">
           Reusable credentials used by monitoring, discovery, and device
-          management. SNMP communities/USM users for network devices,
-          WMI/WinRM credentials for Windows hosts.
+          management. Includes SNMP, Windows WMI/WinRM, and encrypted
+          credentials for URL checks and authenticated service journeys.
         </p>
       </div>
 
@@ -60,6 +62,9 @@ export function CredentialsPage() {
         </TabsContent>
         <TabsContent value="windows">
           <WindowsCredentialsPage hideHeader />
+        </TabsContent>
+        <TabsContent value="services">
+          <ServiceCredentialsPage />
         </TabsContent>
       </Tabs>
     </div>

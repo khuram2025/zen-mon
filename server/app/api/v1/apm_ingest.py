@@ -15,6 +15,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import gzip
+import io
 import hashlib
 import json
 import logging
@@ -34,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.apm import authenticate_ingest_key
 from app.core.database import get_ch_client, get_db
+from app.core.security import require_operator_user
 
 logger = logging.getLogger("zenplus.apm.ingest")
 
@@ -43,6 +46,8 @@ router = APIRouter(tags=["APM Ingest (OTLP)"])
 BATCH_MAX_ROWS = 2000          # flush when this many spans buffered
 BATCH_INTERVAL_S = 1.0         # ...or after this long
 QUEUE_MAXSIZE = 512            # number of pending request-payloads before backpressure
+MAX_OTLP_BODY_BYTES = 32 * 1024 * 1024
+INGEST_COMMIT_TIMEOUT_S = 30.0 # never acknowledge before ClickHouse commits
 
 SPAN_COLUMNS = [
     "timestamp", "trace_id", "span_id", "parent_span_id", "name", "span_kind",
@@ -68,6 +73,28 @@ _NORM_SUBS = [
     (re.compile(r":\d+"), ":N"),
     (re.compile(r"\b\d+\b"), "N"),
 ]
+
+# Database statements are a high-risk telemetry field. Keep the operation and
+# shape useful while ensuring common literal forms never reach ClickHouse. This
+# is a final appliance-side safety net; managed runtime bundles also disable
+# capture of query parameters at the source.
+_SQL_LITERAL_SUBS = [
+    (re.compile(r"/\*.*?\*/", re.S), " "),
+    (re.compile(r"--[^\r\n]*"), " "),
+    (re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$.*?\$\1\$", re.S), "?"),
+    (re.compile(r"'([^']|'')*'"), "?"),
+    (re.compile(r'"([^"\\]|\\.)*"'), "?"),
+    (re.compile(r"\b0x[0-9a-fA-F]+\b"), "?"),
+    (re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}\b"), "?"),
+    (re.compile(r"(?<![A-Za-z0-9_])[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"), "?"),
+]
+
+
+def obfuscate_db_statement(statement: object) -> str:
+    value = str(statement or "")[:32768]
+    for pattern, replacement in _SQL_LITERAL_SUBS:
+        value = pattern.sub(replacement, value)
+    return re.sub(r"\s+", " ", value).strip()[:8192]
 
 
 def _normalize(s: str) -> str:
@@ -100,10 +127,23 @@ def _otlp_enum_number(value: object, prefix: str, names: dict[int, str]) -> int:
         return next((number for number, name in names.items() if name == normalized), 0)
 
 # observability counters (read by /v1/traces health + tests)
-STATS = {"accepted_spans": 0, "rejected_spans": 0, "dropped_spans": 0, "flushes": 0}
+STATS = {"accepted_spans": 0, "rejected_spans": 0, "dropped_spans": 0,
+         "skewed_spans": 0, "flushes": 0}
+
+# Deltas since the last persist, flushed to zenplus.apm_ingest_stats so
+# data-quality counters survive restarts and aggregate across workers.
+_PENDING_STATS = {"accepted": 0, "rejected": 0, "dropped": 0, "skewed": 0, "flushes": 0}
+
+# Spans stamped further than this into the future are unacceptable data —
+# a skewed producer clock would corrupt every time-window query.
+CLOCK_SKEW_MAX_FUTURE_S = 300
+# Spans older than the raw-span TTL would be deleted on arrival; reject them
+# so the producer learns instead of silently losing data.
+CLOCK_SKEW_MAX_PAST_S = 7 * 86400
 
 _queue: "asyncio.Queue | None" = None
 _writer_task: "asyncio.Task | None" = None
+_last_received_at: datetime | None = None
 
 
 # ── OTLP decoding ────────────────────────────────────────────────────────────
@@ -125,6 +165,25 @@ def decode_otlp_traces_protobuf(raw: bytes) -> dict:
         preserving_proto_field_name=False,
         use_integers_for_enums=True,
     )
+
+
+def decode_content_encoding(raw: bytes, content_encoding: str | None) -> bytes:
+    """Decode standard OTLP HTTP compression with a bounded output size."""
+    encoding = (content_encoding or "identity").strip().lower()
+    if encoding in {"", "identity"}:
+        if len(raw) > MAX_OTLP_BODY_BYTES:
+            raise ValueError("OTLP body exceeds the 32 MiB limit")
+        return raw
+    if encoding != "gzip":
+        raise LookupError(f"Unsupported OTLP content encoding: {encoding}")
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(raw), mode="rb") as stream:
+            decoded = stream.read(MAX_OTLP_BODY_BYTES + 1)
+    except (OSError, EOFError) as exc:
+        raise ValueError("Invalid gzip-compressed OTLP body") from exc
+    if len(decoded) > MAX_OTLP_BODY_BYTES:
+        raise ValueError("Decompressed OTLP body exceeds the 32 MiB limit")
+    return decoded
 
 
 def _protobuf_response(rejected: int = 0, message: str = "") -> Response:
@@ -196,8 +255,8 @@ def _resource_fingerprint(res_attrs: dict) -> str:
     return hashlib.sha1(canonical.encode()).hexdigest()
 
 
-def decode_otlp_traces_json(payload: dict, default_env: str | None) -> tuple[list, dict, int]:
-    """Return (span_rows, resource_rows_by_fp, rejected_count).
+def decode_otlp_traces_json(payload: dict, default_env: str | None) -> tuple[list, dict, list, int, int]:
+    """Return (span_rows, resource_rows_by_fp, exc_rows, rejected_count, skewed_count).
 
     span_rows are lists ordered per SPAN_COLUMNS; resource_rows_by_fp dedupes
     resource side-table rows by fingerprint.
@@ -206,6 +265,10 @@ def decode_otlp_traces_json(payload: dict, default_env: str | None) -> tuple[lis
     res_rows: dict = {}
     exc_rows: list = []
     rejected = 0
+    skewed = 0
+    now_ns = int(datetime.now(timezone.utc).timestamp() * 1e9)
+    max_start_ns = now_ns + CLOCK_SKEW_MAX_FUTURE_S * 1_000_000_000
+    min_start_ns = now_ns - CLOCK_SKEW_MAX_PAST_S * 1_000_000_000
 
     for rs in payload.get("resourceSpans", []) or []:
         res = rs.get("resource") or {}
@@ -227,6 +290,10 @@ def decode_otlp_traces_json(payload: dict, default_env: str | None) -> tuple[lis
                     start_ns = int(sp.get("startTimeUnixNano") or 0)
                     end_ns = int(sp.get("endTimeUnixNano") or start_ns)
                     if start_ns <= 0:
+                        rejected += 1
+                        continue
+                    if start_ns > max_start_ns or start_ns < min_start_ns:
+                        skewed += 1
                         rejected += 1
                         continue
                     dur = max(0, end_ns - start_ns)
@@ -261,7 +328,7 @@ def decode_otlp_traces_json(payload: dict, default_env: str | None) -> tuple[lis
                         int(http_sc) if http_sc else 0,                # http_status_code
                         a_s.get("db.system") or "",
                         a_s.get("db.operation") or "",
-                        a_s.get("db.statement") or "",                 # digest (collector scrubs)
+                        obfuscate_db_statement(a_s.get("db.statement") or a_s.get("db.query.text")),
                         a_s.get("rpc.method") or "",
                         a_s, a_n, a_b,                                 # typed attr maps
                         res_json,                                      # resource
@@ -317,7 +384,7 @@ def decode_otlp_traces_json(payload: dict, default_env: str | None) -> tuple[lis
         if produced_spans and fp not in res_rows:
             res_rows[fp] = [fp, res_json, datetime.now(timezone.utc), 0]
 
-    return span_rows, res_rows, exc_rows, rejected
+    return span_rows, res_rows, exc_rows, rejected, skewed
 
 
 # ── batch writer ─────────────────────────────────────────────────────────────
@@ -337,6 +404,29 @@ async def _flush(span_rows: list, res_rows: dict, exc_rows: list) -> None:
         await asyncio.to_thread(_insert, "apm_exceptions", exc_rows, EXC_COLUMNS)
     STATS["flushes"] += 1
     STATS["accepted_spans"] += len(span_rows)
+    _PENDING_STATS["flushes"] += 1
+    _PENDING_STATS["accepted"] += len(span_rows)
+
+
+async def _persist_pending_stats() -> None:
+    """Write accumulated counter deltas to apm_ingest_stats (per-minute rows;
+    SummingMergeTree collapses concurrent workers). Best-effort: on failure the
+    deltas stay pending and ride the next attempt."""
+    if not any(_PENDING_STATS.values()):
+        return
+    snapshot = dict(_PENDING_STATS)
+    try:
+        minute = datetime.now(timezone.utc).replace(second=0, microsecond=0, tzinfo=None)
+        await asyncio.to_thread(
+            _insert, "apm_ingest_stats",
+            [[minute, snapshot["accepted"], snapshot["rejected"],
+              snapshot["dropped"], snapshot["skewed"], snapshot["flushes"]]],
+            ["timestamp", "accepted", "rejected", "dropped", "skewed", "flushes"],
+        )
+        for k, v in snapshot.items():
+            _PENDING_STATS[k] -= v
+    except Exception:
+        logger.debug("apm ingest-stats persist deferred (clickhouse unavailable)")
 
 
 async def _writer_loop() -> None:
@@ -344,29 +434,57 @@ async def _writer_loop() -> None:
     spans: list = []
     res: dict = {}
     excs: list = []
+    acknowledgements: list[asyncio.Future] = []
+
+    def complete(error: Exception | None = None) -> None:
+        for acknowledgement in acknowledgements:
+            if acknowledgement.done():
+                continue
+            if error is None:
+                acknowledgement.set_result(None)
+            else:
+                acknowledgement.set_exception(error)
+
+    def add(item) -> None:
+        spans.extend(item[0])
+        res.update(item[1])
+        excs.extend(item[2])
+        acknowledgements.append(item[3])
+
     while True:
         try:
             item = await asyncio.wait_for(_queue.get(), timeout=BATCH_INTERVAL_S)
-            spans.extend(item[0])
-            res.update(item[1])
-            excs.extend(item[2])
+            add(item)
             _queue.task_done()
         except asyncio.TimeoutError:
             pass
         except asyncio.CancelledError:
+            while True:
+                try:
+                    item = _queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                add(item)
+                _queue.task_done()
             if spans or excs:
                 try:
                     await _flush(spans, res, excs)
-                except Exception:
+                    complete()
+                except Exception as exc:
+                    complete(exc)
                     logger.exception("apm final flush failed")
             raise
         if (spans or excs) and (len(spans) >= BATCH_MAX_ROWS or _queue.empty()):
             try:
                 await _flush(spans, res, excs)
-            except Exception:
+                complete()
+            except Exception as exc:
                 STATS["dropped_spans"] += len(spans)
+                _PENDING_STATS["dropped"] += len(spans)
+                complete(exc)
                 logger.exception("apm flush to ClickHouse failed; dropped %d spans", len(spans))
-            spans, res, excs = [], {}, []
+            spans, res, excs, acknowledgements = [], {}, [], []
+        await _persist_pending_stats()
 
 
 async def start_batch_writer() -> None:
@@ -379,7 +497,7 @@ async def start_batch_writer() -> None:
 
 
 async def stop_batch_writer() -> None:
-    global _writer_task
+    global _queue, _writer_task
     if _writer_task is not None:
         _writer_task.cancel()
         try:
@@ -387,6 +505,7 @@ async def stop_batch_writer() -> None:
         except (asyncio.CancelledError, Exception):
             pass
         _writer_task = None
+        _queue = None
 
 
 # ── endpoints ────────────────────────────────────────────────────────────────
@@ -397,15 +516,22 @@ async def otlp_traces(
     response: Response,
     authorization: str | None = Header(default=None),
     content_type: str | None = Header(default=None),
+    content_encoding: str | None = Header(default=None),
     db: AsyncSession = Depends(get_db),
 ):
+    global _last_received_at
     key = await authenticate_ingest_key(authorization or "", db, kind="sdk")
 
     ct = (content_type or "application/json").split(";", 1)[0].strip().lower()
     is_protobuf = ct in {"application/x-protobuf", "application/protobuf"}
     if not is_protobuf and ct not in {"application/json", "application/x-json"}:
         raise HTTPException(415, f"Unsupported OTLP content type: {ct}")
-    raw = await request.body()
+    try:
+        raw = decode_content_encoding(await request.body(), content_encoding)
+    except LookupError as exc:
+        raise HTTPException(415, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     if is_protobuf:
         try:
             payload = decode_otlp_traces_protobuf(raw)
@@ -417,31 +543,65 @@ async def otlp_traces(
         except json.JSONDecodeError as exc:
             raise HTTPException(400, "Invalid OTLP/JSON body") from exc
 
-    span_rows, res_rows, exc_rows, rejected = decode_otlp_traces_json(payload, key.get("env_name"))
+    span_rows, res_rows, exc_rows, rejected, skewed = decode_otlp_traces_json(payload, key.get("env_name"))
 
     if span_rows:
         if _queue is None:
             raise HTTPException(503, "APM ingest not ready")
         try:
-            _queue.put_nowait((span_rows, res_rows, exc_rows))
+            acknowledgement = asyncio.get_running_loop().create_future()
+            _queue.put_nowait((span_rows, res_rows, exc_rows, acknowledgement))
         except asyncio.QueueFull:
             STATS["rejected_spans"] += len(span_rows)
-            response.headers["Retry-After"] = "1"
-            raise HTTPException(503, "APM ingest backpressure; retry shortly")
+            _PENDING_STATS["rejected"] += len(span_rows)
+            raise HTTPException(503, "APM ingest backpressure; retry shortly",
+                                headers={"Retry-After": "1"})
+        try:
+            # Only acknowledge telemetry after ClickHouse commits it. If this
+            # process or ClickHouse fails, the upstream collector sees a 503
+            # and retains the spans in its disk-backed retry queue.
+            await asyncio.wait_for(
+                asyncio.shield(acknowledgement), timeout=INGEST_COMMIT_TIMEOUT_S
+            )
+            _last_received_at = datetime.now(timezone.utc)
+        except asyncio.TimeoutError as exc:
+            raise HTTPException(503, "APM storage commit timed out; retry shortly",
+                                headers={"Retry-After": "1"}) from exc
+        except Exception as exc:
+            raise HTTPException(503, "APM storage is unavailable; retry shortly",
+                                headers={"Retry-After": "1"}) from exc
 
     STATS["rejected_spans"] += rejected
+    STATS["skewed_spans"] += skewed
+    _PENDING_STATS["rejected"] += rejected
+    _PENDING_STATS["skewed"] += skewed
     if is_protobuf:
+        message = "some spans failed to decode" if rejected else ""
+        if skewed:
+            message = (
+                f"{skewed} span(s) rejected for clock skew "
+                f"(timestamp beyond ±{CLOCK_SKEW_MAX_FUTURE_S}s future / "
+                f"{CLOCK_SKEW_MAX_PAST_S // 86400}d past); check the producer's clock"
+            )
         return _protobuf_response(
             rejected,
-            "some spans failed to decode" if rejected else "",
+            message,
         )
     if rejected:
-        return {"partialSuccess": {"rejectedSpans": rejected,
-                                   "errorMessage": "some spans failed to decode"}}
+        msg = "some spans failed to decode"
+        if skewed:
+            msg = (f"{skewed} span(s) rejected for clock skew "
+                   f"(timestamp beyond ±{CLOCK_SKEW_MAX_FUTURE_S}s future / "
+                   f"{CLOCK_SKEW_MAX_PAST_S // 86400}d past); check the producer's clock")
+        return {"partialSuccess": {"rejectedSpans": rejected, "errorMessage": msg}}
     return {"partialSuccess": {}}
 
 
 @router.get("/v1/apm/ingest-stats")
-async def ingest_stats(db: AsyncSession = Depends(get_db)):
-    """Lightweight unauthenticated liveness/counters for the ingest path."""
+async def ingest_stats(user=Depends(require_operator_user)):
+    """Per-process liveness/counters for the ingest path (operator+).
+
+    Cluster-wide, restart-surviving counters live in zenplus.apm_ingest_stats
+    (see GET /api/v1/apm/data-quality).
+    """
     return {"queue_depth": _queue.qsize() if _queue else None, **STATS}

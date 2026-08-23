@@ -1,8 +1,9 @@
 import re
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlsplit
 from uuid import UUID
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 _STATUS_PATTERN_RE = re.compile(r"^\s*([1-5][0-9xX]{2}|[1-5][0-9]{2}-[1-5][0-9]{2})\s*$")
@@ -30,6 +31,97 @@ def _validate_statuses(value: Optional[str]) -> Optional[str]:
     return ",".join(cleaned)
 
 
+class ServiceWorkflowStep(BaseModel):
+    """One browser-like request in an authenticated service journey."""
+
+    name: str = Field(..., min_length=1, max_length=120)
+    url: str = Field(..., max_length=2048)
+    method: str = Field(default="GET", pattern="^(GET|POST|HEAD|PUT)$")
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: Optional[str] = Field(default=None, max_length=32768)
+    expected_statuses: str = Field(default="200", max_length=255)
+    content_match: Optional[str] = Field(default=None, max_length=1024)
+    follow_redirects: bool = True
+
+    @field_validator("url")
+    @classmethod
+    def _check_url(cls, value: str) -> str:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Workflow step URL must be an absolute HTTP(S) URL")
+        if parsed.username or parsed.password:
+            raise ValueError("Credentials must not be embedded in a workflow URL")
+        return value
+
+    @field_validator("expected_statuses")
+    @classmethod
+    def _check_expected_statuses(cls, value: str) -> str:
+        return _validate_statuses(value) or "200"
+
+    @field_validator("headers")
+    @classmethod
+    def _check_headers(cls, value: dict[str, str]) -> dict[str, str]:
+        if len(value) > 30:
+            raise ValueError("A workflow step may have at most 30 headers")
+        for key, header_value in value.items():
+            if not key.strip() or "\n" in key or "\r" in key:
+                raise ValueError("Invalid HTTP header name")
+            if "\n" in header_value or "\r" in header_value:
+                raise ValueError("HTTP header values cannot contain line breaks")
+        return value
+
+
+def _validate_workflow_origin(target_url: str | None, steps: list[ServiceWorkflowStep], credential_id: UUID | None) -> None:
+    if not steps:
+        return
+    def origin(value: str):
+        parsed = urlsplit(value)
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+        return parsed.scheme.lower(), parsed.hostname, port
+
+    base_origin = origin(target_url or steps[0].url)
+    for step in steps:
+        if origin(step.url) != base_origin:
+            raise ValueError("All workflow steps must use the same origin")
+    # Transport security depends on the selected credential type, which cannot
+    # be resolved from a UUID inside a Pydantic model.  The service layer
+    # validates it after loading the encrypted credential metadata.
+
+
+class ServiceCredentialCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=120)
+    auth_type: str = Field(..., pattern="^(basic|bearer|form|ntlm)$")
+    username: Optional[str] = Field(default=None, max_length=255)
+    secret: str = Field(..., min_length=1, max_length=8192)
+    description: Optional[str] = Field(default=None, max_length=1024)
+
+    @model_validator(mode="after")
+    def _username_required(self):
+        if self.auth_type in {"basic", "form", "ntlm"} and not (self.username or "").strip():
+            raise ValueError("Username is required for Basic, form, and Windows Integrated authentication")
+        return self
+
+
+class ServiceCredentialUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    auth_type: Optional[str] = Field(default=None, pattern="^(basic|bearer|form|ntlm)$")
+    username: Optional[str] = Field(default=None, max_length=255)
+    secret: Optional[str] = Field(default=None, min_length=1, max_length=8192)
+    description: Optional[str] = Field(default=None, max_length=1024)
+
+
+class ServiceCredentialResponse(BaseModel):
+    id: UUID
+    name: str
+    auth_type: str
+    username: Optional[str] = None
+    description: Optional[str] = None
+    has_secret: bool = True
+    used_by: int = 0
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+
 class ServiceCheckCreate(BaseModel):
     device_id: Optional[UUID] = None
     group_id: Optional[UUID] = None
@@ -41,6 +133,9 @@ class ServiceCheckCreate(BaseModel):
     tags: list[str] = Field(default_factory=list)
     retry_count: int = Field(default=1, ge=1, le=10)
     retry_delay_s: int = Field(default=30, ge=1, le=600)
+    credential_id: Optional[UUID] = None
+    workflow_operator: str = Field(default="all", pattern="^(all|any)$")
+    workflow_steps: list[ServiceWorkflowStep] = Field(default_factory=list, max_length=10)
     enabled: bool = True
     target_host: str = Field(..., max_length=255)
     target_port: Optional[int] = Field(default=None, ge=1, le=65535)
@@ -52,6 +147,8 @@ class ServiceCheckCreate(BaseModel):
     http_expected_statuses: Optional[str] = Field(default=None, max_length=255)
     http_content_match: Optional[str] = None
     http_follow_redirects: bool = True
+    http_ignore_tls_errors: bool = False
+    http_allow_insecure_auth: bool = False
     tls_warn_days: int = Field(default=30, ge=1, le=365)
     tls_critical_days: int = Field(default=7, ge=1, le=365)
     check_interval: int = Field(default=60, ge=10, le=3600)
@@ -63,6 +160,13 @@ class ServiceCheckCreate(BaseModel):
     def _check_statuses(cls, v):
         return _validate_statuses(v)
 
+    @model_validator(mode="after")
+    def _check_workflow(self):
+        if self.workflow_steps and self.check_type != "http":
+            raise ValueError("Multi-step workflows are supported only for HTTP checks")
+        _validate_workflow_origin(self.target_url, self.workflow_steps, self.credential_id)
+        return self
+
 
 class ServiceCheckUpdate(BaseModel):
     name: Optional[str] = Field(default=None, max_length=255)
@@ -73,6 +177,9 @@ class ServiceCheckUpdate(BaseModel):
     tags: Optional[list[str]] = None
     retry_count: Optional[int] = Field(default=None, ge=1, le=10)
     retry_delay_s: Optional[int] = Field(default=None, ge=1, le=600)
+    credential_id: Optional[UUID] = None
+    workflow_operator: Optional[str] = Field(default=None, pattern="^(all|any)$")
+    workflow_steps: Optional[list[ServiceWorkflowStep]] = Field(default=None, max_length=10)
     enabled: Optional[bool] = None
     target_host: Optional[str] = Field(default=None, max_length=255)
     target_port: Optional[int] = Field(default=None, ge=1, le=65535)
@@ -84,6 +191,8 @@ class ServiceCheckUpdate(BaseModel):
     http_expected_statuses: Optional[str] = Field(default=None, max_length=255)
     http_content_match: Optional[str] = None
     http_follow_redirects: Optional[bool] = None
+    http_ignore_tls_errors: Optional[bool] = None
+    http_allow_insecure_auth: Optional[bool] = None
     tls_warn_days: Optional[int] = Field(default=None, ge=1, le=365)
     tls_critical_days: Optional[int] = Field(default=None, ge=1, le=365)
     check_interval: Optional[int] = Field(default=None, ge=10, le=3600)
@@ -111,6 +220,11 @@ class ServiceCheckResponse(BaseModel):
     tags: list[str] = Field(default_factory=list)
     retry_count: int = 1
     retry_delay_s: int = 30
+    credential_id: Optional[UUID] = None
+    credential_name: Optional[str] = None
+    credential_auth_type: Optional[str] = None
+    workflow_operator: str = "all"
+    workflow_steps: list[ServiceWorkflowStep] = Field(default_factory=list)
     in_maintenance: bool = False
     enabled: bool
     target_host: str
@@ -121,6 +235,8 @@ class ServiceCheckResponse(BaseModel):
     http_expected_statuses: Optional[str] = None
     http_content_match: Optional[str] = None
     http_follow_redirects: bool
+    http_ignore_tls_errors: bool = False
+    http_allow_insecure_auth: bool = False
     tls_warn_days: int
     tls_critical_days: int
     check_interval: int

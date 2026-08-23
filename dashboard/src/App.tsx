@@ -4,6 +4,9 @@ import { useAuth } from '@/stores/auth'
 import { Layout } from '@/components/Layout'
 import { LoginPage } from '@/pages/LoginPage'
 import { DashboardPage } from '@/pages/DashboardPage'
+import { NetworkSecurityDashboard } from '@/pages/dashboards/NetworkSecurityDashboard'
+import { ServerTeamDashboard } from '@/pages/dashboards/ServerTeamDashboard'
+import { ApplicationTeamDashboard } from '@/pages/dashboards/ApplicationTeamDashboard'
 import { AvailabilityPage } from '@/pages/AvailabilityPage'
 import { DevicesPage } from '@/pages/DevicesPage'
 import { DeviceDetailPage } from '@/pages/DeviceDetailPage'
@@ -31,11 +34,22 @@ import { ReportsPage as DiscoveryReportsPage } from '@/pages/discovery/ReportsPa
 import { ImportsPage as DiscoveryImportsPage } from '@/pages/discovery/ImportsPage'
 import { IgnoredPage as DiscoveryIgnoredPage } from '@/pages/discovery/IgnoredPage'
 import { CredentialsPage as DiscoveryCredentialsPage } from '@/pages/discovery/CredentialsPage'
-import { MibLibraryPage } from '@/pages/MibLibraryPage'
+import { UdtLayout } from '@/pages/udt/UdtLayout'
+import { EndpointSearchPage } from '@/pages/udt/EndpointSearchPage'
+import { EndpointDetailPage } from '@/pages/udt/EndpointDetailPage'
+import { SwitchPortsPage } from '@/pages/udt/SwitchPortsPage'
+import { UserLoginsPage } from '@/pages/udt/UserLoginsPage'
+import { WatchListsPage } from '@/pages/udt/WatchListsPage'
+import { ProbesPage as NetPathProbesPage } from '@/pages/netpath/ProbesPage'
+import { PathDetailPage as NetPathDetailPage } from '@/pages/netpath/PathDetailPage'
+import { ClassificationPage as UdtClassificationPage } from '@/pages/udt/ClassificationPage'
+import { ActivityPage as UdtActivityPage } from '@/pages/udt/ActivityPage'
+import { SettingsPage as UdtSettingsPage } from '@/pages/udt/SettingsPage'
 import { ManualMapsEntry } from '@/pages/ManualMapsEntry'
 import { ReportsPage } from '@/pages/ReportsPage'
 import { SensorsPage } from '@/pages/SensorsPage'
 import { NetflowPage, NetflowDevicePage, NetflowSectionPage } from '@/pages/NetflowPage'
+import { ApmLayout } from '@/pages/apm/ApmLayout'
 import { ApmSettingsPage } from '@/pages/apm/ApmSettingsPage'
 import { TraceExplorerPage } from '@/pages/apm/TraceExplorerPage'
 import { TraceWaterfallPage } from '@/pages/apm/TraceWaterfallPage'
@@ -44,6 +58,10 @@ import { ServicesPage as ApmServicesPage } from '@/pages/apm/ServicesPage'
 import { ServiceDetailPage as ApmServiceDetailPage } from '@/pages/apm/ServiceDetailPage'
 import { ServiceMapPage as ApmServiceMapPage } from '@/pages/apm/ServiceMapPage'
 import { ErrorsInboxPage } from '@/pages/apm/ErrorsInboxPage'
+import { SlosPage } from '@/pages/apm/SlosPage'
+import { SyntheticsPage } from '@/pages/apm/SyntheticsPage'
+import { RumPage } from '@/pages/apm/RumPage'
+import { UsagePage } from '@/pages/apm/UsagePage'
 import { ErrorIssueDetailPage } from '@/pages/apm/ErrorIssueDetailPage'
 import { ServersDashboardPage } from '@/pages/servers/ServersDashboardPage'
 import { ServerInventoryPage } from '@/pages/servers/ServersPage'
@@ -60,11 +78,15 @@ const ExecutiveReport = lazy(() => import('@/pages/reports/ExecutiveReport'))
 const TechnicalReport = lazy(() => import('@/pages/reports/TechnicalReport'))
 const BusinessReport = lazy(() => import('@/pages/reports/BusinessReport'))
 const InventoryReport = lazy(() => import('@/pages/reports/InventoryReport'))
+const ApmReport = lazy(() => import('@/pages/reports/ApmReport'))
+const ReportLibrary = lazy(() => import('@/pages/reports/ReportLibrary'))
+const SectionReportViewer = lazy(() => import('@/pages/reports/SectionReportViewer'))
+const ReportBuilder = lazy(() => import('@/pages/reports/ReportBuilder'))
+const ReportSchedulesPage = lazy(() => import('@/pages/reports/SchedulesPage'))
 
 function ReportTabFallback() {
   return <div className="py-10 text-center text-sm text-muted">Loading report…</div>
 }
-import { UsersPage } from '@/pages/UsersPage'
 import { ChannelsPage } from '@/pages/ChannelsPage'
 import { GatewaysPage } from '@/pages/GatewaysPage'
 import { CredentialsPage } from '@/pages/CredentialsPage'
@@ -83,7 +105,7 @@ const tabRedirects: Record<string, string> = {
   company: '/settings/general',
   channels: '/channels',
   gateways: '/gateways',
-  users: '/users',
+  users: '/settings/general?tab=users',
   sensors: '/sensors',
   snmp: '/credentials?tab=snmp',
   subscription: '/subscription',
@@ -116,6 +138,9 @@ export default function App() {
         }
       >
         <Route index element={<DashboardPage />} />
+        <Route path="dashboards/network" element={<NetworkSecurityDashboard />} />
+        <Route path="dashboards/servers" element={<ServerTeamDashboard />} />
+        <Route path="dashboards/apps" element={<ApplicationTeamDashboard />} />
         <Route path="availability" element={<AvailabilityPage />} />
         <Route path="devices" element={<DevicesPage />} />
         <Route path="devices/:id" element={<DeviceDetailPage />} />
@@ -145,6 +170,18 @@ export default function App() {
           <Route path="profiles/:id/edit" element={<DiscoveryWizardPage />} />
           <Route path="runs/:id" element={<DiscoveryRunPage />} />
         </Route>
+        <Route path="udt" element={<UdtLayout />}>
+          <Route index element={<EndpointSearchPage />} />
+          <Route path="ports" element={<SwitchPortsPage />} />
+          <Route path="users" element={<UserLoginsPage />} />
+          <Route path="classification" element={<UdtClassificationPage />} />
+          <Route path="watch-lists" element={<WatchListsPage />} />
+          <Route path="activity" element={<UdtActivityPage />} />
+          <Route path="settings" element={<UdtSettingsPage />} />
+          <Route path="endpoints/:id" element={<EndpointDetailPage />} />
+        </Route>
+        <Route path="netpath" element={<NetPathProbesPage />} />
+        <Route path="netpath/probes/:id" element={<NetPathDetailPage />} />
         <Route path="maps" element={<Navigate to="/maps/manual" replace />} />
         <Route path="maps/manual" element={<ManualMapsEntry />} />
         <Route path="netflow" element={<NetflowPage />} />
@@ -154,17 +191,24 @@ export default function App() {
         <Route path="netflow/anomalies" element={<NetflowAnomaliesPage />} />
         <Route path="netflow/devices/:ip" element={<NetflowDevicePage />} />
         <Route path="netflow/:section" element={<NetflowSectionPage />} />
-        <Route path="mibs" element={<MibLibraryPage />} />
+        <Route path="mibs" element={<Navigate to="/settings/general?tab=mibs" replace />} />
+        <Route path="templates" element={<Navigate to="/settings/general?tab=templates" replace />} />
         <Route path="sensors" element={<SensorsPage />} />
-        <Route path="apm" element={<ApmOverviewPage />} />
-        <Route path="apm/services" element={<ApmServicesPage />} />
-        <Route path="apm/services/:name" element={<ApmServiceDetailPage />} />
-        <Route path="apm/service-map" element={<ApmServiceMapPage />} />
-        <Route path="apm/errors" element={<ErrorsInboxPage />} />
-        <Route path="apm/errors/:id" element={<ErrorIssueDetailPage />} />
-        <Route path="apm/traces" element={<TraceExplorerPage />} />
-        <Route path="apm/traces/:traceId" element={<TraceWaterfallPage />} />
-        <Route path="apm/settings" element={<ApmSettingsPage />} />
+        <Route path="apm" element={<ApmLayout />}>
+          <Route index element={<ApmOverviewPage />} />
+          <Route path="services" element={<ApmServicesPage />} />
+          <Route path="services/:name" element={<ApmServiceDetailPage />} />
+          <Route path="service-map" element={<ApmServiceMapPage />} />
+          <Route path="slos" element={<SlosPage />} />
+          <Route path="synthetics" element={<SyntheticsPage />} />
+          <Route path="rum" element={<RumPage />} />
+          <Route path="usage" element={<UsagePage />} />
+          <Route path="errors" element={<ErrorsInboxPage />} />
+          <Route path="errors/:id" element={<ErrorIssueDetailPage />} />
+          <Route path="traces" element={<TraceExplorerPage />} />
+          <Route path="traces/:traceId" element={<TraceWaterfallPage />} />
+          <Route path="settings" element={<ApmSettingsPage />} />
+        </Route>
         <Route path="alerts" element={<AlertsPage />} />
         <Route path="alerts/:id" element={<AlertDetailPage />} />
         <Route path="alert-rules" element={<AlertRulesPage />} />
@@ -172,15 +216,20 @@ export default function App() {
         <Route path="ncm" element={<NcmPage />} />
         <Route path="ncm/:deviceId" element={<NcmDevicePage />} />
         <Route path="reports" element={<ReportsPage />}>
-          <Route index element={<Navigate to="executive" replace />} />
+          <Route index element={<Suspense fallback={<ReportTabFallback />}><ReportLibrary /></Suspense>} />
           <Route path="executive" element={<Suspense fallback={<ReportTabFallback />}><ExecutiveReport /></Suspense>} />
           <Route path="technical" element={<Suspense fallback={<ReportTabFallback />}><TechnicalReport /></Suspense>} />
           <Route path="business" element={<Suspense fallback={<ReportTabFallback />}><BusinessReport /></Suspense>} />
           <Route path="inventory" element={<Suspense fallback={<ReportTabFallback />}><InventoryReport /></Suspense>} />
+          <Route path="apm" element={<Suspense fallback={<ReportTabFallback />}><ApmReport /></Suspense>} />
+          <Route path="view/:key" element={<Suspense fallback={<ReportTabFallback />}><SectionReportViewer /></Suspense>} />
+          <Route path="builder" element={<Suspense fallback={<ReportTabFallback />}><ReportBuilder /></Suspense>} />
+          <Route path="schedules" element={<Suspense fallback={<ReportTabFallback />}><ReportSchedulesPage /></Suspense>} />
         </Route>
 
         {/* Broken-out settings pages */}
-        <Route path="users" element={<UsersPage />} />
+        {/* Users now lives in Settings → Users & Access */}
+        <Route path="users" element={<Navigate to="/settings/general?tab=users" replace />} />
         <Route path="channels" element={<ChannelsPage />} />
         <Route path="notifications" element={<Navigate to="/channels" replace />} />
         <Route path="gateways" element={<GatewaysPage />} />

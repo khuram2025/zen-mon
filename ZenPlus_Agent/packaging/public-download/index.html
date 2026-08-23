@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Download ZenPlus Agent for Windows | Zentryc</title>
+  <meta name="description" content="Download the official ZenPlus Agent MSI or guided Windows installer from Zentryc.">
+  <style>
+    :root { color-scheme: dark; --bg:#061419; --panel:#0b2027; --line:#1d3b43; --text:#f2f8f9; --muted:#9db1b7; --teal:#18b8a7; --blue:#5da9ff; --warn:#f4b860; --ok:#64d897; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; background:radial-gradient(circle at 80% 0,#123b42 0,transparent 34%),linear-gradient(145deg,#041014,#071a20 62%,#09262c); color:var(--text); font:15px/1.55 Inter,"Segoe UI",system-ui,sans-serif; }
+    a { color:inherit; }
+    .shell { width:min(1080px,calc(100% - 36px)); margin:auto; padding:32px 0 48px; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:20px; margin-bottom:68px; }
+    .brand { display:flex; align-items:center; gap:12px; text-decoration:none; font-size:18px; font-weight:700; letter-spacing:.2px; }
+    .mark { display:grid; place-items:center; width:38px; height:38px; border-radius:11px; background:linear-gradient(145deg,var(--teal),#087c76); box-shadow:0 10px 30px #00a89833; }
+    .back { color:var(--muted); text-decoration:none; }
+    .back:hover { color:var(--text); }
+    main { display:grid; grid-template-columns:1.25fr .75fr; gap:28px; align-items:start; }
+    .eyebrow { color:var(--teal); font-size:12px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; }
+    h1 { margin:12px 0 18px; max-width:720px; font-size:clamp(38px,6vw,66px); line-height:1.04; letter-spacing:-.045em; }
+    .lead { max-width:700px; margin:0 0 30px; color:#bfd0d4; font-size:18px; }
+    .downloads { display:flex; flex-wrap:wrap; gap:12px; }
+    .button { display:inline-flex; align-items:center; justify-content:center; min-height:48px; padding:0 20px; border:1px solid transparent; border-radius:11px; background:var(--teal); color:#041516; text-decoration:none; font-weight:800; transition:.18s ease; }
+    .button:hover { transform:translateY(-1px); filter:brightness(1.08); }
+    .button.secondary { background:transparent; border-color:#3e646d; color:var(--text); }
+    .meta { display:flex; flex-wrap:wrap; gap:10px 18px; margin-top:20px; color:var(--muted); font-size:13px; }
+    .card { border:1px solid var(--line); border-radius:18px; background:linear-gradient(180deg,#0d252cdd,#091a20ee); box-shadow:0 24px 70px #0007; overflow:hidden; }
+    .card-head { padding:22px 24px; border-bottom:1px solid var(--line); }
+    .card-head h2 { margin:0; font-size:17px; }
+    .rows { padding:8px 24px 18px; }
+    .row { display:flex; justify-content:space-between; gap:18px; padding:13px 0; border-bottom:1px solid #17333a; }
+    .row:last-child { border:0; }
+    .row span:first-child { color:var(--muted); }
+    .row span:last-child { text-align:right; font-weight:700; }
+    .trust { margin-top:28px; padding:18px 20px; border:1px solid #24534d; border-radius:14px; background:#0b2928; color:#c5dedb; }
+    .trust strong { display:block; margin-bottom:4px; color:var(--ok); }
+    .trust.warning { border-color:#624b25; background:#2b2213; }
+    .trust.warning strong { color:var(--warn); }
+    .checks { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:34px; }
+    .check { padding:18px; border:1px solid var(--line); border-radius:14px; background:#091b21aa; }
+    .check strong { display:block; margin-bottom:5px; }
+    .check span { color:var(--muted); font-size:13px; }
+    footer { display:flex; justify-content:space-between; gap:16px; margin-top:70px; padding-top:22px; border-top:1px solid var(--line); color:var(--muted); font-size:13px; }
+    code { overflow-wrap:anywhere; color:#d7e8eb; }
+    @media (max-width:800px) { header{margin-bottom:44px} main{grid-template-columns:1fr}.checks{grid-template-columns:1fr} footer{flex-direction:column} }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header><a class="brand" href="/"><span class="mark">Z</span><span>Zentryc</span></a><a class="back" href="/zenplus/">Explore ZenPlus &rarr;</a></header>
+    <main>
+      <section>
+        <div class="eyebrow">Official Windows release</div>
+        <h1>ZenPlus Agent for Windows</h1>
+        <p class="lead">Install endpoint monitoring with a guided setup, Windows service, tray dashboard, and a verified update channel.</p>
+        <div class="downloads">
+          <a id="exe-download" class="button" href="stable/ZenPlusAgentSetup-latest.exe">Download guided installer</a>
+          <a id="msi-download" class="button secondary" href="stable/ZenPlusAgent-latest.msi">Download MSI for deployment</a>
+        </div>
+        <div class="meta"><span>Windows 10/11 &amp; Windows Server</span><span>x64</span><span id="release-date">Stable channel</span></div>
+        <div id="trust" class="trust"><strong>Checking publisher signature...</strong><span>The page is validating the current release manifest.</span></div>
+        <div class="checks">
+          <div class="check"><strong>Tray dashboard</strong><span>Live health, version, controller status, logs, and update checks.</span></div>
+          <div class="check"><strong>Enterprise MSI</strong><span>Silent deployment, major upgrades, Apps &amp; Features registration, and uninstall support.</span></div>
+          <div class="check"><strong>Safe updates</strong><span>HTTPS manifest, SHA-256 verification, and trusted Authenticode enforcement.</span></div>
+        </div>
+      </section>
+      <aside class="card">
+        <div class="card-head"><h2>Current release</h2></div>
+        <div class="rows">
+          <div class="row"><span>Version</span><span id="version">Loading...</span></div>
+          <div class="row"><span>Channel</span><span id="channel">Stable</span></div>
+          <div class="row"><span>Architecture</span><span id="arch">AMD64</span></div>
+          <div class="row"><span>MSI SHA-256</span><span><code id="sha">Loading...</code></span></div>
+          <div class="row"><span>Publisher</span><span id="publisher">Checking...</span></div>
+        </div>
+      </aside>
+    </main>
+    <footer><span>&copy; 2026 Zentryc. Official distribution channel.</span><span><a href="/security/">Security</a> &nbsp; <a href="/contact/">Support</a> &nbsp; <a href="/privacy/">Privacy</a></span></footer>
+  </div>
+  <script>
+    fetch('stable/manifest.json', {cache:'no-store'}).then(function(response){ if(!response.ok) throw new Error('manifest unavailable'); return response.json(); }).then(function(m){
+      document.getElementById('version').textContent='v'+m.latest_version;
+      document.getElementById('channel').textContent=m.channel || 'stable';
+      document.getElementById('arch').textContent=(m.arch || 'amd64').toUpperCase();
+      document.getElementById('sha').textContent=m.sha256;
+      document.getElementById('exe-download').href=m.setup_download_url;
+      document.getElementById('msi-download').href=m.download_url;
+      if(m.released_at) document.getElementById('release-date').textContent='Released '+new Date(m.released_at).toLocaleDateString();
+      var valid=m.signature_status==='Valid' && m.setup_signature_status==='Valid';
+      var trust=document.getElementById('trust');
+      document.getElementById('publisher').textContent=valid ? (m.signing_subject || 'Verified') : 'Not verified';
+      trust.className=valid ? 'trust' : 'trust warning';
+      trust.innerHTML=valid ? '<strong>Verified Zentryc publisher</strong><span>Both installers are Authenticode signed and the agent verifies the MSI again before an automatic update.</span>' : '<strong>Publisher signing pending</strong><span>This preview release is available for testing, but automatic installation remains blocked until trusted signing is applied.</span>';
+    }).catch(function(){
+      document.getElementById('version').textContent='Unavailable';
+      document.getElementById('trust').className='trust warning';
+      document.getElementById('trust').innerHTML='<strong>Release channel unavailable</strong><span>Please contact Zentryc support before installing.</span>';
+    });
+  </script>
+</body>
+</html>

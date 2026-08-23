@@ -64,17 +64,15 @@ type BatchSnapshot struct {
 }
 
 type ConfigSnapshot struct {
-	ControllerURL             string
-	SiteID                    string
-	PolicyID                  string
-	EnrollmentTokenConfigured bool
-	VerifyTLS                 bool
-	DataDir                   string
-	HeartbeatIntervalSeconds  int
-	UploadIntervalSeconds     int
-	CollectIntervalSeconds    int
-	CollectorEnabled          map[string]bool
-	Labels                    map[string]string
+	ControllerURL            string
+	PolicyID                 string
+	VerifyTLS                bool
+	DataDir                  string
+	HeartbeatIntervalSeconds int
+	UploadIntervalSeconds    int
+	CollectIntervalSeconds   int
+	CollectorEnabled         map[string]bool
+	Labels                   map[string]string
 }
 
 type PathSnapshot struct {
@@ -138,16 +136,14 @@ func DefaultConfigPath() string {
 
 func ConfigFrom(cfg config.Config) ConfigSnapshot {
 	return ConfigSnapshot{
-		ControllerURL:             cfg.ControllerURL,
-		SiteID:                    cfg.SiteID,
-		PolicyID:                  cfg.PolicyID,
-		EnrollmentTokenConfigured: cfg.EnrollmentToken != "",
-		VerifyTLS:                 cfg.VerifyTLS,
-		DataDir:                   cfg.DataDir,
-		HeartbeatIntervalSeconds:  cfg.HeartbeatIntervalSeconds,
-		UploadIntervalSeconds:     cfg.UploadIntervalSeconds,
-		CollectIntervalSeconds:    cfg.CollectIntervalSeconds,
-		Labels:                    cfg.Labels,
+		ControllerURL:            cfg.ControllerURL,
+		PolicyID:                 cfg.PolicyID,
+		VerifyTLS:                cfg.VerifyTLS,
+		DataDir:                  cfg.DataDir,
+		HeartbeatIntervalSeconds: cfg.HeartbeatIntervalSeconds,
+		UploadIntervalSeconds:    cfg.UploadIntervalSeconds,
+		CollectIntervalSeconds:   cfg.CollectIntervalSeconds,
+		Labels:                   cfg.Labels,
 		CollectorEnabled: map[string]bool{
 			"cpu":        cfg.Collectors.CPU.Enabled,
 			"memory":     cfg.Collectors.Memory.Enabled,
@@ -279,10 +275,18 @@ func HealthText(s Snapshot) (string, string) {
 		return "Service " + strings.ToLower(valueOr(s.Service.State, "stopped")), "bad"
 	case s.Status == nil:
 		return "Waiting for agent", "warn"
+	case s.Status.AuthState == "pending" || s.Status.AuthState == "unenrolled":
+		return "Pending authorization", "warn"
+	case s.Status.AuthState == "revoked":
+		return "Authorization revoked", "bad"
+	case s.Status.AuthState == "unauthorized":
+		return "Authorization required", "bad"
+	case !s.Controller.Reachable:
+		return "Controller unreachable", "bad"
+	case s.Status.LastHeartbeat == nil:
+		return "Connecting", "warn"
 	case statusIsStale(s):
 		return "Agent stale", "warn"
-	case !s.Controller.Reachable:
-		return "Controller offline", "bad"
 	case uploadError != "" || heartbeatError != "":
 		return "Spooling locally", "warn"
 	case s.Spool.Depth > 0:

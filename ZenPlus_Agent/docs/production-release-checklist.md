@@ -13,10 +13,15 @@ See `deployment.md` for the build → publish → install flow.
   - `zenplus-agentctl.exe`
   - `zenplus-agent-app.exe`
   - `ZenPlusAgentSetup-x64.exe`
-- Build `zenplus-agent-<version>.msi` on a release machine with WiX installed.
+  - `zenplus-agent-<version>.exe`
+  - `zenplus-agent-<version>.msi` (optional enterprise wrapper)
+  - `agent-manifest.json`
 - Confirm the MSI `ProductVersion` matches `model.AgentVersion`.
-- If the build bakes in a controller URL/token, confirm both appear in
-  `dist\zenplus-agent.exe` and that the token is one you intend to publish.
+- Confirm the MSI summary template is `x64;1033`, its components are 64-bit,
+  and every EXE has PE machine type `0x8664`.
+- Confirm the MSI and binaries contain no enrollment-token placeholder or
+  compiled enrollment credential.
+- Confirm the canonical setup SHA-256 and byte length match `agent-manifest.json`.
 
 ## Signing
 
@@ -24,6 +29,8 @@ See `deployment.md` for the build → publish → install flow.
 - Authenticode-sign the MSI.
 - Use a trusted code-signing certificate and timestamp server.
 - Verify signatures with `Get-AuthenticodeSignature`.
+- Confirm an unsigned build fails the production workflow before publication.
+- Confirm the public manifest requires Authenticode and points only to immutable HTTPS release URLs.
 
 ## Installer QA
 
@@ -32,10 +39,12 @@ See `deployment.md` for the build → publish → install flow.
 - All-users install with administrator approval.
 - Upgrade over a previous ZenPlus install.
 - Upgrade over a legacy `%ProgramData%\ZenPlus\Agent\bin` install.
-- Quiet install with `CONTROLLER_URL`, `ENROLLMENT_TOKEN`, `SITE_ID`, and `POLICY_ID`.
-- Quiet install with **no** properties enrols using the baked-in controller/token.
-- MSI properties override the baked-in controller URL and token.
+- Quiet install with only `CONTROLLER_URL`.
+- A new install appears as pending without an authentication retry storm.
+- MSI properties override only the default controller URL.
+- Appliance approval issues a unique credential and the agent begins reporting.
 - Download from `/api/v1/agents/packages/windows/latest` matches the manifest SHA-256.
+- Download from `https://zentryc.com/downloads/zenplus-agent/` matches the public manifest SHA-256.
 - Uninstall without purge preserves config/state.
 - Current-user uninstall with purge removes `%LOCALAPPDATA%\ZenPlus\Agent`.
 - All-users uninstall with purge removes `%ProgramData%\ZenPlus\Agent`.
@@ -48,6 +57,8 @@ See `deployment.md` for the build → publish → install flow.
 - `ZenPlusAgent` service is `Automatic` and `Running` after install.
 - Service recovery restarts the service after failure.
 - Dashboard starts with `--start-hidden` after sign-in.
+- Dashboard shows the current version and checks the public update channel at startup, every six hours, and on demand.
+- A valid signed newer release is offered; unsigned or checksum-invalid releases are blocked.
 - Only one dashboard/tray process runs per user session.
 - `zenplus-agentctl service-status` matches Services.msc.
 - Dashboard reports service stopped/degraded/healthy correctly.
@@ -59,12 +70,21 @@ See `deployment.md` for the build → publish → install flow.
   than two hosts sharing one identity.
 - Controller reports `System clock synchronized: yes`; agents show
   `clock_skew_s` near zero and detail-page charts render points.
+- Heartbeat advertises `network_capture_v1`, `capture_stop_v1`, and
+  `interface_traffic_v1`.
+- A five-minute capture starts on demand, streams running updates, completes,
+  and records process/service, endpoints, ports, and available byte totals.
+- Stopping a capture produces `cancelled`; duplicate start/stop commands are
+  idempotent and do not create concurrent collectors.
+- Interface samples show cumulative RX/TX bytes, current/peak bit rates, link
+  speed, and utilisation for the selected NIC or all NICs.
 
 ## Security
 
 - Verify config and state live under `%ProgramData%\ZenPlus\Agent`.
 - Verify credentials are stored with DPAPI and are not printed in logs/UI.
-- Verify installer does not expose enrollment tokens after enrollment.
+- Verify installer and Settings expose no token, site, or policy input.
+- Verify `zenplus-agentctl print-config` and logs redact credential and bearer values.
 - Review whether `LocalSystem` is still required for collectors before release.
 
 ## Release Notes

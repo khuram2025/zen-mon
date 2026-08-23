@@ -58,25 +58,24 @@ func run() error {
 		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 		defer cancel()
 		return agent.CollectNow(ctx, *configPath)
-	case "enroll", "re-enroll", "reenroll":
-		fs := flag.NewFlagSet("enroll", flag.ExitOnError)
+	case "register":
+		fs := flag.NewFlagSet("register", flag.ExitOnError)
 		configPath := fs.String("config", config.DefaultConfigPath, "agent config path")
-		token := fs.String("token", "", "one-time enrollment token")
-		timeout := fs.Duration("timeout", 45*time.Second, "enrollment timeout")
+		timeout := fs.Duration("timeout", 45*time.Second, "registration timeout")
 		_ = fs.Parse(os.Args[2:])
 		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 		defer cancel()
-		result, err := agent.EnrollNow(ctx, *configPath, *token)
+		result, err := agent.RegisterNow(ctx, *configPath)
 		if err != nil {
 			return err
 		}
-		fmt.Printf("enrolled agent_id=%s server_id=%s\n", result.Identity.AgentID, result.Identity.ServerID)
+		fmt.Printf("registration_state=%s agent_id=%s server_id=%s\n", result.AuthorizationState, result.Identity.AgentID, result.Identity.ServerID)
 		return nil
 	case "version":
 		fmt.Println(model.AgentVersion)
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q\nusage: %s [run|service|install-service|uninstall-service|collect-now|enroll|version]", cmd, filepath.Base(os.Args[0]))
+		return fmt.Errorf("unknown command %q\nusage: %s [run|service|install-service|uninstall-service|collect-now|register|version]", cmd, filepath.Base(os.Args[0]))
 	}
 }
 

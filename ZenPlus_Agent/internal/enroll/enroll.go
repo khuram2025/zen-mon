@@ -2,6 +2,8 @@ package enroll
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +28,7 @@ type Result struct {
 	ConfigPollIntervalSeconds int
 	UploadIntervalSeconds     int
 	PolicyID                  string
+	AuthorizationState        string
 }
 
 func Ensure(ctx context.Context, cfg config.Config, paths runtime.Paths, logf func(string, ...any)) (Result, error) {
@@ -34,35 +37,27 @@ func Ensure(ctx context.Context, cfg config.Config, paths runtime.Paths, logf fu
 		return Result{}, err
 	}
 	if cloned {
-		logf("machine identity changed (cloned VM or golden image); regenerated agent_uid=%s and discarding stale credentials", id.AgentUID)
+		logf("machine identity changed (cloned VM or golden image); regenerated agent_uid=%s and discarding stale registration state", id.AgentUID)
 		_ = os.Remove(paths.CredentialFile)
 		_ = os.Remove(paths.CredentialMeta)
+		_ = os.Remove(paths.PendingSecret)
 	}
-	// Prefer stored credentials: enrollment tokens are one-time bootstrap
-	// material, so an already-enrolled agent must not burn token uses (or
-	// mint a new api key) on every restart.
+	// Prefer the appliance-issued durable credential so an already-authorized
+	// agent never creates a second identity or rotates its key on restart.
 	if apiKey, err := secrets.UnprotectFromFile(paths.CredentialFile); err == nil && len(apiKey) > 0 {
-		return Result{Identity: id, APIKey: string(apiKey), Enrolled: true}, nil
+		return Result{Identity: id, APIKey: string(apiKey), Enrolled: true, AuthorizationState: "authorized"}, nil
 	}
-	if cfg.EnrollmentToken != "" {
-		return Enroll(ctx, cfg, paths, id, logf)
+	pendingSecret, err := ensurePendingSecret(paths.PendingSecret)
+	if err != nil {
+		return Result{Identity: id, Enrolled: false}, err
 	}
-	logf("no enrollment token configured; running in local spool mode as %s", id.AgentID)
-	return Result{Identity: id, Enrolled: false}, nil
+	return register(ctx, cfg, paths, id, pendingSecret, logf)
 }
 
-// Recover discards credentials the controller has rejected and re-enrolls
-// with the configured enrollment token. Called by the runtime when uploads
-// or heartbeats come back 401/403 so the agent heals itself instead of
-// hammering the controller with a dead key.
+// Recover discards credentials the controller has rejected and returns to the
+// same protected pending-registration channel. The appliance decides whether
+// that installation is pending, authorized, or revoked.
 func Recover(ctx context.Context, cfg config.Config, paths runtime.Paths, logf func(string, ...any)) (Result, error) {
-	if cfg.EnrollmentToken == "" {
-		id, _, err := identity.LoadOrCreate(paths.IdentityFile, cfg.AgentID, cfg.ServerID)
-		if err != nil {
-			return Result{}, err
-		}
-		return Result{Identity: id, Enrolled: false}, fmt.Errorf("credentials rejected and no enrollment token is configured; re-enroll with zenplus-agent enroll --token <token>")
-	}
 	if err := os.Remove(paths.CredentialFile); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return Result{}, err
 	}
@@ -72,25 +67,23 @@ func Recover(ctx context.Context, cfg config.Config, paths runtime.Paths, logf f
 	return Ensure(ctx, cfg, paths, logf)
 }
 
-func Enroll(ctx context.Context, cfg config.Config, paths runtime.Paths, id identity.Identity, logf func(string, ...any)) (Result, error) {
+func register(ctx context.Context, cfg config.Config, paths runtime.Paths, id identity.Identity, pendingSecret string, logf func(string, ...any)) (Result, error) {
 	c, err := client.New(cfg.ControllerURL, cfg.ProxyURL, cfg.VerifyTLS, "", "")
 	if err != nil {
 		return Result{Identity: id}, err
 	}
 	req := model.EnrollmentRequest{
-		EnrollmentToken: cfg.EnrollmentToken,
-		AgentUID:        id.AgentUID,
-		Hostname:        id.Hostname,
-		Platform:        id.Platform,
-		Version:         model.AgentVersion,
-		SiteID:          cfg.SiteID,
-		PolicyID:        cfg.PolicyID,
-		FQDN:            id.FQDN,
-		PrimaryIP:       id.PrimaryIP,
-		OSName:          id.OSName,
-		OSVersion:       id.OSVersion,
-		KernelOrBuild:   id.KernelOrBuild,
-		Architecture:    id.Architecture,
+		PendingSecret: pendingSecret,
+		AgentUID:      id.AgentUID,
+		Hostname:      id.Hostname,
+		Platform:      id.Platform,
+		Version:       model.AgentVersion,
+		FQDN:          id.FQDN,
+		PrimaryIP:     id.PrimaryIP,
+		OSName:        id.OSName,
+		OSVersion:     id.OSVersion,
+		KernelOrBuild: id.KernelOrBuild,
+		Architecture:  id.Architecture,
 	}
 	var resp model.EnrollmentResponse
 	httpResp, body, err := c.PostJSON(ctx, "/api/v1/agents/enroll", req, &resp)
@@ -100,17 +93,36 @@ func Enroll(ctx context.Context, cfg config.Config, paths runtime.Paths, id iden
 			return Result{Identity: id, Enrolled: false}, nil
 		}
 		if httpResp != nil && (httpResp.StatusCode == http.StatusUnauthorized || httpResp.StatusCode == http.StatusForbidden) {
-			return Result{Identity: id}, fmt.Errorf("enrollment token rejected by controller (%s)", httpResp.Status)
+			return Result{Identity: id}, fmt.Errorf("registration request rejected by controller (%s)", httpResp.Status)
 		}
 		return Result{Identity: id}, err
 	}
-	if resp.AgentID == "" || resp.ServerID == "" || resp.APIKey == "" {
+	if resp.AgentID == "" {
 		return Result{Identity: id}, fmt.Errorf("invalid enrollment response: %s", safeJSON(body))
 	}
 	id.AgentID = resp.AgentID
-	id.ServerID = resp.ServerID
+	if resp.ServerID != "" {
+		id.ServerID = resp.ServerID
+	}
 	if err := identity.Save(paths.IdentityFile, id); err != nil {
 		return Result{Identity: id}, err
+	}
+	authState := resp.AuthorizationState
+	if authState == "" {
+		authState = "authorized"
+	}
+	if authState != "authorized" {
+		logf("registration state=%s agent_id=%s; waiting for appliance authorization", authState, id.AgentID)
+		return Result{
+			Identity: id, Enrolled: false, AuthorizationState: authState,
+			HeartbeatIntervalSeconds:  resp.HeartbeatIntervalSeconds,
+			ConfigPollIntervalSeconds: resp.ConfigPollIntervalSeconds,
+			UploadIntervalSeconds:     resp.UploadIntervalSeconds,
+			PolicyID:                  resp.PolicyID,
+		}, nil
+	}
+	if resp.ServerID == "" || resp.APIKey == "" {
+		return Result{Identity: id}, fmt.Errorf("invalid authorized enrollment response: %s", safeJSON(body))
 	}
 	if err := secrets.ProtectToFile(paths.CredentialFile, []byte(resp.APIKey)); err != nil {
 		return Result{Identity: id}, err
@@ -128,13 +140,32 @@ func Enroll(ctx context.Context, cfg config.Config, paths runtime.Paths, id iden
 		ConfigPollIntervalSeconds: resp.ConfigPollIntervalSeconds,
 		UploadIntervalSeconds:     resp.UploadIntervalSeconds,
 		PolicyID:                  resp.PolicyID,
+		AuthorizationState:        "authorized",
 	}, nil
+}
+
+func ensurePendingSecret(path string) (string, error) {
+	if protected, err := secrets.UnprotectFromFile(path); err == nil {
+		if value := string(protected); len(value) >= 32 {
+			return value, nil
+		}
+	}
+	random := make([]byte, 32)
+	if _, err := rand.Read(random); err != nil {
+		return "", fmt.Errorf("generate pending registration secret: %w", err)
+	}
+	value := "zpa_pending_" + base64.RawURLEncoding.EncodeToString(random)
+	if err := secrets.ProtectToFile(path, []byte(value)); err != nil {
+		return "", fmt.Errorf("protect pending registration secret: %w", err)
+	}
+	return value, nil
 }
 
 func Reset(paths runtime.Paths) error {
 	errCred := os.Remove(paths.CredentialFile)
 	errMeta := os.Remove(paths.CredentialMeta)
 	errID := os.Remove(paths.IdentityFile)
+	errPending := os.Remove(paths.PendingSecret)
 	if errCred != nil && !errors.Is(errCred, os.ErrNotExist) {
 		return errCred
 	}
@@ -143,6 +174,9 @@ func Reset(paths runtime.Paths) error {
 	}
 	if errID != nil && !errors.Is(errID, os.ErrNotExist) {
 		return errID
+	}
+	if errPending != nil && !errors.Is(errPending, os.ErrNotExist) {
+		return errPending
 	}
 	return nil
 }
