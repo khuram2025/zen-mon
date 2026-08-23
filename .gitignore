@@ -30,6 +30,9 @@ env/
 node_modules/
 dashboard/dist/
 dashboard/build/
+# Deployment-time dashboard snapshots are stored only for local rollback.
+dashboard/dist.pre-*/
+dashboard/dist_old_*/
 .next/
 *.tsbuildinfo
 
