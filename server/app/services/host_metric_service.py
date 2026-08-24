@@ -7,6 +7,7 @@ to read it back for charts.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -51,6 +52,27 @@ def _i(v: Any, default: int = 0) -> int:
         return int(v)
     except Exception:
         return default
+
+
+def _b(v: Any, default: bool = False) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v != 0
+    if isinstance(v, str):
+        normalized = v.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off", ""}:
+            return False
+    return default
+
+
+def _text_or_none(v: Any, max_length: int) -> Optional[str]:
+    if not isinstance(v, str):
+        return None
+    value = v.strip()
+    return value[:max_length] if value else None
 
 
 def _dt_or_none(v: Any) -> Optional[datetime]:
@@ -225,12 +247,18 @@ def _insert_process(client, agent_id: str, server_id: str, rows: list[dict]) -> 
             _i(d.get("thread_count")),
             _i(d.get("handle_count")),
             str(d.get("user_name") or "")[:255],
+            str(d.get("cmdline") or "")[:2048],
+            _dt_or_none(d.get("started_at")),
+            str(d.get("state") or ("running" if _i(d.get("pid")) > 0 else "unknown"))[:32],
+            1 if _b(d.get("running"), _i(d.get("pid")) > 0) else 0,
+            1 if _b(d.get("watchlisted")) else 0,
         ])
     if not data:
         return 0
     client.insert("host_process_metrics", data, column_names=[
         "server_id", "agent_id", "process_name", "timestamp",
         "pid", "cpu_pct", "memory_bytes", "thread_count", "handle_count", "user_name",
+        "cmdline", "started_at", "state", "running", "watchlisted",
     ])
     return len(data)
 
@@ -303,11 +331,11 @@ def _insert_agent_health(client, agent_id: str, server_id: str, rows: list[dict]
 
 # ── Inventory upsert (Postgres) ──────────────────────────────────────
 
-# Processes not refreshed within this window are treated as exited and pruned
-# from the inventory snapshot. Keep in sync with the freshness filter in
-# server/app/api/v1/servers.py (server_processes). 5× the default 60s upload
-# interval, so a couple of missed uploads won't drop still-running processes.
-PROCESS_STALE_SECONDS = 300
+# PostgreSQL is only a bounded cache; the API applies the agent policy's exact
+# freshness horizon.  Keep rows longer than the maximum supported 60-minute
+# collection plus 60-minute upload cycle so a valid slow policy is never
+# physically pruned before the API can evaluate it.
+PROCESS_INVENTORY_RETENTION_SECONDS = 86_400
 
 # Agent batches whose newest sample deviates from server time by more than
 # this are shifted to server time (see ingest_host_metric_batch); the offset
@@ -319,15 +347,62 @@ async def _upsert_process_inventory(server_id: str, rows: list[dict], db: AsyncS
     for p in rows:
         pid = _i(p.get("pid"))
         name = str(p.get("process_name") or p.get("name") or "")[:255]
-        if pid <= 0 or not name:
+        if not name:
             continue
+        running = _b(p.get("running"), pid > 0)
+        watchlisted = _b(p.get("watchlisted"))
+        state = str(p.get("state") or ("running" if running else "unknown"))[:32]
+        values = {
+            "sid": server_id,
+            "name": name,
+            "cmd": _text_or_none(p.get("cmdline"), 2048),
+            "user": _text_or_none(p.get("user_name"), 255),
+            "cpu": _f(p.get("cpu_pct")),
+            "mem": max(0, _i(p.get("memory_bytes"))),
+            "started": _dt_or_none(p.get("started_at")),
+            "state": state,
+            "running": running,
+            "watchlisted": watchlisted,
+        }
+
+        # A missing watchlist member intentionally has pid=0. Multiple missing
+        # names cannot share the normal (server_id, pid) primary key, so retain
+        # them in the name-keyed watchlist snapshot instead of discarding them.
+        if pid <= 0:
+            if not watchlisted:
+                continue
+            await db.execute(text(
+                """INSERT INTO server_process_watchlist_inventory
+                       (server_id, name, cmdline, user_name, cpu_pct, memory_bytes,
+                        started_at, state, running, watchlisted, updated_at)
+                   VALUES (:sid, :name, :cmd, :user, :cpu, :mem,
+                           :started, :state, :running, :watchlisted, NOW())
+                   ON CONFLICT (server_id, name) DO UPDATE SET
+                       cmdline = EXCLUDED.cmdline,
+                       user_name = EXCLUDED.user_name,
+                       cpu_pct = EXCLUDED.cpu_pct,
+                       memory_bytes = EXCLUDED.memory_bytes,
+                       started_at = EXCLUDED.started_at,
+                       state = EXCLUDED.state,
+                       running = EXCLUDED.running,
+                       watchlisted = EXCLUDED.watchlisted,
+                       updated_at = NOW()"""
+            ), values)
+            await db.execute(text(
+                """DELETE FROM server_process_inventory
+                   WHERE server_id = :sid AND lower(name) = lower(:name)"""
+            ), {"sid": server_id, "name": name})
+            continue
+
         # When the name for a PID changes the OS has recycled the PID onto a
         # different process, so reset start time / cmdline instead of carrying
         # the previous process's values forward.
         await db.execute(text(
             """INSERT INTO server_process_inventory
-                   (server_id, pid, name, cmdline, user_name, cpu_pct, memory_bytes, started_at, updated_at)
-               VALUES (:sid, :pid, :name, :cmd, :user, :cpu, :mem, :started, NOW())
+                   (server_id, pid, name, cmdline, user_name, cpu_pct, memory_bytes,
+                    started_at, state, running, watchlisted, updated_at)
+               VALUES (:sid, :pid, :name, :cmd, :user, :cpu, :mem,
+                       :started, :state, :running, :watchlisted, NOW())
                ON CONFLICT (server_id, pid) DO UPDATE SET
                    name = EXCLUDED.name,
                    cmdline = CASE WHEN server_process_inventory.name IS DISTINCT FROM EXCLUDED.name
@@ -339,31 +414,79 @@ async def _upsert_process_inventory(server_id: str, rows: list[dict], db: AsyncS
                    started_at = CASE WHEN server_process_inventory.name IS DISTINCT FROM EXCLUDED.name
                                      THEN EXCLUDED.started_at
                                      ELSE COALESCE(EXCLUDED.started_at, server_process_inventory.started_at) END,
+                   state = EXCLUDED.state,
+                   running = EXCLUDED.running,
+                   watchlisted = EXCLUDED.watchlisted,
                    updated_at = NOW()"""
-        ), {
-            "sid": server_id,
-            "pid": pid,
-            "name": name,
-            "cmd": p.get("cmdline"),
-            "user": (p.get("user_name") or "")[:255] or None,
-            "cpu": _f(p.get("cpu_pct")),
-            "mem": _i(p.get("memory_bytes")),
-            "started": _dt_or_none(p.get("started_at")),
-        })
+        ), {**values, "pid": pid})
+        # If this watched process has returned, its earlier pid=0 absence row
+        # must disappear immediately rather than remain visible until expiry.
+        if watchlisted:
+            await db.execute(text(
+                """DELETE FROM server_process_watchlist_inventory
+                   WHERE server_id = :sid AND lower(name) = lower(:name)"""
+            ), {"sid": server_id, "name": name})
 
-    # Prune processes we haven't heard about within the freshness window so
-    # exited processes don't linger in the snapshot and the table stays bounded.
-    await db.execute(
-        text(
-            "DELETE FROM server_process_inventory "
-            "WHERE server_id = :sid "
-            "AND updated_at < NOW() - make_interval(secs => :ttl)"
-        ),
-        {"sid": server_id, "ttl": PROCESS_STALE_SECONDS},
-    )
+    # Long-lived cache retention is separate from the policy-aware live-view
+    # filter. This bounds PID churn without deleting valid slow-policy data.
+    for table in ("server_process_inventory", "server_process_watchlist_inventory"):
+        await db.execute(
+            text(
+                f"DELETE FROM {table} WHERE server_id = :sid "
+                "AND updated_at < NOW() - make_interval(secs => :ttl)"
+            ),
+            {"sid": server_id, "ttl": PROCESS_INVENTORY_RETENTION_SECONDS},
+        )
 
 
 async def _upsert_inventory(server_id: str, inv: Dict[str, Any], db: AsyncSession) -> None:
+    hardware = inv.get("hardware")
+    if isinstance(hardware, dict):
+        cpu = hardware.get("cpu") if isinstance(hardware.get("cpu"), dict) else {}
+        memory = hardware.get("memory") if isinstance(hardware.get("memory"), dict) else {}
+        raw_disks = hardware.get("physical_disks")
+        disks: list[dict[str, Any]] = []
+        if isinstance(raw_disks, list):
+            for raw in raw_disks[:64]:
+                if not isinstance(raw, dict):
+                    continue
+                disks.append({
+                    "index": _i(raw.get("index")),
+                    "device_id": str(raw.get("device_id") or "")[:255],
+                    "model": str(raw.get("model") or "")[:255],
+                    "manufacturer": str(raw.get("manufacturer") or "")[:255],
+                    "interface_type": str(raw.get("interface_type") or "")[:64],
+                    "media_type": str(raw.get("media_type") or "")[:64],
+                    "size_bytes": max(0, _i(raw.get("size_bytes"))),
+                    "status": str(raw.get("status") or "")[:64],
+                })
+        cpu_model = _text_or_none(cpu.get("model"), 255)
+        logical_count = max(0, _i(cpu.get("logical_count"))) or None
+        physical_count = max(0, _i(cpu.get("physical_count"))) or None
+        memory_total = max(0, _i(memory.get("total_physical_bytes"))) or None
+        has_disks = isinstance(raw_disks, list)
+        if cpu_model or logical_count or physical_count or memory_total or has_disks:
+            await db.execute(text(
+                """UPDATE servers SET
+                       cpu_model = COALESCE(:cpu_model, cpu_model),
+                       cpu_cores = COALESCE(:cpu_cores, cpu_cores),
+                       cpu_physical_cores = COALESCE(:physical_cores, cpu_physical_cores),
+                       memory_total_bytes = COALESCE(:memory_total, memory_total_bytes),
+                       physical_disks = CASE WHEN :has_disks
+                                            THEN CAST(:physical_disks AS jsonb)
+                                            ELSE physical_disks END,
+                       updated_at = NOW()
+                   WHERE id = :sid"""
+            ), {
+                "sid": server_id,
+                "cpu_model": cpu_model,
+                "cpu_cores": logical_count,
+                "physical_cores": physical_count,
+                "memory_total": memory_total,
+                "has_disks": has_disks,
+                "physical_disks": json.dumps(disks),
+            })
+
     os_info = inv.get("os")
     if isinstance(os_info, dict):
         boot_raw = os_info.get("boot_time")
@@ -796,14 +919,29 @@ def query_server_metrics(
     return out
 
 
-def query_fleet_latest_metrics(window_minutes: int = 10) -> dict[str, dict]:
+def telemetry_freshness_seconds(
+    metric_interval_s: Any,
+    upload_interval_s: Any,
+    *,
+    minimum_seconds: int = 300,
+) -> int:
+    """Freshness horizon that covers one collection plus one upload cycle."""
+    metric = max(5, min(_i(metric_interval_s, 30), 3600))
+    upload = max(5, min(_i(upload_interval_s, 60), 3600))
+    return max(minimum_seconds, metric + upload + 60)
+
+
+def query_fleet_latest_metrics(
+    window_minutes: int = 10,
+    freshness_seconds_by_server: Optional[dict[str, int]] = None,
+) -> dict[str, dict]:
     """Current cpu/mem/disk/net per server for the inventory list.
 
-    One aggregate per server over the last ``window_minutes`` — cheap enough
-    to refresh on every list poll (the raw tables are (server_id, ts)-ordered).
+    One current/summary value per server over the last ``window_minutes`` —
+    cheap enough to refresh on every list poll (the raw tables are ordered by
+    server and timestamp).
     """
     client = get_clickhouse_client()
-    since = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).strftime("%Y-%m-%d %H:%M:%S")
     out: dict[str, dict] = {}
 
     def _merge(rows, key):
@@ -811,27 +949,61 @@ def query_fleet_latest_metrics(window_minutes: int = 10) -> dict[str, dict]:
             sid = str(r[0])
             out.setdefault(sid, {})[key] = float(r[1] or 0)
 
-    try:
-        _merge(client.query(
-            """SELECT server_id, avg(cpu_total_pct) FROM zenplus.host_cpu_metrics
-               WHERE timestamp >= %(s)s GROUP BY server_id""",
-            parameters={"s": since}).result_rows, "cpu_pct")
-        _merge(client.query(
-            """SELECT server_id, avg(used_pct) FROM zenplus.host_memory_metrics
-               WHERE timestamp >= %(s)s GROUP BY server_id""",
-            parameters={"s": since}).result_rows, "memory_pct")
-        _merge(client.query(
-            f"""SELECT server_id, max(used_pct) FROM zenplus.host_filesystem_metrics
-               WHERE timestamp >= %(s)s AND {ch_capacity_filter()}
-               GROUP BY server_id""",
-            parameters={"s": since}).result_rows, "disk_max_pct")
-        _merge(client.query(
-            """SELECT server_id, sum(rx_bytes_ps + tx_bytes_ps) / uniqExact(timestamp)
-               FROM zenplus.host_network_metrics
-               WHERE timestamp >= %(s)s GROUP BY server_id""",
-            parameters={"s": since}).result_rows, "net_bps")
-    except Exception as exc:
-        logger.warning("fleet latest metrics query failed: %s", exc)
+    # Keep each signal independent. A missing/newly-migrating table must not
+    # blank every other KPI on the server page. CPU and memory are snapshots,
+    # so use the newest sample rather than a ten-minute average labelled as
+    # the current value.
+    now = datetime.now(timezone.utc)
+    scopes: list[tuple[int, Optional[tuple[str, ...]]]]
+    if freshness_seconds_by_server:
+        grouped: dict[int, list[str]] = {}
+        for server_id, seconds in freshness_seconds_by_server.items():
+            bounded = max(60, min(_i(seconds, window_minutes * 60), 7260))
+            grouped.setdefault(bounded, []).append(str(server_id))
+        scopes = [
+            (seconds, tuple(server_ids))
+            for seconds, server_ids in grouped.items()
+        ]
+    else:
+        scopes = [(max(60, window_minutes * 60), None)]
+
+    for freshness_s, server_ids in scopes:
+        since = (now - timedelta(seconds=freshness_s)).strftime("%Y-%m-%d %H:%M:%S")
+        scope_sql = " AND toString(server_id) IN %(ids)s" if server_ids else ""
+        params: dict[str, Any] = {"s": since}
+        if server_ids:
+            params["ids"] = server_ids
+        queries = [
+            (
+                "cpu_pct",
+                f"""SELECT server_id, argMax(cpu_total_pct, timestamp)
+                    FROM zenplus.host_cpu_metrics
+                    WHERE timestamp >= %(s)s{scope_sql} GROUP BY server_id""",
+            ),
+            (
+                "memory_pct",
+                f"""SELECT server_id, argMax(used_pct, timestamp)
+                    FROM zenplus.host_memory_metrics
+                    WHERE timestamp >= %(s)s{scope_sql} GROUP BY server_id""",
+            ),
+            (
+                "disk_max_pct",
+                f"""SELECT server_id, max(used_pct) FROM zenplus.host_filesystem_metrics
+                    WHERE timestamp >= %(s)s{scope_sql} AND {ch_capacity_filter()}
+                    GROUP BY server_id""",
+            ),
+            (
+                "net_bps",
+                f"""SELECT server_id, sum(rx_bytes_ps + tx_bytes_ps) / uniqExact(timestamp)
+                    FROM zenplus.host_network_metrics
+                    WHERE timestamp >= %(s)s{scope_sql} GROUP BY server_id""",
+            ),
+        ]
+        for key, sql in queries:
+            try:
+                _merge(client.query(sql, parameters=params).result_rows, key)
+            except Exception as exc:
+                logger.warning("fleet latest %s query failed: %s", key, exc)
     return out
 
 
@@ -853,6 +1025,98 @@ def query_server_memory_total(server_id: str, window_minutes: int = 10) -> int:
     except Exception as exc:
         logger.warning("server memory total query failed: %s", exc)
     return 0
+
+
+def query_latest_process_snapshot(
+    server_id: str,
+    window_minutes: int = 5,
+    limit: int = 200,
+) -> list[dict]:
+    """Rebuild a current process snapshot from raw metrics.
+
+    PostgreSQL is the normal fast path for the process tab. This fallback
+    covers upgraded controllers that already have ClickHouse process samples
+    but missed the inventory upsert, instead of presenting an empty process
+    table while history data exists.
+    """
+    client = get_clickhouse_client()
+    since = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    try:
+        rows = client.query(
+            """SELECT pid,
+                      process_name AS name,
+                      argMax(cmdline, timestamp) AS cmdline,
+                      argMax(user_name, timestamp) AS user_name,
+                      argMax(cpu_pct, timestamp) AS cpu_pct,
+                      argMax(memory_bytes, timestamp) AS memory_bytes,
+                      argMax(started_at, timestamp) AS started_at,
+                      argMax(state, timestamp) AS state,
+                      argMax(running, timestamp) AS running,
+                      argMax(watchlisted, timestamp) AS watchlisted,
+                      max(timestamp) AS updated_at
+               FROM zenplus.host_process_metrics
+               WHERE server_id = %(sid)s AND timestamp >= %(s)s
+                 AND notEmpty(process_name)
+               GROUP BY pid, process_name
+               ORDER BY (pid <= 0 AND watchlisted = 1) DESC, cpu_pct DESC
+               LIMIT %(limit)s""",
+            parameters={
+                "sid": server_id,
+                "s": since,
+                # Reserve room for explicit pid=0 watchlist states in addition
+                # to the requested top running-process slice.
+                "limit": max(2, min(limit * 2, 400)),
+            },
+        ).result_rows
+    except Exception as exc:
+        logger.warning("latest process snapshot query failed for %s: %s", server_id, exc)
+        return []
+
+    snapshots = [
+        {
+            "pid": int(row[0]),
+            "name": str(row[1]),
+            "cmdline": str(row[2] or "") or None,
+            "user_name": str(row[3] or "") or None,
+            "cpu_pct": float(row[4] or 0),
+            "memory_bytes": int(row[5] or 0),
+            "started_at": _utc(row[6]) if row[6] is not None else None,
+            "state": str(row[7] or "unknown"),
+            "running": bool(row[8]),
+            "watchlisted": bool(row[9]),
+            "updated_at": _utc(row[10]),
+        }
+        for row in rows
+    ]
+
+    # A watched name can transition between a real PID and a pid=0
+    # ``not_running`` sample inside the query window. Keep the newest state for
+    # that name so fallback mode never renders both "running" and "missing".
+    newest_by_name: dict[str, dict] = {}
+    for item in snapshots:
+        key = item["name"].casefold()
+        newest = newest_by_name.get(key)
+        if (
+            newest is None
+            or item["updated_at"] > newest["updated_at"]
+            or (
+                item["updated_at"] == newest["updated_at"]
+                and item["running"] and not newest["running"]
+            )
+        ):
+            newest_by_name[key] = item
+    current = [
+        item for item in snapshots
+        if (
+            (item["pid"] > 0 and newest_by_name[item["name"].casefold()]["running"])
+            or (item["pid"] <= 0 and not newest_by_name[item["name"].casefold()]["running"])
+        )
+    ]
+    running = [item for item in current if item["pid"] > 0][:limit]
+    missing = [item for item in current if item["pid"] <= 0]
+    return running + missing
 
 
 def query_process_history(

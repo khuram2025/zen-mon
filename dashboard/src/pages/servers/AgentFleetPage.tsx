@@ -5,8 +5,8 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  AlertTriangle, Bot, CheckCircle2, ChevronLeft, ChevronRight, Clock, CloudOff,
-  FileDown, HardDrive, Inbox, KeyRound, Plus, Search, ShieldAlert, ShieldOff, Trash2,
+  AlertTriangle, Ban, Bot, CheckCircle2, ChevronLeft, ChevronRight, Clock, CloudOff, CopyPlus,
+  FileDown, HardDrive, Inbox, KeyRound, Plus, RefreshCw, Search, ShieldAlert, ShieldOff, Trash2,
   UserCheck, Wifi, WifiOff, X,
 } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -21,6 +21,8 @@ import {
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
+import { Switch } from '@/components/ui/Switch'
 import { toast } from '@/components/ui/Toast'
 import { AgentStatusBadge, AuthorizationBadge, KpiTile, TagList } from '@/components/servers/shared'
 import { InstallTokenDialog } from '@/components/servers/InstallTokenDialog'
@@ -32,6 +34,7 @@ interface AgentFleetSummary {
   offline: number
   disabled: number
   pending_authorization: number
+  registration_conflicts: number
   total: number
   queue_depth: number
   spool_bytes: number
@@ -55,6 +58,8 @@ type BulkAction =
   | 'trigger_upgrade'
   | 'disable'
   | 'enable'
+
+type ConflictResolutionAction = 'replace' | 'register_clone' | 'block'
 
 const BULK_ACTIONS: { value: BulkAction; label: string }[] = [
   { value: 'authorize', label: 'Authorize' },
@@ -85,6 +90,7 @@ const AUTHORIZATION_FILTERS = [
   { value: 'pending', label: 'Awaiting authorization' },
   { value: 'authorized', label: 'Authorized' },
   { value: 'revoked', label: 'Revoked' },
+  { value: 'conflict', label: 'Registration conflicts' },
 ]
 
 const PLATFORM_FILTERS = [
@@ -126,6 +132,10 @@ export function AgentFleetPage() {
   const [confirmDisable, setConfirmDisable] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<AgentItem | null>(null)
   const [revokeTarget, setRevokeTarget] = useState<AgentItem | null>(null)
+  const [conflictTarget, setConflictTarget] = useState<AgentItem | null>(null)
+  const [conflictAction, setConflictAction] = useState<ConflictResolutionAction>('register_clone')
+  const [cloneDisplayName, setCloneDisplayName] = useState('')
+  const [authorizeClone, setAuthorizeClone] = useState(false)
   const [confirmBulkRevoke, setConfirmBulkRevoke] = useState(false)
   const [pendingRow, setPendingRow] = useState<string | null>(null)
 
@@ -139,6 +149,14 @@ export function AgentFleetPage() {
     setPage(1)
     setSelected(new Set())
   }, [q, status, platform, ring, authFilter])
+  useEffect(() => {
+    if (!conflictTarget) return
+    const hostname = conflictTarget.registration_conflict_hostname || conflictTarget.hostname || 'Cloned server'
+    const ip = conflictTarget.registration_conflict_ip
+    setConflictAction('register_clone')
+    setCloneDisplayName(`${hostname} (clone${ip ? ` ${ip}` : ''})`)
+    setAuthorizeClone(false)
+  }, [conflictTarget])
 
   const { data, isLoading, isError, error } = useQuery<AgentFleetResponse>({
     queryKey: ['agent-fleet', q, status, platform, ring, authFilter, page],
@@ -165,7 +183,8 @@ export function AgentFleetPage() {
   const items = data?.items || []
   const total = data?.total ?? 0
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
-  const hasFilters = q !== '' || status !== 'all' || platform !== 'all' || ring !== 'all'
+  const hasFilters = q !== '' || status !== 'all' || platform !== 'all'
+    || ring !== 'all' || authFilter !== 'all'
 
   // Fleet-wide KPIs from the backend summary — never from the visible page,
   // which is filtered and capped at PAGE_SIZE.
@@ -173,6 +192,7 @@ export function AgentFleetPage() {
   const online = summary?.online ?? 0
   const down = (summary?.offline ?? 0) + (summary?.stale ?? 0)
   const pendingAuth = summary?.pending_authorization ?? 0
+  const registrationConflicts = summary?.registration_conflicts ?? 0
   const queueBacklog = summary?.queue_depth ?? 0
   const spoolTotal = summary?.spool_bytes ?? 0
   const fleetTotal = summary?.total ?? total
@@ -237,10 +257,53 @@ export function AgentFleetPage() {
   const deleteAgent = useMutation({
     mutationFn: async (id: string) => api.delete(`/agent-fleet/${id}`),
     onSuccess: () => {
-      toast.success('Agent removed', 'Its API key no longer authenticates; the host can re-enroll with a new token')
+      toast.success('Agent removed', 'Its host and APM credentials were revoked; the host can re-enroll with a new token')
       invalidate()
     },
     onError: (e) => toast.error('Agent removal failed', apiErrorMessage(e)),
+  })
+
+  const resolveConflict = useMutation({
+    mutationFn: async ({
+      agent, action, displayName, authorizeImmediately,
+    }: {
+      agent: AgentItem
+      action: ConflictResolutionAction
+      displayName?: string
+      authorizeImmediately?: boolean
+    }) => {
+      if (!agent.registration_conflict_revision) {
+        throw new Error('Registration candidate is missing its review revision; refresh and try again')
+      }
+      setPendingRow(agent.id)
+      return api.post(`/agent-fleet/${agent.id}/resolve-registration-conflict`, {
+        conflict_revision: agent.registration_conflict_revision,
+        action,
+        display_name: action === 'register_clone' ? displayName?.trim() || undefined : undefined,
+        authorize: action === 'register_clone' && Boolean(authorizeImmediately),
+      })
+    },
+    onSuccess: (_response, variables) => {
+      if (variables.action === 'register_clone') {
+        toast.success(
+          'Clone registered separately',
+          variables.authorizeImmediately
+            ? 'A new server identity was created and authorized; the clone will adopt it on retry'
+            : 'A new server identity was created and is awaiting authorization',
+        )
+      } else if (variables.action === 'block') {
+        toast.success('Candidate blocked', 'The current agent remains active and this installation cannot claim it')
+      } else {
+        toast.success('Replacement accepted', 'The waiting agent will receive a fresh key on its next retry')
+      }
+      setConflictTarget(null)
+      invalidate()
+    },
+    onError: (e) => {
+      toast.error('Could not resolve registration conflict', apiErrorMessage(e))
+      invalidate()
+    },
+    onSettled: () => setPendingRow(null),
   })
 
   const bulk = useMutation({
@@ -307,7 +370,7 @@ export function AgentFleetPage() {
       </div>
 
       {/* KPIs */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
         <KpiTile icon={Wifi} label="Online" value={online} tone="success" />
         <KpiTile icon={WifiOff} label="Offline / Stale" value={down} tone="danger" />
         {pendingAuth > 0 ? (
@@ -324,6 +387,21 @@ export function AgentFleetPage() {
           </button>
         ) : (
           <KpiTile icon={UserCheck} label="Awaiting authorization" value={0} />
+        )}
+        {registrationConflicts > 0 ? (
+          <button
+            type="button"
+            onClick={() => setAuthFilter('conflict')}
+            className="rounded-lg border border-danger/40 bg-danger/10 p-3 text-left transition-colors hover:bg-danger/15"
+          >
+            <div className="flex items-center gap-2 text-xs font-medium text-danger">
+              <AlertTriangle className="h-3.5 w-3.5" /> Registration conflicts
+            </div>
+            <div className="mt-1 text-xl font-semibold text-danger">{registrationConflicts}</div>
+            <div className="text-[11px] text-danger/80">click to review</div>
+          </button>
+        ) : (
+          <KpiTile icon={RefreshCw} label="Registration conflicts" value={0} />
         )}
         <KpiTile icon={Inbox} label="Queue backlog" value={queueBacklog.toLocaleString()} sub="pending batches" tone="info" />
         <KpiTile icon={HardDrive} label="Spool size" value={formatBytes(spoolTotal)} sub="buffered on disk" />
@@ -472,7 +550,10 @@ export function AgentFleetPage() {
                     </Tr>
                   )}
                   {!isLoading && items.map((agent) => (
-                    <Tr key={agent.id} className={selected.has(agent.id) ? 'bg-primary/5' : undefined}>
+                    <Tr
+                      key={agent.id}
+                      className={selected.has(agent.id) ? 'bg-primary/5' : agent.registration_conflict ? 'bg-danger/5' : undefined}
+                    >
                       <Td>
                         <input
                           type="checkbox"
@@ -515,27 +596,24 @@ export function AgentFleetPage() {
                         </div>
                       </Td>
                       <Td>
-                        <AuthorizationBadge state={agent.authorization_state} source={agent.authorization_source} />
+                        <div className="flex flex-col items-start gap-1">
+                          <AuthorizationBadge state={agent.authorization_state} source={agent.authorization_source} />
+                          {agent.registration_conflict && (
+                            <Badge
+                              variant="danger"
+                              title={`A different installation retried ${agent.registration_conflict_attempts} time(s)${agent.registration_conflict_ip ? ` from ${agent.registration_conflict_ip}` : ''}`}
+                            >
+                              <AlertTriangle className="h-3 w-3" /> Registration conflict
+                            </Badge>
+                          )}
+                        </div>
                       </Td>
                       <Td className="text-xs">{agent.policy_name || '—'}</Td>
                       <Td>
                         <Badge variant="outline" className="capitalize">{agent.update_ring}</Badge>
                       </Td>
                       <Td className="text-xs text-muted">{relativeTime(agent.last_heartbeat_at)}</Td>
-                      <Td>
-                        <Badge
-                          variant={agent.apm_status?.enabled === false ? 'outline' : agent.apm_status?.gateway?.listening ? 'success' : 'warning'}
-                          title={agent.apm_status?.last_error || 'Reported by the endpoint agent'}
-                        >
-                          {agent.apm_status?.enabled === false
-                            ? 'Disabled'
-                            : agent.apm_status?.gateway?.listening
-                              ? 'OTLP detected'
-                              : agent.apm_status?.enabled
-                                ? 'Enabled'
-                                : 'No status'}
-                        </Badge>
-                      </Td>
+                      <Td><AgentApmStatusBadge status={agent.apm_status} /></Td>
                       <Td>
                         <div className="text-xs tabular-nums">{agent.queue_depth.toLocaleString()}</div>
                         <div className="text-[11px] tabular-nums text-muted">{formatBytes(agent.spool_bytes)}</div>
@@ -543,7 +621,16 @@ export function AgentFleetPage() {
                       <Td className="font-mono text-xs text-muted">{agent.last_ip || '—'}</Td>
                       <Td>
                         <div className="flex justify-end gap-0.5">
-                          {agent.authorization_state === 'authorized' ? (
+                          {agent.registration_conflict ? (
+                            <Button
+                              variant="ghost" size="icon" className="h-7 w-7 text-danger hover:text-danger"
+                              onClick={() => setConflictTarget(agent)}
+                              disabled={pendingRow === agent.id}
+                              title="Review and accept the replacement installation"
+                            >
+                              <RefreshCw className="h-3.5 w-3.5" />
+                            </Button>
+                          ) : agent.authorization_state === 'authorized' ? (
                             <>
                               <Button
                                 variant="ghost" size="icon" className="h-7 w-7"
@@ -618,6 +705,111 @@ export function AgentFleetPage() {
       </Card>
 
       <InstallTokenDialog open={deployOpen} onOpenChange={setDeployOpen} />
+      <Dialog open={Boolean(conflictTarget)} onOpenChange={(o) => { if (!o && !resolveConflict.isPending) setConflictTarget(null) }}>
+        <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-danger" /> Resolve registration conflict
+            </DialogTitle>
+            <DialogDescription>
+              Two installations reported the same stable agent identity. Review both endpoints and choose the intended outcome.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-lg border border-border bg-surface2 p-3">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Current installation</div>
+              <div className="font-medium text-text">{conflictTarget?.hostname || conflictTarget?.agent_uid}</div>
+              <div className="mt-1 space-y-1 text-xs text-muted">
+                <div>IP <span className="font-mono text-text">{conflictTarget?.last_ip || 'Unknown'}</span></div>
+                <div>Version <span className="font-mono text-text">{conflictTarget?.version || 'Unknown'}</span></div>
+                <div>Status <span className="text-text">{conflictTarget?.status || 'Unknown'}</span></div>
+              </div>
+            </div>
+            <div className="rounded-lg border border-danger/35 bg-danger/5 p-3">
+              <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-danger">Conflicting installation</div>
+              <div className="font-medium text-text">{conflictTarget?.registration_conflict_hostname || 'Unknown host'}</div>
+              <div className="mt-1 space-y-1 text-xs text-muted">
+                <div>IP <span className="font-mono text-text">{conflictTarget?.registration_conflict_ip || 'Unknown'}</span></div>
+                <div>Version <span className="font-mono text-text">{conflictTarget?.registration_conflict_version || 'Unknown'}</span></div>
+                <div>Attempts <span className="text-text">{conflictTarget?.registration_conflict_attempts || 0}</span></div>
+                {conflictTarget?.registration_conflict_at && <div>Latest retry <span className="text-text">{relativeTime(conflictTarget.registration_conflict_at)}</span></div>}
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-muted">
+            IP addresses are informational. The conflict is based on a duplicated agent identity with a different protected installation secret, which commonly happens after cloning a VM.
+          </div>
+
+          <div className="space-y-2">
+            <div className="text-sm font-medium text-text">Choose an outcome</div>
+            <button
+              type="button"
+              onClick={() => setConflictAction('register_clone')}
+              className={`w-full rounded-lg border p-3 text-left transition-colors ${conflictAction === 'register_clone' ? 'border-primary bg-primary/10' : 'border-border hover:bg-surface2'}`}
+            >
+              <div className="flex items-start gap-3">
+                <CopyPlus className="mt-0.5 h-4 w-4 text-primary" />
+                <div><div className="text-sm font-medium text-text">Register as a new cloned machine</div><div className="mt-0.5 text-xs text-muted">Keep the current agent and create separate agent and server identities for the waiting clone.</div></div>
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setConflictAction('replace')}
+              className={`w-full rounded-lg border p-3 text-left transition-colors ${conflictAction === 'replace' ? 'border-warning bg-warning/10' : 'border-border hover:bg-surface2'}`}
+            >
+              <div className="flex items-start gap-3">
+                <RefreshCw className="mt-0.5 h-4 w-4 text-warning" />
+                <div><div className="text-sm font-medium text-text">Replace the current installation</div><div className="mt-0.5 text-xs text-muted">Move this identity to the waiting installation and revoke the current host and APM credentials.</div></div>
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => setConflictAction('block')}
+              className={`w-full rounded-lg border p-3 text-left transition-colors ${conflictAction === 'block' ? 'border-danger bg-danger/10' : 'border-border hover:bg-surface2'}`}
+            >
+              <div className="flex items-start gap-3">
+                <Ban className="mt-0.5 h-4 w-4 text-danger" />
+                <div><div className="text-sm font-medium text-text">Block this candidate</div><div className="mt-0.5 text-xs text-muted">Keep the current agent and reject only this reviewed installation secret on future retries.</div></div>
+              </div>
+            </button>
+          </div>
+
+          {conflictAction === 'register_clone' && (
+            <div className="space-y-3 rounded-lg border border-primary/25 bg-primary/5 p-3">
+              <div>
+                <label htmlFor="clone-display-name" className="mb-1 block text-xs font-medium text-text">Server display name</label>
+                <Input id="clone-display-name" value={cloneDisplayName} maxLength={255} onChange={(e) => setCloneDisplayName(e.target.value)} />
+                <p className="mt-1 text-[11px] text-muted">The appliance assigns the technical identity automatically. Rename the Windows clone separately when practical.</p>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <div><div className="text-xs font-medium text-text">Authorize immediately</div><div className="text-[11px] text-muted">Otherwise the new clone appears in Awaiting authorization.</div></div>
+                <Switch checked={authorizeClone} onCheckedChange={setAuthorizeClone} aria-label="Authorize cloned machine immediately" />
+              </div>
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button variant="outline" disabled={resolveConflict.isPending} onClick={() => setConflictTarget(null)}>Cancel</Button>
+            <Button
+              variant={conflictAction === 'register_clone' ? 'default' : 'destructive'}
+              disabled={resolveConflict.isPending || (conflictAction === 'register_clone' && !cloneDisplayName.trim())}
+              onClick={() => {
+                if (!conflictTarget) return
+                resolveConflict.mutate({
+                  agent: conflictTarget,
+                  action: conflictAction,
+                  displayName: cloneDisplayName,
+                  authorizeImmediately: authorizeClone,
+                })
+              }}
+            >
+              {resolveConflict.isPending ? 'Applying…' : conflictAction === 'register_clone' ? 'Register new clone' : conflictAction === 'replace' ? 'Accept replacement' : 'Block candidate'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         onOpenChange={(o) => { if (!o) setDeleteTarget(null) }}
@@ -689,4 +881,42 @@ export function AgentFleetPage() {
       />
     </div>
   )
+}
+
+function AgentApmStatusBadge({ status }: { status: AgentItem['apm_status'] }) {
+  const failed = status?.failed ?? 0
+  const state = (status?.state || '').toLowerCase()
+  const hasProblem = Boolean(status?.last_error)
+    || failed > 0
+    || state === 'error'
+    || state === 'failed'
+    || (status?.enabled === true && status.gateway?.managed === true && status.gateway.healthy === false)
+  const variant = status?.enabled === false
+    ? 'outline'
+    : hasProblem
+      ? 'danger'
+      : status?.gateway?.healthy
+        ? 'success'
+        : 'warning'
+  const label = status?.enabled === false
+    ? 'Disabled'
+    : hasProblem
+      ? 'Needs attention'
+      : status?.gateway?.healthy
+        ? 'Ready'
+        : status?.gateway?.listening
+          ? 'OTLP listening'
+          : status?.enabled
+            ? 'Starting'
+            : 'No status'
+  const detail = [
+    status?.last_error,
+    status?.gateway?.version ? `Gateway ${status.gateway.version}` : null,
+    status?.discovered != null || status?.instrumented != null
+      ? `${status?.instrumented ?? 0}/${status?.discovered ?? 0} processes instrumented`
+      : null,
+    failed > 0 ? `${failed} instrumentation failures` : null,
+  ].filter(Boolean).join(' · ') || 'Reported by the endpoint agent'
+
+  return <Badge variant={variant} title={detail}>{label}</Badge>
 }

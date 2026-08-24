@@ -3,9 +3,11 @@ package apm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -42,20 +44,24 @@ type instrumentationState struct {
 }
 
 type instrumentationTarget struct {
-	TargetKind  string             `json:"target_kind"`
-	TargetName  string             `json:"target_name"`
-	Runtime     string             `json:"runtime,omitempty"`
-	ProcessKey  string             `json:"process_key,omitempty"`
-	ServiceName string             `json:"service_name"`
-	Environment string             `json:"environment"`
-	Enabled     bool               `json:"enabled"`
-	AppliedAt   time.Time          `json:"applied_at"`
-	RestartedAt *time.Time         `json:"restarted_at,omitempty"`
-	Previous    map[string]*string `json:"previous,omitempty"`
-	Managed     map[string]string  `json:"managed,omitempty"`
-	LastError   string             `json:"last_error,omitempty"`
-	LastPID     int32              `json:"last_pid,omitempty"`
-	Restarts    []time.Time        `json:"restart_history,omitempty"`
+	TargetKind  string `json:"target_kind"`
+	TargetName  string `json:"target_name"`
+	Runtime     string `json:"runtime,omitempty"`
+	ProcessKey  string `json:"process_key,omitempty"`
+	ServiceName string `json:"service_name"`
+	Environment string `json:"environment"`
+	Enabled     bool   `json:"enabled"`
+	// PendingRestart means the managed environment has been removed but a
+	// still-running target may have the profiler/agent loaded. Runtime files
+	// must remain available until that target stops or restarts.
+	PendingRestart bool               `json:"pending_restart,omitempty"`
+	AppliedAt      time.Time          `json:"applied_at"`
+	RestartedAt    *time.Time         `json:"restarted_at,omitempty"`
+	Previous       map[string]*string `json:"previous,omitempty"`
+	Managed        map[string]string  `json:"managed,omitempty"`
+	LastError      string             `json:"last_error,omitempty"`
+	LastPID        int32              `json:"last_pid,omitempty"`
+	Restarts       []time.Time        `json:"restart_history,omitempty"`
 }
 
 func (m *Manager) Instrument(ctx context.Context, request InstrumentationRequest) (InstrumentationResult, error) {
@@ -205,4 +211,121 @@ func writeInstrumentationState(path string, state instrumentationState) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// ManagedIISTargets returns the enabled IIS application pools whose runtime
+// files are owned by this installation. Installers use it to stop only the
+// affected pools during an upgrade instead of disrupting the whole IIS host.
+func ManagedIISTargets(statePath string) ([]string, error) {
+	state, err := readInstrumentationState(statePath)
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]string, 0)
+	for _, target := range state.Targets {
+		if (target.Enabled || target.PendingRestart) && target.TargetKind == "iis_app_pool" && strings.TrimSpace(target.TargetName) != "" {
+			targets = append(targets, target.TargetName)
+		}
+	}
+	sort.Strings(targets)
+	return targets, nil
+}
+
+// ManagedWindowsServiceTargets returns enabled application services that load
+// runtime files from this installation and therefore must be stopped briefly
+// during an in-place agent upgrade.
+func ManagedWindowsServiceTargets(statePath string) ([]string, error) {
+	state, err := readInstrumentationState(statePath)
+	if err != nil {
+		return nil, err
+	}
+	targets := make([]string, 0)
+	for _, target := range state.Targets {
+		if (target.Enabled || target.PendingRestart) && target.TargetKind == "windows_service" && strings.TrimSpace(target.TargetName) != "" {
+			targets = append(targets, target.TargetName)
+		}
+	}
+	sort.Strings(targets)
+	return targets, nil
+}
+
+// ManagedInstrumentationCount reports how many application targets still
+// depend on the local APM gateway and bundled runtime files.
+func ManagedInstrumentationCount(statePath string) (int, error) {
+	state, err := readInstrumentationState(statePath)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, target := range state.Targets {
+		if target.Enabled || target.PendingRestart {
+			count++
+		}
+	}
+	return count, nil
+}
+
+// RollbackAll restores every application target currently managed by
+// ZenPlus. It must run before uninstall removes the bundled profiler/runtime
+// files; otherwise monitored applications retain references to missing files.
+func RollbackAll(ctx context.Context, statePath, installDir string, restart bool) error {
+	state, err := readInstrumentationState(statePath)
+	if err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(state.Targets))
+	for key, target := range state.Targets {
+		if target.Enabled || target.PendingRestart {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	var rollbackErrors []error
+	for _, key := range keys {
+		target := state.Targets[key]
+		runtimeName := target.Runtime
+		if runtimeName == "" && target.TargetKind == "iis_app_pool" {
+			runtimeName = "iis"
+		}
+		request := InstrumentationRequest{
+			Enabled:     false,
+			Runtime:     runtimeName,
+			ProcessKey:  target.ProcessKey,
+			TargetKind:  target.TargetKind,
+			TargetName:  target.TargetName,
+			ServiceName: target.ServiceName,
+			Environment: target.Environment,
+			Restart:     restart,
+		}
+		bundlePath := instrumentationBundlePath(installDir, runtimeName)
+		if target.TargetKind == "iis_app_pool" {
+			_, err = applyIISInstrumentation(ctx, statePath, bundlePath, request)
+		} else if target.TargetKind == "windows_service" {
+			_, err = applyWindowsServiceInstrumentation(ctx, statePath, bundlePath, request)
+		} else {
+			err = fmt.Errorf("unsupported managed target kind %q", target.TargetKind)
+		}
+		if err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("restore %s %q: %w", target.TargetKind, target.TargetName, err))
+		}
+	}
+	return errors.Join(rollbackErrors...)
+}
+
+func readInstrumentationState(path string) (instrumentationState, error) {
+	state := instrumentationState{Version: 1, Targets: map[string]instrumentationTarget{}}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return state, nil
+	}
+	if err != nil {
+		return state, fmt.Errorf("read instrumentation state: %w", err)
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return instrumentationState{}, fmt.Errorf("parse instrumentation state: %w", err)
+	}
+	if state.Targets == nil {
+		state.Targets = map[string]instrumentationTarget{}
+	}
+	return state, nil
 }

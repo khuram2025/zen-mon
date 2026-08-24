@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/color"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"zenplus-agent/internal/agent"
+	apmruntime "zenplus-agent/internal/apm"
 	"zenplus-agent/internal/appstate"
 	"zenplus-agent/internal/client"
 	"zenplus-agent/internal/config"
@@ -36,10 +38,10 @@ var (
 	muted    = walk.RGB(82, 94, 113)
 	faint    = walk.RGB(129, 140, 160)
 	blue     = walk.RGB(12, 106, 228)
-	teal     = walk.RGB(0, 137, 129)
-	green    = walk.RGB(49, 181, 64)
-	amber    = walk.RGB(204, 135, 25)
-	red      = walk.RGB(210, 62, 62)
+	teal     = walk.RGB(0, 105, 98)
+	green    = walk.RGB(22, 101, 52)
+	amber    = walk.RGB(146, 64, 14)
+	red      = walk.RGB(180, 35, 24)
 )
 
 type appUI struct {
@@ -62,6 +64,8 @@ type appUI struct {
 	controllerURL  *walk.Label
 	queueDepth     *walk.Label
 	lastCollection *walk.Label
+	collectorState *walk.Label
+	collectorIssue *walk.Label
 	apmService     *walk.Label
 	apmActivity    *walk.Label
 	apmEndpoint    *walk.Label
@@ -69,7 +73,6 @@ type appUI struct {
 	versionStatus  *walk.Label
 	updateStatus   *walk.Label
 	actionStatus   *walk.Label
-	collectButton  *walk.PushButton
 	updateButton   *walk.PushButton
 	settingsButton *walk.PushButton
 	logsButton     *walk.PushButton
@@ -132,8 +135,8 @@ func (a *appUI) create(startHidden bool) error {
 		Title:      "ZenPlus Agent",
 		Icon:       icon,
 		Background: SolidColorBrush{Color: bg},
-		Size:       Size{Width: 780, Height: 465},
-		MinSize:    Size{Width: 720, Height: 440},
+		Size:       Size{Width: 780, Height: 535},
+		MinSize:    Size{Width: 720, Height: 500},
 		Layout:     VBox{Margins: Margins{Left: 12, Top: 10, Right: 12, Bottom: 12}, Spacing: 8},
 		Children: []Widget{
 			a.header(),
@@ -230,7 +233,6 @@ func (a *appUI) header() Widget {
 				Layout:     HBox{Margins: Margins{Left: 0, Top: 6, Right: 0, Bottom: 0}, Spacing: 5},
 				Children: []Widget{
 					PushButton{Text: "Refresh", MinSize: Size{Width: 68, Height: 28}, OnClicked: a.refresh},
-					PushButton{AssignTo: &a.collectButton, Text: "Collect", MinSize: Size{Width: 66, Height: 28}, OnClicked: a.collectNow},
 					PushButton{AssignTo: &a.updateButton, Text: "Updates", MinSize: Size{Width: 72, Height: 28}, OnClicked: func() { a.checkForUpdates(true) }},
 					PushButton{AssignTo: &a.logsButton, Text: "Logs", MinSize: Size{Width: 56, Height: 28}, OnClicked: a.showLogs},
 					PushButton{AssignTo: &a.settingsButton, Text: "Settings", MinSize: Size{Width: 72, Height: 28}, ToolTipText: "Settings", OnClicked: a.showSettings},
@@ -313,6 +315,14 @@ func (a *appUI) detailsCard() Widget {
 					a.detailTile("Appliance APM", &a.apmQueue),
 				},
 			},
+			Composite{
+				Background: SolidColorBrush{Color: surface},
+				Layout:     HBox{MarginsZero: true, Spacing: 8},
+				Children: []Widget{
+					a.detailTile("Server collectors", &a.collectorState),
+					a.detailTile("Collector health", &a.collectorIssue),
+				},
+			},
 		},
 	}
 }
@@ -343,9 +353,6 @@ func (a *appUI) setupTray(icon *walk.Icon) error {
 	openAction := walk.NewAction()
 	_ = openAction.SetText("Open")
 	openAction.Triggered().Attach(a.show)
-	collectAction := walk.NewAction()
-	_ = collectAction.SetText("Collect now")
-	collectAction.Triggered().Attach(a.collectNow)
 	updateAction := walk.NewAction()
 	_ = updateAction.SetText("Check for updates")
 	updateAction.Triggered().Attach(func() { a.checkForUpdates(true) })
@@ -359,7 +366,6 @@ func (a *appUI) setupTray(icon *walk.Icon) error {
 		_ = a.window.Close()
 	})
 	_ = ni.ContextMenu().Actions().Add(openAction)
-	_ = ni.ContextMenu().Actions().Add(collectAction)
 	_ = ni.ContextMenu().Actions().Add(updateAction)
 	_ = ni.ContextMenu().Actions().Add(hideAction)
 	_ = ni.ContextMenu().Actions().Add(walk.NewSeparatorAction())
@@ -473,9 +479,11 @@ func (a *appUI) showUpdateResult(manifest selfupdate.Manifest, updateErr error) 
 	var dlg *walk.Dialog
 	var closeButton *walk.PushButton
 	var downloadButton *walk.PushButton
-	statusText := "The Zentryc update channel could not be reached.\r\n\r\n" + compactMiddle(updateErr.Error(), 180)
+	statusText := "The Zentryc update channel could not be reached."
 	canDownload := false
-	if updateErr == nil {
+	if updateErr != nil {
+		statusText += "\r\n\r\n" + compactMiddle(updateErr.Error(), 180)
+	} else {
 		signed := strings.EqualFold(manifest.SignatureStatus, "Valid")
 		signatureText := "Publisher signature: verified"
 		if !signed {
@@ -530,34 +538,24 @@ func openURL(raw string) error {
 	return windows.ShellExecute(0, nil, windows.StringToUTF16Ptr(raw), nil, nil, windows.SW_SHOWNORMAL)
 }
 
-func (a *appUI) collectNow() {
-	if a.collectButton != nil {
-		a.collectButton.SetEnabled(false)
-	}
-	a.set(a.actionStatus, "Collecting now...")
-	a.color(a.actionStatus, muted)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		err := agent.CollectNow(ctx, a.configPath)
-		a.window.Synchronize(func() {
-			if a.collectButton != nil {
-				a.collectButton.SetEnabled(true)
-			}
-			if err != nil {
-				a.set(a.actionStatus, "Collection failed: "+compactMiddle(err.Error(), 90))
-				a.color(a.actionStatus, red)
-			} else {
-				a.set(a.actionStatus, "Collection complete.")
-				a.color(a.actionStatus, green)
-			}
-			a.refresh()
-		})
-	}()
-}
-
 func (a *appUI) showSettings() {
+	machineConfig := isMachineConfigPath(a.configPath)
+	var publishedStatus *model.Status
 	cfg, err := config.LoadForEdit(a.configPath)
+	if err != nil && machineConfig {
+		published, publishedErr := runtime.ReadMachineDashboardSnapshot(a.configPath)
+		if publishedErr == nil {
+			statusCopy := published.Status
+			publishedStatus = &statusCopy
+			cfg = config.Default()
+			cfg.ControllerURL = published.Config.ControllerURL
+			cfg.PolicyID = published.Config.PolicyID
+			cfg.VerifyTLS = published.Config.VerifyTLS
+			cfg.DataDir = published.Config.DataDir
+			_ = config.ApplyProfile(&cfg, published.Config.MonitoringProfile)
+			err = nil
+		}
+	}
 	if err != nil {
 		a.set(a.actionStatus, "Unable to open settings: "+compactMiddle(err.Error(), 90))
 		a.color(a.actionStatus, red)
@@ -565,15 +563,27 @@ func (a *appUI) showSettings() {
 	}
 	var dlg *walk.Dialog
 	var remoteURL *walk.LineEdit
-	var apmEnabled *walk.CheckBox
+	var profileCombined *walk.RadioButton
+	var profileInfrastructure *walk.RadioButton
+	var profileAPM *walk.RadioButton
 	var status *walk.Label
 	var saveButton *walk.PushButton
 	var cancelButton *walk.PushButton
 	registrationLabel := "Starting registration"
 	if current, readErr := agent.ReadStatus(a.configPath); readErr == nil {
 		registrationLabel = registrationStateLabel(current.AuthState)
+	} else if publishedStatus != nil {
+		registrationLabel = registrationStateLabel(publishedStatus.AuthState)
 	}
 	credentialLabel := storedCredentialState(cfg)
+	if machineConfig && publishedStatus != nil {
+		if publishedStatus.Enrolled || publishedStatus.AuthState == "ok" {
+			credentialLabel = "Issued by appliance and protected by Windows"
+		} else {
+			credentialLabel = "Not issued yet"
+		}
+	}
+	openedSetup := false
 	saveSettings := func() (config.Config, error) {
 		next := cfg
 		normalized, err := config.NormalizeControllerURL(remoteURL.Text())
@@ -581,9 +591,33 @@ func (a *appUI) showSettings() {
 			return next, fmt.Errorf("invalid controller URL")
 		}
 		next.ControllerURL = normalized
-		next.APM.Enabled = apmEnabled != nil && apmEnabled.Checked()
+		profile := "combined"
+		if profileInfrastructure != nil && profileInfrastructure.Checked() {
+			profile = "infrastructure"
+		} else if profileAPM != nil && profileAPM.Checked() {
+			profile = "apm"
+		}
+		if profile == "infrastructure" && cfg.APM.Enabled && !machineConfig {
+			managed, err := apmruntime.ManagedInstrumentationCount(runtime.NewPaths(cfg.DataDir).APMInstrumentationState)
+			if err != nil {
+				return next, fmt.Errorf("cannot verify managed APM targets: %w", err)
+			}
+			if managed > 0 {
+				return next, fmt.Errorf("%d application target(s) are still instrumented; uninstrument them in APM before disabling APM", managed)
+			}
+		}
+		if err := config.ApplyProfile(&next, profile); err != nil {
+			return next, fmt.Errorf("invalid monitoring profile")
+		}
 		if err := next.Validate(); err != nil {
 			return next, fmt.Errorf("invalid settings")
+		}
+		if isMachineConfigPath(a.configPath) {
+			if err := launchRepairSetup(next); err != nil {
+				return next, fmt.Errorf("open elevated repair setup: %w", err)
+			}
+			openedSetup = true
+			return next, nil
 		}
 		if err := config.Save(a.configPath, next); err != nil {
 			return next, fmt.Errorf("save failed")
@@ -595,8 +629,8 @@ func (a *appUI) showSettings() {
 		Title:         "ZenPlus Agent Settings",
 		Icon:          loadAppIcon(),
 		Background:    SolidColorBrush{Color: bg},
-		Size:          Size{Width: 580, Height: 405},
-		MinSize:       Size{Width: 550, Height: 385},
+		Size:          Size{Width: 610, Height: 500},
+		MinSize:       Size{Width: 580, Height: 470},
 		DefaultButton: &saveButton,
 		CancelButton:  &cancelButton,
 		Layout:        VBox{Margins: Margins{Left: 14, Top: 14, Right: 14, Bottom: 12}, Spacing: 10},
@@ -606,27 +640,24 @@ func (a *appUI) showSettings() {
 				Background: SolidColorBrush{Color: surface},
 				Layout:     Grid{Margins: Margins{Left: 12, Top: 10, Right: 12, Bottom: 10}, Spacing: 8, Columns: 2},
 				Children: []Widget{
-					Label{Text: "Controller URL or IP", TextColor: text, MinSize: Size{Width: 140}},
-					LineEdit{AssignTo: &remoteURL, Text: cfg.ControllerURL, CueBanner: "https://192.168.8.221", Background: SolidColorBrush{Color: fieldBg}, TextColor: text, MinSize: Size{Height: 28}},
+					Label{Text: "Controller URL", TextColor: text, MinSize: Size{Width: 140}},
+					LineEdit{AssignTo: &remoteURL, Text: cfg.ControllerURL, ReadOnly: true, Background: SolidColorBrush{Color: fieldBg}, TextColor: text, MinSize: Size{Height: 28}},
 					Label{Text: "Authorization", TextColor: text},
 					TextLabel{Text: registrationLabel, TextColor: muted, MinSize: Size{Height: 24}},
 					Label{Text: "Appliance credential", TextColor: text},
 					TextLabel{Text: credentialLabel, TextColor: muted, MinSize: Size{Height: 24}},
 				},
 			},
+			TextLabel{Text: "All-users profile changes open Setup for administrator approval. Moving to another appliance also uses Setup so enrollment credentials are renewed safely.", TextColor: muted, MinSize: Size{Width: 520, Height: 32}, Font: Font{Family: "Segoe UI", PointSize: 9}},
 			GroupBox{
-				Title:      "Managed Application Performance Monitoring",
+				Title:      "Monitoring Profile",
 				Background: SolidColorBrush{Color: surface},
-				Layout:     Grid{Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 9}, Spacing: 7, Columns: 2},
+				Layout:     VBox{Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 9}, Spacing: 7},
 				Children: []Widget{
-					Label{Text: "Local gateway", TextColor: text, MinSize: Size{Width: 140}},
-					CheckBox{AssignTo: &apmEnabled, Text: "Enable APM on this server", Checked: cfg.APM.Enabled},
-					Label{Text: "Install profile", TextColor: text},
-					TextLabel{Text: friendlyProfile(cfg.APM.Profile), TextColor: muted, MinSize: Size{Height: 24}},
-					Label{Text: "Local OTLP endpoints", TextColor: text},
-					TextLabel{Text: "127.0.0.1:4317 (gRPC) · 127.0.0.1:4318 (HTTP)", TextColor: muted, MinSize: Size{Height: 24}},
-					HSpacer{},
-					TextLabel{Text: "The agent starts and monitors the bundled telemetry gateway. Its ingest credential is issued by the appliance after authorization and is never shown or stored in this window.", TextColor: muted, MinSize: Size{Width: 350, Height: 43}, Font: Font{Family: "Segoe UI", PointSize: 9}},
+					RadioButton{AssignTo: &profileCombined, Text: "Server monitoring + APM (recommended)"},
+					RadioButton{AssignTo: &profileInfrastructure, Text: "Server monitoring only"},
+					RadioButton{AssignTo: &profileAPM, Text: "APM only (agent health and inventory remain enabled)"},
+					TextLabel{Text: "Server monitoring covers CPU, memory, storage, network, processes, services, Windows event logs, and inventory. APM uses the managed local OTLP gateway at 127.0.0.1:4317/4318.", TextColor: muted, MinSize: Size{Width: 520, Height: 43}, Font: Font{Family: "Segoe UI", PointSize: 9}},
 				},
 			},
 			TextLabel{Text: "New installations appear in Agent Fleet as Pending authorization. An appliance operator must approve them before monitoring data is accepted.", TextColor: muted, MinSize: Size{Width: 500, Height: 28}, Font: Font{Family: "Segoe UI", PointSize: 9}},
@@ -643,7 +674,11 @@ func (a *appUI) showSettings() {
 							status.SetTextColor(red)
 							return
 						}
-						a.set(a.actionStatus, "Settings saved.")
+						if openedSetup {
+							a.set(a.actionStatus, "Setup opened to apply the all-users monitoring profile.")
+						} else {
+							a.set(a.actionStatus, "Settings saved.")
+						}
 						a.color(a.actionStatus, green)
 						dlg.Close(walk.DlgCmdOK)
 						a.refresh()
@@ -657,26 +692,74 @@ func (a *appUI) showSettings() {
 		a.color(a.actionStatus, red)
 		return
 	}
+	if profileCombined != nil {
+		profileCombined.SetChecked(cfg.APM.Profile == "" || cfg.APM.Profile == "combined")
+	}
+	if profileInfrastructure != nil {
+		profileInfrastructure.SetChecked(cfg.APM.Profile == "infrastructure")
+	}
+	if profileAPM != nil {
+		profileAPM.SetChecked(cfg.APM.Profile == "apm")
+	}
 	dlg.Run()
 }
 
-func (a *appUI) showLogs() {
-	cfg, err := config.Load(a.configPath)
-	if err != nil {
-		a.set(a.actionStatus, "Unable to read logs: "+compactMiddle(err.Error(), 90))
-		a.color(a.actionStatus, red)
-		return
+func isMachineConfigPath(configPath string) bool {
+	programData := os.Getenv("ProgramData")
+	if programData == "" {
+		programData = `C:\ProgramData`
 	}
-	paths := runtime.NewPaths(cfg.DataDir)
-	lines := appstate.TailLines(paths.LogFile, 220)
-	textValue := "No local log lines yet."
-	if len(lines) > 0 {
-		textValue = strings.Join(lines, "\r\n")
+	machineRoot := filepath.Join(programData, "ZenPlus", "Agent")
+	absRoot, err := filepath.Abs(machineRoot)
+	if err != nil {
+		return false
+	}
+	absConfig, err := filepath.Abs(configPath)
+	if err != nil {
+		return false
+	}
+	relative, err := filepath.Rel(absRoot, absConfig)
+	return err == nil && (relative == "." || (!filepath.IsAbs(relative) && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))))
+}
+
+func launchRepairSetup(cfg config.Config) error {
+	programFiles := os.Getenv("ProgramFiles")
+	if programFiles == "" {
+		programFiles = `C:\Program Files`
+	}
+	setup := filepath.Join(programFiles, "ZenPlus", "Agent", "ZenPlusAgentSetup.exe")
+	if info, err := os.Stat(setup); err != nil || info.IsDir() {
+		return fmt.Errorf("installed setup was not found at %s", setup)
+	}
+	cmd := exec.Command(setup,
+		"/machine",
+		"CONTROLLER_URL="+cfg.ControllerURL,
+		"INSTALL_PROFILE="+cfg.APM.Profile,
+	)
+	return cmd.Start()
+}
+
+func (a *appUI) showLogs() {
+	machineLogs := isMachineConfigPath(a.configPath)
+	textValue := "Machine-service logs are protected from unelevated local users. Use the appliance diagnostics workflow or open the log as an administrator."
+	if !machineLogs {
+		cfg, err := config.Load(a.configPath)
+		if err != nil {
+			a.set(a.actionStatus, "Unable to read logs: "+compactMiddle(err.Error(), 90))
+			a.color(a.actionStatus, red)
+			return
+		}
+		paths := runtime.NewPaths(cfg.DataDir)
+		lines := appstate.TailLines(paths.LogFile, 220)
+		textValue = "No local log lines yet."
+		if len(lines) > 0 {
+			textValue = strings.Join(lines, "\r\n")
+		}
 	}
 	var dlg *walk.Dialog
 	var logView *walk.TextEdit
 	var closeButton *walk.PushButton
-	err = Dialog{
+	err := Dialog{
 		AssignTo:     &dlg,
 		Title:        "ZenPlus Agent Logs",
 		Icon:         loadAppIcon(),
@@ -691,7 +774,18 @@ func (a *appUI) showLogs() {
 				Background: SolidColorBrush{Color: bg},
 				Layout:     HBox{MarginsZero: true, Spacing: 8},
 				Children: []Widget{
-					PushButton{Text: "Clear", MinSize: Size{Width: 82, Height: 30}, OnClicked: func() {
+					PushButton{Text: "Open as administrator", Visible: machineLogs, ToolTipText: "Open the protected service log in Notepad after Windows administrator approval.", MinSize: Size{Width: 150, Height: 30}, OnClicked: func() {
+						if err := openMachineLogElevated(a.configPath); err != nil {
+							a.set(a.actionStatus, "Unable to open protected log: "+compactMiddle(err.Error(), 90))
+							a.color(a.actionStatus, red)
+						}
+					}},
+					PushButton{Text: "Clear", Enabled: !machineLogs, ToolTipText: func() string {
+						if machineLogs {
+							return "All-users service logs are read-only in the desktop app."
+						}
+						return "Clear the local agent log."
+					}(), MinSize: Size{Width: 82, Height: 30}, OnClicked: func() {
 						if err := a.clearLogFile(); err != nil {
 							_ = logView.SetText("Unable to clear logs: " + err.Error())
 							return
@@ -712,6 +806,23 @@ func (a *appUI) showLogs() {
 		return
 	}
 	dlg.Run()
+}
+
+func openMachineLogElevated(configPath string) error {
+	published, err := runtime.ReadMachineDashboardSnapshot(configPath)
+	if err != nil {
+		return fmt.Errorf("read machine status: %w", err)
+	}
+	logPath := runtime.NewPaths(published.Config.DataDir).LogFile
+	windowsDir := strings.TrimSpace(os.Getenv("WINDIR"))
+	if windowsDir == "" {
+		windowsDir = `C:\Windows`
+	}
+	notepad := filepath.Join(windowsDir, "System32", "notepad.exe")
+	verb, _ := windows.UTF16PtrFromString("runas")
+	executable, _ := windows.UTF16PtrFromString(notepad)
+	parameters, _ := windows.UTF16PtrFromString(`"` + strings.ReplaceAll(logPath, `"`, ``) + `"`)
+	return windows.ShellExecute(0, verb, executable, parameters, nil, windows.SW_SHOWNORMAL)
 }
 
 func (a *appUI) clearLogs() {
@@ -811,6 +922,10 @@ func (a *appUI) applySnapshot(snap appstate.Snapshot) {
 	a.set(a.controllerURL, controllerLine)
 	a.set(a.queueDepth, queue)
 	a.set(a.lastCollection, lastCollection)
+	a.set(a.collectorState, collectorCoverageLine(snap.Config.CollectorEnabled))
+	collectorIssue, collectorColor := collectorIssueLine(snap.Status)
+	a.set(a.collectorIssue, compactMiddle(collectorIssue, 74))
+	a.color(a.collectorIssue, collectorColor)
 	apmService, apmActivity, apmEndpoint, apmQueue, apmColor := apmSummary(snap.Status)
 	if strings.HasPrefix(apmEndpoint, "/") && snap.Config.ControllerURL != "" {
 		apmEndpoint = strings.TrimRight(snap.Config.ControllerURL, "/") + apmEndpoint
@@ -818,6 +933,11 @@ func (a *appUI) applySnapshot(snap appstate.Snapshot) {
 	a.set(a.apmService, apmService)
 	a.color(a.apmService, apmColor)
 	a.set(a.apmActivity, apmActivity)
+	if snap.Status != nil && snap.Status.LocalAPM != nil && strings.TrimSpace(snap.Status.LocalAPM.LastError) != "" {
+		a.color(a.apmActivity, red)
+	} else {
+		a.color(a.apmActivity, text)
+	}
 	a.set(a.apmEndpoint, compactMiddle(apmEndpoint, 32))
 	a.set(a.apmQueue, apmQueue)
 	if snap.Status != nil && snap.Status.APM != nil {
@@ -844,38 +964,51 @@ func (a *appUI) applySnapshot(snap appstate.Snapshot) {
 
 func apmSummary(status *model.Status) (local, activity, endpoint, appliance string, localColor walk.Color) {
 	local = "Checking local host"
+	activity = "No local APM status"
 	localColor = muted
 	if status != nil && status.LocalAPM != nil {
-		profile := friendlyProfile(status.LocalAPM.Profile)
+		localAPM := status.LocalAPM
+		profile := friendlyProfile(localAPM.Profile)
 		switch {
-		case !status.LocalAPM.Enabled:
+		case !localAPM.Enabled:
 			local = "Disabled · " + profile
-		case status.LocalAPM.State == "waiting_authorization":
+		case localAPM.State == "waiting_authorization":
 			local = "Waiting for approval"
 			localColor = amber
-		case status.LocalAPM.Gateway.Managed && status.LocalAPM.Gateway.Healthy:
-			local = "Active · managed gateway"
+		case localAPM.Gateway.Managed && localAPM.Gateway.Healthy:
+			local = "Active · gateway"
+			if localAPM.Gateway.Version != "" {
+				local += " v" + localAPM.Gateway.Version
+			}
 			localColor = green
-		case status.LocalAPM.State == "failed" || status.LocalAPM.State == "credential_error" || status.LocalAPM.State == "configuration_error":
+		case localAPM.State == "failed" || localAPM.State == "credential_error" || localAPM.State == "configuration_error":
 			local = "APM needs attention"
 			localColor = red
-		case status.LocalAPM.Gateway.Listening:
+		case localAPM.Gateway.Listening:
 			local = "Starting · OTLP listening"
 			localColor = amber
 		default:
 			local = "Starting managed gateway"
 			localColor = amber
 		}
+		if strings.TrimSpace(localAPM.LastError) != "" {
+			activity = compactMiddle(localAPM.LastError, 70)
+		} else {
+			activity = fmt.Sprintf("%d discovered · %d instrumented", localAPM.Discovered, localAPM.Instrumented)
+		}
 	}
 	if status == nil || status.APM == nil {
-		return local, "No status received", "/v1/traces", "Waiting for appliance", localColor
+		return local, activity, "/v1/traces", "Waiting for appliance", localColor
 	}
 	apm := status.APM
 	endpoint = apm.IngestPath
 	if endpoint == "" {
 		endpoint = "/v1/traces"
 	}
-	if apm.LastReceivedAt != nil {
+	if status.LocalAPM != nil && strings.TrimSpace(status.LocalAPM.LastError) != "" {
+		// Keep the actionable local failure visible even when appliance-wide
+		// ingest counters are otherwise healthy.
+	} else if apm.LastReceivedAt != nil {
 		activity = fmt.Sprintf("%s ago · %d spans", appstate.TimeAgo(apm.LastReceivedAt), apm.AcceptedSpansTotal)
 	} else if apm.AcceptedSpansTotal > 0 {
 		activity = fmt.Sprintf("%d spans accepted", apm.AcceptedSpansTotal)
@@ -1033,6 +1166,47 @@ func collectorLine(values map[string]bool) string {
 		return "Collectors: none"
 	}
 	return "Collectors: " + strings.Join(parts, " | ")
+}
+
+func collectorCoverageLine(values map[string]bool) string {
+	serverCollectors := []string{"cpu", "memory", "filesystem", "disk_io", "network", "processes", "services", "event_log"}
+	enabled := 0
+	for _, name := range serverCollectors {
+		if values[name] {
+			enabled++
+		}
+	}
+	inventory := "off"
+	if values["inventory"] {
+		inventory = "on"
+	}
+	return fmt.Sprintf("%d/%d server · inventory %s", enabled, len(serverCollectors), inventory)
+}
+
+func collectorIssueLine(status *model.Status) (string, walk.Color) {
+	if status == nil {
+		return "Waiting for agent status", amber
+	}
+	if status.LastConfigError != "" {
+		return "Configuration: " + status.LastConfigError, red
+	}
+	if len(status.CollectorErrors) == 0 {
+		return "No collector errors", green
+	}
+	keys := make([]string, 0, len(status.CollectorErrors))
+	for name := range status.CollectorErrors {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	name := keys[0]
+	message := strings.TrimSpace(status.CollectorErrors[name])
+	if message == "" {
+		message = "collection failed"
+	}
+	if len(keys) > 1 {
+		message += fmt.Sprintf(" (+%d more)", len(keys)-1)
+	}
+	return strings.ReplaceAll(name, "_", " ") + ": " + message, red
 }
 
 func makeIcon(size int) image.Image {

@@ -7,10 +7,17 @@ param(
   [string]$PublicBaseUrl = "https://zentryc.com/downloads/zenplus-agent",
   [switch]$RequireSigning,
   [switch]$AllowUnsignedDevelopmentBuild,
+  # Some managed build workstations prohibit executing newly compiled,
+  # unsigned binaries. This may be used only for unsigned validation builds;
+  # production-signed builds must always execute the embedded-payload verifier.
+  [switch]$SkipPayloadExecutionVerification,
   # Endpoint-protection on some build hosts blocks freshly compiled test
   # binaries; run "go test ./..." manually when skipping here.
   [switch]$SkipTests,
-  [switch]$SkipLanguagePacks
+  [switch]$SkipLanguagePacks,
+  # Reuse the checked-in Windows resource objects on application-controlled
+  # build hosts where `go run` cannot execute the temporary rsrc binary.
+  [switch]$UseExistingResources
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,6 +29,12 @@ if (-not $TimestampUrl) {
 $SigningThumbprint = ($SigningThumbprint -replace '\s', '').ToUpperInvariant()
 if ($RequireSigning -and $AllowUnsignedDevelopmentBuild) {
   throw "-RequireSigning and -AllowUnsignedDevelopmentBuild cannot be used together"
+}
+if ($SkipPayloadExecutionVerification -and -not $AllowUnsignedDevelopmentBuild) {
+  throw "-SkipPayloadExecutionVerification is restricted to unsigned development builds"
+}
+if ($SkipLanguagePacks) {
+  throw "Installer builds always require the complete offline APM bundle. Run prepare-apm-bundle.ps1 -SkipLanguagePacks directly for gateway-only development work."
 }
 if (-not $SigningThumbprint -and -not $AllowUnsignedDevelopmentBuild) {
   throw "Production builds require -SigningThumbprint or ZENPLUS_SIGNING_THUMBPRINT. Use -AllowUnsignedDevelopmentBuild only for local test artifacts."
@@ -100,6 +113,48 @@ function Update-ApmBundleManifest {
   $manifest.files = @($files)
   $json = $manifest | ConvertTo-Json -Depth 8
   [IO.File]::WriteAllText($manifestPath, $json, (New-Object Text.UTF8Encoding($false)))
+}
+
+function Assert-CompleteApmBundle {
+  param([string]$Stage)
+  $manifestPath = Join-Path $Stage "bundle-manifest.json"
+  if (-not (Test-Path -LiteralPath $manifestPath)) {
+    throw "The APM bundle manifest is missing: $manifestPath"
+  }
+  $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+  $requiredComponents = @(
+    "zenplus-telemetry-gateway",
+    "opentelemetry-dotnet-auto",
+    "opentelemetry-javaagent",
+    "opentelemetry-node-auto",
+    "opentelemetry-python-auto"
+  )
+  $componentNames = @($manifest.components | ForEach-Object { $_.name })
+  foreach ($component in $requiredComponents) {
+    if ($componentNames -notcontains $component) {
+      throw "The APM bundle is incomplete: component '$component' is missing"
+    }
+  }
+  $requiredFiles = @(
+    "gateway\zenplus-telemetry-gateway.exe",
+    "instrumentation\dotnet\net\OpenTelemetry.AutoInstrumentation.StartupHook.dll",
+    "instrumentation\dotnet\win-x64\OpenTelemetry.AutoInstrumentation.Native.dll",
+    "instrumentation\java\opentelemetry-javaagent.jar",
+    "instrumentation\node\bootstrap.js",
+    "instrumentation\node\node_modules\@opentelemetry\auto-instrumentations-node\package.json",
+    "instrumentation\python\wheelhouse\opentelemetry_distro-0.65b0-py3-none-any.whl",
+    "instrumentation\python\wheelhouse\opentelemetry_instrumentation_flask-0.65b0-py3-none-any.whl",
+    "instrumentation\python\wheelhouse\opentelemetry_instrumentation_requests-0.65b0-py3-none-any.whl",
+    "instrumentation\python\Install-ZenPlusPythonTracing.ps1",
+    "instrumentation\python\README.txt",
+    "instrumentation\python\constraints.txt"
+  )
+  foreach ($relativePath in $requiredFiles) {
+    $path = Join-Path $Stage $relativePath
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+      throw "The APM bundle is incomplete: required file '$relativePath' is missing"
+    }
+  }
 }
 
 function Find-SignTool {
@@ -222,7 +277,7 @@ try {
   if (-not $SkipTests) {
     Invoke-Go test ./...
   }
-  & (Join-Path $root "scripts\prepare-apm-bundle.ps1") -SkipLanguagePacks:$SkipLanguagePacks
+  & (Join-Path $root "scripts\prepare-apm-bundle.ps1")
   if ($LASTEXITCODE -ne 0) {
     throw "APM bundle preparation failed with exit code $LASTEXITCODE"
   }
@@ -230,8 +285,23 @@ try {
   $apmGateway = Join-Path $apmStage "gateway\zenplus-telemetry-gateway.exe"
   Invoke-SignArtifacts @($apmGateway)
   Update-ApmBundleManifest -Stage $apmStage
-  Invoke-Rsrc -arch amd64 -ico "assets\zenplus-agent.ico" -manifest "cmd\zenplus-agent-app\zenplus-agent-app.manifest" -o "cmd\zenplus-agent-app\rsrc.syso"
-  Invoke-Rsrc -arch amd64 -ico "assets\zenplus-agent.ico" -manifest "cmd\zenplus-agent-installer\zenplus-agent-installer.manifest" -o "cmd\zenplus-agent-installer\rsrc.syso"
+  Assert-CompleteApmBundle -Stage $apmStage
+  $apmBundleManifest = Get-Content -LiteralPath (Join-Path $apmStage "bundle-manifest.json") -Raw | ConvertFrom-Json
+  $apmGatewayComponents = @($apmBundleManifest.components | Where-Object { $_.name -eq "zenplus-telemetry-gateway" })
+  if ($apmGatewayComponents.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$apmGatewayComponents[0].version)) {
+    throw "The APM bundle manifest must contain exactly one versioned zenplus-telemetry-gateway component"
+  }
+  $apmGatewayVersion = [string]$apmGatewayComponents[0].version
+  if ($UseExistingResources) {
+    foreach ($resource in @("cmd\zenplus-agent-app\rsrc.syso", "cmd\zenplus-agent-installer\rsrc.syso")) {
+      if (-not (Test-Path $resource)) {
+        throw "-UseExistingResources requires checked-in resource object $resource"
+      }
+    }
+  } else {
+    Invoke-Rsrc -arch amd64 -ico "assets\zenplus-agent.ico" -manifest "cmd\zenplus-agent-app\zenplus-agent-app.manifest" -o "cmd\zenplus-agent-app\rsrc.syso"
+    Invoke-Rsrc -arch amd64 -ico "assets\zenplus-agent.ico" -manifest "cmd\zenplus-agent-installer\zenplus-agent-installer.manifest" -o "cmd\zenplus-agent-installer\rsrc.syso"
+  }
   Invoke-Go build -trimpath -ldflags="-s -w$embedFlags" -o "dist\zenplus-agent.exe" ".\cmd\zenplus-agent"
   Invoke-Go build -trimpath -ldflags="-s -w$embedFlags" -o "dist\zenplus-agentctl.exe" ".\cmd\zenplus-agentctl"
   Invoke-Go build -trimpath -ldflags="-s -w -H=windowsgui$embedFlags" -o "dist\zenplus-agent-app.exe" ".\cmd\zenplus-agent-app"
@@ -254,11 +324,24 @@ try {
   Copy-Item -Recurse -Force $apmStage (Join-Path $payloadDir "apm")
   try {
     Invoke-Go build -trimpath -tags installerpayload -ldflags="-s -w -H=windowsgui$embedFlags" -o "dist\ZenPlusAgentSetup-x64.exe" ".\cmd\zenplus-agent-installer"
+    # Sign before executing the verifier so production builds also work on
+    # Windows hosts that enforce Smart App Control or WDAC.
+    Invoke-SignArtifacts @("dist\ZenPlusAgentSetup-x64.exe")
+    if (-not $SkipPayloadExecutionVerification) {
+      $payloadVerification = Start-Process `
+        -FilePath (Join-Path $root "dist\ZenPlusAgentSetup-x64.exe") `
+        -ArgumentList @("/verify-payload", "/quiet") `
+        -WindowStyle Hidden `
+        -Wait `
+        -PassThru
+      if ($payloadVerification.ExitCode -ne 0) {
+        throw "Embedded installer payload verification failed with exit code $($payloadVerification.ExitCode)"
+      }
+    }
   }
   finally {
     Remove-Item -Recurse -Force $payloadDir -ErrorAction SilentlyContinue
   }
-  Invoke-SignArtifacts @("dist\ZenPlusAgentSetup-x64.exe")
   $wix = Ensure-Wix
   Invoke-Wix -Candle $wix.Candle -Light $wix.Light
   $msiPath = Join-Path $root "dist\zenplus-agent-$Version.msi"
@@ -294,7 +377,7 @@ try {
     requires_authenticode = $true
     install_profiles = @("infrastructure", "apm", "combined")
     apm_profile_available = $true
-    apm_gateway_version = "0.158.0-zp1"
+    apm_gateway_version = $apmGatewayVersion
     setup_file_name = $setup.Name
     setup_size_bytes = [int64]$setup.Length
     setup_sha256 = $setupHash

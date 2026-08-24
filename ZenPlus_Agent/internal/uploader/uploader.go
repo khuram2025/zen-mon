@@ -71,6 +71,14 @@ func (u *Uploader) Drain(ctx context.Context, limit int) (int, error) {
 			return len(acked), err
 		}
 		if out.Rejected > 0 {
+			// A successful HTTP response means the controller has made a final
+			// decision for this batch. Acknowledge it even when individual samples
+			// were rejected so one permanently invalid sample cannot poison the
+			// FIFO and block every newer server metric behind it.
+			acked = append(acked, rec.Key)
+			if err := u.store.Ack(acked...); err != nil {
+				return len(acked), err
+			}
 			return len(acked), fmt.Errorf("controller rejected %d metric sample(s): %v", out.Rejected, out.Errors)
 		}
 		acked = append(acked, rec.Key)

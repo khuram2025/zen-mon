@@ -79,6 +79,38 @@ See `deployment.md` for the build → publish → install flow.
 - Interface samples show cumulative RX/TX bytes, current/peak bit rates, link
   speed, and utilisation for the selected NIC or all NICs.
 
+## APM QA
+
+- Confirm the packaged gateway reports the version recorded in
+  `apm\bundle-manifest.json` and lists `otlp`, `memory_limiter`, `resource`,
+  `batch`, `otlp_http`, `health_check`, and `file_storage` components.
+- Run the gateway `validate` command against the ZenPlus trace pipeline before
+  packaging; a missing factory is a release blocker.
+- Send an OTLP/HTTP protobuf trace through `127.0.0.1:4318` and verify it is
+  accepted at appliance `/v1/traces` with the expected agent/server resource
+  attributes.
+- Instrument and roll back a representative IIS pool plus .NET, Java, and
+  Node.js Windows services. Verify existing environment values are restored,
+  runtime switches remove stale settings, and stopped targets remain stopped.
+- Disable instrumentation without restart and confirm the target remains
+  upgrade/uninstall-protected until its process is stopped or restarted.
+- Revoke the active APM ingest key and confirm the agent detects the export 401,
+  replaces the stale bound credential, and resumes accepted traces.
+- Send and reject known trace batches and confirm the local one-minute
+  forwarded/error counters, persistent-queue depth/bytes, and dropped-span
+  count follow the gateway's loopback-only internal telemetry. Confirm
+  `telemetry-gateway.log` rotates at 10 MiB during runtime and startup and
+  retains no more than three backups.
+- Verify discovered process command lines contain argument shapes only and do
+  not expose paths, URLs, credentials, SQL, or argument values.
+- Create clean CPython 3.10, 3.11, 3.12, and 3.13 x64 virtual environments and
+  run the bundled Python helper with network disabled; `pip check` must pass.
+- Run `npm audit --omit=dev` against the locked Node runtime pack and record the
+  result in release evidence.
+- Confirm UI and release notes say "traces" rather than claiming OTLP
+  application metrics or log ingest. Infrastructure metrics are a separate
+  agent data path.
+
 ## Security
 
 - Verify config and state live under `%ProgramData%\ZenPlus\Agent`.
@@ -92,3 +124,7 @@ See `deployment.md` for the build → publish → install flow.
 - Include artifact hashes.
 - Include supported silent install and uninstall commands.
 - Include signing certificate subject and timestamp details.
+- Include the supported .NET/Java/Node/Python runtime matrix, trace-only signal
+  scope, and application-owned runtime prerequisites.
+- Generate and review a complete third-party software bill of materials and
+  notices for the gateway plus every Node and Python dependency.

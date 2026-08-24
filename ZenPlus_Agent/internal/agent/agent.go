@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"zenplus-agent/internal/config"
 	"zenplus-agent/internal/configpoller"
 	"zenplus-agent/internal/enroll"
+	"zenplus-agent/internal/identity"
 	"zenplus-agent/internal/model"
 	"zenplus-agent/internal/netcapture"
 	"zenplus-agent/internal/runtime"
@@ -133,6 +135,17 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 	defer store.Close()
+	startedAt := time.Now().UTC()
+	// Publish a safe startup view before enrollment or the first collection can
+	// spend time waiting on the controller. This keeps the all-users dashboard
+	// responsive during outages and on first install.
+	_ = runtime.WriteMachineDashboardSnapshot(cfg, identity.Identity{}, model.Status{
+		ControllerURL:   cfg.ControllerURL,
+		AgentVersion:    model.AgentVersion,
+		StartedAt:       startedAt,
+		CollectorErrors: map[string]string{},
+		LocalAPM:        probeLocalAPM(cfg),
+	})
 
 	enrollCtx, cancel := enroll.ContextWithEnrollmentTimeout(ctx)
 	enrollment, err := enroll.Ensure(enrollCtx, cfg, paths, log.Printf)
@@ -151,7 +164,7 @@ func Run(ctx context.Context, opts Options) error {
 		ServerID:        enrollment.Identity.ServerID,
 		ControllerURL:   cfg.ControllerURL,
 		AgentVersion:    model.AgentVersion,
-		StartedAt:       time.Now().UTC(),
+		StartedAt:       startedAt,
 		CollectorErrors: map[string]string{},
 		LocalAPM:        probeLocalAPM(cfg),
 	}
@@ -181,6 +194,7 @@ func Run(ctx context.Context, opts Options) error {
 	tickUpload(ctx, store, up, &status, &enrollment, sup, log.Printf)
 	syncAuthStatus(&status, enrollment, sup)
 	_ = writeStatus(paths.StatusFile, status)
+	_ = runtime.WriteMachineDashboardSnapshot(cfg, enrollment.Identity, status)
 	if opts.Once {
 		log.Printf("one-shot run complete")
 		return nil
@@ -264,6 +278,7 @@ func Run(ctx context.Context, opts Options) error {
 		status.ServerID = enrollment.Identity.ServerID
 		syncAuthStatus(&status, enrollment, sup)
 		_ = writeStatus(paths.StatusFile, status)
+		_ = runtime.WriteMachineDashboardSnapshot(cfg, enrollment.Identity, status)
 	}
 }
 
@@ -367,7 +382,10 @@ func CollectNow(ctx context.Context, configPath string) error {
 		CollectorErrors: map[string]string{},
 	}
 	runCollection(ctx, cfg, paths, store, &status, enrollment, func(string, ...any) {})
-	return writeStatus(paths.StatusFile, status)
+	if err := writeStatus(paths.StatusFile, status); err != nil {
+		return err
+	}
+	return runtime.WriteMachineDashboardSnapshot(cfg, enrollment.Identity, status)
 }
 
 func RegisterNow(ctx context.Context, configPath string) (enroll.Result, error) {
@@ -418,7 +436,7 @@ func runCollection(ctx context.Context, cfg config.Config, paths runtime.Paths, 
 			"queue_depth":     st.Depth,
 			"spool_bytes":     st.Bytes,
 			"config_apply_ok": status.LastConfigError == "",
-			"last_error":      firstNonEmpty(status.LastUploadError, status.LastHeartbeatError, status.LastConfigError),
+			"last_error":      firstNonEmpty(status.LastUploadError, status.LastHeartbeatError, status.LastConfigError, collectorErrorSummary(result.Errors)),
 		},
 	})
 	seq := uint64(time.Now().UnixNano())
@@ -461,6 +479,26 @@ func runCollection(ctx context.Context, cfg config.Config, paths runtime.Paths, 
 	status.SpoolBytes = st.Bytes
 	logf("collected %d metrics, %d event summaries; queue_depth=%d spool_bytes=%d", len(result.Metrics), len(result.Events), st.Depth, st.Bytes)
 	_ = paths
+}
+
+func collectorErrorSummary(collectorErrors map[string]string) string {
+	if len(collectorErrors) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(collectorErrors))
+	for name := range collectorErrors {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, name := range keys {
+		message := strings.TrimSpace(collectorErrors[name])
+		if message == "" {
+			message = "collection failed"
+		}
+		parts = append(parts, name+": "+message)
+	}
+	return strings.Join(parts, "; ")
 }
 
 // tickHeartbeat drives the heartbeat cadence. When the agent has no valid
@@ -583,7 +621,7 @@ func sendHeartbeat(ctx context.Context, cfg config.Config, store *spool.Store, u
 	}
 	hb := model.Heartbeat{
 		Version:          model.AgentVersion,
-		Capabilities:     append([]string(nil), model.AgentCapabilities...),
+		Capabilities:     capabilitiesForConfig(cfg, canManageApplicationInstrumentation()),
 		UptimeSeconds:    uptimeSeconds(enrollment.Identity.BootTime, now),
 		QueueDepth:       st.Depth,
 		SpoolBytes:       st.Bytes,
@@ -613,6 +651,18 @@ func sendHeartbeat(ctx context.Context, cfg config.Config, store *spool.Store, u
 		}
 	}
 	return &resp, nil
+}
+
+func capabilitiesForConfig(cfg config.Config, privileged bool) []string {
+	allowInstrumentation := privileged && cfg.APM.Enabled && cfg.APM.Profile != "infrastructure"
+	capabilities := make([]string, 0, len(model.AgentCapabilities))
+	for _, capability := range model.AgentCapabilities {
+		if !allowInstrumentation && (capability == "apm_iis_instrumentation_v1" || capability == "apm_windows_service_instrumentation_v1") {
+			continue
+		}
+		capabilities = append(capabilities, capability)
+	}
+	return capabilities
 }
 
 func probeLocalAPM(cfg config.Config) *model.AgentAPMHeartbeat {
@@ -831,6 +881,18 @@ func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, 
 			"duplicate":  stopped.Duplicate,
 		}}
 	case "apm_instrument", "apm_uninstrument", "apm_restart_target":
+		if cmd.Command != "apm_uninstrument" && (cfg == nil || !cfg.APM.Enabled || cfg.APM.Profile == "infrastructure") {
+			return model.CommandResult{
+				Success:      false,
+				ErrorMessage: "managed instrumentation is unavailable while the agent monitoring profile has APM disabled",
+			}
+		}
+		if !canManageApplicationInstrumentation() {
+			return model.CommandResult{
+				Success:      false,
+				ErrorMessage: "managed instrumentation requires the all-users Windows service installation",
+			}
+		}
 		if apmManager == nil {
 			return model.CommandResult{Success: false, ErrorMessage: "local APM manager is unavailable"}
 		}

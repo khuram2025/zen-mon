@@ -107,6 +107,18 @@ func applyControllerConfig(current config.Config, remote model.AgentConfigRespon
 	}
 	if remote.MetricIntervalS > 0 {
 		next.CollectIntervalSeconds = remote.MetricIntervalS
+		// The controller contract exposes one host-metric cadence rather than
+		// separate intervals for every collector. Keep the scheduler switches in
+		// step with the top-level ticker; otherwise a 30-second policy still runs
+		// collectors at their local 60/120-second defaults.
+		next.Collectors.CPU.IntervalSeconds = remote.MetricIntervalS
+		next.Collectors.Memory.IntervalSeconds = remote.MetricIntervalS
+		next.Collectors.Filesystem.IntervalSeconds = remote.MetricIntervalS
+		next.Collectors.DiskIO.IntervalSeconds = remote.MetricIntervalS
+		next.Collectors.Network.IntervalSeconds = remote.MetricIntervalS
+		next.Collectors.Processes.IntervalSeconds = remote.MetricIntervalS
+		next.Collectors.Services.IntervalSeconds = remote.MetricIntervalS
+		next.Collectors.EventLog.IntervalSeconds = remote.MetricIntervalS
 	}
 	if remote.UploadIntervalS > 0 {
 		next.UploadIntervalSeconds = remote.UploadIntervalS
@@ -115,41 +127,36 @@ func applyControllerConfig(current config.Config, remote model.AgentConfigRespon
 		next.Collectors.Processes.TopN = remote.ProcessTopN
 		next.Limits.MaxProcessCount = remote.ProcessTopN
 	}
-	if len(remote.ServiceWatchlist) > 0 {
-		next.Collectors.Services.Watchlist = remote.ServiceWatchlist
+	// A non-nil empty slice is an explicit controller value and must clear a
+	// previous/local list. A nil slice means the field was absent (for backward
+	// compatibility with older controllers) and leaves the current value alone.
+	if remote.ServiceWatchlist != nil {
+		next.Collectors.Services.Watchlist = append([]string(nil), remote.ServiceWatchlist...)
 	}
-	if len(remote.ProcessWatchlist) > 0 {
-		next.Collectors.Processes.Watchlist = remote.ProcessWatchlist
+	if remote.ProcessWatchlist != nil {
+		next.Collectors.Processes.Watchlist = append([]string(nil), remote.ProcessWatchlist...)
 	}
-	if len(remote.EventLogFilters) > 0 {
-		channels := make([]string, 0, len(remote.EventLogFilters))
-		levelSet := map[string]bool{}
-		for _, filter := range remote.EventLogFilters {
-			if filter.Channel != "" {
-				channels = append(channels, filter.Channel)
-			}
-			for _, level := range filter.Levels {
-				if level != "" {
-					levelSet[level] = true
-				}
+	if remote.EventLogFilters != nil {
+		filters := make([]config.EventLogFilter, len(remote.EventLogFilters))
+		for i, filter := range remote.EventLogFilters {
+			filters[i] = config.EventLogFilter{
+				Channel: filter.Channel,
+				Levels:  cloneStrings(filter.Levels),
+				IDs:     cloneInts(filter.IDs),
 			}
 		}
-		if len(channels) > 0 {
-			next.Collectors.EventLog.Channels = channels
-		}
-		if len(levelSet) > 0 {
-			levels := make([]string, 0, len(levelSet))
-			for level := range levelSet {
-				levels = append(levels, level)
-			}
-			next.Collectors.EventLog.Levels = levels
-		}
+		next.Collectors.EventLog.Filters = &filters
+		// The filter list is authoritative when supplied by the controller. Clear
+		// the legacy projection so the persisted config cannot suggest a broader
+		// channel/level policy than the collector actually applies.
+		next.Collectors.EventLog.Channels = nil
+		next.Collectors.EventLog.Levels = nil
 	}
-	if len(remote.DiskIgnore) > 0 {
-		next.DiskIgnore = remote.DiskIgnore
+	if remote.DiskIgnore != nil {
+		next.DiskIgnore = append([]string(nil), remote.DiskIgnore...)
 	}
-	if len(remote.NetworkIgnore) > 0 {
-		next.NetworkIgnore = remote.NetworkIgnore
+	if remote.NetworkIgnore != nil {
+		next.NetworkIgnore = append([]string(nil), remote.NetworkIgnore...)
 	}
 	if remote.UpdateRing != "" {
 		next.UpdateRing = remote.UpdateRing
@@ -191,6 +198,20 @@ func applyFeatureFlag(flags map[string]bool, key string, target *bool) {
 	if value, ok := flags[key]; ok {
 		*target = value
 	}
+}
+
+func cloneStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append([]string{}, values...)
+}
+
+func cloneInts(values []int) []int {
+	if values == nil {
+		return nil
+	}
+	return append([]int{}, values...)
 }
 
 func verifySignature(body []byte, publicKey string) error {

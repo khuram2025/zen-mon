@@ -2,7 +2,7 @@
 
 ZenPlus publishes one immutable, generic x64 setup executable. The package contains no
 registration secret and is never modified after it is built. The same
-checksummed (and optionally Authenticode-signed) MSI can be distributed to any
+checksummed (and optionally Authenticode-signed) package can be distributed to any
 number of hosts through GPO, Intune, SCCM, or another software-management
 system. Only the controller URL is configured on an endpoint.
 
@@ -25,7 +25,7 @@ Outputs:
   appliance publishes the setup executable.
 - `dist/ZenPlusAgentSetup-x64.exe` -- interactive/self-contained setup.
 - `dist/agent-manifest.json` -- version, architecture, file size, build time,
-  and SHA-256 of the MSI.
+  signature state, and SHA-256 of the canonical setup executable.
 
 `-ControllerUrl` may set a convenient default controller address. Credentials
 cannot be compiled into the binaries or MSI. The `CONTROLLER_URL` MSI property
@@ -88,10 +88,11 @@ heartbeats or telemetry.
 
 ## Changing settings after install
 
-Edit `%ProgramData%\ZenPlus\Agent\config\agent.yaml`. The running agent
-re-reads local settings every five seconds. To move a host to another
-controller, set the new controller URL; the host registers there and waits for
-an administrator to approve it.
+Open **ZenPlus Agent > Settings**. For an all-users installation, profile or
+controller changes open the installed Setup program and request administrator
+approval before updating `%ProgramData%\ZenPlus\Agent\config\agent.yaml`.
+Moving a host to another controller clears the old enrollment binding; the
+host registers with the new appliance and waits for administrator approval.
 
 You can also force a registration poll from an elevated terminal:
 
@@ -101,6 +102,12 @@ zenplus-agent.exe register
 
 `zenplus-agentctl.exe print-config` never prints the appliance-issued API key,
 and agent logging redacts credential and bearer values.
+
+For all-users installs, `%ProgramData%\ZenPlus\Agent` is restricted to
+SYSTEM, administrators, and the agent service SID. The unelevated desktop app
+reads only a sanitized status snapshot under
+`%ProgramData%\ZenPlus\AgentDashboard`; raw spool records, gateway queues,
+logs, rollback state, and credentials are not exposed to ordinary users.
 
 ## Uninstall and purge
 
@@ -113,9 +120,10 @@ configuration, logs, and queued telemetry should also be removed:
 
 ## Agent upgrades
 
-Publish a newer generic MSI and set `desired_version` or issue
+Publish a newer generic setup package and set `desired_version` or issue
 `trigger_upgrade`. The agent downloads the portal manifest, verifies SHA-256,
-and starts the installer. Upgrades preserve the appliance-issued credential.
+verifies the Authenticode policy, and starts the installer. Upgrades preserve
+the appliance-issued credential and the selected monitoring profile.
 
 ## Controller clock
 

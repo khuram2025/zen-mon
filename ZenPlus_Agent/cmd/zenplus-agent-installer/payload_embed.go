@@ -7,7 +7,12 @@ import (
 	"io/fs"
 )
 
-//go:embed payload
+// The OpenTelemetry .NET distribution contains NuGet placeholder files named
+// `_._`. The default embed directory walk omits names beginning with `_`, so
+// use the `all:` prefix and let the signed bundle manifest remain the source of
+// truth for every embedded file.
+//
+//go:embed all:payload
 var payloadFS embed.FS
 
 func embeddedPayloads() ([]payloadFile, error) {
