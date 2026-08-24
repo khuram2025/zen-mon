@@ -143,6 +143,61 @@ def _client_ip(request: Request) -> Optional[str]:
     return request.client.host if request.client else None
 
 
+async def _sync_server_identity(
+    db: AsyncSession,
+    server_id: Any,
+    *,
+    hostname: Optional[str],
+    primary_ip: Optional[str],
+    fqdn: Optional[str] = None,
+    os_type: Optional[str] = None,
+    os_name: Optional[str] = None,
+    os_version: Optional[str] = None,
+    kernel_or_build: Optional[str] = None,
+    architecture: Optional[str] = None,
+) -> None:
+    """Keep an agent-managed server's factual identity current.
+
+    ``display_name`` is an operator-controlled friendly name.  It follows the
+    hostname only while it still contains an automatically generated identity
+    (the old hostname, FQDN, or IP); deliberate custom labels are preserved.
+    """
+    await db.execute(
+        text("""UPDATE servers SET
+                  display_name = CASE
+                    WHEN NULLIF(BTRIM(:hostname), '') IS NOT NULL
+                     AND (NULLIF(BTRIM(display_name), '') IS NULL
+                          OR display_name = hostname
+                          OR display_name = fqdn
+                          OR display_name = host(primary_ip))
+                      THEN BTRIM(:hostname)
+                    ELSE display_name
+                  END,
+                  hostname = COALESCE(NULLIF(BTRIM(:hostname), ''), hostname),
+                  fqdn = COALESCE(NULLIF(BTRIM(:fqdn), ''), fqdn),
+                  primary_ip = COALESCE(CAST(NULLIF(BTRIM(:ip), '') AS inet), primary_ip),
+                  os_type = COALESCE(NULLIF(BTRIM(:os_type), ''), os_type),
+                  os_name = COALESCE(NULLIF(BTRIM(:os_name), ''), os_name),
+                  os_version = COALESCE(NULLIF(BTRIM(:os_version), ''), os_version),
+                  kernel_or_build = COALESCE(NULLIF(BTRIM(:kernel), ''), kernel_or_build),
+                  architecture = COALESCE(NULLIF(BTRIM(:architecture), ''), architecture),
+                  collection_mode = 'agent',
+                  updated_at = NOW()
+                WHERE id = :server_id"""),
+        {
+            "server_id": server_id,
+            "hostname": hostname,
+            "fqdn": fqdn,
+            "ip": primary_ip,
+            "os_type": os_type,
+            "os_name": os_name,
+            "os_version": os_version,
+            "kernel": kernel_or_build,
+            "architecture": architecture,
+        },
+    )
+
+
 def _capability_list(value: Any) -> list[str]:
     """Return a small, normalized capability set safe to persist/return."""
     if isinstance(value, str):
@@ -544,6 +599,18 @@ async def _enroll_pending_agent(
         )
 
     server_id = current.get("server_id") or await _ensure_pending_server(data, db)
+    await _sync_server_identity(
+        db,
+        server_id,
+        hostname=data.hostname,
+        primary_ip=client_ip or data.primary_ip,
+        fqdn=data.fqdn,
+        os_type=data.platform if data.platform in ("windows", "linux", "macos") else "other",
+        os_name=data.os_name,
+        os_version=data.os_version,
+        kernel_or_build=data.kernel_or_build,
+        architecture=data.architecture,
+    )
     api_key, api_hash, prefix = _new_api_key()
     await db.execute(
         text("""UPDATE agents SET server_id = :sid,
@@ -633,6 +700,19 @@ async def enroll(
                     WHERE id = :id"""),
             {"id": server_id},
         )
+
+    await _sync_server_identity(
+        db,
+        server_id,
+        hostname=data.hostname,
+        primary_ip=client_ip or data.primary_ip,
+        fqdn=data.fqdn,
+        os_type=data.platform if data.platform in ("windows", "linux", "macos") else "other",
+        os_name=data.os_name,
+        os_version=data.os_version,
+        kernel_or_build=data.kernel_or_build,
+        architecture=data.architecture,
+    )
 
     # Find or create the agent. If agent_uid already exists, treat as re-enrollment.
     existing_agent = (await db.execute(
@@ -791,6 +871,12 @@ async def heartbeat(
     )
     # Roll server.last_seen.
     if agent.get("server_id"):
+        await _sync_server_identity(
+            db,
+            agent["server_id"],
+            hostname=agent.get("hostname"),
+            primary_ip=client_ip,
+        )
         await db.execute(
             text("""UPDATE servers SET last_seen = NOW(),
                                        status = CASE WHEN status = 'disabled' THEN status

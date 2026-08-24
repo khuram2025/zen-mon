@@ -18,6 +18,8 @@ interface AgentProcess {
   id: string
   agent_id: string
   server_id: string
+  server_name?: string | null
+  server_ip?: string | null
   hostname: string
   agent_status: string
   agent_version?: string
@@ -135,7 +137,9 @@ export function ApmAgentsTab() {
   const [selected, setSelected] = useState<AgentProcess | null>(null)
   const processes = useQuery<AgentProcess[]>({ queryKey: ['apm', 'agent-processes'], queryFn: async () => (await api.get('/apm/agent-processes')).data, refetchInterval: 10_000 })
   const rows = processes.data ?? []
-  const hosts = new Set(rows.map((row) => row.hostname)).size
+  // Cloned machines can legitimately report the same Windows hostname. The
+  // authorized agent identity is unique; hostname is only a display field.
+  const hosts = new Set(rows.map((row) => row.agent_id)).size
   const active = rows.filter((row) => row.instrumentation_state === 'active' || row.otel_detected).length
   const pending = rows.filter(isCommandPending).length
 
@@ -169,7 +173,13 @@ export function ApmAgentsTab() {
                     : (isIIS || isManagedServiceRuntime) ? 'Agent upgrade required'
                       : row.runtime === 'python' ? 'Compatibility gated' : 'Manual setup'
                   return <Tr key={row.id}>
-                    <Td><div className="font-medium text-text">{row.hostname}</div><div className="text-[11px] text-muted">Agent {row.agent_status}{row.agent_version ? ` · v${row.agent_version}` : ''}</div></Td>
+                    <Td>
+                      <div className="font-medium text-text">{row.server_name || row.hostname}</div>
+                      <div className="text-[11px] text-muted">
+                        {row.hostname}{row.server_ip ? ` · ${row.server_ip}` : ''}
+                      </div>
+                      <div className="text-[11px] text-muted">Agent {row.agent_status}{row.agent_version ? ` · v${row.agent_version}` : ''}</div>
+                    </Td>
                     <Td><div className="font-medium text-text">{row.configured_service_name || row.service_name_guess || 'Unnamed process'}</div>{row.iis_app_pool && <div className="text-[11px] text-muted">IIS pool · {row.iis_app_pool}</div>}{row.windows_service && <div className="text-[11px] text-muted">Windows service · {row.windows_service}</div>}{row.last_deployment_at && <div className="mt-1 text-[11px] font-medium text-primary">Deployment detected {relativeTime(row.last_deployment_at)}</div>}{row.last_command_error && <div className="mt-1 max-w-xs text-[11px] text-danger">{row.last_command_error}</div>}</Td>
                     <Td><Badge variant="outline">{row.runtime}{row.runtime_version ? ` ${row.runtime_version}` : ''}</Badge></Td><Td>{stateBadge(row)}</Td><Td><div>{telemetryBadge(row)}</div>{row.last_trace_at && <div className="mt-1 text-[11px] text-muted">Last {relativeTime(row.last_trace_at)}</div>}</Td><Td className="text-xs text-muted">{relativeTime(row.last_seen_at)}</Td>
                     <Td className="text-right"><Button variant="outline" size="sm" disabled={!manageable || isCommandPending(row)} onClick={() => setSelected(row)}>{isCommandPending(row) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Settings2 className="h-3.5 w-3.5" />}{actionLabel}</Button></Td>

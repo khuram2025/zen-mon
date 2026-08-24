@@ -348,6 +348,8 @@ async def list_agent_processes(
             )
             SELECT p.*, a.hostname, a.status AS agent_status,
                    a.version AS agent_version, a.capabilities AS agent_capabilities,
+                   COALESCE(NULLIF(s.display_name, ''), a.hostname) AS server_name,
+                   COALESCE(host(s.primary_ip), host(a.last_ip)) AS server_ip,
                    latest.id AS last_command_id,
                    latest.status AS last_command_status,
                    latest.command AS last_command,
@@ -358,6 +360,7 @@ async def list_agent_processes(
                    result.output AS last_command_output
             FROM ranked p
             JOIN agents a ON a.id = p.agent_id
+            LEFT JOIN servers s ON s.id = p.server_id
             LEFT JOIN LATERAL (
                 SELECT c.id, c.status, c.command, c.params, c.created_at, c.completed_at
                 FROM agent_commands c
