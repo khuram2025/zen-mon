@@ -61,6 +61,19 @@ CRITICAL_SCHEMA_CHECKS: tuple[tuple[str, str], ...] = (
     ("schema_migrations", "checksum"),
 )
 
+CRITICAL_CONSTRAINT_CHECKS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "agent_commands",
+        "agent_commands_command_check",
+        (
+            "status", "collect_now", "refresh_config", "upload_diagnostics",
+            "rotate_certificate", "restart_agent", "upgrade_agent",
+            "start_network_capture", "stop_network_capture", "apm_instrument",
+            "apm_uninstrument", "apm_restart_target", "apm_set_config",
+        ),
+    ),
+)
+
 
 def collect(ctx: CollectorContext) -> CollectorResult:
     result = CollectorResult(section="database")
@@ -132,6 +145,24 @@ async def _collect_async(ctx: CollectorContext, url: str) -> dict[str, bytes]:
                 table, column,
             )
             schema_checks.append({"table": table, "column": column, "present": bool(present)})
+        for table, constraint, required_values in CRITICAL_CONSTRAINT_CHECKS:
+            definition = await conn.fetchval(
+                "SELECT pg_get_constraintdef(con.oid) "
+                "FROM pg_constraint con "
+                "JOIN pg_class rel ON rel.oid = con.conrelid "
+                "JOIN pg_namespace n ON n.oid = rel.relnamespace "
+                "WHERE n.nspname = 'public' AND rel.relname = $1 AND con.conname = $2",
+                table, constraint,
+            )
+            lowered = str(definition or "").lower()
+            missing = [value for value in required_values if f"'{value}'" not in lowered]
+            schema_checks.append({
+                "table": table,
+                "constraint": constraint,
+                "present": bool(definition),
+                "valid": bool(definition) and not missing,
+                "missing_values": missing,
+            })
         out["database/critical-schema-checks.json"] = _dump({"checks": schema_checks})
 
         # 4. row counts for known tables (counts only — no PII)

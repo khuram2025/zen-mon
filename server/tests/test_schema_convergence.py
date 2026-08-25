@@ -314,6 +314,7 @@ def test_healing_alone_is_not_drift():
     [
         ({"pending": ["migrate-063-x.sql"]}, {}),
         ({"drift": ["migrate-004-snmp.sql"]}, {}),
+        ({"invariant_drift": ["constraint:agent_commands_command_check"]}, {}),
         ({"failed": [{"filename": "migrate-063-x.sql", "error": "syntax"}]}, {}),
         ({"error": "runner did not start"}, {}),
         ({}, {"pending": ["migrate-058-apm-synthetics-clickhouse.sql"]}),

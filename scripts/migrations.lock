@@ -100,3 +100,4 @@ b8d6c942a48a6aea1d5155fb29a8d409d257a53f0f0d6e0b6d7fed02d69894ea  migrate-088-ag
 6d4fcb9b8648abf41dbf1ad179ee1626af15311610e55b0ba52f392b68b3644e  migrate-089-agent-hardware-process-inventory.sql
 c7bb4bb8993668dac70a6ba778b8ea33d954c57809a7d72c14cadae3c5988b46  migrate-090-agent-process-enrichment-clickhouse.sql
 ddc74d3e22f135f26f3eb02235bf1b8308aeb67bd88a8104f100554e8c0f0f20  migrate-091-agent-clone-resolutions.sql
+8c5c07074218a75d93c35e038e1d4bc0bf97271eeb1949730a83adf4c7b41370  migrate-092-agent-command-check-canonical.sql
