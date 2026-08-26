@@ -14,8 +14,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -35,13 +35,41 @@ KEY_TABLES = (
     "subscriptions",
     "discovery_profiles",
     "discovery_runs",
-    "discovery_results",
+    "discovery_results_v2",
     "servers",
     "agents",
+    "agent_policies",
+    "agent_commands",
+    "agent_command_results",
+    "agent_packages",
+    "agent_host_result_batches",
+    "agent_apm_credentials",
+    "apm_agent_processes",
+    "apm_environments",
+    "apm_services",
+    "apm_ingest_keys",
+    "apm_slos",
+    "apm_synthetic_monitors",
+    "server_process_inventory",
+    "server_service_inventory",
+    "server_filesystem_inventory",
+    "server_network_interface_inventory",
+    "server_software_inventory",
     "sensors",
     "sensor_assignments",
     "notification_channels",
     "notification_gateways",
+    "report_schedules",
+    "report_runs",
+    "custom_reports",
+    "storage_events",
+    "storage_backups",
+    "topology_links",
+    "manual_maps",
+    "network_captures",
+    "udt_endpoints",
+    "udt_events",
+    "netflow_exporter_devices",
     "schema_migrations",
 )
 
@@ -55,7 +83,13 @@ CRITICAL_SCHEMA_CHECKS: tuple[tuple[str, str], ...] = (
     ("windows_credentials", "id"),
     ("discovery_profiles", "snmp_credential_ids"),
     ("discovery_profiles", "windows_credential_ids"),
-    ("discovery_results", "credential_used"),
+    ("discovery_results_v2", "credential_used"),
+    ("agents", "last_metric_at"),
+    ("agents", "apm_status"),
+    ("agent_host_result_batches", "completed_at"),
+    ("agent_apm_credentials", "key_id"),
+    ("apm_agent_processes", "instrumentation_state"),
+    ("apm_services", "last_seen_at"),
     ("audit_logs", "id"),
     ("schema_migrations", "filename"),
     ("schema_migrations", "checksum"),
@@ -92,6 +126,8 @@ def collect(ctx: CollectorContext) -> CollectorResult:
 
     for arc_name, body in snapshot.items():
         result.files[arc_name] = body
+        if b'"error"' in body:
+            result.warn(f"{arc_name} contains an incomplete diagnostic query")
 
     # Run scripts/run-migrations.py --status if available — its output is the
     # quickest evidence of checksum drift (today's first incident).
@@ -105,7 +141,7 @@ async def _collect_async(ctx: CollectorContext, url: str) -> dict[str, bytes]:
     import asyncpg
 
     out: dict[str, bytes] = {}
-    conn = await asyncpg.connect(url, timeout=10)
+    conn = await asyncpg.connect(url, timeout=10, command_timeout=10)
     try:
         # 1. version + size
         version = await conn.fetchval("SELECT version()")
@@ -141,7 +177,7 @@ async def _collect_async(ctx: CollectorContext, url: str) -> dict[str, bytes]:
         for table, column in CRITICAL_SCHEMA_CHECKS:
             present = await conn.fetchval(
                 "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
-                "WHERE table_name = $1 AND column_name = $2)",
+                "WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2)",
                 table, column,
             )
             schema_checks.append({"table": table, "column": column, "present": bool(present)})
@@ -241,11 +277,11 @@ async def _collect_async(ctx: CollectorContext, url: str) -> dict[str, bytes]:
 
 def _run_migration_status(ctx: CollectorContext) -> str:
     runner = ctx.zenplus_root / "scripts" / "run-migrations.py"
-    if not runner.exists() or not shutil.which("python3"):
+    if not runner.exists() or not Path(sys.executable).exists():
         return "[support-bundle: run-migrations.py not available]\n"
     try:
         proc = subprocess.run(
-            ["sudo", "-u", "postgres", "python3", str(runner),
+            [sys.executable, str(runner),
              "--scripts-dir", str(ctx.zenplus_root / "scripts"),
              "--database", "zenplus", "--status"],
             capture_output=True, text=True, timeout=30,

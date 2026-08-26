@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"zenplus-agent/internal/config"
 	"zenplus-agent/internal/configpoller"
 	"zenplus-agent/internal/enroll"
+	"zenplus-agent/internal/identity"
 	"zenplus-agent/internal/model"
 	"zenplus-agent/internal/netcapture"
 	"zenplus-agent/internal/runtime"
@@ -106,10 +108,12 @@ type Options struct {
 }
 
 type localSettings struct {
-	ControllerURL string `json:"controller_url"`
-	ProxyURL      string `json:"proxy_url"`
-	VerifyTLS     bool   `json:"verify_tls"`
-	APMEnabled    bool   `json:"apm_enabled"`
+	ControllerURL       string `json:"controller_url"`
+	ProxyURL            string `json:"proxy_url"`
+	VerifyTLS           bool   `json:"verify_tls"`
+	ControllerCAFile    string `json:"controller_ca_file"`
+	ControllerCAFileSig string `json:"controller_ca_file_sig"`
+	APMEnabled          bool   `json:"apm_enabled"`
 }
 
 func Run(ctx context.Context, opts Options) error {
@@ -133,6 +137,17 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 	defer store.Close()
+	startedAt := time.Now().UTC()
+	// Publish a safe startup view before enrollment or the first collection can
+	// spend time waiting on the controller. This keeps the all-users dashboard
+	// responsive during outages and on first install.
+	_ = runtime.WriteMachineDashboardSnapshot(cfg, identity.Identity{}, model.Status{
+		ControllerURL:   cfg.ControllerURL,
+		AgentVersion:    model.AgentVersion,
+		StartedAt:       startedAt,
+		CollectorErrors: map[string]string{},
+		LocalAPM:        probeLocalAPM(cfg),
+	})
 
 	enrollCtx, cancel := enroll.ContextWithEnrollmentTimeout(ctx)
 	enrollment, err := enroll.Ensure(enrollCtx, cfg, paths, log.Printf)
@@ -141,6 +156,15 @@ func Run(ctx context.Context, opts Options) error {
 		log.Printf("enrollment error: %v", err)
 	}
 	applyEnrollment(&cfg, enrollment)
+	if restored, ok, restoreErr := configpoller.Restore(
+		paths.ConfigCache, cfg, enrollment.Identity.AgentUID,
+		enrollment.Identity.AgentID, enrollment.Identity.ServerID,
+	); restoreErr != nil {
+		log.Printf("cached controller config ignored: %v", restoreErr)
+	} else if ok {
+		cfg = restored
+		log.Printf("restored last-known-good controller config: %s", config.Hash(cfg))
+	}
 
 	up, poller, err := newRuntimeClients(cfg, paths, store, enrollment)
 	if err != nil {
@@ -151,7 +175,7 @@ func Run(ctx context.Context, opts Options) error {
 		ServerID:        enrollment.Identity.ServerID,
 		ControllerURL:   cfg.ControllerURL,
 		AgentVersion:    model.AgentVersion,
-		StartedAt:       time.Now().UTC(),
+		StartedAt:       startedAt,
 		CollectorErrors: map[string]string{},
 		LocalAPM:        probeLocalAPM(cfg),
 	}
@@ -181,6 +205,7 @@ func Run(ctx context.Context, opts Options) error {
 	tickUpload(ctx, store, up, &status, &enrollment, sup, log.Printf)
 	syncAuthStatus(&status, enrollment, sup)
 	_ = writeStatus(paths.StatusFile, status)
+	_ = runtime.WriteMachineDashboardSnapshot(cfg, enrollment.Identity, status)
 	if opts.Once {
 		log.Printf("one-shot run complete")
 		return nil
@@ -264,15 +289,22 @@ func Run(ctx context.Context, opts Options) error {
 		status.ServerID = enrollment.Identity.ServerID
 		syncAuthStatus(&status, enrollment, sup)
 		_ = writeStatus(paths.StatusFile, status)
+		_ = runtime.WriteMachineDashboardSnapshot(cfg, enrollment.Identity, status)
 	}
 }
 
 func newRuntimeClients(cfg config.Config, paths runtime.Paths, store *spool.Store, enrollment enroll.Result) (*uploader.Uploader, *configpoller.Poller, error) {
-	api, err := client.New(cfg.ControllerURL, cfg.ProxyURL, cfg.VerifyTLS, enrollment.Identity.AgentID, enrollment.APIKey)
+	api, err := client.NewWithControllerCA(
+		cfg.ControllerURL, cfg.ProxyURL, cfg.VerifyTLS, cfg.Security.ControllerCAFile,
+		enrollment.Identity.AgentID, enrollment.APIKey,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
-	return uploader.New(api, store, enrollment.Identity.AgentID, enrollment.Identity.ServerID), configpoller.New(api, paths.ConfigCache), nil
+	return uploader.New(api, store, enrollment.Identity.AgentID, enrollment.Identity.ServerID), configpoller.New(
+		api, paths.ConfigCache, enrollment.Identity.AgentUID,
+		enrollment.Identity.AgentID, enrollment.Identity.ServerID,
+	), nil
 }
 
 func refreshLocalRuntime(ctx context.Context, configPath string, cfg *config.Config, paths runtime.Paths, store *spool.Store, enrollment *enroll.Result, up **uploader.Uploader, poller **configpoller.Poller, status *model.Status, localHash *string, authStamp *string, logf func(string, ...any)) bool {
@@ -296,10 +328,14 @@ func refreshLocalRuntime(ctx context.Context, configPath string, cfg *config.Con
 			*localHash = nextLocalHash
 			return false
 		}
-		connectionChanged := cfg.ControllerURL != diskCfg.ControllerURL || cfg.ProxyURL != diskCfg.ProxyURL || cfg.VerifyTLS != diskCfg.VerifyTLS
+		connectionChanged := cfg.ControllerURL != diskCfg.ControllerURL ||
+			cfg.ProxyURL != diskCfg.ProxyURL ||
+			cfg.VerifyTLS != diskCfg.VerifyTLS ||
+			cfg.Security.ControllerCAFile != diskCfg.Security.ControllerCAFile
 		cfg.ControllerURL = diskCfg.ControllerURL
 		cfg.ProxyURL = diskCfg.ProxyURL
 		cfg.VerifyTLS = diskCfg.VerifyTLS
+		cfg.Security.ControllerCAFile = diskCfg.Security.ControllerCAFile
 		cfg.APM.Enabled = diskCfg.APM.Enabled
 		if connectionChanged {
 			cfg.ConfigETag = ""
@@ -312,6 +348,11 @@ func refreshLocalRuntime(ctx context.Context, configPath string, cfg *config.Con
 	enrollCtx, cancel := enroll.ContextWithEnrollmentTimeout(ctx)
 	nextEnrollment, err := enroll.Ensure(enrollCtx, *cfg, paths, logf)
 	cancel()
+	// Enrollment can create/remove protected auth files even when the request
+	// fails (for example, a 409 registration conflict creates the pending
+	// secret). Consume that resulting state here so the five-second local file
+	// watcher does not bypass the enrollment supervisor's exponential backoff.
+	*authStamp = authFileStamp(paths)
 	if err != nil {
 		status.LastConfigError = "local enrollment refresh failed: " + err.Error()
 		logf("%s", status.LastConfigError)
@@ -328,7 +369,6 @@ func refreshLocalRuntime(ctx context.Context, configPath string, cfg *config.Con
 	}
 	*up = nextUp
 	*poller = nextPoller
-	*authStamp = authFileStamp(paths)
 	status.LastConfigError = ""
 	status.ControllerURL = cfg.ControllerURL
 	status.AgentID = nextEnrollment.Identity.AgentID
@@ -367,7 +407,10 @@ func CollectNow(ctx context.Context, configPath string) error {
 		CollectorErrors: map[string]string{},
 	}
 	runCollection(ctx, cfg, paths, store, &status, enrollment, func(string, ...any) {})
-	return writeStatus(paths.StatusFile, status)
+	if err := writeStatus(paths.StatusFile, status); err != nil {
+		return err
+	}
+	return runtime.WriteMachineDashboardSnapshot(cfg, enrollment.Identity, status)
 }
 
 func RegisterNow(ctx context.Context, configPath string) (enroll.Result, error) {
@@ -418,7 +461,7 @@ func runCollection(ctx context.Context, cfg config.Config, paths runtime.Paths, 
 			"queue_depth":     st.Depth,
 			"spool_bytes":     st.Bytes,
 			"config_apply_ok": status.LastConfigError == "",
-			"last_error":      firstNonEmpty(status.LastUploadError, status.LastHeartbeatError, status.LastConfigError),
+			"last_error":      firstNonEmpty(status.LastUploadError, status.LastHeartbeatError, status.LastConfigError, collectorErrorSummary(result.Errors)),
 		},
 	})
 	seq := uint64(time.Now().UnixNano())
@@ -461,6 +504,26 @@ func runCollection(ctx context.Context, cfg config.Config, paths runtime.Paths, 
 	status.SpoolBytes = st.Bytes
 	logf("collected %d metrics, %d event summaries; queue_depth=%d spool_bytes=%d", len(result.Metrics), len(result.Events), st.Depth, st.Bytes)
 	_ = paths
+}
+
+func collectorErrorSummary(collectorErrors map[string]string) string {
+	if len(collectorErrors) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(collectorErrors))
+	for name := range collectorErrors {
+		keys = append(keys, name)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, name := range keys {
+		message := strings.TrimSpace(collectorErrors[name])
+		if message == "" {
+			message = "collection failed"
+		}
+		parts = append(parts, name+": "+message)
+	}
+	return strings.Join(parts, "; ")
 }
 
 // tickHeartbeat drives the heartbeat cadence. When the agent has no valid
@@ -583,7 +646,7 @@ func sendHeartbeat(ctx context.Context, cfg config.Config, store *spool.Store, u
 	}
 	hb := model.Heartbeat{
 		Version:          model.AgentVersion,
-		Capabilities:     append([]string(nil), model.AgentCapabilities...),
+		Capabilities:     capabilitiesForConfig(cfg, canManageApplicationInstrumentation()),
 		UptimeSeconds:    uptimeSeconds(enrollment.Identity.BootTime, now),
 		QueueDepth:       st.Depth,
 		SpoolBytes:       st.Bytes,
@@ -613,6 +676,18 @@ func sendHeartbeat(ctx context.Context, cfg config.Config, store *spool.Store, u
 		}
 	}
 	return &resp, nil
+}
+
+func capabilitiesForConfig(cfg config.Config, privileged bool) []string {
+	allowInstrumentation := privileged && cfg.APM.Enabled && cfg.APM.Profile != "infrastructure"
+	capabilities := make([]string, 0, len(model.AgentCapabilities))
+	for _, capability := range model.AgentCapabilities {
+		if !allowInstrumentation && (capability == "apm_iis_instrumentation_v1" || capability == "apm_windows_service_instrumentation_v1") {
+			continue
+		}
+		capabilities = append(capabilities, capability)
+	}
+	return capabilities
 }
 
 func probeLocalAPM(cfg config.Config) *model.AgentAPMHeartbeat {
@@ -733,6 +808,10 @@ func startSelfUpdate(ctx context.Context, up *uploader.Uploader, channel string,
 			logf("self-update: already running the published version %s", model.AgentVersion)
 			return
 		}
+		if !selfupdate.IsNewer(m.LatestVersion, model.AgentVersion) {
+			logf("self-update: ignoring published version %s because running version %s is newer", m.LatestVersion, model.AgentVersion)
+			return
+		}
 		if err := selfupdate.Apply(ctx, up.Client(), m, model.AgentVersion, logf); err != nil {
 			logf("self-update to %s failed: %v", m.LatestVersion, err)
 		}
@@ -831,6 +910,18 @@ func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, 
 			"duplicate":  stopped.Duplicate,
 		}}
 	case "apm_instrument", "apm_uninstrument", "apm_restart_target":
+		if cmd.Command != "apm_uninstrument" && (cfg == nil || !cfg.APM.Enabled || cfg.APM.Profile == "infrastructure") {
+			return model.CommandResult{
+				Success:      false,
+				ErrorMessage: "managed instrumentation is unavailable while the agent monitoring profile has APM disabled",
+			}
+		}
+		if !canManageApplicationInstrumentation() {
+			return model.CommandResult{
+				Success:      false,
+				ErrorMessage: "managed instrumentation requires the all-users Windows service installation",
+			}
+		}
 		if apmManager == nil {
 			return model.CommandResult{Success: false, ErrorMessage: "local APM manager is unavailable"}
 		}
@@ -1106,10 +1197,12 @@ func ResetEnrollment(configPath string) error {
 
 func localSettingsFingerprint(cfg config.Config) string {
 	b, _ := json.Marshal(localSettings{
-		ControllerURL: cfg.ControllerURL,
-		ProxyURL:      cfg.ProxyURL,
-		VerifyTLS:     cfg.VerifyTLS,
-		APMEnabled:    cfg.APM.Enabled,
+		ControllerURL:       cfg.ControllerURL,
+		ProxyURL:            cfg.ProxyURL,
+		VerifyTLS:           cfg.VerifyTLS,
+		ControllerCAFile:    cfg.Security.ControllerCAFile,
+		ControllerCAFileSig: fileStamp(cfg.Security.ControllerCAFile),
+		APMEnabled:          cfg.APM.Enabled,
 	})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
@@ -1123,6 +1216,9 @@ func authFileStamp(paths runtime.Paths) string {
 }
 
 func fileStamp(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {

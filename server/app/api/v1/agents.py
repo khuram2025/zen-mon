@@ -954,6 +954,39 @@ async def heartbeat(
             "credential; re-enroll the agent APM forwarder"
         )
 
+    # This field was introduced after the host heartbeat contract. Returning it
+    # is backward-compatible (older agents ignore unknown response fields) and
+    # lets newer combined agents distinguish a healthy local gateway from an
+    # unavailable appliance writer during rolling upgrades.
+    from app.api.v1 import apm_ingest as apm_ingest_api
+
+    agent_credential_bound = False
+    if data.apm is not None and data.apm.enabled:
+        credential_row = (await db.execute(
+            text("""SELECT EXISTS (
+                        SELECT 1 FROM agent_apm_credentials credential
+                        JOIN apm_ingest_keys ingest_key
+                          ON ingest_key.id = credential.key_id
+                        WHERE credential.agent_id = :agent_id
+                          AND ingest_key.enabled = TRUE
+                          AND ingest_key.revoked_at IS NULL
+                    )"""),
+            {"agent_id": agent["id"]},
+        )).first()
+        agent_credential_bound = bool(credential_row and credential_row[0])
+    appliance_apm = apm_ingest_api.runtime_status()
+    appliance_apm["agent_credential_bound"] = agent_credential_bound
+    appliance_apm["ready_for_agent"] = bool(
+        appliance_apm.get("available") and agent_credential_bound
+    )
+    if data.apm is not None and data.apm.enabled and not agent_credential_bound:
+        if appliance_apm.get("state") != "unavailable":
+            appliance_apm["state"] = "degraded"
+        appliance_apm["message"] = (
+            "APM is not ready for this agent because it has no scoped ingest "
+            "credential; re-enroll the agent APM forwarder"
+        )
+
     return AgentHeartbeatResponse(
         ok=True,
         server_time=datetime.now(timezone.utc),

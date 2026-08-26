@@ -49,6 +49,11 @@ func applyWindowsServiceInstrumentation(ctx context.Context, statePath, bundlePa
 	if strings.EqualFold(strings.TrimSpace(config.ServiceStartName), "LocalSystem") && isProtectedService(serviceName) {
 		return InstrumentationResult{}, fmt.Errorf("Windows service %q is protected from managed instrumentation", serviceName)
 	}
+	initialStatus, err := service.Query()
+	if err != nil {
+		return InstrumentationResult{}, fmt.Errorf("read Windows service %q status: %w", serviceName, err)
+	}
+	processMayBeRunning := initialStatus.State != svc.Stopped
 
 	state := instrumentationState{Version: 2, Targets: map[string]instrumentationTarget{}}
 	if data, readErr := os.ReadFile(statePath); readErr == nil {
@@ -67,19 +72,26 @@ func applyWindowsServiceInstrumentation(ctx context.Context, statePath, bundlePa
 		return InstrumentationResult{}, err
 	}
 
-	managed := runtimeServiceEnvironment(request.Runtime, bundlePath, request.ServiceName, request.Environment, entries)
-	if !request.Enabled && !priorTarget.Enabled && len(priorTarget.Previous) == 0 {
+	if !request.Enabled && !priorTarget.Enabled && !priorTarget.PendingRestart && len(priorTarget.Previous) == 0 {
 		return InstrumentationResult{
 			State: "none", TargetKind: request.TargetKind, TargetName: serviceName,
 			ServiceName: request.ServiceName, Message: "Windows service is not managed by ZenPlus",
 		}, nil
 	}
+	// Re-instrumentation can change runtimes (for example Java to Node). First
+	// restore the original environment owned by the prior target so stale
+	// JAVA_TOOL_OPTIONS/NODE_OPTIONS/profiler variables are not left behind.
+	baseEntries := entries
+	if request.Enabled && priorTarget.Enabled {
+		baseEntries = restoreEnvironmentValues(baseEntries, priorTarget.Previous)
+	}
+	managed := runtimeServiceEnvironment(request.Runtime, bundlePath, request.ServiceName, request.Environment, baseEntries)
 	previous := priorTarget.Previous
-	if request.Enabled && (!priorTarget.Enabled || len(previous) == 0) {
-		previous = captureEnvironmentValues(entries, managed)
+	if request.Enabled {
+		previous = captureEnvironmentValues(baseEntries, managed)
 	}
 	if request.Enabled {
-		entries = setEnvironmentValues(entries, managed)
+		entries = setEnvironmentValues(baseEntries, managed)
 	} else {
 		entries = restoreEnvironmentValues(entries, previous)
 	}
@@ -96,27 +108,69 @@ func applyWindowsServiceInstrumentation(ctx context.Context, statePath, bundlePa
 	}
 	if request.Enabled {
 		target.Previous = previous
+	} else if processMayBeRunning {
+		target.PendingRestart = true
+		target.Managed = priorTarget.Managed
+	} else {
+		target.Managed = nil
 	}
 	state.Targets[key] = target
 	if err := writeInstrumentationState(statePath, state); err != nil {
+		if request.Enabled {
+			restoreErr := writeWindowsServiceEnvironment(serviceName, restoreEnvironmentValues(entries, previous))
+			return InstrumentationResult{}, errors.Join(
+				fmt.Errorf("persist Windows-service instrumentation state: %w", err),
+				wrapRollbackError("restore service environment after state-write failure", restoreErr),
+			)
+		}
 		return InstrumentationResult{}, fmt.Errorf("persist Windows-service instrumentation state: %w", err)
 	}
 
 	restarted := false
 	if request.Restart {
 		restarted, err = restartWindowsService(ctx, service)
+		if err == nil {
+			target.PendingRestart = false
+			if !request.Enabled {
+				target.Managed = nil
+			}
+		}
 		if restarted {
 			target.RestartedAt = &now
-			state.Targets[key] = target
-			_ = writeInstrumentationState(statePath, state)
 		}
+		state.Targets[key] = target
+		_ = writeInstrumentationState(statePath, state)
 		if err != nil {
-			return InstrumentationResult{}, fmt.Errorf("service environment was updated and rollback is available, but restart failed: %w", err)
+			if request.Enabled {
+				restoreErr := writeWindowsServiceEnvironment(serviceName, restoreEnvironmentValues(entries, previous))
+				target.Enabled = false
+				target.Previous = nil
+				target.Managed = nil
+				target.LastError = "instrumentation activation failed and was rolled back: " + err.Error()
+				state.Targets[key] = target
+				stateErr := writeInstrumentationState(statePath, state)
+				recoveryErr := recoverWindowsServiceAfterRollback(ctx, service)
+				return InstrumentationResult{}, errors.Join(
+					fmt.Errorf("Windows-service instrumentation restart failed and changes were rolled back: %w", err),
+					wrapRollbackError("restore service environment", restoreErr),
+					wrapRollbackError("persist rolled-back instrumentation state", stateErr),
+					wrapRollbackError("restore service operation", recoveryErr),
+				)
+			}
+			recoveryErr := recoverWindowsServiceAfterRollback(ctx, service)
+			return InstrumentationResult{}, errors.Join(
+				fmt.Errorf("service environment was restored, but the service restart failed: %w", err),
+				wrapRollbackError("restore service operation", recoveryErr),
+			)
 		}
 	}
 
 	stateName := "none"
 	message := "OpenTelemetry settings removed and the original service environment restored"
+	if target.PendingRestart {
+		stateName = "pending"
+		message = "OpenTelemetry settings removed; restart the Windows service to unload the managed runtime"
+	}
 	if request.Enabled {
 		stateName = "pending"
 		message = "OpenTelemetry settings applied; restart the Windows service to activate tracing"
@@ -130,6 +184,13 @@ func applyWindowsServiceInstrumentation(ctx context.Context, statePath, bundlePa
 		ServiceName: request.ServiceName, Restarted: restarted,
 		Rollback: request.Enabled && len(previous) > 0, Message: message,
 	}, nil
+}
+
+func wrapRollbackError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", operation, err)
 }
 
 // jsonUnmarshal is replaceable in Windows unit tests alongside the existing
@@ -339,6 +400,29 @@ func restartWindowsService(ctx context.Context, service *mgr.Service) (bool, err
 		return false, err
 	}
 	return true, nil
+}
+
+func recoverWindowsServiceAfterRollback(ctx context.Context, service *mgr.Service) error {
+	status, err := service.Query()
+	if err != nil {
+		return err
+	}
+	if status.State == svc.Running {
+		return nil
+	}
+	if status.State == svc.StopPending {
+		if err := waitForServiceState(ctx, service, svc.Stopped, 45*time.Second); err != nil {
+			return err
+		}
+		status.State = svc.Stopped
+	}
+	if status.State != svc.Stopped {
+		return fmt.Errorf("service is in state %d after rollback", status.State)
+	}
+	if err := service.Start(); err != nil {
+		return fmt.Errorf("restart service after rollback: %w", err)
+	}
+	return waitForServiceState(ctx, service, svc.Running, 45*time.Second)
 }
 
 func waitForServiceState(ctx context.Context, service *mgr.Service, wanted svc.State, timeout time.Duration) error {

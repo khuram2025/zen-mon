@@ -8,7 +8,7 @@ import (
 )
 
 func TestAgentVersionAndCapabilitiesContract(t *testing.T) {
-	if AgentVersion != "1.11.2" {
+	if AgentVersion != "1.12.4" {
 		t.Fatalf("unexpected agent version %q", AgentVersion)
 	}
 	want := []string{
@@ -16,6 +16,7 @@ func TestAgentVersionAndCapabilitiesContract(t *testing.T) {
 		"apm_gateway_v1", "apm_runtime_discovery_v1",
 		"apm_iis_instrumentation_v1", "apm_windows_service_instrumentation_v1",
 		"apm_runtime_health_v1",
+		"clone_identity_assignment_v1",
 	}
 	if !reflect.DeepEqual(AgentCapabilities, want) {
 		t.Fatalf("capabilities changed: got %v want %v", AgentCapabilities, want)
@@ -67,6 +68,24 @@ func TestHeartbeatResponseCarriesReadOnlyApplianceAPMStatus(t *testing.T) {
 	}
 	if response.APM.AcceptedSpansTotal != 42 || response.APM.QueueDepth != 2 {
 		t.Fatalf("APM insights were not decoded: %#v", response.APM)
+	}
+}
+
+func TestBatchCarriesCollectorHealth(t *testing.T) {
+	b, err := json.Marshal(Batch{Health: Health{
+		Status:          "degraded",
+		CollectorErrors: map[string]string{"memory": "counter unavailable"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatal(err)
+	}
+	health, ok := raw["health"].(map[string]any)
+	if !ok || health["status"] != "degraded" {
+		t.Fatalf("batch health missing from JSON: %s", b)
 	}
 }
 

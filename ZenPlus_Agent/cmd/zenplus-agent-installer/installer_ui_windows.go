@@ -27,11 +27,11 @@ var (
 	setupLine    = walk.RGB(226, 232, 240)
 	setupText    = walk.RGB(15, 23, 42)
 	setupMuted   = walk.RGB(83, 96, 116)
-	setupAccent  = walk.RGB(0, 137, 129)
+	setupAccent  = walk.RGB(0, 105, 98)
 	setupBlue    = walk.RGB(12, 106, 228)
-	setupGreen   = walk.RGB(49, 181, 64)
-	setupAmber   = walk.RGB(204, 135, 25)
-	setupRed     = walk.RGB(210, 62, 62)
+	setupGreen   = walk.RGB(22, 101, 52)
+	setupAmber   = walk.RGB(146, 64, 14)
+	setupRed     = walk.RGB(180, 35, 24)
 	setupOverlay = walk.RGB(236, 250, 248)
 )
 
@@ -59,6 +59,8 @@ type setupWindow struct {
 	installButton         *walk.PushButton
 	cancelButton          *walk.PushButton
 	finished              bool
+	working               bool
+	resultErr             error
 }
 
 type uninstallWindow struct {
@@ -75,6 +77,8 @@ type uninstallWindow struct {
 	uninstallButton *walk.PushButton
 	cancelButton    *walk.PushButton
 	finished        bool
+	working         bool
+	resultErr       error
 }
 
 func runSetupUI(opts options, elevated bool) error {
@@ -88,6 +92,7 @@ func runUninstallUI(opts options, elevated bool) error {
 }
 
 func (u *setupWindow) run() error {
+	u.hydrateExistingInstall()
 	defaultMachine := u.opts.machine || (u.elevated && !u.opts.user)
 	defaultUser := !defaultMachine
 	icon := setupIcon()
@@ -101,9 +106,10 @@ func (u *setupWindow) run() error {
 		Layout:     VBox{MarginsZero: true, Spacing: 0},
 		Children: []Widget{
 			setupHeader("Install "+productName, "Version "+model.AgentVersion+" | Guided Windows setup"),
-			Composite{
-				Background: SolidColorBrush{Color: setupBG},
-				Layout:     VBox{Margins: Margins{Left: 16, Top: 14, Right: 16, Bottom: 12}, Spacing: 10},
+			ScrollView{
+				Background:      SolidColorBrush{Color: setupBG},
+				HorizontalFixed: true,
+				Layout:          VBox{Margins: Margins{Left: 16, Top: 14, Right: 16, Bottom: 12}, Spacing: 10},
 				Children: []Widget{
 					u.scopePanel(defaultUser, defaultMachine),
 					u.settingsPanel(),
@@ -117,6 +123,12 @@ func (u *setupWindow) run() error {
 	if err != nil {
 		return err
 	}
+	u.window.Closing().Attach(func(canceled *bool, _ walk.CloseReason) {
+		if u.working {
+			*canceled = true
+			u.setStatusDirect("Setup is applying changes and cannot be closed yet.", setupAmber)
+		}
+	})
 	if u.userScope != nil {
 		u.userScope.SetChecked(defaultUser)
 	}
@@ -134,13 +146,46 @@ func (u *setupWindow) run() error {
 	}
 	u.updateInstallEnabled()
 	u.window.Run()
-	return nil
+	return u.resultErr
+}
+
+func (u *setupWindow) hydrateExistingInstall() {
+	if !u.opts.machine && !u.opts.user {
+		switch {
+		case machineInstallPresent():
+			u.opts.machine = true
+		case userInstallPresent():
+			u.opts.user = true
+		default:
+			// Server monitoring and managed application instrumentation require
+			// the Windows service, so make the professional machine install the
+			// fresh-install default.
+			u.opts.machine = true
+		}
+	}
+	l, err := newLayout(u.opts, u.elevated)
+	if err != nil {
+		return
+	}
+	if _, err := os.Stat(l.ConfigPath); err != nil {
+		return
+	}
+	cfg, err := config.LoadForEdit(l.ConfigPath)
+	if err != nil {
+		return
+	}
+	if strings.TrimSpace(u.opts.controllerURL) == "" {
+		u.opts.controllerURL = cfg.ControllerURL
+	}
+	if strings.TrimSpace(u.opts.profile) == "" {
+		u.opts.profile = cfg.APM.Profile
+	}
 }
 
 func (u *setupWindow) scopePanel(defaultUser, defaultMachine bool) Widget {
-	scopeNote := "Current user installs without administrator approval. All-users installs create a Windows service and require administrator approval."
+	scopeNote := "The all-users Windows service is recommended for reliable server and managed APM monitoring. Current-user mode is intended for evaluation."
 	if !u.elevated {
-		scopeNote = "Current user installs without administrator approval. Choose all users only when you want the Windows service install and can approve the administrator prompt."
+		scopeNote = "The all-users Windows service is recommended for server monitoring and requires administrator approval. Current-user mode is intended for evaluation only."
 	}
 	return GroupBox{
 		Title:      "Installation Scope",
@@ -148,11 +193,11 @@ func (u *setupWindow) scopePanel(defaultUser, defaultMachine bool) Widget {
 		Layout:     VBox{Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 10}, Spacing: 5},
 		Children: []Widget{
 			TextLabel{Text: scopeNote, MinSize: Size{Width: 560, Height: 34}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
-			RadioButton{AssignTo: &u.userScope, Text: "Current user - no administrator approval", OnClicked: func() {
+			RadioButton{AssignTo: &u.userScope, Text: "Current user - evaluation only (no Windows service)", OnClicked: func() {
 				u.userScope.SetChecked(true)
 				u.machineScope.SetChecked(false)
 			}},
-			RadioButton{AssignTo: &u.machineScope, Text: "All users - Windows service installation", OnClicked: func() {
+			RadioButton{AssignTo: &u.machineScope, Text: "All users - Windows service (recommended for servers)", OnClicked: func() {
 				u.userScope.SetChecked(false)
 				u.machineScope.SetChecked(true)
 			}},
@@ -187,7 +232,8 @@ func (u *setupWindow) settingsPanel() Widget {
 			RadioButton{AssignTo: &u.profileCombined, Text: "Server monitoring + APM (recommended)"},
 			RadioButton{AssignTo: &u.profileInfrastructure, Text: "Server monitoring only"},
 			RadioButton{AssignTo: &u.profileAPM, Text: "APM only (keeps agent health and inventory)"},
-			TextLabel{Text: "The APM profile installs a ZenPlus-managed local OpenTelemetry gateway and offline runtime packages. Runtime instrumentation is configured after installation; ingest keys remain on the appliance.", MinSize: Size{Width: 560, Height: 34}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
+			TextLabel{Text: "Every package includes the managed OpenTelemetry gateway plus offline .NET, Java, Node.js, and Python assets. ZenPlus can manage IIS/.NET, Java, and Node Windows-service instrumentation; Python and other applications can send OTLP to 127.0.0.1:4317/4318.", MinSize: Size{Width: 560, Height: 48}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
+			TextLabel{Text: "During an upgrade or removal, Setup briefly stops only application pools and Windows services already managed by ZenPlus, then restores their prior running state. Windows itself is never restarted.", MinSize: Size{Width: 560, Height: 34}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
 			TextLabel{Text: "After installation, this computer registers with the appliance as Pending authorization. An administrator approves it in Agent Fleet; the appliance then issues and manages its protected credential and policy.", MinSize: Size{Width: 560, Height: 46}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
 		},
 	}
@@ -200,7 +246,7 @@ func (u *setupWindow) policyPanel() Widget {
 		Layout:     VBox{Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 10}, Spacing: 7},
 		Children: []Widget{
 			TextEdit{
-				Text:       installPolicyText,
+				Text:       strings.ReplaceAll(installPolicyText, "\n", "\r\n"),
 				ReadOnly:   true,
 				VScroll:    true,
 				Background: SolidColorBrush{Color: setupField},
@@ -261,6 +307,13 @@ func (u *setupWindow) install() {
 		return
 	}
 	opts := u.optionsFromUI()
+	normalizedController, err := config.NormalizeControllerURL(opts.controllerURL)
+	if err != nil {
+		u.setStatus("Enter a valid HTTPS controller URL before continuing.", setupRed)
+		u.appendLog("Controller validation failed: " + err.Error())
+		return
+	}
+	opts.controllerURL = normalizedController
 	launchAfter := u.launchAfter != nil && u.launchAfter.Checked()
 	u.setWorking(true)
 	go func() {
@@ -278,7 +331,12 @@ func (u *setupWindow) install() {
 				u.fail(err)
 				return
 			}
-			u.complete("Administrator approval was opened. Complete the elevated setup to finish the all-users install.", false)
+			if launchAfter {
+				if err := launchDashboard(layout); err != nil {
+					u.appendLog("Dashboard launch failed: " + err.Error())
+				}
+			}
+			u.complete("ZenPlus Agent was installed successfully for all users.", true)
 			return
 		}
 		u.step("Installing files and configuration", 45)
@@ -326,6 +384,7 @@ func (u *setupWindow) updateInstallEnabled() {
 
 func (u *setupWindow) setWorking(working bool) {
 	u.withUI(func() {
+		u.working = working
 		for _, w := range []interface{ SetEnabled(bool) }{
 			u.userScope, u.machineScope, u.controllerURL, u.profileInfrastructure, u.profileAPM, u.profileCombined, u.noStartMenu, u.launchAfter, u.accept,
 		} {
@@ -360,6 +419,8 @@ func (u *setupWindow) appendLog(message string) {
 
 func (u *setupWindow) fail(err error) {
 	u.withUI(func() {
+		u.working = false
+		u.resultErr = err
 		u.setStatusDirect("Setup failed: "+err.Error(), setupRed)
 		if u.progress != nil {
 			u.progress.SetValue(100)
@@ -374,6 +435,7 @@ func (u *setupWindow) fail(err error) {
 
 func (u *setupWindow) complete(message string, installed bool) {
 	u.withUI(func() {
+		u.working = false
 		u.setStatusDirect(message, setupGreen)
 		if u.progress != nil {
 			u.progress.SetValue(100)
@@ -438,9 +500,10 @@ func (u *uninstallWindow) run() error {
 		Layout:     VBox{MarginsZero: true, Spacing: 0},
 		Children: []Widget{
 			setupHeader("Uninstall "+productName, "Remove the agent, shortcuts, and background components"),
-			Composite{
-				Background: SolidColorBrush{Color: setupBG},
-				Layout:     VBox{Margins: Margins{Left: 16, Top: 14, Right: 16, Bottom: 12}, Spacing: 10},
+			ScrollView{
+				Background:      SolidColorBrush{Color: setupBG},
+				HorizontalFixed: true,
+				Layout:          VBox{Margins: Margins{Left: 16, Top: 14, Right: 16, Bottom: 12}, Spacing: 10},
 				Children: []Widget{
 					u.uninstallScopePanel(defaultUser, defaultMachine),
 					u.uninstallProgressPanel(),
@@ -452,6 +515,12 @@ func (u *uninstallWindow) run() error {
 	if err != nil {
 		return err
 	}
+	u.window.Closing().Attach(func(canceled *bool, _ walk.CloseReason) {
+		if u.working {
+			*canceled = true
+			u.setStatusDirect("Uninstall is applying changes and cannot be closed yet.", setupAmber)
+		}
+	})
 	if u.userScope != nil {
 		u.userScope.SetChecked(defaultUser)
 	}
@@ -465,7 +534,7 @@ func (u *uninstallWindow) run() error {
 		}()
 	}
 	u.window.Run()
-	return nil
+	return u.resultErr
 }
 
 func (u *uninstallWindow) uninstallScopePanel(defaultUser, defaultMachine bool) Widget {
@@ -489,7 +558,9 @@ func (u *uninstallWindow) uninstallScopePanel(defaultUser, defaultMachine bool) 
 				u.userScope.SetChecked(false)
 				u.machineScope.SetChecked(true)
 			}},
-			CheckBox{AssignTo: &u.purge, Text: "Also remove local ZenPlus Agent data and logs", Checked: u.opts.purge},
+			CheckBox{AssignTo: &u.purge, Text: "Reset enrollment and remove credentials, buffered telemetry, settings, and logs", Checked: u.opts.purge},
+			TextLabel{Text: "Leave this clear to retain the endpoint identity for a safe reinstall. Select it only when permanently decommissioning this agent; the server-side registration may also need removal in Agent Fleet.", MinSize: Size{Width: 530, Height: 38}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
+			TextLabel{Text: "Before removing runtime files, Setup restores every IIS pool and Windows service instrumented by ZenPlus and restarts only targets that were running.", MinSize: Size{Width: 530, Height: 34}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
 		},
 	}
 }
@@ -554,7 +625,7 @@ func (u *uninstallWindow) uninstall() {
 				u.fail(err)
 				return
 			}
-			u.complete("Administrator approval was opened. Complete the elevated uninstall to remove the all-users install.", false)
+			u.complete("ZenPlus Agent was uninstalled successfully.", true)
 			return
 		}
 		runOpts := opts
@@ -589,6 +660,7 @@ func (u *uninstallWindow) optionsFromUI() options {
 
 func (u *uninstallWindow) setWorking(working bool) {
 	u.withUI(func() {
+		u.working = working
 		for _, w := range []interface{ SetEnabled(bool) }{u.userScope, u.machineScope, u.purge} {
 			if w != nil {
 				w.SetEnabled(!working)
@@ -619,6 +691,8 @@ func (u *uninstallWindow) appendLog(message string) {
 
 func (u *uninstallWindow) fail(err error) {
 	u.withUI(func() {
+		u.working = false
+		u.resultErr = err
 		u.setStatusDirect("Uninstall failed: "+err.Error(), setupRed)
 		if u.progress != nil {
 			u.progress.SetValue(100)
@@ -633,6 +707,7 @@ func (u *uninstallWindow) fail(err error) {
 
 func (u *uninstallWindow) complete(message string, removed bool) {
 	u.withUI(func() {
+		u.working = false
 		u.setStatusDirect(message, setupGreen)
 		if u.progress != nil {
 			u.progress.SetValue(100)
@@ -780,6 +855,12 @@ func commandArgsFromOptions(opts options, uninstall bool, quiet bool) []string {
 	if opts.noStartMenu {
 		args = append(args, "/no-start-menu")
 	}
+	if opts.noRestart {
+		args = append(args, "/norestart")
+	}
+	if opts.managedByMSI {
+		args = append(args, "/managed-by-msi")
+	}
 	if opts.fromTemp {
 		args = append(args, "/from-temp")
 	}
@@ -788,6 +869,9 @@ func commandArgsFromOptions(opts options, uninstall bool, quiet bool) []string {
 	}
 	if opts.controllerURL != "" {
 		args = append(args, "CONTROLLER_URL="+opts.controllerURL)
+	}
+	if opts.controllerCA != "" {
+		args = append(args, "CONTROLLER_CA_FILE="+opts.controllerCA)
 	}
 	if opts.apmMode == "enabled" {
 		args = append(args, "APM_ENABLED=1")

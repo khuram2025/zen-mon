@@ -19,6 +19,7 @@ type Paths struct {
 	CredentialMeta          string
 	PendingSecret           string
 	APMCredential           string
+	APMCredentialMeta       string
 	APMDir                  string
 	APMConfig               string
 	APMStorage              string
@@ -46,6 +47,7 @@ func NewPaths(dataDir string) Paths {
 		CredentialMeta:          filepath.Join(state, "credential.json"),
 		PendingSecret:           filepath.Join(state, "pending-secret.dpapi"),
 		APMCredential:           filepath.Join(state, "apm-credential.dpapi"),
+		APMCredentialMeta:       filepath.Join(state, "apm-credential.json"),
 		APMDir:                  apmDir,
 		APMConfig:               filepath.Join(apmDir, "collector.yaml"),
 		APMStorage:              filepath.Join(apmDir, "storage"),

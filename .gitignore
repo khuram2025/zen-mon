@@ -103,6 +103,7 @@ poller/internal/checker/.netpath-presync-backup/
 
 # ─── Working artifacts (per-VM, never commit) ───
 .playwright-mcp/
+.deploy-inspect/
 *.png
 Documentation/prv.txt
 Documentation/srv_response.txt

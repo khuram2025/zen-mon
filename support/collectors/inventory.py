@@ -22,11 +22,18 @@ TRACKED_SERVICES = (
     "zenplus-updater.service",
     "zenplus-updater.timer",
     "zenplus-wait-deps",
+    "zenplus-netflow-collector.service",
+    "zenplus-support-cleanup.timer",
     "nginx",
     "postgresql",
     "redis-server",
     "docker",
 )
+
+# ``zenplus-updater.service`` is a timer-triggered oneshot. Its healthy steady
+# state between checks is inactive; treating that as a service outage creates
+# a warning in every healthy support bundle.
+IDLE_ALLOWED_SERVICES = {"zenplus-updater.service"}
 
 VERSION_PROBES = (
     ("python", ["python3", "--version"]),
@@ -51,7 +58,13 @@ def collect(ctx: CollectorContext) -> CollectorResult:
     # 2. systemd service state for every tracked unit.
     services = {unit: _systemctl_is_active(unit) for unit in TRACKED_SERVICES}
     result.files["inventory/services.json"] = _dump({"services": services})
-    if any(state not in ("active", "running") for state in services.values()):
+    unhealthy = {
+        unit: state
+        for unit, state in services.items()
+        if state == "failed"
+        or (unit not in IDLE_ALLOWED_SERVICES and state not in ("active", "running"))
+    }
+    if unhealthy:
         result.warn("one or more tracked services not active")
 
     # 3. Docker containers (ClickHouse runs in one).
@@ -107,6 +120,17 @@ def _docker_ps(result: CollectorResult) -> dict:
          "{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.RunningFor}}"],
         timeout=8,
     )
+    if captured.get("exit_code") != 0:
+        # Expected under the hardened service: Docker's socket is hidden even
+        # if the application account belongs to the docker group. Service and
+        # ClickHouse HTTP checks provide the useful health signal without
+        # making the worker root-equivalent.
+        return {
+            "available": False,
+            "intentionally_restricted": True,
+            "exit_code": captured.get("exit_code"),
+            "error": captured.get("stderr", "")[:2000],
+        }
     rows = []
     for line in (captured.get("stdout") or "").splitlines():
         parts = line.split("\t")

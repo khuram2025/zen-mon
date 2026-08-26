@@ -30,6 +30,30 @@ def test_url_password_is_masked_but_user_and_host_preserved():
     assert "url_password" in r.counts
 
 
+def test_token_only_url_userinfo_is_masked():
+    out = Redactor().apply("GET https://secret-token@example.test/path")
+    assert "secret-token" not in out
+    assert "@example.test" in out
+
+
+def test_embedded_cookies_and_opaque_authorization_are_masked():
+    text = 'request headers="Cookie: session=topsecret" Authorization: opaque-secret\n'
+    out = Redactor().apply(text)
+    assert "topsecret" not in out
+    assert "opaque-secret" not in out
+
+
+def test_query_xml_and_curl_passwords_are_masked():
+    text = (
+        "https://example.test/?password=query-secret&safe=1\n"
+        "<client_secret>xml-secret</client_secret>\n"
+        "curl -u alice:cli-secret https://example.test\n"
+    )
+    out = Redactor().apply(text)
+    for secret in ("query-secret", "xml-secret", "cli-secret"):
+        assert secret not in out
+
+
 def test_bearer_token_is_masked():
     r = Redactor()
     out = r.apply("Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.xyz")

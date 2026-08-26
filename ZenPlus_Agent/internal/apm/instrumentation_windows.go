@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,7 +15,10 @@ import (
 	"time"
 )
 
-const dotnetProfilerID = "{918728DD-259F-4A6A-AC2B-B85E1B658318}"
+const (
+	dotnetProfilerID             = "{918728DD-259F-4A6A-AC2B-B85E1B658318}"
+	iisConfigurationResultPrefix = "__ZENPLUS_IIS_RESULT__"
+)
 
 type iisScriptPayload struct {
 	Mode     string             `json:"mode"`
@@ -48,7 +52,7 @@ func applyIISInstrumentation(ctx context.Context, statePath, bundleRoot string, 
 	} else {
 		payload.Mode = "disable"
 		payload.Previous = priorTarget.Previous
-		if !priorTarget.Enabled && len(priorTarget.Previous) == 0 {
+		if !priorTarget.Enabled && !priorTarget.PendingRestart && len(priorTarget.Previous) == 0 {
 			return InstrumentationResult{
 				State: "none", TargetKind: request.TargetKind, TargetName: request.TargetName,
 				ServiceName: request.ServiceName, Message: "IIS application pool is not managed by ZenPlus",
@@ -74,20 +78,68 @@ func applyIISInstrumentation(ctx context.Context, statePath, bundleRoot string, 
 		}
 	} else {
 		target.Previous = nil
-		target.Managed = nil
+		if !request.Restart && (priorTarget.Enabled || priorTarget.PendingRestart) {
+			target.PendingRestart = true
+			target.Managed = priorTarget.Managed
+		} else {
+			target.Managed = nil
+		}
 	}
 	if result.Restarted {
 		target.RestartedAt = &now
 	}
 	state.Targets[key] = target
 	if err := writeInstrumentationState(statePath, state); err != nil {
+		if request.Enabled {
+			_, rollbackErr := runIISConfigurationScript(ctx, iisScriptPayload{
+				Mode: "disable", Target: request.TargetName, Previous: target.Previous,
+			})
+			return InstrumentationResult{}, errors.Join(
+				fmt.Errorf("persist IIS instrumentation state: %w", err),
+				wrapRollbackError("restore IIS environment after state-write failure", rollbackErr),
+			)
+		}
 		return InstrumentationResult{}, fmt.Errorf("persist IIS instrumentation state: %w", err)
 	}
 	if result.RestartError != "" {
-		return InstrumentationResult{}, fmt.Errorf("IIS environment was updated but the application pool could not be recycled: %s", result.RestartError)
+		if request.Enabled {
+			rollback, rollbackErr := runIISConfigurationScript(ctx, iisScriptPayload{
+				Mode: "disable", Target: request.TargetName, Previous: target.Previous, Restart: true,
+			})
+			if rollbackErr != nil {
+				return InstrumentationResult{}, errors.Join(
+					fmt.Errorf("IIS application-pool recycle failed after instrumentation: %s", result.RestartError),
+					fmt.Errorf("automatic IIS instrumentation rollback failed: %w", rollbackErr),
+				)
+			}
+			target.Enabled = false
+			target.Previous = nil
+			target.Managed = nil
+			target.LastError = "instrumentation activation failed and was rolled back: " + result.RestartError
+			state.Targets[key] = target
+			stateErr := writeInstrumentationState(statePath, state)
+			var recycleErr error
+			if rollback.RestartError != "" {
+				recycleErr = fmt.Errorf("recycle IIS application pool after rollback: %s", rollback.RestartError)
+			}
+			return InstrumentationResult{}, errors.Join(
+				fmt.Errorf("IIS instrumentation activation failed and changes were rolled back: %s", result.RestartError),
+				wrapRollbackError("persist rolled-back IIS instrumentation state", stateErr),
+				recycleErr,
+			)
+		}
+		target.PendingRestart = true
+		target.Managed = priorTarget.Managed
+		state.Targets[key] = target
+		_ = writeInstrumentationState(statePath, state)
+		return InstrumentationResult{}, fmt.Errorf("IIS environment was restored but the application pool could not be recycled: %s", result.RestartError)
 	}
 	stateName := "none"
 	message := "OpenTelemetry settings removed and the original application-pool environment restored"
+	if target.PendingRestart {
+		stateName = "pending"
+		message = "OpenTelemetry settings removed; recycle the application pool to unload the managed profiler"
+	}
 	if request.Enabled {
 		stateName = "pending"
 		message = "OpenTelemetry settings applied; recycle the application pool to activate tracing"
@@ -156,9 +208,32 @@ func runIISConfigurationScript(ctx context.Context, payload iisScriptPayload) (i
 	if err != nil {
 		return iisScriptResult{}, fmt.Errorf("configure IIS application pool: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	var result iisScriptResult
-	if err := json.Unmarshal([]byte(strings.TrimSpace(string(output))), &result); err != nil {
+	result, err := decodeIISConfigurationResult(output)
+	if err != nil {
 		return iisScriptResult{}, fmt.Errorf("decode IIS configuration result: %w", err)
+	}
+	return result, nil
+}
+
+func decodeIISConfigurationResult(output []byte) (iisScriptResult, error) {
+	text := strings.ReplaceAll(string(output), "\r\n", "\n")
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, iisConfigurationResultPrefix) {
+			continue
+		}
+		var result iisScriptResult
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, iisConfigurationResultPrefix)), &result); err != nil {
+			return iisScriptResult{}, err
+		}
+		return result, nil
+	}
+
+	// Accept the original single-JSON-object output for compatibility with
+	// tests and diagnostics captured before the result marker was introduced.
+	var result iisScriptResult
+	if err := json.Unmarshal([]byte(strings.TrimSpace(text)), &result); err != nil {
+		return iisScriptResult{}, err
 	}
 	return result, nil
 }
@@ -213,7 +288,7 @@ try {
         $entry = $environmentVariables.CreateElement('add')
         $entry['name'] = $name
         $entry['value'] = [string]$property.Value
-        $environmentVariables.Add($entry)
+        [void]$environmentVariables.Add($entry)
       } else {
         $previous[$name] = [string]$entry['value']
         $entry['value'] = [string]$property.Value
@@ -232,7 +307,7 @@ try {
         $entry = $environmentVariables.CreateElement('add')
         $entry['name'] = $name
         $entry['value'] = [string]$property.Value
-        $environmentVariables.Add($entry)
+        [void]$environmentVariables.Add($entry)
       } else {
         $entry['value'] = [string]$property.Value
       }
@@ -247,13 +322,16 @@ try {
       $manager = New-Object Microsoft.Web.Administration.ServerManager
       $pool = $manager.ApplicationPools[[string]$payload.target]
       if ($null -eq $pool) { throw "IIS application pool disappeared before recycle" }
-      [void]$pool.Recycle()
-      $restarted = $true
+      if ([string]$pool.State -eq 'Started') {
+        [void]$pool.Recycle()
+        $restarted = $true
+      }
     } catch {
       $restartError = $_.Exception.Message
     }
   }
-  @{ previous = $previous; restarted = $restarted; restart_error = $restartError } | ConvertTo-Json -Compress -Depth 5
+  $resultJson = @{ previous = $previous; restarted = $restarted; restart_error = $restartError } | ConvertTo-Json -Compress -Depth 5
+  Write-Output ('__ZENPLUS_IIS_RESULT__' + $resultJson)
 } finally {
   if ($null -ne $manager) { $manager.Dispose() }
 }`

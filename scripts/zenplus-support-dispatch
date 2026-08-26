@@ -1,0 +1,48 @@
+#!/bin/sh
+# Stable, root-owned entry point used by zenplus-support-dispatch.service.
+#
+# The service runs this script as the unprivileged ``zenplus`` account. Keeping
+# the tiny dispatcher outside /opt/zenplus lets an OTA rollback continue to
+# process queued requests through the long-standing ``python -m support --job``
+# worker ABI without restoring any sudo or polkit grant.
+
+set -eu
+
+request_dir=/opt/zenplus/support/requests
+
+for request_path in "${request_dir}"/*.json; do
+    # A non-matching glob is left literal by POSIX sh.
+    if [ ! -e "${request_path}" ] && [ ! -L "${request_path}" ]; then
+        exit 0
+    fi
+
+    # The queue directory is writable by the application account. Refuse and
+    # remove links, devices, sockets, and any file not owned by that account.
+    if [ -L "${request_path}" ] || [ ! -f "${request_path}" ]; then
+        logger -t zenplus-support-dispatch -- "discarding unsafe queue entry"
+        rm -f -- "${request_path}"
+        continue
+    fi
+    if [ "$(stat -c %U -- "${request_path}")" != "zenplus" ]; then
+        logger -t zenplus-support-dispatch -- "discarding queue entry with unexpected owner"
+        rm -f -- "${request_path}"
+        continue
+    fi
+
+    file_name=${request_path##*/}
+    job_id=${file_name%.json}
+    if ! printf '%s\n' "${job_id}" | /usr/bin/grep -Eq \
+        '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then
+        logger -t zenplus-support-dispatch -- "discarding queue entry with invalid job id"
+        rm -f -- "${request_path}"
+        continue
+    fi
+
+    # The worker records its own terminal failure state. Always consume the
+    # request afterwards so a malformed request cannot make the path unit spin.
+    /opt/zenplus/venv/bin/python -m support --job "${job_id}" || true
+    rm -f -- "${request_path}"
+    exit 0
+done
+
+exit 0

@@ -3,6 +3,11 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -10,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -20,8 +26,11 @@ import (
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 
+	apmruntime "zenplus-agent/internal/apm"
 	"zenplus-agent/internal/config"
+	"zenplus-agent/internal/identity"
 	"zenplus-agent/internal/model"
+	agentruntime "zenplus-agent/internal/runtime"
 )
 
 const (
@@ -38,6 +47,7 @@ type payloadFile struct {
 
 type options struct {
 	quiet         bool
+	verifyPayload bool
 	uninstall     bool
 	purge         bool
 	noStartMenu   bool
@@ -48,6 +58,7 @@ type options struct {
 	autoUninstall bool
 	managedByMSI  bool
 	controllerURL string
+	controllerCA  string
 	apmMode       string
 	profile       string
 }
@@ -67,7 +78,17 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if opts.verifyPayload {
+		return verifyEmbeddedInstallerPayload()
+	}
 	elevated := isElevated()
+	if !opts.uninstall && !opts.fromTemp {
+		if relaunched, err := relaunchSetupFromTempIfInstalled(elevated, os.Args[1:], opts.quiet); err != nil {
+			return err
+		} else if relaunched {
+			return nil
+		}
+	}
 	if !opts.quiet {
 		if opts.uninstall {
 			return runUninstallUI(opts, elevated)
@@ -94,6 +115,43 @@ func run() error {
 	return install(layout, opts)
 }
 
+func relaunchSetupFromTempIfInstalled(elevated bool, args []string, wait bool) (bool, error) {
+	for _, scoped := range []options{{machine: true}, {user: true}} {
+		l, err := newLayout(scoped, elevated)
+		if err != nil {
+			return false, err
+		}
+		if !selfInside(l.InstallDir) {
+			continue
+		}
+		tempExe, err := copySelfToTemp()
+		if err != nil {
+			return false, err
+		}
+		cmd := exec.Command(tempExe, ensureArg(args, "/from-temp")...)
+		if !wait {
+			if err := cmd.Start(); err != nil {
+				_ = os.RemoveAll(filepath.Dir(tempExe))
+				return false, err
+			}
+			return true, nil
+		}
+		defer os.RemoveAll(filepath.Dir(tempExe))
+		cmd.SysProcAttr = hiddenSysProcAttr()
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			detail := strings.TrimSpace(stderr.String())
+			if detail != "" {
+				return true, fmt.Errorf("temporary setup failed: %w: %s", err, detail)
+			}
+			return true, fmt.Errorf("temporary setup failed: %w", err)
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 func parseOptions(args []string) (options, error) {
 	var opts options
 	normalized := make([]string, 0, len(args))
@@ -106,6 +164,8 @@ func parseOptions(args []string) (options, error) {
 			switch strings.ToUpper(strings.TrimSpace(key)) {
 			case "CONTROLLER_URL":
 				normalized = append(normalized, "-controller-url", value)
+			case "CONTROLLER_CA_FILE":
+				normalized = append(normalized, "-controller-ca-file", value)
 			case "APM_ENABLED":
 				normalized = append(normalized, "-apm-enabled", value)
 			case "INSTALL_PROFILE":
@@ -125,6 +185,7 @@ func parseOptions(args []string) (options, error) {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	fs.BoolVar(&opts.quiet, "quiet", false, "run without prompts")
 	fs.BoolVar(&opts.quiet, "qn", false, "run without prompts")
+	fs.BoolVar(&opts.verifyPayload, "verify-payload", false, "verify the embedded installer payload and exit")
 	fs.BoolVar(&opts.uninstall, "uninstall", false, "uninstall ZenPlus Agent")
 	fs.BoolVar(&opts.purge, "purge", false, "remove ProgramData state during uninstall")
 	fs.BoolVar(&opts.noStartMenu, "no-start-menu", false, "skip Start Menu shortcut creation")
@@ -135,6 +196,7 @@ func parseOptions(args []string) (options, error) {
 	fs.BoolVar(&opts.autoUninstall, "auto-uninstall", false, "internal UI uninstall continuation")
 	fs.BoolVar(&opts.managedByMSI, "managed-by-msi", false, "let Windows Installer own Apps and Features registration")
 	fs.StringVar(&opts.controllerURL, "controller-url", "", "controller URL")
+	fs.StringVar(&opts.controllerCA, "controller-ca-file", "", "PEM CA bundle for the controller TLS certificate")
 	fs.StringVar(&opts.apmMode, "apm-enabled", "", "enable or disable local APM monitoring")
 	fs.StringVar(&opts.profile, "profile", "", "installation profile: infrastructure, apm, or combined")
 	fs.SetOutput(os.Stderr)
@@ -244,60 +306,492 @@ func pathWithin(parent string, child string) bool {
 	return rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel))
 }
 
-func install(l layout, opts options) error {
-	logStep(opts, "Installing %s %s (%s)", productName, model.AgentVersion, l.Scope)
-	if l.Scope == "machine" {
-		if err := uninstallService(l); err != nil {
+func preflightInstall(opts options) ([]payloadFile, error) {
+	candidate := config.Default()
+	if opts.controllerURL != "" {
+		normalized, err := config.NormalizeControllerURL(opts.controllerURL)
+		if err != nil {
+			return nil, fmt.Errorf("validate controller URL: %w", err)
+		}
+		candidate.ControllerURL = normalized
+	}
+	profile := opts.profile
+	if profile == "" && opts.apmMode != "" {
+		if opts.apmMode == "disabled" {
+			profile = "infrastructure"
+		} else {
+			profile = "combined"
+		}
+	}
+	if profile != "" {
+		if err := config.ApplyProfile(&candidate, profile); err != nil {
+			return nil, fmt.Errorf("validate monitoring profile: %w", err)
+		}
+	}
+	if err := candidate.Validate(); err != nil {
+		return nil, fmt.Errorf("validate installation configuration: %w", err)
+	}
+	payloads, err := verifiedEmbeddedInstallerPayloads()
+	if err != nil {
+		return nil, err
+	}
+	return payloads, nil
+}
+
+func verifyEmbeddedInstallerPayload() error {
+	_, err := verifiedEmbeddedInstallerPayloads()
+	return err
+}
+
+func verifiedEmbeddedInstallerPayloads() ([]payloadFile, error) {
+	payloads, err := embeddedPayloads()
+	if err != nil {
+		return nil, err
+	}
+	if err := validateEmbeddedPayloads(payloads); err != nil {
+		return nil, err
+	}
+	return payloads, nil
+}
+
+func validateEmbeddedPayloads(payloads []payloadFile) error {
+	byName := make(map[string][]byte, len(payloads))
+	for _, payload := range payloads {
+		name, err := canonicalPayloadName(payload.Name)
+		if err != nil {
 			return err
 		}
-	}
-	terminateZenPlusProcesses(15 * time.Second)
-	iisStopped := false
-	if _, err := os.Stat(filepath.Join(l.InstallDir, "apm", "instrumentation")); err == nil &&
-		len(findProcesses(map[string]bool{"w3wp.exe": true}, uint32(os.Getpid()))) > 0 {
-		if err := runCommand("iisreset.exe", "/stop"); err != nil {
-			return fmt.Errorf("stop IIS for profiler upgrade: %w", err)
+		// NuGet packages legitimately use zero-byte `_._` placeholder files.
+		// APM files are accepted here only provisionally: the signed bundle
+		// manifest below must list every one with its exact size and SHA-256.
+		if len(payload.Data) == 0 && !strings.HasPrefix(name, "apm/") {
+			return fmt.Errorf("installer payload %q is empty", payload.Name)
 		}
-		iisStopped = true
-		defer func() {
-			if iisStopped {
-				_ = runCommandAllowFailure("iisreset.exe", "/start")
-			}
-		}()
+		if _, duplicate := byName[name]; duplicate {
+			return fmt.Errorf("installer payload %q is duplicated", payload.Name)
+		}
+		byName[name] = payload.Data
 	}
-	removeLegacyRuntime(l)
-	removeOppositeScopeShortcuts(l)
-	if err := os.MkdirAll(l.InstallDir, 0o755); err != nil {
-		return err
+	requiredFiles := []string{
+		"zenplus-agent.exe",
+		"zenplus-agentctl.exe",
+		"zenplus-agent-app.exe",
+		"zenplus-agent-user.exe",
+		"apm/bundle-manifest.json",
+		"apm/gateway/zenplus-telemetry-gateway.exe",
+		"apm/instrumentation/dotnet/net/opentelemetry.autoinstrumentation.startuphook.dll",
+		"apm/instrumentation/dotnet/win-x64/opentelemetry.autoinstrumentation.native.dll",
+		"apm/instrumentation/java/opentelemetry-javaagent.jar",
+		"apm/instrumentation/node/bootstrap.js",
+		"apm/instrumentation/node/node_modules/@opentelemetry/auto-instrumentations-node/package.json",
+		"apm/instrumentation/python/wheelhouse/opentelemetry_distro-0.65b0-py3-none-any.whl",
+		"apm/instrumentation/python/wheelhouse/opentelemetry_instrumentation_flask-0.65b0-py3-none-any.whl",
+		"apm/instrumentation/python/wheelhouse/opentelemetry_instrumentation_requests-0.65b0-py3-none-any.whl",
+		"apm/instrumentation/python/install-zenpluspythontracing.ps1",
+		"apm/instrumentation/python/constraints.txt",
+		"apm/instrumentation/python/readme.txt",
 	}
-	if err := os.MkdirAll(l.ConfigDir, 0o755); err != nil {
-		return err
+	for _, name := range requiredFiles {
+		if len(byName[name]) == 0 {
+			return fmt.Errorf("installer APM/server payload is incomplete: required file %q is missing", name)
+		}
 	}
+	var manifest struct {
+		Components []struct {
+			Name string `json:"name"`
+		} `json:"components"`
+		Files []struct {
+			Path   string `json:"path"`
+			Size   int64  `json:"size"`
+			SHA256 string `json:"sha256"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(byName["apm/bundle-manifest.json"], &manifest); err != nil {
+		return fmt.Errorf("parse embedded APM bundle manifest: %w", err)
+	}
+	components := make(map[string]bool, len(manifest.Components))
+	for _, component := range manifest.Components {
+		name := strings.ToLower(strings.TrimSpace(component.Name))
+		if name == "" {
+			return fmt.Errorf("installer APM bundle manifest contains an unnamed component")
+		}
+		if components[name] {
+			return fmt.Errorf("installer APM bundle manifest duplicates component %q", component.Name)
+		}
+		components[name] = true
+	}
+	for _, name := range []string{
+		"zenplus-telemetry-gateway",
+		"opentelemetry-dotnet-auto",
+		"opentelemetry-javaagent",
+		"opentelemetry-node-auto",
+		"opentelemetry-python-auto",
+	} {
+		if !components[name] {
+			return fmt.Errorf("installer APM bundle is incomplete: component %q is missing", name)
+		}
+	}
+	if len(manifest.Files) == 0 {
+		return fmt.Errorf("installer APM bundle manifest has no file inventory")
+	}
+	seenManifestFiles := make(map[string]bool, len(manifest.Files))
+	for _, file := range manifest.Files {
+		manifestName, err := canonicalManifestFileName(file.Path)
+		if err != nil {
+			return err
+		}
+		name := "apm/" + manifestName
+		if seenManifestFiles[name] {
+			return fmt.Errorf("installer APM bundle manifest duplicates file %q", file.Path)
+		}
+		seenManifestFiles[name] = true
+		data, found := byName[name]
+		if !found {
+			return fmt.Errorf("installer APM bundle manifest file %q is missing", file.Path)
+		}
+		if file.Size < 0 || int64(len(data)) != file.Size {
+			return fmt.Errorf("installer APM bundle manifest file %q has size %d, expected %d", file.Path, len(data), file.Size)
+		}
+		digest := sha256.Sum256(data)
+		want := strings.TrimSpace(file.SHA256)
+		if len(want) != sha256.Size*2 || !strings.EqualFold(hex.EncodeToString(digest[:]), want) {
+			return fmt.Errorf("installer APM bundle manifest file %q failed SHA-256 verification", file.Path)
+		}
+	}
+	for name := range byName {
+		if name == "apm/bundle-manifest.json" || !strings.HasPrefix(name, "apm/") {
+			continue
+		}
+		if !seenManifestFiles[name] {
+			return fmt.Errorf("installer APM payload %q is not listed in the bundle manifest", name)
+		}
+	}
+	return nil
+}
 
-	payloads, err := embeddedPayloads()
+func canonicalPayloadName(name string) (string, error) {
+	name = strings.TrimSpace(filepath.ToSlash(name))
+	if name == "" {
+		return "", fmt.Errorf("installer payload name is empty")
+	}
+	if strings.HasPrefix(name, "/") || filepath.IsAbs(filepath.FromSlash(name)) {
+		return "", fmt.Errorf("installer payload %q uses an absolute path", name)
+	}
+	clean := filepath.ToSlash(filepath.Clean(filepath.FromSlash(name)))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("installer payload %q escapes the installation directory", name)
+	}
+	return strings.ToLower(clean), nil
+}
+
+func canonicalManifestFileName(name string) (string, error) {
+	clean, err := canonicalPayloadName(name)
+	if err != nil {
+		return "", fmt.Errorf("invalid APM bundle manifest path %q: %w", name, err)
+	}
+	if clean == "bundle-manifest.json" || strings.HasPrefix(clean, "apm/") {
+		return "", fmt.Errorf("invalid APM bundle manifest path %q", name)
+	}
+	return clean, nil
+}
+
+func stopManagedWindowsServices(targets []string) ([]string, error) {
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	manager, err := mgr.Connect()
+	if err != nil {
+		return nil, fmt.Errorf("connect to Windows Service Control Manager for application upgrade: %w", err)
+	}
+	defer manager.Disconnect()
+	stopped := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(target)), "zenplus") {
+			_ = startManagedWindowsServices(stopped)
+			return nil, fmt.Errorf("refusing to stop protected service %q from instrumentation state", target)
+		}
+		service, err := manager.OpenService(target)
+		if err != nil {
+			_ = startManagedWindowsServices(stopped)
+			return nil, fmt.Errorf("open managed application service %q: %w", target, err)
+		}
+		status, queryErr := service.Query()
+		if queryErr == nil && status.State == svc.Running {
+			_, queryErr = service.Control(svc.Stop)
+			if queryErr == nil {
+				queryErr = waitForInstallerServiceState(service, svc.Stopped, 45*time.Second)
+			}
+			if queryErr == nil {
+				stopped = append(stopped, target)
+			}
+		} else if queryErr == nil && status.State != svc.Stopped {
+			queryErr = fmt.Errorf("service is in state %d", status.State)
+		}
+		_ = service.Close()
+		if queryErr != nil {
+			_ = startManagedWindowsServices(stopped)
+			return nil, fmt.Errorf("stop managed application service %q for profiler upgrade: %w", target, queryErr)
+		}
+	}
+	return stopped, nil
+}
+
+func startManagedWindowsServices(targets []string) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	manager, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("connect to Windows Service Control Manager to restore applications: %w", err)
+	}
+	defer manager.Disconnect()
+	var startErrors []error
+	for _, target := range targets {
+		service, err := manager.OpenService(target)
+		if err == nil {
+			status, queryErr := service.Query()
+			err = queryErr
+			if err == nil && status.State != svc.Running {
+				err = service.Start()
+				if err == nil {
+					err = waitForInstallerServiceState(service, svc.Running, 45*time.Second)
+				}
+			}
+			_ = service.Close()
+		}
+		if err != nil {
+			startErrors = append(startErrors, fmt.Errorf("start managed application service %q: %w", target, err))
+		}
+	}
+	return errors.Join(startErrors...)
+}
+
+func waitForInstallerServiceState(service *mgr.Service, wanted svc.State, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		status, err := service.Query()
+		if err != nil {
+			return err
+		}
+		if status.State == wanted {
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out waiting for service state %d", wanted)
+}
+
+func stopManagedIISPools(targets []string) ([]string, error) {
+	stopped := make([]string, 0, len(targets))
+	for _, target := range targets {
+		state, err := managedIISPoolState(target)
+		if err != nil {
+			_ = startManagedIISPools(stopped)
+			return nil, err
+		}
+		if strings.EqualFold(state, "Stopped") {
+			continue
+		}
+		if !strings.EqualFold(state, "Started") {
+			_ = startManagedIISPools(stopped)
+			return nil, fmt.Errorf("IIS application pool %q is in state %q; retry after it reaches Started or Stopped", target, state)
+		}
+		if err := runIISAppCmd("stop", "apppool", target); err != nil {
+			_ = startManagedIISPools(stopped)
+			return nil, fmt.Errorf("stop managed IIS application pool %q for profiler upgrade: %w", target, err)
+		}
+		stopped = append(stopped, target)
+	}
+	return stopped, nil
+}
+
+func startManagedIISPools(targets []string) error {
+	var startErrors []error
+	for _, target := range targets {
+		if err := runIISAppCmd("start", "apppool", target); err != nil {
+			startErrors = append(startErrors, fmt.Errorf("start IIS application pool %q: %w", target, err))
+		}
+	}
+	return errors.Join(startErrors...)
+}
+
+func managedIISPoolState(target string) (string, error) {
+	output, err := runIISAppCmdOutput("list", "apppool", target, "/text:state")
+	if err != nil {
+		return "", fmt.Errorf("read IIS application pool %q state: %w", target, err)
+	}
+	state := strings.TrimSpace(output)
+	if state == "" {
+		return "", fmt.Errorf("IIS application pool %q returned an empty state", target)
+	}
+	return state, nil
+}
+
+func runIISAppCmd(args ...string) error {
+	_, err := runIISAppCmdOutput(args...)
+	return err
+}
+
+func runIISAppCmdOutput(args ...string) (string, error) {
+	windowsDir := os.Getenv("WINDIR")
+	if windowsDir == "" {
+		windowsDir = `C:\Windows`
+	}
+	appcmd := filepath.Join(windowsDir, "System32", "inetsrv", "appcmd.exe")
+	cmd := exec.Command(appcmd, args...)
+	cmd.SysProcAttr = hiddenSysProcAttr()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail != "" {
+			return detail, fmt.Errorf("%w: %s", err, detail)
+		}
+		return "", err
+	}
+	return string(output), nil
+}
+
+func install(l layout, opts options) (returnErr error) {
+	logStep(opts, "Installing %s %s (%s)", productName, model.AgentVersion, l.Scope)
+	payloads, err := preflightInstall(opts)
 	if err != nil {
 		return err
 	}
-	for _, payload := range payloads {
-		target := filepath.Join(l.InstallDir, payload.Name)
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return fmt.Errorf("create payload directory for %s: %w", target, err)
-		}
-		if err := os.WriteFile(target, payload.Data, payload.Mode); err != nil {
-			return fmt.Errorf("write %s: %w", target, err)
-		}
+	// Validate the requested configuration while the old installation is still
+	// fully available. It is rebuilt after quiescing the agent so a policy
+	// update that lands during payload staging is not overwritten.
+	if _, err := buildInstalledConfig(l, opts); err != nil {
+		return fmt.Errorf("prepare installed configuration: %w", err)
 	}
-	if err := copySelf(l.Uninstaller); err != nil {
+	stageDir, err := stageInstallPayloads(l, payloads)
+	if err != nil {
 		return err
 	}
-	if err := writeInstalledConfig(l, opts); err != nil {
+	stageNeedsCleanup := true
+	defer func() {
+		if stageNeedsCleanup {
+			_ = os.RemoveAll(stageDir)
+		}
+	}()
+	apmPaths := agentruntime.NewPaths(l.DataDir)
+	managedPools, err := apmruntime.ManagedIISTargets(apmPaths.APMInstrumentationState)
+	if err != nil {
+		return fmt.Errorf("inspect managed IIS instrumentation before upgrade: %w", err)
+	}
+	managedServices, err := apmruntime.ManagedWindowsServiceTargets(apmPaths.APMInstrumentationState)
+	if err != nil {
+		return fmt.Errorf("inspect managed Windows-service instrumentation before upgrade: %w", err)
+	}
+
+	var serviceBefore agentServiceState
+	var configBefore fileSnapshot
+	var nextConfig config.Config
+	var transaction *installDirectoryTransaction
+	var stoppedServices, stoppedPools []string
+	serviceTouched := false
+	configChanged := false
+	transactionComplete := false
+	defer func() {
+		if transactionComplete {
+			return
+		}
+		var recoveryErrors []error
+		if transaction != nil {
+			if err := quiesceManagedTargetsForRollback(managedServices, managedPools); err != nil {
+				recoveryErrors = append(recoveryErrors, fmt.Errorf("quiesce managed applications for install rollback: %w", err))
+			}
+		}
+		if l.Scope == "machine" && (serviceTouched || transaction != nil) {
+			if _, err := quiesceAgentService(); err != nil {
+				recoveryErrors = append(recoveryErrors, fmt.Errorf("quiesce agent for install rollback: %w", err))
+			}
+		}
+		if transaction != nil {
+			terminateZenPlusProcesses(l, 15*time.Second)
+			if err := transaction.Rollback(); err != nil {
+				recoveryErrors = append(recoveryErrors, err)
+			}
+		}
+		if configChanged {
+			if err := configBefore.Restore(); err != nil {
+				recoveryErrors = append(recoveryErrors, err)
+			}
+		}
+		if l.Scope == "machine" && serviceTouched {
+			if serviceBefore.Exists {
+				if err := resumeExistingAgentService(serviceBefore); err != nil {
+					recoveryErrors = append(recoveryErrors, fmt.Errorf("restore prior agent service state: %w", err))
+				}
+			} else if err := uninstallService(l); err != nil {
+				recoveryErrors = append(recoveryErrors, fmt.Errorf("remove service created by failed install: %w", err))
+			}
+		} else if l.Scope == "user" && transaction != nil && transaction.HadInstall {
+			if err := launchUserRunner(l); err != nil {
+				recoveryErrors = append(recoveryErrors, fmt.Errorf("restore prior user agent: %w", err))
+			}
+		}
+		if err := startManagedIISPools(stoppedPools); err != nil {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("restore managed IIS pools after install rollback: %w", err))
+		}
+		if err := startManagedWindowsServices(stoppedServices); err != nil {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf("restore managed services after install rollback: %w", err))
+		}
+		returnErr = errors.Join(returnErr, errors.Join(recoveryErrors...))
+	}()
+
+	if l.Scope == "machine" {
+		serviceBefore, err = quiesceAgentService()
+		serviceTouched = serviceBefore.Exists
+		if err != nil {
+			return err
+		}
+	}
+	terminateZenPlusProcesses(l, 15*time.Second)
+	// Re-read both the instrumentation state and configuration only after the
+	// agent is stopped. Remote policy/config commands can otherwise race the
+	// potentially long embedded-payload staging step.
+	managedPools, err = apmruntime.ManagedIISTargets(apmPaths.APMInstrumentationState)
+	if err != nil {
+		return fmt.Errorf("inspect quiesced IIS instrumentation before upgrade: %w", err)
+	}
+	managedServices, err = apmruntime.ManagedWindowsServiceTargets(apmPaths.APMInstrumentationState)
+	if err != nil {
+		return fmt.Errorf("inspect quiesced Windows-service instrumentation before upgrade: %w", err)
+	}
+	configBefore, err = captureFileSnapshot(l.ConfigPath)
+	if err != nil {
+		return err
+	}
+	if err := preserveLegacyConfigIdentity(l.ConfigPath, apmPaths.IdentityFile); err != nil {
+		return fmt.Errorf("preserve legacy agent identity before upgrade: %w", err)
+	}
+	nextConfig, err = buildInstalledConfig(l, opts)
+	if err != nil {
+		return fmt.Errorf("prepare quiesced installed configuration: %w", err)
+	}
+	stoppedServices, err = stopManagedWindowsServices(managedServices)
+	if err != nil {
+		return err
+	}
+	stoppedPools, err = stopManagedIISPools(managedPools)
+	if err != nil {
+		return err
+	}
+	transaction, err = activateStagedInstall(stageDir, l.InstallDir)
+	if err != nil {
+		return err
+	}
+	stageNeedsCleanup = false
+	if err := os.MkdirAll(l.ConfigDir, 0o755); err != nil {
 		return err
 	}
 	if l.Scope == "machine" {
-		if err := installService(l); err != nil {
-			return err
+		if err := hardenMachineDataTree(l.DataDir, serviceName); err != nil {
+			return fmt.Errorf("secure machine data directory: %w", err)
 		}
-	} else if err := launchUserRunner(l); err != nil {
+	}
+	configChanged = true
+	if err := config.Save(l.ConfigPath, nextConfig); err != nil {
 		return err
 	}
 	if opts.noStartMenu {
@@ -310,12 +804,6 @@ func install(l layout, opts options) error {
 	if err := createStartupShortcut(l); err != nil {
 		return err
 	}
-	if iisStopped {
-		if err := runCommand("iisreset.exe", "/start"); err != nil {
-			return fmt.Errorf("restart IIS after profiler upgrade: %w", err)
-		}
-		iisStopped = false
-	}
 	if opts.managedByMSI {
 		// Remove the legacy EXE registration when upgrading into the MSI-owned
 		// product so Apps & Features shows one authoritative entry.
@@ -325,6 +813,43 @@ func install(l layout, opts options) error {
 			return err
 		}
 	}
+	if l.Scope == "machine" {
+		serviceTouched = true
+		if serviceBefore.Exists {
+			if err := resumeExistingAgentService(serviceStateForInstalledPayload(serviceBefore, l)); err != nil {
+				return err
+			}
+			if err := configureInstalledServiceRecovery(); err != nil {
+				return err
+			}
+		} else if err := installService(l); err != nil {
+			return err
+		}
+	} else if err := launchUserRunner(l); err != nil {
+		return err
+	}
+	if err := startManagedIISPools(stoppedPools); err != nil {
+		return fmt.Errorf("restart managed IIS application pools after profiler upgrade: %w", err)
+	}
+	if err := startManagedWindowsServices(stoppedServices); err != nil {
+		return fmt.Errorf("restart managed application services after profiler upgrade: %w", err)
+	}
+	stoppedPools = nil
+	stoppedServices = nil
+	// The payload, configuration, service, and instrumented applications are
+	// now healthy on the new release. Commit before removing Windows Installer
+	// registrations: an MSI uninstall cannot be transactionally recreated, so
+	// a cleanup failure must never roll a working agent back to old binaries
+	// while leaving its former Programs & Features ownership removed.
+	transactionComplete = true
+	if err := removeLegacyMSIRegistrations(opts, logStep); err != nil {
+		return fmt.Errorf("agent upgrade completed but superseded MSI cleanup failed: %w", err)
+	}
+	removeLegacyRuntime(l)
+	removeOppositeScopeShortcuts(l)
+	if err := transaction.CleanupBackup(); err != nil {
+		logStep(opts, "Installation completed, but cleanup of the prior payload was deferred: %v", err)
+	}
 	logStep(opts, "%s installed successfully.", productName)
 	if !opts.quiet {
 		showMessage(productName+" Setup", productName+" was installed successfully.", false)
@@ -332,14 +857,41 @@ func install(l layout, opts options) error {
 	return nil
 }
 
-func uninstall(l layout, opts options) error {
+func uninstall(l layout, opts options) (returnErr error) {
 	logStep(opts, "Uninstalling %s (%s)", productName, l.Scope)
+	var serviceBefore agentServiceState
+	serviceQuiesced := false
+	serviceDeleted := false
+	defer func() {
+		if returnErr == nil || l.Scope != "machine" || !serviceQuiesced || serviceDeleted {
+			return
+		}
+		if err := resumeExistingAgentService(serviceBefore); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("restart agent after failed uninstall: %w", err))
+		}
+	}()
+	if l.Scope == "machine" {
+		var err error
+		serviceBefore, err = quiesceAgentService()
+		serviceQuiesced = serviceBefore.Exists
+		if err != nil {
+			return err
+		}
+	}
+	terminateZenPlusProcesses(l, 15*time.Second)
+	rollbackCtx, cancelRollback := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancelRollback()
+	apmPaths := agentruntime.NewPaths(l.DataDir)
+	if err := apmruntime.RollbackAll(rollbackCtx, apmPaths.APMInstrumentationState, l.InstallDir, true); err != nil {
+		return fmt.Errorf("restore managed application instrumentation before uninstall: %w", err)
+	}
 	if l.Scope == "machine" {
 		if err := uninstallService(l); err != nil {
 			return err
 		}
+		serviceDeleted = true
 	}
-	terminateZenPlusProcesses(15 * time.Second)
+	_ = agentruntime.RemoveMachineDashboardSnapshot(l.DataDir)
 	removeShortcuts(l)
 	_ = removeUninstallRegistry(l)
 	if err := removeAllWithRetry(l.InstallDir, 20, 500*time.Millisecond); err != nil {
@@ -357,17 +909,18 @@ func uninstall(l layout, opts options) error {
 	return nil
 }
 
-func terminateZenPlusProcesses(timeout time.Duration) {
+func terminateZenPlusProcesses(l layout, timeout time.Duration) {
 	names := map[string]bool{
 		"zenplus-agent-app.exe":         true,
 		"zenplus-agent.exe":             true,
 		"zenplus-agent-user.exe":        true,
 		"zenplus-telemetry-gateway.exe": true,
 	}
+	roots := []string{l.InstallDir, filepath.Join(l.DataDir, "bin")}
 	currentPID := uint32(os.Getpid())
 	deadline := time.Now().Add(timeout)
 	for {
-		pids := findProcesses(names, currentPID)
+		pids := findProcesses(names, roots, currentPID)
 		if len(pids) == 0 {
 			return
 		}
@@ -381,7 +934,7 @@ func terminateZenPlusProcesses(timeout time.Duration) {
 	}
 }
 
-func findProcesses(names map[string]bool, currentPID uint32) []uint32 {
+func findProcesses(names map[string]bool, roots []string, currentPID uint32) []uint32 {
 	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
 		return nil
@@ -395,7 +948,7 @@ func findProcesses(names map[string]bool, currentPID uint32) []uint32 {
 	var pids []uint32
 	for {
 		name := strings.ToLower(windows.UTF16ToString(entry.ExeFile[:]))
-		if entry.ProcessID != currentPID && names[name] {
+		if entry.ProcessID != currentPID && names[name] && processInsideAnyRoot(entry.ProcessID, roots) {
 			pids = append(pids, entry.ProcessID)
 		}
 		if err := windows.Process32Next(snapshot, &entry); err != nil {
@@ -403,6 +956,26 @@ func findProcesses(names map[string]bool, currentPID uint32) []uint32 {
 		}
 	}
 	return pids
+}
+
+func processInsideAnyRoot(pid uint32, roots []string) bool {
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(handle)
+	buffer := make([]uint16, 32768)
+	size := uint32(len(buffer))
+	if err := windows.QueryFullProcessImageName(handle, 0, &buffer[0], &size); err != nil || size == 0 {
+		return false
+	}
+	imagePath := windows.UTF16ToString(buffer[:size])
+	for _, root := range roots {
+		if strings.TrimSpace(root) != "" && pathWithin(root, imagePath) {
+			return true
+		}
+	}
+	return false
 }
 
 func terminateProcess(pid uint32) {
@@ -454,47 +1027,108 @@ func removeOppositeScopeShortcuts(l layout) {
 	}
 }
 
-func writeInstalledConfig(l layout, opts options) error {
+func buildInstalledConfig(l layout, opts options) (config.Config, error) {
 	cfg, err := config.LoadForEdit(l.ConfigPath)
 	if err != nil {
-		return err
+		return config.Config{}, err
 	}
 	cfg.DataDir = l.DataDir
 	if opts.controllerURL != "" {
 		normalized, err := config.NormalizeControllerURL(opts.controllerURL)
 		if err != nil {
-			return err
+			return config.Config{}, err
 		}
 		cfg.ControllerURL = normalized
 	}
-	if opts.apmMode != "" {
-		cfg.APM.Enabled = opts.apmMode == "enabled"
+	if opts.controllerCA != "" {
+		cfg.Security.ControllerCAFile = filepath.Clean(strings.TrimSpace(opts.controllerCA))
+		cfg.VerifyTLS = true
 	}
 	if opts.profile != "" {
-		cfg.APM.Profile = opts.profile
-		cfg.APM.Enabled = opts.profile != "infrastructure"
-		if opts.profile == "apm" {
-			cfg.Collectors.CPU.Enabled = false
-			cfg.Collectors.Memory.Enabled = false
-			cfg.Collectors.Filesystem.Enabled = false
-			cfg.Collectors.DiskIO.Enabled = false
-			cfg.Collectors.Network.Enabled = false
-			cfg.Collectors.Processes.Enabled = false
-			cfg.Collectors.Services.Enabled = false
-			cfg.Collectors.EventLog.Enabled = false
-			cfg.Collectors.Inventory.Enabled = true
+		if err := config.ApplyProfile(&cfg, opts.profile); err != nil {
+			return config.Config{}, err
+		}
+	} else if opts.apmMode != "" {
+		profile := cfg.APM.Profile
+		if opts.apmMode == "disabled" {
+			profile = "infrastructure"
+		} else if profile == "" || profile == "infrastructure" {
+			profile = "combined"
+		}
+		if err := config.ApplyProfile(&cfg, profile); err != nil {
+			return config.Config{}, err
+		}
+	} else if cfg.APM.Profile != "apm" && config.InfrastructureCollectorsDisabled(cfg) {
+		profile := cfg.APM.Profile
+		if profile == "" {
+			profile = "combined"
+		}
+		if err := config.ApplyProfile(&cfg, profile); err != nil {
+			return config.Config{}, err
 		}
 	}
 	// Authorization, site placement, and policy assignment are controlled by
-	// the appliance. Clear legacy bootstrap values during upgrades so the
-	// endpoint stores only its controller connection setting.
+	// the appliance. Clear legacy bootstrap values during upgrades so stale
+	// IDs in agent.yaml cannot override the durable identity.json binding when
+	// the service restarts with the new binaries.
+	cfg.AgentID = ""
+	cfg.ServerID = ""
 	cfg.PolicyID = ""
+	if err := cfg.Validate(); err != nil {
+		return config.Config{}, err
+	}
+	return cfg, nil
+
+}
+
+func preserveLegacyConfigIdentity(configPath, identityPath string) error {
+	cfg, err := config.LoadForEdit(configPath)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.AgentID) == "" && strings.TrimSpace(cfg.ServerID) == "" {
+		return nil
+	}
+	_, _, err = identity.LoadOrCreate(identityPath, cfg.AgentID, cfg.ServerID)
+	return err
+}
+
+func writeInstalledConfig(l layout, opts options) error {
+	cfg, err := buildInstalledConfig(l, opts)
+	if err != nil {
+		return err
+	}
 	return config.Save(l.ConfigPath, cfg)
 }
 
 func installService(l layout) error {
 	agent := filepath.Join(l.InstallDir, "zenplus-agent.exe")
 	return runCommand(agent, "install-service", "--config", l.ConfigPath)
+}
+
+func configureInstalledServiceRecovery() error {
+	manager, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("connect service manager to configure recovery: %w", err)
+	}
+	defer manager.Disconnect()
+	service, err := manager.OpenService(serviceName)
+	if err != nil {
+		return fmt.Errorf("open upgraded service to configure recovery: %w", err)
+	}
+	defer service.Close()
+	actions := []mgr.RecoveryAction{
+		{Type: mgr.ServiceRestart, Delay: time.Minute},
+		{Type: mgr.ServiceRestart, Delay: time.Minute},
+		{Type: mgr.ServiceRestart, Delay: 5 * time.Minute},
+	}
+	if err := service.SetRecoveryActions(actions, 86400); err != nil {
+		return fmt.Errorf("configure upgraded service recovery actions: %w", err)
+	}
+	if err := service.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
+		return fmt.Errorf("configure upgraded service non-crash recovery: %w", err)
+	}
+	return nil
 }
 
 func launchUserRunner(l layout) error {
@@ -557,8 +1191,7 @@ func serviceMissing(err error) bool {
 	}
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "service does not exist") ||
-		strings.Contains(text, "specified service does not exist") ||
-		strings.Contains(text, "open service")
+		strings.Contains(text, "specified service does not exist")
 }
 
 func runCommand(name string, args ...string) error {
@@ -602,6 +1235,7 @@ func relaunchUninstallFromTemp(l layout, args []string) (bool, error) {
 	if err := os.MkdirAll(tempDir, 0o755); err != nil {
 		return false, err
 	}
+	defer os.RemoveAll(tempDir)
 	tempExe := filepath.Join(tempDir, "ZenPlusAgentSetup.exe")
 	data, err := os.ReadFile(self)
 	if err != nil {
@@ -612,8 +1246,14 @@ func relaunchUninstallFromTemp(l layout, args []string) (bool, error) {
 	}
 	cmd := exec.Command(tempExe, ensureArg(args, "/from-temp")...)
 	cmd.SysProcAttr = hiddenSysProcAttr()
-	if err := cmd.Start(); err != nil {
-		return false, err
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail != "" {
+			return true, fmt.Errorf("temporary uninstaller failed: %w: %s", err, detail)
+		}
+		return true, fmt.Errorf("temporary uninstaller failed: %w", err)
 	}
 	return true, nil
 }
@@ -630,22 +1270,37 @@ func removeAllWithRetry(path string, attempts int, delay time.Duration) error {
 		}
 		time.Sleep(delay)
 	}
-	scheduleDeleteOnReboot(path)
-	return lastErr
+	if err := scheduleDeleteOnReboot(path); err != nil {
+		return errors.Join(lastErr, err)
+	}
+	return nil
 }
 
-func scheduleDeleteOnReboot(path string) {
-	_ = filepath.WalkDir(path, func(p string, _ os.DirEntry, _ error) error {
-		ptr, err := windows.UTF16PtrFromString(p)
-		if err == nil {
-			_ = windows.MoveFileEx(ptr, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
+func scheduleDeleteOnReboot(path string) error {
+	paths := make([]string, 0, 8)
+	if err := filepath.WalkDir(path, func(p string, _ os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
 		}
+		paths = append(paths, p)
 		return nil
-	})
-	ptr, err := windows.UTF16PtrFromString(path)
-	if err == nil {
-		_ = windows.MoveFileEx(ptr, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
+	}); err != nil {
+		return fmt.Errorf("enumerate deferred-delete paths: %w", err)
 	}
+	sort.SliceStable(paths, func(i, j int) bool {
+		return strings.Count(paths[i], string(filepath.Separator)) > strings.Count(paths[j], string(filepath.Separator))
+	})
+	var deleteErrors []error
+	for _, target := range paths {
+		ptr, err := windows.UTF16PtrFromString(target)
+		if err == nil {
+			err = windows.MoveFileEx(ptr, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
+		}
+		if err != nil {
+			deleteErrors = append(deleteErrors, fmt.Errorf("schedule deletion of %q: %w", target, err))
+		}
+	}
+	return errors.Join(deleteErrors...)
 }
 
 func copySelf(target string) error {
@@ -796,13 +1451,75 @@ func relaunchElevated(args []string) error {
 	}
 	argv := make([]string, len(args))
 	for i, arg := range args {
-		argv[i] = quote(arg)
+		argv[i] = windows.EscapeArg(arg)
 	}
-	err = windows.ShellExecute(0, windows.StringToUTF16Ptr("runas"), windows.StringToUTF16Ptr(exe), windows.StringToUTF16Ptr(strings.Join(argv, " ")), nil, windows.SW_SHOWNORMAL)
+	verb, err := windows.UTF16PtrFromString("runas")
 	if err != nil {
-		return fmt.Errorf("administrator approval is required: %w", err)
+		return err
+	}
+	file, err := windows.UTF16PtrFromString(exe)
+	if err != nil {
+		return err
+	}
+	parameters, err := windows.UTF16PtrFromString(strings.Join(argv, " "))
+	if err != nil {
+		return err
+	}
+	info := shellExecuteInfo{
+		Mask:       seeMaskNoCloseProcess,
+		Verb:       verb,
+		File:       file,
+		Parameters: parameters,
+		Show:       int32(windows.SW_SHOWNORMAL),
+	}
+	info.Size = uint32(unsafe.Sizeof(info))
+	ok, _, callErr := shellExecuteExW.Call(uintptr(unsafe.Pointer(&info)))
+	if ok == 0 {
+		return fmt.Errorf("administrator approval is required: %w", callErr)
+	}
+	if info.Process == 0 {
+		return fmt.Errorf("elevated setup did not return a process handle")
+	}
+	defer windows.CloseHandle(info.Process)
+	waitResult, err := windows.WaitForSingleObject(info.Process, windows.INFINITE)
+	if err != nil {
+		return fmt.Errorf("wait for elevated setup: %w", err)
+	}
+	if waitResult != windows.WAIT_OBJECT_0 {
+		return fmt.Errorf("wait for elevated setup returned status 0x%x", waitResult)
+	}
+	var exitCode uint32
+	if err := windows.GetExitCodeProcess(info.Process, &exitCode); err != nil {
+		return fmt.Errorf("read elevated setup result: %w", err)
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("elevated setup failed with exit code %d", exitCode)
 	}
 	return nil
+}
+
+const seeMaskNoCloseProcess = 0x00000040
+
+var shellExecuteExW = windows.NewLazySystemDLL("shell32.dll").NewProc("ShellExecuteExW")
+
+// shellExecuteInfo mirrors SHELLEXECUTEINFOW. The process handle is requested
+// so the unelevated wizard can report the real result of its elevated child.
+type shellExecuteInfo struct {
+	Size          uint32
+	Mask          uint32
+	Window        windows.Handle
+	Verb          *uint16
+	File          *uint16
+	Parameters    *uint16
+	Directory     *uint16
+	Show          int32
+	Instance      windows.Handle
+	IDList        uintptr
+	Class         *uint16
+	ClassKey      windows.Handle
+	HotKey        uint32
+	IconOrMonitor windows.Handle
+	Process       windows.Handle
 }
 
 func ensureArg(args []string, required string) []string {

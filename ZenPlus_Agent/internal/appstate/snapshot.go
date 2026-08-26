@@ -3,7 +3,6 @@ package appstate
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -16,20 +15,19 @@ import (
 	"zenplus-agent/internal/identity"
 	"zenplus-agent/internal/model"
 	"zenplus-agent/internal/runtime"
-	"zenplus-agent/internal/spool"
 )
 
 type Snapshot struct {
-	Now        time.Time
-	Status     *model.Status
-	Identity   *identity.Identity
-	Service    ServiceSnapshot
-	Controller ControllerSnapshot
-	Spool      SpoolSnapshot
-	Latest     *BatchSnapshot
-	Config     ConfigSnapshot
-	Logs       []string
-	Paths      PathSnapshot
+	Now         time.Time
+	PublishedAt time.Time
+	Status      *model.Status
+	Identity    *identity.Identity
+	Service     ServiceSnapshot
+	Controller  ControllerSnapshot
+	Spool       SpoolSnapshot
+	Config      ConfigSnapshot
+	Logs        []string
+	Paths       PathSnapshot
 }
 
 type ControllerSnapshot struct {
@@ -54,15 +52,6 @@ type SpoolSnapshot struct {
 	Error string
 }
 
-type BatchSnapshot struct {
-	BatchID       string
-	CollectedAt   time.Time
-	MetricCount   int
-	EventCount    int
-	HealthStatus  string
-	SampleMetrics []model.Metric
-}
-
 type ConfigSnapshot struct {
 	ControllerURL            string
 	PolicyID                 string
@@ -71,6 +60,7 @@ type ConfigSnapshot struct {
 	HeartbeatIntervalSeconds int
 	UploadIntervalSeconds    int
 	CollectIntervalSeconds   int
+	MonitoringProfile        string
 	CollectorEnabled         map[string]bool
 	Labels                   map[string]string
 }
@@ -85,6 +75,9 @@ type PathSnapshot struct {
 func Load(ctx context.Context, configPath string) Snapshot {
 	if configPath == "" {
 		configPath = DefaultConfigPath()
+	}
+	if published, err := runtime.ReadMachineDashboardSnapshot(configPath); err == nil {
+		return loadPublishedMachineSnapshot(ctx, configPath, published)
 	}
 	cfg, cfgErr := config.Load(configPath)
 	if cfgErr != nil {
@@ -109,18 +102,50 @@ func Load(ctx context.Context, configPath string) Snapshot {
 	}
 	if status, err := agent.ReadStatus(configPath); err == nil {
 		snap.Status = &status
+		snap.Spool.Depth = status.QueueDepth
+		snap.Spool.Bytes = status.SpoolBytes
 	}
 	if id, err := readIdentity(paths.IdentityFile); err == nil {
 		snap.Identity = &id
 	}
-	if stats, latest, err := readSpool(paths.SpoolDB); err == nil {
-		snap.Spool.Depth = stats.Depth
-		snap.Spool.Bytes = stats.Bytes
-		snap.Latest = latest
-	} else if !errors.Is(err, os.ErrNotExist) {
-		snap.Spool.Error = err.Error()
-	}
 	return snap
+}
+
+func loadPublishedMachineSnapshot(ctx context.Context, configPath string, published runtime.DashboardSnapshot) Snapshot {
+	status := published.Status
+	id := identity.Identity{
+		AgentID:   published.Identity.AgentID,
+		ServerID:  published.Identity.ServerID,
+		Hostname:  published.Identity.Hostname,
+		FQDN:      published.Identity.FQDN,
+		Platform:  published.Identity.Platform,
+		OSName:    published.Identity.OSName,
+		OSVersion: published.Identity.OSVersion,
+	}
+	return Snapshot{
+		Now:         time.Now().UTC(),
+		PublishedAt: published.GeneratedAt,
+		Status:      &status,
+		Identity:    &id,
+		Service:     ReadServiceSnapshot(),
+		Controller:  ControllerStatus(ctx, published.Config.ControllerURL),
+		Spool: SpoolSnapshot{
+			Depth: status.QueueDepth,
+			Bytes: status.SpoolBytes,
+		},
+		Config: ConfigSnapshot{
+			ControllerURL:            published.Config.ControllerURL,
+			PolicyID:                 published.Config.PolicyID,
+			VerifyTLS:                published.Config.VerifyTLS,
+			DataDir:                  published.Config.DataDir,
+			HeartbeatIntervalSeconds: published.Config.HeartbeatIntervalSeconds,
+			UploadIntervalSeconds:    published.Config.UploadIntervalSeconds,
+			CollectIntervalSeconds:   published.Config.CollectIntervalSeconds,
+			MonitoringProfile:        published.Config.MonitoringProfile,
+			CollectorEnabled:         published.Config.CollectorEnabled,
+		},
+		Paths: PathSnapshot{Config: configPath},
+	}
 }
 
 func DefaultConfigPath() string {
@@ -143,6 +168,7 @@ func ConfigFrom(cfg config.Config) ConfigSnapshot {
 		HeartbeatIntervalSeconds: cfg.HeartbeatIntervalSeconds,
 		UploadIntervalSeconds:    cfg.UploadIntervalSeconds,
 		CollectIntervalSeconds:   cfg.CollectIntervalSeconds,
+		MonitoringProfile:        cfg.APM.Profile,
 		Labels:                   cfg.Labels,
 		CollectorEnabled: map[string]bool{
 			"cpu":        cfg.Collectors.CPU.Enabled,
@@ -211,58 +237,6 @@ func readIdentity(path string) (identity.Identity, error) {
 	return id, nil
 }
 
-func readSpool(path string) (spool.Stats, *BatchSnapshot, error) {
-	store, err := spool.OpenReadOnly(path)
-	if err != nil {
-		return spool.Stats{}, nil, err
-	}
-	defer store.Close()
-	stats, err := store.Stats()
-	if err != nil {
-		return spool.Stats{}, nil, err
-	}
-	records, err := store.PeekLatest(1)
-	if err != nil || len(records) == 0 {
-		return stats, nil, err
-	}
-	var batch model.Batch
-	if err := json.Unmarshal(records[0].Payload, &batch); err != nil {
-		return stats, nil, err
-	}
-	sample := batch.Metrics
-	if len(sample) > 8 {
-		sample = sample[:8]
-	}
-	healthStatus := batch.Health.Status
-	if healthStatus == "" {
-		healthStatus = healthFromSamples(batch.Metrics)
-	}
-	return stats, &BatchSnapshot{
-		BatchID:       batch.BatchID,
-		CollectedAt:   batch.CollectedAt,
-		MetricCount:   len(batch.Metrics),
-		EventCount:    len(batch.Events),
-		HealthStatus:  healthStatus,
-		SampleMetrics: sample,
-	}, nil
-}
-
-func healthFromSamples(metrics []model.Metric) string {
-	for _, metric := range metrics {
-		if metric.Kind != "agent_health" {
-			continue
-		}
-		if ok, _ := metric.Data["config_apply_ok"].(bool); !ok {
-			return "degraded"
-		}
-		if last, _ := metric.Data["last_error"].(string); last != "" {
-			return "degraded"
-		}
-		return "ok"
-	}
-	return ""
-}
-
 func HealthText(s Snapshot) (string, string) {
 	uploadError := ""
 	heartbeatError := ""
@@ -275,6 +249,8 @@ func HealthText(s Snapshot) (string, string) {
 		return "Service " + strings.ToLower(valueOr(s.Service.State, "stopped")), "bad"
 	case s.Status == nil:
 		return "Waiting for agent", "warn"
+	case statusIsStale(s):
+		return "Agent stale", "warn"
 	case s.Status.AuthState == "pending" || s.Status.AuthState == "unenrolled":
 		return "Pending authorization", "warn"
 	case s.Status.AuthState == "revoked":
@@ -285,8 +261,12 @@ func HealthText(s Snapshot) (string, string) {
 		return "Controller unreachable", "bad"
 	case s.Status.LastHeartbeat == nil:
 		return "Connecting", "warn"
-	case statusIsStale(s):
-		return "Agent stale", "warn"
+	case s.Status.LastConfigError != "":
+		return "Configuration degraded", "bad"
+	case len(s.Status.CollectorErrors) > 0:
+		return "Collector degraded", "bad"
+	case s.Config.MonitoringProfile != "apm" && infrastructureCollectorsDisabled(s.Config.CollectorEnabled):
+		return "Server collectors disabled", "bad"
 	case uploadError != "" || heartbeatError != "":
 		return "Spooling locally", "warn"
 	case s.Spool.Depth > 0:
@@ -296,19 +276,38 @@ func HealthText(s Snapshot) (string, string) {
 	}
 }
 
+func infrastructureCollectorsDisabled(enabled map[string]bool) bool {
+	if len(enabled) == 0 {
+		return false
+	}
+	for _, name := range []string{"cpu", "memory", "filesystem", "disk_io", "network", "processes", "services", "event_log"} {
+		if enabled[name] {
+			return false
+		}
+	}
+	return true
+}
+
 func statusIsStale(s Snapshot) bool {
 	if s.Status == nil {
 		return false
 	}
-	last := latestTime(s.Status.LastHeartbeat, s.Status.LastUpload, s.Status.LastCollection)
+	last := latestTime(timePointer(s.PublishedAt), s.Status.LastHeartbeat, s.Status.LastUpload, s.Status.LastCollection)
 	if last == nil {
-		return true
+		return false
 	}
 	threshold := time.Duration(maxInt(s.Config.HeartbeatIntervalSeconds, s.Config.UploadIntervalSeconds, s.Config.CollectIntervalSeconds))*time.Second + 2*time.Minute
 	if threshold < 3*time.Minute {
 		threshold = 3 * time.Minute
 	}
 	return s.Now.Sub(*last) > threshold
+}
+
+func timePointer(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	return &value
 }
 
 func latestTime(values ...*time.Time) *time.Time {

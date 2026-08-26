@@ -4,6 +4,8 @@ import sys
 import tarfile
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -47,7 +49,7 @@ def test_per_file_cap_truncates_and_marks(tmp_path):
     assert result.truncated is True
     body = _read(out, "logs/huge.log")
     assert body.endswith(TRUNCATION_MARKER)
-    assert len(body) == 1024 + len(TRUNCATION_MARKER)
+    assert len(body) == 1024
 
 
 def test_total_cap_skips_overflowing_files(tmp_path):
@@ -95,3 +97,40 @@ def test_checksum_file_lists_every_entry_except_itself(tmp_path):
     # Both data files appear, checksums.sha256 itself must not appear.
     assert "a.log" in body and "b.log" in body
     assert "checksums.sha256" not in body
+
+
+@pytest.mark.parametrize("unsafe", ["../outside", "a/../../b", "/absolute", "a\\b", "a\nb", "C:/drive"])
+def test_unsafe_member_names_are_rejected(tmp_path, unsafe):
+    out = tmp_path / "bundle.tar.gz"
+    with BundleArchive(output_path=out) as arch:
+        with pytest.raises(ValueError):
+            arch.add(unsafe, b"x")
+
+
+def test_duplicate_member_names_are_rejected(tmp_path):
+    out = tmp_path / "bundle.tar.gz"
+    with BundleArchive(output_path=out) as arch:
+        arch.add("same.txt", b"one")
+        with pytest.raises(ValueError):
+            arch.add("same.txt", b"two")
+
+
+def test_identical_inputs_produce_identical_archive_bytes(tmp_path):
+    outputs = []
+    for name in ("one.tar.gz", "two.tar.gz"):
+        path = tmp_path / name
+        with BundleArchive(output_path=path) as arch:
+            arch.add("a.txt", b"stable")
+            arch.finalize_checksums()
+        outputs.append(path.read_bytes())
+    assert outputs[0] == outputs[1]
+
+
+def test_exception_leaves_no_partial_final_archive(tmp_path):
+    out = tmp_path / "bundle.tar.gz"
+    with pytest.raises(RuntimeError):
+        with BundleArchive(output_path=out) as arch:
+            arch.add("partial.txt", b"partial")
+            raise RuntimeError("boom")
+    assert not out.exists()
+    assert not list(tmp_path.glob("*.tmp"))

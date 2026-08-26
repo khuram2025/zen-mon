@@ -417,15 +417,6 @@ func collectProcesses(ctx context.Context, topN int, watchlist []string, add fun
 		errs["process"] = err.Error()
 		return
 	}
-	type procInfo struct {
-		PID        int32
-		Name       string
-		CPUPercent float64
-		RSS        uint64
-		Threads    int32
-		Handles    int32
-		UserName   string
-	}
 	now := time.Now().UTC()
 	procState.Lock()
 	prevAt := procState.at
@@ -437,9 +428,10 @@ func collectProcesses(ctx context.Context, topN int, watchlist []string, add fun
 	dt := now.Sub(prevAt).Seconds()
 	current := make(map[procCPUKey]float64, len(procs))
 
-	items := make([]procInfo, 0, len(procs))
+	items := make([]processSample, 0, len(procs))
 	for _, p := range procs {
 		name, _ := p.NameWithContext(ctx)
+		name = truncateUTF8Bytes(strings.TrimSpace(name), maxProcessTextBytes)
 		if name == "" {
 			continue
 		}
@@ -472,15 +464,23 @@ func collectProcesses(ctx context.Context, topN int, watchlist []string, add fun
 				cpuPct = clampPct(lifetime / float64(numCPU))
 			}
 		}
-		items = append(items, procInfo{PID: p.Pid, Name: name, CPUPercent: cpuPct, RSS: rss, Threads: threads, Handles: handles, UserName: userName})
+		items = append(items, processSample{
+			process: p, PID: p.Pid, Name: name, CPUPercent: cpuPct, RSS: rss,
+			Threads: threads, Handles: handles,
+			UserName:  truncateUTF8Bytes(strings.TrimSpace(userName), maxProcessTextBytes),
+			CreatedMs: createdMs,
+		})
 	}
 	procState.cpu = current
 	procState.at = now
 	procState.Unlock()
-	selected := map[int32]procInfo{}
-	byCPU := append([]procInfo(nil), items...)
+	selected := map[int32]processSample{}
+	byCPU := append([]processSample(nil), items...)
 	sort.Slice(byCPU, func(i, j int) bool {
 		if byCPU[i].CPUPercent == byCPU[j].CPUPercent {
+			if byCPU[i].RSS == byCPU[j].RSS {
+				return byCPU[i].PID < byCPU[j].PID
+			}
 			return byCPU[i].RSS > byCPU[j].RSS
 		}
 		return byCPU[i].CPUPercent > byCPU[j].CPUPercent
@@ -488,8 +488,13 @@ func collectProcesses(ctx context.Context, topN int, watchlist []string, add fun
 	for _, item := range firstN(byCPU, topN) {
 		selected[item.PID] = item
 	}
-	byMem := append([]procInfo(nil), items...)
-	sort.Slice(byMem, func(i, j int) bool { return byMem[i].RSS > byMem[j].RSS })
+	byMem := append([]processSample(nil), items...)
+	sort.Slice(byMem, func(i, j int) bool {
+		if byMem[i].RSS == byMem[j].RSS {
+			return byMem[i].PID < byMem[j].PID
+		}
+		return byMem[i].RSS > byMem[j].RSS
+	})
 	for _, item := range firstN(byMem, topN) {
 		selected[item.PID] = item
 	}
@@ -499,13 +504,24 @@ func collectProcesses(ctx context.Context, topN int, watchlist []string, add fun
 			selected[item.PID] = item
 		}
 	}
-	ordered := make([]procInfo, 0, len(selected))
+	ordered := make([]processSample, 0, len(selected))
 	for _, item := range selected {
 		ordered = append(ordered, item)
 	}
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].CPUPercent > ordered[j].CPUPercent })
+	sort.Slice(ordered, func(i, j int) bool {
+		if ordered[i].CPUPercent == ordered[j].CPUPercent {
+			if ordered[i].RSS == ordered[j].RSS {
+				if strings.EqualFold(ordered[i].Name, ordered[j].Name) {
+					return ordered[i].PID < ordered[j].PID
+				}
+				return strings.ToLower(ordered[i].Name) < strings.ToLower(ordered[j].Name)
+			}
+			return ordered[i].RSS > ordered[j].RSS
+		}
+		return ordered[i].CPUPercent > ordered[j].CPUPercent
+	})
 	for _, item := range ordered {
-		add("process", map[string]any{
+		data := map[string]any{
 			"process_name": item.Name,
 			"pid":          int(item.PID),
 			"cpu_pct":      item.CPUPercent,
@@ -513,6 +529,36 @@ func collectProcesses(ctx context.Context, topN int, watchlist []string, add fun
 			"thread_count": int(item.Threads),
 			"handle_count": int(item.Handles),
 			"user_name":    item.UserName,
+			"state":        "running",
+			"running":      true,
+			"watchlisted":  watched[strings.ToLower(item.Name)],
+		}
+		if startedAt := processStartedAt(item.CreatedMs); startedAt != "" {
+			data["started_at"] = startedAt
+		}
+		if item.process != nil {
+			// Never export raw argument values: the shape helper retains only a
+			// small allowlist of option names and replaces every value/path.
+			if argv, err := item.process.CmdlineSliceWithContext(ctx); err == nil {
+				if commandShape := safeProcessCommandLine(item.Name, argv); commandShape != "" {
+					data["cmdline"] = commandShape
+				}
+			}
+		}
+		add("process", data)
+	}
+	for _, name := range missingWatchedProcesses(watchlist, items) {
+		add("process", map[string]any{
+			"process_name": name,
+			"pid":          0,
+			"cpu_pct":      float64(0),
+			"memory_bytes": int64(0),
+			"thread_count": 0,
+			"handle_count": 0,
+			"user_name":    "",
+			"state":        "not_running",
+			"running":      false,
+			"watchlisted":  true,
 		})
 	}
 }
@@ -630,16 +676,15 @@ func serviceSignature(svc serviceInfo) string {
 }
 
 func collectEventLog(ctx context.Context, cfg config.EventLogConfig, add func(string, map[string]any), errs map[string]string) {
-	if cfg.LookbackMinutes <= 0 {
-		cfg.LookbackMinutes = 5
+	script, err := eventLogScript(cfg)
+	if err != nil {
+		errs["event_log"] = err.Error()
+		return
 	}
-	if len(cfg.Channels) == 0 {
-		cfg.Channels = []string{"System", "Application"}
+	if script == "" {
+		return
 	}
-	if len(cfg.Levels) == 0 {
-		cfg.Levels = []string{"critical", "error", "warning"}
-	}
-	out, err := runPowerShellJSON(ctx, eventLogScript(cfg))
+	out, err := runPowerShellJSON(ctx, script)
 	if err != nil {
 		errs["event_log"] = err.Error()
 		return
@@ -685,6 +730,7 @@ func collectInventory(ctx context.Context, r *Result) {
 		}
 		r.Inventory["os"] = osInfo
 	}
+	collectHardwareInventory(ctx, r)
 	if runtime.GOOS == "windows" {
 		software, err := collectInstalledSoftware(ctx)
 		if err != nil {
@@ -770,23 +816,59 @@ if ($items.Count -eq 0) {
 `
 }
 
-func eventLogScript(cfg config.EventLogConfig) string {
-	channels := quotedArray(cfg.Channels)
-	levels := quotedArray(cfg.Levels)
-	return fmt.Sprintf(`
+const (
+	maxEventLogFilters         = 32
+	maxEventLogLevelsPerFilter = 5
+	maxEventLogIDsPerFilter    = 64
+	maxEventLogTotalLevels     = 128
+	maxEventLogTotalIDs        = 512
+	maxEventLogChannelBytes    = 256
+	maxEventLogLevelBytes      = 32
+	maxEventLogPowerShellBytes = 24 * 1024
+	maxWindowsEventIdentifier  = 2147483647
+)
+
+var supportedEventLogLevels = map[string]bool{
+	"critical":    true,
+	"error":       true,
+	"warning":     true,
+	"information": true,
+	"verbose":     true,
+}
+
+func eventLogScript(cfg config.EventLogConfig) (string, error) {
+	filters, err := validatedEventLogFilters(cfg)
+	if err != nil {
+		return "", err
+	}
+	if len(filters) == 0 {
+		return "", nil
+	}
+	lookbackMinutes := cfg.LookbackMinutes
+	if lookbackMinutes <= 0 {
+		lookbackMinutes = 5
+	}
+	filterLiteral := powerShellEventLogFilters(filters)
+	script := fmt.Sprintf(`
 $levelMap = @{ critical = 1; error = 2; warning = 3; information = 4; verbose = 5 }
-$channels = @(%s)
-$levels = @(%s)
+$filters = @(%s)
 $since = (Get-Date).ToUniversalTime().AddMinutes(-%d)
 $rows = @()
-foreach ($channel in $channels) {
-  foreach ($level in $levels) {
+foreach ($filter in $filters) {
+  $channel = [string]$filter.channel
+  $filterLevels = @($filter.levels)
+  $eventIds = @($filter.ids)
+  foreach ($level in $filterLevels) {
     $err = ""
     $events = @()
     try {
       $id = $levelMap[$level.ToString().ToLowerInvariant()]
       if ($null -ne $id) {
-        $events = @(Get-WinEvent -FilterHashtable @{ LogName=$channel; Level=$id; StartTime=$since } -ErrorAction SilentlyContinue)
+        $query = @{ LogName=$channel; Level=$id; StartTime=$since }
+        if ($eventIds.Count -gt 0) {
+          $query['Id'] = @($eventIds | ForEach-Object { [int]$_ })
+        }
+        $events = @(Get-WinEvent -FilterHashtable $query -ErrorAction SilentlyContinue)
       }
     } catch {
       $err = $_.Exception.Message
@@ -795,8 +877,105 @@ foreach ($channel in $channels) {
     $rows += [pscustomobject]@{ channel=$channel; level=$level.ToString().ToLowerInvariant(); count=$events.Count; sample_ids=$sampleIds; error=$err }
   }
 }
-$rows | ConvertTo-Json -Depth 5
-`, channels, levels, cfg.LookbackMinutes)
+ConvertTo-Json -InputObject @($rows) -Depth 5
+`, filterLiteral, lookbackMinutes)
+	if len(script) > maxEventLogPowerShellBytes {
+		return "", fmt.Errorf("event-log policy generates a %d-byte PowerShell command; maximum is %d bytes", len(script), maxEventLogPowerShellBytes)
+	}
+	return script, nil
+}
+
+func effectiveEventLogFilters(cfg config.EventLogConfig) []config.EventLogFilter {
+	if cfg.Filters != nil {
+		return *cfg.Filters
+	}
+	channels := cfg.Channels
+	if len(channels) == 0 {
+		channels = []string{"System", "Application"}
+	}
+	levels := cfg.Levels
+	if len(levels) == 0 {
+		levels = []string{"critical", "error", "warning"}
+	}
+	filters := make([]config.EventLogFilter, 0, len(channels))
+	for _, channel := range channels {
+		filters = append(filters, config.EventLogFilter{
+			Channel: channel,
+			Levels:  append([]string(nil), levels...),
+		})
+	}
+	return filters
+}
+
+func validatedEventLogFilters(cfg config.EventLogConfig) ([]config.EventLogFilter, error) {
+	filters := effectiveEventLogFilters(cfg)
+	if len(filters) > maxEventLogFilters {
+		return nil, fmt.Errorf("event-log policy has %d filters; maximum is %d", len(filters), maxEventLogFilters)
+	}
+	totalLevels := 0
+	totalIDs := 0
+	for i, filter := range filters {
+		channel := strings.TrimSpace(filter.Channel)
+		if channel == "" {
+			return nil, fmt.Errorf("event-log filter %d has an empty channel", i+1)
+		}
+		if channel != filter.Channel {
+			return nil, fmt.Errorf("event-log filter %d channel has leading or trailing whitespace", i+1)
+		}
+		if len(filter.Channel) > maxEventLogChannelBytes {
+			return nil, fmt.Errorf("event-log filter %d channel is %d bytes; maximum is %d", i+1, len(filter.Channel), maxEventLogChannelBytes)
+		}
+		if len(filter.Levels) == 0 {
+			return nil, fmt.Errorf("event-log filter %d has no levels", i+1)
+		}
+		if len(filter.Levels) > maxEventLogLevelsPerFilter {
+			return nil, fmt.Errorf("event-log filter %d has %d levels; maximum is %d", i+1, len(filter.Levels), maxEventLogLevelsPerFilter)
+		}
+		totalLevels += len(filter.Levels)
+		if totalLevels > maxEventLogTotalLevels {
+			return nil, fmt.Errorf("event-log policy has %d total levels; maximum is %d", totalLevels, maxEventLogTotalLevels)
+		}
+		for j, level := range filter.Levels {
+			trimmed := strings.TrimSpace(level)
+			if trimmed != level {
+				return nil, fmt.Errorf("event-log filter %d level %d has leading or trailing whitespace", i+1, j+1)
+			}
+			if len(level) > maxEventLogLevelBytes {
+				return nil, fmt.Errorf("event-log filter %d level %d is %d bytes; maximum is %d", i+1, j+1, len(level), maxEventLogLevelBytes)
+			}
+			if !supportedEventLogLevels[strings.ToLower(level)] {
+				return nil, fmt.Errorf("event-log filter %d level %q is unsupported", i+1, level)
+			}
+		}
+		if len(filter.IDs) > maxEventLogIDsPerFilter {
+			return nil, fmt.Errorf("event-log filter %d has %d event IDs; maximum is %d", i+1, len(filter.IDs), maxEventLogIDsPerFilter)
+		}
+		totalIDs += len(filter.IDs)
+		if totalIDs > maxEventLogTotalIDs {
+			return nil, fmt.Errorf("event-log policy has %d total event IDs; maximum is %d", totalIDs, maxEventLogTotalIDs)
+		}
+		for j, id := range filter.IDs {
+			if id <= 0 || id > maxWindowsEventIdentifier {
+				return nil, fmt.Errorf("event-log filter %d event ID %d at position %d must be between 1 and %d", i+1, id, j+1, maxWindowsEventIdentifier)
+			}
+		}
+	}
+	return filters, nil
+}
+
+func powerShellEventLogFilters(filters []config.EventLogFilter) string {
+	items := make([]string, 0, len(filters))
+	for _, filter := range filters {
+		ids := make([]string, 0, len(filter.IDs))
+		for _, id := range filter.IDs {
+			ids = append(ids, fmt.Sprintf("%d", id))
+		}
+		items = append(items, fmt.Sprintf(
+			"[pscustomobject]@{ channel=%s; levels=@(%s); ids=@(%s) }",
+			quotedPowerShellString(filter.Channel), quotedArray(filter.Levels), strings.Join(ids, ","),
+		))
+	}
+	return strings.Join(items, ",")
 }
 
 func installedSoftwareScript() string {
@@ -932,10 +1111,13 @@ try {
 func quotedArray(values []string) string {
 	items := make([]string, 0, len(values))
 	for _, s := range values {
-		s = strings.ReplaceAll(s, "'", "''")
-		items = append(items, "'"+s+"'")
+		items = append(items, quotedPowerShellString(s))
 	}
 	return strings.Join(items, ",")
+}
+
+func quotedPowerShellString(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func average(values []float64) float64 {

@@ -52,7 +52,11 @@ func (u *Uploader) Drain(ctx context.Context, limit int) (int, error) {
 	for _, rec := range records {
 		var batch model.Batch
 		if err := json.Unmarshal(rec.Payload, &batch); err != nil {
-			return len(acked), err
+			// A record already persisted locally cannot become valid on retry. Drop
+			// it so one corrupt/legacy payload cannot permanently block the FIFO
+			// and every newer telemetry batch behind it.
+			acked = append(acked, rec.Key)
+			continue
 		}
 		if !u.isUploadableBatch(batch) {
 			acked = append(acked, rec.Key)
@@ -71,6 +75,14 @@ func (u *Uploader) Drain(ctx context.Context, limit int) (int, error) {
 			return len(acked), err
 		}
 		if out.Rejected > 0 {
+			// A successful HTTP response means the controller has made a final
+			// decision for this batch. Acknowledge it even when individual samples
+			// were rejected so one permanently invalid sample cannot poison the
+			// FIFO and block every newer server metric behind it.
+			acked = append(acked, rec.Key)
+			if err := u.store.Ack(acked...); err != nil {
+				return len(acked), err
+			}
 			return len(acked), fmt.Errorf("controller rejected %d metric sample(s): %v", out.Rejected, out.Errors)
 		}
 		acked = append(acked, rec.Key)

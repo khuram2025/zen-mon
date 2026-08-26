@@ -1,0 +1,54 @@
+extensions:
+  health_check:
+    endpoint: 127.0.0.1:13133
+  file_storage:
+    directory: ${env:ZENPLUS_APM_SMOKE_STORAGE}
+    create_directory: true
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+      http:
+        endpoint: 127.0.0.1:4318
+processors:
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 128
+    spike_limit_mib: 32
+  resource/zenplus:
+    attributes:
+      - key: zenplus.agent_id
+        value: build-agent
+        action: upsert
+      - key: zenplus.server_id
+        value: build-server
+        action: upsert
+  batch:
+    timeout: 2s
+exporters:
+  otlp_http/zenplus:
+    endpoint: https://127.0.0.1
+    headers:
+      Authorization: "Bearer ${env:ZENPLUS_APM_KEY}"
+    sending_queue:
+      enabled: true
+      sizer: items
+      queue_size: 5000
+      storage: file_storage
+service:
+  extensions: [health_check, file_storage]
+  telemetry:
+    metrics:
+      level: basic
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 127.0.0.1
+                port: 18888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/zenplus, batch]
+      exporters: [otlp_http/zenplus]

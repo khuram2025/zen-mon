@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-const AgentVersion = "1.11.2"
+const AgentVersion = "1.12.4"
 
 var AgentCapabilities = []string{
 	"network_capture_v1",
@@ -14,6 +14,7 @@ var AgentCapabilities = []string{
 	"apm_iis_instrumentation_v1",
 	"apm_windows_service_instrumentation_v1",
 	"apm_runtime_health_v1",
+	"clone_identity_assignment_v1",
 }
 
 type Metric struct {
@@ -44,7 +45,7 @@ type Batch struct {
 	Metrics       []Metric       `json:"metrics"`
 	Inventory     map[string]any `json:"inventory,omitempty"`
 	Events        []EventSummary `json:"events,omitempty"`
-	Health        Health         `json:"-"`
+	Health        Health         `json:"health,omitempty"`
 }
 
 type Health struct {
@@ -154,6 +155,7 @@ type EnrollmentResponse struct {
 	AgentID                   string `json:"agent_id"`
 	ServerID                  string `json:"server_id"`
 	APIKey                    string `json:"api_key"`
+	AssignedAgentUID          string `json:"assigned_agent_uid"`
 	AuthorizationState        string `json:"authorization_state"`
 	HeartbeatIntervalSeconds  int    `json:"heartbeat_interval_s"`
 	ConfigPollIntervalSeconds int    `json:"config_poll_interval_s"`

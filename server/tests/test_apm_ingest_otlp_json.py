@@ -1,5 +1,6 @@
 import asyncio
 import time
+from datetime import datetime, timezone
 
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
     ExportTraceServiceRequest,
@@ -93,6 +94,36 @@ def test_decode_otlp_protobuf_uses_the_same_row_pipeline():
     assert row["env"] == "test"
     assert row["span_kind"] == 2
     assert row["duration_nano"] == 5_000_000
+
+
+def test_runtime_status_reports_writer_readiness_and_queue_pressure(monkeypatch):
+    class RunningTask:
+        @staticmethod
+        def done():
+            return False
+
+    checked_at = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+    queue = asyncio.Queue(maxsize=apm_ingest.QUEUE_MAXSIZE)
+    monkeypatch.setattr(apm_ingest, "_writer_task", RunningTask())
+    monkeypatch.setattr(apm_ingest, "_queue", queue)
+    monkeypatch.setattr(apm_ingest, "_last_received_at", checked_at)
+
+    status = apm_ingest.runtime_status(checked_at=checked_at)
+
+    assert status["available"] is True
+    assert status["state"] == "active"
+    assert status["queue_capacity"] == apm_ingest.QUEUE_MAXSIZE
+    assert status["last_received_at"] == checked_at
+
+
+def test_runtime_status_reports_stopped_writer(monkeypatch):
+    monkeypatch.setattr(apm_ingest, "_writer_task", None)
+    monkeypatch.setattr(apm_ingest, "_queue", None)
+
+    status = apm_ingest.runtime_status()
+
+    assert status["available"] is False
+    assert status["state"] == "unavailable"
 
 
 @pytest.mark.asyncio

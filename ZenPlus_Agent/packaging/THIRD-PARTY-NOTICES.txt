@@ -32,5 +32,6 @@ Copyright The OpenTelemetry Authors
 License: Apache License 2.0
 Source: https://github.com/open-telemetry/opentelemetry-python-contrib
 
-The exact component versions, source URLs, SHA-256 digests, and generated SBOM
-are recorded in the release manifest produced by scripts/build.ps1.
+The exact component versions, source URLs, and per-file SHA-256 digests are
+recorded in apm\bundle-manifest.json. The Node dependency lockfile and Python
+wheel filenames are included beside their runtime assets.

@@ -2,7 +2,7 @@ dist:
   module: zentryc.com/zenplus/telemetry-gateway
   name: zenplus-telemetry-gateway
   description: ZenPlus managed OpenTelemetry gateway
-  version: 1.0.0
+  version: 0.158.0-zp2
   output_path: .tools/apm/collector-build
   debug_compilation: false
 
@@ -16,7 +16,11 @@ extensions:
 processors:
   - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.158.0
   - gomod: go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.158.0
-  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/attributesprocessor v0.158.0
+  # The runtime configuration uses a resource/zenplus processor to attach the
+  # owning agent and server IDs. Keep the matching component in the custom
+  # distribution; an attributes processor cannot satisfy a resource processor
+  # declaration and makes the gateway reject its configuration at startup.
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourceprocessor v0.158.0
 
 receivers:
   - gomod: go.opentelemetry.io/collector/receiver/otlpreceiver v0.158.0

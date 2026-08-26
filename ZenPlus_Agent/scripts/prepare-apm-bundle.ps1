@@ -82,7 +82,22 @@ Get-VerifiedFile `
 
 $collectorOut = Join-Path $cache "collector-build"
 $collector = Join-Path $collectorOut "zenplus-telemetry-gateway.exe"
-if ($Force -or -not (Test-Path $collector)) {
+$collectorSpec = Join-Path $root "packaging\apm-collector-builder.yaml"
+$collectorSpecText = Get-Content -LiteralPath $collectorSpec -Raw
+$collectorVersionMatch = [regex]::Match($collectorSpecText, '(?m)^\s{2}version:\s*([^\s#]+)\s*$')
+if (-not $collectorVersionMatch.Success) {
+  throw "Unable to determine the telemetry gateway version from $collectorSpec"
+}
+$collectorVersion = $collectorVersionMatch.Groups[1].Value
+$collectorStamp = Join-Path $collectorOut ".zenplus-build-input.sha256"
+$collectorInput = ((Get-FileHash -Algorithm SHA256 $collectorSpec).Hash.ToLowerInvariant() + ":" +
+  (Get-FileHash -Algorithm SHA256 $ocb).Hash.ToLowerInvariant())
+$cachedCollectorInput = if (Test-Path -LiteralPath $collectorStamp) {
+  (Get-Content -LiteralPath $collectorStamp -Raw).Trim()
+} else {
+  ""
+}
+if ($Force -or -not (Test-Path $collector) -or $cachedCollectorInput -ne $collectorInput) {
   $env:GOTMPDIR = Join-Path $root ".gotmp"
   New-Item -ItemType Directory -Force -Path $env:GOTMPDIR | Out-Null
   $previousPath = $env:PATH
@@ -93,6 +108,7 @@ if ($Force -or -not (Test-Path $collector)) {
     if ($LASTEXITCODE -ne 0) {
       throw "OpenTelemetry Collector Builder failed with exit code $LASTEXITCODE"
     }
+    [IO.File]::WriteAllText($collectorStamp, $collectorInput, (New-Object Text.UTF8Encoding($false)))
   }
   finally {
     Pop-Location
@@ -102,6 +118,52 @@ if ($Force -or -not (Test-Path $collector)) {
 
 if (-not (Test-Path $collector)) {
   throw "Custom telemetry gateway was not produced: $collector"
+}
+
+# Catch collector/config composition errors during the build instead of after
+# installation. The generated runtime configuration requires the resource
+# processor; the stock component list alone does not guarantee it is present.
+$componentOutput = (& $collector components 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0) {
+  throw "Unable to inspect the custom telemetry gateway components: $componentOutput"
+}
+$requiredGatewayComponents = @(
+  "name: otlp",
+  "name: memory_limiter",
+  "name: resource",
+  "name: batch",
+  "name: otlp_http",
+  "name: health_check",
+  "name: file_storage",
+  "scheme: env",
+  "scheme: file",
+  "scheme: yaml"
+)
+foreach ($component in $requiredGatewayComponents) {
+  if ($componentOutput -notmatch ('(?m)^\s+- ' + [regex]::Escape($component) + '\s*$')) {
+    throw "The custom telemetry gateway is missing the runtime-required component '$component'"
+  }
+}
+$versionOutput = (& $collector --version 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch [regex]::Escape($collectorVersion)) {
+  throw "The custom telemetry gateway version does not match $collectorVersion`: $versionOutput"
+}
+
+$smokeConfig = Join-Path $root "packaging\apm-gateway-smoke.yaml"
+$smokeStorage = Join-Path $cache "smoke-storage"
+$previousSmokeStorage = $env:ZENPLUS_APM_SMOKE_STORAGE
+$previousSmokeKey = $env:ZENPLUS_APM_KEY
+try {
+  $env:ZENPLUS_APM_SMOKE_STORAGE = $smokeStorage
+  $env:ZENPLUS_APM_KEY = "zpi_build_validation_only"
+  $validationOutput = (& $collector validate --config $smokeConfig 2>&1 | Out-String)
+  if ($LASTEXITCODE -ne 0) {
+    throw "The custom telemetry gateway rejected the ZenPlus pipeline configuration: $validationOutput"
+  }
+}
+finally {
+  $env:ZENPLUS_APM_SMOKE_STORAGE = $previousSmokeStorage
+  $env:ZENPLUS_APM_KEY = $previousSmokeKey
 }
 
 if (Test-Path $stage) {
@@ -121,7 +183,7 @@ Copy-Item -Force (Join-Path $root "packaging\THIRD-PARTY-NOTICES.txt") (Join-Pat
 $components = @(
   [ordered]@{
     name = "zenplus-telemetry-gateway"
-    version = "0.158.0-zp1"
+    version = $collectorVersion
     source = "OpenTelemetry Collector 0.158.0"
     sha256 = (Get-FileHash -Algorithm SHA256 $collector).Hash.ToLowerInvariant()
   }
@@ -192,19 +254,92 @@ if (-not $SkipLanguagePacks) {
   }
   $wheelhouse = Join-Path $stage "instrumentation\python\wheelhouse"
   New-Item -ItemType Directory -Force -Path $wheelhouse | Out-Null
+  $pythonConstraints = Join-Path $root "packaging\apm-python\constraints.txt"
+  # opentelemetry-distro supplies the bootstrap tool, not the framework and
+  # client integrations it discovers. Ship the official integrations needed
+  # for useful offline auto-instrumentation alongside the base packages.
+  $pythonInstrumentationPackages = @(
+    "opentelemetry-instrumentation-aio-pika==0.65b0",
+    "opentelemetry-instrumentation-aiohttp-client==0.65b0",
+    "opentelemetry-instrumentation-aiohttp-server==0.65b0",
+    "opentelemetry-instrumentation-aiokafka==0.65b0",
+    "opentelemetry-instrumentation-aiopg==0.65b0",
+    "opentelemetry-instrumentation-asgi==0.65b0",
+    "opentelemetry-instrumentation-asyncclick==0.65b0",
+    "opentelemetry-instrumentation-asyncio==0.65b0",
+    "opentelemetry-instrumentation-asyncpg==0.65b0",
+    "opentelemetry-instrumentation-boto3sqs==0.65b0",
+    "opentelemetry-instrumentation-botocore==0.65b0",
+    "opentelemetry-instrumentation-cassandra==0.65b0",
+    "opentelemetry-instrumentation-celery==0.65b0",
+    "opentelemetry-instrumentation-click==0.65b0",
+    "opentelemetry-instrumentation-confluent-kafka==0.65b0",
+    "opentelemetry-instrumentation-dbapi==0.65b0",
+    "opentelemetry-instrumentation-django==0.65b0",
+    "opentelemetry-instrumentation-exceptions==0.65b0",
+    "opentelemetry-instrumentation-falcon==0.65b0",
+    "opentelemetry-instrumentation-fastapi==0.65b0",
+    "opentelemetry-instrumentation-flask==0.65b0",
+    "opentelemetry-instrumentation-grpc==0.65b0",
+    "opentelemetry-instrumentation-httpx==0.65b0",
+    "opentelemetry-instrumentation-jinja2==0.65b0",
+    "opentelemetry-instrumentation-kafka-python==0.65b0",
+    "opentelemetry-instrumentation-logging==0.65b0",
+    "opentelemetry-instrumentation-mysql==0.65b0",
+    "opentelemetry-instrumentation-mysqlclient==0.65b0",
+    "opentelemetry-instrumentation-pika==0.65b0",
+    "opentelemetry-instrumentation-psycopg==0.65b0",
+    "opentelemetry-instrumentation-psycopg2==0.65b0",
+    "opentelemetry-instrumentation-pymemcache==0.65b0",
+    "opentelemetry-instrumentation-pymongo==0.65b0",
+    "opentelemetry-instrumentation-pymssql==0.65b0",
+    "opentelemetry-instrumentation-pymysql==0.65b0",
+    "opentelemetry-instrumentation-pyramid==0.65b0",
+    "opentelemetry-instrumentation-redis==0.65b0",
+    "opentelemetry-instrumentation-remoulade==0.65b0",
+    "opentelemetry-instrumentation-requests==0.65b0",
+    "opentelemetry-instrumentation-sqlalchemy==0.65b0",
+    "opentelemetry-instrumentation-sqlite3==0.65b0",
+    "opentelemetry-instrumentation-starlette==0.65b0",
+    "opentelemetry-instrumentation-structlog==0.65b0",
+    "opentelemetry-instrumentation-system-metrics==0.65b0",
+    "opentelemetry-instrumentation-threading==0.65b0",
+    "opentelemetry-instrumentation-tornado==0.65b0",
+    "opentelemetry-instrumentation-tortoiseorm==0.65b0",
+    "opentelemetry-instrumentation-urllib==0.65b0",
+    "opentelemetry-instrumentation-urllib3==0.65b0",
+    "opentelemetry-instrumentation-wsgi==0.65b0"
+  )
   foreach ($pyVersion in @("310", "311", "312", "313")) {
     & $python -m pip download --disable-pip-version-check --dest $wheelhouse `
       --only-binary=:all: --platform win_amd64 --implementation cp --python-version $pyVersion `
-      "opentelemetry-distro==0.65b0" "opentelemetry-exporter-otlp-proto-http==1.44.0"
+      --constraint $pythonConstraints `
+      "opentelemetry-distro==0.65b0" "opentelemetry-exporter-otlp-proto-http==1.44.0" `
+      @pythonInstrumentationPackages
     if ($LASTEXITCODE -ne 0) {
       throw "pip failed while preparing the Python $pyVersion instrumentation wheelhouse"
     }
+  }
+  $pythonSupport = Join-Path $root "packaging\apm-python"
+  Copy-Item -Force (Join-Path $pythonSupport "Install-ZenPlusPythonTracing.ps1") (Split-Path $wheelhouse)
+  Copy-Item -Force (Join-Path $pythonSupport "README.txt") (Split-Path $wheelhouse)
+  Copy-Item -Force $pythonConstraints (Split-Path $wheelhouse)
+  $pythonDigestLines = Get-ChildItem -LiteralPath $wheelhouse -File -Filter "*.whl" |
+    Sort-Object Name |
+    ForEach-Object { $_.Name + ":" + (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant() }
+  $pythonDigestBytes = [Text.Encoding]::UTF8.GetBytes(($pythonDigestLines -join "`n"))
+  $pythonDigestAlgorithm = [Security.Cryptography.SHA256]::Create()
+  try {
+    $pythonBundleSHA256 = ([BitConverter]::ToString($pythonDigestAlgorithm.ComputeHash($pythonDigestBytes))).Replace("-", "").ToLowerInvariant()
+  }
+  finally {
+    $pythonDigestAlgorithm.Dispose()
   }
   $components += [ordered]@{
     name = "opentelemetry-python-auto"
     version = "0.65b0/1.44.0"
     source = "https://pypi.org/project/opentelemetry-distro/"
-    sha256 = "recorded-per-wheel-in-sbom"
+    sha256 = $pythonBundleSHA256
   }
 }
 

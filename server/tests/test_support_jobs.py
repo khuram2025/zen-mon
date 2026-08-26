@@ -1,15 +1,13 @@
 """Unit tests for the API-side support_jobs helper.
 
-Covers UUID validation, path-traversal rejection, request/state file shape,
-and the systemctl invocation path (mocked).
+Covers UUID validation, path-traversal rejection, request/state ordering,
+queue limits, deletion, and verified bundle opening.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
-
 import pytest
 
 from app.services import support_jobs
@@ -52,19 +50,16 @@ def test_path_helpers_refuse_non_uuid():
 
 
 def test_enqueue_writes_request_and_state_files(isolated_support_root):
-    with patch.object(support_jobs, "_trigger_systemd") as trigger:
-        state = support_jobs.enqueue_job(
-            issue_category="snmp_discovery",
-            issue_summary="cannot assign SNMPv3 cred",
-            time_range="24h",
-            include_extended_logs=False,
-            requested_by="admin",
-        )
+    state = support_jobs.enqueue_job(
+        issue_category="snmp_discovery",
+        issue_summary="cannot assign SNMPv3 cred",
+        time_range="24h",
+        include_extended_logs=False,
+        requested_by="admin",
+    )
 
     job_id = state["id"]
     assert support_jobs.is_valid_job_id(job_id)
-    trigger.assert_called_once_with(job_id)
-
     req = json.loads(support_jobs.request_path(job_id).read_text())
     assert req["issue_category"] == "snmp_discovery"
     assert req["issue_summary"] == "cannot assign SNMPv3 cred"
@@ -78,31 +73,30 @@ def test_enqueue_writes_request_and_state_files(isolated_support_root):
 
 
 def test_enqueue_rejects_invalid_options(isolated_support_root):
-    with patch.object(support_jobs, "_trigger_systemd"):
-        with pytest.raises(ValueError):
-            support_jobs.enqueue_job(
-                issue_category="bogus",
-                issue_summary="",
-                time_range="24h",
-                include_extended_logs=False,
-                requested_by="admin",
-            )
-        with pytest.raises(ValueError):
-            support_jobs.enqueue_job(
-                issue_category="other",
-                issue_summary="",
-                time_range="9d",
-                include_extended_logs=False,
-                requested_by="admin",
-            )
-        with pytest.raises(ValueError):
-            support_jobs.enqueue_job(
-                issue_category="other",
-                issue_summary="x" * 501,
-                time_range="24h",
-                include_extended_logs=False,
-                requested_by="admin",
-            )
+    with pytest.raises(ValueError):
+        support_jobs.enqueue_job(
+            issue_category="bogus",
+            issue_summary="",
+            time_range="24h",
+            include_extended_logs=False,
+            requested_by="admin",
+        )
+    with pytest.raises(ValueError):
+        support_jobs.enqueue_job(
+            issue_category="other",
+            issue_summary="",
+            time_range="9d",
+            include_extended_logs=False,
+            requested_by="admin",
+        )
+    with pytest.raises(ValueError):
+        support_jobs.enqueue_job(
+            issue_category="other",
+            issue_summary="x" * 501,
+            time_range="24h",
+            include_extended_logs=False,
+            requested_by="admin",
+        )
 
 
 def test_get_status_returns_none_for_unknown(isolated_support_root):
@@ -118,17 +112,16 @@ def test_list_jobs_returns_newest_first(isolated_support_root):
     import os
     import time
 
-    with patch.object(support_jobs, "_trigger_systemd"):
-        ids = [
-            support_jobs.enqueue_job(
-                issue_category="other",
-                issue_summary="",
-                time_range="24h",
-                include_extended_logs=False,
-                requested_by="admin",
-            )["id"]
-            for _ in range(3)
-        ]
+    ids = [
+        support_jobs.enqueue_job(
+            issue_category="other",
+            issue_summary="",
+            time_range="24h",
+            include_extended_logs=False,
+            requested_by="admin",
+        )["id"]
+        for _ in range(3)
+    ]
 
     # Force mtimes to a known order so the test doesn't depend on filesystem
     # mtime resolution (some kernels round to whole seconds).
@@ -143,14 +136,13 @@ def test_list_jobs_returns_newest_first(isolated_support_root):
 
 
 def test_delete_job_removes_all_three_files(isolated_support_root):
-    with patch.object(support_jobs, "_trigger_systemd"):
-        state = support_jobs.enqueue_job(
-            issue_category="other",
-            issue_summary="",
-            time_range="24h",
-            include_extended_logs=False,
-            requested_by="admin",
-        )
+    state = support_jobs.enqueue_job(
+        issue_category="other",
+        issue_summary="",
+        time_range="24h",
+        include_extended_logs=False,
+        requested_by="admin",
+    )
     job_id = state["id"]
     # Pretend the worker produced a bundle.
     support_jobs.bundle_path(job_id).parent.mkdir(parents=True, exist_ok=True)
@@ -162,12 +154,48 @@ def test_delete_job_removes_all_three_files(isolated_support_root):
     assert not support_jobs.bundle_path(job_id).exists()
 
 
-def test_trigger_systemd_marks_failed_if_sudo_missing(isolated_support_root, monkeypatch):
-    """When sudo/systemctl is unavailable (dev box, broken sudoers) we must
-    not silently leave the job stuck on 'queued' forever."""
-    state = support_jobs.enqueue_job.__wrapped__ if hasattr(support_jobs.enqueue_job, "__wrapped__") else None  # noqa: F841
+def test_enqueue_commits_state_before_path_watched_request(isolated_support_root, monkeypatch):
+    calls = []
+    original = support_jobs._write_json
 
-    with patch("subprocess.run", side_effect=FileNotFoundError("sudo")):
-        with patch.object(support_jobs, "_mark_failed") as mark_failed:
-            support_jobs._trigger_systemd("e4f1c1b0-3b1a-4c2d-9e10-c7f8a9b0c1d2")
-    mark_failed.assert_called_once()
+    def record(path, data, *, mode):
+        calls.append(path.parent.name)
+        return original(path, data, mode=mode)
+
+    monkeypatch.setattr(support_jobs, "_write_json", record)
+    support_jobs.enqueue_job(
+        issue_category="other",
+        issue_summary="",
+        time_range="24h",
+        include_extended_logs=False,
+        requested_by="admin",
+    )
+    assert calls[:2] == ["jobs", "requests"]
+
+
+def test_queue_cap_rejects_a_fourth_outstanding_job(isolated_support_root):
+    for _ in range(support_jobs.MAX_OUTSTANDING_JOBS):
+        support_jobs.enqueue_job(
+            issue_category="other",
+            issue_summary="",
+            time_range="24h",
+            include_extended_logs=False,
+            requested_by="admin",
+        )
+    with pytest.raises(support_jobs.SupportQueueFullError):
+        support_jobs.enqueue_job(
+            issue_category="other",
+            issue_summary="",
+            time_range="24h",
+            include_extended_logs=False,
+            requested_by="admin",
+        )
+
+
+def test_open_bundle_rejects_digest_mismatch(isolated_support_root):
+    job_id = "e4f1c1b0-3b1a-4c2d-9e10-c7f8a9b0c1d2"
+    path = support_jobs.bundle_path(job_id)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"bundle")
+    with pytest.raises(support_jobs.InvalidBundleFileError, match="digest"):
+        support_jobs.open_bundle_for_download(job_id, expected_sha256="0" * 64)

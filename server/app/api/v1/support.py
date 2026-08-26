@@ -2,7 +2,7 @@
 
 Owned by Settings → General → Support in the dashboard. All operations are
 admin-only. The router is intentionally thin: bundle generation runs in a
-separate root systemd unit (see ``support/__main__.py``), so this file only
+separate unprivileged systemd worker (see ``support/__main__.py``), so this file only
 handles enqueue, status, list, download, delete, and the corresponding audit
 log entries.
 """
@@ -10,11 +10,11 @@ log entries.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -55,6 +55,12 @@ class BundleStatus(BaseModel):
     requested_by: str | None = None
     error: str = ""
     request: dict[str, Any] | None = None
+    skipped_files: list[str] = Field(default_factory=list)
+    truncated_files: list[str] = Field(default_factory=list)
+    collector_failures: list[str] = Field(default_factory=list)
+    collector_warnings: list[str] = Field(default_factory=list)
+    bundle_schema_version: int | None = None
+    worker_version: str | None = None
 
 
 @router.post("/bundles", status_code=202, response_model=BundleStatus)
@@ -76,6 +82,8 @@ async def create_bundle(
             include_extended_logs=payload.include_extended_logs,
             requested_by=user.username or str(user.id),
         )
+    except support_jobs.SupportQueueFullError as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -129,27 +137,54 @@ async def download_bundle(
     if state.get("status") != support_jobs.STATUS_READY:
         raise HTTPException(status_code=409, detail=f"bundle not ready: {state.get('status')}")
 
-    bundle_file: Path = support_jobs.bundle_path(bundle_id)
-    if not bundle_file.exists():
-        raise HTTPException(status_code=410, detail="bundle file missing on disk")
+    try:
+        bundle_stream, actual_size = support_jobs.open_bundle_for_download(
+            bundle_id,
+            expected_size=state.get("size_bytes"),
+            expected_sha256=state.get("sha256"),
+        )
+    except support_jobs.InvalidBundleFileError as exc:
+        logger.warning("refusing unsafe/corrupt support bundle %s: %s", bundle_id, exc)
+        raise HTTPException(
+            status_code=410, detail="bundle file is missing or failed its integrity check"
+        ) from exc
 
-    filename = state.get("filename") or f"zenplus-support-{bundle_id}.tar.gz"
+    filename = support_jobs.safe_download_filename(state.get("filename"), bundle_id)
 
-    await write_audit_log(
-        db,
-        actor=user,
-        action="support_bundle.download",
-        resource_type="support_bundle",
-        resource_id=bundle_id,
-        metadata={"filename": filename, "size_bytes": state.get("size_bytes", 0)},
-    )
-    await db.commit()
+    try:
+        await write_audit_log(
+            db,
+            actor=user,
+            action="support_bundle.download",
+            resource_type="support_bundle",
+            resource_id=bundle_id,
+            metadata={"filename": filename, "size_bytes": actual_size},
+        )
+        await db.commit()
+    except Exception:
+        bundle_stream.close()
+        raise
 
-    return FileResponse(
-        path=str(bundle_file),
+    def chunks():
+        try:
+            while True:
+                chunk = bundle_stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            bundle_stream.close()
+
+    return StreamingResponse(
+        chunks(),
         media_type="application/gzip",
-        filename=filename,
-        headers={"Cache-Control": "no-store"},
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(actual_size),
+            "X-Content-Type-Options": "nosniff",
+        },
+        background=BackgroundTask(bundle_stream.close),
     )
 
 
@@ -161,8 +196,11 @@ async def delete_bundle(
 ) -> Response:
     if not support_jobs.is_valid_job_id(bundle_id):
         raise HTTPException(status_code=400, detail="invalid bundle id")
-    if support_jobs.get_status(bundle_id) is None:
+    state = support_jobs.get_status(bundle_id)
+    if state is None:
         raise HTTPException(status_code=404, detail="bundle not found")
+    if state.get("status") in (support_jobs.STATUS_QUEUED, support_jobs.STATUS_RUNNING):
+        raise HTTPException(status_code=409, detail="cannot delete a running support bundle")
 
     support_jobs.delete_job(bundle_id)
     await write_audit_log(

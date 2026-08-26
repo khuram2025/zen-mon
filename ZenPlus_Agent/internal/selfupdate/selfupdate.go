@@ -110,6 +110,9 @@ func FetchPublicManifest(ctx context.Context, c *client.Client, channel string) 
 	if err := validatePublicURL(m.DownloadURL); err != nil {
 		return Manifest{}, fmt.Errorf("public update manifest is invalid: %w", err)
 	}
+	if runtime.GOOS == "windows" {
+		m.RequiresAuthenticode = true
+	}
 	return m, nil
 }
 
@@ -147,6 +150,11 @@ func normalizeManifest(m *Manifest) error {
 	}
 	if m.LatestVersion == "" || m.FileName == "" || len(m.SHA256) != 64 || m.DownloadURL == "" {
 		return fmt.Errorf("missing version, file, checksum, or download URL")
+	}
+	fileName := strings.TrimSpace(m.FileName)
+	if fileName != m.FileName || fileName == "." || fileName == ".." ||
+		filepath.Base(fileName) != fileName || strings.ContainsAny(fileName, `/\:`) {
+		return fmt.Errorf("package file name must be a single safe file name")
 	}
 	if _, err := hex.DecodeString(m.SHA256); err != nil {
 		return fmt.Errorf("checksum is not hexadecimal")
@@ -213,6 +221,9 @@ func Apply(ctx context.Context, c *client.Client, m Manifest, currentVersion str
 	if m.LatestVersion == currentVersion {
 		return nil
 	}
+	if !IsNewer(m.LatestVersion, currentVersion) {
+		return fmt.Errorf("refusing to downgrade agent from %s to %s", currentVersion, m.LatestVersion)
+	}
 	mu.Lock()
 	if inFlight {
 		mu.Unlock()
@@ -252,7 +263,7 @@ func Apply(ctx context.Context, c *client.Client, m Manifest, currentVersion str
 		os.Remove(pkgPath)
 		return fmt.Errorf("package checksum mismatch: manifest %s, downloaded %s", m.SHA256, sum)
 	}
-	if m.RequiresAuthenticode || strings.HasPrefix(strings.ToLower(m.DownloadURL), "https://zentryc.com/") {
+	if requiresPackageSignature(m) {
 		if err := verifyPackageSignature(pkgPath); err != nil {
 			os.Remove(pkgPath)
 			return fmt.Errorf("package signature verification failed: %w", err)
@@ -263,6 +274,19 @@ func Apply(ctx context.Context, c *client.Client, m Manifest, currentVersion str
 		return fmt.Errorf("launch installer: %w", err)
 	}
 	return nil
+}
+
+func requiresPackageSignature(m Manifest) bool {
+	// A controller-provided manifest is authenticated by the enrolled API, but
+	// it is not itself a code-signing authority. Fail closed for every Windows
+	// installer even when an older appliance omits the manifest flag or serves
+	// the package from a relative URL.
+	if runtime.GOOS == "windows" || m.RequiresAuthenticode {
+		return true
+	}
+	// Retain signature enforcement for every vendor CDN subdomain, not just the
+	// zentryc.com root URL previously recognized by a string prefix.
+	return validatePublicURL(m.DownloadURL) == nil
 }
 
 func sha256File(path string) (string, error) {

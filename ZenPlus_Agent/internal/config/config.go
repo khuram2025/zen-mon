@@ -98,11 +98,22 @@ type WatchConfig struct {
 }
 
 type EventLogConfig struct {
-	Enabled         bool     `yaml:"enabled" json:"enabled"`
-	IntervalSeconds int      `yaml:"interval_seconds,omitempty" json:"interval_seconds,omitempty"`
-	Channels        []string `yaml:"channels" json:"channels"`
-	Levels          []string `yaml:"levels" json:"levels"`
-	LookbackMinutes int      `yaml:"lookback_minutes" json:"lookback_minutes"`
+	Enabled         bool              `yaml:"enabled" json:"enabled"`
+	IntervalSeconds int               `yaml:"interval_seconds,omitempty" json:"interval_seconds,omitempty"`
+	Filters         *[]EventLogFilter `yaml:"filters,omitempty" json:"filters,omitempty"`
+	Channels        []string          `yaml:"channels" json:"channels"`
+	Levels          []string          `yaml:"levels" json:"levels"`
+	LookbackMinutes int               `yaml:"lookback_minutes" json:"lookback_minutes"`
+}
+
+// EventLogFilter is the controller policy representation retained in the
+// local config. A pointer to the filter slice above distinguishes an absent
+// filters field (legacy channels/levels configuration) from an explicit empty
+// controller filter list.
+type EventLogFilter struct {
+	Channel string   `yaml:"channel" json:"channel"`
+	Levels  []string `yaml:"levels" json:"levels"`
+	IDs     []int    `yaml:"ids,omitempty" json:"ids,omitempty"`
 }
 
 type SpoolConfig struct {
@@ -113,6 +124,7 @@ type SpoolConfig struct {
 type SecurityConfig struct {
 	RequireSignedConfig    bool   `yaml:"require_signed_config" json:"require_signed_config"`
 	ConfigPublicKey        string `yaml:"config_public_key,omitempty" json:"config_public_key,omitempty"`
+	ControllerCAFile       string `yaml:"controller_ca_file,omitempty" json:"controller_ca_file,omitempty"`
 	AllowInsecureTransport bool   `yaml:"allow_insecure_transport,omitempty" json:"allow_insecure_transport,omitempty"`
 }
 
@@ -187,6 +199,10 @@ func Load(path string) (Config, error) {
 		base := filepath.Dir(path)
 		cfg.DataDir = filepath.Clean(filepath.Join(base, cfg.DataDir))
 	}
+	if cfg.Security.ControllerCAFile != "" && !filepath.IsAbs(cfg.Security.ControllerCAFile) {
+		base := filepath.Dir(path)
+		cfg.Security.ControllerCAFile = filepath.Clean(filepath.Join(base, cfg.Security.ControllerCAFile))
+	}
 	return cfg, nil
 }
 
@@ -205,10 +221,39 @@ func LoadForEdit(path string) (Config, error) {
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
+	// Releases before TLS enforcement commonly stored an http:// appliance URL
+	// and relied on nginx to redirect every agent request to HTTPS. Rejecting
+	// that legacy file prevents the upgraded service from starting at all.
+	// When insecure transport was not explicitly allowed, upgrade the scheme;
+	// certificate trust remains enforced by the Windows trust store plus any
+	// explicitly configured controller CA bundle.
+	if migrated, ok := migrateLegacyControllerURL(cfg.ControllerURL, cfg.Security.AllowInsecureTransport); ok {
+		cfg.ControllerURL = migrated
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func migrateLegacyControllerURL(rawURL string, allowInsecure bool) (string, bool) {
+	if allowInsecure {
+		return rawURL, false
+	}
+	parsed, err := url.ParseRequestURI(strings.TrimSpace(rawURL))
+	if err != nil || !strings.EqualFold(parsed.Scheme, "http") || parsed.Host == "" {
+		return rawURL, false
+	}
+	host := parsed.Hostname()
+	isLoopback := strings.EqualFold(host, "localhost")
+	if ip := net.ParseIP(host); ip != nil {
+		isLoopback = ip.IsLoopback()
+	}
+	if isLoopback {
+		return rawURL, false
+	}
+	parsed.Scheme = "https"
+	return parsed.String(), true
 }
 
 func SetControllerURL(path string, rawURL string) (Config, error) {
@@ -253,6 +298,9 @@ func Save(path string, cfg Config) error {
 	if path == "" {
 		path = DefaultConfigPath
 	}
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -263,9 +311,19 @@ func Save(path string, cfg Config) error {
 	return os.WriteFile(path, b, 0o600)
 }
 
-func (c Config) Validate() error {
+func (c *Config) Validate() error {
+	if c == nil {
+		return errors.New("config is required")
+	}
 	if c.Version == 0 {
 		c.Version = 1
+	}
+	// Managed instrumentation has historically exported to IPv4 loopback.
+	// Normalize the legacy IPv6 option so old configs keep working without
+	// splitting the gateway receiver from every injected runtime endpoint.
+	c.APM.BindAddress = strings.TrimSpace(c.APM.BindAddress)
+	if c.APM.BindAddress == "" || c.APM.BindAddress == "::1" {
+		c.APM.BindAddress = "127.0.0.1"
 	}
 	if c.ControllerURL == "" {
 		return errors.New("controller_url is required")
@@ -290,6 +348,9 @@ func (c Config) Validate() error {
 	if parsed.Scheme == "https" && !c.VerifyTLS && !c.Security.AllowInsecureTransport {
 		return errors.New("verify_tls cannot be disabled unless security.allow_insecure_transport is explicitly enabled")
 	}
+	if strings.TrimSpace(c.Security.ControllerCAFile) != "" && !c.VerifyTLS {
+		return errors.New("security.controller_ca_file requires verify_tls to be enabled")
+	}
 	if c.HeartbeatIntervalSeconds <= 0 {
 		return errors.New("heartbeat_interval_seconds must be positive")
 	}
@@ -305,8 +366,8 @@ func (c Config) Validate() error {
 	if c.APM.Profile != "" && c.APM.Profile != "infrastructure" && c.APM.Profile != "apm" && c.APM.Profile != "combined" {
 		return errors.New("apm.profile must be infrastructure, apm, or combined")
 	}
-	if c.APM.BindAddress != "" && c.APM.BindAddress != "127.0.0.1" && c.APM.BindAddress != "::1" {
-		return errors.New("apm.bind_address must be a loopback address")
+	if c.APM.BindAddress != "127.0.0.1" {
+		return errors.New("apm.bind_address must be 127.0.0.1")
 	}
 	if c.Spool.MaxBytes <= 0 {
 		return errors.New("spool.max_bytes must be positive")

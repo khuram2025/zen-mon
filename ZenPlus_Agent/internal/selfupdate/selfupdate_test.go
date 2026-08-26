@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
 	"time"
 
@@ -30,6 +31,13 @@ func TestIsNewer(t *testing.T) {
 	}
 }
 
+func TestApplyRefusesDowngradeBeforeDownloading(t *testing.T) {
+	err := Apply(context.Background(), nil, Manifest{LatestVersion: "1.11.9"}, "1.12.1", func(string, ...any) {})
+	if err == nil {
+		t.Fatal("Apply accepted an older published agent")
+	}
+}
+
 func TestValidatePublicURL(t *testing.T) {
 	for _, valid := range []string{
 		"https://zentryc.com/downloads/zenplus-agent/stable/a.msi",
@@ -46,6 +54,36 @@ func TestValidatePublicURL(t *testing.T) {
 	} {
 		if err := validatePublicURL(invalid); err == nil {
 			t.Fatalf("expected %q to be rejected", invalid)
+		}
+	}
+}
+
+func TestPackageSignatureRequirementFailsClosedForWindowsAndVendorCDN(t *testing.T) {
+	relativeControllerPackage := Manifest{DownloadURL: "/api/v1/agents/packages/windows/latest"}
+	wantControllerSignature := runtime.GOOS == "windows"
+	if got := requiresPackageSignature(relativeControllerPackage); got != wantControllerSignature {
+		t.Fatalf("relative controller package signature requirement = %v, want %v on %s", got, wantControllerSignature, runtime.GOOS)
+	}
+	if !requiresPackageSignature(Manifest{DownloadURL: "https://cdn.zentryc.com/agent.msi"}) {
+		t.Fatal("vendor CDN subdomain package did not require a signature")
+	}
+	if !requiresPackageSignature(Manifest{DownloadURL: "https://example.com/agent.msi", RequiresAuthenticode: true}) {
+		t.Fatal("explicit Authenticode requirement was ignored")
+	}
+}
+
+func TestNormalizeManifestRejectsPackageFilePathTraversal(t *testing.T) {
+	for _, fileName := range []string{
+		`..\outside.exe`, "../outside.exe", `C:\outside.exe`, "/outside.exe", "subdir/agent.exe", "agent.exe:stream",
+	} {
+		m := Manifest{
+			LatestVersion: "1.12.4",
+			FileName:      fileName,
+			SHA256:        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			DownloadURL:   "/api/v1/agents/packages/windows/latest",
+		}
+		if err := normalizeManifest(&m); err == nil {
+			t.Errorf("unsafe package file name %q was accepted", fileName)
 		}
 	}
 }

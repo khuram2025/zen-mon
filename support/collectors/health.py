@@ -14,6 +14,7 @@ Today's incidents that this collector flags directly:
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import os
 import shutil
@@ -29,10 +30,10 @@ LOCAL_API_BASE = "http://127.0.0.1:8000"
 LOCAL_NGINX_BASE = "https://127.0.0.1"
 
 INTERNAL_ENDPOINTS = (
-    ("system-health", "/api/v1/system/health"),
-    ("storage", "/api/v1/system/storage"),
-    ("update-status", "/api/v1/system/update-status"),
-    ("registration", "/api/v1/system/registration"),
+    ("system-health", "/api/v1/system/health", False),
+    ("storage", "/api/v1/system/storage", True),
+    ("update-status", "/api/v1/system/update-status", True),
+    ("registration", "/api/v1/system/registration", True),
 )
 
 
@@ -41,11 +42,19 @@ def collect(ctx: CollectorContext) -> CollectorResult:
 
     # 1. Internal HTTP probes. We hit the API directly first (bypasses nginx),
     #    then nginx, to triangulate where a 502 comes from.
-    result.files["health/api-direct.json"] = _dump(_probe_endpoints(LOCAL_API_BASE))
-    result.files["health/api-via-nginx.json"] = _dump(_probe_endpoints(LOCAL_NGINX_BASE))
+    api_direct = _probe_endpoints(LOCAL_API_BASE)
+    api_nginx = _probe_endpoints(LOCAL_NGINX_BASE)
+    result.files["health/api-direct.json"] = _dump(api_direct)
+    result.files["health/api-via-nginx.json"] = _dump(api_nginx)
+    if not api_direct["all_reachable"] or not api_nginx["all_reachable"]:
+        result.warn("one or more local API routes are unreachable")
 
     # 2. Dependency-level connectivity, not via the API.
-    result.files["health/dep-health.json"] = _dump(_dep_health(ctx, result))
+    dependencies = _dep_health(ctx, result)
+    result.files["health/dep-health.json"] = _dump(dependencies)
+    required = ("postgres", "redis", "clickhouse_http", "nginx_running")
+    if any(dependencies[name].get("exit_code") != 0 for name in required):
+        result.warn("one or more required appliance dependencies are unhealthy")
 
     # 3. Known-risk checks: deterministic yes/no signals for known incidents.
     risk = _known_risk_checks(ctx, result)
@@ -73,12 +82,31 @@ def _probe_endpoints(base: str) -> dict:
                 out["results"][name] = {
                     "url": url,
                     "status": resp.status,
+                    "reachable": True,
+                    "auth_required": auth_required,
+                    "authenticated_content_collected": True,
                     "body_preview": body[:4000],
                 }
         except error.HTTPError as e:
-            out["results"][name] = {"url": url, "status": e.code, "body_preview": e.read(2000).decode("utf-8", errors="replace")}
+            expected_auth = auth_required and e.code in (401, 403)
+            out["results"][name] = {
+                "url": url,
+                "status": e.code,
+                "reachable": expected_auth,
+                "auth_required": auth_required,
+                "authenticated_content_collected": False,
+                "body_preview": e.read(2000).decode("utf-8", errors="replace"),
+            }
         except Exception as exc:  # noqa: BLE001
-            out["results"][name] = {"url": url, "status": "error", "error": str(exc)}
+            out["results"][name] = {
+                "url": url,
+                "status": "error",
+                "reachable": False,
+                "auth_required": auth_required,
+                "authenticated_content_collected": False,
+                "error": str(exc),
+            }
+    out["all_reachable"] = all(row["reachable"] for row in out["results"].values())
     return out
 
 
@@ -86,15 +114,40 @@ def _dep_health(ctx: CollectorContext, result: CollectorResult) -> dict:
     return {
         "postgres": _command(["pg_isready", "-q"], timeout=5),
         "redis": _command(["redis-cli", "ping"], timeout=5),
-        "clickhouse_docker_exec": _command(
-            ["docker", "exec", "zenplus-clickhouse", "clickhouse-client", "--query", "SELECT 1"],
-            timeout=10,
-        ),
+        # The support worker is deliberately denied the Docker socket. Probe
+        # the same ClickHouse HTTP endpoint used by the application instead.
+        "clickhouse_http": _clickhouse_health(),
         "nginx_running": _command(["systemctl", "is-active", "nginx"], timeout=5),
         "snmp_enc_key_set": {"value": bool(os.environ.get("SNMP_ENC_KEY"))},
         "snmpget_available": _command(["snmpget", "--version"], timeout=5),
         "snmpwalk_available": _command(["snmpwalk", "--version"], timeout=5),
     }
+
+
+def _clickhouse_health() -> dict:
+    host = os.environ.get("CLICKHOUSE_HOST", "127.0.0.1")
+    port = os.environ.get("CLICKHOUSE_HTTP_PORT", "8123")
+    database = os.environ.get("CLICKHOUSE_DB", "zenplus")
+    user = os.environ.get("CLICKHOUSE_USER", "default")
+    password = os.environ.get("CLICKHOUSE_PASSWORD", "")
+    url = f"http://{host}:{port}/?database={database}"
+    probe = request.Request(url, data=b"SELECT 1", method="POST")
+    if user:
+        encoded = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
+        probe.add_header("Authorization", "Basic " + encoded)
+    try:
+        with request.urlopen(probe, timeout=5) as response:
+            body = response.read(1024).decode("utf-8", errors="replace").strip()
+            ok = response.status == 200 and body == "1"
+            return {
+                "exit_code": 0 if ok else 1,
+                "http_status": response.status,
+                "response": body[:100],
+            }
+    except error.HTTPError as exc:
+        return {"exit_code": 1, "http_status": exc.code, "error": "HTTP error"}
+    except Exception as exc:  # noqa: BLE001
+        return {"exit_code": 1, "error": f"{exc.__class__.__name__}: {exc}"}
 
 
 def _known_risk_checks(ctx: CollectorContext, result: CollectorResult) -> dict:
@@ -153,6 +206,8 @@ def _migrations_lock_check(ctx: CollectorContext) -> dict:
             drift.append({"file": f.name, "issue": "unlocked"})
         elif recorded != on_disk:
             drift.append({"file": f.name, "issue": "drift", "locked": recorded, "on_disk": on_disk})
+    for locked_name in sorted(set(locked) - {p.name for p in scripts.glob("migrate-*.sql")}):
+        drift.append({"file": locked_name, "issue": "locked_file_missing"})
     return {"ok": not drift, "detail": "drift entries below", "drift": drift}
 
 

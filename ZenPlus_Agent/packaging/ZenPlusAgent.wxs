@@ -16,7 +16,7 @@
       InstallPrivileges="elevated"
       Description="ZenPlus Agent Windows installer" />
 
-    <MajorUpgrade Schedule="afterInstallValidate" DowngradeErrorMessage="A newer version of ZenPlus Agent is already installed." />
+    <MajorUpgrade Schedule="afterInstallExecute" DowngradeErrorMessage="A newer version of ZenPlus Agent is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <Icon Id="ProductIcon" SourceFile="$(var.AssetsDir)\zenplus-agent.ico" />
@@ -26,7 +26,8 @@
     <Property Id="ARPHELPLINK" Value="https://zentryc.com/contact/" />
     <Property Id="ARPCONTACT" Value="support@zentryc.com" />
     <Property Id="CONTROLLER_URL" Secure="yes" />
-    <Property Id="INSTALL_PROFILE" Value="combined" Secure="yes" />
+    <Property Id="CONTROLLER_CA_FILE" Secure="yes" />
+    <Property Id="INSTALL_PROFILE" Secure="yes" />
     <Property Id="PURGE" Secure="yes" />
     <Property Id="InstallViaExe" Hidden="yes" />
 
@@ -40,9 +41,9 @@
 
     <SetProperty
       Id="InstallViaExe"
-      Value="/machine /quiet /norestart /managed-by-msi CONTROLLER_URL=&quot;[CONTROLLER_URL]&quot; INSTALL_PROFILE=&quot;[INSTALL_PROFILE]&quot;"
+      Value="/machine /quiet /norestart /managed-by-msi CONTROLLER_URL=&quot;[CONTROLLER_URL]&quot; CONTROLLER_CA_FILE=&quot;[CONTROLLER_CA_FILE]&quot; INSTALL_PROFILE=&quot;[INSTALL_PROFILE]&quot;"
       Sequence="execute"
-      Before="InstallViaExe">NOT Installed AND NOT REMOVE</SetProperty>
+      Before="InstallViaExe">NOT REMOVE</SetProperty>
     <SetProperty
       Id="WixShellExecTarget"
       Value="[ProgramFiles64Folder]ZenPlus\Agent\zenplus-agent-app.exe"
@@ -59,16 +60,17 @@
 
     <SetProperty
       Id="UninstallViaExe"
-      Value="&quot;[ProgramFiles64Folder]ZenPlus\Agent\ZenPlusAgentSetup.exe&quot; /uninstall /quiet /machine /managed-by-msi PURGE=&quot;[PURGE]&quot;"
+      Value="/uninstall /quiet /machine /managed-by-msi PURGE=&quot;[PURGE]&quot;"
       Sequence="execute"
       Before="UninstallViaExe">REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE</SetProperty>
     <CustomAction
       Id="UninstallViaExe"
-      Directory="TARGETDIR"
+      BinaryKey="ZenPlusAgentSetupExe"
       ExeCommand="[UninstallViaExe]"
       Execute="deferred"
-      Return="ignore"
-      Impersonate="no" />
+      Return="check"
+      Impersonate="no"
+      HideTarget="yes" />
 
     <CustomAction
       Id="LaunchDashboard"
@@ -79,7 +81,7 @@
       Impersonate="yes" />
 
     <InstallExecuteSequence>
-      <Custom Action="InstallViaExe" After="InstallInitialize">NOT Installed AND NOT REMOVE</Custom>
+      <Custom Action="InstallViaExe" After="InstallInitialize">NOT REMOVE</Custom>
       <!-- A major upgrade must leave the standalone installation in place for
            the incoming setup custom action to update synchronously. Running
            the old self-uninstaller here races the new installer. -->

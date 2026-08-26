@@ -22,9 +22,13 @@ type dataBlob struct {
 }
 
 func ProtectToFile(path string, plaintext []byte) error {
+	// Encrypt before applying the destination-specific file ACL.
 	ciphertext, err := Protect(plaintext)
 	if err != nil {
 		return err
+	}
+	if isMachineDataPath(path) {
+		return writeMachineSecretFile(path, ciphertext)
 	}
 	return os.WriteFile(path, ciphertext, 0o600)
 }

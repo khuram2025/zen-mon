@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"zenplus-agent/internal/client"
@@ -68,7 +69,9 @@ func Recover(ctx context.Context, cfg config.Config, paths runtime.Paths, logf f
 }
 
 func register(ctx context.Context, cfg config.Config, paths runtime.Paths, id identity.Identity, pendingSecret string, logf func(string, ...any)) (Result, error) {
-	c, err := client.New(cfg.ControllerURL, cfg.ProxyURL, cfg.VerifyTLS, "", "")
+	c, err := client.NewWithControllerCA(
+		cfg.ControllerURL, cfg.ProxyURL, cfg.VerifyTLS, cfg.Security.ControllerCAFile, "", "",
+	)
 	if err != nil {
 		return Result{Identity: id}, err
 	}
@@ -99,6 +102,16 @@ func register(ctx context.Context, cfg config.Config, paths runtime.Paths, id id
 	}
 	if resp.AgentID == "" {
 		return Result{Identity: id}, fmt.Errorf("invalid enrollment response: %s", safeJSON(body))
+	}
+	if resp.AssignedAgentUID != "" {
+		assignedUID, err := validateAssignedAgentUID(resp.AssignedAgentUID)
+		if err != nil {
+			return Result{Identity: id}, fmt.Errorf("invalid appliance-assigned agent identity: %w", err)
+		}
+		if assignedUID != id.AgentUID {
+			logf("appliance assigned a separate identity to this cloned installation")
+			id.AgentUID = assignedUID
+		}
 	}
 	id.AgentID = resp.AgentID
 	if resp.ServerID != "" {
@@ -142,6 +155,20 @@ func register(ctx context.Context, cfg config.Config, paths runtime.Paths, id id
 		PolicyID:                  resp.PolicyID,
 		AuthorizationState:        "authorized",
 	}, nil
+}
+
+func validateAssignedAgentUID(value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed != value {
+		return "", errors.New("leading or trailing whitespace is not allowed")
+	}
+	if len(trimmed) < 8 || len(trimmed) > 128 {
+		return "", errors.New("length must be between 8 and 128 characters")
+	}
+	if strings.ContainsAny(trimmed, "\r\n\t") {
+		return "", errors.New("control characters are not allowed")
+	}
+	return trimmed, nil
 }
 
 func ensurePendingSecret(path string) (string, error) {

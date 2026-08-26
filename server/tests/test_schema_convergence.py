@@ -513,3 +513,44 @@ def test_shipped_template_seeds_are_runnable():
         sql = path.read_text()
         assert migration_order.writes_rows(sql) is False, f"{name} reads as unguarded"
         assert migration_order.is_replay_safe(sql) is True, f"{name} reads as unsafe to replay"
+
+
+def test_manual_map_webhook_runtime_columns_have_a_locked_migration():
+    """The alert fan-out query must not outrun its PostgreSQL schema again."""
+    import hashlib
+
+    scripts = Path(__file__).resolve().parents[2] / "scripts"
+    migration = scripts / "migrate-093-manual-map-webhooks.sql"
+    sql = migration.read_text(encoding="utf-8")
+
+    assert "ADD COLUMN IF NOT EXISTS webhook_enabled" in sql
+    assert "ADD COLUMN IF NOT EXISTS webhook_url" in sql
+    assert migration_order.added_columns(sql) == {
+        "manual_maps.webhook_enabled",
+        "manual_maps.webhook_url",
+    }
+
+    digest = hashlib.sha256(migration.read_bytes()).hexdigest()
+    lock = (scripts / "migrations.lock").read_text(encoding="utf-8")
+    assert f"{digest}  {migration.name}" in lock.splitlines()
+
+
+def test_host_metric_retry_deduplication_has_a_locked_clickhouse_migration():
+    """Every host table retried by one batch must retain deduplication tokens."""
+    import hashlib
+
+    scripts = Path(__file__).resolve().parents[2] / "scripts"
+    migration = scripts / "migrate-094-host-metric-insert-dedup-clickhouse.sql"
+    sql = migration.read_text(encoding="utf-8")
+    tables = {
+        "host_cpu_metrics", "host_memory_metrics", "host_filesystem_metrics",
+        "host_disk_io_metrics", "host_network_metrics", "host_process_metrics",
+        "host_service_state", "host_event_log_summary", "agent_health_metrics",
+    }
+    for table in tables:
+        assert f"ALTER TABLE zenplus.{table}" in sql
+    assert sql.count("non_replicated_deduplication_window = 10000") == len(tables)
+
+    digest = hashlib.sha256(migration.read_bytes()).hexdigest()
+    lock = (scripts / "migrations.lock").read_text(encoding="utf-8")
+    assert f"{digest}  {migration.name}" in lock.splitlines()
