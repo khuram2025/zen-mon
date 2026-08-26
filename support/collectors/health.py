@@ -74,7 +74,7 @@ def _probe_endpoints(base: str) -> dict:
         ssl._create_unverified_context()  # noqa: SLF001
         if base == LOCAL_NGINX_BASE else None
     )
-    for name, path in INTERNAL_ENDPOINTS:
+    for name, path, auth_required in INTERNAL_ENDPOINTS:
         url = base + path
         try:
             with request.urlopen(url, timeout=5, context=ssl_context) as resp:
