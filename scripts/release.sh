@@ -1,87 +1,117 @@
-#!/bin/bash
-# ============================================================================
-# ZenPlus release: build + publish an OTA update to zentryc.com
+#!/usr/bin/env bash
+# Build, verify, and publish a ZenPlus OTA release from the protected main tree.
 #
-#   sudo bash scripts/release.sh <version> "<changelog>" [severity] [rollout]
+# Usage:
+#   bash scripts/release.sh <version> "<changelog>" [severity] [rollout] [min-version]
 #
-#   severity: normal (default) | security | critical | optional
-#   rollout:  full (default)   | canary   | percentage
+# severity: normal (default) | security | critical | optional
+# rollout:  none (default) | canary | percentage | full
 #
-# Handles every gotcha that has bitten past releases:
-#   - dashboard/dist and /tmp/zenplus-releases must be zenplus-owned before the
-#     build (vite emptyDir's dist in place; a stray zen-owned dist kills it),
-#     and world-readable afterwards so nginx can serve it
-#   - build must run as zenplus: the signing key updater/keys/zentryc-release.key
-#     is 0400 zenplus
-#   - publish needs httpx, which is only in server/venv, not system python
-#   - get_admin_token() reads $HOME/.zenplus-admin-creds, and sudo keeps the
-#     caller's HOME, so HOME=/opt/zenplus must be passed explicitly
-#
-# Credentials live in /root/.zenplus-admin-creds (0600 root) and are copied to
-# the zenplus HOME only for the duration of the publish, then removed.
-# Account: admin@zentryc.com. (The older zenai-release@zentryc.com account no
-# longer authenticates — a 401 at publish time usually means a stale file here.)
-#
-# Pre-flight, run these BEFORE calling this script:
-#   1. bump .version  (2 lines: version, ISO timestamp — nothing writes it)
-#   2. server/venv/bin/python -m pytest server/tests -q
-#   3. python3 scripts/build-release.py lint-migrations
-#      (new migrate-*.sql also needs: lint-migrations --update-lock)
-#   4. commit + push — releases are cut from the active feature branch
-# ============================================================================
-set -euo pipefail
-cd /opt/zenplus
+# A release is published without a rollout by default. Promote it only after a
+# genuine prior-version appliance has completed the canary verification.
 
-if [ "$(id -u)" -ne 0 ]; then
-    echo "This script must run as root (sudo bash scripts/release.sh ...)" >&2
-    exit 1
-fi
-if [ $# -lt 2 ]; then
-    echo "usage: sudo bash scripts/release.sh <version> \"<changelog>\" [severity] [rollout]" >&2
+set -euo pipefail
+
+ZENPLUS_DIR="${ZENPLUS_DIR:-/opt/zenplus}"
+PYTHON="${ZENPLUS_RELEASE_PYTHON:-${ZENPLUS_DIR}/venv/bin/python}"
+PRIVATE_KEY="${ZENPLUS_RELEASE_PRIVATE_KEY:-${HOME}/keys/zentryc-release.key}"
+PUBLIC_KEY="${ZENPLUS_RELEASE_PUBLIC_KEY:-${ZENPLUS_DIR}/updater/keys/zentryc-release.pub}"
+CREDS="${HOME}/.zenplus-admin-creds"
+
+if [ "$#" -lt 2 ]; then
+    echo "usage: bash scripts/release.sh <version> \"<changelog>\" [severity] [rollout] [min-version]" >&2
     exit 1
 fi
 
 VERSION="$1"
 CHANGELOG="$2"
 SEVERITY="${3:-normal}"
-ROLLOUT="${4:-full}"
-CREDS_SRC="/root/.zenplus-admin-creds"
-CREDS_DST="/opt/zenplus/.zenplus-admin-creds"
-ZUP="/tmp/zenplus-releases/update-${VERSION}.zup"
+ROLLOUT="${4:-none}"
+MIN_VERSION="${5:-${ZENPLUS_MIN_VERSION:-}}"
+ZUP="${ZENPLUS_RELEASE_DIR:-/tmp/zenplus-releases}/update-${VERSION}.zup"
 
-[ -f "$CREDS_SRC" ] || { echo "Missing $CREDS_SRC — cannot authenticate to zentryc.com" >&2; exit 1; }
+case "$SEVERITY" in
+    normal|security|critical|optional) ;;
+    *) echo "invalid severity: $SEVERITY" >&2; exit 1 ;;
+esac
+case "$ROLLOUT" in
+    none|canary|percentage|full) ;;
+    *) echo "invalid rollout: $ROLLOUT" >&2; exit 1 ;;
+esac
 
-echo "== Fixing ownership (vite builds dist in place as zenplus) =="
-mkdir -p /tmp/zenplus-releases
-chown -R zenplus:zenplus /opt/zenplus/dashboard/dist /tmp/zenplus-releases 2>/dev/null || true
-chown -R zenplus:zenplus /opt/zenplus/.git/objects 2>/dev/null || true
+if [ "$(id -u)" -eq 0 ]; then
+    echo "run this script as the repository/release-key owner, not root" >&2
+    exit 1
+fi
 
-install -o zenplus -g zenplus -m 0600 "$CREDS_SRC" "$CREDS_DST"
-cleanup() {
-    rm -f "$CREDS_DST"
-    chmod -R a+rX /opt/zenplus/dashboard/dist 2>/dev/null || true
+cd "$ZENPLUS_DIR"
+
+test -x "$PYTHON" || { echo "missing release Python: $PYTHON" >&2; exit 1; }
+test -r "$PRIVATE_KEY" || { echo "missing release signing key: $PRIVATE_KEY" >&2; exit 1; }
+test -r "$PUBLIC_KEY" || { echo "missing release public key: $PUBLIC_KEY" >&2; exit 1; }
+test -r "$CREDS" || { echo "missing zentryc admin credentials: $CREDS" >&2; exit 1; }
+
+git fetch origin --prune
+test "$(git branch --show-current)" = "main" || {
+    echo "release must be cut from main" >&2
+    exit 1
 }
-trap cleanup EXIT
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" || {
+    echo "local main is not synchronized with origin/main" >&2
+    exit 1
+}
+test -z "$(git status --porcelain)" || {
+    echo "release worktree is not clean" >&2
+    git status --short >&2
+    exit 1
+}
+test "$(head -n 1 .version)" = "$VERSION" || {
+    echo ".version does not match requested release $VERSION" >&2
+    exit 1
+}
 
-echo "== Building ${VERSION} =="
-sudo -u zenplus env HOME=/opt/zenplus python3 scripts/build-release.py build \
-    --version "$VERSION" --changelog "$CHANGELOG" --severity "$SEVERITY"
+export ZENPLUS_DIR
+export ZENPLUS_RELEASE_PRIVATE_KEY="$PRIVATE_KEY"
+export ZENPLUS_RELEASE_PUBLIC_KEY="$PUBLIC_KEY"
 
-echo "== Verifying manifest signature before publishing =="
-sudo -u zenplus env HOME=/opt/zenplus server/venv/bin/python - "$ZUP" <<'PY'
-import sys, tarfile, tempfile, os
-sys.path.insert(0, "/opt/zenplus")
-from updater.crypto import verify_manifest
-with tempfile.TemporaryDirectory() as d:
-    with tarfile.open(sys.argv[1], "r:gz") as t:
-        t.extract("manifest.json", d); t.extract("manifest.json.sig", d)
-    m = verify_manifest(os.path.join(d, "manifest.json"),
-                        os.path.join(d, "manifest.json.sig"),
-                        "/opt/zenplus/updater/keys/zentryc-release.pub")
-print(f"  Signature valid — v{m['version']} ({m['severity']}), {len(m['steps'])} steps")
-PY
+"$PYTHON" scripts/build-release.py lint-migrations
+BUILD_ARGS=(
+    build
+    --version "$VERSION"
+    --changelog "$CHANGELOG"
+    --severity "$SEVERITY"
+)
+if [ -n "$MIN_VERSION" ]; then
+    BUILD_ARGS+=(--min-version "$MIN_VERSION")
+fi
+"$PYTHON" scripts/build-release.py "${BUILD_ARGS[@]}"
 
-echo "== Publishing ${VERSION} (rollout: ${ROLLOUT}) =="
-sudo -u zenplus env HOME=/opt/zenplus server/venv/bin/python scripts/build-release.py publish \
-    --file "$ZUP" --version "$VERSION" --changelog "$CHANGELOG" \
-    --severity "$SEVERITY" --rollout "$ROLLOUT"
+AGENT_VERSION="$(sed -n 's/.*AgentVersion[[:space:]]*=[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p' ZenPlus_Agent/internal/model/model.go)"
+test -n "$AGENT_VERSION" || { echo "cannot determine Windows AgentVersion" >&2; exit 1; }
+"$PYTHON" scripts/verify-ota-release.py \
+    "$ZUP" \
+    "$PUBLIC_KEY" \
+    --version "$VERSION" \
+    --agent-version "$AGENT_VERSION"
+
+PUBLISH_ARGS=(
+    publish
+    --file "$ZUP"
+    --version "$VERSION"
+    --changelog "$CHANGELOG"
+    --severity "$SEVERITY"
+)
+if [ -n "$MIN_VERSION" ]; then
+    PUBLISH_ARGS+=(--min-version "$MIN_VERSION")
+fi
+if [ "$ROLLOUT" != "none" ]; then
+    PUBLISH_ARGS+=(
+        --rollout "$ROLLOUT"
+        --rollout-pct "${ZENPLUS_ROLLOUT_PCT:-100}"
+    )
+    if [ -n "${ZENPLUS_ROLLOUT_GROUP:-}" ]; then
+        PUBLISH_ARGS+=(--rollout-group "$ZENPLUS_ROLLOUT_GROUP")
+    fi
+fi
+
+"$PYTHON" scripts/build-release.py "${PUBLISH_ARGS[@]}"

@@ -46,6 +46,9 @@ RELEASE_DIR = Path(os.getenv("ZENPLUS_RELEASE_DIR", "/tmp/zenplus-releases"))
 PRIVATE_KEY_PATH = Path(
     os.getenv("ZENPLUS_RELEASE_PRIVATE_KEY", str(ZENPLUS_DIR / "updater" / "keys" / "zentryc-release.key"))
 )
+PUBLIC_KEY_PATH = Path(
+    os.getenv("ZENPLUS_RELEASE_PUBLIC_KEY", str(ZENPLUS_DIR / "updater" / "keys" / "zentryc-release.pub"))
+)
 SERVER_URL = os.getenv("ZENPLUS_RELEASE_SERVER_URL", "https://zentryc.com")
 GO_BIN = shutil.which("go") or "/usr/local/go/bin/go"
 
@@ -602,6 +605,30 @@ def get_admin_token() -> str:
 
 # ─── Build ────────────────────────────────────────────────────────────────────
 
+def validate_release_inputs(version: str) -> None:
+    """Fail before expensive builds when versioning or signing is unsafe."""
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise RuntimeError(f"Release version must be semantic X.Y.Z, got {version!r}")
+
+    version_file = ZENPLUS_DIR / ".version"
+    if not version_file.is_file():
+        raise RuntimeError(f"Release version file is missing: {version_file}")
+    version_lines = version_file.read_text(encoding="utf-8").splitlines()
+    source_version = version_lines[0].strip() if version_lines else ""
+    if source_version != version:
+        raise RuntimeError(
+            f"Release version {version} does not match {version_file} ({source_version}). "
+            "Update and commit .version before building."
+        )
+
+    if not PRIVATE_KEY_PATH.is_file():
+        raise RuntimeError(
+            "Release signing key is missing or unreadable: "
+            f"{PRIVATE_KEY_PATH}. Set ZENPLUS_RELEASE_PRIVATE_KEY to the "
+            "approved Ed25519 private key."
+        )
+
+
 def build_package(version: str, changelog: str, severity: str,
                   min_version: str | None, skip_dashboard: bool,
                   skip_go: bool, include_migrations: bool,
@@ -609,6 +636,8 @@ def build_package(version: str, changelog: str, severity: str,
                   agent_artifact_dir: Path | None = None,
                   skip_agent_artifacts: bool = False) -> Path:
     """Build a .zup release package from the current codebase."""
+
+    validate_release_inputs(version)
 
     print(f"\n{'='*60}")
     print(f"  Building ZenPlus v{version}")
@@ -669,12 +698,33 @@ def build_package(version: str, changelog: str, severity: str,
     if not skip_dashboard:
         print("[2/7] Building dashboard ...")
         dash_dir = ZENPLUS_DIR / "dashboard"
+        # A lockfile change is not part of the release unless the build uses
+        # it. Reinstall deterministically so a long-lived appliance cannot
+        # package stale or vulnerable modules from its existing node_modules.
+        install = subprocess.run(
+            ["npm", "ci"],
+            capture_output=True, text=True,
+            cwd=str(dash_dir), timeout=600,
+        )
+        if install.returncode != 0:
+            print(f"  ERROR: Dashboard dependency install failed:\n{install.stdout}\n{install.stderr}")
+            sys.exit(1)
+
+        audit = subprocess.run(
+            ["npm", "audit", "--omit=dev", "--audit-level=high"],
+            capture_output=True, text=True,
+            cwd=str(dash_dir), timeout=120,
+        )
+        if audit.returncode != 0:
+            print(f"  ERROR: Dashboard production dependency audit failed:\n{audit.stdout}\n{audit.stderr}")
+            sys.exit(1)
+
         # Use vite directly instead of `npm run build` — the latter runs
         # `tsc -b && vite build`, and tsc currently fails on pre-existing
         # type errors in Settings.tsx / authStore.ts that are unrelated
         # to the release. Vite alone produces an identical bundle.
         result = subprocess.run(
-            ["npx", "vite", "build"],
+            ["npx", "--no-install", "vite", "build"],
             capture_output=True, text=True,
             cwd=str(dash_dir), timeout=300,
         )
@@ -1006,13 +1056,18 @@ def build_package(version: str, changelog: str, severity: str,
     manifest_data = json.dumps(manifest, indent=2).encode()
     (build_dir / "manifest.json").write_bytes(manifest_data)
 
-    # Sign manifest
-    if PRIVATE_KEY_PATH.exists():
-        sig = sign_manifest(manifest_data, PRIVATE_KEY_PATH)
-        (build_dir / "manifest.json.sig").write_bytes(sig)
-        print(f"  Manifest signed with {PRIVATE_KEY_PATH}")
-    else:
-        print(f"  WARNING: No private key at {PRIVATE_KEY_PATH}, manifest unsigned!")
+    # Production OTA packages are never valid without this signature. Failing
+    # here prevents a large build from producing an artifact that the portal
+    # and every correctly configured appliance must reject later.
+    if not PRIVATE_KEY_PATH.is_file():
+        raise RuntimeError(
+            "Release signing key is missing or unreadable: "
+            f"{PRIVATE_KEY_PATH}. Set ZENPLUS_RELEASE_PRIVATE_KEY to the "
+            "approved Ed25519 private key."
+        )
+    sig = sign_manifest(manifest_data, PRIVATE_KEY_PATH)
+    (build_dir / "manifest.json.sig").write_bytes(sig)
+    print(f"  Manifest signed with {PRIVATE_KEY_PATH}")
 
     # 7. Generate checksums & create .zup
     print("[7/7] Packaging .zup ...")
@@ -1067,28 +1122,92 @@ def build_package(version: str, changelog: str, severity: str,
 
 # ─── Publish ──────────────────────────────────────────────────────────────────
 
+def verify_release_package(zup_path: Path, version: str) -> None:
+    """Run the complete offline verifier before any production API call."""
+    if not PUBLIC_KEY_PATH.is_file():
+        raise RuntimeError(f"Release verification key is missing: {PUBLIC_KEY_PATH}")
+    agent_version = _agent_source_version()
+    if not agent_version:
+        raise RuntimeError(
+            "Cannot determine the required Windows agent version for release verification"
+        )
+    verifier = ZENPLUS_DIR / "scripts" / "verify-ota-release.py"
+    subprocess.run(
+        [
+            sys.executable,
+            str(verifier),
+            str(zup_path),
+            str(PUBLIC_KEY_PATH),
+            "--version",
+            version,
+            "--agent-version",
+            agent_version,
+        ],
+        check=True,
+    )
+
+
 def publish_package(zup_path: Path, version: str, changelog: str,
                     severity: str, min_version: str | None) -> None:
     """Upload a .zup package to zentryc.com and publish it."""
     import httpx
 
+    pkg_hash = sha256_file(str(zup_path))
+
+    # Reject malformed/unsigned input before contacting the production API.
+    try:
+        with tarfile.open(zup_path, "r:gz") as tar:
+            manifest_file = tar.extractfile(tar.getmember("manifest.json"))
+            if manifest_file is None:
+                raise ValueError("manifest.json is not a regular file")
+            manifest = json.loads(manifest_file.read())
+            sig_member = tar.getmember("manifest.json.sig")
+            sig_file = tar.extractfile(sig_member)
+            if sig_file is None:
+                raise ValueError("manifest.json.sig is not a regular file")
+            sig_data = sig_file.read()
+            if not sig_data:
+                raise ValueError("manifest.json.sig is empty")
+            manifest_sig_b64 = base64.b64encode(sig_data).decode()
+    except Exception as exc:
+        print(f"ERROR: Refusing to publish an unsigned or invalid package: {exc}")
+        sys.exit(1)
+
+    requested_min_version = min_version or None
+    signed_min_version = manifest.get("min_version") or None
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        print(f"ERROR: Invalid semantic release version: {version!r}")
+        sys.exit(1)
+    if requested_min_version != signed_min_version:
+        print(
+            "ERROR: Refusing to publish because --min-version does not match "
+            f"the signed manifest ({signed_min_version!r})."
+        )
+        sys.exit(1)
+    if requested_min_version:
+        if not re.fullmatch(r"\d+\.\d+\.\d+", requested_min_version):
+            print(f"ERROR: Invalid semantic --min-version: {requested_min_version!r}")
+            sys.exit(1)
+        if _version_key(requested_min_version) >= _version_key(version):
+            print("ERROR: --min-version must be lower than the release version.")
+            sys.exit(1)
+
+    print("  Verifying signature, checksums, version, secrets, and agent payload ...")
+    verify_release_package(zup_path, version)
+
     print(f"\nPublishing v{version} to {SERVER_URL} ...")
 
     token = get_admin_token()
     headers = {"Authorization": f"Bearer {token}"}
-
-    pkg_hash = sha256_file(str(zup_path))
-    pkg_size = zup_path.stat().st_size
-
-    # Read manifest signature for API
-    manifest_sig_b64 = ""
-    try:
-        with tarfile.open(zup_path, "r:gz") as tar:
-            sig_member = tar.getmember("manifest.json.sig")
-            sig_data = tar.extractfile(sig_member).read()
-            manifest_sig_b64 = base64.b64encode(sig_data).decode()
-    except (KeyError, Exception) as e:
-        print(f"  WARNING: Could not extract manifest signature: {e}")
+    release_fields = {
+        "version": version,
+        "changelog": changelog,
+        "severity": severity,
+        "package_sha256": pkg_hash,
+        "manifest_sig": manifest_sig_b64,
+    }
+    if min_version:
+        release_fields["min_version"] = min_version
 
     with httpx.Client(timeout=httpx.Timeout(300, connect=30)) as client:
         # Upload release
@@ -1098,13 +1217,7 @@ def publish_package(zup_path: Path, version: str, changelog: str,
                 f"{SERVER_URL}/api/v1/admin/releases/create",
                 headers={"Authorization": f"Bearer {token}"},
                 files={"file": (zup_path.name, f, "application/octet-stream")},
-                data={
-                    "version": version,
-                    "changelog": changelog,
-                    "severity": severity,
-                    "package_sha256": pkg_hash,
-                    "manifest_sig": manifest_sig_b64,
-                },
+                data=release_fields,
             )
 
         if resp.status_code not in (200, 201):
@@ -1114,6 +1227,9 @@ def publish_package(zup_path: Path, version: str, changelog: str,
 
         release_data = resp.json()
         release_id = release_data.get("id", release_data.get("release_id", ""))
+        if not release_id:
+            print("  ERROR: Upload response did not include a release id.")
+            sys.exit(1)
         print(f"  Uploaded: release_id={release_id}")
 
         # Publish the release
@@ -1123,10 +1239,41 @@ def publish_package(zup_path: Path, version: str, changelog: str,
             headers=headers,
         )
         if resp.status_code not in (200, 201):
-            print(f"  WARNING: Publish failed: {resp.status_code} {resp.text}")
-            print("  You can publish manually from the admin dashboard.")
-        else:
-            print("  Published successfully!")
+            print(f"  ERROR: Publish failed: {resp.status_code} {resp.text}")
+            sys.exit(1)
+
+        # The publish endpoint response alone is not enough evidence that the
+        # release is visible to rollout selection. Confirm the catalog state.
+        verify = client.get(
+            f"{SERVER_URL}/api/v1/admin/releases",
+            headers=headers,
+        )
+        if verify.status_code != 200:
+            print(f"  ERROR: Could not confirm publication: {verify.status_code} {verify.text}")
+            sys.exit(1)
+        data = verify.json()
+        releases = data if isinstance(data, list) else data.get("releases", data.get("results", []))
+        published = next(
+            (
+                item
+                for item in releases
+                if str(item.get("id", item.get("release_id", ""))) == str(release_id)
+            ),
+            None,
+        )
+        catalog_matches = (
+            published
+            and published.get("is_published")
+            and published.get("version") == version
+            and str(published.get("package_sha256", "")).lower() == pkg_hash.lower()
+        )
+        if not catalog_matches:
+            print(
+                "  ERROR: Release upload succeeded but the catalog does not confirm "
+                "the exact published version and package hash."
+            )
+            sys.exit(1)
+        print("  Published and independently confirmed in the release catalog.")
 
     print(f"\n  Release v{version} is live on {SERVER_URL}")
     print(f"  Appliances will pick it up on their next check-in.\n")
