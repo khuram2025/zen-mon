@@ -10,6 +10,8 @@ succeeded and every write failed with "Table ... does not exist".
 from __future__ import annotations
 
 import importlib.util
+import json
+import re
 import sys
 from pathlib import Path
 
@@ -111,6 +113,54 @@ def test_created_objects_covers_tables_and_materialized_views():
     ]
 
 
+def test_added_columns_covers_every_clause_in_one_alter():
+    sql = (
+        "ALTER TABLE agents "
+        "ADD COLUMN IF NOT EXISTS first_col TEXT, "
+        "ADD COLUMN IF NOT EXISTS second_col INTEGER, "
+        "ADD COLUMN third_col BOOLEAN;"
+    )
+
+    assert migration_order.added_columns(sql) == {
+        "agents.first_col",
+        "agents.second_col",
+        "agents.third_col",
+    }
+
+
+def test_added_columns_normalizes_quoted_schema_and_table_names():
+    sql = 'ALTER TABLE "zenplus"."agents" ADD COLUMN "new_field" TEXT;'
+
+    assert migration_order.added_columns(sql) == {"agents.new_field"}
+
+
+def test_agent_migrations_expose_every_added_column_to_the_schema_gate():
+    expected = {
+        "migrate-087-agent-registration-conflicts.sql": {
+            "agents.pending_conflict_secret_hash",
+            "agents.registration_conflict_revision",
+            "agents.registration_conflict_at",
+            "agents.registration_conflict_ip",
+            "agents.registration_conflict_attempts",
+            "agents.registration_conflict_install_id",
+            "agents.registration_conflict_hostname",
+            "agents.registration_conflict_version",
+        },
+        "migrate-089-agent-hardware-process-inventory.sql": {
+            "servers.cpu_model",
+            "servers.cpu_physical_cores",
+            "servers.physical_disks",
+            "server_process_inventory.state",
+            "server_process_inventory.running",
+            "server_process_inventory.watchlisted",
+        },
+    }
+
+    for name, columns in expected.items():
+        sql = (SCRIPTS_DIR / name).read_text(encoding="utf-8")
+        assert migration_order.added_columns(sql) == columns
+
+
 def test_every_shipped_clickhouse_migration_is_verifiable_or_replayable():
     """The invariant the ClickHouse sync depends on.
 
@@ -131,22 +181,64 @@ def test_every_shipped_clickhouse_migration_is_verifiable_or_replayable():
 
 
 class FakeClickHouse:
-    """Minimal ClickHouse stand-in that tracks which objects exist."""
+    """Minimal ClickHouse stand-in that tracks schema effects and its ledger."""
 
-    def __init__(self, objects: set[str] | None = None, ledger: dict | None = None):
+    def __init__(
+        self,
+        objects: set[str] | None = None,
+        ledger: dict | None = None,
+        *,
+        columns: set[str] | None = None,
+        settings: dict[tuple[str, str], str] | None = None,
+        apply_columns: bool = True,
+        apply_settings: bool = True,
+    ):
         self.objects = {o.lower() for o in (objects or set())}
         self.ledger = dict(ledger or {})
+        self.columns = {column.lower() for column in (columns or set())}
+        self.settings = {
+            (table.lower(), setting.lower()): str(value)
+            for (table, setting), value in (settings or {}).items()
+        }
+        self.apply_columns = apply_columns
+        self.apply_settings = apply_settings
         self.executed: list[str] = []
+        self.records: list[str] = []
 
     def __call__(self, sql: str, timeout: int = 300) -> str:
         stripped = sql.strip()
         if stripped.upper().startswith("SELECT NAME FROM SYSTEM.TABLES"):
             return "\n".join(sorted(o.split(".", 1)[1] for o in self.objects)) + "\n"
+        if stripped.upper().startswith("SELECT TABLE, NAME FROM SYSTEM.COLUMNS"):
+            return "".join(
+                f"{column.split('.', 1)[0]}\t{column.split('.', 1)[1]}\n"
+                for column in sorted(self.columns)
+            )
+        if "CREATE_TABLE_QUERY FROM SYSTEM.TABLES" in stripped.upper():
+            tables = {
+                obj.split(".", 1)[1]
+                for obj in self.objects
+                if obj.startswith("zenplus.")
+            }
+            tables |= {table for table, _ in self.settings}
+            rows = []
+            for table in sorted(tables):
+                table_settings = [
+                    f"{setting} = {value}"
+                    for (candidate, setting), value in sorted(self.settings.items())
+                    if candidate == table
+                ]
+                create = f"CREATE TABLE zenplus.{table} (x UInt8) ENGINE = MergeTree ORDER BY tuple()"
+                if table_settings:
+                    create += " SETTINGS " + ", ".join(table_settings)
+                rows.append(json.dumps({"name": table, "create_table_query": create}))
+            return "\n".join(rows) + ("\n" if rows else "")
         if "FROM zenplus.schema_migrations" in stripped:
             return "".join(f"{k}\t{v}\n" for k, v in sorted(self.ledger.items()))
         if stripped.upper().startswith("INSERT INTO ZENPLUS.SCHEMA_MIGRATIONS"):
             name = stripped.split("VALUES ('", 1)[1].split("'", 1)[0]
             self.ledger[name] = "recorded"
+            self.records.append(name)
             return ""
         if "CREATE DATABASE" in stripped or "schema_migrations" in stripped:
             return ""
@@ -154,6 +246,17 @@ class FakeClickHouse:
         self.executed.append(stripped)
         for obj in migration_order.created_objects(stripped):
             self.objects.add(obj.lower())
+        if self.apply_columns:
+            for column in migration_order.added_columns(stripped):
+                self.columns.add(column.lower())
+        if self.apply_settings:
+            for match in re.finditer(
+                r"ALTER\s+TABLE\s+(?:zenplus\.)?([A-Za-z0-9_]+)\s+"
+                r"MODIFY\s+SETTING\s+([A-Za-z0-9_]+)\s*=\s*([^;\s]+)",
+                stripped,
+                re.IGNORECASE,
+            ):
+                self.settings[(match.group(1).lower(), match.group(2).lower())] = match.group(3)
         return ""
 
 
@@ -166,6 +269,19 @@ ROLLUP_SQL = (
     "CREATE MATERIALIZED VIEW zenplus.ping_metrics_5m_mv TO zenplus.ping_metrics_5m AS SELECT 1;\n"
     "INSERT INTO zenplus.ping_metrics_5m SELECT 1;\n"
 )
+PROCESS_COLUMNS_SQL = (
+    "ALTER TABLE zenplus.host_process_metrics "
+    "ADD COLUMN IF NOT EXISTS cmdline String DEFAULT '';\n"
+    "ALTER TABLE zenplus.host_process_metrics "
+    "ADD COLUMN IF NOT EXISTS state LowCardinality(String) DEFAULT 'running';\n"
+)
+DEDUP_MIGRATION = "migrate-094-host-metric-insert-dedup-clickhouse.sql"
+DEDUP_SQL = (SCRIPTS_DIR / DEDUP_MIGRATION).read_text(encoding="utf-8")
+DEDUP_TABLES = tuple(
+    str(table)
+    for table in ch_migrate.TABLE_SETTING_INVARIANTS[DEDUP_MIGRATION]["tables"]
+)
+DEDUP_SETTING = str(ch_migrate.TABLE_SETTING_INVARIANTS[DEDUP_MIGRATION]["setting"])
 
 
 def _scripts(tmp_path, files: dict[str, str]) -> Path:
@@ -218,6 +334,126 @@ def test_up_to_date_appliance_does_nothing(tmp_path):
 
     assert ch.executed == []
     assert not any(summary[k] for k in ("applied", "healed", "baselined", "failed"))
+
+
+def test_recorded_column_only_migration_heals_a_missing_column(tmp_path):
+    name = "migrate-090-agent-process-enrichment-clickhouse.sql"
+    scripts = _scripts(tmp_path, {name: PROCESS_COLUMNS_SQL})
+    ch = FakeClickHouse(
+        objects={"zenplus.host_process_metrics"},
+        columns={"host_process_metrics.cmdline"},
+        ledger={name: "recorded"},
+    )
+
+    summary = ch_migrate.sync(scripts, query=ch)
+
+    assert summary["healed"] == [name]
+    assert "host_process_metrics.state" in ch.columns
+
+
+def test_recorded_column_only_migration_skips_when_all_columns_exist(tmp_path):
+    name = "migrate-090-agent-process-enrichment-clickhouse.sql"
+    scripts = _scripts(tmp_path, {name: PROCESS_COLUMNS_SQL})
+    ch = FakeClickHouse(
+        objects={"zenplus.host_process_metrics"},
+        columns={"host_process_metrics.cmdline", "host_process_metrics.state"},
+        ledger={name: "recorded"},
+    )
+
+    summary = ch_migrate.sync(scripts, query=ch)
+
+    assert ch.executed == []
+    assert not any(summary[key] for key in summary)
+
+
+def test_column_postcondition_failure_is_not_recorded(tmp_path):
+    name = "migrate-090-agent-process-enrichment-clickhouse.sql"
+    scripts = _scripts(tmp_path, {name: PROCESS_COLUMNS_SQL})
+    ch = FakeClickHouse(apply_columns=False)
+
+    summary = ch_migrate.sync(scripts, query=ch)
+
+    assert summary["failed"][0]["filename"] == name
+    assert "column:host_process_metrics.cmdline" in summary["failed"][0]["error"]
+    assert name not in ch.ledger
+    assert ch.records == []
+
+
+def test_recorded_table_setting_migration_heals_drift(tmp_path):
+    scripts = _scripts(tmp_path, {DEDUP_MIGRATION: DEDUP_SQL})
+    objects = {f"zenplus.{table}" for table in DEDUP_TABLES}
+    settings = {
+        (table, DEDUP_SETTING): "10000"
+        for table in DEDUP_TABLES[1:]
+    }
+    ch = FakeClickHouse(
+        objects=objects,
+        ledger={DEDUP_MIGRATION: "recorded"},
+        settings=settings,
+    )
+
+    summary = ch_migrate.sync(scripts, query=ch)
+
+    assert summary["healed"] == [DEDUP_MIGRATION]
+    assert all(ch.settings[(table, DEDUP_SETTING)] == "10000" for table in DEDUP_TABLES)
+
+
+def test_up_to_date_table_setting_migration_is_skipped(tmp_path):
+    scripts = _scripts(tmp_path, {DEDUP_MIGRATION: DEDUP_SQL})
+    ch = FakeClickHouse(
+        objects={f"zenplus.{table}" for table in DEDUP_TABLES},
+        ledger={DEDUP_MIGRATION: "recorded"},
+        settings={(table, DEDUP_SETTING): "10000" for table in DEDUP_TABLES},
+    )
+
+    summary = ch_migrate.sync(scripts, query=ch)
+
+    assert ch.executed == []
+    assert not any(summary[key] for key in summary)
+
+
+def test_table_setting_value_requires_an_exact_match(tmp_path):
+    scripts = _scripts(tmp_path, {DEDUP_MIGRATION: DEDUP_SQL})
+    settings = {(table, DEDUP_SETTING): "10000" for table in DEDUP_TABLES}
+    settings[(DEDUP_TABLES[0], DEDUP_SETTING)] = "100000"
+    ch = FakeClickHouse(
+        objects={f"zenplus.{table}" for table in DEDUP_TABLES},
+        ledger={DEDUP_MIGRATION: "recorded"},
+        settings=settings,
+    )
+
+    summary = ch_migrate.sync(scripts, query=ch, dry_run=True)
+
+    assert summary["pending"] == [DEDUP_MIGRATION]
+
+
+def test_table_setting_drift_is_pending_in_a_read_only_check(tmp_path):
+    scripts = _scripts(tmp_path, {DEDUP_MIGRATION: DEDUP_SQL})
+    ch = FakeClickHouse(
+        objects={f"zenplus.{table}" for table in DEDUP_TABLES},
+        ledger={DEDUP_MIGRATION: "recorded"},
+    )
+
+    summary = ch_migrate.sync(scripts, query=ch, dry_run=True)
+
+    assert summary["pending"] == [DEDUP_MIGRATION]
+    assert ch.executed == []
+    assert ch.records == []
+
+
+def test_table_setting_postcondition_failure_is_not_recorded(tmp_path):
+    scripts = _scripts(tmp_path, {DEDUP_MIGRATION: DEDUP_SQL})
+    ch = FakeClickHouse(
+        objects={f"zenplus.{table}" for table in DEDUP_TABLES},
+        apply_settings=False,
+    )
+
+    summary = ch_migrate.sync(scripts, query=ch)
+
+    assert summary["failed"][0]["filename"] == DEDUP_MIGRATION
+    assert "postcondition failed" in summary["failed"][0]["error"]
+    assert DEDUP_MIGRATION not in ch.ledger
+    assert ch.records == []
 
 
 def test_non_replay_safe_migration_runs_on_a_clean_database(tmp_path):
@@ -375,6 +611,8 @@ def test_dry_run_does_not_create_the_ledger_table(tmp_path):
     def query(sql, timeout=300):
         stripped = sql.strip()
         if stripped.upper().startswith("SELECT NAME FROM SYSTEM.TABLES"):
+            return ""
+        if stripped.upper().startswith("SELECT TABLE, NAME FROM SYSTEM.COLUMNS"):
             return ""
         if "FROM zenplus.schema_migrations" in stripped:
             raise ch_migrate.ClickHouseError("Table zenplus.schema_migrations does not exist")

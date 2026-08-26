@@ -164,6 +164,26 @@ def test_column_only_migration_is_applied_not_baselined(tmp_path):
     assert report["applied"] == ["migrate-002-b.sql"]
 
 
+def test_comma_separated_column_migration_requires_every_column_for_baseline(tmp_path):
+    path = tmp_path / "migrate-087-agent-registration-conflicts.sql"
+    write(
+        path,
+        "ALTER TABLE agents "
+        "ADD COLUMN IF NOT EXISTS first_col TEXT, "
+        "ADD COLUMN IF NOT EXISTS second_col INTEGER;",
+    )
+    migration = runner.discover_migrations(tmp_path)[0]
+
+    assert runner.evidence_of(
+        migration,
+        {"column:agents.first_col"},
+    ) is False
+    assert runner.evidence_of(
+        migration,
+        {"column:agents.first_col", "column:agents.second_col"},
+    ) is True
+
+
 def test_unverifiable_row_inserting_migration_is_flagged_not_guessed(tmp_path):
     """No objects to probe and it INSERTs: running it blind could double the
     rows, skipping it could leave a gap. Report it instead of guessing."""

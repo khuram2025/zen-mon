@@ -16,7 +16,8 @@ exist", and CPU/memory read as "—" forever. The ledger said healthy; the schem
 was not there.
 
 So this module never trusts the ledger alone. For every migration it asks
-ClickHouse what actually exists:
+ClickHouse which tables, views, columns and required table settings actually
+exist:
 
 * recorded + objects present      -> skip
 * not recorded + objects present  -> baseline (record, do not re-run)
@@ -37,6 +38,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -59,6 +61,24 @@ CREATE TABLE IF NOT EXISTS {DATABASE}.schema_migrations
 ENGINE = ReplacingMergeTree(applied_at)
 ORDER BY filename
 """
+
+TABLE_SETTING_INVARIANTS: dict[str, dict[str, object]] = {
+    "migrate-094-host-metric-insert-dedup-clickhouse.sql": {
+        "tables": (
+            "host_cpu_metrics",
+            "host_memory_metrics",
+            "host_filesystem_metrics",
+            "host_disk_io_metrics",
+            "host_network_metrics",
+            "host_process_metrics",
+            "host_service_state",
+            "host_event_log_summary",
+            "agent_health_metrics",
+        ),
+        "setting": "non_replicated_deduplication_window",
+        "value": "10000",
+    },
+}
 
 
 class ClickHouseError(RuntimeError):
@@ -120,6 +140,60 @@ def existing_objects(query=ch_query) -> set[str]:
     }
 
 
+def existing_columns(query=ch_query) -> set[str]:
+    """Return ``table.column`` for every ClickHouse column in our database."""
+    out = query(
+        f"SELECT table, name FROM system.columns WHERE database = '{DATABASE}' "
+        "FORMAT TabSeparated"
+    )
+    columns: set[str] = set()
+    for line in out.splitlines():
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) >= 2 and parts[0].strip() and parts[1].strip():
+            columns.add(f"{parts[0].strip()}.{parts[1].strip()}".lower())
+    return columns
+
+
+def missing_table_settings(filename: str, query=ch_query) -> list[str]:
+    """Return required table settings that are absent for a known migration."""
+    spec = TABLE_SETTING_INVARIANTS.get(filename)
+    if spec is None:
+        return []
+
+    tables = tuple(str(table) for table in spec["tables"])
+    setting = str(spec["setting"])
+    value = str(spec["value"])
+    names = ", ".join(f"'{_esc(table)}'" for table in tables)
+    out = query(
+        "SELECT name, create_table_query FROM system.tables "
+        f"WHERE database = '{DATABASE}' AND name IN ({names}) "
+        "FORMAT JSONEachRow"
+    )
+    definitions: dict[str, str] = {}
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ClickHouseError(
+                f"Could not inspect table-setting postconditions: {exc}"
+            ) from exc
+        definitions[str(row.get("name", "")).lower()] = "".join(
+            str(row.get("create_table_query", "")).lower().split()
+        )
+
+    setting_pattern = re.compile(
+        rf"(?:settings|,){re.escape(setting.lower())}="
+        rf"{re.escape(value.lower())}(?:,|$)"
+    )
+    return [
+        f"setting:{DATABASE}.{table}.{setting}={value}"
+        for table in tables
+        if not setting_pattern.search(definitions.get(table.lower(), ""))
+    ]
+
+
 def ledger_entries(query=ch_query) -> dict[str, str]:
     """Return {filename: checksum} from the ClickHouse migration ledger."""
     out = query(
@@ -176,6 +250,7 @@ def sync(
         # A check must not write. If the ledger table is absent there is
         # nothing recorded yet, which is exactly what an empty dict means.
         present = existing_objects(query=query)
+        present_columns = existing_columns(query=query)
         try:
             ledger = ledger_entries(query=query)
         except ClickHouseError:
@@ -184,16 +259,26 @@ def sync(
         query(LEDGER_DDL)
         ledger = ledger_entries(query=query)
         present = existing_objects(query=query)
+        present_columns = existing_columns(query=query)
 
     for path in migrations:
         name = path.name
         sql = path.read_text()
         objects = migration_order.created_objects(sql)
+        columns = migration_order.added_columns(sql)
         recorded = name in ledger
         found = _objects_present(objects, present)
-        satisfied = bool(objects) and found == len(objects)
+        found_columns = sum(1 for col in columns if col.lower() in present_columns)
+        setting_missing = missing_table_settings(name, query=query)
+        has_evidence = bool(objects or columns or name in TABLE_SETTING_INVARIANTS)
+        satisfied = (
+            has_evidence
+            and found == len(objects)
+            and found_columns == len(columns)
+            and not setting_missing
+        )
 
-        if recorded and (satisfied or not objects):
+        if recorded and (satisfied or not has_evidence):
             continue
 
         if not recorded and satisfied:
@@ -211,13 +296,17 @@ def sync(
 
         # Something is missing. Decide whether we may (re)run this file.
         replay_safe = migration_order.is_replay_safe(sql)
-        if not replay_safe and found > 0:
+        if not replay_safe and (found > 0 or found_columns > 0):
             # Partially present and not safe to replay: running it would either
             # duplicate backfilled rows or hard-error on an existing object.
             summary["unresolved"].append({
                 "filename": name,
                 "reason": "partially applied and not replay-safe",
-                "missing": [o for o in objects if o.lower() not in present],
+                "missing": (
+                    [o for o in objects if o.lower() not in present]
+                    + [f"column:{col}" for col in columns if col.lower() not in present_columns]
+                    + setting_missing
+                ),
             })
             continue
 
@@ -227,8 +316,26 @@ def sync(
 
         try:
             query(sql)
+            post_objects = existing_objects(query=query) if objects else present
+            post_columns = existing_columns(query=query) if columns else present_columns
+            postcondition_missing = (
+                [o for o in objects if o.lower() not in post_objects]
+                + [
+                    f"column:{col}"
+                    for col in columns
+                    if col.lower() not in post_columns
+                ]
+                + missing_table_settings(name, query=query)
+            )
+            if postcondition_missing:
+                summary["failed"].append({
+                    "filename": name,
+                    "error": "postcondition failed: " + ", ".join(postcondition_missing),
+                })
+                continue
             record(name, sha256_file(path), query=query)
-            present |= {o.lower() for o in objects}
+            present = post_objects
+            present_columns = post_columns
             if recorded:
                 summary["healed"].append(name)
             else:

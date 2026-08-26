@@ -205,9 +205,14 @@ def created_objects(sql: str) -> list[str]:
     return objects
 
 
-_ADD_COLUMN_RE = re.compile(
+_ALTER_TABLE_BODY_RE = re.compile(
     r"\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?([A-Za-z0-9_.\"`]+)\s+"
-    r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_\"`]+)",
+    r"(.*?)(?:;|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+_ADD_COLUMN_CLAUSE_RE = re.compile(
+    r"(?:\A|,)\s*ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+    r"([A-Za-z0-9_\"`]+)\b",
     re.IGNORECASE,
 )
 _ADD_CONSTRAINT_RE = re.compile(
@@ -236,10 +241,12 @@ def added_columns(sql: str) -> set[str]:
     is then violated by rows the later migrations inserted, and the schema gate
     fails on a database that is in fact correct.
     """
-    return {
-        f"{_clean(m.group(1)).split('.')[-1]}.{_clean(m.group(2))}"
-        for m in _ADD_COLUMN_RE.finditer(analyzable(sql))
-    }
+    columns: set[str] = set()
+    for alter in _ALTER_TABLE_BODY_RE.finditer(analyzable(sql)):
+        table = _clean(alter.group(1).split(".")[-1])
+        for clause in _ADD_COLUMN_CLAUSE_RE.finditer(alter.group(2)):
+            columns.add(f"{table}.{_clean(clause.group(1))}")
+    return columns
 
 
 def added_constraints(sql: str) -> set[str]:
