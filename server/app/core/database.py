@@ -1,6 +1,8 @@
+import threading
+
+import clickhouse_connect
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
-import clickhouse_connect
 
 from app.core.config import get_settings
 
@@ -32,26 +34,19 @@ async def get_db() -> AsyncSession:
             await session.close()
 
 
-_clickhouse_client = None
-
-
 def get_clickhouse_client():
-    # Singleton: clickhouse_connect.HttpClient wraps a urllib3 PoolManager
-    # which is thread-safe and reuses sockets. Creating a fresh client per
-    # request leaks file descriptors until the process hits ulimit -n.
-    global _clickhouse_client
-    if _clickhouse_client is None:
-        _clickhouse_client = clickhouse_connect.get_client(
-            host=settings.CLICKHOUSE_HOST,
-            port=settings.CLICKHOUSE_HTTP_PORT,
-            database=settings.CLICKHOUSE_DB,
-            username=settings.CLICKHOUSE_USER,
-            password=settings.CLICKHOUSE_PASSWORD,
-        )
-    return _clickhouse_client
+    """Backward-compatible name for the thread-local ClickHouse client.
 
+    The underlying urllib3 pool is thread-safe, but a
+    ``clickhouse_connect.HttpClient`` session is not: concurrent operations on
+    one instance fail with ``Attempt to execute concurrent queries within the
+    same session``.  Several legacy call sites are dispatched through
+    ``asyncio.to_thread``; routing this long-standing accessor through the
+    thread-local factory fixes those callers without allowing per-request
+    client creation (and its file-descriptor leak) to return.
+    """
+    return get_ch_client()
 
-import threading
 
 _ch_threadlocal = threading.local()
 
@@ -61,10 +56,10 @@ def get_ch_client():
 
     A single ``clickhouse_connect`` client session does NOT allow concurrent
     queries ("Attempt to execute concurrent queries within the same session").
-    APM runs all ClickHouse work inside the threadpool (``asyncio.to_thread``),
-    so each worker thread gets its own client/session. Thread count (and thus
-    open clients) is bounded by the threadpool size, so this does not leak fds
-    the way a per-request client would.
+    Blocking API and background work runs in a bounded threadpool (usually via
+    ``asyncio.to_thread``), so each worker thread gets its own client/session.
+    Thread count (and thus open clients) is bounded by the threadpool size, so
+    this does not leak fds the way a per-request client would.
     """
     c = getattr(_ch_threadlocal, "client", None)
     if c is None:

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2, Pencil, Loader2, Check, Target } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -15,6 +16,7 @@ import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
 import { KpiTile } from '@/components/apm/shared'
 import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
+import { ApmKpi } from '@/components/apm/viz'
 
 interface Slo {
   id: string
@@ -123,9 +125,11 @@ export function SlosPage() {
         }
       />
 
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-3 max-w-xl">
-        <KpiTile label="SLOs" value={slos.length} />
-        <KpiTile label="Burn alerts on" value={slos.filter((s) => s.burn_alert_enabled).length} />
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <ApmKpi label="SLOs" tone="primary" value={slos.length} sub="reliability targets" />
+        <ApmKpi label="Burn alerts on" tone="info" value={slos.filter((s) => s.burn_alert_enabled).length} sub="paging on fast burn" />
+        <ApmKpi label="Availability SLIs" tone="success" value={slos.filter((s) => s.sli_type === 'availability').length} />
+        <ApmKpi label="Latency SLIs" tone="accent" value={slos.filter((s) => s.sli_type === 'latency').length} />
       </div>
 
       {slosQuery.isError && (
@@ -163,9 +167,13 @@ export function SlosPage() {
               <TBody>
                 {slos.map((s) => (
                   <Tr key={s.id}>
-                    <Td className="font-medium text-text">{s.name}</Td>
                     <Td>
-                      {s.service_name}
+                      <Link to={`/apm/slos/${s.id}`} className="font-medium text-primary hover:underline">{s.name}</Link>
+                    </Td>
+                    <Td>
+                      <Link to={`/apm/services/${encodeURIComponent(s.service_name)}`} className="text-primary hover:underline">
+                        {s.service_name}
+                      </Link>
                       {s.env && <span className="ml-1.5 text-xs text-muted">{s.env}</span>}
                       {s.operation && <div className="text-xs text-muted">{s.operation}</div>}
                     </Td>

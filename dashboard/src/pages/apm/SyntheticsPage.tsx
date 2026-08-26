@@ -26,8 +26,9 @@ import {
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { Textarea } from '@/components/ui/Textarea'
 import { toast } from '@/components/ui/Toast'
-import { KpiTile, fmtMs } from '@/components/apm/shared'
+import { fmtMs } from '@/components/apm/shared'
 import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
+import { ApmKpi, RankBar } from '@/components/apm/viz'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -123,10 +124,10 @@ export function SyntheticsPage() {
       )}
 
       <div className="grid gap-3 sm:grid-cols-4">
-        <KpiTile label="Scenarios" value={s?.total ?? '—'} />
-        <KpiTile label="Up" value={s?.up ?? '—'} accent="#22c55e" />
-        <KpiTile label="Down" value={s?.down ?? '—'} accent={s?.down ? '#ef4444' : undefined} />
-        <KpiTile label="Disabled" value={s?.disabled ?? '—'} />
+        <ApmKpi label="Scenarios" tone="primary" value={s?.total ?? '—'} />
+        <ApmKpi label="Up" tone="success" value={s?.up ?? '—'} sub="passing journeys" />
+        <ApmKpi label="Down" tone={s?.down ? 'danger' : 'success'} value={s?.down ?? '—'} sub="failing now" />
+        <ApmKpi label="Disabled" tone="muted" value={s?.disabled ?? '—'} />
       </div>
 
       <Card>
@@ -238,7 +239,12 @@ function MonitorRow({ m, expanded, onToggle, onEdit, onDelete }: {
         <Td><StatusPill status={m.status} enabled={m.enabled} /></Td>
         <Td className={cn('text-right tabular-nums',
           m.uptime_pct != null && m.uptime_pct < 99 ? 'text-warning' : 'text-text2')}>
-          {m.uptime_pct != null ? `${m.uptime_pct}%` : '—'}
+          {m.uptime_pct != null ? (
+            <div className="min-w-[4.5rem]">
+              <div className={cn('text-right tabular-nums', m.uptime_pct < 99 ? 'text-warning' : 'text-text2')}>{m.uptime_pct}%</div>
+              <RankBar value={m.uptime_pct} max={100} color={m.uptime_pct < 99 ? '#f59e0b' : '#22c55e'} />
+            </div>
+          ) : '—'}
         </Td>
         <Td className="text-right tabular-nums text-text2">{m.avg_ms != null ? fmtMs(m.avg_ms) : '—'}</Td>
         <Td className="text-right tabular-nums text-text2">{m.check_interval}s</Td>

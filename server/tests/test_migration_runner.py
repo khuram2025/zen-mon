@@ -265,6 +265,71 @@ def test_unknown_checksum_change_is_still_drift(tmp_path):
     assert report["reconciled"] == []
 
 
+def _canonical_constraint_psql(migration, *, canonical: bool, calls: list):
+    state = {"canonical": canonical}
+
+    def run(cmd, sql=None, file=None):
+        calls.append((sql, file))
+        if sql and "SELECT filename" in sql:
+            out = f"{migration.filename} {migration.checksum}\n"
+            return type("R", (), {"returncode": 0, "stdout": out, "stderr": ""})()
+        if sql and "pg_class" in sql and "UNION ALL" in sql:
+            return type("R", (), {"returncode": 0, "stdout": "public.agent_commands\n", "stderr": ""})()
+        if sql and "pg_get_constraintdef" in sql:
+            values = (
+                runner.CANONICAL_CONSTRAINTS[migration.filename]["required_values"]
+                if state["canonical"] else ("status", "collect_now")
+            )
+            definition = "CHECK (command IN (" + ",".join(f"'{v}'" for v in values) + "))\n"
+            return type("R", (), {"returncode": 0, "stdout": definition, "stderr": ""})()
+        if file is not None:
+            state["canonical"] = True
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    return run
+
+
+def test_status_detects_canonical_constraint_definition_drift(tmp_path):
+    filename = "migrate-092-agent-command-check-canonical.sql"
+    write(tmp_path / filename, "SELECT 1;")
+    migration = runner.discover_migrations(tmp_path)[0]
+    report = runner.new_report()
+    calls: list = []
+
+    original = runner.run_psql
+    runner.run_psql = _canonical_constraint_psql(migration, canonical=False, calls=calls)
+    try:
+        code = runner.run_migrations(
+            [migration], ["psql"], status_only=True, report=report
+        )
+    finally:
+        runner.run_psql = original
+
+    assert code == 2
+    assert report["invariant_drift"] == ["constraint:agent_commands_command_check"]
+    assert all(file is None for _, file in calls)
+
+
+def test_apply_heals_canonical_constraint_definition_drift(tmp_path):
+    filename = "migrate-092-agent-command-check-canonical.sql"
+    write(tmp_path / filename, "SELECT 1;")
+    migration = runner.discover_migrations(tmp_path)[0]
+    report = runner.new_report()
+    calls: list = []
+
+    original = runner.run_psql
+    runner.run_psql = _canonical_constraint_psql(migration, canonical=False, calls=calls)
+    try:
+        code = runner.run_migrations([migration], ["psql"], report=report)
+    finally:
+        runner.run_psql = original
+
+    assert code == 0
+    assert report["healed"] == [filename]
+    assert report["invariant_drift"] == []
+    assert any(file == migration.path for _, file in calls)
+
+
 def test_shipped_superseded_checksums_match_the_real_history():
     """The recorded pre-rewrite checksums must be the actual bytes appliances
     ran, or the reconciliation silently fails to match in the field."""

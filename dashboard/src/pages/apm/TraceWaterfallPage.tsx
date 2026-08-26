@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { Loader2, ArrowLeft, AlertCircle, Check, Copy, Database, Flame, Server, ArrowRightLeft } from 'lucide-react'
+import { Loader2, ArrowLeft, AlertCircle, Check, Copy, Database, Flame, Server, ArrowRightLeft, ScrollText } from 'lucide-react'
 import { api } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
 import { KbLink } from '@/components/apm/KbLink'
+import { ApmKpi, LatencyCell, fmtCount } from '@/components/apm/viz'
 
 interface SpanNode {
   span_id: string
@@ -52,10 +53,16 @@ export function TraceWaterfallPage() {
   const navigate = useNavigate()
   const [selected, setSelected] = useState<SpanNode | null>(null)
   const [copied, setCopied] = useState(false)
+  const [view, setView] = useState<'waterfall' | 'logs'>('waterfall')
 
   const query = useQuery<TraceDetail>({
     queryKey: ['apm', 'trace', traceId],
     queryFn: async () => (await api.get(`/apm/traces/${traceId}`)).data,
+    enabled: !!traceId,
+  })
+  const logs = useQuery<{ items: Array<{ source: string; timestamp: string; service_name: string; span_id: string; name: string; message: string; level: string }>; note: string }>({
+    queryKey: ['apm', 'trace-logs', traceId],
+    queryFn: async () => (await api.get(`/apm/traces/${traceId}/logs`)).data,
     enabled: !!traceId,
   })
 
@@ -88,18 +95,56 @@ export function TraceWaterfallPage() {
           {copied ? <Check className="h-3 w-3 text-success" /> : <Copy className="h-3 w-3" />}
         </button>
         <div className="flex-1" />
+        <div className="inline-flex rounded-md border border-border p-0.5">
+          <button onClick={() => setView('waterfall')} className={`rounded px-2 py-1 text-[11px] font-semibold ${view === 'waterfall' ? 'bg-primary text-black' : 'text-muted'}`}>Waterfall</button>
+          <button onClick={() => setView('logs')} className={`inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-semibold ${view === 'logs' ? 'bg-primary text-black' : 'text-muted'}`}>
+            <ScrollText className="h-3 w-3" /> Logs
+          </button>
+        </div>
         <KbLink article="traces" />
       </div>
 
-      <div className="flex flex-wrap gap-6 text-sm">
-        <div><span className="text-muted">Duration</span> <span className="font-mono font-medium text-text">{trace.duration_ms.toFixed(1)} ms</span></div>
-        <div><span className="text-muted">Spans</span> <span className="font-medium text-text">{trace.span_count}</span></div>
-        <div className="flex items-center gap-1.5">
-          <span className="text-muted">Services</span>
-          {trace.services.map((s) => <Badge key={s} variant="outline">{s}</Badge>)}
-        </div>
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <ApmKpi label="Duration" tone={trace.duration_ms >= 2000 ? 'danger' : trace.duration_ms >= 800 ? 'warning' : 'success'} value={<LatencyCell ms={trace.duration_ms} />} />
+        <ApmKpi label="Spans" tone="info" value={fmtCount(trace.span_count)} />
+        <ApmKpi label="Services" tone="primary" value={fmtCount(trace.services.length)} />
+        <ApmKpi label="Errors" tone={trace.spans.some((s) => s.has_error) ? 'danger' : 'success'} value={fmtCount(trace.spans.filter((s) => s.has_error).length)} />
       </div>
 
+      <div className="flex flex-wrap items-center gap-1.5">
+        {trace.services.map((s) => (
+          <button key={s} onClick={() => navigate(`/apm/services/${encodeURIComponent(s)}`)}>
+            <Badge variant="outline">{s}</Badge>
+          </button>
+        ))}
+      </div>
+
+      {view === 'logs' ? (
+        <Card>
+          <CardContent className="py-4">
+            <p className="mb-3 text-[11px] text-muted">{logs.data?.note || 'Span events and exceptions correlated to this trace.'}</p>
+            {logs.isLoading ? (
+              <div className="flex items-center gap-2 py-8 text-muted"><Loader2 className="h-4 w-4 animate-spin" /> Loading logs…</div>
+            ) : (logs.data?.items ?? []).length === 0 ? (
+              <div className="py-10 text-center text-sm text-muted">No span events or exceptions on this trace. OTLP logs are not ingested yet.</div>
+            ) : (
+              <div className="space-y-1 font-mono text-xs">
+                {(logs.data?.items ?? []).map((line, i) => (
+                  <div key={`${line.span_id}-${i}`} className="grid grid-cols-[9rem_7rem_1fr] gap-2 rounded px-2 py-1 hover:bg-surface2">
+                    <span className="text-muted">{line.timestamp ? new Date(line.timestamp).toLocaleTimeString() : '—'}</span>
+                    <span className={line.level === 'error' ? 'text-[#ef4444]' : 'text-muted'}>{line.source}</span>
+                    <span>
+                      <span className="text-text2">{line.service_name} </span>
+                      <span className="text-text">{line.name}</span>
+                      {line.message && <span className="text-muted"> — {line.message}</span>}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      ) : (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <Card className="lg:col-span-2">
           <CardContent className="p-0">
@@ -190,6 +235,7 @@ export function TraceWaterfallPage() {
           </CardContent>
         </Card>
       </div>
+      )}
     </div>
   )
 }

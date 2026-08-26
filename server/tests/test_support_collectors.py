@@ -25,6 +25,7 @@ from support.collectors import (  # noqa: E402
     all_collectors,
     run_collector,
 )
+from support.collectors import health as health_collector  # noqa: E402
 
 
 def _ctx(time_range: str = "24h") -> CollectorContext:
@@ -113,3 +114,51 @@ def test_one_failing_collector_does_not_abort_others():
     assert summaries["happy"]["status"] == "ok"
     # The bundle continues — happy still got its file in.
     assert summaries["happy"]["files"] == ["happy.txt"]
+
+
+def test_nginx_probe_uses_loopback_https_without_remote_trust_validation(monkeypatch):
+    calls = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, _limit):
+            return b'{"status":"ok"}'
+
+    def fake_urlopen(url, *, timeout, context):
+        calls.append((url, timeout, context))
+        return Response()
+
+    monkeypatch.setattr(health_collector.request, "urlopen", fake_urlopen)
+    result = health_collector._probe_endpoints(health_collector.LOCAL_NGINX_BASE)
+
+    assert result["base"] == "https://127.0.0.1"
+    assert len(calls) == len(health_collector.INTERNAL_ENDPOINTS)
+    assert all(call[2] is not None and not call[2].check_hostname for call in calls)
+
+
+def test_known_risk_nginx_check_uses_insecure_only_for_loopback(monkeypatch):
+    commands = []
+
+    def fake_command(cmd, *, timeout):
+        commands.append((cmd, timeout))
+        return {"stdout": "200", "exit_code": 0, "stderr": ""}
+
+    monkeypatch.setattr(health_collector, "_command", fake_command)
+    monkeypatch.setattr(health_collector, "_migrations_lock_check", lambda _ctx: {"ok": True})
+    monkeypatch.setattr(health_collector, "_updater_registered_check", lambda _ctx: {"ok": True})
+    monkeypatch.setattr(health_collector.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    result = CollectorResult(section="health")
+    checks = health_collector._known_risk_checks(_ctx(), result)
+
+    curl = commands[0][0]
+    assert curl[:2] == ["curl", "--insecure"]
+    assert curl[-1] == "https://127.0.0.1/api/v1/system/health"
+    assert checks["nginx_proxy_reachable"]["ok"] is True

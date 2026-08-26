@@ -115,7 +115,8 @@ def run_postgres(scripts_dir: Path, *, check_only: bool) -> dict:
                 "applied": [], "skipped": [], "pending": [], "drift": [], "failed": []}
 
     report = {"applied": [], "skipped": [], "pending": [], "drift": [],
-              "failed": [], "baselined": [], "unresolved": []}
+              "failed": [], "baselined": [], "unresolved": [], "reconciled": [],
+              "healed": [], "invariant_drift": []}
     for line in result.stdout.splitlines():
         if line.startswith(JSON_MARKER):
             try:
@@ -156,6 +157,8 @@ def summarize(pg: dict, ch: dict) -> dict:
         problems.append(f"postgres: {name} not applied")
     for name in pg.get("drift", []):
         problems.append(f"postgres: {name} checksum differs from the applied record")
+    for name in pg.get("invariant_drift", []):
+        problems.append(f"postgres: {name} definition is not canonical")
     for item in pg.get("failed", []):
         problems.append(f"postgres: {item['filename']} failed: {item.get('error', '')[:200]}")
     for name in pg.get("unresolved", []):

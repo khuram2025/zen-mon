@@ -59,7 +59,11 @@ from app.schemas.agent import (
     AgentResultsResponse,
     NetworkCaptureUpload,
 )
-from app.services.host_metric_service import ingest_host_metric_batch
+from app.services.host_metric_service import (
+    HOST_TELEMETRY_KINDS,
+    HostMetricStorageError,
+    ingest_host_metric_batch,
+)
 
 router = APIRouter(prefix="/agents", tags=["Agents (runtime)"])
 logger = logging.getLogger("zenplus.agents")
@@ -73,12 +77,54 @@ DEFAULT_HEARTBEAT_S = 30
 DEFAULT_CONFIG_POLL_S = 60
 DEFAULT_UPLOAD_S = 60
 STALE_AFTER_HEARTBEATS = 3
+HOST_RESULTS_LEDGER_RETENTION_DAYS = 7
+HOST_RESULTS_LEDGER_CLEANUP_MODULUS = 256
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
 def _sha256(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _host_results_batch_digest(batch: AgentResultsBatch) -> str:
+    """Hash the immutable batch payload used to detect batch-id collisions.
+
+    ``sent_at`` is deliberately excluded: the agent refreshes it immediately
+    before every spool retry, while the batch identity and metric contents stay
+    unchanged.
+    """
+    payload = batch.model_dump(mode="json", exclude={"sent_at"})
+    canonical = json.dumps(
+        payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    )
+    return _sha256(canonical)
+
+
+def _host_results_errors(value: Any) -> list[str]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value][:25]
+
+
+def _host_results_ledger_cleanup_due(agent_id: Any, batch_id: str) -> bool:
+    """Spread bounded ledger cleanup deterministically across agent uploads."""
+    digest = hashlib.sha256(f"{agent_id}:{batch_id}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:2], "big") % HOST_RESULTS_LEDGER_CLEANUP_MODULUS == 0
+
+
+async def _prune_host_results_ledger(db: AsyncSession, agent_id: Any) -> None:
+    await db.execute(
+        text("""DELETE FROM agent_host_result_batches
+                WHERE agent_id = :aid
+                  AND completed_at < NOW() - make_interval(days => :days)"""),
+        {"aid": agent_id, "days": HOST_RESULTS_LEDGER_RETENTION_DAYS},
+    )
 
 
 def _new_api_key() -> tuple[str, str, str]:
@@ -94,11 +140,74 @@ def _strip_bearer(value: Optional[str]) -> str:
     return value.strip()
 
 
+def _same_uuid(left: Any, right: Any) -> bool:
+    """Compare UUID identities independent of harmless text formatting."""
+    try:
+        return UUID(str(left)) == UUID(str(right))
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
 def _client_ip(request: Request) -> Optional[str]:
     fwd = request.headers.get("x-forwarded-for")
     if fwd:
         return fwd.split(",")[0].strip()
     return request.client.host if request.client else None
+
+
+async def _sync_server_identity(
+    db: AsyncSession,
+    server_id: Any,
+    *,
+    hostname: Optional[str],
+    primary_ip: Optional[str],
+    fqdn: Optional[str] = None,
+    os_type: Optional[str] = None,
+    os_name: Optional[str] = None,
+    os_version: Optional[str] = None,
+    kernel_or_build: Optional[str] = None,
+    architecture: Optional[str] = None,
+) -> None:
+    """Keep an agent-managed server's factual identity current.
+
+    ``display_name`` is an operator-controlled friendly name.  It follows the
+    hostname only while it still contains an automatically generated identity
+    (the old hostname, FQDN, or IP); deliberate custom labels are preserved.
+    """
+    await db.execute(
+        text("""UPDATE servers SET
+                  display_name = CASE
+                    WHEN NULLIF(BTRIM(:hostname), '') IS NOT NULL
+                     AND (NULLIF(BTRIM(display_name), '') IS NULL
+                          OR display_name = hostname
+                          OR display_name = fqdn
+                          OR display_name = host(primary_ip))
+                      THEN BTRIM(:hostname)
+                    ELSE display_name
+                  END,
+                  hostname = COALESCE(NULLIF(BTRIM(:hostname), ''), hostname),
+                  fqdn = COALESCE(NULLIF(BTRIM(:fqdn), ''), fqdn),
+                  primary_ip = COALESCE(CAST(NULLIF(BTRIM(:ip), '') AS inet), primary_ip),
+                  os_type = COALESCE(NULLIF(BTRIM(:os_type), ''), os_type),
+                  os_name = COALESCE(NULLIF(BTRIM(:os_name), ''), os_name),
+                  os_version = COALESCE(NULLIF(BTRIM(:os_version), ''), os_version),
+                  kernel_or_build = COALESCE(NULLIF(BTRIM(:kernel), ''), kernel_or_build),
+                  architecture = COALESCE(NULLIF(BTRIM(:architecture), ''), architecture),
+                  collection_mode = 'agent',
+                  updated_at = NOW()
+                WHERE id = :server_id"""),
+        {
+            "server_id": server_id,
+            "hostname": hostname,
+            "fqdn": fqdn,
+            "ip": primary_ip,
+            "os_type": os_type,
+            "os_name": os_name,
+            "os_version": os_version,
+            "kernel": kernel_or_build,
+            "architecture": architecture,
+        },
+    )
 
 
 def _capability_list(value: Any) -> list[str]:
@@ -351,6 +460,7 @@ async def _enroll_pending_agent(
         raise HTTPException(400, "pending_secret required when enrollment_token is omitted")
     agent_uid = data.agent_uid.strip()
     pending_hash = _sha256(data.pending_secret)
+    assigned_agent_uid: Optional[str] = None
     current = (await db.execute(
         text("SELECT * FROM agents WHERE agent_uid = :uid FOR UPDATE"),
         {"uid": agent_uid},
@@ -381,13 +491,97 @@ async def _enroll_pending_agent(
 
     current = dict(current)
     stored_pending = current.get("pending_secret_hash")
-    if stored_pending and not hmac.compare_digest(str(stored_pending), pending_hash):
-        raise HTTPException(409, "Pending registration belongs to another agent installation")
+    if not stored_pending or not hmac.compare_digest(str(stored_pending), pending_hash):
+        # An administrator can explicitly keep a cloned host as a new machine.
+        # The durable resolution is bound to both the duplicated reported UID
+        # and this installation's protected pending-secret hash. This allows
+        # the controller to route only the reviewed candidate to its assigned
+        # identity; IP address and hostname are never used as proof.
+        resolution = (await db.execute(
+            text("""SELECT action, assigned_agent_id, assigned_agent_uid
+                    FROM agent_registration_resolutions
+                    WHERE reported_agent_uid = :uid
+                      AND pending_secret_hash = :pending
+                    FOR UPDATE"""),
+            {"uid": agent_uid, "pending": pending_hash},
+        )).mappings().first()
+        if resolution:
+            await db.execute(
+                text("""UPDATE agent_registration_resolutions SET
+                          first_claimed_at = COALESCE(first_claimed_at, NOW()),
+                          last_seen_at = NOW(), retry_count = retry_count + 1
+                        WHERE reported_agent_uid = :uid
+                          AND pending_secret_hash = :pending"""),
+                {"uid": agent_uid, "pending": pending_hash},
+            )
+            if resolution["action"] == "block":
+                await db.commit()
+                raise HTTPException(403, "Registration candidate was blocked by an appliance administrator")
+            assigned = (await db.execute(
+                text("SELECT * FROM agents WHERE id = :id FOR UPDATE"),
+                {"id": resolution["assigned_agent_id"]},
+            )).mappings().first()
+            if not assigned:
+                await db.rollback()
+                raise HTTPException(409, "Assigned clone identity is no longer available")
+            current = dict(assigned)
+            assigned_agent_uid = str(resolution["assigned_agent_uid"])
+            stored_pending = current.get("pending_secret_hash")
+            if not stored_pending or not hmac.compare_digest(str(stored_pending), pending_hash):
+                await db.rollback()
+                raise HTTPException(409, "Assigned clone installation secret no longer matches")
+
+        if resolution:
+            # The approved candidate is now handled against its separate agent
+            # row. Continue through the normal pending/authorized response path.
+            pass
+        else:
+            # A reinstalled/reset agent can keep the same stable agent_uid while
+            # generating a new OS-protected pending secret. Persist the candidate
+            # hash and safe identifying metadata before returning 409 so Agent
+            # Fleet can explain and resolve the collision. This commit is
+            # intentional: raising HTTPException would otherwise roll the update
+            # back with the request transaction.
+            await db.execute(
+                text("""UPDATE agents SET
+                          pending_conflict_secret_hash = CAST(:pending AS varchar),
+                          registration_conflict_revision = CASE
+                            WHEN pending_conflict_secret_hash IS DISTINCT FROM CAST(:pending AS varchar)
+                              THEN gen_random_uuid()
+                            ELSE COALESCE(registration_conflict_revision, gen_random_uuid())
+                          END,
+                          registration_conflict_at = NOW(),
+                          registration_conflict_ip = :ip,
+                          registration_conflict_attempts = registration_conflict_attempts + 1,
+                          registration_conflict_install_id = :iid,
+                          registration_conflict_hostname = :hn,
+                          registration_conflict_version = :v,
+                          updated_at = NOW()
+                        WHERE id = :id"""),
+                {
+                    "pending": pending_hash,
+                    "ip": client_ip,
+                    "iid": data.install_id,
+                    "hn": data.hostname,
+                    "v": data.version,
+                    "id": current["id"],
+                },
+            )
+            await db.commit()
+            raise HTTPException(409, "Pending registration belongs to another agent installation")
 
     await db.execute(
         text("""UPDATE agents SET hostname = :hn, platform = :plat,
                   version = :v, install_id = :iid,
                   pending_secret_hash = COALESCE(pending_secret_hash, :pending),
+                  pending_conflict_secret_hash = NULL,
+                  registration_conflict_revision = NULL,
+                  registration_conflict_at = NULL,
+                  registration_conflict_ip = NULL,
+                  registration_conflict_attempts = 0,
+                  registration_conflict_install_id = NULL,
+                  registration_conflict_hostname = NULL,
+                  registration_conflict_version = NULL,
                   current_version = :v, last_ip = :ip, updated_at = NOW()
                 WHERE id = :id"""),
         {
@@ -402,6 +596,7 @@ async def _enroll_pending_agent(
         return AgentEnrollResponse(
             agent_id=str(current["id"]),
             server_id=str(current["server_id"]) if current.get("server_id") else None,
+            assigned_agent_uid=assigned_agent_uid,
             authorization_state="revoked",
             policy_id=str(current["policy_id"]) if current.get("policy_id") else None,
         )
@@ -410,11 +605,24 @@ async def _enroll_pending_agent(
         return AgentEnrollResponse(
             agent_id=str(current["id"]),
             server_id=str(current["server_id"]) if current.get("server_id") else None,
+            assigned_agent_uid=assigned_agent_uid,
             authorization_state="pending",
             policy_id=str(current["policy_id"]) if current.get("policy_id") else None,
         )
 
     server_id = current.get("server_id") or await _ensure_pending_server(data, db)
+    await _sync_server_identity(
+        db,
+        server_id,
+        hostname=data.hostname,
+        primary_ip=client_ip or data.primary_ip,
+        fqdn=data.fqdn,
+        os_type=data.platform if data.platform in ("windows", "linux", "macos") else "other",
+        os_name=data.os_name,
+        os_version=data.os_version,
+        kernel_or_build=data.kernel_or_build,
+        architecture=data.architecture,
+    )
     api_key, api_hash, prefix = _new_api_key()
     await db.execute(
         text("""UPDATE agents SET server_id = :sid,
@@ -430,6 +638,7 @@ async def _enroll_pending_agent(
     await db.commit()
     return AgentEnrollResponse(
         agent_id=str(current["id"]), server_id=str(server_id), api_key=api_key,
+        assigned_agent_uid=assigned_agent_uid,
         authorization_state="authorized",
         heartbeat_interval_s=DEFAULT_HEARTBEAT_S,
         config_poll_interval_s=DEFAULT_CONFIG_POLL_S,
@@ -504,6 +713,19 @@ async def enroll(
             {"id": server_id},
         )
 
+    await _sync_server_identity(
+        db,
+        server_id,
+        hostname=data.hostname,
+        primary_ip=client_ip or data.primary_ip,
+        fqdn=data.fqdn,
+        os_type=data.platform if data.platform in ("windows", "linux", "macos") else "other",
+        os_name=data.os_name,
+        os_version=data.os_version,
+        kernel_or_build=data.kernel_or_build,
+        architecture=data.architecture,
+    )
+
     # Find or create the agent. If agent_uid already exists, treat as re-enrollment.
     existing_agent = (await db.execute(
         text("SELECT id FROM agents WHERE agent_uid = :u"),
@@ -532,6 +754,14 @@ async def enroll(
                       revoked_by = NULL,
                       authorization_source = 'enrollment_token',
                       enrollment_token_prefix = :token_prefix,
+                      pending_conflict_secret_hash = NULL,
+                      registration_conflict_revision = NULL,
+                      registration_conflict_at = NULL,
+                      registration_conflict_ip = NULL,
+                      registration_conflict_attempts = 0,
+                      registration_conflict_install_id = NULL,
+                      registration_conflict_hostname = NULL,
+                      registration_conflict_version = NULL,
                       status = 'online',
                       last_heartbeat_at = NOW(),
                       current_version = :v,
@@ -653,6 +883,12 @@ async def heartbeat(
     )
     # Roll server.last_seen.
     if agent.get("server_id"):
+        await _sync_server_identity(
+            db,
+            agent["server_id"],
+            hostname=agent.get("hostname"),
+            primary_ip=client_ip,
+        )
         await db.execute(
             text("""UPDATE servers SET last_seen = NOW(),
                                        status = CASE WHEN status = 'disabled' THEN status
@@ -685,6 +921,39 @@ async def heartbeat(
     )).mappings().first()
     etag, _ = await _config_etag_for_agent(dict(fresh_agent), db)
 
+    # This field was introduced after the host heartbeat contract. Returning it
+    # is backward-compatible (older agents ignore unknown response fields) and
+    # lets newer combined agents distinguish a healthy local gateway from an
+    # unavailable appliance writer during rolling upgrades.
+    from app.api.v1 import apm_ingest as apm_ingest_api
+
+    agent_credential_bound = False
+    if data.apm is not None and data.apm.enabled:
+        credential_row = (await db.execute(
+            text("""SELECT EXISTS (
+                        SELECT 1 FROM agent_apm_credentials credential
+                        JOIN apm_ingest_keys ingest_key
+                          ON ingest_key.id = credential.key_id
+                        WHERE credential.agent_id = :agent_id
+                          AND ingest_key.enabled = TRUE
+                          AND ingest_key.revoked_at IS NULL
+                    )"""),
+            {"agent_id": agent["id"]},
+        )).first()
+        agent_credential_bound = bool(credential_row and credential_row[0])
+    appliance_apm = apm_ingest_api.runtime_status()
+    appliance_apm["agent_credential_bound"] = agent_credential_bound
+    appliance_apm["ready_for_agent"] = bool(
+        appliance_apm.get("available") and agent_credential_bound
+    )
+    if data.apm is not None and data.apm.enabled and not agent_credential_bound:
+        if appliance_apm.get("state") != "unavailable":
+            appliance_apm["state"] = "degraded"
+        appliance_apm["message"] = (
+            "APM is not ready for this agent because it has no scoped ingest "
+            "credential; re-enroll the agent APM forwarder"
+        )
+
     return AgentHeartbeatResponse(
         ok=True,
         server_time=datetime.now(timezone.utc),
@@ -692,6 +961,7 @@ async def heartbeat(
         has_commands=has_cmd,
         desired_version=fresh_agent.get("desired_version"),
         capabilities=_capability_list(fresh_agent.get("capabilities")),
+        apm=appliance_apm,
     )
 
 
@@ -768,40 +1038,150 @@ async def post_results(
     agent = await _authenticate(x_agent_id, _strip_bearer(authorization), db)
 
     # Validate identity matches the bearer's agent.
-    if str(agent["id"]) != data.agent_id:
+    if not _same_uuid(agent["id"], data.agent_id):
         raise HTTPException(403, "agent_id mismatch with bearer credential")
 
     server_id = agent.get("server_id")
     if not server_id:
         raise HTTPException(400, "Agent has no server binding")
-    if str(server_id) != data.server_id:
+    if not _same_uuid(server_id, data.server_id):
         raise HTTPException(400, "server_id mismatch with agent binding")
 
-    # Idempotency: per-agent batch_id (string) is deduped via the agent's
-    # last seen batch column. Cheap and good enough for MVP; a dedicated
-    # batch ledger can be added later if needed.
-    duplicates = 0
+    batch_id = data.batch_id.strip()
+    if not batch_id or batch_id != data.batch_id or len(batch_id) > 255:
+        raise HTTPException(400, "batch_id must be 1-255 non-whitespace characters")
 
-    accepted, rejected, errors, clock_skew_s = await ingest_host_metric_batch(
-        str(agent["id"]), str(server_id), data, db,
+    # Claim the batch inside this transaction. PostgreSQL's unique constraint
+    # makes concurrent retries wait for the first transaction to finish. Once
+    # the first request commits, response-loss retries observe the recorded
+    # outcome and skip ClickHouse/inventory ingestion. PostgreSQL and
+    # ClickHouse are not atomic, so a crash can still replay an insert before
+    # this transaction commits; deterministic per-kind ClickHouse tokens and
+    # migrate-094's deduplication window make that replay idempotent.
+    payload_sha256 = _host_results_batch_digest(data)
+    claimed = (await db.execute(
+        text("""
+            INSERT INTO agent_host_result_batches
+                (agent_id, batch_id, server_id, payload_sha256,
+                 sequence_start, sequence_end)
+            VALUES (:aid, :bid, :sid, :payload, :seq_start, :seq_end)
+            ON CONFLICT (agent_id, batch_id) DO NOTHING
+            RETURNING 1
+        """),
+        {
+            "aid": agent["id"], "bid": batch_id, "sid": server_id,
+            "payload": payload_sha256,
+            "seq_start": data.sequence_start, "seq_end": data.sequence_end,
+        },
+    )).first()
+
+    if not claimed:
+        existing = (await db.execute(
+            text("""
+                SELECT server_id, payload_sha256, accepted, rejected, errors,
+                       completed_at
+                FROM agent_host_result_batches
+                WHERE agent_id = :aid AND batch_id = :bid
+            """),
+            {"aid": agent["id"], "bid": batch_id},
+        )).mappings().first()
+        if not existing or existing.get("completed_at") is None:
+            await db.rollback()
+            raise HTTPException(409, "host-results batch is still being processed")
+        if (
+            str(existing.get("server_id")) != str(server_id)
+            or not hmac.compare_digest(
+                str(existing.get("payload_sha256") or ""), payload_sha256,
+            )
+        ):
+            await db.rollback()
+            raise HTTPException(409, "batch_id was already used for a different payload")
+
+        accepted_before = max(0, int(existing.get("accepted") or 0))
+        rejected_before = max(0, int(existing.get("rejected") or 0))
+        errors_before = _host_results_errors(existing.get("errors"))
+        await db.commit()
+        logger.info(
+            "agent results duplicate agent=%s batch=%s accepted_before=%d",
+            agent["id"], batch_id, accepted_before,
+        )
+        return AgentResultsResponse(
+            ok=True,
+            accepted=0,
+            rejected=rejected_before,
+            duplicates=accepted_before,
+            errors=errors_before,
+        )
+
+    try:
+        accepted, rejected, errors, clock_skew_s = await ingest_host_metric_batch(
+            str(agent["id"]), str(server_id), data, db,
+        )
+    except HostMetricStorageError as exc:
+        # Do not finalize the durable ledger or acknowledge the batch. The
+        # Windows agent retains it in its spool on 503 and can replay it after
+        # ClickHouse/Postgres schema convergence completes.
+        await db.rollback()
+        logger.warning(
+            "retryable host-results storage failure agent=%s batch=%s part=%s",
+            agent["id"], batch_id, exc.part,
+        )
+        raise HTTPException(
+            503,
+            "Host telemetry storage is unavailable; retry the same batch",
+            headers={"Retry-After": "2"},
+        ) from exc
+    response_errors = errors[:25]
+
+    await db.execute(
+        text("""
+            UPDATE agent_host_result_batches
+            SET accepted = :accepted,
+                rejected = :rejected,
+                errors = CAST(:errors AS JSONB),
+                clock_skew_s = :skew,
+                completed_at = NOW()
+            WHERE agent_id = :aid AND batch_id = :bid
+        """),
+        {
+            "accepted": accepted, "rejected": rejected,
+            "errors": json.dumps(response_errors), "skew": clock_skew_s,
+            "aid": agent["id"], "bid": batch_id,
+        },
     )
 
-    # Update last_metric_at + inventory snapshots
+    # Agent self-health is connectivity/queue telemetry, not proof that the
+    # Server module is delivering host signals.  Keep last_metric_at stable for
+    # agent_health-only batches so heartbeat and host readiness remain distinct.
+    has_host_telemetry = any(
+        sample.kind in HOST_TELEMETRY_KINDS for sample in data.metrics
+    )
     await db.execute(
-        text("""UPDATE agents SET last_metric_at = NOW(), clock_skew_s = :skew,
+        text("""UPDATE agents SET last_metric_at = CASE WHEN :has_host_telemetry
+                                                        THEN NOW() ELSE last_metric_at END,
+                                  clock_skew_s = :skew,
                                   updated_at = NOW()
                 WHERE id = :id"""),
-        {"id": agent["id"], "skew": clock_skew_s},
+        {
+            "id": agent["id"], "skew": clock_skew_s,
+            "has_host_telemetry": has_host_telemetry,
+        },
     )
-    await db.execute(
-        text("""UPDATE servers SET last_seen = NOW(), updated_at = NOW()
-                WHERE id = :id"""),
-        {"id": server_id},
-    )
+    # Heartbeats remain the connectivity signal for the server.  A results
+    # upload may contain only agent self-health, so only a successfully stored
+    # host signal may also advance the Server module's data-seen timestamp.
+    if has_host_telemetry:
+        await db.execute(
+            text("""UPDATE servers SET last_seen = NOW(), updated_at = NOW()
+                    WHERE id = :id"""),
+            {"id": server_id},
+        )
+    if _host_results_ledger_cleanup_due(agent["id"], batch_id):
+        await _prune_host_results_ledger(db, agent["id"])
     await db.commit()
     return AgentResultsResponse(
-        ok=True, accepted=accepted, rejected=rejected, duplicates=duplicates,
-        errors=errors[:25],
+        ok=True, accepted=accepted, rejected=rejected, duplicates=0,
+        errors=response_errors,
     )
 
 
@@ -1024,6 +1404,11 @@ async def packages_manifest(
         "file_size": row["file_size"],
         "sha256": row["sha256"],
         "signature": row.get("signature"),
+        # Windows updates must be Authenticode-signed even when the package is
+        # served from this controller through a relative URL. New agents also
+        # fail closed independently, but publishing the requirement keeps the
+        # manifest contract explicit for every supported client generation.
+        "requires_authenticode": platform == "windows",
         "released_at": row["released_at"],
         "download_url": row["download_path"],
     }

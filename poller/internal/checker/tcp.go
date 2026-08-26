@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"time"
 
 	"go.uber.org/zap"
@@ -29,7 +30,7 @@ func (c *TCPChecker) Check(ctx context.Context, sc *ServiceCheck, pollerID strin
 		PollerID:       pollerID,
 	}
 
-	addr := fmt.Sprintf("%s:%d", sc.TargetHost, sc.TargetPort)
+	addr := tcpAddress(sc.TargetHost, sc.TargetPort)
 
 	start := time.Now()
 	conn, err := net.DialTimeout("tcp", addr, sc.Timeout)
@@ -44,4 +45,8 @@ func (c *TCPChecker) Check(ctx context.Context, sc *ServiceCheck, pollerID strin
 
 	result.IsUp = true
 	return result
+}
+
+func tcpAddress(host string, port int) string {
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }

@@ -59,6 +59,7 @@ import { ServiceDetailPage as ApmServiceDetailPage } from '@/pages/apm/ServiceDe
 import { ServiceMapPage as ApmServiceMapPage } from '@/pages/apm/ServiceMapPage'
 import { ErrorsInboxPage } from '@/pages/apm/ErrorsInboxPage'
 import { SlosPage } from '@/pages/apm/SlosPage'
+import { SloDetailPage } from '@/pages/apm/SloDetailPage'
 import { SyntheticsPage } from '@/pages/apm/SyntheticsPage'
 import { RumPage } from '@/pages/apm/RumPage'
 import { UsagePage } from '@/pages/apm/UsagePage'
@@ -200,6 +201,7 @@ export default function App() {
           <Route path="services/:name" element={<ApmServiceDetailPage />} />
           <Route path="service-map" element={<ApmServiceMapPage />} />
           <Route path="slos" element={<SlosPage />} />
+          <Route path="slos/:id" element={<SloDetailPage />} />
           <Route path="synthetics" element={<SyntheticsPage />} />
           <Route path="rum" element={<RumPage />} />
           <Route path="usage" element={<UsagePage />} />

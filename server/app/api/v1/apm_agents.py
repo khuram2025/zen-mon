@@ -348,6 +348,16 @@ async def list_agent_processes(
             )
             SELECT p.*, a.hostname, a.status AS agent_status,
                    a.version AS agent_version, a.capabilities AS agent_capabilities,
+                   EXISTS (
+                       SELECT 1 FROM agent_apm_credentials credential
+                       JOIN apm_ingest_keys ingest_key
+                         ON ingest_key.id = credential.key_id
+                       WHERE credential.agent_id = a.id
+                         AND ingest_key.enabled = TRUE
+                         AND ingest_key.revoked_at IS NULL
+                   ) AS apm_credential_bound,
+                   COALESCE(NULLIF(s.display_name, ''), a.hostname) AS server_name,
+                   COALESCE(host(s.primary_ip), host(a.last_ip)) AS server_ip,
                    latest.id AS last_command_id,
                    latest.status AS last_command_status,
                    latest.command AS last_command,
@@ -358,6 +368,7 @@ async def list_agent_processes(
                    result.output AS last_command_output
             FROM ranked p
             JOIN agents a ON a.id = p.agent_id
+            LEFT JOIN servers s ON s.id = p.server_id
             LEFT JOIN LATERAL (
                 SELECT c.id, c.status, c.command, c.params, c.created_at, c.completed_at
                 FROM agent_commands c
@@ -385,11 +396,15 @@ async def list_agent_processes(
     # one bounded aggregate query for the whole fleet, never one query per row.
     def _trace_health():
         return get_ch_client().query("""
-            SELECT service_name, env, max(timestamp) AS last_trace_at,
+            SELECT JSONExtractString(resource, 'zenplus.agent_id') AS agent_id,
+                   JSONExtractString(resource, 'zenplus.server_id') AS server_id,
+                   service_name, env, max(timestamp) AS last_trace_at,
                    countIf(timestamp >= now() - INTERVAL 15 MINUTE) AS traces_15m
             FROM zenplus.apm_spans
             WHERE timestamp >= now() - INTERVAL 24 HOUR
-            GROUP BY service_name, env
+              AND JSONExtractString(resource, 'zenplus.agent_id') != ''
+              AND JSONExtractString(resource, 'zenplus.server_id') != ''
+            GROUP BY agent_id, server_id, service_name, env
         """).result_rows
 
     trace_rows = []
@@ -397,17 +412,31 @@ async def list_agent_processes(
         trace_rows = await asyncio.to_thread(_trace_health)
     except Exception:
         logger.warning("APM first-trace health query failed", exc_info=True)
-    trace_health = {(str(r[0]), str(r[1])): (r[2], int(r[3])) for r in trace_rows}
+    trace_health = {
+        (str(r[0]), str(r[1]), str(r[2]), str(r[3])): (r[4], int(r[5]))
+        for r in trace_rows
+    }
     for item in output:
         command_params = item.get("last_command_params") or {}
         service_name = str(command_params.get("service_name") or item.get("service_name_guess") or "")
         environment = str(command_params.get("environment") or "prod")
-        last_trace, traces_15m = trace_health.get((service_name, environment), (None, 0))
+        trace_key = (
+            str(item.get("agent_id") or ""),
+            str(item.get("server_id") or ""),
+            service_name,
+            environment,
+        )
+        last_trace, traces_15m = trace_health.get(trace_key, (None, 0))
         item["configured_service_name"] = service_name
         item["configured_environment"] = environment
         item["last_trace_at"] = last_trace
         item["traces_15m"] = traces_15m
-        if traces_15m:
+        # A controller-owned credential and exact trace resource binding are
+        # both required.  Service/env names are not identities: cloned hosts
+        # commonly share values such as "DefaultAppPool".
+        if not item.get("apm_credential_bound"):
+            item["telemetry_status"] = "credential_missing"
+        elif traces_15m:
             item["telemetry_status"] = "receiving"
         elif last_trace:
             item["telemetry_status"] = "stale"

@@ -79,6 +79,11 @@ class ServerResponse(BaseModel):
     os_version: Optional[str]
     kernel_or_build: Optional[str]
     architecture: Optional[str]
+    cpu_model: Optional[str] = None
+    cpu_cores: Optional[int] = None
+    cpu_physical_cores: Optional[int] = None
+    memory_total_bytes: Optional[int] = None
+    physical_disks: List[Dict[str, Any]] = Field(default_factory=list)
     collection_mode: str
     status: str
     environment: Optional[str]
@@ -95,6 +100,8 @@ class ServerResponse(BaseModel):
     agent_status: Optional[str] = None
     agent_version: Optional[str] = None
     agent_last_heartbeat_at: Optional[datetime] = None
+    agent_last_metric_at: Optional[datetime] = None
+    agent_clock_skew_s: int = 0
     agent_capabilities: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
@@ -213,6 +220,14 @@ class AgentResponse(BaseModel):
     enrollment_token_prefix: Optional[str] = None
     authorized_at: Optional[datetime] = None
     revoked_at: Optional[datetime] = None
+    registration_conflict: bool = False
+    registration_conflict_revision: Optional[str] = None
+    registration_conflict_at: Optional[datetime] = None
+    registration_conflict_ip: Optional[str] = None
+    registration_conflict_attempts: int = 0
+    registration_conflict_install_id: Optional[str] = None
+    registration_conflict_hostname: Optional[str] = None
+    registration_conflict_version: Optional[str] = None
     last_heartbeat_at: Optional[datetime]
     last_metric_at: Optional[datetime]
     last_config_hash: Optional[str]
@@ -244,6 +259,15 @@ class AgentBulkAction(BaseModel):
     target_version: Optional[str] = None
 
 
+class AgentRegistrationConflictResolve(BaseModel):
+    """Administrator-reviewed outcome for a conflicting installation."""
+
+    conflict_revision: UUID
+    action: Literal["replace", "register_clone", "block"] = "replace"
+    display_name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    authorize: bool = False
+
+
 # ── Agent-facing API ─────────────────────────────────────────────────
 
 class AgentEnrollRequest(BaseModel):
@@ -266,6 +290,7 @@ class AgentEnrollResponse(BaseModel):
     agent_id: str
     server_id: Optional[str] = None
     api_key: Optional[str] = None
+    assigned_agent_uid: Optional[str] = None
     authorization_state: Literal["pending", "authorized", "revoked"] = "authorized"
     heartbeat_interval_s: int = 30
     config_poll_interval_s: int = 60
@@ -275,13 +300,20 @@ class AgentEnrollResponse(BaseModel):
 
 class AgentAPMGatewayStatus(BaseModel):
     listening: bool = False
+    healthy: bool = False
+    managed: bool = False
+    version: Optional[str] = None
     grpc_port: int = Field(default=4317, ge=0, le=65535)
     http_port: int = Field(default=4318, ge=0, le=65535)
 
 
 class AgentAPMHeartbeat(BaseModel):
     enabled: bool = True
+    profile: Optional[str] = None
+    environment: Optional[str] = None
+    state: Optional[str] = None
     gateway: AgentAPMGatewayStatus = Field(default_factory=AgentAPMGatewayStatus)
+    discovered: int = Field(default=0, ge=0)
     instrumented: int = Field(default=0, ge=0)
     failed: int = Field(default=0, ge=0)
     spans_forwarded_1m: int = Field(default=0, ge=0)
@@ -307,6 +339,8 @@ class ApplianceAPMStatus(BaseModel):
     rejected_spans_total: int = Field(default=0, ge=0)
     dropped_spans_total: int = Field(default=0, ge=0)
     last_received_at: Optional[datetime] = None
+    agent_credential_bound: bool = False
+    ready_for_agent: bool = False
     message: str = ""
     checked_at: datetime
 
@@ -377,6 +411,7 @@ class AgentResultsBatch(BaseModel):
     metrics: List[MetricSample] = Field(default_factory=list)
     inventory: Dict[str, Any] = Field(default_factory=dict)
     events: List[Dict[str, Any]] = Field(default_factory=list)
+    health: Optional[Dict[str, Any]] = None
 
 
 class AgentResultsResponse(BaseModel):

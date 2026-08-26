@@ -194,6 +194,93 @@ def compute_slo_status(slo: dict) -> dict:
     }
 
 
+def compute_slo_series(slo: dict) -> list[dict]:
+    """Daily SLI / error-budget series over the SLO window (1h rollup).
+
+    Each point is one UTC day: request volume, bad events, observed SLI, and
+    remaining budget if that day's badness were the whole-window rate. Used by
+    the SLO detail page — not by the burn evaluator.
+    """
+    from app.core.database import get_clickhouse_client
+
+    window_days = int(slo.get("window_days") or 30)
+    budget = max(1.0 - float(slo["target"]) / 100.0, 1e-9)
+    since = datetime.now(timezone.utc) - timedelta(days=window_days)
+    conds = ["timestamp >= %(since)s", f"span_kind IN {_ENTRY_KINDS}",
+             "service_name = %(svc)s"]
+    params: dict = {"since": since.strftime("%Y-%m-%d %H:%M:%S"), "svc": slo["service_name"]}
+    if slo.get("env"):
+        conds.append("env = %(env)s"); params["env"] = slo["env"]
+    if slo.get("operation"):
+        conds.append("operation = %(op)s"); params["op"] = slo["operation"]
+    where = " AND ".join(conds)
+    sli_type = slo.get("sli_type") or "availability"
+    q_list = ",".join(str(q) for q in _Q_GRID)
+    try:
+        client = get_clickhouse_client()
+        if sli_type in ("availability", "error_rate"):
+            rows = client.query(
+                f"SELECT toStartOfDay(timestamp) AS day, "
+                f"       sum(request_count), sum(error_count) "
+                f"FROM zenplus.apm_span_metrics_1h WHERE {where} "
+                f"GROUP BY day ORDER BY day",
+                parameters=params,
+            ).result_rows
+            out = []
+            cum_req = cum_bad = 0
+            for day, reqs, errs in rows:
+                reqs, errs = int(reqs or 0), int(errs or 0)
+                if reqs <= 0:
+                    continue
+                cum_req += reqs
+                cum_bad += errs
+                bad_frac = errs / reqs
+                sli = max(0.0, 1.0 - bad_frac) * 100.0
+                consumed = (cum_bad / cum_req) / budget if cum_req else 0.0
+                out.append({
+                    "timestamp": day.isoformat() if hasattr(day, "isoformat") else str(day),
+                    "requests": reqs,
+                    "bad": errs,
+                    "sli": round(sli, 4),
+                    "budget_remaining": round(max(0.0, 1.0 - consumed), 4),
+                })
+            return out
+        if sli_type == "latency":
+            threshold = float(slo.get("latency_threshold_ms") or 0)
+            rows = client.query(
+                f"SELECT toStartOfDay(timestamp) AS day, "
+                f"       sum(request_count), "
+                f"       quantilesTDigestMerge({q_list})(duration_state) "
+                f"FROM zenplus.apm_span_metrics_1h WHERE {where} "
+                f"GROUP BY day ORDER BY day",
+                parameters=params,
+            ).result_rows
+            out = []
+            cum_req = cum_bad = 0.0
+            for day, reqs, grid in rows:
+                reqs = int(reqs or 0)
+                if reqs <= 0:
+                    continue
+                frac = _frac_above(threshold, [float(v) for v in (grid or [])])
+                bad = frac * reqs
+                cum_req += reqs
+                cum_bad += bad
+                sli = max(0.0, 1.0 - frac) * 100.0
+                consumed = (cum_bad / cum_req) / budget if cum_req else 0.0
+                out.append({
+                    "timestamp": day.isoformat() if hasattr(day, "isoformat") else str(day),
+                    "requests": reqs,
+                    "bad": int(round(bad)),
+                    "sli": round(sli, 4),
+                    "budget_remaining": round(max(0.0, 1.0 - consumed), 4),
+                })
+            return out
+    except Exception as exc:
+        logger.warning("slo series: clickhouse query failed (%s): %s", slo.get("name"), exc)
+        return []
+    return []
+
+
 # ─── Alert raise / resolve ───────────────────────────────────────────────────
 
 async def _active_alert_id(db: AsyncSession, dedupe: str):

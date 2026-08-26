@@ -85,6 +85,8 @@ def _build_trace_list(
     *, frm_ms: int, to_ms: int, service: Optional[str], operation: Optional[str],
     errors_only: bool, http_route: Optional[str], env: Optional[str],
     min_duration_ms: Optional[float], limit: int,
+    http_status_code: Optional[int] = None, service_version: Optional[str] = None,
+    status_code: Optional[str] = None,
 ) -> list[dict]:
     # Window applies to both stages (a trace's spans are short-lived, so this
     # keeps partition pruning while still summarising the *whole* matched trace).
@@ -102,6 +104,12 @@ def _build_trace_list(
         match_conds.append("http_route = {rt:String}"); params["rt"] = http_route
     if env:
         match_conds.append("env = {env:String}"); params["env"] = env
+    if http_status_code is not None:
+        match_conds.append("http_status_code = {hsc:UInt16}"); params["hsc"] = int(http_status_code)
+    if service_version:
+        match_conds.append("service_version = {ver:String}"); params["ver"] = service_version
+    if status_code:
+        match_conds.append("status_code = {st:String}"); params["st"] = status_code
     match_where = " AND ".join(match_conds)
     win_where = " AND ".join(win)
 
@@ -243,6 +251,9 @@ async def list_traces(
     http_route: Optional[str] = None,
     env: Optional[str] = None,
     min_duration_ms: Optional[float] = None,
+    http_status_code: Optional[int] = None,
+    service_version: Optional[str] = None,
+    status_code: Optional[str] = None,
     from_ms: Optional[int] = Query(None, description="window start, unix ms"),
     to_ms: Optional[int] = Query(None, description="window end, unix ms"),
     limit: int = Query(100, ge=1, le=1000),
@@ -261,6 +272,8 @@ async def list_traces(
         _build_trace_list, frm_ms=frm, to_ms=to, service=service, operation=operation,
         errors_only=errors_only, http_route=http_route, env=env,
         min_duration_ms=min_duration_ms, limit=limit,
+        http_status_code=http_status_code, service_version=service_version,
+        status_code=status_code,
     )
     return TraceListResponse(
         traces=[TraceSummary(**r) for r in rows], mode=mode, count=len(rows)

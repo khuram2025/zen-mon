@@ -9,6 +9,8 @@ import { Card, CardContent } from '@/components/ui/Card'
 import { HEALTH_COLOR, fmtMs, fmtPct, fmtRps } from '@/components/apm/shared'
 import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
 import { ApmRangePicker, rangePhrase, useApmRange } from '@/components/apm/ApmRange'
+import { ApmKpi, ErrorRateCell, LatencyCell, RankBar, fmtCount } from '@/components/apm/viz'
+import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import type { ServiceMap } from '@/types/apm'
 
 function Legend() {
@@ -101,6 +103,9 @@ export function ServiceMapPage() {
 
   const nodeCount = q.data?.nodes.length ?? 0
   const edgeCount = q.data?.edges.length ?? 0
+  const criticalNodes = (q.data?.nodes ?? []).filter((n) => n.health === 'critical').length
+  const noisyEdges = [...(q.data?.edges ?? [])].sort((a, b) => b.error_rate - a.error_rate || b.calls - a.calls)
+  const maxCalls = Math.max(...noisyEdges.map((e) => e.calls), 1)
 
   return (
     <div className="space-y-4">
@@ -115,6 +120,13 @@ export function ServiceMapPage() {
           </>
         }
       />
+
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <ApmKpi label="Services" tone="primary" value={nodeCount} sub={rangePhrase(range)} />
+        <ApmKpi label="Dependencies" tone="info" value={edgeCount} sub="call edges" />
+        <ApmKpi label="Critical nodes" tone={criticalNodes ? 'danger' : 'success'} value={criticalNodes} />
+        <ApmKpi label="Noisiest edge" tone="warning" value={noisyEdges[0] ? fmtPct(noisyEdges[0].error_rate) : '—'} sub={noisyEdges[0] ? `${noisyEdges[0].client} → ${noisyEdges[0].server}` : 'no edges'} />
+      </div>
 
       {q.isError && (
         <div className="rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
@@ -156,6 +168,46 @@ export function ServiceMapPage() {
           )}
         </CardContent>
       </Card>
+
+      {edgeCount > 0 && (
+        <Card className="overflow-hidden">
+          <div className="border-b border-border px-4 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-muted">
+            Dependency deep dive
+          </div>
+          <Table>
+            <THead>
+              <Tr>
+                <Th>Caller</Th><Th>Callee</Th>
+                <Th className="text-right">Calls</Th>
+                <Th className="text-right">Error rate</Th>
+                <Th className="text-right">Avg latency</Th>
+              </Tr>
+            </THead>
+            <TBody>
+              {noisyEdges.slice(0, 20).map((e) => (
+                <Tr key={`${e.client}->${e.server}`}>
+                  <Td>
+                    <button className="font-medium text-primary hover:underline" onClick={() => navigate(`/apm/services/${encodeURIComponent(e.client)}?range=${range}`)}>
+                      {e.client}
+                    </button>
+                  </Td>
+                  <Td>
+                    <button className="font-medium text-primary hover:underline" onClick={() => navigate(`/apm/services/${encodeURIComponent(e.server)}?range=${range}`)}>
+                      {e.server}
+                    </button>
+                  </Td>
+                  <Td className="text-right">
+                    <div className="font-mono text-xs tabular-nums">{fmtCount(e.calls)}</div>
+                    <RankBar value={e.calls} max={maxCalls} />
+                  </Td>
+                  <Td className="text-right"><ErrorRateCell rate={e.error_rate} /></Td>
+                  <Td className="text-right"><LatencyCell ms={e.avg_ms} /></Td>
+                </Tr>
+              ))}
+            </TBody>
+          </Table>
+        </Card>
+      )}
     </div>
   )
 }

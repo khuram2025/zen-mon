@@ -28,6 +28,7 @@ from app.services import alert_phrasing as ap
 from app.services import alert_notify_state as ns
 from app.services.server_health_service import create_server_alert, resolve_server_alerts
 from app.services.filesystem_monitoring import pg_capacity_filter
+from app.services.host_metric_service import telemetry_freshness_seconds
 
 logger = logging.getLogger("zenplus.host_alerts")
 
@@ -202,11 +203,24 @@ async def _current_value(db: AsyncSession, rule, server_id: str, ch_fleets: dict
     if metric == "host_process_down":
         if not rule.target:
             return None
+        policy = (await db.execute(text(
+            """SELECT p.metric_interval_s, p.upload_interval_s
+               FROM agents a
+               LEFT JOIN agent_policies p ON p.id = a.policy_id
+               WHERE a.server_id = :sid
+               ORDER BY a.last_heartbeat_at DESC NULLS LAST, a.created_at DESC
+               LIMIT 1"""
+        ), {"sid": server_id})).first()
+        freshness_s = telemetry_freshness_seconds(
+            policy[0] if policy else 30,
+            policy[1] if policy else 60,
+        )
         row = (await db.execute(text(
             """SELECT count(*) FROM server_process_inventory
-               WHERE server_id = :sid AND name = :target
-                 AND updated_at >= NOW() - INTERVAL '300 seconds'"""
-        ), {"sid": server_id, "target": rule.target})).first()
+               WHERE server_id = :sid AND lower(name) = lower(:target)
+                 AND running = TRUE
+                 AND updated_at >= NOW() - make_interval(secs => :ttl)"""
+        ), {"sid": server_id, "target": rule.target, "ttl": freshness_s})).first()
         running = int(row[0] or 0) > 0
         return (not running), (0.0 if running else 1.0), (f"{rule.target} {'running' if running else 'not running'}")
 

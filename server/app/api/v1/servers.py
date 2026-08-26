@@ -17,7 +17,7 @@ import secrets
 import shlex
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic import BaseModel, Field
 
+from app.api.v1.apm import invalidate_ingest_key_cache
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.services.tag_service import canonicalize_tags
@@ -39,6 +40,7 @@ from app.schemas.agent import (
     AgentPolicyCreate,
     AgentPolicyResponse,
     AgentPolicyUpdate,
+    AgentRegistrationConflictResolve,
     AgentResponse,
     BaselineCreate,
     BaselineResponse,
@@ -56,11 +58,14 @@ from app.schemas.agent import (
 )
 from app.services.host_metric_service import (
     query_fleet_latest_metrics,
+    query_latest_process_snapshot,
     query_process_history,
     query_server_memory_total,
     query_server_metrics,
     query_top_pressure,
+    telemetry_freshness_seconds,
 )
+from app.services.audit_service import write_audit_log
 from app.services.network_capture_service import (
     ACTIVE_CAPTURE_STATUSES,
     CAPTURE_COMMAND_TTL_S,
@@ -140,6 +145,103 @@ def _json_object(v: Any) -> dict:
     return {}
 
 
+def _apm_status_with_binding(row: dict) -> dict:
+    """Merge controller-owned credential readiness into agent self-status."""
+    status = _json_object(row.get("apm_status"))
+    bound = bool(row.get("apm_credential_bound"))
+    status["credential_bound"] = bound
+    if status.get("enabled") is True:
+        gateway = status.get("gateway") if isinstance(status.get("gateway"), dict) else {}
+        status["ready"] = bool(bound and gateway.get("healthy"))
+        status["readiness"] = "ready" if status["ready"] else (
+            "gateway_unhealthy" if bound else "missing_credential"
+        )
+        if not bound and not status.get("last_error"):
+            status["last_error"] = (
+                "Agent-scoped APM ingest credential is missing; "
+                "the agent must re-enroll its APM forwarder"
+            )
+    elif status.get("enabled") is False:
+        status["ready"] = False
+        status["readiness"] = "disabled"
+    else:
+        status["ready"] = False
+        status["readiness"] = "not_reported"
+    return status
+
+
+def _host_telemetry_readiness(
+    latest: dict[str, dict], freshness: dict[str, int],
+) -> dict[str, dict]:
+    """Describe CPU/memory availability separately from agent connectivity."""
+    output = {}
+    for server_id, freshness_s in freshness.items():
+        present = latest.get(server_id, {})
+        missing = [
+            signal for signal, field in (("cpu", "cpu_pct"), ("memory", "memory_pct"))
+            if field not in present
+        ]
+        output[server_id] = {
+            "state": (
+                "ready" if not missing
+                else "missing" if len(missing) == 2
+                else "partial"
+            ),
+            "available": not missing,
+            "required_signals": ["cpu", "memory"],
+            "missing_signals": missing,
+            "freshness_seconds": freshness_s,
+        }
+    return output
+
+
+async def _server_agent_freshness_seconds(
+    server_id: UUID,
+    db: AsyncSession,
+    *,
+    minimum_seconds: int = 300,
+) -> int:
+    row = (await db.execute(
+        text("""SELECT p.metric_interval_s, p.upload_interval_s
+                FROM agents a
+                LEFT JOIN agent_policies p ON p.id = a.policy_id
+                WHERE a.server_id = :sid
+                ORDER BY a.last_heartbeat_at DESC NULLS LAST, a.created_at DESC
+                LIMIT 1"""),
+        {"sid": server_id},
+    )).first()
+    return telemetry_freshness_seconds(
+        row[0] if row else 30,
+        row[1] if row else 60,
+        minimum_seconds=minimum_seconds,
+    )
+
+
+async def _fleet_agent_freshness_seconds(
+    db: AsyncSession,
+    *,
+    minimum_seconds: int,
+) -> dict[str, int]:
+    rows = (await db.execute(text(
+        """SELECT s.id, p.metric_interval_s, p.upload_interval_s
+           FROM servers s
+           LEFT JOIN LATERAL (
+               SELECT policy_id
+               FROM agents
+               WHERE server_id = s.id
+               ORDER BY last_heartbeat_at DESC NULLS LAST, created_at DESC
+               LIMIT 1
+           ) a ON TRUE
+           LEFT JOIN agent_policies p ON p.id = a.policy_id"""
+    ))).all()
+    return {
+        str(row[0]): telemetry_freshness_seconds(
+            row[1], row[2], minimum_seconds=minimum_seconds,
+        )
+        for row in rows
+    }
+
+
 def _server_row_to_response(row: dict) -> ServerResponse:
     tags = _json_list(row.get("tags"))
     return ServerResponse(
@@ -157,6 +259,14 @@ def _server_row_to_response(row: dict) -> ServerResponse:
         os_version=row.get("os_version"),
         kernel_or_build=row.get("kernel_or_build"),
         architecture=row.get("architecture"),
+        cpu_model=row.get("cpu_model"),
+        cpu_cores=row.get("cpu_cores"),
+        cpu_physical_cores=row.get("cpu_physical_cores"),
+        memory_total_bytes=row.get("memory_total_bytes"),
+        physical_disks=[
+            dict(d) for d in _json_list(row.get("physical_disks"))
+            if isinstance(d, dict)
+        ],
         collection_mode=row.get("collection_mode") or "agent",
         status=row.get("status") or "unknown",
         environment=row.get("environment"),
@@ -172,6 +282,8 @@ def _server_row_to_response(row: dict) -> ServerResponse:
         agent_status=row.get("agent_status"),
         agent_version=row.get("agent_version"),
         agent_last_heartbeat_at=row.get("agent_last_heartbeat_at"),
+        agent_last_metric_at=row.get("agent_last_metric_at"),
+        agent_clock_skew_s=row.get("agent_clock_skew_s") or 0,
         agent_capabilities=[str(v) for v in _json_list(row.get("agent_capabilities"))],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -290,11 +402,14 @@ async def list_servers(
         SELECT s.*, st.name AS site_name,
                a.id AS agent_id, a.status AS agent_status, a.version AS agent_version,
                a.last_heartbeat_at AS agent_last_heartbeat_at,
+               a.last_metric_at AS agent_last_metric_at,
+               a.clock_skew_s AS agent_clock_skew_s,
                a.capabilities AS agent_capabilities
         FROM servers s
         LEFT JOIN sites st ON st.id = s.site_id
         LEFT JOIN LATERAL (
-            SELECT id, status, version, last_heartbeat_at, capabilities FROM agents
+            SELECT id, status, version, last_heartbeat_at, last_metric_at,
+                   clock_skew_s, capabilities FROM agents
             WHERE server_id = s.id
             ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 1
         ) a ON TRUE
@@ -351,10 +466,22 @@ async def server_facets(
 @router.get("/latest-metrics")
 async def servers_latest_metrics(
     window_minutes: int = Query(10, ge=1, le=120),
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     """Current cpu/mem/disk/net per server (keyed by server id) for the list view."""
-    return {"servers": query_fleet_latest_metrics(window_minutes)}
+    freshness = await _fleet_agent_freshness_seconds(
+        db, minimum_seconds=window_minutes * 60,
+    )
+    latest = await asyncio.to_thread(
+        query_fleet_latest_metrics,
+        window_minutes,
+        freshness_seconds_by_server=freshness,
+    )
+    return {
+        "servers": latest,
+        "telemetry": _host_telemetry_readiness(latest, freshness),
+    }
 
 
 @router.post("/bulk")
@@ -367,6 +494,7 @@ async def bulk_server_action(
         raise HTTPException(400, "server_ids required")
     ids = [str(s) for s in data.server_ids]
     affected = 0
+    apm_keys_changed = False
 
     if data.action in ("add_tags", "remove_tags"):
         if not data.tags:
@@ -410,6 +538,14 @@ async def bulk_server_action(
         )
         affected = res.rowcount or 0
     elif data.action == "delete":
+        agent_rows = (await db.execute(
+            text("SELECT id FROM agents WHERE server_id = ANY(CAST(:ids AS uuid[]))"),
+            {"ids": ids},
+        )).all()
+        agent_ids = [row[0] for row in agent_rows]
+        if agent_ids:
+            await _revoke_agents(agent_ids, user.id, db)
+            apm_keys_changed = True
         await db.execute(
             text("DELETE FROM agents WHERE server_id = ANY(CAST(:ids AS uuid[]))"),
             {"ids": ids},
@@ -421,6 +557,8 @@ async def bulk_server_action(
         affected = res.rowcount or 0
 
     await db.commit()
+    if apm_keys_changed:
+        invalidate_ingest_key_cache()
 
     # Tag changes can move servers in/out of tag-scoped baselines.
     if data.action in ("add_tags", "remove_tags"):
@@ -530,14 +668,23 @@ async def delete_server(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_operator_user),
 ):
-    # Remove the server's agents first: the FK is ON DELETE SET NULL, which
-    # would leave an orphan agent authenticating forever with no server
-    # binding (every upload 400s). Deleting the row lets the host re-enroll.
+    # Revoke every host/APM credential while the agent-to-key provenance still
+    # exists. The server FK is ON DELETE SET NULL, so relying on the server
+    # delete itself would otherwise leave host keys authenticating forever and
+    # APM keys enabled without their mapping row.
+    agent_rows = (await db.execute(
+        text("SELECT id FROM agents WHERE server_id = :id"), {"id": server_id},
+    )).all()
+    agent_ids = [row[0] for row in agent_rows]
+    if agent_ids:
+        await _revoke_agents(agent_ids, user.id, db)
     await db.execute(text("DELETE FROM agents WHERE server_id = :id"), {"id": server_id})
     res = await db.execute(text("DELETE FROM servers WHERE id = :id"), {"id": server_id})
     await db.commit()
     if res.rowcount == 0:
         raise HTTPException(404, "Server not found")
+    if agent_ids:
+        invalidate_ingest_key_cache()
     return {"ok": True}
 
 
@@ -576,7 +723,9 @@ async def server_metrics(
     if not from_:
         from_ = to - timedelta(hours=6)
     metric_list = [m.strip() for m in metrics.split(",") if m.strip()]
-    series = query_server_metrics(str(server_id), from_, to, metric_list)
+    series = await asyncio.to_thread(
+        query_server_metrics, str(server_id), from_, to, metric_list,
+    )
     return ServerMetricsResponse(
         server_id=str(server_id),
         **{"from": from_},
@@ -592,19 +741,60 @@ async def server_processes(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    freshness_s = await _server_agent_freshness_seconds(server_id, db)
     # Only return processes refreshed recently so exited processes don't show
-    # as live. Window matches PROCESS_STALE_SECONDS in host_metric_service.py.
+    # as live. The floor is five minutes, while slow but valid collection and
+    # upload policies get one complete collection+upload cycle of headroom.
     rows = (await db.execute(
-        text("""SELECT pid, name, cmdline, user_name, cpu_pct, memory_bytes, started_at, updated_at
+        text("""SELECT pid, name, cmdline, user_name, cpu_pct, memory_bytes,
+                       started_at, state, running, watchlisted, updated_at
                 FROM server_process_inventory
                 WHERE server_id = :id
                   AND updated_at >= NOW() - make_interval(secs => :ttl)
                 ORDER BY cpu_pct DESC NULLS LAST LIMIT 200"""),
-        {"id": server_id, "ttl": 300},
+        {"id": server_id, "ttl": freshness_s},
     )).mappings().all()
+    items = [dict(r) for r in rows]
+    missing_watchlist = (await db.execute(
+        text("""SELECT 0 AS pid, name, cmdline, user_name, cpu_pct, memory_bytes,
+                       started_at, state, running, watchlisted, updated_at
+                FROM server_process_watchlist_inventory
+                WHERE server_id = :id
+                  AND updated_at >= NOW() - make_interval(secs => :ttl)
+                ORDER BY name"""),
+        {"id": server_id, "ttl": freshness_s},
+    )).mappings().all()
+    window_minutes = max(1, (freshness_s + 59) // 60)
+    if not items:
+        items = await asyncio.to_thread(
+            query_latest_process_snapshot,
+            str(server_id),
+            window_minutes=window_minutes,
+        )
+    # PostgreSQL's explicit missing-watchlist snapshot is authoritative over a
+    # still-in-window ClickHouse running sample for the same process name.
+    for missing in missing_watchlist:
+        missing_item = dict(missing)
+        name = str(missing_item.get("name") or "").casefold()
+        items = [
+            item for item in items
+            if str(item.get("name") or "").casefold() != name
+        ]
+        items.append(missing_item)
+    memory_total = await asyncio.to_thread(
+        query_server_memory_total,
+        str(server_id),
+        window_minutes=window_minutes,
+    )
+    if not memory_total:
+        memory_row = (await db.execute(
+            text("SELECT memory_total_bytes FROM servers WHERE id = :id"),
+            {"id": server_id},
+        )).first()
+        memory_total = int(memory_row[0] or 0) if memory_row else 0
     return {
-        "items": [dict(r) for r in rows],
-        "mem_total_bytes": query_server_memory_total(str(server_id)),
+        "items": items,
+        "mem_total_bytes": memory_total,
     }
 
 
@@ -622,7 +812,9 @@ async def server_process_history(
         to = datetime.now(timezone.utc)
     if not from_:
         from_ = to - timedelta(hours=6)
-    series = query_process_history(str(server_id), name, from_, to)
+    series = await asyncio.to_thread(
+        query_process_history, str(server_id), name, from_, to,
+    )
     return ServerMetricsResponse(
         server_id=str(server_id),
         **{"from": from_},
@@ -638,14 +830,17 @@ async def server_services(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    freshness_s = await _server_agent_freshness_seconds(
+        server_id, db, minimum_seconds=900,
+    )
     rows = (await db.execute(
         text("""SELECT service_name, display_name, start_mode, state, pid, description,
                        updated_at,
-                       updated_at < NOW() - INTERVAL '15 minutes' AS is_stale
+                       updated_at < NOW() - make_interval(secs => :ttl) AS is_stale
                 FROM server_service_inventory
                 WHERE server_id = :id
                 ORDER BY service_name"""),
-        {"id": server_id},
+        {"id": server_id, "ttl": freshness_s},
     )).mappings().all()
     return {"items": [dict(r) for r in rows]}
 
@@ -656,15 +851,18 @@ async def server_filesystems(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    freshness_s = await _server_agent_freshness_seconds(
+        server_id, db, minimum_seconds=900,
+    )
     rows = (await db.execute(
         text(f"""SELECT mount, fs_type, device, total_bytes, used_bytes, free_bytes,
                         used_pct, updated_at,
-                        updated_at < NOW() - INTERVAL '15 minutes' AS is_stale
+                        updated_at < NOW() - make_interval(secs => :ttl) AS is_stale
                  FROM server_filesystem_inventory
                  WHERE server_id = :id
                    AND {pg_capacity_filter()}
                  ORDER BY mount"""),
-        {"id": server_id},
+        {"id": server_id, "ttl": freshness_s},
     )).mappings().all()
     return {"items": [dict(r) for r in rows]}
 
@@ -696,16 +894,17 @@ async def server_events(
     user: User = Depends(get_current_user),
 ):
     """Return Event Log summary aggregated from ClickHouse."""
-    from app.core.database import get_clickhouse_client
-    client = get_clickhouse_client()
-    try:
-        conditions = ["server_id = %(sid)s", "timestamp >= now() - INTERVAL %(hrs)s HOUR"]
-        params: dict[str, Any] = {"sid": str(server_id), "lim": limit, "hrs": hours}
-        if not include_empty:
-            conditions.append("event_count > 0")
-        if level:
-            conditions.append("level = %(lvl)s")
-            params["lvl"] = level
+    from app.core.database import get_ch_client
+    conditions = ["server_id = %(sid)s", "timestamp >= now() - INTERVAL %(hrs)s HOUR"]
+    params: dict[str, Any] = {"sid": str(server_id), "lim": limit, "hrs": hours}
+    if not include_empty:
+        conditions.append("event_count > 0")
+    if level:
+        conditions.append("level = %(lvl)s")
+        params["lvl"] = level
+
+    def _query_events():
+        client = get_ch_client()
         res = client.query(
             f"""SELECT timestamp, log_name, level, event_count
                 FROM zenplus.host_event_log_summary
@@ -713,14 +912,16 @@ async def server_events(
                 ORDER BY timestamp DESC LIMIT %(lim)s""",
             parameters=params,
         ).result_rows
-        items = [{"timestamp": r[0], "log_name": r[1], "level": r[2], "count": int(r[3])} for r in res]
-        # Which channels the agent actually checked, so "nothing to report"
-        # can be distinguished from "nothing was collected".
         checked = client.query(
             """SELECT DISTINCT log_name FROM zenplus.host_event_log_summary
                WHERE server_id = %(sid)s AND timestamp >= now() - INTERVAL %(hrs)s HOUR""",
             parameters={"sid": str(server_id), "hrs": hours},
         ).result_rows
+        return res, checked
+
+    try:
+        res, checked = await asyncio.to_thread(_query_events)
+        items = [{"timestamp": r[0], "log_name": r[1], "level": r[2], "count": int(r[3])} for r in res]
     except Exception as exc:
         logger.warning("event log query failed: %s", exc)
         # A store outage must not render as a clean host.
@@ -822,7 +1023,15 @@ async def server_agent(
     user: User = Depends(get_current_user),
 ):
     row = (await db.execute(
-        text("""SELECT a.*, p.name AS policy_name, st.name AS site_name
+        text("""SELECT a.*, p.name AS policy_name, st.name AS site_name,
+                       EXISTS (
+                           SELECT 1 FROM agent_apm_credentials credential
+                           JOIN apm_ingest_keys ingest_key
+                             ON ingest_key.id = credential.key_id
+                           WHERE credential.agent_id = a.id
+                             AND ingest_key.enabled = TRUE
+                             AND ingest_key.revoked_at IS NULL
+                       ) AS apm_credential_bound
                 FROM agents a
                 LEFT JOIN agent_policies p ON p.id = a.policy_id
                 LEFT JOIN sites st ON st.id = a.site_id
@@ -863,6 +1072,20 @@ def _agent_response(row: dict) -> AgentResponse:
         enrollment_token_prefix=row.get("enrollment_token_prefix"),
         authorized_at=row.get("authorized_at"),
         revoked_at=row.get("revoked_at"),
+        registration_conflict=row.get("pending_conflict_secret_hash") is not None,
+        registration_conflict_revision=(
+            str(row["registration_conflict_revision"])
+            if row.get("registration_conflict_revision") else None
+        ),
+        registration_conflict_at=row.get("registration_conflict_at"),
+        registration_conflict_ip=(
+            str(row["registration_conflict_ip"])
+            if row.get("registration_conflict_ip") else None
+        ),
+        registration_conflict_attempts=row.get("registration_conflict_attempts") or 0,
+        registration_conflict_install_id=row.get("registration_conflict_install_id"),
+        registration_conflict_hostname=row.get("registration_conflict_hostname"),
+        registration_conflict_version=row.get("registration_conflict_version"),
         last_heartbeat_at=row.get("last_heartbeat_at"),
         last_metric_at=row.get("last_metric_at"),
         last_config_hash=row.get("last_config_hash"),
@@ -878,7 +1101,7 @@ def _agent_response(row: dict) -> AgentResponse:
         policy_name=row.get("policy_name"),
         config_apply_error=row.get("config_apply_error"),
         capabilities=[str(v) for v in _json_list(row.get("capabilities"))],
-        apm_status=_json_object(row.get("apm_status")),
+        apm_status=_apm_status_with_binding(row),
         tags=list(tags) if isinstance(tags, (list, tuple)) else [],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -939,6 +1162,7 @@ async def _authorize_agents(ids: list[UUID], user_id: UUID, db: AsyncSession) ->
                   authorization_source = 'admin',
                   status = 'enrolling', updated_at = NOW()
                 WHERE id = ANY(:ids)
+                  AND pending_conflict_secret_hash IS NULL
                 RETURNING id"""),
         {"ids": ids, "user": user_id},
     )
@@ -2155,6 +2379,8 @@ async def list_fleet(
         where.append("a.authorized_at IS NOT NULL AND a.revoked_at IS NULL")
     elif authorization == "revoked":
         where.append("a.revoked_at IS NOT NULL")
+    elif authorization == "conflict":
+        where.append("a.pending_conflict_secret_hash IS NOT NULL")
     if q:
         where.append("(a.hostname ILIKE :q OR a.agent_uid ILIKE :q OR a.version ILIKE :q)")
         params["q"] = f"%{q}%"
@@ -2164,7 +2390,15 @@ async def list_fleet(
 
     rows = (await db.execute(
         text(f"""SELECT a.*, p.name AS policy_name, st.name AS site_name,
-                        s.display_name AS server_name
+                        s.display_name AS server_name,
+                        EXISTS (
+                            SELECT 1 FROM agent_apm_credentials credential
+                            JOIN apm_ingest_keys ingest_key
+                              ON ingest_key.id = credential.key_id
+                            WHERE credential.agent_id = a.id
+                              AND ingest_key.enabled = TRUE
+                              AND ingest_key.revoked_at IS NULL
+                        ) AS apm_credential_bound
                  FROM agents a
                  LEFT JOIN agent_policies p ON p.id = a.policy_id
                  LEFT JOIN sites st ON st.id = a.site_id
@@ -2181,6 +2415,8 @@ async def list_fleet(
                   COUNT(*) FILTER (WHERE status = 'disabled') AS disabled,
                   COUNT(*) FILTER (WHERE authorized_at IS NULL
                                      AND revoked_at IS NULL)   AS pending_authorization,
+                  COUNT(*) FILTER (WHERE pending_conflict_secret_hash IS NOT NULL)
+                                                               AS registration_conflicts,
                   COUNT(*)                                    AS total,
                   COALESCE(SUM(queue_depth), 0)               AS queue_depth,
                   COALESCE(SUM(spool_bytes), 0)               AS spool_bytes
@@ -2519,7 +2755,15 @@ async def get_agent(
 ):
     row = (await db.execute(
         text("""SELECT a.*, p.name AS policy_name, st.name AS site_name,
-                       s.display_name AS server_name
+                       s.display_name AS server_name,
+                       EXISTS (
+                           SELECT 1 FROM agent_apm_credentials credential
+                           JOIN apm_ingest_keys ingest_key
+                             ON ingest_key.id = credential.key_id
+                           WHERE credential.agent_id = a.id
+                             AND ingest_key.enabled = TRUE
+                             AND ingest_key.revoked_at IS NULL
+                       ) AS apm_credential_bound
                 FROM agents a
                 LEFT JOIN agent_policies p ON p.id = a.policy_id
                 LEFT JOIN sites st ON st.id = a.site_id
@@ -2538,11 +2782,270 @@ async def authorize_agent(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_operator_user),
 ):
+    conflict = (await db.execute(
+        text("SELECT pending_conflict_secret_hash FROM agents WHERE id = :id"),
+        {"id": agent_id},
+    )).first()
+    if conflict and conflict[0]:
+        raise HTTPException(
+            409,
+            "Agent has a registration conflict; accept or remove the replacement installation first",
+        )
     affected = await _authorize_agents([agent_id], user.id, db)
     await db.commit()
     if not affected:
         raise HTTPException(404, "Agent not found")
     return {"ok": True, "authorization_state": "authorized"}
+
+
+@fleet_router.post("/{agent_id}/resolve-registration-conflict")
+async def resolve_registration_conflict(
+    agent_id: UUID,
+    data: AgentRegistrationConflictResolve,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Apply an administrator-reviewed outcome to a conflicting installation.
+
+    Every decision is bound to the candidate pending-secret hash and optimistic
+    conflict revision. IP address and hostname are display metadata only.
+    """
+    candidate = (await db.execute(
+        text("""SELECT pending_conflict_secret_hash, registration_conflict_revision,
+                       registration_conflict_ip,
+                       registration_conflict_at, registration_conflict_attempts,
+                       registration_conflict_install_id, registration_conflict_hostname,
+                       registration_conflict_version, agent_uid, hostname, platform,
+                       site_id, policy_id, update_ring, server_id
+                FROM agents WHERE id = :id FOR UPDATE"""),
+        {"id": agent_id},
+    )).mappings().first()
+    if not candidate:
+        raise HTTPException(404, "Agent not found")
+    if not candidate.get("pending_conflict_secret_hash"):
+        raise HTTPException(409, "Agent no longer has a registration conflict")
+    if str(candidate.get("registration_conflict_revision") or "") != str(data.conflict_revision):
+        await db.rollback()
+        raise HTTPException(
+            409,
+            "Registration candidate changed; refresh Agent Fleet and review it again",
+        )
+
+    candidate_hash = str(candidate["pending_conflict_secret_hash"])
+    candidate_hostname = (
+        str(candidate.get("registration_conflict_hostname") or candidate.get("hostname") or "Cloned server")
+    )
+    candidate_ip = candidate.get("registration_conflict_ip")
+    candidate_version = candidate.get("registration_conflict_version")
+    audit_metadata = {
+        "decision": data.action,
+        "candidate_ip": str(candidate_ip) if candidate_ip else None,
+        "candidate_seen_at": candidate.get("registration_conflict_at"),
+        "attempts": candidate.get("registration_conflict_attempts") or 0,
+        "candidate_install_id": candidate.get("registration_conflict_install_id"),
+        "candidate_hostname": candidate_hostname,
+        "candidate_version": candidate_version,
+    }
+
+    clear_conflict = text("""UPDATE agents SET
+              pending_conflict_secret_hash = NULL,
+              registration_conflict_revision = NULL,
+              registration_conflict_at = NULL,
+              registration_conflict_ip = NULL,
+              registration_conflict_attempts = 0,
+              registration_conflict_install_id = NULL,
+              registration_conflict_hostname = NULL,
+              registration_conflict_version = NULL,
+              updated_at = NOW()
+            WHERE id = :id""")
+
+    if data.action == "replace":
+        # Revoke APM credentials while their provenance mapping still exists,
+        # then invalidate the old host key before trusting the replacement.
+        await db.execute(
+            text("""UPDATE apm_ingest_keys AS key SET
+                      enabled = FALSE, revoked_at = NOW(), rotated_at = NOW()
+                    FROM agent_apm_credentials AS credential
+                    WHERE credential.key_id = key.id
+                      AND credential.agent_id = :id
+                      AND key.revoked_at IS NULL"""),
+            {"id": agent_id},
+        )
+        await db.execute(
+            text("DELETE FROM agent_apm_credentials WHERE agent_id = :id"),
+            {"id": agent_id},
+        )
+        await db.execute(
+            text("""UPDATE agents SET
+                      pending_secret_hash = pending_conflict_secret_hash,
+                      pending_conflict_secret_hash = NULL,
+                      registration_conflict_revision = NULL,
+                      hostname = COALESCE(registration_conflict_hostname, hostname),
+                      version = COALESCE(registration_conflict_version, version),
+                      current_version = COALESCE(registration_conflict_version, current_version),
+                      install_id = COALESCE(registration_conflict_install_id, install_id),
+                      last_ip = COALESCE(registration_conflict_ip, last_ip),
+                      api_key_hash = NULL,
+                      api_key_prefix = NULL,
+                      api_key_rotated_at = NULL,
+                      authorized_at = NOW(),
+                      authorized_by = :user,
+                      revoked_at = NULL,
+                      revoked_by = NULL,
+                      authorization_source = 'admin_replacement',
+                      status = 'enrolling',
+                      registration_conflict_at = NULL,
+                      registration_conflict_ip = NULL,
+                      registration_conflict_attempts = 0,
+                      registration_conflict_install_id = NULL,
+                      registration_conflict_hostname = NULL,
+                      registration_conflict_version = NULL,
+                      updated_at = NOW()
+                    WHERE id = :id"""),
+            {"id": agent_id, "user": user.id},
+        )
+        result = {
+            "ok": True,
+            "action": "replace",
+            "authorization_state": "authorized",
+            "detail": "Replacement accepted; waiting for the agent to retry enrollment",
+        }
+    elif data.action == "block":
+        await db.execute(
+            text("""INSERT INTO agent_registration_resolutions
+                      (reported_agent_uid, pending_secret_hash, action,
+                       source_agent_id, conflict_revision, candidate_ip,
+                       candidate_hostname, candidate_version, candidate_install_id,
+                       approved_by)
+                    VALUES (:uid, :pending, 'block', :source, :revision, :ip,
+                            :hostname, :version, :install_id, :user)
+                    ON CONFLICT (reported_agent_uid, pending_secret_hash) DO UPDATE SET
+                      action = 'block', source_agent_id = EXCLUDED.source_agent_id,
+                      assigned_agent_id = NULL, assigned_agent_uid = NULL,
+                      conflict_revision = EXCLUDED.conflict_revision,
+                      candidate_ip = EXCLUDED.candidate_ip,
+                      candidate_hostname = EXCLUDED.candidate_hostname,
+                      candidate_version = EXCLUDED.candidate_version,
+                      candidate_install_id = EXCLUDED.candidate_install_id,
+                      approved_by = EXCLUDED.approved_by, approved_at = NOW()"""),
+            {
+                "uid": candidate["agent_uid"], "pending": candidate_hash,
+                "source": agent_id, "revision": data.conflict_revision,
+                "ip": candidate_ip, "hostname": candidate_hostname,
+                "version": candidate_version,
+                "install_id": candidate.get("registration_conflict_install_id"),
+                "user": user.id,
+            },
+        )
+        await db.execute(clear_conflict, {"id": agent_id})
+        result = {
+            "ok": True,
+            "action": "block",
+            "authorization_state": "blocked",
+            "detail": "This specific installation is blocked; the current agent remains unchanged",
+        }
+    else:
+        assigned_uid = f"{str(candidate.get('platform') or 'agent')[:12]}-clone-{uuid4()}"
+        display_name = (data.display_name or "").strip()
+        if not display_name:
+            display_name = f"{candidate_hostname} (clone{f' {candidate_ip}' if candidate_ip else ''})"
+        display_name = display_name[:255]
+
+        server_row = (await db.execute(
+            text("""INSERT INTO servers
+                      (display_name, hostname, primary_ip, site_id, os_type,
+                       collection_mode, status, tags)
+                    VALUES (:display, :hostname, :ip, :site, :platform,
+                            'agent', 'unknown', CAST(:tags AS jsonb))
+                    RETURNING id"""),
+            {
+                "display": display_name, "hostname": candidate_hostname,
+                "ip": candidate_ip, "site": candidate.get("site_id"),
+                "platform": candidate.get("platform") or "other",
+                "tags": json.dumps(["cloned-agent"]),
+            },
+        )).first()
+        if not server_row:
+            raise HTTPException(500, "Could not create a server record for the cloned installation")
+        clone_server_id = server_row[0]
+
+        auth_columns = ", authorized_at, authorized_by" if data.authorize else ""
+        auth_values = ", NOW(), :user" if data.authorize else ""
+        clone_source = "admin_clone" if data.authorize else "pending_clone"
+        clone_row = (await db.execute(
+            text(f"""INSERT INTO agents
+                      (server_id, site_id, agent_uid, hostname, platform, version,
+                       install_id, policy_id, pending_secret_hash,
+                       authorization_source, status, current_version, last_ip,
+                       update_ring{auth_columns})
+                    VALUES (:server, :site, :uid, :hostname, :platform, :version,
+                            :install_id, :policy, :pending,
+                            :source, 'enrolling', :version, :ip, :ring{auth_values})
+                    RETURNING id"""),
+            {
+                "server": clone_server_id, "site": candidate.get("site_id"),
+                "uid": assigned_uid, "hostname": candidate_hostname,
+                "platform": candidate.get("platform") or "other",
+                "version": candidate_version,
+                "install_id": candidate.get("registration_conflict_install_id"),
+                "policy": candidate.get("policy_id"), "pending": candidate_hash,
+                "source": clone_source, "ip": candidate_ip,
+                "ring": candidate.get("update_ring") or "stable", "user": user.id,
+            },
+        )).first()
+        if not clone_row:
+            raise HTTPException(500, "Could not create an agent identity for the cloned installation")
+        clone_agent_id = clone_row[0]
+
+        await db.execute(
+            text("""INSERT INTO agent_registration_resolutions
+                      (reported_agent_uid, pending_secret_hash, action,
+                       source_agent_id, assigned_agent_id, assigned_agent_uid,
+                       conflict_revision, candidate_ip, candidate_hostname,
+                       candidate_version, candidate_install_id, approved_by)
+                    VALUES (:reported, :pending, 'register_clone', :source,
+                            :assigned_agent, :assigned_uid, :revision, :ip,
+                            :hostname, :version, :install_id, :user)"""),
+            {
+                "reported": candidate["agent_uid"], "pending": candidate_hash,
+                "source": agent_id, "assigned_agent": clone_agent_id,
+                "assigned_uid": assigned_uid, "revision": data.conflict_revision,
+                "ip": candidate_ip, "hostname": candidate_hostname,
+                "version": candidate_version,
+                "install_id": candidate.get("registration_conflict_install_id"),
+                "user": user.id,
+            },
+        )
+        await db.execute(clear_conflict, {"id": agent_id})
+        audit_metadata.update({
+            "assigned_agent_id": str(clone_agent_id),
+            "assigned_server_id": str(clone_server_id),
+            "assigned_agent_uid": assigned_uid,
+            "authorize_immediately": data.authorize,
+            "display_name": display_name,
+        })
+        result = {
+            "ok": True,
+            "action": "register_clone",
+            "agent_id": str(clone_agent_id),
+            "server_id": str(clone_server_id),
+            "assigned_agent_uid": assigned_uid,
+            "authorization_state": "authorized" if data.authorize else "pending",
+            "detail": "A separate identity was assigned; waiting for the clone to retry enrollment",
+        }
+
+    await write_audit_log(
+        db,
+        actor=user,
+        action=f"agent.registration_conflict.{data.action}",
+        resource_type="agent",
+        resource_id=str(agent_id),
+        metadata=audit_metadata,
+    )
+    await db.commit()
+    if data.action == "replace":
+        invalidate_ingest_key_cache()
+    return result
 
 
 @fleet_router.post("/{agent_id}/revoke")
@@ -2555,6 +3058,7 @@ async def revoke_agent(
     await db.commit()
     if not affected:
         raise HTTPException(404, "Agent not found")
+    invalidate_ingest_key_cache()
     return {"ok": True, "authorization_state": "revoked"}
 
 
@@ -2675,10 +3179,18 @@ async def delete_agent(
     The uninstalled/retired agent's key stops authenticating immediately;
     a live host can re-enroll with a fresh token. The server row is kept.
     """
+    # Deleting the provenance row alone would cascade agent_apm_credentials but
+    # leave its apm_ingest_keys row enabled and orphaned. Revoke both credential
+    # families while the mapping still exists, then remove the agent.
+    affected = await _revoke_agents([agent_id], user.id, db)
+    if not affected:
+        await db.rollback()
+        raise HTTPException(404, "Agent not found")
     res = await db.execute(text("DELETE FROM agents WHERE id = :id"), {"id": agent_id})
     await db.commit()
     if res.rowcount == 0:
         raise HTTPException(404, "Agent not found")
+    invalidate_ingest_key_cache()
     return {"ok": True}
 
 
@@ -2692,10 +3204,12 @@ async def fleet_bulk_action(
         return {"ok": True, "affected": 0}
     ids = list(data.agent_ids)
     affected = len(ids)
+    apm_keys_changed = False
     if data.action == "authorize":
         affected = await _authorize_agents(ids, user.id, db)
     elif data.action == "revoke":
         affected = await _revoke_agents(ids, user.id, db)
+        apm_keys_changed = affected > 0
     elif data.action == "change_policy":
         if not data.policy_id:
             raise HTTPException(400, "policy_id required")
@@ -2755,6 +3269,8 @@ async def fleet_bulk_action(
     else:
         raise HTTPException(400, "Unknown action")
     await db.commit()
+    if apm_keys_changed:
+        invalidate_ingest_key_cache()
     return {"ok": True, "affected": affected}
 
 
@@ -2791,10 +3307,12 @@ async def overview(
     )).all()
     sites = [{"id": str(r[0]), "name": r[1], "server_count": r[2]} for r in sites_rows]
 
-    top_cpu = query_top_pressure("cpu", 5)
-    top_memory = query_top_pressure("memory", 5)
-    top_disk = query_top_pressure("disk", 5)
-    top_network = query_top_pressure("network", 5)
+    top_cpu, top_memory, top_disk, top_network = await asyncio.gather(
+        asyncio.to_thread(query_top_pressure, "cpu", 5),
+        asyncio.to_thread(query_top_pressure, "memory", 5),
+        asyncio.to_thread(query_top_pressure, "disk", 5),
+        asyncio.to_thread(query_top_pressure, "network", 5),
+    )
 
     # Enrich with display names
     async def _hydrate(items: list[dict]) -> list[dict]:

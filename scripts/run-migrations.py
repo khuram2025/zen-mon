@@ -69,6 +69,33 @@ SUPERSEDED_CHECKSUMS: dict[str, set[str]] = {
 }
 
 
+# Constraint definitions need a stronger post-flight check than ordinary
+# object-presence probing. A composite migration can be baselined because its
+# tables exist even when its final constraint statement never ran. Each entry
+# points at a constraint-only, idempotent migration that is safe to replay.
+CANONICAL_CONSTRAINTS: dict[str, dict[str, object]] = {
+    "migrate-092-agent-command-check-canonical.sql": {
+        "table": "agent_commands",
+        "constraint": "agent_commands_command_check",
+        "required_values": (
+            "status",
+            "collect_now",
+            "refresh_config",
+            "upload_diagnostics",
+            "rotate_certificate",
+            "restart_agent",
+            "upgrade_agent",
+            "start_network_capture",
+            "stop_network_capture",
+            "apm_instrument",
+            "apm_uninstrument",
+            "apm_restart_target",
+            "apm_set_config",
+        ),
+    },
+}
+
+
 def is_superseded(filename: str, applied_checksum: str) -> bool:
     """Whether a differing checksum is a known historical rewrite."""
     return applied_checksum in SUPERSEDED_CHECKSUMS.get(filename, frozenset())
@@ -252,7 +279,83 @@ def escape_sql(value: str) -> str:
 def new_report() -> dict:
     """Empty structured result, filled in by run_migrations()."""
     return {"applied": [], "skipped": [], "pending": [], "drift": [],
-            "failed": [], "baselined": [], "unresolved": [], "reconciled": []}
+            "failed": [], "baselined": [], "unresolved": [], "reconciled": [],
+            "healed": [], "invariant_drift": []}
+
+
+def constraint_definition(cmd: list[str], table: str, constraint: str) -> str:
+    """Return a CHECK definition, or an empty string when it is absent."""
+    sql = (
+        "SELECT pg_get_constraintdef(con.oid) "
+        "FROM pg_constraint con "
+        "JOIN pg_class rel ON rel.oid = con.conrelid "
+        "JOIN pg_namespace n ON n.oid = rel.relnamespace "
+        f"WHERE n.nspname = 'public' AND rel.relname = '{escape_sql(table)}' "
+        f"AND con.conname = '{escape_sql(constraint)}';"
+    )
+    result = run_psql(cmd, sql=sql)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Could not inspect constraint {constraint}: {result.stderr.strip()}"
+        )
+    return result.stdout.lower()
+
+
+def canonical_constraint_ok(cmd: list[str], spec: dict[str, object]) -> bool:
+    definition = constraint_definition(
+        cmd, str(spec["table"]), str(spec["constraint"])
+    )
+    required_values = tuple(str(value) for value in spec["required_values"])
+    return bool(definition) and all(
+        f"'{value.lower()}'" in definition for value in required_values
+    )
+
+
+def converge_canonical_constraints(
+    migrations: list[Migration],
+    cmd: list[str],
+    *,
+    dry_run: bool,
+    status_only: bool,
+    report: dict,
+) -> bool:
+    """Verify and, in apply mode, heal canonical CHECK definitions.
+
+    Returns ``True`` when unresolved invariant drift remains.
+    """
+    by_name = {migration.filename: migration for migration in migrations}
+    unresolved = False
+    for filename, spec in CANONICAL_CONSTRAINTS.items():
+        migration = by_name.get(filename)
+        if migration is None:
+            continue
+        if canonical_constraint_ok(cmd, spec):
+            continue
+
+        label = f"constraint:{spec['constraint']}"
+        if status_only or dry_run:
+            print(f"drift   {label} definition is not canonical", file=sys.stderr)
+            report["invariant_drift"].append(label)
+            unresolved = True
+            continue
+
+        print(f"heal    {label} via {filename}")
+        result = run_psql(cmd, file=migration.path)
+        if result.returncode != 0:
+            print(result.stdout, end="")
+            print(result.stderr, end="", file=sys.stderr)
+            report["failed"].append(
+                {"filename": filename, "error": result.stderr.strip()[:2000]}
+            )
+            unresolved = True
+            continue
+        if not canonical_constraint_ok(cmd, spec):
+            report["invariant_drift"].append(label)
+            unresolved = True
+            continue
+        report["healed"].append(filename)
+
+    return unresolved
 
 
 def run_migrations(
@@ -335,6 +438,15 @@ def run_migrations(
         record_migration(cmd, migration, duration_ms)
         report["applied"].append(migration.filename)
         present |= {o.lower() for o in migration_order.created_objects(sql)}
+
+    if converge_canonical_constraints(
+        migrations,
+        cmd,
+        dry_run=dry_run,
+        status_only=status_only,
+        report=report,
+    ):
+        exit_code = 2
 
     return exit_code
 

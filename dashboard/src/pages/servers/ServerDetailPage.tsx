@@ -384,7 +384,17 @@ export function ServerDetailPage() {
   }).length
   const fsItems = filesystems?.items || []
   const fsCritical = fsItems.filter((fs) => (fs.used_pct || 0) >= 90).length
+  const processItems = processes?.items || []
+  const runningProcessCount = processItems.filter((p) => p.running !== false).length
+  const missingWatchlistCount = processItems.filter(
+    (p) => p.running === false && p.watchlisted,
+  ).length
   const isLive = server.status !== 'stale' && server.status !== 'disabled' && server.status !== 'unknown'
+  const telemetryEmptyMessage = server.agent_status === 'online'
+    ? 'Agent is online but is not reporting this telemetry. Verify that Server monitoring is enabled in the agent installation profile.'
+    : server.agent_id
+      ? 'No recent agent telemetry is available for this window.'
+      : 'Install and authorize an agent to collect server telemetry.'
 
   const complianceFailures = compliance?.summary
     ? compliance.summary.missing + compliance.summary.outdated + compliance.summary.prohibited
@@ -463,11 +473,13 @@ export function ServerDetailPage() {
           icon={Cpu} label="CPU"
           value={isLive && lm.cpu_pct != null ? `${lm.cpu_pct.toFixed(1)}%` : '—'}
           tone={lm.cpu_pct != null && lm.cpu_pct >= 90 ? 'danger' : 'default'}
+          sub={isLive && lm.cpu_pct == null ? 'not reported by agent' : undefined}
         />
         <KpiTile
           icon={MemoryStick} label="Memory"
           value={isLive && lm.memory_pct != null ? `${lm.memory_pct.toFixed(1)}%` : '—'}
           tone={lm.memory_pct != null && lm.memory_pct >= 90 ? 'danger' : 'default'}
+          sub={isLive && lm.memory_pct == null ? 'not reported by agent' : undefined}
         />
         <KpiTile
           icon={HardDrive} label="Disk (max)"
@@ -483,8 +495,13 @@ export function ServerDetailPage() {
             labelling it "Processes" implied a full count. */}
         <KpiTile
           icon={ListTree} label="Top processes"
-          value={processes?.items?.length ?? '—'}
-          sub={processes?.items?.length ? 'sampled by CPU / memory' : undefined}
+          value={processes ? runningProcessCount : '—'}
+          sub={missingWatchlistCount
+            ? `${missingWatchlistCount} watched not running`
+            : runningProcessCount
+              ? 'sampled by CPU / memory'
+              : processes ? 'not reported by agent' : undefined}
+          tone={missingWatchlistCount ? 'warning' : 'default'}
         />
         <KpiTile
           icon={Wrench} label="Services"
@@ -500,25 +517,27 @@ export function ServerDetailPage() {
         <OverviewTab
           serverId={server.id}
           filesystems={fsItems}
-          processes={processes?.items || []}
+          processes={processItems}
           onGoTo={(t, s) => { setTab(t); if (s) setTimeout(() => setSub(s), 0) }}
           openAlertCount={openAlertCount}
           complianceFailures={complianceFailures}
           stoppedServices={svcStopped}
+          telemetryEmptyMessage={telemetryEmptyMessage}
         />
       )}
-      {tab === 'performance' && <PerformanceTab serverId={server.id} />}
+      {tab === 'performance' && <PerformanceTab serverId={server.id} telemetryEmptyMessage={telemetryEmptyMessage} />}
       {tab === 'inventory' && (
         <InventoryTab
           server={server}
           sub={sub}
           setSub={setSub}
-          processes={processes?.items || []}
+          processes={processItems}
           memTotal={processes?.mem_total_bytes || 0}
           services={svcItems}
           filesystems={fsItems}
           stoppedServices={svcStopped}
           fullVolumes={fsCritical}
+          telemetryEmptyMessage={telemetryEmptyMessage}
         />
       )}
       {tab === 'alerts' && (
@@ -566,7 +585,7 @@ export function ServerDetailPage() {
 type InventorySection = 'processes' | 'services' | 'software' | 'storage' | 'network'
 
 function InventoryTab({
-  server, sub, setSub, processes, memTotal, services, filesystems, stoppedServices, fullVolumes,
+  server, sub, setSub, processes, memTotal, services, filesystems, stoppedServices, fullVolumes, telemetryEmptyMessage,
 }: {
   server: ServerItem
   sub: string
@@ -577,6 +596,7 @@ function InventoryTab({
   filesystems: ServerFilesystem[]
   stoppedServices: number
   fullVolumes: number
+  telemetryEmptyMessage: string
 }) {
   const sections = [
     { key: 'processes' as const, label: 'Processes', icon: ListTree },
@@ -591,7 +611,7 @@ function InventoryTab({
     <div className="space-y-4">
       <SubNav items={sections} value={active} onChange={setSub} />
       {active === 'processes' && (
-        <ProcessesTab serverId={server.id} items={processes} memTotal={memTotal} />
+        <ProcessesTab serverId={server.id} items={processes} memTotal={memTotal} telemetryEmptyMessage={telemetryEmptyMessage} />
       )}
       {active === 'services' && (
         <ServicesTab serverId={server.id} serverName={server.display_name} items={services} />
@@ -600,7 +620,7 @@ function InventoryTab({
         <SoftwareTab serverId={server.id} serverName={server.display_name} />
       )}
       {active === 'storage' && (
-        <StorageTab items={filesystems} />
+        <StorageTab server={server} items={filesystems} />
       )}
       {active === 'network' && (
         <NetworkTab server={server} />
@@ -748,7 +768,7 @@ function chartAxis(tick: (v: number) => string) {
 }
 
 function MetricChartCard({
-  icon, title, hint, isLoading, rows, miniStats, children,
+  icon, title, hint, isLoading, rows, miniStats, emptyMessage, children,
 }: {
   icon: React.ReactNode
   title: string
@@ -756,6 +776,7 @@ function MetricChartCard({
   isLoading?: boolean
   rows: ChartRow[]
   miniStats?: React.ReactNode
+  emptyMessage?: string
   children: React.ReactNode
 }) {
   return (
@@ -763,7 +784,7 @@ function MetricChartCard({
       <PanelHeader icon={icon} title={title} hint={hint} />
       {miniStats}
       <CardContent className="px-2 pb-3 pt-2" style={{ height: CHART_H }}>
-        {isLoading ? <Skeleton className="mx-2 h-full w-[calc(100%-1rem)]" /> : rows.length === 0 ? <NoData /> : (
+        {isLoading ? <Skeleton className="mx-2 h-full w-[calc(100%-1rem)]" /> : rows.length === 0 ? <NoData message={emptyMessage} /> : (
           <ResponsiveContainer width="100%" height="100%">{children as React.ReactElement}</ResponsiveContainer>
         )}
       </CardContent>
@@ -866,7 +887,7 @@ function NeedsAttention({
 
 function OverviewTab({
   serverId, filesystems, processes, onGoTo,
-  openAlertCount, complianceFailures, stoppedServices,
+  openAlertCount, complianceFailures, stoppedServices, telemetryEmptyMessage,
 }: {
   serverId: string
   filesystems: ServerFilesystem[]
@@ -875,6 +896,7 @@ function OverviewTab({
   openAlertCount: number
   complianceFailures: number
   stoppedServices: number
+  telemetryEmptyMessage: string
 }) {
   const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
   // Only what this tab actually plots — the network chart lived here and on
@@ -896,7 +918,10 @@ function OverviewTab({
   const cpuStats = seriesStats(cpuMem, 'cpu')
   const memStats = seriesStats(cpuMem, 'mem')
   const fullVolumes = filesystems.filter((fs) => (fs.used_pct || 0) >= 90).length
-  const topProcs = [...processes].sort((a, b) => (b.cpu_pct || 0) - (a.cpu_pct || 0)).slice(0, 8)
+  const topProcs = processes
+    .filter((p) => p.running !== false)
+    .sort((a, b) => (b.cpu_pct || 0) - (a.cpu_pct || 0))
+    .slice(0, 8)
   const maxProcCpu = Math.max(1, ...topProcs.map((p) => p.cpu_pct || 0))
   const tick = timeAxisTickFormatter(range.hours)
   const chartH = 240
@@ -954,7 +979,7 @@ function OverviewTab({
             <PanelMiniStat label="Memory peak" value={memStats ? `${memStats.peak.toFixed(1)}%` : '—'} />
           </div>
           <CardContent className="px-2 pb-3 pt-2" style={{ height: chartH }}>
-            {isLoading ? <Skeleton className="mx-2 h-full w-[calc(100%-1rem)]" /> : cpuMem.length === 0 ? <NoData /> : (
+            {isLoading ? <Skeleton className="mx-2 h-full w-[calc(100%-1rem)]" /> : cpuMem.length === 0 ? <NoData message={telemetryEmptyMessage} /> : (
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={cpuMem} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
                   <defs>
@@ -1037,7 +1062,7 @@ function OverviewTab({
             right={<span className="text-[10px] text-muted">live snapshot</span>}
           />
           <CardContent className="px-0 pb-2 pt-1">
-            {topProcs.length === 0 ? <div className="px-4"><NoData /></div> : (
+            {topProcs.length === 0 ? <div className="px-4"><NoData message={telemetryEmptyMessage} /></div> : (
               <Table>
                 <THead>
                   <Tr className="hover:bg-transparent">
@@ -1087,7 +1112,7 @@ function OverviewTab({
 
 /* ── Performance ─────────────────────────────────────────────────── */
 
-function PerformanceTab({ serverId }: { serverId: string }) {
+function PerformanceTab({ serverId, telemetryEmptyMessage }: { serverId: string; telemetryEmptyMessage: string }) {
   const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
   const { data: metrics, isLoading } = useQuery<ServerMetricsResponse>({
     queryKey: ['servers', serverId, 'metrics', range.fromISO, range.toISO],
@@ -1134,6 +1159,7 @@ function PerformanceTab({ serverId }: { serverId: string }) {
           hint={range.label}
           isLoading={isLoading}
           rows={cpu}
+          emptyMessage={telemetryEmptyMessage}
           miniStats={miniRow(<>
             <PanelMiniStat label="Current" value={cpuStats ? `${cpuStats.current.toFixed(1)}%` : '—'} tone="text-info" />
             <PanelMiniStat label="Average" value={cpuStats ? `${cpuStats.avg.toFixed(1)}%` : '—'} />
@@ -1164,6 +1190,7 @@ function PerformanceTab({ serverId }: { serverId: string }) {
           hint={range.label}
           isLoading={isLoading}
           rows={mem}
+          emptyMessage={telemetryEmptyMessage}
           miniStats={miniRow(<>
             <PanelMiniStat label="Current" value={memStats ? `${memStats.current.toFixed(1)}%` : '—'} tone="text-primary" />
             <PanelMiniStat label="Average" value={memStats ? `${memStats.avg.toFixed(1)}%` : '—'} />
@@ -1194,6 +1221,7 @@ function PerformanceTab({ serverId }: { serverId: string }) {
           hint={range.label}
           isLoading={isLoading}
           rows={net}
+          emptyMessage={telemetryEmptyMessage}
           miniStats={miniRow(<>
             <PanelMiniStat label="Current" value={netStats ? formatBps(netStats.current * 8) : '—'} tone="text-info" />
             <PanelMiniStat label="Average" value={netStats ? formatBps(netStats.avg * 8) : '—'} />
@@ -1228,6 +1256,7 @@ function PerformanceTab({ serverId }: { serverId: string }) {
           hint={range.label}
           isLoading={isLoading}
           rows={disk}
+          emptyMessage={telemetryEmptyMessage}
           miniStats={miniRow(<>
             <PanelMiniStat label="Current" value={diskStats ? `${formatBytes(diskStats.current)}/s` : '—'} tone="text-info" />
             <PanelMiniStat label="Average" value={diskStats ? `${formatBytes(diskStats.avg)}/s` : '—'} />
@@ -1271,10 +1300,21 @@ type ProcRow = {
   memory_bytes: number
   user_name: string | null
   cmdline: string | null
+  started_at: string | null
+  state: string
+  running: boolean
+  watchlisted: boolean
   updated_at: string | null
 }
 
-function ProcessesTab({ serverId, items, memTotal }: { serverId: string; items: ServerProcess[]; memTotal: number }) {
+function ProcessesTab({
+  serverId, items, memTotal, telemetryEmptyMessage,
+}: {
+  serverId: string
+  items: ServerProcess[]
+  memTotal: number
+  telemetryEmptyMessage: string
+}) {
   const [q, setQ] = useState('')
   const [grouped, setGrouped] = useState(false)
   const [sortBy, setSortBy] = useState<'cpu' | 'mem' | 'name'>('cpu')
@@ -1300,12 +1340,18 @@ function ProcessesTab({ serverId, items, memTotal }: { serverId: string; items: 
           g.count += 1
           g.cpu_pct += p.cpu_pct || 0
           g.memory_bytes += p.memory_bytes || 0
+          g.running = g.running || p.running !== false
+          g.watchlisted = g.watchlisted || Boolean(p.watchlisted)
+          if (p.running !== false) g.state = p.state || 'running'
           if (p.updated_at && (!g.updated_at || p.updated_at > g.updated_at)) g.updated_at = p.updated_at
         } else {
           m.set(p.name, {
             key: p.name, name: p.name, pid: null, count: 1,
             cpu_pct: p.cpu_pct || 0, memory_bytes: p.memory_bytes || 0,
-            user_name: p.user_name, cmdline: p.cmdline, updated_at: p.updated_at,
+            user_name: p.user_name, cmdline: p.cmdline, started_at: p.started_at,
+            state: p.state || (p.running === false ? 'not_running' : 'running'),
+            running: p.running !== false, watchlisted: Boolean(p.watchlisted),
+            updated_at: p.updated_at,
           })
         }
       }
@@ -1314,7 +1360,10 @@ function ProcessesTab({ serverId, items, memTotal }: { serverId: string; items: 
       base = matched.map((p) => ({
         key: `${p.pid}-${p.name}`, name: p.name, pid: p.pid, count: 1,
         cpu_pct: p.cpu_pct || 0, memory_bytes: p.memory_bytes || 0,
-        user_name: p.user_name, cmdline: p.cmdline, updated_at: p.updated_at,
+        user_name: p.user_name, cmdline: p.cmdline, started_at: p.started_at,
+        state: p.state || (p.running === false ? 'not_running' : 'running'),
+        running: p.running !== false, watchlisted: Boolean(p.watchlisted),
+        updated_at: p.updated_at,
       }))
     }
     const dir = sortDir === 'asc' ? 1 : -1
@@ -1395,23 +1444,32 @@ function ProcessesTab({ serverId, items, memTotal }: { serverId: string; items: 
           </THead>
           <TBody>
             {rows.length === 0 && (
-              <Tr><Td colSpan={7}><div className="py-10 text-center text-xs text-muted">No processes reported</div></Td></Tr>
+              <Tr>
+                <Td colSpan={7}>
+                  <div className="mx-auto max-w-xl py-10 text-center text-xs text-muted">
+                    {items.length === 0 ? telemetryEmptyMessage : 'No processes match this filter.'}
+                  </div>
+                </Td>
+              </Tr>
             )}
             {rows.map((p, i) => {
               const mp = memPct(p.memory_bytes)
               const open = expanded === p.key
+              const expandable = p.running && (grouped || (p.pid || 0) > 0)
               return (
                 <Fragment key={p.key}>
                   <Tr className={i % 2 === 0 ? 'bg-surface2/10' : undefined}>
                     <Td className="py-2 pl-4 text-sm font-medium">
                       <button
                         type="button"
-                        className="flex items-center gap-1 text-left hover:text-primary"
-                        title={p.cmdline || 'Show history'}
-                        onClick={() => setExpanded(open ? null : p.key)}
+                        className={cn('flex flex-wrap items-center gap-1 text-left', expandable && 'hover:text-primary')}
+                        title={p.cmdline || p.state}
+                        onClick={() => { if (expandable) setExpanded(open ? null : p.key) }}
                       >
-                        <ChevronRight className={cn('h-3.5 w-3.5 shrink-0 text-muted transition-transform', open && 'rotate-90')} />
+                        <ChevronRight className={cn('h-3.5 w-3.5 shrink-0 text-muted transition-transform', open && 'rotate-90', !expandable && 'invisible')} />
                         {p.name}
+                        {!p.running && <Badge variant="danger">Not running</Badge>}
+                        {p.watchlisted && <Badge variant="outline">Watchlisted</Badge>}
                       </button>
                     </Td>
                     <Td className="text-right text-xs tabular-nums text-muted">{grouped ? `×${p.count}` : p.pid}</Td>
@@ -1437,6 +1495,13 @@ function ProcessesTab({ serverId, items, memTotal }: { serverId: string; items: 
                   {open && (
                     <Tr>
                       <Td colSpan={7} className="bg-surface2/25 p-0">
+                        <div className="border-b border-border/50 px-4 py-2 text-[11px] text-muted">
+                          <span className="font-medium text-text2">Started:</span>{' '}
+                          {p.started_at ? new Date(p.started_at).toLocaleString() : 'unknown'}
+                          <span className="mx-2">·</span>
+                          <span className="font-medium text-text2">Command:</span>{' '}
+                          <span className="font-mono">{p.cmdline || 'not reported'}</span>
+                        </div>
                         <ProcessHistory serverId={serverId} name={p.name} />
                       </Td>
                     </Tr>
@@ -1768,12 +1833,78 @@ function ServicesTab({ serverId, serverName, items }: {
 
 /** Volumes only. Disk I/O throughput lives on the Performance tab; this tab
  *  used to render an identical copy of that chart. */
-function StorageTab({ items }: { items: ServerFilesystem[] }) {
+function StorageTab({ server, items }: { server: ServerItem; items: ServerFilesystem[] }) {
   const maxPct = Math.max(0, ...items.map((fs) => fs.used_pct || 0))
   const stale = items.some((fs) => fs.is_stale)
+  const physicalDisks = server.physical_disks || []
+  const hasHardware = Boolean(
+    server.cpu_model || server.cpu_cores || server.cpu_physical_cores ||
+    server.memory_total_bytes || physicalDisks.length,
+  )
 
   return (
     <div className="space-y-4">
+      <TablePanel
+        icon={<Cpu className="h-3.5 w-3.5" />}
+        title="Host hardware"
+        hint={physicalDisks.length ? `${physicalDisks.length} physical disk${physicalDisks.length === 1 ? '' : 's'}` : undefined}
+        toolbar={hasHardware ? (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <PanelMiniStat label="CPU model" value={server.cpu_model || '—'} />
+            <PanelMiniStat
+              label="CPU cores"
+              value={server.cpu_cores
+                ? `${server.cpu_cores} logical${server.cpu_physical_cores ? ` · ${server.cpu_physical_cores} physical` : ''}`
+                : '—'}
+            />
+            <PanelMiniStat label="Physical memory" value={server.memory_total_bytes ? formatBytes(server.memory_total_bytes) : '—'} />
+            <PanelMiniStat label="Physical disks" value={String(physicalDisks.length)} />
+          </div>
+        ) : undefined}
+      >
+        {!hasHardware ? (
+          <EmptyState
+            icon={<Cpu className="h-7 w-7" />}
+            title="No hardware inventory reported"
+            hint="A current agent reports CPU, physical memory, and physical disk details with its inventory snapshot."
+          />
+        ) : physicalDisks.length > 0 ? (
+          <div className="overflow-x-auto">
+            <Table>
+              <THead className="bg-surface2/40">
+                <Tr>
+                  <Th className="pl-4">Physical disk</Th>
+                  <Th>Interface</Th>
+                  <Th>Media</Th>
+                  <Th className="text-right">Capacity</Th>
+                  <Th className="pr-4">Status</Th>
+                </Tr>
+              </THead>
+              <TBody>
+                {physicalDisks.map((disk) => (
+                  <Tr key={`${disk.index}-${disk.device_id || disk.model}`}>
+                    <Td className="pl-4">
+                      <div className="text-sm font-medium">{disk.model || disk.device_id || `Disk ${disk.index}`}</div>
+                      <div className="text-[11px] text-muted">{disk.manufacturer || '—'} · {disk.device_id || `index ${disk.index}`}</div>
+                    </Td>
+                    <Td className="text-xs">{disk.interface_type || '—'}</Td>
+                    <Td className="text-xs">{disk.media_type || '—'}</Td>
+                    <Td className="text-right text-xs tabular-nums">{disk.size_bytes ? formatBytes(disk.size_bytes) : '—'}</Td>
+                    <Td className="pr-4">
+                      <Badge variant={disk.status.toLowerCase() === 'ok' ? 'success' : 'outline'}>
+                        {disk.status || 'Unknown'}
+                      </Badge>
+                    </Td>
+                  </Tr>
+                ))}
+              </TBody>
+            </Table>
+          </div>
+        ) : (
+          <div className="px-4 py-5 text-xs text-muted">CPU and memory inventory is available; no physical disks were reported.</div>
+        )}
+      </TablePanel>
+
       <TablePanel
         icon={<HardDrive className="h-3.5 w-3.5" />}
         title="Filesystems"
@@ -3132,11 +3263,11 @@ function SettingsTab({ server, onEdit, onDecommission, onDelete }: {
 
 /* ── Shared ──────────────────────────────────────────────────────── */
 
-function NoData() {
+function NoData({ message = 'No data for this window' }: { message?: string }) {
   return (
     <div className="flex h-full min-h-[80px] flex-col items-center justify-center gap-1 text-center">
       <Database className="h-5 w-5 text-muted/40" />
-      <span className="text-xs text-muted">No data for this window</span>
+      <span className="max-w-md text-xs text-muted">{message}</span>
     </div>
   )
 }

@@ -38,6 +38,9 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import migration_order  # noqa: E402
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from updater.code_inventory import write_payload_manifest  # noqa: E402
+
 ZENPLUS_DIR = Path(os.getenv("ZENPLUS_DIR", "/opt/zenplus"))
 RELEASE_DIR = Path(os.getenv("ZENPLUS_RELEASE_DIR", "/tmp/zenplus-releases"))
 PRIVATE_KEY_PATH = Path(
@@ -651,6 +654,17 @@ def build_package(version: str, changelog: str, severity: str,
         ))
         print(f"  + updater/")
 
+    # Exact inventory for apply_code. It is covered by manifest/checksum
+    # verification and lets the appliance remove code deleted by this release
+    # without touching runtime state such as venvs, updater credentials or
+    # support bundles.
+    write_payload_manifest(
+        code_dir,
+        managed_roots=[*CODE_DIRS, "updater"],
+        managed_files=CODE_FILES,
+    )
+    print("  + signed code inventory")
+
     # 2. Build dashboard
     if not skip_dashboard:
         print("[2/7] Building dashboard ...")
@@ -831,6 +845,16 @@ def build_package(version: str, changelog: str, severity: str,
     })
 
     steps.append({"type": "apply_code", "method": "replace", "source": "code/"})
+
+    # The updater process imported its apply_code handler before replacing its
+    # own module. Old appliances therefore need one post-overlay hook to load
+    # the new reconciler during this same release; future releases also run it
+    # harmlessly and verify that the signed snapshot stayed exact.
+    steps.append({
+        "type": "run_hook",
+        "script": "code/scripts/reconcile-code-payload.py",
+        "timeout": 120,
+    })
 
     # Run setup-support.sh so the support-bundle systemd template, sudoers
     # grant, and runtime dirs are present on appliances that were installed

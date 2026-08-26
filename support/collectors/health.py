@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 import shutil
+import ssl
 import subprocess
 from pathlib import Path
 from urllib import error, request
@@ -25,7 +26,7 @@ from . import CollectorContext, CollectorResult
 
 
 LOCAL_API_BASE = "http://127.0.0.1:8000"
-LOCAL_NGINX_BASE = "http://127.0.0.1"
+LOCAL_NGINX_BASE = "https://127.0.0.1"
 
 INTERNAL_ENDPOINTS = (
     ("system-health", "/api/v1/system/health"),
@@ -57,10 +58,17 @@ def collect(ctx: CollectorContext) -> CollectorResult:
 
 def _probe_endpoints(base: str) -> dict:
     out = {"base": base, "results": {}}
+    # Appliance certificates are commonly self-signed or issued to the
+    # management hostname rather than 127.0.0.1. This is a loopback-only
+    # connectivity probe, not a remote trust check.
+    ssl_context = (
+        ssl._create_unverified_context()  # noqa: SLF001
+        if base == LOCAL_NGINX_BASE else None
+    )
     for name, path in INTERNAL_ENDPOINTS:
         url = base + path
         try:
-            with request.urlopen(url, timeout=5) as resp:
+            with request.urlopen(url, timeout=5, context=ssl_context) as resp:
                 body = resp.read(64 * 1024).decode("utf-8", errors="replace")
                 out["results"][name] = {
                     "url": url,
@@ -110,7 +118,7 @@ def _known_risk_checks(ctx: CollectorContext, result: CollectorResult) -> dict:
     checks["migrations_lock_matches_disk"] = _migrations_lock_check(ctx)
     checks["updater_registered"] = _updater_registered_check(ctx)
     checks["nginx_proxy_reachable"] = {
-        "ok": _command(["curl", "-fsS", "-o", "/dev/null", "-w", "%{http_code}",
+        "ok": _command(["curl", "--insecure", "-fsS", "-o", "/dev/null", "-w", "%{http_code}",
                         LOCAL_NGINX_BASE + "/api/v1/system/health"], timeout=5).get("stdout") in ("200",),
         "detail": "nginx → API connectivity",
     }

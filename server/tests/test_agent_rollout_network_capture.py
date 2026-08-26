@@ -15,7 +15,11 @@ from starlette.requests import Request
 
 from app.api.v1 import agents, servers
 from app.core import database
-from app.schemas.agent import AgentPackageDownloadRequest, NetworkCaptureUpload
+from app.schemas.agent import (
+    AgentHeartbeatRequest,
+    AgentPackageDownloadRequest,
+    NetworkCaptureUpload,
+)
 from app.services import network_capture_service
 
 
@@ -81,6 +85,109 @@ def test_heartbeat_capabilities_are_normalized_and_bounded():
     assert agents._capability_list('["INTERFACE_TRAFFIC_V1"]') == [
         "interface_traffic_v1"
     ]
+
+
+@pytest.mark.asyncio
+async def test_server_identity_sync_preserves_custom_label_and_updates_facts():
+    server_id = uuid4()
+
+    class IdentityDB:
+        def __init__(self):
+            self.sql = ""
+            self.params = {}
+
+        async def execute(self, statement, params=None):
+            self.sql = str(statement)
+            self.params = params or {}
+            return Result()
+
+    db = IdentityDB()
+    await agents._sync_server_identity(
+        db,
+        server_id,
+        hostname="WIN-SERVER-01",
+        primary_ip="192.0.2.20",
+        fqdn="win-server-01.example.test",
+        os_type="windows",
+        os_name="Windows Server 2025",
+        os_version="24H2",
+        kernel_or_build="26100",
+        architecture="x86_64",
+    )
+
+    assert "display_name = CASE" in db.sql
+    assert "display_name = hostname" in db.sql
+    assert "display_name = host(primary_ip)" in db.sql
+    assert "primary_ip = COALESCE" in db.sql
+    assert db.params == {
+        "server_id": server_id,
+        "hostname": "WIN-SERVER-01",
+        "fqdn": "win-server-01.example.test",
+        "ip": "192.0.2.20",
+        "os_type": "windows",
+        "os_name": "Windows Server 2025",
+        "os_version": "24H2",
+        "kernel": "26100",
+        "architecture": "x86_64",
+    }
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_syncs_linked_server_hostname_and_request_ip(monkeypatch):
+    agent_id, server_id = uuid4(), uuid4()
+    synced = {}
+
+    async def authenticate(*_args):
+        return {
+            "id": agent_id,
+            "server_id": server_id,
+            "hostname": "WIN-SERVER-02",
+            "status": "online",
+        }
+
+    async def sync_identity(_db, synced_server_id, **identity):
+        synced.update({"server_id": synced_server_id, **identity})
+
+    async def config_etag(*_args):
+        return "etag", {}
+
+    class HeartbeatDB:
+        async def execute(self, statement, params=None):
+            sql = str(statement)
+            if sql.lstrip().startswith("UPDATE agents SET"):
+                return Result()
+            if sql.lstrip().startswith("UPDATE servers SET last_seen"):
+                return Result()
+            if sql.lstrip().startswith("SELECT COUNT(*) FROM agent_commands"):
+                return Result([(0,)])
+            if sql.lstrip().startswith("SELECT * FROM agents"):
+                return Result([{
+                    "id": agent_id,
+                    "desired_version": None,
+                    "capabilities": [],
+                }])
+            raise AssertionError(sql)
+
+        async def commit(self):
+            return None
+
+    monkeypatch.setattr(agents, "_authenticate", authenticate)
+    monkeypatch.setattr(agents, "_sync_server_identity", sync_identity)
+    monkeypatch.setattr(agents, "_config_etag_for_agent", config_etag)
+
+    await agents.heartbeat(
+        AgentHeartbeatRequest(version="1.12.0"),
+        _request(),
+        HeartbeatDB(),
+        str(agent_id),
+        "Bearer key",
+    )
+
+    assert synced == {
+        "server_id": server_id,
+        "hostname": "WIN-SERVER-02",
+        "primary_ip": "192.0.2.10",
+    }
 
 
 def test_network_capture_upload_validates_interface_samples_and_limits():

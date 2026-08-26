@@ -2,16 +2,15 @@ import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Loader2, ArrowLeft, ExternalLink } from 'lucide-react'
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { toast } from '@/components/ui/Toast'
-import { KpiTile } from '@/components/apm/shared'
 import { ErrorStatusBadge, ERROR_STATUSES } from '@/components/apm/errorShared'
 import { KbLink } from '@/components/apm/KbLink'
+import { APM_SERIES, ApmKpi, ApmTimeChart, ChartPanel, RankBar, fmtCount } from '@/components/apm/viz'
 
 interface Occurrence { timestamp: string; trace_id: string; span_id: string; service: string; message: string }
 interface ErrorDetail {
@@ -68,31 +67,26 @@ export function ErrorIssueDetailPage() {
       </div>
       <div className="text-sm text-danger font-mono">{d.message}</div>
 
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        <KpiTile label="Events" value={d.occurrences} />
-        <KpiTile label="Traces" value={d.traces} />
-        <KpiTile label="Service" value={d.service} />
-        <KpiTile label="First seen" value={new Date(d.first_seen).toLocaleDateString()} />
-        <KpiTile label="Last seen" value={new Date(d.last_seen).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} />
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+        <ApmKpi label="Events" tone="danger" value={fmtCount(d.occurrences)} sub="grouped occurrences" />
+        <ApmKpi label="Traces" tone="info" value={fmtCount(d.traces)} sub="distinct trace ids" />
+        <ApmKpi
+          to={`/apm/services/${encodeURIComponent(d.service)}`}
+          label="Service" tone="primary" value={<span className="truncate text-lg">{d.service}</span>} sub="primary service"
+        />
+        <ApmKpi label="First seen" value={new Date(d.first_seen).toLocaleDateString()} sub="introduced" />
+        <ApmKpi label="Last seen" value={new Date(d.last_seen).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} sub="most recent fire" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 space-y-4">
-          <Card>
-            <CardHeader className="pb-1"><CardTitle className="text-sm">Occurrences over time</CardTitle></CardHeader>
-            <CardContent>
-              <ResponsiveContainer width="100%" height={150}>
-                <AreaChart data={d.trend} margin={{ top: 4, right: 8, bottom: 0, left: -16 }}>
-                  <defs><linearGradient id="g-err" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#ef4444" stopOpacity={0.4} /><stop offset="100%" stopColor="#ef4444" stopOpacity={0} /></linearGradient></defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(148,163,184,0.15)" vertical={false} />
-                  <XAxis dataKey="timestamp" tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={(t) => new Date(t).toLocaleTimeString([], { hour: '2-digit' })} minTickGap={40} />
-                  <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} allowDecimals={false} width={36} />
-                  <Tooltip contentStyle={{ background: '#0d121b', border: '1px solid #1e293b', fontSize: 12, color: '#e5e7eb' }} labelFormatter={(t) => new Date(t).toLocaleString()} />
-                  <Area type="monotone" dataKey="count" stroke="#ef4444" fill="url(#g-err)" strokeWidth={2} />
-                </AreaChart>
-              </ResponsiveContainer>
-            </CardContent>
-          </Card>
+          <ChartPanel title="Occurrences over time" hint="7-day trend">
+            <ApmTimeChart
+              data={d.trend}
+              series={[{ key: 'count', name: 'events', color: APM_SERIES.errors, fmt: (v) => String(Math.round(v)) }]}
+              height={220}
+            />
+          </ChartPanel>
 
           {d.sample_stack && (
             <Card>
@@ -145,9 +139,22 @@ export function ErrorIssueDetailPage() {
           <Card>
             <CardHeader className="pb-1"><CardTitle className="text-sm">Affected services</CardTitle></CardHeader>
             <CardContent className="space-y-1">
-              {d.per_service.map((p) => (
-                <div key={p.service} className="flex items-center justify-between text-sm"><span>{p.service}</span><span className="font-mono text-xs text-muted">{p.count}</span></div>
-              ))}
+              {d.per_service.map((p) => {
+                const max = Math.max(...d.per_service.map((x) => x.count), 1)
+                return (
+                  <button
+                    key={p.service}
+                    onClick={() => navigate(`/apm/services/${encodeURIComponent(p.service)}`)}
+                    className="w-full text-left"
+                  >
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="truncate text-primary hover:underline">{p.service}</span>
+                      <span className="font-mono text-xs text-muted">{fmtCount(p.count)}</span>
+                    </div>
+                    <RankBar value={p.count} max={max} color={APM_SERIES.errors} />
+                  </button>
+                )
+              })}
               {d.versions.length > 0 && <div className="text-xs text-muted pt-2">Versions: {d.versions.join(', ')}</div>}
             </CardContent>
           </Card>

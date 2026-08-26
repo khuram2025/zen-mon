@@ -1168,6 +1168,23 @@ case "${1:-help}" in
         NEW=$(git rev-parse --short HEAD)
         if [[ "$OLD" == "$NEW" ]]; then echo "Already up to date ($OLD)"; exit 0; fi
         echo "  $OLD -> $NEW"
+        # Converge and verify the schema before replacing any generated runtime
+        # artifacts or restarting services.  The previous order restarted the
+        # newly checked-out API even when migration failed, then returned an
+        # error; that left the running code ahead of PostgreSQL/ClickHouse and
+        # caused only some telemetry modules to fail.  Keep the already-loaded
+        # old services healthy and restore their source checkout on failure.
+        echo "  running migrations..."
+        if ! run_migrations; then
+            echo -e "${RED}Schema drift — update aborted before service restart.${NC}"
+            echo -e "${YELLOW}Details: $ZENPLUS_HOME/.schema-status.json${NC}"
+            if git reset --hard "$OLD" >/dev/null 2>&1; then
+                echo -e "${YELLOW}Restored source checkout $OLD; existing services were not restarted.${NC}"
+            else
+                echo -e "${RED}Could not restore source checkout $OLD; existing processes are still running but manual repair is required.${NC}"
+            fi
+            exit 1
+        fi
         export PATH=/usr/local/go/bin:$PATH
         echo "  building poller..."
         ( cd "$ZENPLUS_HOME/poller" && go mod tidy && CGO_ENABLED=0 go build -buildvcs=false -o "$ZENPLUS_HOME/bin/zenplus-poller" ./cmd/poller ) || { echo "Poller build failed"; exit 1; }
@@ -1190,24 +1207,13 @@ EOF
         "$ZENPLUS_HOME/venv/bin/pip" install -q -r "$ZENPLUS_HOME/server/requirements.txt"
         echo "  building dashboard..."
         ( cd "$ZENPLUS_HOME/dashboard" && npm install --silent 2>/dev/null && npx vite build 2>/dev/null )
-        echo "  running migrations..."
-        MIGRATION_RC=0
-        run_migrations || MIGRATION_RC=$?
         echo "  reloading systemd..."
         reinstall_units
         chown -R "$ZENPLUS_USER:$ZENPLUS_USER" "$ZENPLUS_HOME" 2>/dev/null
         echo "  restarting services..."
         systemctl restart zenplus-api zenplus-poller nginx
         systemctl restart zenplus-updater.timer 2>/dev/null || true
-        # Stamp the version only if the schema actually matches this code. A
-        # version marker that outruns the schema is what made two appliances
-        # reporting the same version behave differently.
-        if [[ $MIGRATION_RC -ne 0 ]]; then
-            echo -e "${RED}Schema drift — version not stamped. Code is at $NEW, schema is not.${NC}"
-            echo -e "${YELLOW}Details: $ZENPLUS_HOME/.schema-status.json${NC}"
-            echo -e "${YELLOW}Re-run after fixing: zenplus update${NC}"
-            exit 1
-        fi
+        # The pre-restart schema gate above proved this checkout safe to run.
         echo "$NEW" > "$ZENPLUS_HOME/.version"
         date -Iseconds >> "$ZENPLUS_HOME/.version"
         echo -e "${GREEN}Updated to $NEW${NC}"

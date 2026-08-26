@@ -8,6 +8,7 @@ import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { ErrorStatusBadge } from '@/components/apm/errorShared'
 import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
 import { ApmRangePicker, rangePhrase, useApmRange } from '@/components/apm/ApmRange'
+import { ApmKpi, RankBar, fmtCount } from '@/components/apm/viz'
 import type { ErrorListResponse } from '@/types/apm'
 
 /**
@@ -64,6 +65,8 @@ export function ErrorsInboxPage() {
   const issues = q.data?.issues ?? []
   const counts = q.data?.counts ?? {}
   const services = [...new Set(issues.map((i) => i.service))].sort()
+  const maxOcc = Math.max(...issues.map((i) => i.occurrences), 1)
+  const totalOcc = issues.reduce((a, i) => a + i.occurrences, 0)
 
   const chip = (key: string, label: string, count?: number) => (
     <button
@@ -85,6 +88,13 @@ export function ErrorsInboxPage() {
         article="errors"
         actions={<ApmRangePicker value={range} onChange={setRange} />}
       />
+
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <ApmKpi label="Unresolved" icon={<Bug className="h-4 w-4" />} tone={(counts.unresolved ?? 0) ? 'danger' : 'success'} value={fmtCount(counts.unresolved)} sub="open issues" />
+        <ApmKpi label="All issues" tone="info" value={fmtCount(counts.all)} sub={rangePhrase(range)} />
+        <ApmKpi label="Events shown" tone="warning" value={fmtCount(totalOcc)} sub="in this filter" />
+        <ApmKpi label="Services hit" tone="accent" value={fmtCount(services.length)} sub="distinct services" />
+      </div>
 
       {q.isError && (
         <div className="rounded-lg border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger">
@@ -143,8 +153,18 @@ export function ErrorsInboxPage() {
                       <div className="font-medium text-text">{e.exception_type}</div>
                       <div className="max-w-md truncate text-xs text-muted">{e.message}</div>
                     </Td>
-                    <Td className="text-sm">{e.service}</Td>
-                    <Td className="text-right font-mono text-xs">{e.occurrences.toLocaleString()}</Td>
+                    <Td className="text-sm">
+                      <button
+                        className="text-primary hover:underline"
+                        onClick={(ev) => { ev.stopPropagation(); navigate(`/apm/services/${encodeURIComponent(e.service)}`) }}
+                      >
+                        {e.service}
+                      </button>
+                    </Td>
+                    <Td className="min-w-[5.5rem] text-right">
+                      <div className="font-mono text-xs tabular-nums">{e.occurrences.toLocaleString()}</div>
+                      <RankBar value={e.occurrences} max={maxOcc} color="#db2777" />
+                    </Td>
                     <Td className="text-right font-mono text-xs">{e.traces.toLocaleString()}</Td>
                     <Td><ErrorStatusBadge status={e.status} /></Td>
                     <Td className="text-right text-xs text-muted">{rel(e.last_seen)}</Td>

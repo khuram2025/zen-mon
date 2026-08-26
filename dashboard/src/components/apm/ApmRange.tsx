@@ -1,5 +1,6 @@
 import { useSearchParams } from 'react-router-dom'
 import { Clock } from 'lucide-react'
+import { Switch } from '@/components/ui/Switch'
 
 /**
  * The APM range vocabulary, shared by every page.
@@ -28,6 +29,30 @@ export const RANGE_LABEL: Record<ApmRangeKey, string> = {
 /** Mid-sentence phrasing: "No errors in the last 24h". */
 export function rangePhrase(range: ApmRangeKey): string {
   return `the last ${RANGE_LABEL[range]}`
+}
+
+export function previousWindow(range: ApmRangeKey, now = Date.now()): { from_ms: number; to_ms: number; windowMs: number } {
+  const windowMs = RANGE_MS[range]
+  const to_ms = now - windowMs
+  return { from_ms: to_ms - windowMs, to_ms, windowMs }
+}
+
+export function shiftTimestamp(iso: string, offsetMs: number): string {
+  const t = new Date(iso).getTime()
+  if (!Number.isFinite(t)) return iso
+  return new Date(t + offsetMs).toISOString()
+}
+
+export function useApmCompare(): [boolean, (v: boolean) => void] {
+  const [params, setParams] = useSearchParams()
+  const on = params.get('compare') === '1'
+  const set = (v: boolean) => {
+    const next = new URLSearchParams(params)
+    if (v) next.set('compare', '1')
+    else next.delete('compare')
+    setParams(next, { replace: true })
+  }
+  return [on, set]
 }
 
 export function useApmRange(fallback: ApmRangeKey = '1h'): [ApmRangeKey, (r: ApmRangeKey) => void] {
@@ -75,5 +100,14 @@ export function ApmRangePicker({ value, onChange, options = APM_RANGES, classNam
         )
       })}
     </div>
+  )
+}
+
+export function CompareToggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label className="inline-flex h-8 cursor-pointer items-center gap-2 rounded-md border border-border bg-surface2/40 px-2.5 text-[11px] font-semibold text-muted">
+      <Switch checked={value} onCheckedChange={onChange} />
+      Compare previous
+    </label>
   )
 }

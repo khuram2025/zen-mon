@@ -1,20 +1,18 @@
 // APM Usage Analytics — who uses what: traffic, pages, operations and users.
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Loader2, Download, Users, FileSearch, Info } from 'lucide-react'
-import {
-  ComposedChart, Area, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
-} from 'recharts'
 import { api } from '@/lib/api'
 import { apiErrorMessage, relativeTime } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Input } from '@/components/ui/Input'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
-import { KpiTile, fmtMs, fmtPct } from '@/components/apm/shared'
+import { fmtMs, fmtPct } from '@/components/apm/shared'
 import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
 import { toCsv, downloadCsv } from '@/components/servers/tables'
+import { APM_SERIES, ApmKpi, ApmTimeChart, ChartPanel, RankBar, fmtCount } from '@/components/apm/viz'
 
 /* ── Types (mirror /apm/usage/*) ────────────────────────────────────────── */
 
@@ -48,25 +46,6 @@ const HOURS_OPTIONS = [
   { value: 168, label: 'Last 7 days' },
 ]
 
-const CHART = {
-  requests: '#3b82f6',
-  users: '#22d3ee',
-  errors: '#ef4444',
-  grid: 'rgba(148,163,184,0.15)',
-  tick: '#94a3b8',
-  tooltipBg: '#0d121b',
-  tooltipBorder: '#1e293b',
-  tooltipText: '#e5e7eb',
-}
-
-function fmtCount(n: number | null | undefined): string {
-  if (n == null || !isFinite(n)) return '—'
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 10_000) return `${(n / 1000).toFixed(0)}K`
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`
-  return `${Math.round(n)}`
-}
-
 function errTone(rate: number): string | undefined {
   return rate > 0.02 ? '#ef4444' : undefined
 }
@@ -88,16 +67,6 @@ function LoadingRows({ colSpan }: { colSpan: number }) {
         <span className="inline-flex items-center gap-2 text-muted"><Loader2 className="w-4 h-4 animate-spin" /> Loading…</span>
       </Td>
     </Tr>
-  )
-}
-
-/** Proportional inline bar: value relative to the list max. */
-function RankBar({ value, max }: { value: number; max: number }) {
-  const pct = max > 0 ? Math.max(2, (value / max) * 100) : 0
-  return (
-    <div className="mt-1 h-1.5 w-full overflow-hidden rounded bg-surface2">
-      <div className="h-full rounded bg-primary/60" style={{ width: `${pct}%` }} />
-    </div>
   )
 }
 
@@ -174,6 +143,14 @@ export function UsagePage() {
     queryKey: ['apm', 'usage', 'users', { hours, service }],
     queryFn: async () => (await api.get(`/apm/usage/users?${qp({ limit: '50' })}`)).data,
   })
+  const cardQ = useQuery<{ spans: number; services: number; operations: number; routes: number; versions: number; attributes: Array<{ key: string; distinct: number; spans: number }> }>({
+    queryKey: ['apm', 'cardinality', { hours, service }],
+    queryFn: async () => {
+      const p = new URLSearchParams({ hours: String(hours) })
+      if (service) p.set('service', service)
+      return (await api.get(`/apm/cardinality?${p}`)).data
+    },
+  })
 
   const s = summary.data
   const pages = pagesQ.data?.pages ?? []
@@ -183,17 +160,6 @@ export function UsagePage() {
   const maxPageHits = pages.length ? pages[0].hits : 0
   const maxOpHits = ops.length ? ops[0].hits : 0
   const maxUserReqs = users.length ? users[0].requests : 0
-
-  const chartData = useMemo(
-    () => (s?.series ?? []).map((p) => ({ ...p, ts: new Date(p.t).getTime() })),
-    [s?.series],
-  )
-  const xTick = (ts: number) => {
-    const d = new Date(ts)
-    return hours >= 72
-      ? d.toLocaleDateString([], { month: '2-digit', day: '2-digit' })
-      : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  }
 
   const attribution = usersQ.data
     ? usersQ.data.total_requests > 0 ? usersQ.data.attributed_requests / usersQ.data.total_requests : 0
@@ -260,64 +226,28 @@ export function UsagePage() {
 
       {summary.isError && <QueryError label="usage summary" error={summary.error} />}
 
-      {/* KPI row */}
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
-        <KpiTile label="Requests" value={fmtCount(s?.requests)} />
-        <KpiTile label="Unique users" value={fmtCount(s?.unique_users)} />
-        <KpiTile label="Pages" value={fmtCount(s?.pages)} />
-        <KpiTile label="Latency avg / p95" value={s ? `${fmtMs(s.avg_ms)} / ${fmtMs(s.p95_ms)}` : '—'} />
-        <KpiTile label="Error rate" value={fmtPct(s?.error_rate)} accent={s ? errTone(s.error_rate) : undefined} />
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+        <ApmKpi label="Requests" tone="info" value={fmtCount(s?.requests)} sub="in this window" />
+        <ApmKpi label="Unique users" tone="accent" value={fmtCount(s?.unique_users)} />
+        <ApmKpi label="Pages" tone="primary" value={fmtCount(s?.pages)} />
+        <ApmKpi label="Latency avg / p95" tone="warning" value={s ? `${fmtMs(s.avg_ms)} / ${fmtMs(s.p95_ms)}` : '—'} />
+        <ApmKpi label="Error rate" tone={s && s.error_rate > 0.02 ? 'danger' : 'success'} value={fmtPct(s?.error_rate)} />
       </div>
 
-      {/* Traffic chart */}
-      <Card>
-        <CardHeader className="flex-row items-center justify-between space-y-0 py-3 px-4 border-b border-border">
-          <CardTitle className="text-sm">Traffic</CardTitle>
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-            {([['Requests', CHART.requests], ['Users', CHART.users], ['Errors', CHART.errors]] as const).map(([label, color]) => (
-              <span key={label} className="flex items-center gap-1.5 text-[11px] text-text2">
-                <span className="h-2 w-2 rounded-sm" style={{ background: color }} /> {label}
-              </span>
-            ))}
-          </div>
-        </CardHeader>
-        <CardContent className="pt-4">
-          {summary.isLoading ? (
-            <div className="flex h-[220px] items-center justify-center gap-2 text-muted">
-              <Loader2 className="w-4 h-4 animate-spin" /> Loading…
-            </div>
-          ) : chartData.length === 0 ? (
-            <div className="flex h-[220px] items-center justify-center text-sm text-muted">No traffic in this window.</div>
-          ) : (
-            <ResponsiveContainer width="100%" height={220}>
-              <ComposedChart data={chartData} margin={{ top: 4, right: 12, bottom: 0, left: -8 }}>
-                <defs>
-                  <linearGradient id="usage-req" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor={CHART.requests} stopOpacity={0.35} />
-                    <stop offset="100%" stopColor={CHART.requests} stopOpacity={0} />
-                  </linearGradient>
-                  <linearGradient id="usage-err" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor={CHART.errors} stopOpacity={0.35} />
-                    <stop offset="100%" stopColor={CHART.errors} stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke={CHART.grid} vertical={false} />
-                <XAxis dataKey="ts" type="number" scale="time" domain={['dataMin', 'dataMax']}
-                  tick={{ fontSize: 10, fill: CHART.tick }} tickFormatter={xTick} minTickGap={40} />
-                <YAxis tick={{ fontSize: 10, fill: CHART.tick }} width={48} allowDecimals={false} />
-                <Tooltip
-                  contentStyle={{ background: CHART.tooltipBg, border: `1px solid ${CHART.tooltipBorder}`, borderRadius: 8, fontSize: 12, color: CHART.tooltipText }}
-                  labelFormatter={(ts) => new Date(Number(ts)).toLocaleString()}
-                  formatter={(v: number | string, name: string) => [Number(v).toLocaleString(), name.charAt(0).toUpperCase() + name.slice(1)]}
-                />
-                <Area type="monotone" dataKey="requests" stroke={CHART.requests} strokeWidth={2} fill="url(#usage-req)" isAnimationActive={false} dot={false} />
-                <Area type="monotone" dataKey="errors" stroke={CHART.errors} strokeWidth={1.5} fill="url(#usage-err)" isAnimationActive={false} dot={false} />
-                <Line type="monotone" dataKey="users" stroke={CHART.users} strokeWidth={2} dot={false} isAnimationActive={false} />
-              </ComposedChart>
-            </ResponsiveContainer>
-          )}
-        </CardContent>
-      </Card>
+      <ChartPanel title="Traffic" hint="requests, users and errors">
+        <ApmTimeChart
+          data={s?.series ?? []}
+          timeKey="t"
+          loading={summary.isLoading}
+          empty="No traffic in this window."
+          series={[
+            { key: 'requests', name: 'Requests', color: APM_SERIES.requests, fmt: (v) => fmtCount(v) },
+            { key: 'errors', name: 'Errors', color: APM_SERIES.errors, fmt: (v) => fmtCount(v) },
+            { key: 'users', name: 'Users', color: APM_SERIES.users, yAxisIndex: 1, fmt: (v) => fmtCount(v) },
+          ]}
+          height={260}
+        />
+      </ChartPanel>
 
       {/* Top pages / Top operations */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
@@ -450,6 +380,50 @@ export function UsagePage() {
           </Table>
         </TableCard>
       )}
+
+      <Card>
+        <CardHeader className="flex-row items-center justify-between space-y-0 border-b border-border px-4 py-3">
+          <div>
+            <CardTitle className="text-sm">Ingest cardinality</CardTitle>
+            <p className="mt-0.5 text-[11px] text-muted">Distinct services, operations, routes and span attribute keys in this window. High-cardinality keys inflate storage and query cost.</p>
+          </div>
+        </CardHeader>
+        <CardContent className="p-0">
+          {cardQ.isLoading ? (
+            <div className="flex items-center justify-center gap-2 py-10 text-muted"><Loader2 className="h-4 w-4 animate-spin" /> Loading cardinality…</div>
+          ) : cardQ.isError ? (
+            <QueryError label="cardinality" error={cardQ.error} />
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-3 border-b border-border p-4 md:grid-cols-5">
+                <ApmKpi label="Spans" tone="info" value={fmtCount(cardQ.data?.spans)} />
+                <ApmKpi label="Services" tone="primary" value={fmtCount(cardQ.data?.services)} />
+                <ApmKpi label="Operations" tone="accent" value={fmtCount(cardQ.data?.operations)} />
+                <ApmKpi label="Routes" tone="warning" value={fmtCount(cardQ.data?.routes)} />
+                <ApmKpi label="Versions" tone="success" value={fmtCount(cardQ.data?.versions)} />
+              </div>
+              <Table>
+                <THead><Tr><Th>Attribute key</Th><Th className="text-right">Distinct values</Th><Th className="text-right">Spans</Th></Tr></THead>
+                <TBody>
+                  {(cardQ.data?.attributes ?? []).map((a) => (
+                    <Tr key={a.key}>
+                      <Td className="font-mono text-xs">{a.key}</Td>
+                      <Td className="text-right font-mono text-xs tabular-nums">{fmtCount(a.distinct)}</Td>
+                      <Td className="text-right">
+                        <span className="font-mono text-xs tabular-nums">{fmtCount(a.spans)}</span>
+                        <RankBar value={a.distinct} max={Math.max(cardQ.data?.attributes[0]?.distinct || 1, 1)} color={a.distinct > 1000 ? '#db2777' : APM_SERIES.throughput} />
+                      </Td>
+                    </Tr>
+                  ))}
+                  {(cardQ.data?.attributes ?? []).length === 0 && (
+                    <Tr><Td colSpan={3} className="py-8 text-center text-muted">No string attributes in this window.</Td></Tr>
+                  )}
+                </TBody>
+              </Table>
+            </>
+          )}
+        </CardContent>
+      </Card>
     </div>
   )
 }

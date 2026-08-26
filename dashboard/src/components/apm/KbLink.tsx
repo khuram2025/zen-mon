@@ -21,6 +21,7 @@ export const KB_ARTICLES = {
   slos: '/slos/',
   synthetics: '/synthetics/',
   usage: '/usage/',
+  rum: '/rum/',
   settings: '/settings/',
   troubleshooting: '/troubleshooting/',
 } as const

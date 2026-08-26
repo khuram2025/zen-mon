@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
-from app.services.apm_slo_service import compute_slo_status
+from app.services.apm_slo_service import compute_slo_series, compute_slo_status
 
 router = APIRouter(prefix="/apm/slos", tags=["APM SLOs"])
 
@@ -184,6 +184,19 @@ async def delete_slo(
     return {"deleted": True}
 
 
+@router.get("/{slo_id}")
+async def get_slo(
+    slo_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    del user
+    row = (await db.execute(text(_SELECT + " WHERE s.id = :id"), {"id": slo_id})).first()
+    if not row:
+        raise HTTPException(404, "SLO not found")
+    return _row(row)
+
+
 @router.get("/{slo_id}/budget")
 async def slo_budget(
     slo_id: UUID,
@@ -196,3 +209,18 @@ async def slo_budget(
     slo = _row(row)
     status = await asyncio.to_thread(compute_slo_status, slo)
     return {"slo": slo, **status}
+
+
+@router.get("/{slo_id}/series")
+async def slo_series(
+    slo_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    del user
+    row = (await db.execute(text(_SELECT + " WHERE s.id = :id"), {"id": slo_id})).first()
+    if not row:
+        raise HTTPException(404, "SLO not found")
+    slo = _row(row)
+    points = await asyncio.to_thread(compute_slo_series, slo)
+    return {"slo": slo, "points": points}

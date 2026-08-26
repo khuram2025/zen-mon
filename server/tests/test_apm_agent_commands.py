@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import pytest
 
+from app.api.v1 import apm_agents
 from app.api.v1.apm_agents import DiscoveredProcess, InstrumentationRequest
 from app.services.apm_agent_service import reconcile_apm_command_result
 
@@ -14,6 +15,17 @@ class RecordingDB:
 
     async def execute(self, statement, params=None):
         self.calls.append((str(statement), params or {}))
+
+
+class MappingRows:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self.rows
 
 
 @pytest.mark.asyncio
@@ -75,3 +87,44 @@ async def test_windows_service_result_can_reconcile_by_stable_target():
     )
     assert db.calls[0][1]["target_kind"] == "windows_service"
     assert "windows_service" in db.calls[0][0]
+
+
+@pytest.mark.asyncio
+async def test_agent_process_list_exposes_server_identity_for_cloned_hostnames(monkeypatch):
+    agent_id, server_id = uuid4(), uuid4()
+
+    class ProcessDB:
+        def __init__(self):
+            self.sql = ""
+
+        async def execute(self, statement, params=None):
+            self.sql = str(statement)
+            return MappingRows([{
+                "id": uuid4(),
+                "agent_id": agent_id,
+                "server_id": server_id,
+                "hostname": "WIN-CLONED",
+                "server_name": "WIN-CLONED (clone 192.0.2.21)",
+                "server_ip": "192.0.2.21",
+                "service_name_guess": "TestWebApp",
+                "instrumentation_state": "none",
+                "last_command_params": {},
+            }])
+
+    async def no_trace_rows(_callable):
+        return []
+
+    db = ProcessDB()
+    monkeypatch.setattr(apm_agents.asyncio, "to_thread", no_trace_rows)
+    output = await apm_agents.list_agent_processes(
+        server_id=None,
+        active_hours=24,
+        db=db,
+        user=object(),
+    )
+
+    assert "LEFT JOIN servers s ON s.id = p.server_id" in db.sql
+    assert "COALESCE(host(s.primary_ip), host(a.last_ip)) AS server_ip" in db.sql
+    assert output[0]["agent_id"] == agent_id
+    assert output[0]["server_name"] == "WIN-CLONED (clone 192.0.2.21)"
+    assert output[0]["server_ip"] == "192.0.2.21"

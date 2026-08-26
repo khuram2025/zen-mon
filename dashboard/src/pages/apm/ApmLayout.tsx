@@ -18,33 +18,29 @@ const tabs: TabDef[] = [
 ]
 
 /**
- * Module chrome for APM: one title, one tab strip, everywhere.
- *
- * Detail views (a single trace, a single error, a single service) take the full
- * canvas — they have their own back-navigation and the strip would just compete
- * with it.
+ * Module chrome for APM: compact title + prominent tab strip on list views.
+ * Detail views keep a slimmer context strip so back-navigation stays first.
  */
 export function ApmLayout() {
   const { pathname } = useLocation()
   const isDetail =
     /^\/apm\/traces\/[^/]+/.test(pathname) ||
     /^\/apm\/errors\/[^/]+/.test(pathname) ||
-    /^\/apm\/services\/[^/]+/.test(pathname)
+    /^\/apm\/services\/[^/]+/.test(pathname) ||
+    /^\/apm\/slos\/[^/]+/.test(pathname)
 
   return (
     <div className="space-y-4">
       {!isDetail && (
-        <>
+        <div className="space-y-3">
           <div>
-            <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
-              <Activity className="h-6 w-6 text-primary" />
-              Application Monitoring
-            </h1>
-            <p className="mt-1 text-xs text-muted">
-              Distributed tracing, golden signals, error tracking and reliability targets for every instrumented service.
+            <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-muted">Applications</p>
+            <h1 className="mt-0.5 text-2xl font-semibold tracking-tight">Application Performance</h1>
+            <p className="mt-1 max-w-3xl text-sm text-muted">
+              Golden signals, traces, errors and reliability — from fleet health down to a single span.
             </p>
           </div>
-          <div className="-mb-px flex items-center gap-1 overflow-x-auto border-b border-border">
+          <nav className="flex items-center gap-1 overflow-x-auto rounded-lg border border-border bg-surface2/50 p-1">
             {tabs.map((t) => (
               <NavLink
                 key={t.to}
@@ -52,17 +48,19 @@ export function ApmLayout() {
                 end={t.end}
                 className={({ isActive }) =>
                   cn(
-                    'inline-flex items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2 text-sm font-medium transition-colors',
-                    isActive ? 'border-primary text-text' : 'border-transparent text-muted hover:text-text',
+                    'inline-flex items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors',
+                    isActive
+                      ? 'bg-surface text-text shadow-sm ring-1 ring-border'
+                      : 'text-muted hover:bg-surface/60 hover:text-text',
                   )
                 }
               >
-                <t.icon className="h-4 w-4" />
+                <t.icon className="h-3.5 w-3.5" />
                 {t.label}
               </NavLink>
             ))}
-          </div>
-        </>
+          </nav>
+        </div>
       )}
       <Outlet />
     </div>

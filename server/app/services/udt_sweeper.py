@@ -42,6 +42,45 @@ WATCH_SEEN_DEDUPE = "1 hour"
 UDT_SWEEP_ADVISORY_LOCK = 1515074391
 
 
+def _consume_dns_lookup_exception(lookup: asyncio.Future) -> None:
+    """Mark a detached DNS lookup's eventual exception as observed."""
+    if lookup.cancelled():
+        return
+    try:
+        lookup.exception()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        # A done callback must never create a second unhandled exception while
+        # it is cleaning up the original resolver failure.
+        pass
+
+
+async def _resolve_dns_name(ip: str, resolver=None) -> str | None:
+    """Resolve one endpoint without cancelling uvloop's DNS callback."""
+    if resolver is None:
+        resolver = asyncio.get_running_loop().getnameinfo
+    try:
+        # uvloop raises InvalidStateError in its DNS completion callback when
+        # wait_for cancels getnameinfo at the deadline. Shield the lookup so the
+        # caller still times out while its callback finishes cleanly.
+        lookup = asyncio.ensure_future(
+            resolver((ip, 0), socket.NI_NAMEREQD)
+        )
+        # The shield deliberately lets the resolver outlive our timeout.  If
+        # that detached lookup later fails (NXDOMAIN, resolver outage, etc.),
+        # retrieve the exception so asyncio does not emit "Task exception was
+        # never retrieved" for every unresolved endpoint in the sweep.
+        lookup.add_done_callback(_consume_dns_lookup_exception)
+        name, _ = await asyncio.wait_for(
+            asyncio.shield(lookup),
+            timeout=DNS_TIMEOUT_S,
+        )
+        return name
+    except Exception:
+        return None
+
+
 async def _close_stale(db: AsyncSession) -> None:
     await db.execute(text(
         f"UPDATE udt_endpoint_locations SET active = FALSE, closed_at = NOW() "
@@ -250,18 +289,7 @@ async def _enrich_dns(db: AsyncSession) -> None:
     ), {"lim": DNS_BUDGET_PER_TICK})).mappings().all()
     if not rows:
         return
-    loop = asyncio.get_running_loop()
-
-    async def resolve(ip: str) -> str | None:
-        try:
-            name, _ = await asyncio.wait_for(
-                loop.getnameinfo((ip, 0), socket.NI_NAMEREQD), timeout=DNS_TIMEOUT_S
-            )
-            return name
-        except Exception:
-            return None
-
-    results = await asyncio.gather(*(resolve(r["ip"]) for r in rows))
+    results = await asyncio.gather(*(_resolve_dns_name(r["ip"]) for r in rows))
     for r, name in zip(rows, results):
         if name and name != r["ip"]:
             await db.execute(text(

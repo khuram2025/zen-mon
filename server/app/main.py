@@ -23,6 +23,7 @@ from app.api.v1 import apm_slos as apm_slos_api
 from app.api.v1 import apm_synthetics as apm_synthetics_api
 from app.api.v1 import apm_usage as apm_usage_api
 from app.api.v1 import apm_p3 as apm_p3_api
+from app.api.v1 import apm_insights as apm_insights_api
 from app.api.websocket import realtime
 
 settings = get_settings()
@@ -111,6 +112,8 @@ def create_app() -> FastAPI:
     app.include_router(apm_synthetics_api.router, prefix="/api/v1")
     # APM usage analytics (pages/operations/users) under /api/v1/apm/usage
     app.include_router(apm_usage_api.router, prefix="/api/v1")
+    # APM deep-dive (heatmap, exemplars, facets, deployments, hosts, logs)
+    app.include_router(apm_insights_api.router, prefix="/api/v1")
     # APM OTLP receiver mounted at ROOT so the path is exactly /v1/traces.
     app.include_router(apm_ingest_api.router)
     app.include_router(apm_p3_api.router)

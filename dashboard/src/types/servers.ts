@@ -21,6 +21,12 @@ export interface ServerItem {
   os_version: string | null
   kernel_or_build: string | null
   architecture: string | null
+  cpu_model?: string | null
+  /** Logical processors reported by the host. */
+  cpu_cores?: number | null
+  cpu_physical_cores?: number | null
+  memory_total_bytes?: number | null
+  physical_disks?: ServerPhysicalDisk[]
   collection_mode: CollectionMode
   windows_credential_id: string | null
   snmp_credential_id: string | null
@@ -108,6 +114,14 @@ export interface AgentItem {
   enrollment_token_prefix: string | null
   authorized_at: string | null
   revoked_at: string | null
+  registration_conflict: boolean
+  registration_conflict_revision: string | null
+  registration_conflict_at: string | null
+  registration_conflict_ip: string | null
+  registration_conflict_attempts: number
+  registration_conflict_install_id: string | null
+  registration_conflict_hostname: string | null
+  registration_conflict_version: string | null
   last_heartbeat_at: string | null
   last_metric_at: string | null
   last_config_hash: string | null
@@ -124,7 +138,26 @@ export interface AgentItem {
   config_apply_error: string | null
   apm_status?: {
     enabled?: boolean
-    gateway?: { listening?: boolean; grpc_port?: number; http_port?: number }
+    profile?: string
+    environment?: string
+    state?: string
+    gateway?: {
+      listening?: boolean
+      healthy?: boolean
+      managed?: boolean
+      version?: string
+      grpc_port?: number
+      http_port?: number
+    }
+    discovered?: number
+    instrumented?: number
+    failed?: number
+    spans_forwarded_1m?: number
+    export_errors_1m?: number
+    spool_depth_spans?: number
+    spool_bytes?: number
+    dropped_spans_total?: number
+    bundles?: Record<string, string>
     checked_at?: string | null
     last_error?: string | null
   }
@@ -193,7 +226,21 @@ export interface ServerProcess {
   cpu_pct: number | null
   memory_bytes: number | null
   started_at: string | null
+  state?: string | null
+  running?: boolean
+  watchlisted?: boolean
   updated_at: string
+}
+
+export interface ServerPhysicalDisk {
+  index: number
+  device_id: string
+  model: string
+  manufacturer: string
+  interface_type: string
+  media_type: string
+  size_bytes: number
+  status: string
 }
 
 export interface ServerService {
