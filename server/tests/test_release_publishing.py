@@ -78,10 +78,10 @@ class _Client:
         raise AssertionError(f"unexpected POST {url}")
 
     def get(self, url, **_kwargs):
-        assert url.endswith("/releases")
+        assert url.endswith("/releases/release-1")
         return _Response(
             200,
-            [{
+            {
                 "id": self.catalog_id,
                 "version": self.catalog_version,
                 "package_sha256": (
@@ -90,7 +90,7 @@ class _Client:
                     else self.upload_fields["package_sha256"]
                 ),
                 "is_published": self.catalog_published,
-            }],
+            },
         )
 
 

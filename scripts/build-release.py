@@ -1259,26 +1259,19 @@ def publish_package(zup_path: Path, version: str, changelog: str,
             sys.exit(1)
 
         # The publish endpoint response alone is not enough evidence that the
-        # release is visible to rollout selection. Confirm the catalog state.
+        # exact stored object is ready. The list endpoint intentionally omits
+        # package_sha256, so verify through the authenticated detail endpoint.
         verify = client.get(
-            f"{SERVER_URL}/api/v1/admin/releases",
+            f"{SERVER_URL}/api/v1/admin/releases/{release_id}",
             headers=headers,
         )
         if verify.status_code != 200:
             print(f"  ERROR: Could not confirm publication: {verify.status_code} {verify.text}")
             sys.exit(1)
-        data = verify.json()
-        releases = data if isinstance(data, list) else data.get("releases", data.get("results", []))
-        published = next(
-            (
-                item
-                for item in releases
-                if str(item.get("id", item.get("release_id", ""))) == str(release_id)
-            ),
-            None,
-        )
+        published = verify.json()
         catalog_matches = (
             published
+            and str(published.get("id", published.get("release_id", ""))) == str(release_id)
             and published.get("is_published")
             and published.get("version") == version
             and str(published.get("package_sha256", "")).lower() == pkg_hash.lower()
