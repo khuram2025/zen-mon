@@ -990,6 +990,12 @@ def build_package(version: str, changelog: str, severity: str,
         "steps": steps,
         "rollback_steps": [
             {"type": "restore_backup"},
+            # Security floor: restoring older code must never resurrect the
+            # legacy support worker's root execution path. This hook executes
+            # from the signed release payload, not the restored code tree.
+            {"type": "run_hook",
+             "script": "code/scripts/enforce-support-security-floor.sh",
+             "timeout": 120},
             {"type": "start_services",
              "services": ["zenplus-api", "zenplus-poller",
                           "zenplus-netflow-collector", "netmon-gunicorn",

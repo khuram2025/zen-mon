@@ -141,11 +141,16 @@ def _backup_postgres(backup_path: Path) -> None:
                 stderr=subprocess.PIPE,
             )
             pg_dump.stdout.close()
-            gzip.communicate(timeout=300)
+            _, gzip_stderr = gzip.communicate(timeout=300)
 
             if pg_dump.wait() != 0:
                 stderr = pg_dump.stderr.read().decode()
-                logger.warning("pg_dump warnings: %s", stderr)
+                raise RuntimeError(f"pg_dump exited unsuccessfully: {stderr.strip()}")
+            if gzip.returncode != 0:
+                detail = (gzip_stderr or b"").decode(errors="replace").strip()
+                raise RuntimeError(f"gzip exited unsuccessfully: {detail}")
+            if not dump_file.is_file() or dump_file.stat().st_size == 0:
+                raise RuntimeError("pg_dump produced an empty backup")
 
         logger.info(
             "PostgreSQL backup: %s (%.1f MB)",
@@ -155,6 +160,7 @@ def _backup_postgres(backup_path: Path) -> None:
     except Exception as e:
         logger.error("PostgreSQL backup failed: %s", e)
         dump_file.unlink(missing_ok=True)
+        raise RuntimeError(f"PostgreSQL backup failed: {e}") from e
 
 
 def restore_backup(backup_dir: str) -> None:
@@ -245,13 +251,19 @@ def _restore_postgres(dump_file: Path) -> None:
         )
         gunzip.stdout.close()
         _, stderr = psql.communicate(timeout=300)
+        gunzip_code = gunzip.wait(timeout=30)
 
         if psql.returncode != 0:
-            logger.warning("psql restore warnings: %s", stderr.decode())
-        else:
-            logger.info("PostgreSQL restored")
+            raise RuntimeError(
+                f"psql exited unsuccessfully: {stderr.decode(errors='replace').strip()}"
+            )
+        if gunzip_code != 0:
+            detail = gunzip.stderr.read().decode(errors="replace").strip()
+            raise RuntimeError(f"gunzip exited unsuccessfully: {detail}")
+        logger.info("PostgreSQL restored")
     except Exception as e:
         logger.error("PostgreSQL restore failed: %s", e)
+        raise RuntimeError(f"PostgreSQL restore failed: {e}") from e
 
 
 def cleanup_old_backups(backup_dir: str, max_backups: int = 3) -> None:

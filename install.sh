@@ -1397,7 +1397,7 @@ main() {
     run_step      "Configuring services"         create_services
     run_soft_step "Installing TLS/security tools" setup_security_hardening
     run_soft_step "Configuring OTA updater"      setup_updater
-    run_soft_step "Installing support tooling"   setup_support_bundles
+    run_step      "Installing support tooling"   setup_support_bundles
     run_step      "Installing management CLI"    create_cli
     run_step      "Finalising installation"      finalize
     run_step      "Verifying appliance health"   verify_installation
