@@ -35,29 +35,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Require portal publishing configuration
+      - name: Require production signing configuration
         shell: pwsh
         env:
-          AUTO_PUBLISH: ${{ vars.ZENPLUS_AGENT_AUTO_PUBLISH }}
-          PORTAL_HOST: ${{ vars.ZENPLUS_AGENT_HOST }}
-          PORTAL_USER: ${{ vars.ZENPLUS_AGENT_USER }}
-          DEPLOYMENT_KEY: ${{ secrets.ZENPLUS_AGENT_SSH_PRIVATE_KEY }}
-          PUBLIC_HOST: ${{ vars.ZENTRYC_AGENT_RELEASE_HOST }}
-          PUBLIC_USER: ${{ vars.ZENTRYC_AGENT_RELEASE_USER }}
-          PUBLIC_DEPLOYMENT_KEY: ${{ secrets.ZENTRYC_AGENT_RELEASE_SSH_PRIVATE_KEY }}
           SIGNING_PFX: ${{ secrets.ZENPLUS_CODE_SIGNING_PFX_BASE64 }}
           SIGNING_PASSWORD: ${{ secrets.ZENPLUS_CODE_SIGNING_PFX_PASSWORD }}
         run: |
-          if ($env:AUTO_PUBLISH -ne 'true' -or
-              [string]::IsNullOrWhiteSpace($env:PORTAL_HOST) -or
-              [string]::IsNullOrWhiteSpace($env:PORTAL_USER) -or
-              [string]::IsNullOrWhiteSpace($env:DEPLOYMENT_KEY) -or
-              [string]::IsNullOrWhiteSpace($env:PUBLIC_HOST) -or
-              [string]::IsNullOrWhiteSpace($env:PUBLIC_USER) -or
-              [string]::IsNullOrWhiteSpace($env:PUBLIC_DEPLOYMENT_KEY) -or
-              [string]::IsNullOrWhiteSpace($env:SIGNING_PFX) -or
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX) -or
               [string]::IsNullOrWhiteSpace($env:SIGNING_PASSWORD)) {
-            throw "Production agent builds require portal/public publishing configuration and an Authenticode PFX. Configure the ZENPLUS_AGENT_*, ZENTRYC_AGENT_RELEASE_*, and ZENPLUS_CODE_SIGNING_* repository variables/secrets."
+            throw "Production agent builds require an Authenticode PFX. Configure the ZENPLUS_CODE_SIGNING_PFX_BASE64 and ZENPLUS_CODE_SIGNING_PFX_PASSWORD repository secrets."
           }
 
       - name: Import Authenticode certificate
@@ -135,14 +121,9 @@ jobs:
           --clobber
 
   publish-to-portal:
-    # The build job fails closed unless these repository variables and the
-    # deployment-key secret are configured, so a successful agent commit or
-    # release cannot silently omit the MSI from the portal.
-    # Agent-source commits publish the rebuilt package immediately; a GitHub
-    # release publishes the exact same verified artifact as a second path.
-    # The portal reconciles its package table from this directory on startup
-    # and whenever the fleet package list is opened; no manual publish call is
-    # required after the copy.
+    # Agent-source commits publish the rebuilt package when auto-publishing is
+    # explicitly enabled. Otherwise the signed build artifact remains
+    # available for a controlled/manual release path.
     if: >-
       vars.ZENPLUS_AGENT_AUTO_PUBLISH == 'true' &&
       (github.event_name == 'push' || github.event_name == 'release' ||
@@ -161,8 +142,12 @@ jobs:
         env:
           SSH_PRIVATE_KEY: ${{ secrets.ZENPLUS_AGENT_SSH_PRIVATE_KEY }}
           ZENPLUS_AGENT_HOST: ${{ vars.ZENPLUS_AGENT_HOST }}
+          ZENPLUS_AGENT_USER: ${{ vars.ZENPLUS_AGENT_USER }}
         run: |
           set -euo pipefail
+          test -n "$SSH_PRIVATE_KEY"
+          test -n "$ZENPLUS_AGENT_HOST"
+          test -n "$ZENPLUS_AGENT_USER"
           install -d -m 0700 ~/.ssh
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/zenplus-agent-release
           chmod 0600 ~/.ssh/zenplus-agent-release
@@ -229,8 +214,12 @@ jobs:
         env:
           SSH_PRIVATE_KEY: ${{ secrets.ZENTRYC_AGENT_RELEASE_SSH_PRIVATE_KEY }}
           RELEASE_HOST: ${{ vars.ZENTRYC_AGENT_RELEASE_HOST }}
+          RELEASE_USER: ${{ vars.ZENTRYC_AGENT_RELEASE_USER }}
         run: |
           set -euo pipefail
+          test -n "$SSH_PRIVATE_KEY"
+          test -n "$RELEASE_HOST"
+          test -n "$RELEASE_USER"
           install -d -m 0700 ~/.ssh
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/zentryc-agent-release
           chmod 0600 ~/.ssh/zentryc-agent-release

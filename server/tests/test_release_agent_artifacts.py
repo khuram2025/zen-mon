@@ -87,3 +87,17 @@ def test_stage_agent_artifacts_rejects_truncated_installer(tmp_path, monkeypatch
 
     with pytest.raises(RuntimeError, match="looks truncated"):
         builder.stage_agent_artifacts(build, artifacts)
+
+
+def test_apm_bundle_builder_accepts_go_from_ci_path():
+    script = (
+        Path(__file__).resolve().parents[2]
+        / "ZenPlus_Agent"
+        / "scripts"
+        / "prepare-apm-bundle.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "Get-Command go.exe" in script
+    assert "Get-Command go -ErrorAction SilentlyContinue" in script
+    assert 'throw "Go was not found in .tools\\go or PATH"' in script
+    assert "Portable Go toolchain is missing" not in script

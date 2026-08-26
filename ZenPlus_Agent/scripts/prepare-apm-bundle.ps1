@@ -9,7 +9,19 @@ $ErrorActionPreference = "Stop"
 $root = Resolve-Path "$PSScriptRoot\.."
 $cache = Join-Path $root ".tools\apm"
 $stage = Join-Path $cache "stage"
-$go = Join-Path $root ".tools\go\bin\go.exe"
+$portableGo = Join-Path $root ".tools\go\bin\go.exe"
+if (Test-Path $portableGo) {
+  $go = $portableGo
+} else {
+  $goCommand = Get-Command go.exe -ErrorAction SilentlyContinue
+  if ($null -eq $goCommand) {
+    $goCommand = Get-Command go -ErrorAction SilentlyContinue
+  }
+  if ($null -eq $goCommand) {
+    throw "Go was not found in .tools\go or PATH"
+  }
+  $go = $goCommand.Path
+}
 $python = $PythonPath
 if (-not $python) {
   $portablePython = Join-Path $root ".tools\python-nuget\package\tools\python.exe"
@@ -50,10 +62,6 @@ if (-not $python) {
   if (-not (Test-Path $python)) {
     throw "Pinned CPython build dependency did not contain tools\python.exe"
   }
-}
-
-if (-not (Test-Path $go)) {
-  throw "Portable Go toolchain is missing: $go"
 }
 
 function Get-VerifiedFile {
