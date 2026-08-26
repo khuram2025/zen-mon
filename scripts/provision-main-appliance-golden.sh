@@ -252,6 +252,23 @@ server {
         try_files $uri $uri/ /index.html;
     }
 
+    # BEGIN ZenPlus host-results ingest timeout
+    # Keep host inventory ingestion bounded independently of long-lived API
+    # endpoints. The API's own deadline responds before the agent times out.
+    location = /api/v1/agents/results/host {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 45s;
+        proxy_send_timeout 45s;
+    }
+    # END ZenPlus host-results ingest timeout
+
     location /api/ {
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;

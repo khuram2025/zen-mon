@@ -79,6 +79,16 @@ DEFAULT_UPLOAD_S = 60
 STALE_AFTER_HEARTBEATS = 3
 HOST_RESULTS_LEDGER_RETENTION_DAYS = 7
 HOST_RESULTS_LEDGER_CLEANUP_MODULUS = 256
+# Keep the application deadline comfortably below the current Windows agent's
+# 30-second HTTP timeout.  A timed-out transaction is rolled back, releasing
+# the batch claim so the same id can be retried safely.
+HOST_RESULTS_CLAIM_TIMEOUT_S = 5.0
+HOST_RESULTS_INGEST_TIMEOUT_S = 20.0
+# ``completed_at IS NULL`` rows should normally exist only inside an open
+# transaction.  This lease also recovers incomplete rows committed by older
+# releases or left behind by operational intervention.
+HOST_RESULTS_IN_PROGRESS_TTL_S = 60
+HOST_RESULTS_IN_PROGRESS_RETRY_AFTER_S = 5
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -1087,41 +1097,68 @@ async def post_results(
     # Claim the batch inside this transaction. PostgreSQL's unique constraint
     # makes concurrent retries wait for the first transaction to finish. Once
     # the first request commits, response-loss retries observe the recorded
-    # outcome and skip ClickHouse/inventory ingestion. PostgreSQL and
-    # ClickHouse are not atomic, so a crash can still replay an insert before
-    # this transaction commits; deterministic per-kind ClickHouse tokens and
-    # migrate-094's deduplication window make that replay idempotent.
+    # outcome and skip ClickHouse/inventory ingestion. A matching incomplete
+    # row older than the lease TTL can be reclaimed atomically; the WHERE
+    # predicate is re-evaluated after PostgreSQL obtains the conflicting row
+    # lock, so only one concurrent retry can reclaim it. PostgreSQL and
+    # ClickHouse are not atomic, so a crash or deadline can still replay an
+    # insert; deterministic per-kind ClickHouse tokens and migrate-094's
+    # deduplication window make that replay idempotent.
     payload_sha256 = _host_results_batch_digest(data)
-    claimed = (await db.execute(
-        text("""
-            INSERT INTO agent_host_result_batches
-                (agent_id, batch_id, server_id, payload_sha256,
-                 sequence_start, sequence_end)
-            VALUES (:aid, :bid, :sid, :payload, :seq_start, :seq_end)
-            ON CONFLICT (agent_id, batch_id) DO NOTHING
-            RETURNING 1
-        """),
-        {
-            "aid": agent["id"], "bid": batch_id, "sid": server_id,
-            "payload": payload_sha256,
-            "seq_start": data.sequence_start, "seq_end": data.sequence_end,
-        },
-    )).first()
+    try:
+        claim_result = await asyncio.wait_for(
+            db.execute(
+                text("""
+                    INSERT INTO agent_host_result_batches
+                        (agent_id, batch_id, server_id, payload_sha256,
+                         sequence_start, sequence_end)
+                    VALUES (:aid, :bid, :sid, :payload, :seq_start, :seq_end)
+                    ON CONFLICT (agent_id, batch_id) DO UPDATE
+                    SET created_at = NOW()
+                    WHERE agent_host_result_batches.completed_at IS NULL
+                      AND agent_host_result_batches.created_at
+                            < NOW() - make_interval(secs => :stale_seconds)
+                      AND agent_host_result_batches.server_id = EXCLUDED.server_id
+                      AND agent_host_result_batches.payload_sha256 = EXCLUDED.payload_sha256
+                    RETURNING 1
+                """),
+                {
+                    "aid": agent["id"], "bid": batch_id, "sid": server_id,
+                    "payload": payload_sha256,
+                    "seq_start": data.sequence_start,
+                    "seq_end": data.sequence_end,
+                    "stale_seconds": HOST_RESULTS_IN_PROGRESS_TTL_S,
+                },
+            ),
+            timeout=HOST_RESULTS_CLAIM_TIMEOUT_S,
+        )
+    except TimeoutError as exc:
+        # A retry can block on the unique key while the original transaction
+        # is still ingesting. Bound that wait independently so it cannot
+        # inherit nginx's broad /api timeout.
+        await db.rollback()
+        logger.warning(
+            "host-results claim deadline exceeded agent=%s batch=%s timeout_s=%s",
+            agent["id"], batch_id, HOST_RESULTS_CLAIM_TIMEOUT_S,
+        )
+        raise HTTPException(
+            503,
+            "Host-results batch claim is busy; retry the same batch",
+            headers={"Retry-After": "2"},
+        ) from exc
+    claimed = claim_result.first()
 
     if not claimed:
         existing = (await db.execute(
             text("""
                 SELECT server_id, payload_sha256, accepted, rejected, errors,
-                       completed_at
+                       created_at, completed_at
                 FROM agent_host_result_batches
                 WHERE agent_id = :aid AND batch_id = :bid
             """),
             {"aid": agent["id"], "bid": batch_id},
         )).mappings().first()
-        if not existing or existing.get("completed_at") is None:
-            await db.rollback()
-            raise HTTPException(409, "host-results batch is still being processed")
-        if (
+        if existing and (
             str(existing.get("server_id")) != str(server_id)
             or not hmac.compare_digest(
                 str(existing.get("payload_sha256") or ""), payload_sha256,
@@ -1129,6 +1166,15 @@ async def post_results(
         ):
             await db.rollback()
             raise HTTPException(409, "batch_id was already used for a different payload")
+        if not existing or existing.get("completed_at") is None:
+            await db.rollback()
+            raise HTTPException(
+                409,
+                "host-results batch is still being processed; retry later",
+                headers={
+                    "Retry-After": str(HOST_RESULTS_IN_PROGRESS_RETRY_AFTER_S),
+                },
+            )
 
         accepted_before = max(0, int(existing.get("accepted") or 0))
         rejected_before = max(0, int(existing.get("rejected") or 0))
@@ -1147,9 +1193,27 @@ async def post_results(
         )
 
     try:
-        accepted, rejected, errors, clock_skew_s = await ingest_host_metric_batch(
-            str(agent["id"]), str(server_id), data, db,
+        accepted, rejected, errors, clock_skew_s = await asyncio.wait_for(
+            ingest_host_metric_batch(
+                str(agent["id"]), str(server_id), data, db,
+            ),
+            timeout=HOST_RESULTS_INGEST_TIMEOUT_S,
         )
+    except TimeoutError as exc:
+        # The ledger claim is part of this transaction, so rollback makes the
+        # same batch id immediately claimable. A ClickHouse worker thread may
+        # finish after cancellation; its stable deduplication token makes the
+        # subsequent replay harmless.
+        await db.rollback()
+        logger.warning(
+            "host-results ingest deadline exceeded agent=%s batch=%s timeout_s=%s",
+            agent["id"], batch_id, HOST_RESULTS_INGEST_TIMEOUT_S,
+        )
+        raise HTTPException(
+            503,
+            "Host telemetry processing timed out; retry the same batch",
+            headers={"Retry-After": "2"},
+        ) from exc
     except HostMetricStorageError as exc:
         # Do not finalize the durable ledger or acknowledge the batch. The
         # Windows agent retains it in its spool on 503 and can replay it after

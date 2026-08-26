@@ -939,6 +939,16 @@ def build_package(version: str, changelog: str, severity: str,
             "timeout": 120,
         })
 
+    # Host-results ingestion must not inherit the generic API's day-long nginx
+    # timeout. Reconcile the active site after applying code while preserving
+    # each appliance's existing HTTP/HTTPS and certificate configuration.
+    if (Path(build_dir) / "code" / "scripts" / "setup-nginx-ingest.sh").exists():
+        steps.append({
+            "type": "run_hook",
+            "script": "code/scripts/setup-nginx-ingest.sh",
+            "timeout": 120,
+        })
+
     # Best-effort GeoIP provisioning (Phase 2b). fetch-geoip.py always exits 0
     # and skips when the current month's DB is already present, so a download
     # failure (no route to db-ip.com) never fails or delays the OTA update.
