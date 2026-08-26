@@ -2,7 +2,8 @@
 # ============================================================================
 # ZenPlus Tech-Support Bundle Setup
 #
-# Installs the systemd unit, sudoers grant, and runtime directories that the
+# Installs the unprivileged systemd queue worker, cleanup timer, and runtime
+# directories that the
 # Support tab in the dashboard uses to generate diagnostic bundles.
 #
 # Run this once per appliance, after the OTA updater is in place.
@@ -10,7 +11,8 @@
 # ============================================================================
 set -e
 
-ZENPLUS_DIR="/opt/zenplus"
+ZENPLUS_DIR="${ZENPLUS_DIR:-/opt/zenplus}"
+ZENPLUS_SOURCE_DIR="${ZENPLUS_SOURCE_DIR:-${ZENPLUS_DIR}}"
 VENV="${ZENPLUS_DIR}/venv"
 SUPPORT_DIR="${ZENPLUS_DIR}/support"
 GREEN='\033[0;32m'
@@ -35,17 +37,26 @@ echo ""
 
 # ─── 1. Runtime directories ──────────────────────────────────────────────────
 log "Creating runtime directories ..."
+for runtime_dir in \
+    "${SUPPORT_DIR}/requests" \
+    "${SUPPORT_DIR}/jobs" \
+    "${SUPPORT_DIR}/bundles"; do
+    if [ -L "${runtime_dir}" ]; then
+        err "refusing symlinked support runtime directory: ${runtime_dir}"
+        exit 1
+    fi
+done
 mkdir -p \
     "${SUPPORT_DIR}/requests" \
     "${SUPPORT_DIR}/jobs" \
     "${SUPPORT_DIR}/bundles"
 
-# requests + jobs are written by the API (zenplus user). bundles are written
-# by the worker (root) and need to be readable by the zenplus group so the
-# API process can stream the file.
+# The API, worker, and cleanup task all run as zenplus. Keeping the worker
+# unprivileged is essential because the application tree and venv are also
+# owned by that account on standard installations.
 if getent group zenplus >/dev/null 2>&1; then
-    chown -R zenplus:zenplus "${SUPPORT_DIR}/requests" "${SUPPORT_DIR}/jobs"
-    chown root:zenplus "${SUPPORT_DIR}/bundles"
+    chown -R zenplus:zenplus \
+        "${SUPPORT_DIR}/requests" "${SUPPORT_DIR}/jobs" "${SUPPORT_DIR}/bundles"
     chmod 0750 "${SUPPORT_DIR}/requests" "${SUPPORT_DIR}/jobs" "${SUPPORT_DIR}/bundles"
 else
     warn "zenplus group missing — leaving ownership unchanged"
@@ -53,77 +64,53 @@ fi
 
 # ─── 2. Systemd units ────────────────────────────────────────────────────────
 log "Installing systemd units ..."
-cp "${ZENPLUS_DIR}/updater/systemd/zenplus-support-bundle@.service"   /etc/systemd/system/
-cp "${ZENPLUS_DIR}/updater/systemd/zenplus-support-cleanup.service"   /etc/systemd/system/
-cp "${ZENPLUS_DIR}/updater/systemd/zenplus-support-cleanup.timer"     /etc/systemd/system/
+install -o root -g root -m 0644 \
+    "${ZENPLUS_SOURCE_DIR}/updater/systemd/zenplus-support-dispatch.service" \
+    /etc/systemd/system/zenplus-support-dispatch.service
+install -o root -g root -m 0644 \
+    "${ZENPLUS_SOURCE_DIR}/updater/systemd/zenplus-support-queue.path" \
+    /etc/systemd/system/zenplus-support-queue.path
+install -o root -g root -m 0644 \
+    "${ZENPLUS_SOURCE_DIR}/updater/systemd/zenplus-support-cleanup.service" \
+    /etc/systemd/system/zenplus-support-cleanup.service
+install -o root -g root -m 0644 \
+    "${ZENPLUS_SOURCE_DIR}/updater/systemd/zenplus-support-cleanup.timer" \
+    /etc/systemd/system/zenplus-support-cleanup.timer
 
-# ─── 3. Sudoers grant (validated) ────────────────────────────────────────────
-SUDOERS_FILE="/etc/sudoers.d/zenplus-support"
-SUDOERS_TMP="$(mktemp)"
-cat > "${SUDOERS_TMP}" <<'EOF'
-# Allow the zenplus user to start support-bundle worker instances without a
-# password. The instance name (after the @) is a UUID validated by the worker
-# itself, so the wildcard cannot escape /opt/zenplus/support/.
-zenplus ALL=(root) NOPASSWD: /bin/systemctl start zenplus-support-bundle@*.service
-zenplus ALL=(root) NOPASSWD: /bin/systemctl --no-block start zenplus-support-bundle@*.service
-EOF
-chmod 0440 "${SUDOERS_TMP}"
-
-if visudo -cf "${SUDOERS_TMP}" >/dev/null; then
-    mv "${SUDOERS_TMP}" "${SUDOERS_FILE}"
-    log "Installed sudoers grant: ${SUDOERS_FILE}"
-else
-    err "sudoers syntax invalid — refusing to install"
-    rm -f "${SUDOERS_TMP}"
+# ─── 3. Stable unprivileged dispatcher + legacy-grant removal ───────────────
+DISPATCH_SRC="${ZENPLUS_SOURCE_DIR}/scripts/zenplus-support-dispatch"
+DISPATCH_DST="/usr/local/libexec/zenplus-support-dispatch"
+if [ ! -f "${DISPATCH_SRC}" ]; then
+    err "support dispatcher missing: ${DISPATCH_SRC}"
     exit 1
 fi
+install -d -o root -g root -m 0755 /usr/local/libexec
+install -o root -g root -m 0755 "${DISPATCH_SRC}" "${DISPATCH_DST}"
 
-# ─── 4. Polkit rule for the API process (mirrors updater pattern) ────────────
-log "Installing polkit rule ..."
-POLKIT_VER=$(pkaction --version 2>/dev/null | grep -oP '[\d.]+' || echo "0.0")
-POLKIT_MINOR=$(echo "$POLKIT_VER" | cut -d. -f2)
+# Remove grants shipped by older releases. The legacy .pkla form allowed the
+# service account to manage every systemd unit and must not survive upgrades.
+systemctl stop 'zenplus-support-bundle@*.service' 2>/dev/null || true
+rm -f \
+    /etc/systemd/system/zenplus-support-bundle@.service \
+    /etc/sudoers.d/zenplus-support \
+    /usr/local/libexec/zenplus-support-start \
+    /etc/polkit-1/rules.d/51-zenplus-support.rules \
+    /etc/polkit-1/localauthority/50-local.d/zenplus-support.pkla
 
-if [ "${POLKIT_MINOR:-0}" -ge 106 ] 2>/dev/null; then
-    mkdir -p /etc/polkit-1/rules.d
-    cat > /etc/polkit-1/rules.d/51-zenplus-support.rules <<'EOF'
-// Allow the zenplus user to start support-bundle worker instances without
-// being prompted by polkit. The @<uuid> is validated by the worker.
-polkit.addRule(function(action, subject) {
-    if (action.id == "org.freedesktop.systemd1.manage-units" &&
-        subject.user == "zenplus") {
-        var unit = action.lookup("unit");
-        if (unit && unit.indexOf("zenplus-support-bundle@") === 0) {
-            return polkit.Result.YES;
-        }
-    }
-});
-EOF
-    log "Installed .rules (polkit >= 0.106)"
-else
-    mkdir -p /etc/polkit-1/localauthority/50-local.d
-    cat > /etc/polkit-1/localauthority/50-local.d/zenplus-support.pkla <<'EOF'
-[zenplus support bundle]
-Identity=unix-user:zenplus
-Action=org.freedesktop.systemd1.manage-units
-ResultActive=yes
-EOF
-    log "Installed .pkla (polkit < 0.106)"
-fi
-systemctl restart polkit 2>/dev/null || true
-
-# ─── 5. Reload + enable cleanup timer ────────────────────────────────────────
+# ─── 4. Reload + enable queue watcher and cleanup timer ─────────────────────
 log "Reloading systemd ..."
 systemctl daemon-reload
-systemctl enable zenplus-support-cleanup.timer
-systemctl restart zenplus-support-cleanup.timer
+systemctl enable --now zenplus-support-queue.path
+systemctl enable --now zenplus-support-cleanup.timer
 
-# ─── 6. Verify ───────────────────────────────────────────────────────────────
+# ─── 5. Verify ───────────────────────────────────────────────────────────────
 echo ""
 log "Verifying ..."
 for path in \
-    /etc/systemd/system/zenplus-support-bundle@.service \
+    /etc/systemd/system/zenplus-support-dispatch.service \
+    /etc/systemd/system/zenplus-support-queue.path \
     /etc/systemd/system/zenplus-support-cleanup.timer \
-    "${SUDOERS_FILE}" \
+    "${DISPATCH_DST}" \
     "${SUPPORT_DIR}/requests" \
     "${SUPPORT_DIR}/jobs" \
     "${SUPPORT_DIR}/bundles"; do

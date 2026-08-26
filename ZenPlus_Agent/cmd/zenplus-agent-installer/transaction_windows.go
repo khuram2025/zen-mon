@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -231,8 +232,10 @@ func (transaction *installDirectoryTransaction) CleanupBackup() error {
 }
 
 type agentServiceState struct {
-	Exists       bool
-	InitialState svc.State
+	Exists         bool
+	InitialState   svc.State
+	Config         mgr.Config
+	ConfigCaptured bool
 }
 
 func quiesceAgentService() (agentServiceState, error) {
@@ -253,7 +256,11 @@ func quiesceAgentService() (agentServiceState, error) {
 	if err != nil {
 		return agentServiceState{}, fmt.Errorf("query service: %w", err)
 	}
-	state := agentServiceState{Exists: true, InitialState: status.State}
+	serviceConfig, err := service.Config()
+	if err != nil {
+		return agentServiceState{}, fmt.Errorf("read service configuration: %w", err)
+	}
+	state := agentServiceState{Exists: true, InitialState: status.State, Config: serviceConfig, ConfigCaptured: true}
 	if err := stopOpenedService(service, 45*time.Second); err != nil {
 		return state, fmt.Errorf("stop service safely: %w", err)
 	}
@@ -304,6 +311,11 @@ func resumeExistingAgentService(state agentServiceState) error {
 	if err != nil {
 		return fmt.Errorf("query preserved service: %w", err)
 	}
+	if state.ConfigCaptured {
+		if err := service.UpdateConfig(state.Config); err != nil {
+			return fmt.Errorf("restore preserved service configuration: %w", err)
+		}
+	}
 	if status.State != svc.Running && status.State != svc.Paused {
 		if err := service.Start(); err != nil {
 			return fmt.Errorf("restart preserved service: %w", err)
@@ -321,6 +333,23 @@ func resumeExistingAgentService(state agentServiceState) error {
 		}
 	}
 	return nil
+}
+
+func serviceStateForInstalledPayload(state agentServiceState, l layout) agentServiceState {
+	if !state.Exists || !state.ConfigCaptured {
+		return state
+	}
+	next := state
+	next.Config.BinaryPathName = strings.Join([]string{
+		syscall.EscapeArg(filepath.Join(l.InstallDir, "zenplus-agent.exe")),
+		"service",
+		"--config",
+		syscall.EscapeArg(l.ConfigPath),
+	}, " ")
+	next.Config.StartType = mgr.StartAutomatic
+	next.Config.DisplayName = productName
+	next.Config.Description = "Collects Windows host telemetry and uploads it to the ZenPlus controller."
+	return next
 }
 
 func quiesceManagedTargetsForRollback(serviceTargets, poolTargets []string) error {

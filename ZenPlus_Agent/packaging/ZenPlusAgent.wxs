@@ -26,6 +26,7 @@
     <Property Id="ARPHELPLINK" Value="https://zentryc.com/contact/" />
     <Property Id="ARPCONTACT" Value="support@zentryc.com" />
     <Property Id="CONTROLLER_URL" Secure="yes" />
+    <Property Id="CONTROLLER_CA_FILE" Secure="yes" />
     <Property Id="INSTALL_PROFILE" Secure="yes" />
     <Property Id="PURGE" Secure="yes" />
     <Property Id="InstallViaExe" Hidden="yes" />
@@ -40,7 +41,7 @@
 
     <SetProperty
       Id="InstallViaExe"
-      Value="/machine /quiet /norestart /managed-by-msi CONTROLLER_URL=&quot;[CONTROLLER_URL]&quot; INSTALL_PROFILE=&quot;[INSTALL_PROFILE]&quot;"
+      Value="/machine /quiet /norestart /managed-by-msi CONTROLLER_URL=&quot;[CONTROLLER_URL]&quot; CONTROLLER_CA_FILE=&quot;[CONTROLLER_CA_FILE]&quot; INSTALL_PROFILE=&quot;[INSTALL_PROFILE]&quot;"
       Sequence="execute"
       Before="InstallViaExe">NOT REMOVE</SetProperty>
     <SetProperty

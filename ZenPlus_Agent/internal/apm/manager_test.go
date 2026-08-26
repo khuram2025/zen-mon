@@ -31,6 +31,56 @@ func TestIISConfigurationScriptLoadsAdministrationAssemblyFromIIS(t *testing.T) 
 	}
 }
 
+func TestTransientAPMFailureDoesNotIncrementInstrumentationFailures(t *testing.T) {
+	m := New(agentruntime.NewPaths(t.TempDir()), func(string, ...any) {})
+	m.status.Failed = 2
+
+	m.setFailure("active", "runtime discovery report failed: temporary appliance outage")
+
+	status := m.Snapshot()
+	if status.Failed != 2 {
+		t.Fatalf("transient failure changed instrumentation failure count: got %d want 2", status.Failed)
+	}
+	if status.LastError == "" || status.State != "active" {
+		t.Fatalf("transient failure was not surfaced through state/error: %#v", status)
+	}
+}
+
+func TestCountInstrumentationFailuresUsesUniquePersistedTargets(t *testing.T) {
+	state := instrumentationState{Targets: map[string]instrumentationTarget{
+		"iis:one": {LastError: "first failure"},
+		"iis:two": {LastError: " second failure "},
+		"iis:ok":  {LastError: ""},
+	}}
+	if failed := countInstrumentationFailures(state); failed != 2 {
+		t.Fatalf("instrumentation failure count = %d; want 2", failed)
+	}
+}
+
+func TestClearInactiveInstrumentationFailureRemovesFailureOnlyTarget(t *testing.T) {
+	paths := agentruntime.NewPaths(t.TempDir())
+	if err := paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	m := New(paths, func(string, ...any) {})
+	state := instrumentationState{Version: 1, Targets: map[string]instrumentationTarget{
+		"iis_app_pool:defaultapppool": {
+			TargetKind: "iis_app_pool", TargetName: "DefaultAppPool",
+			LastError: "temporary activation failure",
+		},
+	}}
+	if err := writeInstrumentationState(paths.APMInstrumentationState, state); err != nil {
+		t.Fatal(err)
+	}
+	request := InstrumentationRequest{TargetKind: "iis_app_pool", TargetName: "DefaultAppPool"}
+	if err := m.clearInactiveInstrumentationFailure(request); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.loadInstrumentationState(); len(got.Targets) != 0 {
+		t.Fatalf("failure-only target was not removed: %#v", got.Targets)
+	}
+}
+
 func TestCollectorConfigUsesLoopbackAndProtectedEnvironmentCredential(t *testing.T) {
 	paths := agentruntime.NewPaths(t.TempDir())
 	if err := paths.Ensure(); err != nil {
@@ -116,6 +166,53 @@ func TestCollectorConfigUsesLoopbackAndProtectedEnvironmentCredential(t *testing
 	}
 	if !changed || replacementFingerprint == fingerprint {
 		t.Fatalf("replacement config changed=%v fingerprint=%q", changed, replacementFingerprint)
+	}
+}
+
+func TestCollectorConfigUsesExplicitControllerCABundle(t *testing.T) {
+	paths := agentruntime.NewPaths(t.TempDir())
+	if err := paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	m := New(paths, func(string, ...any) {})
+	cfg := config.Default()
+	cfg.ControllerURL = "https://192.168.8.221"
+	cfg.Security.ControllerCAFile = filepath.Join(t.TempDir(), "controller-ca.pem")
+	if err := os.WriteFile(cfg.Security.ControllerCAFile, []byte("test CA bundle"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	firstFingerprint, _, err := m.ensureConfig(cfg, "agent-id", "server-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(paths.APMConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Exporters map[string]struct {
+			TLS struct {
+				InsecureSkipVerify bool   `yaml:"insecure_skip_verify"`
+				CAFile             string `yaml:"ca_file"`
+			} `yaml:"tls"`
+		} `yaml:"exporters"`
+	}
+	if err := yaml.Unmarshal(body, &document); err != nil {
+		t.Fatal(err)
+	}
+	tls := document.Exporters["otlp_http/zenplus"].TLS
+	if tls.InsecureSkipVerify || tls.CAFile != cfg.Security.ControllerCAFile {
+		t.Fatalf("gateway TLS config = %#v", tls)
+	}
+	if err := os.WriteFile(cfg.Security.ControllerCAFile, []byte("rotated CA bundle"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rotatedFingerprint, changed, err := m.ensureConfig(cfg, "agent-id", "server-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || rotatedFingerprint == firstFingerprint {
+		t.Fatal("in-place controller CA rotation did not restart the APM configuration")
 	}
 }
 

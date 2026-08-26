@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -68,6 +69,9 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) Enqueue(batchID string, payload []byte, maxBytes int64) (uint64, error) {
+	if maxBytes > 0 && int64(len(payload)) > maxBytes {
+		return 0, fmt.Errorf("payload size %d exceeds spool limit %d", len(payload), maxBytes)
+	}
 	var seq uint64
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		meta := tx.Bucket(bucketMeta)

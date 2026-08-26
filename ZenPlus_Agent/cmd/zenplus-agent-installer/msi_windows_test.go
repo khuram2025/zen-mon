@@ -21,6 +21,10 @@ func TestMSIInvokesSetupForInstallAndRepair(t *testing.T) {
 	if !strings.Contains(wxs, `<Property Id="CONTROLLER_URL" Secure="yes" />`) {
 		t.Fatal("MSI must expose a secure CONTROLLER_URL property")
 	}
+	if !strings.Contains(wxs, `<Property Id="CONTROLLER_CA_FILE" Secure="yes" />`) ||
+		!strings.Contains(wxs, `CONTROLLER_CA_FILE=&quot;[CONTROLLER_CA_FILE]&quot;`) {
+		t.Fatal("MSI must securely forward the optional controller CA bundle")
+	}
 	if !strings.Contains(wxs, `<Property Id="INSTALL_PROFILE" Secure="yes" />`) {
 		t.Fatal("MSI must expose a secure INSTALL_PROFILE property")
 	}
@@ -65,5 +69,21 @@ func TestInstallerIncludesNuGetPlaceholderFilesAndVerifiesBuiltPayload(t *testin
 	}
 	if !strings.Contains(strings.ReplaceAll(string(buildSource), "\r\n", "\n"), `@("/verify-payload", "/quiet")`) {
 		t.Fatal("build must execute the finished setup's embedded-payload verification gate")
+	}
+}
+
+func TestLegacyMSICleanupRunsOnlyAfterInstallCommit(t *testing.T) {
+	mainSource, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := strings.ReplaceAll(string(mainSource), "\r\n", "\n")
+	commit := strings.Index(source, "transactionComplete = true")
+	cleanup := strings.Index(source, "removeLegacyMSIRegistrations(opts, logStep)")
+	if commit < 0 || cleanup < 0 || cleanup < commit {
+		t.Fatal("legacy MSI ownership must be removed only after the replacement install is committed")
+	}
+	if strings.Count(source, "removeLegacyMSIRegistrations(opts, logStep)") != 1 {
+		t.Fatal("install should have exactly one committed legacy MSI cleanup point")
 	}
 }

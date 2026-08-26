@@ -8,10 +8,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/windows/svc/mgr"
+
 	"zenplus-agent/internal/config"
+	"zenplus-agent/internal/identity"
 )
 
 func TestParseOptionsVerifyPayload(t *testing.T) {
@@ -21,6 +25,99 @@ func TestParseOptionsVerifyPayload(t *testing.T) {
 	}
 	if !opts.verifyPayload || !opts.quiet {
 		t.Fatalf("verification options = %#v", opts)
+	}
+}
+
+func TestParseOptionsControllerCAFile(t *testing.T) {
+	want := `C:\ProgramData\ZenPlus\Agent\trust\controller-ca.pem`
+	opts, err := parseOptions([]string{"/quiet", "CONTROLLER_CA_FILE=" + want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.controllerCA != want {
+		t.Fatalf("controller CA file = %q, want %q", opts.controllerCA, want)
+	}
+}
+
+func TestStandaloneUpgradeRemovesEveryRelatedLegacyMSIOnce(t *testing.T) {
+	oldEnumerate := enumerateRelatedMSIProducts
+	oldUninstall := uninstallLegacyMSIProduct
+	defer func() {
+		enumerateRelatedMSIProducts = oldEnumerate
+		uninstallLegacyMSIProduct = oldUninstall
+	}()
+	first := `{2F1EF7B7-1111-4222-8333-444444444444}`
+	second := `{D0423DB6-AAAA-4BBB-8CCC-DDDDDDDDDDDD}`
+	enumerateRelatedMSIProducts = func() ([]string, error) {
+		return []string{second, strings.ToLower(first), first}, nil
+	}
+	var removed []string
+	uninstallLegacyMSIProduct = func(product string) error {
+		removed = append(removed, product)
+		return nil
+	}
+
+	if err := removeLegacyMSIRegistrations(options{}, func(options, string, ...any) {}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{first, second}
+	if !reflect.DeepEqual(removed, want) {
+		t.Fatalf("removed MSI products = %v, want %v", removed, want)
+	}
+}
+
+func TestMSIManagedUpgradeDoesNotReenterWindowsInstaller(t *testing.T) {
+	oldEnumerate := enumerateRelatedMSIProducts
+	defer func() { enumerateRelatedMSIProducts = oldEnumerate }()
+	called := false
+	enumerateRelatedMSIProducts = func() ([]string, error) {
+		called = true
+		return nil, nil
+	}
+
+	if err := removeLegacyMSIRegistrations(options{managedByMSI: true}, func(options, string, ...any) {}); err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("MSI embedded setup recursively enumerated Windows Installer products")
+	}
+}
+
+func TestLegacyMSIRemovalIsMarkedAsNonDestructiveUpgrade(t *testing.T) {
+	product := `{09F731E5-1111-4222-8333-444444444444}`
+	args := legacyMSIUninstallArgs(product)
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "/x "+product) ||
+		!strings.Contains(joined, "UPGRADINGPRODUCTCODE="+agentMSIUpgradeCode) {
+		t.Fatalf("unsafe legacy MSI removal command: %q", joined)
+	}
+	if strings.Contains(strings.ToUpper(joined), "PURGE") {
+		t.Fatalf("legacy MSI removal would purge ProgramData: %q", joined)
+	}
+}
+
+func TestExistingServiceIsReboundToCurrentPayloadDuringUpgrade(t *testing.T) {
+	l := testLayout(t)
+	l.InstallDir = filepath.Join(t.TempDir(), "Program Files", "ZenPlus", "Agent")
+	before := agentServiceState{
+		Exists:         true,
+		ConfigCaptured: true,
+		Config: mgr.Config{
+			BinaryPathName: `C:\ProgramData\ZenPlus\Agent\bin\zenplus-agent.exe service --config old.yaml`,
+			StartType:      mgr.StartManual,
+		},
+	}
+
+	after := serviceStateForInstalledPayload(before, l)
+	if !strings.Contains(after.Config.BinaryPathName, filepath.Join(l.InstallDir, "zenplus-agent.exe")) ||
+		!strings.Contains(after.Config.BinaryPathName, l.ConfigPath) {
+		t.Fatalf("upgraded service still targets a legacy payload: %q", after.Config.BinaryPathName)
+	}
+	if after.Config.StartType != mgr.StartAutomatic {
+		t.Fatalf("upgraded service start type = %d, want automatic", after.Config.StartType)
+	}
+	if before.Config.StartType != mgr.StartManual || strings.Contains(before.Config.BinaryPathName, l.InstallDir) {
+		t.Fatal("service-state migration mutated the rollback snapshot")
 	}
 }
 
@@ -157,6 +254,78 @@ func TestWriteInstalledConfigRepairsBrokenCombinedProfileWithoutMSIOverride(t *t
 		t.Fatal(err)
 	}
 	assertInfrastructureCollectorsEnabled(t, got)
+}
+
+func TestWriteInstalledConfigRemovesLegacyRegistrationIDs(t *testing.T) {
+	l := testLayout(t)
+	cfg := config.Default()
+	cfg.AgentID = "agt_stale"
+	cfg.ServerID = "srv_stale"
+	cfg.PolicyID = "policy_stale"
+	if err := config.Save(l.ConfigPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeInstalledConfig(l, options{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.LoadForEdit(l.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AgentID != "" || got.ServerID != "" || got.PolicyID != "" {
+		t.Fatalf("legacy appliance registration fields survived upgrade: agent=%q server=%q policy=%q", got.AgentID, got.ServerID, got.PolicyID)
+	}
+}
+
+func TestUpgradePersistsLegacyRegistrationIDsBeforeConfigSanitization(t *testing.T) {
+	l := testLayout(t)
+	cfg := config.Default()
+	cfg.AgentID = "agt_legacy"
+	cfg.ServerID = "srv_legacy"
+	if err := config.Save(l.ConfigPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	identityPath := filepath.Join(l.DataDir, "state", "identity.json")
+	if err := os.MkdirAll(filepath.Dir(identityPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := preserveLegacyConfigIdentity(l.ConfigPath, identityPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeInstalledConfig(l, options{}); err != nil {
+		t.Fatal(err)
+	}
+
+	persisted, _, err := identity.LoadOrCreate(identityPath, "agt_stale", "srv_stale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.AgentID != cfg.AgentID || persisted.ServerID != cfg.ServerID {
+		t.Fatalf("legacy registration was not preserved: agent=%q server=%q", persisted.AgentID, persisted.ServerID)
+	}
+	installed, err := config.LoadForEdit(l.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installed.AgentID != "" || installed.ServerID != "" {
+		t.Fatalf("legacy config IDs survived sanitization: %#v", installed)
+	}
+}
+
+func TestWriteInstalledConfigAppliesExplicitControllerCAFile(t *testing.T) {
+	l := testLayout(t)
+	caFile := filepath.Join(l.DataDir, "trust", "controller-ca.pem")
+	if err := writeInstalledConfig(l, options{controllerCA: caFile}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.LoadForEdit(l.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Security.ControllerCAFile != caFile || !got.VerifyTLS {
+		t.Fatalf("installed TLS trust config = ca:%q verify:%v", got.Security.ControllerCAFile, got.VerifyTLS)
+	}
 }
 
 func TestValidateEmbeddedPayloadsRequiresCompleteServerAndAPMBundle(t *testing.T) {

@@ -52,7 +52,11 @@ func (u *Uploader) Drain(ctx context.Context, limit int) (int, error) {
 	for _, rec := range records {
 		var batch model.Batch
 		if err := json.Unmarshal(rec.Payload, &batch); err != nil {
-			return len(acked), err
+			// A record already persisted locally cannot become valid on retry. Drop
+			// it so one corrupt/legacy payload cannot permanently block the FIFO
+			// and every newer telemetry batch behind it.
+			acked = append(acked, rec.Key)
+			continue
 		}
 		if !u.isUploadableBatch(batch) {
 			acked = append(acked, rec.Key)

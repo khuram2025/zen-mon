@@ -145,6 +145,56 @@ def _json_object(v: Any) -> dict:
     return {}
 
 
+def _apm_status_with_binding(row: dict) -> dict:
+    """Merge controller-owned credential readiness into agent self-status."""
+    status = _json_object(row.get("apm_status"))
+    bound = bool(row.get("apm_credential_bound"))
+    status["credential_bound"] = bound
+    if status.get("enabled") is True:
+        gateway = status.get("gateway") if isinstance(status.get("gateway"), dict) else {}
+        status["ready"] = bool(bound and gateway.get("healthy"))
+        status["readiness"] = "ready" if status["ready"] else (
+            "gateway_unhealthy" if bound else "missing_credential"
+        )
+        if not bound and not status.get("last_error"):
+            status["last_error"] = (
+                "Agent-scoped APM ingest credential is missing; "
+                "the agent must re-enroll its APM forwarder"
+            )
+    elif status.get("enabled") is False:
+        status["ready"] = False
+        status["readiness"] = "disabled"
+    else:
+        status["ready"] = False
+        status["readiness"] = "not_reported"
+    return status
+
+
+def _host_telemetry_readiness(
+    latest: dict[str, dict], freshness: dict[str, int],
+) -> dict[str, dict]:
+    """Describe CPU/memory availability separately from agent connectivity."""
+    output = {}
+    for server_id, freshness_s in freshness.items():
+        present = latest.get(server_id, {})
+        missing = [
+            signal for signal, field in (("cpu", "cpu_pct"), ("memory", "memory_pct"))
+            if field not in present
+        ]
+        output[server_id] = {
+            "state": (
+                "ready" if not missing
+                else "missing" if len(missing) == 2
+                else "partial"
+            ),
+            "available": not missing,
+            "required_signals": ["cpu", "memory"],
+            "missing_signals": missing,
+            "freshness_seconds": freshness_s,
+        }
+    return output
+
+
 async def _server_agent_freshness_seconds(
     server_id: UUID,
     db: AsyncSession,
@@ -232,6 +282,8 @@ def _server_row_to_response(row: dict) -> ServerResponse:
         agent_status=row.get("agent_status"),
         agent_version=row.get("agent_version"),
         agent_last_heartbeat_at=row.get("agent_last_heartbeat_at"),
+        agent_last_metric_at=row.get("agent_last_metric_at"),
+        agent_clock_skew_s=row.get("agent_clock_skew_s") or 0,
         agent_capabilities=[str(v) for v in _json_list(row.get("agent_capabilities"))],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -350,11 +402,14 @@ async def list_servers(
         SELECT s.*, st.name AS site_name,
                a.id AS agent_id, a.status AS agent_status, a.version AS agent_version,
                a.last_heartbeat_at AS agent_last_heartbeat_at,
+               a.last_metric_at AS agent_last_metric_at,
+               a.clock_skew_s AS agent_clock_skew_s,
                a.capabilities AS agent_capabilities
         FROM servers s
         LEFT JOIN sites st ON st.id = s.site_id
         LEFT JOIN LATERAL (
-            SELECT id, status, version, last_heartbeat_at, capabilities FROM agents
+            SELECT id, status, version, last_heartbeat_at, last_metric_at,
+                   clock_skew_s, capabilities FROM agents
             WHERE server_id = s.id
             ORDER BY last_heartbeat_at DESC NULLS LAST LIMIT 1
         ) a ON TRUE
@@ -418,10 +473,14 @@ async def servers_latest_metrics(
     freshness = await _fleet_agent_freshness_seconds(
         db, minimum_seconds=window_minutes * 60,
     )
+    latest = await asyncio.to_thread(
+        query_fleet_latest_metrics,
+        window_minutes,
+        freshness_seconds_by_server=freshness,
+    )
     return {
-        "servers": query_fleet_latest_metrics(
-            window_minutes, freshness_seconds_by_server=freshness,
-        )
+        "servers": latest,
+        "telemetry": _host_telemetry_readiness(latest, freshness),
     }
 
 
@@ -664,7 +723,9 @@ async def server_metrics(
     if not from_:
         from_ = to - timedelta(hours=6)
     metric_list = [m.strip() for m in metrics.split(",") if m.strip()]
-    series = query_server_metrics(str(server_id), from_, to, metric_list)
+    series = await asyncio.to_thread(
+        query_server_metrics, str(server_id), from_, to, metric_list,
+    )
     return ServerMetricsResponse(
         server_id=str(server_id),
         **{"from": from_},
@@ -705,8 +766,10 @@ async def server_processes(
     )).mappings().all()
     window_minutes = max(1, (freshness_s + 59) // 60)
     if not items:
-        items = query_latest_process_snapshot(
-            str(server_id), window_minutes=window_minutes,
+        items = await asyncio.to_thread(
+            query_latest_process_snapshot,
+            str(server_id),
+            window_minutes=window_minutes,
         )
     # PostgreSQL's explicit missing-watchlist snapshot is authoritative over a
     # still-in-window ClickHouse running sample for the same process name.
@@ -718,8 +781,10 @@ async def server_processes(
             if str(item.get("name") or "").casefold() != name
         ]
         items.append(missing_item)
-    memory_total = query_server_memory_total(
-        str(server_id), window_minutes=window_minutes,
+    memory_total = await asyncio.to_thread(
+        query_server_memory_total,
+        str(server_id),
+        window_minutes=window_minutes,
     )
     if not memory_total:
         memory_row = (await db.execute(
@@ -747,7 +812,9 @@ async def server_process_history(
         to = datetime.now(timezone.utc)
     if not from_:
         from_ = to - timedelta(hours=6)
-    series = query_process_history(str(server_id), name, from_, to)
+    series = await asyncio.to_thread(
+        query_process_history, str(server_id), name, from_, to,
+    )
     return ServerMetricsResponse(
         server_id=str(server_id),
         **{"from": from_},
@@ -827,16 +894,17 @@ async def server_events(
     user: User = Depends(get_current_user),
 ):
     """Return Event Log summary aggregated from ClickHouse."""
-    from app.core.database import get_clickhouse_client
-    client = get_clickhouse_client()
-    try:
-        conditions = ["server_id = %(sid)s", "timestamp >= now() - INTERVAL %(hrs)s HOUR"]
-        params: dict[str, Any] = {"sid": str(server_id), "lim": limit, "hrs": hours}
-        if not include_empty:
-            conditions.append("event_count > 0")
-        if level:
-            conditions.append("level = %(lvl)s")
-            params["lvl"] = level
+    from app.core.database import get_ch_client
+    conditions = ["server_id = %(sid)s", "timestamp >= now() - INTERVAL %(hrs)s HOUR"]
+    params: dict[str, Any] = {"sid": str(server_id), "lim": limit, "hrs": hours}
+    if not include_empty:
+        conditions.append("event_count > 0")
+    if level:
+        conditions.append("level = %(lvl)s")
+        params["lvl"] = level
+
+    def _query_events():
+        client = get_ch_client()
         res = client.query(
             f"""SELECT timestamp, log_name, level, event_count
                 FROM zenplus.host_event_log_summary
@@ -844,14 +912,16 @@ async def server_events(
                 ORDER BY timestamp DESC LIMIT %(lim)s""",
             parameters=params,
         ).result_rows
-        items = [{"timestamp": r[0], "log_name": r[1], "level": r[2], "count": int(r[3])} for r in res]
-        # Which channels the agent actually checked, so "nothing to report"
-        # can be distinguished from "nothing was collected".
         checked = client.query(
             """SELECT DISTINCT log_name FROM zenplus.host_event_log_summary
                WHERE server_id = %(sid)s AND timestamp >= now() - INTERVAL %(hrs)s HOUR""",
             parameters={"sid": str(server_id), "hrs": hours},
         ).result_rows
+        return res, checked
+
+    try:
+        res, checked = await asyncio.to_thread(_query_events)
+        items = [{"timestamp": r[0], "log_name": r[1], "level": r[2], "count": int(r[3])} for r in res]
     except Exception as exc:
         logger.warning("event log query failed: %s", exc)
         # A store outage must not render as a clean host.
@@ -953,7 +1023,15 @@ async def server_agent(
     user: User = Depends(get_current_user),
 ):
     row = (await db.execute(
-        text("""SELECT a.*, p.name AS policy_name, st.name AS site_name
+        text("""SELECT a.*, p.name AS policy_name, st.name AS site_name,
+                       EXISTS (
+                           SELECT 1 FROM agent_apm_credentials credential
+                           JOIN apm_ingest_keys ingest_key
+                             ON ingest_key.id = credential.key_id
+                           WHERE credential.agent_id = a.id
+                             AND ingest_key.enabled = TRUE
+                             AND ingest_key.revoked_at IS NULL
+                       ) AS apm_credential_bound
                 FROM agents a
                 LEFT JOIN agent_policies p ON p.id = a.policy_id
                 LEFT JOIN sites st ON st.id = a.site_id
@@ -1023,7 +1101,7 @@ def _agent_response(row: dict) -> AgentResponse:
         policy_name=row.get("policy_name"),
         config_apply_error=row.get("config_apply_error"),
         capabilities=[str(v) for v in _json_list(row.get("capabilities"))],
-        apm_status=_json_object(row.get("apm_status")),
+        apm_status=_apm_status_with_binding(row),
         tags=list(tags) if isinstance(tags, (list, tuple)) else [],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -2312,7 +2390,15 @@ async def list_fleet(
 
     rows = (await db.execute(
         text(f"""SELECT a.*, p.name AS policy_name, st.name AS site_name,
-                        s.display_name AS server_name
+                        s.display_name AS server_name,
+                        EXISTS (
+                            SELECT 1 FROM agent_apm_credentials credential
+                            JOIN apm_ingest_keys ingest_key
+                              ON ingest_key.id = credential.key_id
+                            WHERE credential.agent_id = a.id
+                              AND ingest_key.enabled = TRUE
+                              AND ingest_key.revoked_at IS NULL
+                        ) AS apm_credential_bound
                  FROM agents a
                  LEFT JOIN agent_policies p ON p.id = a.policy_id
                  LEFT JOIN sites st ON st.id = a.site_id
@@ -2669,7 +2755,15 @@ async def get_agent(
 ):
     row = (await db.execute(
         text("""SELECT a.*, p.name AS policy_name, st.name AS site_name,
-                       s.display_name AS server_name
+                       s.display_name AS server_name,
+                       EXISTS (
+                           SELECT 1 FROM agent_apm_credentials credential
+                           JOIN apm_ingest_keys ingest_key
+                             ON ingest_key.id = credential.key_id
+                           WHERE credential.agent_id = a.id
+                             AND ingest_key.enabled = TRUE
+                             AND ingest_key.revoked_at IS NULL
+                       ) AS apm_credential_bound
                 FROM agents a
                 LEFT JOIN agent_policies p ON p.id = a.policy_id
                 LEFT JOIN sites st ON st.id = a.site_id
@@ -3213,10 +3307,12 @@ async def overview(
     )).all()
     sites = [{"id": str(r[0]), "name": r[1], "server_count": r[2]} for r in sites_rows]
 
-    top_cpu = query_top_pressure("cpu", 5)
-    top_memory = query_top_pressure("memory", 5)
-    top_disk = query_top_pressure("disk", 5)
-    top_network = query_top_pressure("network", 5)
+    top_cpu, top_memory, top_disk, top_network = await asyncio.gather(
+        asyncio.to_thread(query_top_pressure, "cpu", 5),
+        asyncio.to_thread(query_top_pressure, "memory", 5),
+        asyncio.to_thread(query_top_pressure, "disk", 5),
+        asyncio.to_thread(query_top_pressure, "network", 5),
+    )
 
     # Enrich with display names
     async def _hydrate(items: list[dict]) -> list[dict]:

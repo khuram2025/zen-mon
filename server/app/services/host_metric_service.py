@@ -7,6 +7,8 @@ to read it back for charts.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -16,11 +18,38 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_clickhouse_client
+from app.core.database import get_ch_client
 from app.schemas.agent import AgentResultsBatch, MetricPoint, MetricSeries
 from app.services.filesystem_monitoring import ch_capacity_filter
 
 logger = logging.getLogger("zenplus.host_metric_service")
+
+
+def get_clickhouse_client():
+    """Compatibility seam returning the current thread's CH session."""
+    return get_ch_client()
+
+
+class HostMetricStorageError(RuntimeError):
+    """A retryable failure while persisting authoritative host telemetry."""
+
+    def __init__(self, part: str):
+        super().__init__(f"host telemetry storage failed for {part}")
+        self.part = part
+
+
+class _DeduplicatingInsertClient:
+    """Inject one stable ClickHouse retry token into an insert call."""
+
+    def __init__(self, client: Any, token: str):
+        self._client = client
+        self._token = token
+
+    def insert(self, *args, settings=None, **kwargs):
+        insert_settings = dict(settings or {})
+        insert_settings["insert_deduplication_token"] = self._token
+        insert_settings["insert_deduplicate"] = 1
+        return self._client.insert(*args, settings=insert_settings, **kwargs)
 
 
 # ── Inserts ──────────────────────────────────────────────────────────
@@ -662,6 +691,83 @@ KIND_INSERTERS = {
     "agent_health": _insert_agent_health,
 }
 
+# ``agent_health`` describes the uploader itself (queue, spool and errors), not
+# the monitored Windows host.  In particular, receiving it must not make an
+# otherwise empty Server module look healthy or advance ``last_metric_at``.
+HOST_TELEMETRY_KINDS = frozenset(KIND_INSERTERS) - {"agent_health"}
+HEALTH_TELEMETRY_KINDS = frozenset({"cpu", "memory", "filesystem"})
+
+
+def _correct_agent_clock_skew(
+    metric_rows: list[dict],
+    sent_at: datetime,
+    agent_id: str,
+    *,
+    received_at: datetime | None = None,
+) -> int:
+    """Correct host clock skew without turning spool age into clock skew.
+
+    ``sent_at`` is refreshed immediately before every upload, including a
+    replay from the on-disk spool.  Comparing the newest sample to wall clock
+    used to shift every delayed batch to "now" after an appliance outage or
+    upgrade.  That destroyed the historical timestamps precisely when the
+    spool was doing its job.  The transport timestamp is the clock probe; the
+    sample timestamps retain their original spacing and age.
+    """
+    now = _ts(received_at or datetime.now(timezone.utc))
+    agent_sent_at = _ts(sent_at)
+    offset = now - agent_sent_at
+    clock_skew_s = -int(offset.total_seconds())
+    if metric_rows and abs(offset.total_seconds()) > CLOCK_SKEW_TOLERANCE_S:
+        for row in metric_rows:
+            row["timestamp"] = _ts(row.get("timestamp")) + offset
+        logger.warning(
+            "clock skew of %+ds corrected for agent=%s "
+            "(using batch sent_at; sample age preserved)",
+            clock_skew_s,
+            agent_id,
+        )
+    return clock_skew_s
+
+
+def _insert_metric_groups(
+    agent_id: str,
+    server_id: str,
+    batch_id: str,
+    by_kind: dict[str, list[dict]],
+) -> int:
+    """Persist one batch on a worker thread with that thread's CH session.
+
+    ``clickhouse_connect`` sessions reject concurrent operations.  Host ingest
+    previously ran up to nine blocking inserts on the asyncio event loop using
+    one process-global session, which could stall heartbeats and APM traffic
+    while fleets replayed their spools after an appliance restart.
+    """
+    client = get_ch_client()
+    accepted = 0
+    for kind, inserter in KIND_INSERTERS.items():
+        rows = by_kind.get(kind) or []
+        if not rows:
+            continue
+        try:
+            # A failure after an earlier kind committed returns 503 and replays
+            # the whole batch.  Every kind therefore needs a deterministic
+            # block token; migrate-094 enables the corresponding deduplication
+            # window on these non-replicated MergeTree tables.
+            token = hashlib.sha256(
+                f"zenplus-host-v1\0{agent_id}\0{batch_id}\0{kind}".encode("utf-8")
+            ).hexdigest()
+            accepted += inserter(
+                _DeduplicatingInsertClient(client, token),
+                agent_id,
+                server_id,
+                rows,
+            )
+        except Exception as exc:
+            logger.exception("ClickHouse insert failed for kind=%s", kind)
+            raise HostMetricStorageError(kind) from exc
+    return accepted
+
 
 async def ingest_host_metric_batch(
     agent_id: str,
@@ -694,43 +800,28 @@ async def ingest_host_metric_batch(
             continue
         by_kind.setdefault(kind, []).append(row)
 
-    # Clock-skew correction: agent timestamps are wall-clock on the host and
-    # hosts routinely have wrong clocks/timezones. If the newest sample in the
-    # batch deviates from server time by more than the tolerance, shift every
-    # sample by that offset — this keeps spooled-sample spacing intact while
-    # anchoring the batch to server time, so "latest" windows stay truthful.
-    clock_skew_s = 0
+    # Clock-skew correction uses the transmit timestamp, not the newest metric.
+    # A metric can legitimately be hours old after an appliance upgrade while
+    # ``sent_at`` still reflects the agent's current wall clock.
     metric_rows = [r for k, rows in by_kind.items() if k != "inventory" for r in rows]
-    if metric_rows:
-        newest = max(r["timestamp"] for r in metric_rows)
-        offset = datetime.now(timezone.utc) - newest
-        clock_skew_s = -int(offset.total_seconds())
-        if abs(offset.total_seconds()) > CLOCK_SKEW_TOLERANCE_S:
-            for r in metric_rows:
-                r["timestamp"] = r["timestamp"] + offset
-            logger.warning(
-                "clock skew of %+ds corrected for agent=%s (batch shifted to server time)",
-                clock_skew_s, agent_id,
-            )
+    clock_skew_s = _correct_agent_clock_skew(
+        metric_rows, batch.sent_at, agent_id,
+    )
 
-    client = get_clickhouse_client()
-    for kind, rows in by_kind.items():
-        if kind == "inventory":
-            continue
-        try:
-            n = KIND_INSERTERS[kind](client, agent_id, server_id, rows)
-            accepted += n
-        except Exception as exc:
-            rejected += len(rows)
-            errors.append(f"{kind}: {exc}")
-            logger.exception("ClickHouse insert failed for kind=%s", kind)
+    # Keep blocking ClickHouse I/O off the API event loop. A storage/schema
+    # failure is retryable and must not be reported as a final per-sample
+    # rejection: the Windows agent deliberately acknowledges and removes every
+    # batch that receives a successful HTTP response with rejected samples.
+    accepted = await asyncio.to_thread(
+        _insert_metric_groups, agent_id, server_id, batch.batch_id, by_kind,
+    )
 
     if by_kind.get("process"):
         try:
             await _upsert_process_inventory(server_id, by_kind["process"], db)
         except Exception as exc:
-            errors.append(f"process_inventory: {exc}")
             logger.exception("Process inventory upsert failed")
+            raise HostMetricStorageError("process_inventory") from exc
 
     # Inventory snapshot (either from sample kind or top-level field).
     software_updated = False
@@ -740,8 +831,8 @@ async def ingest_host_metric_batch(
             software_updated = software_updated or bool(
                 batch.inventory.get("software") or batch.inventory.get("applications"))
         except Exception as exc:
-            errors.append(f"inventory: {exc}")
             logger.exception("Inventory upsert failed")
+            raise HostMetricStorageError("inventory") from exc
 
     for row in by_kind.get("inventory", []):
         try:
@@ -749,16 +840,20 @@ async def ingest_host_metric_batch(
             software_updated = software_updated or bool(
                 row.get("software") or row.get("applications"))
         except Exception as exc:
-            errors.append(f"inventory: {exc}")
+            logger.exception("Inventory metric upsert failed")
+            raise HostMetricStorageError("inventory") from exc
 
-    # Health: derive server status + reasons from the fresh telemetry.
-    try:
-        from app.services.server_health_service import compute_server_health, store_server_health
-        status, reasons, issues = await compute_server_health(db, server_id, by_kind)
-        await store_server_health(db, server_id, status, reasons, issues)
-    except Exception as exc:
-        errors.append(f"health: {exc}")
-        logger.exception("Health computation failed")
+    # Health is only authoritative when this batch contains an input used by
+    # the health calculation.  An agent-health-only batch used to default the
+    # server to healthy even when it had never delivered CPU or memory data.
+    if HEALTH_TELEMETRY_KINDS.intersection(by_kind):
+        try:
+            from app.services.server_health_service import compute_server_health, store_server_health
+            status, reasons, issues = await compute_server_health(db, server_id, by_kind)
+            await store_server_health(db, server_id, status, reasons, issues)
+        except Exception as exc:
+            errors.append(f"health: {exc}")
+            logger.exception("Health computation failed")
 
     # Compliance: a fresh software list may change baseline outcomes.
     if software_updated:

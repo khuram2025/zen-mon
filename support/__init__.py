@@ -1,13 +1,13 @@
 """ZenPlus appliance tech-support bundle generator.
 
-Runs as a root systemd template unit, invoked by the API process via a narrow
-sudoers grant. Collects logs, configuration, health, and database/clickhouse
-diagnostics into a single redacted tarball that customers can attach to a
-support ticket.
+Runs as the unprivileged ``zenplus`` account behind a systemd path-triggered
+queue. It collects logs, configuration, health, reachability, Server-agent,
+APM, and database diagnostics into one redacted archive that customers can
+attach to a support ticket.
 
-This module is intentionally kept independent of the FastAPI/SQLAlchemy stack
-so the root worker can stay small and start fast.
+This module is intentionally independent of the FastAPI/SQLAlchemy stack so
+the isolated worker stays small and starts quickly.
 """
 
-__version__ = "1.0.0"
-BUNDLE_SCHEMA_VERSION = 1
+__version__ = "1.1.0"
+BUNDLE_SCHEMA_VERSION = 2

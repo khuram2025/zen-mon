@@ -75,7 +75,6 @@ def test_all_collectors_runs_phase1_and_phase2_in_order():
     expected = [
         "inventory",
         "health",
-        "logs",
         "database",
         "clickhouse",
         "config_files",
@@ -83,6 +82,9 @@ def test_all_collectors_runs_phase1_and_phase2_in_order():
         "storage",
         "updates",
         "features",
+        "telemetry",
+        "reachability",
+        "logs",
     ]
     assert names == expected
 

@@ -4,10 +4,31 @@ Documentation=https://zentryc.com/docs/support-bundles
 
 [Service]
 Type=oneshot
-User=root
+User=zenplus
+Group=zenplus
 WorkingDirectory=/opt/zenplus
 Environment=PYTHONPATH=/opt/zenplus
 ExecStart=/opt/zenplus/venv/bin/python -m support.cleanup
+UMask=0027
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/zenplus/support/requests /opt/zenplus/support/jobs /opt/zenplus/support/bundles
+PrivateTmp=true
+PrivateNetwork=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictNamespaces=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+TasksMax=32
+MemoryMax=256M
+CPUQuota=50%
 
 StandardOutput=journal
 StandardError=journal

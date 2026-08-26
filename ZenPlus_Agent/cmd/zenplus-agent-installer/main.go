@@ -28,6 +28,7 @@ import (
 
 	apmruntime "zenplus-agent/internal/apm"
 	"zenplus-agent/internal/config"
+	"zenplus-agent/internal/identity"
 	"zenplus-agent/internal/model"
 	agentruntime "zenplus-agent/internal/runtime"
 )
@@ -57,6 +58,7 @@ type options struct {
 	autoUninstall bool
 	managedByMSI  bool
 	controllerURL string
+	controllerCA  string
 	apmMode       string
 	profile       string
 }
@@ -162,6 +164,8 @@ func parseOptions(args []string) (options, error) {
 			switch strings.ToUpper(strings.TrimSpace(key)) {
 			case "CONTROLLER_URL":
 				normalized = append(normalized, "-controller-url", value)
+			case "CONTROLLER_CA_FILE":
+				normalized = append(normalized, "-controller-ca-file", value)
 			case "APM_ENABLED":
 				normalized = append(normalized, "-apm-enabled", value)
 			case "INSTALL_PROFILE":
@@ -192,6 +196,7 @@ func parseOptions(args []string) (options, error) {
 	fs.BoolVar(&opts.autoUninstall, "auto-uninstall", false, "internal UI uninstall continuation")
 	fs.BoolVar(&opts.managedByMSI, "managed-by-msi", false, "let Windows Installer own Apps and Features registration")
 	fs.StringVar(&opts.controllerURL, "controller-url", "", "controller URL")
+	fs.StringVar(&opts.controllerCA, "controller-ca-file", "", "PEM CA bundle for the controller TLS certificate")
 	fs.StringVar(&opts.apmMode, "apm-enabled", "", "enable or disable local APM monitoring")
 	fs.StringVar(&opts.profile, "profile", "", "installation profile: infrastructure, apm, or combined")
 	fs.SetOutput(os.Stderr)
@@ -668,7 +673,6 @@ func install(l layout, opts options) (returnErr error) {
 			_ = os.RemoveAll(stageDir)
 		}
 	}()
-
 	apmPaths := agentruntime.NewPaths(l.DataDir)
 	managedPools, err := apmruntime.ManagedIISTargets(apmPaths.APMInstrumentationState)
 	if err != nil {
@@ -758,6 +762,9 @@ func install(l layout, opts options) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	if err := preserveLegacyConfigIdentity(l.ConfigPath, apmPaths.IdentityFile); err != nil {
+		return fmt.Errorf("preserve legacy agent identity before upgrade: %w", err)
+	}
 	nextConfig, err = buildInstalledConfig(l, opts)
 	if err != nil {
 		return fmt.Errorf("prepare quiesced installed configuration: %w", err)
@@ -809,7 +816,10 @@ func install(l layout, opts options) (returnErr error) {
 	if l.Scope == "machine" {
 		serviceTouched = true
 		if serviceBefore.Exists {
-			if err := resumeExistingAgentService(serviceBefore); err != nil {
+			if err := resumeExistingAgentService(serviceStateForInstalledPayload(serviceBefore, l)); err != nil {
+				return err
+			}
+			if err := configureInstalledServiceRecovery(); err != nil {
 				return err
 			}
 		} else if err := installService(l); err != nil {
@@ -826,7 +836,15 @@ func install(l layout, opts options) (returnErr error) {
 	}
 	stoppedPools = nil
 	stoppedServices = nil
+	// The payload, configuration, service, and instrumented applications are
+	// now healthy on the new release. Commit before removing Windows Installer
+	// registrations: an MSI uninstall cannot be transactionally recreated, so
+	// a cleanup failure must never roll a working agent back to old binaries
+	// while leaving its former Programs & Features ownership removed.
 	transactionComplete = true
+	if err := removeLegacyMSIRegistrations(opts, logStep); err != nil {
+		return fmt.Errorf("agent upgrade completed but superseded MSI cleanup failed: %w", err)
+	}
 	removeLegacyRuntime(l)
 	removeOppositeScopeShortcuts(l)
 	if err := transaction.CleanupBackup(); err != nil {
@@ -1022,6 +1040,10 @@ func buildInstalledConfig(l layout, opts options) (config.Config, error) {
 		}
 		cfg.ControllerURL = normalized
 	}
+	if opts.controllerCA != "" {
+		cfg.Security.ControllerCAFile = filepath.Clean(strings.TrimSpace(opts.controllerCA))
+		cfg.VerifyTLS = true
+	}
 	if opts.profile != "" {
 		if err := config.ApplyProfile(&cfg, opts.profile); err != nil {
 			return config.Config{}, err
@@ -1046,14 +1068,29 @@ func buildInstalledConfig(l layout, opts options) (config.Config, error) {
 		}
 	}
 	// Authorization, site placement, and policy assignment are controlled by
-	// the appliance. Clear legacy bootstrap values during upgrades so the
-	// endpoint stores only its controller connection setting.
+	// the appliance. Clear legacy bootstrap values during upgrades so stale
+	// IDs in agent.yaml cannot override the durable identity.json binding when
+	// the service restarts with the new binaries.
+	cfg.AgentID = ""
+	cfg.ServerID = ""
 	cfg.PolicyID = ""
 	if err := cfg.Validate(); err != nil {
 		return config.Config{}, err
 	}
 	return cfg, nil
 
+}
+
+func preserveLegacyConfigIdentity(configPath, identityPath string) error {
+	cfg, err := config.LoadForEdit(configPath)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(cfg.AgentID) == "" && strings.TrimSpace(cfg.ServerID) == "" {
+		return nil
+	}
+	_, _, err = identity.LoadOrCreate(identityPath, cfg.AgentID, cfg.ServerID)
+	return err
 }
 
 func writeInstalledConfig(l layout, opts options) error {
@@ -1067,6 +1104,31 @@ func writeInstalledConfig(l layout, opts options) error {
 func installService(l layout) error {
 	agent := filepath.Join(l.InstallDir, "zenplus-agent.exe")
 	return runCommand(agent, "install-service", "--config", l.ConfigPath)
+}
+
+func configureInstalledServiceRecovery() error {
+	manager, err := mgr.Connect()
+	if err != nil {
+		return fmt.Errorf("connect service manager to configure recovery: %w", err)
+	}
+	defer manager.Disconnect()
+	service, err := manager.OpenService(serviceName)
+	if err != nil {
+		return fmt.Errorf("open upgraded service to configure recovery: %w", err)
+	}
+	defer service.Close()
+	actions := []mgr.RecoveryAction{
+		{Type: mgr.ServiceRestart, Delay: time.Minute},
+		{Type: mgr.ServiceRestart, Delay: time.Minute},
+		{Type: mgr.ServiceRestart, Delay: 5 * time.Minute},
+	}
+	if err := service.SetRecoveryActions(actions, 86400); err != nil {
+		return fmt.Errorf("configure upgraded service recovery actions: %w", err)
+	}
+	if err := service.SetRecoveryActionsOnNonCrashFailures(true); err != nil {
+		return fmt.Errorf("configure upgraded service non-crash recovery: %w", err)
+	}
+	return nil
 }
 
 func launchUserRunner(l layout) error {

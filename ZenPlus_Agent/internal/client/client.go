@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,6 +60,14 @@ type Client struct {
 }
 
 func New(baseURL, proxyURL string, verifyTLS bool, agentID string, apiKey string) (*Client, error) {
+	return NewWithControllerCA(baseURL, proxyURL, verifyTLS, "", agentID, apiKey)
+}
+
+// NewWithControllerCA constructs a controller client that retains the Windows
+// system trust roots and optionally adds a deployment-scoped CA bundle. This
+// is the secure migration path for appliances using an internal or self-signed
+// certificate; it never weakens verification for unrelated TLS connections.
+func NewWithControllerCA(baseURL, proxyURL string, verifyTLS bool, caFile, agentID, apiKey string) (*Client, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("base URL is required")
 	}
@@ -75,15 +84,34 @@ func New(baseURL, proxyURL string, verifyTLS bool, agentID string, apiKey string
 		}
 		transport.Proxy = http.ProxyURL(pu)
 	}
-	if !verifyTLS {
+	caFile = strings.TrimSpace(caFile)
+	if caFile != "" && !verifyTLS {
+		return nil, fmt.Errorf("controller CA file cannot be used when TLS verification is disabled")
+	}
+	if caFile != "" {
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("read controller CA file: %w", err)
+		}
+		roots, err := x509.SystemCertPool()
+		if err != nil || roots == nil {
+			roots = x509.NewCertPool()
+		}
+		if ok := roots.AppendCertsFromPEM(pem); !ok {
+			return nil, fmt.Errorf("controller CA file %q contains no PEM certificates", caFile)
+		}
+		transport.TLSClientConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	} else if !verifyTLS {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec
 	}
-	return &Client{
+	c := &Client{
 		baseURL:    baseURL,
 		agentID:    agentID,
 		apiKey:     apiKey,
 		httpClient: &http.Client{Timeout: 30 * time.Second, Transport: transport},
-	}, nil
+	}
+	c.httpClient.CheckRedirect = c.checkRedirect
+	return c, nil
 }
 
 func (c *Client) SetAuth(agentID string, apiKey string) {
@@ -145,7 +173,7 @@ func (c *Client) do(ctx context.Context, method, endpoint string, body []byte, o
 	} else if method == http.MethodGet && special != "" {
 		req.Header.Set("If-None-Match", special)
 	}
-	if c.apiKey != "" {
+	if c.apiKey != "" && c.isControllerURL(urlText) {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 		if c.agentID != "" {
 			req.Header.Set("X-Agent-Id", c.agentID)
@@ -184,13 +212,17 @@ func (c *Client) Download(ctx context.Context, endpoint string, destPath string)
 	if err != nil {
 		return err
 	}
-	if c.apiKey != "" {
+	downloadURL := c.resolve(endpoint)
+	if c.apiKey != "" && c.isControllerURL(downloadURL) {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 		if c.agentID != "" {
 			req.Header.Set("X-Agent-Id", c.agentID)
 		}
 	}
-	dl := &http.Client{Timeout: 15 * time.Minute, Transport: c.httpClient.Transport}
+	dl := &http.Client{
+		Timeout: 15 * time.Minute, Transport: c.httpClient.Transport,
+		CheckRedirect: c.checkRedirect,
+	}
 	resp, err := dl.Do(req)
 	if err != nil {
 		return err
@@ -216,6 +248,46 @@ func (c *Client) Download(ctx context.Context, endpoint string, destPath string)
 		return err
 	}
 	return f.Close()
+}
+
+func (c *Client) checkRedirect(req *http.Request, _ []*http.Request) error {
+	if !c.isControllerURL(req.URL.String()) {
+		req.Header.Del("Authorization")
+		req.Header.Del("X-Agent-Id")
+	}
+	return nil
+}
+
+func (c *Client) isControllerURL(raw string) bool {
+	base, err := url.Parse(c.baseURL)
+	if err != nil {
+		return false
+	}
+	target, err := url.Parse(raw)
+	if err != nil || !strings.EqualFold(base.Hostname(), target.Hostname()) {
+		return false
+	}
+	if strings.EqualFold(base.Scheme, target.Scheme) {
+		return effectivePort(base) == effectivePort(target)
+	}
+	// Preserve the appliance's legacy HTTP-to-HTTPS redirect migration, but
+	// never forward credentials across hosts, custom ports, or a TLS downgrade.
+	return strings.EqualFold(base.Scheme, "http") && strings.EqualFold(target.Scheme, "https") &&
+		effectivePort(base) == "80" && effectivePort(target) == "443"
+}
+
+func effectivePort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
 }
 
 func (c *Client) resolve(endpoint string) string {

@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch for queued ZenPlus support bundles
+Documentation=https://zentryc.com/docs/support-bundles
+
+[Path]
+PathExistsGlob=/opt/zenplus/support/requests/*.json
+Unit=zenplus-support-dispatch.service
+
+[Install]
+WantedBy=multi-user.target

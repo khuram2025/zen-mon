@@ -29,7 +29,7 @@ FEATURE_PROBES: dict[str, list[tuple[str, str]]] = {
     "features/discovery.json": [
         ("discovery_profiles", "updated_at"),
         ("discovery_runs", "started_at"),
-        ("discovery_results", "discovered_at"),
+        ("discovery_results_v2", "scanned_at"),
     ],
     "features/windows-credentials.json": [
         ("windows_credentials", "updated_at"),
@@ -41,7 +41,7 @@ FEATURE_PROBES: dict[str, list[tuple[str, str]]] = {
     ],
     "features/sensors.json": [
         ("sensors", "last_heartbeat_at"),
-        ("sensor_assignments", "updated_at"),
+        ("sensor_assignments", "created_at"),
         ("sites", "updated_at"),
     ],
     "features/notifications.json": [
@@ -49,7 +49,33 @@ FEATURE_PROBES: dict[str, list[tuple[str, str]]] = {
         ("notification_gateways", "updated_at"),
     ],
     "features/netflow.json": [
-        ("flow_exporters", "updated_at"),
+        ("netflow_exporter_devices", "updated_at"),
+    ],
+    "features/apm.json": [
+        ("apm_environments", "created_at"),
+        ("apm_services", "last_seen_at"),
+        ("apm_slos", "created_at"),
+        ("apm_synthetic_monitors", "updated_at"),
+        ("apm_agent_processes", "last_seen_at"),
+    ],
+    "features/alerts-services.json": [
+        ("alert_rules", "updated_at"),
+        ("alerts", "triggered_at"),
+        ("service_checks", "updated_at"),
+    ],
+    "features/reports-storage.json": [
+        ("custom_reports", "updated_at"),
+        ("report_schedules", "updated_at"),
+        ("report_runs", "generated_at"),
+        ("storage_events", "created_at"),
+        ("storage_backups", "created_at"),
+    ],
+    "features/topology-udt.json": [
+        ("topology_links", "updated_at"),
+        ("topology_discovery_runs", "started_at"),
+        ("manual_maps", "updated_at"),
+        ("udt_endpoints", "last_seen"),
+        ("udt_events", "created_at"),
     ],
 }
 
@@ -71,6 +97,11 @@ def collect(ctx: CollectorContext) -> CollectorResult:
 
     for arcname, data in snapshot.items():
         result.files[arcname] = (json.dumps(data, indent=2, sort_keys=True, default=str) + "\n").encode("utf-8")
+        for probe, details in data.items():
+            if isinstance(details, dict) and (
+                details.get("table_exists") is False or "error" in details
+            ):
+                result.warn(f"{probe} probe incomplete")
     return result
 
 
@@ -78,7 +109,7 @@ async def _collect_async(url: str) -> dict[str, dict[str, Any]]:
     import asyncpg
 
     out: dict[str, dict[str, Any]] = {}
-    conn = await asyncpg.connect(url, timeout=10)
+    conn = await asyncpg.connect(url, timeout=10, command_timeout=10)
     try:
         for arcname, probes in FEATURE_PROBES.items():
             section: dict[str, Any] = {}
@@ -104,7 +135,8 @@ async def _collect_async(url: str) -> dict[str, dict[str, Any]]:
 
 async def _probe_table(conn, table: str, recency_column: str) -> dict[str, Any]:
     exists = await conn.fetchval(
-        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
+        "SELECT EXISTS (SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = 'public' AND table_name = $1)",
         table,
     )
     if not exists:

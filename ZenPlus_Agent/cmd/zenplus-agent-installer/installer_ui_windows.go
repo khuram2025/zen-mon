@@ -870,6 +870,9 @@ func commandArgsFromOptions(opts options, uninstall bool, quiet bool) []string {
 	if opts.controllerURL != "" {
 		args = append(args, "CONTROLLER_URL="+opts.controllerURL)
 	}
+	if opts.controllerCA != "" {
+		args = append(args, "CONTROLLER_CA_FILE="+opts.controllerCA)
+	}
 	if opts.apmMode == "enabled" {
 		args = append(args, "APM_ENABLED=1")
 	} else if opts.apmMode == "disabled" {

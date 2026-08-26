@@ -6,6 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from ..code_inventory import reconcile_code_tree
 from ..executor import step_handler
 
 logger = logging.getLogger("zenplus.updater")
@@ -63,13 +64,14 @@ def _apply_patch(step: dict, extract_dir: str) -> None:
 
 
 def _apply_replace(step: dict, extract_dir: str) -> None:
-    """Replace files from the code/ directory in the package."""
+    """Apply an exact signed code snapshot (or a legacy overlay payload)."""
     source_dir = step.get("source", "code/")
     code_path = Path(extract_dir) / source_dir
 
     if not code_path.exists():
         raise FileNotFoundError(f"Code directory not found: {code_path}")
 
+    removed = reconcile_code_tree(code_path, ZENPLUS_DIR)
     count = 0
     for src_file in code_path.rglob("*"):
         if src_file.is_dir():
@@ -80,4 +82,4 @@ def _apply_replace(step: dict, extract_dir: str) -> None:
         shutil.copy2(src_file, dest_file)
         count += 1
 
-    logger.info("Replaced %d files", count)
+    logger.info("Replaced %d files; removed %d stale files", count, removed)

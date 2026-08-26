@@ -1,8 +1,8 @@
 """Support-bundle worker entry point.
 
-Invoked by ``zenplus-support-bundle@<uuid>.service`` as root. Reads the
-request JSON the API process dropped under ``/opt/zenplus/support/requests/``,
-runs every registered collector, writes a redacted tarball to
+Invoked by the unprivileged queue dispatcher. Reads the request JSON the API
+process dropped under ``/opt/zenplus/support/requests/``, runs every registered
+collector, writes a redacted tarball to
 ``/opt/zenplus/support/bundles/<uuid>.tar.gz`` and updates
 ``/opt/zenplus/support/jobs/<uuid>.json`` so the dashboard can poll status.
 
@@ -17,7 +17,6 @@ import argparse
 import hashlib
 import logging
 import os
-import shutil
 import sys
 import traceback
 from datetime import datetime, timezone
@@ -25,9 +24,14 @@ from pathlib import Path
 
 from . import BUNDLE_SCHEMA_VERSION, __version__
 from . import job_state as js
-from .archiver import BundleArchive
+from .archiver import (
+    DEFAULT_PER_FILE_CAP,
+    DEFAULT_TOTAL_CAP,
+    EXTENDED_PER_FILE_CAP,
+    BundleArchive,
+)
 from .collectors import CollectorContext, all_collectors, run_collector
-from .manifest import BundleRequest, build_manifest, write_manifest
+from .manifest import BundleRequest, build_manifest
 from .redaction import Redactor
 
 
@@ -58,8 +62,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # Read request, validate, kick off.
     try:
-        raw_request = js.read_json(req_path)
-        request = BundleRequest.from_json({"job_id": job_id, **raw_request})
+        raw_request = js.read_json_safe(req_path, max_bytes=64 * 1024)
+        # The pathname is authoritative. Never let a forged JSON field put a
+        # different job identifier into the bundle metadata.
+        request = BundleRequest.from_json({**raw_request, "job_id": job_id})
         errors = request.validate()
         if errors:
             _mark_failed(job_path, job_id, "; ".join(errors))
@@ -68,7 +74,10 @@ def main(argv: list[str] | None = None) -> int:
         _mark_failed(job_path, job_id, f"cannot parse request: {exc!r}")
         return 2
 
-    state = js.initial_job_state(job_id, request.requested_by)
+    try:
+        state = js.read_json_safe(job_path, max_bytes=256 * 1024)
+    except (OSError, ValueError):
+        state = js.initial_job_state(job_id, request.requested_by)
     state.update({"status": js.STATUS_RUNNING, "phase": "running"})
     js.write_atomic(job_path, state)
 
@@ -82,11 +91,15 @@ def main(argv: list[str] | None = None) -> int:
     redactor = Redactor()
     section_summaries: dict[str, dict] = {}
     skipped_total: list[str] = []
+    truncated_total: list[str] = []
 
     js.BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
 
     try:
-        with BundleArchive(output_path=bundle_path) as archive:
+        per_file_cap = (
+            EXTENDED_PER_FILE_CAP if request.include_extended_logs else DEFAULT_PER_FILE_CAP
+        )
+        with BundleArchive(output_path=bundle_path, per_file_cap=per_file_cap) as archive:
             for name, fn in all_collectors():
                 state["phase"] = name
                 js.write_atomic(job_path, state)
@@ -95,8 +108,19 @@ def main(argv: list[str] | None = None) -> int:
                 # Redact and add every file the collector produced.
                 for arc_name, body in result.files.items():
                     redacted = redactor.apply_bytes(body)
-                    add_result = archive.add(arc_name, redacted)
-                    if add_result.truncated:
+                    try:
+                        add_result = archive.add(arc_name, redacted)
+                    except ValueError as exc:
+                        result.skipped_files.append(arc_name)
+                        result.warn(f"{arc_name} rejected by archive policy: {exc}")
+                        continue
+                    if add_result.skipped:
+                        result.skipped_files.append(arc_name)
+                        result.warn(f"{arc_name} skipped because bundle data cap was reached")
+                    else:
+                        result.archived_files.append(arc_name)
+                    if add_result.truncated and not add_result.skipped:
+                        result.truncated_files.append(arc_name)
                         result.notes.append(f"{arc_name} truncated to fit per-file cap")
                 section_summaries[name] = result.summary()
 
@@ -116,30 +140,56 @@ def main(argv: list[str] | None = None) -> int:
                 section_summaries=section_summaries,
             )
             import json as _json
-            archive.add("manifest.json", _json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-            archive.add("redaction-report.json",
-                        _json.dumps({"counts": redactor.report()}, indent=2, sort_keys=True) + "\n")
-            archive.add("README.txt", _readme_text(appliance_id, version, request).encode("utf-8"))
+            manifest["archive"] = {
+                "per_file_cap_bytes": per_file_cap,
+                "total_cap_bytes": archive.total_cap,
+                "skipped_files": sorted(archive.skipped),
+                "truncated_files": sorted(
+                    item.arcname for item in archive.added if item.truncated
+                ),
+            }
+            _add_required(
+                archive,
+                "manifest.json",
+                _json.dumps(
+                    redactor.apply_structure(manifest), indent=2, sort_keys=True
+                ) + "\n",
+            )
+            _add_required(
+                archive,
+                "README.txt",
+                redactor.apply_bytes(_readme_text(appliance_id, version, request).encode("utf-8")),
+            )
+            # Generate the report only after every other text item (including
+            # request metadata and collector notes in manifest.json) has been
+            # scrubbed, otherwise its counts under-report actual redactions.
+            _add_required(
+                archive,
+                "redaction-report.json",
+                _json.dumps({"counts": redactor.report()}, indent=2, sort_keys=True) + "\n",
+            )
             archive.finalize_checksums()
             skipped_total = list(archive.skipped)
+            truncated_total = sorted(item.arcname for item in archive.added if item.truncated)
     except Exception as exc:  # noqa: BLE001
         logger.exception("bundle worker crashed")
+        _unlink_quietly(bundle_path)
         _mark_failed(job_path, job_id, f"worker crash: {exc!r}\n{traceback.format_exc()[:2000]}")
         return 3
 
     # Finalize: hash and stat the bundle, write final job state.
     sha256 = _sha256_file(bundle_path)
     size = bundle_path.stat().st_size
+    if size > DEFAULT_TOTAL_CAP:
+        _unlink_quietly(bundle_path)
+        _mark_failed(
+            job_path,
+            job_id,
+            f"packaged bundle exceeded hard {DEFAULT_TOTAL_CAP}-byte output limit",
+        )
+        return 3
     try:
         os.chmod(bundle_path, 0o640)
-        # Best-effort chown to root:zenplus so the API process can read it.
-        # Ignore failures in dev environments where the zenplus group is absent.
-        try:
-            import grp
-            gid = grp.getgrnam("zenplus").gr_gid
-            os.chown(bundle_path, 0, gid)
-        except (KeyError, PermissionError):
-            pass
     except OSError:
         pass
 
@@ -151,6 +201,15 @@ def main(argv: list[str] | None = None) -> int:
         "sha256": sha256,
         "filename": _bundle_filename(appliance_id, started),
         "skipped_files": skipped_total,
+        "truncated_files": truncated_total,
+        "collector_failures": sorted(
+            name for name, summary in section_summaries.items()
+            if summary.get("status") == "failed"
+        ),
+        "collector_warnings": sorted(
+            name for name, summary in section_summaries.items()
+            if summary.get("status") == "warning"
+        ),
         "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
         "worker_version": __version__,
     })
@@ -193,7 +252,11 @@ def _identity() -> tuple[str, str, str]:
 
 
 def _bundle_filename(appliance_id: str, when: datetime) -> str:
-    short = (appliance_id or "appliance").replace("-", "")[:8] or "appliance"
+    import re
+
+    # This value becomes a Content-Disposition filename. Keep it deliberately
+    # narrow even though appliance IDs are normally UUIDs.
+    short = re.sub(r"[^A-Za-z0-9]", "", appliance_id or "")[:8] or "appliance"
     ts = when.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"zenplus-support-{short}-{ts}.tar.gz"
 
@@ -225,7 +288,7 @@ def _mark_failed(path: Path, job_id: str, reason: str) -> None:
     state = js.initial_job_state(job_id, "")
     state["status"] = js.STATUS_FAILED
     state["phase"] = "failed"
-    state["error"] = reason[:2000]
+    state["error"] = Redactor().apply(reason)[:2000]
     state["completed_at"] = js.now_iso()
     try:
         js.write_atomic(path, state)
@@ -239,6 +302,21 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _add_required(archive: BundleArchive, arcname: str, body: bytes | str) -> None:
+    result = archive.add(arcname, body, required=True)
+    if result.skipped:
+        raise RuntimeError(f"required bundle metadata did not fit: {arcname}")
+
+
+def _unlink_quietly(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.warning("could not remove incomplete bundle %s", path)
 
 
 if __name__ == "__main__":

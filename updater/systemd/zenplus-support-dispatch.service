@@ -1,0 +1,41 @@
+[Unit]
+Description=ZenPlus queued support-bundle dispatcher
+After=network-online.target
+Wants=network-online.target
+Documentation=https://zentryc.com/docs/support-bundles
+
+[Service]
+Type=oneshot
+User=zenplus
+Group=zenplus
+SupplementaryGroups=adm systemd-journal
+WorkingDirectory=/opt/zenplus
+Environment=PYTHONPATH=/opt/zenplus
+EnvironmentFile=-/opt/zenplus/.env
+ExecStart=/usr/local/libexec/zenplus-support-dispatch
+UMask=0027
+TimeoutStartSec=600
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zenplus-support
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/zenplus/support/requests /opt/zenplus/support/jobs /opt/zenplus/support/bundles
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock
+CapabilityBoundingSet=
+AmbientCapabilities=
+TasksMax=64
+MemoryMax=768M
+CPUQuota=200%

@@ -48,24 +48,24 @@ func LoadOrCreate(path string, agentID string, serverID string) (Identity, bool,
 				if fresh.AgentUID == "" {
 					fresh.AgentUID = stableAgentUID(fresh.Hostname)
 				}
-				if agentID != "" {
-					fresh.AgentID = agentID
-				} else {
-					fresh.AgentID = "agt_local_" + randomHex(10)
-				}
-				if serverID != "" {
-					fresh.ServerID = serverID
-				} else {
-					fresh.ServerID = "srv_local_" + stableHostHash(fresh.Hostname)
-				}
+				// A cloned image must never inherit configured registration IDs.
+				// Older installers copied agent_id/server_id into agent.yaml, so
+				// using those values here would undo clone detection and make two
+				// machines upload as the same appliance host.
+				fresh.AgentID = "agt_local_" + randomHex(10)
+				fresh.ServerID = "srv_local_" + stableHostHash(fresh.Hostname)
 				fresh.CreatedAt = time.Now().UTC()
 				return fresh, true, Save(path, fresh)
 			}
 			id.fillMissing(detected)
-			if agentID != "" {
+			// Persisted appliance identity is authoritative. Configuration IDs
+			// are legacy first-install hints only; allowing them to overwrite an
+			// existing identity after an agent/service upgrade splits host metric
+			// uploads from the APM credential binding.
+			if id.AgentID == "" && agentID != "" {
 				id.AgentID = agentID
 			}
-			if serverID != "" {
+			if id.ServerID == "" && serverID != "" {
 				id.ServerID = serverID
 			}
 			return id, false, Save(path, id)

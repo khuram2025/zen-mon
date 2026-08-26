@@ -69,7 +69,9 @@ func Recover(ctx context.Context, cfg config.Config, paths runtime.Paths, logf f
 }
 
 func register(ctx context.Context, cfg config.Config, paths runtime.Paths, id identity.Identity, pendingSecret string, logf func(string, ...any)) (Result, error) {
-	c, err := client.New(cfg.ControllerURL, cfg.ProxyURL, cfg.VerifyTLS, "", "")
+	c, err := client.NewWithControllerCA(
+		cfg.ControllerURL, cfg.ProxyURL, cfg.VerifyTLS, cfg.Security.ControllerCAFile, "", "",
+	)
 	if err != nil {
 		return Result{Identity: id}, err
 	}

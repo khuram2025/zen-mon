@@ -25,6 +25,10 @@ ISSUE_CATEGORIES = (
     "alerts_notifications",
     "performance_storage",
     "ui_api_error",
+    "server_monitoring",
+    "apm",
+    "agent_upgrade",
+    "appliance_reachability",
     "other",
 )
 
@@ -56,16 +60,21 @@ class BundleRequest:
             errors.append(f"time_range must be one of {TIME_RANGES}")
         if len(self.issue_summary) > 500:
             errors.append("issue_summary exceeds 500 chars")
+        if len(self.requested_by) > 255:
+            errors.append("requested_by exceeds 255 chars")
         return errors
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "BundleRequest":
+        extended = data.get("include_extended_logs", False)
+        if not isinstance(extended, bool):
+            raise ValueError("include_extended_logs must be a boolean")
         return cls(
             job_id=str(data["job_id"]),
             issue_category=str(data.get("issue_category", "other")),
             issue_summary=str(data.get("issue_summary", "")),
             time_range=str(data.get("time_range", "24h")),
-            include_extended_logs=bool(data.get("include_extended_logs", False)),
+            include_extended_logs=extended,
             requested_by=str(data.get("requested_by", "")),
             created_at=str(data.get("created_at", "")),
         )

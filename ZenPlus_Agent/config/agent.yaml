@@ -1,5 +1,5 @@
 version: 1
-controller_url: http://192.168.8.221
+controller_url: https://192.168.8.221
 enrollment_token: ""
 agent_name: ""
 site_id: ""
@@ -62,6 +62,9 @@ spool:
   max_age_hours: 24
 security:
   require_signed_config: false
+  # Set this to a PEM CA/certificate bundle when the appliance uses an
+  # internal or self-signed certificate. TLS verification remains enabled.
+  # controller_ca_file: ../trust/controller-ca.pem
 limits:
   max_process_count: 10
   max_payload_bytes: 2097152

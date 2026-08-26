@@ -108,10 +108,12 @@ type Options struct {
 }
 
 type localSettings struct {
-	ControllerURL string `json:"controller_url"`
-	ProxyURL      string `json:"proxy_url"`
-	VerifyTLS     bool   `json:"verify_tls"`
-	APMEnabled    bool   `json:"apm_enabled"`
+	ControllerURL       string `json:"controller_url"`
+	ProxyURL            string `json:"proxy_url"`
+	VerifyTLS           bool   `json:"verify_tls"`
+	ControllerCAFile    string `json:"controller_ca_file"`
+	ControllerCAFileSig string `json:"controller_ca_file_sig"`
+	APMEnabled          bool   `json:"apm_enabled"`
 }
 
 func Run(ctx context.Context, opts Options) error {
@@ -154,6 +156,15 @@ func Run(ctx context.Context, opts Options) error {
 		log.Printf("enrollment error: %v", err)
 	}
 	applyEnrollment(&cfg, enrollment)
+	if restored, ok, restoreErr := configpoller.Restore(
+		paths.ConfigCache, cfg, enrollment.Identity.AgentUID,
+		enrollment.Identity.AgentID, enrollment.Identity.ServerID,
+	); restoreErr != nil {
+		log.Printf("cached controller config ignored: %v", restoreErr)
+	} else if ok {
+		cfg = restored
+		log.Printf("restored last-known-good controller config: %s", config.Hash(cfg))
+	}
 
 	up, poller, err := newRuntimeClients(cfg, paths, store, enrollment)
 	if err != nil {
@@ -283,11 +294,17 @@ func Run(ctx context.Context, opts Options) error {
 }
 
 func newRuntimeClients(cfg config.Config, paths runtime.Paths, store *spool.Store, enrollment enroll.Result) (*uploader.Uploader, *configpoller.Poller, error) {
-	api, err := client.New(cfg.ControllerURL, cfg.ProxyURL, cfg.VerifyTLS, enrollment.Identity.AgentID, enrollment.APIKey)
+	api, err := client.NewWithControllerCA(
+		cfg.ControllerURL, cfg.ProxyURL, cfg.VerifyTLS, cfg.Security.ControllerCAFile,
+		enrollment.Identity.AgentID, enrollment.APIKey,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
-	return uploader.New(api, store, enrollment.Identity.AgentID, enrollment.Identity.ServerID), configpoller.New(api, paths.ConfigCache), nil
+	return uploader.New(api, store, enrollment.Identity.AgentID, enrollment.Identity.ServerID), configpoller.New(
+		api, paths.ConfigCache, enrollment.Identity.AgentUID,
+		enrollment.Identity.AgentID, enrollment.Identity.ServerID,
+	), nil
 }
 
 func refreshLocalRuntime(ctx context.Context, configPath string, cfg *config.Config, paths runtime.Paths, store *spool.Store, enrollment *enroll.Result, up **uploader.Uploader, poller **configpoller.Poller, status *model.Status, localHash *string, authStamp *string, logf func(string, ...any)) bool {
@@ -311,10 +328,14 @@ func refreshLocalRuntime(ctx context.Context, configPath string, cfg *config.Con
 			*localHash = nextLocalHash
 			return false
 		}
-		connectionChanged := cfg.ControllerURL != diskCfg.ControllerURL || cfg.ProxyURL != diskCfg.ProxyURL || cfg.VerifyTLS != diskCfg.VerifyTLS
+		connectionChanged := cfg.ControllerURL != diskCfg.ControllerURL ||
+			cfg.ProxyURL != diskCfg.ProxyURL ||
+			cfg.VerifyTLS != diskCfg.VerifyTLS ||
+			cfg.Security.ControllerCAFile != diskCfg.Security.ControllerCAFile
 		cfg.ControllerURL = diskCfg.ControllerURL
 		cfg.ProxyURL = diskCfg.ProxyURL
 		cfg.VerifyTLS = diskCfg.VerifyTLS
+		cfg.Security.ControllerCAFile = diskCfg.Security.ControllerCAFile
 		cfg.APM.Enabled = diskCfg.APM.Enabled
 		if connectionChanged {
 			cfg.ConfigETag = ""
@@ -327,6 +348,11 @@ func refreshLocalRuntime(ctx context.Context, configPath string, cfg *config.Con
 	enrollCtx, cancel := enroll.ContextWithEnrollmentTimeout(ctx)
 	nextEnrollment, err := enroll.Ensure(enrollCtx, *cfg, paths, logf)
 	cancel()
+	// Enrollment can create/remove protected auth files even when the request
+	// fails (for example, a 409 registration conflict creates the pending
+	// secret). Consume that resulting state here so the five-second local file
+	// watcher does not bypass the enrollment supervisor's exponential backoff.
+	*authStamp = authFileStamp(paths)
 	if err != nil {
 		status.LastConfigError = "local enrollment refresh failed: " + err.Error()
 		logf("%s", status.LastConfigError)
@@ -343,7 +369,6 @@ func refreshLocalRuntime(ctx context.Context, configPath string, cfg *config.Con
 	}
 	*up = nextUp
 	*poller = nextPoller
-	*authStamp = authFileStamp(paths)
 	status.LastConfigError = ""
 	status.ControllerURL = cfg.ControllerURL
 	status.AgentID = nextEnrollment.Identity.AgentID
@@ -783,6 +808,10 @@ func startSelfUpdate(ctx context.Context, up *uploader.Uploader, channel string,
 			logf("self-update: already running the published version %s", model.AgentVersion)
 			return
 		}
+		if !selfupdate.IsNewer(m.LatestVersion, model.AgentVersion) {
+			logf("self-update: ignoring published version %s because running version %s is newer", m.LatestVersion, model.AgentVersion)
+			return
+		}
 		if err := selfupdate.Apply(ctx, up.Client(), m, model.AgentVersion, logf); err != nil {
 			logf("self-update to %s failed: %v", m.LatestVersion, err)
 		}
@@ -1168,10 +1197,12 @@ func ResetEnrollment(configPath string) error {
 
 func localSettingsFingerprint(cfg config.Config) string {
 	b, _ := json.Marshal(localSettings{
-		ControllerURL: cfg.ControllerURL,
-		ProxyURL:      cfg.ProxyURL,
-		VerifyTLS:     cfg.VerifyTLS,
-		APMEnabled:    cfg.APM.Enabled,
+		ControllerURL:       cfg.ControllerURL,
+		ProxyURL:            cfg.ProxyURL,
+		VerifyTLS:           cfg.VerifyTLS,
+		ControllerCAFile:    cfg.Security.ControllerCAFile,
+		ControllerCAFileSig: fileStamp(cfg.Security.ControllerCAFile),
+		APMEnabled:          cfg.APM.Enabled,
 	})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
@@ -1185,6 +1216,9 @@ func authFileStamp(paths runtime.Paths) string {
 }
 
 func fileStamp(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {

@@ -59,7 +59,11 @@ from app.schemas.agent import (
     AgentResultsResponse,
     NetworkCaptureUpload,
 )
-from app.services.host_metric_service import ingest_host_metric_batch
+from app.services.host_metric_service import (
+    HOST_TELEMETRY_KINDS,
+    HostMetricStorageError,
+    ingest_host_metric_batch,
+)
 
 router = APIRouter(prefix="/agents", tags=["Agents (runtime)"])
 logger = logging.getLogger("zenplus.agents")
@@ -134,6 +138,14 @@ def _strip_bearer(value: Optional[str]) -> str:
     if value.lower().startswith("bearer "):
         return value[7:].strip()
     return value.strip()
+
+
+def _same_uuid(left: Any, right: Any) -> bool:
+    """Compare UUID identities independent of harmless text formatting."""
+    try:
+        return UUID(str(left)) == UUID(str(right))
+    except (TypeError, ValueError, AttributeError):
+        return False
 
 
 def _client_ip(request: Request) -> Optional[str]:
@@ -909,6 +921,39 @@ async def heartbeat(
     )).mappings().first()
     etag, _ = await _config_etag_for_agent(dict(fresh_agent), db)
 
+    # This field was introduced after the host heartbeat contract. Returning it
+    # is backward-compatible (older agents ignore unknown response fields) and
+    # lets newer combined agents distinguish a healthy local gateway from an
+    # unavailable appliance writer during rolling upgrades.
+    from app.api.v1 import apm_ingest as apm_ingest_api
+
+    agent_credential_bound = False
+    if data.apm is not None and data.apm.enabled:
+        credential_row = (await db.execute(
+            text("""SELECT EXISTS (
+                        SELECT 1 FROM agent_apm_credentials credential
+                        JOIN apm_ingest_keys ingest_key
+                          ON ingest_key.id = credential.key_id
+                        WHERE credential.agent_id = :agent_id
+                          AND ingest_key.enabled = TRUE
+                          AND ingest_key.revoked_at IS NULL
+                    )"""),
+            {"agent_id": agent["id"]},
+        )).first()
+        agent_credential_bound = bool(credential_row and credential_row[0])
+    appliance_apm = apm_ingest_api.runtime_status()
+    appliance_apm["agent_credential_bound"] = agent_credential_bound
+    appliance_apm["ready_for_agent"] = bool(
+        appliance_apm.get("available") and agent_credential_bound
+    )
+    if data.apm is not None and data.apm.enabled and not agent_credential_bound:
+        if appliance_apm.get("state") != "unavailable":
+            appliance_apm["state"] = "degraded"
+        appliance_apm["message"] = (
+            "APM is not ready for this agent because it has no scoped ingest "
+            "credential; re-enroll the agent APM forwarder"
+        )
+
     return AgentHeartbeatResponse(
         ok=True,
         server_time=datetime.now(timezone.utc),
@@ -916,6 +961,7 @@ async def heartbeat(
         has_commands=has_cmd,
         desired_version=fresh_agent.get("desired_version"),
         capabilities=_capability_list(fresh_agent.get("capabilities")),
+        apm=appliance_apm,
     )
 
 
@@ -992,13 +1038,13 @@ async def post_results(
     agent = await _authenticate(x_agent_id, _strip_bearer(authorization), db)
 
     # Validate identity matches the bearer's agent.
-    if str(agent["id"]) != data.agent_id:
+    if not _same_uuid(agent["id"], data.agent_id):
         raise HTTPException(403, "agent_id mismatch with bearer credential")
 
     server_id = agent.get("server_id")
     if not server_id:
         raise HTTPException(400, "Agent has no server binding")
-    if str(server_id) != data.server_id:
+    if not _same_uuid(server_id, data.server_id):
         raise HTTPException(400, "server_id mismatch with agent binding")
 
     batch_id = data.batch_id.strip()
@@ -1009,8 +1055,9 @@ async def post_results(
     # makes concurrent retries wait for the first transaction to finish. Once
     # the first request commits, response-loss retries observe the recorded
     # outcome and skip ClickHouse/inventory ingestion. PostgreSQL and
-    # ClickHouse are not atomic: a worker crash after a ClickHouse insert but
-    # before this transaction commits can still replay that insert.
+    # ClickHouse are not atomic, so a crash can still replay an insert before
+    # this transaction commits; deterministic per-kind ClickHouse tokens and
+    # migrate-094's deduplication window make that replay idempotent.
     payload_sha256 = _host_results_batch_digest(data)
     claimed = (await db.execute(
         text("""
@@ -1066,9 +1113,24 @@ async def post_results(
             errors=errors_before,
         )
 
-    accepted, rejected, errors, clock_skew_s = await ingest_host_metric_batch(
-        str(agent["id"]), str(server_id), data, db,
-    )
+    try:
+        accepted, rejected, errors, clock_skew_s = await ingest_host_metric_batch(
+            str(agent["id"]), str(server_id), data, db,
+        )
+    except HostMetricStorageError as exc:
+        # Do not finalize the durable ledger or acknowledge the batch. The
+        # Windows agent retains it in its spool on 503 and can replay it after
+        # ClickHouse/Postgres schema convergence completes.
+        await db.rollback()
+        logger.warning(
+            "retryable host-results storage failure agent=%s batch=%s part=%s",
+            agent["id"], batch_id, exc.part,
+        )
+        raise HTTPException(
+            503,
+            "Host telemetry storage is unavailable; retry the same batch",
+            headers={"Retry-After": "2"},
+        ) from exc
     response_errors = errors[:25]
 
     await db.execute(
@@ -1088,18 +1150,32 @@ async def post_results(
         },
     )
 
-    # Update last_metric_at + inventory snapshots
+    # Agent self-health is connectivity/queue telemetry, not proof that the
+    # Server module is delivering host signals.  Keep last_metric_at stable for
+    # agent_health-only batches so heartbeat and host readiness remain distinct.
+    has_host_telemetry = any(
+        sample.kind in HOST_TELEMETRY_KINDS for sample in data.metrics
+    )
     await db.execute(
-        text("""UPDATE agents SET last_metric_at = NOW(), clock_skew_s = :skew,
+        text("""UPDATE agents SET last_metric_at = CASE WHEN :has_host_telemetry
+                                                        THEN NOW() ELSE last_metric_at END,
+                                  clock_skew_s = :skew,
                                   updated_at = NOW()
                 WHERE id = :id"""),
-        {"id": agent["id"], "skew": clock_skew_s},
+        {
+            "id": agent["id"], "skew": clock_skew_s,
+            "has_host_telemetry": has_host_telemetry,
+        },
     )
-    await db.execute(
-        text("""UPDATE servers SET last_seen = NOW(), updated_at = NOW()
-                WHERE id = :id"""),
-        {"id": server_id},
-    )
+    # Heartbeats remain the connectivity signal for the server.  A results
+    # upload may contain only agent self-health, so only a successfully stored
+    # host signal may also advance the Server module's data-seen timestamp.
+    if has_host_telemetry:
+        await db.execute(
+            text("""UPDATE servers SET last_seen = NOW(), updated_at = NOW()
+                    WHERE id = :id"""),
+            {"id": server_id},
+        )
     if _host_results_ledger_cleanup_due(agent["id"], batch_id):
         await _prune_host_results_ledger(db, agent["id"])
     await db.commit()
@@ -1328,6 +1404,11 @@ async def packages_manifest(
         "file_size": row["file_size"],
         "sha256": row["sha256"],
         "signature": row.get("signature"),
+        # Windows updates must be Authenticode-signed even when the package is
+        # served from this controller through a relative URL. New agents also
+        # fail closed independently, but publishing the requirement keeps the
+        # manifest contract explicit for every supported client generation.
+        "requires_authenticode": platform == "windows",
         "released_at": row["released_at"],
         "download_url": row["download_path"],
     }

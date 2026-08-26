@@ -100,6 +100,8 @@ class ServerResponse(BaseModel):
     agent_status: Optional[str] = None
     agent_version: Optional[str] = None
     agent_last_heartbeat_at: Optional[datetime] = None
+    agent_last_metric_at: Optional[datetime] = None
+    agent_clock_skew_s: int = 0
     agent_capabilities: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
@@ -337,6 +339,8 @@ class ApplianceAPMStatus(BaseModel):
     rejected_spans_total: int = Field(default=0, ge=0)
     dropped_spans_total: int = Field(default=0, ge=0)
     last_received_at: Optional[datetime] = None
+    agent_credential_bound: bool = False
+    ready_for_agent: bool = False
     message: str = ""
     checked_at: datetime
 

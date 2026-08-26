@@ -249,6 +249,19 @@ func (m *Manager) ensureConfig(cfg config.Config, agentID, serverID string) (str
 		return "", false, fmt.Errorf("refusing non-loopback OTLP bind address %q", bind)
 	}
 	endpoint := strings.TrimRight(cfg.ControllerURL, "/")
+	tlsSettings := fmt.Sprintf("      insecure_skip_verify: %t", !cfg.VerifyTLS)
+	if caFile := strings.TrimSpace(cfg.Security.ControllerCAFile); caFile != "" {
+		caBundle, err := os.ReadFile(caFile)
+		if err != nil {
+			return "", false, fmt.Errorf("read controller CA file for APM gateway: %w", err)
+		}
+		caHash := sha256.Sum256(caBundle)
+		tlsSettings += "\n      ca_file: " + quoteYAML(caFile)
+		// The collector loads its TLS roots at process start. Including the
+		// content fingerprint makes an in-place CA rotation change the generated
+		// config fingerprint and therefore restart the managed gateway.
+		tlsSettings += "\n      # zenplus_ca_sha256: " + hex.EncodeToString(caHash[:])
+	}
 	content := fmt.Sprintf(`extensions:
   health_check:
     endpoint: %s
@@ -287,7 +300,7 @@ exporters:
     headers:
       Authorization: "Bearer ${env:ZENPLUS_APM_KEY}"
     tls:
-      insecure_skip_verify: %t
+%s
     sending_queue:
       enabled: true
       num_consumers: 2
@@ -318,7 +331,7 @@ service:
       processors: [memory_limiter, resource/zenplus, batch]
       exporters: [otlp_http/zenplus]
 `, quoteYAML(netJoin(bind, 13133)), quoteYAML(m.paths.APMStorage), quoteYAML(netJoin(bind, 4317)),
-		quoteYAML(netJoin(bind, 4318)), quoteYAML(agentID), quoteYAML(serverID), quoteYAML(endpoint), !cfg.VerifyTLS,
+		quoteYAML(netJoin(bind, 4318)), quoteYAML(agentID), quoteYAML(serverID), quoteYAML(endpoint), tlsSettings,
 		quoteYAML(bind), gatewayMetricsPort)
 	configHash := sha256.Sum256([]byte(content))
 	fingerprint := hex.EncodeToString(configHash[:])
@@ -854,7 +867,6 @@ func (m *Manager) setFailure(state, message string) {
 	m.status.State = state
 	m.status.LastError = message
 	m.status.CheckedAt = time.Now().UTC()
-	m.status.Failed++
 	m.mu.Unlock()
 	m.logf("APM: %s", message)
 }
@@ -884,9 +896,11 @@ func (m *Manager) reportDiscovery(ctx context.Context, api *client.Client) {
 	}
 	m.lastDiscovery = time.Now()
 	m.mu.Unlock()
-	rows := discoverProcessesWithState(m.loadInstrumentationState())
+	instrumentation := m.loadInstrumentationState()
+	rows := discoverProcessesWithState(instrumentation)
 	if m.guardInstrumentationCrashLoops(ctx, rows) {
-		rows = discoverProcessesWithState(m.loadInstrumentationState())
+		instrumentation = m.loadInstrumentationState()
+		rows = discoverProcessesWithState(instrumentation)
 	}
 	var accepted struct {
 		Accepted int `json:"accepted"`
@@ -905,8 +919,23 @@ func (m *Manager) reportDiscovery(ctx context.Context, api *client.Client) {
 	m.mu.Lock()
 	m.status.Discovered = len(rows)
 	m.status.Instrumented = instrumented
+	// Failed is a current instrumentation-target count. Transport, credential,
+	// and appliance outages are represented by State/LastError instead; treating
+	// those transient failures as instrumentation failures left Agent Fleet in a
+	// permanent "Needs attention" state after the connection recovered.
+	m.status.Failed = countInstrumentationFailures(instrumentation)
 	m.status.CheckedAt = time.Now().UTC()
 	m.mu.Unlock()
+}
+
+func countInstrumentationFailures(state instrumentationState) int {
+	failed := 0
+	for _, target := range state.Targets {
+		if strings.TrimSpace(target.LastError) != "" {
+			failed++
+		}
+	}
+	return failed
 }
 
 // guardInstrumentationCrashLoops automatically restores the pre-ZenPlus

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
@@ -106,6 +107,7 @@ async def test_agent_process_list_exposes_server_identity_for_cloned_hostnames(m
                 "hostname": "WIN-CLONED",
                 "server_name": "WIN-CLONED (clone 192.0.2.21)",
                 "server_ip": "192.0.2.21",
+                "apm_credential_bound": False,
                 "service_name_guess": "TestWebApp",
                 "instrumentation_state": "none",
                 "last_command_params": {},
@@ -124,7 +126,68 @@ async def test_agent_process_list_exposes_server_identity_for_cloned_hostnames(m
     )
 
     assert "LEFT JOIN servers s ON s.id = p.server_id" in db.sql
+    assert "AS apm_credential_bound" in db.sql
     assert "COALESCE(host(s.primary_ip), host(a.last_ip)) AS server_ip" in db.sql
     assert output[0]["agent_id"] == agent_id
     assert output[0]["server_name"] == "WIN-CLONED (clone 192.0.2.21)"
     assert output[0]["server_ip"] == "192.0.2.21"
+    assert output[0]["telemetry_status"] == "credential_missing"
+
+
+@pytest.mark.asyncio
+async def test_agent_process_trace_health_requires_exact_agent_and_server_binding(monkeypatch):
+    agent_id, server_id = uuid4(), uuid4()
+    other_agent_id, other_server_id = uuid4(), uuid4()
+    traced_at = datetime(2026, 8, 25, 18, 0, tzinfo=timezone.utc)
+
+    class ProcessDB:
+        async def execute(self, statement, params=None):
+            return MappingRows([{
+                "id": uuid4(),
+                "agent_id": agent_id,
+                "server_id": server_id,
+                "hostname": "WIN-CLONED",
+                "server_name": "WIN-CLONED (clone 192.0.2.21)",
+                "server_ip": "192.0.2.21",
+                "apm_credential_bound": True,
+                "service_name_guess": "DefaultAppPool",
+                "instrumentation_state": "active",
+                "last_command_params": {"environment": "prod"},
+            }])
+
+    trace_rows = [[
+        str(other_agent_id), str(other_server_id), "DefaultAppPool", "prod",
+        traced_at, 12,
+    ]]
+    queries = []
+
+    class TraceResult:
+        @property
+        def result_rows(self):
+            return trace_rows
+
+    class FakeClickHouse:
+        def query(self, sql):
+            queries.append(sql)
+            return TraceResult()
+
+    monkeypatch.setattr(apm_agents, "get_ch_client", lambda: FakeClickHouse())
+    output = await apm_agents.list_agent_processes(
+        server_id=None, active_hours=24, db=ProcessDB(), user=object(),
+    )
+    assert output[0]["telemetry_status"] == "waiting_for_first_trace"
+    assert output[0]["traces_15m"] == 0
+    assert "JSONExtractString(resource, 'zenplus.agent_id')" in queries[0]
+    assert "JSONExtractString(resource, 'zenplus.server_id')" in queries[0]
+    assert "GROUP BY agent_id, server_id, service_name, env" in queries[0]
+
+    trace_rows = [[
+        str(agent_id), str(server_id), "DefaultAppPool", "prod",
+        traced_at, 12,
+    ]]
+    output = await apm_agents.list_agent_processes(
+        server_id=None, active_hours=24, db=ProcessDB(), user=object(),
+    )
+    assert output[0]["telemetry_status"] == "receiving"
+    assert output[0]["last_trace_at"] == traced_at
+    assert output[0]["traces_15m"] == 12

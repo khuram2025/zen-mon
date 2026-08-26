@@ -118,8 +118,15 @@ def test_delete_bundle_requires_admin(client, as_viewer, fake_jobs):
 
 
 def test_delete_bundle_returns_204(client, as_admin, fake_jobs):
+    fake_jobs["status"] = "ready"
     r = client.delete(f"/api/v1/support/bundles/{VALID_ID}")
     assert r.status_code == 204
+
+
+def test_delete_bundle_rejects_running_job(client, as_admin, fake_jobs):
+    fake_jobs["status"] = "running"
+    r = client.delete(f"/api/v1/support/bundles/{VALID_ID}")
+    assert r.status_code == 409
 
 
 def test_delete_bundle_404_for_unknown(client, as_admin, fake_jobs):

@@ -88,6 +88,30 @@ def test_heartbeat_capabilities_are_normalized_and_bounded():
 
 
 @pytest.mark.asyncio
+async def test_windows_package_manifest_requires_authenticode(monkeypatch):
+    released_at = datetime.now(timezone.utc)
+
+    class PackageDB:
+        async def execute(self, _statement, _params=None):
+            return Result([{
+                "version": "1.12.4",
+                "file_name": "zenplus-agent-1.12.4.exe",
+                "file_size": 123,
+                "sha256": "a" * 64,
+                "signature": None,
+                "released_at": released_at,
+                "download_path": "/api/v1/agents/packages/windows/latest",
+            }])
+
+    monkeypatch.setattr(agents, "_verified_package_path", lambda *_args: Path("agent.exe"))
+    manifest = await agents.packages_manifest(
+        platform="windows", channel="stable", arch="amd64", db=PackageDB()
+    )
+
+    assert manifest["requires_authenticode"] is True
+
+
+@pytest.mark.asyncio
 async def test_server_identity_sync_preserves_custom_label_and_updates_facts():
     server_id = uuid4()
 

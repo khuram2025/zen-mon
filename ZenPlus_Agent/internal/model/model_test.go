@@ -8,7 +8,7 @@ import (
 )
 
 func TestAgentVersionAndCapabilitiesContract(t *testing.T) {
-	if AgentVersion != "1.12.0" {
+	if AgentVersion != "1.12.4" {
 		t.Fatalf("unexpected agent version %q", AgentVersion)
 	}
 	want := []string{

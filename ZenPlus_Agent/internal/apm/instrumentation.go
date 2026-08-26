@@ -110,6 +110,9 @@ func (m *Manager) Instrument(ctx context.Context, request InstrumentationRequest
 		m.recordInstrumentationFailure(request, err)
 		return InstrumentationResult{}, err
 	}
+	if err := m.clearInactiveInstrumentationFailure(request); err != nil {
+		return InstrumentationResult{}, fmt.Errorf("clear recovered instrumentation failure: %w", err)
+	}
 	m.logf("APM instrumentation kind=%s runtime=%s target=%q enabled=%t restarted=%t state=%s", request.TargetKind, request.Runtime, request.TargetName, request.Enabled, result.Restarted, result.State)
 	// Command results are sent immediately; allow the next 10-second reconcile
 	// to also refresh the controller inventory instead of waiting a minute.
@@ -192,6 +195,26 @@ func (m *Manager) recordInstrumentationFailure(request InstrumentationRequest, c
 	target.LastError = cause.Error()
 	state.Targets[key] = target
 	_ = writeInstrumentationState(m.paths.APMInstrumentationState, state)
+}
+
+// Successful enable/disable operations normally replace the target record and
+// therefore clear LastError. A disable for an already-unmanaged target is a
+// deliberate no-op, so clear the prior failure-only record here as well. This
+// lets Agent Fleet recover without requiring a process to still be running.
+func (m *Manager) clearInactiveInstrumentationFailure(request InstrumentationRequest) error {
+	state := m.loadInstrumentationState()
+	key := instrumentationTargetKey(request.TargetKind, request.TargetName)
+	target, ok := state.Targets[key]
+	if !ok || strings.TrimSpace(target.LastError) == "" {
+		return nil
+	}
+	target.LastError = ""
+	if !target.Enabled && !target.PendingRestart && len(target.Previous) == 0 && len(target.Managed) == 0 {
+		delete(state.Targets, key)
+	} else {
+		state.Targets[key] = target
+	}
+	return writeInstrumentationState(m.paths.APMInstrumentationState, state)
 }
 
 func instrumentationTargetKey(kind, name string) string {

@@ -146,6 +146,48 @@ _writer_task: "asyncio.Task | None" = None
 _last_received_at: datetime | None = None
 
 
+def runtime_status(*, checked_at: datetime | None = None) -> dict:
+    """Return the read-only state of this worker's OTLP writer.
+
+    Uvicorn starts one writer per API worker.  The snapshot is intentionally
+    local and cheap enough to attach to every host-agent heartbeat; durable,
+    cross-worker counters remain available through the APM data-quality API.
+    """
+    now = checked_at or datetime.now(timezone.utc)
+    writer_alive = bool(
+        _writer_task is not None
+        and not _writer_task.done()
+        and _queue is not None
+    )
+    queue_depth = _queue.qsize() if _queue is not None else 0
+    if not writer_alive:
+        state = "unavailable"
+        message = "APM ingest writer is not running"
+    elif queue_depth >= max(1, int(QUEUE_MAXSIZE * 0.8)):
+        state = "degraded"
+        message = "APM ingest queue is under backpressure"
+    elif _last_received_at is None:
+        state = "starting"
+        message = "APM ingest is ready and waiting for traces"
+    else:
+        state = "active"
+        message = "APM ingest writer is active"
+    return {
+        "available": writer_alive,
+        "state": state,
+        "managed_by": "appliance",
+        "ingest_path": "/v1/traces",
+        "queue_depth": queue_depth,
+        "queue_capacity": QUEUE_MAXSIZE,
+        "accepted_spans_total": max(0, int(STATS["accepted_spans"])),
+        "rejected_spans_total": max(0, int(STATS["rejected_spans"])),
+        "dropped_spans_total": max(0, int(STATS["dropped_spans"])),
+        "last_received_at": _last_received_at,
+        "message": message,
+        "checked_at": now,
+    }
+
+
 # ── OTLP decoding ────────────────────────────────────────────────────────────
 
 def decode_otlp_traces_protobuf(raw: bytes) -> dict:

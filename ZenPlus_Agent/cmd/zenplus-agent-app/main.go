@@ -731,11 +731,11 @@ func launchRepairSetup(cfg config.Config) error {
 	if info, err := os.Stat(setup); err != nil || info.IsDir() {
 		return fmt.Errorf("installed setup was not found at %s", setup)
 	}
-	cmd := exec.Command(setup,
-		"/machine",
-		"CONTROLLER_URL="+cfg.ControllerURL,
-		"INSTALL_PROFILE="+cfg.APM.Profile,
-	)
+	args := []string{"/machine", "CONTROLLER_URL=" + cfg.ControllerURL, "INSTALL_PROFILE=" + cfg.APM.Profile}
+	if cfg.Security.ControllerCAFile != "" {
+		args = append(args, "CONTROLLER_CA_FILE="+cfg.Security.ControllerCAFile)
+	}
+	cmd := exec.Command(setup, args...)
 	return cmd.Start()
 }
 

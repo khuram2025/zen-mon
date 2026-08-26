@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
 from app.api.v1 import servers
+from app.schemas.agent import AgentResultsBatch
 from app.services import host_alert_service as host_alerts
 from app.services import host_metric_service as metrics
+from app.services import server_health_service
 
 
 class QueryResult:
@@ -20,8 +22,8 @@ class InsertClient:
     def __init__(self):
         self.calls = []
 
-    def insert(self, table, data, column_names):
-        self.calls.append((table, data, column_names))
+    def insert(self, table, data, column_names, settings=None):
+        self.calls.append((table, data, column_names, settings))
 
 
 def test_agent_cpu_memory_and_process_fields_map_to_clickhouse_columns():
@@ -74,6 +76,179 @@ def test_agent_cpu_memory_and_process_fields_map_to_clickhouse_columns():
     assert process[1][0][process[2].index("state")] == "running"
     assert process[1][0][process[2].index("running")] == 1
     assert process[1][0][process[2].index("watchlisted")] == 1
+
+
+def test_spool_delay_is_not_misclassified_as_agent_clock_skew():
+    received_at = datetime(2026, 8, 25, 12, 0, 2, tzinfo=timezone.utc)
+    sent_at = datetime(2026, 8, 25, 12, 0, 0, tzinfo=timezone.utc)
+    collected_at = datetime(2026, 8, 25, 9, 0, 0, tzinfo=timezone.utc)
+    rows = [{"timestamp": collected_at}]
+
+    skew = metrics._correct_agent_clock_skew(
+        rows, sent_at, "agent-1", received_at=received_at,
+    )
+
+    assert skew == -2
+    assert rows[0]["timestamp"] == collected_at
+
+
+def test_agent_clock_skew_correction_preserves_sample_age_and_spacing():
+    received_at = datetime(2026, 8, 25, 12, 0, 0, tzinfo=timezone.utc)
+    # The host clock is ten minutes fast. The samples are also an hour old
+    # because they came from the spool; only the ten-minute skew is removed.
+    sent_at = received_at + timedelta(minutes=10)
+    rows = [
+        {"timestamp": received_at - timedelta(minutes=50)},
+        {"timestamp": received_at - timedelta(minutes=49)},
+    ]
+
+    skew = metrics._correct_agent_clock_skew(
+        rows, sent_at, "agent-1", received_at=received_at,
+    )
+
+    assert skew == 600
+    assert rows[0]["timestamp"] == received_at - timedelta(minutes=60)
+    assert rows[1]["timestamp"] - rows[0]["timestamp"] == timedelta(minutes=1)
+
+
+def test_host_insert_uses_thread_local_clickhouse_session(monkeypatch):
+    client = InsertClient()
+    monkeypatch.setattr(metrics, "get_ch_client", lambda: client)
+    stamp = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+
+    accepted = metrics._insert_metric_groups(
+        str(uuid4()), str(uuid4()), "batch-1",
+        {"cpu": [{"timestamp": stamp, "cpu_total_pct": 42.0}]},
+    )
+
+    assert accepted == 1
+    assert client.calls[0][0] == "host_cpu_metrics"
+    assert len(client.calls[0][3]["insert_deduplication_token"]) == 64
+
+
+def test_clickhouse_session_concurrency_error_is_retryable(monkeypatch):
+    class ConcurrentSessionClient:
+        def insert(self, *_args, **_kwargs):
+            raise RuntimeError(
+                "Attempt to execute concurrent queries within the same session. "
+                "Please use a separate client instance per thread/process."
+            )
+
+    monkeypatch.setattr(metrics, "get_ch_client", lambda: ConcurrentSessionClient())
+    stamp = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+
+    with pytest.raises(metrics.HostMetricStorageError) as exc:
+        metrics._insert_metric_groups(
+            str(uuid4()), str(uuid4()), "batch-1",
+            {"cpu": [{"timestamp": stamp, "cpu_total_pct": 42.0}]},
+        )
+
+    assert exc.value.part == "cpu"
+
+
+def test_replayed_metric_kind_uses_the_same_deduplication_token(monkeypatch):
+    client = InsertClient()
+    monkeypatch.setattr(metrics, "get_ch_client", lambda: client)
+    agent_id, server_id = str(uuid4()), str(uuid4())
+    rows = {
+        "cpu": [{
+            "timestamp": datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc),
+            "cpu_total_pct": 42.0,
+        }],
+    }
+
+    metrics._insert_metric_groups(agent_id, server_id, "batch-1", rows)
+    metrics._insert_metric_groups(agent_id, server_id, "batch-1", rows)
+    first_token = client.calls[0][3]["insert_deduplication_token"]
+    retry_token = client.calls[1][3]["insert_deduplication_token"]
+
+    assert first_token == retry_token
+    assert client.calls[0][3]["insert_deduplicate"] == 1
+
+
+def test_host_telemetry_readiness_is_not_inferred_from_heartbeat():
+    ready, missing, partial = str(uuid4()), str(uuid4()), str(uuid4())
+
+    result = servers._host_telemetry_readiness(
+        {
+            ready: {"cpu_pct": 20.0, "memory_pct": 40.0},
+            partial: {"cpu_pct": 10.0},
+            # ``missing`` deliberately has no current CPU/memory sample even
+            # though it can still have a healthy agent heartbeat in Postgres.
+        },
+        {ready: 300, missing: 300, partial: 300},
+    )
+
+    assert result[ready]["state"] == "ready"
+    assert result[ready]["available"] is True
+    assert result[missing]["state"] == "missing"
+    assert result[missing]["missing_signals"] == ["cpu", "memory"]
+    assert result[partial]["state"] == "partial"
+
+
+def test_agent_apm_status_requires_controller_scoped_credential():
+    status = servers._apm_status_with_binding({
+        "apm_status": {
+            "enabled": True,
+            "gateway": {"listening": True, "healthy": True},
+        },
+        "apm_credential_bound": False,
+    })
+
+    assert status["ready"] is False
+    assert status["readiness"] == "missing_credential"
+    assert "re-enroll" in status["last_error"]
+
+    bound = servers._apm_status_with_binding({
+        "apm_status": {
+            "enabled": True,
+            "gateway": {"listening": True, "healthy": True},
+        },
+        "apm_credential_bound": True,
+    })
+    assert bound["ready"] is True
+    assert bound["readiness"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_agent_health_only_batch_cannot_mark_server_healthy(monkeypatch):
+    agent_id, server_id = str(uuid4()), str(uuid4())
+    stamp = datetime.now(timezone.utc)
+    batch = AgentResultsBatch(
+        agent_id=agent_id,
+        server_id=server_id,
+        batch_id="health-only",
+        sequence_start=1,
+        sequence_end=1,
+        agent_version="1.12.0",
+        collected_at=stamp,
+        sent_at=stamp,
+        metrics=[{
+            "kind": "agent_health",
+            "timestamp": stamp,
+            "data": {"queue_depth": 1, "spool_bytes": 568},
+        }],
+    )
+    health_calls = []
+
+    monkeypatch.setattr(metrics, "_insert_metric_groups", lambda *_args: 1)
+
+    async def compute(*_args):
+        health_calls.append("compute")
+        return "healthy", [], []
+
+    async def store(*_args):
+        health_calls.append("store")
+
+    monkeypatch.setattr(server_health_service, "compute_server_health", compute)
+    monkeypatch.setattr(server_health_service, "store_server_health", store)
+
+    accepted, rejected, errors, _skew = await metrics.ingest_host_metric_batch(
+        agent_id, server_id, batch, object(),
+    )
+
+    assert (accepted, rejected, errors) == (1, 0, [])
+    assert health_calls == []
 
 
 def test_latest_metric_queries_are_independent_and_use_current_snapshots(monkeypatch):

@@ -124,6 +124,7 @@ type SpoolConfig struct {
 type SecurityConfig struct {
 	RequireSignedConfig    bool   `yaml:"require_signed_config" json:"require_signed_config"`
 	ConfigPublicKey        string `yaml:"config_public_key,omitempty" json:"config_public_key,omitempty"`
+	ControllerCAFile       string `yaml:"controller_ca_file,omitempty" json:"controller_ca_file,omitempty"`
 	AllowInsecureTransport bool   `yaml:"allow_insecure_transport,omitempty" json:"allow_insecure_transport,omitempty"`
 }
 
@@ -198,6 +199,10 @@ func Load(path string) (Config, error) {
 		base := filepath.Dir(path)
 		cfg.DataDir = filepath.Clean(filepath.Join(base, cfg.DataDir))
 	}
+	if cfg.Security.ControllerCAFile != "" && !filepath.IsAbs(cfg.Security.ControllerCAFile) {
+		base := filepath.Dir(path)
+		cfg.Security.ControllerCAFile = filepath.Clean(filepath.Join(base, cfg.Security.ControllerCAFile))
+	}
 	return cfg, nil
 }
 
@@ -216,10 +221,39 @@ func LoadForEdit(path string) (Config, error) {
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
+	// Releases before TLS enforcement commonly stored an http:// appliance URL
+	// and relied on nginx to redirect every agent request to HTTPS. Rejecting
+	// that legacy file prevents the upgraded service from starting at all.
+	// When insecure transport was not explicitly allowed, upgrade the scheme;
+	// certificate trust remains enforced by the Windows trust store plus any
+	// explicitly configured controller CA bundle.
+	if migrated, ok := migrateLegacyControllerURL(cfg.ControllerURL, cfg.Security.AllowInsecureTransport); ok {
+		cfg.ControllerURL = migrated
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func migrateLegacyControllerURL(rawURL string, allowInsecure bool) (string, bool) {
+	if allowInsecure {
+		return rawURL, false
+	}
+	parsed, err := url.ParseRequestURI(strings.TrimSpace(rawURL))
+	if err != nil || !strings.EqualFold(parsed.Scheme, "http") || parsed.Host == "" {
+		return rawURL, false
+	}
+	host := parsed.Hostname()
+	isLoopback := strings.EqualFold(host, "localhost")
+	if ip := net.ParseIP(host); ip != nil {
+		isLoopback = ip.IsLoopback()
+	}
+	if isLoopback {
+		return rawURL, false
+	}
+	parsed.Scheme = "https"
+	return parsed.String(), true
 }
 
 func SetControllerURL(path string, rawURL string) (Config, error) {
@@ -313,6 +347,9 @@ func (c *Config) Validate() error {
 	}
 	if parsed.Scheme == "https" && !c.VerifyTLS && !c.Security.AllowInsecureTransport {
 		return errors.New("verify_tls cannot be disabled unless security.allow_insecure_transport is explicitly enabled")
+	}
+	if strings.TrimSpace(c.Security.ControllerCAFile) != "" && !c.VerifyTLS {
+		return errors.New("security.controller_ca_file requires verify_tls to be enabled")
 	}
 	if c.HeartbeatIntervalSeconds <= 0 {
 		return errors.New("heartbeat_interval_seconds must be positive")

@@ -42,6 +42,20 @@ WATCH_SEEN_DEDUPE = "1 hour"
 UDT_SWEEP_ADVISORY_LOCK = 1515074391
 
 
+def _consume_dns_lookup_exception(lookup: asyncio.Future) -> None:
+    """Mark a detached DNS lookup's eventual exception as observed."""
+    if lookup.cancelled():
+        return
+    try:
+        lookup.exception()
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        # A done callback must never create a second unhandled exception while
+        # it is cleaning up the original resolver failure.
+        pass
+
+
 async def _resolve_dns_name(ip: str, resolver=None) -> str | None:
     """Resolve one endpoint without cancelling uvloop's DNS callback."""
     if resolver is None:
@@ -50,8 +64,16 @@ async def _resolve_dns_name(ip: str, resolver=None) -> str | None:
         # uvloop raises InvalidStateError in its DNS completion callback when
         # wait_for cancels getnameinfo at the deadline. Shield the lookup so the
         # caller still times out while its callback finishes cleanly.
+        lookup = asyncio.ensure_future(
+            resolver((ip, 0), socket.NI_NAMEREQD)
+        )
+        # The shield deliberately lets the resolver outlive our timeout.  If
+        # that detached lookup later fails (NXDOMAIN, resolver outage, etc.),
+        # retrieve the exception so asyncio does not emit "Task exception was
+        # never retrieved" for every unresolved endpoint in the sweep.
+        lookup.add_done_callback(_consume_dns_lookup_exception)
         name, _ = await asyncio.wait_for(
-            asyncio.shield(resolver((ip, 0), socket.NI_NAMEREQD)),
+            asyncio.shield(lookup),
             timeout=DNS_TIMEOUT_S,
         )
         return name

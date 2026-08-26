@@ -93,6 +93,15 @@ def make_batch(agent_id, server_id, *, cpu_pct=12.5, sent_at=None):
     )
 
 
+def make_agent_health_batch(agent_id, server_id):
+    batch = make_batch(agent_id, server_id)
+    batch.metrics = [batch.metrics[0].model_copy(update={
+        "kind": "agent_health",
+        "data": {"queue_depth": 1, "spool_bytes": 568},
+    })]
+    return batch
+
+
 @pytest.mark.asyncio
 async def test_host_results_retry_uses_durable_batch_outcome(monkeypatch):
     agent_id, server_id = uuid4(), uuid4()
@@ -195,6 +204,92 @@ async def test_host_results_prunes_completed_ledger_rows_on_sampled_upload(monke
         "aid": agent_id,
         "days": agents.HOST_RESULTS_LEDGER_RETENTION_DAYS,
     }
+
+
+@pytest.mark.asyncio
+async def test_host_results_storage_failure_returns_retryable_503(monkeypatch):
+    agent_id, server_id = uuid4(), uuid4()
+    db = BatchLedgerDB()
+
+    async def authenticate(*_args):
+        return {"id": agent_id, "server_id": server_id}
+
+    async def ingest(*_args):
+        raise agents.HostMetricStorageError("cpu")
+
+    monkeypatch.setattr(agents, "_authenticate", authenticate)
+    monkeypatch.setattr(agents, "ingest_host_metric_batch", ingest)
+
+    with pytest.raises(HTTPException) as exc:
+        await agents.post_results(
+            make_batch(agent_id, server_id), db, str(agent_id), "Bearer key",
+        )
+
+    assert exc.value.status_code == 503
+    assert exc.value.headers == {"Retry-After": "2"}
+    assert db.rollbacks == 1
+    assert not any(
+        "UPDATE agent_host_result_batches" in sql for sql, _params in db.calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_health_only_batch_does_not_advance_host_metric_freshness(monkeypatch):
+    agent_id, server_id = uuid4(), uuid4()
+    db = BatchLedgerDB()
+
+    async def authenticate(*_args):
+        return {"id": agent_id, "server_id": server_id}
+
+    async def ingest(*_args):
+        return 1, 0, [], 0
+
+    monkeypatch.setattr(agents, "_authenticate", authenticate)
+    monkeypatch.setattr(agents, "ingest_host_metric_batch", ingest)
+
+    await agents.post_results(
+        make_agent_health_batch(agent_id, server_id),
+        db,
+        str(agent_id),
+        "Bearer key",
+    )
+
+    metric_update = next(
+        params for sql, params in db.calls if "UPDATE agents SET last_metric_at" in sql
+    )
+    assert metric_update["has_host_telemetry"] is False
+    assert not any("UPDATE servers SET last_seen" in sql for sql, _ in db.calls)
+
+
+@pytest.mark.asyncio
+async def test_host_telemetry_batch_advances_server_data_freshness(monkeypatch):
+    agent_id, server_id = uuid4(), uuid4()
+    db = BatchLedgerDB()
+
+    async def authenticate(*_args):
+        return {"id": agent_id, "server_id": server_id}
+
+    async def ingest(*_args):
+        return 1, 0, [], 0
+
+    monkeypatch.setattr(agents, "_authenticate", authenticate)
+    monkeypatch.setattr(agents, "ingest_host_metric_batch", ingest)
+
+    await agents.post_results(
+        make_batch(agent_id, server_id), db, str(agent_id), "Bearer key",
+    )
+
+    server_updates = [
+        params for sql, params in db.calls if "UPDATE servers SET last_seen" in sql
+    ]
+    assert server_updates == [{"id": server_id}]
+
+
+def test_host_results_uuid_identity_comparison_is_format_insensitive():
+    identity = uuid4()
+    assert agents._same_uuid(identity, str(identity).upper())
+    assert not agents._same_uuid(identity, uuid4())
+    assert not agents._same_uuid(identity, "not-a-uuid")
 
 
 def test_host_results_batch_migration_defines_durable_agent_ledger():

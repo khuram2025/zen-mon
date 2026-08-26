@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 
 from app.services import udt_sweeper
 
@@ -28,3 +29,29 @@ def test_timed_out_reverse_dns_lookup_is_not_cancelled(monkeypatch):
 
     assert asyncio.run(scenario()) is None
     assert state == {"cancelled": False, "completed": True}
+
+
+def test_timed_out_reverse_dns_failure_is_observed(monkeypatch):
+    async def delayed_failure(_address, _flags):
+        await asyncio.sleep(0.02)
+        raise OSError("DNS failed after the caller timed out")
+
+    async def scenario():
+        unhandled = []
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(
+            lambda _loop, context: unhandled.append(context)
+        )
+        result = await udt_sweeper._resolve_dns_name(
+            "192.0.2.99", resolver=delayed_failure
+        )
+        await asyncio.sleep(0.03)
+        gc.collect()
+        await asyncio.sleep(0)
+        return result, unhandled
+
+    monkeypatch.setattr(udt_sweeper, "DNS_TIMEOUT_S", 0.001)
+
+    result, unhandled = asyncio.run(scenario())
+    assert result is None
+    assert unhandled == []
