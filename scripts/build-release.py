@@ -1046,6 +1046,7 @@ def build_package(version: str, changelog: str, severity: str,
         "severity": severity,
         "arch": "amd64",
         "os_min": "ubuntu-22.04",
+        "agent_artifacts_included": not skip_agent_artifacts,
         "agent_packages": agent_staged,
         "steps": steps,
         "rollback_steps": [
@@ -1132,33 +1133,38 @@ def build_package(version: str, changelog: str, severity: str,
 
 # ─── Publish ──────────────────────────────────────────────────────────────────
 
-def verify_release_package(zup_path: Path, version: str) -> None:
+def verify_release_package(
+    zup_path: Path,
+    version: str,
+    appliance_only: bool = False,
+) -> None:
     """Run the complete offline verifier before any production API call."""
     if not PUBLIC_KEY_PATH.is_file():
         raise RuntimeError(f"Release verification key is missing: {PUBLIC_KEY_PATH}")
-    agent_version = _agent_source_version()
-    if not agent_version:
-        raise RuntimeError(
-            "Cannot determine the required Windows agent version for release verification"
-        )
     verifier = ZENPLUS_DIR / "scripts" / "verify-ota-release.py"
-    subprocess.run(
-        [
-            sys.executable,
-            str(verifier),
-            str(zup_path),
-            str(PUBLIC_KEY_PATH),
-            "--version",
-            version,
-            "--agent-version",
-            agent_version,
-        ],
-        check=True,
-    )
+    verify_args = [
+        sys.executable,
+        str(verifier),
+        str(zup_path),
+        str(PUBLIC_KEY_PATH),
+        "--version",
+        version,
+    ]
+    if appliance_only:
+        verify_args.append("--appliance-only")
+    else:
+        agent_version = _agent_source_version()
+        if not agent_version:
+            raise RuntimeError(
+                "Cannot determine the required Windows agent version for release verification"
+            )
+        verify_args.extend(["--agent-version", agent_version])
+    subprocess.run(verify_args, check=True)
 
 
 def publish_package(zup_path: Path, version: str, changelog: str,
-                    severity: str, min_version: str | None) -> None:
+                    severity: str, min_version: str | None,
+                    appliance_only: bool = False) -> None:
     """Upload a .zup package to zentryc.com and publish it."""
     import httpx
 
@@ -1202,8 +1208,8 @@ def publish_package(zup_path: Path, version: str, changelog: str,
             print("ERROR: --min-version must be lower than the release version.")
             sys.exit(1)
 
-    print("  Verifying signature, checksums, version, secrets, and agent payload ...")
-    verify_release_package(zup_path, version)
+    print("  Verifying signature, checksums, version, secrets, and release scope ...")
+    verify_release_package(zup_path, version, appliance_only)
 
     print(f"\nPublishing v{version} to {SERVER_URL} ...")
 
@@ -1420,7 +1426,7 @@ Examples:
     build_p.add_argument(
         "--skip-agent-artifacts",
         action="store_true",
-        help="Emergency override: build without an agent installer",
+        help="Build a verified appliance-only release without an agent installer",
     )
     build_p.add_argument("--include-migrations", action="store_true",
                          help="Require explicit --migration values for schema releases")
@@ -1487,7 +1493,8 @@ Examples:
                                      Path(args.agent_artifact_dir) if args.agent_artifact_dir else None,
                                      args.skip_agent_artifacts)
         publish_package(zup_path, args.version, args.changelog,
-                        args.severity, args.min_version)
+                        args.severity, args.min_version,
+                        args.skip_agent_artifacts)
 
         if args.rollout:
             create_rollout(args.version, args.rollout, args.rollout_group, args.rollout_pct)

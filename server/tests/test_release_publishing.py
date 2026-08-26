@@ -133,6 +133,48 @@ def test_release_inputs_require_matching_version_and_signing_key(tmp_path, monke
         builder.validate_release_inputs("1.21.0")
 
 
+def test_release_verifier_requires_explicit_agent_or_appliance_scope(
+    tmp_path, monkeypatch
+):
+    builder = _load_builder()
+    key = tmp_path / "release.pub"
+    key.write_bytes(b"public-key-placeholder")
+    verifier = tmp_path / "scripts" / "verify-ota-release.py"
+    verifier.parent.mkdir()
+    verifier.write_text("# verifier placeholder\n", encoding="utf-8")
+    package = tmp_path / "release.zup"
+    package.write_bytes(b"package-placeholder")
+    calls = []
+
+    monkeypatch.setattr(builder, "ZENPLUS_DIR", tmp_path)
+    monkeypatch.setattr(builder, "PUBLIC_KEY_PATH", key)
+    monkeypatch.setattr(builder, "_agent_source_version", lambda: "1.12.4")
+    monkeypatch.setattr(
+        builder.subprocess,
+        "run",
+        lambda args, check: calls.append((args, check)),
+    )
+
+    builder.verify_release_package(package, "1.20.4")
+    builder.verify_release_package(package, "1.20.4", appliance_only=True)
+
+    assert calls[0][0][-2:] == ["--agent-version", "1.12.4"]
+    assert calls[1][0][-1] == "--appliance-only"
+    assert "--agent-version" not in calls[1][0]
+    assert all(check is True for _args, check in calls)
+
+
+def test_release_script_propagates_verified_appliance_only_scope():
+    source = (
+        Path(__file__).resolve().parents[2] / "scripts" / "release.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'RELEASE_SCOPE="${6:-${ZENPLUS_RELEASE_SCOPE:-bundled}}"' in source
+    assert "VERIFY_ARGS+=(--appliance-only)" in source
+    assert "BUILD_ARGS+=(--skip-agent-artifacts)" in source
+    assert "PUBLISH_ARGS+=(--skip-agent-artifacts)" in source
+
+
 def test_publish_fails_before_authentication_when_package_is_unsigned(
     tmp_path, monkeypatch
 ):
