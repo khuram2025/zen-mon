@@ -31,6 +31,7 @@ import {
   ListChecks,
   MapPinned,
   Mail,
+  MousePointerClick,
   Network,
   Palette,
   PieChart,
@@ -95,6 +96,16 @@ function settingsTab(tab: string, label: string, icon: NavIcon, permission?: str
     permission,
     match: ({ pathname, params }) =>
       pathname === '/settings/general' && (params.get('tab') || 'company') === tab,
+  }
+}
+
+function rumTab(tab: string, label: string, icon: NavIcon): NavNode {
+  return {
+    to: tab === 'overview' ? '/apm/rum' : `/apm/rum?tab=${tab}`,
+    label,
+    icon,
+    match: ({ pathname, params }) =>
+      pathname === '/apm/rum' && (params.get('tab') || 'overview') === tab,
   }
 }
 
@@ -212,7 +223,21 @@ export const NAV_GROUPS: NavGroup[] = [
       { to: '/apm/synthetics', label: 'Synthetics', icon: Workflow, hint: 'Scripted uptime journeys' },
       { to: '/apm/errors', label: 'Errors', icon: Bug, hint: 'Grouped exception inbox' },
       { to: '/apm/traces', label: 'Traces', icon: GitBranch, hint: 'Distributed trace explorer' },
-      { to: '/apm/rum', label: 'RUM', icon: Globe2, hint: 'Real-user vitals and sessions' },
+      {
+        to: '/apm/rum',
+        label: 'RUM',
+        icon: Globe2,
+        hint: 'Real-user vitals and sessions',
+        children: [
+          rumTab('overview', 'Overview', LayoutDashboard),
+          rumTab('web-vitals', 'Web Vitals', Gauge),
+          rumTab('views', 'Views', FileBarChart),
+          rumTab('sessions', 'Sessions', Users),
+          rumTab('errors', 'JS Errors', Bug),
+          rumTab('resources', 'Resources', HardDrive),
+          rumTab('actions', 'Actions', MousePointerClick),
+        ],
+      },
       { to: '/apm/usage', label: 'Usage', icon: BarChart3, hint: 'Pages, users and span volume' },
       { to: '/apm/settings', label: 'APM Settings', icon: SlidersHorizontal },
     ],

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { NavLink, useLocation, useNavigate } from 'react-router-dom'
+import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   ChevronDown,
@@ -89,9 +89,10 @@ type RowProps = {
 function LeafRow({ node, pathname, params, alertCount, onNavigate, depth = 0 }: RowProps) {
   const active = isNodeActive(node, pathname, params)
   return (
-    <NavLink
+    <Link
       to={node.to}
       onClick={onNavigate}
+      aria-current={active ? 'page' : undefined}
       className={cn(
         'group relative flex items-center gap-2.5 rounded-lg py-[7px] pr-2 text-[13px] transition-colors',
         depth === 0 ? 'px-2.5 font-medium' : 'px-2 text-[12.5px]',
@@ -109,7 +110,7 @@ function LeafRow({ node, pathname, params, alertCount, onNavigate, depth = 0 }: 
       <node.icon className={cn('shrink-0', depth === 0 ? 'h-[17px] w-[17px]' : 'h-[15px] w-[15px]')} />
       <span className="truncate">{node.label}</span>
       {node.badge === 'alerts' && <AlertBadge count={alertCount} />}
-    </NavLink>
+    </Link>
   )
 }
 
@@ -257,10 +258,11 @@ function RailFlyout({
                     {item.children.map((child) => {
                       const active = isNodeActive(child, pathname, params)
                       return (
-                        <NavLink
+                        <Link
                           key={child.to}
                           to={child.to}
                           onClick={onClose}
+                          aria-current={active ? 'page' : undefined}
                           className={cn(
                             'flex items-center gap-2 rounded-md px-2 py-1 text-[12px] transition-colors',
                             active
@@ -270,7 +272,7 @@ function RailFlyout({
                         >
                           <child.icon className="h-[13px] w-[13px] shrink-0" />
                           <span className="truncate">{child.label}</span>
-                        </NavLink>
+                        </Link>
                       )
                     })}
                   </div>

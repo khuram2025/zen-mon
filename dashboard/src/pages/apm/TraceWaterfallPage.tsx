@@ -6,6 +6,8 @@ import { api } from '@/lib/api'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
+import { fmtMs } from '@/components/apm/shared'
+import { hopsFromTraceSpans, RequestFlow } from '@/components/apm/explorer'
 import { KbLink } from '@/components/apm/KbLink'
 import { ApmKpi, LatencyCell, fmtCount } from '@/components/apm/viz'
 
@@ -118,6 +120,8 @@ export function TraceWaterfallPage() {
         <ApmKpi label="Services" tone="primary" value={fmtCount(trace.services.length)} />
         <ApmKpi label="Errors" tone={trace.spans.some((s) => s.has_error) ? 'danger' : 'success'} value={fmtCount(trace.spans.filter((s) => s.has_error).length)} />
       </div>
+
+      <RequestFlow hops={hopsFromTraceSpans(trace.spans)} totalLabel={fmtMs(trace.duration_ms)} />
 
       <div className="flex flex-wrap items-center gap-1.5">
         {trace.services.map((s) => (

@@ -1,6 +1,6 @@
 import type { KeyboardEvent } from 'react'
+import { Link } from 'react-router-dom'
 import {
-  Activity,
   AlertTriangle,
   CheckCircle2,
   Clock3,
@@ -14,20 +14,21 @@ import {
 } from 'lucide-react'
 import { relativeTime } from '@/lib/utils'
 import { fmtPct } from '@/components/apm/shared'
-import { APM_SERIES, ApmTimeChart, ChartPanel, RankBar, fmtCount } from '@/components/apm/viz'
+import { APM_SERIES, ApmKpi, ApmTimeChart, ChartPanel, RankBar, errorTone, fmtCount } from '@/components/apm/viz'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
-import type { RumCoverage, RumError, RumFacets, RumFilters, RumIngestHealth, RumOverview, RumTimeseries, RumView } from '@/types/apm'
+import type { RumCoverage, RumError, RumFacets, RumFilters, RumIngestHealth, RumOverview, RumTab, RumTimeseries, RumView } from '@/types/apm'
 import {
   QueryErrorPanel,
   RumCoverageNotice,
   RumEmptyState,
+  RumExperienceCard,
   RumMetricCell,
+  RumSectionHeader,
   RumTableCard,
   RumVitalCard,
-  SignalTile,
   TracePivot,
   formatRumVital,
 } from './RumUi'
@@ -46,6 +47,7 @@ interface OverviewProps {
   facets?: Partial<RumFacets>
   trendsLoading?: boolean
   trendsError?: unknown
+  exploreTo: Record<Extract<RumTab, 'web-vitals' | 'views' | 'sessions' | 'errors' | 'resources' | 'actions'>, string>
   onRetryTrends?: () => void
   onRetryViews?: () => void
   onRetryErrors?: () => void
@@ -82,14 +84,16 @@ function HealthPanel({ overview, health }: { overview: RumOverview; health?: Rum
   const Icon = good ? CheckCircle2 : status === 'no_data' ? Clock3 : AlertTriangle
   const sdkVersions = details?.sdk_versions?.filter(Boolean) ?? (details?.sdk_version ? [details.sdk_version] : [])
   return (
-    <Card>
+    <Card className="h-full">
       <CardHeader className="border-b border-border px-4 py-3">
         <CardTitle className="flex items-center gap-2 text-sm"><ServerCog className="h-4 w-4 text-primary" /> Collection health</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 p-4">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <Icon className={good ? 'h-4 w-4 text-success' : warn ? 'h-4 w-4 text-warning' : 'h-4 w-4 text-muted'} />
+            <span className={`flex h-8 w-8 items-center justify-center rounded-lg ${good ? 'bg-success/10 text-success' : warn ? 'bg-warning/10 text-warning' : 'bg-surface2 text-muted'}`}>
+              <Icon className="h-4 w-4" />
+            </span>
             <div>
               <div className="text-sm font-medium capitalize text-text">{status.replace('_', ' ')}</div>
               <div className="text-[11px] text-muted">Browser SDK ingest pipeline</div>
@@ -98,9 +102,9 @@ function HealthPanel({ overview, health }: { overview: RumOverview; health?: Rum
           {!!sdkVersions.length && <Badge variant="outline" title={sdkVersions.join(', ')}>SDK {sdkVersions.slice(0, 2).join(', ')}{sdkVersions.length > 2 ? ` +${sdkVersions.length - 2}` : ''}</Badge>}
         </div>
         <div className="grid grid-cols-3 gap-2 rounded-lg bg-surface2/50 p-3 text-center">
-          <div><div className="font-mono text-sm font-semibold text-text">{fmtCount(details?.accepted)}</div><div className="text-[9px] uppercase text-muted">Accepted</div></div>
-          <div><div className="font-mono text-sm font-semibold text-warning">{fmtCount(details?.rejected)}</div><div className="text-[9px] uppercase text-muted">Rejected</div></div>
-          <div><div className="font-mono text-sm font-semibold text-danger">{fmtCount(details?.dropped)}</div><div className="text-[9px] uppercase text-muted">Dropped</div></div>
+          <div><div className="font-mono text-sm font-semibold text-text">{fmtCount(details?.accepted)}</div><div className="text-[9px] uppercase tracking-wider text-muted">Accepted</div></div>
+          <div><div className="font-mono text-sm font-semibold text-warning">{fmtCount(details?.rejected)}</div><div className="text-[9px] uppercase tracking-wider text-muted">Rejected</div></div>
+          <div><div className="font-mono text-sm font-semibold text-danger">{fmtCount(details?.dropped)}</div><div className="text-[9px] uppercase tracking-wider text-muted">Dropped</div></div>
         </div>
         <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-[10px] sm:grid-cols-4">
           <div><div className="font-mono font-semibold text-text2">{fmtCount(details?.accepted_since_process_start)}</div><div className="text-muted">Process accepted</div></div>
@@ -122,10 +126,10 @@ function HealthPanel({ overview, health }: { overview: RumOverview; health?: Rum
 }
 
 function FacetCard({ title, items, onSelect }: { title: string; items?: Array<{ value: string; count: number }>; onSelect: (value: string) => void }) {
-  const visible = (items ?? []).slice(0, 5)
+  const visible = (items ?? []).slice(0, 6)
   const max = Math.max(...visible.map((item) => item.count), 1)
   return (
-    <Card>
+    <Card className="h-full">
       <CardHeader className="border-b border-border px-4 py-3"><CardTitle className="text-xs">{title}</CardTitle></CardHeader>
       <CardContent className="space-y-2 p-3">
         {visible.map((item) => (
@@ -141,52 +145,109 @@ function FacetCard({ title, items, onSelect }: { title: string; items?: Array<{ 
 }
 
 export function RumOverviewPanel(props: OverviewProps) {
-  const { overview: d } = props
+  const { overview: d, exploreTo } = props
   const errorRate = d.rates.error_session_rate
   const series = props.timeseries?.series ?? []
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <section aria-labelledby="rum-volume-heading">
-        <h3 id="rum-volume-heading" className="sr-only">Experience volume</h3>
+        <RumSectionHeader id="rum-volume-heading" title="Experience volume" description="Sampled traffic, reliability and interaction load for the selected segment. Open a tile to inspect the matching explorer." />
         <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-          <SignalTile icon={Users} label="Sampled sessions" value={fmtCount(d.totals.sessions)} hint={`${fmtCount(d.totals.views)} sampled views`} tone="info" />
-          <SignalTile icon={Layers3} label="Sampled page views" value={fmtCount(d.totals.views)} hint={`${fmtCount(d.totals.events)} collected events`} tone="primary" />
-          <SignalTile icon={FileWarning} label="JS errors" value={fmtCount(d.totals.errors)} hint={(d.totals.unsampled_errors ?? 0) > 0 ? `${fmtCount(d.totals.sampled_errors ?? 0)} sampled · ${fmtCount(d.totals.unsampled_errors ?? 0)} retained` : `${fmtCount(d.totals.error_sessions)} affected sessions`} tone={d.totals.errors > 0 ? 'danger' : 'success'} />
-          <SignalTile icon={AlertTriangle} label="Errored sessions" value={fmtPct(errorRate)} hint="sampled sessions with ≥1 error" tone={(errorRate ?? 0) >= 0.05 ? 'danger' : (errorRate ?? 0) >= 0.01 ? 'warning' : 'success'} />
-          <SignalTile icon={Network} label="Resources" value={fmtCount(d.totals.resources)} hint={d.rates.resource_failure_rate == null ? 'fetch, XHR and assets' : `${fmtPct(d.rates.resource_failure_rate)} failed`} tone={(d.rates.resource_failure_rate ?? 0) >= 0.05 ? 'danger' : 'accent'} />
-          <SignalTile icon={MousePointerClick} label="User actions" value={fmtCount(d.totals.actions)} hint={`${fmtCount(d.totals.long_tasks)} long tasks`} tone="warning" />
+          <ApmKpi
+            to={exploreTo.sessions}
+            label="Sessions"
+            icon={<Users className="h-4 w-4" />}
+            tone="info"
+            value={fmtCount(d.totals.sessions)}
+            sub={`${fmtCount(d.totals.views)} sampled views`}
+          />
+          <ApmKpi
+            to={exploreTo.views}
+            label="Page views"
+            icon={<Layers3 className="h-4 w-4" />}
+            tone="primary"
+            value={fmtCount(d.totals.views)}
+            sub={`${fmtCount(d.totals.events)} collected events`}
+          />
+          <ApmKpi
+            to={exploreTo.errors}
+            label="JS errors"
+            icon={<FileWarning className="h-4 w-4" />}
+            tone={d.totals.errors > 0 ? 'danger' : 'success'}
+            value={fmtCount(d.totals.errors)}
+            sub={(d.totals.unsampled_errors ?? 0) > 0
+              ? `${fmtCount(d.totals.sampled_errors ?? 0)} sampled · ${fmtCount(d.totals.unsampled_errors ?? 0)} retained`
+              : `${fmtCount(d.totals.error_sessions)} affected sessions`}
+          />
+          <ApmKpi
+            to={exploreTo.errors}
+            label="Errored sessions"
+            icon={<AlertTriangle className="h-4 w-4" />}
+            tone={errorTone(errorRate ?? 0)}
+            value={fmtPct(errorRate)}
+            sub="sampled sessions with ≥1 error"
+          />
+          <ApmKpi
+            to={exploreTo.resources}
+            label="Resources"
+            icon={<Network className="h-4 w-4" />}
+            tone={(d.rates.resource_failure_rate ?? 0) >= 0.05 ? 'danger' : 'accent'}
+            value={fmtCount(d.totals.resources)}
+            sub={d.rates.resource_failure_rate == null ? 'fetch, XHR and assets' : `${fmtPct(d.rates.resource_failure_rate)} failed`}
+          />
+          <ApmKpi
+            to={exploreTo.actions}
+            label="User actions"
+            icon={<MousePointerClick className="h-4 w-4" />}
+            tone="warning"
+            value={fmtCount(d.totals.actions)}
+            sub={`${fmtCount(d.totals.long_tasks)} long tasks`}
+          />
         </div>
       </section>
 
       <section aria-labelledby="rum-vitals-heading">
-        <div className="mb-2 flex items-center justify-between gap-2">
-          <div>
-            <h3 id="rum-vitals-heading" className="text-sm font-semibold text-text">Core Web Vitals</h3>
-            <p className="text-[11px] text-muted">75th percentile across finalized view measurements. Every tile shows its sample population.</p>
-          </div>
-        </div>
-        <div className="grid gap-3 md:grid-cols-3">
+        <RumSectionHeader
+          id="rum-vitals-heading"
+          title="Core Web Vitals"
+          description="75th percentile across finalized view measurements. Score uses the share of good LCP, INP and CLS samples."
+          action={<Button asChild variant="ghost" size="sm"><Link to={exploreTo['web-vitals']}>Open Web Vitals</Link></Button>}
+        />
+        <div className="grid gap-3 xl:grid-cols-4">
+          <RumExperienceCard vitals={d.vitals} href={exploreTo['web-vitals']} />
           <RumVitalCard name="lcp" metric={d.vitals.lcp} />
           <RumVitalCard name="inp" metric={d.vitals.inp} />
           <RumVitalCard name="cls" metric={d.vitals.cls} />
         </div>
+        <div className="mt-3 grid gap-3 sm:grid-cols-3">
+          {(['fcp', 'ttfb', 'load'] as const).map((name) => (
+            <div key={name} className="rounded-lg border border-border bg-surface px-4 py-3">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{name.toUpperCase()} p75</div>
+              <div className="mt-1 text-lg font-semibold tabular-nums text-text">{formatRumVital(name, d.vitals[name].p75)}</div>
+              <div className="mt-1 text-[10px] text-muted">{d.vitals[name].samples.toLocaleString()} samples · supporting navigation metric</div>
+            </div>
+          ))}
+        </div>
       </section>
 
-      {props.trendsError ? <QueryErrorPanel label="experience trends" error={props.trendsError} onRetry={props.onRetryTrends} /> : (
-        <ChartPanel title="Real-user experience over time" hint="Sampled views and sessions, plus all retained JavaScript errors">
-          <ApmTimeChart
-            data={series}
-            loading={props.trendsLoading}
-            empty="No experience samples match this segment."
-            height={260}
-            series={[
-              { key: 'views', name: 'Views', color: APM_SERIES.throughput, type: 'bar', fmt: fmtCount },
-              { key: 'sessions', name: 'Sessions', color: APM_SERIES.users, fmt: fmtCount },
-              { key: 'errors', name: 'JS errors', color: APM_SERIES.errors, yAxisIndex: 1, fmt: fmtCount },
-            ]}
-          />
-        </ChartPanel>
-      )}
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr),minmax(280px,1fr)]">
+        {props.trendsError ? <QueryErrorPanel label="experience trends" error={props.trendsError} onRetry={props.onRetryTrends} /> : (
+          <ChartPanel title="Real-user experience over time" hint="Sampled views and sessions, plus all retained JavaScript errors">
+            <ApmTimeChart
+              data={series}
+              loading={props.trendsLoading}
+              empty="No experience samples match this segment."
+              height={280}
+              series={[
+                { key: 'views', name: 'Views', color: APM_SERIES.throughput, type: 'bar', fmt: fmtCount },
+                { key: 'sessions', name: 'Sessions', color: APM_SERIES.users, fmt: fmtCount },
+                { key: 'errors', name: 'JS errors', color: APM_SERIES.errors, yAxisIndex: 1, fmt: fmtCount },
+              ]}
+            />
+          </ChartPanel>
+        )}
+        <HealthPanel overview={d} health={props.health} />
+      </div>
 
       {props.explorerCoverage?.partial && <div className="overflow-hidden rounded-lg border border-border"><RumCoverageNotice coverage={props.explorerCoverage} /></div>}
 
@@ -234,22 +295,6 @@ export function RumOverviewPanel(props: OverviewProps) {
         </RumTableCard>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[2fr,1fr]">
-        <Card>
-          <CardHeader className="border-b border-border px-4 py-3"><CardTitle className="flex items-center gap-2 text-sm"><Activity className="h-4 w-4 text-primary" /> Supporting navigation metrics</CardTitle></CardHeader>
-          <CardContent className="grid gap-3 p-4 sm:grid-cols-3">
-            {(['fcp', 'ttfb', 'load'] as const).map((name) => (
-              <div key={name} className="rounded-lg border border-border bg-surface2/35 p-3">
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{name.toUpperCase()} p75</div>
-                <div className="mt-1 text-lg font-semibold tabular-nums text-text">{formatRumVital(name, d.vitals[name].p75)}</div>
-                <div className="mt-1 text-[10px] text-muted">{d.vitals[name].samples.toLocaleString()} samples</div>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-        <HealthPanel overview={d} health={props.health} />
-      </div>
-
       {!!d.releases?.length && (
         <RumTableCard title="Release health" description="Compare real-user reliability and Core Web Vitals by deployed version. Select a release to segment the dashboard.">
           <Table>
@@ -280,7 +325,7 @@ export function RumOverviewPanel(props: OverviewProps) {
       )}
 
       <section aria-labelledby="rum-audience-heading">
-        <div className="mb-2"><h3 id="rum-audience-heading" className="text-sm font-semibold text-text">Audience and release context</h3><p className="text-[11px] text-muted">Select a segment to apply it to every RUM view.</p></div>
+        <RumSectionHeader id="rum-audience-heading" title="Audience and release context" description="Select a segment to apply it to every RUM view." />
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <FacetCard title="Browsers" items={props.facets?.browser} onSelect={(value) => props.onFilter('browser', value)} />
           <FacetCard title="Devices" items={props.facets?.device_type} onSelect={(value) => props.onFilter('device_type', value)} />
@@ -292,22 +337,20 @@ export function RumOverviewPanel(props: OverviewProps) {
   )
 }
 
-export function RumWebVitalsPanel({ overview, timeseries, loading, error, onRetry }: {
+export function RumWebVitalsPanel({ overview, timeseries, loading, error, onRetry, exploreTo }: {
   overview: RumOverview
   timeseries?: RumTimeseries
   loading?: boolean
   error?: unknown
   onRetry?: () => void
+  exploreTo?: string
 }) {
   const series = timeseries?.series ?? []
   const totalSamples = overview.vitals.lcp.samples + overview.vitals.inp.samples + overview.vitals.cls.samples
   return (
-    <div className="space-y-4">
-      <div className="rounded-lg border border-info/25 bg-info/5 px-4 py-3 text-xs text-text2">
-        <div className="flex items-start gap-2"><Gauge className="mt-0.5 h-4 w-4 shrink-0 text-info" /><p><span className="font-semibold text-text">Field performance at p75.</span> At least 75% of measured visits experienced a value at or below each result. Missing samples remain “No data” and are excluded from scoring.</p></div>
-      </div>
-
-      <div className="grid gap-3 md:grid-cols-3">
+    <div className="space-y-5">
+      <div className="grid gap-3 xl:grid-cols-4">
+        <RumExperienceCard vitals={overview.vitals} href={exploreTo} />
         <RumVitalCard name="lcp" metric={overview.vitals.lcp} />
         <RumVitalCard name="inp" metric={overview.vitals.inp} />
         <RumVitalCard name="cls" metric={overview.vitals.cls} />
@@ -316,6 +359,9 @@ export function RumWebVitalsPanel({ overview, timeseries, loading, error, onRetr
         <RumVitalCard name="fcp" metric={overview.vitals.fcp} compact />
         <RumVitalCard name="ttfb" metric={overview.vitals.ttfb} compact />
         <RumVitalCard name="load" metric={overview.vitals.load} compact />
+      </div>
+      <div className="rounded-lg border border-info/25 bg-info/5 px-4 py-3 text-xs text-text2">
+        <div className="flex items-start gap-2"><Gauge className="mt-0.5 h-4 w-4 shrink-0 text-info" /><p><span className="font-semibold text-text">Field performance at p75.</span> At least 75% of measured visits experienced a value at or below each result. Missing samples remain “No data” and are excluded from scoring.</p></div>
       </div>
 
       {error ? <QueryErrorPanel label="Web Vital trends" error={error} onRetry={onRetry} /> : totalSamples === 0 && !loading ? (

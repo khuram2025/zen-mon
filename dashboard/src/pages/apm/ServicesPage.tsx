@@ -1,19 +1,27 @@
 import { useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, ArrowDown, ArrowUp, Boxes, Bug, Gauge, Loader2 } from 'lucide-react'
+import { Activity, ArrowDown, ArrowUp, Boxes, Bug, Download, Gauge, Loader2, RefreshCw, Search } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
-import { Card, CardContent } from '@/components/ui/Card'
+import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { HealthBadge, fmtMs, fmtPct, fmtRps } from '@/components/apm/shared'
 import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
 import { ApmRangePicker, rangePhrase, useApmRange } from '@/components/apm/ApmRange'
 import {
-  ApdexCell, ApmKpi, DeepLinks, ErrorRateCell, HealthShareBar, LatencyCell,
+  ApdexCell, ApmKpi, DeepLinks, ErrorRateCell, HealthShareBar,
   ThroughputCell, errorTone, fmtCount,
 } from '@/components/apm/viz'
+import {
+  ApmExplorerFrame,
+  ApmFacetSidebar,
+  ApmUnderlineNav,
+  DurationTimeline,
+  EXPLORER_HEAD,
+  downloadCsv,
+} from '@/components/apm/explorer'
 import type { ServiceListResponse, ServiceRED } from '@/types/apm'
 
 type SortKey = 'name' | 'rps' | 'error_rate' | 'p50_ms' | 'p95_ms' | 'p99_ms' | 'apdex' | 'request_count'
@@ -121,97 +129,113 @@ export function ServicesPage() {
         <ApmKpi label="Degraded + critical" tone={criticalCount + degradedCount ? 'danger' : 'success'} value={criticalCount + degradedCount} sub={`${degradedCount} degraded · ${criticalCount} critical`} />
       </div>
 
-      <Card>
-        <CardContent className="py-3">
-          <div className="flex flex-wrap items-center gap-2">
-            {HEALTH_FILTERS.map((h) => {
-              const count = h === 'all' ? all.length : (health[h] ?? 0)
-              const active = healthFilter === h
-              return (
-                <button
-                  key={h}
-                  onClick={() => set('health', h === 'all' ? '' : h)}
-                  className={`rounded-full border px-3 py-1 text-[11px] font-medium capitalize ${
-                    active ? 'border-primary bg-primary text-black' : 'border-border text-muted hover:text-text'
-                  }`}
-                >
-                  {h === 'no_data' ? 'No data' : h} ({count})
-                </button>
-              )
-            })}
-            <div className="flex-1" />
-            <select
-              value={env} onChange={(e) => set('env', e.target.value)}
-              className="h-9 rounded-md border border-border bg-surface2 px-2 text-sm text-text"
-            >
-              <option value="">All environments</option>
-              {envs.map((e) => <option key={e} value={e}>{e}</option>)}
-            </select>
-            <Input className="w-56" placeholder="Search services…" value={search} onChange={(e) => set('q', e.target.value)} />
-            {search && <span className="text-xs text-muted">{services.length} of {all.length}</span>}
-            {q.isFetching && <Loader2 className="h-4 w-4 animate-spin text-muted" />}
-          </div>
-        </CardContent>
-      </Card>
+      <ApmUnderlineNav
+        items={HEALTH_FILTERS.map((h) => ({
+          key: h,
+          label: h === 'no_data' ? 'No data' : h === 'all' ? 'All' : h.replace(/^./, (c) => c.toUpperCase()),
+          count: h === 'all' ? all.length : (health[h] ?? 0),
+          current: healthFilter === h,
+          onSelect: () => set('health', h === 'all' ? '' : h),
+        }))}
+      />
 
-      <Card className="overflow-hidden">
-        <CardContent className="p-0">
-          {q.isLoading ? (
-            <div className="flex items-center justify-center gap-2 py-12 text-muted">
-              <Loader2 className="h-4 w-4 animate-spin" /> Loading…
-            </div>
-          ) : services.length === 0 ? (
-            <div className="flex flex-col items-center gap-2 py-12 text-center text-muted">
-              <Boxes className="h-6 w-6" />
-              {all.length === 0 ? (
-                <>
-                  <span className="text-sm">No service reported in {rangePhrase(range)}.</span>
-                  <span className="text-xs">Send traces to the OTLP ingest, or widen the time range.</span>
-                </>
-              ) : (
-                <span className="text-sm">No service matches the current filters.</span>
+      <ApmExplorerFrame
+        search={
+          <div className="relative min-w-[14rem] flex-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
+            <Input className="pl-8" placeholder="Search services…" value={search} onChange={(e) => set('q', e.target.value)} />
+          </div>
+        }
+        actions={
+          <>
+            <Button variant="outline" size="sm" onClick={() => q.refetch()} disabled={q.isFetching}>
+              <RefreshCw className={`h-3.5 w-3.5 ${q.isFetching ? 'animate-spin' : ''}`} /> Refresh
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!services.length}
+              onClick={() => downloadCsv(
+                'apm-services.csv',
+                ['name', 'health', 'rps', 'error_rate', 'p50_ms', 'p95_ms', 'p99_ms', 'apdex', 'requests'],
+                services.map((s) => [s.name, s.health, s.rps, s.error_rate, s.p50_ms, s.p95_ms, s.p99_ms, s.apdex, s.request_count]),
               )}
-            </div>
-          ) : (
-            <Table>
-              <THead>
-                <Tr>
-                  <SortTh k="name" align="left">Service</SortTh>
-                  <Th>Health</Th>
-                  <SortTh k="rps">Throughput</SortTh>
-                  <SortTh k="error_rate">Error rate</SortTh>
-                  <SortTh k="p50_ms">p50</SortTh>
-                  <SortTh k="p95_ms">p95</SortTh>
-                  <SortTh k="p99_ms">p99</SortTh>
-                  <SortTh k="apdex">Apdex</SortTh>
-                  <Th>Env</Th>
-                  <Th className="text-right">Deep dive</Th>
+            >
+              <Download className="h-3.5 w-3.5" /> Export
+            </Button>
+          </>
+        }
+        summary={<>Displaying {fmtCount(services.length)} of {fmtCount(all.length)} services · {rangePhrase(range)}</>}
+        sidebar={
+          <ApmFacetSidebar
+            title="Service analytics"
+            groups={[{
+              title: 'Environment',
+              items: envs.map((value) => ({
+                value,
+                count: all.filter((s) => s.envs.includes(value)).length,
+                active: env === value,
+                onSelect: () => set('env', env === value ? '' : value),
+              })),
+            }]}
+          />
+        }
+      >
+        {q.isLoading ? (
+          <div className="flex items-center justify-center gap-2 py-12 text-muted">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading…
+          </div>
+        ) : services.length === 0 ? (
+          <div className="flex flex-col items-center gap-2 py-12 text-center text-muted">
+            <Boxes className="h-6 w-6" />
+            {all.length === 0 ? (
+              <>
+                <span className="text-sm">No service reported in {rangePhrase(range)}.</span>
+                <span className="text-xs">Send traces to the OTLP ingest, or widen the time range.</span>
+              </>
+            ) : (
+              <span className="text-sm">No service matches the current filters.</span>
+            )}
+          </div>
+        ) : (
+          <Table>
+            <THead className={EXPLORER_HEAD}>
+              <Tr>
+                <SortTh k="name" align="left">Service</SortTh>
+                <Th>Health</Th>
+                <SortTh k="rps">Throughput</SortTh>
+                <SortTh k="error_rate">Error rate</SortTh>
+                <SortTh k="p95_ms">p95</SortTh>
+                <SortTh k="p99_ms">p99</SortTh>
+                <SortTh k="apdex">Apdex</SortTh>
+                <Th>Env</Th>
+                <Th className="text-right">Deep dive</Th>
+              </Tr>
+            </THead>
+            <TBody>
+              {services.map((s) => (
+                <Tr key={s.name} className="cursor-pointer" tabIndex={0} aria-label={`Open service ${s.name}`}
+                  onClick={() => navigate(`/apm/services/${encodeURIComponent(s.name)}?range=${range}`)}>
+                  <Td className="font-medium text-text">
+                    <div>{s.name}</div>
+                    <div className="text-[10px] text-muted">{fmtCount(s.request_count)} requests</div>
+                  </Td>
+                  <Td><HealthBadge health={s.health} /></Td>
+                  <Td className="text-right"><ThroughputCell rps={s.rps} maxRps={maxRps} /></Td>
+                  <Td className="text-right"><ErrorRateCell rate={s.error_rate} /></Td>
+                  <Td className="min-w-[6.5rem] text-right">
+                    <DurationTimeline ms={s.p95_ms} maxMs={worstP95 || 1} significant={s.health === 'critical' || s.p95_ms >= 800} />
+                  </Td>
+                  <Td className="text-right font-mono text-xs tabular-nums">{fmtMs(s.p99_ms)}</Td>
+                  <Td className="text-right"><ApdexCell value={s.apdex} /></Td>
+                  <Td className="text-xs text-muted">{(s.envs ?? []).join(', ') || '—'}</Td>
+                  <Td><DeepLinks service={s.name} range={range} /></Td>
                 </Tr>
-              </THead>
-              <TBody>
-                {services.map((s) => (
-                  <Tr key={s.name} className="cursor-pointer"
-                    onClick={() => navigate(`/apm/services/${encodeURIComponent(s.name)}?range=${range}`)}>
-                    <Td className="font-medium text-text">
-                      <div>{s.name}</div>
-                      <div className="text-[10px] text-muted">{fmtCount(s.request_count)} requests</div>
-                    </Td>
-                    <Td><HealthBadge health={s.health} /></Td>
-                    <Td className="text-right"><ThroughputCell rps={s.rps} maxRps={maxRps} /></Td>
-                    <Td className="text-right"><ErrorRateCell rate={s.error_rate} /></Td>
-                    <Td className="text-right"><LatencyCell ms={s.p50_ms} /></Td>
-                    <Td className="text-right"><LatencyCell ms={s.p95_ms} /></Td>
-                    <Td className="text-right"><LatencyCell ms={s.p99_ms} /></Td>
-                    <Td className="text-right"><ApdexCell value={s.apdex} /></Td>
-                    <Td className="text-xs text-muted">{s.envs.join(', ') || '—'}</Td>
-                    <Td><DeepLinks service={s.name} range={range} /></Td>
-                  </Tr>
-                ))}
-              </TBody>
-            </Table>
-          )}
-        </CardContent>
-      </Card>
+              ))}
+            </TBody>
+          </Table>
+        )}
+      </ApmExplorerFrame>
     </div>
   )
 }

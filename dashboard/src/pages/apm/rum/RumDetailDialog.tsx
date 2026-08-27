@@ -6,14 +6,17 @@ import {
   Gauge,
   Layers3,
   Loader2,
+  Monitor,
   MousePointerClick,
   Network,
   Route,
+  Server,
   UserRound,
 } from 'lucide-react'
 import { formatBytes, relativeTime } from '@/lib/utils'
 import { fmtPct } from '@/components/apm/shared'
 import { fmtCount } from '@/components/apm/viz'
+import { RequestFlow } from '@/components/apm/explorer'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent } from '@/components/ui/Card'
@@ -55,6 +58,13 @@ function ViewDetail({ view, onDrill }: { view: RumView; onDrill: (tab: 'sessions
         <Stat label="Errors" value={fmtCount(view.errors)} hint={fmtPct(view.error_session_rate)} />
         <Stat label="Last seen" value={view.last_seen ? relativeTime(view.last_seen) : '—'} />
       </div>
+      <RequestFlow
+        hops={[
+          { id: 'client', label: 'Client', icon: UserRound, tone: 'ok' },
+          { id: 'view', label: 'View', hint: view.view_name || '/', metric: formatRumVital('lcp', view.lcp_p75), icon: Layers3, tone: 'ok' },
+          { id: 'app', label: 'App', hint: view.application_id, icon: Server, tone: view.errors > 0 ? 'warn' : 'ok' },
+        ]}
+      />
       <Card><CardContent className="p-4">
         <div className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted"><Gauge className="h-3.5 w-3.5 text-primary" /> Experience</div>
         <div className="grid grid-cols-3 gap-3">
@@ -82,6 +92,13 @@ function ErrorDetail({ error }: { error: RumError }) {
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3"><Stat label="Occurrences" value={fmtCount(error.count)} hint={(error.sampled_count != null || error.unsampled_count != null) ? `${fmtCount(error.sampled_count)} sampled · ${fmtCount(error.unsampled_count)} retained unsampled` : undefined} /><Stat label="Affected sessions" value={fmtCount(error.sessions)} /><Stat label="Last seen" value={relativeTime(error.last_seen)} /></div>
+      <RequestFlow
+        hops={[
+          { id: 'client', label: 'Client', hint: [error.browser, error.os, error.device_type].filter(Boolean).join(' · ') || 'Unknown', icon: UserRound, tone: 'warn' },
+          { id: 'view', label: 'View', hint: error.view_name || '/', icon: Layers3, tone: 'muted' },
+          { id: 'err', label: 'JS error', hint: error.error_type || 'Exception', icon: FileWarning, tone: 'err' },
+        ]}
+      />
       <Card><CardContent className="p-4"><Fact label="Type">{error.error_type || 'JavaScript error'}</Fact><Fact label="Message"><span className="font-medium text-text">{error.message}</span></Fact><Fact label="Source"><span className="font-mono text-[11px]">{error.source || 'Not captured'}</span></Fact><Fact label="Fingerprint"><span className="font-mono text-[11px]">{error.fingerprint}</span></Fact><Fact label="Release">{error.service_version || 'Not captured'}</Fact><Fact label="View">{error.view_name || '/'}</Fact><Fact label="Client">{[error.browser && `${error.browser}${error.browser_version ? ` ${error.browser_version}` : ''}`, error.os, error.device_type, error.country].filter(Boolean).join(' · ') || 'Unknown'}</Fact><Fact label="Backend trace"><TracePivot traceId={error.backend_trace_id} /></Fact></CardContent></Card>
       {error.stack && <div><div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Latest stack trace</div><pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-border bg-surface2 p-3 font-mono text-[11px] leading-relaxed text-text2">{error.stack}</pre></div>}
     </div>
@@ -93,6 +110,14 @@ function ResourceDetail({ resource }: { resource: RumResource }) {
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4"><Stat label="Requests" value={fmtCount(resource.count)} /><Stat label="Failed" value={fmtCount(resource.failed_count)} hint={fmtPct(failureRate)} /><Stat label="Duration p75" value={formatDurationMs(resource.duration_p75)} /><Stat label="Average size" value={resource.size_avg == null ? '—' : formatBytes(resource.size_avg)} /></div>
+      <RequestFlow
+        hops={[
+          { id: 'client', label: 'Client', icon: UserRound, tone: 'ok' },
+          { id: 'resource', label: String(resource.method || resource.resource_type || 'GET'), hint: resource.name, metric: formatDurationMs(resource.duration_p75), status: resource.status_code, icon: Network, tone: resource.failed_count ? 'err' : 'ok' },
+          { id: 'app', label: 'App', hint: resource.view_name || '/', icon: Server, tone: 'muted' },
+        ]}
+        totalLabel={formatDurationMs(resource.duration_p75)}
+      />
       <Card><CardContent className="p-4"><Fact label="Name"><span className="font-mono text-[11px]">{resource.name}</span></Fact><Fact label="URL"><span className="font-mono text-[11px]">{resource.url || 'Not captured'}</span></Fact><Fact label="Kind">{resource.resource_type || 'resource'}</Fact><Fact label="HTTP">{[resource.method, resource.status_code].filter((value) => value != null).join(' ') || 'Not captured'}</Fact><Fact label="View">{resource.view_name || '/'}</Fact><Fact label="Application">{resource.application_id} · {resource.env}</Fact><Fact label="Release">{resource.service_version || 'Not captured'}</Fact><Fact label="Last seen">{relativeTime(resource.last_seen)}</Fact><Fact label="Backend trace"><TracePivot traceId={resource.backend_trace_id} /></Fact></CardContent></Card>
     </div>
   )
@@ -104,7 +129,15 @@ function ActionDetail({ action }: { action: RumAction }) {
     <div className="space-y-4">
       {frustration && <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning"><span className="font-semibold">Frustration signal:</span> this interaction pattern can indicate a broken or unresponsive experience.</div>}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3"><Stat label="Occurrences" value={fmtCount(action.count)} /><Stat label="Errors" value={fmtCount(action.error_count)} /><Stat label="Duration p75" value={formatDurationMs(action.duration_p75)} /></div>
-      <Card><CardContent className="p-4"><Fact label="Action">{action.name || 'Unnamed action'}</Fact><Fact label="Type"><Badge variant={frustration ? 'warning' : 'outline'}>{action.action_type.replaceAll('_', ' ')}</Badge></Fact><Fact label="Target"><span className="font-mono text-[11px]">{action.target || 'Not captured'}</span></Fact><Fact label="View">{action.view_name || '/'}</Fact><Fact label="Application">{action.application_id} · {action.env}</Fact><Fact label="Release">{action.service_version || 'Not captured'}</Fact><Fact label="Last seen">{relativeTime(action.last_seen)}</Fact><Fact label="Backend trace"><TracePivot traceId={action.backend_trace_id} /></Fact></CardContent></Card>
+      <RequestFlow
+        hops={[
+          { id: 'client', label: 'Client', icon: UserRound, tone: 'ok' },
+          { id: 'action', label: (action.action_type || 'action').replaceAll('_', ' '), hint: action.name || action.target, metric: formatDurationMs(action.duration_p75), icon: MousePointerClick, tone: frustration ? 'warn' : 'ok' },
+          { id: 'app', label: 'App', hint: action.view_name || '/', icon: Server, tone: action.error_count ? 'err' : 'muted' },
+        ]}
+        totalLabel={formatDurationMs(action.duration_p75)}
+      />
+      <Card><CardContent className="p-4"><Fact label="Action">{action.name || 'Unnamed action'}</Fact><Fact label="Type"><Badge variant={frustration ? 'warning' : 'outline'}>{(action.action_type || 'action').replaceAll('_', ' ')}</Badge></Fact><Fact label="Target"><span className="font-mono text-[11px]">{action.target || 'Not captured'}</span></Fact><Fact label="View">{action.view_name || '/'}</Fact><Fact label="Application">{action.application_id} · {action.env}</Fact><Fact label="Release">{action.service_version || 'Not captured'}</Fact><Fact label="Last seen">{relativeTime(action.last_seen)}</Fact><Fact label="Backend trace"><TracePivot traceId={action.backend_trace_id} /></Fact></CardContent></Card>
     </div>
   )
 }
@@ -166,6 +199,14 @@ function SessionDetailPanel({ fallback, detail, loading, error, onRetry }: { fal
     <div className="space-y-5">
       {detail?.coverage && <div className="overflow-hidden rounded-lg border border-border"><RumCoverageNotice coverage={detail.coverage} showRetention /></div>}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4"><Stat label="Duration" value={formatDurationMs(session.duration_ms)} /><Stat label="Views" value={fmtCount(session.views)} /><Stat label="Actions" value={fmtCount(session.actions)} /><Stat label="Errors" value={fmtCount(session.errors)} /></div>
+      <RequestFlow
+        hops={[
+          { id: 'client', label: 'Client', hint: [session.browser && `${session.browser}${session.browser_version ? ` ${session.browser_version}` : ''}`, session.os, session.country].filter(Boolean).join(' · ') || 'Unknown', icon: UserRound, tone: 'ok' },
+          { id: 'browser', label: 'Browser', hint: `${session.views} views · ${session.actions} actions`, metric: formatDurationMs(session.duration_ms), icon: Monitor, tone: session.errors ? 'warn' : 'ok' },
+          { id: 'app', label: 'Backend', hint: traceIds[0] ? `Trace ${traceIds[0].slice(0, 8)}…` : 'No correlated trace', icon: Server, tone: traceIds.length ? 'ok' : 'muted' },
+        ]}
+        totalLabel={formatDurationMs(session.duration_ms)}
+      />
       <Card><CardContent className="p-4"><Fact label="Session ID"><span className="font-mono text-[11px]">{session.session_id}</span></Fact><Fact label="User">{session.user_id || 'Anonymous'}</Fact><Fact label="Application">{session.application_id} · {session.env}</Fact><Fact label="Release">{session.service_version || 'Not captured'}</Fact>{session.sampled != null && <Fact label="Sampling"><Badge variant={session.sampled ? 'success' : 'warning'}>{session.sampled ? 'Sampled cohort' : 'Retained unsampled'}</Badge></Fact>}<Fact label="Client">{[session.browser && `${session.browser}${session.browser_version ? ` ${session.browser_version}` : ''}`, session.os, session.device_type, session.country].filter(Boolean).join(' · ') || 'Unknown'}</Fact><Fact label="Started">{new Date(session.started_at).toLocaleString()}</Fact><Fact label="Backend traces">{traceIds.length ? <div className="flex flex-wrap gap-2">{traceIds.map((id) => <TracePivot key={id} traceId={id} compact />)}</div> : 'No correlated trace'}</Fact></CardContent></Card>
       <div><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="text-sm font-semibold text-text">Session timeline</h3><p className="text-[11px] text-muted">Views, actions, errors, resources and main-thread work in chronological order.{totalEvents > loadedEvents ? ` Showing the first ${loadedEvents.toLocaleString()} of ${totalEvents.toLocaleString()} events.` : ''}</p></div><Badge variant="outline">{loadedEvents.toLocaleString()}{totalEvents > loadedEvents ? ` / ${totalEvents.toLocaleString()}` : ''} events</Badge></div><Timeline events={detail?.timeline ?? []} /></div>
     </div>
@@ -207,8 +248,11 @@ export function RumDetailDialog({
     <Dialog open={open} onOpenChange={(next) => { if (!next) onClose() }}>
       <DialogContent className="bottom-0 left-auto right-0 top-0 block h-screen w-[min(760px,calc(100vw-1rem))] max-w-none translate-x-0 translate-y-0 overflow-y-auto rounded-none border-y-0 border-r-0 p-0 sm:w-[min(760px,calc(100vw-3rem))]">
         <DialogHeader className="sticky top-0 z-10 border-b border-border bg-surface/95 px-5 py-4 pr-12 backdrop-blur">
-          <DialogTitle className="flex items-center gap-2 text-base"><span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><Icon className="h-4 w-4" /></span><span className="min-w-0 truncate">{meta.title}</span></DialogTitle>
-          <DialogDescription className="pl-10 text-xs">{meta.description}</DialogDescription>
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/10 text-primary"><Icon className="h-4 w-4" /></span>
+            <span className="min-w-0 truncate">{meta.title}</span>
+          </DialogTitle>
+          <DialogDescription className="pl-11 text-xs">{meta.description}</DialogDescription>
         </DialogHeader>
         <div className="p-5">
           {kind === 'session' ? <SessionDetailPanel fallback={selected as RumSession | undefined} detail={sessionDetail} loading={sessionLoading} error={sessionError} onRetry={onRetrySession} />

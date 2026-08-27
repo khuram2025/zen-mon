@@ -188,7 +188,7 @@ export function Layout() {
   const { user, logout } = useAuth()
   const { theme, toggle } = useTheme()
   const navigate = useNavigate()
-  const { pathname } = useLocation()
+  const { pathname, search } = useLocation()
 
   const [expanded, setExpanded] = useState(() => {
     try { return localStorage.getItem('zp-sidebar-pinned') !== 'false' } catch { return true }
@@ -307,7 +307,7 @@ export function Layout() {
 
         {/* Content — full width */}
         <main className="flex-1 overflow-y-auto p-5 animate-fade-in">
-          <ErrorBoundary resetKey={pathname}>
+          <ErrorBoundary resetKey={`${pathname}${search}`}>
             <Outlet />
           </ErrorBoundary>
         </main>

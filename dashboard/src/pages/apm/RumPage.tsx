@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { Globe2, Loader2, Radio, Settings2 } from 'lucide-react'
+import { Globe2, Radio, Settings2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
 import { Badge } from '@/components/ui/Badge'
@@ -37,12 +37,14 @@ import {
   QueryErrorPanel,
   RefreshIndicator,
   RumEmptyState,
+  RumExplorerShell,
   RumFilterBar,
   RumPageSkeleton,
   RumRangePicker,
   RumTabBar,
 } from './rum/RumUi'
 import { useRumUrlState } from './rum/useRumUrlState'
+import { buildRumHref } from './rum/model'
 
 const REFRESH_MS = 30_000
 const SESSION_PAGE_SIZE = 500
@@ -157,6 +159,15 @@ export function RumPage() {
     enabled: state.detailKind === 'session' && !!state.detailId,
   })
 
+  const exploreTo = useMemo(() => ({
+    'web-vitals': buildRumHref('web-vitals', state.range, state.filters),
+    views: buildRumHref('views', state.range, state.filters),
+    sessions: buildRumHref('sessions', state.range, state.filters),
+    errors: buildRumHref('errors', state.range, state.filters),
+    resources: buildRumHref('resources', state.range, state.filters),
+    actions: buildRumHref('actions', state.range, state.filters),
+  }), [state.filters, state.range])
+
   const selected = useMemo(() => {
     if (!state.detailId) return undefined
     if (state.detailKind === 'session') return sessionsQ.data?.items.find((row) => row.session_id === state.detailId)
@@ -216,14 +227,35 @@ export function RumPage() {
         onShowViews={() => state.setTab('views')}
         onShowErrors={() => state.setTab('errors')}
         onFilter={state.setFilter}
+        exploreTo={exploreTo}
       />
     )
     if (state.tab === 'web-vitals' && overviewQ.data) return <RumWebVitalsPanel overview={overviewQ.data} timeseries={timeseriesQ.data} loading={timeseriesQ.isLoading} error={timeseriesQ.error} onRetry={() => timeseriesQ.refetch()} />
-    if (state.tab === 'views') return <RumViewsTable {...sharedTableProps} data={viewsQ.data} loading={viewsQ.isLoading} error={viewsQ.error} onRetry={() => viewsQ.refetch()} onOpen={(row) => state.openDetail('view', viewRowKey(row))} />
-    if (state.tab === 'sessions') return <RumSessionsTable {...sharedTableProps} data={sessionsQ.data} loading={sessionsQ.isLoading} error={sessionsQ.error} onRetry={() => sessionsQ.refetch()} onOpen={(row) => state.openDetail('session', row.session_id)} />
-    if (state.tab === 'errors') return <RumErrorsTable {...sharedTableProps} data={errorsQ.data} loading={errorsQ.isLoading} error={errorsQ.error} onRetry={() => errorsQ.refetch()} onOpen={(row) => state.openDetail('error', errorRowKey(row))} />
-    if (state.tab === 'resources') return <RumResourcesTable {...sharedTableProps} data={resourcesQ.data} loading={resourcesQ.isLoading} error={resourcesQ.error} onRetry={() => resourcesQ.refetch()} onOpen={(row) => state.openDetail('resource', resourceRowKey(row))} />
-    if (state.tab === 'actions') return <RumActionsTable {...sharedTableProps} data={actionsQ.data} loading={actionsQ.isLoading} error={actionsQ.error} onRetry={() => actionsQ.refetch()} onOpen={(row) => state.openDetail('action', actionRowKey(row))} />
+    if (state.tab === 'views') return (
+      <RumExplorerShell noun="views" total={viewsQ.data?.total} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} items={viewsQ.data?.items} getTime={(row) => row.last_seen || ''} isErr={(row) => (row.error_session_rate ?? 0) >= 0.05 || row.errors > 0}>
+        <RumViewsTable embedded {...sharedTableProps} data={viewsQ.data} loading={viewsQ.isLoading} error={viewsQ.error} onRetry={() => viewsQ.refetch()} onOpen={(row) => state.openDetail('view', viewRowKey(row))} />
+      </RumExplorerShell>
+    )
+    if (state.tab === 'sessions') return (
+      <RumExplorerShell noun="sessions" total={sessionsQ.data?.total} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} items={sessionsQ.data?.items} getTime={(row) => row.last_seen} isErr={(row) => row.errors > 0}>
+        <RumSessionsTable embedded {...sharedTableProps} data={sessionsQ.data} loading={sessionsQ.isLoading} error={sessionsQ.error} onRetry={() => sessionsQ.refetch()} onOpen={(row) => state.openDetail('session', row.session_id)} />
+      </RumExplorerShell>
+    )
+    if (state.tab === 'errors') return (
+      <RumExplorerShell noun="issues" total={errorsQ.data?.total} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} items={errorsQ.data?.items} getTime={(row) => row.last_seen} isErr={() => true} okLabel="Other" errLabel="JS errors">
+        <RumErrorsTable embedded {...sharedTableProps} data={errorsQ.data} loading={errorsQ.isLoading} error={errorsQ.error} onRetry={() => errorsQ.refetch()} onOpen={(row) => state.openDetail('error', errorRowKey(row))} />
+      </RumExplorerShell>
+    )
+    if (state.tab === 'resources') return (
+      <RumExplorerShell noun="resources" total={resourcesQ.data?.total} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} items={resourcesQ.data?.items} getTime={(row) => row.last_seen} isErr={(row) => row.failed_count > 0}>
+        <RumResourcesTable embedded {...sharedTableProps} data={resourcesQ.data} loading={resourcesQ.isLoading} error={resourcesQ.error} onRetry={() => resourcesQ.refetch()} onOpen={(row) => state.openDetail('resource', resourceRowKey(row))} />
+      </RumExplorerShell>
+    )
+    if (state.tab === 'actions') return (
+      <RumExplorerShell noun="actions" total={actionsQ.data?.total} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} items={actionsQ.data?.items} getTime={(row) => row.last_seen} isErr={(row) => row.error_count > 0 || ['rage_click', 'dead_click', 'error_click'].includes(row.action_type)}>
+        <RumActionsTable embedded {...sharedTableProps} data={actionsQ.data} loading={actionsQ.isLoading} error={actionsQ.error} onRetry={() => actionsQ.refetch()} onOpen={(row) => state.openDetail('action', actionRowKey(row))} />
+      </RumExplorerShell>
+    )
     return null
   })()
 
@@ -231,20 +263,36 @@ export function RumPage() {
     <div className="space-y-4">
       <ApmPageHeader
         title="Real User Monitoring"
-        description="Field performance, JavaScript reliability, user journeys, resources and frontend-to-backend trace correlation."
+        description="Field performance, JavaScript reliability and user journeys — from Core Web Vitals down to a correlated backend trace."
         article="rum"
-        actions={<><RefreshIndicator active={anyFetching && !overviewQ.isLoading} /><RumRangePicker value={state.range} onChange={state.setRange} /></>}
+        actions={
+          <>
+            <RefreshIndicator active={anyFetching && !overviewQ.isLoading} />
+            <Badge variant={overviewQ.data?.totals.events ? 'success' : 'outline'}>
+              <Radio className="h-3 w-3" />
+              {overviewQ.data?.totals.events ? 'Receiving data' : overviewQ.isLoading ? 'Checking ingest' : 'No recent data'}
+            </Badge>
+            <Button asChild variant="outline" size="sm">
+              <Link to="/apm/settings?tab=keys&create=rum"><Settings2 className="h-4 w-4" /> Setup</Link>
+            </Button>
+            <RumRangePicker value={state.range} onChange={state.setRange} />
+          </>
+        }
       />
 
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <RumTabBar value={state.tab} onChange={state.setTab} />
-        <div className="flex items-center gap-2 text-[11px] text-muted">
-          <Badge variant={overviewQ.data?.totals.events ? 'success' : 'outline'}><Radio className="h-3 w-3" />{overviewQ.data?.totals.events ? 'Receiving data' : overviewQ.isLoading ? 'Checking ingest' : 'No recent data'}</Badge>
-          {anyFetching && <span className="hidden items-center gap-1 sm:inline-flex"><Loader2 className="h-3 w-3 animate-spin" /> refreshing</span>}
-        </div>
-      </div>
+      <RumTabBar
+        value={state.tab}
+        onChange={state.setTab}
+        counts={overviewQ.data ? {
+          views: overviewQ.data.totals.views,
+          sessions: overviewQ.data.totals.sessions,
+          errors: overviewQ.data.totals.errors,
+          resources: overviewQ.data.totals.resources,
+          actions: overviewQ.data.totals.actions,
+        } : undefined}
+      />
 
-      <RumFilterBar filters={state.filters} facets={facetsQ.data} loading={facetsQ.isLoading} error={facetsQ.isError} activeCount={state.activeFilterCount} onChange={state.setFilter} onClear={state.clearFilters} onRetry={() => facetsQ.refetch()} />
+      <RumFilterBar compact={state.tab !== 'overview' && state.tab !== 'web-vitals'} filters={state.filters} facets={facetsQ.data} loading={facetsQ.isLoading} error={facetsQ.isError} activeCount={state.activeFilterCount} onChange={state.setFilter} onClear={state.clearFilters} onRetry={() => facetsQ.refetch()} />
 
       {content}
 
