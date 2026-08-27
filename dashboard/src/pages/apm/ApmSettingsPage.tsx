@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -9,10 +9,11 @@ import { apiErrorMessage, relativeTime } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
+import { Switch } from '@/components/ui/Switch'
 import { FormField } from '@/components/ui/FormField'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
 import { Badge } from '@/components/ui/Badge'
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
@@ -26,10 +27,29 @@ interface IngestKey {
   kind: 'sdk' | 'rum'
   key_prefix: string
   env: string | null
+  origin_allowlist: string[]
+  application_id: string | null
   enabled: boolean
   last_used_at: string | null
   revoked_at: string | null
   created_at: string
+}
+
+interface RumSdkOptions {
+  applicationId: string
+  serviceName: string
+  version: string
+  sampleRatePercent: number
+  replaySampleRatePercent: number
+  trackActions: boolean
+  trackLongTasks: boolean
+  consent: 'granted' | 'pending'
+  privacy: 'mask-user-input' | 'strict'
+}
+
+interface CreatedKeyConfig extends IngestKey {
+  key: string
+  rum?: RumSdkOptions
 }
 
 interface EnrollmentToken {
@@ -60,17 +80,44 @@ type SettingsTab = typeof SETTINGS_TABS[number]['key']
 export function ApmSettingsPage() {
   const qc = useQueryClient()
   const [params, setParams] = useSearchParams()
-  const tab = (params.get('tab') as SettingsTab) || 'agents'
+  const requestedTab = params.get('tab')
+  const tab: SettingsTab = SETTINGS_TABS.some((item) => item.key === requestedTab)
+    ? requestedTab as SettingsTab
+    : 'agents'
   const setTab = (t: SettingsTab) => {
     const n = new URLSearchParams(params); n.set('tab', t); setParams(n, { replace: true })
   }
   const [formOpen, setFormOpen] = useState(false)
+  const [formKind, setFormKind] = useState<'sdk' | 'rum'>('sdk')
+  const [formOrigin, setFormOrigin] = useState('')
   const [revoking, setRevoking] = useState<IngestKey | null>(null)
-  const [createdKey, setCreatedKey] = useState<string | null>(null)
+  const [createdKey, setCreatedKey] = useState<CreatedKeyConfig | null>(null)
+
+  const openCreateKey = (kind: 'sdk' | 'rum' = 'sdk', origin = '') => {
+    setFormKind(kind)
+    setFormOrigin(origin)
+    setFormOpen(true)
+  }
+
+  useEffect(() => {
+    if (params.get('create') !== 'rum') return
+    openCreateKey('rum', params.get('origin') ?? '')
+    const next = new URLSearchParams(params)
+    next.set('tab', 'keys')
+    next.delete('create')
+    next.delete('origin')
+    setParams(next, { replace: true })
+  // Consume this navigation command once; reacting to every params identity change would reopen the dialog.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [params.get('create')])
 
   const keysQuery = useQuery<IngestKey[]>({
     queryKey: ['apm', 'ingest-keys'],
     queryFn: async () => (await api.get('/apm/ingest-keys')).data,
+    refetchInterval: (query) => {
+      const rows = query.state.data as IngestKey[] | undefined
+      return createdKey && !rows?.find((key) => key.id === createdKey.id)?.last_used_at ? 5_000 : false
+    },
   })
 
   const revoke = useMutation({
@@ -108,7 +155,7 @@ export function ApmSettingsPage() {
       </div>
 
       {tab === 'agents' && <ApmAgentsTab />}
-      {tab === 'start' && <GettingStartedTab keys={keys} onCreateKey={() => setFormOpen(true)} />}
+      {tab === 'start' && <GettingStartedTab keys={keys} onCreateKey={() => openCreateKey('sdk')} />}
       {tab === 'quality' && <DataQualityCard />}
 
       {tab === 'keys' && (
@@ -124,7 +171,7 @@ export function ApmSettingsPage() {
           <CardTitle className="flex items-center gap-2">
             <KeyRound className="w-4 h-4 text-primary" /> Ingest Keys
           </CardTitle>
-          <Button onClick={() => setFormOpen(true)}>
+          <Button onClick={() => openCreateKey('sdk')}>
             <Plus className="w-4 h-4 mr-1" /> Create ingest key
           </Button>
         </CardHeader>
@@ -135,7 +182,7 @@ export function ApmSettingsPage() {
             </div>
           ) : keys.length === 0 ? (
             <div className="text-center text-muted py-10">
-              No ingest keys yet. Create one to start sending OTLP traces.
+              No ingest keys yet. Create one to send server traces or browser telemetry.
             </div>
           ) : (
             <Table>
@@ -144,7 +191,7 @@ export function ApmSettingsPage() {
                   <Th>Name</Th>
                   <Th>Type</Th>
                   <Th>Key prefix</Th>
-                  <Th>Environment</Th>
+                  <Th>Scope</Th>
                   <Th>Status</Th>
                   <Th>Last used</Th>
                   <Th>Created</Th>
@@ -157,7 +204,19 @@ export function ApmSettingsPage() {
                     <Td className="font-medium text-text">{k.name}</Td>
                     <Td><Badge variant="outline">{k.kind.toUpperCase()}</Badge></Td>
                     <Td className="font-mono text-xs">{k.key_prefix}…</Td>
-                    <Td>{k.env ?? <span className="text-muted">all</span>}</Td>
+                    <Td className="max-w-[20rem]">
+                      <div>{k.env ?? <span className="text-muted">all environments</span>}</div>
+                      {k.kind === 'rum' && (
+                        <>
+                          <div className="mt-0.5 text-xs text-muted">
+                            App: <span className="font-mono text-text2">{k.application_id || 'legacy / unbound'}</span>
+                          </div>
+                          <div className="truncate text-xs text-muted" title={(k.origin_allowlist ?? []).join(', ')}>
+                            {(k.origin_allowlist ?? []).join(', ') || 'No browser origins'}
+                          </div>
+                        </>
+                      )}
+                    </Td>
                     <Td>
                       {k.revoked_at || !k.enabled ? (
                         <Badge variant="danger">Revoked</Badge>
@@ -193,10 +252,16 @@ export function ApmSettingsPage() {
       <IngestKeyFormDialog
         open={formOpen}
         onOpenChange={setFormOpen}
-        onCreated={(plaintext) => { setFormOpen(false); setCreatedKey(plaintext) }}
+        defaultKind={formKind}
+        defaultOrigin={formOrigin}
+        onCreated={(created) => { setFormOpen(false); setCreatedKey(created) }}
       />
 
-      <CopyOnceDialog value={createdKey} onClose={() => setCreatedKey(null)} />
+      <CopyOnceDialog
+        value={createdKey}
+        lastUsedAt={createdKey ? keys.find((key) => key.id === createdKey.id)?.last_used_at ?? null : null}
+        onClose={() => setCreatedKey(null)}
+      />
 
       <ConfirmDialog
         open={!!revoking}
@@ -244,9 +309,10 @@ function CodeBlock({ code }: { code: string }) {
  */
 function GettingStartedTab({ keys, onCreateKey }: { keys: IngestKey[]; onCreateKey: () => void }) {
   const origin = window.location.origin
-  const activeKey = keys.find((k) => k.enabled && !k.revoked_at)
+  const sdkKeys = keys.filter((k) => k.kind === 'sdk')
+  const activeKey = sdkKeys.find((k) => k.enabled && !k.revoked_at)
   const keyPlaceholder = activeKey ? `${activeKey.key_prefix}…` : 'zpi_your_key_here'
-  const hasTraffic = keys.some((k) => k.last_used_at)
+  const hasTraffic = sdkKeys.some((k) => k.last_used_at)
 
   const steps: { title: string; body: React.ReactNode }[] = [
     {
@@ -257,13 +323,13 @@ function GettingStartedTab({ keys, onCreateKey }: { keys: IngestKey[]; onCreateK
             Every producer authenticates with a <code className="rounded bg-surface2 px-1">zpi_</code> key scoped to an
             environment. Create one per environment (or per service, if you want to revoke them independently).
           </p>
-          {keys.length === 0 ? (
+          {sdkKeys.length === 0 ? (
             <Button size="sm" className="mt-2" onClick={onCreateKey}>
               <Plus className="h-4 w-4" /> Create ingest key
             </Button>
           ) : (
             <p className="mt-2 flex items-center gap-1.5 text-xs text-success">
-              <Check className="h-3.5 w-3.5" /> {keys.length} key{keys.length === 1 ? '' : 's'} configured
+              <Check className="h-3.5 w-3.5" /> {sdkKeys.length} SDK key{sdkKeys.length === 1 ? '' : 's'} configured
             </p>
           )}
         </>
@@ -648,16 +714,82 @@ function DataQualityCard() {
   )
 }
 
-function IngestKeyFormDialog({ open, onOpenChange, onCreated }: {
+function parseRumOrigins(raw: string): { origins: string[]; error: string | null } {
+  const values = raw.split(/[\n,]/).map((value) => value.trim()).filter(Boolean)
+  if (!values.length) return { origins: [], error: 'Add at least one browser origin.' }
+  const origins: string[] = []
+  for (const value of values) {
+    try {
+      if (value.includes('*')) throw new Error('wildcard')
+      const url = new URL(value)
+      if (!['http:', 'https:'].includes(url.protocol) || !url.hostname || url.username || url.password
+        || (url.pathname && url.pathname !== '/') || url.search || url.hash) {
+        throw new Error('invalid')
+      }
+      origins.push(url.origin)
+    } catch {
+      return {
+        origins: [],
+        error: `“${value}” is not an exact HTTP(S) origin. Remove paths, credentials, queries, fragments, and wildcards.`,
+      }
+    }
+  }
+  return { origins: Array.from(new Set(origins)), error: null }
+}
+
+function IngestKeyFormDialog({ open, onOpenChange, onCreated, defaultKind, defaultOrigin }: {
   open: boolean
   onOpenChange: (o: boolean) => void
-  onCreated: (plaintext: string) => void
+  onCreated: (created: CreatedKeyConfig) => void
+  defaultKind: 'sdk' | 'rum'
+  defaultOrigin: string
 }) {
   const qc = useQueryClient()
   const [name, setName] = useState('')
   const [env, setEnv] = useState<string>('prod')
   const [kind, setKind] = useState<'sdk' | 'rum'>('sdk')
   const [origins, setOrigins] = useState('')
+  const [applicationId, setApplicationId] = useState('web-app')
+  const [serviceName, setServiceName] = useState('web-frontend')
+  const [version, setVersion] = useState('')
+  const [sampleRate, setSampleRate] = useState('100')
+  const [replaySampleRate, setReplaySampleRate] = useState('0')
+  const [trackActions, setTrackActions] = useState(true)
+  const [trackLongTasks, setTrackLongTasks] = useState(true)
+  const [consent, setConsent] = useState<'granted' | 'pending'>('granted')
+  const [privacy, setPrivacy] = useState<'mask-user-input' | 'strict'>('mask-user-input')
+
+  useEffect(() => {
+    if (!open) return
+    setKind(defaultKind)
+    setOrigins(defaultOrigin)
+    setName(defaultKind === 'rum' ? 'browser-rum-prod' : '')
+    setApplicationId('web-app')
+    setServiceName('web-frontend')
+    setVersion('')
+    setSampleRate('100')
+    setReplaySampleRate('0')
+    setTrackActions(true)
+    setTrackLongTasks(true)
+    setConsent('granted')
+    setPrivacy('mask-user-input')
+  }, [open, defaultKind, defaultOrigin])
+
+  const parsedOrigins = useMemo(() => parseRumOrigins(origins), [origins])
+  const originError = kind === 'rum'
+    ? (!origins.trim() ? 'Add at least one exact HTTP(S) browser origin.' : parsedOrigins.error)
+    : null
+  const applicationError = kind === 'rum' && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(applicationId.trim())
+    ? 'Use 1–128 letters, numbers, dots, underscores, or hyphens.'
+    : null
+  const sampleRateNumber = Number(sampleRate)
+  const replayRateNumber = Number(replaySampleRate)
+  const samplingError = !Number.isFinite(sampleRateNumber) || sampleRateNumber < 1 || sampleRateNumber > 100
+    ? 'Session sampling must be between 1% and 100%.'
+    : null
+  const replaySamplingError = !Number.isFinite(replayRateNumber) || replayRateNumber !== 0
+    ? 'Session replay capture and storage are not enabled in this release; keep this at 0%.'
+    : null
 
   const envs = useQuery<Environment[]>({
     queryKey: ['apm', 'environments'],
@@ -668,22 +800,39 @@ function IngestKeyFormDialog({ open, onOpenChange, onCreated }: {
   const create = useMutation({
     mutationFn: async () =>
       (await api.post('/apm/ingest-keys', {
-        name, kind, env,
-        origin_allowlist: kind === 'rum' ? origins.split(',').map((v) => v.trim()).filter(Boolean) : [],
+        name: name.trim(), kind, env,
+        origin_allowlist: kind === 'rum' ? parsedOrigins.origins : [],
+        application_id: kind === 'rum' ? applicationId.trim() : null,
       })).data,
-    onSuccess: (data: { key: string }) => {
+    onSuccess: (data: IngestKey & { key: string }) => {
       qc.invalidateQueries({ queryKey: ['apm', 'ingest-keys'] })
-      setName('')
-      setOrigins('')
-      onCreated(data.key)
+      onCreated({
+        ...data,
+        rum: kind === 'rum' ? {
+          applicationId: applicationId.trim(),
+          serviceName: serviceName.trim() || applicationId.trim(),
+          version: version.trim(),
+          sampleRatePercent: sampleRateNumber,
+          replaySampleRatePercent: replayRateNumber,
+          trackActions,
+          trackLongTasks,
+          consent,
+          privacy,
+        } : undefined,
+      })
     },
     onError: (e: any) => toast.error('Could not create key', apiErrorMessage(e)),
   })
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader><DialogTitle>Create ingest key</DialogTitle></DialogHeader>
+      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Create ingest key</DialogTitle>
+          <DialogDescription>
+            Create a secret collector key or a public Browser RUM key restricted to one application and an exact origin allowlist.
+          </DialogDescription>
+        </DialogHeader>
         <div className="space-y-4">
           <FormField label="Name" required>
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="prod-checkout-service" />
@@ -697,9 +846,6 @@ function IngestKeyFormDialog({ open, onOpenChange, onCreated }: {
               </SelectContent>
             </Select>
           </FormField>
-          {kind === 'rum' && <FormField label="Allowed browser origins" required hint="Exact origins only; comma-separate multiple sites. Wildcards are rejected.">
-            <Input value={origins} onChange={(e) => setOrigins(e.target.value)} placeholder="https://portal.example.com, http://192.168.8.19" />
-          </FormField>}
           <FormField label="Environment">
             <Select value={env} onValueChange={setEnv}>
               <SelectTrigger><SelectValue /></SelectTrigger>
@@ -710,12 +856,92 @@ function IngestKeyFormDialog({ open, onOpenChange, onCreated }: {
               </SelectContent>
             </Select>
           </FormField>
+          {kind === 'rum' && (
+            <div className="space-y-4 rounded-lg border border-border bg-surface2/30 p-4">
+              <div>
+                <div className="text-sm font-medium text-text">Browser application scope</div>
+                <p className="mt-0.5 text-xs text-muted">
+                  A public browser key is accepted only for this application and these exact origins.
+                </p>
+              </div>
+              <FormField label="Application ID" required error={applicationError}
+                hint="A stable identifier used by filters and application-level key enforcement.">
+                <Input value={applicationId} onChange={(e) => setApplicationId(e.target.value)}
+                  placeholder="customer-portal" autoComplete="off" />
+              </FormField>
+              <FormField label="Allowed browser origins" required
+                error={originError}
+                hint="One per line or comma-separated. A trailing slash is normalized; paths and wildcards are rejected.">
+                <textarea
+                  className="min-h-20 w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-text outline-none placeholder:text-muted focus:border-primary focus:ring-2 focus:ring-primary/20"
+                  value={origins}
+                  onChange={(e) => setOrigins(e.target.value)}
+                  placeholder={'https://portal.example.com\nhttp://192.168.8.19:8080'}
+                />
+              </FormField>
+
+              <div className="grid gap-4 sm:grid-cols-2">
+                <FormField label="Frontend service name" required hint="Used for frontend-to-backend trace pivots.">
+                  <Input value={serviceName} onChange={(e) => setServiceName(e.target.value)} placeholder="customer-portal-web" />
+                </FormField>
+                <FormField label="Release version" hint="Optional; enables release comparison and error context.">
+                  <Input value={version} onChange={(e) => setVersion(e.target.value)} placeholder="2026.08.27" />
+                </FormField>
+                <FormField label="Session sample rate" error={samplingError} hint="Deterministic per-session sampling; errors are retained.">
+                  <div className="relative">
+                    <Input type="number" min={1} max={100} step={1} value={sampleRate}
+                      onChange={(e) => setSampleRate(e.target.value)} className="pr-8" />
+                    <span className="pointer-events-none absolute right-3 top-2 text-sm text-muted">%</span>
+                  </div>
+                </FormField>
+                <FormField label="Session replay (not enabled)" error={replaySamplingError}
+                  hint="Replay requires a separate privacy-reviewed capture and storage pipeline. This SDK advertises replay as unavailable.">
+                  <div className="relative">
+                    <Input type="number" min={0} max={0} step={1} value={replaySampleRate}
+                      onChange={(e) => setReplaySampleRate(e.target.value)} className="pr-8" disabled />
+                    <span className="pointer-events-none absolute right-3 top-2 text-sm text-muted">%</span>
+                  </div>
+                </FormField>
+                <FormField label="Consent at startup" hint="Pending sends nothing until ZenPlusRUM.grantConsent() is called.">
+                  <Select value={consent} onValueChange={(value) => setConsent(value as 'granted' | 'pending')}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="granted">Granted</SelectItem>
+                      <SelectItem value="pending">Pending consent</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </FormField>
+                <FormField label="Privacy mode" hint="Input values are never collected; strict mode minimizes user context.">
+                  <Select value={privacy} onValueChange={(value) => setPrivacy(value as 'mask-user-input' | 'strict')}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="mask-user-input">Mask user input</SelectItem>
+                      <SelectItem value="strict">Strict minimization</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </FormField>
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-2">
+                <label className="flex items-center justify-between gap-3 rounded-md border border-border bg-surface px-3 py-2">
+                  <span><span className="block text-sm text-text">User actions</span><span className="block text-xs text-muted">Clicks and interaction timing</span></span>
+                  <Switch checked={trackActions} onCheckedChange={setTrackActions} aria-label="Track user actions" />
+                </label>
+                <label className="flex items-center justify-between gap-3 rounded-md border border-border bg-surface px-3 py-2">
+                  <span><span className="block text-sm text-text">Long tasks</span><span className="block text-xs text-muted">Main-thread blocking over 50 ms</span></span>
+                  <Switch checked={trackLongTasks} onCheckedChange={setTrackLongTasks} aria-label="Track long tasks" />
+                </label>
+              </div>
+            </div>
+          )}
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button disabled={!name.trim() || (kind === 'rum' && !origins.trim()) || create.isPending} onClick={() => create.mutate()}>
+          <Button disabled={!name.trim() || create.isPending || (kind === 'rum' && (
+            !!originError || !!applicationError || !serviceName.trim() || !!samplingError || !!replaySamplingError
+          ))} onClick={() => create.mutate()}>
             {create.isPending && <Loader2 className="w-4 h-4 mr-1 animate-spin" />}
-            Create
+            Create {kind === 'rum' ? 'RUM key' : 'SDK key'}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -723,32 +949,96 @@ function IngestKeyFormDialog({ open, onOpenChange, onCreated }: {
   )
 }
 
-function CopyOnceDialog({ value, onClose }: { value: string | null; onClose: () => void }) {
-  const [copied, setCopied] = useState(false)
-  const copy = () => {
-    if (value) {
-      navigator.clipboard?.writeText(value)
-      setCopied(true)
-      toast.success('Copied to clipboard')
+function htmlAttribute(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+}
+
+function buildRumSnippet(value: CreatedKeyConfig): string {
+  const options = value.rum
+  if (!options) return ''
+  const attributes = [
+    ['src', `${window.location.origin}/api/v1/apm/rum/sdk.js`],
+    ['data-key', value.key],
+    ['data-app', options.applicationId],
+    ['data-service', options.serviceName],
+    ...(options.version ? [['data-version', options.version]] : []),
+    ['data-sample-rate', String(options.sampleRatePercent / 100)],
+    ['data-track-actions', String(options.trackActions)],
+    ['data-track-long-tasks', String(options.trackLongTasks)],
+    ['data-consent', options.consent],
+    ['data-privacy', options.privacy],
+    ['data-replay-sample-rate', String(options.replaySampleRatePercent / 100)],
+    ['crossorigin', 'anonymous'],
+  ]
+  return `<script\n${attributes.map(([name, attributeValue]) => `  ${name}="${htmlAttribute(attributeValue)}"`).join('\n')}\n  defer><\/script>`
+}
+
+function CopyOnceDialog({ value, lastUsedAt = null, onClose }: {
+  value: CreatedKeyConfig | string | null
+  lastUsedAt?: string | null
+  onClose: () => void
+}) {
+  const [copied, setCopied] = useState<'key' | 'snippet' | null>(null)
+  const created = typeof value === 'string' ? null : value
+  const plaintext = typeof value === 'string' ? value : value?.key ?? ''
+  const isRum = created?.kind === 'rum' && !!created.rum
+  const snippet = created && isRum ? buildRumSnippet(created) : ''
+  const copy = (text: string, target: 'key' | 'snippet') => {
+    if (text) {
+      navigator.clipboard?.writeText(text)
+      setCopied(target)
+      window.setTimeout(() => setCopied(null), 1500)
+      toast.success(target === 'snippet' ? 'Installation snippet copied' : 'Key copied to clipboard')
     }
   }
   return (
-    <Dialog open={!!value} onOpenChange={(o) => { if (!o) { setCopied(false); onClose() } }}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader><DialogTitle>Your new ingest key</DialogTitle></DialogHeader>
-        <p className="text-sm text-muted">
-          Copy this key now — for security it is shown <strong>only once</strong> and cannot be retrieved again.
-        </p>
-        <div className="flex items-center gap-2 mt-3">
-          <code className="flex-1 px-3 py-2 rounded-md bg-surface2 text-text font-mono text-sm break-all">
-            {value}
-          </code>
-          <Button variant="outline" size="sm" onClick={copy}>
-            {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-          </Button>
-        </div>
+    <Dialog open={!!value} onOpenChange={(o) => { if (!o) { setCopied(null); onClose() } }}>
+      <DialogContent className={isRum ? 'max-h-[90vh] max-w-2xl overflow-y-auto' : 'max-w-lg'}>
+        <DialogHeader>
+          <DialogTitle>{isRum ? 'Install Browser RUM' : 'Your new ingest key'}</DialogTitle>
+          <DialogDescription>
+            {isRum
+              ? <>Add this tag before <code className="rounded bg-surface2 px-1">&lt;/head&gt;</code> on every page. The public key is protected by its exact origin allowlist and application binding.</>
+              : <>Copy this key now — for security it is shown <strong>only once</strong> and cannot be retrieved again.</>}
+          </DialogDescription>
+        </DialogHeader>
+        {isRum && (
+          <>
+            <div className="relative mt-3">
+              <pre className="max-h-72 overflow-auto rounded-md border border-border bg-surface2/60 p-3 pr-12 text-xs leading-relaxed text-text"><code>{snippet}</code></pre>
+              <Button className="absolute right-2 top-2" variant="outline" size="sm"
+                onClick={() => copy(snippet, 'snippet')} aria-label="Copy installation snippet">
+                {copied === 'snippet' ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+              </Button>
+            </div>
+            <div className={`mt-3 rounded-md border px-3 py-2 text-sm ${lastUsedAt
+              ? 'border-success/30 bg-success/10 text-success'
+              : 'border-warning/30 bg-warning/10 text-warning'}`} role="status" aria-live="polite">
+              {lastUsedAt
+                ? <span className="flex items-center gap-2"><Check className="h-4 w-4" /> Data flow verified · last event {relativeTime(lastUsedAt)}</span>
+                : <span className="flex items-center gap-2"><Loader2 className="h-4 w-4 animate-spin" /> Waiting for the first browser event…</span>}
+            </div>
+            <p className="mt-2 text-xs text-muted">
+              ZenPlus automatically batches events, retries transient failures, respects consent, strips URL queries and fragments, and never captures input values. Revoke and replace this key if its permitted origin or application changes.
+            </p>
+            <p className="mt-1 text-xs text-muted">
+              If your site uses Content Security Policy, allow <code className="rounded bg-surface2 px-1">{window.location.origin}</code> in both <code className="rounded bg-surface2 px-1">script-src</code> and <code className="rounded bg-surface2 px-1">connect-src</code>.
+            </p>
+          </>
+        )}
+        <details className="mt-3 rounded-md border border-border px-3 py-2">
+          <summary className="cursor-pointer text-xs font-medium text-text">{isRum ? 'Show public key' : 'Show key'}</summary>
+          <div className="mt-2 flex items-center gap-2">
+            <code className="flex-1 break-all rounded-md bg-surface2 px-3 py-2 font-mono text-sm text-text">
+              {plaintext}
+            </code>
+            <Button variant="outline" size="sm" onClick={() => copy(plaintext, 'key')} aria-label="Copy key">
+              {copied === 'key' ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+            </Button>
+          </div>
+        </details>
         <DialogFooter>
-          <Button onClick={() => { setCopied(false); onClose() }}>Done</Button>
+          <Button onClick={() => { setCopied(null); onClose() }}>{lastUsedAt ? 'Done' : isRum ? 'I’ll verify later' : 'Done'}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

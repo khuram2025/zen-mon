@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 
 CONTROLLER = os.environ.get("ZENPLUS_DEMO_CONTROLLER", "https://192.168.8.221").rstrip("/")
+PROFILE_CONTROLLER = os.environ.get("ZENPLUS_DEMO_PROFILE_CONTROLLER", CONTROLLER).rstrip("/")
 SDK_KEY = os.environ["ZENPLUS_DEMO_SDK_KEY"]
 RUM_KEY = os.environ["ZENPLUS_DEMO_RUM_KEY"]
 ORIGIN = os.environ.get("ZENPLUS_DEMO_ORIGIN", "http://192.168.8.19")
@@ -42,10 +43,16 @@ def attr_b(key: str, value: bool) -> dict:
     return {"key": key, "value": {"boolValue": value}}
 
 
-def post(path: str, body: dict, headers: dict[str, str] | None = None) -> dict:
+def post(
+    path: str,
+    body: dict,
+    headers: dict[str, str] | None = None,
+    *,
+    controller: str = CONTROLLER,
+) -> dict:
     data = json.dumps(body, separators=(",", ":")).encode()
     request = urllib.request.Request(
-        CONTROLLER + path,
+        controller + path,
         data=data,
         method="POST",
         headers={"Content-Type": "application/json", **(headers or {})},
@@ -269,6 +276,7 @@ def main() -> None:
             "/v1development/profiles",
             profile,
             {"Authorization": f"Bearer {SDK_KEY}"},
+            controller=PROFILE_CONTROLLER,
         )
         profile_count += 1
 

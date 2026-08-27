@@ -1,64 +1,264 @@
-import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useMemo } from 'react'
+import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, ExternalLink, Globe2, MonitorSmartphone, TriangleAlert } from 'lucide-react'
+import { Globe2, Loader2, Radio, Settings2 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
-import { Button } from '@/components/ui/Button'
-import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
-import { fmtMs } from '@/components/apm/shared'
-import { ApmRangePicker, type ApmRangeKey } from '@/components/apm/ApmRange'
 import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
-import { ApmKpi, VitalGauge, LatencyCell, RankBar, fmtCount } from '@/components/apm/viz'
+import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { Card } from '@/components/ui/Card'
+import type {
+  RumAction,
+  RumError,
+  RumFacets,
+  RumIngestHealth,
+  RumListResponse,
+  RumOverview,
+  RumResource,
+  RumSession,
+  RumSessionDetail,
+  RumTimeseries,
+  RumView,
+} from '@/types/apm'
+import { RumDetailDialog } from './rum/RumDetailDialog'
+import { RumOverviewPanel, RumWebVitalsPanel } from './rum/RumOverview'
+import {
+  RumActionsTable,
+  RumErrorsTable,
+  RumResourcesTable,
+  RumSessionsTable,
+  RumViewsTable,
+  actionRowKey,
+  errorRowKey,
+  resourceRowKey,
+  viewRowKey,
+} from './rum/RumTables'
+import {
+  QueryErrorPanel,
+  RefreshIndicator,
+  RumEmptyState,
+  RumFilterBar,
+  RumPageSkeleton,
+  RumRangePicker,
+  RumTabBar,
+} from './rum/RumUi'
+import { useRumUrlState } from './rum/useRumUrlState'
 
-interface RumSummary {
-  events: number; sessions: number; views: number; lcp_p75: number; inp_p75: number; cls_p75: number; errors: number
-  routes: { application_id: string; view_name: string; views: number; sessions: number; lcp_p75: number; inp_p75: number; cls_p75: number; errors: number; last_seen: string }[]
-  recent_sessions: { session_id: string; application_id: string; started_at: string; last_seen: string; events: number; errors: number; browser: string; device_type: string; backend_trace_id: string }[]
+const REFRESH_MS = 30_000
+const SESSION_PAGE_SIZE = 500
+const MAX_SESSION_TIMELINE_EVENTS = 2_000
+
+async function get<T>(path: string): Promise<T> {
+  return (await api.get<T>(path)).data
 }
 
-const score = (name: 'lcp' | 'inp' | 'cls', value: number) => {
-  const limits = name === 'lcp' ? [2500, 4000] : name === 'inp' ? [200, 500] : [0.1, 0.25]
-  return value <= limits[0] ? 'text-success' : value <= limits[1] ? 'text-warning' : 'text-danger'
+async function getRumSessionDetail(sessionId: string, baseQuery: string): Promise<RumSessionDetail> {
+  const path = `/apm/rum/sessions/${encodeURIComponent(sessionId)}`
+  const params = new URLSearchParams(baseQuery)
+  params.set('page', '1')
+  params.set('page_size', String(SESSION_PAGE_SIZE))
+  const first = await get<RumSessionDetail>(`${path}?${params}`)
+  const available = Math.min(first.total ?? first.timeline.length, MAX_SESSION_TIMELINE_EVENTS)
+  const pageCount = Math.max(1, Math.ceil(available / SESSION_PAGE_SIZE))
+  if (pageCount === 1) return first
+
+  const remaining = await Promise.all(Array.from({ length: pageCount - 1 }, (_, index) => {
+    const pageParams = new URLSearchParams(params)
+    pageParams.set('page', String(index + 2))
+    return get<RumSessionDetail>(`${path}?${pageParams}`)
+  }))
+  return {
+    ...first,
+    page: 1,
+    page_size: SESSION_PAGE_SIZE,
+    timeline: [first, ...remaining].flatMap((response) => response.timeline).slice(0, available),
+  }
 }
 
 export function RumPage() {
-  const navigate = useNavigate()
-  const [range, setRange] = useState<ApmRangeKey>('24h')
-  const query = useQuery<RumSummary>({ queryKey: ['apm', 'rum', range], queryFn: async () => (await api.get(`/apm/rum/summary?range=${range}`)).data, refetchInterval: 30_000 })
-  const d = query.data
-  return <div className="space-y-4">
-    <ApmPageHeader title="Real User Monitoring" description="Core Web Vitals, browser errors, sessions, and frontend-to-backend trace correlation." article="rum"
-      actions={<ApmRangePicker value={range} onChange={setRange} />} />
-    {!query.isLoading && !query.isError && d?.events === 0 && <Card><CardContent className="flex flex-col items-center py-12 text-center">
-      <Globe2 className="mb-3 h-9 w-9 text-primary" /><h2 className="text-base font-semibold text-text">Connect your first web application</h2>
-      <p className="mt-1 max-w-xl text-sm text-muted">Create a Browser RUM key with an exact origin allowlist, then add the controller-hosted SDK tag. The SDK has no internet dependency and masks form input by design.</p>
-      <Button className="mt-4" onClick={() => navigate('/apm/settings?tab=keys')}>Create Browser RUM key</Button>
-    </CardContent></Card>}
-    {query.isError && <div className="rounded-lg border border-danger/30 bg-danger/10 p-3 text-sm text-danger">RUM analytics are temporarily unavailable.</div>}
-    {d && d.events > 0 && <>
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <ApmKpi label="Sessions" tone="info" value={fmtCount(d.sessions)} sub={`${fmtCount(d.views)} page views`} />
-        <ApmKpi label="JS errors" tone={d.errors ? 'danger' : 'success'} value={fmtCount(d.errors)} sub={`${fmtCount(d.events)} events`} />
-        <VitalGauge label="LCP p75" value={d.lcp_p75} good={2500} poor={4000} format={fmtMs} />
-        <VitalGauge label="INP p75" value={d.inp_p75} good={200} poor={500} format={fmtMs} />
+  const state = useRumUrlState()
+  const commonQuery = state.query()
+  const filtered = state.activeFilterCount > 0
+  const overviewMode = state.tab === 'overview'
+
+  const overviewQ = useQuery<RumOverview>({
+    queryKey: ['apm', 'rum', 'overview', commonQuery],
+    queryFn: () => get(`/apm/rum/overview?${commonQuery}`),
+    refetchInterval: REFRESH_MS,
+  })
+  const timeseriesQ = useQuery<RumTimeseries>({
+    queryKey: ['apm', 'rum', 'timeseries', commonQuery],
+    queryFn: () => get(`/apm/rum/timeseries?${commonQuery}`),
+    enabled: overviewMode || state.tab === 'web-vitals',
+    refetchInterval: REFRESH_MS,
+  })
+  const facetsQ = useQuery<RumFacets>({
+    queryKey: ['apm', 'rum', 'facets', commonQuery],
+    queryFn: () => get(`/apm/rum/facets?${commonQuery}`),
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  })
+  const healthQ = useQuery<RumIngestHealth>({
+    queryKey: ['apm', 'rum', 'health', commonQuery],
+    queryFn: () => get(`/apm/rum/health?${commonQuery}`),
+    enabled: overviewMode,
+    refetchInterval: REFRESH_MS,
+  })
+
+  const viewsQuery = state.query({
+    page: overviewMode ? 1 : state.page,
+    page_size: overviewMode ? 5 : state.pageSize,
+    sort: overviewMode ? 'lcp_p75' : state.sort,
+    order: overviewMode ? 'desc' : state.order,
+  })
+  const viewsQ = useQuery<RumListResponse<RumView>>({
+    queryKey: ['apm', 'rum', 'views', viewsQuery],
+    queryFn: () => get(`/apm/rum/views?${viewsQuery}`),
+    enabled: overviewMode || state.tab === 'views',
+    refetchInterval: REFRESH_MS,
+  })
+
+  const errorsQuery = state.query({
+    page: overviewMode ? 1 : state.page,
+    page_size: overviewMode ? 5 : state.pageSize,
+    sort: overviewMode ? 'count' : state.sort,
+    order: overviewMode ? 'desc' : state.order,
+  })
+  const errorsQ = useQuery<RumListResponse<RumError>>({
+    queryKey: ['apm', 'rum', 'errors', errorsQuery],
+    queryFn: () => get(`/apm/rum/errors?${errorsQuery}`),
+    enabled: overviewMode || state.tab === 'errors',
+    refetchInterval: REFRESH_MS,
+  })
+
+  const listQuery = state.query({ page: state.page, page_size: state.pageSize, sort: state.sort, order: state.order })
+  const sessionsQ = useQuery<RumListResponse<RumSession>>({
+    queryKey: ['apm', 'rum', 'sessions', listQuery],
+    queryFn: () => get(`/apm/rum/sessions?${listQuery}`),
+    enabled: state.tab === 'sessions' || (state.detailKind === 'session' && !!state.detailId),
+    refetchInterval: REFRESH_MS,
+  })
+  const resourcesQ = useQuery<RumListResponse<RumResource>>({
+    queryKey: ['apm', 'rum', 'resources', listQuery],
+    queryFn: () => get(`/apm/rum/resources?${listQuery}`),
+    enabled: state.tab === 'resources',
+    refetchInterval: REFRESH_MS,
+  })
+  const actionsQ = useQuery<RumListResponse<RumAction>>({
+    queryKey: ['apm', 'rum', 'actions', listQuery],
+    queryFn: () => get(`/apm/rum/actions?${listQuery}`),
+    enabled: state.tab === 'actions',
+    refetchInterval: REFRESH_MS,
+  })
+
+  const sessionDetailQ = useQuery<RumSessionDetail>({
+    queryKey: ['apm', 'rum', 'session', state.detailId, commonQuery],
+    queryFn: () => getRumSessionDetail(state.detailId, commonQuery),
+    enabled: state.detailKind === 'session' && !!state.detailId,
+  })
+
+  const selected = useMemo(() => {
+    if (!state.detailId) return undefined
+    if (state.detailKind === 'session') return sessionsQ.data?.items.find((row) => row.session_id === state.detailId)
+    if (state.detailKind === 'view') return viewsQ.data?.items.find((row) => viewRowKey(row) === state.detailId)
+    if (state.detailKind === 'error') return errorsQ.data?.items.find((row) => errorRowKey(row) === state.detailId)
+    if (state.detailKind === 'resource') return resourcesQ.data?.items.find((row) => resourceRowKey(row) === state.detailId)
+    if (state.detailKind === 'action') return actionsQ.data?.items.find((row) => actionRowKey(row) === state.detailId)
+    return undefined
+  }, [actionsQ.data?.items, errorsQ.data?.items, resourcesQ.data?.items, sessionsQ.data?.items, state.detailId, state.detailKind, viewsQ.data?.items])
+
+  const anyFetching = overviewQ.isFetching || timeseriesQ.isFetching || facetsQ.isFetching || viewsQ.isFetching || errorsQ.isFetching || sessionsQ.isFetching || resourcesQ.isFetching || actionsQ.isFetching
+  const noTelemetry = !filtered && overviewQ.data?.totals.events === 0
+  const sharedTableProps = {
+    page: state.page,
+    pageSize: state.pageSize,
+    sort: state.sort,
+    order: state.order,
+    filtered,
+    onSort: state.setSort,
+    onPage: state.setPage,
+    onPageSize: state.setPageSize,
+  }
+
+  const content = (() => {
+    if ((state.tab === 'overview' || state.tab === 'web-vitals') && overviewQ.isLoading) return <RumPageSkeleton />
+    if ((state.tab === 'overview' || state.tab === 'web-vitals') && overviewQ.isError) return <QueryErrorPanel label="RUM overview" error={overviewQ.error} onRetry={() => overviewQ.refetch()} />
+    if (noTelemetry) return (
+      <Card>
+        <RumEmptyState
+          icon={Globe2}
+          title="Connect your first web application"
+          description="Create an origin-scoped Browser RUM key and install the controller-hosted SDK. Data is self-hosted, form values are masked, and no third-party network dependency is required."
+          action={<Button asChild><Link to="/apm/settings?tab=keys&create=rum"><Settings2 className="h-4 w-4" /> Configure Browser RUM</Link></Button>}
+        />
+      </Card>
+    )
+    if (state.tab === 'overview' && overviewQ.data) return (
+      <RumOverviewPanel
+        overview={overviewQ.data}
+        timeseries={timeseriesQ.data}
+        topViews={viewsQ.data?.items}
+        topErrors={errorsQ.data?.items}
+        topViewsLoading={viewsQ.isLoading}
+        topViewsError={viewsQ.error}
+        topErrorsLoading={errorsQ.isLoading}
+        topErrorsError={errorsQ.error}
+        health={healthQ.data}
+        explorerCoverage={viewsQ.data?.coverage ?? errorsQ.data?.coverage}
+        facets={facetsQ.data}
+        trendsLoading={timeseriesQ.isLoading}
+        trendsError={timeseriesQ.error}
+        onRetryTrends={() => timeseriesQ.refetch()}
+        onRetryViews={() => viewsQ.refetch()}
+        onRetryErrors={() => errorsQ.refetch()}
+        onOpenView={(row) => state.openDetail('view', viewRowKey(row))}
+        onOpenError={(row) => state.openDetail('error', errorRowKey(row))}
+        onShowViews={() => state.setTab('views')}
+        onShowErrors={() => state.setTab('errors')}
+        onFilter={state.setFilter}
+      />
+    )
+    if (state.tab === 'web-vitals' && overviewQ.data) return <RumWebVitalsPanel overview={overviewQ.data} timeseries={timeseriesQ.data} loading={timeseriesQ.isLoading} error={timeseriesQ.error} onRetry={() => timeseriesQ.refetch()} />
+    if (state.tab === 'views') return <RumViewsTable {...sharedTableProps} data={viewsQ.data} loading={viewsQ.isLoading} error={viewsQ.error} onRetry={() => viewsQ.refetch()} onOpen={(row) => state.openDetail('view', viewRowKey(row))} />
+    if (state.tab === 'sessions') return <RumSessionsTable {...sharedTableProps} data={sessionsQ.data} loading={sessionsQ.isLoading} error={sessionsQ.error} onRetry={() => sessionsQ.refetch()} onOpen={(row) => state.openDetail('session', row.session_id)} />
+    if (state.tab === 'errors') return <RumErrorsTable {...sharedTableProps} data={errorsQ.data} loading={errorsQ.isLoading} error={errorsQ.error} onRetry={() => errorsQ.refetch()} onOpen={(row) => state.openDetail('error', errorRowKey(row))} />
+    if (state.tab === 'resources') return <RumResourcesTable {...sharedTableProps} data={resourcesQ.data} loading={resourcesQ.isLoading} error={resourcesQ.error} onRetry={() => resourcesQ.refetch()} onOpen={(row) => state.openDetail('resource', resourceRowKey(row))} />
+    if (state.tab === 'actions') return <RumActionsTable {...sharedTableProps} data={actionsQ.data} loading={actionsQ.isLoading} error={actionsQ.error} onRetry={() => actionsQ.refetch()} onOpen={(row) => state.openDetail('action', actionRowKey(row))} />
+    return null
+  })()
+
+  return (
+    <div className="space-y-4">
+      <ApmPageHeader
+        title="Real User Monitoring"
+        description="Field performance, JavaScript reliability, user journeys, resources and frontend-to-backend trace correlation."
+        article="rum"
+        actions={<><RefreshIndicator active={anyFetching && !overviewQ.isLoading} /><RumRangePicker value={state.range} onChange={state.setRange} /></>}
+      />
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <RumTabBar value={state.tab} onChange={state.setTab} />
+        <div className="flex items-center gap-2 text-[11px] text-muted">
+          <Badge variant={overviewQ.data?.totals.events ? 'success' : 'outline'}><Radio className="h-3 w-3" />{overviewQ.data?.totals.events ? 'Receiving data' : overviewQ.isLoading ? 'Checking ingest' : 'No recent data'}</Badge>
+          {anyFetching && <span className="hidden items-center gap-1 sm:inline-flex"><Loader2 className="h-3 w-3 animate-spin" /> refreshing</span>}
+        </div>
       </div>
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-        <VitalGauge label="CLS p75" value={d.cls_p75} good={0.1} poor={0.25} format={(v) => v.toFixed(3)} />
-        <ApmKpi label="Routes" tone="primary" value={fmtCount(d.routes.length)} sub="distinct views" />
-        <ApmKpi label="Recent sessions" tone="accent" value={fmtCount(d.recent_sessions.length)} sub="latest clients" />
-      </div>
-      <Card><CardHeader><CardTitle className="flex items-center gap-2 text-sm"><Activity className="h-4 w-4 text-primary" /> Route experience</CardTitle></CardHeader><CardContent className="p-0"><Table>
-        <THead><Tr><Th>Application / route</Th><Th className="text-right">Views</Th><Th className="text-right">LCP p75</Th><Th className="text-right">INP p75</Th><Th className="text-right">CLS p75</Th><Th className="text-right">Errors</Th></Tr></THead>
-        <TBody>{d.routes.map(r => {
-          const maxViews = Math.max(...d.routes.map((x) => x.views), 1)
-          return <Tr key={`${r.application_id}:${r.view_name}`}><Td><div className="font-medium text-text">{r.view_name}</div><div className="text-xs text-muted">{r.application_id}</div></Td><Td className="text-right"><div className="font-mono text-xs">{r.views}</div><RankBar value={r.views} max={maxViews} /></Td><Td className="text-right"><LatencyCell ms={r.lcp_p75} /></Td><Td className="text-right"><LatencyCell ms={r.inp_p75} /></Td><Td className={`text-right font-mono text-xs ${score('cls', r.cls_p75)}`}>{r.cls_p75.toFixed(3)}</Td><Td className="text-right">{r.errors}</Td></Tr>
-        })}</TBody>
-      </Table></CardContent></Card>
-      <Card><CardHeader><CardTitle className="flex items-center gap-2 text-sm"><MonitorSmartphone className="h-4 w-4 text-primary" /> Recent sessions</CardTitle></CardHeader><CardContent className="p-0"><Table>
-        <THead><Tr><Th>Session</Th><Th>Client</Th><Th className="text-right">Events</Th><Th className="text-right">Errors</Th><Th>Last seen</Th><Th>Backend trace</Th></Tr></THead>
-        <TBody>{d.recent_sessions.map(s => <Tr key={s.session_id}><Td className="font-mono text-xs">{s.session_id.slice(0, 12)}…</Td><Td>{s.browser} · {s.device_type}</Td><Td className="text-right">{s.events}</Td><Td className="text-right">{s.errors ? <span className="inline-flex items-center gap-1 text-danger"><TriangleAlert className="h-3 w-3" />{s.errors}</span> : '0'}</Td><Td className="text-xs text-muted">{new Date(s.last_seen).toLocaleString()}</Td><Td>{s.backend_trace_id ? <button className="inline-flex items-center gap-1 font-mono text-xs text-primary hover:underline" onClick={() => navigate(`/apm/traces/${s.backend_trace_id}`)}>{s.backend_trace_id.slice(0, 10)}…<ExternalLink className="h-3 w-3" /></button> : <span className="text-xs text-muted">—</span>}</Td></Tr>)}</TBody>
-      </Table></CardContent></Card>
-    </>}
-  </div>
+
+      <RumFilterBar filters={state.filters} facets={facetsQ.data} loading={facetsQ.isLoading} error={facetsQ.isError} activeCount={state.activeFilterCount} onChange={state.setFilter} onClear={state.clearFilters} onRetry={() => facetsQ.refetch()} />
+
+      {content}
+
+      <RumDetailDialog
+        open={!!state.detailId}
+        kind={state.detailKind}
+        selected={selected}
+        sessionDetail={sessionDetailQ.data}
+        sessionLoading={sessionDetailQ.isLoading}
+        sessionError={sessionDetailQ.error}
+        onRetrySession={() => sessionDetailQ.refetch()}
+        onClose={state.closeDetail}
+        onDrill={(tab, viewName) => state.drillTo(tab, { view_name: viewName })}
+      />
+    </div>
+  )
 }

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useLocation, useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Loader2, ArrowLeft, AlertCircle, Check, Copy, Database, Flame, Server, ArrowRightLeft, ScrollText } from 'lucide-react'
 import { api } from '@/lib/api'
@@ -51,6 +51,14 @@ function kindIcon(kind: string, db: string) {
 export function TraceWaterfallPage() {
   const { traceId } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
+  const stateReturn = (location.state as { returnTo?: unknown } | null)?.returnTo
+  const queryReturn = new URLSearchParams(location.search).get('rum_return')
+  const rumReturn = [stateReturn, queryReturn].find((value): value is string => (
+    typeof value === 'string' && value.startsWith('/apm/rum') && !value.startsWith('//')
+  ))
+  const backTarget = rumReturn || '/apm/traces'
+  const backLabel = rumReturn ? 'Back to RUM' : 'Traces'
   const [selected, setSelected] = useState<SpanNode | null>(null)
   const [copied, setCopied] = useState(false)
   const [view, setView] = useState<'waterfall' | 'logs'>('waterfall')
@@ -72,7 +80,7 @@ export function TraceWaterfallPage() {
   if (query.isError || !query.data) {
     return (
       <div className="space-y-4">
-        <Button variant="ghost" onClick={() => navigate('/apm/traces')}><ArrowLeft className="w-4 h-4 mr-1" /> Back</Button>
+        <Button variant="ghost" onClick={() => navigate(backTarget)}><ArrowLeft className="w-4 h-4 mr-1" /> {backLabel}</Button>
         <div className="text-center text-muted py-12">Trace not found.</div>
       </div>
     )
@@ -84,7 +92,7 @@ export function TraceWaterfallPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
-        <Button variant="ghost" size="sm" onClick={() => navigate('/apm/traces')}><ArrowLeft className="w-4 h-4 mr-1" /> Traces</Button>
+        <Button variant="ghost" size="sm" onClick={() => navigate(backTarget)}><ArrowLeft className="w-4 h-4 mr-1" /> {backLabel}</Button>
         <h1 className="text-lg font-semibold text-text">Trace</h1>
         <button
           onClick={() => { navigator.clipboard?.writeText(trace.trace_id); setCopied(true); window.setTimeout(() => setCopied(false), 1500) }}

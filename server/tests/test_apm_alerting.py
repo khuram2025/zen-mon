@@ -21,7 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.services import apm_alert_service, apm_slo_service
 from app.services.apm_alert_service import (
-    _cmp, _detail, _services_in_scope, evaluate_apm_rules, APM_PULL_METRICS,
+    _cmp, _detail, _services_in_scope, _rum_scopes_in_scope,
+    evaluate_apm_rules, APM_PULL_METRICS,
 )
 from app.services.apm_slo_service import _frac_above, _Q_GRID, compute_slo_status, BURN_TIERS
 
@@ -117,6 +118,8 @@ def test_detail_formatting():
     assert _detail("apm_error_rate", 0.023) == "error rate 2.30%"
     assert _detail("apm_throughput", 12.5) == "12.50 req/s"
     assert _detail("apm_apdex", 0.912) == "apdex 0.912"
+    assert _detail("apm_rum_lcp_p75", 2512.3) == "field LCP p75 2512ms"
+    assert _detail("apm_rum_error_session_rate", 0.075) == "error-affected sessions 7.50%"
 
 
 def test_services_in_scope():
@@ -127,6 +130,20 @@ def test_services_in_scope():
     assert sorted(_services_in_scope(all_rule, fleet)) == ["Payments", "checkout"]
     assert _services_in_scope(one_rule, fleet) == ["Payments"]
     assert _services_in_scope(miss_rule, fleet) == []
+
+
+def test_rum_scope_is_environment_aware_and_preserves_app_only_rules():
+    fleet = {
+        "customer-portal @ prod": {},
+        "customer-portal @ staging": {},
+        "admin @ prod": {},
+    }
+    exact = SimpleNamespace(target="customer-portal @ prod")
+    legacy = SimpleNamespace(target="customer-portal")
+    assert _rum_scopes_in_scope(exact, fleet) == ["customer-portal @ prod"]
+    assert sorted(_rum_scopes_in_scope(legacy, fleet)) == [
+        "customer-portal @ prod", "customer-portal @ staging",
+    ]
 
 
 # ── evaluator raise/resolve flow ─────────────────────────────────────────────
@@ -229,6 +246,55 @@ async def test_evaluator_scoped_rule_ignores_other_services(monkeypatch):
     assert out["raised"] == 0 and not db.inserted
 
 
+@pytest.mark.asyncio
+async def test_evaluator_raises_browser_rum_metric_with_application_context(monkeypatch):
+    fleet = {"customer-portal": {"apm_rum_lcp_p75": 4_250.0, "sessions": 50}}
+    monkeypatch.setattr(apm_alert_service, "_rum_fleet", lambda w: fleet)
+    db = EvalFakeDB([_rule(metric="apm_rum_lcp_p75", threshold=4_000)])
+    out = await evaluate_apm_rules(db)
+    assert out["raised"] == 1
+    assert "customer-portal" in db.inserted[0]["msg"]
+    assert '"source": "apm_rum_metric"' in db.inserted[0]["meta"]
+
+
+@pytest.mark.asyncio
+async def test_evaluator_does_not_treat_missing_rum_samples_as_zero(monkeypatch):
+    monkeypatch.setattr(apm_alert_service, "_rum_fleet", lambda w: {"customer-portal": {"sessions": 20}})
+    existing = uuid4()
+    db = EvalFakeDB([
+        _rule(metric="apm_rum_lcp_p75", operator="<", threshold=2_500),
+    ], active_alert_id=existing)
+    out = await evaluate_apm_rules(db)
+    assert out["resolved"] == 0
+    assert db.resolved == []
+
+
+def test_rum_alert_rates_use_only_the_sampled_session_cohort(monkeypatch):
+    statements = []
+
+    class Result:
+        def __init__(self, rows):
+            self.result_rows = rows
+
+    class Client:
+        def query(self, statement, parameters=None):
+            statements.append(" ".join(statement.split()))
+            if len(statements) == 1:
+                return Result([("customer-portal", "prod", 10, 2, 5, 1)])
+            return Result([])
+
+    monkeypatch.setattr("app.core.database.get_clickhouse_client", lambda: Client())
+    fleet = apm_alert_service._rum_fleet(300)
+
+    scope = fleet["customer-portal @ prod"]
+    assert scope["apm_rum_error_session_rate"] == pytest.approx(0.2)
+    assert scope["apm_rum_resource_failure_rate"] == pytest.approx(0.2)
+    assert "uniqExactIf(session_id, sampled = 1)" in statements[0]
+    assert "event_type = 'error' AND sampled = 1" in statements[0]
+    assert "event_type = 'resource' AND sampled = 1" in statements[0]
+    assert "AND sampled = 1" in statements[1]
+
+
 # ── alert-rules API accepts apm_* keys ───────────────────────────────────────
 
 def test_alert_rule_create_accepts_apm_metric(client, as_admin):
@@ -248,15 +314,17 @@ def test_alert_rule_create_rejects_unknown_apm_metric(client, as_admin):
     assert resp.status_code == 422
 
 
-def test_all_nine_apm_keys_pass_schema_validation():
+def test_all_apm_and_rum_keys_pass_schema_validation():
     from app.api.v1.alert_rules import _APM_METRICS
     keys = set(_APM_METRICS.split("|"))
     assert keys == {
         "apm_latency_p50", "apm_latency_p95", "apm_latency_p99",
         "apm_error_rate", "apm_throughput", "apm_apdex",
+        "apm_rum_lcp_p75", "apm_rum_inp_p75", "apm_rum_cls_p75",
+        "apm_rum_error_session_rate", "apm_rum_resource_failure_rate",
         "apm_slo_burn", "apm_synthetic_down", "apm_anomaly",
     }
-    # The evaluator handles exactly the six pull-path RED keys.
+    # Pull-path server and browser metrics are handled by the evaluator.
     assert APM_PULL_METRICS < keys
 
 

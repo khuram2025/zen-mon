@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "smoke:routes": "node scripts/smoke-routes.mjs",
+    "test:rum": "node scripts/test-rum-ui.mjs",
     "smoke:build": "vite build",
     "smoke": "npm run smoke:routes && npm run smoke:build"
   },

@@ -1,19 +1,20 @@
 """APM metric alert evaluation (AM-E6 / F8).
 
 Ping/trap alerting is event-driven, host and network metrics have periodic
-ClickHouse evaluators (host_alert_service / network_alert_service). APM RED
-signals also arrive continuously — as 5-minute rollups in
-``apm_span_metrics_5m`` — so they get the same periodic treatment here.
+ClickHouse evaluators (host_alert_service / network_alert_service). Server APM
+RED signals and browser RUM field metrics also arrive continuously, so they get
+the same periodic treatment here.
 
-Every ``EVAL_INTERVAL_S`` this loads the enabled alert rules whose ``metric``
-is one of the APM pull-path keys, computes the current per-service value from
-the RED rollup (never raw ``apm_spans`` — the rollup is built from 100% of
-spans pre-sampling, which is the doc-set's accuracy guarantee), and raises or
-resolves a service-scoped row in ``alerts``.
+Every ``EVAL_INTERVAL_S`` this loads enabled APM/RUM pull-path rules, computes
+the current per-service or per-browser-application value, and raises or resolves
+a scoped row in ``alerts``. Server RED reads its pre-sampling rollup; RUM reads
+validated browser events and collapses finalized vitals once per view.
 
 Rule semantics:
-- Scope: ``target`` holds the APM service name (exact, case-insensitive);
-  empty target = every service reporting in the window.
+- Scope: ``target`` holds the APM service name or RUM ``application @ env``
+  scope (exact, case-insensitive); empty target = every matching reporter in
+  the window. Legacy RUM app-only targets continue to match each environment
+  for that application independently.
 - Window: ``max(min_duration, 300)`` seconds, then snapped down to a rollup
   bucket boundary and floored at two buckets (``apm_rollup``). Rollup rows carry
   their bucket *start*, so an unaligned window silently excluded the bucket
@@ -57,11 +58,18 @@ DEFAULT_WINDOW_S = 300       # rollup granularity floor (5m buckets)
 # Entry spans only — inbound request RED, matching the /apm/services API.
 _ENTRY_KINDS = "('SERVER','CONSUMER')"
 
-# The APM pull-path metrics this evaluator handles.
-APM_PULL_METRICS = {
+# Server-side RED metrics and browser field-experience metrics share the alert
+# lifecycle, but read different ClickHouse data sets.
+RED_PULL_METRICS = {
     "apm_latency_p50", "apm_latency_p95", "apm_latency_p99",
     "apm_error_rate", "apm_throughput", "apm_apdex",
 }
+RUM_PULL_METRICS = {
+    "apm_rum_lcp_p75", "apm_rum_inp_p75", "apm_rum_cls_p75",
+    "apm_rum_error_session_rate", "apm_rum_resource_failure_rate",
+}
+APM_PULL_METRICS = RED_PULL_METRICS | RUM_PULL_METRICS
+_RUM_SCOPE_SEPARATOR = " @ "
 
 _OPS = {
     "gt": lambda a, b: a > b, ">": lambda a, b: a > b,
@@ -133,6 +141,89 @@ def _service_fleet(window_s: int) -> dict[str, dict]:
     return out
 
 
+def _rum_fleet(window_s: int) -> dict[str, dict]:
+    """Return alertable field metrics keyed by browser application/environment.
+
+    Vitals are collapsed to the most recent finalized record per view before
+    the percentile is calculated. This avoids weighting a view more heavily
+    when a browser retries or sends an interim checkpoint. Session/resource
+    rates are calculated independently across the same aligned window.
+    """
+    from app.core.database import get_clickhouse_client
+
+    win = rollup_window(window_s)
+    try:
+        client = get_clickhouse_client()
+        totals = client.query(
+            """
+            SELECT application_id, env,
+                   uniqExactIf(session_id, sampled = 1) AS sessions,
+                   uniqExactIf(session_id, event_type = 'error' AND sampled = 1) AS error_sessions,
+                   countIf(event_type = 'resource' AND sampled = 1) AS resources,
+                   countIf(event_type = 'resource' AND sampled = 1 AND
+                           (status_code >= 400 OR attributes['failed'] = 'true')) AS failed_resources
+            FROM zenplus.apm_rum_events
+            WHERE timestamp >= %(s)s AND application_id != ''
+            GROUP BY application_id, env
+            """,
+            parameters={"s": win.start_str},
+        ).result_rows
+        vitals = client.query(
+            """
+            SELECT application_id, env,
+                   quantileTDigestIf(0.75)(lcp, lcp_present = 1), countIf(lcp_present = 1),
+                   quantileTDigestIf(0.75)(inp, inp_present = 1), countIf(inp_present = 1),
+                   quantileTDigestIf(0.75)(cls, cls_present = 1), countIf(cls_present = 1)
+            FROM (
+                SELECT application_id, env, view_id,
+                       argMaxIf(lcp, timestamp, event_type = 'view' AND is_final = 1 AND has_lcp = 1) AS lcp,
+                       max(event_type = 'view' AND is_final = 1 AND has_lcp = 1) AS lcp_present,
+                       argMaxIf(inp, timestamp, event_type = 'view' AND is_final = 1 AND has_inp = 1) AS inp,
+                       max(event_type = 'view' AND is_final = 1 AND has_inp = 1) AS inp_present,
+                       argMaxIf(cls, timestamp, event_type = 'view' AND is_final = 1 AND has_cls = 1) AS cls,
+                       max(event_type = 'view' AND is_final = 1 AND has_cls = 1) AS cls_present
+                FROM zenplus.apm_rum_events
+                WHERE timestamp >= %(s)s AND application_id != '' AND view_id != ''
+                  AND sampled = 1
+                GROUP BY application_id, env, view_id
+            )
+            GROUP BY application_id, env
+            """,
+            parameters={"s": win.start_str},
+        ).result_rows
+    except Exception as exc:
+        logger.warning("RUM alert: ClickHouse field-metric query failed: %s", exc)
+        return {}
+
+    out: dict[str, dict] = {}
+    for app, env, sessions, error_sessions, resources, failed_resources in totals:
+        session_count = int(sessions or 0)
+        resource_count = int(resources or 0)
+        if session_count <= 0:
+            continue
+        scope = f"{app}{_RUM_SCOPE_SEPARATOR}{env or 'unknown'}"
+        out[scope] = {
+            "apm_rum_error_session_rate": int(error_sessions or 0) / session_count,
+            "sessions": session_count,
+            "application_id": str(app),
+            "env": str(env or "unknown"),
+        }
+        if resource_count > 0:
+            out[scope]["apm_rum_resource_failure_rate"] = int(failed_resources or 0) / resource_count
+    for app, env, lcp, lcp_samples, inp, inp_samples, cls, cls_samples in vitals:
+        scope = f"{app}{_RUM_SCOPE_SEPARATOR}{env or 'unknown'}"
+        metrics = out.setdefault(scope, {
+            "application_id": str(app), "env": str(env or "unknown"),
+        })
+        if int(lcp_samples or 0) > 0:
+            metrics["apm_rum_lcp_p75"] = float(lcp)
+        if int(inp_samples or 0) > 0:
+            metrics["apm_rum_inp_p75"] = float(inp)
+        if int(cls_samples or 0) > 0:
+            metrics["apm_rum_cls_p75"] = float(cls)
+    return out
+
+
 # ─── Value formatting ────────────────────────────────────────────────────────
 
 def _detail(metric: str, value: float) -> str:
@@ -145,6 +236,16 @@ def _detail(metric: str, value: float) -> str:
         return f"{value:.2f} req/s"
     if metric == "apm_apdex":
         return f"apdex {value:.3f}"
+    if metric == "apm_rum_lcp_p75":
+        return f"field LCP p75 {value:.0f}ms"
+    if metric == "apm_rum_inp_p75":
+        return f"field INP p75 {value:.0f}ms"
+    if metric == "apm_rum_cls_p75":
+        return f"field CLS p75 {value:.3f}"
+    if metric == "apm_rum_error_session_rate":
+        return f"error-affected sessions {value * 100:.2f}%"
+    if metric == "apm_rum_resource_failure_rate":
+        return f"failed browser resources {value * 100:.2f}%"
     return f"{value:.3f}"
 
 
@@ -166,6 +267,8 @@ async def _active_alert(db: AsyncSession, rule_id, service: str):
 
 
 async def _raise(db: AsyncSession, rule, service: str, message: str, value: float):
+    is_rum = rule.metric in RUM_PULL_METRICS
+    rum_app, separator, rum_env = service.partition(_RUM_SCOPE_SEPARATOR)
     row = (await db.execute(text(
         "INSERT INTO alerts (rule_id, status, severity, message, triggered_at, metadata) "
         "VALUES (:rid, 'active', :sev, :msg, :ts, CAST(:meta AS jsonb)) RETURNING id"
@@ -173,7 +276,11 @@ async def _raise(db: AsyncSession, rule, service: str, message: str, value: floa
         "rid": str(rule.id), "sev": rule.severity or "warning",
         "msg": message, "ts": datetime.now(timezone.utc),
         "meta": json.dumps({
-            "source": "apm_metric", "service": service,
+            "source": "apm_rum_metric" if is_rum else "apm_metric", "service": service,
+            **({
+                "application_id": rum_app,
+                "environment": rum_env if separator else "",
+            } if is_rum else {}),
             "rule_id": str(rule.id), "metric": rule.metric,
             "value": round(value, 4), "threshold": float(rule.threshold or 0),
         }),
@@ -212,6 +319,7 @@ async def _notify(db: AsyncSession, rule, service: str, value: float, *,
     ):
         return False
     sev = rule.severity or "warning"
+    rum_app, separator, rum_env = service.partition(_RUM_SCOPE_SEPARATOR)
     reading = ap.format_value(rule.metric, value)
     v = ap.rule_phrasing(rule, hostname=service, is_recovery=is_recovery,
                          reading=reading, duration=duration)
@@ -231,7 +339,10 @@ async def _notify(db: AsyncSession, rule, service: str, value: float, *,
             "label": ap.metric_noun(rule.metric), "value": reading,
             "secondary_label": "Threshold", "secondary_value": v.get("threshold_value"),
         },
-        "details": [("Alert rule", rule.name), ("Service", service),
+        "details": [("Alert rule", rule.name),
+                    ("Browser application" if rule.metric in RUM_PULL_METRICS else "Service",
+                     rum_app if rule.metric in RUM_PULL_METRICS else service),
+                    ("Environment", rum_env if rule.metric in RUM_PULL_METRICS and separator else None),
                     ("Condition", v.get("condition_label")),
                     ("Active for", duration if is_recovery else None)],
         "triggered_at": datetime.now(timezone.utc).isoformat(),
@@ -249,6 +360,22 @@ def _services_in_scope(rule, fleet: dict[str, dict]) -> list[str]:
     return [s for s in fleet if s.lower() == t]
 
 
+def _rum_scopes_in_scope(rule, fleet: dict[str, dict]) -> list[str]:
+    """Match a specific app/environment scope, with legacy app-only support."""
+    if not rule.target:
+        return list(fleet)
+    target = rule.target.strip().casefold()
+    exact = [scope for scope in fleet if scope.casefold() == target]
+    if exact:
+        return exact
+    # Rules created before environment-aware RUM scoping stored only the app
+    # identifier. Preserve them by evaluating that app independently per env.
+    return [
+        scope for scope in fleet
+        if scope.partition(_RUM_SCOPE_SEPARATOR)[0].casefold() == target
+    ]
+
+
 async def evaluate_apm_rules(db: AsyncSession) -> dict[str, int]:
     metric_list = ",".join(f"'{m}'" for m in sorted(APM_PULL_METRICS))
     rules = (await db.execute(text(
@@ -260,14 +387,32 @@ async def evaluate_apm_rules(db: AsyncSession) -> dict[str, int]:
     if not rules:
         return {"rules": 0, "raised": 0, "resolved": 0}
 
-    # Pre-fetch the per-service RED fleet once per distinct window.
-    windows = {max(r.min_duration or 0, DEFAULT_WINDOW_S) for r in rules}
-    fleet_cache = {w: _service_fleet(w) for w in windows}
+    # Pre-fetch each data plane once per distinct window. Avoid touching the
+    # RUM table on installations that have no RUM alert rules yet.
+    red_windows = {
+        max(r.min_duration or 0, DEFAULT_WINDOW_S)
+        for r in rules if r.metric in RED_PULL_METRICS
+    }
+    rum_windows = {
+        max(r.min_duration or 0, DEFAULT_WINDOW_S)
+        for r in rules if r.metric in RUM_PULL_METRICS
+    }
+    red_fleet_cache = {w: _service_fleet(w) for w in red_windows}
+    rum_fleet_cache = {w: _rum_fleet(w) for w in rum_windows}
 
     raised = resolved = 0
     for rule in rules:
-        fleet = fleet_cache[max(rule.min_duration or 0, DEFAULT_WINDOW_S)]
-        for service in _services_in_scope(rule, fleet):
+        window = max(rule.min_duration or 0, DEFAULT_WINDOW_S)
+        fleet = (rum_fleet_cache if rule.metric in RUM_PULL_METRICS else red_fleet_cache)[window]
+        scope_selector = (
+            _rum_scopes_in_scope if rule.metric in RUM_PULL_METRICS
+            else _services_in_scope
+        )
+        for service in scope_selector(rule, fleet):
+            # A percentile without samples is absent, not zero. Leave any
+            # existing alert unchanged until field data resumes.
+            if rule.metric not in fleet[service]:
+                continue
             value = fleet[service][rule.metric]
             breach = _cmp(value, rule.operator, float(rule.threshold or 0))
             existing = await _active_alert(db, rule.id, service)

@@ -29,6 +29,26 @@ from app.api.websocket import realtime
 settings = get_settings()
 
 
+class _DynamicRumCORSMiddleware(CORSMiddleware):
+    """Leave the browser intake's key-scoped CORS policy to its own route.
+
+    Starlette normally answers every browser preflight inside CORSMiddleware.
+    RUM origins are dynamic and belong to individual public ingest keys, so
+    only this exact endpoint must reach the route that authenticates the key
+    and checks its origin allowlist.  All other APIs retain the global policy.
+    """
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope.get("type") == "http"
+            and scope.get("path") == "/api/v1/apm/rum/ingest"
+            and scope.get("method") in {"OPTIONS", "POST"}
+        ):
+            await self.app(scope, receive, send)
+            return
+        await super().__call__(scope, receive, send)
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.APP_NAME,
@@ -39,7 +59,7 @@ def create_app() -> FastAPI:
 
     # CORS
     app.add_middleware(
-        CORSMiddleware,
+        _DynamicRumCORSMiddleware,
         allow_origins=settings.CORS_ORIGINS,
         allow_credentials=True,
         allow_methods=["*"],

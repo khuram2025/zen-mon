@@ -18,6 +18,8 @@ def test_rum_origins_are_exact_and_canonical():
     assert _origin("HTTPS://Portal.Example.com:443") == "https://portal.example.com"
     assert _origin("http://192.168.8.19:8080") == "http://192.168.8.19:8080"
     assert _assert_allowed_origin("https://portal.example.com", ["https://portal.example.com/"]) == "https://portal.example.com"
+    assert _assert_allowed_origin("http://192.168.8.19", ["http://192.168.8.19/"]) == "http://192.168.8.19"
+    assert _origin("http://[2001:db8::1]:8080") == "http://[2001:db8::1]:8080"
     with pytest.raises(HTTPException) as exc:
         _assert_allowed_origin("https://evil.example.com", ["https://portal.example.com"])
     assert exc.value.status_code == 403
@@ -34,5 +36,16 @@ def test_rum_event_rejects_bad_trace_id_and_unbounded_attributes():
 def test_controller_hosted_sdk_avoids_recursive_beacons_and_limits_trace_headers():
     assert 'endpoint.searchParams.set("key",key)' in _RUM_SDK
     assert "originalFetch(endpoint" in _RUM_SDK
-    assert "target.origin!==location.origin" in _RUM_SDK
+    assert "target.origin===location.origin&&!tp" in _RUM_SDK
+    assert 'resource("fetch",target.toString()' in _RUM_SDK
     assert "sendBeacon" not in _RUM_SDK
+
+
+def test_controller_hosted_sdk_supports_plain_http_origins():
+    helper = 'function randomId(){return typeof crypto.randomUUID==="function"?crypto.randomUUID():hex(16);}'
+    assert helper in _RUM_SDK
+    assert "crypto.getRandomValues" in _RUM_SDK
+    assert "||crypto.randomUUID()" not in _RUM_SDK
+    assert "var vid=crypto.randomUUID()" not in _RUM_SDK
+    assert "sid=randomId()" in _RUM_SDK
+    assert "id:randomId()" in _RUM_SDK

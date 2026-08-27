@@ -117,7 +117,8 @@ async def authenticate_ingest_key(
             text(
                 """
                 SELECT k.id, k.kind, k.key_hash, k.enabled, k.revoked_at,
-                       k.env_id, e.name AS env_name, k.origin_allowlist
+                       k.env_id, e.name AS env_name, k.origin_allowlist,
+                       k.application_id
                 FROM apm_ingest_keys k
                 LEFT JOIN apm_environments e ON e.id = k.env_id
                 WHERE k.key_hash = :h
@@ -148,6 +149,15 @@ class IngestKeyCreate(BaseModel):
     kind: KindT = "sdk"
     env: Optional[str] = Field(default=None, max_length=64)
     origin_allowlist: list[str] = Field(default_factory=list)
+    # Optional for backwards compatibility.  New browser keys should normally
+    # bind to one application so a leaked public key cannot poison a different
+    # application's data while presenting a forged Origin header.
+    application_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+    )
 
 
 class IngestKeyResponse(BaseModel):
@@ -157,6 +167,7 @@ class IngestKeyResponse(BaseModel):
     key_prefix: str
     env: Optional[str] = None
     origin_allowlist: list[str] = []
+    application_id: Optional[str] = None
     enabled: bool
     last_used_at: Optional[datetime] = None
     revoked_at: Optional[datetime] = None
@@ -210,6 +221,7 @@ def _key_row_to_response(r: dict) -> IngestKeyResponse:
     return IngestKeyResponse(
         id=r["id"], name=r["name"], kind=r["kind"], key_prefix=r["key_prefix"],
         env=r.get("env_name"), origin_allowlist=list(r.get("origin_allowlist") or []),
+        application_id=r.get("application_id"),
         enabled=r["enabled"], last_used_at=r.get("last_used_at"),
         revoked_at=r.get("revoked_at"), created_at=r["created_at"],
     )
@@ -250,6 +262,8 @@ async def create_ingest_key(
     user: User = Depends(require_operator_user),
 ):
     if body.kind == "rum":
+        if not body.application_id:
+            raise HTTPException(400, "New browser RUM keys require an application_id binding")
         if not body.origin_allowlist:
             raise HTTPException(400, "Browser RUM keys require at least one allowed origin")
         from urllib.parse import urlsplit
@@ -264,8 +278,8 @@ async def create_ingest_key(
                 invalid = True
             if invalid:
                 raise HTTPException(400, f"Invalid RUM origin '{origin}'; use an exact http(s) origin without a path or wildcard")
-    elif body.origin_allowlist:
-        raise HTTPException(400, "Origin allowlists are only valid for browser RUM keys")
+    elif body.origin_allowlist or body.application_id:
+        raise HTTPException(400, "Origin allowlists and application binding are only valid for browser RUM keys")
     plaintext, key_hash, key_prefix = _new_ingest_key(body.kind)
     env_id = await _resolve_env_id(db, body.env)
     import json
@@ -273,9 +287,9 @@ async def create_ingest_key(
         text(
             """
             INSERT INTO apm_ingest_keys (name, kind, key_hash, key_prefix, env_id,
-                                         origin_allowlist, created_by)
+                                         origin_allowlist, application_id, created_by)
             VALUES (:name, :kind, :hash, :prefix, :env_id,
-                    CAST(:origins AS jsonb), :uid)
+                    CAST(:origins AS jsonb), :application_id, :uid)
             RETURNING id, name, kind, key_prefix, enabled, last_used_at,
                       revoked_at, created_at, origin_allowlist
             """
@@ -284,17 +298,19 @@ async def create_ingest_key(
             "name": body.name, "kind": body.kind, "hash": key_hash,
             "prefix": key_prefix, "env_id": env_id,
             "origins": json.dumps(body.origin_allowlist),
+            "application_id": body.application_id,
             "uid": getattr(user, "id", None),
         },
     )).mappings().first()
     await db.commit()
     invalidate_ingest_key_cache()
-    resp = _key_row_to_response({**dict(row), "env_name": body.env})
+    resp = _key_row_to_response({**dict(row), "env_name": body.env,
+                                 "application_id": body.application_id})
     await write_audit_log(
         db, actor=user, action="apm.ingest_key.create",
         resource_type="apm_ingest_key", resource_id=str(row["id"]),
         metadata={"name": body.name, "kind": body.kind, "env": body.env,
-                  "key_prefix": key_prefix},
+                  "key_prefix": key_prefix, "application_id": body.application_id},
     )
     await db.commit()
     return IngestKeyCreated(**resp.model_dump(), key=plaintext)

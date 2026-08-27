@@ -26,14 +26,13 @@ _NETWORK_METRICS = (
     "if_in_bps|if_out_bps|if_util_pct|if_errors|if_discards|if_oper_status|"
     "session_count|vpn_tunnel_state|ha_state|bgp_neighbor_down"
 )
-# APM metric keys (AM-E6/F8), in lockstep with the migrate-039 CHECK. The six
-# RED keys are evaluated by apm_alert_service against the ClickHouse rollups
-# (scope: `target` = APM service name, empty = all services; latency in ms,
-# error_rate/apdex as fractions, throughput in req/s). slo_burn/synthetic/
-# anomaly are accepted but their evaluators land with F7-adjacent/AM-E9/E12.
+# APM and browser-RUM metric keys. Server RED keys are scoped by service; RUM
+# keys are scoped by browser application ID. Rates are fractions in [0,1].
 _APM_METRICS = (
     "apm_latency_p50|apm_latency_p95|apm_latency_p99|"
     "apm_error_rate|apm_throughput|apm_apdex|"
+    "apm_rum_lcp_p75|apm_rum_inp_p75|apm_rum_cls_p75|"
+    "apm_rum_error_session_rate|apm_rum_resource_failure_rate|"
     "apm_slo_burn|apm_synthetic_down|apm_anomaly"
 )
 # User Device Tracker metric keys (migrate-060 CHECK), evaluated by

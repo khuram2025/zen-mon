@@ -1,0 +1,1796 @@
+"""Production browser Real User Monitoring data plane and analytics.
+
+The browser token is public by design.  Trust therefore comes from exact-origin
+and optional application binding, strict bounded schemas, deterministic event
+identifiers, per-session/distributed quotas, privacy scrubbing and authenticated
+read APIs -- never from treating the token as a secret.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import hmac
+import json
+import math
+import re
+import time
+import uuid
+from collections import Counter, defaultdict, deque
+from datetime import datetime, timezone
+from typing import Annotated, Literal
+from urllib.parse import unquote, urlsplit, urlunsplit
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.v1.apm import authenticate_ingest_key
+from app.api.v1.rum_sdk import RUM_SDK
+from app.core.config import get_settings
+from app.core.database import get_ch_client, get_db
+from app.core.security import get_current_user
+
+router = APIRouter(tags=["APM RUM"])
+
+RANGE_SECONDS = {
+    "15m": 900,
+    "1h": 3600,
+    "6h": 21600,
+    "24h": 86400,
+    "7d": 604800,
+    "30d": 2592000,
+    "90d": 7776000,
+}
+RANGE_BUCKET_SECONDS = {
+    "15m": 60,
+    "1h": 300,
+    "6h": 900,
+    "24h": 1800,
+    "7d": 21600,
+    "30d": 86400,
+    "90d": 86400,
+}
+MAX_BODY_BYTES = 256 * 1024
+MAX_BATCH_EVENTS = 50
+MAX_TIMELINE_EVENTS = 2000
+
+RUM_COLUMNS = [
+    "timestamp", "application_id", "service_name", "env", "event_type",
+    "session_id", "view_id", "view_name", "url", "user_id", "country",
+    "browser", "device_type", "lcp", "inp", "cls", "fcp", "ttfb",
+    "load_ms", "error_message", "backend_trace_id", "attributes", "ts_bucket",
+    "event_id", "sdk_version", "service_version", "browser_version", "os",
+    "action_name", "action_type", "target", "duration_ms", "resource_url",
+    "resource_type", "method", "status_code", "transfer_size",
+    "encoded_body_size", "error_type", "error_stack", "error_source",
+    "error_fingerprint", "end_reason", "is_final", "sample_rate",
+    "vital_attribution", "has_lcp", "has_inp", "has_cls", "has_fcp",
+    "has_ttfb", "has_load", "sampled",
+    "dedupe_id",
+]
+
+_RUM_ROLLUP_INSERT_SQL = """
+INSERT INTO zenplus.apm_rum_metrics_5m
+SELECT
+    toStartOfFiveMinutes(r.timestamp) AS bucket_timestamp,
+    application_id, env, service_version, view_name, browser,
+    browser_version, os, device_type, country,
+    count() AS events,
+    countIf(event_type = 'error') AS errors,
+    countIf(event_type = 'error' AND sampled = 1) AS sampled_errors,
+    countIf(event_type = 'error' AND sampled = 0) AS unsampled_errors,
+    countIf(event_type = 'resource' AND sampled = 1) AS resources,
+    countIf(event_type = 'resource' AND sampled = 1
+            AND (status_code >= 400 OR attributes['failed'] = 'true')) AS resource_failures,
+    countIf(event_type = 'action' AND sampled = 1) AS actions,
+    countIf(event_type = 'long_task' AND sampled = 1) AS long_tasks,
+    uniqCombined64StateIf(
+        concat(application_id, char(31), env, char(31), session_id), sampled = 1
+    ) AS sessions,
+    uniqCombined64StateIf(
+        concat(application_id, char(31), env, char(31), session_id),
+        event_type = 'error' AND sampled = 1
+    ) AS error_sessions,
+    uniqCombined64StateIf(
+        concat(application_id, char(31), env, char(31), view_id),
+        sampled = 1 AND event_type = 'view'
+            AND (sdk_version = '' OR (is_final = 0 AND end_reason = 'view_start'))
+    ) AS views,
+    quantileTDigestStateIf(0.75)(r.lcp, sampled = 1 AND event_type = 'view'
+        AND (is_final = 1 OR sdk_version = '')
+        AND (has_lcp = 1 OR (sdk_version = '' AND r.lcp > 0))) AS lcp,
+    quantileTDigestStateIf(0.75)(r.inp, sampled = 1 AND event_type = 'view'
+        AND (is_final = 1 OR sdk_version = '')
+        AND (has_inp = 1 OR (sdk_version = '' AND r.inp > 0))) AS inp,
+    quantileTDigestStateIf(0.75)(r.cls, sampled = 1 AND event_type = 'view'
+        AND (is_final = 1 OR sdk_version = '')
+        AND (has_cls = 1 OR (sdk_version = '' AND r.cls > 0))) AS cls,
+    quantileTDigestStateIf(0.75)(r.fcp, sampled = 1 AND event_type = 'view'
+        AND (is_final = 1 OR sdk_version = '')
+        AND (has_fcp = 1 OR (sdk_version = '' AND r.fcp > 0))) AS fcp,
+    quantileTDigestStateIf(0.75)(r.ttfb, sampled = 1 AND event_type = 'view'
+        AND (is_final = 1 OR sdk_version = '')
+        AND (has_ttfb = 1 OR (sdk_version = '' AND r.ttfb > 0))) AS ttfb,
+    quantileTDigestStateIf(0.75)(r.load_ms, sampled = 1 AND event_type = 'view'
+        AND (is_final = 1 OR sdk_version = '')
+        AND (has_load = 1 OR (sdk_version = '' AND r.load_ms > 0))) AS load_ms,
+    countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '')
+            AND (has_lcp = 1 OR (sdk_version = '' AND r.lcp > 0))) AS lcp_samples,
+    countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '')
+            AND (has_inp = 1 OR (sdk_version = '' AND r.inp > 0))) AS inp_samples,
+    countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '')
+            AND (has_cls = 1 OR (sdk_version = '' AND r.cls > 0))) AS cls_samples,
+    countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '')
+            AND (has_fcp = 1 OR (sdk_version = '' AND r.fcp > 0))) AS fcp_samples,
+    countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '')
+            AND (has_ttfb = 1 OR (sdk_version = '' AND r.ttfb > 0))) AS ttfb_samples,
+    countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '')
+            AND (has_load = 1 OR (sdk_version = '' AND r.load_ms > 0))) AS load_samples
+FROM zenplus.apm_rum_events AS r
+WHERE r.timestamp >= fromUnixTimestamp64Milli({batch_from_ms:Int64})
+  AND r.timestamp <= fromUnixTimestamp64Milli({batch_to_ms:Int64})
+  AND dedupe_id IN {dedupe_ids:Array(String)}
+GROUP BY bucket_timestamp, application_id, env, service_version, view_name,
+         browser, browser_version, os, device_type, country
+"""
+
+_TRACE_ID = re.compile(r"^[0-9a-fA-F]{32}$")
+_EVENT_ID = re.compile(r"^[A-Za-z0-9_.:-]{8,128}$")
+_SAFE_COUNTRY = re.compile(r"^[A-Za-z]{2}$")
+_SENSITIVE_KEY = re.compile(
+    r"(?:password|passwd|secret|authorization|cookie|token|api[_-]?key|session)", re.I
+)
+_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
+_BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
+_CREDENTIAL = re.compile(
+    r"(?i)\b(password|passwd|secret|token|api[_-]?key)\s*[:=]\s*([^\s,;&]+)"
+)
+_UUID_PATH = re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
+_LONG_ID_PATH = re.compile(r"^(?:\d+|[0-9a-fA-F]{16,})$")
+
+# Local fallback for appliances where Redis is momentarily unavailable.  The
+# distributed path below is preferred and uses the same limits.
+_RATE_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
+_SEEN_EVENTS: dict[str, float] = {}
+_REDIS = None
+_REDIS_DISABLED_UNTIL = 0.0
+_KEY_ORIGIN_LIMIT = 60_000
+_SESSION_LIMIT = 1_200
+_RATE_WINDOW = 60
+_HEALTH = Counter()
+_HEALTH_META: dict[str, object] = {"last_event_at": None, "sdk_versions": Counter()}
+
+
+@router.get("/api/v1/apm/rum/sdk.js")
+async def rum_sdk():
+    return PlainTextResponse(
+        RUM_SDK,
+        media_type="application/javascript",
+        headers={
+            "Cache-Control": "public, max-age=300",
+            "Access-Control-Allow-Origin": "*",
+            "X-Content-Type-Options": "nosniff",
+            "Cross-Origin-Resource-Policy": "cross-origin",
+        },
+    )
+
+
+def _ch():
+    return get_ch_client()
+
+
+def _window(range_: str) -> tuple[datetime, datetime]:
+    seconds = RANGE_SECONDS.get(range_)
+    if seconds is None:
+        raise HTTPException(400, f"Unsupported range '{range_}'")
+    end = datetime.now(timezone.utc)
+    return datetime.fromtimestamp(end.timestamp() - seconds, tz=timezone.utc), end
+
+
+def _origin(value: str) -> str:
+    """Return a canonical scheme://host[:port] origin or an empty string."""
+    try:
+        parsed = urlsplit(value.strip())
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username is not None or parsed.password is not None):
+            return ""
+        default = (parsed.scheme == "http" and parsed.port in {None, 80}) or (
+            parsed.scheme == "https" and parsed.port in {None, 443}
+        )
+        hostname = parsed.hostname.lower()
+        if ":" in hostname:  # URL origins retain brackets around IPv6 literals.
+            hostname = f"[{hostname}]"
+        return f"{parsed.scheme}://{hostname}" + (
+            "" if default else f":{parsed.port}"
+        )
+    except (TypeError, ValueError):
+        return ""
+
+
+def _assert_allowed_origin(origin: str, allowlist: list[str]) -> str:
+    canonical = _origin(origin)
+    allowed = {_origin(item) for item in allowlist}
+    allowed.discard("")
+    if not canonical or canonical not in allowed:
+        raise HTTPException(403, "RUM origin is not allow-listed for this key")
+    return canonical
+
+
+def _cors(origin: str) -> dict[str, str]:
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Max-Age": "600",
+        "Vary": "Origin",
+        "Cache-Control": "no-store",
+    }
+
+
+def _scrub_text(value: str, limit: int) -> str:
+    value = _EMAIL.sub("[email]", str(value))
+    value = _BEARER.sub("Bearer [redacted]", value)
+    value = _CREDENTIAL.sub(lambda m: f"{m.group(1)}=[redacted]", value)
+    return value[:limit]
+
+
+def _scrub_path(path: str) -> str:
+    segments = []
+    for segment in path.split("/"):
+        decoded = unquote(segment)
+        if (_UUID_PATH.fullmatch(decoded) or _LONG_ID_PATH.fullmatch(decoded)
+                or "@" in decoded or _EMAIL.search(decoded)):
+            segments.append(":id")
+        else:
+            segments.append(segment[:255])
+    return "/".join(segments)[:2048]
+
+
+def _safe_url(value: str) -> str:
+    try:
+        parsed = urlsplit(str(value))
+        path = _scrub_path(parsed.path)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            host = parsed.hostname or ""
+            if ":" in host:
+                host = f"[{host}]"
+            port = f":{parsed.port}" if parsed.port else ""
+            return urlunsplit((parsed.scheme, host.lower() + port, path, "", ""))[:2048]
+        return path[:2048]
+    except (TypeError, ValueError):
+        return ""
+
+
+def _bounded_map(value: dict[str, object], *, maximum: int = 32) -> dict[str, str]:
+    if len(value) > maximum:
+        raise ValueError(f"at most {maximum} attributes are allowed")
+    cleaned: dict[str, str] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key)[:128]
+        if _SENSITIVE_KEY.search(key):
+            continue
+        cleaned[key] = _scrub_text(str(raw_value), 1024)
+    return cleaned
+
+
+class RumEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    client_token: str = Field(min_length=12, max_length=256)
+    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()), min_length=8, max_length=128)
+    application_id: str = Field(min_length=1, max_length=128)
+    service_name: str = Field(default="browser", max_length=255)
+    service_version: str = Field(default="", max_length=128)
+    sdk_version: str = Field(default="", max_length=64)
+    event_type: Literal["view", "action", "error", "resource", "long_task"] = "view"
+    timestamp_ms: int | None = None
+    session_id: str = Field(min_length=1, max_length=128)
+    view_id: str = Field(default="", max_length=128)
+    view_name: str = Field(default="/", max_length=512)
+    url: str = Field(default="", max_length=2048)
+    user_id: str = Field(default="", max_length=255)
+    lcp: float | None = Field(default=None, ge=0, le=600000)
+    inp: float | None = Field(default=None, ge=0, le=600000)
+    cls: float | None = Field(default=None, ge=0, le=100)
+    fcp: float | None = Field(default=None, ge=0, le=600000)
+    ttfb: float | None = Field(default=None, ge=0, le=600000)
+    load_ms: float | None = Field(default=None, ge=0, le=600000)
+    is_final: bool = False
+    end_reason: str = Field(default="", max_length=64)
+    sample_rate: float = Field(default=1, ge=0, le=1)
+    sampled: bool = True
+    action_name: str = Field(default="", max_length=512)
+    action_type: str = Field(default="", max_length=64)
+    target: str = Field(default="", max_length=512)
+    duration_ms: float = Field(default=0, ge=0, le=3_600_000)
+    resource_url: str = Field(default="", max_length=2048)
+    resource_type: str = Field(default="", max_length=64)
+    method: str = Field(default="", max_length=16)
+    status_code: int = Field(default=0, ge=0, le=599)
+    transfer_size: int = Field(default=0, ge=0, le=10_000_000_000)
+    encoded_body_size: int = Field(default=0, ge=0, le=10_000_000_000)
+    error_message: str = Field(default="", max_length=4096)
+    error_type: str = Field(default="", max_length=255)
+    error_stack: str = Field(default="", max_length=16384)
+    error_source: str = Field(default="", max_length=2048)
+    error_fingerprint: str = Field(default="", max_length=128)
+    backend_trace_id: str = Field(default="", max_length=32)
+    attributes: dict[str, str] = Field(default_factory=dict)
+    vital_attribution: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("event_id")
+    @classmethod
+    def valid_event_id(cls, value: str) -> str:
+        if not _EVENT_ID.fullmatch(value):
+            raise ValueError("event_id contains unsupported characters")
+        return value
+
+    @field_validator("backend_trace_id")
+    @classmethod
+    def valid_trace_id(cls, value: str) -> str:
+        if value and not _TRACE_ID.fullmatch(value):
+            raise ValueError("backend_trace_id must be 32 hexadecimal characters")
+        return value.lower()
+
+    @field_validator("attributes", "vital_attribution")
+    @classmethod
+    def bounded_attributes(cls, value: dict[str, object]) -> dict[str, str]:
+        return _bounded_map(value)
+
+    @field_validator("url", "resource_url")
+    @classmethod
+    def strip_url_secrets(cls, value: str) -> str:
+        return _safe_url(value)
+
+    @field_validator("view_name")
+    @classmethod
+    def normalize_view_name(cls, value: str) -> str:
+        return _scrub_path(urlsplit(value).path or "/")[:512]
+
+    @field_validator("error_message", "error_stack", "error_source")
+    @classmethod
+    def scrub_error_text(cls, value: str, info) -> str:
+        limits = {"error_message": 4096, "error_stack": 16384, "error_source": 2048}
+        return _scrub_text(value, limits[info.field_name])
+
+    @field_validator("action_name", "target")
+    @classmethod
+    def scrub_action_text(cls, value: str, info) -> str:
+        return _scrub_text(value, 512)
+
+    @field_validator("method")
+    @classmethod
+    def normalize_method(cls, value: str) -> str:
+        return value.upper()
+
+
+class RumBatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    events: list[RumEvent] = Field(min_length=1, max_length=MAX_BATCH_EVENTS)
+
+
+async def _parse_payload(request: Request) -> list[RumEvent]:
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            parsed_length = int(content_length)
+            if parsed_length < 0:
+                raise ValueError
+            if parsed_length > MAX_BODY_BYTES:
+                raise HTTPException(413, f"RUM payload exceeds {MAX_BODY_BYTES} bytes")
+        except ValueError as exc:
+            raise HTTPException(400, "Invalid Content-Length") from exc
+    chunks: list[bytes] = []
+    received = 0
+    async for chunk in request.stream():
+        received += len(chunk)
+        if received > MAX_BODY_BYTES:
+            raise HTTPException(413, f"RUM payload exceeds {MAX_BODY_BYTES} bytes")
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and "events" in data:
+            return RumBatch.model_validate(data).events
+        return [RumEvent.model_validate(data)]
+    except (json.JSONDecodeError, ValidationError, TypeError) as exc:
+        _HEALTH["rejected"] += 1
+        raise HTTPException(422, "Invalid or unsupported RUM payload") from exc
+
+
+def _fallback_rate_limit(key: str, amount: int, limit: int) -> None:
+    now = time.monotonic()
+    if len(_RATE_BUCKETS) > 10_000:
+        cutoff = now - _RATE_WINDOW
+        for bucket_key, values in list(_RATE_BUCKETS.items()):
+            while values and values[0] <= cutoff:
+                values.popleft()
+            if not values:
+                _RATE_BUCKETS.pop(bucket_key, None)
+        # Keep the process fallback bounded even under attacker-controlled
+        # session churn while Redis is unavailable.
+        while len(_RATE_BUCKETS) > 8_000:
+            _RATE_BUCKETS.pop(next(iter(_RATE_BUCKETS)), None)
+    bucket = _RATE_BUCKETS[key]
+    cutoff = now - _RATE_WINDOW
+    while bucket and bucket[0] <= cutoff:
+        bucket.popleft()
+    if len(bucket) + amount > limit:
+        raise HTTPException(429, "RUM event quota exceeded", headers={"Retry-After": "60"})
+    bucket.extend([now] * amount)
+
+
+async def _redis_client():
+    global _REDIS, _REDIS_DISABLED_UNTIL
+    if time.monotonic() < _REDIS_DISABLED_UNTIL:
+        return None
+    if _REDIS is None:
+        try:
+            import redis.asyncio as redis
+            _REDIS = redis.from_url(
+                get_settings().REDIS_URL,
+                decode_responses=True,
+                socket_connect_timeout=0.15,
+                socket_timeout=0.15,
+            )
+        except Exception:
+            _REDIS_DISABLED_UNTIL = time.monotonic() + 30
+            return None
+    return _REDIS
+
+
+_SHARED_QUOTA_SCRIPT = """
+local a = redis.call('INCRBY', KEYS[1], ARGV[1])
+if a == tonumber(ARGV[1]) then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
+local b = redis.call('INCRBY', KEYS[2], ARGV[1])
+if b == tonumber(ARGV[1]) then redis.call('EXPIRE', KEYS[2], ARGV[2]) end
+return {a, b}
+"""
+
+_SESSION_QUOTA_SCRIPT = """
+local n = redis.call('INCRBY', KEYS[1], ARGV[1])
+if n == tonumber(ARGV[1]) then redis.call('EXPIRE', KEYS[1], ARGV[2]) end
+return n
+"""
+
+
+async def _enforce_quota(
+    key_id: object, origin: str, client_ip: str,
+    session_counts: dict[str, int], amount: int,
+) -> None:
+    origin_hash = hashlib.sha256(origin.encode()).hexdigest()[:16]
+    ip_hash = hashlib.sha256(client_ip.encode()).hexdigest()[:24]
+    client = await _redis_client()
+    if client is not None:
+        try:
+            shared = await client.eval(
+                _SHARED_QUOTA_SCRIPT,
+                2,
+                f"zp:rum:q:k:{key_id}:{origin_hash}",
+                f"zp:rum:q:i:{key_id}:{ip_hash}",
+                amount,
+                _RATE_WINDOW + 2,
+            )
+            if int(shared[0]) > _KEY_ORIGIN_LIMIT or int(shared[1]) > 10_000:
+                raise HTTPException(429, "RUM event quota exceeded", headers={"Retry-After": "60"})
+            for session_id, session_amount in session_counts.items():
+                session_hash = hashlib.sha256(session_id.encode()).hexdigest()[:24]
+                count = await client.eval(
+                    _SESSION_QUOTA_SCRIPT,
+                    1,
+                    f"zp:rum:q:s:{key_id}:{session_hash}",
+                    session_amount,
+                    _RATE_WINDOW + 2,
+                )
+                if int(count) > _SESSION_LIMIT:
+                    raise HTTPException(429, "RUM event quota exceeded", headers={"Retry-After": "60"})
+            return
+        except HTTPException:
+            raise
+        except Exception:
+            global _REDIS_DISABLED_UNTIL
+            _REDIS_DISABLED_UNTIL = time.monotonic() + 30
+    _fallback_rate_limit(f"key:{key_id}:{origin}", amount, _KEY_ORIGIN_LIMIT)
+    _fallback_rate_limit(f"ip:{key_id}:{ip_hash}", amount, 10_000)
+    for session_id, session_amount in session_counts.items():
+        _fallback_rate_limit(
+            f"session:{key_id}:{hashlib.sha256(session_id.encode()).hexdigest()[:24]}",
+            session_amount,
+            _SESSION_LIMIT,
+        )
+
+
+def _dedupe_identity(key_id: object, event: RumEvent) -> str:
+    if event.event_type == "view" and event.is_final and event.view_id:
+        identity = f"final:{event.application_id}:{event.view_id}"
+    else:
+        identity = f"event:{event.event_id}"
+    return f"{key_id}:{identity}"
+
+
+async def _dedupe(key_id: object, events: list[RumEvent]) -> list[RumEvent]:
+    global _REDIS_DISABLED_UNTIL
+    client = await _redis_client()
+    if client is not None:
+        try:
+            bucket = int(time.time() // 86_400)
+            current_key = f"zp:rum:d:{key_id}:{bucket}"
+            previous_key = f"zp:rum:d:{key_id}:{bucket - 1}"
+            reserve_script = """
+                if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 or
+                   redis.call('SISMEMBER', KEYS[2], ARGV[1]) == 1 then
+                    return 0
+                end
+                redis.call('SADD', KEYS[1], ARGV[1])
+                redis.call('EXPIRE', KEYS[1], 172800)
+                return 1
+            """
+            pipe = client.pipeline(transaction=False)
+            for event in events:
+                pipe.eval(
+                    reserve_script, 2, current_key, previous_key,
+                    _dedupe_identity(key_id, event),
+                )
+            fresh = await pipe.execute()
+            return [event for event, inserted in zip(events, fresh) if inserted]
+        except Exception:
+            _REDIS_DISABLED_UNTIL = time.monotonic() + 30
+
+    now = time.monotonic()
+    if len(_SEEN_EVENTS) > 50_000:
+        expired = [event_id for event_id, expiry in _SEEN_EVENTS.items() if expiry <= now]
+        for event_id in expired:
+            _SEEN_EVENTS.pop(event_id, None)
+        if len(_SEEN_EVENTS) > 50_000:
+            for event_id in list(_SEEN_EVENTS)[:10_000]:
+                _SEEN_EVENTS.pop(event_id, None)
+    result = []
+    for event in events:
+        cache_key = _dedupe_identity(key_id, event)
+        if _SEEN_EVENTS.get(cache_key, 0) > now:
+            continue
+        _SEEN_EVENTS[cache_key] = now + 86400
+        result.append(event)
+    return result
+
+
+async def _release_dedupe(key_id: object, events: list[RumEvent]) -> None:
+    """Release reservations after a storage failure so the browser can retry."""
+    global _REDIS_DISABLED_UNTIL
+    client = await _redis_client()
+    if client is not None:
+        try:
+            if events:
+                bucket = int(time.time() // 86_400)
+                identities = [_dedupe_identity(key_id, event) for event in events]
+                pipe = client.pipeline(transaction=False)
+                pipe.srem(f"zp:rum:d:{key_id}:{bucket}", *identities)
+                pipe.srem(f"zp:rum:d:{key_id}:{bucket - 1}", *identities)
+                await pipe.execute()
+        except Exception:
+            _REDIS_DISABLED_UNTIL = time.monotonic() + 30
+    for event in events:
+        _SEEN_EVENTS.pop(_dedupe_identity(key_id, event), None)
+
+
+def _pseudonymize_user(value: str) -> str:
+    if not value:
+        return ""
+    digest = hmac.new(
+        get_settings().JWT_SECRET.encode("utf-8"), value.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return f"usr_{digest[:32]}"
+
+
+def _user_agent(value: str) -> tuple[str, str, str, str]:
+    browser, version = "Other", ""
+    for name, pattern in (
+        ("Edge", r"Edg/([\d.]+)"),
+        ("Chrome", r"(?:Chrome|CriOS)/([\d.]+)"),
+        ("Firefox", r"(?:Firefox|FxiOS)/([\d.]+)"),
+        ("Safari", r"Version/([\d.]+).+Safari/"),
+    ):
+        match = re.search(pattern, value)
+        if match:
+            browser, version = name, match.group(1)[:32]
+            break
+    if re.search(r"iPhone|iPad|iPod", value, re.I):
+        os_name = "iOS"
+    elif re.search(r"Android", value, re.I):
+        os_name = "Android"
+    elif re.search(r"Windows", value, re.I):
+        os_name = "Windows"
+    elif re.search(r"Macintosh|Mac OS X", value, re.I):
+        os_name = "macOS"
+    elif re.search(r"Linux", value, re.I):
+        os_name = "Linux"
+    else:
+        os_name = "Other"
+    device = "mobile" if re.search(r"Mobile|Android|iPhone", value, re.I) else (
+        "tablet" if re.search(r"iPad|Tablet", value, re.I) else "desktop"
+    )
+    return browser, version, os_name, device
+
+
+def _row(event: RumEvent, key: dict, request: Request) -> list[object]:
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    event_ms = event.timestamp_ms or now_ms
+    if abs(event_ms - now_ms) > 86_400_000:
+        raise HTTPException(400, "RUM event timestamp is outside the accepted 24-hour window")
+    timestamp = datetime.fromtimestamp(event_ms / 1000, tz=timezone.utc)
+    browser, browser_version, os_name, device = _user_agent(
+        request.headers.get("user-agent", "")[:512]
+    )
+    raw_country = request.headers.get("cf-ipcountry") or request.headers.get("x-country-code") or ""
+    country = raw_country.upper() if _SAFE_COUNTRY.fullmatch(raw_country) else ""
+    return [
+        timestamp, event.application_id, event.service_name,
+        key.get("env_name") or "prod", event.event_type, event.session_id,
+        event.view_id, event.view_name, event.url, _pseudonymize_user(event.user_id), country,
+        browser, device, event.lcp or 0, event.inp or 0,
+        event.cls if event.cls is not None else 0, event.fcp or 0,
+        event.ttfb or 0, event.load_ms or 0, event.error_message,
+        event.backend_trace_id, event.attributes, int(event_ms / 1000 // 300 * 300),
+        event.event_id, event.sdk_version, event.service_version,
+        browser_version, os_name, event.action_name, event.action_type,
+        event.target, event.duration_ms, event.resource_url, event.resource_type,
+        event.method, event.status_code, event.transfer_size,
+        event.encoded_body_size, event.error_type, event.error_stack,
+        event.error_source, event.error_fingerprint, event.end_reason,
+        int(event.is_final), event.sample_rate, event.vital_attribution,
+        int(event.lcp is not None), int(event.inp is not None),
+        int(event.cls is not None), int(event.fcp is not None),
+        int(event.ttfb is not None), int(event.load_ms is not None),
+        int(event.sampled),
+        "",  # stable per-key semantic identity is attached after deduplication
+    ]
+
+
+@router.options("/api/v1/apm/rum/ingest")
+async def rum_preflight(request: Request, db: AsyncSession = Depends(get_db)):
+    origin = request.headers.get("origin", "")
+    try:
+        token = request.query_params.get("key", "")
+        key = await authenticate_ingest_key(token, db, kind="rum")
+        if not key.get("application_id"):
+            raise HTTPException(403, "Legacy RUM key must be replaced with an application-bound key")
+        allowed = _assert_allowed_origin(origin, list(key.get("origin_allowlist") or []))
+        return Response(status_code=204, headers=_cors(allowed))
+    except HTTPException as exc:
+        canonical = _origin(origin)
+        if canonical:
+            exc.headers = {**_cors(canonical), **(exc.headers or {})}
+        raise
+
+
+@router.post("/api/v1/apm/rum/ingest")
+async def ingest_rum(request: Request, db: AsyncSession = Depends(get_db)):
+    try:
+        return await _ingest_rum(request, db)
+    except HTTPException as exc:
+        # Browsers must be able to observe terminal validation/auth/quota errors;
+        # otherwise the Fetch API exposes an opaque network failure and an SDK
+        # cannot distinguish a permanent 4xx from a retryable outage.
+        canonical = _origin(request.headers.get("origin", ""))
+        if canonical:
+            exc.headers = {**_cors(canonical), **(exc.headers or {})}
+        raise
+
+
+async def _ingest_rum(request: Request, db: AsyncSession):
+    events = await _parse_payload(request)
+    token = events[0].client_token
+    if any(not hmac.compare_digest(event.client_token, token) for event in events[1:]):
+        _HEALTH["rejected"] += len(events)
+        raise HTTPException(400, "A RUM batch must use one client token")
+    key = await authenticate_ingest_key(token, db, kind="rum")
+    if not key.get("application_id"):
+        _HEALTH["rejected"] += len(events)
+        raise HTTPException(403, "Legacy RUM key must be replaced with an application-bound key")
+    origin = _assert_allowed_origin(
+        request.headers.get("origin", ""), list(key.get("origin_allowlist") or [])
+    )
+    bound_app = key.get("application_id")
+    if bound_app and any(event.application_id != bound_app for event in events):
+        _HEALTH["rejected"] += len(events)
+        raise HTTPException(403, "RUM key is bound to a different application")
+    try:
+        client_ip = request.client.host if request.client else "unknown"
+        await _enforce_quota(
+            key["id"], origin, client_ip,
+            dict(Counter(event.session_id for event in events)), len(events),
+        )
+    except HTTPException:
+        _HEALTH["rate_limited"] += len(events)
+        raise
+    # Validate timestamps and construct every row before reserving event IDs.
+    # A single bad event must never make valid retry IDs look accepted.
+    prepared = {id(event): _row(event, key, request) for event in events}
+    fresh = await _dedupe(key["id"], events)
+    duplicates = len(events) - len(fresh)
+    _HEALTH["duplicates"] += duplicates
+    if fresh:
+        rows = [prepared[id(event)] for event in fresh]
+        identities = [_dedupe_identity(key["id"], event) for event in fresh]
+        dedupe_ids = [hashlib.sha256(identity.encode()).hexdigest() for identity in identities]
+        for row, dedupe_id in zip(rows, dedupe_ids, strict=True):
+            row[-1] = dedupe_id
+        token_material = "\n".join(sorted(identities))
+        insert_token = "rum-" + hashlib.sha256(token_material.encode()).hexdigest()
+
+        def store_batch() -> None:
+            # ClickHouse 24.x cannot safely deduplicate an async insert through
+            # a dependent materialized view.  Write both tables synchronously,
+            # with independent stable tokens.  If the raw write succeeds and
+            # the rollup write fails, an identical retry is harmless and still
+            # completes the missing rollup write.
+            client = _ch()
+            client.insert(
+                "apm_rum_events",
+                rows,
+                column_names=RUM_COLUMNS,
+                database="zenplus",
+                settings={
+                    "insert_deduplicate": 1,
+                    "insert_deduplication_token": insert_token,
+                },
+            )
+            client.command(
+                _RUM_ROLLUP_INSERT_SQL,
+                parameters={
+                    "dedupe_ids": dedupe_ids,
+                    # clickhouse-connect 0.8 formats a bare datetime query
+                    # parameter at whole-second precision, even for
+                    # DateTime64(3).  Integer epoch milliseconds preserve the
+                    # exact raw-event bounds for single-event batches.
+                    "batch_from_ms": min(
+                        int(row[0].timestamp() * 1000) for row in rows
+                    ),
+                    "batch_to_ms": max(
+                        int(row[0].timestamp() * 1000) for row in rows
+                    ),
+                },
+                settings={
+                    "insert_deduplicate": 1,
+                    "insert_deduplication_token": "rollup-" + insert_token,
+                },
+            )
+
+        try:
+            await asyncio.to_thread(store_batch)
+        except Exception as exc:
+            await _release_dedupe(key["id"], fresh)
+            _HEALTH["storage_errors"] += len(fresh)
+            raise HTTPException(
+                503,
+                "RUM storage is temporarily unavailable",
+                headers={"Retry-After": "1", **_cors(origin)},
+            ) from exc
+        _HEALTH["accepted"] += len(fresh)
+        _HEALTH["batches"] += 1
+        _HEALTH_META["last_event_at"] = datetime.now(timezone.utc)
+        versions: Counter = _HEALTH_META["sdk_versions"]  # type: ignore[assignment]
+        versions.update(event.sdk_version or "legacy" for event in fresh)
+    headers = {**_cors(origin), "X-RUM-Accepted": str(len(fresh)), "X-RUM-Duplicate": str(duplicates)}
+    return Response(status_code=202, headers=headers)
+
+
+# ── authenticated analytics ─────────────────────────────────────────────────
+
+RangeName = Literal["15m", "1h", "6h", "24h", "7d", "30d", "90d"]
+OrderName = Literal["asc", "desc"]
+
+
+def _scope(
+    range_: str,
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+) -> tuple[dict[str, object], str]:
+    frm, to = _window(range_)
+    params: dict[str, object] = {"frm": frm, "to": to}
+    clauses = ["timestamp >= {frm:DateTime64(3)}", "timestamp < {to:DateTime64(3)}"]
+    for column, value in (
+        ("application_id", application_id),
+        ("env", env),
+        ("view_name", view_name),
+        ("browser", browser),
+        ("device_type", device_type),
+        ("country", country.upper() if country else None),
+        ("service_version", service_version),
+        ("browser_version", browser_version),
+        ("os", os),
+    ):
+        if value is not None and value != "":
+            params[column] = value
+            clauses.append(f"{column} = {{{column}:String}}")
+    return params, " AND ".join(clauses)
+
+
+def _filters_payload(**values) -> dict[str, str]:
+    return {key: value for key, value in values.items() if value not in (None, "")}
+
+
+def _raw_coverage(range_: str) -> dict[str, object]:
+    return {
+        "raw_retention_days": 14,
+        "rollup_retention_days": 90,
+        "partial": range_ in {"30d", "90d"},
+        "message": (
+            "Event-level drill-down is limited to the most recent 14 days."
+            if range_ in {"30d", "90d"} else None
+        ),
+    }
+
+
+def _nullable(value: object, samples: object) -> float | None:
+    count = int(samples or 0)
+    if count <= 0 or value is None:
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _vital(value: object, samples: object, good: object, poor: object) -> dict[str, object]:
+    count = int(samples or 0)
+    return {
+        "p75": _nullable(value, count),
+        "samples": count,
+        "good_pct": (float(good or 0) / count * 100) if count else None,
+        "needs_improvement_pct": (
+            max(count - int(good or 0) - int(poor or 0), 0) / count * 100
+            if count else None
+        ),
+        "poor_pct": (float(poor or 0) / count * 100) if count else None,
+    }
+
+
+def _vitals_query(scope_sql: str) -> str:
+    # The nested query enforces one sample per view even for legacy clients that
+    # retried a finalized record with a different event_id.
+    return f"""
+        SELECT
+            quantileTDigestIf(0.75)(lcp_value, lcp_present = 1), countIf(lcp_present = 1),
+            countIf(lcp_present = 1 AND lcp_value <= 2500), countIf(lcp_present = 1 AND lcp_value > 4000),
+            quantileTDigestIf(0.75)(inp_value, inp_present = 1), countIf(inp_present = 1),
+            countIf(inp_present = 1 AND inp_value <= 200), countIf(inp_present = 1 AND inp_value > 500),
+            quantileTDigestIf(0.75)(cls_value, cls_present = 1), countIf(cls_present = 1),
+            countIf(cls_present = 1 AND cls_value <= 0.1), countIf(cls_present = 1 AND cls_value > 0.25),
+            quantileTDigestIf(0.75)(fcp_value, fcp_present = 1), countIf(fcp_present = 1),
+            countIf(fcp_present = 1 AND fcp_value <= 1800), countIf(fcp_present = 1 AND fcp_value > 3000),
+            quantileTDigestIf(0.75)(ttfb_value, ttfb_present = 1), countIf(ttfb_present = 1),
+            countIf(ttfb_present = 1 AND ttfb_value <= 800), countIf(ttfb_present = 1 AND ttfb_value > 1800),
+            quantileTDigestIf(0.75)(load_value, load_present = 1), countIf(load_present = 1),
+            countIf(load_present = 1 AND load_value <= 2500), countIf(load_present = 1 AND load_value > 4000)
+        FROM (
+            SELECT application_id, env, view_id,
+                argMaxIf(raw.lcp, raw.timestamp, raw.final_view AND (raw.has_lcp = 1 OR (raw.sdk_version = '' AND raw.lcp > 0))) AS lcp_value,
+                max(raw.final_view AND (raw.has_lcp = 1 OR (raw.sdk_version = '' AND raw.lcp > 0))) AS lcp_present,
+                argMaxIf(raw.inp, raw.timestamp, raw.final_view AND (raw.has_inp = 1 OR (raw.sdk_version = '' AND raw.inp > 0))) AS inp_value,
+                max(raw.final_view AND (raw.has_inp = 1 OR (raw.sdk_version = '' AND raw.inp > 0))) AS inp_present,
+                argMaxIf(raw.cls, raw.timestamp, raw.final_view AND (raw.has_cls = 1 OR (raw.sdk_version = '' AND raw.cls > 0))) AS cls_value,
+                max(raw.final_view AND (raw.has_cls = 1 OR (raw.sdk_version = '' AND raw.cls > 0))) AS cls_present,
+                argMaxIf(raw.fcp, raw.timestamp, raw.final_view AND (raw.has_fcp = 1 OR (raw.sdk_version = '' AND raw.fcp > 0))) AS fcp_value,
+                max(raw.final_view AND (raw.has_fcp = 1 OR (raw.sdk_version = '' AND raw.fcp > 0))) AS fcp_present,
+                argMaxIf(raw.ttfb, raw.timestamp, raw.final_view AND (raw.has_ttfb = 1 OR (raw.sdk_version = '' AND raw.ttfb > 0))) AS ttfb_value,
+                max(raw.final_view AND (raw.has_ttfb = 1 OR (raw.sdk_version = '' AND raw.ttfb > 0))) AS ttfb_present,
+                argMaxIf(raw.load_ms, raw.timestamp, raw.final_view AND (raw.has_load = 1 OR (raw.sdk_version = '' AND raw.load_ms > 0))) AS load_value,
+                max(raw.final_view AND (raw.has_load = 1 OR (raw.sdk_version = '' AND raw.load_ms > 0))) AS load_present
+            FROM (
+                SELECT *, event_type = 'view' AND (is_final = 1 OR sdk_version = '') AS final_view
+                FROM zenplus.apm_rum_events
+                WHERE {scope_sql} AND view_id != '' AND sampled = 1
+            ) AS raw
+            GROUP BY application_id, env, view_id
+        )
+    """
+
+
+def _vitals_payload(row: list | tuple) -> dict[str, dict[str, object]]:
+    return {
+        "lcp": _vital(row[0], row[1], row[2], row[3]),
+        "inp": _vital(row[4], row[5], row[6], row[7]),
+        "cls": _vital(row[8], row[9], row[10], row[11]),
+        "fcp": _vital(row[12], row[13], row[14], row[15]),
+        "ttfb": _vital(row[16], row[17], row[18], row[19]),
+        "load": _vital(row[20], row[21], row[22], row[23]),
+    }
+
+
+def _rollup_vitals_payload(row: list | tuple) -> dict[str, dict[str, object]]:
+    result = {}
+    for index, name in enumerate(("lcp", "inp", "cls", "fcp", "ttfb", "load")):
+        value, samples = row[index * 2], int(row[index * 2 + 1] or 0)
+        result[name] = {
+            "p75": _nullable(value, samples), "samples": samples,
+            "good_pct": None, "needs_improvement_pct": None, "poor_pct": None,
+        }
+    return result
+
+
+@router.get("/api/v1/apm/rum/overview")
+async def rum_overview(
+    range_: RangeName = Query(default="24h", alias="range"),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    _user=Depends(get_current_user),
+):
+    params, scope_sql = _scope(
+        range_, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os,
+    )
+
+    def query():
+        if range_ in {"30d", "90d"}:
+            totals = _ch().query(f"""
+                SELECT sum(events), uniqCombined64Merge(sessions),
+                       uniqCombined64Merge(views), sum(errors),
+                       uniqCombined64Merge(error_sessions), sum(resources),
+                       sum(actions), sum(long_tasks), sum(resource_failures),
+                       sum(sampled_errors), sum(unsampled_errors)
+                FROM zenplus.apm_rum_metrics_5m WHERE {scope_sql}
+            """, parameters=params).result_rows[0]
+            vitals = _ch().query(f"""
+                SELECT quantileTDigestMerge(0.75)(lcp), sum(lcp_samples),
+                       quantileTDigestMerge(0.75)(inp), sum(inp_samples),
+                       quantileTDigestMerge(0.75)(cls), sum(cls_samples),
+                       quantileTDigestMerge(0.75)(fcp), sum(fcp_samples),
+                       quantileTDigestMerge(0.75)(ttfb), sum(ttfb_samples),
+                       quantileTDigestMerge(0.75)(load_ms), sum(load_samples)
+                FROM zenplus.apm_rum_metrics_5m WHERE {scope_sql}
+            """, parameters=params).result_rows[0]
+            releases = _ch().query(f"""
+                SELECT service_version, uniqCombined64Merge(sessions) AS sessions,
+                       uniqCombined64Merge(views) AS views, sum(sampled_errors) AS errors,
+                       uniqCombined64Merge(error_sessions) / greatest(sessions, 1) AS error_session_rate,
+                       quantileTDigestMerge(0.75)(lcp), sum(lcp_samples),
+                       quantileTDigestMerge(0.75)(inp), sum(inp_samples),
+                       quantileTDigestMerge(0.75)(cls), sum(cls_samples), max(timestamp)
+                FROM zenplus.apm_rum_metrics_5m
+                WHERE {scope_sql} AND service_version != ''
+                GROUP BY service_version ORDER BY max(timestamp) DESC LIMIT 20
+            """, parameters=params).result_rows
+            return totals, vitals, releases
+        totals = _ch().query(f"""
+            SELECT count(),
+                   uniqExactIf((application_id, env, session_id), sampled = 1),
+                   uniqExactIf((application_id, env, view_id), event_type = 'view' AND sampled = 1),
+                   countIf(event_type = 'error'),
+                   uniqExactIf((application_id, env, session_id), event_type = 'error' AND sampled = 1),
+                   countIf(event_type = 'resource' AND sampled = 1),
+                   countIf(event_type = 'action' AND sampled = 1),
+                   countIf(event_type = 'long_task' AND sampled = 1),
+                   countIf(event_type = 'resource' AND sampled = 1 AND (status_code >= 400 OR attributes['failed'] = 'true')),
+                   countIf(event_type = 'error' AND sampled = 1),
+                   countIf(event_type = 'error' AND sampled = 0)
+            FROM zenplus.apm_rum_events WHERE {scope_sql}
+        """, parameters=params).result_rows[0]
+        vitals = _ch().query(_vitals_query(scope_sql), parameters=params).result_rows[0]
+        releases = _ch().query(f"""
+            SELECT service_version,
+                   uniqExactIf((application_id, env, session_id), sampled = 1) AS sessions,
+                   uniqExactIf((application_id, env, view_id), event_type = 'view' AND sampled = 1) AS views,
+                   countIf(event_type = 'error' AND sampled = 1) AS errors,
+                   uniqExactIf(session_id, event_type = 'error' AND sampled = 1) / greatest(sessions, 1) AS error_session_rate,
+                   quantileTDigestIf(0.75)(lcp, sampled = 1 AND event_type = 'view' AND is_final = 1 AND has_lcp = 1),
+                   countIf(sampled = 1 AND event_type = 'view' AND is_final = 1 AND has_lcp = 1),
+                   quantileTDigestIf(0.75)(inp, sampled = 1 AND event_type = 'view' AND is_final = 1 AND has_inp = 1),
+                   countIf(sampled = 1 AND event_type = 'view' AND is_final = 1 AND has_inp = 1),
+                   quantileTDigestIf(0.75)(cls, sampled = 1 AND event_type = 'view' AND is_final = 1 AND has_cls = 1),
+                   countIf(sampled = 1 AND event_type = 'view' AND is_final = 1 AND has_cls = 1), max(timestamp)
+            FROM zenplus.apm_rum_events
+            WHERE {scope_sql} AND service_version != ''
+            GROUP BY service_version ORDER BY max(timestamp) DESC LIMIT 20
+        """, parameters=params).result_rows
+        return totals, vitals, releases
+
+    totals, vital_row, releases = await asyncio.to_thread(query)
+    sessions = int(totals[1])
+    return {
+        "range": range_,
+        "filters": _filters_payload(
+            application_id=application_id, env=env, view_name=view_name,
+            browser=browser, device_type=device_type, country=country,
+            service_version=service_version, browser_version=browser_version, os=os,
+        ),
+        "totals": {
+            "events": int(totals[0]), "sessions": sessions, "views": int(totals[2]),
+            "errors": int(totals[3]), "error_sessions": int(totals[4]),
+            "resources": int(totals[5]), "actions": int(totals[6]),
+            "long_tasks": int(totals[7]), "resource_failures": int(totals[8]),
+            "sampled_errors": int(totals[9]), "unsampled_errors": int(totals[10]),
+        },
+        "rates": {
+            "error_session_rate": (int(totals[4]) / sessions) if sessions else None,
+            "resource_failure_rate": (
+                int(totals[8]) / int(totals[5]) if int(totals[5]) else None
+            ),
+        },
+        "vitals": (
+            _rollup_vitals_payload(vital_row)
+            if range_ in {"30d", "90d"} else _vitals_payload(vital_row)
+        ),
+        "releases": [
+            {
+                "service_version": r[0], "sessions": int(r[1]), "views": int(r[2]),
+                "errors": int(r[3]), "error_session_rate": float(r[4] or 0),
+                "lcp_p75": _nullable(r[5], r[6]), "lcp_samples": int(r[6]),
+                "inp_p75": _nullable(r[7], r[8]), "inp_samples": int(r[8]),
+                "cls_p75": _nullable(r[9], r[10]), "cls_samples": int(r[10]),
+                "last_seen": r[11],
+            }
+            for r in releases
+        ],
+        "ingest_health": {
+            "accepted_since_process_start": int(_HEALTH["accepted"]),
+            "rejected": int(_HEALTH["rejected"]),
+            "rate_limited": int(_HEALTH["rate_limited"]),
+            "duplicates": int(_HEALTH["duplicates"]),
+            "storage_errors": int(_HEALTH["storage_errors"]),
+            "last_event_at": _HEALTH_META["last_event_at"],
+        },
+    }
+
+
+@router.get("/api/v1/apm/rum/timeseries")
+async def rum_timeseries(
+    range_: RangeName = Query(default="24h", alias="range"),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    _user=Depends(get_current_user),
+):
+    params, scope_sql = _scope(
+        range_, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os,
+    )
+    bucket = RANGE_BUCKET_SECONDS[range_]
+    if range_ in {"30d", "90d"}:
+        rows = await asyncio.to_thread(lambda: _ch().query(f"""
+            SELECT toStartOfInterval(timestamp, INTERVAL {bucket} SECOND) AS bucket,
+                   uniqCombined64Merge(views), uniqCombined64Merge(sessions), sum(errors),
+                   quantileTDigestMerge(0.75)(lcp), sum(lcp_samples),
+                   quantileTDigestMerge(0.75)(inp), sum(inp_samples),
+                   quantileTDigestMerge(0.75)(cls), sum(cls_samples),
+                   quantileTDigestMerge(0.75)(fcp), sum(fcp_samples),
+                   quantileTDigestMerge(0.75)(ttfb), sum(ttfb_samples),
+                   quantileTDigestMerge(0.75)(load_ms), sum(load_samples)
+            FROM zenplus.apm_rum_metrics_5m WHERE {scope_sql}
+            GROUP BY bucket ORDER BY bucket
+        """, parameters=params).result_rows)
+    else:
+        rows = await asyncio.to_thread(lambda: _ch().query(f"""
+        SELECT toStartOfInterval(timestamp, INTERVAL {bucket} SECOND) AS bucket,
+               uniqExactIf(
+                   (application_id, env, view_id),
+                   sampled = 1 AND event_type = 'view'
+                       AND (sdk_version = '' OR (is_final = 0 AND end_reason = 'view_start'))
+               ) AS views,
+               uniqExactIf((application_id, env, session_id), sampled = 1) AS sessions,
+               countIf(event_type = 'error') AS errors,
+               quantileTDigestIf(0.75)(lcp, sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_lcp = 1 OR (sdk_version = '' AND lcp > 0))),
+               countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_lcp = 1 OR (sdk_version = '' AND lcp > 0))),
+               quantileTDigestIf(0.75)(inp, sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_inp = 1 OR (sdk_version = '' AND inp > 0))),
+               countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_inp = 1 OR (sdk_version = '' AND inp > 0))),
+               quantileTDigestIf(0.75)(cls, sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_cls = 1 OR (sdk_version = '' AND cls > 0))),
+               countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_cls = 1 OR (sdk_version = '' AND cls > 0))),
+               quantileTDigestIf(0.75)(fcp, sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_fcp = 1 OR (sdk_version = '' AND fcp > 0))),
+               countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_fcp = 1 OR (sdk_version = '' AND fcp > 0))),
+               quantileTDigestIf(0.75)(ttfb, sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_ttfb = 1 OR (sdk_version = '' AND ttfb > 0))),
+               countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_ttfb = 1 OR (sdk_version = '' AND ttfb > 0))),
+               quantileTDigestIf(0.75)(load_ms, sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_load = 1 OR (sdk_version = '' AND load_ms > 0))),
+               countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_load = 1 OR (sdk_version = '' AND load_ms > 0)))
+        FROM zenplus.apm_rum_events WHERE {scope_sql}
+        GROUP BY bucket ORDER BY bucket
+        """, parameters=params).result_rows)
+    return {
+        "range": range_, "bucket_seconds": bucket,
+        "series": [
+            {
+                "timestamp": row[0], "views": int(row[1]), "sessions": int(row[2]),
+                "errors": int(row[3]), "lcp_p75": _nullable(row[4], row[5]),
+                "lcp_samples": int(row[5]), "inp_p75": _nullable(row[6], row[7]),
+                "inp_samples": int(row[7]), "cls_p75": _nullable(row[8], row[9]),
+                "cls_samples": int(row[9]), "fcp_p75": _nullable(row[10], row[11]),
+                "fcp_samples": int(row[11]), "ttfb_p75": _nullable(row[12], row[13]),
+                "ttfb_samples": int(row[13]), "load_p75": _nullable(row[14], row[15]),
+                "load_samples": int(row[15]),
+            }
+            for row in rows
+        ],
+    }
+
+
+@router.get("/api/v1/apm/rum/facets")
+async def rum_facets(
+    range_: RangeName = Query(default="24h", alias="range"),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    _user=Depends(get_current_user),
+):
+    params, scope_sql = _scope(
+        range_, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os,
+    )
+
+    def query():
+        result = {}
+        for column in (
+            "application_id", "env", "view_name", "browser", "browser_version",
+            "os", "device_type", "country", "service_version",
+        ):
+            table = "zenplus.apm_rum_metrics_5m" if range_ in {"30d", "90d"} else "zenplus.apm_rum_events"
+            weight = "sum(events)" if range_ in {"30d", "90d"} else "count()"
+            rows = _ch().query(f"""
+                SELECT {column}, {weight} FROM {table}
+                WHERE {scope_sql} AND {column} != ''
+                GROUP BY {column} ORDER BY {weight} DESC LIMIT 200
+            """, parameters=params).result_rows
+            result[column] = [{"value": row[0], "count": int(row[1])} for row in rows]
+        return result
+
+    return await asyncio.to_thread(query)
+
+
+_VIEW_SORTS = {
+    "views": "views", "sessions": "sessions", "errors": "error_count",
+    "error_session_rate": "error_session_rate", "lcp_p75": "lcp_p75",
+    "inp_p75": "inp_p75", "cls_p75": "cls_p75", "fcp_p75": "fcp_p75",
+    "ttfb_p75": "ttfb_p75", "load_p75": "load_p75", "last_seen": "last_seen",
+}
+
+
+@router.get("/api/v1/apm/rum/views")
+async def rum_views(
+    range_: RangeName = Query(default="24h", alias="range"),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    sort: str = "views",
+    order: OrderName = "desc",
+    _user=Depends(get_current_user),
+):
+    sort_sql = _VIEW_SORTS.get(sort)
+    if sort_sql is None:
+        raise HTTPException(400, f"Unsupported views sort '{sort}'")
+    params, scope_sql = _scope(
+        range_, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os,
+    )
+    params.update(limit=page_size, offset=(page - 1) * page_size)
+
+    def query():
+        total = _ch().query(f"""
+            SELECT count() FROM (
+                SELECT application_id, env, view_name FROM zenplus.apm_rum_events
+                WHERE {scope_sql} AND sampled = 1 GROUP BY application_id, env, view_name
+            )
+        """, parameters=params).result_rows[0][0]
+        rows = _ch().query(f"""
+            SELECT application_id, env, view_name, argMax(url, timestamp) AS latest_url,
+                   uniqExactIf(view_id, event_type = 'view') AS views,
+                   uniqExact(session_id) AS sessions,
+                   countIf(event_type = 'error') AS error_count,
+                   uniqExactIf(session_id, event_type = 'error') / greatest(uniqExact(session_id), 1) AS error_session_rate,
+                   quantileTDigestIf(0.75)(lcp, event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_lcp = 1 OR (sdk_version = '' AND lcp > 0))) AS lcp_p75,
+                   countIf(event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_lcp = 1 OR (sdk_version = '' AND lcp > 0))) AS lcp_samples,
+                   quantileTDigestIf(0.75)(inp, event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_inp = 1 OR (sdk_version = '' AND inp > 0))) AS inp_p75,
+                   countIf(event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_inp = 1 OR (sdk_version = '' AND inp > 0))) AS inp_samples,
+                   quantileTDigestIf(0.75)(cls, event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_cls = 1 OR (sdk_version = '' AND cls > 0))) AS cls_p75,
+                   countIf(event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_cls = 1 OR (sdk_version = '' AND cls > 0))) AS cls_samples,
+                   quantileTDigestIf(0.75)(fcp, event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_fcp = 1 OR (sdk_version = '' AND fcp > 0))) AS fcp_p75,
+                   countIf(event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_fcp = 1 OR (sdk_version = '' AND fcp > 0))) AS fcp_samples,
+                   quantileTDigestIf(0.75)(ttfb, event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_ttfb = 1 OR (sdk_version = '' AND ttfb > 0))) AS ttfb_p75,
+                   countIf(event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_ttfb = 1 OR (sdk_version = '' AND ttfb > 0))) AS ttfb_samples,
+                   quantileTDigestIf(0.75)(load_ms, event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_load = 1 OR (sdk_version = '' AND load_ms > 0))) AS load_p75,
+                   countIf(event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_load = 1 OR (sdk_version = '' AND load_ms > 0))) AS load_samples,
+                   max(timestamp) AS last_seen,
+                   anyIf(backend_trace_id, backend_trace_id != '') AS primary_trace_id,
+                   groupUniqArrayIf(20)(backend_trace_id, backend_trace_id != '') AS backend_trace_ids,
+                   argMax(service_version, timestamp) AS latest_service_version
+            FROM zenplus.apm_rum_events WHERE {scope_sql} AND sampled = 1
+            GROUP BY application_id, env, view_name
+            ORDER BY {sort_sql} {order.upper()}, view_name ASC
+            LIMIT {{limit:UInt32}} OFFSET {{offset:UInt64}}
+        """, parameters=params).result_rows
+        return int(total), rows
+
+    total, rows = await asyncio.to_thread(query)
+    return {
+        "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(range_),
+        "items": [
+            {
+                "application_id": r[0], "env": r[1], "view_name": r[2], "url": r[3],
+                "views": int(r[4]), "sessions": int(r[5]), "error_count": int(r[6]),
+                "errors": int(r[6]),
+                "error_session_rate": float(r[7] or 0),
+                "lcp_p75": _nullable(r[8], r[9]), "lcp_samples": int(r[9]),
+                "inp_p75": _nullable(r[10], r[11]), "inp_samples": int(r[11]),
+                "cls_p75": _nullable(r[12], r[13]), "cls_samples": int(r[13]),
+                "fcp_p75": _nullable(r[14], r[15]), "fcp_samples": int(r[15]),
+                "ttfb_p75": _nullable(r[16], r[17]), "ttfb_samples": int(r[17]),
+                "load_p75": _nullable(r[18], r[19]), "load_samples": int(r[19]),
+                "last_seen": r[20], "backend_trace_id": r[21],
+                "backend_trace_ids": list(r[22] or []), "service_version": r[23],
+            }
+            for r in rows
+        ],
+    }
+
+
+_SESSION_SORTS = {
+    "last_seen": "last_seen", "started_at": "started_at",
+    "duration_ms": "duration_ms", "views": "views", "actions": "actions",
+    "resources": "resources", "long_tasks": "long_tasks", "errors": "errors",
+}
+
+
+@router.get("/api/v1/apm/rum/sessions")
+async def rum_sessions(
+    range_: RangeName = Query(default="24h", alias="range"),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    sort: str = "last_seen",
+    order: OrderName = "desc",
+    _user=Depends(get_current_user),
+):
+    sort_sql = _SESSION_SORTS.get(sort)
+    if sort_sql is None:
+        raise HTTPException(400, f"Unsupported sessions sort '{sort}'")
+    params, scope_sql = _scope(
+        range_, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os,
+    )
+    params.update(limit=page_size, offset=(page - 1) * page_size)
+
+    def query():
+        total = _ch().query(f"""
+            SELECT uniqExact((application_id, env, session_id))
+            FROM zenplus.apm_rum_events WHERE {scope_sql} AND sampled = 1
+        """, parameters=params).result_rows[0][0]
+        rows = _ch().query(f"""
+            SELECT session_id, application_id, env,
+                   min(timestamp) AS started_at, max(timestamp) AS last_seen,
+                   dateDiff('millisecond', min(timestamp), max(timestamp)) AS duration_ms,
+                   uniqExactIf(view_id, event_type = 'view') AS views,
+                   countIf(event_type = 'action') AS actions,
+                   countIf(event_type = 'resource') AS resources,
+                   countIf(event_type = 'long_task') AS long_tasks,
+                   countIf(event_type = 'error') AS errors,
+                   argMax(browser, timestamp), argMax(browser_version, timestamp),
+                   argMax(os, timestamp), argMax(device_type, timestamp),
+                   argMax(country, timestamp), anyIf(user_id, user_id != ''),
+                   anyIf(backend_trace_id, backend_trace_id != '') AS primary_trace_id,
+                   groupUniqArrayIf(100)(backend_trace_id, backend_trace_id != '') AS backend_trace_ids,
+                   argMax(sdk_version, timestamp), argMax(service_version, timestamp)
+            FROM zenplus.apm_rum_events WHERE {scope_sql} AND sampled = 1
+            GROUP BY session_id, application_id, env
+            ORDER BY {sort_sql} {order.upper()}, session_id ASC
+            LIMIT {{limit:UInt32}} OFFSET {{offset:UInt64}}
+        """, parameters=params).result_rows
+        return int(total), rows
+
+    total, rows = await asyncio.to_thread(query)
+    return {
+        "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(range_),
+        "items": [
+            {
+                "session_id": r[0], "application_id": r[1], "env": r[2],
+                "started_at": r[3], "last_seen": r[4], "duration_ms": int(r[5]),
+                "views": int(r[6]), "actions": int(r[7]), "resources": int(r[8]),
+                "long_tasks": int(r[9]), "errors": int(r[10]), "browser": r[11],
+                "browser_version": r[12], "os": r[13], "device_type": r[14],
+                "country": r[15], "user_id": r[16], "backend_trace_id": r[17],
+                "backend_trace_ids": list(r[18] or []), "sdk_version": r[19],
+                "service_version": r[20], "sampled": True,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/api/v1/apm/rum/sessions/{session_id}")
+async def rum_session_detail(
+    session_id: str,
+    range_: RangeName = Query(default="24h", alias="range"),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=500),
+    _user=Depends(get_current_user),
+):
+    if not 1 <= len(session_id) <= 128:
+        raise HTTPException(400, "Invalid RUM session identifier")
+    params, scope_sql = _scope(
+        range_, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os,
+    )
+    params.update(
+        session=session_id, limit=page_size, offset=(page - 1) * page_size,
+    )
+
+    def query():
+        summary_rows = _ch().query(f"""
+            SELECT application_id, env, min(timestamp), max(timestamp),
+                   uniqExactIf(view_id, event_type = 'view'),
+                   countIf(event_type = 'action'), countIf(event_type = 'resource'),
+                   countIf(event_type = 'long_task'), countIf(event_type = 'error'),
+                   argMax(browser, timestamp), argMax(browser_version, timestamp),
+                   argMax(os, timestamp), argMax(device_type, timestamp),
+                   argMax(country, timestamp), anyIf(user_id, user_id != ''),
+                   groupUniqArrayIf(500)(backend_trace_id, backend_trace_id != ''),
+                   argMax(sdk_version, timestamp), argMax(service_version, timestamp),
+                   max(sampled), count()
+            FROM zenplus.apm_rum_events
+            WHERE {scope_sql} AND session_id = {{session:String}}
+            GROUP BY application_id, env ORDER BY max(timestamp) DESC LIMIT 1
+        """, parameters=params).result_rows
+        if not summary_rows:
+            return None, [], 0
+        total = int(summary_rows[0][19])
+        event_params = {
+            **params,
+            "selected_app": summary_rows[0][0],
+            "selected_env": summary_rows[0][1],
+        }
+        events = _ch().query(f"""
+            SELECT timestamp, event_id, event_type, view_id, view_name, url,
+                   action_name, action_type, target, duration_ms,
+                   resource_url, resource_type, method, status_code, transfer_size,
+                   encoded_body_size, error_message, error_type, error_stack,
+                   error_source, error_fingerprint, backend_trace_id,
+                   lcp, inp, cls, fcp, ttfb, load_ms,
+                   has_lcp, has_inp, has_cls, has_fcp, has_ttfb, has_load,
+                   is_final, end_reason, attributes, vital_attribution,
+                   sdk_version, service_version, browser_version, os, sampled
+            FROM zenplus.apm_rum_events
+            WHERE {scope_sql} AND session_id = {{session:String}}
+              AND application_id = {{selected_app:String}}
+              AND env = {{selected_env:String}}
+            ORDER BY timestamp ASC, event_id ASC
+            LIMIT {{limit:UInt32}} OFFSET {{offset:UInt64}}
+        """, parameters=event_params).result_rows
+        return summary_rows[0], events, total
+
+    summary, events, total = await asyncio.to_thread(query)
+    if summary is None:
+        raise HTTPException(404, "RUM session not found")
+    timeline = []
+    for r in events:
+        item_url = r[10] or r[5]
+        item_name = r[6] or (r[10].rsplit("/", 1)[-1] if r[10] else "") or r[17] or r[2]
+        timeline.append({
+            "timestamp": r[0], "event_id": r[1], "event_type": r[2],
+            "view_id": r[3], "view_name": r[4], "url": item_url,
+            "page_url": r[5], "name": item_name,
+            "action_name": r[6], "action_type": r[7], "target": r[8],
+            "duration_ms": float(r[9] or 0), "resource_url": r[10],
+            "resource_type": r[11], "method": r[12],
+            "status_code": int(r[13]) if r[13] else None,
+            "transfer_size": int(r[14]), "size_bytes": int(r[14]),
+            "encoded_body_size": int(r[15]),
+            "error_message": r[16], "error_type": r[17], "error_stack": r[18],
+            "stack": r[18], "error_source": r[19], "source": r[19],
+            "error_fingerprint": r[20],
+            "backend_trace_id": r[21],
+            "vitals": {
+                "lcp": float(r[22]) if r[28] else None,
+                "inp": float(r[23]) if r[29] else None,
+                "cls": float(r[24]) if r[30] else None,
+                "fcp": float(r[25]) if r[31] else None,
+                "ttfb": float(r[26]) if r[32] else None,
+                "load": float(r[27]) if r[33] else None,
+            },
+            "lcp": float(r[22]) if r[28] else None,
+            "inp": float(r[23]) if r[29] else None,
+            "cls": float(r[24]) if r[30] else None,
+            "fcp": float(r[25]) if r[31] else None,
+            "ttfb": float(r[26]) if r[32] else None,
+            "load_ms": float(r[27]) if r[33] else None,
+            "is_final": bool(r[34]), "end_reason": r[35],
+            "attributes": dict(r[36] or {}), "vital_attribution": dict(r[37] or {}),
+            "sdk_version": r[38], "service_version": r[39],
+            "browser_version": r[40], "os": r[41], "sampled": bool(r[42]),
+        })
+    return {
+        "session": {
+            "session_id": session_id, "application_id": summary[0], "env": summary[1],
+            "started_at": summary[2], "last_seen": summary[3],
+            "duration_ms": int((summary[3] - summary[2]).total_seconds() * 1000),
+            "views": int(summary[4]), "actions": int(summary[5]),
+            "resources": int(summary[6]), "long_tasks": int(summary[7]),
+            "errors": int(summary[8]), "browser": summary[9],
+            "browser_version": summary[10], "os": summary[11],
+            "device_type": summary[12], "country": summary[13], "user_id": summary[14],
+            "backend_trace_ids": list(summary[15] or []),
+            "backend_trace_id": (summary[15][0] if summary[15] else ""),
+            "sdk_version": summary[16], "service_version": summary[17],
+            "sampled": bool(summary[18]),
+        },
+        "total": total, "page": page, "page_size": page_size,
+        "coverage": {
+            **_raw_coverage(range_),
+            "message": "Session event detail is retained for the most recent 14 days.",
+        },
+        "timeline": timeline,
+    }
+
+
+_ERROR_SORTS = {"count": "event_count", "sessions": "sessions", "first_seen": "first_seen", "last_seen": "last_seen"}
+
+
+@router.get("/api/v1/apm/rum/errors")
+async def rum_errors(
+    range_: RangeName = Query(default="24h", alias="range"),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    sort: str = "count",
+    order: OrderName = "desc",
+    _user=Depends(get_current_user),
+):
+    sort_sql = _ERROR_SORTS.get(sort)
+    if sort_sql is None:
+        raise HTTPException(400, f"Unsupported errors sort '{sort}'")
+    params, scope_sql = _scope(
+        range_, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os,
+    )
+    params.update(limit=page_size, offset=(page - 1) * page_size)
+    fingerprint = "if(error_fingerprint != '', error_fingerprint, lower(hex(MD5(concat(error_type, ':', error_message)))))"
+
+    def query():
+        total = _ch().query(f"""
+            SELECT uniqExact((application_id, env, {fingerprint})) FROM zenplus.apm_rum_events
+            WHERE {scope_sql} AND event_type = 'error'
+        """, parameters=params).result_rows[0][0]
+        rows = _ch().query(f"""
+            SELECT {fingerprint} AS fingerprint,
+                   argMax(error_message, timestamp), argMax(error_source, timestamp),
+                   argMax(error_stack, timestamp), argMax(error_type, timestamp),
+                   count() AS event_count, uniqExact(session_id) AS sessions,
+                   min(timestamp) AS first_seen, max(timestamp) AS last_seen,
+                   argMax(view_name, timestamp), application_id, env,
+                   argMax(browser, timestamp), argMax(browser_version, timestamp),
+                   argMax(os, timestamp), argMax(device_type, timestamp),
+                   argMax(country, timestamp), argMax(service_version, timestamp),
+                   anyIf(backend_trace_id, backend_trace_id != '') AS primary_trace_id,
+                   groupUniqArrayIf(50)(backend_trace_id, backend_trace_id != '') AS backend_trace_ids,
+                   countIf(sampled = 1) AS sampled_count,
+                   countIf(sampled = 0) AS unsampled_count
+            FROM zenplus.apm_rum_events
+            WHERE {scope_sql} AND event_type = 'error'
+            GROUP BY application_id, env, fingerprint
+            ORDER BY {sort_sql} {order.upper()}, fingerprint ASC
+            LIMIT {{limit:UInt32}} OFFSET {{offset:UInt64}}
+        """, parameters=params).result_rows
+        return int(total), rows
+
+    total, rows = await asyncio.to_thread(query)
+    return {
+        "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(range_),
+        "sampling": {
+            "includes_retained_unsampled_errors": True,
+            "aggregate_error_session_rates_use_sampled_sessions_only": True,
+        },
+        "items": [
+            {
+                "fingerprint": r[0], "message": r[1], "source": r[2], "stack": r[3],
+                "error_type": r[4], "count": int(r[5]), "sessions": int(r[6]),
+                "first_seen": r[7], "last_seen": r[8], "view_name": r[9],
+                "application_id": r[10], "env": r[11], "browser": r[12],
+                "browser_version": r[13], "os": r[14], "device_type": r[15],
+                "country": r[16], "service_version": r[17], "backend_trace_id": r[18],
+                "backend_trace_ids": list(r[19] or []), "sampled_count": int(r[20]),
+                "unsampled_count": int(r[21]),
+            }
+            for r in rows
+        ],
+    }
+
+
+_RESOURCE_SORTS = {
+    "count": "event_count", "failed_count": "failed_count",
+    "duration_p75": "duration_p75", "size_avg": "size_avg", "last_seen": "last_seen",
+}
+
+
+@router.get("/api/v1/apm/rum/resources")
+async def rum_resources(
+    range_: RangeName = Query(default="24h", alias="range"),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    sort: str = "duration_p75",
+    order: OrderName = "desc",
+    _user=Depends(get_current_user),
+):
+    sort_sql = _RESOURCE_SORTS.get(sort)
+    if sort_sql is None:
+        raise HTTPException(400, f"Unsupported resources sort '{sort}'")
+    params, scope_sql = _scope(
+        range_, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os,
+    )
+    params.update(limit=page_size, offset=(page - 1) * page_size)
+    group = "application_id, env, view_name, resource_url, resource_type, method, status_code"
+
+    def query():
+        total = _ch().query(f"""
+            SELECT count() FROM (SELECT 1 FROM zenplus.apm_rum_events
+            WHERE {scope_sql} AND event_type = 'resource' AND sampled = 1 GROUP BY {group})
+        """, parameters=params).result_rows[0][0]
+        rows = _ch().query(f"""
+            SELECT application_id, env, view_name, resource_url, resource_type,
+                   method, status_code, count() AS event_count,
+                   countIf(status_code >= 400 OR attributes['failed'] = 'true') AS failed_count,
+                   quantileTDigestIf(0.75)(duration_ms, duration_ms > 0) AS duration_p75,
+                   countIf(duration_ms > 0) AS duration_samples,
+                   avgIf(transfer_size, transfer_size > 0) AS size_avg,
+                   countIf(transfer_size > 0) AS size_samples,
+                   countIf(status_code >= 400 OR attributes['failed'] = 'true') / count() AS failure_rate,
+                   max(timestamp) AS last_seen, argMax(service_version, timestamp),
+                   anyIf(backend_trace_id, backend_trace_id != '') AS primary_trace_id,
+                   groupUniqArrayIf(50)(backend_trace_id, backend_trace_id != '') AS backend_trace_ids
+            FROM zenplus.apm_rum_events
+            WHERE {scope_sql} AND event_type = 'resource' AND sampled = 1
+            GROUP BY {group}
+            ORDER BY {sort_sql} {order.upper()}, resource_url ASC
+            LIMIT {{limit:UInt32}} OFFSET {{offset:UInt64}}
+        """, parameters=params).result_rows
+        return int(total), rows
+
+    total, rows = await asyncio.to_thread(query)
+    return {
+        "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(range_),
+        "items": [
+            {
+                "application_id": r[0], "env": r[1], "view_name": r[2],
+                "name": r[3].rsplit("/", 1)[-1] or r[3], "url": r[3],
+                "resource_type": r[4], "method": r[5],
+                "status_code": int(r[6]) if r[6] else None,
+                "count": int(r[7]), "failed_count": int(r[8]),
+                "duration_p75": _nullable(r[9], r[10]), "duration_samples": int(r[10]),
+                "size_avg": _nullable(r[11], r[12]), "size_samples": int(r[12]),
+                "failure_rate": float(r[13] or 0), "last_seen": r[14],
+                "service_version": r[15], "backend_trace_id": r[16],
+                "backend_trace_ids": list(r[17] or []),
+            }
+            for r in rows
+        ],
+    }
+
+
+_ACTION_SORTS = {
+    "count": "event_count", "error_count": "error_count",
+    "duration_p75": "duration_p75", "last_seen": "last_seen",
+}
+
+
+@router.get("/api/v1/apm/rum/actions")
+async def rum_actions(
+    range_: RangeName = Query(default="24h", alias="range"),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    sort: str = "count",
+    order: OrderName = "desc",
+    _user=Depends(get_current_user),
+):
+    sort_sql = _ACTION_SORTS.get(sort)
+    if sort_sql is None:
+        raise HTTPException(400, f"Unsupported actions sort '{sort}'")
+    params, scope_sql = _scope(
+        range_, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os,
+    )
+    params.update(limit=page_size, offset=(page - 1) * page_size)
+    name_expr = "if(event_type = 'long_task', 'Long task', action_name)"
+    type_expr = "if(event_type = 'long_task', 'long_task', action_type)"
+    group = f"application_id, env, view_name, {name_expr}, {type_expr}, target"
+
+    def query():
+        total = _ch().query(f"""
+            SELECT count() FROM (SELECT 1 FROM zenplus.apm_rum_events
+            WHERE {scope_sql} AND event_type IN ('action', 'long_task') AND sampled = 1 GROUP BY {group})
+        """, parameters=params).result_rows[0][0]
+        rows = _ch().query(f"""
+            SELECT application_id, env, view_name, {name_expr} AS name,
+                   {type_expr} AS type, target, count() AS event_count,
+                   countIf(attributes['error'] = 'true') AS error_count,
+                   quantileTDigestIf(0.75)(duration_ms, duration_ms > 0) AS duration_p75,
+                   countIf(duration_ms > 0) AS duration_samples,
+                   max(timestamp) AS last_seen, argMax(service_version, timestamp),
+                   anyIf(backend_trace_id, backend_trace_id != '') AS primary_trace_id,
+                   groupUniqArrayIf(50)(backend_trace_id, backend_trace_id != '') AS backend_trace_ids
+            FROM zenplus.apm_rum_events
+            WHERE {scope_sql} AND event_type IN ('action', 'long_task') AND sampled = 1
+            GROUP BY {group}
+            ORDER BY {sort_sql} {order.upper()}, name ASC
+            LIMIT {{limit:UInt32}} OFFSET {{offset:UInt64}}
+        """, parameters=params).result_rows
+        return int(total), rows
+
+    total, rows = await asyncio.to_thread(query)
+    return {
+        "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(range_),
+        "items": [
+            {
+                "application_id": r[0], "env": r[1], "view_name": r[2],
+                "name": r[3], "action_name": r[3], "action_type": r[4], "target": r[5],
+                "count": int(r[6]), "error_count": int(r[7]),
+                "duration_p75": _nullable(r[8], r[9]), "duration_samples": int(r[9]),
+                "last_seen": r[10], "service_version": r[11], "backend_trace_id": r[12],
+                "backend_trace_ids": list(r[13] or []),
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/api/v1/apm/rum/health")
+async def rum_health(
+    range_: RangeName = Query(default="24h", alias="range"),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    _user=Depends(get_current_user),
+):
+    params, scope_sql = _scope(
+        range_, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os,
+    )
+    try:
+        row = await asyncio.to_thread(lambda: _ch().query(f"""
+            SELECT count(), max(timestamp),
+                   sum(toUInt64OrZero(attributes['sdk.dropped_events'])),
+                   groupUniqArrayIf(20)(sdk_version, sdk_version != '')
+            FROM zenplus.apm_rum_events WHERE {scope_sql}
+        """, parameters=params).result_rows[0])
+        accepted, last_event, dropped, versions = int(row[0]), row[1], int(row[2] or 0), list(row[3] or [])
+        storage_ok = True
+    except Exception:
+        accepted, last_event, dropped, versions, storage_ok = 0, None, 0, [], False
+    issues = []
+    if not storage_ok:
+        issues.append("RUM storage query failed")
+    if int(_HEALTH["storage_errors"]):
+        issues.append("Recent RUM writes failed")
+    if int(_HEALTH["rate_limited"]):
+        issues.append("Recent RUM events exceeded an intake quota")
+    return {
+        "status": "healthy" if not issues else "degraded",
+        "accepted": accepted,
+        "accepted_since_process_start": int(_HEALTH["accepted"]),
+        "rejected": int(_HEALTH["rejected"]),
+        "rate_limited": int(_HEALTH["rate_limited"]),
+        "duplicates": int(_HEALTH["duplicates"]),
+        "dropped": dropped,
+        "sampled_out": 0,
+        "storage_errors": int(_HEALTH["storage_errors"]),
+        "last_event_at": last_event or _HEALTH_META["last_event_at"],
+        "sdk_versions": versions or list((_HEALTH_META["sdk_versions"] or {}).keys()),
+        "issues": issues,
+    }
+
+
+@router.get("/api/v1/apm/rum/summary")
+async def rum_summary(
+    range_: RangeName = Query(default="24h", alias="range"),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    _user=Depends(get_current_user),
+):
+    """Legacy dashboard contract backed by the corrected analytics queries."""
+    common = {
+        "range_": range_, "application_id": application_id, "env": env,
+        "view_name": view_name, "browser": browser, "device_type": device_type,
+        "country": country, "service_version": service_version,
+        "browser_version": browser_version, "os": os, "_user": _user,
+    }
+    overview = await rum_overview(**common)
+    views = await rum_views(**common, page=1, page_size=100, sort="views", order="desc")
+    sessions = await rum_sessions(
+        **common, page=1, page_size=100, sort="last_seen", order="desc"
+    )
+    vital = overview["vitals"]
+    return {
+        **overview["totals"],
+        "lcp_p75": vital["lcp"]["p75"], "lcp_samples": vital["lcp"]["samples"],
+        "inp_p75": vital["inp"]["p75"], "inp_samples": vital["inp"]["samples"],
+        "cls_p75": vital["cls"]["p75"], "cls_samples": vital["cls"]["samples"],
+        "fcp_p75": vital["fcp"]["p75"], "fcp_samples": vital["fcp"]["samples"],
+        "ttfb_p75": vital["ttfb"]["p75"], "ttfb_samples": vital["ttfb"]["samples"],
+        "load_p75": vital["load"]["p75"], "load_samples": vital["load"]["samples"],
+        "routes": views["items"], "recent_sessions": sessions["items"],
+        "coverage": _raw_coverage(range_),
+    }

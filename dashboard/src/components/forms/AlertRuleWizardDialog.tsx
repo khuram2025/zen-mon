@@ -116,11 +116,8 @@ const NETWORK_METRICS = [
 
 const INTERFACE_METRICS = new Set(NETWORK_METRICS.filter((m) => m.iface).map((m) => m.value))
 
-// APM (application) metrics, evaluated per-service every minute by the APM
-// alert evaluator against the RED rollups. Latency is milliseconds; error
-// rate and apdex are fractions in 0–1; throughput is requests/second.
-// Scope: the service picker on the Scope step (stored in `target`; empty =
-// every reporting service).
+// Server APM metrics are evaluated per service; browser RUM metrics are
+// evaluated per application ID. Rates are fractions in 0–1.
 const APM_METRICS = [
   { value: 'apm_latency_p95', label: 'p95 latency (ms)' },
   { value: 'apm_latency_p99', label: 'p99 latency (ms)' },
@@ -128,6 +125,11 @@ const APM_METRICS = [
   { value: 'apm_error_rate', label: 'Error rate (0.02 = 2%)' },
   { value: 'apm_throughput', label: 'Throughput (req/s)' },
   { value: 'apm_apdex', label: 'Apdex (0–1)' },
+  { value: 'apm_rum_lcp_p75', label: 'Browser RUM — LCP p75 (ms)' },
+  { value: 'apm_rum_inp_p75', label: 'Browser RUM — INP p75 (ms)' },
+  { value: 'apm_rum_cls_p75', label: 'Browser RUM — CLS p75' },
+  { value: 'apm_rum_error_session_rate', label: 'Browser RUM — error-affected sessions (0.05 = 5%)' },
+  { value: 'apm_rum_resource_failure_rate', label: 'Browser RUM — failed resources (0.05 = 5%)' },
 ] as const
 
 // Ordered by how often a template needs them. The phrasing variables at the
@@ -313,6 +315,7 @@ export function AlertRuleWizardDialog({
   const [s, setS] = useState<WizardState>(DEFAULT_STATE)
   const [scopeMode, setScopeMode] = useState<'all' | 'device' | 'group' | 'type' | 'location' | 'tag'>('all')
   const [preview, setPreview] = useState<any>(null)
+  const isRumMetric = s.source === 'apm' && s.conditions[0]?.metric.startsWith('apm_rum_')
 
   const stepIdx = STEPS.findIndex((st) => st.id === step)
 
@@ -364,6 +367,14 @@ export function AlertRuleWizardDialog({
     enabled: open && s.source === 'apm',
   })
   const apmServices: string[] = (apmServicesResp?.services || []).map((x: any) => x.name)
+  const { data: rumScopeRows } = useQuery<any>({
+    queryKey: ['apm', 'rum', 'views', 'alert-scope'],
+    queryFn: async () => (await api.get('/apm/rum/views?range=24h&page=1&page_size=100&sort=last_seen&order=desc')).data,
+    enabled: open && isRumMetric,
+  })
+  const rumApplications: string[] = Array.from(new Set(
+    (rumScopeRows?.items || []).map((item: any) => `${item.application_id} @ ${item.env || 'unknown'}`),
+  ))
 
   useEffect(() => {
     if (!open) return
@@ -576,7 +587,7 @@ export function AlertRuleWizardDialog({
                       }}
                       className={cn('flex-1 rounded-md py-2 font-medium', s.source === src ? 'bg-primary text-white' : 'text-muted')}
                     >
-                      {src === 'device' ? 'Device / SNMP' : src === 'service' ? 'Service Check' : src === 'trap' ? 'SNMP Trap' : 'APM Service'}
+                      {src === 'device' ? 'Device / SNMP' : src === 'service' ? 'Service Check' : src === 'trap' ? 'SNMP Trap' : 'APM & RUM'}
                     </button>
                   ))}
                 </div>
@@ -678,7 +689,14 @@ export function AlertRuleWizardDialog({
                   <div className="flex items-end gap-2 rounded-lg border border-border/60 bg-surface2/30 p-3">
                     <div className="grid flex-1 grid-cols-3 gap-2">
                       <FormField label="Metric">
-                        <Select value={s.conditions[0]?.metric} onValueChange={(v) => updateCond(0, { metric: v })}>
+                        <Select value={s.conditions[0]?.metric} onValueChange={(v) => {
+                          const switchesDataPlane = v.startsWith('apm_rum_') !== isRumMetric
+                          setS({
+                            ...s,
+                            target: switchesDataPlane ? '' : s.target,
+                            conditions: s.conditions.map((condition, index) => index === 0 ? { ...condition, metric: v } : condition),
+                          })
+                        }}>
                           <SelectTrigger><SelectValue /></SelectTrigger>
                           <SelectContent>
                             {APM_METRICS.map((m) => (
@@ -746,17 +764,19 @@ export function AlertRuleWizardDialog({
                 <SectionTitle title="Scope" hint="Which objects this alert monitors." />
                 {s.source === 'apm' ? (
                   <FormField
-                    label="Application service"
-                    hint="Empty = every service reporting traces. Evaluated per service every minute against the RED rollups."
+                    label={isRumMetric ? 'Browser application / environment' : 'Application service'}
+                    hint={isRumMetric
+                      ? 'Empty = every application and environment reporting browser events. Each environment is evaluated independently once per minute.'
+                      : 'Empty = every service reporting traces. Evaluated per service every minute against the RED rollups.'}
                   >
                     <Select
                       value={s.target || '__all__'}
                       onValueChange={(v) => setS({ ...s, target: v === '__all__' ? '' : v })}
                     >
-                      <SelectTrigger><SelectValue placeholder="All services" /></SelectTrigger>
+                      <SelectTrigger><SelectValue placeholder={isRumMetric ? 'All browser app environments' : 'All services'} /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="__all__">All services</SelectItem>
-                        {apmServices.map((name) => (
+                        <SelectItem value="__all__">{isRumMetric ? 'All browser app environments' : 'All services'}</SelectItem>
+                        {(isRumMetric ? rumApplications : apmServices).map((name) => (
                           <SelectItem key={name} value={name}>{name}</SelectItem>
                         ))}
                       </SelectContent>
