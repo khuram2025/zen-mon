@@ -116,3 +116,40 @@ export function apiErrorMessage(e: any, fallback = 'Something went wrong'): stri
   if (d?.msg) return d.msg
   return e?.message || fallback
 }
+
+/**
+ * Copy text to the clipboard, falling back to a hidden textarea + execCommand.
+ *
+ * The async Clipboard API is gated on a secure context, so on an appliance reached over
+ * plain HTTP at a LAN address (http://192.168.x.x) `navigator.clipboard` is undefined
+ * outright. Call sites that only used it silently copied nothing while still reporting
+ * success. Returns whether the text actually reached the clipboard so callers can say so.
+ */
+export async function copyText(text: string): Promise<boolean> {
+  if (!text) return false
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    // Blocked or permission denied — fall through to the legacy path.
+  }
+  try {
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.setAttribute('readonly', '')
+    // execCommand needs a rendered, selectable node; keep it off-screen without display:none.
+    ta.style.position = 'fixed'
+    ta.style.top = '-1000px'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    ta.setSelectionRange(0, ta.value.length)
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    return ok
+  } catch {
+    return false
+  }
+}

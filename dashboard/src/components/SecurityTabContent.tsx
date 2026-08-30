@@ -13,7 +13,7 @@ import {
   Upload,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage, cn } from '@/lib/utils'
+import { apiErrorMessage, cn, copyText } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -508,7 +508,7 @@ function CsrFlow({ status }: { status: TlsStatus }) {
         </Button>
         <Button
           size="sm" variant="outline"
-          onClick={() => navigator.clipboard.writeText(pending.csr_pem).then(() => toast.success('CSR copied'))}
+          onClick={async () => { if (await copyText(pending.csr_pem)) toast.success('CSR copied'); else toast.error('Could not copy', 'Select the text and copy manually.') }}
         >
           Copy
         </Button>

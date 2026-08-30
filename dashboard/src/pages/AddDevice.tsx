@@ -23,7 +23,7 @@ import {
   Copy,
   Info,
 } from 'lucide-react'
-import { cn } from '@/lib/utils'
+import { cn, copyText } from '@/lib/utils'
 
 type Tab = 'single' | 'import' | 'export'
 
@@ -426,7 +426,7 @@ REPLACE-hostname-2,REPLACE-IP-2,server,REPLACE-location,REPLACE-group,true,60,RE
   }
 
   const copyTemplate = (format: 'csv' | 'json') => {
-    navigator.clipboard.writeText(format === 'csv' ? csvTemplate : jsonTemplate)
+    void copyText(format === 'csv' ? csvTemplate : jsonTemplate)
   }
 
   return (

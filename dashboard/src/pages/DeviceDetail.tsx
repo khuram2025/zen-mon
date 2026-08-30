@@ -5,7 +5,7 @@ import { api } from '@/lib/api'
 import { StatusIndicator } from '@/components/dashboard/StatusIndicator'
 import { StatusCard } from '@/components/dashboard/StatusCard'
 import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
-import { formatRTT, timeAgo, statusColors, cn, formatDateTime, formatTime } from '@/lib/utils'
+import { formatRTT, timeAgo, statusColors, cn, copyText, formatDateTime, formatTime } from '@/lib/utils'
 import { useTimezone } from '@/hooks/useSettings'
 import { generateDeviceReport } from '@/lib/deviceReport'
 import type { StatusEvent as ReportStatusEvent } from '@/lib/deviceReport'
@@ -275,7 +275,7 @@ function PingStats({ points }: { points: { rtt_ms: number | null; packet_loss: n
 // ─── Quick Actions ───
 function QuickActions({ device, onDelete }: { device: Device; onDelete: () => void }) {
   const [copied, setCopied] = useState(false)
-  const copyIP = () => { navigator.clipboard.writeText(device.ip_address); setCopied(true); setTimeout(() => setCopied(false), 2000) }
+  const copyIP = async () => { if (await copyText(device.ip_address ?? '')) { setCopied(true); setTimeout(() => setCopied(false), 2000) } }
 
   return (
     <div className="bg-[var(--bg-secondary)] rounded-xl border border-[var(--bg-elevated)] p-5">

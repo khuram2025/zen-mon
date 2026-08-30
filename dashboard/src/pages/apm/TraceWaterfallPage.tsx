@@ -3,7 +3,7 @@ import { useLocation, useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Loader2, ArrowLeft, AlertCircle, Check, Copy, Database, Flame, Server, ArrowRightLeft, ScrollText } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage } from '@/lib/utils'
+import { apiErrorMessage, copyText } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
@@ -100,7 +100,7 @@ export function TraceWaterfallPage() {
             </p>
             {traceId && (
               <button
-                onClick={() => { navigator.clipboard?.writeText(traceId); setCopied(true); window.setTimeout(() => setCopied(false), 1500) }}
+                onClick={async () => { if (await copyText(traceId)) { setCopied(true); window.setTimeout(() => setCopied(false), 1500) } }}
                 title="Copy trace ID"
                 className="mt-3 inline-flex items-center gap-1.5 rounded border border-border px-2 py-1 font-mono text-xs text-muted hover:text-text"
               >
@@ -128,7 +128,7 @@ export function TraceWaterfallPage() {
         <Button variant="ghost" size="sm" onClick={() => navigate(backTarget)}><ArrowLeft className="w-4 h-4 mr-1" /> {backLabel}</Button>
         <h1 className="text-lg font-semibold text-text">Trace</h1>
         <button
-          onClick={() => { navigator.clipboard?.writeText(trace.trace_id); setCopied(true); window.setTimeout(() => setCopied(false), 1500) }}
+          onClick={async () => { if (await copyText(trace.trace_id)) { setCopied(true); window.setTimeout(() => setCopied(false), 1500) } }}
           title="Copy trace ID"
           className="inline-flex items-center gap-1.5 rounded border border-transparent px-1.5 py-0.5 font-mono text-xs text-muted hover:border-border hover:text-text"
         >

@@ -13,7 +13,7 @@ import {
   Activity, Copy, Download, Loader2, Pause, Plus, RotateCw, Trash2, Plug, Pencil, Check, X,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage, relativeTime } from '@/lib/utils'
+import { apiErrorMessage, copyText, relativeTime } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -126,15 +126,9 @@ const statusVariant: Record<Sensor['status'], 'success' | 'warning' | 'danger' |
 const NO_SITE_VALUE = '__none__'
 
 
-function copyToClipboard(s: string, label: string) {
-  if (typeof navigator === 'undefined' || !navigator.clipboard) {
-    toast.info('Copy manually', s)
-    return
-  }
-  navigator.clipboard.writeText(s).then(
-    () => toast.success(`${label} copied`),
-    () => toast.error('Copy failed'),
-  )
+async function copyToClipboard(s: string, label: string) {
+  if (await copyText(s)) toast.success(`${label} copied`)
+  else toast.info('Copy manually', s)
 }
 
 function downloadText(filename: string, content: string) {

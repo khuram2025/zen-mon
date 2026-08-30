@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, Fragment } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
-import { cn } from '@/lib/utils'
+import { cn, copyText } from '@/lib/utils'
 import {
   Settings,
   Mail,
@@ -1857,7 +1857,7 @@ function AlertRulesTab({ showToast }: { showToast: (type: 'success' | 'error', m
                       <div className="flex flex-wrap gap-1">
                         {['{hostname}','{ip_address}','{status}','{severity}','{rule_name}','{group}','{location}','{device_type}','{metric}','{operator}','{threshold}','{timestamp}','{duration}','{rtt}','{packet_loss}','{status_intro}'].map(v => (
                           <code key={v} className="text-[10px] bg-[var(--bg-secondary)] px-1.5 py-0.5 rounded text-[var(--text-secondary)] cursor-pointer hover:text-[var(--accent)]"
-                            onClick={() => navigator.clipboard.writeText(v)}
+                            onClick={() => { void copyText(v) }}
                             title="Click to copy">{v}</code>
                         ))}
                       </div>

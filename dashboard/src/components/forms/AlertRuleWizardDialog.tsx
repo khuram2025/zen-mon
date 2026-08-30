@@ -24,7 +24,7 @@ import {
   X,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage, cn } from '@/lib/utils'
+import { apiErrorMessage, cn, copyText } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Textarea } from '@/components/ui/Textarea'
@@ -1271,7 +1271,7 @@ function TemplateVars() {
       <div className="mt-2 flex flex-wrap gap-1">
         {TEMPLATE_VARS.map((v) => (
           <code key={v} className="cursor-pointer rounded bg-surface px-1.5 py-0.5 text-[10px] text-muted hover:text-primary"
-            onClick={() => navigator.clipboard.writeText(v)} title="Click to copy">{v}</code>
+            onClick={() => { void copyText(v) }} title="Click to copy">{v}</code>
         ))}
       </div>
     </div>

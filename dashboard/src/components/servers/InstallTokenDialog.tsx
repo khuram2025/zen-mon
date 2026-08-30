@@ -5,7 +5,7 @@ import { useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Bot, Check, Copy, Download, Loader2, ShieldCheck, Terminal, UserCheck } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage } from '@/lib/utils'
+import { apiErrorMessage, copyText } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
@@ -130,7 +130,7 @@ export function InstallTokenDialog({
 
   const copyCommand = async () => {
     try {
-      await navigator.clipboard.writeText(command)
+      if (!(await copyText(command))) throw new Error('clipboard blocked')
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch {
