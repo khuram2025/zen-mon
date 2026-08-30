@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.crypto import decrypt, encrypt
 from app.core.database import get_db
 from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
@@ -144,6 +145,24 @@ async def authenticate_ingest_key(
 
 # ── schemas ──────────────────────────────────────────────────────────────────
 
+class RumSdkOptions(BaseModel):
+    """Browser RUM snippet settings.
+
+    Persisted alongside the key so the install tag can be regenerated exactly; without
+    them a lost snippet could only be rebuilt by guessing the sampling and privacy
+    settings it was originally issued with.
+    """
+    service_name: str = Field(..., min_length=1, max_length=255)
+    version: str = Field(default="", max_length=64)
+    sample_rate_percent: int = Field(default=100, ge=1, le=100)
+    # Replay capture/storage is not implemented; the SDK advertises it as unavailable.
+    replay_sample_rate_percent: int = Field(default=0, ge=0, le=0)
+    track_actions: bool = True
+    track_long_tasks: bool = True
+    consent: Literal["granted", "pending"] = "granted"
+    privacy: Literal["mask-user-input", "strict"] = "mask-user-input"
+
+
 class IngestKeyCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     kind: KindT = "sdk"
@@ -158,6 +177,21 @@ class IngestKeyCreate(BaseModel):
         max_length=128,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
     )
+    rum_options: Optional[RumSdkOptions] = None
+
+
+class IngestKeyUpdate(BaseModel):
+    """Editable fields. Kind is immutable — it determines the key's trust model."""
+    name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    env: Optional[str] = Field(default=None, max_length=64)
+    origin_allowlist: Optional[list[str]] = None
+    application_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+    )
+    rum_options: Optional[RumSdkOptions] = None
 
 
 class IngestKeyResponse(BaseModel):
@@ -172,10 +206,18 @@ class IngestKeyResponse(BaseModel):
     last_used_at: Optional[datetime] = None
     revoked_at: Optional[datetime] = None
     created_at: datetime
+    rum_options: Optional[RumSdkOptions] = None
+    # Whether the plaintext can still be revealed (public RUM keys only).
+    key_recoverable: bool = False
 
 
 class IngestKeyCreated(IngestKeyResponse):
-    key: str  # plaintext — shown ONCE
+    key: str  # plaintext — for secret sdk keys this is the only time it is shown
+
+
+class IngestKeyRevealed(BaseModel):
+    id: uuid.UUID
+    key: str
 
 
 class EnrollmentTokenCreate(BaseModel):
@@ -217,13 +259,41 @@ async def _resolve_env_id(db: AsyncSession, env: Optional[str]) -> Optional[uuid
     return row[0]
 
 
+def _validate_rum_origins(origins: list[str]) -> None:
+    """Reject anything but an exact http(s) origin — a path or wildcard would widen the
+    allowlist beyond what the browser actually sends in the Origin header."""
+    from urllib.parse import urlsplit
+    for origin in origins:
+        try:
+            parsed = urlsplit(origin)
+            invalid = (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                       or parsed.username is not None or parsed.password is not None
+                       or parsed.path not in {"", "/"} or parsed.query
+                       or parsed.fragment or "*" in origin)
+        except (TypeError, ValueError):
+            invalid = True
+        if invalid:
+            raise HTTPException(400, f"Invalid RUM origin '{origin}'; use an exact http(s) origin without a path or wildcard")
+
+
 def _key_row_to_response(r: dict) -> IngestKeyResponse:
+    raw_options = r.get("rum_options")
+    options: Optional[RumSdkOptions] = None
+    if raw_options:
+        try:
+            options = RumSdkOptions(**raw_options)
+        except Exception:
+            # Settings written by an older build may not satisfy today's model; the key
+            # itself is still valid, so degrade to "no stored snippet" rather than 500.
+            options = None
     return IngestKeyResponse(
         id=r["id"], name=r["name"], kind=r["kind"], key_prefix=r["key_prefix"],
         env=r.get("env_name"), origin_allowlist=list(r.get("origin_allowlist") or []),
         application_id=r.get("application_id"),
         enabled=r["enabled"], last_used_at=r.get("last_used_at"),
         revoked_at=r.get("revoked_at"), created_at=r["created_at"],
+        rum_options=options,
+        key_recoverable=r["kind"] == "rum" and r.get("key_cipher") is not None,
     )
 
 
@@ -266,32 +336,29 @@ async def create_ingest_key(
             raise HTTPException(400, "New browser RUM keys require an application_id binding")
         if not body.origin_allowlist:
             raise HTTPException(400, "Browser RUM keys require at least one allowed origin")
-        from urllib.parse import urlsplit
-        for origin in body.origin_allowlist:
-            try:
-                parsed = urlsplit(origin)
-                invalid = (parsed.scheme not in {"http", "https"} or not parsed.hostname
-                           or parsed.username is not None or parsed.password is not None
-                           or parsed.path not in {"", "/"} or parsed.query
-                           or parsed.fragment or "*" in origin)
-            except (TypeError, ValueError):
-                invalid = True
-            if invalid:
-                raise HTTPException(400, f"Invalid RUM origin '{origin}'; use an exact http(s) origin without a path or wildcard")
+        _validate_rum_origins(body.origin_allowlist)
     elif body.origin_allowlist or body.application_id:
         raise HTTPException(400, "Origin allowlists and application binding are only valid for browser RUM keys")
     plaintext, key_hash, key_prefix = _new_ingest_key(body.kind)
     env_id = await _resolve_env_id(db, body.env)
     import json
+    # A public browser key is recoverable so its snippet can be re-read; a secret
+    # collector key is never stored in any reversible form.
+    key_cipher = encrypt(plaintext) if body.kind == "rum" else None
+    rum_options = (
+        json.dumps(body.rum_options.model_dump()) if body.kind == "rum" and body.rum_options else None
+    )
     row = (await db.execute(
         text(
             """
             INSERT INTO apm_ingest_keys (name, kind, key_hash, key_prefix, env_id,
-                                         origin_allowlist, application_id, created_by)
+                                         origin_allowlist, application_id, created_by,
+                                         key_cipher, rum_options)
             VALUES (:name, :kind, :hash, :prefix, :env_id,
-                    CAST(:origins AS jsonb), :application_id, :uid)
+                    CAST(:origins AS jsonb), :application_id, :uid,
+                    :key_cipher, CAST(:rum_options AS jsonb))
             RETURNING id, name, kind, key_prefix, enabled, last_used_at,
-                      revoked_at, created_at, origin_allowlist
+                      revoked_at, created_at, origin_allowlist, key_cipher, rum_options
             """
         ),
         {
@@ -300,6 +367,8 @@ async def create_ingest_key(
             "origins": json.dumps(body.origin_allowlist),
             "application_id": body.application_id,
             "uid": getattr(user, "id", None),
+            "key_cipher": key_cipher,
+            "rum_options": rum_options,
         },
     )).mappings().first()
     await db.commit()
@@ -314,6 +383,124 @@ async def create_ingest_key(
     )
     await db.commit()
     return IngestKeyCreated(**resp.model_dump(), key=plaintext)
+
+
+@router.get("/ingest-keys/{key_id}/reveal", response_model=IngestKeyRevealed)
+async def reveal_ingest_key(
+    key_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Return the plaintext of a public browser RUM key.
+
+    Only RUM keys can be revealed. They are public by construction — served inside every
+    page's HTML and readable by any visitor — so what protects the tenant is the exact
+    origin allowlist and application binding, not the key's secrecy. Secret collector
+    keys are stored as a hash alone and are genuinely unrecoverable.
+    """
+    row = (await db.execute(
+        text("SELECT id, name, kind, key_cipher FROM apm_ingest_keys WHERE id = :id"),
+        {"id": key_id},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(404, "Ingest key not found")
+    if row["kind"] != "rum":
+        raise HTTPException(
+            400,
+            "Secret collector keys are stored only as a hash and cannot be shown again. "
+            "Create a replacement key and revoke this one.",
+        )
+    if row["key_cipher"] is None:
+        raise HTTPException(
+            400,
+            "This key was issued before keys were stored recoverably. "
+            "Create a replacement key and revoke this one.",
+        )
+    plaintext = decrypt(row["key_cipher"])
+    if not plaintext:
+        raise HTTPException(500, "Stored key could not be decrypted")
+    await write_audit_log(
+        db, actor=user, action="apm.ingest_key.reveal",
+        resource_type="apm_ingest_key", resource_id=str(row["id"]),
+        metadata={"name": row["name"], "kind": row["kind"]},
+    )
+    await db.commit()
+    return IngestKeyRevealed(id=row["id"], key=plaintext)
+
+
+@router.patch("/ingest-keys/{key_id}", response_model=IngestKeyResponse)
+async def update_ingest_key(
+    key_id: uuid.UUID,
+    body: IngestKeyUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Edit a key's scope and snippet settings in place.
+
+    Without this, widening an origin allowlist meant revoking the key and redeploying
+    the snippet on every page.
+    """
+    import json
+    row = (await db.execute(
+        text("SELECT id, name, kind, revoked_at, application_id, origin_allowlist "
+             "FROM apm_ingest_keys WHERE id = :id"),
+        {"id": key_id},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(404, "Ingest key not found")
+    if row["revoked_at"] is not None:
+        raise HTTPException(400, "A revoked key cannot be edited")
+
+    is_rum = row["kind"] == "rum"
+    if not is_rum and (body.origin_allowlist is not None or body.application_id is not None
+                       or body.rum_options is not None):
+        raise HTTPException(400, "Origin allowlists, application binding and RUM options are only valid for browser RUM keys")
+
+    if body.origin_allowlist is not None:
+        if not body.origin_allowlist:
+            raise HTTPException(400, "Browser RUM keys require at least one allowed origin")
+        _validate_rum_origins(body.origin_allowlist)
+
+    sets: list[str] = []
+    params: dict = {"id": key_id}
+    if body.name is not None:
+        sets.append("name = :name")
+        params["name"] = body.name
+    if body.env is not None:
+        sets.append("env_id = :env_id")
+        params["env_id"] = await _resolve_env_id(db, body.env)
+    if body.origin_allowlist is not None:
+        sets.append("origin_allowlist = CAST(:origins AS jsonb)")
+        params["origins"] = json.dumps(body.origin_allowlist)
+    if body.application_id is not None:
+        sets.append("application_id = :application_id")
+        params["application_id"] = body.application_id
+    if body.rum_options is not None:
+        sets.append("rum_options = CAST(:rum_options AS jsonb)")
+        params["rum_options"] = json.dumps(body.rum_options.model_dump())
+    if not sets:
+        raise HTTPException(400, "No changes supplied")
+
+    updated = (await db.execute(
+        text(f"UPDATE apm_ingest_keys SET {', '.join(sets)} WHERE id = :id RETURNING *"),
+        params,
+    )).mappings().first()
+    await db.commit()
+    # Origin and application binding are enforced from the cached key record.
+    invalidate_ingest_key_cache()
+
+    env_name = (await db.execute(
+        text("SELECT name FROM apm_environments WHERE id = :e"),
+        {"e": updated["env_id"]},
+    )).scalar() if updated["env_id"] else None
+
+    await write_audit_log(
+        db, actor=user, action="apm.ingest_key.update",
+        resource_type="apm_ingest_key", resource_id=str(key_id),
+        metadata={"changed": sorted(body.model_dump(exclude_none=True).keys())},
+    )
+    await db.commit()
+    return _key_row_to_response({**dict(updated), "env_name": env_name})
 
 
 @router.delete("/ingest-keys/{key_id}", status_code=204)

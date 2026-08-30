@@ -2,10 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Plus, Trash2, Copy, Check, KeyRound, Loader2, ShieldCheck, Ticket, Terminal,
+  Plus, Trash2, Copy, Check, KeyRound, Loader2, ShieldCheck, Ticket, Terminal, Eye, Pencil,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage, relativeTime } from '@/lib/utils'
+import { apiErrorMessage, copyText, relativeTime } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -21,6 +21,17 @@ import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
 import { KbLink } from '@/components/apm/KbLink'
 import { ApmAgentsTab } from './ApmAgentsTab'
 
+interface RumSdkOptions {
+  service_name: string
+  version: string
+  sample_rate_percent: number
+  replay_sample_rate_percent: number
+  track_actions: boolean
+  track_long_tasks: boolean
+  consent: 'granted' | 'pending'
+  privacy: 'mask-user-input' | 'strict'
+}
+
 interface IngestKey {
   id: string
   name: string
@@ -33,23 +44,13 @@ interface IngestKey {
   last_used_at: string | null
   revoked_at: string | null
   created_at: string
-}
-
-interface RumSdkOptions {
-  applicationId: string
-  serviceName: string
-  version: string
-  sampleRatePercent: number
-  replaySampleRatePercent: number
-  trackActions: boolean
-  trackLongTasks: boolean
-  consent: 'granted' | 'pending'
-  privacy: 'mask-user-input' | 'strict'
+  rum_options: RumSdkOptions | null
+  /** Public browser keys can be shown again; secret collector keys never can. */
+  key_recoverable: boolean
 }
 
 interface CreatedKeyConfig extends IngestKey {
   key: string
-  rum?: RumSdkOptions
 }
 
 interface EnrollmentToken {
@@ -92,6 +93,8 @@ export function ApmSettingsPage() {
   const [formOrigin, setFormOrigin] = useState('')
   const [revoking, setRevoking] = useState<IngestKey | null>(null)
   const [createdKey, setCreatedKey] = useState<CreatedKeyConfig | null>(null)
+  const [viewing, setViewing] = useState<IngestKey | null>(null)
+  const [editing, setEditing] = useState<IngestKey | null>(null)
 
   const openCreateKey = (kind: 'sdk' | 'rum' = 'sdk', origin = '') => {
     setFormKind(kind)
@@ -235,11 +238,24 @@ export function ApmSettingsPage() {
                       {new Date(k.created_at).toLocaleDateString()}
                     </Td>
                     <Td className="text-right">
-                      {!k.revoked_at && k.enabled && (
-                        <Button variant="ghost" size="sm" onClick={() => setRevoking(k)}>
-                          <Trash2 className="w-4 h-4 text-danger" />
+                      <div className="flex justify-end gap-0.5">
+                        <Button variant="ghost" size="icon" className="h-7 w-7" title="View details and install snippet"
+                          onClick={() => setViewing(k)}>
+                          <Eye className="h-4 w-4" />
                         </Button>
-                      )}
+                        {!k.revoked_at && k.enabled && (
+                          <>
+                            <Button variant="ghost" size="icon" className="h-7 w-7" title="Edit scope and settings"
+                              onClick={() => setEditing(k)}>
+                              <Pencil className="h-4 w-4" />
+                            </Button>
+                            <Button variant="ghost" size="icon" className="h-7 w-7" title="Revoke key"
+                              onClick={() => setRevoking(k)}>
+                              <Trash2 className="h-4 w-4 text-danger" />
+                            </Button>
+                          </>
+                        )}
+                      </div>
                     </Td>
                   </Tr>
                 ))}
@@ -263,6 +279,17 @@ export function ApmSettingsPage() {
         value={createdKey}
         lastUsedAt={createdKey ? keys.find((key) => key.id === createdKey.id)?.last_used_at ?? null : null}
         onClose={() => setCreatedKey(null)}
+      />
+
+      <KeyDetailsDialog
+        keyRow={viewing ? keys.find((k) => k.id === viewing.id) ?? viewing : null}
+        onClose={() => setViewing(null)}
+        onEdit={(k) => setEditing(k)}
+      />
+
+      <EditKeyDialog
+        keyRow={editing ? keys.find((k) => k.id === editing.id) ?? editing : null}
+        onClose={() => setEditing(null)}
       />
 
       <ConfirmDialog
@@ -289,8 +316,11 @@ function CodeBlock({ code }: { code: string }) {
         <code>{code}</code>
       </pre>
       <button
-        onClick={() => {
-          navigator.clipboard?.writeText(code)
+        onClick={async () => {
+          if (!(await copyText(code))) {
+            toast.error('Could not copy', 'The browser blocked clipboard access — select the text and copy manually.')
+            return
+          }
           setCopied(true)
           window.setTimeout(() => setCopied(false), 1500)
         }}
@@ -750,48 +780,19 @@ function IngestKeyFormDialog({ open, onOpenChange, onCreated, defaultKind, defau
   const [name, setName] = useState('')
   const [env, setEnv] = useState<string>('prod')
   const [kind, setKind] = useState<'sdk' | 'rum'>('sdk')
-  const [origins, setOrigins] = useState('')
-  const [applicationId, setApplicationId] = useState('web-app')
-  const [serviceName, setServiceName] = useState('web-frontend')
-  const [version, setVersion] = useState('')
-  const [sampleRate, setSampleRate] = useState('100')
-  const [replaySampleRate, setReplaySampleRate] = useState('0')
-  const [trackActions, setTrackActions] = useState(true)
-  const [trackLongTasks, setTrackLongTasks] = useState(true)
-  const [consent, setConsent] = useState<'granted' | 'pending'>('granted')
-  const [privacy, setPrivacy] = useState<'mask-user-input' | 'strict'>('mask-user-input')
+  const [rumForm, setRumForm] = useState<RumFormState>(emptyRumForm)
+  const setRum = (patch: Partial<RumFormState>) => setRumForm((s) => ({ ...s, ...patch }))
 
   useEffect(() => {
     if (!open) return
     setKind(defaultKind)
-    setOrigins(defaultOrigin)
     setName(defaultKind === 'rum' ? 'browser-rum-prod' : '')
-    setApplicationId('web-app')
-    setServiceName('web-frontend')
-    setVersion('')
-    setSampleRate('100')
-    setReplaySampleRate('0')
-    setTrackActions(true)
-    setTrackLongTasks(true)
-    setConsent('granted')
-    setPrivacy('mask-user-input')
+    setRumForm({ ...emptyRumForm(), origins: defaultOrigin })
   }, [open, defaultKind, defaultOrigin])
 
-  const parsedOrigins = useMemo(() => parseRumOrigins(origins), [origins])
-  const originError = kind === 'rum'
-    ? (!origins.trim() ? 'Add at least one exact HTTP(S) browser origin.' : parsedOrigins.error)
-    : null
-  const applicationError = kind === 'rum' && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(applicationId.trim())
-    ? 'Use 1–128 letters, numbers, dots, underscores, or hyphens.'
-    : null
-  const sampleRateNumber = Number(sampleRate)
-  const replayRateNumber = Number(replaySampleRate)
-  const samplingError = !Number.isFinite(sampleRateNumber) || sampleRateNumber < 1 || sampleRateNumber > 100
-    ? 'Session sampling must be between 1% and 100%.'
-    : null
-  const replaySamplingError = !Number.isFinite(replayRateNumber) || replayRateNumber !== 0
-    ? 'Session replay capture and storage are not enabled in this release; keep this at 0%.'
-    : null
+  const errors = useMemo(() => rumFormErrors(rumForm), [rumForm])
+  const originError = kind === 'rum' ? errors.origin : null
+  const applicationError = kind === 'rum' ? errors.application : null
 
   const envs = useQuery<Environment[]>({
     queryKey: ['apm', 'environments'],
@@ -803,25 +804,13 @@ function IngestKeyFormDialog({ open, onOpenChange, onCreated, defaultKind, defau
     mutationFn: async () =>
       (await api.post('/apm/ingest-keys', {
         name: name.trim(), kind, env,
-        origin_allowlist: kind === 'rum' ? parsedOrigins.origins : [],
-        application_id: kind === 'rum' ? applicationId.trim() : null,
+        origin_allowlist: kind === 'rum' ? errors.parsedOrigins.origins : [],
+        application_id: kind === 'rum' ? rumForm.applicationId.trim() : null,
+        rum_options: kind === 'rum' ? rumOptionsPayload(rumForm, errors) : null,
       })).data,
-    onSuccess: (data: IngestKey & { key: string }) => {
+    onSuccess: (data: CreatedKeyConfig) => {
       qc.invalidateQueries({ queryKey: ['apm', 'ingest-keys'] })
-      onCreated({
-        ...data,
-        rum: kind === 'rum' ? {
-          applicationId: applicationId.trim(),
-          serviceName: serviceName.trim() || applicationId.trim(),
-          version: version.trim(),
-          sampleRatePercent: sampleRateNumber,
-          replaySampleRatePercent: replayRateNumber,
-          trackActions,
-          trackLongTasks,
-          consent,
-          privacy,
-        } : undefined,
-      })
+      onCreated(data)
     },
     onError: (e: any) => toast.error('Could not create key', apiErrorMessage(e)),
   })
@@ -859,88 +848,13 @@ function IngestKeyFormDialog({ open, onOpenChange, onCreated, defaultKind, defau
             </Select>
           </FormField>
           {kind === 'rum' && (
-            <div className="space-y-4 rounded-lg border border-border bg-surface2/30 p-4">
-              <div>
-                <div className="text-sm font-medium text-text">Browser application scope</div>
-                <p className="mt-0.5 text-xs text-muted">
-                  A public browser key is accepted only for this application and these exact origins.
-                </p>
-              </div>
-              <FormField label="Application ID" required error={applicationError}
-                hint="A stable identifier used by filters and application-level key enforcement.">
-                <Input value={applicationId} onChange={(e) => setApplicationId(e.target.value)}
-                  placeholder="customer-portal" autoComplete="off" />
-              </FormField>
-              <FormField label="Allowed browser origins" required
-                error={originError}
-                hint="One per line or comma-separated. A trailing slash is normalized; paths and wildcards are rejected.">
-                <textarea
-                  className="min-h-20 w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-text outline-none placeholder:text-muted focus:border-primary focus:ring-2 focus:ring-primary/20"
-                  value={origins}
-                  onChange={(e) => setOrigins(e.target.value)}
-                  placeholder={'https://portal.example.com\nhttp://192.168.8.19:8080'}
-                />
-              </FormField>
-
-              <div className="grid gap-4 sm:grid-cols-2">
-                <FormField label="Frontend service name" required hint="Used for frontend-to-backend trace pivots.">
-                  <Input value={serviceName} onChange={(e) => setServiceName(e.target.value)} placeholder="customer-portal-web" />
-                </FormField>
-                <FormField label="Release version" hint="Optional; enables release comparison and error context.">
-                  <Input value={version} onChange={(e) => setVersion(e.target.value)} placeholder="2026.08.27" />
-                </FormField>
-                <FormField label="Session sample rate" error={samplingError} hint="Deterministic per-session sampling; errors are retained.">
-                  <div className="relative">
-                    <Input type="number" min={1} max={100} step={1} value={sampleRate}
-                      onChange={(e) => setSampleRate(e.target.value)} className="pr-8" />
-                    <span className="pointer-events-none absolute right-3 top-2 text-sm text-muted">%</span>
-                  </div>
-                </FormField>
-                <FormField label="Session replay (not enabled)" error={replaySamplingError}
-                  hint="Replay requires a separate privacy-reviewed capture and storage pipeline. This SDK advertises replay as unavailable.">
-                  <div className="relative">
-                    <Input type="number" min={0} max={0} step={1} value={replaySampleRate}
-                      onChange={(e) => setReplaySampleRate(e.target.value)} className="pr-8" disabled />
-                    <span className="pointer-events-none absolute right-3 top-2 text-sm text-muted">%</span>
-                  </div>
-                </FormField>
-                <FormField label="Consent at startup" hint="Pending sends nothing until ZenPlusRUM.grantConsent() is called.">
-                  <Select value={consent} onValueChange={(value) => setConsent(value as 'granted' | 'pending')}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="granted">Granted</SelectItem>
-                      <SelectItem value="pending">Pending consent</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </FormField>
-                <FormField label="Privacy mode" hint="Input values are never collected; strict mode minimizes user context.">
-                  <Select value={privacy} onValueChange={(value) => setPrivacy(value as 'mask-user-input' | 'strict')}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="mask-user-input">Mask user input</SelectItem>
-                      <SelectItem value="strict">Strict minimization</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </FormField>
-              </div>
-
-              <div className="grid gap-2 sm:grid-cols-2">
-                <label className="flex items-center justify-between gap-3 rounded-md border border-border bg-surface px-3 py-2">
-                  <span><span className="block text-sm text-text">User actions</span><span className="block text-xs text-muted">Clicks and interaction timing</span></span>
-                  <Switch checked={trackActions} onCheckedChange={setTrackActions} aria-label="Track user actions" />
-                </label>
-                <label className="flex items-center justify-between gap-3 rounded-md border border-border bg-surface px-3 py-2">
-                  <span><span className="block text-sm text-text">Long tasks</span><span className="block text-xs text-muted">Main-thread blocking over 50 ms</span></span>
-                  <Switch checked={trackLongTasks} onCheckedChange={setTrackLongTasks} aria-label="Track long tasks" />
-                </label>
-              </div>
-            </div>
+            <RumConfigFields state={rumForm} set={setRum} errors={errors} />
           )}
         </div>
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button disabled={!name.trim() || create.isPending || (kind === 'rum' && (
-            !!originError || !!applicationError || !serviceName.trim() || !!samplingError || !!replaySamplingError
+            !!originError || !!applicationError || !rumForm.serviceName.trim() || !!errors.sampling || !!errors.replaySampling
           ))} onClick={() => create.mutate()}>
             {create.isPending && <Loader2 className="w-4 h-4 mr-1 animate-spin" />}
             Create {kind === 'rum' ? 'RUM key' : 'SDK key'}
@@ -955,24 +869,187 @@ function htmlAttribute(value: string): string {
   return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
 }
 
-function buildRumSnippet(value: CreatedKeyConfig): string {
-  const options = value.rum
-  if (!options) return ''
+function buildRumSnippet(key: string, applicationId: string | null, options: RumSdkOptions | null): string {
+  if (!options || !key) return ''
   const attributes = [
     ['src', `${window.location.origin}/api/v1/apm/rum/sdk.js`],
-    ['data-key', value.key],
-    ['data-app', options.applicationId],
-    ['data-service', options.serviceName],
+    ['data-key', key],
+    ['data-app', applicationId ?? ''],
+    ['data-service', options.service_name],
     ...(options.version ? [['data-version', options.version]] : []),
-    ['data-sample-rate', String(options.sampleRatePercent / 100)],
-    ['data-track-actions', String(options.trackActions)],
-    ['data-track-long-tasks', String(options.trackLongTasks)],
+    ['data-sample-rate', String(options.sample_rate_percent / 100)],
+    ['data-track-actions', String(options.track_actions)],
+    ['data-track-long-tasks', String(options.track_long_tasks)],
     ['data-consent', options.consent],
     ['data-privacy', options.privacy],
-    ['data-replay-sample-rate', String(options.replaySampleRatePercent / 100)],
+    ['data-replay-sample-rate', String(options.replay_sample_rate_percent / 100)],
     ['crossorigin', 'anonymous'],
   ]
   return `<script\n${attributes.map(([name, attributeValue]) => `  ${name}="${htmlAttribute(attributeValue)}"`).join('\n')}\n  defer><\/script>`
+}
+
+/* ─── Shared RUM configuration form ─────────────────────────────────────── */
+
+interface RumFormState {
+  applicationId: string
+  origins: string
+  serviceName: string
+  version: string
+  sampleRate: string
+  replaySampleRate: string
+  trackActions: boolean
+  trackLongTasks: boolean
+  consent: 'granted' | 'pending'
+  privacy: 'mask-user-input' | 'strict'
+}
+
+function emptyRumForm(): RumFormState {
+  return {
+    applicationId: 'web-app',
+    origins: '',
+    serviceName: 'web-frontend',
+    version: '',
+    sampleRate: '100',
+    replaySampleRate: '0',
+    trackActions: true,
+    trackLongTasks: true,
+    consent: 'granted',
+    privacy: 'mask-user-input',
+  }
+}
+
+function rumFormFromKey(k: IngestKey): RumFormState {
+  const o = k.rum_options
+  return {
+    applicationId: k.application_id ?? '',
+    origins: (k.origin_allowlist ?? []).join('\n'),
+    serviceName: o?.service_name ?? k.application_id ?? '',
+    version: o?.version ?? '',
+    sampleRate: String(o?.sample_rate_percent ?? 100),
+    replaySampleRate: String(o?.replay_sample_rate_percent ?? 0),
+    trackActions: o?.track_actions ?? true,
+    trackLongTasks: o?.track_long_tasks ?? true,
+    consent: o?.consent ?? 'granted',
+    privacy: o?.privacy ?? 'mask-user-input',
+  }
+}
+
+function rumFormErrors(s: RumFormState) {
+  const parsed = parseRumOrigins(s.origins)
+  const sampleRateNumber = Number(s.sampleRate)
+  const replayRateNumber = Number(s.replaySampleRate)
+  return {
+    parsedOrigins: parsed,
+    origin: !s.origins.trim() ? 'Add at least one exact HTTP(S) browser origin.' : parsed.error,
+    application: !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(s.applicationId.trim())
+      ? 'Use 1–128 letters, numbers, dots, underscores, or hyphens.'
+      : null,
+    sampling: !Number.isFinite(sampleRateNumber) || sampleRateNumber < 1 || sampleRateNumber > 100
+      ? 'Session sampling must be between 1% and 100%.'
+      : null,
+    replaySampling: !Number.isFinite(replayRateNumber) || replayRateNumber !== 0
+      ? 'Session replay capture and storage are not enabled in this release; keep this at 0%.'
+      : null,
+    sampleRateNumber,
+    replayRateNumber,
+  }
+}
+
+function rumOptionsPayload(s: RumFormState, e: ReturnType<typeof rumFormErrors>): RumSdkOptions {
+  return {
+    service_name: s.serviceName.trim() || s.applicationId.trim(),
+    version: s.version.trim(),
+    sample_rate_percent: e.sampleRateNumber,
+    replay_sample_rate_percent: e.replayRateNumber,
+    track_actions: s.trackActions,
+    track_long_tasks: s.trackLongTasks,
+    consent: s.consent,
+    privacy: s.privacy,
+  }
+}
+
+function RumConfigFields({ state, set, errors }: {
+  state: RumFormState
+  set: (patch: Partial<RumFormState>) => void
+  errors: ReturnType<typeof rumFormErrors>
+}) {
+  return (
+    <div className="space-y-4 rounded-lg border border-border bg-surface2/30 p-4">
+      <div>
+        <div className="text-sm font-medium text-text">Browser application scope</div>
+        <p className="mt-0.5 text-xs text-muted">
+          A public browser key is accepted only for this application and these exact origins.
+        </p>
+      </div>
+      <FormField label="Application ID" required error={errors.application}
+        hint="A stable identifier used by filters and application-level key enforcement.">
+        <Input value={state.applicationId} onChange={(e) => set({ applicationId: e.target.value })}
+          placeholder="customer-portal" autoComplete="off" />
+      </FormField>
+      <FormField label="Allowed browser origins" required error={errors.origin}
+        hint="One per line or comma-separated. A trailing slash is normalized; paths and wildcards are rejected.">
+        <textarea
+          className="min-h-20 w-full rounded-md border border-border bg-surface px-3 py-2 text-sm text-text outline-none placeholder:text-muted focus:border-primary focus:ring-2 focus:ring-primary/20"
+          value={state.origins}
+          onChange={(e) => set({ origins: e.target.value })}
+          placeholder={'https://portal.example.com\nhttp://192.168.8.19:8080'}
+        />
+      </FormField>
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <FormField label="Frontend service name" required hint="Used for frontend-to-backend trace pivots.">
+          <Input value={state.serviceName} onChange={(e) => set({ serviceName: e.target.value })} placeholder="customer-portal-web" />
+        </FormField>
+        <FormField label="Release version" hint="Optional; enables release comparison and error context.">
+          <Input value={state.version} onChange={(e) => set({ version: e.target.value })} placeholder="2026.08.27" />
+        </FormField>
+        <FormField label="Session sample rate" error={errors.sampling} hint="Deterministic per-session sampling; errors are retained.">
+          <div className="relative">
+            <Input type="number" min={1} max={100} step={1} value={state.sampleRate}
+              onChange={(e) => set({ sampleRate: e.target.value })} className="pr-8" />
+            <span className="pointer-events-none absolute right-3 top-2 text-sm text-muted">%</span>
+          </div>
+        </FormField>
+        <FormField label="Session replay (not enabled)" error={errors.replaySampling}
+          hint="Replay requires a separate privacy-reviewed capture and storage pipeline. This SDK advertises replay as unavailable.">
+          <div className="relative">
+            <Input type="number" min={0} max={0} step={1} value={state.replaySampleRate}
+              onChange={(e) => set({ replaySampleRate: e.target.value })} className="pr-8" disabled />
+            <span className="pointer-events-none absolute right-3 top-2 text-sm text-muted">%</span>
+          </div>
+        </FormField>
+        <FormField label="Consent at startup" hint="Pending sends nothing until ZenPlusRUM.grantConsent() is called.">
+          <Select value={state.consent} onValueChange={(value) => set({ consent: value as 'granted' | 'pending' })}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="granted">Granted</SelectItem>
+              <SelectItem value="pending">Pending consent</SelectItem>
+            </SelectContent>
+          </Select>
+        </FormField>
+        <FormField label="Privacy mode" hint="Input values are never collected; strict mode minimizes user context.">
+          <Select value={state.privacy} onValueChange={(value) => set({ privacy: value as 'mask-user-input' | 'strict' })}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="mask-user-input">Mask user input</SelectItem>
+              <SelectItem value="strict">Strict minimization</SelectItem>
+            </SelectContent>
+          </Select>
+        </FormField>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className="flex items-center justify-between gap-3 rounded-md border border-border bg-surface px-3 py-2">
+          <span><span className="block text-sm text-text">User actions</span><span className="block text-xs text-muted">Clicks and interaction timing</span></span>
+          <Switch checked={state.trackActions} onCheckedChange={(v) => set({ trackActions: v })} aria-label="Track user actions" />
+        </label>
+        <label className="flex items-center justify-between gap-3 rounded-md border border-border bg-surface px-3 py-2">
+          <span><span className="block text-sm text-text">Long tasks</span><span className="block text-xs text-muted">Main-thread blocking over 50 ms</span></span>
+          <Switch checked={state.trackLongTasks} onCheckedChange={(v) => set({ trackLongTasks: v })} aria-label="Track long tasks" />
+        </label>
+      </div>
+    </div>
+  )
 }
 
 function CopyOnceDialog({ value, lastUsedAt = null, onClose }: {
@@ -983,15 +1060,17 @@ function CopyOnceDialog({ value, lastUsedAt = null, onClose }: {
   const [copied, setCopied] = useState<'key' | 'snippet' | null>(null)
   const created = typeof value === 'string' ? null : value
   const plaintext = typeof value === 'string' ? value : value?.key ?? ''
-  const isRum = created?.kind === 'rum' && !!created.rum
-  const snippet = created && isRum ? buildRumSnippet(created) : ''
-  const copy = (text: string, target: 'key' | 'snippet') => {
-    if (text) {
-      navigator.clipboard?.writeText(text)
-      setCopied(target)
-      window.setTimeout(() => setCopied(null), 1500)
-      toast.success(target === 'snippet' ? 'Installation snippet copied' : 'Key copied to clipboard')
+  const isRum = created?.kind === 'rum' && !!created.rum_options
+  const snippet = created && isRum ? buildRumSnippet(plaintext, created.application_id, created.rum_options) : ''
+  const copy = async (text: string, target: 'key' | 'snippet') => {
+    if (!text) return
+    if (!(await copyText(text))) {
+      toast.error('Could not copy', 'The browser blocked clipboard access — select the text and copy manually.')
+      return
     }
+    setCopied(target)
+    window.setTimeout(() => setCopied(null), 1500)
+    toast.success(target === 'snippet' ? 'Installation snippet copied' : 'Key copied to clipboard')
   }
   return (
     <Dialog open={!!value} onOpenChange={(o) => { if (!o) { setCopied(null); onClose() } }}>
@@ -1001,17 +1080,24 @@ function CopyOnceDialog({ value, lastUsedAt = null, onClose }: {
           <DialogDescription>
             {isRum
               ? <>Add this tag before <code className="rounded bg-surface2 px-1">&lt;/head&gt;</code> on every page. The public key is protected by its exact origin allowlist and application binding.</>
-              : <>Copy this key now — for security it is shown <strong>only once</strong> and cannot be retrieved again.</>}
+              : <>Copy this key now — a secret collector key is stored hashed and <strong>cannot be retrieved again</strong>.</>}
           </DialogDescription>
         </DialogHeader>
         {isRum && (
           <>
-            <div className="relative mt-3">
-              <pre className="max-h-72 overflow-auto rounded-md border border-border bg-surface2/60 p-3 pr-12 text-xs leading-relaxed text-text"><code>{snippet}</code></pre>
-              <Button className="absolute right-2 top-2" variant="outline" size="sm"
-                onClick={() => copy(snippet, 'snippet')} aria-label="Copy installation snippet">
-                {copied === 'snippet' ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-              </Button>
+            <div className="mt-3">
+              <div className="mb-1.5 flex items-center justify-between gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+                  Install snippet — paste before &lt;/head&gt;
+                </span>
+                <Button variant="outline" size="sm" className="h-7 shrink-0"
+                  onClick={() => copy(snippet, 'snippet')} aria-label="Copy installation snippet">
+                  {copied === 'snippet'
+                    ? <><Check className="h-3.5 w-3.5" /> Copied</>
+                    : <><Copy className="h-3.5 w-3.5" /> Copy snippet</>}
+                </Button>
+              </div>
+              <pre className="max-h-72 overflow-auto rounded-md border border-border bg-surface2/60 p-3 text-xs leading-relaxed text-text"><code>{snippet}</code></pre>
             </div>
             <div className={`mt-3 rounded-md border px-3 py-2 text-sm ${lastUsedAt
               ? 'border-success/30 bg-success/10 text-success'
@@ -1041,6 +1127,268 @@ function CopyOnceDialog({ value, lastUsedAt = null, onClose }: {
         </details>
         <DialogFooter>
           <Button onClick={() => { setCopied(null); onClose() }}>{lastUsedAt ? 'Done' : isRum ? 'I’ll verify later' : 'Done'}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/* ─── View key details ──────────────────────────────────────────────────── */
+
+/**
+ * Re-opens everything an operator saw at creation time. A browser RUM key is public
+ * by construction — it ships inside every page's HTML — so it is stored recoverably
+ * and shown again here with its install snippet. A secret collector key is stored as
+ * a hash alone and genuinely cannot be reproduced; this dialog says so instead of
+ * pretending otherwise.
+ */
+function KeyDetailsDialog({ keyRow, onClose, onEdit }: {
+  keyRow: IngestKey | null
+  onClose: () => void
+  onEdit: (k: IngestKey) => void
+}) {
+  const [copied, setCopied] = useState<'key' | 'snippet' | null>(null)
+  const isRum = keyRow?.kind === 'rum'
+  const canReveal = !!keyRow && isRum && keyRow.key_recoverable
+
+  const reveal = useQuery<{ id: string; key: string }>({
+    queryKey: ['apm', 'ingest-key-reveal', keyRow?.id],
+    queryFn: async () => (await api.get(`/apm/ingest-keys/${keyRow!.id}/reveal`)).data,
+    enabled: !!keyRow && canReveal,
+    staleTime: 5 * 60_000,
+    retry: false,
+  })
+
+  const plaintext = reveal.data?.key ?? ''
+  const snippet = keyRow && plaintext ? buildRumSnippet(plaintext, keyRow.application_id, keyRow.rum_options) : ''
+  const copy = async (text: string, target: 'key' | 'snippet') => {
+    if (!text) return
+    if (!(await copyText(text))) {
+      toast.error('Could not copy', 'The browser blocked clipboard access — select the text and copy manually.')
+      return
+    }
+    setCopied(target)
+    window.setTimeout(() => setCopied(null), 1500)
+    toast.success(target === 'snippet' ? 'Installation snippet copied' : 'Key copied to clipboard')
+  }
+
+  const o = keyRow?.rum_options
+  const rows: Array<{ label: string; value: React.ReactNode }> = keyRow ? [
+    { label: 'Name', value: keyRow.name },
+    { label: 'Type', value: keyRow.kind === 'rum' ? 'Browser RUM (public)' : 'SDK / Collector (secret)' },
+    { label: 'Environment', value: keyRow.env ?? 'all environments' },
+    { label: 'Key prefix', value: <code className="font-mono text-xs">{keyRow.key_prefix}…</code> },
+    { label: 'Status', value: keyRow.revoked_at || !keyRow.enabled ? 'Revoked' : 'Active' },
+    { label: 'Created', value: new Date(keyRow.created_at).toLocaleString() },
+    { label: 'Last used', value: keyRow.last_used_at ? relativeTime(keyRow.last_used_at) : 'never used' },
+    ...(isRum ? [
+      { label: 'Application ID', value: <code className="font-mono text-xs">{keyRow.application_id || 'legacy / unbound'}</code> },
+      {
+        label: 'Allowed origins',
+        value: (keyRow.origin_allowlist ?? []).length
+          ? <div className="space-y-0.5">{keyRow.origin_allowlist.map((x) => <div key={x} className="font-mono text-xs">{x}</div>)}</div>
+          : 'none',
+      },
+    ] : []),
+    ...(o ? [
+      { label: 'Service name', value: <code className="font-mono text-xs">{o.service_name}</code> },
+      { label: 'Release version', value: o.version || '—' },
+      { label: 'Session sampling', value: `${o.sample_rate_percent}%` },
+      { label: 'Session replay', value: `${o.replay_sample_rate_percent}% (not enabled)` },
+      { label: 'User actions', value: o.track_actions ? 'Tracked' : 'Off' },
+      { label: 'Long tasks', value: o.track_long_tasks ? 'Tracked' : 'Off' },
+      { label: 'Consent at startup', value: o.consent === 'granted' ? 'Granted' : 'Pending consent' },
+      { label: 'Privacy mode', value: o.privacy === 'strict' ? 'Strict minimization' : 'Mask user input' },
+    ] : []),
+  ] : []
+
+  return (
+    <Dialog open={!!keyRow} onOpenChange={(open) => { if (!open) { setCopied(null); onClose() } }}>
+      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{keyRow?.name}</DialogTitle>
+          <DialogDescription>
+            {isRum
+              ? 'Full configuration and the install snippet for this browser RUM key.'
+              : 'Full configuration for this collector key.'}
+          </DialogDescription>
+        </DialogHeader>
+
+        {isRum && (
+          <div className="mt-1">
+            {reveal.isLoading ? (
+              <div className="flex items-center gap-2 rounded-md border border-border bg-surface2/40 px-3 py-4 text-sm text-muted">
+                <Loader2 className="h-4 w-4 animate-spin" /> Loading install snippet…
+              </div>
+            ) : !canReveal || reveal.isError ? (
+              <div className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+                {reveal.isError
+                  ? apiErrorMessage(reveal.error)
+                  : 'This key was issued before keys were stored recoverably, so its snippet cannot be rebuilt. Create a replacement key and revoke this one.'}
+              </div>
+            ) : !keyRow?.rum_options ? (
+              <div className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
+                This key predates stored SDK settings, so only the key itself can be shown — the sampling and privacy
+                options it was installed with are unknown. Use Edit to record them.
+              </div>
+            ) : (
+              <>
+                <div className="mb-1.5 flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+                    Install snippet — paste before &lt;/head&gt;
+                  </span>
+                  <Button variant="outline" size="sm" className="h-7 shrink-0"
+                    onClick={() => copy(snippet, 'snippet')} aria-label="Copy installation snippet">
+                    {copied === 'snippet'
+                      ? <><Check className="h-3.5 w-3.5" /> Copied</>
+                      : <><Copy className="h-3.5 w-3.5" /> Copy snippet</>}
+                  </Button>
+                </div>
+                <pre className="max-h-72 overflow-auto rounded-md border border-border bg-surface2/60 p-3 text-xs leading-relaxed text-text"><code>{snippet}</code></pre>
+                <p className="mt-2 text-xs text-muted">
+                  Add this tag before <code className="rounded bg-surface2 px-1">&lt;/head&gt;</code> on every page. If your site
+                  uses Content Security Policy, allow <code className="rounded bg-surface2 px-1">{window.location.origin}</code> in
+                  both <code className="rounded bg-surface2 px-1">script-src</code> and <code className="rounded bg-surface2 px-1">connect-src</code>.
+                </p>
+              </>
+            )}
+          </div>
+        )}
+
+        <dl className="mt-3 divide-y divide-border/60 rounded-md border border-border">
+          {rows.map((r) => (
+            <div key={r.label} className="grid grid-cols-[150px_1fr] gap-3 px-3 py-2">
+              <dt className="text-xs text-muted">{r.label}</dt>
+              <dd className="min-w-0 break-words text-xs text-text">{r.value}</dd>
+            </div>
+          ))}
+        </dl>
+
+        {canReveal && plaintext && (
+          <div className="mt-3 rounded-md border border-border px-3 py-2.5">
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+                Public key — for a config file or env var
+              </span>
+              <Button variant="outline" size="sm" className="h-7 shrink-0"
+                onClick={() => copy(plaintext, 'key')} aria-label="Copy key">
+                {copied === 'key'
+                  ? <><Check className="h-3.5 w-3.5" /> Copied</>
+                  : <><Copy className="h-3.5 w-3.5" /> Copy key</>}
+              </Button>
+            </div>
+            <code className="block break-all rounded-md bg-surface2 px-3 py-2 font-mono text-sm text-text">{plaintext}</code>
+          </div>
+        )}
+
+        {!isRum && (
+          <p className="mt-3 rounded-md border border-border bg-surface2/40 px-3 py-2 text-xs text-muted">
+            A collector key is secret and is stored only as a hash, so its value cannot be shown again. If it was lost,
+            create a replacement key and revoke this one.
+          </p>
+        )}
+
+        <DialogFooter>
+          {keyRow && !keyRow.revoked_at && keyRow.enabled && (
+            <Button variant="outline" onClick={() => { onClose(); onEdit(keyRow) }}>
+              <Pencil className="h-4 w-4 mr-1" /> Edit
+            </Button>
+          )}
+          {snippet && (
+            <Button onClick={() => copy(snippet, 'snippet')}>
+              {copied === 'snippet'
+                ? <><Check className="h-4 w-4 mr-1" /> Copied</>
+                : <><Copy className="h-4 w-4 mr-1" /> Copy snippet</>}
+            </Button>
+          )}
+          <Button variant={snippet ? 'outline' : 'default'} onClick={() => { setCopied(null); onClose() }}>Close</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/* ─── Edit key ──────────────────────────────────────────────────────────── */
+
+function EditKeyDialog({ keyRow, onClose }: { keyRow: IngestKey | null; onClose: () => void }) {
+  const qc = useQueryClient()
+  const [name, setName] = useState('')
+  const [env, setEnv] = useState<string>('')
+  const [rumForm, setRumForm] = useState<RumFormState>(emptyRumForm)
+  const setRum = (patch: Partial<RumFormState>) => setRumForm((s) => ({ ...s, ...patch }))
+  const isRum = keyRow?.kind === 'rum'
+
+  useEffect(() => {
+    if (!keyRow) return
+    setName(keyRow.name)
+    setEnv(keyRow.env ?? '')
+    setRumForm(rumFormFromKey(keyRow))
+  }, [keyRow])
+
+  const envs = useQuery<Environment[]>({
+    queryKey: ['apm', 'environments'],
+    queryFn: async () => (await api.get('/apm/environments')).data,
+    enabled: !!keyRow,
+  })
+
+  const errors = useMemo(() => rumFormErrors(rumForm), [rumForm])
+
+  const save = useMutation({
+    mutationFn: async () => {
+      const body: Record<string, unknown> = { name: name.trim() }
+      if (env) body.env = env
+      if (isRum) {
+        body.origin_allowlist = errors.parsedOrigins.origins
+        body.application_id = rumForm.applicationId.trim()
+        body.rum_options = rumOptionsPayload(rumForm, errors)
+      }
+      return (await api.patch(`/apm/ingest-keys/${keyRow!.id}`, body)).data
+    },
+    onSuccess: () => {
+      toast.success('Ingest key updated', isRum ? 'Re-copy the snippet if sampling or privacy changed.' : undefined)
+      qc.invalidateQueries({ queryKey: ['apm', 'ingest-keys'] })
+      qc.invalidateQueries({ queryKey: ['apm', 'ingest-key-reveal'] })
+      onClose()
+    },
+    onError: (e: any) => toast.error('Could not update key', apiErrorMessage(e)),
+  })
+
+  const blocked = !name.trim() || save.isPending || (isRum && (
+    !!errors.origin || !!errors.application || !rumForm.serviceName.trim() || !!errors.sampling || !!errors.replaySampling
+  ))
+
+  return (
+    <Dialog open={!!keyRow} onOpenChange={(open) => { if (!open) onClose() }}>
+      <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Edit ingest key</DialogTitle>
+          <DialogDescription>
+            The key value itself never changes — only its scope and settings. Editing origins or the application
+            binding takes effect within seconds; changing SDK settings requires re-copying the snippet.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <FormField label="Name" required>
+            <Input value={name} onChange={(e) => setName(e.target.value)} />
+          </FormField>
+          <FormField label="Environment">
+            <Select value={env} onValueChange={setEnv}>
+              <SelectTrigger><SelectValue placeholder="all environments" /></SelectTrigger>
+              <SelectContent>
+                {(envs.data ?? []).map((e) => (
+                  <SelectItem key={e.id} value={e.name}>{e.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </FormField>
+          {isRum && <RumConfigFields state={rumForm} set={setRum} errors={errors} />}
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button disabled={blocked} onClick={() => save.mutate()}>
+            {save.isPending && <Loader2 className="w-4 h-4 mr-1 animate-spin" />}
+            Save changes
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
