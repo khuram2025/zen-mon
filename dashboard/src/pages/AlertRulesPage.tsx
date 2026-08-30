@@ -97,8 +97,9 @@ export function AlertRulesPage() {
             Alert Manager
           </h1>
           <p className="mt-1 max-w-2xl text-xs text-muted">
-            Define trigger conditions, reset behavior, notification actions, and schedules —
-            SolarWinds-style alert definitions for devices, services, and SNMP traps.
+            Define trigger conditions, reset behavior, notification actions, SLA escalation
+            tiers, and schedules — professional alert definitions for devices, services,
+            applications, and SNMP traps.
           </p>
         </div>
         <Button onClick={() => { setEditing(null); setFormOpen(true) }}>
@@ -167,6 +168,11 @@ export function AlertRulesPage() {
                         <span className="text-emerald-600">Auto + notify</span>
                       ) : (
                         <span>Silent</span>
+                      )}
+                      {Array.isArray(r.escalation_levels) && r.escalation_levels.length > 0 && (
+                        <div className="mt-0.5 text-[10px] font-medium text-amber-600">
+                          {r.escalation_levels.length} escalation level{r.escalation_levels.length > 1 ? 's' : ''}
+                        </div>
                       )}
                     </Td>
                     <Td className="text-xs text-muted">{relativeTime(r.created_at)}</Td>

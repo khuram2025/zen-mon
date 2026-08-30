@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  ChevronsUp,
   Clock,
   Copy,
   Eye,
@@ -42,6 +43,11 @@ import { useTags, tagColor, tagColorMap } from '@/hooks/useTags'
 
 type Cond = { metric: string; operator: string; threshold: number }
 
+// One SLA escalation tier: if the alert is still active and unacknowledged
+// after_minutes after triggering, page notify_channels. repeat_every_minutes
+// re-pages the tier on that cadence until ack/resolve (null = no repeat).
+type EscLevel = { after_minutes: number; notify_channels: string[]; repeat_every_minutes: number | null }
+
 type WizardState = {
   name: string
   description: string
@@ -66,6 +72,7 @@ type WizardState = {
   notify_channels: string[]
   cooldown: number
   max_repeat: number
+  escalation_levels: EscLevel[]
   schedule_start: string
   schedule_end: string
   schedule_days: number[]
@@ -83,6 +90,7 @@ const STEPS = [
   { id: 'reset', label: 'Reset', icon: RotateCcw },
   { id: 'scope', label: 'Scope', icon: Target },
   { id: 'actions', label: 'Trigger Actions', icon: Bell },
+  { id: 'escalation', label: 'Escalation', icon: ChevronsUp },
   { id: 'reset_actions', label: 'Reset Actions', icon: CheckCircle2 },
   { id: 'schedule', label: 'Schedule', icon: Clock },
   { id: 'review', label: 'Review', icon: Eye },
@@ -180,6 +188,7 @@ const DEFAULT_STATE: WizardState = {
   notify_channels: [],
   cooldown: 300,
   max_repeat: 0,
+  escalation_levels: [],
   schedule_start: '',
   schedule_end: '',
   schedule_days: [],
@@ -236,6 +245,13 @@ function ruleToState(rule: any): WizardState {
     notify_channels: Array.isArray(rule.notify_channels) ? rule.notify_channels : [],
     cooldown: rule.cooldown ?? 300,
     max_repeat: rule.max_repeat ?? 0,
+    escalation_levels: Array.isArray(rule.escalation_levels)
+      ? rule.escalation_levels.map((lv: any) => ({
+          after_minutes: lv.after_minutes ?? 15,
+          notify_channels: Array.isArray(lv.notify_channels) ? lv.notify_channels : [],
+          repeat_every_minutes: lv.repeat_every_minutes ?? null,
+        }))
+      : [],
     schedule_start: rule.schedule_start || '',
     schedule_end: rule.schedule_end || '',
     schedule_days: Array.isArray(rule.schedule_days) ? rule.schedule_days : [],
@@ -288,6 +304,13 @@ function stateToPayload(s: WizardState) {
     service_check_id: isService ? s.service_check_id || null : null,
     service_check_group_id: isService ? s.service_check_group_id || null : null,
     notify_channels: s.notify_channels,
+    escalation_levels: s.escalation_levels.length
+      ? s.escalation_levels.map((lv) => ({
+          after_minutes: lv.after_minutes,
+          notify_channels: lv.notify_channels,
+          repeat_every_minutes: lv.repeat_every_minutes || null,
+        }))
+      : null,
     schedule_start: s.schedule_start || null,
     schedule_end: s.schedule_end || null,
     schedule_days: s.schedule_days.length ? s.schedule_days : null,
@@ -409,10 +432,14 @@ export function AlertRuleWizardDialog({
   const previewMut = useMutation({
     mutationFn: async () => {
       if (isEdit) return (await api.post(`/alert-rules/${rule.id}/preview`)).data
+      // No id yet: preview via a disabled throwaway rule, deleted even when
+      // the preview call fails (it used to leak into the rules list).
       const created = (await api.post('/alert-rules', { ...stateToPayload(s), enabled: false })).data
-      const data = (await api.post(`/alert-rules/${created.id}/preview`)).data
-      await api.delete(`/alert-rules/${created.id}`)
-      return data
+      try {
+        return (await api.post(`/alert-rules/${created.id}/preview`)).data
+      } finally {
+        await api.delete(`/alert-rules/${created.id}`).catch(() => {})
+      }
     },
     onSuccess: (data) => setPreview(data),
     onError: (e: any) => toast.error('Preview failed', apiErrorMessage(e)),
@@ -443,6 +470,38 @@ export function AlertRuleWizardDialog({
         ? st.notify_channels.filter((c) => c !== id)
         : [...st.notify_channels, id],
     }))
+  const updateEsc = (i: number, patch: Partial<EscLevel>) =>
+    setS((st) => ({
+      ...st,
+      escalation_levels: st.escalation_levels.map((lv, idx) => (idx === i ? { ...lv, ...patch } : lv)),
+    }))
+  const toggleEscChannel = (i: number, id: string) =>
+    setS((st) => ({
+      ...st,
+      escalation_levels: st.escalation_levels.map((lv, idx) =>
+        idx === i
+          ? {
+              ...lv,
+              notify_channels: lv.notify_channels.includes(id)
+                ? lv.notify_channels.filter((c) => c !== id)
+                : [...lv.notify_channels, id],
+            }
+          : lv,
+      ),
+    }))
+  const addEscLevel = () =>
+    setS((st) => {
+      const last = st.escalation_levels[st.escalation_levels.length - 1]
+      return {
+        ...st,
+        escalation_levels: [
+          ...st.escalation_levels,
+          { after_minutes: last ? last.after_minutes * 2 : 15, notify_channels: [], repeat_every_minutes: null },
+        ],
+      }
+    })
+  const removeEscLevel = (i: number) =>
+    setS((st) => ({ ...st, escalation_levels: st.escalation_levels.filter((_, idx) => idx !== i) }))
   const toggleDay = (n: number) =>
     setS((st) => ({
       ...st,
@@ -481,8 +540,40 @@ export function AlertRuleWizardDialog({
       setStep('properties')
       return
     }
+    // A scope mode was chosen but nothing selected — saving now would silently
+    // apply the rule to every device, which is never what was meant.
+    const scopeEmpty =
+      (scopeMode === 'device' && !s.device_id) ||
+      (scopeMode === 'group' && !s.group_id) ||
+      (scopeMode === 'type' && !s.device_type) ||
+      (scopeMode === 'location' && !s.location) ||
+      (scopeMode === 'tag' && !s.scope_tag)
+    if (!isService && s.source !== 'apm' && scopeEmpty) {
+      toast.error('Scope incomplete', `Select a ${scopeMode === 'type' ? 'device type' : scopeMode}, or choose "All devices".`)
+      setStep('scope')
+      return
+    }
+    for (let i = 0; i < s.escalation_levels.length; i++) {
+      const lv = s.escalation_levels[i]
+      if (!lv.notify_channels.length) {
+        toast.error(`Escalation level ${i + 1} has no channels`, 'Pick at least one channel or remove the level.')
+        setStep('escalation')
+        return
+      }
+      if (!(lv.after_minutes >= 1)) {
+        toast.error(`Escalation level ${i + 1} needs a delay of at least 1 minute`)
+        setStep('escalation')
+        return
+      }
+      if (i > 0 && lv.after_minutes <= s.escalation_levels[i - 1].after_minutes) {
+        toast.error('Escalation delays must increase', `Level ${i + 1} must fire later than level ${i}.`)
+        setStep('escalation')
+        return
+      }
+    }
     save.mutate(stateToPayload(s))
   }
+  const isService = s.source === 'service'
 
   if (!open) return null
 
@@ -614,7 +705,7 @@ export function AlertRuleWizardDialog({
 
                 {s.source === 'device' && (
                   <>
-                    {(s.conditions[0]?.metric === 'ping_status' || s.source === 'device') && (
+                    {s.conditions.some((c) => c.metric === 'ping_status') && (
                       <FormField label="Status transition" hint="For ping/status rules — when device changes state">
                         <Select value={s.trigger_on} onValueChange={(v: any) => setS({ ...s, trigger_on: v })}>
                           <SelectTrigger><SelectValue /></SelectTrigger>
@@ -909,10 +1000,10 @@ export function AlertRuleWizardDialog({
                   })}
                 </div>
                 <div className="grid grid-cols-2 gap-3">
-                  <FormField label="Cooldown (seconds)" hint="Min gap between repeat fires">
+                  <FormField label="Cooldown (seconds)" hint="Anti-flap: after a notification goes out, repeat triggers for the same object stay quiet this long">
                     <Input type="number" min={0} value={s.cooldown} onChange={(e) => setS({ ...s, cooldown: Number(e.target.value) })} />
                   </FormField>
-                  <FormField label="Max repeat" hint="0 = unlimited">
+                  <FormField label="Max escalation repeats" hint="Cap on repeat pages from an escalation level (0 = unlimited)">
                     <Input type="number" min={0} value={s.max_repeat} onChange={(e) => setS({ ...s, max_repeat: Number(e.target.value) })} />
                   </FormField>
                 </div>
@@ -931,6 +1022,80 @@ export function AlertRuleWizardDialog({
                 <FormField label="SMS template">
                   <Textarea value={s.sms_template} onChange={(e) => setS({ ...s, sms_template: e.target.value })} rows={2} className="font-mono text-xs" placeholder={DEFAULTS.sms_template} />
                 </FormField>
+              </div>
+            )}
+
+            {step === 'escalation' && (
+              <div className="space-y-4">
+                <SectionTitle
+                  title="Escalation Policy"
+                  hint="SLA tiers: if the alert stays active and nobody acknowledges it, page the next level. Acknowledging the alert stops escalation; resolving sends an all-clear to every level that was paged."
+                />
+                <div className="rounded-lg border border-border bg-surface2/40 px-4 py-3 text-xs">
+                  <span className="font-semibold text-text">Immediately on trigger:</span>{' '}
+                  <span className="text-muted">
+                    {s.notify_channels.length
+                      ? `${s.notify_channels.length} trigger action channel${s.notify_channels.length > 1 ? 's' : ''} (previous step)`
+                      : 'no channels selected on the Trigger Actions step'}
+                  </span>
+                </div>
+                {s.escalation_levels.map((lv, i) => (
+                  <div key={i} className="space-y-3 rounded-lg border border-border/60 bg-surface2/30 p-4">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold uppercase tracking-wider text-primary">
+                        Escalation level {i + 1}
+                      </span>
+                      <Button type="button" variant="ghost" size="icon" className="h-7 w-7 text-muted hover:text-danger"
+                        onClick={() => removeEscLevel(i)}>
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                    <div className="flex items-center gap-2 text-sm">
+                      <span className="text-muted">If still unacknowledged after</span>
+                      <Input type="number" min={1} className="w-24" value={lv.after_minutes}
+                        onChange={(e) => updateEsc(i, { after_minutes: Number(e.target.value) })} />
+                      <span className="text-muted">minutes, notify:</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {channels.length === 0 ? (
+                        <p className="col-span-2 text-xs text-muted">
+                          No channels — <a href="/channels" className="text-primary hover:underline">create one</a>
+                        </p>
+                      ) : channels.map((c) => {
+                        const checked = lv.notify_channels.includes(c.id)
+                        return (
+                          <button key={c.id} type="button" onClick={() => toggleEscChannel(i, c.id)}
+                            className={cn('flex items-center justify-between rounded-lg border px-3 py-2 text-left text-xs', checked ? 'border-primary bg-primary/10' : 'border-border')}>
+                            <span><span className="font-medium">{c.name}</span> <span className="text-muted">{CHANNEL_TYPE_LABEL[c.type]}</span></span>
+                            {checked && <Check className="h-3.5 w-3.5 text-primary" />}
+                          </button>
+                        )
+                      })}
+                    </div>
+                    <div className="flex items-center gap-2 text-xs">
+                      <Switch
+                        checked={!!lv.repeat_every_minutes}
+                        onCheckedChange={(v) => updateEsc(i, { repeat_every_minutes: v ? Math.max(lv.after_minutes, 15) : null })}
+                      />
+                      <span className="text-muted">Repeat this level every</span>
+                      <Input type="number" min={1} className="w-20" disabled={!lv.repeat_every_minutes}
+                        value={lv.repeat_every_minutes ?? ''}
+                        onChange={(e) => updateEsc(i, { repeat_every_minutes: Number(e.target.value) || null })} />
+                      <span className="text-muted">minutes until acknowledged or resolved</span>
+                    </div>
+                  </div>
+                ))}
+                {s.escalation_levels.length < 4 && (
+                  <Button type="button" variant="outline" size="sm" onClick={addEscLevel}>
+                    <Plus className="h-3.5 w-3.5" />Add escalation level
+                  </Button>
+                )}
+                <p className="text-[11px] text-muted">
+                  Escalation emails and SMS state the level, how long the alert has been active, and
+                  that it is unacknowledged — e.g.&nbsp;
+                  <span className="font-mono text-text">[CRITICAL] Escalation L2: Core router down — core-router-01</span>.
+                  &quot;Max escalation repeats&quot; on the Trigger Actions step caps repeats.
+                </p>
               </div>
             )}
 
@@ -1002,6 +1167,12 @@ export function AlertRuleWizardDialog({
                 <ReviewRow label="Hold time" value={s.min_duration ? `${s.min_duration}s` : 'Immediate'} />
                 <ReviewRow label="Reset" value={s.reset_mode === 'auto' ? 'Auto + recovery notify' : 'No recovery notify'} />
                 <ReviewRow label="Channels" value={s.notify_channels.length ? `${s.notify_channels.length} selected` : 'None (alert only)'} />
+                <ReviewRow
+                  label="Escalation"
+                  value={s.escalation_levels.length
+                    ? `${s.escalation_levels.length} level${s.escalation_levels.length > 1 ? 's' : ''} (${s.escalation_levels.map((lv) => `${lv.after_minutes}m`).join(' → ')})`
+                    : 'None'}
+                />
                 <ReviewRow label="Enabled" value={s.enabled ? 'Yes' : 'No'} />
                 <div className="flex gap-2 pt-2">
                   <Button type="button" variant="outline" size="sm" onClick={() => previewMut.mutate()} disabled={previewMut.isPending}>

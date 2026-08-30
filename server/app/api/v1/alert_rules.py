@@ -65,6 +65,35 @@ class ConditionItem(BaseModel):
     threshold: float
 
 
+class EscalationLevel(BaseModel):
+    """One SLA escalation tier: if the alert is still active and unacknowledged
+    ``after_minutes`` after triggering, page ``notify_channels``. An optional
+    ``repeat_every_minutes`` re-pages this tier on that cadence until
+    ack/resolve (capped by the rule's max_repeat; 0 = unlimited)."""
+    after_minutes: int = Field(..., ge=1, le=10080)
+    notify_channels: list[str] = Field(..., min_length=1, max_length=20)
+    repeat_every_minutes: Optional[int] = Field(default=None, ge=1, le=1440)
+
+
+def _validated_escalation(levels: Optional[list[EscalationLevel]]) -> Optional[list[dict]]:
+    """Normalise and sanity-check escalation tiers; None when empty.
+
+    Tiers are stored sorted by deadline and must not share one — two tiers due
+    at the same minute is one tier with more channels, and the sweeper's
+    "highest due level wins" rule would silently swallow the lower one.
+    """
+    if not levels:
+        return None
+    if len(levels) > 5:
+        raise HTTPException(status_code=422, detail="At most 5 escalation levels")
+    out = sorted((lv.model_dump() for lv in levels), key=lambda lv: lv["after_minutes"])
+    deadlines = [lv["after_minutes"] for lv in out]
+    if len(set(deadlines)) != len(deadlines):
+        raise HTTPException(status_code=422,
+                            detail="Escalation levels must have distinct delays")
+    return out
+
+
 class AlertRuleCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
@@ -103,6 +132,9 @@ class AlertRuleCreate(BaseModel):
     cooldown: int = Field(default=300, ge=0)
     min_duration: int = Field(default=0, ge=0)
     max_repeat: int = Field(default=0, ge=0)
+
+    # SLA escalation tiers (see EscalationLevel). None/empty = no escalation.
+    escalation_levels: Optional[list[EscalationLevel]] = None
 
     schedule_start: Optional[str] = None  # HH:MM
     schedule_end: Optional[str] = None    # HH:MM
@@ -148,6 +180,8 @@ class AlertRuleUpdate(BaseModel):
     min_duration: Optional[int] = Field(None, ge=0)
     max_repeat: Optional[int] = Field(None, ge=0)
 
+    escalation_levels: Optional[list[EscalationLevel]] = None
+
     schedule_start: Optional[str] = None
     schedule_end: Optional[str] = None
     schedule_days: Optional[list[int]] = None
@@ -188,7 +222,8 @@ _RULE_COLUMNS = (
     "device_id, group_id, service_check_id, service_check_group_id, "
     "severity, notify_channels, cooldown, "
     "device_type, location, scope_tag, trigger_on, recovery_alert, "
-    "min_duration, max_repeat, schedule_start, schedule_end, schedule_days, "
+    "min_duration, max_repeat, escalation_levels, "
+    "schedule_start, schedule_end, schedule_days, "
     "email_subject, email_body, sms_template, "
     "recovery_email_subject, recovery_email_body, recovery_sms_template, "
     "conditions, condition_logic, trap_oid, target, "
@@ -227,6 +262,7 @@ def _row_to_dict(row) -> dict:
         "recovery_alert": row.recovery_alert,
         "min_duration": row.min_duration,
         "max_repeat": row.max_repeat,
+        "escalation_levels": getattr(row, "escalation_levels", None) or [],
         "schedule_start": schedule_start,
         "schedule_end": schedule_end,
         "schedule_days": row.schedule_days if row.schedule_days else [],
@@ -306,6 +342,8 @@ async def create_alert_rule(
         "recovery_alert": data.recovery_alert,
         "min_duration": data.min_duration,
         "max_repeat": data.max_repeat,
+        "escalation_levels": json.dumps(_validated_escalation(data.escalation_levels))
+                             if data.escalation_levels else None,
         "schedule_start": data.schedule_start,
         "schedule_end": data.schedule_end,
         "schedule_days": json.dumps(data.schedule_days) if data.schedule_days else None,
@@ -328,7 +366,8 @@ async def create_alert_rule(
             "device_id, group_id, service_check_id, service_check_group_id, "
             "severity, notify_channels, cooldown, "
             "device_type, location, scope_tag, trigger_on, recovery_alert, "
-            "min_duration, max_repeat, schedule_start, schedule_end, schedule_days, "
+            "min_duration, max_repeat, escalation_levels, "
+            "schedule_start, schedule_end, schedule_days, "
             "email_subject, email_body, sms_template, "
             "recovery_email_subject, recovery_email_body, recovery_sms_template, "
             "created_at, updated_at, created_by) "
@@ -338,7 +377,8 @@ async def create_alert_rule(
             ":device_id, :group_id, :service_check_id, :service_check_group_id, "
             ":severity, CAST(:notify_channels AS jsonb), :cooldown, "
             ":device_type, :location, :scope_tag, :trigger_on, :recovery_alert, "
-            ":min_duration, :max_repeat, CAST(:schedule_start AS time), CAST(:schedule_end AS time), "
+            ":min_duration, :max_repeat, CAST(:escalation_levels AS jsonb), "
+            "CAST(:schedule_start AS time), CAST(:schedule_end AS time), "
             "CAST(:schedule_days AS jsonb), "
             ":email_subject, :email_body, :sms_template, "
             ":recovery_email_subject, :recovery_email_body, :recovery_sms_template, "
@@ -400,6 +440,13 @@ async def update_alert_rule(
         if key == "conditions":
             set_parts.append("conditions = CAST(:conditions AS jsonb)")
             params["conditions"] = json.dumps(value) if value else None
+        elif key == "escalation_levels":
+            # Empty list clears escalation; validation re-parses because
+            # exclude_unset dumps gave us plain dicts.
+            levels = [EscalationLevel(**lv) for lv in (value or [])]
+            set_parts.append("escalation_levels = CAST(:escalation_levels AS jsonb)")
+            validated = _validated_escalation(levels)
+            params["escalation_levels"] = json.dumps(validated) if validated else None
         elif key in _jsonb_cols:
             set_parts.append(f"{key} = CAST(:{key} AS jsonb)")
             params[key] = json.dumps(value) if value is not None else None

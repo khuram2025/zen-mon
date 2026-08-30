@@ -137,15 +137,36 @@ def _render(template: str, variables: dict) -> str:
     return result
 
 
+def _sms_fill(template: str, values: dict, *, is_get: bool) -> str:
+    """Substitute {placeholders} into an SMS gateway request template.
+
+    GET templates become part of a query string, so substituted values must be
+    URL-encoded — an unencoded message body ("CPU > 90% & rising") truncated
+    the text at the first ``&`` and could smuggle extra query parameters.
+    Recipient lists keep ``,`` and ``+`` literal (multi-number and E.164
+    conventions most gateways expect). POST bodies are provider-defined
+    (JSON/XML/form), so they are substituted verbatim as before.
+    """
+    from urllib.parse import quote
+    for key, value in values.items():
+        v = str(value)
+        if is_get:
+            v = quote(v, safe=",+") if key == "recipients" else quote(v, safe="")
+        template = template.replace(f"{{{key}}}", v)
+    return template
+
+
 async def _send_sms(gw_config: dict, phones: str, message: str):
     """Send SMS via custom HTTP gateway."""
     if gw_config.get("provider") != "custom_http" or not gw_config.get("api_url"):
         return
 
-    template = gw_config.get("request_template", "")
-    template = template.replace("{recipients}", phones)
-    template = template.replace("{message}", message)
-    template = template.replace("{sender}", gw_config.get("sender_name", "ZenPlus"))
+    is_get = gw_config.get("http_method", "GET").upper() != "POST"
+    template = _sms_fill(gw_config.get("request_template", ""), {
+        "recipients": phones,
+        "message": message,
+        "sender": gw_config.get("sender_name", "ZenPlus"),
+    }, is_get=is_get)
 
     headers = dict(gw_config.get("custom_headers", {}))
     auth = None
@@ -153,7 +174,7 @@ async def _send_sms(gw_config: dict, phones: str, message: str):
         auth = (gw_config.get("auth_username", ""), gw_config.get("auth_password", ""))
 
     async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
-        if gw_config.get("http_method", "GET").upper() == "POST":
+        if not is_get:
             await client.post(gw_config["api_url"], content=template, headers=headers, auth=auth)
         else:
             url = gw_config["api_url"]
@@ -436,6 +457,38 @@ def _recovery_map(closed_rows) -> dict:
         if row.triggered_at and (entry["since"] is None or row.triggered_at < entry["since"]):
             entry["since"] = row.triggered_at
     return out
+
+
+async def _within_cooldown(db: AsyncSession, rule, *, device_id: str | None = None,
+                           service_check_id: str | None = None,
+                           exclude_alert_id=None) -> bool:
+    """True when this rule already announced a trigger for this object within
+    its cooldown window.
+
+    This is what the wizard's "Cooldown (seconds)" field promises and the
+    engine never enforced: a device flapping down/up/down re-paged every
+    transition. The alert row is still recorded either way — only the outbound
+    notification is suppressed, and only when the previous trigger actually
+    went out (a quiet-hours-suppressed one doesn't start a cooldown).
+    """
+    cd = int(getattr(rule, "cooldown", 0) or 0)
+    if cd <= 0:
+        return False
+    scope = "device_id = :oid" if device_id else "service_check_id = :oid"
+    row = (await db.execute(
+        text(f"""
+            SELECT 1 FROM alerts
+            WHERE rule_id = :rid AND {scope}
+              AND (CAST(:aid AS uuid) IS NULL OR id <> CAST(:aid AS uuid))
+              AND COALESCE(metadata->>'is_recovery', 'false') <> 'true'
+              AND COALESCE(metadata->>'notified', 'true') = 'true'
+              AND triggered_at > now() - make_interval(secs => :cd)
+            LIMIT 1
+        """),
+        {"rid": str(rule.id), "oid": device_id or service_check_id,
+         "aid": str(exclude_alert_id) if exclude_alert_id else None, "cd": cd},
+    )).first()
+    return row is not None
 
 
 def _conditions_match(rule, values: dict) -> bool:
@@ -812,6 +865,13 @@ async def evaluate_status_change(
             await ns.stamp(db, new_alert_id, allowed)
             if not allowed:
                 continue
+            # Flap cooldown: this rule already paged for this device moments
+            # ago. Stamped not-notified so the matching recovery stays quiet.
+            if await _within_cooldown(db, rule, device_id=event.device_id,
+                                      exclude_alert_id=new_alert_id):
+                await ns.stamp(db, new_alert_id, False)
+                suppressed_alerts += 1
+                continue
         # A recovery follows the trigger's fate: an all-clear for a page nobody
         # received is noise about an event they never heard of.
         elif trigger != "up" and not recovered[str(rule.id)]["notified"]:
@@ -844,11 +904,17 @@ async def evaluate_status_change(
                         gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'sms' AND is_default = true LIMIT 1"))
                     gw_row = gw_res.first()
                     if gw_row:
-                        # Replace {message} in gateway template with our alert SMS
+                        # Pre-fill device placeholders in the gateway template
+                        # (encoded per HTTP method); {message}/{recipients}/
+                        # {sender} are filled by _send_sms itself.
                         gw_cfg = dict(gw_row.config)
-                        tpl = gw_cfg.get("request_template", "")
-                        tpl = tpl.replace("{hostname}", event.hostname).replace("{ip_address}", event.ip_address).replace("{status}", event.new_status.upper())
-                        gw_cfg["request_template"] = tpl
+                        gw_cfg["request_template"] = _sms_fill(
+                            gw_cfg.get("request_template", ""),
+                            {"hostname": event.hostname,
+                             "ip_address": event.ip_address,
+                             "status": event.new_status.upper()},
+                            is_get=gw_cfg.get("http_method", "GET").upper() != "POST",
+                        )
                         await _send_sms(gw_cfg, phones, sms_body)
                         notifications_sent += 1
 
@@ -1173,7 +1239,14 @@ async def evaluate_service_status_change(
                 "rule_id": str(rule.id),
                 "status": "resolved" if is_recovery else "active",
                 "severity": rule.severity or "warning",
-                "message": sms_body,
+                # A clean human sentence, as on the device path — the rendered
+                # SMS is a transport payload and made every alert list read
+                # like "[ZenPlus WARNING] ..." template dumps.
+                "message": (
+                    f"{rule.name}: {event.check_name} is passing again — recovered"
+                    if is_recovery else
+                    f"{rule.name}: {event.check_name} ({target}) is {event.new_status.upper()}"
+                ),
                 "triggered_at": now,
                 "resolved_at": now if is_recovery else None,
                 "metadata": json.dumps({
@@ -1195,6 +1268,12 @@ async def evaluate_service_status_change(
             )
             await ns.stamp(db, svc_alert_id, allowed)
             if not allowed:
+                continue
+            # Flap cooldown (see device path).
+            if await _within_cooldown(db, rule, service_check_id=event.service_check_id,
+                                      exclude_alert_id=svc_alert_id):
+                await ns.stamp(db, svc_alert_id, False)
+                suppressed_alerts += 1
                 continue
         elif trigger != "up" and not recovered[str(rule.id)]["notified"]:
             continue
@@ -1293,8 +1372,9 @@ async def evaluate_trap(
     """
     Called by the Go poller's trap listener for every received SNMP trap.
     Fires metric='trap' alert rules whose optional OID filter and device/group
-    scope match. ALERTS-ONLY: this writes alert rows (visible in the Alerts UI)
-    and deliberately does NOT dispatch to notification channels yet.
+    scope match, records the alert row, and dispatches the rule's notification
+    channels (email/SMS/webhook family) with a per-rule cooldown so a trap
+    storm pages once, not once per trap.
     """
     now = datetime.now(timezone.utc)
 
@@ -1304,12 +1384,17 @@ async def evaluate_trap(
 
     group_id = None
     device_tags: set[str] = set()
+    hostname = ""
+    device_ip = ""
     if did:
         dev = (await db.execute(
-            text("SELECT group_id, tags FROM devices WHERE id = :id"), {"id": did}
+            text("SELECT group_id, tags, hostname, host(ip_address) AS ip "
+                 "FROM devices WHERE id = :id"), {"id": did}
         )).first()
         group_id = str(dev.group_id) if dev and dev.group_id else None
         device_tags = _tag_set(dev.tags if dev else None)
+        hostname = (dev.hostname if dev else "") or ""
+        device_ip = (dev.ip if dev else "") or ""
 
         # Planned downtime: traps from a device in maintenance don't raise alerts.
         if await _device_in_maintenance(db, did):
@@ -1317,11 +1402,16 @@ async def evaluate_trap(
 
     rules = (await db.execute(
         text("""
-            SELECT id, name, severity, device_id, group_id, scope_tag, trap_oid
+            SELECT id, name, severity, device_id, group_id, scope_tag, trap_oid,
+                   notify_channels, cooldown, metric, operator, threshold,
+                   conditions, condition_logic,
+                   email_subject, email_body, sms_template,
+                   schedule_start, schedule_end, schedule_days
             FROM alert_rules
             WHERE enabled = true AND metric = 'trap'
         """)
     )).fetchall()
+    _tz = await get_configured_timezone(db)
 
     alerts_created = 0
     for rule in rules:
@@ -1349,10 +1439,11 @@ async def evaluate_trap(
 
         label = event.trap_name or event.trap_oid
         message = event.message or f"SNMP trap {label} from {event.source_ip}"
-        await db.execute(
+        inserted = await db.execute(
             text("""
                 INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, metadata)
                 VALUES (:device_id, :rule_id, 'active', :severity, :message, :triggered_at, CAST(:metadata AS jsonb))
+                RETURNING id
             """),
             {
                 "device_id": did,
@@ -1370,11 +1461,84 @@ async def evaluate_trap(
             },
         )
         alerts_created += 1
+        alert_id = (inserted.first() or [None])[0]
+
+        # Dispatch the rule's channels. Traps arrive in storms, so the rule's
+        # cooldown (floor 60s) dedupes per rule+device: one page per burst.
+        channels = rule.notify_channels or []
+        if not channels:
+            continue
+        allowed = notifications_allowed(
+            rule.schedule_start, rule.schedule_end,
+            getattr(rule, "schedule_days", None), _tz,
+        )
+        if allowed:
+            prior = (await db.execute(
+                text("""
+                    SELECT 1 FROM alerts
+                    WHERE rule_id = :rid
+                      AND device_id IS NOT DISTINCT FROM CAST(:did AS uuid)
+                      AND id <> :aid
+                      AND COALESCE(metadata->>'notified', 'true') = 'true'
+                      AND COALESCE(metadata->>'trap', 'false') = 'true'
+                      AND triggered_at > now() - make_interval(secs => :cd)
+                    LIMIT 1
+                """),
+                {"rid": str(rule.id), "did": did, "aid": alert_id,
+                 "cd": max(int(rule.cooldown or 0), 60)},
+            )).first()
+            allowed = prior is None
+        await ns.stamp(db, alert_id, allowed)
+        if not allowed:
+            continue
+
+        subject_name = hostname or event.source_ip
+        sev = rule.severity or event.severity or "warning"
+        variables = {
+            "hostname": subject_name,
+            "ip_address": device_ip or event.source_ip,
+            "status": "TRAP",
+            "severity": sev.upper(),
+            "rule_name": rule.name or "Alert",
+            "timestamp": now.strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "trap_oid": event.trap_oid or "",
+            "trap_name": event.trap_name or "",
+            "source_ip": event.source_ip or "",
+            "trap_message": message,
+            **rule_phrasing(rule, hostname=subject_name),
+        }
+        email_subject = _render(effective_template(rule.email_subject, DEFAULT_EMAIL_SUBJECT), variables)
+        email_body = _render(effective_template(rule.email_body, "{event_sentence} {trap_message}"), variables)
+        sms_body = _render(effective_template(rule.sms_template, DEFAULT_SMS), variables)
+
+        try:
+            from app.services.host_alert_service import dispatch_to_channels
+            await dispatch_to_channels(db, channels, {
+                "subject": email_subject,
+                "body": email_body,
+                "message": sms_body,
+                "hostname": subject_name,
+                "ip_address": device_ip or event.source_ip,
+                "status": "TRAP", "severity": sev, "resolved": False,
+                "rule_name": rule.name,
+                "details": [
+                    ("Alert rule", rule.name),
+                    ("Trap OID", event.trap_oid),
+                    ("Trap name", event.trap_name),
+                    ("Source IP", event.source_ip),
+                    ("Message", event.message),
+                ],
+                "action_url": await _dashboard_url(db, "/alerts"),
+                "triggered_at": now.isoformat(),
+                "rule_id": str(rule.id),
+                "is_recovery": False,
+            })
+        except Exception as exc:
+            print(f"ERROR trap notification for rule {rule.id}: {exc}")
 
     await db.commit()
     return {
         "matched_rules": len(rules),
         "alerts_created": alerts_created,
         "trap_oid": event.trap_oid,
-        "channels": "skipped (alerts-only)",
     }

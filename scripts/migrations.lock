@@ -108,3 +108,4 @@ e71f28a939499f70c11ae61371fc505a48cacf9f0e38e03bda5d9fa6b74fa088  migrate-096-ru
 2a8627dd22542aedc47a6d2dce9396af263524707d3fb37026b3e9054b2b33a8  migrate-097-rum-alert-metrics.sql
 ba6755a745984a4a6c24f6810fb7184a364e6339757c121ec0261abcf32696b8  migrate-098-rum-client-ip-and-span-retention-clickhouse.sql
 967b7665d688c0bef6942727a884e30f832bcee36677a3c94d547e383d546026  migrate-099-fix-service-metrics-5m-mv-clickhouse.sql
+b3d8731ff2b17a14aa66129407eed6cfa2dcb1f5b1b4bc4e1683b05edb0d96d1  migrate-100-alert-escalations.sql

@@ -147,6 +147,7 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
                         # SMS line. Reading them the wrong way round put a 140-
                         # character telegram in the callout of a full-width mail.
                         "message": ctx.get("body") or ctx.get("message"),
+                        "notice": ctx.get("notice") or "",
                         "details": _clean_details(ctx.get("details") or []),
                         "headline_metric": ctx.get("headline_metric") or {},
                         "action_url": ctx.get("action_url") or "",

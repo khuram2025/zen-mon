@@ -161,6 +161,10 @@ def create_app() -> FastAPI:
         # Network-device (SNMP) alert rules: periodic threshold evaluation against ClickHouse.
         from app.services.network_alert_service import network_alert_evaluator_loop
         app.state.network_alert_evaluator = asyncio.create_task(network_alert_evaluator_loop())
+        # SLA escalation tiers: page the next on-call level for alerts that stay
+        # active and unacknowledged past each level's deadline.
+        from app.services.alert_escalation_service import escalation_sweeper_loop
+        app.state.alert_escalation_sweeper = asyncio.create_task(escalation_sweeper_loop())
         # Scheduled reports: fire due report schedules (render + email delivery).
         from app.services.report_scheduler import report_scheduler_loop
         app.state.report_scheduler = asyncio.create_task(report_scheduler_loop())
