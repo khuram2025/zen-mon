@@ -1,9 +1,10 @@
+import math
 from uuid import UUID
 from urllib.parse import urlsplit
-from sqlalchemy import select, func, delete, distinct
+from sqlalchemy import or_, select, func, delete, distinct
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.models.service_check import (
     ServiceCheck,
@@ -165,6 +166,84 @@ async def get_service_check(db: AsyncSession, check_id: UUID):
         )).scalar_one_or_none()
         parent_name = pr
     return _to_response(sc, in_maintenance=sc.id in maint_ids, parent_name=parent_name)
+
+
+async def get_related_service_checks(db: AsyncSession, check_id: UUID, limit: int = 16):
+    """Find checks related to this one: parent, children, same device, host, or group."""
+    sc = (await db.execute(select(ServiceCheck).where(ServiceCheck.id == check_id))).scalar_one_or_none()
+    if not sc:
+        return None
+
+    seen: set[UUID] = {sc.id}
+    maint_ids = await active_maintenance_check_ids(db)
+
+    def pack(items: list[ServiceCheck]):
+        return [_to_response(c, in_maintenance=c.id in maint_ids) for c in items]
+
+    parent = None
+    if sc.parent_check_id:
+        parent = (await db.execute(
+            select(ServiceCheck).where(ServiceCheck.id == sc.parent_check_id)
+        )).scalar_one_or_none()
+        if parent:
+            seen.add(parent.id)
+
+    children = list((await db.execute(
+        select(ServiceCheck)
+        .where(ServiceCheck.parent_check_id == sc.id)
+        .order_by(ServiceCheck.name)
+        .limit(limit)
+    )).scalars().all())
+    seen.update(c.id for c in children)
+
+    same_device: list[ServiceCheck] = []
+    if sc.device_id:
+        same_device = list((await db.execute(
+            select(ServiceCheck)
+            .where(ServiceCheck.device_id == sc.device_id, ServiceCheck.id.notin_(seen))
+            .order_by(ServiceCheck.name)
+            .limit(limit)
+        )).scalars().all())
+        seen.update(c.id for c in same_device)
+
+    host = (sc.target_host or "").strip().lower()
+    if not host and sc.target_url:
+        host = (urlsplit(sc.target_url).hostname or "").lower()
+
+    same_host: list[ServiceCheck] = []
+    if host:
+        same_host = list((await db.execute(
+            select(ServiceCheck)
+            .where(
+                ServiceCheck.id.notin_(seen),
+                or_(
+                    func.lower(ServiceCheck.target_host) == host,
+                    ServiceCheck.target_url.ilike(f"%://{host}/%"),
+                    ServiceCheck.target_url.ilike(f"%://{host}:%"),
+                    ServiceCheck.target_url.ilike(f"%://{host}"),
+                ),
+            )
+            .order_by(ServiceCheck.name)
+            .limit(limit)
+        )).scalars().all())
+        seen.update(c.id for c in same_host)
+
+    same_group: list[ServiceCheck] = []
+    if sc.group_id:
+        same_group = list((await db.execute(
+            select(ServiceCheck)
+            .where(ServiceCheck.group_id == sc.group_id, ServiceCheck.id.notin_(seen))
+            .order_by(ServiceCheck.name)
+            .limit(limit)
+        )).scalars().all())
+
+    return {
+        "parent": pack([parent])[0] if parent else None,
+        "children": pack(children),
+        "same_device": pack(same_device),
+        "same_host": pack(same_host),
+        "same_group": pack(same_group),
+    }
 
 
 async def get_runtime_service_check(db: AsyncSession, check_id: UUID):
@@ -775,10 +854,39 @@ async def apply_template(
 
 # ── SLA reporting ─────────────────────────────────────────────────────────
 
-async def get_service_sla(db: AsyncSession, check_id: UUID, hours: int) -> dict:
-    """Compute uptime %, MTTR, MTBF, incident stats for a service check over
-    the last `hours` hours. Uses ClickHouse rollup tables for speed; falls
-    back to raw when needed."""
+# scripts/init-clickhouse.sql gives zenplus.service_metrics a 30-day TTL.
+RAW_METRIC_RETENTION_HOURS = 720
+
+
+def _finite(value) -> float | None:
+    """Coerce a ClickHouse aggregate to a JSON-safe float.
+
+    avg()/quantile()/countIf()/count() ratios over an empty match set come back as nan
+    rather than NULL, and nan is not JSON-encodable — FastAPI raises
+    "Out of range float values are not JSON compliant" and the endpoint 500s.
+    """
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+async def get_service_sla(
+    db: AsyncSession,
+    check_id: UUID,
+    hours: int,
+    from_dt: datetime | None = None,
+    to_dt: datetime | None = None,
+) -> dict:
+    """Compute uptime %, MTTR, MTBF and incident stats for a service check.
+
+    The window is the last `hours` hours, or the explicit [from_dt, to_dt) span when both
+    are given — a caller looking at a historical range needs stats for *that* range, not
+    for the same number of hours ending now.
+    """
     from app.core.database import get_clickhouse_client
     ch = get_clickhouse_client()
 
@@ -789,35 +897,48 @@ async def get_service_sla(db: AsyncSession, check_id: UUID, hours: int) -> dict:
     if not sc:
         return {"error": "not_found"}
 
-    # Uptime: prefer the 5m rollup for windows > 6h; raw otherwise.
-    if hours <= 6:
-        table = "zenplus.service_metrics"
-        up_expr = "countIf(is_up = 1) AS up_count, count() AS total_count"
+    # Bind the window as explicit literals rather than `now() - INTERVAL n HOUR`. Note that
+    # clickhouse-connect renders a bound Python datetime with microseconds, which the
+    # ClickHouse DateTime parser rejects, so these are pre-formatted strings.
+    def _aware(d: datetime) -> datetime:
+        return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+    if from_dt and to_dt:
+        win_from, win_to = _aware(from_dt), _aware(to_dt)
+        if win_to <= win_from:
+            win_to = win_from + timedelta(hours=1)
+        hours = max(1, round((win_to - win_from).total_seconds() / 3600))
     else:
+        win_to = datetime.now(timezone.utc)
+        win_from = win_to - timedelta(hours=hours)
+
+    bounds = {
+        "id": str(check_id),
+        "f": win_from.strftime("%Y-%m-%d %H:%M:%S"),
+        "t": win_to.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    WINDOW = "timestamp >= %(f)s AND timestamp < %(t)s"
+
+    # Uptime: raw probes for short windows, the 5m rollup beyond that.
+    # service_metrics_5m.uptime_pct is a 0..1 fraction (avg(is_up)) per bucket, and buckets
+    # hold differing sample counts, so re-aggregating it has to be weighted by sample_count —
+    # a plain avg() lets a 1-sample bucket outweigh a 12-sample one.
+    use_raw = hours <= 6
+    if use_raw:
+        up_expr = "countIf(is_up = 1) * 100.0 / count() AS up_pct, count() AS total_count"
+        table = "zenplus.service_metrics"
+    else:
+        up_expr = (
+            "sum(uptime_pct * sample_count) * 100.0 / nullIf(sum(sample_count), 0) AS up_pct, "
+            "sum(sample_count) AS total_count"
+        )
         table = "zenplus.service_metrics_5m"
-        up_expr = "avg(uptime_pct) * 100 AS up_pct, count() AS total_count"
 
     try:
-        if table.endswith("service_metrics"):
-            res = ch.query(
-                f"""
-                SELECT {up_expr}
-                FROM {table}
-                WHERE service_check_id = %(id)s
-                  AND timestamp >= now() - INTERVAL %(h)s HOUR
-                """,
-                parameters={"id": str(check_id), "h": hours},
-            )
-        else:
-            res = ch.query(
-                f"""
-                SELECT {up_expr}
-                FROM {table}
-                WHERE service_check_id = %(id)s
-                  AND timestamp >= now() - INTERVAL %(h)s HOUR
-                """,
-                parameters={"id": str(check_id), "h": hours},
-            )
+        res = ch.query(
+            f"SELECT {up_expr} FROM {table} WHERE service_check_id = %(id)s AND {WINDOW}",
+            parameters=bounds,
+        )
         row = res.result_rows[0] if res.result_rows else None
     except Exception:
         row = None
@@ -825,64 +946,130 @@ async def get_service_sla(db: AsyncSession, check_id: UUID, hours: int) -> dict:
     uptime_pct: float | None = None
     sample_count = 0
     if row:
-        if table.endswith("service_metrics"):
-            up, total = int(row[0] or 0), int(row[1] or 0)
-            sample_count = total
-            uptime_pct = (up / total * 100) if total > 0 else None
-        else:
-            uptime_pct = float(row[0]) if row[0] is not None else None
-            sample_count = int(row[1] or 0)
+        uptime_pct = _finite(row[0])
+        sample_count = int(row[1] or 0)
 
-    # Incidents: status_log transitions to down/degraded/warning in the window.
+    # Outages: pair every transition away from "up" with the recovery that follows it.
+    # The poller writes duration_sec = 0 on every status_log row, so an outage's length only
+    # exists as the gap between two rows and has to be reconstructed. An outage already open
+    # when the window starts is clipped to the window; one still open now runs to now.
+    now_utc = min(datetime.now(timezone.utc), win_to)
+    window_start = win_from
+
     incident_count = 0
     longest_incident_sec = 0.0
     total_downtime_sec = 0.0
     try:
         res = ch.query(
-            """
-            SELECT new_status, duration_sec
+            f"""
+            SELECT timestamp, new_status
             FROM zenplus.service_status_log
-            WHERE service_check_id = %(id)s
-              AND timestamp >= now() - INTERVAL %(h)s HOUR
-              AND new_status IN ('down', 'degraded', 'warning')
+            WHERE service_check_id = %(id)s AND {WINDOW}
+            ORDER BY timestamp
             """,
-            parameters={"id": str(check_id), "h": hours},
+            parameters=bounds,
         )
-        for r in res.result_rows:
-            incident_count += 1
-            d = float(r[1] or 0)
-            total_downtime_sec += d
-            if d > longest_incident_sec:
-                longest_incident_sec = d
+        transitions: list[tuple[datetime, str]] = []
+        for r in res.result_rows or []:
+            ts = r[0]
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            transitions.append((ts, str(r[1] or "").lower()))
+
+        # State on entering the window, so a pre-existing outage still counts.
+        prior = ch.query(
+            """
+            SELECT new_status
+            FROM zenplus.service_status_log
+            WHERE service_check_id = %(id)s AND timestamp < %(f)s
+            ORDER BY timestamp DESC
+            LIMIT 1
+            """,
+            parameters=bounds,
+        )
+        prior_rows = prior.result_rows or []
+        if prior_rows:
+            entered_down = str(prior_rows[0][0] or "").lower() not in ("up", "")
+        else:
+            # No prior transition at all: a window whose first event is a recovery must have
+            # been in a bad state before it. The poller logs no transition for the initial
+            # unknown -> down edge, so this is the only trace such an outage leaves.
+            entered_down = bool(transitions) and transitions[0][1] == "up"
+
+        # Clamp an inferred outage to the check's creation, so a 30-day window over a check
+        # that is a week old does not bill three weeks of downtime against it.
+        opened_at = window_start
+        if entered_down and sc.created_at:
+            created = sc.created_at if sc.created_at.tzinfo else sc.created_at.replace(tzinfo=timezone.utc)
+            opened_at = max(window_start, created)
+
+        def close(start: datetime, end: datetime) -> None:
+            nonlocal incident_count, total_downtime_sec, longest_incident_sec
+            dur = (end - start).total_seconds()
+            if dur > 0:
+                incident_count += 1
+                total_downtime_sec += dur
+                longest_incident_sec = max(longest_incident_sec, dur)
+
+        open_at: datetime | None = opened_at if entered_down else None
+        for ts, status in transitions:
+            if status == "up":
+                if open_at is not None:
+                    close(open_at, ts)
+                    open_at = None
+            elif open_at is None:
+                open_at = ts
+        if open_at is not None:
+            close(open_at, now_utc)
     except Exception:
         pass
 
     # MTTR = total downtime / incident count (only if we had incidents)
     mttr_sec = (total_downtime_sec / incident_count) if incident_count > 0 else None
     # MTBF approx: (window_sec - downtime) / max(incident_count, 1)
-    window_sec = hours * 3600
+    window_sec = max(1.0, (win_to - win_from).total_seconds())
     mtbf_sec = ((window_sec - total_downtime_sec) / incident_count) if incident_count > 0 else None
 
-    # Avg + P95 response time from raw metrics (last N hours clamped to 24 max for cost)
+    # Reconcile the two sources: during an ingestion gap the metrics table can miss an outage
+    # the status log recorded, quoting "100% up" alongside non-zero downtime in the same
+    # response. Sample-based availability is capped by the reconstructed wall-clock downtime.
+    if total_downtime_sec > 0:
+        time_based_pct = max(0.0, 100.0 * (1.0 - total_downtime_sec / window_sec))
+        uptime_pct = time_based_pct if uptime_pct is None else min(uptime_pct, time_based_pct)
+
+    # Latency over the *selected* window. Raw keeps a true p95 and is retained 30 days, so it
+    # serves every window up to that; longer windows fall back to the 90-day rollup, which has
+    # no percentile to reconstruct — p95 is reported as null rather than silently quoting 24h.
     avg_response_ms: float | None = None
     p95_response_ms: float | None = None
     max_response_ms: float | None = None
     try:
-        cap_h = min(hours, 24)
-        r = ch.query(
-            """
-            SELECT avg(response_ms), quantile(0.95)(response_ms), max(response_ms)
-            FROM zenplus.service_metrics
-            WHERE service_check_id = %(id)s
-              AND is_up = 1
-              AND timestamp >= now() - INTERVAL %(h)s HOUR
-            """,
-            parameters={"id": str(check_id), "h": cap_h},
-        )
-        if r.result_rows and r.result_rows[0][0] is not None:
-            avg_response_ms = float(r.result_rows[0][0])
-            p95_response_ms = float(r.result_rows[0][1]) if r.result_rows[0][1] is not None else None
-            max_response_ms = float(r.result_rows[0][2]) if r.result_rows[0][2] is not None else None
+        if hours <= RAW_METRIC_RETENTION_HOURS:
+            r = ch.query(
+                f"""
+                SELECT avg(response_ms), quantile(0.95)(response_ms), max(response_ms)
+                FROM zenplus.service_metrics
+                WHERE service_check_id = %(id)s AND is_up = 1 AND {WINDOW}
+                """,
+                parameters=bounds,
+            )
+            if r.result_rows:
+                avg_response_ms = _finite(r.result_rows[0][0])
+                p95_response_ms = _finite(r.result_rows[0][1])
+                max_response_ms = _finite(r.result_rows[0][2])
+        else:
+            r = ch.query(
+                f"""
+                SELECT sum(avg_response_ms * sample_count) / nullIf(sum(sample_count), 0),
+                       max(max_response_ms)
+                FROM zenplus.service_metrics_5m
+                WHERE service_check_id = %(id)s AND {WINDOW}
+                """,
+                parameters=bounds,
+            )
+            if r.result_rows:
+                avg_response_ms = _finite(r.result_rows[0][0])
+                max_response_ms = _finite(r.result_rows[0][1])
     except Exception:
         pass
 
@@ -919,24 +1106,59 @@ async def get_service_sla(db: AsyncSession, check_id: UUID, hours: int) -> dict:
     else:
         uptime_streak_sec = 0.0
 
-    error_rate_pct = 100.0 - uptime_pct if uptime_pct is not None else None
+    error_rate_pct = _finite(100.0 - uptime_pct) if uptime_pct is not None else None
 
     return {
         "check_id": str(check_id),
         "window_hours": hours,
-        "uptime_pct": uptime_pct,
+        "uptime_pct": _finite(uptime_pct),
         "sample_count": sample_count,
         "incident_count": incident_count,
-        "total_downtime_sec": total_downtime_sec,
-        "longest_incident_sec": longest_incident_sec,
-        "mttr_sec": mttr_sec,
-        "mtbf_sec": mtbf_sec,
+        "total_downtime_sec": _finite(total_downtime_sec) or 0.0,
+        "longest_incident_sec": _finite(longest_incident_sec) or 0.0,
+        "mttr_sec": _finite(mttr_sec),
+        "mtbf_sec": _finite(mtbf_sec),
         "avg_response_ms": avg_response_ms,
         "p95_response_ms": p95_response_ms,
         "max_response_ms": max_response_ms,
         "error_rate_pct": error_rate_pct,
-        "uptime_streak_sec": uptime_streak_sec,
+        "uptime_streak_sec": _finite(uptime_streak_sec),
     }
+
+
+async def get_daily_uptime_all(days: int) -> dict:
+    """Weighted daily uptime for every check in one rollup scan.
+
+    Returns {"days": N, "checks": {check_id: [{date, uptime_pct, sample_count}, ...]}}.
+    Days a check was not monitored are simply absent from its list.
+    """
+    from app.core.database import get_clickhouse_client
+    ch = get_clickhouse_client()
+
+    out: dict[str, list] = {}
+    try:
+        res = ch.query(
+            """
+            SELECT service_check_id,
+                   toDate(timestamp) AS d,
+                   sum(uptime_pct * sample_count) * 100.0 / nullIf(sum(sample_count), 0) AS pct,
+                   sum(sample_count) AS samples
+            FROM zenplus.service_metrics_5m
+            WHERE timestamp >= now() - INTERVAL %(d)s DAY
+            GROUP BY service_check_id, d
+            ORDER BY d
+            """,
+            parameters={"d": days},
+        )
+        for r in res.result_rows or []:
+            out.setdefault(str(r[0]), []).append({
+                "date": r[1].isoformat(),
+                "uptime_pct": _finite(r[2]),
+                "sample_count": int(r[3] or 0),
+            })
+    except Exception:
+        pass
+    return {"days": days, "checks": out}
 
 
 async def get_hourly_uptime(db: AsyncSession, check_id: UUID, days: int) -> dict:
@@ -992,7 +1214,7 @@ async def get_hourly_uptime(db: AsyncSession, check_id: UUID, days: int) -> dict
         if ts.tzinfo is None:
             from datetime import timezone as _tz
             ts = ts.replace(tzinfo=_tz.utc)
-        pct = float(r[1]) if r[1] is not None else None
+        pct = _finite(r[1])
         samples = int(r[2] or 0)
         out.append({
             "ts": ts.isoformat(),

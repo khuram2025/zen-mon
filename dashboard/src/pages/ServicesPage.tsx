@@ -1,17 +1,16 @@
-import { useMemo, useState } from 'react'
+import { useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
-  AlertTriangle,
-  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Copy,
   Download,
   Globe,
-  HelpCircle,
+  LockKeyhole,
   Network,
+  Pause,
   Pencil,
   Play,
   Plug,
@@ -22,17 +21,16 @@ import {
   Search,
   ShieldCheck,
   Trash2,
+  Wrench,
   X,
-  XCircle,
 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage, relativeTime } from '@/lib/utils'
-import { Card, CardContent } from '@/components/ui/Card'
-import { Badge } from '@/components/ui/Badge'
+import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
+import { Card } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
-import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { Skeleton } from '@/components/ui/Skeleton'
 import {
   Select,
   SelectContent,
@@ -42,11 +40,33 @@ import {
 } from '@/components/ui/Select'
 import { ServiceCheckFormDialog } from '@/components/forms/ServiceCheckFormDialog'
 import { toast } from '@/components/ui/Toast'
+import {
+  BAND_TEXT,
+  PulseDot,
+  UptimeBars,
+  buildDaySeries,
+  dayTitle,
+  pulseStatusOf,
+  uptimeBand,
+} from '@/components/services/uptime'
 import type { ServiceCheck, ServiceCheckGroup, ServiceCheckSummary } from '@/types'
 
 const PAGE_SIZE = 20
+const BAR_DAYS = 30
 
 type ListResponse = { data: ServiceCheck[]; meta: { total: number; skip: number; limit: number } }
+type DailyUptimeResponse = {
+  days: number
+  checks: Record<string, Array<{ date: string; uptime_pct: number | null; sample_count: number }>>
+}
+
+const TYPE_META: Record<string, { label: string; Icon: typeof Globe }> = {
+  http: { label: 'HTTP', Icon: Globe },
+  tcp: { label: 'TCP', Icon: Plug },
+  tls: { label: 'TLS', Icon: ShieldCheck },
+  icmp: { label: 'ICMP', Icon: Radar },
+  dns: { label: 'DNS', Icon: Network },
+}
 
 export function ServicesPage() {
   const qc = useQueryClient()
@@ -82,7 +102,7 @@ export function ServicesPage() {
     refetchInterval: 15_000,
   })
 
-  const { data: listData, isFetching, refetch } = useQuery<ListResponse>({
+  const { data: listData, isFetching, isLoading, refetch } = useQuery<ListResponse>({
     queryKey: [
       'service-checks',
       'list',
@@ -115,17 +135,25 @@ export function ServicesPage() {
     refetchInterval: 60_000,
   })
 
-  const checks = listData?.data || []
+  // Failing monitors surface first within the page, the way uptime tools triage.
+  const statusRank = (c: ServiceCheck) =>
+    !c.enabled ? 4 : c.status === 'down' ? 0 : c.status === 'warning' || c.status === 'degraded' ? 1 : c.status === 'unknown' ? 3 : 2
+  const checks = [...(listData?.data || [])].sort((a, b) => statusRank(a) - statusRank(b) || a.name.localeCompare(b.name))
   const totalRecords = listData?.meta?.total || 0
   const totalPages = Math.max(1, Math.ceil(totalRecords / PAGE_SIZE))
 
-  // Per-check uptime over 24h for the uptime column.
   const { data: uptimeStats } = useQuery<{ checks: Record<string, number> }>({
     queryKey: ['service-checks', 'uptime-stats', 24],
     queryFn: async () => (await api.get('/service-checks/uptime-stats?hours=24')).data,
     refetchInterval: 30_000,
   })
   const uptimeMap = uptimeStats?.checks || {}
+
+  const { data: dailyUptime } = useQuery<DailyUptimeResponse>({
+    queryKey: ['service-checks', 'daily-uptime', BAR_DAYS],
+    queryFn: async () => (await api.get(`/service-checks/daily-uptime?days=${BAR_DAYS}`)).data,
+    refetchInterval: 120_000,
+  })
 
   const del = useMutation({
     mutationFn: async (id: string) => api.delete(`/service-checks/${id}`),
@@ -210,150 +238,104 @@ export function ServicesPage() {
     (levelFilter ? 1 : 0) +
     (search ? 1 : 0)
 
-  const kpiClasses = useMemo(
-    () => ({
-      total: 'border-primary/30 ring-primary/30',
-      up: 'border-success/30 ring-success/30',
-      down: 'border-danger/30 ring-danger/30',
-      warn: 'border-warning/40 ring-warning/40',
-      unknown: 'border-border-strong ring-border-strong/40',
-    }),
-    [],
-  )
+  const warnCount = (summary?.warning || 0) + (summary?.degraded || 0)
 
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
-            <Activity className="h-5 w-5 text-primary" />
-            Services
-          </h1>
-          <p className="text-xs text-muted">
-            {summary?.total || 0} checks • {summary?.up || 0} up • {summary?.down || 0} down
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="text-xl font-semibold tracking-tight">Services</h1>
+          <p className="mt-0.5 text-xs text-muted">
+            Synthetic uptime monitoring — HTTP, TCP, TLS, ICMP and DNS probes from this appliance.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="outline" onClick={handleExport}>
-            <Download className="h-4 w-4" />
-            Export
+          <QuietLink to="/services/groups" icon={<Route className="h-3.5 w-3.5" />} label="Groups" />
+          <QuietLink to="/services/maintenance" icon={<Wrench className="h-3.5 w-3.5" />} label="Maintenance" />
+          <QuietLink to="/services/templates" icon={<Copy className="h-3.5 w-3.5" />} label="Templates" />
+          <span className="hidden h-5 w-px bg-border sm:inline-block" />
+          <Button variant="outline" size="sm" className="h-8" onClick={handleExport}>
+            <Download className="h-3.5 w-3.5" /> Export
           </Button>
-          <Button variant="outline" onClick={() => refetch()} disabled={isFetching}>
-            <RefreshCw className={`h-4 w-4 ${isFetching ? 'animate-spin' : ''}`} />
-            Refresh
+          <Button variant="outline" size="sm" className="h-8" onClick={() => refetch()} disabled={isFetching}>
+            <RefreshCw className={cn('h-3.5 w-3.5', isFetching && 'animate-spin')} /> Refresh
           </Button>
           <Button
+            size="sm"
+            className="h-8"
             onClick={() => {
               setEditing(null)
               setFormOpen(true)
             }}
           >
-            <Plus className="h-4 w-4" />
-            Add check
+            <Plus className="h-3.5 w-3.5" /> Add monitor
           </Button>
         </div>
       </div>
 
-      {/* KPI cards */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
-        <KpiCard
-          icon={<Activity className="h-4 w-4" />}
-          label="Total"
-          value={summary?.total || 0}
-          color="primary"
-          active={!statusFilter && !typeFilter}
-          onClick={() => patchParams({ status: null, type: null, page: '1' })}
-          ring={kpiClasses.total}
-        />
-        <KpiCard
-          icon={<CheckCircle2 className="h-4 w-4" />}
-          label="Up"
-          value={summary?.up || 0}
-          color="success"
-          active={statusFilter === 'up'}
-          onClick={() => patchParams({ status: statusFilter === 'up' ? null : 'up', page: '1' })}
-          ring={kpiClasses.up}
-        />
-        <KpiCard
-          icon={<XCircle className="h-4 w-4" />}
-          label="Down"
-          value={summary?.down || 0}
-          color="danger"
-          active={statusFilter === 'down'}
-          onClick={() => patchParams({ status: statusFilter === 'down' ? null : 'down', page: '1' })}
-          ring={kpiClasses.down}
-        />
-        <KpiCard
-          icon={<AlertTriangle className="h-4 w-4" />}
-          label="Warning"
-          value={(summary?.warning || 0) + (summary?.degraded || 0)}
-          color="warning"
-          active={statusFilter === 'warning'}
-          onClick={() => patchParams({ status: statusFilter === 'warning' ? null : 'warning', page: '1' })}
-          ring={kpiClasses.warn}
-        />
-        <KpiCard
-          icon={<HelpCircle className="h-4 w-4" />}
-          label="Unknown"
-          value={summary?.unknown || 0}
-          color="muted"
-          active={statusFilter === 'unknown'}
-          onClick={() => patchParams({ status: statusFilter === 'unknown' ? null : 'unknown', page: '1' })}
-          ring={kpiClasses.unknown}
-        />
-      </div>
-
-      {/* Filter bar */}
+      {/* Status chips + filters */}
       <div className="flex flex-wrap items-center gap-2">
-        <div className="relative min-w-[220px] flex-1 max-w-sm">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
+        <div className="flex items-center gap-1 rounded-lg border border-border bg-surface p-1">
+          <StatusChip
+            label="All"
+            count={summary?.total || 0}
+            active={!statusFilter}
+            onClick={() => patchParams({ status: null, page: '1' })}
+          />
+          <StatusChip
+            label="Up"
+            count={summary?.up || 0}
+            dot="bg-success"
+            active={statusFilter === 'up'}
+            onClick={() => patchParams({ status: statusFilter === 'up' ? null : 'up', page: '1' })}
+          />
+          <StatusChip
+            label="Down"
+            count={summary?.down || 0}
+            dot="bg-danger"
+            attention={(summary?.down || 0) > 0}
+            active={statusFilter === 'down'}
+            onClick={() => patchParams({ status: statusFilter === 'down' ? null : 'down', page: '1' })}
+          />
+          <StatusChip
+            label="Warning"
+            count={warnCount}
+            dot="bg-warning"
+            active={statusFilter === 'warning'}
+            onClick={() => patchParams({ status: statusFilter === 'warning' ? null : 'warning', page: '1' })}
+          />
+          <StatusChip
+            label="Unknown"
+            count={summary?.unknown || 0}
+            dot="bg-muted/50"
+            active={statusFilter === 'unknown'}
+            onClick={() => patchParams({ status: statusFilter === 'unknown' ? null : 'unknown', page: '1' })}
+          />
+        </div>
+
+        <div className="relative min-w-[200px] max-w-xs flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
           <Input
             value={search}
             onChange={(e) => patchParams({ q: e.target.value || null, page: '1' })}
-            placeholder="Search checks, hosts, URLs…"
-            className="pl-9"
+            placeholder="Search monitors…"
+            className="h-8 pl-8 text-xs"
           />
         </div>
-        <Select
-          value={typeFilter || 'all'}
-          onValueChange={(v) => patchParams({ type: v === 'all' ? null : v, page: '1' })}
-        >
-          <SelectTrigger className="w-[160px]">
-            <SelectValue placeholder="Type" />
-          </SelectTrigger>
+        <Select value={typeFilter || 'all'} onValueChange={(v) => patchParams({ type: v === 'all' ? null : v, page: '1' })}>
+          <SelectTrigger className="h-8 w-[120px] text-xs"><SelectValue placeholder="Type" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All types</SelectItem>
-            <SelectItem value="icmp">ICMP</SelectItem>
-            <SelectItem value="tcp">TCP</SelectItem>
             <SelectItem value="http">HTTP(S)</SelectItem>
+            <SelectItem value="tcp">TCP</SelectItem>
             <SelectItem value="tls">TLS</SelectItem>
+            <SelectItem value="icmp">ICMP</SelectItem>
             <SelectItem value="dns">DNS</SelectItem>
           </SelectContent>
         </Select>
-        <Select
-          value={statusFilter || 'all'}
-          onValueChange={(v) => patchParams({ status: v === 'all' ? null : v, page: '1' })}
-        >
-          <SelectTrigger className="w-[160px]">
-            <SelectValue placeholder="Status" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All statuses</SelectItem>
-            <SelectItem value="up">Up</SelectItem>
-            <SelectItem value="down">Down</SelectItem>
-            <SelectItem value="warning">Warning</SelectItem>
-            <SelectItem value="degraded">Degraded</SelectItem>
-            <SelectItem value="unknown">Unknown</SelectItem>
-          </SelectContent>
-        </Select>
-        <Select
-          value={levelFilter || 'all'}
-          onValueChange={(v) => patchParams({ level: v === 'all' ? null : v, page: '1' })}
-        >
-          <SelectTrigger className="w-[140px]">
-            <SelectValue placeholder="Level" />
-          </SelectTrigger>
+        <Select value={levelFilter || 'all'} onValueChange={(v) => patchParams({ level: v === 'all' ? null : v, page: '1' })}>
+          <SelectTrigger className="h-8 w-[130px] text-xs"><SelectValue placeholder="Level" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All levels</SelectItem>
             <SelectItem value="1">L1 · availability</SelectItem>
@@ -361,66 +343,34 @@ export function ServicesPage() {
             <SelectItem value="3">L3 · transaction</SelectItem>
           </SelectContent>
         </Select>
-        <Select
-          value={groupFilter || 'all'}
-          onValueChange={(v) => patchParams({ group: v === 'all' ? null : v, page: '1' })}
-        >
-          <SelectTrigger className="w-[180px]">
-            <SelectValue placeholder="Group" />
-          </SelectTrigger>
+        <Select value={groupFilter || 'all'} onValueChange={(v) => patchParams({ group: v === 'all' ? null : v, page: '1' })}>
+          <SelectTrigger className="h-8 w-[150px] text-xs"><SelectValue placeholder="Group" /></SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All groups</SelectItem>
             {groupsList.map((g) => (
-              <SelectItem key={g.id} value={g.id}>
-                {g.name}
-              </SelectItem>
+              <SelectItem key={g.id} value={g.id}>{g.name}</SelectItem>
             ))}
           </SelectContent>
         </Select>
         {tagsList.length > 0 && (
-          <Select
-            value={tagFilter || 'all'}
-            onValueChange={(v) => patchParams({ tag: v === 'all' ? null : v, page: '1' })}
-          >
-            <SelectTrigger className="w-[160px]">
-              <SelectValue placeholder="Tag" />
-            </SelectTrigger>
+          <Select value={tagFilter || 'all'} onValueChange={(v) => patchParams({ tag: v === 'all' ? null : v, page: '1' })}>
+            <SelectTrigger className="h-8 w-[130px] text-xs"><SelectValue placeholder="Tag" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All tags</SelectItem>
               {tagsList.map((t) => (
-                <SelectItem key={t} value={t}>
-                  {t}
-                </SelectItem>
+                <SelectItem key={t} value={t}>{t}</SelectItem>
               ))}
             </SelectContent>
           </Select>
         )}
-        <Link
-          to="/services/groups"
-          className="inline-flex h-9 items-center rounded-md border border-border bg-surface px-3 text-xs font-medium text-muted hover:border-border-strong hover:text-text"
-        >
-          Manage groups
-        </Link>
-        <Link
-          to="/services/maintenance"
-          className="inline-flex h-9 items-center rounded-md border border-border bg-surface px-3 text-xs font-medium text-muted hover:border-border-strong hover:text-text"
-        >
-          Maintenance
-        </Link>
-        <Link
-          to="/services/templates"
-          className="inline-flex h-9 items-center rounded-md border border-border bg-surface px-3 text-xs font-medium text-muted hover:border-border-strong hover:text-text"
-        >
-          Templates
-        </Link>
         {activeFilterCount > 0 && (
           <Button
             variant="ghost"
             size="sm"
+            className="h-8"
             onClick={() => patchParams({ q: null, type: null, status: null, group: null, tag: null, level: null, page: '1' })}
           >
-            <X className="h-3.5 w-3.5" />
-            Clear
+            <X className="h-3.5 w-3.5" /> Clear
           </Button>
         )}
       </div>
@@ -429,277 +379,113 @@ export function ServicesPage() {
       {selected.size > 0 && (
         <div className="flex items-center justify-between rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
           <span className="font-medium text-primary">
-            {selected.size} check{selected.size > 1 ? 's' : ''} selected
+            {selected.size} monitor{selected.size > 1 ? 's' : ''} selected
           </span>
           <div className="flex items-center gap-1">
-            <Button variant="ghost" size="sm" onClick={() => setSelected(new Set())}>
-              Clear
-            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setSelected(new Set())}>Clear</Button>
             <Button
               variant="outline"
               size="sm"
               className="text-danger hover:text-danger"
               onClick={() => setBulkDeleteOpen(true)}
             >
-              <Trash2 className="h-3.5 w-3.5" />
-              Delete selected
+              <Trash2 className="h-3.5 w-3.5" /> Delete selected
             </Button>
           </div>
         </div>
       )}
 
-      {/* Table */}
-      <Card>
-        <CardContent className="pt-4">
-          <div className="overflow-hidden rounded-md border border-border">
-            <Table>
-              <THead className="bg-surface2/50">
-                <Tr>
-                  <Th className="w-8">
-                    <input
-                      type="checkbox"
-                      aria-label="Select all on page"
-                      checked={checks.length > 0 && checks.every((c) => selected.has(c.id))}
-                      onChange={toggleAll}
-                      className="h-3.5 w-3.5 accent-primary"
-                    />
-                  </Th>
-                  <Th>Status</Th>
-                  <Th>Name</Th>
-                  <Th>Type</Th>
-                  <Th>Level</Th>
-                  <Th>Group</Th>
-                  <Th>Target</Th>
-                  <Th>Device</Th>
-                  <Th className="text-right">Uptime 24h</Th>
-                  <Th className="text-right">Response</Th>
-                  <Th className="text-right">Last check</Th>
-                  <Th className="w-32 text-right">Actions</Th>
-                </Tr>
-              </THead>
-              <TBody>
-                {checks.map((c) => (
-                  <Tr
-                    key={c.id}
-                    className="cursor-pointer hover:bg-surface2/40"
-                    onClick={() => navigate(`/services/${c.id}`)}
-                  >
-                    <Td onClick={(e) => e.stopPropagation()}>
-                      <input
-                        type="checkbox"
-                        checked={selected.has(c.id)}
-                        onChange={() => toggleRow(c.id)}
-                        className="h-3.5 w-3.5 accent-primary"
-                      />
-                    </Td>
-                    <Td>
-                      <StatusPill status={c.status} />
-                      {c.in_maintenance && (
-                        <span
-                          className="ml-1.5 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider"
-                          title="In maintenance window — alerts suppressed"
-                          style={{ background: 'rgba(99,102,241,0.15)', color: '#818cf8' }}
-                        >
-                          Maint
-                        </span>
-                      )}
-                      {c.check_type === 'tls' &&
-                        c.tls_days_remaining != null &&
-                        c.tls_days_remaining < 30 && (
-                          <span
-                            className={`ml-1.5 rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${
-                              c.tls_days_remaining < 7
-                                ? 'bg-danger/15 text-danger'
-                                : c.tls_days_remaining < 14
-                                  ? 'bg-warning/15 text-warning'
-                                  : 'bg-yellow-500/15 text-yellow-500'
-                            }`}
-                          >
-                            {c.tls_days_remaining}d
-                          </span>
-                        )}
-                    </Td>
-                    <Td className="font-medium">
-                      <Link
-                        to={`/services/${c.id}`}
-                        className="hover:underline"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        {c.name}
-                      </Link>
-                    </Td>
-                    <Td>
-                      <TypePill type={c.check_type} />
-                      {(c.credential_id || (c.workflow_steps?.length || 0) > 0) && (
-                        <div className="mt-1 flex flex-wrap gap-1">
-                          {c.credential_id && (
-                            <span className="inline-flex items-center gap-1 rounded bg-success/10 px-1.5 py-0.5 text-[10px] text-success" title={`Encrypted ${c.credential_auth_type || ''} credential`}>
-                              <ShieldCheck className="h-2.5 w-2.5" /> Auth
-                            </span>
-                          )}
-                          {(c.workflow_steps?.length || 0) > 0 && (
-                            <span className="inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary" title={`${c.workflow_operator === 'any' ? 'ANY' : 'ALL'} step health rule`}>
-                              <Route className="h-2.5 w-2.5" /> {c.workflow_steps?.length} steps
-                            </span>
-                          )}
-                        </div>
-                      )}
-                    </Td>
-                    <Td>
-                      <LevelBadge level={c.level} />
-                    </Td>
-                    <Td className="text-xs">
-                      {c.group_name ? (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            patchParams({ group: c.group_id, page: '1' })
-                          }}
-                          className="rounded-full border border-border bg-surface2 px-2 py-0.5 text-muted hover:text-text"
-                        >
-                          {c.group_name}
-                        </button>
-                      ) : (
-                        <span className="text-muted">—</span>
-                      )}
-                      {c.tags.length > 0 && (
-                        <div className="mt-1 flex flex-wrap gap-1">
-                          {c.tags.slice(0, 4).map((t) => (
-                            <button
-                              key={t}
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                patchParams({ tag: t, page: '1' })
-                              }}
-                              className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary hover:bg-primary/20"
-                            >
-                              {t}
-                            </button>
-                          ))}
-                          {c.tags.length > 4 && (
-                            <span className="text-[10px] text-muted">+{c.tags.length - 4}</span>
-                          )}
-                        </div>
-                      )}
-                    </Td>
-                    <Td className="max-w-[280px] truncate font-mono text-xs">
-                      {c.target_url || `${c.target_host}${c.target_port ? `:${c.target_port}` : ''}`}
-                    </Td>
-                    <Td className="text-xs text-muted">
-                      {c.device_id ? (
-                        <Link
-                          to={`/devices/${c.device_id}`}
-                          className="hover:underline"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          {c.device_hostname || '—'}
-                        </Link>
-                      ) : (
-                        '—'
-                      )}
-                    </Td>
-                    <Td className="text-right font-mono text-xs">
-                      <UptimeValue pct={uptimeMap[c.id]} />
-                    </Td>
-                    <Td className="text-right font-mono text-xs">
-                      {c.last_response_ms != null ? `${c.last_response_ms.toFixed(0)} ms` : '—'}
-                    </Td>
-                    <Td className="text-right text-xs text-muted">
-                      {relativeTime(c.last_check_at) || '—'}
-                    </Td>
-                    <Td onClick={(e) => e.stopPropagation()}>
-                      <div className="flex justify-end gap-0.5">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          title="Test now"
-                          onClick={() => testNow.mutate(c.id)}
-                          disabled={testNow.isPending}
-                        >
-                          <Play className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          title="Edit"
-                          onClick={() => {
-                            setEditing(c)
-                            setFormOpen(true)
-                          }}
-                        >
-                          <Pencil className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          title="Duplicate"
-                          onClick={() => openClone(c)}
-                        >
-                          <Copy className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7 text-muted hover:text-danger"
-                          title="Delete"
-                          onClick={() => setDeleting(c)}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
-                      </div>
-                    </Td>
-                  </Tr>
-                ))}
-                {checks.length === 0 && (
-                  <Tr>
-                    <Td colSpan={12} className="py-12 text-center text-muted">
-                      {activeFilterCount > 0
-                        ? 'No service checks match the current filters.'
-                        : 'No service checks configured yet. Click “Add check” to create one.'}
-                    </Td>
-                  </Tr>
-                )}
-              </TBody>
-            </Table>
-          </div>
+      {/* Monitor list */}
+      <Card className="overflow-hidden">
+        <div className="hidden items-center gap-3 border-b border-border bg-surface2/40 px-4 py-2 text-[10px] font-semibold uppercase tracking-wider text-muted lg:flex">
+          <span className="w-4 shrink-0">
+            <input
+              type="checkbox"
+              aria-label="Select all on page"
+              checked={checks.length > 0 && checks.every((c) => selected.has(c.id))}
+              onChange={toggleAll}
+              className="h-3.5 w-3.5 accent-primary"
+            />
+          </span>
+          <span className="w-[30%] min-w-[220px]">Monitor</span>
+          <span className="min-w-0 flex-1">Last {BAR_DAYS} days</span>
+          <span className="w-16 text-right">24 h</span>
+          <span className="w-[72px] text-right">Response</span>
+          <span className="w-14 text-right">Every</span>
+          <span className="w-[132px] text-right">Actions</span>
+        </div>
 
-          {/* Pagination */}
-          {totalRecords > 0 && (
-            <div className="mt-3 flex items-center justify-between text-xs text-muted">
-              <span>
-                Showing <span className="text-text">{(page - 1) * PAGE_SIZE + 1}</span>–
-                <span className="text-text">{Math.min(page * PAGE_SIZE, totalRecords)}</span> of{' '}
-                <span className="text-text">{totalRecords}</span>
-              </span>
-              <div className="flex items-center gap-1">
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="h-7 w-7"
-                  disabled={page <= 1}
-                  onClick={() => patchParams({ page: String(page - 1) })}
-                >
-                  <ChevronLeft className="h-3.5 w-3.5" />
+        {isLoading ? (
+          <div className="space-y-0 divide-y divide-border/60">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <div key={i} className="px-4 py-3"><Skeleton className="h-10 w-full" /></div>
+            ))}
+          </div>
+        ) : checks.length === 0 ? (
+          <div className="flex flex-col items-center justify-center px-4 py-16 text-center">
+            <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+              <Activity className="h-5 w-5" />
+            </span>
+            <h3 className="mt-3 text-sm font-semibold">
+              {activeFilterCount > 0 ? 'No monitors match these filters' : 'No monitors yet'}
+            </h3>
+            <p className="mt-1 max-w-sm text-xs leading-relaxed text-muted">
+              {activeFilterCount > 0
+                ? 'Try clearing a filter, or search for a different name, host or URL.'
+                : 'Create your first uptime monitor — an HTTP endpoint, TCP port, ping target, TLS certificate or DNS record.'}
+            </p>
+            <div className="mt-4">
+              {activeFilterCount > 0 ? (
+                <Button variant="outline" size="sm" onClick={() => patchParams({ q: null, type: null, status: null, group: null, tag: null, level: null, page: '1' })}>
+                  Clear filters
                 </Button>
-                <span className="min-w-[60px] text-center text-text">
-                  Page {page} / {totalPages}
-                </span>
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="h-7 w-7"
-                  disabled={page >= totalPages}
-                  onClick={() => patchParams({ page: String(page + 1) })}
-                >
-                  <ChevronRight className="h-3.5 w-3.5" />
+              ) : (
+                <Button size="sm" onClick={() => { setEditing(null); setFormOpen(true) }}>
+                  <Plus className="h-3.5 w-3.5" /> Add monitor
                 </Button>
-              </div>
+              )}
             </div>
-          )}
-        </CardContent>
+          </div>
+        ) : (
+          <div className="divide-y divide-border/60">
+            {checks.map((c) => (
+              <MonitorRow
+                key={c.id}
+                check={c}
+                selected={selected.has(c.id)}
+                onToggle={() => toggleRow(c.id)}
+                uptime24h={uptimeMap[c.id]}
+                dailyRows={dailyUptime?.checks?.[c.id]}
+                onOpen={() => navigate(`/services/${c.id}`)}
+                onTest={() => testNow.mutate(c.id)}
+                testPending={testNow.isPending}
+                onEdit={() => { setEditing(c); setFormOpen(true) }}
+                onClone={() => openClone(c)}
+                onDelete={() => setDeleting(c)}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Pagination */}
+        {totalRecords > PAGE_SIZE && (
+          <div className="flex items-center justify-between border-t border-border px-4 py-2.5 text-xs text-muted">
+            <span>
+              Showing <span className="text-text">{(page - 1) * PAGE_SIZE + 1}</span>–
+              <span className="text-text">{Math.min(page * PAGE_SIZE, totalRecords)}</span> of{' '}
+              <span className="text-text">{totalRecords}</span>
+            </span>
+            <div className="flex items-center gap-1">
+              <Button variant="outline" size="icon" className="h-7 w-7" disabled={page <= 1} onClick={() => patchParams({ page: String(page - 1) })}>
+                <ChevronLeft className="h-3.5 w-3.5" />
+              </Button>
+              <span className="min-w-[60px] text-center text-text">Page {page} / {totalPages}</span>
+              <Button variant="outline" size="icon" className="h-7 w-7" disabled={page >= totalPages} onClick={() => patchParams({ page: String(page + 1) })}>
+                <ChevronRight className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          </div>
+        )}
       </Card>
 
       <ServiceCheckFormDialog open={formOpen} onOpenChange={setFormOpen} check={editing} />
@@ -709,8 +495,7 @@ export function ServicesPage() {
         title="Delete service check"
         description={
           <>
-            Delete <span className="font-semibold text-text">{deleting?.name}</span>? This cannot be
-            undone.
+            Delete <span className="font-semibold text-text">{deleting?.name}</span>? This cannot be undone.
           </>
         }
         confirmText="Delete"
@@ -734,108 +519,160 @@ export function ServicesPage() {
   )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+/* ─── Row ───────────────────────────────────────────────────────────────── */
 
-function KpiCard({
-  icon,
-  label,
-  value,
-  color,
-  active,
-  onClick,
-  ring,
+function MonitorRow({
+  check: c, selected, onToggle, uptime24h, dailyRows, onOpen, onTest, testPending, onEdit, onClone, onDelete,
 }: {
-  icon: React.ReactNode
-  label: string
-  value: number
-  color: 'primary' | 'success' | 'warning' | 'danger' | 'muted'
-  active?: boolean
-  onClick?: () => void
-  ring?: string
+  check: ServiceCheck
+  selected: boolean
+  onToggle: () => void
+  uptime24h: number | undefined
+  dailyRows?: Array<{ date: string; uptime_pct: number | null; sample_count: number }>
+  onOpen: () => void
+  onTest: () => void
+  testPending: boolean
+  onEdit: () => void
+  onClone: () => void
+  onDelete: () => void
 }) {
-  const iconCls =
-    color === 'primary'
-      ? 'text-primary bg-primary/10'
-      : color === 'success'
-        ? 'text-success bg-success/10'
-        : color === 'warning'
-          ? 'text-warning bg-warning/10'
-          : color === 'danger'
-            ? 'text-danger bg-danger/10'
-            : 'text-muted bg-muted/10'
-  const Wrapper: any = onClick ? 'button' : 'div'
+  const t = TYPE_META[c.check_type] || TYPE_META.http
+  const target = c.target_url || `${c.target_host}${c.target_port ? `:${c.target_port}` : ''}`
+  const pulse = pulseStatusOf(c.status, c.enabled)
+  const statusText = !c.enabled
+    ? 'Paused'
+    : c.status === 'up' ? 'Up'
+      : c.status === 'down' ? 'Down'
+        : c.status === 'unknown' ? 'Pending'
+          : 'Warning'
+  const statusTone = !c.enabled
+    ? 'text-muted'
+    : c.status === 'up' ? 'text-success'
+      : c.status === 'down' ? 'text-danger'
+        : c.status === 'unknown' ? 'text-muted'
+          : 'text-warning'
+  const cells = buildDaySeries(dailyRows || [], BAR_DAYS).map((d) => ({ key: d.key, pct: d.pct, title: dayTitle(d) }))
+  const band = uptimeBand(uptime24h)
+
   return (
-    <Wrapper
-      type={onClick ? 'button' : undefined}
-      onClick={onClick}
-      className={`group relative flex flex-col gap-2 overflow-hidden rounded-xl border p-4 text-left transition-all ${
-        active ? `${ring || ''} ring-1 bg-surface` : 'border-border bg-surface hover:border-border-strong'
-      }`}
+    <div
+      role="link"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => { if (e.key === 'Enter') onOpen() }}
+      className="group flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3 transition-colors hover:bg-surface2/40 focus:outline-none focus-visible:bg-surface2/60 lg:flex-nowrap"
     >
-      <div className="flex items-center justify-between">
-        <span className={`inline-flex h-7 w-7 items-center justify-center rounded-md ${iconCls}`}>
-          {icon}
-        </span>
-      </div>
-      <div>
-        <div className="text-[11px] font-medium uppercase tracking-wider text-muted">{label}</div>
-        <div className="mt-0.5 text-2xl font-bold leading-tight tracking-tight tabular-nums">
-          {value.toLocaleString()}
+      <span className="w-4 shrink-0" onClick={(e) => e.stopPropagation()}>
+        <input type="checkbox" checked={selected} onChange={onToggle} className="h-3.5 w-3.5 accent-primary" aria-label={`Select ${c.name}`} />
+      </span>
+
+      {/* Identity */}
+      <div className="flex w-full min-w-[220px] items-center gap-3 lg:w-[30%]">
+        <PulseDot status={pulse} size="md" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-[13px] font-semibold text-text">{c.name}</span>
+            <span className="inline-flex shrink-0 items-center gap-1 rounded border border-border bg-surface2/60 px-1.5 py-px text-[9.5px] font-semibold uppercase tracking-wider text-muted">
+              <t.Icon className="h-2.5 w-2.5" />{t.label}
+            </span>
+            {c.in_maintenance && (
+              <span className="inline-flex shrink-0 items-center gap-1 rounded bg-info/10 px-1.5 py-px text-[9.5px] font-semibold uppercase tracking-wider text-info" title="In maintenance — alerts suppressed">
+                <Wrench className="h-2.5 w-2.5" />Maint
+              </span>
+            )}
+            {c.credential_id && (
+              <LockKeyhole className="h-3 w-3 shrink-0 text-success" aria-label="Authenticated check" />
+            )}
+            {c.check_type === 'tls' && c.tls_days_remaining != null && c.tls_days_remaining < 30 && (
+              <span className={cn(
+                'shrink-0 rounded px-1.5 py-px font-mono text-[9.5px] font-bold',
+                c.tls_days_remaining < 7 ? 'bg-danger/15 text-danger' : 'bg-warning/15 text-warning',
+              )}>
+                cert {c.tls_days_remaining}d
+              </span>
+            )}
+          </div>
+          <div className="mt-0.5 flex items-center gap-1.5 text-[11px]">
+            <span className={cn('shrink-0 font-medium', statusTone)}>{statusText}</span>
+            <span className="text-border-strong">·</span>
+            <span className="truncate font-mono text-muted" title={target}>{target}</span>
+          </div>
         </div>
       </div>
-    </Wrapper>
+
+      {/* 30-day bars */}
+      <div className="hidden h-7 min-w-0 flex-1 lg:block">
+        <UptimeBars cells={cells} className="h-full" />
+      </div>
+
+      {/* 24h uptime */}
+      <span className={cn('w-16 shrink-0 text-right font-mono text-xs font-medium tabular-nums', BAND_TEXT[band])}>
+        {uptime24h != null ? `${uptime24h.toFixed(uptime24h >= 99.995 ? 0 : 2)}%` : '—'}
+      </span>
+
+      {/* Response */}
+      <span className="w-[72px] shrink-0 text-right font-mono text-xs tabular-nums text-text2">
+        {c.last_response_ms != null ? `${c.last_response_ms.toFixed(0)} ms` : '—'}
+      </span>
+
+      {/* Interval */}
+      <span className="w-14 shrink-0 text-right text-[11px] tabular-nums text-muted" title={`Checked every ${c.check_interval}s · last ${relativeTime(c.last_check_at) || 'never'}`}>
+        {c.check_interval}s
+      </span>
+
+      {/* Actions */}
+      <div className="flex w-[132px] shrink-0 justify-end gap-0.5 opacity-60 transition-opacity group-hover:opacity-100" onClick={(e) => e.stopPropagation()}>
+        <Button variant="ghost" size="icon" className="h-7 w-7" title="Test now" onClick={onTest} disabled={testPending}>
+          {c.enabled ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
+        </Button>
+        <Button variant="ghost" size="icon" className="h-7 w-7" title="Edit" onClick={onEdit}>
+          <Pencil className="h-3.5 w-3.5" />
+        </Button>
+        <Button variant="ghost" size="icon" className="h-7 w-7" title="Duplicate" onClick={onClone}>
+          <Copy className="h-3.5 w-3.5" />
+        </Button>
+        <Button variant="ghost" size="icon" className="h-7 w-7 text-muted hover:text-danger" title="Delete" onClick={onDelete}>
+          <Trash2 className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+    </div>
   )
 }
 
-function StatusPill({ status }: { status: ServiceCheck['status'] }) {
-  const map: Record<string, { label: string; cls: string }> = {
-    up: { label: 'Up', cls: 'border-success/30 bg-success/10 text-success' },
-    down: { label: 'Down', cls: 'border-danger/30 bg-danger/10 text-danger' },
-    warning: { label: 'Warning', cls: 'border-warning/30 bg-warning/10 text-warning' },
-    degraded: { label: 'Degraded', cls: 'border-yellow-500/30 bg-yellow-500/10 text-yellow-400' },
-    unknown: { label: 'Unknown', cls: 'border-border-strong bg-surface2 text-muted' },
-  }
-  const s = map[status] || map.unknown
+/* ─── Small pieces ──────────────────────────────────────────────────────── */
+
+function StatusChip({ label, count, dot, active, attention, onClick }: {
+  label: string
+  count: number
+  dot?: string
+  active?: boolean
+  attention?: boolean
+  onClick: () => void
+}) {
   return (
-    <Badge variant="outline" className={`border ${s.cls}`}>
-      {s.label}
-    </Badge>
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        'inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
+        active ? 'bg-surface2 text-text shadow-sm ring-1 ring-border' : 'text-muted hover:text-text',
+      )}
+    >
+      {dot && <span className={cn('h-1.5 w-1.5 rounded-full', dot, attention && 'animate-pulse-soft')} />}
+      {label}
+      <span className={cn('font-mono tabular-nums', attention ? 'font-semibold text-danger' : 'text-muted')}>{count}</span>
+    </button>
   )
 }
 
-function TypePill({ type }: { type: ServiceCheck['check_type'] }) {
-  const map: Record<string, { Icon: any; cls: string }> = {
-    http: { Icon: Globe, cls: 'border-primary/30 bg-primary/10 text-primary' },
-    tcp: { Icon: Plug, cls: 'border-success/30 bg-success/10 text-success' },
-    tls: { Icon: ShieldCheck, cls: 'border-warning/30 bg-warning/10 text-warning' },
-    icmp: { Icon: Radar, cls: 'border-accent/30 bg-accent/10 text-accent' },
-    dns: { Icon: Network, cls: 'border-yellow-500/30 bg-yellow-500/10 text-yellow-400' },
-  }
-  const c = map[type] || map.http
-  const Icon = c.Icon
+function QuietLink({ to, icon, label }: { to: string; icon: React.ReactNode; label: string }) {
   return (
-    <Badge variant="outline" className={`border uppercase ${c.cls}`}>
-      <Icon className="h-3 w-3" />
-      <span>{type}</span>
-    </Badge>
+    <Link
+      to={to}
+      className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-surface px-2.5 text-xs font-medium text-muted transition-colors hover:border-border-strong hover:text-text"
+    >
+      {icon}
+      {label}
+    </Link>
   )
-}
-
-function LevelBadge({ level }: { level: number | undefined }) {
-  const lvl = level || 1
-  const cls =
-    lvl === 1 ? 'border-success/30 bg-success/10 text-success'
-    : lvl === 2 ? 'border-primary/30 bg-primary/10 text-primary'
-    : 'border-accent/30 bg-accent/10 text-accent'
-  return (
-    <Badge variant="outline" className={`border ${cls}`} title={`Monitoring level ${lvl}`}>
-      L{lvl}
-    </Badge>
-  )
-}
-
-function UptimeValue({ pct }: { pct: number | undefined }) {
-  if (pct == null) return <span className="text-muted">—</span>
-  const cls = pct >= 99 ? 'text-success' : pct >= 95 ? 'text-warning' : 'text-danger'
-  return <span className={`font-medium ${cls}`}>{pct.toFixed(2)}%</span>
 }

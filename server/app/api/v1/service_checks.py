@@ -384,6 +384,19 @@ async def service_check_uptime_stats(
     return {"hours": hours, "from": from_time.isoformat(), "to": to_time.isoformat(), "checks": uptime_map}
 
 
+@router.get("/daily-uptime")
+async def service_check_daily_uptime(
+    days: int = Query(default=30, ge=1, le=90),
+    current_user: User = Depends(get_current_user),
+):
+    """Daily uptime percentage per check, batched for every check at once.
+
+    Powers the per-row uptime bar strips on the services list — one rollup scan
+    instead of a request per check.
+    """
+    return await service_check_service.get_daily_uptime_all(days)
+
+
 @router.post("", response_model=ServiceCheckResponse, status_code=201)
 async def create_service_check(
     data: ServiceCheckCreate,
@@ -490,6 +503,20 @@ async def export_service_checks(
     return JSONResponse(content=checks)
 
 
+@router.get("/{check_id}/related")
+async def get_related_service_checks(
+    check_id: UUID,
+    limit: int = Query(default=16, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Parent, dependents, and checks that share this device, host, or group."""
+    out = await service_check_service.get_related_service_checks(db, check_id, limit=limit)
+    if out is None:
+        raise HTTPException(status_code=404, detail="Service check not found")
+    return out
+
+
 @router.get("/{check_id}/metrics", response_model=ServiceMetricResponse)
 async def get_service_check_metrics(
     check_id: UUID,
@@ -531,14 +558,18 @@ async def get_service_check_hourly_uptime(
 async def get_service_check_sla(
     check_id: UUID,
     hours: int = Query(default=720, ge=1, le=8760),
+    from_time: datetime | None = Query(default=None, alias="from"),
+    to_time: datetime | None = Query(default=None, alias="to"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """SLA stats: uptime %, MTTR, MTBF, incident count over a time window.
 
-    Default window is 30 days (720h). Valid range 1h..1y.
+    Default window is the last 30 days (720h), valid range 1h..1y. Pass `from` and `to`
+    together to score an explicit span instead — `hours` alone always ends at now, which
+    is the wrong window for a historical range.
     """
-    out = await service_check_service.get_service_sla(db, check_id, hours)
+    out = await service_check_service.get_service_sla(db, check_id, hours, from_time, to_time)
     if out.get("error") == "not_found":
         raise HTTPException(status_code=404, detail="Service check not found")
     return out

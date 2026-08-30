@@ -164,7 +164,7 @@ TO zenplus.service_metrics_5m
 AS SELECT
     service_check_id,
     any(device_id)                      AS device_id,
-    toStartOfFiveMinutes(timestamp)     AS ts,
+    toStartOfFiveMinutes(timestamp)     AS timestamp,
     any(check_type)                     AS check_type,
     avg(response_ms)                    AS avg_response_ms,
     min(response_ms)                    AS min_response_ms,
@@ -172,7 +172,10 @@ AS SELECT
     avg(is_up)                          AS uptime_pct,
     count()                             AS sample_count
 FROM zenplus.service_metrics
-GROUP BY service_check_id, ts;
+-- Group by the alias, not toStartOfFiveMinutes(timestamp): inside GROUP BY the bare column
+-- resolves to the alias above, and repeating the expression makes the key differ from the
+-- projection, which ClickHouse rejects with code 215 and fails every insert into the source.
+GROUP BY service_check_id, timestamp;
 
 -- ─── Service status change log (1-year retention) ───
 CREATE TABLE IF NOT EXISTS zenplus.service_status_log (

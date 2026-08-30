@@ -1,54 +1,54 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react'
-import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
   AlertCircle,
   AlertTriangle,
-  ArrowDown,
+  ArrowDownRight,
   ArrowLeft,
-  ArrowUp,
+  ArrowUpRight,
   Bell,
+  BellOff,
+  CalendarDays,
   Check,
   CheckCircle2,
-  ChevronDown,
   ChevronRight,
   Clock,
-  Copy,
-  Database,
   Download,
-  Edit3,
-  ExternalLink,
-  Eye,
   FileText,
   Gauge,
   Globe,
+  HelpCircle,
   Info,
-  Network,
+  LineChart,
+  Loader2,
   LockKeyhole,
+  MoreHorizontal,
+  Network,
   Pause,
+  Pencil,
   Play,
   Plug,
-  RefreshCw,
-  Shield,
+  Radar,
+  Route,
+  Settings as SettingsIcon,
   ShieldCheck,
+  SlidersHorizontal,
   Terminal,
+  Timer,
   Trash2,
+  TrendingUp,
   Wrench,
   XCircle,
-  HelpCircle,
-  Radar,
-  Settings as SettingsIcon,
-  RotateCcw,
-  Route,
-  TrendingUp,
 } from 'lucide-react'
 import {
   Area,
   AreaChart,
+  Bar,
+  BarChart,
   CartesianGrid,
-  Line,
-  LineChart,
+  Cell,
   ReferenceArea,
   ResponsiveContainer,
   Tooltip,
@@ -56,132 +56,91 @@ import {
   YAxis,
 } from 'recharts'
 import { api } from '@/lib/api'
-import { apiErrorMessage, relativeTime, timeAxisTickFormatter, timeTooltipLabelFormatter } from '@/lib/utils'
+import {
+  apiErrorMessage,
+  axisRightPad,
+  cn,
+  relativeTime,
+  timeAxisTickFormatter,
+  timeTicks,
+  timeTooltipLabelFormatter,
+} from '@/lib/utils'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/Tabs'
+import { Card, CardContent } from '@/components/ui/Card'
+import { Badge } from '@/components/ui/Badge'
+import { Skeleton } from '@/components/ui/Skeleton'
+import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
 import { ServiceCheckFormDialog } from '@/components/forms/ServiceCheckFormDialog'
-import { useTheme } from '@/stores/theme'
+import { TimeRangePicker, rangePhrase, useTimeRange } from '@/components/TimeRangePicker'
+import {
+  BAND_FILL,
+  BAND_TEXT,
+  PulseDot,
+  UptimeBars,
+  pulseStatusOf,
+  uptimeBand,
+  type UptimeBand,
+} from '@/components/services/uptime'
 import type { ServiceCheck, ServiceMetricPoint, ServiceMetricResponse } from '@/types'
 
-/* ─── Theme palette ─────────────────────────────────────────────────────
- * Two palettes — chrome (bg, panel, border, text) flips with the active
- * theme, semantic + brand colors stay stable (so module-level
- * statusMeta/typeMeta keep working).
- * --------------------------------------------------------------------- */
-const C_DARK = {
-  bg: '#0B111F',
-  panel: '#0F172A',
-  panelLift: '#121a2e',
-  border: '#1f2a44',
-  borderSoft: '#172135',
-  text: '#E5E7EB',
-  textDim: '#94A3B8',
-  textMuted: '#64748B',
-  up: '#22c55e',
-  down: '#ef4444',
-  warn: '#f59e0b',
-  unknown: '#475569',
-  cyan: '#22d3ee',
-  violet: '#a78bfa',
-  pink: '#f472b6',
-  primary: '#38bdf8',
-}
+const UP_COLOR = 'rgb(var(--success))'
+const DOWN_COLOR = 'rgb(var(--danger))'
+const WARN_COLOR = 'rgb(var(--warning))'
 
-type Palette = typeof C_DARK
-
-const C_LIGHT: Palette = {
-  bg: '#F8FAFC',
-  panel: '#FFFFFF',
-  panelLift: '#F1F5F9',
-  border: '#E2E8F0',
-  borderSoft: '#EEF2F7',
-  text: '#0F172A',
-  textDim: '#475569',
-  textMuted: '#64748B',
-  up: '#16A34A',
-  down: '#DC2626',
-  warn: '#D97706',
-  unknown: '#94A3B8',
-  cyan: '#0891B2',
-  violet: '#7C3AED',
-  pink: '#DB2777',
-  primary: '#2563EB',
-}
-
-const PaletteContext = createContext<Palette>(C_DARK)
-function useC(): Palette {
-  return useContext(PaletteContext)
-}
-
-// Module-level metas reference C_DARK semantic keys; both palettes share
-// the same shape so they're swappable, but `statusMeta` / `typeMeta`
-// values are only used for icons/labels — when a *color* is needed at
-// runtime, components re-resolve via `useC()`.
-const C = C_DARK
-
-const TIME_RANGES = [
-  { key: '1h', label: '1h', hours: 1 },
-  { key: '24h', label: '24h', hours: 24 },
-  { key: '7d', label: '7d', hours: 168 },
-  { key: '1M', label: '1M', hours: 720 },
+const TABS = [
+  { key: 'overview', label: 'Overview', Icon: LineChart },
+  { key: 'uptime', label: 'Uptime', Icon: CalendarDays },
+  { key: 'incidents', label: 'Incidents & alerts', Icon: AlertTriangle },
+  { key: 'config', label: 'Configuration', Icon: SlidersHorizontal },
 ] as const
 
-function rangeIdxFromKey(k: string | null): number {
-  const i = TIME_RANGES.findIndex((r) => r.key === k)
-  return i >= 0 ? i : 0 // default 1h
+type TabKey = (typeof TABS)[number]['key']
+
+const statusMeta: Record<string, { label: string; tone: 'success' | 'danger' | 'warning' | 'outline'; Icon: typeof CheckCircle2 }> = {
+  up: { label: 'Healthy', tone: 'success', Icon: CheckCircle2 },
+  down: { label: 'Down', tone: 'danger', Icon: XCircle },
+  degraded: { label: 'Degraded', tone: 'warning', Icon: AlertTriangle },
+  warning: { label: 'Warning', tone: 'warning', Icon: AlertTriangle },
+  unknown: { label: 'Unknown', tone: 'outline', Icon: HelpCircle },
 }
 
-function formatRangeLabel(hours: number): string {
-  if (hours < 24) return `${hours}h`
-  if (hours < 24 * 30) return `${Math.round(hours / 24)}d`
-  return `${Math.round(hours / (24 * 30))}M`
+const typeMeta: Record<string, { label: string; Icon: typeof Globe }> = {
+  http: { label: 'HTTP', Icon: Globe },
+  tcp: { label: 'TCP', Icon: Plug },
+  tls: { label: 'TLS', Icon: ShieldCheck },
+  icmp: { label: 'ICMP', Icon: Radar },
+  dns: { label: 'DNS', Icon: Network },
 }
 
-const statusMeta: Record<
-  string,
-  { label: string; color: string; Icon: any }
-> = {
-  up: { label: 'Healthy', color: C.up, Icon: CheckCircle2 },
-  down: { label: 'Down', color: C.down, Icon: XCircle },
-  degraded: { label: 'Degraded', color: C.warn, Icon: AlertTriangle },
-  warning: { label: 'Warning', color: C.warn, Icon: AlertTriangle },
-  unknown: { label: 'Unknown', color: C.unknown, Icon: HelpCircle },
+type StatusHistoryEvent = {
+  timestamp: string
+  old_status: string | null
+  new_status: string
+  reason?: string | null
+  duration_sec?: number | null
 }
 
-const typeMeta: Record<string, { label: string; Icon: any; tint: string }> = {
-  http: { label: 'HTTP', Icon: Globe, tint: C.cyan },
-  tcp: { label: 'TCP', Icon: Plug, tint: C.up },
-  tls: { label: 'TLS', Icon: ShieldCheck, tint: C.warn },
-  icmp: { label: 'ICMP', Icon: Radar, tint: C.violet },
-  dns: { label: 'DNS', Icon: Network, tint: C.pink },
+type ServiceAlert = {
+  id: string
+  status: 'active' | 'acknowledged' | 'resolved'
+  severity: string
+  message: string
+  triggered_at: string
+  acknowledged_at?: string | null
+  resolved_at?: string | null
 }
 
-/* ─── Helpers ───────────────────────────────────────────────────────────── */
-
-function formatDur(sec: number | null | undefined): string {
-  if (sec == null || !Number.isFinite(sec) || sec <= 0) return '—'
-  const d = Math.floor(sec / 86400)
-  const h = Math.floor((sec % 86400) / 3600)
-  const m = Math.floor((sec % 3600) / 60)
-  if (d > 0) return `${d}d ${h}h`
-  if (h > 0) return `${h}h ${m}m`
-  if (m > 0) return `${m}m ${Math.floor(sec % 60)}s`
-  return `${Math.floor(sec)}s`
-}
-
-function formatMs(n: number | null | undefined): string {
-  if (n == null || !Number.isFinite(n)) return '—'
-  if (n >= 1000) return `${(n / 1000).toFixed(1)} s`
-  return `${n.toFixed(n < 10 ? 1 : 0)} ms`
-}
-
-function pct(n: number | null | undefined, digits = 2): string {
-  if (n == null || !Number.isFinite(n)) return '—'
-  return `${n.toFixed(digits)}%`
+type RelatedResponse = {
+  parent: ServiceCheck | null
+  children: ServiceCheck[]
+  same_device: ServiceCheck[]
+  same_host: ServiceCheck[]
+  same_group: ServiceCheck[]
 }
 
 type ProbeEvidenceStep = {
@@ -209,185 +168,246 @@ type ProbeEvidenceResult = {
   details?: {
     status_code?: number | null
     authentication?: string
-    transport_security?: string
-    steps_total?: number
-    steps_passed?: number
     steps?: ProbeEvidenceStep[]
   }
+}
+
+type ActivityEvent = {
+  id: string
+  timestamp: string
+  kind: 'alert' | 'status'
+  severity: 'critical' | 'warning' | 'info' | 'success'
+  title: string
+  subtitle?: string
+  href?: string
+}
+
+type SlaStats = {
+  uptime_pct: number | null
+  sample_count: number
+  incident_count: number
+  total_downtime_sec: number
+  longest_incident_sec: number
+  mttr_sec: number | null
+  mtbf_sec: number | null
+  avg_response_ms: number | null
+  p95_response_ms: number | null
+  max_response_ms: number | null
+  error_rate_pct: number | null
+  uptime_streak_sec: number | null
+}
+
+type HourlyUptime = { ts: string; uptime_pct: number | null; sample_count: number }
+
+type Outage = {
+  start: number
+  end: number | null
+  kind: 'down' | 'warn'
+  reason?: string
+  clippedStart: boolean
+}
+
+/* ─── Formatters ────────────────────────────────────────────────────────── */
+
+function formatDur(sec: number | null | undefined): string {
+  if (sec == null || !Number.isFinite(sec) || sec <= 0) return '—'
+  const d = Math.floor(sec / 86400)
+  const h = Math.floor((sec % 86400) / 3600)
+  const m = Math.floor((sec % 3600) / 60)
+  if (d > 0) return `${d}d ${h}h`
+  if (h > 0) return `${h}h ${m}m`
+  if (m > 0) return `${m}m ${Math.floor(sec % 60)}s`
+  return `${Math.floor(sec)}s`
+}
+
+function formatMs(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n)) return '—'
+  if (n >= 1000) return `${(n / 1000).toFixed(1)} s`
+  return `${n.toFixed(n < 10 ? 1 : 0)} ms`
+}
+
+function pct(n: number | null | undefined, digits = 2): string {
+  if (n == null || !Number.isFinite(n)) return '—'
+  return `${n.toFixed(digits)}%`
+}
+
+function statusOf(s: string) {
+  return statusMeta[s] || statusMeta.unknown
+}
+
+function normalizeSeverity(s: string): ActivityEvent['severity'] {
+  const v = (s || '').toLowerCase()
+  if (v === 'critical' || v === 'down') return 'critical'
+  if (v === 'warning' || v === 'degraded') return 'warning'
+  if (v === 'success' || v === 'up' || v === 'ok') return 'success'
+  return 'info'
+}
+
+function cleanAlertMessage(msg: string): string {
+  return (msg || 'Alert').replace(/^\[ZenPlus\s+[A-Z]+\]\s*/, '')
 }
 
 /* ─── Page ──────────────────────────────────────────────────────────────── */
 
 export function ServiceCheckDetailPage() {
-  const { theme } = useTheme()
-  const C = theme === 'dark' ? C_DARK : C_LIGHT
   const { id = '' } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
   const [searchParams, setSearchParams] = useSearchParams()
 
-  // Range can be a preset key (1h/24h/7d/1M) or "custom" — if "custom" the
-  // window comes from explicit ?from=&to= ISO timestamps.
-  const rangeKey = searchParams.get('range')
-  const isCustom = rangeKey === 'custom' && !!searchParams.get('from') && !!searchParams.get('to')
-  const rangeIdx = rangeIdxFromKey(rangeKey)
-  const setPresetRange = (i: number) => {
-    const next = new URLSearchParams(searchParams)
-    next.set('range', TIME_RANGES[i].key)
-    next.delete('from')
-    next.delete('to')
-    setSearchParams(next, { replace: true })
-  }
-  const setCustomRange = (fromISO: string, toISO: string) => {
-    const next = new URLSearchParams(searchParams)
-    next.set('range', 'custom')
-    next.set('from', fromISO)
-    next.set('to', toISO)
-    setSearchParams(next, { replace: true })
+  const tab = (TABS.find((t) => t.key === searchParams.get('tab'))?.key ?? 'overview') as TabKey
+  const setTab = (next: TabKey) => {
+    const p = new URLSearchParams(searchParams)
+    if (next === 'overview') p.delete('tab')
+    else p.set('tab', next)
+    setSearchParams(p, { replace: true })
   }
 
   const [editOpen, setEditOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
-  const [copied, setCopied] = useState(false)
-  const [nowTick, setNowTick] = useState(() => Date.now())
   const [hsOpen, setHsOpen] = useState(false)
+  const [maintOpen, setMaintOpen] = useState(false)
+  const [eventsOpen, setEventsOpen] = useState(false)
   const [hsConfig, setHsConfig] = useState<HealthScoreConfig>(() => loadHealthScoreConfig())
   const [manualProbe, setManualProbe] = useState<{ result: ProbeEvidenceResult; observedAt: string } | null>(null)
+  const [nowTick, setNowTick] = useState(() => Date.now())
 
-  // Tick every second for the "Next poll in" countdown.
   useEffect(() => {
     const h = setInterval(() => setNowTick(Date.now()), 1000)
     return () => clearInterval(h)
   }, [])
 
-  const { data: check, isLoading } = useQuery<ServiceCheck>({
+  const { data: check, isLoading, isError } = useQuery<ServiceCheck>({
     queryKey: ['service-check', id],
     queryFn: async () => (await api.get(`/service-checks/${id}`)).data,
     enabled: !!id,
     refetchInterval: 15_000,
   })
 
-  const customFrom = searchParams.get('from')
-  const customTo = searchParams.get('to')
-  const fromTo = useMemo(() => {
-    if (isCustom && customFrom && customTo) {
-      return { from: customFrom, to: customTo }
-    }
-    const now = Date.now()
-    return {
-      from: new Date(now - TIME_RANGES[rangeIdx].hours * 3_600_000).toISOString(),
-      to: new Date(now).toISOString(),
-    }
-  }, [isCustom, customFrom, customTo, rangeIdx])
-  const rangeHours = useMemo(() => {
-    if (isCustom) {
-      const span = (Date.parse(fromTo.to) - Date.parse(fromTo.from)) / 3_600_000
-      return Math.max(1, Math.round(span))
-    }
-    return TIME_RANGES[rangeIdx].hours
-  }, [isCustom, fromTo, rangeIdx])
-  const rangeLabel = isCustom
-    ? `${new Date(fromTo.from).toLocaleString()} → ${new Date(fromTo.to).toLocaleString()}`
-    : `Last ${formatRangeLabel(rangeHours)}`
+  const fromTs = Date.parse(range.fromISO)
+  const toTs = Date.parse(range.toISO)
+  const granularity = range.hours <= 24 ? 'raw' : 'auto'
 
-  const { data: metrics } = useQuery<ServiceMetricResponse>({
-    queryKey: ['service-check-metrics', id, rangeHours],
-    queryFn: async () => {
-      const g = rangeHours <= 6 ? 'raw' : 'auto'
-      return (await api.get(
-        `/service-checks/${id}/metrics?from=${encodeURIComponent(fromTo.from)}&to=${encodeURIComponent(fromTo.to)}&granularity=${g}`,
-      )).data
-    },
+  const metricsQ = useQuery<ServiceMetricResponse>({
+    queryKey: ['service-check-metrics', id, range.fromISO, range.toISO, granularity],
+    queryFn: async () =>
+      (await api.get(
+        `/service-checks/${id}/metrics?from=${encodeURIComponent(range.fromISO)}&to=${encodeURIComponent(range.toISO)}&granularity=${granularity}`,
+      )).data,
     enabled: !!id && !!check,
     refetchInterval: 30_000,
   })
-  const points: ServiceMetricPoint[] = metrics?.points || []
+  const points: ServiceMetricPoint[] = metricsQ.data?.points || []
 
-  const { data: statusHistory = [] } = useQuery<
-    Array<{
-      timestamp: string
-      old_status: string | null
-      new_status: string
-      reason?: string | null
-      duration_sec?: number | null
-    }>
-  >({
-    queryKey: ['service-status-history', id, fromTo.from, fromTo.to],
+  const { data: statusHistory = [] } = useQuery<StatusHistoryEvent[]>({
+    queryKey: ['service-status-history', id, range.fromISO, range.toISO],
     queryFn: async () =>
       (await api.get(
-        `/service-checks/${id}/status-history?from=${encodeURIComponent(fromTo.from)}&to=${encodeURIComponent(fromTo.to)}&limit=500`,
+        `/service-checks/${id}/status-history?from=${encodeURIComponent(range.fromISO)}&to=${encodeURIComponent(range.toISO)}&limit=500`,
       )).data,
     enabled: !!id && !!check,
     refetchInterval: 60_000,
   })
 
-  const { data: sla } = useQuery<{
-    uptime_pct: number | null
-    sample_count: number
-    incident_count: number
-    total_downtime_sec: number
-    longest_incident_sec: number
-    mttr_sec: number | null
-    mtbf_sec: number | null
-    avg_response_ms: number | null
-    p95_response_ms: number | null
-    max_response_ms: number | null
-    error_rate_pct: number | null
-    uptime_streak_sec: number | null
-  }>({
-    queryKey: ['service-sla', id, rangeHours],
-    queryFn: async () => (await api.get(`/service-checks/${id}/sla?hours=${rangeHours}`)).data,
+  const slaQ = useQuery<SlaStats>({
+    // Send explicit bounds: `hours` alone always ends at now, so a custom historical range
+    // would silently be scored against the last N hours instead.
+    queryKey: ['service-sla', id, range.fromISO, range.toISO],
+    queryFn: async () =>
+      (await api.get(
+        `/service-checks/${id}/sla?hours=${range.hours}&from=${encodeURIComponent(range.fromISO)}&to=${encodeURIComponent(range.toISO)}`,
+      )).data,
     enabled: !!id && !!check,
     refetchInterval: 30_000,
   })
+  const sla = slaQ.data
 
-  const { data: hourly } = useQuery<{
-    hours: Array<{ ts: string; uptime_pct: number | null; sample_count: number }>
-  }>({
+  // Fixed windows for the hero strip — always the last 24h/7d/30d ending now, independent
+  // of the range picker, the way uptime products present a monitor.
+  const sla24Q = useQuery<SlaStats>({
+    queryKey: ['service-sla-fixed', id, 24],
+    queryFn: async () => (await api.get(`/service-checks/${id}/sla?hours=24`)).data,
+    enabled: !!id && !!check,
+    refetchInterval: 60_000,
+  })
+  const sla7dQ = useQuery<SlaStats>({
+    queryKey: ['service-sla-fixed', id, 168],
+    queryFn: async () => (await api.get(`/service-checks/${id}/sla?hours=168`)).data,
+    enabled: !!id && !!check,
+    refetchInterval: 120_000,
+  })
+  const sla30dQ = useQuery<SlaStats>({
+    queryKey: ['service-sla-fixed', id, 720],
+    queryFn: async () => (await api.get(`/service-checks/${id}/sla?hours=720`)).data,
+    enabled: !!id && !!check,
+    refetchInterval: 300_000,
+  })
+
+  const hourlyQ = useQuery<{ hours: HourlyUptime[] }>({
     queryKey: ['service-hourly-uptime', id],
-    queryFn: async () =>
-      (await api.get(`/service-checks/${id}/hourly-uptime?days=30`)).data,
+    queryFn: async () => (await api.get(`/service-checks/${id}/hourly-uptime?days=30`)).data,
     enabled: !!id && !!check,
     refetchInterval: 60_000,
   })
+  const hourly = hourlyQ.data?.hours || []
 
-  const { data: alertsResp } = useQuery<{ data: any[] }>({
+  const { data: alertsResp } = useQuery<{ data: ServiceAlert[]; meta: { total: number } }>({
     queryKey: ['service-alerts', id],
-    queryFn: async () =>
-      (await api.get(`/alerts?service_check_id=${id}&limit=100`)).data,
+    queryFn: async () => (await api.get(`/alerts?service_check_id=${id}&limit=50`)).data,
     enabled: !!id && !!check,
     refetchInterval: 30_000,
   })
-  const alerts = alertsResp?.data || []
-  const activeAlerts = alerts.filter((a) => a.status === 'active')
-  const alertCounts = useMemo(() => {
-    const c = { critical: 0, warning: 0, info: 0 }
-    for (const a of alerts) {
-      if (a.status !== 'active') continue
-      c[a.severity as keyof typeof c] = (c[a.severity as keyof typeof c] || 0) + 1
-    }
-    return c
-  }, [alerts])
+  const alerts = useMemo(() => alertsResp?.data || [], [alertsResp])
+  const activeAlerts = useMemo(() => alerts.filter((a) => a.status === 'active'), [alerts])
 
-  const { data: relatedResp } = useQuery<{ data: ServiceCheck[] }>({
-    queryKey: ['service-related', check?.group_id, check?.parent_check_id, id],
+  // Whether any enabled alert rule can ever produce an alert for this check. When none
+  // does, an empty Alerts panel is expected behaviour rather than a fault, and saying so
+  // is the difference between a useful empty state and a confusing one.
+  const { data: ruleCoverage } = useQuery<{ covered: boolean; count: number }>({
+    queryKey: ['service-alert-rule-coverage', id, check?.group_id],
     queryFn: async () => {
-      // Fetch all checks once — we filter client-side.
-      return (await api.get('/service-checks?limit=200')).data
+      const raw = (await api.get('/alert-rules')).data
+      const rules: any[] = Array.isArray(raw) ? raw : raw?.data || []
+      const matches = rules.filter(
+        (r) =>
+          r?.enabled !== false &&
+          (r?.service_check_id === id ||
+            (!!check?.group_id && r?.service_check_group_id === check.group_id) ||
+            r?.metric === 'service_status'),
+      )
+      return { covered: matches.length > 0, count: matches.length }
     },
-    enabled: !!check,
+    enabled: !!id && !!check,
+    staleTime: 120_000,
+    retry: false,
+  })
+
+  const { data: related, isError: relatedError } = useQuery<RelatedResponse>({
+    queryKey: ['service-related', id, check?.device_id, check?.group_id, check?.target_host, check?.parent_check_id],
+    queryFn: async () => {
+      try {
+        return (await api.get(`/service-checks/${id}/related`)).data
+      } catch {
+        return fetchRelatedFallback(check!)
+      }
+    },
+    enabled: !!id && !!check,
     refetchInterval: 60_000,
   })
-  const allChecks = relatedResp?.data || []
-  const upstream = useMemo(() => {
-    if (!check?.parent_check_id) return []
-    const p = allChecks.find((c) => c.id === check.parent_check_id)
-    return p ? [p] : []
-  }, [allChecks, check])
-  const downstream = useMemo(
-    () => allChecks.filter((c) => c.parent_check_id === id),
-    [allChecks, id],
-  )
+
+  // Widest-window fallback so a quiet 1h window still shows the service's real history.
+  const wantsEventFallback = statusHistory.length === 0 && alerts.length === 0
+  const wideFrom = useMemo(() => new Date(Date.now() - 720 * 3600_000).toISOString(), [])
+  const { data: fbHistory = [] } = useQuery<StatusHistoryEvent[]>({
+    queryKey: ['service-status-history-fallback', id],
+    queryFn: async () =>
+      (await api.get(
+        `/service-checks/${id}/status-history?from=${encodeURIComponent(wideFrom)}&to=${encodeURIComponent(new Date().toISOString())}&limit=100`,
+      )).data,
+    enabled: !!id && !!check && wantsEventFallback,
+    staleTime: 60_000,
+  })
 
   const del = useMutation({
     mutationFn: async () => api.delete(`/service-checks/${id}`),
@@ -407,13 +427,13 @@ export function ServiceCheckDetailPage() {
       qc.invalidateQueries({ queryKey: ['service-check', id] })
       qc.invalidateQueries({ queryKey: ['service-check-metrics', id] })
       qc.invalidateQueries({ queryKey: ['service-sla', id] })
+      qc.invalidateQueries({ queryKey: ['service-status-history', id] })
     },
     onError: (e: any) => toast.error('Probe failed to run', apiErrorMessage(e)),
   })
 
   const togglePause = useMutation({
-    mutationFn: async () =>
-      (await api.put(`/service-checks/${id}`, { enabled: !check?.enabled })).data,
+    mutationFn: async () => (await api.put(`/service-checks/${id}`, { enabled: !check?.enabled })).data,
     onSuccess: () => {
       toast.success(check?.enabled ? 'Checks paused' : 'Checks resumed')
       qc.invalidateQueries({ queryKey: ['service-check', id] })
@@ -421,29 +441,6 @@ export function ServiceCheckDetailPage() {
     },
     onError: (e: any) => toast.error('Failed', apiErrorMessage(e)),
   })
-
-  const forceRevalidate = useMutation({
-    mutationFn: async () => {
-      // Run two consecutive probes to confirm the current status is not transient.
-      await api.post(`/service-checks/${id}/test`, {})
-      return (await api.post(`/service-checks/${id}/test`, {})).data
-    },
-    onSuccess: (d: any) => {
-      setManualProbe({ result: d as ProbeEvidenceResult, observedAt: new Date().toISOString() })
-      toast.success(
-        'Re-validation complete',
-        d?.status === 'up'
-          ? `Confirmed up · ${Math.round(d.response_time_ms || 0)} ms`
-          : `Confirmed ${d?.status || 'down'}: ${d?.error || ''}`,
-      )
-      qc.invalidateQueries({ queryKey: ['service-check', id] })
-      qc.invalidateQueries({ queryKey: ['service-check-metrics', id] })
-      qc.invalidateQueries({ queryKey: ['service-sla', id] })
-    },
-    onError: (e: any) => toast.error('Re-validation failed', apiErrorMessage(e)),
-  })
-
-  const [maintOpen, setMaintOpen] = useState(false)
 
   const startMaintenance = useMutation({
     mutationFn: async (durationHours: number) => {
@@ -455,7 +452,7 @@ export function ServiceCheckDetailPage() {
           scope_check_id: id,
           starts_at: now.toISOString(),
           ends_at: end.toISOString(),
-          reason: `Manual ${durationHours}h window from Quick Actions`,
+          reason: `Manual ${durationHours}h window from service detail`,
         })
       ).data
     },
@@ -464,23 +461,21 @@ export function ServiceCheckDetailPage() {
       setMaintOpen(false)
       qc.invalidateQueries({ queryKey: ['service-check', id] })
       qc.invalidateQueries({ queryKey: ['service-checks'] })
-      qc.invalidateQueries({ queryKey: ['service-check-maintenance'] })
     },
     onError: (e: any) => toast.error('Failed to start maintenance', apiErrorMessage(e)),
   })
 
   const startMaintenanceCustom = useMutation({
-    mutationFn: async (args: { startsAtISO: string; endsAtISO: string }) => {
-      return (
+    mutationFn: async (args: { startsAtISO: string; endsAtISO: string }) =>
+      (
         await api.post('/service-check-maintenance', {
           scope_type: 'check',
           scope_check_id: id,
           starts_at: args.startsAtISO,
           ends_at: args.endsAtISO,
-          reason: 'Custom maintenance window from Quick Actions',
+          reason: 'Custom maintenance window from service detail',
         })
-      ).data
-    },
+      ).data,
     onSuccess: (_d, args) => {
       const start = new Date(args.startsAtISO)
       const isFuture = start.getTime() > Date.now() + 60_000
@@ -491,7 +486,6 @@ export function ServiceCheckDetailPage() {
       setMaintOpen(false)
       qc.invalidateQueries({ queryKey: ['service-check', id] })
       qc.invalidateQueries({ queryKey: ['service-checks'] })
-      qc.invalidateQueries({ queryKey: ['service-check-maintenance'] })
     },
     onError: (e: any) => toast.error('Failed to start maintenance', apiErrorMessage(e)),
   })
@@ -508,8 +502,6 @@ export function ServiceCheckDetailPage() {
           Date.parse(m.ends_at) >= now,
       )
       if (active.length === 0) throw new Error('No active maintenance window for this check')
-      // Delete every active window so the check fully exits maintenance, even if
-      // overlapping windows exist (multi-session quick-action use).
       await Promise.all(active.map((m) => api.delete(`/service-check-maintenance/${m.id}`)))
       return active.length
     },
@@ -518,17 +510,15 @@ export function ServiceCheckDetailPage() {
       setMaintOpen(false)
       qc.invalidateQueries({ queryKey: ['service-check', id] })
       qc.invalidateQueries({ queryKey: ['service-checks'] })
-      qc.invalidateQueries({ queryKey: ['service-check-maintenance'] })
     },
     onError: (e: any) => toast.error('Failed to end maintenance', apiErrorMessage(e)),
   })
 
   const ackAllAlerts = useMutation({
     mutationFn: async () => {
-      const active = alerts.filter((a: any) => a.status === 'active')
-      if (active.length === 0) throw new Error('No active alerts to acknowledge')
-      await Promise.all(active.map((a: any) => api.post(`/alerts/${a.id}/acknowledge`)))
-      return active.length
+      if (activeAlerts.length === 0) throw new Error('No active alerts to acknowledge')
+      await Promise.all(activeAlerts.map((a) => api.post(`/alerts/${a.id}/acknowledge`)))
+      return activeAlerts.length
     },
     onSuccess: (n: number) => {
       toast.success(`Acknowledged ${n} alert${n === 1 ? '' : 's'}`)
@@ -540,11 +530,7 @@ export function ServiceCheckDetailPage() {
 
   const exportConfig = () => {
     if (!check) return
-    const payload = {
-      ...check,
-      _exported_at: new Date().toISOString(),
-    }
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const blob = new Blob([JSON.stringify({ ...check, _exported_at: new Date().toISOString() }, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -556,363 +542,278 @@ export function ServiceCheckDetailPage() {
     toast.success('Config exported')
   }
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center py-32">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-          <span className="text-sm text-muted">Loading service…</span>
-        </div>
-      </div>
-    )
-  }
+  const activityEvents = useMemo(
+    () => buildActivityEvents(statusHistory, alerts, range.fromISO, range.toISO, check),
+    [statusHistory, alerts, range.fromISO, range.toISO, check],
+  )
+  const fallbackEvents = useMemo(
+    () => (wantsEventFallback ? buildActivityEvents(fbHistory, alerts, wideFrom, new Date().toISOString(), check) : []),
+    [wantsEventFallback, fbHistory, alerts, wideFrom, check],
+  )
+  const derived = useMemo(
+    () => (check ? deriveWindowStats(points, statusHistory, check, fromTs, toTs) : {
+      uptime_pct: null, error_rate_pct: null, incident_count: 0, avg_ms: null, p95_ms: null, streak_sec: null,
+    }),
+    [points, statusHistory, check, fromTs, toTs],
+  )
 
-  if (!check) {
+  const outages = useMemo(
+    () => (check ? buildOutages(statusHistory, fromTs, toTs, check) : []),
+    [statusHistory, fromTs, toTs, check],
+  )
+  const days = useMemo(() => buildDailyUptime(hourly, 30, check?.check_interval || 60), [hourly, check?.check_interval])
+
+  if (isLoading) return <DetailSkeleton />
+
+  if (isError || !check) {
     return (
-      <div className="flex flex-col items-center justify-center gap-4 py-32">
+      <div className="flex flex-col items-center justify-center gap-3 py-24 text-center">
         <XCircle className="h-10 w-10 text-danger" />
-        <h3 className="text-lg font-semibold">Service not found</h3>
-        <Link to="/services" className="inline-flex items-center gap-2 text-sm text-primary hover:underline">
-          <ArrowLeft className="h-4 w-4" /> Back
-        </Link>
+        <h3 className="text-lg font-semibold">Service check not found</h3>
+        <p className="max-w-sm text-sm text-muted">
+          It may have been deleted, or the link points at an id that no longer exists.
+        </p>
+        <Button variant="outline" size="sm" asChild>
+          <Link to="/services"><ArrowLeft className="h-4 w-4" /> Back to services</Link>
+        </Button>
       </div>
     )
   }
 
-  const sm = statusMeta[check.status] || statusMeta.unknown
-  const tMeta = typeMeta[check.check_type] || typeMeta.http
-  const TypeIcon = tMeta.Icon
-  const target = check.target_url || `${check.target_host}${check.target_port ? `:${check.target_port}` : ''}`
-  const healthScore = computeHealthScore({
-    uptime_pct: sla?.uptime_pct ?? null,
-    error_rate_pct: sla?.error_rate_pct ?? null,
-    incident_count: sla?.incident_count ?? 0,
-    p95_response_ms: sla?.p95_response_ms ?? null,
-  }, hsConfig)
   const lastCheckMs = check.last_check_at ? Date.parse(check.last_check_at) : null
   const intervalMs = (check.check_interval || 60) * 1000
   const nextPollMs = lastCheckMs ? lastCheckMs + intervalMs : null
   const secsToNext = nextPollMs ? Math.max(0, Math.floor((nextPollMs - nowTick) / 1000)) : null
-  const env = pickEnv(check.tags || [])
+
+  const uptimePct = sla?.uptime_pct ?? derived.uptime_pct
+  const errorRatePct = sla?.error_rate_pct ?? derived.error_rate_pct
+  const incidentCount = sla?.incident_count ?? derived.incident_count
+  const avgMs = sla?.avg_response_ms ?? derived.avg_ms ?? check.last_response_ms
+  const p95Ms = sla?.p95_response_ms ?? derived.p95_ms
+  const streakSec = sla?.uptime_streak_sec ?? derived.streak_sec
+  const downtimeSec = sla?.total_downtime_sec ?? 0
+
+  const healthScore = computeHealthScore(
+    { uptime_pct: uptimePct, error_rate_pct: errorRatePct, incident_count: incidentCount, p95_response_ms: p95Ms },
+    hsConfig,
+  )
+
+  const latestPoint = latestProbePoint(points, check)
+
+  // The poller updates Postgres and ClickHouse on separate paths, so a live last_check_at
+  // with no stored samples means the metrics pipeline is broken, not that the service is idle.
+  const metricsStale =
+    !!lastCheckMs &&
+    nowTick - lastCheckMs < Math.max(10 * 60_000, intervalMs * 5) &&
+    points.length === 0 &&
+    !metricsQ.isLoading &&
+    check.enabled &&
+    toTs - fromTs >= intervalMs * 3
 
   return (
-    <PaletteContext.Provider value={C}>
-    <div
-      className="space-y-5 pb-8"
-      style={{ color: C.text }}
-    >
-      {/* Page header */}
-      <div
-        className="flex flex-col gap-4 rounded-2xl p-4 shadow-sm xl:flex-row xl:items-center xl:justify-between"
-        style={{ background: C.panel, border: `1px solid ${C.border}` }}
-      >
-        <div className="flex items-start gap-2">
-          <button
-            onClick={() => navigate('/services')}
-            className="mt-1 rounded-md p-1.5 text-muted hover:bg-white/5"
-            aria-label="Back"
-          >
-            <ArrowLeft className="h-4 w-4" />
-          </button>
-          <div>
-            <div className="mb-1 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wider text-muted">
-              Monitoring <ChevronRight className="h-3 w-3" /> Service overview
-            </div>
-            <h1 className="text-2xl font-semibold tracking-tight">Service operations</h1>
-            <p className="mt-0.5 text-sm text-muted">
-              Live health, response evidence, reliability, and configuration in one workspace.
-            </p>
-          </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
+    <div className="space-y-4 pb-10">
+      <ServiceHeader
+        check={check}
+        secsToNext={secsToNext}
+        rangePicker={(
           <TimeRangePicker
             rangeIdx={rangeIdx}
             isCustom={isCustom}
-            customFrom={fromTo.from}
-            customTo={fromTo.to}
-            onPreset={setPresetRange}
-            onCustom={setCustomRange}
+            customFrom={range.fromISO}
+            customTo={range.toISO}
+            onPreset={setPreset}
+            onCustom={setCustom}
           />
-          <span className="mx-1 hidden h-5 w-px bg-white/10 sm:inline-block" />
-          <HeaderBtn
-            icon={check.enabled ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
-            label={check.enabled ? 'Pause Checks' : 'Resume Checks'}
-            onClick={() => togglePause.mutate()}
-            tone="warn"
-          />
-          <HeaderBtn
-            icon={<Play className="h-3.5 w-3.5 fill-current" />}
-            label="Run Probe"
-            onClick={() => runNow.mutate()}
-            loading={runNow.isPending}
-            tone="success"
-          />
-          <HeaderBtn
-            icon={<Check className="h-3.5 w-3.5" />}
-            label={activeAlerts.length > 0 ? `Acknowledge (${activeAlerts.length})` : 'Acknowledge'}
-            onClick={() => ackAllAlerts.mutate()}
-            loading={ackAllAlerts.isPending}
-            disabled={activeAlerts.length === 0}
-            tone="primary"
-          />
-          <HeaderBtn
-            icon={<FileText className="h-3.5 w-3.5" />}
-            label="Open Logs"
-            onClick={() => navigate(`/services/${id}/incidents?filter=all`)}
-            tone="neutral"
-          />
-        </div>
-      </div>
-
-      {/* ── Hero metadata card ───────────────────────────────────────── */}
-      <HeroCard
-        name={check.name}
-        status={check.status}
-        type={check.check_type}
-        target={target}
-        environment={env}
-        group={check.group_name}
-        tags={check.tags || []}
-        deviceHostname={check.device_hostname || null}
-        deviceId={check.device_id}
-        checkInterval={check.check_interval}
-        lastCheckAt={check.last_check_at}
-        secsToNext={secsToNext}
-        inMaintenance={!!check.in_maintenance}
-        enabled={check.enabled}
-        probeInfo={
-          check.check_type === 'http'
-            ? (check.workflow_steps?.length || 0) > 0
-              ? `HTTP journey · ${check.workflow_steps?.length} steps · ${(check.workflow_operator || 'all').toUpperCase()}`
-              : `HTTP(S) · Status + Body`
-            : check.check_type.toUpperCase()
-        }
+        )}
+        onEdit={() => setEditOpen(true)}
+        onDelete={() => setDeleteOpen(true)}
+        onRunProbe={() => runNow.mutate()}
+        runPending={runNow.isPending}
+        onPause={() => togglePause.mutate()}
+        pausePending={togglePause.isPending}
+        onMaintenance={() => {
+          if (check.in_maintenance) endMaintenance.mutate()
+          else setMaintOpen(true)
+        }}
+        onAck={() => ackAllAlerts.mutate()}
+        activeAlertCount={activeAlerts.length}
+        onLogs={() => navigate(`/services/${id}/incidents?filter=all`)}
+        onExport={exportConfig}
       />
 
-      {(check.workflow_steps?.length || 0) > 0 && <WorkflowOverview check={check} />}
-
-      {/* ── Maintenance banner ───────────────────────────────────────── */}
       {check.in_maintenance && (
-        <MaintenanceBanner
-          onEnd={() => endMaintenance.mutate()}
-          ending={endMaintenance.isPending}
+        <StatusBanner
+          tone="info"
+          icon={Wrench}
+          title="In maintenance"
+          body="Probes still run. Alerts are suppressed and this window is excluded from SLA."
+          actionLabel={endMaintenance.isPending ? 'Ending…' : 'End now'}
+          onAction={() => endMaintenance.mutate()}
+          actionDisabled={endMaintenance.isPending}
         />
       )}
-
-      {/* ── Paused banner ────────────────────────────────────────────── */}
       {!check.enabled && !check.in_maintenance && (
-        <PausedBanner
-          onResume={() => togglePause.mutate()}
-          resuming={togglePause.isPending}
+        <StatusBanner
+          tone="warning"
+          icon={Pause}
+          title="Checks paused"
+          body="The poller will not schedule this check until it is resumed."
+          actionLabel={togglePause.isPending ? 'Resuming…' : 'Resume'}
+          onAction={() => togglePause.mutate()}
+          actionDisabled={togglePause.isPending}
         />
       )}
-
-      {/* ── Failure reason banner ────────────────────────────────────── */}
       {check.last_error && (check.status === 'down' || check.status === 'warning') && !check.in_maintenance && (
-        <FailureReasonBanner
-          status={check.status}
-          error={check.last_error}
-          lastCheckAt={check.last_check_at}
+        <StatusBanner
+          tone={check.status === 'down' ? 'danger' : 'warning'}
+          icon={check.status === 'down' ? XCircle : AlertTriangle}
+          title={check.status === 'down' ? 'Service is down' : 'Service is degraded'}
+          body={check.last_error}
+          meta={check.last_check_at ? `Last probe ${relativeTime(check.last_check_at)}` : undefined}
+          mono
+        />
+      )}
+      {metricsStale && (
+        <StatusBanner
+          tone="warning"
+          icon={AlertCircle}
+          title="Probing, but no samples are being stored"
+          body={`The last probe ran ${relativeTime(check.last_check_at!)} yet no metrics were recorded for this window. Charts and SLA will stay empty until the metrics pipeline is restored.`}
         />
       )}
 
-      <ProbeEvidenceCard
+      <HeroStrip
         check={check}
-        latestMetric={points.length > 0 ? points[points.length - 1] : null}
-        recentMetrics={points.slice(-8).reverse()}
-        manualProbe={manualProbe}
+        sla24={sla24Q.data}
+        sla7d={sla7dQ.data}
+        sla30d={sla30dQ.data}
+        loading={sla24Q.isLoading && sla7dQ.isLoading}
+        ongoingOutage={outages.find((o) => o.end == null) || null}
+        nowTick={nowTick}
       />
 
-      {/* ── Live Probe Strip ─────────────────────────────────────────── */}
-      <Card className="p-4">
-        <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-2">
-            <Activity className="h-3.5 w-3.5" style={{ color: C.cyan }} />
-            <span className="text-sm font-semibold">Live availability stream</span>
-            <span className="text-xs text-muted">Last 60 checks</span>
-            {check.in_maintenance && (
-              <span
-                className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider"
-                style={{ background: `${C.violet}20`, color: C.violet }}
-              >
-                <Wrench className="h-2.5 w-2.5" />
-                Alerts suppressed
-              </span>
-            )}
-            {!check.enabled && (
-              <span
-                className="inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider"
-                style={{ background: `${C.warn}20`, color: C.warn }}
-              >
-                <Pause className="h-2.5 w-2.5" />
-                No new probes
-              </span>
-            )}
-          </div>
-          <div className="flex flex-wrap items-center gap-3 text-xs">
-            <Legend color={C.up} label="Up" />
-            <Legend color={C.warn} label="Warn" />
-            <Legend color={C.down} label="Down" />
-            <span className="text-muted">
-              Next poll in{' '}
-              <span className="font-mono text-text">
-                {!check.enabled
-                  ? '—'
-                  : secsToNext == null
-                    ? '—'
-                    : `${String(Math.floor(secsToNext / 60)).padStart(2, '0')}:${String(secsToNext % 60).padStart(2, '0')}`}
-              </span>
-            </span>
-          </div>
-        </div>
-        <div style={{ opacity: check.in_maintenance || !check.enabled ? 0.55 : 1 }}>
-          <ProbeStrip points={points.slice(-60)} />
-        </div>
-      </Card>
+      <ThirtyDayStrip
+        days={days}
+        onSelectDay={(d) => setCustom(new Date(d.start).toISOString(), new Date(Math.min(d.end, Date.now())).toISOString())}
+      />
 
-      {/* ── KPI row + health ring ───────────────────────────────────── */}
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
-        <div className="lg:col-span-8">
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            <Kpi
-              label="Availability"
-              value={pct(sla?.uptime_pct ?? null, 2)}
-              windowLabel={rangeLabel}
-              tint={
-                sla?.uptime_pct == null
-                  ? C.textDim
-                  : sla.uptime_pct >= 99.9
-                    ? C.up
-                    : sla.uptime_pct >= 99
-                      ? C.warn
-                      : C.down
-              }
-              delta={sla?.uptime_pct != null ? (sla.uptime_pct < 100 ? `-${(100 - sla.uptime_pct).toFixed(2)}%` : '0.00%') : '—'}
-              deltaDirection={sla?.uptime_pct != null && sla.uptime_pct >= 99.99 ? 'flat' : 'down'}
-              series={buildUptimeSeries(hourly?.hours || [])}
-            />
-            <Kpi
-              label="Avg Response"
-              value={formatMs(sla?.avg_response_ms ?? null)}
-              windowLabel={rangeLabel}
-              tint={C.cyan}
-              delta="—"
-              deltaDirection="flat"
-              series={buildResponseSeries(points)}
-            />
-            <Kpi
-              label="P95 Latency"
-              value={formatMs(sla?.p95_response_ms ?? null)}
-              windowLabel={rangeLabel}
-              tint={C.violet}
-              delta="—"
-              deltaDirection="flat"
-              series={buildResponseSeries(points, 0.95)}
-            />
-            <Kpi
-              label="Error Rate"
-              value={pct(sla?.error_rate_pct ?? null, 3)}
-              windowLabel={rangeLabel}
-              tint={sla?.error_rate_pct && sla.error_rate_pct > 1 ? C.down : C.up}
-              delta={sla?.error_rate_pct == null ? '—' : sla.error_rate_pct > 0 ? `+${sla.error_rate_pct.toFixed(2)}%` : '0.00%'}
-              deltaDirection={sla?.error_rate_pct == null ? 'flat' : sla.error_rate_pct > 0 ? 'up' : 'flat'}
-              series={buildErrorSeries(points)}
-              invertTrend
-            />
-            <Kpi
-              label="Active Incidents"
-              value={String(activeAlerts.length)}
-              windowLabel="active now"
-              tint={activeAlerts.length > 0 ? C.down : C.up}
-              delta={`${activeAlerts.length > 0 ? '+' : ''}${activeAlerts.length}`}
-              deltaDirection={activeAlerts.length > 0 ? 'up' : 'flat'}
-              series={[]}
-            />
-            <Kpi
-              label="Uptime Streak"
-              value={formatDur(sla?.uptime_streak_sec ?? null)}
-              windowLabel="current"
-              tint={C.up}
-              delta="no change"
-              deltaDirection="flat"
-              series={[]}
-              big
-            />
-          </div>
-        </div>
-
-        {/* Health score ring */}
-        <div className="lg:col-span-4">
-          <HealthScoreRing
-            score={healthScore.score}
-            tint={healthScore.tint}
-            label={healthScore.label}
-            factors={healthScore.factors}
-            onViewDetails={() => setHsOpen(true)}
-          />
-        </div>
+      <div
+        role="tablist"
+        aria-label="Service detail sections"
+        className="sticky top-0 z-20 -mx-1 flex gap-1 overflow-x-auto border-b border-border bg-bg/95 px-1 backdrop-blur supports-[backdrop-filter]:bg-bg/80"
+      >
+        {TABS.map((t) => {
+          const active = tab === t.key
+          const count = t.key === 'incidents' ? outages.length + activeAlerts.length : 0
+          return (
+            <button
+              key={t.key}
+              role="tab"
+              aria-selected={active}
+              onClick={() => setTab(t.key)}
+              className={cn(
+                'inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-4 py-2.5 text-sm font-medium transition-colors',
+                active ? 'border-primary text-primary' : 'border-transparent text-muted hover:border-border hover:text-text',
+              )}
+            >
+              <t.Icon className="h-4 w-4" />
+              {t.label}
+              {count > 0 && (
+                <span className="ml-0.5 rounded-full bg-surface3 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-text2">
+                  {count}
+                </span>
+              )}
+            </button>
+          )
+        })}
       </div>
 
-      {/* ── Performance + Region columns ─────────────────────────────── */}
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
-        <div className="space-y-3 lg:col-span-8">
-          <PerformanceChart
+      {tab === 'overview' && (
+        <div className="space-y-4">
+          <AvailabilityTimeline
             points={points}
             statusHistory={statusHistory}
-            rangeLabel={rangeLabel}
-            rangeHours={rangeHours}
+            check={check}
+            rangeLabel={range.label}
+            fromTs={fromTs}
+            toTs={toTs}
           />
 
-          {/* Incidents strip */}
-          <IncidentsStrip history={statusHistory} fromTo={fromTo} rangeLabel={rangeLabel} checkId={id || ''} />
-
-          {/* Uptime Calendar + Related */}
-          <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
-            <div className="lg:col-span-2">
-              <UptimeCalendar hours={hourly?.hours || []} />
-            </div>
-            <div>
-              <RelatedServices upstream={upstream} downstream={downstream} />
-            </div>
-          </div>
-
-          {/* Recent activity table */}
-          <RecentActivityTable history={statusHistory} fromTo={fromTo} rangeLabel={rangeLabel} />
-        </div>
-
-        {/* ── Right sidebar ───────────────────────────────────────── */}
-        <div className="space-y-3 lg:col-span-4">
-          <CurrentChecksSummary points={points} />
-          <div className="grid grid-cols-2 gap-3">
-            <QuickActions
-              onRunProbe={() => runNow.mutate()}
-              onPauseAll={() => togglePause.mutate()}
-              onForceRevalidate={() => forceRevalidate.mutate()}
-              onMaintenance={() => {
-                // If currently in maintenance, end it directly (no dialog).
-                // Otherwise open the duration-picker dialog.
-                if (check.in_maintenance) endMaintenance.mutate()
-                else setMaintOpen(true)
-              }}
-              onAckAll={() => ackAllAlerts.mutate()}
-              onExport={exportConfig}
-              enabled={check.enabled}
-              inMaintenance={!!check.in_maintenance}
-              activeAlertCount={activeAlerts.length}
-              busy={{
-                probe: runNow.isPending,
-                pause: togglePause.isPending,
-                revalidate: forceRevalidate.isPending,
-                ack: ackAllAlerts.isPending,
-              }}
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.85fr)]">
+            <PerformanceChart
+              points={points}
+              statusHistory={statusHistory}
+              rangeLabel={range.label}
+              rangeHours={range.hours}
+              fromTs={fromTs}
+              toTs={toTs}
+              loading={metricsQ.isLoading}
+              error={metricsQ.isError}
+              onRetry={() => metricsQ.refetch()}
+              stats={[
+                { label: 'Avg', value: formatMs(avgMs) },
+                { label: 'P95', value: formatMs(p95Ms) },
+                { label: 'Error', value: pct(errorRatePct, 2) },
+                { label: 'Incidents', value: String(incidentCount) },
+              ]}
             />
-            <AlertSummary counts={alertCounts} checkId={id || ''} />
+            <div className="space-y-4">
+              <LatestProbeCard check={check} latest={latestPoint} recent={points.slice(-6).reverse()} manualProbe={manualProbe} />
+              <HealthScoreCard
+                score={healthScore.score}
+                tint={healthScore.tint}
+                label={healthScore.label}
+                factors={healthScore.factors}
+                onViewDetails={() => setHsOpen(true)}
+              />
+            </div>
           </div>
-          <InlineConfig check={check} onEdit={() => setEditOpen(true)} />
-        </div>
-      </div>
 
-      {/* Dialogs */}
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <ActivityLogCard
+              events={activityEvents.length > 0 ? activityEvents : fallbackEvents}
+              rangeLabel={range.label}
+              showingFallback={activityEvents.length === 0 && fallbackEvents.length > 0}
+              onViewAll={() => setEventsOpen(true)}
+              onWiden={() => setPreset(3)}
+            />
+            <RelatedServicesCard related={related} failed={relatedError} />
+            <ConfigSummaryCard check={check} onEdit={() => setEditOpen(true)} onOpenConfig={() => setTab('config')} />
+          </div>
+        </div>
+      )}
+
+      {tab === 'uptime' && (
+        <div className="space-y-4">
+          <UptimeCalendar
+            days={days}
+            loading={hourlyQ.isLoading}
+            error={hourlyQ.isError}
+            onRetry={() => hourlyQ.refetch()}
+            onSelectDay={(d) => setCustom(new Date(d.start).toISOString(), new Date(Math.min(d.end, Date.now())).toISOString())}
+          />
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(300px,0.9fr)]">
+            <DailyUptimeChart days={days} />
+            <SlaSummaryCard sla={sla} rangeLabel={range.label} loading={slaQ.isLoading} error={slaQ.isError} onRetry={() => slaQ.refetch()} />
+          </div>
+        </div>
+      )}
+
+      {tab === 'incidents' && (
+        <IncidentsTab
+          outages={outages}
+          alerts={alerts}
+          rangeLabel={range.label}
+          checkId={id}
+          ruleCovered={ruleCoverage?.covered}
+          onAck={() => ackAllAlerts.mutate()}
+          ackDisabled={activeAlerts.length === 0 || ackAllAlerts.isPending}
+          onWiden={() => setPreset(3)}
+        />
+      )}
+
+      {tab === 'config' && <ConfigTab check={check} onEdit={() => setEditOpen(true)} onExport={exportConfig} />}
+
       <ServiceCheckFormDialog open={editOpen} onOpenChange={setEditOpen} check={check} />
       <ConfirmDialog
         open={deleteOpen}
@@ -929,9 +830,7 @@ export function ServiceCheckDetailPage() {
         onOpenChange={setMaintOpen}
         inMaintenance={!!check.in_maintenance}
         onStart={(hours) => startMaintenance.mutate(hours)}
-        onStartCustom={(startsAtISO, endsAtISO) =>
-          startMaintenanceCustom.mutate({ startsAtISO, endsAtISO })
-        }
+        onStartCustom={(startsAtISO, endsAtISO) => startMaintenanceCustom.mutate({ startsAtISO, endsAtISO })}
         onEnd={() => endMaintenance.mutate()}
         starting={startMaintenance.isPending || startMaintenanceCustom.isPending}
         ending={endMaintenance.isPending}
@@ -949,1074 +848,698 @@ export function ServiceCheckDetailPage() {
           saveHealthScoreConfig(next)
         }}
       />
+      <EventsDialog
+        open={eventsOpen}
+        onOpenChange={setEventsOpen}
+        events={activityEvents.length > 0 ? activityEvents : fallbackEvents}
+        rangeLabel={range.label}
+        checkId={id}
+      />
     </div>
-    </PaletteContext.Provider>
   )
 }
 
-/* ─── Sub-components ────────────────────────────────────────────────────── */
+/* ─── Shell states ──────────────────────────────────────────────────────── */
 
-function TimeRangePicker({
-  rangeIdx, isCustom, customFrom, customTo, onPreset, onCustom,
-}: {
-  rangeIdx: number
-  isCustom: boolean
-  customFrom: string
-  customTo: string
-  onPreset: (i: number) => void
-  onCustom: (fromISO: string, toISO: string) => void
-}) {
-  const C = useC()
-  const [open, setOpen] = useState(false)
-  // Initialize datetime-local fields from the active window when the popover opens.
-  const toLocal = (iso: string) => {
-    const d = new Date(iso)
-    const pad = (n: number) => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
-  }
-  const [fromInput, setFromInput] = useState(() => toLocal(customFrom))
-  const [toInput, setToInput] = useState(() => toLocal(customTo))
-  useEffect(() => {
-    if (open) {
-      setFromInput(toLocal(customFrom))
-      setToInput(toLocal(customTo))
-    }
-  }, [open, customFrom, customTo])
-
+function DetailSkeleton() {
   return (
-    <div className="relative">
-      <div
-        className="inline-flex items-center gap-0.5 rounded-md border p-0.5"
-        style={{ background: C.panel, borderColor: C.border }}
-        role="tablist"
-        aria-label="Time range"
-      >
-        <Clock className="ml-1 mr-0.5 h-3 w-3" style={{ color: C.textDim }} />
-        {TIME_RANGES.map((r, i) => {
-          const active = !isCustom && rangeIdx === i
-          return (
-            <button
-              key={r.key}
-              role="tab"
-              aria-selected={active}
-              onClick={() => { setOpen(false); onPreset(i) }}
-              className="rounded px-2 py-1 text-[11px] font-semibold transition-colors"
-              style={{
-                background: active ? C.primary : 'transparent',
-                color: active ? '#000' : C.textDim,
-              }}
-            >
-              {r.label}
-            </button>
-          )
-        })}
-        <button
-          role="tab"
-          aria-selected={isCustom}
-          onClick={() => setOpen((v) => !v)}
-          className="rounded px-2 py-1 text-[11px] font-semibold transition-colors"
-          style={{
-            background: isCustom ? C.primary : 'transparent',
-            color: isCustom ? '#000' : C.textDim,
-          }}
-        >
-          Custom
-        </button>
+    <div className="space-y-4" aria-label="Loading service check">
+      <Skeleton className="h-[74px] w-full" />
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+        {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-[92px]" />)}
       </div>
-
-      {open && (
-        <div
-          className="absolute right-0 top-full z-20 mt-1 w-72 rounded-md border p-3 shadow-lg"
-          style={{ background: C.panel, borderColor: C.border }}
-        >
-          <div className="space-y-2">
-            <label className="block">
-              <span className="text-[10px] uppercase tracking-wider" style={{ color: C.textMuted }}>From</span>
-              <input
-                type="datetime-local"
-                value={fromInput}
-                onChange={(e) => setFromInput(e.target.value)}
-                className="mt-1 w-full rounded border bg-transparent px-2 py-1 text-xs"
-                style={{ borderColor: C.border, color: C.text }}
-              />
-            </label>
-            <label className="block">
-              <span className="text-[10px] uppercase tracking-wider" style={{ color: C.textMuted }}>To</span>
-              <input
-                type="datetime-local"
-                value={toInput}
-                onChange={(e) => setToInput(e.target.value)}
-                className="mt-1 w-full rounded border bg-transparent px-2 py-1 text-xs"
-                style={{ borderColor: C.border, color: C.text }}
-              />
-            </label>
-            <div className="flex justify-end gap-2 pt-1">
-              <button
-                onClick={() => setOpen(false)}
-                className="rounded px-2 py-1 text-[11px]"
-                style={{ color: C.textDim }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  const fromISO = new Date(fromInput).toISOString()
-                  const toISO = new Date(toInput).toISOString()
-                  if (Date.parse(fromISO) >= Date.parse(toISO)) return
-                  onCustom(fromISO, toISO)
-                  setOpen(false)
-                }}
-                className="rounded px-2 py-1 text-[11px] font-semibold"
-                style={{ background: C.primary, color: '#000' }}
-              >
-                Apply
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <Skeleton className="h-10 w-full" />
+      <Skeleton className="h-24 w-full" />
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.85fr)]">
+        <Skeleton className="h-[280px]" />
+        <Skeleton className="h-[280px]" />
+      </div>
     </div>
   )
 }
 
-function HeaderBtn({
-  icon, label, onClick, tone = 'neutral', loading, disabled,
+function PanelState({
+  loading, error, empty, onRetry, loadingText, errorText, children,
 }: {
-  icon: React.ReactNode
-  label: string
-  onClick?: () => void
-  tone?: 'primary' | 'success' | 'warn' | 'danger' | 'neutral'
   loading?: boolean
-  disabled?: boolean
+  error?: boolean
+  empty?: boolean
+  onRetry?: () => void
+  loadingText?: string
+  errorText?: string
+  children: React.ReactNode
 }) {
-  const C = useC()
-  const color =
-    tone === 'primary' ? C.primary
-    : tone === 'success' ? C.up
-    : tone === 'warn' ? C.warn
-    : tone === 'danger' ? C.down
-    : C.textDim
-  return (
-    <button
-      onClick={onClick}
-      disabled={loading || disabled}
-      className="inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-      style={{
-        background: C.panel,
-        borderColor: C.border,
-        color,
-      }}
-    >
-      {icon}
-      {label}
-    </button>
-  )
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center gap-2 py-10 text-xs text-muted">
+        <Loader2 className="h-4 w-4 animate-spin" /> {loadingText || 'Loading…'}
+      </div>
+    )
+  }
+  if (error) {
+    return (
+      <div className="py-8 text-center text-xs text-danger">
+        {errorText || 'Could not load this data.'}
+        {onRetry && (
+          <button type="button" onClick={onRetry} className="ml-1.5 font-medium underline">Retry</button>
+        )}
+      </div>
+    )
+  }
+  if (empty) return <>{children}</>
+  return <>{children}</>
 }
 
-function FailureReasonBanner({
-  status,
-  error,
-  lastCheckAt,
-}: {
-  status: string
-  error: string
-  lastCheckAt: string | null
+function EmptyState({ icon: Icon, title, description, action }: {
+  icon: typeof Info
+  title: string
+  description: string
+  action?: React.ReactNode
 }) {
-  const C = useC()
-  const isDown = status === 'down'
-  const tint = isDown ? C.down : C.warn
-  const Icon = isDown ? XCircle : AlertTriangle
   return (
-    <div
-      className="rounded-xl p-3"
-      style={{
-        background: `${tint}10`,
-        border: `1px solid ${tint}40`,
-      }}
-    >
-      <div className="flex items-start gap-3">
-        <div
-          className="flex h-8 w-8 flex-none items-center justify-center rounded-lg"
-          style={{ background: `${tint}20`, color: tint }}
-        >
-          <Icon className="h-4 w-4" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: tint }}>
-              {isDown ? 'Service is down' : 'Service is degraded'}
-            </span>
-            {lastCheckAt && (
-              <span className="text-[11px] text-muted">
-                · last probe {relativeTime(lastCheckAt)}
-              </span>
-            )}
-          </div>
-          <p
-            className="mt-1 break-words font-mono text-[12.5px] leading-relaxed"
-            style={{ color: C.text }}
-          >
-            {error}
-          </p>
-        </div>
-      </div>
+    <div className="flex flex-col items-center justify-center px-4 py-10 text-center">
+      <span className="flex h-11 w-11 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+        <Icon className="h-5 w-5" />
+      </span>
+      <h3 className="mt-3 text-sm font-semibold text-text">{title}</h3>
+      <p className="mt-1 max-w-md text-xs leading-relaxed text-muted">{description}</p>
+      {action && <div className="mt-3">{action}</div>}
     </div>
   )
 }
 
-function MaintenanceBanner({
-  onEnd,
-  ending,
+function SectionCard({
+  title, subtitle, actions, children, className, bodyClassName,
 }: {
-  onEnd: () => void
-  ending: boolean
+  title: string
+  subtitle?: React.ReactNode
+  actions?: React.ReactNode
+  children: React.ReactNode
+  className?: string
+  bodyClassName?: string
 }) {
-  const C = useC()
-  const tint = C.violet
   return (
-    <div
-      className="rounded-xl p-3"
-      style={{ background: `${tint}10`, border: `1px solid ${tint}40` }}
-    >
-      <div className="flex items-start gap-3">
-        <div
-          className="flex h-8 w-8 flex-none items-center justify-center rounded-lg"
-          style={{ background: `${tint}20`, color: tint }}
-        >
-          <Wrench className="h-4 w-4" />
+    <Card className={cn('flex flex-col overflow-hidden', className)}>
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-2.5">
+        <div className="min-w-0">
+          <h3 className="text-sm font-semibold tracking-tight text-text">{title}</h3>
+          {subtitle && <div className="mt-0.5 text-[11px] text-muted">{subtitle}</div>}
         </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: tint }}>
-              Service in maintenance
-            </span>
-            <span className="text-[11px] text-muted">· Alerts are suppressed for this service.</span>
-          </div>
-          <p className="mt-1 text-[12.5px] leading-relaxed" style={{ color: C.text }}>
-            Probes continue to run, but no notifications fire and incidents from this window are not counted toward SLA.
-          </p>
-        </div>
-        <button
-          onClick={onEnd}
-          disabled={ending}
-          className="flex-none rounded-md px-3 py-1.5 text-[11px] font-medium transition-opacity disabled:opacity-50"
-          style={{ background: tint, color: '#fff' }}
-        >
-          {ending ? 'Ending…' : 'End maintenance'}
-        </button>
+        {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
       </div>
-    </div>
-  )
-}
-
-function PausedBanner({
-  onResume,
-  resuming,
-}: {
-  onResume: () => void
-  resuming: boolean
-}) {
-  const C = useC()
-  const tint = C.warn
-  return (
-    <div
-      className="rounded-xl p-3"
-      style={{ background: `${tint}10`, border: `1px solid ${tint}40` }}
-    >
-      <div className="flex items-start gap-3">
-        <div
-          className="flex h-8 w-8 flex-none items-center justify-center rounded-lg"
-          style={{ background: `${tint}20`, color: tint }}
-        >
-          <Pause className="h-4 w-4" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-            <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: tint }}>
-              Checks paused
-            </span>
-            <span className="text-[11px] text-muted">· No new probes are being scheduled.</span>
-          </div>
-          <p className="mt-1 text-[12.5px] leading-relaxed" style={{ color: C.text }}>
-            The poller will not run this check until it's resumed. Live probe data will not update.
-          </p>
-        </div>
-        <button
-          onClick={onResume}
-          disabled={resuming}
-          className="flex-none rounded-md px-3 py-1.5 text-[11px] font-medium transition-opacity disabled:opacity-50"
-          style={{ background: tint, color: '#0B111F' }}
-        >
-          {resuming ? 'Resuming…' : 'Resume checks'}
-        </button>
-      </div>
-    </div>
-  )
-}
-
-function Card({ children, className = '', ...rest }: React.HTMLAttributes<HTMLDivElement>) {
-  const C = useC()
-  return (
-    <div
-      className={`rounded-xl p-3 ${className}`}
-      style={{ background: C.panel, border: `1px solid ${C.border}` }}
-      {...rest}
-    >
-      {children}
-    </div>
-  )
-}
-
-function ProbeEvidenceCard({
-  check,
-  latestMetric,
-  recentMetrics,
-  manualProbe,
-}: {
-  check: ServiceCheck
-  latestMetric: ServiceMetricPoint | null
-  recentMetrics: ServiceMetricPoint[]
-  manualProbe: { result: ProbeEvidenceResult; observedAt: string } | null
-}) {
-  const C = useC()
-  const steps = manualProbe?.result.details?.steps || []
-  const finalStep = steps.length > 0 ? steps[steps.length - 1] : null
-  const manualStatusCode = finalStep?.status_code ?? manualProbe?.result.details?.status_code ?? null
-  const expected = check.http_expected_statuses || String(check.http_expected_status || 200)
-  const authLabel = check.credential_name
-    ? `${check.credential_name} · ${check.credential_auth_type === 'ntlm' ? 'Windows Integrated' : check.credential_auth_type}`
-    : check.check_type === 'http' && latestMetric?.status_code === 401
-      ? 'Anonymous authentication boundary'
-      : 'No saved credential'
-  const byteLabel = finalStep?.response_size_bytes == null
-    ? null
-    : finalStep.response_size_bytes < 1024
-      ? `${finalStep.response_size_bytes} B`
-      : `${(finalStep.response_size_bytes / 1024).toFixed(1)} KB`
-
-  return (
-    <Card className="overflow-hidden p-0 shadow-sm">
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border p-4">
-        <div className="flex items-start gap-2">
-          <div className="rounded-lg bg-info/10 p-2 text-info"><Terminal className="h-4 w-4" /></div>
-          <div>
-            <div className="text-sm font-semibold">Latest probe evidence</div>
-            <div className="mt-0.5 text-xs text-muted">
-              Exact response metadata is retained; response bodies, cookies, and credential secrets are never displayed or stored.
-            </div>
-          </div>
-        </div>
-        <span className="rounded-full border border-border bg-surface2/50 px-2.5 py-1 text-xs text-muted">
-          Expected HTTP {expected}
-        </span>
-      </div>
-
-      <div className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 xl:grid-cols-4">
-        <EvidenceValue
-          label="Scheduled result"
-          value={latestMetric?.is_up == null ? 'No data' : latestMetric.is_up ? 'UP' : 'DOWN'}
-          tint={latestMetric?.is_up == null ? C.textDim : latestMetric.is_up ? C.up : C.down}
-          sub={latestMetric?.timestamp ? new Date(latestMetric.timestamp).toLocaleString() : 'Waiting for poller'}
-        />
-        <EvidenceValue
-          label="HTTP response"
-          value={latestMetric?.status_code == null ? '—' : `${latestMetric.status_code}`}
-          tint={latestMetric?.is_up === false ? C.down : C.text}
-          sub={latestMetric?.error_message || `Accepted: ${expected}`}
-        />
-        <EvidenceValue
-          label="Response time"
-          value={formatMs(latestMetric?.response_ms)}
-          tint={C.cyan}
-          sub="End-to-end from appliance"
-        />
-        <EvidenceValue
-          label="Authentication"
-          value={check.credential_auth_type === 'ntlm' ? 'NTLM' : check.credential_id ? 'Credentialed' : 'Boundary only'}
-          tint={check.credential_id ? C.violet : C.warn}
-          sub={authLabel}
-        />
-      </div>
-
-      {manualProbe && (
-        <div className="mx-4 mb-4 rounded-lg border border-border bg-surface2/40 p-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-xs font-semibold">
-              <Play className="h-3.5 w-3.5" style={{ color: manualProbe.result.status === 'up' ? C.up : C.down }} />
-              Last manual probe
-              <span style={{ color: manualProbe.result.status === 'up' ? C.up : C.down }}>
-                {manualProbe.result.status.toUpperCase()}
-              </span>
-            </div>
-            <span className="text-[10px] text-muted">{new Date(manualProbe.observedAt).toLocaleString()}</span>
-          </div>
-          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted">
-            {manualStatusCode != null && <span><span className="text-text">HTTP {manualStatusCode}</span>{finalStep?.response_reason ? ` ${finalStep.response_reason}` : ''}</span>}
-            <span>{formatMs(manualProbe.result.response_time_ms)}</span>
-            {finalStep?.content_type && <span>{finalStep.content_type}</span>}
-            {byteLabel && <span>{byteLabel}</span>}
-            {finalStep?.redirect_count != null && <span>{finalStep.redirect_count} redirect{finalStep.redirect_count === 1 ? '' : 's'}</span>}
-            {finalStep?.authentication_challenges?.length ? <span>Challenge: {finalStep.authentication_challenges.join(' / ').toUpperCase()}</span> : null}
-            {finalStep?.content_matched != null && <span>Content match: {finalStep.content_matched ? 'passed' : 'failed'}</span>}
-          </div>
-          {finalStep?.response_url && <div className="mt-1 truncate font-mono text-[10px] text-muted">Response URL: {finalStep.response_url}</div>}
-          {(manualProbe.result.error || finalStep?.error) && (
-            <div className="mt-2 text-[11px]" style={{ color: C.down }}>{manualProbe.result.error || finalStep?.error}</div>
-          )}
-        </div>
-      )}
-
-      {recentMetrics.length > 0 && (
-        <div className="overflow-x-auto border-t border-border">
-          <div className="border-b border-border bg-surface2/30 px-4 py-2.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Recent scheduled responses</div>
-          <table className="w-full min-w-[620px] text-left text-xs">
-            <thead className="bg-surface2/20 text-[10px] uppercase tracking-wider text-muted">
-              <tr className="border-b border-border">
-                <th className="px-4 py-2.5 font-medium">Received</th>
-                <th className="px-4 py-2.5 font-medium">Result</th>
-                <th className="px-4 py-2.5 font-medium">HTTP</th>
-                <th className="px-4 py-2.5 font-medium">Response</th>
-                <th className="px-4 py-2.5 font-medium">Evidence</th>
-              </tr>
-            </thead>
-            <tbody>
-              {recentMetrics.map((point, index) => (
-                <tr key={`${point.timestamp}-${index}`} className="border-b border-border/60 transition-colors last:border-0 hover:bg-surface2/25">
-                  <td className="whitespace-nowrap px-4 py-2.5 text-muted">{new Date(point.timestamp).toLocaleString()}</td>
-                  <td className="px-4 py-2.5 font-semibold" style={{ color: point.is_up ? C.up : C.down }}>{point.is_up ? 'UP' : 'DOWN'}</td>
-                  <td className="px-4 py-2.5 font-mono">{point.status_code ?? '—'}</td>
-                  <td className="whitespace-nowrap px-4 py-2.5">{formatMs(point.response_ms)}</td>
-                  <td className="max-w-[360px] truncate px-4 py-2.5 text-muted" title={point.error_message || undefined}>{point.error_message || 'Accepted at collection time'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+      <CardContent className={cn('flex-1 p-4', bodyClassName)}>{children}</CardContent>
     </Card>
   )
 }
 
-function EvidenceValue({ label, value, tint, sub }: { label: string; value: string; tint: string; sub: string }) {
+/* ─── Header ────────────────────────────────────────────────────────────── */
+
+function ServiceHeader({
+  check, secsToNext, rangePicker, onEdit, onDelete, onRunProbe, runPending,
+  onPause, pausePending, onMaintenance, onAck, activeAlertCount, onLogs, onExport,
+}: {
+  check: ServiceCheck
+  secsToNext: number | null
+  rangePicker: React.ReactNode
+  onEdit: () => void
+  onDelete: () => void
+  onRunProbe: () => void
+  runPending: boolean
+  onPause: () => void
+  pausePending: boolean
+  onMaintenance: () => void
+  onAck: () => void
+  activeAlertCount: number
+  onLogs: () => void
+  onExport: () => void
+}) {
+  const t = typeMeta[check.check_type] || typeMeta.http
+  const target = check.target_url || `${check.target_host}${check.target_port ? `:${check.target_port}` : ''}`
+  const nextLabel = !check.enabled || secsToNext == null
+    ? '—'
+    : `${String(Math.floor(secsToNext / 60)).padStart(2, '0')}:${String(secsToNext % 60).padStart(2, '0')}`
+  const pulse = pulseStatusOf(check.status, check.enabled)
+  const statusWord = !check.enabled
+    ? 'Paused'
+    : check.status === 'up' ? 'Up'
+      : check.status === 'down' ? 'Down'
+        : check.status === 'unknown' ? 'Pending'
+          : 'Warning'
+  const statusTone = !check.enabled
+    ? 'text-muted'
+    : check.status === 'up' ? 'text-success'
+      : check.status === 'down' ? 'text-danger'
+        : check.status === 'unknown' ? 'text-muted'
+          : 'text-warning'
+
   return (
-    <div className="min-w-0 rounded-xl border border-border bg-surface2/25 px-3.5 py-3">
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
-      <div className="mt-1 truncate text-lg font-semibold" style={{ color: tint }}>{value}</div>
-      <div className="mt-1 truncate text-xs text-muted" title={sub}>{sub}</div>
+    <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
+      <div className="flex min-w-0 flex-1 items-start gap-3">
+        <Link
+          to="/services"
+          className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border text-muted transition-colors hover:bg-surface2 hover:text-text"
+          aria-label="Back to services"
+        >
+          <ArrowLeft className="h-4 w-4" />
+        </Link>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+            <PulseDot status={pulse} size="lg" />
+            <h1 className="truncate text-xl font-semibold tracking-tight">{check.name}</h1>
+            <span className={cn('text-sm font-semibold', statusTone)}>{statusWord}</span>
+            <span className="inline-flex items-center gap-1 rounded border border-border bg-surface2/60 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-muted">
+              <t.Icon className="h-2.5 w-2.5" />{t.label}
+            </span>
+            {check.in_maintenance && <Badge variant="info"><Wrench className="h-3 w-3" />Maintenance</Badge>}
+            {activeAlertCount > 0 && <Badge variant="danger"><Bell className="h-3 w-3" />{activeAlertCount} active</Badge>}
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-muted">
+            <span className="inline-flex min-w-0 max-w-full items-center gap-1.5">
+              <Globe className="h-3 w-3 shrink-0 text-primary" />
+              <span className="truncate font-mono text-[11px] text-text2" title={target}>{target}</span>
+            </span>
+            <Dot />
+            <span className="inline-flex items-center gap-1"><Timer className="h-3 w-3" />every {check.check_interval}s</span>
+            <Dot />
+            <span>checked {check.last_check_at ? relativeTime(check.last_check_at) : 'never'}</span>
+            <Dot />
+            <span className="tabular-nums">next in {nextLabel}</span>
+            {check.device_id && (
+              <>
+                <Dot />
+                <Link to={`/devices/${check.device_id}`} className="hover:text-primary hover:underline">
+                  {check.device_hostname || 'Linked device'}
+                </Link>
+              </>
+            )}
+            {check.group_name && (
+              <>
+                <Dot />
+                <span>{check.group_name}</span>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {rangePicker}
+        <span className="hidden h-5 w-px bg-border sm:inline-block" />
+        <Button size="sm" className="h-8" onClick={onRunProbe} disabled={runPending}>
+          {runPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+          Run probe
+        </Button>
+        <Button variant="outline" size="sm" className="h-8" onClick={onPause} disabled={pausePending}>
+          {check.enabled ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+          {check.enabled ? 'Pause' : 'Resume'}
+        </Button>
+        <Button variant="outline" size="sm" className="h-8" onClick={onEdit}>
+          <Pencil className="h-3.5 w-3.5" /> Edit
+        </Button>
+        <MoreMenu
+          items={[
+            { label: check.in_maintenance ? 'End maintenance' : 'Schedule maintenance', icon: Wrench, onSelect: onMaintenance },
+            { label: `Acknowledge alerts${activeAlertCount > 0 ? ` (${activeAlertCount})` : ''}`, icon: Check, onSelect: onAck, disabled: activeAlertCount === 0 },
+            { label: 'Incident log', icon: FileText, onSelect: onLogs },
+            { label: 'Export config', icon: Download, onSelect: onExport },
+            { label: 'Delete check', icon: Trash2, onSelect: onDelete, destructive: true },
+          ]}
+        />
+      </div>
     </div>
   )
 }
 
-function Legend({ color, label }: { color: string; label: string }) {
+/* ─── Hero strip: fixed-window availability, uptime-product style ───────── */
+
+function HeroStrip({ check, sla24, sla7d, sla30d, loading, ongoingOutage, nowTick }: {
+  check: ServiceCheck
+  sla24?: SlaStats
+  sla7d?: SlaStats
+  sla30d?: SlaStats
+  loading: boolean
+  ongoingOutage: Outage | null
+  nowTick: number
+}) {
+  if (loading) {
+    return (
+      <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+        {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-[86px]" />)}
+      </div>
+    )
+  }
+
+  const isDown = check.status === 'down' || check.status === 'warning' || check.status === 'degraded'
+  const downForSec = ongoingOutage ? Math.max(0, (nowTick - ongoingOutage.start) / 1000) : null
+
+  let statusCell: { label: string; value: string; tone: string; sub: string }
+  if (!check.enabled) {
+    statusCell = { label: 'Monitoring', value: 'Paused', tone: 'text-muted', sub: 'probes are not scheduled' }
+  } else if (isDown) {
+    statusCell = {
+      label: check.status === 'down' ? 'Currently down for' : 'Degraded for',
+      value: downForSec != null ? `${ongoingOutage?.clippedStart ? '≥ ' : ''}${formatDur(downForSec)}` : '—',
+      tone: check.status === 'down' ? 'text-danger' : 'text-warning',
+      sub: check.last_error ? check.last_error.slice(0, 60) : 'no error detail',
+    }
+  } else if (check.status === 'unknown') {
+    statusCell = { label: 'Monitoring', value: 'Pending', tone: 'text-muted', sub: 'waiting for the first probe' }
+  } else {
+    statusCell = {
+      label: 'Currently up for',
+      value: formatDur(sla24?.uptime_streak_sec),
+      tone: 'text-success',
+      sub: sla24?.uptime_streak_sec
+        ? `since ${new Date(nowTick - sla24.uptime_streak_sec * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
+        : 'no downtime recorded',
+    }
+  }
+
+  const windowCell = (label: string, s?: SlaStats) => {
+    const band = uptimeBand(s?.uptime_pct)
+    const down = s?.total_downtime_sec || 0
+    const inc = s?.incident_count || 0
+    return {
+      label,
+      value: s?.uptime_pct != null ? `${s.uptime_pct.toFixed(s.uptime_pct >= 99.95 ? 2 : 2)}%` : '—',
+      tone: BAND_TEXT[band],
+      sub: s?.uptime_pct == null
+        ? 'no data in this window'
+        : down > 0
+          ? `${formatDur(down)} down · ${inc} incident${inc === 1 ? '' : 's'}`
+          : 'no downtime',
+    }
+  }
+
+  const cells = [
+    statusCell,
+    windowCell('Last 24 hours', sla24),
+    windowCell('Last 7 days', sla7d),
+    windowCell('Last 30 days', sla30d),
+  ]
+
+  return (
+    <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+      {cells.map((c, i) => (
+        <div key={c.label} className="rounded-xl border border-border bg-surface px-4 py-3 transition-colors hover:border-border-strong">
+          <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
+            {i === 0 && <PulseDot status={pulseStatusOf(check.status, check.enabled)} size="sm" />}
+            {c.label}
+          </div>
+          <div className={cn('mt-1 text-[24px] font-bold leading-none tabular-nums', c.tone)}>{c.value}</div>
+          <div className="mt-1 truncate text-[10.5px] text-muted" title={c.sub}>{c.sub}</div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/* ─── 30-day bar strip ──────────────────────────────────────────────────── */
+
+function ThirtyDayStrip({ days, onSelectDay }: {
+  days: DayUptime[]
+  onSelectDay: (d: DayUptime) => void
+}) {
+  const measured = days.filter((d) => d.uptimePct != null)
+  const totalSamples = measured.reduce((s, d) => s + d.samples, 0)
+  const overall = totalSamples > 0
+    ? measured.reduce((s, d) => s + (d.uptimePct as number) * d.samples, 0) / totalSamples
+    : null
+  const totalDowntime = days.reduce((s, d) => s + d.downtimeSec, 0)
+
+  const cells = days.map((d) => ({
+    key: d.key,
+    pct: d.uptimePct,
+    title:
+      d.uptimePct == null
+        ? `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} — not monitored`
+        : `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} — ${d.uptimePct.toFixed(2)}% up${d.downtimeSec > 0 ? ` · ${formatDur(d.downtimeSec)} down` : ''}`,
+  }))
+
+  return (
+    <Card>
+      <CardContent className="px-4 py-3">
+        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+          <div className="flex items-baseline gap-2">
+            <h3 className="text-sm font-semibold tracking-tight">Last 30 days</h3>
+            <span className="text-[11px] text-muted">click a day to zoom the page to it</span>
+          </div>
+          <div className="flex items-baseline gap-3 text-xs">
+            {totalDowntime > 0 && <span className="text-muted">{formatDur(totalDowntime)} down</span>}
+            {overall != null && (
+              <span className={cn('font-mono font-semibold tabular-nums', BAND_TEXT[uptimeBand(overall)])}>
+                {overall.toFixed(3)}%
+              </span>
+            )}
+          </div>
+        </div>
+        <UptimeBars
+          cells={cells}
+          className="h-9"
+          onSelect={(key) => {
+            const d = days.find((x) => x.key === key)
+            if (d) onSelectDay(d)
+          }}
+        />
+        <div className="mt-1.5 flex justify-between text-[10px] text-muted">
+          <span>30 days ago</span>
+          <span>Today</span>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function Dot() {
+  return <span aria-hidden className="text-border-strong">·</span>
+}
+
+function MoreMenu({ items }: {
+  items: Array<{ label: string; icon: typeof Wrench; onSelect: () => void; disabled?: boolean; destructive?: boolean }>
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  return (
+    <div ref={ref} className="relative">
+      <Button
+        variant="outline"
+        size="icon"
+        className="h-8 w-8"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label="More actions"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <MoreHorizontal className="h-4 w-4" />
+      </Button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 z-30 mt-1 w-56 overflow-hidden rounded-lg border border-border bg-surface p-1 shadow-elevated"
+        >
+          {items.map((it) => (
+            <button
+              key={it.label}
+              role="menuitem"
+              disabled={it.disabled}
+              onClick={() => { setOpen(false); it.onSelect() }}
+              className={cn(
+                'flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs font-medium transition-colors',
+                it.disabled
+                  ? 'cursor-not-allowed text-muted/50'
+                  : it.destructive
+                    ? 'text-danger hover:bg-danger/10'
+                    : 'text-text2 hover:bg-surface2 hover:text-text',
+              )}
+            >
+              <it.icon className="h-3.5 w-3.5 shrink-0" />
+              {it.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function StatusBanner({
+  tone, icon: Icon, title, body, meta, actionLabel, onAction, actionDisabled, mono,
+}: {
+  tone: 'danger' | 'warning' | 'info'
+  icon: typeof XCircle
+  title: string
+  body: string
+  meta?: string
+  actionLabel?: string
+  onAction?: () => void
+  actionDisabled?: boolean
+  mono?: boolean
+}) {
+  const wrap = tone === 'danger'
+    ? 'border-danger/40 bg-danger/10'
+    : tone === 'warning'
+      ? 'border-warning/40 bg-warning/10'
+      : 'border-info/40 bg-info/10'
+  const fg = tone === 'danger' ? 'text-danger' : tone === 'warning' ? 'text-warning' : 'text-info'
+  return (
+    <div className={cn('flex items-start gap-3 rounded-lg border px-3 py-2.5', wrap)}>
+      <Icon className={cn('mt-0.5 h-4 w-4 shrink-0', fg)} />
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <span className={cn('text-xs font-semibold uppercase tracking-wider', fg)}>{title}</span>
+          {meta && <span className="text-[11px] text-muted">{meta}</span>}
+        </div>
+        <p className={cn('mt-0.5 break-words text-[12.5px] leading-relaxed', mono && 'font-mono')}>{body}</p>
+      </div>
+      {actionLabel && onAction && (
+        <Button size="sm" className="shrink-0" onClick={onAction} disabled={actionDisabled}>{actionLabel}</Button>
+      )}
+    </div>
+  )
+}
+
+/* ─── Availability timeline ─────────────────────────────────────────────── */
+
+function AvailabilityTimeline({
+  points, statusHistory, check, rangeLabel, fromTs, toTs,
+}: {
+  points: ServiceMetricPoint[]
+  statusHistory: StatusHistoryEvent[]
+  check: ServiceCheck
+  rangeLabel: string
+  fromTs: number
+  toTs: number
+}) {
+  const buckets = useMemo(
+    () => buildAvailabilityBuckets(points, statusHistory, check, fromTs, toTs),
+    [points, statusHistory, check, fromTs, toTs],
+  )
+  const covered = buckets.filter((b) => b.state !== 'gap')
+  const upCount = covered.filter((b) => b.state === 'up').length
+  const downCount = covered.filter((b) => b.state === 'down' || b.state === 'warn').length
+  const pctUp = covered.length ? (upCount / covered.length) * 100 : null
+  const coverage = buckets.length ? (covered.length / buckets.length) * 100 : 0
+
+  return (
+    <SectionCard
+      title="Availability timeline"
+      subtitle={
+        <span>
+          {rangeLabel}
+          {points.length > 0 && ` · ${points.length} probe${points.length === 1 ? '' : 's'}`}
+          {covered.length > 0 && coverage < 95 && ` · ${coverage.toFixed(0)}% of the window has data`}
+        </span>
+      }
+      actions={
+        <div className="flex items-baseline gap-3 text-xs">
+          {downCount > 0 && <span className="font-medium text-danger">{downCount} bad interval{downCount === 1 ? '' : 's'}</span>}
+          {pctUp != null && (
+            <span className={cn('font-mono font-semibold tabular-nums', BAND_TEXT[uptimeBand(pctUp)])}>{pctUp.toFixed(2)}% up</span>
+          )}
+        </div>
+      }
+      bodyClassName="p-4 pt-3"
+    >
+      {covered.length === 0 ? (
+        <EmptyState
+          icon={Activity}
+          title="No availability data in this window"
+          description={`Nothing was recorded for ${rangePhrase(rangeLabel)}. Widen the range, or check that the poller is storing probe results.`}
+        />
+      ) : (
+        <>
+          <div className="flex h-9 gap-[1px] overflow-hidden rounded-lg bg-surface2">
+            {buckets.map((b, i) => (
+              <div
+                key={i}
+                className="flex-1 transition-opacity hover:opacity-70"
+                style={{
+                  backgroundColor:
+                    b.state === 'up' ? UP_COLOR
+                      : b.state === 'down' ? DOWN_COLOR
+                        : b.state === 'warn' ? WARN_COLOR
+                          : 'transparent',
+                }}
+                title={
+                  b.state === 'gap'
+                    ? `${timeTooltipLabelFormatter(b.start)} — no data`
+                    : `${timeTooltipLabelFormatter(b.start)} — ${b.state.toUpperCase()}${b.reason ? ` · ${b.reason}` : ''}`
+                }
+              />
+            ))}
+          </div>
+          <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+            <span className="text-[10px] tabular-nums text-muted">{timeTooltipLabelFormatter(fromTs)}</span>
+            <div className="flex items-center gap-3 text-[10px] text-muted">
+              <Swatch color={UP_COLOR} label="Up" />
+              <Swatch color={WARN_COLOR} label="Warn" />
+              <Swatch color={DOWN_COLOR} label="Down" />
+              <span className="inline-flex items-center gap-1">
+                <span className="h-2 w-2 rounded-sm bg-surface2 ring-1 ring-inset ring-border" />No data
+              </span>
+            </div>
+            <span className="text-[10px] tabular-nums text-muted">{timeTooltipLabelFormatter(toTs)}</span>
+          </div>
+        </>
+      )}
+    </SectionCard>
+  )
+}
+
+function Swatch({ color, label }: { color: string; label: string }) {
   return (
     <span className="inline-flex items-center gap-1">
-      <span className="h-2 w-2 rounded-full" style={{ background: color }} />
-      <span className="text-muted">{label}</span>
+      <span className="h-2 w-2 rounded-sm" style={{ background: color }} />{label}
     </span>
   )
 }
 
-function pickEnv(tags: string[]): string {
-  const t = tags.map((s) => s.toLowerCase())
-  if (t.includes('prod') || t.includes('production')) return 'Production'
-  if (t.includes('staging') || t.includes('stg')) return 'Staging'
-  if (t.includes('dev') || t.includes('development')) return 'Development'
-  return '—'
-}
+function buildAvailabilityBuckets(
+  points: ServiceMetricPoint[],
+  history: StatusHistoryEvent[],
+  check: ServiceCheck,
+  fromTs: number,
+  toTs: number,
+) {
+  // Never make a bucket narrower than the polling interval: at 96 fixed buckets a 1h window
+  // gives 37s slots while the probe runs every 60s, so two thirds of them render as "no data"
+  // and a perfectly healthy service looks striped.
+  const span = Math.max(1, toTs - fromTs)
+  const intervalMs = Math.max(1, (check.check_interval || 60) * 1000)
+  const count = Math.max(12, Math.min(96, Math.floor(span / Math.max(span / 96, intervalMs))))
+  const width = span / count
+  const slots: Array<{ start: number; end: number; up: number; down: number; warn: number; reason?: string; fromHistory?: 'up' | 'down' | 'warn' }> =
+    Array.from({ length: count }, (_, i) => ({ start: fromTs + i * width, end: fromTs + (i + 1) * width, up: 0, down: 0, warn: 0 }))
 
-function HeroCard(props: {
-  name: string
-  status: string
-  type: string
-  target: string
-  environment: string
-  group: string | null | undefined
-  tags: string[]
-  deviceHostname: string | null
-  deviceId: string | null | undefined
-  checkInterval: number
-  lastCheckAt: string | null
-  secsToNext: number | null
-  probeInfo: string
-  inMaintenance: boolean
-  enabled: boolean
-}) {
-  const C = useC()
-  const sm = statusMeta[props.status] || statusMeta.unknown
-  const t = typeMeta[props.type] || typeMeta.http
-  const TypeIcon = t.Icon
-  return (
-    <Card className="overflow-hidden p-0 shadow-sm">
-      <div className="h-1" style={{ background: sm.color }} />
-      <div className="grid gap-5 p-5 xl:grid-cols-[minmax(0,1fr)_340px]">
-        <div className="min-w-0">
-          <div className="flex items-start gap-4">
-            <div
-              className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl shadow-sm"
-              style={{ background: `${t.tint}18`, color: t.tint, border: `1px solid ${t.tint}30` }}
-            >
-              <TypeIcon className="h-7 w-7" />
-            </div>
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <h2 className="text-2xl font-semibold tracking-tight">{props.name}</h2>
-                <span
-                  className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold"
-                  style={{ background: `${sm.color}15`, color: sm.color, border: `1px solid ${sm.color}30` }}
-                >
-                  <span className="h-2 w-2 rounded-full" style={{ background: sm.color }} />
-                  {sm.label}
-                </span>
-                {props.inMaintenance && <StateBadge icon={Wrench} label="Maintenance" color={C.violet} />}
-                {!props.enabled && <StateBadge icon={Pause} label="Paused" color={C.warn} />}
-              </div>
-              <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted">
-                <span>{props.deviceHostname || 'Synthetic service'}</span>
-                <span>·</span>
-                <span>{t.label} monitor</span>
-                <span>·</span>
-                <span>{props.probeInfo}</span>
-              </div>
-              <div className="mt-3 inline-flex max-w-full items-center gap-2 rounded-lg border border-border bg-surface2/50 px-3 py-2 font-mono text-xs">
-                <Globe className="h-3.5 w-3.5 shrink-0 text-primary" />
-                <span className="truncate" title={props.target}>{props.target}</span>
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-5 grid gap-3 border-t pt-4 sm:grid-cols-2 xl:grid-cols-4" style={{ borderColor: C.borderSoft }}>
-            <Meta label="Environment" value={props.environment} />
-            <Meta label="Group / owner" value={props.group || 'Unassigned'} />
-            <Meta label="Primary region" value="Appliance local" />
-            <Meta label="Tags" value={props.tags.length ? props.tags.join(', ') : 'No tags'} />
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-border bg-surface2/45 p-4">
-          <div className="flex items-center justify-between">
-            <div className="text-xs font-semibold uppercase tracking-wider text-muted">Polling status</div>
-            <span className="inline-flex items-center gap-1.5 text-xs font-medium" style={{ color: props.enabled ? C.up : C.warn }}>
-              <span className="h-2 w-2 rounded-full" style={{ background: props.enabled ? C.up : C.warn }} />
-              {props.enabled ? 'Active' : 'Paused'}
-            </span>
-          </div>
-          <div className="mt-4 grid grid-cols-2 gap-3">
-            <OperationalValue label="Last checked" value={props.lastCheckAt ? relativeTime(props.lastCheckAt) : 'Waiting'} sub={props.lastCheckAt ? new Date(props.lastCheckAt).toLocaleTimeString() : 'No result'} />
-            <OperationalValue label="Next probe" value={props.secsToNext == null ? '—' : `${String(Math.floor(props.secsToNext / 60)).padStart(2, '0')}:${String(props.secsToNext % 60).padStart(2, '0')}`} sub={`Every ${props.checkInterval}s`} mono />
-          </div>
-          <div className="mt-3 rounded-lg border border-border bg-surface px-3 py-2.5">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Monitoring policy</div>
-            <div className="mt-1 text-sm font-medium">{props.inMaintenance ? 'Alerts suppressed during maintenance' : props.enabled ? 'Probes and alerting enabled' : 'Probe scheduling paused'}</div>
-          </div>
-        </div>
-      </div>
-    </Card>
-  )
-}
-
-function StateBadge({ icon: Icon, label, color }: { icon: typeof Pause; label: string; color: string }) {
-  return <span className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-bold uppercase tracking-wider" style={{ background: `${color}15`, color, border: `1px solid ${color}30` }}><Icon className="h-3 w-3" />{label}</span>
-}
-
-function OperationalValue({ label, value, sub, mono }: { label: string; value: string; sub: string; mono?: boolean }) {
-  return <div><div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div><div className={`mt-1 text-lg font-semibold ${mono ? 'font-mono' : ''}`}>{value}</div><div className="mt-0.5 text-[10px] text-muted">{sub}</div></div>
-}
-
-function Meta({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
-  const C = useC()
-  return (
-    <div className="min-w-0">
-      <div className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: C.textMuted }}>
-        {label}
-      </div>
-      <div
-        className={`mt-1 truncate text-sm font-medium ${mono ? 'font-mono' : ''}`}
-        style={{ color: C.text }}
-        title={value}
-      >
-        {value}
-      </div>
-    </div>
-  )
-}
-
-function ProbeStrip({ points }: { points: ServiceMetricPoint[] }) {
-  const C = useC()
-  if (points.length === 0) {
-    return <div className="h-6 text-[11px] text-muted">No samples yet.</div>
+  for (const p of points) {
+    const ts = Date.parse(p.timestamp)
+    if (!Number.isFinite(ts)) continue
+    const i = Math.min(count - 1, Math.floor((ts - fromTs) / width))
+    if (i < 0) continue
+    if (p.is_up) slots[i].up++
+    else slots[i].down++
   }
-  return (
-    <div className="flex h-7 gap-[2px] overflow-hidden rounded-md" style={{ background: C.borderSoft }}>
-      {points.map((p, i) => {
-        const color = p.is_up ? C.up : C.down
-        return (
-          <div
-            key={i}
-            className="flex-1 transition-transform hover:scale-y-110"
-            style={{ background: color }}
-            title={`${new Date(p.timestamp).toLocaleTimeString()} — ${p.is_up ? 'UP' : 'DOWN'}${p.response_ms != null ? ` (${Math.round(p.response_ms)}ms)` : ''}`}
-          />
-        )
-      })}
-    </div>
-  )
-}
 
-function Kpi({
-  label, value, tint, delta, deltaDirection, series, invertTrend, windowLabel,
-}: {
-  label: string
-  value: string
-  tint: string
-  delta: string
-  deltaDirection: 'up' | 'down' | 'flat'
-  series: { x: number; y: number }[]
-  big?: boolean
-  invertTrend?: boolean
-  windowLabel?: string
-}) {
-  const C = useC()
-  const ArrowIcon = deltaDirection === 'up' ? ArrowUp : deltaDirection === 'down' ? ArrowDown : ArrowUp
-  const goodDir = invertTrend ? deltaDirection === 'down' : deltaDirection !== 'up'
-  const deltaColor = deltaDirection === 'flat' ? C.textMuted : goodDir ? C.up : C.down
-  const gid = `kpi-${label.replace(/\s+/g, '-')}`
-  return (
-    <div
-      className="flex h-full min-h-[152px] flex-col rounded-xl p-4 shadow-sm"
-      style={{ background: C.panel, border: `1px solid ${C.border}` }}
-    >
-      <div className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: C.textMuted }}>
-        {label}
-      </div>
-      <div
-        className="mt-1 text-2xl font-semibold tabular-nums"
-        style={{ color: tint }}
-      >
-        {value}
-      </div>
-      <div className="mt-0.5 flex items-center gap-1 text-[10px]" style={{ color: deltaColor }}>
-        {deltaDirection !== 'flat' && <ArrowIcon className="h-3 w-3" />}
-        <span>{delta}</span>
-        <span className="ml-1 truncate" style={{ color: C.textMuted }} title={windowLabel}>{windowLabel || 'window'}</span>
-      </div>
-      <div className="mt-auto pt-3" style={{ minHeight: 48 }}>
-        {series.length > 1 ? (
-          <ResponsiveContainer width="100%" height={52}>
-            <AreaChart data={series} margin={{ top: 2, right: 0, left: 0, bottom: 0 }}>
-              <defs>
-                <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={tint} stopOpacity={0.45} />
-                  <stop offset="100%" stopColor={tint} stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <Area
-                type="monotone"
-                dataKey="y"
-                stroke={tint}
-                strokeWidth={1.5}
-                fill={`url(#${gid})`}
-                isAnimationActive={false}
-              />
-              <YAxis hide domain={['dataMin', 'dataMax']} />
-              <XAxis hide dataKey="x" />
-            </AreaChart>
-          </ResponsiveContainer>
-        ) : (
-          <div className="h-full rounded" style={{ background: `${tint}08` }} />
-        )}
-      </div>
-    </div>
-  )
-}
-
-function HealthScoreRing({
-  score, tint, label, factors, onViewDetails,
-}: {
-  score: number
-  tint: string
-  label: string
-  factors: HealthFactor[]
-  onViewDetails?: () => void
-}) {
-  const C = useC()
-  const radius = 52
-  const circ = 2 * Math.PI * radius
-  const offset = circ - (score / 100) * circ
-  return (
-    <div
-      className="flex h-full min-h-[170px] flex-col rounded-xl p-4 shadow-sm"
-      style={{ background: C.panel, border: `1px solid ${C.border}` }}
-    >
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: C.textMuted }}>
-          Health Score
-        </span>
-        <button
-          type="button"
-          onClick={onViewDetails}
-          className="text-[10px] hover:underline"
-          style={{ color: C.primary }}
-        >
-          View all details
-        </button>
-      </div>
-      <div className="flex flex-1 items-center gap-3">
-        <div className="relative h-[120px] w-[120px] flex-shrink-0">
-          <svg viewBox="0 0 130 130" className="h-full w-full -rotate-90">
-            <defs>
-              <linearGradient id="hsGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                <stop offset="0%" stopColor={tint} stopOpacity={0.6} />
-                <stop offset="100%" stopColor={tint} stopOpacity={1} />
-              </linearGradient>
-            </defs>
-            <circle
-              cx="65" cy="65" r={radius}
-              fill="none"
-              stroke={C.borderSoft}
-              strokeWidth="10"
-            />
-            <circle
-              cx="65" cy="65" r={radius}
-              fill="none"
-              stroke="url(#hsGrad)"
-              strokeWidth="10"
-              strokeLinecap="round"
-              strokeDasharray={circ}
-              strokeDashoffset={offset}
-            />
-          </svg>
-          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-            <div className="text-4xl font-bold leading-none" style={{ color: tint }}>{score}</div>
-            <div className="mt-0.5 text-[10px]" style={{ color: C.textMuted }}>/ 100</div>
-            <div className="mt-1 text-[10px] font-semibold" style={{ color: tint }}>{label}</div>
-          </div>
-        </div>
-        <div className="flex-1 space-y-1.5 text-[10px]">
-          <div className="grid grid-cols-[auto_1fr_auto] items-center gap-2" style={{ color: C.textMuted }}>
-            <span>Factors</span>
-            <span className="h-px" style={{ background: C.border }} />
-            <span>Impact</span>
-          </div>
-          {factors.map((f) => (
-            <div key={f.key} className="flex items-center gap-2">
-              <span className="w-20 truncate" style={{ color: C.textDim }}>{f.label}</span>
-              <div className="h-1 flex-1 overflow-hidden rounded-full" style={{ background: C.borderSoft }}>
-                <div
-                  className="h-full"
-                  style={{
-                    width: `${f.subScore}%`,
-                    background: f.subScore > 90 ? C.up : f.subScore > 70 ? C.warn : C.down,
-                  }}
-                />
-              </div>
-              <span className="w-8 text-right font-mono" style={{ color: C.text }}>
-                {f.subScore}
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function HealthScoreDetailsDialog({
-  open, onOpenChange, score, tint, label, factors, config, onConfigChange,
-}: {
-  open: boolean
-  onOpenChange: (o: boolean) => void
-  score: number
-  tint: string
-  label: string
-  factors: HealthFactor[]
-  config: HealthScoreConfig
-  onConfigChange: (next: HealthScoreConfig) => void
-}) {
-  const [tab, setTab] = useState<'breakdown' | 'configure'>('breakdown')
-  const [draft, setDraft] = useState<HealthScoreConfig>(config)
-
-  useEffect(() => {
-    if (open) {
-      setDraft(config)
-      setTab('breakdown')
+  const sorted = [...history].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
+  let cursor = fromTs
+  let state: 'up' | 'down' | 'warn' | null = null
+  let reason: string | undefined
+  for (const ev of sorted) {
+    const t = Date.parse(ev.timestamp)
+    if (!Number.isFinite(t)) continue
+    if (state && t > cursor) paintHistory(slots, width, fromTs, count, cursor, Math.min(t, toTs), state, reason)
+    state = ev.new_status === 'up' ? 'up' : ev.new_status === 'down' ? 'down' : 'warn'
+    reason = ev.reason || undefined
+    cursor = Math.max(t, fromTs)
+  }
+  if (state && cursor < toTs) paintHistory(slots, width, fromTs, count, cursor, toTs, state, reason)
+  if (!sorted.length && check.last_check_at) {
+    const live = check.status === 'up' ? 'up' : check.status === 'down' ? 'down' : 'warn'
+    const last = Date.parse(check.last_check_at)
+    if (Number.isFinite(last) && last >= fromTs && last <= toTs) {
+      paintHistory(slots, width, fromTs, count, last, toTs, live, check.last_error || undefined)
     }
-  }, [open, config])
-
-  const totalW = Math.max(1, draft.weights.availability + draft.weights.latency + draft.weights.errors + draft.weights.incidents)
-  const dirty = JSON.stringify(draft) !== JSON.stringify(config)
-
-  const setWeight = (k: keyof HealthScoreConfig['weights'], v: number) => {
-    const n = Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : 0
-    setDraft({ ...draft, weights: { ...draft.weights, [k]: n } })
-  }
-  const setThreshold = (k: keyof HealthScoreConfig['thresholds'], v: number) => {
-    const n = Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : 0
-    setDraft({ ...draft, thresholds: { ...draft.thresholds, [k]: n } })
   }
 
-  const handleSave = () => {
-    onConfigChange(draft)
-    toast.success('Health Score criteria updated')
-    onOpenChange(false)
-  }
-  const handleReset = () => setDraft({ ...DEFAULT_HEALTH_SCORE_CONFIG })
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <TrendingUp className="h-5 w-5 text-primary" />
-            Health Score Details
-          </DialogTitle>
-        </DialogHeader>
-
-        <div className="flex items-center justify-between rounded-md border border-border bg-surface2/40 px-3 py-2">
-          <div>
-            <div className="text-xs text-muted">Current score</div>
-            <div className="text-[11px]" style={{ color: tint }}>{label}</div>
-          </div>
-          <div className="text-3xl font-bold tabular-nums" style={{ color: tint }}>
-            {score}<span className="text-sm text-muted">/100</span>
-          </div>
-        </div>
-
-        <Tabs value={tab} onValueChange={(v) => setTab(v as 'breakdown' | 'configure')}>
-          <TabsList className="grid w-full grid-cols-2">
-            <TabsTrigger value="breakdown">Breakdown</TabsTrigger>
-            <TabsTrigger value="configure">
-              <SettingsIcon className="mr-1.5 h-3.5 w-3.5" />
-              Configure
-            </TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="breakdown" className="space-y-2 pt-3">
-            <div className="grid grid-cols-[1fr_auto_auto_auto] gap-x-3 gap-y-1 text-[10px] uppercase tracking-wider text-muted">
-              <span>Factor</span>
-              <span className="text-right">Sub-score</span>
-              <span className="text-right">Weight</span>
-              <span className="text-right">Contribution</span>
-            </div>
-            {factors.map((f) => {
-              const tone = f.subScore > 90 ? 'text-success' : f.subScore > 70 ? 'text-warning' : 'text-danger'
-              return (
-                <div key={f.key} className="grid grid-cols-[1fr_auto_auto_auto] items-start gap-x-3 gap-y-0.5 border-b border-border/40 py-2 last:border-0">
-                  <div className="min-w-0">
-                    <div className="text-xs font-semibold">{f.label}</div>
-                    <div className="text-[11px] text-muted">{f.raw}</div>
-                    <div className="mt-0.5 font-mono text-[10px] text-muted/80" title="How this sub-score is derived">
-                      {f.formula}
-                    </div>
-                  </div>
-                  <span className={`text-right font-mono text-xs tabular-nums ${tone}`}>{f.subScore}</span>
-                  <span className="text-right font-mono text-xs tabular-nums text-muted">{f.weight}%</span>
-                  <span className="text-right font-mono text-xs tabular-nums">{f.contribution.toFixed(1)}</span>
-                </div>
-              )
-            })}
-            <div className="flex items-center justify-between pt-2 text-[11px] text-muted">
-              <span>Status thresholds</span>
-              <span className="font-mono">
-                Excellent ≥ {config.thresholds.excellent} · Good ≥ {config.thresholds.good} · Degraded ≥ {config.thresholds.degraded}
-              </span>
-            </div>
-          </TabsContent>
-
-          <TabsContent value="configure" className="space-y-4 pt-3">
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="text-xs font-semibold">Factor weights</div>
-                <span className={`text-[11px] font-mono ${totalW === 100 ? 'text-muted' : 'text-warning'}`}>
-                  Total: {totalW}{totalW !== 100 ? ' (will be normalized)' : ''}
-                </span>
-              </div>
-              {(['availability', 'latency', 'errors', 'incidents'] as const).map((k) => (
-                <div key={k} className="grid grid-cols-[140px_1fr_70px] items-center gap-3">
-                  <label className="text-xs capitalize">{k}</label>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={draft.weights[k]}
-                    onChange={(e) => setWeight(k, Number(e.target.value))}
-                    className="accent-primary"
-                  />
-                  <Input
-                    type="number"
-                    min={0}
-                    max={100}
-                    value={draft.weights[k]}
-                    onChange={(e) => setWeight(k, Number(e.target.value))}
-                    className="h-8 text-xs"
-                  />
-                </div>
-              ))}
-            </div>
-
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="text-xs font-semibold">Status thresholds (score ≥)</div>
-                {!(draft.thresholds.excellent > draft.thresholds.good && draft.thresholds.good > draft.thresholds.degraded) && (
-                  <span className="text-[11px] font-medium text-warning">
-                    Excellent &gt; Good &gt; Degraded must be ordered
-                  </span>
-                )}
-              </div>
-              {(['excellent', 'good', 'degraded'] as const).map((k) => (
-                <div key={k} className="grid grid-cols-[140px_1fr_70px] items-center gap-3">
-                  <label className="text-xs capitalize">{k}</label>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={draft.thresholds[k]}
-                    onChange={(e) => setThreshold(k, Number(e.target.value))}
-                    className="accent-primary"
-                  />
-                  <Input
-                    type="number"
-                    min={0}
-                    max={100}
-                    value={draft.thresholds[k]}
-                    onChange={(e) => setThreshold(k, Number(e.target.value))}
-                    className="h-8 text-xs"
-                  />
-                </div>
-              ))}
-            </div>
-
-            <div className="space-y-2">
-              <div className="text-xs font-semibold">Penalty tuning</div>
-              <div className="grid grid-cols-[140px_1fr] items-center gap-3">
-                <label className="text-xs">Latency target (ms)</label>
-                <Input
-                  type="number"
-                  min={1}
-                  value={draft.latencyTargetMs}
-                  onChange={(e) => setDraft({ ...draft, latencyTargetMs: Math.max(1, Number(e.target.value) || 1) })}
-                  className="h-8 text-xs"
-                />
-              </div>
-              <div className="text-[10px] leading-relaxed text-muted">
-                p95 ≤ target → 100. Above target, sub-score drops linearly and reaches 0 at 2× target.
-              </div>
-              <div className="grid grid-cols-[140px_1fr] items-center gap-3">
-                <label className="text-xs">Error scale</label>
-                <Input
-                  type="number"
-                  min={0}
-                  step={0.5}
-                  value={draft.errorScale}
-                  onChange={(e) => setDraft({ ...draft, errorScale: Math.max(0, Number(e.target.value) || 0) })}
-                  className="h-8 text-xs"
-                />
-              </div>
-              <div className="text-[10px] leading-relaxed text-muted">
-                Penalty per 1% error rate. Default 10 → 1% drops the errors sub-score by 10 points.
-              </div>
-              <div className="grid grid-cols-[140px_1fr] items-center gap-3">
-                <label className="text-xs">Incident penalty</label>
-                <Input
-                  type="number"
-                  min={0}
-                  step={1}
-                  value={draft.incidentScale}
-                  onChange={(e) => setDraft({ ...draft, incidentScale: Math.max(0, Number(e.target.value) || 0) })}
-                  className="h-8 text-xs"
-                />
-              </div>
-              <div className="text-[10px] leading-relaxed text-muted">
-                Penalty per active incident. Default 15 → 7 incidents bring incidents sub-score to 0.
-              </div>
-            </div>
-          </TabsContent>
-        </Tabs>
-
-        <DialogFooter className="flex items-center justify-between gap-2">
-          {tab === 'configure' ? (
-            <>
-              <Button variant="outline" size="sm" onClick={handleReset}>
-                <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
-                Reset to defaults
-              </Button>
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>Cancel</Button>
-                <Button size="sm" onClick={handleSave} disabled={!dirty}>Save</Button>
-              </div>
-            </>
-          ) : (
-            <Button size="sm" onClick={() => onOpenChange(false)}>Close</Button>
-          )}
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
+  return slots.map((s) => {
+    let st: 'up' | 'down' | 'warn' | 'gap' = 'gap'
+    if (s.down > 0) st = 'down'
+    else if (s.warn > 0) st = 'warn'
+    else if (s.up > 0) st = 'up'
+    else if (s.fromHistory) st = s.fromHistory
+    return { start: s.start, end: s.end, state: st, reason: s.reason }
+  })
 }
+
+function paintHistory(
+  slots: Array<{ start: number; fromHistory?: 'up' | 'down' | 'warn'; reason?: string }>,
+  width: number,
+  fromTs: number,
+  count: number,
+  start: number,
+  end: number,
+  state: 'up' | 'down' | 'warn',
+  reason?: string,
+) {
+  const a = Math.max(0, Math.floor((start - fromTs) / width))
+  const b = Math.min(count - 1, Math.floor((end - 1 - fromTs) / width))
+  for (let i = a; i <= b; i++) {
+    if (!slots[i].fromHistory || state !== 'up') {
+      slots[i].fromHistory = state
+      if (reason) slots[i].reason = reason
+    }
+  }
+}
+
+/* ─── Performance chart ─────────────────────────────────────────────────── */
 
 function PerformanceChart({
-  points, statusHistory, rangeLabel, rangeHours,
+  points, statusHistory, rangeLabel, rangeHours, fromTs, toTs, loading, error, onRetry, stats,
 }: {
   points: ServiceMetricPoint[]
-  statusHistory: Array<{ timestamp: string; new_status: string; duration_sec?: number | null }>
+  statusHistory: StatusHistoryEvent[]
   rangeLabel: string
   rangeHours: number
+  fromTs: number
+  toTs: number
+  loading: boolean
+  error: boolean
+  onRetry: () => void
+  stats?: Array<{ label: string; value: string }>
 }) {
-  const C = useC()
-  // Pick a display bucket that yields ~150–300 plotted points regardless of
-  // the source resolution. This keeps the line readable on long ranges
-  // without losing meaningful detail on short ones.
   const { p95Window, displayBucketMs, errBucketMs } = useMemo(() => {
-    if (rangeHours <= 6)
-      return { p95Window: 20, displayBucketMs: 0, errBucketMs: 5 * 60_000 }      // raw probes, 5m buckets
-    if (rangeHours <= 24)
-      return { p95Window: 12, displayBucketMs: 0, errBucketMs: 30 * 60_000 }     // 5m points, 30m buckets
-    if (rangeHours <= 24 * 7)
-      return { p95Window: 24, displayBucketMs: 30 * 60_000, errBucketMs: 2 * 3600_000 }
+    if (rangeHours <= 6) return { p95Window: 20, displayBucketMs: 0, errBucketMs: 5 * 60_000 }
+    if (rangeHours <= 24) return { p95Window: 12, displayBucketMs: 0, errBucketMs: 15 * 60_000 }
+    if (rangeHours <= 24 * 7) return { p95Window: 24, displayBucketMs: 30 * 60_000, errBucketMs: 2 * 3600_000 }
     return { p95Window: 12, displayBucketMs: 3600_000, errBucketMs: 6 * 3600_000 }
   }, [rangeHours])
 
-  // Build the plot series: rolling P95 over the source resolution, then
-  // optionally bucket the whole thing down to a coarser display granularity.
   const merged = useMemo(() => {
-    const base = points.map((p) => ({
-      ts: new Date(p.timestamp).getTime(),
-      ms: p.is_up ? p.response_ms : null,
-    }))
-    const p95s = rollingPercentile(base.map((b) => ({ ts: b.ts, ms: b.ms })), 0.95, p95Window)
-
+    const base = points
+      .map((p) => ({ ts: Date.parse(p.timestamp), ms: p.response_ms, up: p.is_up }))
+      .filter((b) => Number.isFinite(b.ts))
+    const p95s = rollingPercentile(base.map((b) => ({ ts: b.ts, ms: b.up ? b.ms : null })), 0.95, p95Window)
     const errBucket = new Map<number, { up: number; down: number }>()
     for (const p of points) {
-      const k = Math.floor(new Date(p.timestamp).getTime() / errBucketMs) * errBucketMs
+      const k = Math.floor(Date.parse(p.timestamp) / errBucketMs) * errBucketMs
       const b = errBucket.get(k) || { up: 0, down: 0 }
       if (p.is_up) b.up++
       else b.down++
       errBucket.set(k, b)
     }
-
     const enriched = base.map((b, i) => {
-      const bkey = Math.floor(b.ts / errBucketMs) * errBucketMs
-      const bb = errBucket.get(bkey)
-      const errRate = bb ? (bb.down / Math.max(1, bb.up + bb.down)) * 100 : 0
-      return { ts: b.ts, avg: b.ms ?? null, p95: p95s[i]?.p95 ?? null, err: errRate }
+      const bb = errBucket.get(Math.floor(b.ts / errBucketMs) * errBucketMs)
+      return {
+        ts: b.ts,
+        avg: b.up ? b.ms : null,
+        p95: p95s[i]?.p95 ?? null,
+        err: bb ? (bb.down / Math.max(1, bb.up + bb.down)) * 100 : 0,
+      }
     })
-
     if (displayBucketMs === 0 || enriched.length === 0) return enriched
-
-    // Bucket down to the display granularity. avg → mean, p95 → max,
-    // err → mean. Buckets with no avg samples render a gap (null).
     type Bin = { ts: number; avgSum: number; avgN: number; p95Max: number | null; errSum: number; errN: number }
     const bins = new Map<number, Bin>()
     for (const e of enriched) {
       const k = Math.floor(e.ts / displayBucketMs) * displayBucketMs
       let bin = bins.get(k)
-      if (!bin) {
-        bin = { ts: k, avgSum: 0, avgN: 0, p95Max: null, errSum: 0, errN: 0 }
-        bins.set(k, bin)
-      }
+      if (!bin) { bin = { ts: k, avgSum: 0, avgN: 0, p95Max: null, errSum: 0, errN: 0 }; bins.set(k, bin) }
       if (e.avg != null && Number.isFinite(e.avg)) { bin.avgSum += e.avg; bin.avgN++ }
-      if (e.p95 != null && Number.isFinite(e.p95)) {
-        bin.p95Max = bin.p95Max == null ? e.p95 : Math.max(bin.p95Max, e.p95)
-      }
+      if (e.p95 != null && Number.isFinite(e.p95)) bin.p95Max = bin.p95Max == null ? e.p95 : Math.max(bin.p95Max, e.p95)
       bin.errSum += e.err; bin.errN++
     }
     return Array.from(bins.values()).sort((a, b) => a.ts - b.ts).map((b) => ({
@@ -2027,701 +1550,1302 @@ function PerformanceChart({
     }))
   }, [points, p95Window, errBucketMs, displayBucketMs])
 
+  const bands = useMemo(() => statusBands(statusHistory, fromTs, toTs), [statusHistory, fromTs, toTs])
+  const axisData = merged.length > 0 ? merged : [{ ts: fromTs, avg: null, p95: null, err: 0 }, { ts: toTs, avg: null, p95: null, err: 0 }]
   const tickFormatter = useMemo(() => timeAxisTickFormatter(rangeHours), [rangeHours])
-  const minTickGap = rangeHours <= 24 ? 60 : rangeHours <= 24 * 7 ? 80 : 50
-
-  // Incident bands come from real status transitions (not per-bucket is_up,
-  // which loses detail at 5m granularity). Each non-up transition opens a
-  // band that closes at the next "up" transition or at "now" if still open.
-  const bands = useMemo(() => {
-    if (!statusHistory || statusHistory.length === 0) return []
-    // Endpoint returns DESC by timestamp; sort ascending to walk forward.
-    const sorted = [...statusHistory].sort(
-      (a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp),
-    )
-    const out: { start: number; end: number }[] = []
-    let open: number | null = null
-    for (const ev of sorted) {
-      const t = Date.parse(ev.timestamp)
-      const down = ev.new_status !== 'up'
-      if (down && open == null) open = t
-      else if (!down && open != null) {
-        out.push({ start: open, end: t })
-        open = null
-      }
-    }
-    if (open != null) out.push({ start: open, end: Date.now() })
-    return out
-  }, [statusHistory])
-
-  const hasData = merged.length > 0
+  const ticks = useMemo(() => timeTicks(fromTs, toTs, rangeHours), [fromTs, toTs, rangeHours])
+  const hasSeries = merged.some((m) => m.avg != null || m.p95 != null)
+  const singlePoint = merged.filter((m) => m.avg != null).length === 1
 
   return (
-    <div
-      className="rounded-xl p-3"
-      style={{ background: C.panel, border: `1px solid ${C.border}` }}
-    >
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-3">
-          <span className="text-xs font-semibold">Performance &amp; Status Timeline</span>
-          <div className="flex items-center gap-3 text-[10px]" style={{ color: C.textMuted }}>
-            <Legend color={C.cyan} label="Avg Response (ms)" />
-            <Legend color={C.pink} label="P95 Latency (ms)" />
-            <Legend color={C.warn} label="Error Rate %" />
-            <Legend color={`${C.down}60`} label="Status Bands" />
-          </div>
+    <SectionCard
+      title="Response & outages"
+      subtitle={
+        <div className="flex flex-wrap items-center gap-3">
+          <LegendDot color="rgb(var(--info))" label="Avg ms" />
+          <LegendDot color="rgb(var(--accent))" label="P95 ms" />
+          <LegendDot color="rgb(var(--warning))" label="Error %" />
+          <LegendDot color="rgb(var(--danger) / 0.4)" label="Outage" />
         </div>
-        <span className="text-[11px] font-medium" style={{ color: C.textMuted }}>
-          {rangeLabel}
-        </span>
-      </div>
-      <div className="h-[240px] w-full">
-        {!hasData ? (
-          <div className="flex h-full items-center justify-center text-xs" style={{ color: C.textMuted }}>
-            No data yet for this range.
-          </div>
-        ) : (
+      }
+      actions={
+        <div className="flex flex-wrap items-center gap-2">
+          {stats?.map((s) => (
+            <span key={s.label} className="inline-flex items-baseline gap-1 rounded-md border border-border bg-surface2/50 px-2 py-0.5">
+              <span className="text-[9.5px] font-semibold uppercase tracking-wider text-muted">{s.label}</span>
+              <span className="font-mono text-[11px] font-medium tabular-nums text-text">{s.value}</span>
+            </span>
+          ))}
+          <span className="text-[11px] font-medium text-muted">{rangeLabel}</span>
+        </div>
+      }
+      bodyClassName="flex flex-col p-4"
+    >
+      <PanelState loading={loading} error={error} onRetry={onRetry} loadingText="Loading probe samples…" errorText="Could not load probe metrics.">
+        <div className="min-h-[236px] w-full flex-1">
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={merged} margin={{ top: 8, right: 30, bottom: 0, left: -5 }}>
+            <AreaChart data={axisData} margin={{ top: 8, right: axisRightPad(rangeHours) + 18, bottom: 0, left: 0 }}>
               <defs>
-                <linearGradient id="respG" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={C.cyan} stopOpacity={0.45} />
-                  <stop offset="100%" stopColor={C.cyan} stopOpacity={0} />
+                <linearGradient id="svcRespG" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="rgb(var(--info))" stopOpacity={0.4} />
+                  <stop offset="100%" stopColor="rgb(var(--info))" stopOpacity={0} />
                 </linearGradient>
-                <linearGradient id="p95G" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={C.pink} stopOpacity={0.25} />
-                  <stop offset="100%" stopColor={C.pink} stopOpacity={0} />
-                </linearGradient>
-                <linearGradient id="errG" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={C.warn} stopOpacity={0.55} />
-                  <stop offset="100%" stopColor={C.warn} stopOpacity={0} />
+                <linearGradient id="svcP95G" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="rgb(var(--accent))" stopOpacity={0.25} />
+                  <stop offset="100%" stopColor="rgb(var(--accent))" stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid stroke={C.border} strokeDasharray="3 3" vertical={false} />
+              <CartesianGrid stroke="rgb(var(--border) / 0.4)" strokeDasharray="3 3" vertical={false} />
               <XAxis
                 dataKey="ts"
                 type="number"
-                domain={['dataMin', 'dataMax']}
+                domain={[fromTs, toTs]}
                 scale="time"
+                ticks={ticks}
+                interval={0}
                 tickFormatter={tickFormatter}
-                tick={{ fontSize: 10, fill: C.textMuted }}
-                stroke={C.border}
-                minTickGap={minTickGap}
+                tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
+                axisLine={false}
+                tickLine={false}
               />
               <YAxis
                 yAxisId="ms"
-                tick={{ fontSize: 10, fill: C.textMuted }}
-                stroke={C.border}
-                tickFormatter={(v) => `${v}ms`}
+                tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
+                width={52}
+                axisLine={false}
+                tickLine={false}
+                tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${v}ms`)}
               />
               <YAxis
                 yAxisId="err"
                 orientation="right"
-                tick={{ fontSize: 10, fill: C.warn }}
-                stroke={C.border}
-                tickFormatter={(v) => `${v.toFixed(0)}%`}
+                tick={{ fontSize: 10, fill: 'rgb(var(--warning))' }}
+                width={36}
+                axisLine={false}
+                tickLine={false}
+                tickFormatter={(v) => `${Number(v).toFixed(0)}%`}
                 domain={[0, (dataMax: number) => Math.max(10, dataMax * 1.2)]}
               />
               <Tooltip
-                contentStyle={{ background: C.panelLift, border: `1px solid ${C.border}`, borderRadius: 6, fontSize: 11, color: C.text }}
+                contentStyle={{
+                  background: 'rgb(var(--surface))',
+                  border: '1px solid rgb(var(--border))',
+                  borderRadius: 6,
+                  fontSize: 11,
+                  color: 'rgb(var(--text))',
+                }}
                 labelFormatter={timeTooltipLabelFormatter}
                 formatter={(v: any, name: any) => {
                   if (v == null) return ['—', name]
                   if (name === 'Error Rate') return [`${Number(v).toFixed(2)}%`, name]
-                  return [`${Number(v).toFixed(2)} ms`, name]
+                  return [`${Number(v).toFixed(1)} ms`, name]
                 }}
               />
               {bands.map((b, i) => (
                 <ReferenceArea
                   key={i}
                   yAxisId="ms"
-                  x1={b.start}
-                  x2={b.end}
+                  x1={Math.max(b.start, fromTs)}
+                  x2={Math.min(b.end, toTs)}
                   stroke="none"
-                  fill={C.down}
-                  fillOpacity={0.12}
+                  fill={b.kind === 'down' ? 'rgb(var(--danger))' : 'rgb(var(--warning))'}
+                  fillOpacity={0.16}
                 />
               ))}
-              <Area
-                yAxisId="err"
-                type="stepAfter"
-                dataKey="err"
-                name="Error Rate"
-                stroke={C.warn}
-                fill="url(#errG)"
-                strokeWidth={1.5}
-                isAnimationActive={false}
-              />
-              <Area
-                yAxisId="ms"
-                type="monotone"
-                dataKey="avg"
-                name="Avg Response"
-                stroke={C.cyan}
-                fill="url(#respG)"
-                strokeWidth={rangeHours > 24 ? 1.25 : 2}
-                strokeOpacity={rangeHours > 24 ? 0.7 : 1}
-                fillOpacity={rangeHours > 24 ? 0.5 : 1}
-                isAnimationActive={false}
-                connectNulls={false}
-              />
-              <Area
-                yAxisId="ms"
-                type="monotone"
-                dataKey="p95"
-                name="P95"
-                stroke={C.pink}
-                fill="url(#p95G)"
-                strokeWidth={rangeHours > 24 ? 2.25 : 2}
-                isAnimationActive={false}
-                connectNulls={false}
-              />
+              <Area yAxisId="err" type="stepAfter" dataKey="err" name="Error Rate" stroke="rgb(var(--warning))" fill="rgb(var(--warning) / 0.12)" strokeWidth={1.25} isAnimationActive={false} dot={false} />
+              <Area yAxisId="ms" type="monotone" dataKey="avg" name="Avg Response" stroke="rgb(var(--info))" fill="url(#svcRespG)" strokeWidth={2} isAnimationActive={false} connectNulls={false} dot={singlePoint ? { r: 3 } : false} />
+              <Area yAxisId="ms" type="monotone" dataKey="p95" name="P95" stroke="rgb(var(--accent))" fill="url(#svcP95G)" strokeWidth={1.5} isAnimationActive={false} connectNulls={false} dot={false} />
             </AreaChart>
           </ResponsiveContainer>
+        </div>
+        {!hasSeries && (
+          <div className="mt-1 text-center text-[11px] text-muted">
+            {bands.length > 0
+              ? 'No response samples in this window — outage intervals are shaded from the status log.'
+              : `No probe samples in ${rangePhrase(rangeLabel)}.`}
+          </div>
         )}
+      </PanelState>
+    </SectionCard>
+  )
+}
+
+function statusBands(history: StatusHistoryEvent[], fromTs: number, toTs: number) {
+  const sorted = [...history].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
+  const out: { start: number; end: number; kind: 'down' | 'warn' }[] = []
+  let open: { start: number; kind: 'down' | 'warn' } | null = null
+  for (const ev of sorted) {
+    const t = Date.parse(ev.timestamp)
+    const kind = ev.new_status === 'up' ? null : ev.new_status === 'down' ? 'down' : 'warn'
+    if (kind && !open) open = { start: t, kind }
+    else if (!kind && open) {
+      out.push({ start: open.start, end: t, kind: open.kind })
+      open = null
+    } else if (kind && open && kind !== open.kind) {
+      out.push({ start: open.start, end: t, kind: open.kind })
+      open = { start: t, kind }
+    }
+  }
+  if (open) out.push({ start: open.start, end: Date.now(), kind: open.kind })
+  return out.filter((b) => b.end > fromTs && b.start < toTs)
+}
+
+function LegendDot({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span className="h-2 w-2 rounded-full" style={{ background: color }} />
+      <span>{label}</span>
+    </span>
+  )
+}
+
+/* ─── Latest probe ──────────────────────────────────────────────────────── */
+
+function latestProbePoint(points: ServiceMetricPoint[], check: ServiceCheck): ServiceMetricPoint | null {
+  if (points.length > 0) return points[points.length - 1]
+  if (!check.last_check_at) return null
+  return {
+    timestamp: check.last_check_at,
+    response_ms: check.last_response_ms,
+    is_up: check.status === 'up' ? true : check.status === 'down' ? false : null,
+    status_code: null,
+    tls_days_remaining: check.tls_days_remaining,
+    error_message: check.last_error,
+  }
+}
+
+function LatestProbeCard({ check, latest, recent, manualProbe }: {
+  check: ServiceCheck
+  latest: ServiceMetricPoint | null
+  recent: ServiceMetricPoint[]
+  manualProbe: { result: ProbeEvidenceResult; observedAt: string } | null
+}) {
+  const expected = check.http_expected_statuses || String(check.http_expected_status || 200)
+  const authLabel = check.credential_name
+    ? `${check.credential_name} · ${check.credential_auth_type === 'ntlm' ? 'NTLM' : check.credential_auth_type}`
+    : 'No saved credential'
+  const resultLabel = latest?.is_up == null ? 'No data' : latest.is_up ? 'UP' : 'DOWN'
+  const resultTone = latest?.is_up == null ? 'text-muted' : latest.is_up ? 'text-success' : 'text-danger'
+
+  return (
+    <SectionCard
+      title="Latest probe"
+      actions={check.check_type === 'http' ? (
+        <span className="rounded-full border border-border bg-surface2/50 px-2 py-0.5 text-[10px] text-muted">Expect HTTP {expected}</span>
+      ) : undefined}
+    >
+      <div className="grid grid-cols-2 gap-2">
+        <ProbeStat label="Result" value={resultLabel} className={resultTone} sub={latest?.timestamp ? relativeTime(latest.timestamp) : 'Waiting for poller'} />
+        <ProbeStat label="Response" value={formatMs(latest?.response_ms)} className="text-info" sub={latest?.status_code != null ? `HTTP ${latest.status_code}` : authLabel} />
       </div>
+      {(latest?.error_message || check.last_error) && latest?.is_up === false && (
+        <p className="mt-2 break-words rounded-md border border-danger/30 bg-danger/10 px-2 py-1.5 font-mono text-[11px] text-danger">
+          {latest?.error_message || check.last_error}
+        </p>
+      )}
+      {manualProbe && (
+        <div className="mt-2 rounded-md border border-border bg-surface2/40 px-2.5 py-2">
+          <div className="flex items-center justify-between text-[11px] font-semibold">
+            <span className="inline-flex items-center gap-1.5">
+              <Play className="h-3 w-3" /> Manual probe
+              <span className={manualProbe.result.status === 'up' ? 'text-success' : 'text-danger'}>
+                {manualProbe.result.status.toUpperCase()}
+              </span>
+            </span>
+            <span className="font-normal text-muted">{relativeTime(manualProbe.observedAt)}</span>
+          </div>
+          <div className="mt-1 text-[11px] text-muted">
+            {formatMs(manualProbe.result.response_time_ms)}
+            {manualProbe.result.details?.status_code != null ? ` · HTTP ${manualProbe.result.details.status_code}` : ''}
+          </div>
+          {manualProbe.result.error && <div className="mt-1 break-words font-mono text-[11px] text-danger">{manualProbe.result.error}</div>}
+          {(manualProbe.result.details?.steps?.length || 0) > 1 && (
+            <div className="mt-2 space-y-1 border-t border-border/60 pt-1.5">
+              {manualProbe.result.details!.steps!.map((s) => (
+                <div key={s.index} className="flex items-center gap-2 text-[10px]">
+                  <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', s.status === 'up' ? 'bg-success' : 'bg-danger')} />
+                  <span className="min-w-0 flex-1 truncate" title={s.name}>{s.index}. {s.name}</span>
+                  <span className="shrink-0 tabular-nums text-muted">{s.status_code ?? '—'}</span>
+                  <span className="shrink-0 tabular-nums text-muted">{formatMs(s.response_time_ms)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {recent.length > 0 && (
+        <div className="mt-3 border-t border-border/60 pt-2">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Recent scheduled</div>
+          <div className="space-y-1">
+            {recent.slice(0, 5).map((p, i) => (
+              <div key={`${p.timestamp}-${i}`} className="flex items-center gap-2 text-[11px]">
+                <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', p.is_up ? 'bg-success' : 'bg-danger')} />
+                <span className="w-[68px] shrink-0 tabular-nums text-muted">
+                  {new Date(p.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                </span>
+                <span className={cn('font-medium', p.is_up ? 'text-success' : 'text-danger')}>{p.is_up ? 'UP' : 'DOWN'}</span>
+                <span className="tabular-nums text-muted">{formatMs(p.response_ms)}</span>
+                <span className="min-w-0 flex-1 truncate text-muted" title={p.error_message || undefined}>
+                  {p.status_code != null ? `HTTP ${p.status_code}` : p.error_message || ''}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </SectionCard>
+  )
+}
+
+function ProbeStat({ label, value, sub, className }: { label: string; value: string; sub: string; className?: string }) {
+  return (
+    <div className="rounded-lg border border-border bg-surface2/30 px-2.5 py-2">
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
+      <div className={cn('mt-0.5 text-lg font-semibold tabular-nums', className)}>{value}</div>
+      <div className="truncate text-[10px] text-muted" title={sub}>{sub}</div>
     </div>
   )
 }
 
-function IncidentsStrip({
-  history, fromTo, rangeLabel, checkId,
-}: {
-  history: Array<{ timestamp: string; new_status: string; reason?: string | null; duration_sec?: number | null }>
-  fromTo: { from: string; to: string }
+/* ─── Health score ──────────────────────────────────────────────────────── */
+
+function HealthScoreCard({ score, tint, label, factors, onViewDetails }: {
+  score: number
+  tint: string
+  label: string
+  factors: HealthFactor[]
+  onViewDetails: () => void
+}) {
+  const radius = 36
+  const circ = 2 * Math.PI * radius
+  const offset = circ - (score / 100) * circ
+  return (
+    <SectionCard
+      title="Health score"
+      actions={<button type="button" onClick={onViewDetails} className="text-xs text-primary hover:underline">How it's scored</button>}
+    >
+      <div className="flex items-center gap-4">
+        <div className="relative h-[84px] w-[84px] shrink-0">
+          <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90">
+            <circle cx="50" cy="50" r={radius} fill="none" stroke="rgb(var(--border))" strokeWidth="8" />
+            <circle cx="50" cy="50" r={radius} fill="none" stroke={tint} strokeWidth="8" strokeLinecap="round" strokeDasharray={circ} strokeDashoffset={offset} />
+          </svg>
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+            <div className="text-2xl font-bold leading-none tabular-nums" style={{ color: tint }}>{score}</div>
+            <div className="text-[9px] font-semibold" style={{ color: tint }}>{label}</div>
+          </div>
+        </div>
+        <div className="min-w-0 flex-1 space-y-2">
+          {factors.map((f) => (
+            <div key={f.key} className="flex items-center gap-2 text-[10px]">
+              <span className="w-[68px] shrink-0 truncate text-muted">{f.label}</span>
+              <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface2">
+                <div
+                  className="h-full rounded-full transition-all"
+                  style={{ width: `${f.subScore}%`, background: f.subScore > 90 ? UP_COLOR : f.subScore > 70 ? WARN_COLOR : DOWN_COLOR }}
+                />
+              </div>
+              <span className="w-6 shrink-0 text-right font-mono tabular-nums">{f.subScore}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </SectionCard>
+  )
+}
+
+/* ─── Activity ──────────────────────────────────────────────────────────── */
+
+function buildActivityEvents(
+  history: StatusHistoryEvent[],
+  alerts: ServiceAlert[],
+  fromISO: string,
+  toISO: string,
+  check?: ServiceCheck,
+): ActivityEvent[] {
+  const fromMs = Date.parse(fromISO)
+  const toMs = Date.parse(toISO)
+  const inRange = (iso: string) => {
+    const t = Date.parse(iso)
+    return Number.isFinite(t) && t >= fromMs && t <= toMs
+  }
+
+  const statusEvents: ActivityEvent[] = history.filter((h) => inRange(h.timestamp)).map((h, i) => {
+    const up = h.new_status === 'up'
+    const down = h.new_status === 'down'
+    return {
+      id: `status-${h.timestamp}-${i}`,
+      timestamp: h.timestamp,
+      kind: 'status',
+      severity: up ? 'success' : down ? 'critical' : 'warning',
+      title: up ? 'Service recovered' : down ? 'Service went down' : `Status → ${statusOf(h.new_status).label}`,
+      subtitle: [h.reason, h.old_status ? `${h.old_status} → ${h.new_status}` : null].filter(Boolean).join(' · ') || undefined,
+    }
+  })
+
+  const alertEvents: ActivityEvent[] = alerts.filter((a) => inRange(a.triggered_at)).map((a) => ({
+    id: `alert-${a.id}`,
+    timestamp: a.triggered_at,
+    kind: 'alert',
+    severity: normalizeSeverity(a.severity),
+    title: a.status === 'resolved' ? 'Alert resolved' : a.status === 'acknowledged' ? 'Alert acknowledged' : 'Alert fired',
+    subtitle: cleanAlertMessage(a.message),
+    href: `/alerts/${a.id}`,
+  }))
+
+  const extra: ActivityEvent[] = []
+  if (
+    check &&
+    (check.status === 'down' || check.status === 'warning') &&
+    check.last_error &&
+    check.last_check_at &&
+    inRange(check.last_check_at) &&
+    !statusEvents.some((e) => e.severity === 'critical' || e.severity === 'warning')
+  ) {
+    extra.push({
+      id: 'live-down',
+      timestamp: check.last_check_at,
+      kind: 'status',
+      severity: check.status === 'down' ? 'critical' : 'warning',
+      title: check.status === 'down' ? 'Service is down' : 'Service is degraded',
+      subtitle: check.last_error,
+    })
+  }
+
+  return [...statusEvents, ...alertEvents, ...extra].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+}
+
+function ActivityLogCard({ events, rangeLabel, showingFallback, onViewAll, onWiden }: {
+  events: ActivityEvent[]
+  rangeLabel: string
+  showingFallback?: boolean
+  onViewAll: () => void
+  onWiden: () => void
+}) {
+  const [filter, setFilter] = useState<'all' | 'status' | 'alert'>('all')
+  const filtered = filter === 'all' ? events : events.filter((e) => e.kind === filter)
+  const shown = filtered.slice(0, 7)
+
+  return (
+    <SectionCard
+      title="Activity"
+      subtitle={showingFallback ? `Nothing in ${rangePhrase(rangeLabel)} — showing the most recent history` : rangeLabel}
+      actions={<button type="button" onClick={onViewAll} className="text-xs text-primary hover:underline">View all</button>}
+    >
+      <div className="mb-3 flex gap-0.5 rounded-md bg-surface2/60 p-0.5">
+        {(['all', 'status', 'alert'] as const).map((f) => (
+          <button
+            key={f}
+            onClick={() => setFilter(f)}
+            className={cn(
+              'flex-1 rounded px-2 py-1 text-[11px] font-medium capitalize transition-colors',
+              filter === f ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text',
+            )}
+          >
+            {f === 'all' ? 'All' : f === 'status' ? 'Status' : 'Alerts'}
+          </button>
+        ))}
+      </div>
+      <div className="relative">
+        {shown.length > 0 && <div className="absolute bottom-2 left-[13px] top-2 w-px bg-border/60" />}
+        <div className="space-y-3">
+          {shown.length === 0 && (
+            <EmptyState
+              icon={Info}
+              title={filter === 'all' ? `No activity in ${rangePhrase(rangeLabel)}` : `No ${filter === 'alert' ? 'alerts' : 'status changes'} here`}
+              description="Status changes and alerts appear here when the service goes down or recovers."
+              action={<Button variant="outline" size="sm" onClick={onWiden}>Widen to 30 days</Button>}
+            />
+          )}
+          {shown.map((e) => {
+            const tone =
+              e.severity === 'critical' ? 'bg-danger/15 text-danger ring-danger/30'
+                : e.severity === 'warning' ? 'bg-warning/15 text-warning ring-warning/30'
+                  : e.severity === 'success' ? 'bg-success/15 text-success ring-success/30'
+                    : 'bg-info/15 text-info ring-info/30'
+            const Icon = e.kind === 'alert' ? Bell : e.severity === 'success' ? CheckCircle2 : e.severity === 'critical' ? XCircle : AlertTriangle
+            const inner = (
+              <>
+                <span className={cn('relative z-10 flex h-7 w-7 shrink-0 items-center justify-center rounded-full ring-2', tone)}>
+                  <Icon className="h-3.5 w-3.5" />
+                </span>
+                <div className="min-w-0 flex-1 pt-0.5">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="truncate text-[11px] font-semibold" title={e.title}>{e.title}</div>
+                    <div className="shrink-0 text-[10px] tabular-nums text-muted">{relativeTime(e.timestamp)}</div>
+                  </div>
+                  <div className="font-mono text-[10px] tabular-nums text-text2">
+                    {new Date(e.timestamp).toLocaleString(undefined, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                  </div>
+                  {e.subtitle && <div className="truncate text-[10px] text-muted" title={e.subtitle}>{e.subtitle}</div>}
+                </div>
+              </>
+            )
+            return e.href ? (
+              <Link key={e.id} to={e.href} className="relative flex items-start gap-3 rounded-md hover:bg-surface2/40">{inner}</Link>
+            ) : (
+              <div key={e.id} className="relative flex items-start gap-3">{inner}</div>
+            )
+          })}
+        </div>
+      </div>
+    </SectionCard>
+  )
+}
+
+function EventsDialog({ open, onOpenChange, events, rangeLabel, checkId }: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  events: ActivityEvent[]
   rangeLabel: string
   checkId: string
 }) {
-  const C = useC()
-  const fromMs = Date.parse(fromTo.from)
-  const toMs = Date.parse(fromTo.to)
-  const recent = history
-    .filter((h) => h.new_status !== 'up')
-    .filter((h) => {
-      const t = Date.parse(h.timestamp)
-      return t >= fromMs && t <= toMs
-    })
-    .slice(0, 4)
   return (
-    <div
-      className="rounded-xl p-3"
-      style={{ background: C.panel, border: `1px solid ${C.border}` }}
-    >
-      <div className="mb-2 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <AlertCircle className="h-3.5 w-3.5" style={{ color: C.warn }} />
-          <span className="text-xs font-semibold">Incidents Strip</span>
-          <span className="text-[10px]" style={{ color: C.textMuted }}>({rangeLabel})</span>
-        </div>
-        <Link
-          to={checkId ? `/services/${checkId}/incidents` : '#'}
-          className="text-[10px] hover:underline"
-          style={{ color: C.primary }}
-        >
-          View all
-        </Link>
-      </div>
-      {recent.length === 0 ? (
-        <div className="rounded-md p-3 text-center text-[11px]" style={{ color: C.textMuted, background: C.borderSoft }}>
-          No incidents recorded in the selected window.
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-          {recent.map((h, i) => {
-            const tint = h.new_status === 'down' ? C.down : C.warn
-            return (
-              <div
-                key={i}
-                className="rounded-md border p-2 text-[11px]"
-                style={{ borderColor: `${tint}40`, background: `${tint}10` }}
-              >
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold" style={{ color: tint }}>
-                    {h.reason ? h.reason.slice(0, 22) : h.new_status.toUpperCase()}
-                  </span>
-                  <span className="font-mono" style={{ color: tint }}>
-                    {formatDur(h.duration_sec)}
-                  </span>
-                </div>
-                <div className="mt-1" style={{ color: C.textMuted }}>
-                  {relativeTime(h.timestamp) || '—'}
-                </div>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Activity · {rangeLabel}</DialogTitle>
+        </DialogHeader>
+        <div className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
+          {events.length === 0 && <div className="py-8 text-center text-xs text-muted">No events in this window.</div>}
+          {events.map((e) => (
+            <div key={e.id} className="rounded-md border border-border bg-surface2/30 px-3 py-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold">{e.title}</span>
+                <span className="text-[10px] text-muted">{relativeTime(e.timestamp)}</span>
               </div>
-            )
-          })}
+              <div className="mt-0.5 font-mono text-[10px] text-muted">{new Date(e.timestamp).toLocaleString()}</div>
+              {e.subtitle && <div className="mt-1 break-words text-[11px] text-muted">{e.subtitle}</div>}
+              {e.href && <Link to={e.href} className="mt-1 inline-block text-[11px] text-primary hover:underline">Open alert</Link>}
+            </div>
+          ))}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>Close</Button>
+          <Button size="sm" asChild>
+            <Link to={`/services/${checkId}/incidents?filter=all`}>Incident log</Link>
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/* ─── Related ───────────────────────────────────────────────────────────── */
+
+function hostOf(c: Pick<ServiceCheck, 'target_host' | 'target_url'>): string {
+  const h = (c.target_host || '').trim().toLowerCase()
+  if (h) return h
+  try {
+    return new URL(c.target_url || '').hostname.toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+async function fetchRelatedFallback(check: ServiceCheck): Promise<RelatedResponse> {
+  const out: RelatedResponse = { parent: null, children: [], same_device: [], same_host: [], same_group: [] }
+  const seen = new Set<string>([check.id])
+  const take = (rows: ServiceCheck[]) => rows.filter((c) => !seen.has(c.id)).slice(0, 16)
+
+  const queries: Promise<ServiceCheck[]>[] = [
+    api.get<{ data: ServiceCheck[] }>('/service-checks?limit=200').then((r) => r.data.data || []).catch(() => []),
+  ]
+  if (check.device_id) {
+    queries.push(api.get<{ data: ServiceCheck[] }>(`/service-checks?device_id=${check.device_id}&limit=50`).then((r) => r.data.data || []).catch(() => []))
+  }
+  if (check.group_id) {
+    queries.push(api.get<{ data: ServiceCheck[] }>(`/service-checks?group_id=${check.group_id}&limit=50`).then((r) => r.data.data || []).catch(() => []))
+  }
+  const batches = await Promise.all(queries)
+  const all = new Map<string, ServiceCheck>()
+  for (const batch of batches) for (const c of batch) all.set(c.id, c)
+  const pool = [...all.values()]
+
+  if (check.parent_check_id) {
+    out.parent = all.get(check.parent_check_id) || null
+    if (out.parent) seen.add(out.parent.id)
+  }
+  out.children = take(pool.filter((c) => c.parent_check_id === check.id))
+  out.children.forEach((c) => seen.add(c.id))
+
+  if (check.device_id) {
+    out.same_device = take(pool.filter((c) => c.device_id === check.device_id))
+    out.same_device.forEach((c) => seen.add(c.id))
+  }
+  const host = hostOf(check)
+  if (host) {
+    out.same_host = take(pool.filter((c) => hostOf(c) === host))
+    out.same_host.forEach((c) => seen.add(c.id))
+  }
+  if (check.group_id) out.same_group = take(pool.filter((c) => c.group_id === check.group_id))
+  return out
+}
+
+function RelatedServicesCard({ related, failed }: { related?: RelatedResponse; failed?: boolean }) {
+  const groups: Array<{ title: string; items: ServiceCheck[] }> = [
+    { title: 'Parent', items: related?.parent ? [related.parent] : [] },
+    { title: 'Dependents', items: related?.children || [] },
+    { title: 'Same device', items: related?.same_device || [] },
+    { title: 'Same host', items: related?.same_host || [] },
+    { title: 'Same group', items: related?.same_group || [] },
+  ].filter((g) => g.items.length > 0)
+  const total = groups.reduce((n, g) => n + g.items.length, 0)
+
+  return (
+    <SectionCard title="Related checks" actions={total > 0 ? <span className="text-[11px] tabular-nums text-muted">{total}</span> : undefined}>
+      {failed ? (
+        <div className="py-6 text-center text-xs text-danger">Could not load related checks.</div>
+      ) : groups.length === 0 ? (
+        <EmptyState
+          icon={Route}
+          title="No related checks"
+          description="Checks appear here when they share this host, device or group, or when one is linked as a parent or dependent."
+          action={<Button variant="outline" size="sm" asChild><Link to="/services">Browse all checks</Link></Button>}
+        />
+      ) : (
+        <div className="space-y-3">
+          {groups.map((g) => (
+            <div key={g.title}>
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">{g.title}</div>
+              <div className="space-y-1">
+                {g.items.map((c) => {
+                  const sm = statusOf(c.status)
+                  const target = c.target_url || `${c.target_host}${c.target_port ? `:${c.target_port}` : ''}`
+                  return (
+                    <Link
+                      key={c.id}
+                      to={`/services/${c.id}`}
+                      className="flex items-center gap-2 rounded-md border border-border bg-surface2/30 px-2 py-1.5 transition-colors hover:bg-surface2"
+                    >
+                      <span className={cn(
+                        'h-1.5 w-1.5 shrink-0 rounded-full',
+                        c.status === 'up' ? 'bg-success' : c.status === 'down' ? 'bg-danger' : 'bg-warning',
+                      )} />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[11px] font-medium">{c.name}</div>
+                        <div className="truncate font-mono text-[10px] text-muted">{target}</div>
+                      </div>
+                      <span className="shrink-0 text-[10px] text-muted">{sm.label}</span>
+                      <ChevronRight className="h-3 w-3 shrink-0 text-muted" />
+                    </Link>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
         </div>
       )}
-    </div>
+    </SectionCard>
   )
 }
 
-function UptimeCalendar({
-  hours,
-}: {
-  hours: Array<{ ts: string; uptime_pct: number | null; sample_count: number }>
-}) {
-  const C = useC()
-  // Build a 30d × 24h grid anchored to today's date.
-  const DAYS = 30
-  const now = new Date()
-  now.setMinutes(0, 0, 0)
-  const grid: Array<Array<{ ts: Date; pct: number | null }>> = []
-  const byKey = new Map<string, { pct: number | null }>()
+/* ─── Config summary (overview) ─────────────────────────────────────────── */
+
+function ConfigSummaryCard({ check, onEdit, onOpenConfig }: { check: ServiceCheck; onEdit: () => void; onOpenConfig: () => void }) {
+  const rows: Array<{ label: string; value: string; mono?: boolean }> = [
+    { label: 'Target', value: check.target_url || check.target_host || '—', mono: true },
+    { label: 'Method', value: check.http_method || '—' },
+    { label: 'Auth', value: check.credential_name ? `${check.credential_name} (${check.credential_auth_type})` : 'None' },
+    { label: 'Journey', value: (check.workflow_steps?.length || 0) > 0 ? `${check.workflow_steps?.length} steps · ${(check.workflow_operator || 'all').toUpperCase()}` : 'Single request' },
+    { label: 'Expected', value: check.http_expected_statuses || String(check.http_expected_status || '—') },
+    { label: 'Timeout', value: `${check.timeout}s` },
+    { label: 'Interval', value: `${check.check_interval}s` },
+    { label: 'Group', value: check.group_name || 'Unassigned' },
+  ]
+  return (
+    <SectionCard
+      title="Configuration"
+      actions={
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={onOpenConfig} className="text-xs text-primary hover:underline">Full</button>
+          <button type="button" onClick={onEdit} className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
+            <Pencil className="h-3 w-3" /> Edit
+          </button>
+        </div>
+      }
+    >
+      <dl className="space-y-1.5">
+        {rows.map((r) => (
+          <div key={r.label} className="grid grid-cols-[80px_1fr] items-start gap-2 text-[11px]">
+            <dt className="text-muted">{r.label}</dt>
+            <dd className={cn('min-w-0 truncate font-medium', r.mono && 'font-mono')} title={r.value}>{r.value}</dd>
+          </div>
+        ))}
+      </dl>
+      {check.tags.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1 border-t border-border/60 pt-2.5">
+          {check.tags.map((t) => (
+            <span key={t} className="rounded-full border border-border bg-surface2/50 px-2 py-0.5 text-[10px] text-muted">{t}</span>
+          ))}
+        </div>
+      )}
+    </SectionCard>
+  )
+}
+
+/* ─── Uptime tab: 30-day calendar ───────────────────────────────────────── */
+
+type DayUptime = {
+  key: string
+  start: number
+  end: number
+  date: Date
+  uptimePct: number | null
+  samples: number
+  downtimeSec: number
+  hours: Array<{ hour: number; uptimePct: number | null; samples: number }>
+}
+
+function buildDailyUptime(hours: HourlyUptime[], dayCount: number, intervalSec = 60): DayUptime[] {
+  const byDay = new Map<string, { up: number; total: number; hours: Map<number, { pct: number | null; samples: number }> }>()
   for (const h of hours) {
-    const d = new Date(h.ts)
-    const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}-${d.getHours()}`
-    byKey.set(key, { pct: h.uptime_pct })
-  }
-  for (let dayOffset = DAYS - 1; dayOffset >= 0; dayOffset--) {
-    const row: Array<{ ts: Date; pct: number | null }> = []
-    for (let hr = 0; hr < 24; hr++) {
-      const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dayOffset, hr)
-      const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}-${hr}`
-      const v = byKey.get(key)
-      row.push({ ts: d, pct: v ? v.pct : null })
+    const t = Date.parse(h.ts)
+    if (!Number.isFinite(t)) continue
+    const d = new Date(t)
+    const key = dayKey(d)
+    let entry = byDay.get(key)
+    if (!entry) { entry = { up: 0, total: 0, hours: new Map() }; byDay.set(key, entry) }
+    const samples = h.sample_count || 0
+    if (h.uptime_pct != null && samples > 0) {
+      entry.up += (h.uptime_pct / 100) * samples
+      entry.total += samples
     }
-    grid.push(row)
+    entry.hours.set(d.getHours(), { pct: h.uptime_pct, samples })
   }
 
-  function cellColor(pct: number | null): string {
-    if (pct == null) return C.unknown
-    if (pct >= 99.9) return C.up
-    if (pct >= 95) return '#84cc16'
-    if (pct >= 80) return C.warn
-    return C.down
+  const out: DayUptime[] = []
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  for (let i = dayCount - 1; i >= 0; i--) {
+    const date = new Date(today)
+    date.setDate(today.getDate() - i)
+    const key = dayKey(date)
+    const entry = byDay.get(key)
+    const start = date.getTime()
+    const end = start + 86_400_000
+    const uptimePct = entry && entry.total > 0 ? (entry.up / entry.total) * 100 : null
+    // Downtime is estimated from the samples actually taken (samples × polling interval), not
+    // from whole measured hours — a monitor created 15 minutes ago that straddles an hour
+    // boundary must not be billed two hours of downtime.
+    const measuredSec = entry ? Math.min(86_400, entry.total * intervalSec) : 0
+    const downtimeSec = uptimePct == null ? 0 : ((100 - uptimePct) / 100) * measuredSec
+    out.push({
+      key,
+      start,
+      end,
+      date,
+      uptimePct,
+      samples: entry?.total ?? 0,
+      downtimeSec,
+      hours: Array.from({ length: 24 }, (_, hour) => {
+        const hv = entry?.hours.get(hour)
+        return { hour, uptimePct: hv?.pct ?? null, samples: hv?.samples ?? 0 }
+      }),
+    })
   }
-
-  // Day labels along the bottom — show ~5 evenly-spaced tick labels.
-  const tickIdx = [0, Math.floor(DAYS * 0.2), Math.floor(DAYS * 0.4), Math.floor(DAYS * 0.6), Math.floor(DAYS * 0.8), DAYS - 1]
-
-  return (
-    <div
-      className="rounded-xl p-3"
-      style={{ background: C.panel, border: `1px solid ${C.border}` }}
-    >
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs font-semibold">Uptime Calendar (30 days)</span>
-        <div className="flex items-center gap-3 text-[10px]" style={{ color: C.textMuted }}>
-          <Legend color={C.up} label="Up" />
-          <Legend color={C.warn} label="Warning" />
-          <Legend color={C.down} label="Down" />
-          <Legend color={C.unknown} label="No Data" />
-        </div>
-      </div>
-      <div className="flex gap-[1.5px]">
-        {grid.map((row, i) => (
-          <div key={i} className="flex flex-1 flex-col gap-[1.5px]">
-            {row.map((c, j) => (
-              <div
-                key={j}
-                className="h-[9px] rounded-[1px]"
-                style={{ background: cellColor(c.pct) }}
-                title={`${c.ts.toLocaleString()} — ${c.pct == null ? 'no data' : `${c.pct.toFixed(1)}%`}`}
-              />
-            ))}
-          </div>
-        ))}
-      </div>
-      {/* Bottom date axis */}
-      <div className="mt-2 flex text-[9px]" style={{ color: C.textMuted, fontFamily: 'ui-monospace, monospace' }}>
-        {grid.map((row, i) => (
-          <div key={i} className="flex flex-1 justify-center">
-            {tickIdx.includes(i) ? row[0].ts.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : ''}
-          </div>
-        ))}
-      </div>
-    </div>
-  )
+  return out
 }
 
-function RelatedServices({
-  upstream, downstream,
-}: {
-  upstream: ServiceCheck[]
-  downstream: ServiceCheck[]
+function dayKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+function UptimeCalendar({ days, loading, error, onRetry, onSelectDay }: {
+  days: DayUptime[]
+  loading: boolean
+  error: boolean
+  onRetry: () => void
+  onSelectDay: (d: DayUptime) => void
 }) {
-  const C = useC()
-  return (
-    <div
-      className="rounded-xl p-3"
-      style={{ background: C.panel, border: `1px solid ${C.border}` }}
-    >
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs font-semibold">Related Services</span>
-        <button className="text-[10px] hover:underline" style={{ color: C.primary }}>View dependency map</button>
-      </div>
-      <div className="space-y-2">
-        <RelatedList title="Upstream" items={upstream} emptyLabel="No parent" />
-        <RelatedList title="Downstream" items={downstream} emptyLabel="No dependents" />
-      </div>
-    </div>
-  )
-}
+  const [selected, setSelected] = useState<string | null>(null)
+  const measured = days.filter((d) => d.uptimePct != null)
+  const overall = measured.length
+    ? measured.reduce((s, d) => s + (d.uptimePct as number) * d.samples, 0) / Math.max(1, measured.reduce((s, d) => s + d.samples, 0))
+    : null
+  const totalDowntime = days.reduce((s, d) => s + d.downtimeSec, 0)
+  const worst = measured.length ? measured.reduce((w, d) => ((d.uptimePct as number) < (w.uptimePct as number) ? d : w)) : null
+  const selectedDay = days.find((d) => d.key === selected) || null
 
-function RelatedList({
-  title, items, emptyLabel,
-}: { title: string; items: ServiceCheck[]; emptyLabel: string }) {
-  const C = useC()
+  // Monday-first grid: pad the first week so each column is a weekday.
+  const leadPad = days.length ? (days[0].date.getDay() + 6) % 7 : 0
+
   return (
-    <div>
-      <div className="mb-1 text-[10px] uppercase tracking-wider" style={{ color: C.textMuted }}>
-        {title}
-      </div>
-      {items.length === 0 ? (
-        <div className="rounded-md px-2 py-1.5 text-[11px]" style={{ background: C.borderSoft, color: C.textMuted }}>
-          {emptyLabel}
+    <SectionCard
+      title="Uptime calendar"
+      subtitle="Last 30 days · click a day to zoom the whole page to it"
+      actions={
+        <div className="flex items-center gap-3 text-xs">
+          {overall != null && (
+            <span className={cn('font-mono font-semibold tabular-nums', BAND_TEXT[uptimeBand(overall)])}>{overall.toFixed(3)}%</span>
+          )}
+          {totalDowntime > 0 && <span className="text-muted">{formatDur(totalDowntime)} down</span>}
         </div>
-      ) : (
-        <div className="space-y-1">
-          {items.map((c) => {
-            const sm = statusMeta[c.status] || statusMeta.unknown
-            // Fake-but-stable sparkline based on current response — purely decorative.
-            const seed = c.id
-              .split('-')
-              .reduce((a, s) => a + parseInt(s.slice(0, 4), 16), 0)
-            const bars = Array.from({ length: 12 }, (_, i) => {
-              const v = Math.sin((seed + i * 7) * 0.37) * 0.5 + 0.5
-              const down = c.status !== 'up' && i >= 9
-              return { v: down ? 0.2 : 0.3 + v * 0.6, down }
-            })
-            return (
-              <Link
-                key={c.id}
-                to={`/services/${c.id}`}
-                className="flex items-center justify-between rounded-md px-2 py-1.5 hover:bg-white/5"
-                style={{ background: C.borderSoft }}
-              >
-                <div className="flex min-w-0 flex-1 items-center gap-2 text-[11px]">
-                  <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full" style={{ background: sm.color }} />
-                  <span className="truncate" style={{ color: C.text }}>{c.name}</span>
-                </div>
-                <div className="flex items-end gap-[1.5px]" style={{ height: 14 }}>
-                  {bars.map((b, i) => (
+      }
+    >
+      <PanelState loading={loading} error={error} onRetry={onRetry} loadingText="Loading 30 days of uptime…" errorText="Could not load uptime history.">
+        {measured.length === 0 && !loading ? (
+          <EmptyState
+            icon={CalendarDays}
+            title="No uptime history yet"
+            description="Once the poller has stored a few probe results, each day of the last 30 will appear here shaded by its availability."
+          />
+        ) : (
+          <>
+            <div className="grid grid-cols-7 gap-1.5">
+              {WEEKDAYS.map((w) => (
+                <div key={w} className="pb-0.5 text-center text-[10px] font-semibold uppercase tracking-wider text-muted">{w}</div>
+              ))}
+              {Array.from({ length: leadPad }).map((_, i) => <div key={`pad-${i}`} />)}
+              {days.map((d) => {
+                const band = uptimeBand(d.uptimePct)
+                const isSelected = selected === d.key
+                return (
+                  <button
+                    key={d.key}
+                    type="button"
+                    onClick={() => setSelected(isSelected ? null : d.key)}
+                    title={
+                      d.uptimePct == null
+                        ? `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} — no data`
+                        : `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}\n${d.uptimePct.toFixed(3)}% up · ${d.samples} samples${d.downtimeSec > 0 ? `\n${formatDur(d.downtimeSec)} down` : ''}`
+                    }
+                    className={cn(
+                      'group relative flex h-[62px] flex-col items-center justify-center rounded-lg border transition-all',
+                      isSelected ? 'border-primary ring-2 ring-primary/40' : 'border-border hover:border-border-strong',
+                      d.uptimePct == null && 'bg-surface2/40',
+                    )}
+                    style={d.uptimePct != null ? { backgroundColor: withAlpha(BAND_FILL[band], band === 'perfect' ? 0.22 : 0.28) } : undefined}
+                  >
+                    <span className="text-[11px] font-semibold tabular-nums text-text">{d.date.getDate()}</span>
+                    <span className={cn('text-[9px] font-medium tabular-nums', BAND_TEXT[band])}>
+                      {d.uptimePct == null ? '—' : d.uptimePct >= 99.95 ? '100%' : `${d.uptimePct.toFixed(d.uptimePct >= 99 ? 1 : 0)}%`}
+                    </span>
                     <span
-                      key={i}
+                      className="absolute inset-x-1.5 bottom-1 h-[3px] rounded-full"
+                      style={{ backgroundColor: BAND_FILL[band] }}
+                    />
+                  </button>
+                )
+              })}
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-border/60 pt-3">
+              <div className="flex flex-wrap items-center gap-3 text-[10px] text-muted">
+                <Swatch color={BAND_FILL.perfect} label="100%" />
+                <Swatch color={BAND_FILL.good} label="≥ 99%" />
+                <Swatch color={BAND_FILL.fair} label="≥ 95%" />
+                <Swatch color={BAND_FILL.poor} label="< 95%" />
+                <span className="inline-flex items-center gap-1">
+                  <span className="h-2 w-2 rounded-sm bg-surface2 ring-1 ring-inset ring-border" />No data
+                </span>
+              </div>
+              {worst && (worst.uptimePct as number) < 100 && (
+                <span className="text-[11px] text-muted">
+                  Worst day{' '}
+                  <span className={BAND_TEXT[uptimeBand(worst.uptimePct)]}>
+                    {worst.date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · {(worst.uptimePct as number).toFixed(2)}%
+                  </span>
+                </span>
+              )}
+            </div>
+
+            {selectedDay && (
+              <div className="mt-3 rounded-lg border border-border bg-surface2/30 p-3">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs font-semibold">
+                    {selectedDay.date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
+                    <span className={cn('ml-2 font-mono font-medium tabular-nums', BAND_TEXT[uptimeBand(selectedDay.uptimePct)])}>
+                      {selectedDay.uptimePct == null ? 'no data' : `${selectedDay.uptimePct.toFixed(3)}%`}
+                    </span>
+                    {selectedDay.downtimeSec > 0 && (
+                      <span className="ml-2 text-[11px] font-normal text-muted">{formatDur(selectedDay.downtimeSec)} down</span>
+                    )}
+                  </div>
+                  <Button variant="outline" size="sm" className="h-7" onClick={() => onSelectDay(selectedDay)}>
+                    Zoom to this day
+                  </Button>
+                </div>
+                <div className="flex gap-[2px]">
+                  {selectedDay.hours.map((h) => (
+                    <div
+                      key={h.hour}
+                      className="h-6 flex-1 rounded-sm"
                       style={{
-                        display: 'inline-block',
-                        width: 2,
-                        height: `${Math.max(2, b.v * 14)}px`,
-                        background: b.down ? C.down : sm.color,
-                        opacity: b.down ? 0.8 : 0.6 + b.v * 0.4,
-                        borderRadius: 1,
+                        backgroundColor: h.samples === 0 ? 'rgb(var(--surface3) / 0.5)' : BAND_FILL[uptimeBand(h.uptimePct)],
                       }}
+                      title={
+                        h.samples === 0
+                          ? `${String(h.hour).padStart(2, '0')}:00 — no data`
+                          : `${String(h.hour).padStart(2, '0')}:00 — ${(h.uptimePct ?? 0).toFixed(1)}% up · ${h.samples} samples`
+                      }
                     />
                   ))}
                 </div>
-                <span className="ml-2 text-[10px]" style={{ color: sm.color }}>{sm.label}</span>
-              </Link>
-            )
-          })}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function RecentActivityTable({
-  history, fromTo, rangeLabel,
-}: {
-  history: Array<{ timestamp: string; new_status: string; old_status: string | null; reason?: string | null; duration_sec?: number | null }>
-  fromTo: { from: string; to: string }
-  rangeLabel: string
-}) {
-  const C = useC()
-  const fromMs = Date.parse(fromTo.from)
-  const toMs = Date.parse(fromTo.to)
-  const rows = history.filter((h) => {
-    const t = Date.parse(h.timestamp)
-    return t >= fromMs && t <= toMs
-  })
-  return (
-    <div
-      className="rounded-xl p-3"
-      style={{ background: C.panel, border: `1px solid ${C.border}` }}
-    >
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs font-semibold">Recent Activity &amp; Status Changes</span>
-        <span className="text-[10px]" style={{ color: C.textMuted }}>{rangeLabel}</span>
-      </div>
-      {rows.length === 0 ? (
-        <div className="py-6 text-center text-[11px]" style={{ color: C.textMuted }}>
-          No status changes in this window.
-        </div>
-      ) : (
-        <div className="overflow-hidden rounded-md border" style={{ borderColor: C.border }}>
-          <table className="w-full text-[11px]" style={{ color: C.text }}>
-            <thead>
-              <tr style={{ background: C.borderSoft, color: C.textMuted }}>
-                <th className="px-3 py-1.5 text-left font-medium">Date &amp; Time</th>
-                <th className="px-3 py-1.5 text-left font-medium">Type</th>
-                <th className="px-3 py-1.5 text-left font-medium">Status</th>
-                <th className="px-3 py-1.5 text-left font-medium">Message</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.slice(0, 10).map((h, i) => {
-                const sm = statusMeta[h.new_status] || statusMeta.unknown
-                return (
-                  <tr key={i} style={{ borderTop: `1px solid ${C.border}` }}>
-                    <td className="px-3 py-1.5 font-mono" style={{ color: C.textDim }}>
-                      {new Date(h.timestamp).toLocaleString()}
-                    </td>
-                    <td className="px-3 py-1.5" style={{ color: C.textDim }}>Probe</td>
-                    <td className="px-3 py-1.5">
-                      <span
-                        className="rounded-full px-2 py-0.5 text-[10px] font-semibold"
-                        style={{ background: `${sm.color}20`, color: sm.color }}
-                      >
-                        {sm.label}
-                      </span>
-                    </td>
-                    <td className="px-3 py-1.5" style={{ color: C.textDim }}>
-                      {h.reason || (h.old_status ? `${h.old_status} → ${h.new_status}` : '—')}
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function InlineConfig({
-  check, onEdit,
-}: { check: ServiceCheck; onEdit: () => void }) {
-  const C = useC()
-  const [open, setOpen] = useState(false)
-  return (
-    <div className="rounded-xl p-3" style={{ background: C.panel, border: `1px solid ${C.border}` }}>
-      <div className="flex items-center justify-between">
-        <button
-          type="button"
-          onClick={() => setOpen((o) => !o)}
-          className="flex flex-1 items-center gap-1.5 text-left"
-          aria-expanded={open}
-        >
-          {open
-            ? <ChevronDown className="h-3.5 w-3.5" style={{ color: C.textMuted }} />
-            : <ChevronRight className="h-3.5 w-3.5" style={{ color: C.textMuted }} />}
-          <span className="text-xs font-semibold">Inline Configuration</span>
-        </button>
-        <button
-          onClick={onEdit}
-          className="text-[10px] hover:underline"
-          style={{ color: C.primary }}
-        >
-          Edit all
-        </button>
-      </div>
-      {open && (
-        <div className="mt-2 space-y-1.5 text-[11px]">
-          <CfgRow label="URL" value={check.target_url || check.target_host || '—'} mono onEdit={onEdit} />
-          <CfgRow label="Method" value={check.http_method || '—'} onEdit={onEdit} />
-          <CfgRow
-            label="Authentication"
-            value={check.credential_name ? `${check.credential_name} (${check.credential_auth_type})` : 'None'}
-            onEdit={onEdit}
-          />
-          <CfgRow
-            label="Journey"
-            value={(check.workflow_steps?.length || 0) > 0 ? `${check.workflow_steps?.length} steps · ${(check.workflow_operator || 'all').toUpperCase()}` : 'Single request'}
-            onEdit={onEdit}
-          />
-          <CfgRow
-            label="Expected Status"
-            value={check.http_expected_statuses || String(check.http_expected_status || '—')}
-            onEdit={onEdit}
-          />
-          <CfgRow label="Timeout" value={`${check.timeout}s`} onEdit={onEdit} />
-          <CfgRow label="Check Interval" value={`${check.check_interval}s`} onEdit={onEdit} />
-          <CfgRow
-            label="Tags"
-            value={check.tags.length > 0 ? check.tags.join(', ') : '—'}
-            onEdit={onEdit}
-          />
-          <CfgRow label="Alert Policy" value={check.group_name || 'default'} onEdit={onEdit} />
-          <CfgRow
-            label="Maintenance Window"
-            value={check.in_maintenance ? 'Active' : 'None'}
-            onEdit={onEdit}
-          />
-        </div>
-      )}
-    </div>
-  )
-}
-
-function WorkflowOverview({ check }: { check: ServiceCheck }) {
-  const C = useC()
-  const steps = check.workflow_steps || []
-  return (
-    <div className="rounded-xl p-4" style={{ background: C.panel, border: `1px solid ${C.border}` }}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <Route className="h-4 w-4" style={{ color: C.primary }} />
-          <div>
-            <div className="text-xs font-semibold">Authenticated service journey</div>
-            <div className="text-[11px]" style={{ color: C.textMuted }}>
-              Cookie-preserving navigation · {(check.workflow_operator || 'all').toUpperCase()} rule
-            </div>
-          </div>
-        </div>
-        {check.credential_name && (
-          <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold" style={{ background: `${C.up}18`, color: C.up }}>
-            <LockKeyhole className="h-3 w-3" /> {check.credential_name} · {check.credential_auth_type}
-          </span>
+                <div className="mt-1 flex justify-between text-[9px] tabular-nums text-muted">
+                  <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span>
+                </div>
+              </div>
+            )}
+          </>
         )}
-      </div>
-      <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-        {steps.map((step, index) => (
-          <div key={`${step.name}-${index}`} className="rounded-lg p-3" style={{ background: C.panelLift, border: `1px solid ${C.borderSoft}` }}>
-            <div className="flex items-center gap-2">
-              <span className="flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold" style={{ background: `${C.primary}20`, color: C.primary }}>{index + 1}</span>
-              <span className="truncate text-xs font-semibold">{step.name}</span>
-            </div>
-            <div className="mt-2 truncate font-mono text-[10px]" style={{ color: C.textDim }} title={step.url}>{step.method} {step.url}</div>
-            <div className="mt-1 text-[10px]" style={{ color: C.textMuted }}>
-              Expect {step.expected_statuses || '200'}{step.content_match ? ' + content validation' : ''}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
+      </PanelState>
+    </SectionCard>
   )
 }
 
-function CfgRow({ label, value, mono, onEdit }: { label: string; value: string; mono?: boolean; onEdit: () => void }) {
-  const C = useC()
+function withAlpha(rgbExpr: string, alpha: number): string {
+  const inner = rgbExpr.replace(/^rgb\(/, '').replace(/\)$/, '').split('/')[0].trim()
+  return `rgb(${inner} / ${alpha})`
+}
+
+function DailyUptimeChart({ days }: { days: DayUptime[] }) {
+  const data = days.map((d) => ({
+    label: d.date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+    pct: d.uptimePct,
+    band: uptimeBand(d.uptimePct),
+  }))
+  const hasData = data.some((d) => d.pct != null)
   return (
-    <div
-      className="grid grid-cols-[1fr_auto] items-start gap-2 border-b pb-1.5"
-      style={{ borderColor: C.borderSoft }}
-    >
-      <div className="min-w-0">
-        <div className="text-[9px] uppercase tracking-wider" style={{ color: C.textMuted }}>{label}</div>
-        <div
-          className={`truncate text-[11px] leading-tight ${mono ? 'font-mono' : ''}`}
-          style={{ color: C.text }}
-          title={value}
-        >
-          {value}
+    <SectionCard title="Daily availability" subtitle="Last 30 days" bodyClassName="flex flex-col p-4">
+      {!hasData ? (
+        <EmptyState icon={Gauge} title="No daily data" description="Daily availability appears once probe results have been stored." />
+      ) : (
+        <div className="min-h-[220px] w-full flex-1">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={data} margin={{ top: 6, right: 8, bottom: 0, left: 0 }}>
+              <CartesianGrid stroke="rgb(var(--border) / 0.35)" strokeDasharray="3 3" vertical={false} />
+              <XAxis
+                dataKey="label"
+                tick={{ fontSize: 9, fill: 'rgb(var(--muted))' }}
+                axisLine={false}
+                tickLine={false}
+                interval={Math.max(0, Math.floor(data.length / 8) - 1)}
+              />
+              <YAxis
+                domain={[(dataMin: number) => (Number.isFinite(dataMin) ? Math.min(90, Math.floor(dataMin)) : 90), 100]}
+                tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
+                width={42}
+                axisLine={false}
+                tickLine={false}
+                tickFormatter={(v) => `${v}%`}
+              />
+              <Tooltip
+                cursor={{ fill: 'rgb(var(--surface2) / 0.6)' }}
+                contentStyle={{
+                  background: 'rgb(var(--surface))',
+                  border: '1px solid rgb(var(--border))',
+                  borderRadius: 6,
+                  fontSize: 11,
+                  color: 'rgb(var(--text))',
+                }}
+                formatter={(v: any) => [v == null ? 'no data' : `${Number(v).toFixed(3)}%`, 'Uptime']}
+              />
+              <Bar dataKey="pct" radius={[3, 3, 0, 0]} isAnimationActive={false}>
+                {data.map((d, i) => <Cell key={i} fill={BAND_FILL[d.band]} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
         </div>
-      </div>
-      <button
-        onClick={onEdit}
-        className="mt-0.5 rounded p-1 hover:bg-white/5"
-        style={{ color: C.textMuted }}
-        title="Edit"
-      >
-        <Edit3 className="h-3 w-3" />
-      </button>
-    </div>
+      )}
+    </SectionCard>
   )
 }
 
-function QuickActions({
-  onRunProbe,
-  onPauseAll,
-  onForceRevalidate,
-  onMaintenance,
-  onAckAll,
-  onExport,
-  enabled,
-  inMaintenance,
-  activeAlertCount,
-  busy,
-}: {
-  onRunProbe: () => void
-  onPauseAll: () => void
-  onForceRevalidate: () => void
-  onMaintenance: () => void
-  onAckAll: () => void
-  onExport: () => void
-  enabled: boolean
-  inMaintenance: boolean
-  activeAlertCount: number
-  busy: { probe: boolean; pause: boolean; revalidate: boolean; ack: boolean }
+function SlaSummaryCard({ sla, rangeLabel, loading, error, onRetry }: {
+  sla?: SlaStats
+  rangeLabel: string
+  loading: boolean
+  error: boolean
+  onRetry: () => void
 }) {
-  const C = useC()
-  const items: Array<{
-    Icon: any
-    label: string
-    onClick: () => void
-    tint: string
-    loading?: boolean
-    disabled?: boolean
-  }> = [
-    { Icon: Play, label: 'Run Probe Now', onClick: onRunProbe, tint: C.up, loading: busy.probe },
-    {
-      Icon: Pause,
-      label: enabled ? 'Pause All Checks' : 'Resume All Checks',
-      onClick: onPauseAll,
-      tint: C.warn,
-      loading: busy.pause,
-    },
-    { Icon: RefreshCw, label: 'Force Re-validate', onClick: onForceRevalidate, tint: C.cyan, loading: busy.revalidate },
-    {
-      Icon: Wrench,
-      label: inMaintenance ? 'End Maintenance' : 'Maintenance Mode',
-      onClick: onMaintenance,
-      tint: C.violet,
-    },
-    {
-      Icon: Bell,
-      label: `Acknowledge Alerts${activeAlertCount > 0 ? ` (${activeAlertCount})` : ''}`,
-      onClick: onAckAll,
-      tint: C.pink,
-      loading: busy.ack,
-      disabled: activeAlertCount === 0,
-    },
-    { Icon: Download, label: 'Export Config', onClick: onExport, tint: C.textDim },
+  const rows: Array<{ label: string; value: string; tone?: string; hint?: string }> = [
+    { label: 'Availability', value: pct(sla?.uptime_pct, 3), tone: BAND_TEXT[uptimeBand(sla?.uptime_pct)] },
+    { label: 'Error rate', value: pct(sla?.error_rate_pct, 3) },
+    // A clean window really has zero downtime; "—" would read as "unknown".
+    { label: 'Total downtime', value: (sla?.total_downtime_sec || 0) > 0 ? formatDur(sla?.total_downtime_sec) : '0s', tone: (sla?.total_downtime_sec || 0) > 0 ? 'text-danger' : 'text-success' },
+    { label: 'Incidents', value: String(sla?.incident_count ?? 0) },
+    { label: 'Longest outage', value: (sla?.longest_incident_sec || 0) > 0 ? formatDur(sla?.longest_incident_sec) : '0s' },
+    { label: 'MTTR', value: sla?.mttr_sec != null ? formatDur(sla.mttr_sec) : 'n/a', hint: 'mean time to recovery' },
+    { label: 'MTBF', value: sla?.mtbf_sec != null ? formatDur(sla.mtbf_sec) : 'n/a', hint: 'mean time between failures' },
+    { label: 'Avg response', value: formatMs(sla?.avg_response_ms) },
+    { label: 'P95 response', value: formatMs(sla?.p95_response_ms) },
+    { label: 'Max response', value: formatMs(sla?.max_response_ms) },
+    { label: 'Samples', value: (sla?.sample_count ?? 0).toLocaleString() },
+    { label: 'Current streak', value: formatDur(sla?.uptime_streak_sec), tone: 'text-success' },
   ]
   return (
-    <div className="rounded-xl p-3" style={{ background: C.panel, border: `1px solid ${C.border}` }}>
-      <div className="mb-2 text-xs font-semibold">Quick Actions</div>
-      <div className="space-y-1">
-        {items.map((it, i) => {
-          const Icon = it.Icon
-          const isDisabled = it.disabled || it.loading
-          return (
-            <button
-              key={i}
-              onClick={it.onClick}
-              disabled={isDisabled}
-              className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-[10px] transition-colors hover:bg-white/5 disabled:cursor-not-allowed disabled:opacity-50"
-              style={{ background: C.borderSoft, color: C.text }}
-            >
-              <span
-                className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded"
-                style={{ background: `${it.tint}20`, color: it.tint }}
-              >
-                {it.loading ? (
-                  <RefreshCw className="h-2.5 w-2.5 animate-spin" />
-                ) : (
-                  <Icon className="h-2.5 w-2.5" />
+    <SectionCard title="SLA summary" subtitle={rangeLabel} bodyClassName="p-0">
+      <PanelState loading={loading} error={error} onRetry={onRetry} loadingText="Computing SLA…" errorText="Could not compute SLA for this window.">
+        <dl className="divide-y divide-border/60">
+          {rows.map((r) => (
+            <div key={r.label} className="flex items-baseline justify-between gap-3 px-4 py-2">
+              <dt className="text-[11px] text-muted">
+                {r.label}
+                {r.hint && <span className="ml-1 text-[10px] text-muted/70">({r.hint})</span>}
+              </dt>
+              <dd className={cn('font-mono text-xs font-medium tabular-nums', r.tone)}>{r.value}</dd>
+            </div>
+          ))}
+        </dl>
+      </PanelState>
+    </SectionCard>
+  )
+}
+
+/* ─── Incidents tab ─────────────────────────────────────────────────────── */
+
+function buildOutages(history: StatusHistoryEvent[], fromTs: number, toTs: number, check: ServiceCheck): Outage[] {
+  const sorted = [...history]
+    .filter((h) => Number.isFinite(Date.parse(h.timestamp)))
+    .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
+
+  const out: Outage[] = []
+  let open: { start: number; kind: 'down' | 'warn'; reason?: string; clipped: boolean } | null = null
+
+  // A window that opens mid-outage has no "went down" row inside it, so a leading recovery
+  // implies the service was already down. Clamp that inferred start to when the check was
+  // created — otherwise a 30-day window over a week-old check invents weeks of downtime.
+  const createdTs = Date.parse(check.created_at)
+  const inferredStart = Math.max(fromTs, Number.isFinite(createdTs) ? createdTs : fromTs)
+  if (sorted.length > 0 && sorted[0].new_status === 'up') {
+    open = { start: inferredStart, kind: 'down', reason: undefined, clipped: inferredStart <= fromTs }
+  } else if (sorted.length === 0 && check.status !== 'up' && check.status !== 'unknown') {
+    open = {
+      start: inferredStart,
+      kind: check.status === 'down' ? 'down' : 'warn',
+      reason: check.last_error || undefined,
+      clipped: inferredStart <= fromTs,
+    }
+  }
+
+  for (const ev of sorted) {
+    const t = Date.parse(ev.timestamp)
+    if (ev.new_status === 'up') {
+      if (open) {
+        out.push({ start: open.start, end: t, kind: open.kind, reason: open.reason, clippedStart: open.clipped })
+        open = null
+      }
+    } else if (!open) {
+      open = { start: t, kind: ev.new_status === 'down' ? 'down' : 'warn', reason: ev.reason || undefined, clipped: false }
+    }
+  }
+  if (open) out.push({ start: open.start, end: null, kind: open.kind, reason: open.reason, clippedStart: open.clipped })
+
+  return out.filter((o) => (o.end ?? Date.now()) > fromTs && o.start < toTs).sort((a, b) => b.start - a.start)
+}
+
+function IncidentsTab({
+  outages, alerts, rangeLabel, checkId, ruleCovered, onAck, ackDisabled, onWiden,
+}: {
+  outages: Outage[]
+  alerts: ServiceAlert[]
+  rangeLabel: string
+  checkId: string
+  ruleCovered?: boolean
+  onAck: () => void
+  ackDisabled: boolean
+  onWiden: () => void
+}) {
+  const [kind, setKind] = useState<'all' | 'down' | 'warn'>('all')
+  const [alertStatus, setAlertStatus] = useState<'all' | 'active' | 'acknowledged' | 'resolved'>('all')
+
+  const filteredOutages = kind === 'all' ? outages : outages.filter((o) => o.kind === kind)
+  const filteredAlerts = alertStatus === 'all' ? alerts : alerts.filter((a) => a.status === alertStatus)
+  const totalDown = outages.reduce((s, o) => s + ((o.end ?? Date.now()) - o.start), 0) / 1000
+
+  return (
+    <div className="space-y-4">
+      <SectionCard
+        title="Outages"
+        subtitle={
+          outages.length > 0
+            ? `${outages.length} in ${rangePhrase(rangeLabel)} · ${formatDur(totalDown)} total`
+            : rangeLabel
+        }
+        actions={
+          <div className="flex gap-0.5 rounded-md bg-surface2/60 p-0.5">
+            {(['all', 'down', 'warn'] as const).map((k) => (
+              <button
+                key={k}
+                onClick={() => setKind(k)}
+                className={cn(
+                  'rounded px-2 py-1 text-[11px] font-medium capitalize transition-colors',
+                  kind === k ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text',
                 )}
-              </span>
-              <span className="truncate">{it.label}</span>
-            </button>
+              >
+                {k === 'all' ? 'All' : k === 'down' ? 'Down' : 'Warning'}
+              </button>
+            ))}
+          </div>
+        }
+        bodyClassName="p-0"
+      >
+        {filteredOutages.length === 0 ? (
+          <EmptyState
+            icon={CheckCircle2}
+            title={outages.length === 0 ? `No outages in ${rangePhrase(rangeLabel)}` : 'Nothing matches this filter'}
+            description={
+              outages.length === 0
+                ? 'The service stayed healthy for the whole window. Widen the range to look further back.'
+                : 'Try switching the filter back to All.'
+            }
+            action={outages.length === 0 ? <Button variant="outline" size="sm" onClick={onWiden}>Widen to 30 days</Button> : undefined}
+          />
+        ) : (
+          <Table>
+            <THead>
+              <Tr>
+                <Th>Status</Th>
+                <Th>Started</Th>
+                <Th>Recovered</Th>
+                <Th className="text-right">Duration</Th>
+                <Th>Reason</Th>
+              </Tr>
+            </THead>
+            <TBody>
+              {filteredOutages.map((o, i) => {
+                const end = o.end ?? Date.now()
+                const ongoing = o.end == null
+                return (
+                  <Tr key={`${o.start}-${i}`}>
+                    <Td>
+                      <Badge variant={o.kind === 'down' ? 'danger' : 'warning'}>
+                        {o.kind === 'down' ? <XCircle className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
+                        {o.kind === 'down' ? 'Down' : 'Warning'}
+                      </Badge>
+                    </Td>
+                    <Td>
+                      <div className="font-mono text-[11px] tabular-nums">{new Date(o.start).toLocaleString()}</div>
+                      <div className="text-[10px] text-muted">
+                        {o.clippedStart ? 'started before this window' : relativeTime(new Date(o.start).toISOString())}
+                      </div>
+                    </Td>
+                    <Td>
+                      {ongoing ? (
+                        <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-danger">
+                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-danger" /> Ongoing
+                        </span>
+                      ) : (
+                        <>
+                          <div className="font-mono text-[11px] tabular-nums">{new Date(end).toLocaleString()}</div>
+                          <div className="text-[10px] text-muted">{relativeTime(new Date(end).toISOString())}</div>
+                        </>
+                      )}
+                    </Td>
+                    <Td className="text-right font-mono text-xs font-medium tabular-nums">{formatDur((end - o.start) / 1000)}</Td>
+                    <Td>
+                      <div className="max-w-[380px] truncate text-[11px] text-muted" title={o.reason || undefined}>{o.reason || '—'}</div>
+                    </Td>
+                  </Tr>
+                )
+              })}
+            </TBody>
+          </Table>
+        )}
+      </SectionCard>
+
+      <SectionCard
+        title="Alerts"
+        subtitle={alerts.length > 0 ? `${alerts.length} for this check` : 'Alerts raised for this service check'}
+        actions={
+          <div className="flex items-center gap-2">
+            <div className="flex gap-0.5 rounded-md bg-surface2/60 p-0.5">
+              {(['all', 'active', 'acknowledged', 'resolved'] as const).map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setAlertStatus(s)}
+                  className={cn(
+                    'rounded px-2 py-1 text-[11px] font-medium capitalize transition-colors',
+                    alertStatus === s ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text',
+                  )}
+                >
+                  {s === 'acknowledged' ? 'Ack' : s}
+                </button>
+              ))}
+            </div>
+            <Button variant="outline" size="sm" className="h-7" onClick={onAck} disabled={ackDisabled}>
+              <Check className="h-3 w-3" /> Ack all
+            </Button>
+          </div>
+        }
+        bodyClassName="p-0"
+      >
+        {filteredAlerts.length === 0 ? (
+          ruleCovered === false ? (
+            <EmptyState
+              icon={BellOff}
+              title="No alert rule covers this check"
+              description="Outages are recorded above, but nothing will page anyone: no enabled alert rule targets this check, its group, or the service_status metric. Create one to get notified when it goes down."
+              action={<Button variant="outline" size="sm" asChild><Link to="/alert-rules">Create an alert rule</Link></Button>}
+            />
+          ) : (
+            <EmptyState
+              icon={Bell}
+              title={alerts.length === 0 ? 'No alerts for this check' : 'Nothing matches this filter'}
+              description={
+                alerts.length === 0
+                  ? 'Alerts raised by a rule scoped to this check will be listed here.'
+                  : 'Try switching the status filter back to All.'
+              }
+            />
           )
-        })}
-      </div>
+        ) : (
+          <Table>
+            <THead>
+              <Tr>
+                <Th>Severity</Th>
+                <Th>Message</Th>
+                <Th>Status</Th>
+                <Th>Triggered</Th>
+                <Th>Resolved</Th>
+              </Tr>
+            </THead>
+            <TBody>
+              {filteredAlerts.map((a) => (
+                <Tr key={a.id} className="cursor-pointer">
+                  <Td>
+                    <Badge variant={a.severity === 'critical' ? 'danger' : a.severity === 'warning' ? 'warning' : 'info'}>
+                      {a.severity}
+                    </Badge>
+                  </Td>
+                  <Td>
+                    <Link to={`/alerts/${a.id}`} className="block max-w-[420px] truncate text-[11px] hover:text-primary hover:underline" title={cleanAlertMessage(a.message)}>
+                      {cleanAlertMessage(a.message)}
+                    </Link>
+                  </Td>
+                  <Td>
+                    <span className={cn(
+                      'text-[11px] font-medium capitalize',
+                      a.status === 'active' ? 'text-danger' : a.status === 'acknowledged' ? 'text-warning' : 'text-success',
+                    )}>
+                      {a.status}
+                    </span>
+                  </Td>
+                  <Td className="text-[11px] tabular-nums text-muted">{relativeTime(a.triggered_at)}</Td>
+                  <Td className="text-[11px] tabular-nums text-muted">{a.resolved_at ? relativeTime(a.resolved_at) : '—'}</Td>
+                </Tr>
+              ))}
+            </TBody>
+          </Table>
+        )}
+      </SectionCard>
     </div>
   )
 }
 
+/* ─── Config tab ────────────────────────────────────────────────────────── */
+
+function ConfigTab({ check, onEdit, onExport }: { check: ServiceCheck; onEdit: () => void; onExport: () => void }) {
+  const steps = check.workflow_steps || []
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-3">
+        <SectionCard
+          title="Endpoint"
+          actions={<button type="button" onClick={onEdit} className="inline-flex items-center gap-1 text-xs text-primary hover:underline"><Pencil className="h-3 w-3" /> Edit</button>}
+        >
+          <InfoGrid rows={[
+            { label: 'Type', value: (typeMeta[check.check_type] || typeMeta.http).label },
+            { label: 'Target URL', value: check.target_url || '—', mono: true },
+            { label: 'Host', value: check.target_host || '—', mono: true },
+            { label: 'Port', value: check.target_port != null ? String(check.target_port) : '—' },
+            { label: 'Method', value: check.http_method || '—' },
+            { label: 'Expected status', value: check.http_expected_statuses || String(check.http_expected_status || '—') },
+            { label: 'Content match', value: check.http_content_match || '—', mono: !!check.http_content_match },
+            { label: 'Follow redirects', value: check.http_follow_redirects ? 'Yes' : 'No' },
+          ]} />
+        </SectionCard>
+
+        <SectionCard title="Scheduling & retries">
+          <InfoGrid rows={[
+            { label: 'Interval', value: `${check.check_interval}s` },
+            { label: 'Timeout', value: `${check.timeout}s` },
+            { label: 'Retries', value: `${check.retry_count ?? 1} × ${check.retry_delay_s ?? 30}s delay` },
+            { label: 'Level', value: `L${check.level ?? 1}` },
+            { label: 'Enabled', value: check.enabled ? 'Yes' : 'Paused' },
+            { label: 'Maintenance', value: check.in_maintenance ? 'Active window' : 'None' },
+            { label: 'Group', value: check.group_name || 'Unassigned' },
+            { label: 'Parent check', value: check.parent_check_name || '—' },
+          ]} />
+        </SectionCard>
+
+        <SectionCard title="Security & TLS">
+          <InfoGrid rows={[
+            { label: 'Credential', value: check.credential_name || 'None' },
+            { label: 'Auth type', value: check.credential_auth_type || '—' },
+            { label: 'Ignore TLS errors', value: check.http_ignore_tls_errors ? 'Yes' : 'No' },
+            { label: 'Allow insecure auth', value: check.http_allow_insecure_auth ? 'Yes' : 'No' },
+            { label: 'Cert expires', value: check.tls_expiry_date ? new Date(check.tls_expiry_date).toLocaleDateString() : '—' },
+            { label: 'Days remaining', value: check.tls_days_remaining != null ? String(check.tls_days_remaining) : '—' },
+            { label: 'Issuer', value: check.tls_issuer || '—' },
+            { label: 'Warn / critical', value: `${check.tls_warn_days}d / ${check.tls_critical_days}d` },
+          ]} />
+        </SectionCard>
+      </div>
+
+      {steps.length > 0 && (
+        <SectionCard
+          title="Authenticated journey"
+          subtitle={`Cookie-preserving · ${(check.workflow_operator || 'all').toUpperCase()} rule · ${steps.length} step${steps.length === 1 ? '' : 's'}`}
+          actions={check.credential_name ? (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 px-2.5 py-1 text-[10px] font-semibold text-success">
+              <LockKeyhole className="h-3 w-3" /> {check.credential_name} · {check.credential_auth_type}
+            </span>
+          ) : undefined}
+        >
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {steps.map((step, index) => (
+              <div key={`${step.name}-${index}`} className="rounded-lg border border-border bg-surface2/30 p-3">
+                <div className="flex items-center gap-2">
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[10px] font-bold text-primary">{index + 1}</span>
+                  <span className="truncate text-xs font-semibold">{step.name}</span>
+                </div>
+                <div className="mt-2 truncate font-mono text-[10px] text-muted" title={step.url}>{step.method} {step.url}</div>
+                <div className="mt-1 text-[10px] text-muted">
+                  Expect {step.expected_statuses || '200'}{step.content_match ? ' + content validation' : ''}
+                </div>
+              </div>
+            ))}
+          </div>
+        </SectionCard>
+      )}
+
+      <SectionCard
+        title="Metadata"
+        actions={<Button variant="outline" size="sm" className="h-7" onClick={onExport}><Download className="h-3 w-3" /> Export JSON</Button>}
+      >
+        <InfoGrid rows={[
+          { label: 'Description', value: check.description || '—' },
+          { label: 'Tags', value: check.tags.length ? check.tags.join(', ') : '—' },
+          { label: 'Check id', value: check.id, mono: true },
+          { label: 'Created', value: new Date(check.created_at).toLocaleString() },
+          { label: 'Updated', value: check.updated_at ? new Date(check.updated_at).toLocaleString() : '—' },
+        ]} />
+      </SectionCard>
+    </div>
+  )
+}
+
+function InfoGrid({ rows }: { rows: Array<{ label: string; value: string; mono?: boolean }> }) {
+  return (
+    <dl className="space-y-1.5">
+      {rows.map((r) => (
+        <div key={r.label} className="grid grid-cols-[112px_1fr] items-start gap-2 text-[11px]">
+          <dt className="text-muted">{r.label}</dt>
+          <dd className={cn('min-w-0 truncate font-medium', r.mono && 'font-mono')} title={r.value}>{r.value}</dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
+/* ─── Maintenance dialog ────────────────────────────────────────────────── */
+
 function MaintenanceDialog({
-  open,
-  onOpenChange,
-  inMaintenance,
-  onStart,
-  onStartCustom,
-  onEnd,
-  starting,
-  ending,
+  open, onOpenChange, inMaintenance, onStart, onStartCustom, onEnd, starting, ending,
 }: {
   open: boolean
   onOpenChange: (o: boolean) => void
@@ -2732,11 +2856,7 @@ function MaintenanceDialog({
   starting: boolean
   ending: boolean
 }) {
-  const C = useC()
-  // Always-on hooks — must run before any early return.
   const [mode, setMode] = useState<'preset' | 'custom'>('preset')
-
-  // datetime-local default values: now, now+1h, in the user's local timezone.
   const toLocalInput = (d: Date) => {
     const pad = (n: number) => String(n).padStart(2, '0')
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
@@ -2745,7 +2865,6 @@ function MaintenanceDialog({
   const [endsAt, setEndsAt] = useState(() => toLocalInput(new Date(Date.now() + 60 * 60_000)))
   const [error, setError] = useState<string | null>(null)
 
-  // Reset to preset mode whenever the dialog reopens.
   useEffect(() => {
     if (open) {
       setMode('preset')
@@ -2754,8 +2873,6 @@ function MaintenanceDialog({
       setEndsAt(toLocalInput(new Date(Date.now() + 60 * 60_000)))
     }
   }, [open])
-
-  if (!open) return null
 
   const presets = [
     { label: '15 min', hours: 0.25 },
@@ -2780,285 +2897,79 @@ function MaintenanceDialog({
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(0,0,0,0.6)' }}
-      onClick={() => onOpenChange(false)}
-    >
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-md rounded-xl p-4 shadow-xl"
-        style={{ background: C.panel, border: `1px solid ${C.border}`, color: C.text }}
-      >
-        <div className="mb-1 flex items-center gap-2">
-          <Wrench className="h-4 w-4" style={{ color: C.violet }} />
-          <h3 className="text-sm font-semibold">
-            {inMaintenance ? 'Active Maintenance Window' : 'Start Maintenance Window'}
-          </h3>
-        </div>
-        <p className="mb-3 text-xs" style={{ color: C.textDim }}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Wrench className="h-4 w-4 text-primary" />
+            {inMaintenance ? 'Active maintenance' : 'Start maintenance'}
+          </DialogTitle>
+        </DialogHeader>
+        <p className="text-xs text-muted">
           {inMaintenance
-            ? 'This service is currently in maintenance. Alerts are suppressed.'
-            : 'Suppress alerts for this service for a defined period.'}
+            ? 'Alerts are suppressed for this service while the window is open.'
+            : 'Suppress alerts for this service for a defined period. Probes keep running.'}
         </p>
         {inMaintenance ? (
-          <div className="flex items-center justify-end gap-2">
-            <button
-              onClick={() => onOpenChange(false)}
-              className="rounded-md px-3 py-1.5 text-xs hover:bg-white/5"
-              style={{ background: C.borderSoft, color: C.text }}
-            >
-              Close
-            </button>
-            <button
-              onClick={onEnd}
-              disabled={ending}
-              className="rounded-md px-3 py-1.5 text-xs font-medium disabled:opacity-50"
-              style={{ background: C.down, color: '#fff' }}
-            >
-              {ending ? 'Ending…' : 'End maintenance now'}
-            </button>
-          </div>
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>Close</Button>
+            <Button size="sm" variant="destructive" onClick={onEnd} disabled={ending}>{ending ? 'Ending…' : 'End now'}</Button>
+          </DialogFooter>
         ) : (
           <>
-            {/* Mode toggle: presets vs custom */}
-            <div className="mb-3 flex gap-0.5 rounded-md p-0.5" style={{ background: C.borderSoft }}>
+            <div className="flex gap-0.5 rounded-md bg-surface2 p-0.5">
               {(['preset', 'custom'] as const).map((m) => (
                 <button
                   key={m}
                   onClick={() => setMode(m)}
-                  className="flex-1 rounded px-2 py-1 text-[11px] font-medium capitalize transition-colors"
-                  style={
-                    mode === m
-                      ? { background: C.panel, color: C.text }
-                      : { color: C.textDim }
-                  }
+                  className={cn('flex-1 rounded px-2 py-1 text-[11px] font-medium', mode === m ? 'bg-surface text-text' : 'text-muted')}
                 >
-                  {m === 'preset' ? 'Quick presets' : 'Custom date & time'}
+                  {m === 'preset' ? 'Quick presets' : 'Custom'}
                 </button>
               ))}
             </div>
-
             {mode === 'preset' ? (
               <div className="grid grid-cols-2 gap-2">
                 {presets.map((p) => (
-                  <button
-                    key={p.hours}
-                    onClick={() => onStart(p.hours)}
-                    disabled={starting}
-                    className="flex items-center justify-center gap-1.5 rounded-md py-2 text-xs font-medium hover:bg-white/5 disabled:opacity-50"
-                    style={{ background: C.borderSoft, color: C.text, border: `1px solid ${C.border}` }}
-                  >
-                    <Clock className="h-3 w-3" style={{ color: C.violet }} />
-                    {p.label}
-                  </button>
+                  <Button key={p.hours} variant="outline" size="sm" disabled={starting} onClick={() => onStart(p.hours)}>
+                    <Clock className="h-3 w-3" />{p.label}
+                  </Button>
                 ))}
               </div>
             ) : (
               <div className="space-y-3">
-                <div>
-                  <label className="mb-1 block text-[10px] uppercase tracking-wider" style={{ color: C.textMuted }}>
-                    Starts at (your local time)
-                  </label>
-                  <input
-                    type="datetime-local"
-                    value={startsAt}
-                    onChange={(e) => setStartsAt(e.target.value)}
-                    className="w-full rounded-md px-2 py-1.5 text-xs"
-                    style={{ background: C.borderSoft, color: C.text, border: `1px solid ${C.border}` }}
-                  />
-                </div>
-                <div>
-                  <label className="mb-1 block text-[10px] uppercase tracking-wider" style={{ color: C.textMuted }}>
-                    Ends at (your local time)
-                  </label>
-                  <input
-                    type="datetime-local"
-                    value={endsAt}
-                    onChange={(e) => setEndsAt(e.target.value)}
-                    className="w-full rounded-md px-2 py-1.5 text-xs"
-                    style={{ background: C.borderSoft, color: C.text, border: `1px solid ${C.border}` }}
-                  />
-                </div>
-                {error && (
-                  <div
-                    className="rounded-md px-2 py-1.5 text-[11px]"
-                    style={{ background: `${C.down}15`, color: C.down, border: `1px solid ${C.down}40` }}
-                  >
-                    {error}
-                  </div>
-                )}
+                <label className="block">
+                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted">Starts at</span>
+                  <input type="datetime-local" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} className="w-full rounded-md border border-border bg-surface2 px-2 py-1.5 text-xs" />
+                </label>
+                <label className="block">
+                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted">Ends at</span>
+                  <input type="datetime-local" value={endsAt} onChange={(e) => setEndsAt(e.target.value)} className="w-full rounded-md border border-border bg-surface2 px-2 py-1.5 text-xs" />
+                </label>
+                {error && <div className="rounded-md border border-danger/40 bg-danger/10 px-2 py-1.5 text-[11px] text-danger">{error}</div>}
               </div>
             )}
-
-            <div className="mt-3 flex justify-end gap-2">
-              <button
-                onClick={() => onOpenChange(false)}
-                disabled={starting}
-                className="rounded-md px-3 py-1.5 text-xs hover:bg-white/5 disabled:opacity-50"
-                style={{ color: C.textDim }}
-              >
-                Cancel
-              </button>
+            <DialogFooter>
+              <Button variant="outline" size="sm" onClick={() => onOpenChange(false)} disabled={starting}>Cancel</Button>
               {mode === 'custom' && (
-                <button
-                  onClick={submitCustom}
-                  disabled={starting}
-                  className="rounded-md px-3 py-1.5 text-xs font-medium disabled:opacity-50"
-                  style={{ background: C.violet, color: '#fff' }}
-                >
-                  {starting ? 'Starting…' : 'Start maintenance'}
-                </button>
+                <Button size="sm" onClick={submitCustom} disabled={starting}>{starting ? 'Starting…' : 'Start'}</Button>
               )}
-            </div>
+            </DialogFooter>
           </>
         )}
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 
-function CurrentChecksSummary({ points }: { points: ServiceMetricPoint[] }) {
-  const C = useC()
-  const recent = points.slice(-120)
-  const total = recent.length || 0
-  const passed = recent.filter((p) => p.is_up === true).length
-  const failed = recent.filter((p) => p.is_up === false).length
-  const noData = Math.max(0, total - passed - failed)
-  const segments = [
-    { label: 'Passed', value: passed, color: C.up },
-    { label: 'Warning', value: 0, color: C.warn },
-    { label: 'Failed', value: failed, color: C.down },
-    { label: 'No Data', value: noData, color: C.unknown },
-  ]
-  const sum = segments.reduce((a, b) => a + b.value, 0) || 1
-  let acc = 0
-  const arcs = segments.map((s) => {
-    const start = acc / sum
-    acc += s.value
-    const end = acc / sum
-    return { ...s, start, end }
-  })
-  return (
-    <div className="rounded-xl p-3" style={{ background: C.panel, border: `1px solid ${C.border}` }}>
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs font-semibold">Current Checks Summary</span>
-        <button className="text-[10px] hover:underline" style={{ color: C.primary }}>View all</button>
-      </div>
-      <div className="flex items-center gap-3">
-        <div className="relative h-[80px] w-[80px] flex-shrink-0">
-          <svg viewBox="0 0 42 42" className="h-full w-full -rotate-90">
-            <circle cx="21" cy="21" r="15.915" fill="none" stroke={C.borderSoft} strokeWidth="4" />
-            {arcs.map((a, i) => {
-              const dash = (a.end - a.start) * 100
-              const gap = 100 - dash
-              const offset = 100 - a.start * 100 + 25
-              return (
-                <circle
-                  key={i}
-                  cx="21" cy="21" r="15.915"
-                  fill="none"
-                  stroke={a.color}
-                  strokeWidth="4"
-                  strokeDasharray={`${dash} ${gap}`}
-                  strokeDashoffset={offset}
-                />
-              )
-            })}
-          </svg>
-          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-            <div className="text-base font-bold" style={{ color: C.text }}>{total}</div>
-            <div className="text-[8px]" style={{ color: C.textMuted }}>Checks</div>
-          </div>
-        </div>
-        <div className="flex-1 space-y-1 text-[11px]">
-          {segments.map((s) => (
-            <div key={s.label} className="flex items-center justify-between">
-              <div className="flex items-center gap-1.5">
-                <span className="h-1.5 w-1.5 rounded-full" style={{ background: s.color }} />
-                <span style={{ color: C.textDim }}>{s.label}</span>
-              </div>
-              <div className="flex items-center gap-2 font-mono">
-                <span style={{ color: C.text }}>{s.value}</span>
-                <span className="text-[9px]" style={{ color: C.textMuted }}>
-                  {total > 0 ? `${((s.value / total) * 100).toFixed(1)}%` : '0%'}
-                </span>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function AlertSummary({
-  counts,
-  checkId,
-}: {
-  counts: { critical: number; warning: number; info: number }
-  checkId: string
-}) {
-  const C = useC()
-  const items = [
-    { label: 'Critical', severity: 'critical', value: counts.critical, color: C.down, Icon: AlertCircle },
-    { label: 'Warning', severity: 'warning', value: counts.warning, color: C.warn, Icon: AlertTriangle },
-    { label: 'Info', severity: 'info', value: counts.info, color: C.primary, Icon: Info },
-  ]
-  const allHref = checkId ? `/alerts?service_check_id=${checkId}&status=active` : '/alerts'
-  return (
-    <div className="rounded-xl p-3" style={{ background: C.panel, border: `1px solid ${C.border}` }}>
-      <div className="mb-2 flex items-center justify-between gap-1">
-        <span className="text-xs font-semibold">Alert Summary</span>
-        <Link to={allHref} className="text-[9px] hover:underline" style={{ color: C.primary }}>View all</Link>
-      </div>
-      <div className="space-y-1">
-        {items.map((a) => {
-          const Icon = a.Icon
-          const href = checkId
-            ? `/alerts?service_check_id=${checkId}&severity=${a.severity}&status=active`
-            : `/alerts?severity=${a.severity}&status=active`
-          const inactive = a.value === 0
-          return (
-            <Link
-              key={a.label}
-              to={href}
-              className="flex items-center justify-between gap-1.5 rounded-md px-1.5 py-1 text-[10px] transition-colors hover:bg-white/10"
-              style={{
-                background: C.borderSoft,
-                opacity: inactive ? 0.7 : 1,
-                borderLeft: `2px solid ${a.color}`,
-              }}
-              title={`View ${a.value} ${a.label.toLowerCase()} alert${a.value === 1 ? '' : 's'} for this service`}
-            >
-              <span className="flex items-center gap-1.5">
-                <Icon className="h-3 w-3 flex-shrink-0" style={{ color: a.color }} />
-                <span style={{ color: C.textDim }}>{a.label}</span>
-              </span>
-              <span className="flex items-center gap-1">
-                <span className="font-mono font-semibold" style={{ color: a.value > 0 ? a.color : C.text }}>
-                  {a.value}
-                </span>
-                <ChevronRight className="h-2.5 w-2.5" style={{ color: C.textMuted }} />
-              </span>
-            </Link>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-/* ─── Derivations ───────────────────────────────────────────────────────── */
-
-/* ─── Health score configuration ────────────────────────────────────────── */
+/* ─── Health score model ────────────────────────────────────────────────── */
 
 type HealthScoreConfig = {
   weights: { availability: number; latency: number; errors: number; incidents: number }
   thresholds: { excellent: number; good: number; degraded: number }
-  latencyTargetMs: number   // ms at which latency sub-score reaches 0
-  errorScale: number        // multiplier on error_rate_pct → penalty points
-  incidentScale: number     // penalty per active incident
+  latencyTargetMs: number
+  errorScale: number
+  incidentScale: number
 }
 
 const DEFAULT_HEALTH_SCORE_CONFIG: HealthScoreConfig = {
@@ -3095,47 +3006,34 @@ function saveHealthScoreConfig(cfg: HealthScoreConfig) {
 type HealthFactor = {
   key: 'availability' | 'latency' | 'errors' | 'incidents'
   label: string
-  raw: string          // human-readable measurement
-  formula: string      // how subScore was derived (shown in Breakdown UI)
-  subScore: number     // 0-100 normalized contribution
-  weight: number       // 0-100 share of total
-  contribution: number // weighted contribution to final score
+  raw: string
+  formula: string
+  subScore: number
+  weight: number
+  contribution: number
 }
 
-function computeHealthScore(args: {
-  uptime_pct: number | null
-  error_rate_pct: number | null
-  incident_count: number
-  p95_response_ms: number | null
-}, cfg: HealthScoreConfig = DEFAULT_HEALTH_SCORE_CONFIG) {
+function computeHealthScore(
+  args: { uptime_pct: number | null; error_rate_pct: number | null; incident_count: number; p95_response_ms: number | null },
+  cfg: HealthScoreConfig = DEFAULT_HEALTH_SCORE_CONFIG,
+) {
   const up = args.uptime_pct ?? 100
   const err = args.error_rate_pct ?? 0
   const inc = args.incident_count || 0
   const p95 = args.p95_response_ms
-
   const availabilitySub = clamp(up, 0, 100)
-  // Latency: target is the SLO. p95 ≤ target → 100. Above target,
-  // sub-score drops linearly and reaches 0 at 2× target.
   const target = Math.max(1, cfg.latencyTargetMs)
-  const latencySub = p95 == null
-    ? 100
-    : p95 <= target
-      ? 100
-      : clamp(100 - ((p95 - target) / target) * 100, 0, 100)
+  const latencySub = p95 == null ? 100 : p95 <= target ? 100 : clamp(100 - ((p95 - target) / target) * 100, 0, 100)
   const errorsSub = clamp(100 - err * cfg.errorScale, 0, 100)
   const incidentsSub = clamp(100 - inc * cfg.incidentScale, 0, 100)
-
   const w = cfg.weights
   const totalW = Math.max(1, w.availability + w.latency + w.errors + w.incidents)
-
   const factors: HealthFactor[] = [
     {
       key: 'availability',
       label: 'Availability',
       raw: args.uptime_pct == null ? 'no data' : `${up.toFixed(2)}%`,
-      formula: args.uptime_pct == null
-        ? 'no samples in window — defaults to 100'
-        : `uptime % directly = ${availabilitySub.toFixed(1)}`,
+      formula: args.uptime_pct == null ? 'no samples — defaults to 100' : `uptime % = ${availabilitySub.toFixed(1)}`,
       subScore: Math.round(availabilitySub),
       weight: w.availability,
       contribution: (availabilitySub * w.availability) / totalW,
@@ -3144,11 +3042,9 @@ function computeHealthScore(args: {
       key: 'latency',
       label: 'Latency',
       raw: p95 == null ? 'no data' : `${Math.round(p95)} ms p95`,
-      formula: p95 == null
-        ? 'no response samples — defaults to 100'
-        : p95 <= target
-          ? `${Math.round(p95)} ms ≤ ${cfg.latencyTargetMs} ms target → 100`
-          : `100 − ((${Math.round(p95)} − ${cfg.latencyTargetMs}) / ${cfg.latencyTargetMs}) × 100 = ${latencySub.toFixed(1)}`,
+      formula: p95 == null ? 'no samples — defaults to 100' : p95 <= target
+        ? `${Math.round(p95)} ms ≤ ${cfg.latencyTargetMs} ms → 100`
+        : `100 − ((${Math.round(p95)} − ${cfg.latencyTargetMs}) / ${cfg.latencyTargetMs}) × 100`,
       subScore: Math.round(latencySub),
       weight: w.latency,
       contribution: (latencySub * w.latency) / totalW,
@@ -3157,9 +3053,7 @@ function computeHealthScore(args: {
       key: 'errors',
       label: 'Errors',
       raw: args.error_rate_pct == null ? 'no data' : `${err.toFixed(2)}%`,
-      formula: args.error_rate_pct == null
-        ? 'no error data — defaults to 100'
-        : `100 − ${err.toFixed(2)} × ${cfg.errorScale} = ${errorsSub.toFixed(1)}`,
+      formula: args.error_rate_pct == null ? 'no data — defaults to 100' : `100 − ${err.toFixed(2)} × ${cfg.errorScale}`,
       subScore: Math.round(errorsSub),
       weight: w.errors,
       contribution: (errorsSub * w.errors) / totalW,
@@ -3167,65 +3061,148 @@ function computeHealthScore(args: {
     {
       key: 'incidents',
       label: 'Incidents',
-      raw: `${inc} active`,
-      formula: `100 − ${inc} × ${cfg.incidentScale} = ${incidentsSub.toFixed(1)}`,
+      raw: `${inc} in window`,
+      formula: `100 − ${inc} × ${cfg.incidentScale}`,
       subScore: Math.round(incidentsSub),
       weight: w.incidents,
       contribution: (incidentsSub * w.incidents) / totalW,
     },
   ]
-
   const rawScore = factors.reduce((s, f) => s + f.contribution, 0)
   const score = Math.max(0, Math.min(100, Math.round(rawScore)))
-
   const t = cfg.thresholds
-  const tint = score >= t.excellent ? C.up : score >= t.good ? C.warn : C.down
-  const label =
-    score >= t.excellent ? 'Excellent' :
-    score >= t.good ? 'Good' :
-    score >= t.degraded ? 'Degraded' : 'Critical'
-
+  const tint = score >= t.excellent ? UP_COLOR : score >= t.good ? WARN_COLOR : DOWN_COLOR
+  const label = score >= t.excellent ? 'Excellent' : score >= t.good ? 'Good' : score >= t.degraded ? 'Degraded' : 'Critical'
   return { score, tint, label, factors }
 }
 
-function buildUptimeSeries(
-  hours: Array<{ ts: string; uptime_pct: number | null }>,
-): { x: number; y: number }[] {
-  return hours
-    .filter((h) => h.uptime_pct != null)
-    .map((h) => ({ x: Date.parse(h.ts), y: h.uptime_pct as number }))
+function HealthScoreDetailsDialog({
+  open, onOpenChange, score, tint, label, factors, config, onConfigChange,
+}: {
+  open: boolean
+  onOpenChange: (o: boolean) => void
+  score: number
+  tint: string
+  label: string
+  factors: HealthFactor[]
+  config: HealthScoreConfig
+  onConfigChange: (next: HealthScoreConfig) => void
+}) {
+  const [tab, setTab] = useState<'breakdown' | 'configure'>('breakdown')
+  const [draft, setDraft] = useState<HealthScoreConfig>(config)
+
+  useEffect(() => {
+    if (open) {
+      setDraft(config)
+      setTab('breakdown')
+    }
+  }, [open, config])
+
+  const totalW = Math.max(1, draft.weights.availability + draft.weights.latency + draft.weights.errors + draft.weights.incidents)
+  const dirty = JSON.stringify(draft) !== JSON.stringify(config)
+  const setWeight = (k: keyof HealthScoreConfig['weights'], v: number) => {
+    const n = Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : 0
+    setDraft({ ...draft, weights: { ...draft.weights, [k]: n } })
+  }
+  const setThreshold = (k: keyof HealthScoreConfig['thresholds'], v: number) => {
+    const n = Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : 0
+    setDraft({ ...draft, thresholds: { ...draft.thresholds, [k]: n } })
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <TrendingUp className="h-5 w-5 text-primary" /> Health score
+          </DialogTitle>
+        </DialogHeader>
+        <div className="flex items-center justify-between rounded-md border border-border bg-surface2/40 px-3 py-2">
+          <div>
+            <div className="text-xs text-muted">Current score</div>
+            <div className="text-[11px]" style={{ color: tint }}>{label}</div>
+          </div>
+          <div className="text-3xl font-bold tabular-nums" style={{ color: tint }}>
+            {score}<span className="text-sm text-muted">/100</span>
+          </div>
+        </div>
+        <Tabs value={tab} onValueChange={(v) => setTab(v as 'breakdown' | 'configure')}>
+          <TabsList className="grid w-full grid-cols-2">
+            <TabsTrigger value="breakdown">Breakdown</TabsTrigger>
+            <TabsTrigger value="configure"><SettingsIcon className="mr-1.5 h-3.5 w-3.5" />Configure</TabsTrigger>
+          </TabsList>
+          <TabsContent value="breakdown" className="space-y-2 pt-3">
+            {factors.map((f) => {
+              const tone = f.subScore > 90 ? 'text-success' : f.subScore > 70 ? 'text-warning' : 'text-danger'
+              return (
+                <div key={f.key} className="grid grid-cols-[1fr_auto_auto_auto] items-start gap-x-3 border-b border-border/40 py-2 last:border-0">
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold">{f.label}</div>
+                    <div className="text-[11px] text-muted">{f.raw}</div>
+                    <div className="mt-0.5 font-mono text-[10px] text-muted/80">{f.formula}</div>
+                  </div>
+                  <span className={cn('text-right font-mono text-xs tabular-nums', tone)}>{f.subScore}</span>
+                  <span className="text-right font-mono text-xs tabular-nums text-muted">{f.weight}%</span>
+                  <span className="text-right font-mono text-xs tabular-nums">{f.contribution.toFixed(1)}</span>
+                </div>
+              )
+            })}
+          </TabsContent>
+          <TabsContent value="configure" className="space-y-4 pt-3">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-semibold">Factor weights</span>
+              <span className={cn('font-mono', totalW === 100 ? 'text-muted' : 'text-warning')}>
+                Total: {totalW}{totalW !== 100 ? ' (normalized)' : ''}
+              </span>
+            </div>
+            {(['availability', 'latency', 'errors', 'incidents'] as const).map((k) => (
+              <div key={k} className="grid grid-cols-[140px_1fr_70px] items-center gap-3">
+                <label className="text-xs capitalize">{k}</label>
+                <input type="range" min={0} max={100} value={draft.weights[k]} onChange={(e) => setWeight(k, Number(e.target.value))} className="accent-primary" />
+                <Input type="number" min={0} max={100} value={draft.weights[k]} onChange={(e) => setWeight(k, Number(e.target.value))} className="h-8 text-xs" />
+              </div>
+            ))}
+            <div className="text-xs font-semibold">Status thresholds (score ≥)</div>
+            {(['excellent', 'good', 'degraded'] as const).map((k) => (
+              <div key={k} className="grid grid-cols-[140px_1fr_70px] items-center gap-3">
+                <label className="text-xs capitalize">{k}</label>
+                <input type="range" min={0} max={100} value={draft.thresholds[k]} onChange={(e) => setThreshold(k, Number(e.target.value))} className="accent-primary" />
+                <Input type="number" min={0} max={100} value={draft.thresholds[k]} onChange={(e) => setThreshold(k, Number(e.target.value))} className="h-8 text-xs" />
+              </div>
+            ))}
+            <div className="grid grid-cols-[140px_1fr] items-center gap-3">
+              <label className="text-xs">Latency target (ms)</label>
+              <Input type="number" min={1} value={draft.latencyTargetMs} onChange={(e) => setDraft({ ...draft, latencyTargetMs: Math.max(1, Number(e.target.value) || 1) })} className="h-8 text-xs" />
+            </div>
+            <div className="grid grid-cols-[140px_1fr] items-center gap-3">
+              <label className="text-xs">Error scale</label>
+              <Input type="number" min={0} step={0.5} value={draft.errorScale} onChange={(e) => setDraft({ ...draft, errorScale: Math.max(0, Number(e.target.value) || 0) })} className="h-8 text-xs" />
+            </div>
+            <div className="grid grid-cols-[140px_1fr] items-center gap-3">
+              <label className="text-xs">Incident penalty</label>
+              <Input type="number" min={0} step={1} value={draft.incidentScale} onChange={(e) => setDraft({ ...draft, incidentScale: Math.max(0, Number(e.target.value) || 0) })} className="h-8 text-xs" />
+            </div>
+          </TabsContent>
+        </Tabs>
+        <DialogFooter>
+          {tab === 'configure' ? (
+            <>
+              <Button variant="outline" size="sm" onClick={() => setDraft({ ...DEFAULT_HEALTH_SCORE_CONFIG })}>Reset</Button>
+              <div className="flex gap-2">
+                <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>Cancel</Button>
+                <Button size="sm" disabled={!dirty} onClick={() => { onConfigChange(draft); toast.success('Health score criteria updated'); onOpenChange(false) }}>Save</Button>
+              </div>
+            </>
+          ) : (
+            <Button size="sm" onClick={() => onOpenChange(false)}>Close</Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
 }
 
-function buildResponseSeries(points: ServiceMetricPoint[], quantile = 0): { x: number; y: number }[] {
-  if (quantile > 0) {
-    return rollingPercentile(
-      points.map((p) => ({ ts: Date.parse(p.timestamp), ms: p.is_up ? p.response_ms : null, down: 0 })),
-      quantile,
-      20,
-    )
-      .filter((p) => p.p95 != null)
-      .map((p) => ({ x: p.ts, y: p.p95 as number }))
-  }
-  return points
-    .filter((p) => p.is_up && p.response_ms != null && p.response_ms > 0)
-    .map((p) => ({ x: Date.parse(p.timestamp), y: p.response_ms as number }))
-}
-
-function buildErrorSeries(points: ServiceMetricPoint[]): { x: number; y: number }[] {
-  const bucketMin = 5
-  const bucket = new Map<number, { up: number; down: number }>()
-  for (const p of points) {
-    const t = Date.parse(p.timestamp)
-    const key = Math.floor(t / (bucketMin * 60_000)) * (bucketMin * 60_000)
-    const b = bucket.get(key) || { up: 0, down: 0 }
-    if (p.is_up) b.up++
-    else b.down++
-    bucket.set(key, b)
-  }
-  return [...bucket.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([ts, v]) => ({ x: ts, y: (v.down / Math.max(1, v.up + v.down)) * 100 }))
-}
+/* ─── Series helpers ────────────────────────────────────────────────────── */
 
 function rollingPercentile(
   data: Array<{ ts: number; ms: number | null }>,
@@ -3234,21 +3211,50 @@ function rollingPercentile(
 ): Array<{ ts: number; p95: number | null }> {
   const out: Array<{ ts: number; p95: number | null }> = []
   for (let i = 0; i < data.length; i++) {
-    const slice = data
-      .slice(Math.max(0, i - window), i + 1)
-      .map((d) => d.ms)
-      .filter((x): x is number => x != null && x > 0)
+    const slice = data.slice(Math.max(0, i - window), i + 1).map((d) => d.ms).filter((x): x is number => x != null && x > 0)
     if (slice.length < 3) {
       out.push({ ts: data[i].ts, p95: null })
       continue
     }
     slice.sort((a, b) => a - b)
-    const idx = Math.max(0, Math.floor(slice.length * q) - 1)
-    out.push({ ts: data[i].ts, p95: slice[idx] })
+    out.push({ ts: data[i].ts, p95: slice[Math.max(0, Math.floor(slice.length * q) - 1)] })
   }
   return out
 }
 
 function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n))
+}
+
+function deriveWindowStats(
+  points: ServiceMetricPoint[],
+  history: StatusHistoryEvent[],
+  check: ServiceCheck,
+  fromTs: number,
+  toTs: number,
+) {
+  const buckets = buildAvailabilityBuckets(points, history, check, fromTs, toTs)
+  const covered = buckets.filter((b) => b.state !== 'gap')
+  const upCount = covered.filter((b) => b.state === 'up').length
+  const downCount = covered.filter((b) => b.state === 'down').length
+  const uptime_pct = covered.length ? (upCount / covered.length) * 100 : null
+  const error_rate_pct = covered.length ? (downCount / covered.length) * 100 : null
+  const incident_count = history.filter((h) => h.new_status !== 'up').length
+
+  const samples = points.filter((p) => p.is_up && p.response_ms != null && p.response_ms > 0).map((p) => p.response_ms as number)
+  const avg_ms = samples.length ? samples.reduce((a, b) => a + b, 0) / samples.length : null
+  const sorted = [...samples].sort((a, b) => a - b)
+  const p95_ms = sorted.length >= 3 ? sorted[Math.max(0, Math.floor(sorted.length * 0.95) - 1)] : null
+
+  const recovered = [...history].filter((h) => h.new_status === 'up').sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))[0]
+  const lastDown = [...history].filter((h) => h.new_status !== 'up').sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))[0]
+  let streak_sec: number | null = null
+  if (check.status === 'up' && recovered) {
+    const rec = Date.parse(recovered.timestamp)
+    if (!lastDown || Date.parse(lastDown.timestamp) <= rec) streak_sec = Math.max(0, (Date.now() - rec) / 1000)
+  } else if (check.status === 'up' && check.last_check_at && !lastDown) {
+    streak_sec = Math.max(0, (Date.now() - Date.parse(check.last_check_at)) / 1000)
+  }
+
+  return { uptime_pct, error_rate_pct, incident_count, avg_ms, p95_ms, streak_sec }
 }
