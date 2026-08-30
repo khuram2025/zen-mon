@@ -19,7 +19,7 @@ import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
-import type { RumCoverage, RumError, RumFacets, RumFilters, RumIngestHealth, RumOverview, RumTab, RumTimeseries, RumView } from '@/types/apm'
+import type { RumBreakdown, RumBreakdownSide, RumCoverage, RumError, RumFacets, RumFilters, RumIngestHealth, RumOverview, RumRequestTiming, RumTab, RumTimeseries, RumView } from '@/types/apm'
 import {
   QueryErrorPanel,
   RumCoverageNotice,
@@ -30,12 +30,18 @@ import {
   RumTableCard,
   RumVitalCard,
   TracePivot,
+  formatDurationMs,
   formatRumVital,
 } from './RumUi'
+import { PHASE_COLORS, PhaseBar, PhaseLegend, phaseSegments } from './RumBreakdown'
 
 interface OverviewProps {
   overview: RumOverview
   timeseries?: RumTimeseries
+  breakdown?: RumBreakdown
+  breakdownLoading?: boolean
+  breakdownError?: unknown
+  onRetryBreakdown?: () => void
   topViews?: RumView[]
   topErrors?: RumError[]
   topViewsLoading?: boolean
@@ -119,6 +125,61 @@ function HealthPanel({ overview, health }: { overview: RumOverview; health?: Rum
           <div className="rounded-md border border-warning/30 bg-warning/10 p-2.5 text-[11px] text-warning">
             {details.issues.slice(0, 3).map((issue) => <div key={issue}>• {issue}</div>)}
           </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function sideTiming(side?: RumBreakdownSide): RumRequestTiming | null {
+  if (!side || side.samples <= 0) return null
+  return {
+    redirect_ms: side.phases.redirect ?? 0,
+    dns_ms: side.phases.dns ?? 0,
+    connect_ms: side.phases.connect ?? 0,
+    tls_ms: side.phases.tls ?? 0,
+    wait_ms: side.phases.wait ?? 0,
+    download_ms: side.phases.download ?? 0,
+    blocked_ms: side.phases.blocked ?? 0,
+    processing_ms: side.phases.processing ?? 0,
+    server_ms: side.server_p75 ?? 0,
+    db_ms: side.db_p75 ?? 0,
+    has_server_timing: side.server_samples > 0,
+  }
+}
+
+function BreakdownCard({ title, hint, side }: { title: string; hint: string; side?: RumBreakdownSide }) {
+  const timing = sideTiming(side)
+  const segments = timing ? phaseSegments(timing) : []
+  const hasServer = (side?.server_samples ?? 0) > 0
+  return (
+    <Card className="h-full">
+      <CardHeader className="border-b border-border px-4 py-3">
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="text-sm">{title}</CardTitle>
+          <span className="text-[10px] text-muted">{hint}</span>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3 p-4">
+        {segments.length ? (
+          <>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-lg font-semibold tabular-nums text-text">{formatDurationMs(side?.duration_p75)}</span>
+              <span className="text-[10px] text-muted">p75 · {fmtCount(side?.samples)} measured{hasServer ? ` · ${fmtCount(side?.server_samples)} with app/db split` : ''}</span>
+            </div>
+            <PhaseBar segments={segments} height={12} />
+            <PhaseLegend segments={segments} />
+            {hasServer && (
+              <div className="grid grid-cols-3 gap-2 rounded-lg bg-surface2/50 p-2.5 text-center">
+                <div><div className="font-mono text-sm font-semibold" style={{ color: PHASE_COLORS.network }}>{formatDurationMs(Math.max(0, (side!.phases.wait ?? 0) - Math.min(side!.server_p75 ?? 0, side!.phases.wait ?? 0)))}</div><div className="text-[9px] uppercase tracking-wider text-muted">Network</div></div>
+                <div><div className="font-mono text-sm font-semibold" style={{ color: PHASE_COLORS.server }}>{formatDurationMs(Math.max(0, (side!.server_p75 ?? 0) - (side!.db_p75 ?? 0)))}</div><div className="text-[9px] uppercase tracking-wider text-muted">App execution</div></div>
+                <div><div className="font-mono text-sm font-semibold" style={{ color: PHASE_COLORS.db }}>{formatDurationMs(side!.db_p75)}</div><div className="text-[9px] uppercase tracking-wider text-muted">Database</div></div>
+              </div>
+            )}
+            {!hasServer && <p className="text-[10px] text-muted">Add a <span className="font-mono">Server-Timing</span> header (e.g. <span className="font-mono">app;dur=12, db;dur=4</span>) or instrument the backend with APM to split wait time into network vs. execution.</p>}
+          </>
+        ) : (
+          <div className="py-8 text-center text-[11px] text-muted">No timing-capable samples in this segment yet. Requires browser SDK 2.1+.</div>
         )}
       </CardContent>
     </Card>
@@ -228,6 +289,44 @@ export function RumOverviewPanel(props: OverviewProps) {
             </div>
           ))}
         </div>
+      </section>
+
+      <section aria-labelledby="rum-breakdown-heading">
+        <RumSectionHeader
+          id="rum-breakdown-heading"
+          title="End-to-end latency"
+          description="Where real-user time goes across the request path: DNS, connection, network round trip, application execution, database and data transfer — the NSX-style split at p75."
+        />
+        {props.breakdownError ? <QueryErrorPanel label="latency breakdown" error={props.breakdownError} onRetry={props.onRetryBreakdown} /> : (
+          <>
+            <div className="grid gap-3 xl:grid-cols-2">
+              <BreakdownCard title="Page loads" hint="finalized navigations" side={props.breakdown?.page_loads} />
+              <BreakdownCard title="API requests" hint="fetch and XHR calls" side={props.breakdown?.api_requests} />
+            </div>
+            {!!props.breakdown?.slowest_endpoints?.length && (
+              <div className="mt-3">
+                <RumTableCard title="Slowest endpoints" description="fetch/XHR targets ranked by p75 total time; app and database figures come from Server-Timing captures">
+                  <Table>
+                    <THead><Tr><Th>Endpoint</Th><Th className="text-right">Requests</Th><Th className="text-right">Total p75</Th><Th className="text-right">Wait p75</Th><Th className="text-right">App p75</Th><Th className="text-right">DB p75</Th><Th className="text-right">Failures</Th></Tr></THead>
+                    <TBody>
+                      {props.breakdown.slowest_endpoints.map((endpoint) => (
+                        <Tr key={`${endpoint.method}:${endpoint.url}`}>
+                          <Td><div className="max-w-[340px] truncate font-mono text-xs text-text" title={endpoint.url}>{endpoint.method ? `${endpoint.method} ` : ''}{endpoint.url}</div></Td>
+                          <Td className="text-right font-mono text-xs tabular-nums">{fmtCount(endpoint.count)}</Td>
+                          <Td className="text-right font-mono text-xs tabular-nums">{formatDurationMs(endpoint.duration_p75)}</Td>
+                          <Td className="text-right font-mono text-xs tabular-nums">{formatDurationMs(endpoint.wait_p75)}</Td>
+                          <Td className="text-right font-mono text-xs tabular-nums">{endpoint.server_samples ? formatDurationMs(endpoint.server_p75) : '—'}</Td>
+                          <Td className="text-right font-mono text-xs tabular-nums">{endpoint.server_samples ? formatDurationMs(endpoint.db_p75) : '—'}</Td>
+                          <Td className="text-right"><span className={endpoint.failures ? 'font-mono text-xs text-danger' : 'font-mono text-xs text-muted'}>{fmtCount(endpoint.failures)}</span></Td>
+                        </Tr>
+                      ))}
+                    </TBody>
+                  </Table>
+                </RumTableCard>
+              </div>
+            )}
+          </>
+        )}
       </section>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr),minmax(280px,1fr)]">

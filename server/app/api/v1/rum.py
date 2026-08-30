@@ -69,6 +69,10 @@ RUM_COLUMNS = [
     "vital_attribution", "has_lcp", "has_inp", "has_cls", "has_fcp",
     "has_ttfb", "has_load", "sampled",
     "client_ip",
+    "redirect_ms", "dns_ms", "connect_ms", "tls_ms", "wait_ms", "download_ms",
+    "blocked_ms", "processing_ms", "server_ms", "db_ms", "has_timing",
+    "has_server_timing", "protocol", "connection_type", "connection_rtt_ms",
+    "connection_downlink", "language", "timezone", "screen_res", "viewport",
     "dedupe_id",
 ]
 
@@ -320,6 +324,29 @@ class RumEvent(BaseModel):
     backend_trace_id: str = Field(default="", max_length=32)
     attributes: dict[str, str] = Field(default_factory=dict)
     vital_attribution: dict[str, str] = Field(default_factory=dict)
+    # Request phase breakdown (Navigation/Resource Timing, milliseconds).
+    redirect_ms: float = Field(default=0, ge=0, le=600_000)
+    dns_ms: float = Field(default=0, ge=0, le=600_000)
+    connect_ms: float = Field(default=0, ge=0, le=600_000)
+    tls_ms: float = Field(default=0, ge=0, le=600_000)
+    wait_ms: float = Field(default=0, ge=0, le=600_000)
+    download_ms: float = Field(default=0, ge=0, le=600_000)
+    blocked_ms: float = Field(default=0, ge=0, le=600_000)
+    processing_ms: float = Field(default=0, ge=0, le=600_000)
+    # Server-declared execution split from Server-Timing response headers.
+    server_ms: float = Field(default=0, ge=0, le=600_000)
+    db_ms: float = Field(default=0, ge=0, le=600_000)
+    has_timing: bool = False
+    has_server_timing: bool = False
+    protocol: str = Field(default="", max_length=32)
+    # Client environment context (sent on view events).
+    connection_type: str = Field(default="", max_length=32)
+    connection_rtt_ms: float = Field(default=0, ge=0, le=600_000)
+    connection_downlink: float = Field(default=0, ge=0, le=100_000)
+    language: str = Field(default="", max_length=35)
+    timezone: str = Field(default="", max_length=64)
+    screen_res: str = Field(default="", max_length=32)
+    viewport: str = Field(default="", max_length=32)
 
     @field_validator("event_id")
     @classmethod
@@ -663,6 +690,12 @@ def _row(event: RumEvent, key: dict, request: Request) -> list[object]:
         int(event.ttfb is not None), int(event.load_ms is not None),
         int(event.sampled),
         _client_ip(request),
+        event.redirect_ms, event.dns_ms, event.connect_ms, event.tls_ms,
+        event.wait_ms, event.download_ms, event.blocked_ms, event.processing_ms,
+        event.server_ms, event.db_ms, int(event.has_timing),
+        int(event.has_server_timing), event.protocol, event.connection_type,
+        event.connection_rtt_ms, event.connection_downlink, event.language,
+        event.timezone, event.screen_res, event.viewport,
         "",  # stable per-key semantic identity is attached after deduplication
     ]
 
@@ -1188,6 +1221,128 @@ async def rum_facets(
     return await asyncio.to_thread(query)
 
 
+_PHASE_COLUMNS = (
+    ("redirect", "redirect_ms"), ("dns", "dns_ms"), ("connect", "connect_ms"),
+    ("tls", "tls_ms"), ("wait", "wait_ms"), ("download", "download_ms"),
+    ("blocked", "blocked_ms"), ("processing", "processing_ms"),
+)
+
+
+def _phase_select(duration_column: str = "duration_ms") -> str:
+    # For views, duration_ms is dwell time on the page — the meaningful
+    # end-to-end figure there is load_ms (navigation start → load event).
+    phase_sql = ", ".join(
+        f"quantileTDigestIf(0.75)({column}, has_timing = 1)"
+        for _, column in _PHASE_COLUMNS
+    )
+    return f"""
+        countIf(has_timing = 1), {phase_sql},
+        quantileTDigestIf(0.75)(server_ms, has_server_timing = 1),
+        quantileTDigestIf(0.75)(db_ms, has_server_timing = 1),
+        countIf(has_server_timing = 1),
+        quantileTDigestIf(0.75)({duration_column}, {duration_column} > 0),
+        countIf({duration_column} > 0)
+    """
+
+
+def _phase_payload(row: list | tuple) -> dict[str, object]:
+    samples = int(row[0] or 0)
+    phases = {
+        name: _nullable(row[index + 1], samples)
+        for index, (name, _) in enumerate(_PHASE_COLUMNS)
+    }
+    offset = len(_PHASE_COLUMNS) + 1
+    server_samples = int(row[offset + 2] or 0)
+    return {
+        "samples": samples,
+        "phases": phases,
+        "server_p75": _nullable(row[offset], server_samples),
+        "db_p75": _nullable(row[offset + 1], server_samples),
+        "server_samples": server_samples,
+        "duration_p75": _nullable(row[offset + 3], row[offset + 4]),
+        "duration_samples": int(row[offset + 4] or 0),
+    }
+
+
+@router.get("/api/v1/apm/rum/breakdown")
+async def rum_breakdown(
+    range_: RangeName = Query(default="24h", alias="range"),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    client_ip: str | None = None,
+    _user=Depends(get_current_user),
+):
+    """NSX-ALB-style end-to-end latency split across the selected scope.
+
+    Aggregates the Navigation/Resource Timing phases plus the Server-Timing
+    execution split (raw events only, so drill-down retention applies).
+    """
+    params, scope_sql = _scope(
+        range_, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os, client_ip,
+    )
+
+    def query():
+        nav = _ch().query(f"""
+            SELECT {_phase_select("load_ms")}
+            FROM zenplus.apm_rum_events
+            WHERE {scope_sql} AND sampled = 1 AND event_type = 'view' AND is_final = 1
+        """, parameters=params).result_rows[0]
+        api = _ch().query(f"""
+            SELECT {_phase_select()}
+            FROM zenplus.apm_rum_events
+            WHERE {scope_sql} AND sampled = 1 AND event_type = 'resource'
+              AND resource_type IN ('fetch', 'xhr')
+        """, parameters=params).result_rows[0]
+        slow = _ch().query(f"""
+            SELECT resource_url, anyIf(method, method != '') AS req_method,
+                   count() AS requests,
+                   quantileTDigestIf(0.75)(duration_ms, duration_ms > 0) AS duration_p75,
+                   countIf(duration_ms > 0) AS duration_samples,
+                   quantileTDigestIf(0.75)(wait_ms, has_timing = 1) AS wait_p75,
+                   countIf(has_timing = 1) AS timing_samples,
+                   quantileTDigestIf(0.75)(server_ms, has_server_timing = 1) AS server_p75,
+                   quantileTDigestIf(0.75)(db_ms, has_server_timing = 1) AS db_p75,
+                   countIf(has_server_timing = 1) AS server_samples,
+                   countIf(status_code >= 400 OR attributes['failed'] = 'true') AS failures
+            FROM zenplus.apm_rum_events
+            WHERE {scope_sql} AND sampled = 1 AND event_type = 'resource'
+              AND resource_type IN ('fetch', 'xhr') AND resource_url != ''
+            GROUP BY resource_url
+            HAVING countIf(duration_ms > 0) >= 2
+            ORDER BY duration_p75 DESC
+            LIMIT 8
+        """, parameters=params).result_rows
+        return nav, api, slow
+
+    nav, api, slow = await asyncio.to_thread(query)
+    return {
+        "range": range_,
+        "coverage": _raw_coverage(range_),
+        "page_loads": _phase_payload(nav),
+        "api_requests": _phase_payload(api),
+        "slowest_endpoints": [
+            {
+                "url": row[0], "method": row[1], "count": int(row[2]),
+                "duration_p75": _nullable(row[3], row[4]),
+                "wait_p75": _nullable(row[5], row[6]),
+                "server_p75": _nullable(row[7], row[9]),
+                "db_p75": _nullable(row[8], row[9]),
+                "server_samples": int(row[9]),
+                "failures": int(row[10]),
+            }
+            for row in slow
+        ],
+    }
+
+
 _VIEW_SORTS = {
     "views": "views", "sessions": "sessions", "errors": "error_count",
     "error_session_rate": "error_session_rate", "lcp_p75": "lcp_p75",
@@ -1404,13 +1559,20 @@ async def rum_session_detail(
                    argMax(country, timestamp), anyIf(user_id, user_id != ''),
                    groupUniqArrayIf(500)(backend_trace_id, backend_trace_id != ''),
                    argMax(sdk_version, timestamp), argMax(service_version, timestamp),
-                   max(sampled), count(), anyIf(client_ip, client_ip != '')
+                   max(sampled), count(), anyIf(client_ip, client_ip != ''),
+                   argMaxIf(connection_type, timestamp, connection_type != ''),
+                   maxIf(connection_rtt_ms, connection_rtt_ms > 0),
+                   maxIf(connection_downlink, connection_downlink > 0),
+                   argMaxIf(language, timestamp, language != ''),
+                   argMaxIf(timezone, timestamp, timezone != ''),
+                   argMaxIf(screen_res, timestamp, screen_res != ''),
+                   argMaxIf(viewport, timestamp, viewport != '')
             FROM zenplus.apm_rum_events
             WHERE {scope_sql} AND session_id = {{session:String}}
             GROUP BY application_id, env ORDER BY max(timestamp) DESC LIMIT 1
         """, parameters=params).result_rows
         if not summary_rows:
-            return None, [], 0
+            return None, [], 0, {}
         total = int(summary_rows[0][19])
         event_params = {
             **params,
@@ -1426,23 +1588,68 @@ async def rum_session_detail(
                    lcp, inp, cls, fcp, ttfb, load_ms,
                    has_lcp, has_inp, has_cls, has_fcp, has_ttfb, has_load,
                    is_final, end_reason, attributes, vital_attribution,
-                   sdk_version, service_version, browser_version, os, sampled
+                   sdk_version, service_version, browser_version, os, sampled,
+                   redirect_ms, dns_ms, connect_ms, tls_ms, wait_ms, download_ms,
+                   blocked_ms, processing_ms, server_ms, db_ms, has_timing,
+                   has_server_timing, protocol
             FROM zenplus.apm_rum_events
             WHERE {scope_sql} AND session_id = {{session:String}}
               AND application_id = {{selected_app:String}}
               AND env = {{selected_env:String}}
-            ORDER BY timestamp ASC, event_id ASC
+            ORDER BY timestamp ASC, is_final DESC, event_id ASC
             LIMIT {{limit:UInt32}} OFFSET {{offset:UInt64}}
         """, parameters=event_params).result_rows
-        return summary_rows[0], events, total
+        # Correlate this page's backend traces so the UI can split browser wait
+        # time into network vs. application execution vs. database time.
+        trace_ids = sorted(
+            {row[21] for row in events if row[21]}
+            | set(list(summary_rows[0][15] or [])[:100])
+        )[:300]
+        trace_timings: dict[str, dict[str, object]] = {}
+        if trace_ids:
+            try:
+                span_rows = _ch().query("""
+                    SELECT lower(toString(trace_id)) AS tid,
+                           maxIf(duration_nano, span_kind_str = 'SERVER') / 1e6,
+                           sumIf(duration_nano, db_system != '') / 1e6,
+                           countIf(db_system != ''), count(),
+                           argMaxIf(service_name, duration_nano, span_kind_str = 'SERVER'),
+                           groupUniqArrayIf(3)(db_system, db_system != ''),
+                           max(has_error)
+                    FROM zenplus.apm_spans
+                    WHERE trace_id IN {tids:Array(String)}
+                    GROUP BY tid
+                """, parameters={"tids": trace_ids}).result_rows
+                trace_timings = {
+                    row[0]: {
+                        "server_ms": float(row[1] or 0), "db_ms": float(row[2] or 0),
+                        "db_calls": int(row[3]), "spans": int(row[4]),
+                        "service": row[5], "db_systems": list(row[6] or []),
+                        "has_error": bool(row[7]),
+                    }
+                    for row in span_rows
+                }
+            except Exception:
+                trace_timings = {}
+        return summary_rows[0], events, total, trace_timings
 
-    summary, events, total = await asyncio.to_thread(query)
+    summary, events, total, trace_timings = await asyncio.to_thread(query)
     if summary is None:
         raise HTTPException(404, "RUM session not found")
     timeline = []
     for r in events:
         item_url = r[10] or r[5]
         item_name = r[6] or (r[10].rsplit("/", 1)[-1] if r[10] else "") or r[17] or r[2]
+        timing = None
+        if r[53]:
+            timing = {
+                "redirect_ms": float(r[43]), "dns_ms": float(r[44]),
+                "connect_ms": float(r[45]), "tls_ms": float(r[46]),
+                "wait_ms": float(r[47]), "download_ms": float(r[48]),
+                "blocked_ms": float(r[49]), "processing_ms": float(r[50]),
+                "server_ms": float(r[51]), "db_ms": float(r[52]),
+                "has_server_timing": bool(r[54]), "protocol": r[55],
+            }
         timeline.append({
             "timestamp": r[0], "event_id": r[1], "event_type": r[2],
             "view_id": r[3], "view_name": r[4], "url": item_url,
@@ -1475,6 +1682,8 @@ async def rum_session_detail(
             "attributes": dict(r[36] or {}), "vital_attribution": dict(r[37] or {}),
             "sdk_version": r[38], "service_version": r[39],
             "browser_version": r[40], "os": r[41], "sampled": bool(r[42]),
+            "timing": timing,
+            "backend": trace_timings.get(r[21]) if r[21] else None,
         })
     return {
         "session": {
@@ -1491,7 +1700,32 @@ async def rum_session_detail(
             "sdk_version": summary[16], "service_version": summary[17],
             "client_ip": (summary[20] if len(summary) > 20 else ""),
             "sampled": bool(summary[18]),
+            "connection_type": summary[21], "connection_rtt_ms": float(summary[22] or 0) or None,
+            "connection_downlink": float(summary[23] or 0) or None,
+            "language": summary[24], "timezone": summary[25],
+            "screen_res": summary[26], "viewport": summary[27],
         },
+        "backend_summary": (
+            {
+                "traces": len(trace_timings),
+                "services": sorted({
+                    str(t["service"]) for t in trace_timings.values() if t["service"]
+                }),
+                "db_systems": sorted({
+                    str(system)
+                    for t in trace_timings.values() for system in t["db_systems"]
+                }),
+                "avg_server_ms": (
+                    sum(t["server_ms"] for t in trace_timings.values() if t["server_ms"] > 0)
+                    / max(sum(1 for t in trace_timings.values() if t["server_ms"] > 0), 1)
+                ) if any(t["server_ms"] > 0 for t in trace_timings.values()) else None,
+                "avg_db_ms": (
+                    sum(t["db_ms"] for t in trace_timings.values() if t["db_ms"] > 0)
+                    / max(sum(1 for t in trace_timings.values() if t["db_ms"] > 0), 1)
+                ) if any(t["db_ms"] > 0 for t in trace_timings.values()) else None,
+            }
+            if trace_timings else None
+        ),
         "total": total, "page": page, "page_size": page_size,
         "coverage": {
             **_raw_coverage(range_),
@@ -1634,7 +1868,17 @@ async def rum_resources(
                    countIf(status_code >= 400 OR attributes['failed'] = 'true') / count() AS failure_rate,
                    max(timestamp) AS last_seen, argMax(service_version, timestamp),
                    anyIf(backend_trace_id, backend_trace_id != '') AS primary_trace_id,
-                   groupUniqArrayIf(50)(backend_trace_id, backend_trace_id != '') AS backend_trace_ids
+                   groupUniqArrayIf(50)(backend_trace_id, backend_trace_id != '') AS backend_trace_ids,
+                   quantileTDigestIf(0.75)(dns_ms, has_timing = 1) AS dns_p75,
+                   quantileTDigestIf(0.75)(connect_ms, has_timing = 1) AS connect_p75,
+                   quantileTDigestIf(0.75)(tls_ms, has_timing = 1) AS tls_p75,
+                   quantileTDigestIf(0.75)(wait_ms, has_timing = 1) AS wait_p75,
+                   quantileTDigestIf(0.75)(download_ms, has_timing = 1) AS download_p75,
+                   countIf(has_timing = 1) AS timing_samples,
+                   quantileTDigestIf(0.75)(server_ms, has_server_timing = 1) AS server_p75,
+                   quantileTDigestIf(0.75)(db_ms, has_server_timing = 1) AS db_p75,
+                   countIf(has_server_timing = 1) AS server_samples,
+                   anyIf(protocol, protocol != '') AS protocol
             FROM zenplus.apm_rum_events
             WHERE {scope_sql} AND event_type = 'resource' AND sampled = 1
             GROUP BY {group}
@@ -1658,6 +1902,11 @@ async def rum_resources(
                 "failure_rate": float(r[13] or 0), "last_seen": r[14],
                 "service_version": r[15], "backend_trace_id": r[16],
                 "backend_trace_ids": list(r[17] or []),
+                "dns_p75": _nullable(r[18], r[23]), "connect_p75": _nullable(r[19], r[23]),
+                "tls_p75": _nullable(r[20], r[23]), "wait_p75": _nullable(r[21], r[23]),
+                "download_p75": _nullable(r[22], r[23]), "timing_samples": int(r[23]),
+                "server_p75": _nullable(r[24], r[26]), "db_p75": _nullable(r[25], r[26]),
+                "server_samples": int(r[26]), "protocol": r[27],
             }
             for r in rows
         ],

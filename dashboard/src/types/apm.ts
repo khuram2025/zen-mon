@@ -361,6 +361,13 @@ export interface RumSession {
   client_ip?: string
   backend_trace_id?: string
   backend_trace_ids?: string[]
+  connection_type?: string
+  connection_rtt_ms?: number | null
+  connection_downlink?: number | null
+  language?: string
+  timezone?: string
+  screen_res?: string
+  viewport?: string
 }
 
 export interface RumError {
@@ -408,6 +415,16 @@ export interface RumResource {
   last_seen: string
   backend_trace_id?: string
   backend_trace_ids?: string[]
+  dns_p75?: number | null
+  connect_p75?: number | null
+  tls_p75?: number | null
+  wait_p75?: number | null
+  download_p75?: number | null
+  timing_samples?: number
+  server_p75?: number | null
+  db_p75?: number | null
+  server_samples?: number
+  protocol?: string
 }
 
 export interface RumAction {
@@ -473,10 +490,76 @@ export interface RumTimelineEvent {
   sampled?: boolean
   end_reason?: string
   vital_attribution?: Record<string, string>
+  timing?: RumRequestTiming | null
+  backend?: RumBackendTiming | null
+}
+
+/** Navigation/Resource Timing phase split for one request (milliseconds). */
+export interface RumRequestTiming {
+  redirect_ms: number
+  dns_ms: number
+  connect_ms: number
+  tls_ms: number
+  wait_ms: number
+  download_ms: number
+  blocked_ms: number
+  processing_ms: number
+  server_ms: number
+  db_ms: number
+  has_server_timing: boolean
+  protocol?: string
+}
+
+/** Execution split of a correlated backend APM trace. */
+export interface RumBackendTiming {
+  server_ms: number
+  db_ms: number
+  db_calls: number
+  spans: number
+  service?: string
+  db_systems?: string[]
+  has_error?: boolean
+}
+
+export interface RumBackendSummary {
+  traces: number
+  services: string[]
+  db_systems: string[]
+  avg_server_ms: number | null
+  avg_db_ms: number | null
+}
+
+export interface RumBreakdownSide {
+  samples: number
+  phases: Record<'redirect' | 'dns' | 'connect' | 'tls' | 'wait' | 'download' | 'blocked' | 'processing', number | null>
+  server_p75: number | null
+  db_p75: number | null
+  server_samples: number
+  duration_p75: number | null
+  duration_samples: number
+}
+
+export interface RumBreakdown {
+  range: RumRange
+  coverage?: RumCoverage
+  page_loads: RumBreakdownSide
+  api_requests: RumBreakdownSide
+  slowest_endpoints: Array<{
+    url: string
+    method?: string
+    count: number
+    duration_p75: number | null
+    wait_p75: number | null
+    server_p75: number | null
+    db_p75: number | null
+    server_samples: number
+    failures: number
+  }>
 }
 
 export interface RumSessionDetail {
   session: RumSession
+  backend_summary?: RumBackendSummary | null
   timeline: RumTimelineEvent[]
   total?: number
   page?: number

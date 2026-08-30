@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react'
 import {
   Activity,
   Clock3,
+  Database,
   FileWarning,
   Gauge,
   Layers3,
@@ -12,11 +13,22 @@ import {
   Route,
   Server,
   UserRound,
+  Waypoints,
+  Wifi,
 } from 'lucide-react'
 import { cn, formatBytes, relativeTime } from '@/lib/utils'
 import { fmtPct } from '@/components/apm/shared'
 import { fmtCount } from '@/components/apm/viz'
 import { RequestFlow } from '@/components/apm/explorer'
+import {
+  BreakdownInline,
+  LocationHint,
+  PhaseBar,
+  PhaseLegend,
+  RequestPathFlow,
+  phaseSegments,
+} from './RumBreakdown'
+import type { RumRequestTiming } from '@/types/apm'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent } from '@/components/ui/Card'
@@ -107,18 +119,54 @@ function ErrorDetail({ error }: { error: RumError }) {
 
 function ResourceDetail({ resource }: { resource: RumResource }) {
   const failureRate = resource.failure_rate ?? (resource.count ? resource.failed_count / resource.count : null)
+  const hasTiming = (resource.timing_samples ?? 0) > 0
+  const p75Timing: RumRequestTiming | null = hasTiming ? {
+    redirect_ms: 0,
+    dns_ms: resource.dns_p75 ?? 0,
+    connect_ms: resource.connect_p75 ?? 0,
+    tls_ms: resource.tls_p75 ?? 0,
+    wait_ms: resource.wait_p75 ?? 0,
+    download_ms: resource.download_p75 ?? 0,
+    blocked_ms: 0,
+    processing_ms: 0,
+    server_ms: resource.server_p75 ?? 0,
+    db_ms: resource.db_p75 ?? 0,
+    has_server_timing: (resource.server_samples ?? 0) > 0,
+    protocol: resource.protocol,
+  } : null
+  const segments = p75Timing ? phaseSegments(p75Timing) : []
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4"><Stat label="Requests" value={fmtCount(resource.count)} /><Stat label="Failed" value={fmtCount(resource.failed_count)} hint={fmtPct(failureRate)} /><Stat label="Duration p75" value={formatDurationMs(resource.duration_p75)} /><Stat label="Average size" value={resource.size_avg == null ? '—' : formatBytes(resource.size_avg)} /></div>
-      <RequestFlow
-        hops={[
-          { id: 'client', label: 'Client', icon: UserRound, tone: 'ok' },
-          { id: 'resource', label: String(resource.method || resource.resource_type || 'GET'), hint: resource.name, metric: formatDurationMs(resource.duration_p75), status: resource.status_code, icon: Network, tone: resource.failed_count ? 'err' : 'ok' },
-          { id: 'app', label: 'App', hint: resource.view_name || '/', icon: Server, tone: 'muted' },
-        ]}
-        totalLabel={formatDurationMs(resource.duration_p75)}
-      />
-      <Card><CardContent className="p-4"><Fact label="Name"><span className="font-mono text-[11px]">{resource.name}</span></Fact><Fact label="URL"><span className="font-mono text-[11px]">{resource.url || 'Not captured'}</span></Fact><Fact label="Kind">{resource.resource_type || 'resource'}</Fact><Fact label="HTTP">{[resource.method, resource.status_code].filter((value) => value != null).join(' ') || 'Not captured'}</Fact><Fact label="View">{resource.view_name || '/'}</Fact><Fact label="Application">{resource.application_id} · {resource.env}</Fact><Fact label="Release">{resource.service_version || 'Not captured'}</Fact><Fact label="Last seen">{relativeTime(resource.last_seen)}</Fact><Fact label="Backend trace"><TracePivot traceId={resource.backend_trace_id} /></Fact></CardContent></Card>
+      {p75Timing ? (
+        <RequestPathFlow
+          timing={p75Timing}
+          clientHint={resource.view_name || '/'}
+          totalMs={resource.duration_p75}
+          status={resource.status_code}
+        />
+      ) : (
+        <RequestFlow
+          hops={[
+            { id: 'client', label: 'Client', icon: UserRound, tone: 'ok' },
+            { id: 'resource', label: String(resource.method || resource.resource_type || 'GET'), hint: resource.name, metric: formatDurationMs(resource.duration_p75), status: resource.status_code, icon: Network, tone: resource.failed_count ? 'err' : 'ok' },
+            { id: 'app', label: 'App', hint: resource.view_name || '/', icon: Server, tone: 'muted' },
+          ]}
+          totalLabel={formatDurationMs(resource.duration_p75)}
+        />
+      )}
+      {segments.length > 0 && (
+        <Card><CardContent className="p-4">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted"><Waypoints className="h-3.5 w-3.5 text-primary" /> Where the time goes</div>
+            <span className="text-[10px] text-muted">p75 across {fmtCount(resource.timing_samples)} measured requests{(resource.server_samples ?? 0) > 0 ? ` · ${fmtCount(resource.server_samples)} with server timing` : ''}</span>
+          </div>
+          <PhaseBar segments={segments} height={10} />
+          <PhaseLegend segments={segments} className="mt-2" />
+          {(resource.server_samples ?? 0) === 0 && <p className="mt-2 text-[10px] text-muted">Server execution vs. network split appears when the backend sends a <span className="font-mono">Server-Timing</span> header or a correlated APM trace exists.</p>}
+        </CardContent></Card>
+      )}
+      <Card><CardContent className="p-4"><Fact label="Name"><span className="font-mono text-[11px]">{resource.name}</span></Fact><Fact label="URL"><span className="font-mono text-[11px]">{resource.url || 'Not captured'}</span></Fact><Fact label="Kind">{resource.resource_type || 'resource'}{resource.protocol ? ` · ${resource.protocol}` : ''}</Fact><Fact label="HTTP">{[resource.method, resource.status_code].filter((value) => value != null).join(' ') || 'Not captured'}</Fact><Fact label="View">{resource.view_name || '/'}</Fact><Fact label="Application">{resource.application_id} · {resource.env}</Fact><Fact label="Release">{resource.service_version || 'Not captured'}</Fact><Fact label="Last seen">{relativeTime(resource.last_seen)}</Fact><Fact label="Backend trace"><TracePivot traceId={resource.backend_trace_id} /></Fact></CardContent></Card>
     </div>
   )
 }
@@ -267,6 +315,16 @@ function TimelineChild({ event, sessionStart }: { event: RumTimelineEvent; sessi
           <TracePivot traceId={event.backend_trace_id} compact />
         </div>
       </div>
+      {event.timing && (event.event_type === 'resource' || event.event_type === 'view') && (() => {
+        const segments = phaseSegments(event.timing, event.backend)
+        if (!segments.length) return null
+        return (
+          <div className="mt-1.5 pr-1">
+            <PhaseBar segments={segments} height={5} />
+            <BreakdownInline timing={event.timing} backend={event.backend} className="mt-1" />
+          </div>
+        )
+      })()}
       {event.stack && <pre className="mt-1.5 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-surface2 p-2 font-mono text-[10px] text-text2">{event.stack}</pre>}
     </li>
   )
@@ -303,6 +361,17 @@ function SegmentRow({ seg, sessionStart, hidden }: { seg: ViewSegment; sessionSt
           {seg.backendTraceId && <TracePivot traceId={seg.backendTraceId} compact />}
         </div>
       </div>
+      {vitals?.timing && (() => {
+        const segments = phaseSegments(vitals.timing, vitals.backend)
+        if (!segments.length) return null
+        return (
+          <div className="border-b border-border/60 bg-surface2/20 px-3 py-2">
+            <div className="mb-1 text-[9px] font-semibold uppercase tracking-wider text-muted">Page load breakdown{vitals.timing.protocol ? ` · ${vitals.timing.protocol}` : ''}</div>
+            <PhaseBar segments={segments} height={6} />
+            <PhaseLegend segments={segments} className="mt-1.5" />
+          </div>
+        )
+      })()}
       {visibleChildren.length > 0 && (
         <ol className="relative ml-5 border-l border-border/70 py-1 pl-4 pr-3">
           {visibleChildren.map((event, index) => (
@@ -364,6 +433,74 @@ function Timeline({ events }: { events: RumTimelineEvent[] }) {
   )
 }
 
+/**
+ * Session-level Client → Browser → Network → App → Database chain. Per-hop
+ * figures are averaged over this session's measured requests; the app/db side
+ * comes from Server-Timing captures or correlated backend traces.
+ */
+function SessionPathFlow({ session, detail, traceIds }: { session: RumSession; detail?: RumSessionDetail; traceIds: string[] }) {
+  const stats = useMemo(() => {
+    let netSum = 0, netN = 0, serverSum = 0, serverN = 0, dbSum = 0, dbN = 0, measured = 0
+    for (const ev of detail?.timeline ?? []) {
+      if (ev.event_type !== 'resource') continue
+      const t = ev.timing
+      const serverMs = t?.has_server_timing && t.server_ms > 0 ? t.server_ms : (ev.backend && ev.backend.server_ms > 0 ? ev.backend.server_ms : null)
+      const dbMs = t?.has_server_timing && t.db_ms > 0 ? t.db_ms : (ev.backend && ev.backend.db_ms > 0 ? ev.backend.db_ms : null)
+      if (t && t.wait_ms > 0) measured += 1
+      if (serverMs != null) { serverSum += serverMs; serverN += 1 }
+      if (dbMs != null) { dbSum += dbMs; dbN += 1 }
+      if (t && t.wait_ms > 0 && serverMs != null) { netSum += Math.max(0, t.wait_ms - Math.min(serverMs, t.wait_ms)); netN += 1 }
+    }
+    const summary = detail?.backend_summary
+    return {
+      measured,
+      net: netN ? netSum / netN : null,
+      server: serverN ? serverSum / serverN : summary?.avg_server_ms ?? null,
+      db: dbN ? dbSum / dbN : summary?.avg_db_ms ?? null,
+      service: summary?.services?.[0] ?? '',
+      dbSystems: summary?.db_systems ?? [],
+    }
+  }, [detail])
+  const hops: Parameters<typeof RequestFlow>[0]['hops'] = [
+    {
+      id: 'client',
+      label: 'Client',
+      hint: [session.browser && `${session.browser}${session.browser_version ? ` ${session.browser_version}` : ''}`, session.os, session.client_ip].filter(Boolean).join(' · ') || 'Unknown',
+      metric: session.connection_rtt_ms != null && session.connection_rtt_ms > 0 ? `~${Math.round(session.connection_rtt_ms)} ms RTT` : undefined,
+      icon: UserRound,
+      tone: 'ok',
+    },
+    { id: 'browser', label: 'Browser', hint: `${session.views} views · ${session.actions} actions`, metric: formatDurationMs(session.duration_ms), icon: Monitor, tone: session.errors ? 'warn' : 'ok' },
+    {
+      id: 'network',
+      label: 'Network',
+      hint: stats.net != null ? `avg over ${stats.measured} requests` : (stats.measured ? 'no server split yet' : 'no measured requests'),
+      metric: stats.net != null ? formatDurationMs(stats.net) : undefined,
+      icon: Waypoints,
+      tone: 'muted',
+    },
+    {
+      id: 'app',
+      label: stats.service || 'Backend',
+      hint: traceIds.length ? `${traceIds.length} correlated trace${traceIds.length > 1 ? 's' : ''}` : 'No correlated trace',
+      metric: stats.server != null ? formatDurationMs(Math.max(0, stats.server - (stats.db ?? 0))) : undefined,
+      icon: Server,
+      tone: traceIds.length || stats.server != null ? 'ok' : 'muted',
+    },
+  ]
+  if (stats.db != null && stats.db > 0) {
+    hops.push({
+      id: 'db',
+      label: 'Database',
+      hint: stats.dbSystems.length ? stats.dbSystems.join(', ') : 'reported by server',
+      metric: formatDurationMs(stats.db),
+      icon: Database,
+      tone: 'ok',
+    })
+  }
+  return <RequestFlow hops={hops} totalLabel={formatDurationMs(session.duration_ms)} />
+}
+
 function SessionDetailPanel({ fallback, detail, loading, error, onRetry }: { fallback?: RumSession; detail?: RumSessionDetail; loading?: boolean; error?: unknown; onRetry?: () => void }) {
   if (loading && !detail) return <div className="flex items-center justify-center gap-2 py-20 text-sm text-muted"><Loader2 className="h-4 w-4 animate-spin" /> Loading session timeline…</div>
   if (error) return <QueryErrorPanel label="session timeline" error={error} onRetry={onRetry} />
@@ -376,15 +513,8 @@ function SessionDetailPanel({ fallback, detail, loading, error, onRetry }: { fal
     <div className="space-y-5">
       {detail?.coverage && <div className="overflow-hidden rounded-lg border border-border"><RumCoverageNotice coverage={detail.coverage} showRetention /></div>}
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4"><Stat label="Duration" value={formatDurationMs(session.duration_ms)} /><Stat label="Views" value={fmtCount(session.views)} /><Stat label="Actions" value={fmtCount(session.actions)} /><Stat label="Errors" value={fmtCount(session.errors)} /></div>
-      <RequestFlow
-        hops={[
-          { id: 'client', label: 'Client', hint: [session.browser && `${session.browser}${session.browser_version ? ` ${session.browser_version}` : ''}`, session.os, session.client_ip, session.country].filter(Boolean).join(' · ') || 'Unknown', icon: UserRound, tone: 'ok' },
-          { id: 'browser', label: 'Browser', hint: `${session.views} views · ${session.actions} actions`, metric: formatDurationMs(session.duration_ms), icon: Monitor, tone: session.errors ? 'warn' : 'ok' },
-          { id: 'app', label: 'Backend', hint: traceIds[0] ? `Trace ${traceIds[0].slice(0, 8)}…` : 'No correlated trace', icon: Server, tone: traceIds.length ? 'ok' : 'muted' },
-        ]}
-        totalLabel={formatDurationMs(session.duration_ms)}
-      />
-      <Card><CardContent className="p-4"><Fact label="Session ID"><span className="font-mono text-[11px]">{session.session_id}</span></Fact><Fact label="User">{session.user_id || 'Anonymous'}</Fact><Fact label="Application">{session.application_id} · {session.env}</Fact><Fact label="Release">{session.service_version || 'Not captured'}</Fact>{session.sampled != null && <Fact label="Sampling"><Badge variant={session.sampled ? 'success' : 'warning'}>{session.sampled ? 'Sampled cohort' : 'Retained unsampled'}</Badge></Fact>}<Fact label="Client">{[session.browser && `${session.browser}${session.browser_version ? ` ${session.browser_version}` : ''}`, session.os, session.device_type, session.country].filter(Boolean).join(' · ') || 'Unknown'}</Fact><Fact label="IP address"><span className="font-mono text-[11px]">{session.client_ip || 'Not captured'}</span></Fact><Fact label="Started">{new Date(session.started_at).toLocaleString()}</Fact><Fact label="Backend traces">{traceIds.length ? <div className="flex flex-wrap gap-2">{traceIds.map((id) => <TracePivot key={id} traceId={id} compact />)}</div> : 'No correlated trace'}</Fact></CardContent></Card>
+      <SessionPathFlow session={session} detail={detail} traceIds={traceIds} />
+      <Card><CardContent className="p-4"><Fact label="Session ID"><span className="font-mono text-[11px]">{session.session_id}</span></Fact><Fact label="User">{session.user_id || 'Anonymous'}</Fact><Fact label="Application">{session.application_id} · {session.env}</Fact><Fact label="Release">{session.service_version || 'Not captured'}</Fact>{session.sampled != null && <Fact label="Sampling"><Badge variant={session.sampled ? 'success' : 'warning'}>{session.sampled ? 'Sampled cohort' : 'Retained unsampled'}</Badge></Fact>}<Fact label="Client">{[session.browser && `${session.browser}${session.browser_version ? ` ${session.browser_version}` : ''}`, session.os, session.device_type].filter(Boolean).join(' · ') || 'Unknown'}</Fact><Fact label="Location"><LocationHint country={session.country} timezone={session.timezone} clientIp={session.client_ip} /></Fact><Fact label="IP address"><span className="font-mono text-[11px]">{session.client_ip || 'Not captured'}</span></Fact><Fact label="Connection">{session.connection_type || session.connection_rtt_ms != null ? <span className="inline-flex items-center gap-1.5"><Wifi className="h-3 w-3 text-muted" aria-hidden />{[session.connection_type, session.connection_rtt_ms != null ? `~${Math.round(session.connection_rtt_ms)} ms RTT` : '', session.connection_downlink != null ? `${Number(session.connection_downlink.toFixed(1))} Mbps` : ''].filter(Boolean).join(' · ')}</span> : 'Not captured'}</Fact><Fact label="Locale">{[session.language, session.timezone].filter(Boolean).join(' · ') || 'Not captured'}</Fact><Fact label="Display">{[session.screen_res && `screen ${session.screen_res}`, session.viewport && `viewport ${session.viewport}`].filter(Boolean).join(' · ') || 'Not captured'}</Fact><Fact label="Started">{new Date(session.started_at).toLocaleString()}</Fact><Fact label="Backend traces">{traceIds.length ? <div className="flex flex-wrap gap-2">{traceIds.map((id) => <TracePivot key={id} traceId={id} compact />)}</div> : 'No correlated trace'}</Fact></CardContent></Card>
       <div><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="text-sm font-semibold text-text">Session timeline</h3><p className="text-[11px] text-muted">Grouped by page view — actions, resources, errors and main-thread work are nested under the view where they happened.{totalEvents > loadedEvents ? ` Showing the first ${loadedEvents.toLocaleString()} of ${totalEvents.toLocaleString()} events.` : ''}</p></div><Badge variant="outline">{loadedEvents.toLocaleString()}{totalEvents > loadedEvents ? ` / ${totalEvents.toLocaleString()}` : ''} events</Badge></div><Timeline events={detail?.timeline ?? []} /></div>
     </div>
   )

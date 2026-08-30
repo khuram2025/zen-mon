@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/Button'
 import { Card } from '@/components/ui/Card'
 import type {
   RumAction,
+  RumBreakdown,
   RumError,
   RumFacets,
   RumIngestHealth,
@@ -103,6 +104,12 @@ export function RumPage() {
   const healthQ = useQuery<RumIngestHealth>({
     queryKey: ['apm', 'rum', 'health', commonQuery],
     queryFn: () => get(`/apm/rum/health?${commonQuery}`),
+    enabled: overviewMode,
+    refetchInterval: REFRESH_MS,
+  })
+  const breakdownQ = useQuery<RumBreakdown>({
+    queryKey: ['apm', 'rum', 'breakdown', commonQuery],
+    queryFn: () => get(`/apm/rum/breakdown?${commonQuery}`),
     enabled: overviewMode,
     refetchInterval: REFRESH_MS,
   })
@@ -215,6 +222,10 @@ export function RumPage() {
         topErrorsLoading={errorsQ.isLoading}
         topErrorsError={errorsQ.error}
         health={healthQ.data}
+        breakdown={breakdownQ.data}
+        breakdownLoading={breakdownQ.isLoading}
+        breakdownError={breakdownQ.error}
+        onRetryBreakdown={() => breakdownQ.refetch()}
         explorerCoverage={viewsQ.data?.coverage ?? errorsQ.data?.coverage}
         facets={facetsQ.data}
         trendsLoading={timeseriesQ.isLoading}

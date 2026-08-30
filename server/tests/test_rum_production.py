@@ -503,7 +503,12 @@ async def test_views_and_session_timeline_response_contract(monkeypatch):
                 return Result([[
                     "portal", "prod", now, now + timedelta(seconds=2), 1, 1, 1, 0, 1,
                     "Chrome", "126", "Windows", "desktop", "SA", "usr_x",
-                    ["a" * 32], "2.0.0", "2026.8.27", 1, 2,
+                    ["a" * 32], "2.0.0", "2026.8.27", 1, 2, "203.0.113.7",
+                    "4g", 50.0, 9.6, "en-US", "Asia/Riyadh", "1920x1080", "1280x720",
+                ]])
+            if "apm_spans" in sql:
+                return Result([[
+                    "a" * 32, 92.5, 40.25, 2, 5, "orders-api", ["postgresql"], 0,
                 ]])
             return Result([[
                 now, "event-12345678", "resource", "view-1", "/orders",
@@ -513,6 +518,7 @@ async def test_views_and_session_timeline_response_contract(monkeypatch):
                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
                 0, 0, 0, 0, 0, 0, 0, "", {}, {},
                 "2.0.0", "2026.8.27", "126", "Windows", 1,
+                0.0, 1.5, 3.0, 2.0, 110.0, 6.5, 0.5, 0.0, 92.5, 40.25, 1, 1, "h2",
             ]])
 
     session_ch = SessionCH()
@@ -530,6 +536,20 @@ async def test_views_and_session_timeline_response_contract(monkeypatch):
     assert event["lcp"] is None and event["vitals"]["lcp"] is None
     assert event["service_version"] == "2026.8.27"
     assert event["sampled"] is True
+    # NSX-style request breakdown: browser phases plus server execution split.
+    assert event["timing"]["wait_ms"] == 110.0
+    assert event["timing"]["server_ms"] == 92.5
+    assert event["timing"]["db_ms"] == 40.25
+    assert event["timing"]["has_server_timing"] is True
+    assert event["timing"]["protocol"] == "h2"
+    assert event["backend"]["service"] == "orders-api"
+    assert event["backend"]["db_calls"] == 2
+    assert detail["backend_summary"]["services"] == ["orders-api"]
+    assert detail["backend_summary"]["avg_server_ms"] == 92.5
+    assert detail["session"]["connection_type"] == "4g"
+    assert detail["session"]["connection_rtt_ms"] == 50.0
+    assert detail["session"]["timezone"] == "Asia/Riyadh"
+    assert detail["session"]["viewport"] == "1280x720"
     assert detail["coverage"]["raw_retention_days"] == 14
     assert detail["coverage"]["partial"] is False
     assert session_ch.parameters[1]["selected_app"] == "portal"
@@ -578,6 +598,7 @@ async def test_resource_unknown_status_size_and_duration_are_null(monkeypatch):
             return Result([[
                 "portal", "prod", "/", "https://cdn.example.com/app.js", "script",
                 "GET", 0, 2, 0, 0.0, 0, 0.0, 0, 0.0, now, "1.0.0", "", [],
+                0.0, 0.0, 0.0, 0.0, 0.0, 0, 0.0, 0.0, 0, "",
             ]])
 
     monkeypatch.setattr(rum, "_ch", lambda: ResourceCH())
@@ -590,6 +611,8 @@ async def test_resource_unknown_status_size_and_duration_are_null(monkeypatch):
     assert item["status_code"] is None
     assert item["duration_p75"] is None and item["duration_samples"] == 0
     assert item["size_avg"] is None and item["size_samples"] == 0
+    assert item["wait_p75"] is None and item["timing_samples"] == 0
+    assert item["server_p75"] is None and item["server_samples"] == 0
 
 
 @pytest.mark.asyncio
