@@ -326,10 +326,11 @@ export function RumOverviewPanel(props: OverviewProps) {
 
       <section aria-labelledby="rum-audience-heading">
         <RumSectionHeader id="rum-audience-heading" title="Audience and release context" description="Select a segment to apply it to every RUM view." />
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
           <FacetCard title="Browsers" items={props.facets?.browser} onSelect={(value) => props.onFilter('browser', value)} />
           <FacetCard title="Devices" items={props.facets?.device_type} onSelect={(value) => props.onFilter('device_type', value)} />
           <FacetCard title="Countries" items={props.facets?.country} onSelect={(value) => props.onFilter('country', value)} />
+          <FacetCard title="Client IPs" items={props.facets?.client_ip} onSelect={(value) => props.onFilter('client_ip', value)} />
           <FacetCard title="Releases" items={props.facets?.service_version} onSelect={(value) => props.onFilter('service_version', value)} />
         </div>
       </section>

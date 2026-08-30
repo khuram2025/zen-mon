@@ -113,6 +113,7 @@ const ADVANCED_FILTERS: Array<{ key: keyof RumFilters; placeholder: string }> = 
   { key: 'os', placeholder: 'All operating systems' },
   { key: 'device_type', placeholder: 'All devices' },
   { key: 'country', placeholder: 'All countries' },
+  { key: 'client_ip', placeholder: 'All client IPs' },
   { key: 'service_version', placeholder: 'All releases' },
 ]
 

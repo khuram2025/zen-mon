@@ -3,7 +3,7 @@ import type { RumFilters, RumRange, RumTab, RumVitalMetric } from '@/types/apm'
 export type RumVitalName = 'lcp' | 'inp' | 'cls' | 'fcp' | 'ttfb' | 'load'
 export type RumVitalBand = 'good' | 'needs-improvement' | 'poor' | 'no-data'
 
-export const RUM_FILTER_KEYS = ['application_id', 'env', 'view_name', 'browser', 'browser_version', 'os', 'device_type', 'country', 'service_version'] as const satisfies readonly (keyof RumFilters)[]
+export const RUM_FILTER_KEYS = ['application_id', 'env', 'view_name', 'browser', 'browser_version', 'os', 'device_type', 'country', 'service_version', 'client_ip'] as const satisfies readonly (keyof RumFilters)[]
 
 export const RUM_FILTER_LABEL: Record<keyof RumFilters, string> = {
   application_id: 'Application',
@@ -15,6 +15,7 @@ export const RUM_FILTER_LABEL: Record<keyof RumFilters, string> = {
   device_type: 'Device',
   country: 'Country',
   service_version: 'Release',
+  client_ip: 'Client IP',
 }
 
 export const VITAL_LIMITS: Record<RumVitalName, { good: number; poor: number }> = {

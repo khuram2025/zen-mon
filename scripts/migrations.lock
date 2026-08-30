@@ -106,3 +106,4 @@ dd55a4d99a4cc05d4395e22c258aa5501caf1c281bc4c39002b7e670adaaf87d  migrate-094-ho
 f49dcbf316ef642ae54738e3a3c2a525aec4852ca665901e568c6fd234bf5e9a  migrate-095-rum-production.sql
 e71f28a939499f70c11ae61371fc505a48cacf9f0e38e03bda5d9fa6b74fa088  migrate-096-rum-production-clickhouse.sql
 2a8627dd22542aedc47a6d2dce9396af263524707d3fb37026b3e9054b2b33a8  migrate-097-rum-alert-metrics.sql
+ba6755a745984a4a6c24f6810fb7184a364e6339757c121ec0261abcf32696b8  migrate-098-rum-client-ip-and-span-retention-clickhouse.sql

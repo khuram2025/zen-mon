@@ -149,7 +149,7 @@ export function RumSessionsTable({ data, onOpen, ...props }: SharedProps & { dat
                 </button>
                 <div className="text-[10px] text-muted">{session.user_id || session.application_id} · {session.env}{session.service_version ? ` · ${session.service_version}` : ''}</div>
               </Td>
-              <Td><div className="text-xs text-text2">{session.browser || 'Unknown'}{session.browser_version ? ` ${session.browser_version}` : ''} · {session.device_type || 'unknown'}</div><div className="text-[10px] text-muted">{[session.os, session.country].filter(Boolean).join(' · ') || 'Unknown location'}</div></Td>
+              <Td><div className="text-xs text-text2">{session.browser || 'Unknown'}{session.browser_version ? ` ${session.browser_version}` : ''} · {session.device_type || 'unknown'}</div><div className="text-[10px] text-muted">{[session.os, session.country].filter(Boolean).join(' · ') || 'Unknown location'}</div>{session.client_ip && <div className="font-mono text-[10px] text-muted">{session.client_ip}</div>}</Td>
               <Td className="text-right"><DurationTimeline ms={session.duration_ms} maxMs={maxDuration} significant={session.errors > 0 || session.duration_ms >= 30_000} /></Td>
               <Td className="text-right font-mono text-xs tabular-nums">{fmtCount(session.views)}</Td>
               <Td className="text-right font-mono text-xs tabular-nums">{fmtCount(session.actions)}</Td>

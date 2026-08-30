@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import {
   Activity,
   Clock3,
@@ -13,7 +13,7 @@ import {
   Server,
   UserRound,
 } from 'lucide-react'
-import { formatBytes, relativeTime } from '@/lib/utils'
+import { cn, formatBytes, relativeTime } from '@/lib/utils'
 import { fmtPct } from '@/components/apm/shared'
 import { fmtCount } from '@/components/apm/viz'
 import { RequestFlow } from '@/components/apm/explorer'
@@ -150,6 +150,10 @@ const EVENT_META: Record<RumTimelineEvent['event_type'], { label: string; icon: 
   long_task: { label: 'Long task', icon: Clock3, tone: 'bg-warning/10 text-warning' },
 }
 
+const CHILD_TYPES = ['action', 'resource', 'error', 'long_task'] as const
+type ChildType = (typeof CHILD_TYPES)[number]
+const CHILD_LABEL: Record<ChildType, string> = { action: 'action', resource: 'resource', error: 'error', long_task: 'long task' }
+
 function attr(event: RumTimelineEvent, ...keys: string[]): string | undefined {
   for (const key of keys) if (event.attributes?.[key]) return event.attributes[key]
   return undefined
@@ -163,27 +167,200 @@ function timelineTitle(event: RumTimelineEvent): string {
   return event.view_name || event.url || 'Page view'
 }
 
-function Timeline({ events }: { events: RumTimelineEvent[] }) {
-  if (!events.length) return <div className="py-10 text-center text-xs text-muted">No timeline events are available for this session.</div>
+function offsetLabel(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '+0s'
+  if (ms < 1000) return `+${Math.round(ms)}ms`
+  if (ms < 60_000) return `+${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`
+  const minutes = Math.floor(ms / 60_000)
+  const seconds = Math.round((ms % 60_000) / 1000)
+  return `+${minutes}m${seconds ? ` ${seconds}s` : ''}`
+}
+
+interface ViewSegment {
+  key: string
+  viewId?: string
+  viewName: string
+  startMs: number
+  endMs: number
+  vitals: RumTimelineEvent | null
+  backendTraceId?: string
+  children: RumTimelineEvent[]
+}
+
+/**
+ * Collapse the raw event stream into one node per page view. A session emits
+ * many `view` lifecycle events (view_start, checkpoint, pagehide, hidden,
+ * final) for the same navigation; rendering each as its own row buries the
+ * user journey. Here every navigation becomes a single grouped segment that
+ * carries its finalized Web Vitals, and the actions / resources / errors that
+ * happened on that view are nested beneath it in chronological order.
+ */
+function buildSegments(events: RumTimelineEvent[]): ViewSegment[] {
+  const segments: ViewSegment[] = []
+  const open = (event: RumTimelineEvent, ts: number, index: number, isView: boolean): ViewSegment => {
+    const seg: ViewSegment = {
+      key: `${event.view_id || event.view_name || (isView ? 'view' : 'activity')}:${ts}:${index}`,
+      viewId: event.view_id,
+      viewName: event.view_name || event.url || (isView ? '/' : 'Session activity'),
+      startMs: ts,
+      endMs: ts,
+      vitals: null,
+      backendTraceId: isView ? (event.backend_trace_id || undefined) : undefined,
+      children: [],
+    }
+    segments.push(seg)
+    return seg
+  }
+  events.forEach((event, index) => {
+    const ts = new Date(event.timestamp).getTime()
+    const last = segments[segments.length - 1]
+    if (event.event_type === 'view') {
+      const startsNew = !last || event.end_reason === 'view_start' || (!!event.view_id && event.view_id !== last.viewId)
+      const seg = startsNew ? open(event, ts, index, true) : last!
+      seg.endMs = Math.max(seg.endMs, ts)
+      if (!seg.backendTraceId && event.backend_trace_id) seg.backendTraceId = event.backend_trace_id
+      const hasVitals = event.lcp != null || event.inp != null || event.cls != null || event.fcp != null || event.ttfb != null || event.load_ms != null
+      if (hasVitals && (!seg.vitals || event.is_final)) seg.vitals = event
+    } else {
+      const seg = last ?? open(event, ts, index, false)
+      seg.endMs = Math.max(seg.endMs, ts)
+      seg.children.push(event)
+    }
+  })
+  return segments
+}
+
+function childSummary(children: RumTimelineEvent[]): string {
+  const counts = children.reduce<Record<string, number>>((acc, event) => {
+    acc[event.event_type] = (acc[event.event_type] ?? 0) + 1
+    return acc
+  }, {})
+  return CHILD_TYPES
+    .filter((type) => counts[type])
+    .map((type) => `${counts[type]} ${CHILD_LABEL[type]}${counts[type] > 1 ? 's' : ''}`)
+    .join(' · ')
+}
+
+function TimelineChild({ event, sessionStart }: { event: RumTimelineEvent; sessionStart: number }) {
+  const meta = EVENT_META[event.event_type] || EVENT_META.view
+  const Icon = meta.icon
+  const duration = event.duration_ms ?? undefined
   return (
-    <ol className="relative ml-3 border-l border-border pl-5">
-      {events.map((event, index) => {
-        const meta = EVENT_META[event.event_type] || EVENT_META.view
-        const Icon = meta.icon
-        const duration = event.duration_ms ?? (event.load_ms != null ? event.load_ms : undefined)
-        return (
-          <li key={`${event.timestamp}:${event.event_type}:${index}`} className="relative pb-5 last:pb-0">
-            <span className={`absolute -left-[33px] flex h-6 w-6 items-center justify-center rounded-full border border-border ${meta.tone}`}><Icon className="h-3 w-3" /></span>
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div className="min-w-0"><div className="max-w-md break-words text-xs font-medium text-text">{timelineTitle(event)}</div><div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-muted"><Badge variant="outline" className="px-1.5 py-0 text-[9px]">{meta.label}</Badge>{event.sampled === false && <Badge variant="warning" className="px-1.5 py-0 text-[9px]">retained unsampled</Badge>}<span>{new Date(event.timestamp).toLocaleString()}</span>{event.view_name && event.event_type !== 'view' && <span>· {event.view_name}</span>}</div></div>
-              <div className="flex items-center gap-2">{duration != null && <span className="font-mono text-[10px] text-muted">{formatDurationMs(duration)}</span>}<TracePivot traceId={event.backend_trace_id} compact /></div>
+    <li className="relative py-1.5">
+      <span className={cn('absolute -left-[25px] flex h-4 w-4 items-center justify-center rounded-full border border-border', meta.tone)}><Icon className="h-2.5 w-2.5" /></span>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {event.event_type === 'resource' && event.method && <Badge variant="outline" className="px-1 py-0 text-[9px] uppercase">{event.method}</Badge>}
+            {event.event_type === 'resource' && event.status_code != null && <span className={cn('font-mono text-[9px]', event.status_code >= 400 ? 'text-danger' : 'text-muted')}>{event.status_code}</span>}
+            <span className={cn('max-w-md break-words text-xs', event.event_type === 'error' ? 'font-medium text-danger' : 'text-text')}>{timelineTitle(event)}</span>
+          </div>
+          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-muted">
+            <Badge variant="outline" className="px-1.5 py-0 text-[9px]">{meta.label}</Badge>
+            {event.sampled === false && <Badge variant="warning" className="px-1.5 py-0 text-[9px]">retained unsampled</Badge>}
+            <span className="font-mono">{offsetLabel(new Date(event.timestamp).getTime() - sessionStart)}</span>
+            <span>· {new Date(event.timestamp).toLocaleTimeString()}</span>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {duration != null && duration > 0 && <span className="font-mono text-[10px] text-muted">{formatDurationMs(duration)}</span>}
+          <TracePivot traceId={event.backend_trace_id} compact />
+        </div>
+      </div>
+      {event.stack && <pre className="mt-1.5 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-surface2 p-2 font-mono text-[10px] text-text2">{event.stack}</pre>}
+    </li>
+  )
+}
+
+function SegmentRow({ seg, sessionStart, hidden }: { seg: ViewSegment; sessionStart: number; hidden: Set<ChildType> }) {
+  const duration = seg.endMs - seg.startMs
+  const vitals = seg.vitals
+  const summary = childSummary(seg.children)
+  const visibleChildren = seg.children.filter((event) => !hidden.has(event.event_type as ChildType))
+  return (
+    <li className="overflow-hidden rounded-lg border border-border bg-surface2/30">
+      <div className="flex flex-wrap items-start justify-between gap-2 border-b border-border/60 bg-surface2/50 px-3 py-2">
+        <div className="flex min-w-0 items-start gap-2">
+          <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary"><Route className="h-3 w-3" /></span>
+          <div className="min-w-0">
+            <span className="block truncate font-mono text-xs font-semibold text-text" title={seg.viewName}>{seg.viewName || '/'}</span>
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-muted">
+              <Badge variant="outline" className="px-1.5 py-0 text-[9px]">Page view</Badge>
+              <span className="font-mono">{offsetLabel(seg.startMs - sessionStart)}</span>
+              {duration > 0 && <span>· {formatDurationMs(duration)} on view</span>}
+              {summary && <span>· {summary}</span>}
             </div>
-            {event.event_type === 'view' && (event.lcp != null || event.inp != null || event.cls != null) && <div className="mt-2 flex flex-wrap gap-2 rounded-md bg-surface2/50 p-2 font-mono text-[10px] text-text2"><span>LCP {formatRumVital('lcp', event.lcp)}</span><span>INP {formatRumVital('inp', event.inp)}</span><span>CLS {formatRumVital('cls', event.cls)}</span></div>}
-            {event.stack && <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap rounded-md bg-surface2 p-2 font-mono text-[10px] text-text2">{event.stack}</pre>}
-          </li>
-        )
-      })}
-    </ol>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {vitals && (vitals.lcp != null || vitals.inp != null || vitals.cls != null) && (
+            <div className="hidden gap-1.5 font-mono text-[10px] text-text2 sm:flex">
+              {vitals.lcp != null && <span>LCP {formatRumVital('lcp', vitals.lcp)}</span>}
+              {vitals.inp != null && <span>INP {formatRumVital('inp', vitals.inp)}</span>}
+              {vitals.cls != null && <span>CLS {formatRumVital('cls', vitals.cls)}</span>}
+            </div>
+          )}
+          {seg.backendTraceId && <TracePivot traceId={seg.backendTraceId} compact />}
+        </div>
+      </div>
+      {visibleChildren.length > 0 && (
+        <ol className="relative ml-5 border-l border-border/70 py-1 pl-4 pr-3">
+          {visibleChildren.map((event, index) => (
+            <TimelineChild key={`${event.timestamp}:${event.event_type}:${index}`} event={event} sessionStart={sessionStart} />
+          ))}
+        </ol>
+      )}
+    </li>
+  )
+}
+
+function Timeline({ events }: { events: RumTimelineEvent[] }) {
+  const segments = useMemo(() => buildSegments(events), [events])
+  const counts = useMemo(() => events.reduce<Record<ChildType, number>>((acc, event) => {
+    if ((CHILD_TYPES as readonly string[]).includes(event.event_type)) acc[event.event_type as ChildType] += 1
+    return acc
+  }, { action: 0, resource: 0, error: 0, long_task: 0 }), [events])
+  const [hidden, setHidden] = useState<Set<ChildType>>(new Set())
+  if (!events.length) return <div className="py-10 text-center text-xs text-muted">No timeline events are available for this session.</div>
+  const sessionStart = new Date(events[0].timestamp).getTime()
+  const toggle = (type: ChildType) => setHidden((prev) => {
+    const next = new Set(prev)
+    if (next.has(type)) next.delete(type)
+    else next.add(type)
+    return next
+  })
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Show</span>
+        {CHILD_TYPES.map((type) => {
+          const meta = EVENT_META[type]
+          const Icon = meta.icon
+          const off = hidden.has(type)
+          const empty = !counts[type]
+          return (
+            <button
+              key={type}
+              type="button"
+              onClick={() => toggle(type)}
+              disabled={empty}
+              aria-pressed={!off}
+              className={cn(
+                'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition',
+                off ? 'border-border bg-transparent text-muted' : 'border-primary/25 bg-primary/10 text-text2',
+                empty && 'cursor-not-allowed opacity-40',
+              )}
+            >
+              <Icon className="h-3 w-3" /> {CHILD_LABEL[type].replace(/^\w/, (character) => character.toUpperCase())}s
+              <span className="tabular-nums">{counts[type]}</span>
+            </button>
+          )
+        })}
+      </div>
+      <ol className="space-y-2.5">
+        {segments.map((seg) => <SegmentRow key={seg.key} seg={seg} sessionStart={sessionStart} hidden={hidden} />)}
+      </ol>
+    </div>
   )
 }
 
@@ -201,14 +378,14 @@ function SessionDetailPanel({ fallback, detail, loading, error, onRetry }: { fal
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4"><Stat label="Duration" value={formatDurationMs(session.duration_ms)} /><Stat label="Views" value={fmtCount(session.views)} /><Stat label="Actions" value={fmtCount(session.actions)} /><Stat label="Errors" value={fmtCount(session.errors)} /></div>
       <RequestFlow
         hops={[
-          { id: 'client', label: 'Client', hint: [session.browser && `${session.browser}${session.browser_version ? ` ${session.browser_version}` : ''}`, session.os, session.country].filter(Boolean).join(' · ') || 'Unknown', icon: UserRound, tone: 'ok' },
+          { id: 'client', label: 'Client', hint: [session.browser && `${session.browser}${session.browser_version ? ` ${session.browser_version}` : ''}`, session.os, session.client_ip, session.country].filter(Boolean).join(' · ') || 'Unknown', icon: UserRound, tone: 'ok' },
           { id: 'browser', label: 'Browser', hint: `${session.views} views · ${session.actions} actions`, metric: formatDurationMs(session.duration_ms), icon: Monitor, tone: session.errors ? 'warn' : 'ok' },
           { id: 'app', label: 'Backend', hint: traceIds[0] ? `Trace ${traceIds[0].slice(0, 8)}…` : 'No correlated trace', icon: Server, tone: traceIds.length ? 'ok' : 'muted' },
         ]}
         totalLabel={formatDurationMs(session.duration_ms)}
       />
-      <Card><CardContent className="p-4"><Fact label="Session ID"><span className="font-mono text-[11px]">{session.session_id}</span></Fact><Fact label="User">{session.user_id || 'Anonymous'}</Fact><Fact label="Application">{session.application_id} · {session.env}</Fact><Fact label="Release">{session.service_version || 'Not captured'}</Fact>{session.sampled != null && <Fact label="Sampling"><Badge variant={session.sampled ? 'success' : 'warning'}>{session.sampled ? 'Sampled cohort' : 'Retained unsampled'}</Badge></Fact>}<Fact label="Client">{[session.browser && `${session.browser}${session.browser_version ? ` ${session.browser_version}` : ''}`, session.os, session.device_type, session.country].filter(Boolean).join(' · ') || 'Unknown'}</Fact><Fact label="Started">{new Date(session.started_at).toLocaleString()}</Fact><Fact label="Backend traces">{traceIds.length ? <div className="flex flex-wrap gap-2">{traceIds.map((id) => <TracePivot key={id} traceId={id} compact />)}</div> : 'No correlated trace'}</Fact></CardContent></Card>
-      <div><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="text-sm font-semibold text-text">Session timeline</h3><p className="text-[11px] text-muted">Views, actions, errors, resources and main-thread work in chronological order.{totalEvents > loadedEvents ? ` Showing the first ${loadedEvents.toLocaleString()} of ${totalEvents.toLocaleString()} events.` : ''}</p></div><Badge variant="outline">{loadedEvents.toLocaleString()}{totalEvents > loadedEvents ? ` / ${totalEvents.toLocaleString()}` : ''} events</Badge></div><Timeline events={detail?.timeline ?? []} /></div>
+      <Card><CardContent className="p-4"><Fact label="Session ID"><span className="font-mono text-[11px]">{session.session_id}</span></Fact><Fact label="User">{session.user_id || 'Anonymous'}</Fact><Fact label="Application">{session.application_id} · {session.env}</Fact><Fact label="Release">{session.service_version || 'Not captured'}</Fact>{session.sampled != null && <Fact label="Sampling"><Badge variant={session.sampled ? 'success' : 'warning'}>{session.sampled ? 'Sampled cohort' : 'Retained unsampled'}</Badge></Fact>}<Fact label="Client">{[session.browser && `${session.browser}${session.browser_version ? ` ${session.browser_version}` : ''}`, session.os, session.device_type, session.country].filter(Boolean).join(' · ') || 'Unknown'}</Fact><Fact label="IP address"><span className="font-mono text-[11px]">{session.client_ip || 'Not captured'}</span></Fact><Fact label="Started">{new Date(session.started_at).toLocaleString()}</Fact><Fact label="Backend traces">{traceIds.length ? <div className="flex flex-wrap gap-2">{traceIds.map((id) => <TracePivot key={id} traceId={id} compact />)}</div> : 'No correlated trace'}</Fact></CardContent></Card>
+      <div><div className="mb-3 flex items-center justify-between gap-3"><div><h3 className="text-sm font-semibold text-text">Session timeline</h3><p className="text-[11px] text-muted">Grouped by page view — actions, resources, errors and main-thread work are nested under the view where they happened.{totalEvents > loadedEvents ? ` Showing the first ${loadedEvents.toLocaleString()} of ${totalEvents.toLocaleString()} events.` : ''}</p></div><Badge variant="outline">{loadedEvents.toLocaleString()}{totalEvents > loadedEvents ? ` / ${totalEvents.toLocaleString()}` : ''} events</Badge></div><Timeline events={detail?.timeline ?? []} /></div>
     </div>
   )
 }

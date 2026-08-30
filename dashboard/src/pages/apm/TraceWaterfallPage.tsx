@@ -3,6 +3,7 @@ import { useLocation, useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Loader2, ArrowLeft, AlertCircle, Check, Copy, Database, Flame, Server, ArrowRightLeft, ScrollText } from 'lucide-react'
 import { api } from '@/lib/api'
+import { apiErrorMessage } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Badge } from '@/components/ui/Badge'
@@ -80,10 +81,40 @@ export function TraceWaterfallPage() {
     return <div className="flex items-center justify-center gap-2 text-muted p-12"><Loader2 className="w-4 h-4 animate-spin" /> Loading trace…</div>
   }
   if (query.isError || !query.data) {
+    const status = (query.error as { response?: { status?: number } } | null)?.response?.status
+    const notFound = !query.isError || status === 404
     return (
       <div className="space-y-4">
-        <Button variant="ghost" onClick={() => navigate(backTarget)}><ArrowLeft className="w-4 h-4 mr-1" /> {backLabel}</Button>
-        <div className="text-center text-muted py-12">Trace not found.</div>
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" onClick={() => navigate(backTarget)}><ArrowLeft className="w-4 h-4 mr-1" /> {backLabel}</Button>
+          <h1 className="text-lg font-semibold text-text">Trace</h1>
+        </div>
+        <Card className="border-warning/30">
+          <CardContent className="flex flex-col items-center py-12 text-center">
+            <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-warning/10 text-warning"><AlertCircle className="h-6 w-6" /></span>
+            <div className="mt-3 text-sm font-semibold text-text">{notFound ? 'Backend trace not available' : 'Could not load trace'}</div>
+            <p className="mt-1 max-w-lg text-xs leading-relaxed text-muted">
+              {notFound
+                ? 'This trace is no longer stored. Backend spans are retained for 14 days, so a real-user event older than that window — or a request that was sampled out or never reached an instrumented backend — has no viewable trace.'
+                : apiErrorMessage(query.error, 'The trace service did not respond.')}
+            </p>
+            {traceId && (
+              <button
+                onClick={() => { navigator.clipboard?.writeText(traceId); setCopied(true); window.setTimeout(() => setCopied(false), 1500) }}
+                title="Copy trace ID"
+                className="mt-3 inline-flex items-center gap-1.5 rounded border border-border px-2 py-1 font-mono text-xs text-muted hover:text-text"
+              >
+                {traceId}
+                {copied ? <Check className="h-3 w-3 text-success" /> : <Copy className="h-3 w-3" />}
+              </button>
+            )}
+            <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => navigate(backTarget)}><ArrowLeft className="w-3.5 h-3.5 mr-1" /> {backLabel}</Button>
+              <Button variant="outline" size="sm" onClick={() => navigate('/apm/traces')}>Search traces</Button>
+              {query.isError && <Button variant="outline" size="sm" onClick={() => query.refetch()}>Retry</Button>}
+            </div>
+          </CardContent>
+        </Card>
       </div>
     )
   }

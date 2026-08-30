@@ -191,6 +191,7 @@ export interface RumFilters {
   device_type: string
   country: string
   service_version: string
+  client_ip: string
 }
 
 export interface RumFacetValue {
@@ -357,6 +358,7 @@ export interface RumSession {
   os?: string
   device_type: string
   country: string
+  client_ip?: string
   backend_trace_id?: string
   backend_trace_ids?: string[]
 }

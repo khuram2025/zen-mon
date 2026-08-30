@@ -68,6 +68,7 @@ RUM_COLUMNS = [
     "error_fingerprint", "end_reason", "is_final", "sample_rate",
     "vital_attribution", "has_lcp", "has_inp", "has_cls", "has_fcp",
     "has_ttfb", "has_load", "sampled",
+    "client_ip",
     "dedupe_id",
 ]
 
@@ -614,6 +615,23 @@ def _user_agent(value: str) -> tuple[str, str, str, str]:
     return browser, version, os_name, device
 
 
+def _client_ip(request: Request) -> str:
+    """Best-effort real client IP behind the reverse proxy.
+
+    nginx forwards the caller in X-Forwarded-For / X-Real-IP; the left-most
+    X-Forwarded-For hop is the browser.  Falls back to the socket peer.
+    """
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first[:45]
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip:
+        return real_ip[:45]
+    return (request.client.host if request.client else "")[:45]
+
+
 def _row(event: RumEvent, key: dict, request: Request) -> list[object]:
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     event_ms = event.timestamp_ms or now_ms
@@ -644,6 +662,7 @@ def _row(event: RumEvent, key: dict, request: Request) -> list[object]:
         int(event.cls is not None), int(event.fcp is not None),
         int(event.ttfb is not None), int(event.load_ms is not None),
         int(event.sampled),
+        _client_ip(request),
         "",  # stable per-key semantic identity is attached after deduplication
     ]
 
@@ -697,7 +716,7 @@ async def _ingest_rum(request: Request, db: AsyncSession):
         _HEALTH["rejected"] += len(events)
         raise HTTPException(403, "RUM key is bound to a different application")
     try:
-        client_ip = request.client.host if request.client else "unknown"
+        client_ip = _client_ip(request) or "unknown"
         await _enforce_quota(
             key["id"], origin, client_ip,
             dict(Counter(event.session_id for event in events)), len(events),
@@ -794,6 +813,7 @@ def _scope(
     service_version: str | None = None,
     browser_version: str | None = None,
     os: str | None = None,
+    client_ip: str | None = None,
 ) -> tuple[dict[str, object], str]:
     frm, to = _window(range_)
     params: dict[str, object] = {"frm": frm, "to": to}
@@ -808,6 +828,7 @@ def _scope(
         ("service_version", service_version),
         ("browser_version", browser_version),
         ("os", os),
+        ("client_ip", client_ip),
     ):
         if value is not None and value != "":
             params[column] = value
@@ -928,6 +949,7 @@ async def rum_overview(
     service_version: str | None = None,
     browser_version: str | None = None,
     os: str | None = None,
+    client_ip: str | None = None,
     _user=Depends(get_current_user),
 ):
     params, scope_sql = _scope(
@@ -1007,6 +1029,7 @@ async def rum_overview(
             application_id=application_id, env=env, view_name=view_name,
             browser=browser, device_type=device_type, country=country,
             service_version=service_version, browser_version=browser_version, os=os,
+            client_ip=client_ip,
         ),
         "totals": {
             "events": int(totals[0]), "sessions": sessions, "views": int(totals[2]),
@@ -1059,6 +1082,7 @@ async def rum_timeseries(
     service_version: str | None = None,
     browser_version: str | None = None,
     os: str | None = None,
+    client_ip: str | None = None,
     _user=Depends(get_current_user),
 ):
     params, scope_sql = _scope(
@@ -1134,6 +1158,7 @@ async def rum_facets(
     service_version: str | None = None,
     browser_version: str | None = None,
     os: str | None = None,
+    client_ip: str | None = None,
     _user=Depends(get_current_user),
 ):
     params, scope_sql = _scope(
@@ -1145,10 +1170,13 @@ async def rum_facets(
         result = {}
         for column in (
             "application_id", "env", "view_name", "browser", "browser_version",
-            "os", "device_type", "country", "service_version",
+            "os", "device_type", "country", "service_version", "client_ip",
         ):
-            table = "zenplus.apm_rum_metrics_5m" if range_ in {"30d", "90d"} else "zenplus.apm_rum_events"
-            weight = "sum(events)" if range_ in {"30d", "90d"} else "count()"
+            # client_ip only lives on raw events (never in the 5m rollup), so it
+            # always reads from apm_rum_events regardless of the selected range.
+            use_rollup = range_ in {"30d", "90d"} and column != "client_ip"
+            table = "zenplus.apm_rum_metrics_5m" if use_rollup else "zenplus.apm_rum_events"
+            weight = "sum(events)" if use_rollup else "count()"
             rows = _ch().query(f"""
                 SELECT {column}, {weight} FROM {table}
                 WHERE {scope_sql} AND {column} != ''
@@ -1180,6 +1208,7 @@ async def rum_views(
     service_version: str | None = None,
     browser_version: str | None = None,
     os: str | None = None,
+    client_ip: str | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
     sort: str = "views",
@@ -1191,7 +1220,7 @@ async def rum_views(
         raise HTTPException(400, f"Unsupported views sort '{sort}'")
     params, scope_sql = _scope(
         range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os,
+        service_version, browser_version, os, client_ip,
     )
     params.update(limit=page_size, offset=(page - 1) * page_size)
 
@@ -1273,6 +1302,7 @@ async def rum_sessions(
     service_version: str | None = None,
     browser_version: str | None = None,
     os: str | None = None,
+    client_ip: str | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
     sort: str = "last_seen",
@@ -1284,7 +1314,7 @@ async def rum_sessions(
         raise HTTPException(400, f"Unsupported sessions sort '{sort}'")
     params, scope_sql = _scope(
         range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os,
+        service_version, browser_version, os, client_ip,
     )
     params.update(limit=page_size, offset=(page - 1) * page_size)
 
@@ -1307,7 +1337,8 @@ async def rum_sessions(
                    argMax(country, timestamp), anyIf(user_id, user_id != ''),
                    anyIf(backend_trace_id, backend_trace_id != '') AS primary_trace_id,
                    groupUniqArrayIf(100)(backend_trace_id, backend_trace_id != '') AS backend_trace_ids,
-                   argMax(sdk_version, timestamp), argMax(service_version, timestamp)
+                   argMax(sdk_version, timestamp), argMax(service_version, timestamp),
+                   anyIf(client_ip, client_ip != '') AS client_ip
             FROM zenplus.apm_rum_events WHERE {scope_sql} AND sampled = 1
             GROUP BY session_id, application_id, env
             ORDER BY {sort_sql} {order.upper()}, session_id ASC
@@ -1327,7 +1358,7 @@ async def rum_sessions(
                 "browser_version": r[12], "os": r[13], "device_type": r[14],
                 "country": r[15], "user_id": r[16], "backend_trace_id": r[17],
                 "backend_trace_ids": list(r[18] or []), "sdk_version": r[19],
-                "service_version": r[20], "sampled": True,
+                "service_version": r[20], "client_ip": r[21], "sampled": True,
             }
             for r in rows
         ],
@@ -1347,6 +1378,7 @@ async def rum_session_detail(
     service_version: str | None = None,
     browser_version: str | None = None,
     os: str | None = None,
+    client_ip: str | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=100, ge=1, le=500),
     _user=Depends(get_current_user),
@@ -1355,7 +1387,7 @@ async def rum_session_detail(
         raise HTTPException(400, "Invalid RUM session identifier")
     params, scope_sql = _scope(
         range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os,
+        service_version, browser_version, os, client_ip,
     )
     params.update(
         session=session_id, limit=page_size, offset=(page - 1) * page_size,
@@ -1372,7 +1404,7 @@ async def rum_session_detail(
                    argMax(country, timestamp), anyIf(user_id, user_id != ''),
                    groupUniqArrayIf(500)(backend_trace_id, backend_trace_id != ''),
                    argMax(sdk_version, timestamp), argMax(service_version, timestamp),
-                   max(sampled), count()
+                   max(sampled), count(), anyIf(client_ip, client_ip != '')
             FROM zenplus.apm_rum_events
             WHERE {scope_sql} AND session_id = {{session:String}}
             GROUP BY application_id, env ORDER BY max(timestamp) DESC LIMIT 1
@@ -1457,6 +1489,7 @@ async def rum_session_detail(
             "backend_trace_ids": list(summary[15] or []),
             "backend_trace_id": (summary[15][0] if summary[15] else ""),
             "sdk_version": summary[16], "service_version": summary[17],
+            "client_ip": (summary[20] if len(summary) > 20 else ""),
             "sampled": bool(summary[18]),
         },
         "total": total, "page": page, "page_size": page_size,
@@ -1483,6 +1516,7 @@ async def rum_errors(
     service_version: str | None = None,
     browser_version: str | None = None,
     os: str | None = None,
+    client_ip: str | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
     sort: str = "count",
@@ -1494,7 +1528,7 @@ async def rum_errors(
         raise HTTPException(400, f"Unsupported errors sort '{sort}'")
     params, scope_sql = _scope(
         range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os,
+        service_version, browser_version, os, client_ip,
     )
     params.update(limit=page_size, offset=(page - 1) * page_size)
     fingerprint = "if(error_fingerprint != '', error_fingerprint, lower(hex(MD5(concat(error_type, ':', error_message)))))"
@@ -1567,6 +1601,7 @@ async def rum_resources(
     service_version: str | None = None,
     browser_version: str | None = None,
     os: str | None = None,
+    client_ip: str | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
     sort: str = "duration_p75",
@@ -1578,7 +1613,7 @@ async def rum_resources(
         raise HTTPException(400, f"Unsupported resources sort '{sort}'")
     params, scope_sql = _scope(
         range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os,
+        service_version, browser_version, os, client_ip,
     )
     params.update(limit=page_size, offset=(page - 1) * page_size)
     group = "application_id, env, view_name, resource_url, resource_type, method, status_code"
@@ -1647,6 +1682,7 @@ async def rum_actions(
     service_version: str | None = None,
     browser_version: str | None = None,
     os: str | None = None,
+    client_ip: str | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
     sort: str = "count",
@@ -1658,7 +1694,7 @@ async def rum_actions(
         raise HTTPException(400, f"Unsupported actions sort '{sort}'")
     params, scope_sql = _scope(
         range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os,
+        service_version, browser_version, os, client_ip,
     )
     params.update(limit=page_size, offset=(page - 1) * page_size)
     name_expr = "if(event_type = 'long_task', 'Long task', action_name)"
@@ -1716,6 +1752,7 @@ async def rum_health(
     service_version: str | None = None,
     browser_version: str | None = None,
     os: str | None = None,
+    client_ip: str | None = None,
     _user=Depends(get_current_user),
 ):
     params, scope_sql = _scope(
@@ -1768,6 +1805,7 @@ async def rum_summary(
     service_version: str | None = None,
     browser_version: str | None = None,
     os: str | None = None,
+    client_ip: str | None = None,
     _user=Depends(get_current_user),
 ):
     """Legacy dashboard contract backed by the corrected analytics queries."""
@@ -1775,7 +1813,8 @@ async def rum_summary(
         "range_": range_, "application_id": application_id, "env": env,
         "view_name": view_name, "browser": browser, "device_type": device_type,
         "country": country, "service_version": service_version,
-        "browser_version": browser_version, "os": os, "_user": _user,
+        "browser_version": browser_version, "os": os, "client_ip": client_ip,
+        "_user": _user,
     }
     overview = await rum_overview(**common)
     views = await rum_views(**common, page=1, page_size=100, sort="views", order="desc")

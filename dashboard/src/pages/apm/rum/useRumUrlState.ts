@@ -55,6 +55,7 @@ export function useRumUrlState() {
     device_type: params.get('device_type') || '',
     country: params.get('country') || '',
     service_version: params.get('service_version') || '',
+    client_ip: params.get('client_ip') || '',
   }), [params])
   const page = positiveInt(params.get('page'), 1, 1_000_000)
   const pageSize = oneOf(params.get('page_size'), ['25', '50', '100'] as const, '25')
