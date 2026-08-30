@@ -56,6 +56,7 @@ from app.services.report_service import (
     MARGIN_T,
     ZenPlusReport,
     _fetch_company_info,
+    _make_bar_chart,
     _make_donut,
     _make_line_chart,
     _make_time_bar_chart,
@@ -144,6 +145,23 @@ class SectionCtx:
     def device_ids(self) -> Optional[list[str]]:
         ids = self.filters.get("device_ids")
         return [str(i) for i in ids] if ids else None
+
+    @property
+    def application_id(self) -> Optional[str]:
+        """RUM application to scope browser sections to; None means every application."""
+        app = self.filters.get("application_id")
+        return str(app) if app else None
+
+    def rum_app_clause(self) -> str:
+        """SQL fragment scoping a RUM query to the selected application."""
+        return " AND application_id = %(app)s" if self.application_id else ""
+
+    def rum_params(self, **extra: Any) -> dict:
+        p: dict[str, Any] = {"f": self.frm, "t": self.to}
+        if self.application_id:
+            p["app"] = self.application_id
+        p.update(extra)
+        return p
 
     async def dataset(self, name: str) -> dict:
         if name not in self._cache:
@@ -886,6 +904,308 @@ async def _sec_usage_users(ctx: SectionCtx) -> dict:
     )
 
 
+# ─── Browser RUM sections ───────────────────────────────────────────────────
+#
+# These read zenplus.apm_rum_events — what real browsers reported — rather than
+# server spans, so they answer the question a business owner actually asks:
+# how many people used the product, what did they use, and was it fast and
+# reliable for them. Google's Core Web Vitals thresholds are used verbatim so
+# the verdicts match what Search Console and PageSpeed report.
+
+# metric -> (good_max, poor_min, unit) using the p75 the Web Vitals spec scores on.
+_VITAL_THRESHOLDS = {
+    "LCP": (2500.0, 4000.0, "ms"),
+    "INP": (200.0, 500.0, "ms"),
+    "CLS": (0.10, 0.25, ""),
+    "FCP": (1800.0, 3000.0, "ms"),
+    "TTFB": (800.0, 1800.0, "ms"),
+}
+
+
+def _vital_verdict(metric: str, value: Optional[float]) -> tuple[str, str]:
+    """(verdict, accent) for a Core Web Vital p75."""
+    if value is None:
+        return "No data", "info"
+    good, poor, _ = _VITAL_THRESHOLDS[metric]
+    if value <= good:
+        return "Good", "success"
+    if value <= poor:
+        return "Needs work", "warning"
+    return "Poor", "danger"
+
+
+def _fmt_vital(metric: str, value: Optional[float]) -> str:
+    if value is None:
+        return "—"
+    return f"{value:.3f}" if metric == "CLS" else _fmt_ms(value)
+
+
+async def _sec_rum_audience(ctx: SectionCtx) -> dict:
+    sessions = users = views = actions = 0
+    per_session = 0.0
+    series_pts: list[tuple[datetime, float]] = []
+    series_png = None
+    try:
+        app = ctx.rum_app_clause()
+        t = ctx.ch().query(
+            f"""
+            SELECT uniq(session_id),
+                   uniqIf(user_id, user_id != ''),
+                   countIf(event_type = 'view'),
+                   countIf(event_type = 'action')
+            FROM zenplus.apm_rum_events
+            WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+            """, parameters=ctx.rum_params()).result_rows[0]
+        sessions, users, views, actions = int(t[0]), int(t[1]), int(t[2]), int(t[3])
+        per_session = views / sessions if sessions else 0.0
+        rows = ctx.ch().query(
+            f"""
+            SELECT toStartOfInterval(timestamp, INTERVAL {ctx.bucket()}) AS b,
+                   uniq(session_id)
+            FROM zenplus.apm_rum_events
+            WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+            GROUP BY b ORDER BY b
+            """, parameters=ctx.rum_params()).result_rows
+        series_pts = [(r[0], float(r[1])) for r in rows]
+        if len(series_pts) >= 2:
+            series_png = _make_line_chart([p[0] for p in series_pts], [p[1] for p in series_pts],
+                                          ylabel="sessions", color=HEX_PRIMARY)
+    except Exception:
+        logger.debug("rum audience unavailable", exc_info=True)
+    return _section(
+        "rum_audience", "Audience & Engagement",
+        description="Real people who opened the application in a browser during this period.",
+        kpis=[
+            {"label": "Sessions", "value": f"{sessions:,}", "accent": "primary"},
+            {"label": "Unique users", "value": f"{users:,}", "accent": "info",
+             "subtitle": "signed-in identities" if users else "no user attribution"},
+            {"label": "Page views", "value": f"{views:,}", "accent": "primary"},
+            {"label": "Views / session", "value": f"{per_session:.1f}", "accent": "info",
+             "subtitle": "engagement depth"},
+            {"label": "User actions", "value": f"{actions:,}", "accent": "success",
+             "subtitle": "clicks and interactions"},
+        ],
+        charts=([{"title": "Sessions over time", "png": series_png,
+                  "series": {"kind": "area", "unit": "sessions", "color": "primary",
+                             "points": [{"t": t.isoformat(), "v": v} for t, v in series_pts]}}]
+                if series_png else []),
+        notes=[] if sessions else
+        ["No browser telemetry in this window — install a Browser RUM key from APM Settings → Ingest keys."],
+    )
+
+
+async def _sec_rum_experience(ctx: SectionCtx) -> dict:
+    vitals: dict[str, Optional[float]] = {k: None for k in _VITAL_THRESHOLDS}
+    good = needs = poor = 0
+    donut_png = None
+    try:
+        app = ctx.rum_app_clause()
+        r = ctx.ch().query(
+            f"""
+            SELECT quantileIf(0.75)(lcp, has_lcp = 1),
+                   quantileIf(0.75)(inp, has_inp = 1),
+                   quantileIf(0.75)(cls, has_cls = 1),
+                   quantileIf(0.75)(fcp, has_fcp = 1),
+                   quantileIf(0.75)(ttfb, has_ttfb = 1),
+                   countIf(has_lcp = 1 AND lcp <= 2500),
+                   countIf(has_lcp = 1 AND lcp > 2500 AND lcp <= 4000),
+                   countIf(has_lcp = 1 AND lcp > 4000)
+            FROM zenplus.apm_rum_events
+            WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+            """, parameters=ctx.rum_params()).result_rows[0]
+        for i, k in enumerate(["LCP", "INP", "CLS", "FCP", "TTFB"]):
+            v = r[i]
+            # An empty quantile comes back as nan, which is not JSON-encodable.
+            vitals[k] = float(v) if v is not None and float(v) == float(v) else None
+        good, needs, poor = int(r[5]), int(r[6]), int(r[7])
+        if good + needs + poor:
+            donut_png = _make_donut(
+                ["Good", "Needs work", "Poor"],
+                [float(good), float(needs), float(poor)],
+                colors=[HEX_SUCCESS, HEX_WARNING, "#E5484D"],
+                unit="views",
+            )
+    except Exception:
+        logger.debug("rum experience unavailable", exc_info=True)
+
+    kpis = []
+    for k in ["LCP", "INP", "CLS", "FCP", "TTFB"]:
+        verdict, accent = _vital_verdict(k, vitals[k])
+        kpis.append({"label": f"{k} (p75)", "value": _fmt_vital(k, vitals[k]),
+                     "accent": accent, "subtitle": verdict})
+    total = good + needs + poor
+    return _section(
+        "rum_experience", "Real-User Experience",
+        description=("Core Web Vitals at the 75th percentile — the score Google applies to "
+                     "search ranking, measured on your real visitors' devices."),
+        kpis=kpis,
+        charts=([{"title": "Page-load experience (LCP)", "png": donut_png,
+                  "series": {"kind": "donut", "unit": "views",
+                             "points": [{"label": "Good", "value": good},
+                                        {"label": "Needs work", "value": needs},
+                                        {"label": "Poor", "value": poor}]}}]
+                if donut_png else []),
+        notes=([f"{good / total * 100:.0f}% of page loads met the “Good” bar for LCP."]
+               if total else
+               ["No Core Web Vitals collected yet — vitals arrive once real visitors load an instrumented page."]),
+    )
+
+
+async def _sec_rum_top_pages(ctx: SectionCtx) -> dict:
+    rows_out: list[list[str]] = []
+    bar_png = None
+    try:
+        app = ctx.rum_app_clause()
+        rows = ctx.ch().query(
+            f"""
+            SELECT view_name,
+                   countIf(event_type = 'view') AS views,
+                   uniq(session_id),
+                   uniqIf(user_id, user_id != ''),
+                   quantileIf(0.75)(lcp, has_lcp = 1),
+                   quantileIf(0.75)(load_ms, has_load = 1),
+                   countIf(event_type = 'error')
+            FROM zenplus.apm_rum_events
+            WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND view_name != ''{app}
+            GROUP BY view_name ORDER BY views DESC LIMIT 15
+            """, parameters=ctx.rum_params()).result_rows
+        labels, values = [], []
+        for r in rows:
+            lcp = float(r[4]) if r[4] is not None and float(r[4]) == float(r[4]) else None
+            load = float(r[5]) if r[5] is not None and float(r[5]) == float(r[5]) else None
+            rows_out.append([r[0], f"{int(r[1]):,}", f"{int(r[2]):,}", f"{int(r[3]):,}",
+                             _fmt_vital("LCP", lcp), _fmt_ms(load) if load else "—",
+                             f"{int(r[6]):,}"])
+            labels.append(r[0])
+            values.append(float(r[1]))
+        if labels:
+            bar_png = _make_bar_chart(labels[:10], values[:10], ylabel="views")
+    except Exception:
+        logger.debug("rum top pages unavailable", exc_info=True)
+    return _section(
+        "rum_top_pages", "Most-Visited Pages",
+        description="Where visitors actually spend their attention, and how each page performs.",
+        charts=([{"title": "Views by page", "png": bar_png,
+                  "series": {"kind": "rank", "unit": "views", "color": "primary",
+                             "points": [{"label": r[0], "value": int(r[1].replace(",", ""))}
+                                        for r in rows_out[:10]]}}]
+                if bar_png else []),
+        tables=[{"headers": ["Page", "Views", "Sessions", "Users", "LCP p75", "Load p75", "Errors"],
+                 "styles": ["text", "num", "num", "num", "num", "num", "num"],
+                 "rows": rows_out}],
+    )
+
+
+async def _sec_rum_segments(ctx: SectionCtx) -> dict:
+    device_rows: list[list[str]] = []
+    browser_rows: list[list[str]] = []
+    donut_png = None
+    try:
+        app = ctx.rum_app_clause()
+        drows = ctx.ch().query(
+            f"""
+            SELECT device_type, uniq(session_id) AS s, countIf(event_type = 'view'),
+                   quantileIf(0.75)(lcp, has_lcp = 1)
+            FROM zenplus.apm_rum_events
+            WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND device_type != ''{app}
+            GROUP BY device_type ORDER BY s DESC LIMIT 10
+            """, parameters=ctx.rum_params()).result_rows
+        total_sessions = sum(int(r[1]) for r in drows) or 1
+        dev_labels, dev_values = [], []
+        for r in drows:
+            lcp = float(r[3]) if r[3] is not None and float(r[3]) == float(r[3]) else None
+            device_rows.append([r[0].title(), f"{int(r[1]):,}",
+                                _fmt_pct(int(r[1]) / total_sessions * 100, 1),
+                                f"{int(r[2]):,}", _fmt_vital("LCP", lcp)])
+            dev_labels.append(r[0].title())
+            dev_values.append(float(r[1]))
+        if dev_labels:
+            donut_png = _make_donut(dev_labels, dev_values, unit="sessions")
+
+        brows = ctx.ch().query(
+            f"""
+            SELECT browser, anyHeavy(os), uniq(session_id) AS s,
+                   countIf(event_type = 'view'), countIf(event_type = 'error')
+            FROM zenplus.apm_rum_events
+            WHERE timestamp >= %(f)s AND timestamp <= %(t)s AND browser != ''{app}
+            GROUP BY browser ORDER BY s DESC LIMIT 10
+            """, parameters=ctx.rum_params()).result_rows
+        for r in brows:
+            browser_rows.append([r[0], str(r[1] or "—"), f"{int(r[2]):,}",
+                                 f"{int(r[3]):,}", f"{int(r[4]):,}"])
+    except Exception:
+        logger.debug("rum segments unavailable", exc_info=True)
+    return _section(
+        "rum_segments", "Audience Segments",
+        description="Which devices and browsers your visitors use — and whether any of them get a worse experience.",
+        charts=([{"title": "Sessions by device", "png": donut_png,
+                  "series": {"kind": "donut", "unit": "sessions",
+                             "points": [{"label": r[0], "value": int(r[1].replace(",", ""))}
+                                        for r in device_rows]}}]
+                if donut_png else []),
+        tables=[
+            {"title": "By device", "headers": ["Device", "Sessions", "Share", "Views", "LCP p75"],
+             "styles": ["text", "num", "num", "num", "num"], "rows": device_rows},
+            {"title": "By browser", "headers": ["Browser", "OS", "Sessions", "Views", "Errors"],
+             "styles": ["text", "text", "num", "num", "num"], "rows": browser_rows},
+        ],
+    )
+
+
+async def _sec_rum_reliability(ctx: SectionCtx) -> dict:
+    errors = distinct = affected_sessions = affected_users = 0
+    views = 0
+    rows_out: list[list[str]] = []
+    try:
+        app = ctx.rum_app_clause()
+        t = ctx.ch().query(
+            f"""
+            SELECT countIf(event_type = 'error'),
+                   uniqIf(error_fingerprint, error_fingerprint != ''),
+                   uniqIf(session_id, event_type = 'error'),
+                   uniqIf(user_id, event_type = 'error' AND user_id != ''),
+                   countIf(event_type = 'view')
+            FROM zenplus.apm_rum_events
+            WHERE timestamp >= %(f)s AND timestamp <= %(t)s{app}
+            """, parameters=ctx.rum_params()).result_rows[0]
+        errors, distinct, affected_sessions, affected_users, views = (
+            int(t[0]), int(t[1]), int(t[2]), int(t[3]), int(t[4]))
+        rows = ctx.ch().query(
+            f"""
+            SELECT anyHeavy(error_message), anyHeavy(error_type), anyHeavy(view_name),
+                   count() AS n, uniq(session_id), max(timestamp)
+            FROM zenplus.apm_rum_events
+            WHERE timestamp >= %(f)s AND timestamp <= %(t)s
+              AND event_type = 'error' AND error_fingerprint != ''{app}
+            GROUP BY error_fingerprint ORDER BY n DESC LIMIT 12
+            """, parameters=ctx.rum_params()).result_rows
+        for r in rows:
+            msg = str(r[0] or "Unknown error")
+            rows_out.append([msg if len(msg) <= 90 else msg[:89] + "…",
+                             str(r[1] or "—"), str(r[2] or "—"),
+                             f"{int(r[3]):,}", f"{int(r[4]):,}",
+                             r[5].strftime("%m-%d %H:%M") if r[5] else "—"])
+    except Exception:
+        logger.debug("rum reliability unavailable", exc_info=True)
+    err_rate = errors / views * 100 if views else 0.0
+    return _section(
+        "rum_reliability", "Reliability in the Browser",
+        description="JavaScript failures real visitors hit — each one is a person who could not finish what they came to do.",
+        kpis=[
+            {"label": "Errors", "value": f"{errors:,}",
+             "accent": "danger" if errors else "success"},
+            {"label": "Distinct issues", "value": f"{distinct:,}", "accent": "warning"},
+            {"label": "Error rate", "value": _fmt_pct(err_rate),
+             "accent": "danger" if err_rate > 1 else "success", "subtitle": "of page views"},
+            {"label": "Sessions affected", "value": f"{affected_sessions:,}", "accent": "warning"},
+            {"label": "Users affected", "value": f"{affected_users:,}", "accent": "danger" if affected_users else "success"},
+        ],
+        tables=[{"headers": ["Error", "Type", "Page", "Count", "Sessions", "Last seen"],
+                 "styles": ["text", "text", "text", "num", "num", "num"], "rows": rows_out}],
+        notes=[] if errors else ["No browser errors reported in this period."],
+    )
+
+
 # ─── Capacity sections ──────────────────────────────────────────────────────
 
 async def _sec_capacity_filesystems(ctx: SectionCtx) -> dict:
@@ -1138,6 +1458,21 @@ SECTION_REGISTRY: dict[str, dict[str, Any]] = {
                    "description": "Requests, unique users, pages and error rate."},
     "usage_pages": {"fn": _sec_usage_pages, "title": "Top Pages", "category": "Applications",
                     "description": "Most visited routes with audience and latency."},
+    "rum_audience": {"fn": _sec_rum_audience, "title": "Audience & Engagement",
+                     "category": "Applications",
+                     "description": "Browser sessions, users, page views and engagement depth."},
+    "rum_experience": {"fn": _sec_rum_experience, "title": "Real-User Experience",
+                       "category": "Applications",
+                       "description": "Core Web Vitals (LCP/INP/CLS) at p75 with Google's verdicts."},
+    "rum_top_pages": {"fn": _sec_rum_top_pages, "title": "Most-Visited Pages",
+                      "category": "Applications",
+                      "description": "Top pages by views with per-page speed and errors."},
+    "rum_segments": {"fn": _sec_rum_segments, "title": "Audience Segments",
+                     "category": "Applications",
+                     "description": "Device and browser mix, and the experience each segment gets."},
+    "rum_reliability": {"fn": _sec_rum_reliability, "title": "Reliability in the Browser",
+                        "category": "Applications",
+                        "description": "JavaScript errors, distinct issues and affected users."},
     "usage_users": {"fn": _sec_usage_users, "title": "Top Users", "category": "Applications",
                     "description": "Most active users by request volume."},
     # Capacity
@@ -1210,6 +1545,14 @@ REPORT_PRESETS: dict[str, dict[str, Any]] = {
         "description": "Application traffic, top pages and most active users.",
         "category": "Applications",
         "sections": ["usage_kpis", "usage_pages", "usage_users"],
+    },
+    "rum_usage": {
+        "title": "Digital Experience Report",
+        "description": ("How real people experienced the application in their browser — audience, "
+                        "engagement, Core Web Vitals and reliability."),
+        "category": "Applications",
+        "sections": ["rum_audience", "rum_experience", "rum_top_pages",
+                     "rum_segments", "rum_reliability"],
     },
     "inventory": {
         "title": "Inventory Report",
@@ -1326,7 +1669,8 @@ def render_html(meta: dict, sections: list[dict]) -> str:
   <div class="brand">{brand_img}<span>{_esc(meta.get('company_name') or 'ZenPlus')}</span></div>
   <h1>{_esc(meta.get('title') or 'Report')}</h1>
   <div class="meta">{_esc(meta.get('period_label') or '')} &nbsp;·&nbsp;
-    Generated {_esc(meta.get('generated_label') or '')}</div>
+    Generated {_esc(meta.get('generated_label') or '')}
+    {f"&nbsp;·&nbsp; Scope: {_esc(meta.get('scope_label') or '')}" if meta.get('scope_label') else ''}</div>
 </div>
 <div class="content">"""]
 

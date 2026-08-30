@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -17,6 +17,7 @@ import {
 } from 'recharts'
 import {
   ArrowLeft,
+  Boxes,
   CalendarClock,
   Check,
   ChevronDown,
@@ -49,7 +50,7 @@ interface RenderKpi {
 }
 
 interface ChartSeries {
-  kind: 'area' | 'bars' | 'donut'
+  kind: 'area' | 'bars' | 'donut' | 'rank'
   unit?: string
   color?: KpiAccent
   y_domain?: [number, number]
@@ -177,6 +178,40 @@ function TimeSeriesChart({ series }: { series: ChartSeries }) {
         </AreaChart>
       )}
     </ResponsiveContainer>
+  )
+}
+
+/** Ranked horizontal bars for categorical data (top pages, top talkers).
+ *  Distinct from `bars`, which is a time-bucketed column chart. */
+function RankBarChart({ series }: { series: ChartSeries }) {
+  const data = series.points
+    .filter((p) => p.label != null && (p.value ?? 0) > 0)
+    .map((p) => ({ name: p.label!, value: p.value! }))
+    .sort((a, b) => b.value - a.value)
+  if (data.length === 0) {
+    return <p className="py-8 text-center text-sm text-muted">No data for this window</p>
+  }
+  const max = data[0].value || 1
+  return (
+    <div className="space-y-1.5">
+      {data.map((d) => (
+        <div key={d.name} className="flex items-center gap-2.5 text-xs">
+          <span className="w-[42%] shrink-0 truncate font-medium text-text2" title={d.name}>{d.name}</span>
+          <div className="h-3.5 min-w-0 flex-1 overflow-hidden rounded-sm bg-surface2">
+            <div
+              className="h-full rounded-sm"
+              style={{ width: `${Math.max(2, (d.value / max) * 100)}%`, background: ACCENT[series.color || 'primary'] }}
+            />
+          </div>
+          <span className="w-16 shrink-0 text-right tabular-nums text-text">
+            {d.value.toLocaleString()}
+          </span>
+        </div>
+      ))}
+      {series.unit && (
+        <p className="pt-0.5 text-right text-[10px] text-muted">{series.unit}</p>
+      )}
+    </div>
   )
 }
 
@@ -441,6 +476,8 @@ function SectionCard({ section, index }: { section: RenderSection; index: number
             )}
             {chart.series?.kind === 'donut' ? (
               <DonutChart series={chart.series} />
+            ) : chart.series?.kind === 'rank' ? (
+              <RankBarChart series={chart.series} />
             ) : chart.series ? (
               <TimeSeriesChart series={chart.series} />
             ) : chart.data_uri ? (
@@ -493,6 +530,90 @@ interface DeviceLite {
   id: string
   hostname: string | null
   ip_address: string | null
+}
+
+interface RumApplication {
+  application_id: string
+  service_name: string
+  sessions: number
+  last_seen: string | null
+}
+
+/** Scope a browser-RUM report to one application, or leave it across all of them. */
+function ApplicationScopePicker({
+  selected,
+  onChange,
+}: {
+  selected: string | null
+  onChange: (appId: string | null) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  const { data } = useQuery<{ applications: RumApplication[] }>({
+    queryKey: ['reports', 'rum-applications'],
+    queryFn: async () => (await api.get('/reports/rum-applications')).data,
+    staleTime: 5 * 60_000,
+  })
+  const apps = data?.applications ?? []
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [open])
+
+  const label = selected
+    ? apps.find((a) => a.application_id === selected)?.application_id ?? selected
+    : 'All applications'
+
+  return (
+    <div ref={ref} className="relative">
+      <Button variant="outline" size="sm" className="h-8 gap-1.5" onClick={() => setOpen((v) => !v)}>
+        <Boxes className="h-3.5 w-3.5" />
+        <span className="max-w-[160px] truncate text-xs font-semibold">{label}</span>
+        <ChevronDown className="h-3 w-3 opacity-60" />
+      </Button>
+      {open && (
+        <div className="absolute right-0 z-30 mt-1 w-72 overflow-hidden rounded-lg border border-border bg-surface p-1 shadow-elevated">
+          <button
+            type="button"
+            onClick={() => { onChange(null); setOpen(false) }}
+            className={cn('flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left text-xs hover:bg-surface2',
+              !selected && 'bg-surface2 font-semibold text-text')}
+          >
+            All applications
+            {!selected && <Check className="h-3.5 w-3.5 text-primary" />}
+          </button>
+          {apps.length === 0 && (
+            <div className="px-2.5 py-3 text-center text-[11px] text-muted">
+              No browser telemetry yet — install a RUM key to populate this.
+            </div>
+          )}
+          {apps.map((a) => (
+            <button
+              key={a.application_id}
+              type="button"
+              onClick={() => { onChange(a.application_id); setOpen(false) }}
+              className={cn('flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-left hover:bg-surface2',
+                selected === a.application_id && 'bg-surface2')}
+            >
+              <span className="min-w-0">
+                <span className="block truncate text-xs font-medium text-text">{a.application_id}</span>
+                <span className="block truncate text-[10px] text-muted">
+                  {a.service_name || 'no service name'} · {a.sessions.toLocaleString()} sessions
+                </span>
+              </span>
+              {selected === a.application_id && <Check className="h-3.5 w-3.5 shrink-0 text-primary" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function DeviceScopePicker({
@@ -644,12 +765,14 @@ function RenderExportMenu({
   fromISO,
   toISO,
   deviceIds,
+  applicationId,
 }: {
   reportKey: string
   customId: string | null
   fromISO: string
   toISO: string
   deviceIds?: string[]
+  applicationId?: string | null
 }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState<RenderFormat | null>(null)
@@ -667,6 +790,7 @@ function RenderExportMenu({
           to: toISO,
           ...(customId ? { custom_id: customId } : {}),
           ...(deviceIds && deviceIds.length > 0 ? { device_ids: deviceIds.join(',') } : {}),
+          ...(applicationId ? { application_id: applicationId } : {}),
         },
         responseType: 'blob',
         timeout: 120_000,
@@ -758,6 +882,17 @@ export default function SectionReportViewer() {
   })
   const supportsDeviceFilter =
     catalog?.types.find((t) => t.key === key)?.filterable?.includes('devices') ?? false
+  const supportsAppFilter =
+    catalog?.types.find((t) => t.key === key)?.filterable?.includes('applications') ?? false
+
+  // Application scope (browser-RUM reports): in the URL so a scoped view is shareable.
+  const appId = searchParams.get('app') || null
+  const setAppId = (id: string | null) => {
+    const next = new URLSearchParams(searchParams)
+    if (id) next.set('app', id)
+    else next.delete('app')
+    setSearchParams(next, { replace: true })
+  }
 
   // Presets slide with the wall clock every minute; bucket the window to 5
   // minutes so a heavy report isn't refetched (and reset to skeletons) each
@@ -772,7 +907,7 @@ export default function SectionReportViewer() {
   }, [range.fromISO, range.toISO])
 
   const { data, isLoading, error, isPlaceholderData } = useQuery<RenderReport>({
-    queryKey: ['reports', 'render', key, customId ?? null, fromISO, toISO, nodeIds.join(',')],
+    queryKey: ['reports', 'render', key, customId ?? null, fromISO, toISO, nodeIds.join(','), appId],
     queryFn: async () =>
       (
         await api.get(`/reports/render/${key}`, {
@@ -782,6 +917,7 @@ export default function SectionReportViewer() {
             to: toISO,
             ...(customId ? { custom_id: customId } : {}),
             ...(nodeIds.length > 0 ? { device_ids: nodeIds.join(',') } : {}),
+            ...(appId ? { application_id: appId } : {}),
           },
           timeout: 120_000,
         })
@@ -829,12 +965,14 @@ export default function SectionReportViewer() {
               onCustom={setCustom}
             />
             {supportsDeviceFilter && <DeviceScopePicker selected={nodeIds} onChange={setNodeIds} />}
+            {supportsAppFilter && <ApplicationScopePicker selected={appId} onChange={setAppId} />}
             <RenderExportMenu
               reportKey={key}
               customId={customId}
               fromISO={fromISO}
               toISO={toISO}
               deviceIds={nodeIds}
+              applicationId={appId}
             />
             <Button variant="outline" size="sm" className="h-8 gap-1.5" onClick={() => setScheduleOpen(true)}>
               <CalendarClock className="h-3.5 w-3.5" />

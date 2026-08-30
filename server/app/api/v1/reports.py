@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -20,6 +21,7 @@ from app.services.report_data_service import (
 )
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
+logger = logging.getLogger(__name__)
 
 REPORT_NAMES = {
     'executive_summary': 'Executive-Summary',
@@ -291,8 +293,10 @@ async def report_catalog(
         {"key": k, "title": p["title"], "description": p["description"],
          "category": p["category"], "engine": "sections",
          "formats": ["html", "pdf"], "sections": p["sections"],
-         # Reports whose sections honour the device filter.
-         "filterable": (["devices"] if k == "availability" else [])}
+         # Which scope filters this report's sections actually honour.
+         "filterable": (["devices"] if k == "availability" else
+                        ["applications"] if any(s.startswith("rum_") for s in p["sections"])
+                        else [])}
         for k, p in _rs.REPORT_PRESETS.items()
     ]
     sections = [
@@ -311,6 +315,36 @@ async def report_catalog(
     return {"types": legacy + presets, "sections": sections, "custom": custom}
 
 
+@router.get("/rum-applications")
+async def list_rum_applications(
+    days: int = Query(30, ge=1, le=90),
+    current_user: User = Depends(get_current_user),
+):
+    """Applications that have reported browser telemetry, for the report scope picker."""
+    from app.core.database import get_clickhouse_client
+    out: list[dict] = []
+    try:
+        rows = get_clickhouse_client().query(
+            """
+            SELECT application_id, anyHeavy(service_name), uniq(session_id) AS s, max(timestamp)
+            FROM zenplus.apm_rum_events
+            WHERE timestamp >= now() - INTERVAL %(d)s DAY AND application_id != ''
+            GROUP BY application_id ORDER BY s DESC LIMIT 200
+            """,
+            parameters={"d": days},
+        ).result_rows
+        for r in rows:
+            out.append({
+                "application_id": str(r[0]),
+                "service_name": str(r[1] or ""),
+                "sessions": int(r[2] or 0),
+                "last_seen": r[3].isoformat() if r[3] else None,
+            })
+    except Exception:
+        logger.debug("rum applications unavailable", exc_info=True)
+    return {"days": days, "applications": out}
+
+
 @router.get("/render/{key}")
 async def render_section_report(
     key: str,
@@ -320,6 +354,8 @@ async def render_section_report(
     hours: int = Query(24, ge=1, le=24 * 92),
     custom_id: Optional[str] = None,
     device_ids: Optional[str] = Query(None, description="Comma-separated device UUIDs to scope node-aware sections"),
+    application_id: Optional[str] = Query(None, max_length=128,
+                                          description="Scope browser RUM sections to one application; omit for all"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -330,7 +366,7 @@ async def render_section_report(
     except KeyError:
         raise HTTPException(404, f"Unknown report: {key}")
 
-    filters = None
+    filters: Optional[dict] = None
     if device_ids:
         ids = [i.strip() for i in device_ids.split(",") if i.strip()]
         try:
@@ -341,13 +377,19 @@ async def render_section_report(
         if len(ids) > 500:
             raise HTTPException(400, "Too many device ids (max 500)")
         filters = {"device_ids": ids}
+    if application_id:
+        filters = {**(filters or {}), "application_id": application_id.strip()}
 
     start, end = _window_from_query(from_, to, hours)
     sections = await _rs.build_sections(db, section_ids, start, end, filters)
     category = (_rs.REPORT_PRESETS.get(key) or {}).get("category") or \
         ("Custom Report" if key == "custom" else "")
-    scope_label = (f"{len(filters['device_ids'])} selected device(s)"
-                   if filters else "All monitored infrastructure")
+    scope_bits = []
+    if filters and filters.get("device_ids"):
+        scope_bits.append(f"{len(filters['device_ids'])} selected device(s)")
+    if filters and filters.get("application_id"):
+        scope_bits.append(f"application “{filters['application_id']}”")
+    scope_label = " · ".join(scope_bits) if scope_bits else "All monitored infrastructure"
     meta = await _rs.build_report_meta(db, title, start, end,
                                       description=description,
                                       category=category,
@@ -360,6 +402,7 @@ async def render_section_report(
             "period_label": meta["period_label"],
             "generated_label": meta["generated_label"],
             "company_name": meta["company_name"],
+            "scope_label": scope_label,
             "sections": _rs.sections_to_json(sections),
         }
 
