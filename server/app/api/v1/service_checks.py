@@ -387,14 +387,16 @@ async def service_check_uptime_stats(
 @router.get("/daily-uptime")
 async def service_check_daily_uptime(
     days: int = Query(default=30, ge=1, le=90),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Daily uptime percentage per check, batched for every check at once.
 
     Powers the per-row uptime bar strips on the services list — one rollup scan
-    instead of a request per check.
+    instead of a request per check. Sample-less days are reconstructed from the
+    status log so an ingestion gap does not read as "not monitored".
     """
-    return await service_check_service.get_daily_uptime_all(days)
+    return await service_check_service.get_daily_uptime_all(db, days)
 
 
 @router.post("", response_model=ServiceCheckResponse, status_code=201)

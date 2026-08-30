@@ -959,6 +959,8 @@ async def get_service_sla(
     incident_count = 0
     longest_incident_sec = 0.0
     total_downtime_sec = 0.0
+    transitions: list[tuple[datetime, str]] = []
+    entered_down = False
     try:
         res = ch.query(
             f"""
@@ -969,7 +971,6 @@ async def get_service_sla(
             """,
             parameters=bounds,
         )
-        transitions: list[tuple[datetime, str]] = []
         for r in res.result_rows or []:
             ts = r[0]
             if ts.tzinfo is None:
@@ -1030,10 +1031,21 @@ async def get_service_sla(
     window_sec = max(1.0, (win_to - win_from).total_seconds())
     mtbf_sec = ((window_sec - total_downtime_sec) / incident_count) if incident_count > 0 else None
 
-    # Reconcile the two sources: during an ingestion gap the metrics table can miss an outage
-    # the status log recorded, quoting "100% up" alongside non-zero downtime in the same
-    # response. Sample-based availability is capped by the reconstructed wall-clock downtime.
-    if total_downtime_sec > 0:
+    # Availability from the reconstructed outage timeline, the way uptime products score it:
+    # wall-clock downtime over monitored wall-clock time. Probe samples are biased whenever
+    # ingestion has gaps — a stretch that stored no samples contributes nothing to a
+    # sample-based percentage even though the status log knows exactly what happened there.
+    # Samples remain the fallback for checks with no status-log history at all.
+    had_log = bool(transitions) or entered_down or incident_count > 0
+    if had_log:
+        mon_start = window_start
+        if sc.created_at:
+            created_aware = sc.created_at if sc.created_at.tzinfo else sc.created_at.replace(tzinfo=timezone.utc)
+            mon_start = max(window_start, created_aware)
+        monitored_sec = (now_utc - mon_start).total_seconds()
+        if monitored_sec > 0:
+            uptime_pct = _finite(max(0.0, 100.0 * (1.0 - total_downtime_sec / monitored_sec)))
+    elif total_downtime_sec > 0:
         time_based_pct = max(0.0, 100.0 * (1.0 - total_downtime_sec / window_sec))
         uptime_pct = time_based_pct if uptime_pct is None else min(uptime_pct, time_based_pct)
 
@@ -1126,11 +1138,58 @@ async def get_service_sla(
     }
 
 
-async def get_daily_uptime_all(days: int) -> dict:
+def _status_segments(
+    events: list[tuple[datetime, str]],
+    prior_status: str | None,
+    span_start: datetime,
+    span_end: datetime,
+) -> list[tuple[datetime, datetime, bool | None]]:
+    """Piecewise up/down timeline over [span_start, span_end) from status-log transitions.
+
+    Returns (start, end, is_up) segments; is_up is None while the state is unknown
+    (before the first transition when nothing preceded the window).
+    """
+    state: bool | None = None if prior_status is None else prior_status.lower() == "up"
+    segments: list[tuple[datetime, datetime, bool | None]] = []
+    cursor = span_start
+    for ts, status in events:
+        if ts <= span_start:
+            state = status.lower() == "up"
+            continue
+        if ts >= span_end:
+            break
+        if ts > cursor:
+            segments.append((cursor, ts, state))
+        state = status.lower() == "up"
+        cursor = ts
+    if cursor < span_end:
+        segments.append((cursor, span_end, state))
+    return segments
+
+
+def _uptime_over(segments: list[tuple[datetime, datetime, bool | None]], b0: datetime, b1: datetime) -> float | None:
+    """Percentage of [b0, b1) spent up, over the portion where the state is known."""
+    up = known = 0.0
+    for s, e, st in segments:
+        lo, hi = max(s, b0), min(e, b1)
+        if hi <= lo or st is None:
+            continue
+        dur = (hi - lo).total_seconds()
+        known += dur
+        if st:
+            up += dur
+    if known <= 0:
+        return None
+    return up / known * 100.0
+
+
+async def get_daily_uptime_all(db: AsyncSession, days: int) -> dict:
     """Weighted daily uptime for every check in one rollup scan.
 
     Returns {"days": N, "checks": {check_id: [{date, uptime_pct, sample_count}, ...]}}.
-    Days a check was not monitored are simply absent from its list.
+    Days with no stored samples are reconstructed from the status log (sample_count 0):
+    the poller updates Postgres and ClickHouse on separate paths, so a metrics-ingestion
+    gap must not paint an actively monitored service as "not monitored".
     """
     from app.core.database import get_clickhouse_client
     ch = get_clickhouse_client()
@@ -1158,6 +1217,72 @@ async def get_daily_uptime_all(days: int) -> dict:
             })
     except Exception:
         pass
+
+    # Fill sample-less days from the status log.
+    try:
+        created_rows = (await db.execute(select(ServiceCheck.id, ServiceCheck.created_at))).all()
+        created = {
+            str(cid): (c if c is None or c.tzinfo else c.replace(tzinfo=timezone.utc))
+            for cid, c in created_rows
+        }
+
+        now = datetime.now(timezone.utc)
+        window_start = (now - timedelta(days=days)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+        trans: dict[str, list[tuple[datetime, str]]] = {}
+        res = ch.query(
+            """
+            SELECT service_check_id, timestamp, new_status
+            FROM zenplus.service_status_log
+            WHERE timestamp >= %(f)s
+            ORDER BY timestamp
+            """,
+            parameters={"f": window_start.strftime("%Y-%m-%d %H:%M:%S")},
+        )
+        for r in res.result_rows or []:
+            ts = r[1] if r[1].tzinfo else r[1].replace(tzinfo=timezone.utc)
+            trans.setdefault(str(r[0]), []).append((ts, str(r[2] or "")))
+
+        prior: dict[str, str] = {}
+        res = ch.query(
+            """
+            SELECT service_check_id, argMax(new_status, timestamp)
+            FROM zenplus.service_status_log
+            WHERE timestamp < %(f)s
+            GROUP BY service_check_id
+            """,
+            parameters={"f": window_start.strftime("%Y-%m-%d %H:%M:%S")},
+        )
+        for r in res.result_rows or []:
+            prior[str(r[0])] = str(r[1] or "")
+
+        for cid in created:
+            events = trans.get(cid, [])
+            if not events and cid not in prior:
+                continue
+            segments = _status_segments(events, prior.get(cid), window_start, now)
+            have = {e["date"] for e in out.get(cid, [])}
+            c_at = created[cid]
+            day = window_start
+            while day < now:
+                nxt = day + timedelta(days=1)
+                key = day.date().isoformat()
+                b0 = day if c_at is None else max(day, c_at)
+                b1 = min(nxt, now)
+                if key not in have and b1 > b0:
+                    pct = _uptime_over(segments, b0, b1)
+                    if pct is not None:
+                        out.setdefault(cid, []).append({
+                            "date": key,
+                            "uptime_pct": _finite(pct),
+                            "sample_count": 0,
+                        })
+                day = nxt
+        for rows in out.values():
+            rows.sort(key=lambda e: e["date"])
+    except Exception:
+        pass
+
     return {"days": days, "checks": out}
 
 
@@ -1209,17 +1334,72 @@ async def get_hourly_uptime(db: AsyncSession, check_id: UUID, days: int) -> dict
             rows = []
 
     out = []
+    have: set[str] = set()
     for r in rows:
         ts = r[0]
         if ts.tzinfo is None:
-            from datetime import timezone as _tz
-            ts = ts.replace(tzinfo=_tz.utc)
+            ts = ts.replace(tzinfo=timezone.utc)
         pct = _finite(r[1])
         samples = int(r[2] or 0)
+        have.add(ts.isoformat())
         out.append({
             "ts": ts.isoformat(),
             "uptime_pct": pct,
             "sample_count": samples,
         })
+
+    # Reconstruct sample-less hours from the status log (sample_count 0), so a
+    # metrics-ingestion gap does not render an actively monitored service as "no data".
+    try:
+        sc = (await db.execute(select(ServiceCheck).where(ServiceCheck.id == check_id))).scalar_one_or_none()
+        now = datetime.now(timezone.utc)
+        window_start = (now - timedelta(days=days)).replace(minute=0, second=0, microsecond=0)
+
+        res = ch.query(
+            """
+            SELECT timestamp, new_status
+            FROM zenplus.service_status_log
+            WHERE service_check_id = %(id)s AND timestamp >= %(f)s
+            ORDER BY timestamp
+            """,
+            parameters={"id": str(check_id), "f": window_start.strftime("%Y-%m-%d %H:%M:%S")},
+        )
+        events = [
+            ((r[0] if r[0].tzinfo else r[0].replace(tzinfo=timezone.utc)), str(r[1] or ""))
+            for r in res.result_rows or []
+        ]
+        prior_status: str | None = None
+        res = ch.query(
+            """
+            SELECT new_status
+            FROM zenplus.service_status_log
+            WHERE service_check_id = %(id)s AND timestamp < %(f)s
+            ORDER BY timestamp DESC
+            LIMIT 1
+            """,
+            parameters={"id": str(check_id), "f": window_start.strftime("%Y-%m-%d %H:%M:%S")},
+        )
+        if res.result_rows:
+            prior_status = str(res.result_rows[0][0] or "")
+
+        if events or prior_status is not None:
+            segments = _status_segments(events, prior_status, window_start, now)
+            created = sc.created_at if sc and sc.created_at else None
+            if created is not None and created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            hour = window_start
+            while hour < now:
+                nxt = hour + timedelta(hours=1)
+                if hour.isoformat() not in have:
+                    b0 = hour if created is None else max(hour, created)
+                    b1 = min(nxt, now)
+                    if b1 > b0:
+                        pct = _uptime_over(segments, b0, b1)
+                        if pct is not None:
+                            out.append({"ts": hour.isoformat(), "uptime_pct": _finite(pct), "sample_count": 0})
+                hour = nxt
+            out.sort(key=lambda e: e["ts"])
+    except Exception:
+        pass
 
     return {"check_id": str(check_id), "days": days, "hours": out}

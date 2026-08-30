@@ -3,11 +3,14 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
+  AlertTriangle,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Copy,
   Download,
   Globe,
+  HelpCircle,
   LockKeyhole,
   Network,
   Pause,
@@ -23,6 +26,7 @@ import {
   Trash2,
   Wrench,
   X,
+  XCircle,
 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, cn, relativeTime } from '@/lib/utils'
@@ -239,6 +243,10 @@ export function ServicesPage() {
     (search ? 1 : 0)
 
   const warnCount = (summary?.warning || 0) + (summary?.degraded || 0)
+  const uptimeValues = Object.values(uptimeMap)
+  const fleetUptime = uptimeValues.length
+    ? uptimeValues.reduce((s, v) => s + v, 0) / uptimeValues.length
+    : null
 
   return (
     <div className="space-y-4">
@@ -274,46 +282,58 @@ export function ServicesPage() {
         </div>
       </div>
 
-      {/* Status chips + filters */}
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="flex items-center gap-1 rounded-lg border border-border bg-surface p-1">
-          <StatusChip
-            label="All"
-            count={summary?.total || 0}
-            active={!statusFilter}
-            onClick={() => patchParams({ status: null, page: '1' })}
-          />
-          <StatusChip
-            label="Up"
-            count={summary?.up || 0}
-            dot="bg-success"
-            active={statusFilter === 'up'}
-            onClick={() => patchParams({ status: statusFilter === 'up' ? null : 'up', page: '1' })}
-          />
-          <StatusChip
-            label="Down"
-            count={summary?.down || 0}
-            dot="bg-danger"
-            attention={(summary?.down || 0) > 0}
-            active={statusFilter === 'down'}
-            onClick={() => patchParams({ status: statusFilter === 'down' ? null : 'down', page: '1' })}
-          />
-          <StatusChip
-            label="Warning"
-            count={warnCount}
-            dot="bg-warning"
-            active={statusFilter === 'warning'}
-            onClick={() => patchParams({ status: statusFilter === 'warning' ? null : 'warning', page: '1' })}
-          />
-          <StatusChip
-            label="Unknown"
-            count={summary?.unknown || 0}
-            dot="bg-muted/50"
-            active={statusFilter === 'unknown'}
-            onClick={() => patchParams({ status: statusFilter === 'unknown' ? null : 'unknown', page: '1' })}
-          />
-        </div>
+      {/* Status stat cards — click to filter */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+        <StatCard
+          label="Monitors"
+          count={summary?.total || 0}
+          icon={<Activity className="h-3.5 w-3.5" />}
+          tone="primary"
+          sub={fleetUptime != null ? `${fleetUptime.toFixed(2)}% fleet uptime · 24 h` : 'across this appliance'}
+          active={!statusFilter}
+          onClick={() => patchParams({ status: null, page: '1' })}
+        />
+        <StatCard
+          label="Up"
+          count={summary?.up || 0}
+          icon={<CheckCircle2 className="h-3.5 w-3.5" />}
+          tone="success"
+          sub={summary?.total ? `${Math.round(((summary.up || 0) / summary.total) * 100)}% of fleet` : '—'}
+          active={statusFilter === 'up'}
+          onClick={() => patchParams({ status: statusFilter === 'up' ? null : 'up', page: '1' })}
+        />
+        <StatCard
+          label="Down"
+          count={summary?.down || 0}
+          icon={<XCircle className="h-3.5 w-3.5" />}
+          tone="danger"
+          attention={(summary?.down || 0) > 0}
+          sub={(summary?.down || 0) > 0 ? 'needs attention now' : 'all clear'}
+          active={statusFilter === 'down'}
+          onClick={() => patchParams({ status: statusFilter === 'down' ? null : 'down', page: '1' })}
+        />
+        <StatCard
+          label="Warning"
+          count={warnCount}
+          icon={<AlertTriangle className="h-3.5 w-3.5" />}
+          tone="warning"
+          sub="degraded or warning"
+          active={statusFilter === 'warning'}
+          onClick={() => patchParams({ status: statusFilter === 'warning' ? null : 'warning', page: '1' })}
+        />
+        <StatCard
+          label="Unknown"
+          count={summary?.unknown || 0}
+          icon={<HelpCircle className="h-3.5 w-3.5" />}
+          tone="muted"
+          sub="awaiting first probe"
+          active={statusFilter === 'unknown'}
+          onClick={() => patchParams({ status: statusFilter === 'unknown' ? null : 'unknown', page: '1' })}
+        />
+      </div>
 
+      {/* Filters */}
+      <div className="flex flex-wrap items-center gap-2">
         <div className="relative min-w-[200px] max-w-xs flex-1">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
           <Input
@@ -641,26 +661,46 @@ function MonitorRow({
 
 /* ─── Small pieces ──────────────────────────────────────────────────────── */
 
-function StatusChip({ label, count, dot, active, attention, onClick }: {
+function StatCard({ label, count, icon, tone, sub, active, attention, onClick }: {
   label: string
   count: number
-  dot?: string
+  icon: React.ReactNode
+  tone: 'primary' | 'success' | 'danger' | 'warning' | 'muted'
+  sub: string
   active?: boolean
   attention?: boolean
   onClick: () => void
 }) {
+  const TONE: Record<typeof tone, { chip: string; value: string; ring: string }> = {
+    primary: { chip: 'bg-primary/10 text-primary', value: 'text-text', ring: 'border-primary/40 ring-primary/30' },
+    success: { chip: 'bg-success/10 text-success', value: 'text-success', ring: 'border-success/40 ring-success/30' },
+    danger: { chip: 'bg-danger/10 text-danger', value: 'text-danger', ring: 'border-danger/40 ring-danger/30' },
+    warning: { chip: 'bg-warning/10 text-warning', value: 'text-warning', ring: 'border-warning/40 ring-warning/30' },
+    muted: { chip: 'bg-surface3/60 text-muted', value: 'text-text2', ring: 'border-border-strong ring-border-strong/40' },
+  }
+  const t = TONE[tone]
+  const zero = count === 0 && tone !== 'primary'
   return (
     <button
       type="button"
       onClick={onClick}
+      aria-pressed={active}
       className={cn(
-        'inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
-        active ? 'bg-surface2 text-text shadow-sm ring-1 ring-border' : 'text-muted hover:text-text',
+        'rounded-xl border bg-surface p-3.5 text-left transition-all',
+        active ? cn('ring-1', t.ring) : 'border-border hover:border-border-strong',
       )}
     >
-      {dot && <span className={cn('h-1.5 w-1.5 rounded-full', dot, attention && 'animate-pulse-soft')} />}
-      {label}
-      <span className={cn('font-mono tabular-nums', attention ? 'font-semibold text-danger' : 'text-muted')}>{count}</span>
+      <div className="flex items-center justify-between gap-2">
+        <span className="truncate text-[10.5px] font-semibold uppercase tracking-wider text-muted">{label}</span>
+        <span className={cn('relative inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full', t.chip)}>
+          {attention && <span className="svc-ping absolute inline-flex h-full w-full rounded-full bg-danger" />}
+          {icon}
+        </span>
+      </div>
+      <div className={cn('mt-1 text-[26px] font-bold leading-none tabular-nums', zero ? 'text-muted/50' : t.value)}>
+        {count.toLocaleString()}
+      </div>
+      <div className="mt-1 truncate text-[10.5px] text-muted" title={sub}>{sub}</div>
     </button>
   )
 }

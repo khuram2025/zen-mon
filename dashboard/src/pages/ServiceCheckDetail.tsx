@@ -561,7 +561,7 @@ export function ServiceCheckDetailPage() {
     () => (check ? buildOutages(statusHistory, fromTs, toTs, check) : []),
     [statusHistory, fromTs, toTs, check],
   )
-  const days = useMemo(() => buildDailyUptime(hourly, 30, check?.check_interval || 60), [hourly, check?.check_interval])
+  const days = useMemo(() => buildDailyUptime(hourly, 30), [hourly])
 
   if (isLoading) return <DetailSkeleton />
 
@@ -1160,11 +1160,7 @@ function ThirtyDayStrip({ days, onSelectDay }: {
   days: DayUptime[]
   onSelectDay: (d: DayUptime) => void
 }) {
-  const measured = days.filter((d) => d.uptimePct != null)
-  const totalSamples = measured.reduce((s, d) => s + d.samples, 0)
-  const overall = totalSamples > 0
-    ? measured.reduce((s, d) => s + (d.uptimePct as number) * d.samples, 0) / totalSamples
-    : null
+  const overall = coveredWeightedUptime(days)
   const totalDowntime = days.reduce((s, d) => s + d.downtimeSec, 0)
 
   const cells = days.map((d) => ({
@@ -2197,21 +2193,23 @@ type DayUptime = {
   hours: Array<{ hour: number; uptimePct: number | null; samples: number }>
 }
 
-function buildDailyUptime(hours: HourlyUptime[], dayCount: number, intervalSec = 60): DayUptime[] {
-  const byDay = new Map<string, { up: number; total: number; hours: Map<number, { pct: number | null; samples: number }> }>()
+function buildDailyUptime(hours: HourlyUptime[], dayCount: number): DayUptime[] {
+  const byDay = new Map<string, { pctSum: number; pctN: number; total: number; hours: Map<number, { pct: number | null; samples: number }> }>()
   for (const h of hours) {
     const t = Date.parse(h.ts)
     if (!Number.isFinite(t)) continue
     const d = new Date(t)
     const key = dayKey(d)
     let entry = byDay.get(key)
-    if (!entry) { entry = { up: 0, total: 0, hours: new Map() }; byDay.set(key, entry) }
-    const samples = h.sample_count || 0
-    if (h.uptime_pct != null && samples > 0) {
-      entry.up += (h.uptime_pct / 100) * samples
-      entry.total += samples
+    if (!entry) { entry = { pctSum: 0, pctN: 0, total: 0, hours: new Map() }; byDay.set(key, entry) }
+    // Hours reconstructed from the status log arrive with sample_count 0 but a real
+    // uptime_pct — they count toward availability like any measured hour.
+    if (h.uptime_pct != null) {
+      entry.pctSum += h.uptime_pct
+      entry.pctN += 1
+      entry.total += h.sample_count || 0
     }
-    entry.hours.set(d.getHours(), { pct: h.uptime_pct, samples })
+    entry.hours.set(d.getHours(), { pct: h.uptime_pct, samples: h.sample_count || 0 })
   }
 
   const out: DayUptime[] = []
@@ -2224,12 +2222,9 @@ function buildDailyUptime(hours: HourlyUptime[], dayCount: number, intervalSec =
     const entry = byDay.get(key)
     const start = date.getTime()
     const end = start + 86_400_000
-    const uptimePct = entry && entry.total > 0 ? (entry.up / entry.total) * 100 : null
-    // Downtime is estimated from the samples actually taken (samples × polling interval), not
-    // from whole measured hours — a monitor created 15 minutes ago that straddles an hour
-    // boundary must not be billed two hours of downtime.
-    const measuredSec = entry ? Math.min(86_400, entry.total * intervalSec) : 0
-    const downtimeSec = uptimePct == null ? 0 : ((100 - uptimePct) / 100) * measuredSec
+    const uptimePct = entry && entry.pctN > 0 ? entry.pctSum / entry.pctN : null
+    const coveredSec = entry ? Math.min(86_400, entry.pctN * 3600) : 0
+    const downtimeSec = uptimePct == null ? 0 : ((100 - uptimePct) / 100) * coveredSec
     out.push({
       key,
       start,
@@ -2247,6 +2242,21 @@ function buildDailyUptime(hours: HourlyUptime[], dayCount: number, intervalSec =
   return out
 }
 
+/** Availability weighted by each day's covered wall-clock hours, so a day with one stored
+    sample doesn't count as heavily as a fully monitored one. */
+function coveredWeightedUptime(days: DayUptime[]): number | null {
+  let up = 0
+  let weight = 0
+  for (const d of days) {
+    if (d.uptimePct == null) continue
+    const covered = d.hours.filter((h) => h.uptimePct != null).length
+    if (covered === 0) continue
+    up += d.uptimePct * covered
+    weight += covered
+  }
+  return weight > 0 ? up / weight : null
+}
+
 function dayKey(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
@@ -2262,9 +2272,7 @@ function UptimeCalendar({ days, loading, error, onRetry, onSelectDay }: {
 }) {
   const [selected, setSelected] = useState<string | null>(null)
   const measured = days.filter((d) => d.uptimePct != null)
-  const overall = measured.length
-    ? measured.reduce((s, d) => s + (d.uptimePct as number) * d.samples, 0) / Math.max(1, measured.reduce((s, d) => s + d.samples, 0))
-    : null
+  const overall = coveredWeightedUptime(days)
   const totalDowntime = days.reduce((s, d) => s + d.downtimeSec, 0)
   const worst = measured.length ? measured.reduce((w, d) => ((d.uptimePct as number) < (w.uptimePct as number) ? d : w)) : null
   const selectedDay = days.find((d) => d.key === selected) || null
@@ -2310,7 +2318,7 @@ function UptimeCalendar({ days, loading, error, onRetry, onSelectDay }: {
                     title={
                       d.uptimePct == null
                         ? `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} — no data`
-                        : `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}\n${d.uptimePct.toFixed(3)}% up · ${d.samples} samples${d.downtimeSec > 0 ? `\n${formatDur(d.downtimeSec)} down` : ''}`
+                        : `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}\n${d.uptimePct.toFixed(3)}% up · ${d.samples > 0 ? `${d.samples} samples` : 'from status log'}${d.downtimeSec > 0 ? `\n${formatDur(d.downtimeSec)} down` : ''}`
                     }
                     className={cn(
                       'group relative flex h-[62px] flex-col items-center justify-center rounded-lg border transition-all',
@@ -2374,12 +2382,12 @@ function UptimeCalendar({ days, loading, error, onRetry, onSelectDay }: {
                       key={h.hour}
                       className="h-6 flex-1 rounded-sm"
                       style={{
-                        backgroundColor: h.samples === 0 ? 'rgb(var(--surface3) / 0.5)' : BAND_FILL[uptimeBand(h.uptimePct)],
+                        backgroundColor: h.uptimePct == null ? 'rgb(var(--surface3) / 0.5)' : BAND_FILL[uptimeBand(h.uptimePct)],
                       }}
                       title={
-                        h.samples === 0
+                        h.uptimePct == null
                           ? `${String(h.hour).padStart(2, '0')}:00 — no data`
-                          : `${String(h.hour).padStart(2, '0')}:00 — ${(h.uptimePct ?? 0).toFixed(1)}% up · ${h.samples} samples`
+                          : `${String(h.hour).padStart(2, '0')}:00 — ${h.uptimePct.toFixed(1)}% up · ${h.samples > 0 ? `${h.samples} samples` : 'from status log'}`
                       }
                     />
                   ))}
