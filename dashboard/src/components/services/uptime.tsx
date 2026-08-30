@@ -95,7 +95,7 @@ export function buildDaySeries(
 
 /** The signature uptime-monitor bar strip: one full-height rounded bar per day. */
 export function UptimeBars({ cells, className, barClassName, onSelect }: {
-  cells: Array<{ key: string; pct: number | null; title: string }>
+  cells: Array<{ key: string; pct: number | null; title: string; dim?: boolean }>
   className?: string
   barClassName?: string
   onSelect?: (key: string) => void
@@ -112,8 +112,9 @@ export function UptimeBars({ cells, className, barClassName, onSelect }: {
             onClick={onSelect ? () => onSelect(c.key) : undefined}
             title={c.title}
             className={cn(
-              'min-w-[3px] flex-1 rounded-[3px] transition-transform',
-              onSelect && 'hover:scale-y-110 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
+              'min-w-[3px] flex-1 rounded-[3px] transition-[transform,opacity]',
+              c.dim && 'opacity-35',
+              onSelect && 'hover:scale-y-110 hover:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
               barClassName,
             )}
             style={{ backgroundColor: BAND_FILL[band] }}

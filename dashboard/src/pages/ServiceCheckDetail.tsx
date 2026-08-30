@@ -205,6 +205,8 @@ type Outage = {
   kind: 'down' | 'warn'
   reason?: string
   clippedStart: boolean
+  /** The outage continued past the window's end — `end` is the window edge, not a recovery. */
+  clippedEnd?: boolean
 }
 
 /* ─── Formatters ────────────────────────────────────────────────────────── */
@@ -396,17 +398,20 @@ export function ServiceCheckDetailPage() {
     refetchInterval: 60_000,
   })
 
-  // Widest-window fallback so a quiet 1h window still shows the service's real history.
-  const wantsEventFallback = statusHistory.length === 0 && alerts.length === 0
+  // 30-day status history, always loaded. It serves three jobs: the activity fallback for a
+  // quiet window, the day drill-down failure list on the Uptime tab, and — critically — the
+  // state *entering* the selected window. A range that sits wholly inside a long outage
+  // contains zero transitions, so without the prior event every range-scoped panel would
+  // claim the service was fine while its day renders red.
   const wideFrom = useMemo(() => new Date(Date.now() - 720 * 3600_000).toISOString(), [])
-  const { data: fbHistory = [] } = useQuery<StatusHistoryEvent[]>({
-    queryKey: ['service-status-history-fallback', id],
+  const { data: wideHistory = [] } = useQuery<StatusHistoryEvent[]>({
+    queryKey: ['service-status-history-wide', id],
     queryFn: async () =>
       (await api.get(
-        `/service-checks/${id}/status-history?from=${encodeURIComponent(wideFrom)}&to=${encodeURIComponent(new Date().toISOString())}&limit=100`,
+        `/service-checks/${id}/status-history?from=${encodeURIComponent(wideFrom)}&to=${encodeURIComponent(new Date().toISOString())}&limit=500`,
       )).data,
-    enabled: !!id && !!check && wantsEventFallback,
-    staleTime: 60_000,
+    enabled: !!id && !!check,
+    refetchInterval: 60_000,
   })
 
   const del = useMutation({
@@ -547,21 +552,45 @@ export function ServiceCheckDetailPage() {
     [statusHistory, alerts, range.fromISO, range.toISO, check],
   )
   const fallbackEvents = useMemo(
-    () => (wantsEventFallback ? buildActivityEvents(fbHistory, alerts, wideFrom, new Date().toISOString(), check) : []),
-    [wantsEventFallback, fbHistory, alerts, wideFrom, check],
+    () =>
+      activityEvents.length === 0
+        ? buildActivityEvents(wideHistory, alerts, wideFrom, new Date().toISOString(), check)
+        : [],
+    [activityEvents.length, wideHistory, alerts, wideFrom, check],
   )
+
+  // The window's true opening state, taken from the last transition before it. Prepending it
+  // as a synthetic event lets the timeline, outage bands and outage table handle a window
+  // that starts mid-outage (or mid-uptime) without any transition of its own.
+  const seededHistory = useMemo(
+    () => seedHistoryWithPrior(statusHistory, wideHistory, fromTs),
+    [statusHistory, wideHistory, fromTs],
+  )
+
   const derived = useMemo(
-    () => (check ? deriveWindowStats(points, statusHistory, check, fromTs, toTs) : {
+    () => (check ? deriveWindowStats(points, seededHistory, check, fromTs, toTs) : {
       uptime_pct: null, error_rate_pct: null, incident_count: 0, avg_ms: null, p95_ms: null, streak_sec: null,
     }),
-    [points, statusHistory, check, fromTs, toTs],
+    [points, seededHistory, check, fromTs, toTs],
   )
 
   const outages = useMemo(
-    () => (check ? buildOutages(statusHistory, fromTs, toTs, check) : []),
-    [statusHistory, fromTs, toTs, check],
+    () => (check ? buildOutages(seededHistory, fromTs, toTs, check) : []),
+    [seededHistory, fromTs, toTs, check],
   )
   const days = useMemo(() => buildDailyUptime(hourly, 30), [hourly])
+
+  const outagesForDay = useMemo(
+    () => (d: DayUptime): Outage[] => {
+      if (!check) return []
+      const inDay = wideHistory.filter((h) => {
+        const t = Date.parse(h.timestamp)
+        return Number.isFinite(t) && t >= d.start && t < d.end
+      })
+      return buildOutages(seedHistoryWithPrior(inDay, wideHistory, d.start), d.start, Math.min(d.end, Date.now()), check)
+    },
+    [wideHistory, check],
+  )
 
   if (isLoading) return <DetailSkeleton />
 
@@ -685,6 +714,8 @@ export function ServiceCheckDetailPage() {
       <HeroStrip
         check={check}
         sla24={sla24Q.data}
+        slaRange={sla}
+        rangeLabel={range.label}
         sla7d={sla7dQ.data}
         sla30d={sla30dQ.data}
         loading={sla24Q.isLoading && sla7dQ.isLoading}
@@ -694,6 +725,8 @@ export function ServiceCheckDetailPage() {
 
       <ThirtyDayStrip
         days={days}
+        fromTs={fromTs}
+        toTs={toTs}
         onSelectDay={(d) => setCustom(new Date(d.start).toISOString(), new Date(Math.min(d.end, Date.now())).toISOString())}
       />
 
@@ -732,7 +765,7 @@ export function ServiceCheckDetailPage() {
         <div className="space-y-4">
           <AvailabilityTimeline
             points={points}
-            statusHistory={statusHistory}
+            statusHistory={seededHistory}
             check={check}
             rangeLabel={range.label}
             fromTs={fromTs}
@@ -742,7 +775,7 @@ export function ServiceCheckDetailPage() {
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.85fr)]">
             <PerformanceChart
               points={points}
-              statusHistory={statusHistory}
+              statusHistory={seededHistory}
               rangeLabel={range.label}
               rangeHours={range.hours}
               fromTs={fromTs}
@@ -787,13 +820,16 @@ export function ServiceCheckDetailPage() {
         <div className="space-y-4">
           <UptimeCalendar
             days={days}
+            fromTs={fromTs}
+            toTs={toTs}
             loading={hourlyQ.isLoading}
             error={hourlyQ.isError}
             onRetry={() => hourlyQ.refetch()}
             onSelectDay={(d) => setCustom(new Date(d.start).toISOString(), new Date(Math.min(d.end, Date.now())).toISOString())}
+            outagesFor={outagesForDay}
           />
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(300px,0.9fr)]">
-            <DailyUptimeChart days={days} />
+            <DailyUptimeChart days={days} fromTs={fromTs} toTs={toTs} />
             <SlaSummaryCard sla={sla} rangeLabel={range.label} loading={slaQ.isLoading} error={slaQ.isError} onRetry={() => slaQ.refetch()} />
           </div>
         </div>
@@ -1072,9 +1108,11 @@ function ServiceHeader({
 
 /* ─── Hero strip: fixed-window availability, uptime-product style ───────── */
 
-function HeroStrip({ check, sla24, sla7d, sla30d, loading, ongoingOutage, nowTick }: {
+function HeroStrip({ check, sla24, slaRange, rangeLabel, sla7d, sla30d, loading, ongoingOutage, nowTick }: {
   check: ServiceCheck
   sla24?: SlaStats
+  slaRange?: SlaStats
+  rangeLabel: string
   sla7d?: SlaStats
   sla30d?: SlaStats
   loading: boolean
@@ -1131,20 +1169,33 @@ function HeroStrip({ check, sla24, sla7d, sla30d, loading, ongoingOutage, nowTic
     }
   }
 
+  // The second cell tracks the range picker so the strip reacts to the selected window;
+  // 7 days and 30 days stay as fixed reference points.
   const cells = [
-    statusCell,
-    windowCell('Last 24 hours', sla24),
-    windowCell('Last 7 days', sla7d),
-    windowCell('Last 30 days', sla30d),
+    { ...statusCell, selected: false },
+    { ...windowCell(rangeLabel, slaRange), selected: true },
+    { ...windowCell('Last 7 days', sla7d), selected: false },
+    { ...windowCell('Last 30 days', sla30d), selected: false },
   ]
 
   return (
     <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
       {cells.map((c, i) => (
-        <div key={c.label} className="rounded-xl border border-border bg-surface px-4 py-3 transition-colors hover:border-border-strong">
+        <div
+          key={c.label}
+          className={cn(
+            'rounded-xl border bg-surface px-4 py-3 transition-colors',
+            c.selected ? 'border-primary/40 ring-1 ring-primary/25' : 'border-border hover:border-border-strong',
+          )}
+        >
           <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
             {i === 0 && <PulseDot status={pulseStatusOf(check.status, check.enabled)} size="sm" />}
-            {c.label}
+            <span className="truncate" title={c.label}>{c.label}</span>
+            {c.selected && (
+              <span className="ml-auto shrink-0 rounded bg-primary/10 px-1.5 py-px text-[9px] font-semibold text-primary">
+                Selected
+              </span>
+            )}
           </div>
           <div className={cn('mt-1 text-[24px] font-bold leading-none tabular-nums', c.tone)}>{c.value}</div>
           <div className="mt-1 truncate text-[10.5px] text-muted" title={c.sub}>{c.sub}</div>
@@ -1156,16 +1207,25 @@ function HeroStrip({ check, sla24, sla7d, sla30d, loading, ongoingOutage, nowTic
 
 /* ─── 30-day bar strip ──────────────────────────────────────────────────── */
 
-function ThirtyDayStrip({ days, onSelectDay }: {
+function ThirtyDayStrip({ days, fromTs, toTs, onSelectDay }: {
   days: DayUptime[]
+  fromTs: number
+  toTs: number
   onSelectDay: (d: DayUptime) => void
 }) {
   const overall = coveredWeightedUptime(days)
   const totalDowntime = days.reduce((s, d) => s + d.downtimeSec, 0)
 
+  // Dim days outside the selected window, so the strip visibly tracks the range picker —
+  // unless the range covers everything (or nothing), where dimming would only add noise.
+  const inRange = (d: DayUptime) => d.end > fromTs && d.start < toTs
+  const inCount = days.filter(inRange).length
+  const dimOthers = inCount > 0 && inCount < days.length
+
   const cells = days.map((d) => ({
     key: d.key,
     pct: d.uptimePct,
+    dim: dimOthers && !inRange(d),
     title:
       d.uptimePct == null
         ? `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} — not monitored`
@@ -2263,12 +2323,15 @@ function dayKey(d: Date): string {
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
-function UptimeCalendar({ days, loading, error, onRetry, onSelectDay }: {
+function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectDay, outagesFor }: {
   days: DayUptime[]
+  fromTs: number
+  toTs: number
   loading: boolean
   error: boolean
   onRetry: () => void
   onSelectDay: (d: DayUptime) => void
+  outagesFor: (d: DayUptime) => Outage[]
 }) {
   const [selected, setSelected] = useState<string | null>(null)
   const measured = days.filter((d) => d.uptimePct != null)
@@ -2276,6 +2339,12 @@ function UptimeCalendar({ days, loading, error, onRetry, onSelectDay }: {
   const totalDowntime = days.reduce((s, d) => s + d.downtimeSec, 0)
   const worst = measured.length ? measured.reduce((w, d) => ((d.uptimePct as number) < (w.uptimePct as number) ? d : w)) : null
   const selectedDay = days.find((d) => d.key === selected) || null
+  const selectedOutages = selectedDay ? outagesFor(selectedDay) : []
+
+  // Dim days outside the range picker's window, matching the 30-day strip.
+  const inRange = (d: DayUptime) => d.end > fromTs && d.start < toTs
+  const inCount = days.filter(inRange).length
+  const dimOthers = inCount > 0 && inCount < days.length
 
   // Monday-first grid: pad the first week so each column is a weekday.
   const leadPad = days.length ? (days[0].date.getDay() + 6) % 7 : 0
@@ -2324,6 +2393,7 @@ function UptimeCalendar({ days, loading, error, onRetry, onSelectDay }: {
                       'group relative flex h-[62px] flex-col items-center justify-center rounded-lg border transition-all',
                       isSelected ? 'border-primary ring-2 ring-primary/40' : 'border-border hover:border-border-strong',
                       d.uptimePct == null && 'bg-surface2/40',
+                      dimOthers && !inRange(d) && !isSelected && 'opacity-45 hover:opacity-100',
                     )}
                     style={d.uptimePct != null ? { backgroundColor: withAlpha(BAND_FILL[band], band === 'perfect' ? 0.22 : 0.28) } : undefined}
                   >
@@ -2395,6 +2465,49 @@ function UptimeCalendar({ days, loading, error, onRetry, onSelectDay }: {
                 <div className="mt-1 flex justify-between text-[9px] tabular-nums text-muted">
                   <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span>
                 </div>
+
+                <div className="mt-3 border-t border-border/60 pt-2.5">
+                  <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
+                    Failures this day
+                    {selectedOutages.length > 0 && (
+                      <span className="ml-1.5 font-mono text-danger">{selectedOutages.length}</span>
+                    )}
+                  </div>
+                  {selectedOutages.length === 0 ? (
+                    <div className="flex items-center gap-1.5 text-[11px] text-muted">
+                      <CheckCircle2 className="h-3.5 w-3.5 text-success" />
+                      {selectedDay.uptimePct == null
+                        ? 'No status changes recorded for this day.'
+                        : 'No failures — the service stayed up all day.'}
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      {selectedOutages.map((o, i) => {
+                        const end = o.end ?? Date.now()
+                        const fmt = (t: number) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                        return (
+                          <div key={`${o.start}-${i}`} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
+                            <span className={cn(
+                              'inline-flex shrink-0 items-center rounded px-1.5 py-px text-[9px] font-semibold uppercase tracking-wider',
+                              o.kind === 'down' ? 'bg-danger/15 text-danger' : 'bg-warning/15 text-warning',
+                            )}>
+                              {o.kind === 'down' ? 'Down' : 'Warn'}
+                            </span>
+                            <span className="font-mono tabular-nums text-text2">
+                              {o.clippedStart ? '…' : ''}{fmt(o.start)} → {o.end == null ? 'ongoing' : `${fmt(end)}${o.clippedEnd ? '…' : ''}`}
+                            </span>
+                            <span className="font-mono font-medium tabular-nums text-danger">
+                              {o.clippedStart || o.clippedEnd ? '≥ ' : ''}{formatDur((end - o.start) / 1000)}
+                            </span>
+                            {o.reason && (
+                              <span className="min-w-0 flex-1 truncate text-muted" title={o.reason}>{o.reason}</span>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </>
@@ -2409,11 +2522,14 @@ function withAlpha(rgbExpr: string, alpha: number): string {
   return `rgb(${inner} / ${alpha})`
 }
 
-function DailyUptimeChart({ days }: { days: DayUptime[] }) {
+function DailyUptimeChart({ days, fromTs, toTs }: { days: DayUptime[]; fromTs: number; toTs: number }) {
+  const inRangeCount = days.filter((d) => d.end > fromTs && d.start < toTs).length
+  const dimOthers = inRangeCount > 0 && inRangeCount < days.length
   const data = days.map((d) => ({
     label: d.date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
     pct: d.uptimePct,
     band: uptimeBand(d.uptimePct),
+    dim: dimOthers && !(d.end > fromTs && d.start < toTs),
   }))
   const hasData = data.some((d) => d.pct != null)
   return (
@@ -2452,7 +2568,7 @@ function DailyUptimeChart({ days }: { days: DayUptime[] }) {
                 formatter={(v: any) => [v == null ? 'no data' : `${Number(v).toFixed(3)}%`, 'Uptime']}
               />
               <Bar dataKey="pct" radius={[3, 3, 0, 0]} isAnimationActive={false}>
-                {data.map((d, i) => <Cell key={i} fill={BAND_FILL[d.band]} />)}
+                {data.map((d, i) => <Cell key={i} fill={BAND_FILL[d.band]} fillOpacity={d.dim ? 0.3 : 1} />)}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
@@ -2505,6 +2621,30 @@ function SlaSummaryCard({ sla, rangeLabel, loading, error, onRetry }: {
 
 /* ─── Incidents tab ─────────────────────────────────────────────────────── */
 
+/** Prepend the last transition before `fromTs` as a synthetic event at `fromTs`, so a window
+    that opens mid-outage (or mid-uptime) carries its true starting state. */
+function seedHistoryWithPrior(
+  history: StatusHistoryEvent[],
+  wideHistory: StatusHistoryEvent[],
+  fromTs: number,
+): StatusHistoryEvent[] {
+  if (history.some((h) => Date.parse(h.timestamp) <= fromTs)) return history
+  const prior = wideHistory
+    .filter((h) => {
+      const t = Date.parse(h.timestamp)
+      return Number.isFinite(t) && t < fromTs
+    })
+    .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))[0]
+  if (!prior) return history
+  const synthetic: StatusHistoryEvent = {
+    timestamp: new Date(fromTs).toISOString(),
+    old_status: prior.old_status,
+    new_status: prior.new_status,
+    reason: prior.reason,
+  }
+  return [synthetic, ...history]
+}
+
 function buildOutages(history: StatusHistoryEvent[], fromTs: number, toTs: number, check: ServiceCheck): Outage[] {
   const sorted = [...history]
     .filter((h) => Number.isFinite(Date.parse(h.timestamp)))
@@ -2513,19 +2653,27 @@ function buildOutages(history: StatusHistoryEvent[], fromTs: number, toTs: numbe
   const out: Outage[] = []
   let open: { start: number; kind: 'down' | 'warn'; reason?: string; clipped: boolean } | null = null
 
-  // A window that opens mid-outage has no "went down" row inside it, so a leading recovery
-  // implies the service was already down. Clamp that inferred start to when the check was
-  // created — otherwise a 30-day window over a week-old check invents weeks of downtime.
+  // Any outage can only start once the check exists — clamp inferred/seeded starts so a
+  // 30-day window over a week-old check doesn't invent weeks of downtime.
   const createdTs = Date.parse(check.created_at)
-  const inferredStart = Math.max(fromTs, Number.isFinite(createdTs) ? createdTs : fromTs)
-  if (sorted.length > 0 && sorted[0].new_status === 'up') {
-    open = { start: inferredStart, kind: 'down', reason: undefined, clipped: inferredStart <= fromTs }
-  } else if (sorted.length === 0 && check.status !== 'up' && check.status !== 'unknown') {
+  const clampStart = (t: number) => Math.max(t, Number.isFinite(createdTs) ? createdTs : t)
+
+  // Without a seed, a leading recovery still implies the service entered the window down.
+  const inferredStart = clampStart(fromTs)
+  if (sorted.length > 0 && sorted[0].new_status === 'up' && Date.parse(sorted[0].timestamp) > fromTs) {
+    open = { start: inferredStart, kind: 'down', reason: undefined, clipped: true }
+  } else if (
+    sorted.length === 0 &&
+    check.status !== 'up' &&
+    check.status !== 'unknown' &&
+    // Live status only speaks for a window that reaches the present.
+    toTs >= Date.now() - 60_000
+  ) {
     open = {
       start: inferredStart,
       kind: check.status === 'down' ? 'down' : 'warn',
       reason: check.last_error || undefined,
-      clipped: inferredStart <= fromTs,
+      clipped: true,
     }
   }
 
@@ -2537,12 +2685,31 @@ function buildOutages(history: StatusHistoryEvent[], fromTs: number, toTs: numbe
         open = null
       }
     } else if (!open) {
-      open = { start: t, kind: ev.new_status === 'down' ? 'down' : 'warn', reason: ev.reason || undefined, clipped: false }
+      open = {
+        start: clampStart(t),
+        kind: ev.new_status === 'down' ? 'down' : 'warn',
+        reason: ev.reason || undefined,
+        // A seeded event lands exactly on the window edge: the outage actually began earlier.
+        clipped: t <= fromTs,
+      }
     }
   }
   if (open) out.push({ start: open.start, end: null, kind: open.kind, reason: open.reason, clippedStart: open.clipped })
 
-  return out.filter((o) => (o.end ?? Date.now()) > fromTs && o.start < toTs).sort((a, b) => b.start - a.start)
+  // A historical window's trailing outage isn't "ongoing" — its recovery simply lies beyond
+  // the window. Clip it (and any recovery past the edge) to the window end.
+  const nowMs = Date.now()
+  const windowReachesNow = toTs >= nowMs - 60_000
+  const clipped = out.map((o) => {
+    if (o.end == null) {
+      if (windowReachesNow) return o
+      return { ...o, end: Math.min(toTs, nowMs), clippedEnd: true }
+    }
+    if (o.end > toTs) return { ...o, end: toTs, clippedEnd: true }
+    return o
+  })
+
+  return clipped.filter((o) => (o.end ?? nowMs) > fromTs && o.start < toTs).sort((a, b) => b.start - a.start)
 }
 
 function IncidentsTab({
@@ -2639,11 +2806,15 @@ function IncidentsTab({
                       ) : (
                         <>
                           <div className="font-mono text-[11px] tabular-nums">{new Date(end).toLocaleString()}</div>
-                          <div className="text-[10px] text-muted">{relativeTime(new Date(end).toISOString())}</div>
+                          <div className="text-[10px] text-muted">
+                            {o.clippedEnd ? 'continued past this window' : relativeTime(new Date(end).toISOString())}
+                          </div>
                         </>
                       )}
                     </Td>
-                    <Td className="text-right font-mono text-xs font-medium tabular-nums">{formatDur((end - o.start) / 1000)}</Td>
+                    <Td className="text-right font-mono text-xs font-medium tabular-nums">
+                      {o.clippedStart || o.clippedEnd ? '≥ ' : ''}{formatDur((end - o.start) / 1000)}
+                    </Td>
                     <Td>
                       <div className="max-w-[380px] truncate text-[11px] text-muted" title={o.reason || undefined}>{o.reason || '—'}</div>
                     </Td>
