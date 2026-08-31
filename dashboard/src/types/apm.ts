@@ -15,6 +15,8 @@ export interface ServiceRED {
   p95_ms: number
   p99_ms: number
   apdex: number
+  /** Registry tags (classification); editable via PATCH /apm/services/{name}/meta. */
+  tags?: string[]
 }
 
 export interface ServiceListResponse {

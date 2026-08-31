@@ -8,6 +8,7 @@ from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core import scoping
 from app.core.database import get_db
 from app.core.security import get_current_user, require_operator_user
 from app.models.alert import Alert
@@ -116,6 +117,7 @@ async def list_alerts(
     alerts, total = await alert_service.get_alerts(
         db, status, severity, device_id, service_check_id, from_time, to_time, search, skip, limit,
         server_id=server_id,
+        visible_tags=await scoping.visible_tags(db, user),
     )
     data = [_serialize_alert(alert) for alert in alerts]
     await _attach_channels_and_silences(db, data)
@@ -131,7 +133,8 @@ async def alert_stats(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    return await alert_service.get_alert_stats(db)
+    return await alert_service.get_alert_stats(
+        db, visible_tags=await scoping.visible_tags(db, user))
 
 
 @router.get("/device-counts")
@@ -156,7 +159,8 @@ async def alert_device_counts(
     from sqlalchemy import and_, or_
 
     in_window = and_(Alert.triggered_at >= start, Alert.triggered_at <= end)
-    result = await db.execute(
+    scope = await scoping.visible_tags(db, user)
+    query = (
         select(
             Alert.device_id,
             func.sum(case((in_window, 1), else_=0)).label("total"),
@@ -171,6 +175,13 @@ async def alert_device_counts(
         .where(or_(in_window, Alert.status == "active"))
         .group_by(Alert.device_id)
     )
+    if scope is not None:
+        query = query.where(
+            text("EXISTS (SELECT 1 FROM devices _vd WHERE _vd.id = alerts.device_id AND "
+                 + scoping.jsonb_tags_visible("_vd.tags") + ")")
+            .bindparams(**{scoping.SCOPE_PARAM: scope})
+        )
+    result = await db.execute(query)
 
     devices = {}
     for row in result.all():
@@ -234,6 +245,9 @@ async def get_alert_detail(
     )
     alert = result.scalar_one_or_none()
     if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    if not await scoping.alert_in_scope(db, alert_id, await scoping.visible_tags(db, user)):
+        # 404, not 403: out-of-scope ids must not be confirmable.
         raise HTTPException(status_code=404, detail="Alert not found")
 
     related_query = (

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import scoping
 from app.core.database import get_db
 from app.core.security import get_current_user, require_admin_user, require_operator_user
 from app.models.user import User
@@ -263,6 +264,7 @@ async def list_service_checks(
         db, device_id=device_id, check_type=check_type, status=status,
         search=search, group_id=group_id, tag=tag, level=level,
         skip=skip, limit=limit,
+        visible_tags=await scoping.visible_tags(db, current_user),
     )
 
 
@@ -323,7 +325,8 @@ async def service_check_summary(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return await service_check_service.get_service_check_summary(db)
+    return await service_check_service.get_service_check_summary(
+        db, visible_tags=await scoping.visible_tags(db, current_user))
 
 
 @router.get("/uptime-stats")
@@ -451,6 +454,9 @@ async def get_service_check(
 ):
     sc = await service_check_service.get_service_check(db, check_id)
     if not sc:
+        raise HTTPException(status_code=404, detail="Service check not found")
+    if not scoping.entity_visible(sc.tags, await scoping.visible_tags(db, current_user)):
+        # 404, not 403: out-of-scope ids must not be confirmable.
         raise HTTPException(status_code=404, detail="Service check not found")
     return sc
 

@@ -9,11 +9,13 @@ import {
 } from '@/components/ui/Dialog'
 import { Input } from '@/components/ui/Input'
 import { toast } from '@/components/ui/Toast'
-import { TAG_PALETTE, TagDef, autoTagColor, useTags } from '@/hooks/useTags'
+import { TAG_PALETTE, TagDef, autoTagColor, tagUsage, useTags } from '@/hooks/useTags'
 import { TagBadge } from './TagBadge'
 
-/** Registry management: create, rename (propagates to every device and
- * tag-scoped maintenance window), recolor, delete (strips from devices). */
+/** Registry management: create, rename (propagates to every tagged surface —
+ * devices, servers, services, applications, links — plus tag-scoped rules,
+ * windows, and user visibility scopes), recolor, delete (strips assignments;
+ * user scopes keep the name and simply match nothing). */
 export function ManageTagsDialog({
   open, onOpenChange,
 }: {
@@ -45,8 +47,9 @@ export function ManageTagsDialog({
             Manage tags
           </DialogTitle>
           <DialogDescription>
-            Renaming a tag updates it on every device and tag-scoped maintenance window.
-            Deleting removes it from all devices.
+            Renaming a tag updates it everywhere it is used — devices, servers,
+            services, applications, links, alert rules, maintenance windows, and
+            user visibility scopes. Deleting strips it from all of them.
           </DialogDescription>
         </DialogHeader>
 
@@ -150,7 +153,18 @@ function TagRow({ tag, onChanged }: { tag: TagDef; onChanged: () => void }) {
     <div className="flex items-center gap-2 p-3">
       <TagBadge name={tag.name} color={tag.color} />
       <span className="flex-1 truncate text-xs text-muted">
-        {tag.device_count} device{tag.device_count === 1 ? '' : 's'}
+        {[
+          tag.device_count ? `${tag.device_count} device${tag.device_count === 1 ? '' : 's'}` : null,
+          tag.server_count ? `${tag.server_count} server${tag.server_count === 1 ? '' : 's'}` : null,
+          tag.service_count ? `${tag.service_count} service${tag.service_count === 1 ? '' : 's'}` : null,
+          tag.app_count ? `${tag.app_count} app${tag.app_count === 1 ? '' : 's'}` : null,
+          tag.link_count ? `${tag.link_count} link${tag.link_count === 1 ? '' : 's'}` : null,
+        ].filter(Boolean).join(', ') || 'unused'}
+        {(tag.user_count || 0) > 0 && (
+          <span className="ml-2 inline-flex items-center gap-1 text-info" title="Limits what these users can see">
+            {tag.user_count} user scope{tag.user_count === 1 ? '' : 's'}
+          </span>
+        )}
         {tag.maintenance_count > 0 && (
           <span className="ml-2 inline-flex items-center gap-1 text-warning" title="Used by tag-scoped maintenance windows">
             <AlertTriangle className="h-3 w-3" />
@@ -160,7 +174,7 @@ function TagRow({ tag, onChanged }: { tag: TagDef; onChanged: () => void }) {
       </span>
       {confirmDelete ? (
         <>
-          <span className="text-xs text-danger">Remove from {tag.device_count}?</span>
+          <span className="text-xs text-danger">Remove from {tagUsage(tag)} item{tagUsage(tag) === 1 ? '' : 's'}?</span>
           <Button
             variant="destructive" size="sm" className="h-7"
             disabled={del.isPending}

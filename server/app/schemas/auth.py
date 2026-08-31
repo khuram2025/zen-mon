@@ -24,6 +24,9 @@ class UserResponse(BaseModel):
     role: str
     auth_source: str = "local"
     permissions: list[str] = []
+    # Visibility scope (empty = unrestricted); the UI uses this to show a
+    # "filtered view" indicator, never to enforce — enforcement is server-side.
+    scope_tags: list[str] = []
     last_login: Optional[datetime]
 
     model_config = {"from_attributes": True}

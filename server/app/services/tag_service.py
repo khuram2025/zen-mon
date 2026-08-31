@@ -24,10 +24,31 @@ PALETTE = [
 
 MAX_TAG_LEN = 64
 
-# Every surface that stores tag assignments as a JSONB text array, and every
-# column that stores a single tag name as a scope. Declared once so a rename or
+# Every surface that stores tag assignments as an array, and every column
+# that stores a single tag name as a scope. Declared once so a rename or
 # delete cannot silently miss one — see the note in api/v1/tags.py.
-TAG_ARRAY_TABLES: tuple[str, ...] = ("devices", "servers", "device_interfaces")
+#
+# (table, column, kind) — kind is the storage shape: "jsonb" for JSONB text
+# arrays, "text[]" for Postgres TEXT[]. service_checks and friends predate
+# the registry with TEXT[]; converting them would touch the ORM model and
+# every reader for no behavioral gain, so propagation speaks both shapes.
+TAG_ARRAY_SURFACES: tuple[tuple[str, str, str], ...] = (
+    ("devices", "tags", "jsonb"),
+    ("servers", "tags", "jsonb"),
+    ("device_interfaces", "tags", "jsonb"),
+    ("apm_services", "tags", "jsonb"),
+    ("service_checks", "tags", "text[]"),
+    ("service_check_templates", "tags", "text[]"),
+    ("netpath_probes", "tags", "text[]"),
+)
+
+# users.scope_tags participates in RENAME only: access must follow a renamed
+# tag, but a DELETE keeps the (now matching-nothing) name in the scope —
+# stripping it could silently widen a user whose last scope tag was deleted
+# to an unrestricted view. Fail-closed. See migrate-104.
+TAG_RENAME_ONLY_SURFACES: tuple[tuple[str, str, str], ...] = (
+    ("users", "scope_tags", "jsonb"),
+)
 
 TAG_SCOPE_COLUMNS: tuple[tuple[str, str, str | None], ...] = (
     ("device_maintenance", "scope_tag", "scope_type = 'tag'"),
@@ -108,14 +129,16 @@ async def adopt_device_tags(db: AsyncSession, commit: bool = True) -> int:
 
     Covers fleets that tagged rows before the registry existed and rows written
     by paths that bypass canonicalize_tags(). Named for devices for backwards
-    compatibility; it sweeps every table in TAG_ARRAY_TABLES.
+    compatibility; it sweeps every surface in TAG_ARRAY_SURFACES.
     """
     union = " UNION ".join(
         f"""SELECT DISTINCT el
-            FROM {tbl} t, jsonb_array_elements_text(COALESCE(t.tags, '[]'::jsonb)) el
+            FROM {tbl} t, {"jsonb_array_elements_text(COALESCE(t." + col + ", '[]'::jsonb))"
+                           if kind == "jsonb"
+                           else "unnest(COALESCE(t." + col + ", ARRAY[]::text[]))"} el
             WHERE btrim(el) <> ''
               AND NOT EXISTS (SELECT 1 FROM tags x WHERE LOWER(x.name) = LOWER(el))"""
-        for tbl in TAG_ARRAY_TABLES
+        for tbl, col, kind in TAG_ARRAY_SURFACES
     )
     missing = (await db.execute(text(union))).scalars().all()
     for name in missing:

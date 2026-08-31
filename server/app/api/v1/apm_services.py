@@ -21,10 +21,13 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import scoping
 from app.core.database import get_ch_client, get_db, AsyncSessionLocal
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
+from app.services import tag_service
 from app.services.apm_rollup import align_ms_window, bucket_for, table_for
 
 logger = logging.getLogger("zenplus.apm.services")
@@ -46,6 +49,9 @@ class ServiceRED(BaseModel):
     p95_ms: float
     p99_ms: float
     apdex: float
+    # Registry tags from the Postgres apm_services row(s) for this name —
+    # RED comes from ClickHouse, classification lives in Postgres.
+    tags: list[str] = []
 
 
 class ServiceListResponse(BaseModel):
@@ -178,16 +184,38 @@ def _query_services(frm: int, to: int, env: Optional[str]) -> list[dict]:
 
 # ── endpoints ────────────────────────────────────────────────────────────────
 
+async def _service_tags_map(db: AsyncSession) -> dict[str, list[str]]:
+    """Display tags per service name, unioned across its (name, env) rows."""
+    rows = (await db.execute(text("SELECT name, tags FROM apm_services"))).all()
+    out: dict[str, list[str]] = {}
+    for name, tags in rows:
+        cur = out.setdefault(name, [])
+        have = {c.lower() for c in cur}
+        for t in tags if isinstance(tags, list) else []:
+            if isinstance(t, str) and t.strip() and t.lower() not in have:
+                cur.append(t)
+                have.add(t.lower())
+    return out
+
+
 @router.get("/services", response_model=ServiceListResponse)
 async def list_services(
     env: Optional[str] = None,
     range_: Optional[str] = Query("1h", alias="range"),
     from_ms: Optional[int] = None,
     to_ms: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     frm, to = _window(from_ms, to_ms, range_)
     rows = await asyncio.to_thread(_query_services, frm, to, env)
+
+    tags_map = await _service_tags_map(db)
+    for s in rows:
+        s["tags"] = tags_map.get(s["name"], [])
+    scope = await scoping.visible_tags(db, user)
+    if scope is not None:
+        rows = [s for s in rows if scoping.entity_visible(s["tags"], scope)]
 
     def facets():
         sql = f"""
@@ -200,7 +228,15 @@ async def list_services(
         """
         return {r[0]: int(r[1]) for r in _ch().query(sql, parameters={"frm": frm, "to": to}).result_rows}
 
-    env_facet = await asyncio.to_thread(facets)
+    if scope is None:
+        env_facet = await asyncio.to_thread(facets)
+    else:
+        # ClickHouse counts the whole fleet; a scoped facet must not leak
+        # how many hidden services exist per env.
+        env_facet = {}
+        for s in rows:
+            for e in s["envs"]:
+                env_facet[e] = env_facet.get(e, 0) + 1
     health_facet: dict[str, int] = {}
     for s in rows:
         health_facet[s["health"]] = health_facet.get(s["health"], 0) + 1
@@ -212,22 +248,76 @@ async def list_services(
     )
 
 
+async def _require_service_in_scope(db: AsyncSession, user: User, name: str) -> None:
+    """404 (not 403) for out-of-scope services: ids must not be confirmable."""
+    scope = await scoping.visible_tags(db, user)
+    if scope is not None and name not in await scoping.visible_apm_service_names(db, scope):
+        raise HTTPException(status_code=404, detail="Service not found")
+
+
 @router.get("/services/{name}", response_model=ServiceRED)
 async def get_service(
     name: str, env: Optional[str] = None,
     range_: Optional[str] = Query("1h", alias="range"),
     from_ms: Optional[int] = None, to_ms: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await _require_service_in_scope(db, user, name)
     frm, to = _window(from_ms, to_ms, range_)
     rows = await asyncio.to_thread(_query_services, frm, to, env)
+    tags = (await _service_tags_map(db)).get(name, [])
     match = next((s for s in rows if s["name"] == name), None)
     if not match:
         # service exists but no entry-span RED in window -> empty shell
         return ServiceRED(name=name, envs=[env] if env else [], health="no_data",
                           request_count=0, rps=0, error_rate=0, p50_ms=0, p95_ms=0,
-                          p99_ms=0, apdex=0)
-    return ServiceRED(**match)
+                          p99_ms=0, apdex=0, tags=tags)
+    return ServiceRED(**{**match, "tags": tags})
+
+
+class ServiceMetaUpdate(BaseModel):
+    tags: Optional[list[str]] = None
+    team: Optional[str] = None
+    owner: Optional[str] = None
+
+
+@router.patch("/services/{name}/meta")
+async def update_service_meta(
+    name: str,
+    payload: ServiceMetaUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Classification metadata for an APM service. Applies to every (name,
+    env) row so a service keeps one identity across environments. Tags are
+    canonicalized against the registry, same contract as devices/servers."""
+    exists = (await db.execute(
+        text("SELECT 1 FROM apm_services WHERE name = :n LIMIT 1"), {"n": name},
+    )).first()
+    if not exists:
+        raise HTTPException(status_code=404, detail="Service not found")
+
+    sets, params = [], {"n": name}
+    if payload.tags is not None:
+        import json as _json
+        sets.append("tags = CAST(:tags AS jsonb)")
+        params["tags"] = _json.dumps(await tag_service.canonicalize_tags(db, payload.tags))
+    if payload.team is not None:
+        sets.append("team = :team"); params["team"] = payload.team.strip() or None
+    if payload.owner is not None:
+        sets.append("owner = :owner"); params["owner"] = payload.owner.strip() or None
+    if sets:
+        await db.execute(
+            text(f"UPDATE apm_services SET {', '.join(sets)}, updated_at = NOW() WHERE name = :n"),
+            params,
+        )
+        await db.commit()
+    row = (await db.execute(text(
+        "SELECT name, tags, team, owner FROM apm_services WHERE name = :n LIMIT 1"
+    ), {"n": name})).mappings().first()
+    return {"name": row["name"], "tags": row["tags"] or [],
+            "team": row["team"], "owner": row["owner"]}
 
 
 @router.get("/services/{name}/red", response_model=list[REDPoint])
@@ -235,8 +325,10 @@ async def service_red_timeseries(
     name: str, env: Optional[str] = None,
     range_: Optional[str] = Query("1h", alias="range"),
     from_ms: Optional[int] = None, to_ms: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await _require_service_in_scope(db, user, name)
     frm, to = _window(from_ms, to_ms, range_)
     params = {"frm": frm, "to": to, "svc": name}
     env_cond = ""
@@ -280,8 +372,10 @@ async def service_operations(
     name: str, env: Optional[str] = None,
     range_: Optional[str] = Query("1h", alias="range"),
     from_ms: Optional[int] = None, to_ms: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await _require_service_in_scope(db, user, name)
     frm, to = _window(from_ms, to_ms, range_)
     win_s = _covered_seconds(frm, to)
     params = {"frm": frm, "to": to, "svc": name}
@@ -319,10 +413,15 @@ async def service_map(
     env: Optional[str] = None,
     range_: Optional[str] = Query("1h", alias="range"),
     from_ms: Optional[int] = None, to_ms: Optional[int] = None,
+    db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     frm, to = _window(from_ms, to_ms, range_)
     nodes = await asyncio.to_thread(_query_services, frm, to, env)
+    _map_scope = await scoping.visible_tags(db, user)
+    if _map_scope is not None:
+        _visible = await scoping.visible_apm_service_names(db, _map_scope)
+        nodes = [n for n in nodes if n["name"] in _visible]
 
     def edges():
         """Edges from the pre-aggregated graph, plus a live tail.
@@ -397,6 +496,10 @@ async def service_map(
         return out
 
     edge_list = await asyncio.to_thread(edges)
+    if _map_scope is not None:
+        # A scoped map shows only the user's services; edges touching a
+        # hidden service would leak its name.
+        edge_list = [e for e in edge_list if e.client in _visible and e.server in _visible]
     node_names = {n["name"] for n in nodes}
     # include client/server-only services that have no entry-span RED as bare nodes
     for e in edge_list:

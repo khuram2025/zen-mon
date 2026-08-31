@@ -23,6 +23,7 @@ import {
   SelectValue,
 } from '@/components/ui/Select'
 import { toast } from '@/components/ui/Toast'
+import { TagPicker } from '@/components/tags/TagPicker'
 
 export function UserFormDialog({
   open,
@@ -49,6 +50,7 @@ export function UserFormDialog({
   const [password, setPassword] = useState('')
   const [role, setRole] = useState('viewer')
   const [isActive, setIsActive] = useState(true)
+  const [scopeTags, setScopeTags] = useState<string[]>([])
 
   useEffect(() => {
     if (!open) return
@@ -59,6 +61,7 @@ export function UserFormDialog({
       setPassword('')
       setRole(user.role || 'viewer')
       setIsActive(user.is_active ?? true)
+      setScopeTags(user.scope_tags || [])
     } else {
       setUsername('')
       setEmail('')
@@ -66,13 +69,14 @@ export function UserFormDialog({
       setPassword('')
       setRole('viewer')
       setIsActive(true)
+      setScopeTags([])
     }
   }, [open, user])
 
   const save = useMutation({
     mutationFn: async () => {
       if (isEdit) {
-        const payload: any = { email, full_name: fullName || null, role, is_active: isActive }
+        const payload: any = { email, full_name: fullName || null, role, is_active: isActive, scope_tags: scopeTags }
         return (await api.put(`/users/${user.id}`, payload)).data
       }
       return (
@@ -82,6 +86,7 @@ export function UserFormDialog({
           full_name: fullName || null,
           password,
           role,
+          scope_tags: scopeTags,
         })
       ).data
     },
@@ -170,6 +175,15 @@ export function UserFormDialog({
               </div>
             )}
           </div>
+          <FormField
+            label="Visibility scope"
+            hint={scopeTags.length === 0
+              ? 'No tags: this user sees everything.'
+              : 'Sees only devices, servers, services, applications — and their alerts — carrying at least one of these tags. Untagged entities are hidden. Admin roles are never restricted.'}
+          >
+            <TagPicker value={scopeTags} onChange={setScopeTags} allowCreate={false}
+              placeholder="Unrestricted — add tags to limit visibility…" />
+          </FormField>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
             <Button type="submit" disabled={save.isPending}>

@@ -1,12 +1,18 @@
 import { useMemo, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { Activity, ArrowDown, ArrowUp, Boxes, Bug, Download, Gauge, Loader2, RefreshCw, Search } from 'lucide-react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Activity, ArrowDown, ArrowUp, Boxes, Bug, Download, Gauge, Loader2, Pencil, RefreshCw, Search } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
+import { FormField } from '@/components/ui/FormField'
+import { toast } from '@/components/ui/Toast'
+import { TagBadge } from '@/components/tags/TagBadge'
+import { TagPicker } from '@/components/tags/TagPicker'
+import { tagColor, tagColorMap, useTags } from '@/hooks/useTags'
 import { HealthBadge, fmtMs, fmtPct, fmtRps } from '@/components/apm/shared'
 import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
 import { ApmRangePicker, rangePhrase, useApmRange } from '@/components/apm/ApmRange'
@@ -35,7 +41,25 @@ export function ServicesPage() {
   const env = params.get('env') || ''
   const search = params.get('q') || ''
   const healthFilter = params.get('health') || 'all'
+  const tagFilter = params.get('tag') || ''
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean } | null>(null)
+  const [tagTarget, setTagTarget] = useState<ServiceRED | null>(null)
+  const [draftTags, setDraftTags] = useState<string[]>([])
+  const qc = useQueryClient()
+  const { data: tagDefs } = useTags()
+  const tagColors = useMemo(() => tagColorMap(tagDefs), [tagDefs])
+
+  const saveTags = useMutation({
+    mutationFn: async () =>
+      (await api.patch(`/apm/services/${encodeURIComponent(tagTarget!.name)}/meta`, { tags: draftTags })).data,
+    onSuccess: () => {
+      toast.success('Tags updated')
+      qc.invalidateQueries({ queryKey: ['apm', 'services'] })
+      qc.invalidateQueries({ queryKey: ['tags'] })
+      setTagTarget(null)
+    },
+    onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
+  })
 
   const set = (k: string, v: string) => {
     const n = new URLSearchParams(params)
@@ -58,6 +82,7 @@ export function ServicesPage() {
     const filtered = all.filter((s) => {
       if (search && !s.name.toLowerCase().includes(search.toLowerCase())) return false
       if (healthFilter !== 'all' && s.health !== healthFilter) return false
+      if (tagFilter && !(s.tags ?? []).some((t) => t.toLowerCase() === tagFilter.toLowerCase())) return false
       return true
     })
     if (!sort) {
@@ -71,7 +96,7 @@ export function ServicesPage() {
       if (typeof av === 'string' && typeof bv === 'string') return av.localeCompare(bv) * dir
       return ((av as number) - (bv as number)) * dir
     })
-  }, [all, search, sort, healthFilter])
+  }, [all, search, sort, healthFilter, tagFilter])
 
   const totalRps = all.reduce((a, s) => a + s.rps, 0)
   const totalReqs = all.reduce((a, s) => a + s.request_count, 0)
@@ -177,7 +202,15 @@ export function ServicesPage() {
                 active: env === value,
                 onSelect: () => set('env', env === value ? '' : value),
               })),
-            }]}
+            }, ...(all.some((s) => (s.tags ?? []).length > 0) ? [{
+              title: 'Tags',
+              items: [...new Set(all.flatMap((s) => s.tags ?? []))].sort().map((value) => ({
+                value,
+                count: all.filter((s) => (s.tags ?? []).includes(value)).length,
+                active: tagFilter.toLowerCase() === value.toLowerCase(),
+                onSelect: () => set('tag', tagFilter.toLowerCase() === value.toLowerCase() ? '' : value),
+              })),
+            }] : [])]}
           />
         }
       >
@@ -209,6 +242,7 @@ export function ServicesPage() {
                 <SortTh k="p99_ms">p99</SortTh>
                 <SortTh k="apdex">Apdex</SortTh>
                 <Th>Env</Th>
+                <Th>Tags</Th>
                 <Th className="text-right">Deep dive</Th>
               </Tr>
             </THead>
@@ -229,6 +263,22 @@ export function ServicesPage() {
                   <Td className="text-right font-mono text-xs tabular-nums">{fmtMs(s.p99_ms)}</Td>
                   <Td className="text-right"><ApdexCell value={s.apdex} /></Td>
                   <Td className="text-xs text-muted">{(s.envs ?? []).join(', ') || '—'}</Td>
+                  <Td onClick={(e) => e.stopPropagation()}>
+                    <div className="flex max-w-[200px] flex-wrap items-center gap-1">
+                      {(s.tags ?? []).slice(0, 3).map((t) => (
+                        <TagBadge key={t} name={t} color={tagColor(t, tagColors)}
+                          onClick={() => set('tag', tagFilter.toLowerCase() === t.toLowerCase() ? '' : t)} />
+                      ))}
+                      {(s.tags ?? []).length > 3 && (
+                        <span className="text-[10px] text-muted">+{(s.tags ?? []).length - 3}</span>
+                      )}
+                      <Button variant="ghost" size="icon" className="h-6 w-6 text-muted hover:text-text"
+                        title="Edit tags"
+                        onClick={() => { setTagTarget(s); setDraftTags(s.tags ?? []) }}>
+                        <Pencil className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  </Td>
                   <Td><DeepLinks service={s.name} range={range} /></Td>
                 </Tr>
               ))}
@@ -236,6 +286,23 @@ export function ServicesPage() {
           </Table>
         )}
       </ApmExplorerFrame>
+
+      <Dialog open={!!tagTarget} onOpenChange={(o) => !o && setTagTarget(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Tags — {tagTarget?.name}</DialogTitle>
+          </DialogHeader>
+          <FormField label="Tags" hint="Applies across every environment of this service. Tags drive filtering, alert scoping, and user visibility.">
+            <TagPicker value={draftTags} onChange={setDraftTags} autoFocus />
+          </FormField>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTagTarget(null)}>Cancel</Button>
+            <Button disabled={saveTags.isPending} onClick={() => saveTags.mutate()}>
+              {saveTags.isPending && <Loader2 className="h-4 w-4 animate-spin" />} Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

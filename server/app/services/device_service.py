@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete, text, cast, String, or_, and_
 from sqlalchemy.orm import selectinload
 
-from app.core import crypto
+from app.core import crypto, scoping
 from app.models.device import Device, DeviceGroup
 from app.schemas.device import DeviceCreate, DeviceUpdate, DeviceSummary, DeviceBulkImportItem, BulkImportResult
 from app.services import tag_service
@@ -93,9 +93,15 @@ async def get_devices(
     tags: list[str] | None = None,
     tags_match: str = "any",
     managed_by: UUID | None = None,
+    visible_tags: list[str] | None = None,
 ) -> tuple[list[Device], int]:
     query = select(Device).options(selectinload(Device.group))
 
+    if visible_tags is not None:
+        query = query.where(
+            text(scoping.jsonb_tags_visible("devices.tags"))
+            .bindparams(**{scoping.SCOPE_PARAM: visible_tags})
+        )
     if status:
         query = query.where(Device.status == status)
     if managed_by:
@@ -269,10 +275,16 @@ async def delete_device(db: AsyncSession, device_id: UUID) -> bool:
     return result.rowcount > 0
 
 
-async def get_device_summary(db: AsyncSession) -> DeviceSummary:
-    result = await db.execute(
-        select(Device.status, func.count(Device.id)).group_by(Device.status)
-    )
+async def get_device_summary(
+    db: AsyncSession, visible_tags: list[str] | None = None,
+) -> DeviceSummary:
+    query = select(Device.status, func.count(Device.id)).group_by(Device.status)
+    if visible_tags is not None:
+        query = query.where(
+            text(scoping.jsonb_tags_visible("devices.tags"))
+            .bindparams(**{scoping.SCOPE_PARAM: visible_tags})
+        )
+    result = await db.execute(query)
     counts = {row[0]: row[1] for row in result.all()}
 
     return DeviceSummary(

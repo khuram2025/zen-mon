@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import scoping
 from app.core.database import get_db
 from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
@@ -108,6 +109,7 @@ async def list_devices(
     devices, total = await device_service.get_devices(
         db, status, group_id, device_type, location, search, skip, limit,
         tags=tag_list, tags_match=tags_match, managed_by=managed_by,
+        visible_tags=await scoping.visible_tags(db, user),
     )
     profile_names = await _profile_name_map(db)
     parent_names, child_counts = await _managed_maps(db, devices)
@@ -122,7 +124,8 @@ async def device_summary(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    return await device_service.get_device_summary(db)
+    return await device_service.get_device_summary(
+        db, visible_tags=await scoping.visible_tags(db, user))
 
 
 
@@ -447,6 +450,9 @@ async def export_devices(
     user: User = Depends(get_current_user),
 ):
     devices = await device_service.export_devices(db)
+    scope = await scoping.visible_tags(db, user)
+    if scope is not None:
+        devices = [d for d in devices if scoping.entity_visible(d.get("tags"), scope)]
     return JSONResponse(content={"devices": devices})
 
 
@@ -458,6 +464,9 @@ async def get_device(
 ):
     device = await device_service.get_device(db, device_id)
     if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if not scoping.entity_visible(device.tags, await scoping.visible_tags(db, user)):
+        # 404, not 403: out-of-scope ids must not be confirmable.
         raise HTTPException(status_code=404, detail="Device not found")
     parent_names, child_counts = await _managed_maps(db, [device])
     return _device_to_response(device, await _profile_name_map(db), parent_names, child_counts)

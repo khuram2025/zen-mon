@@ -5,13 +5,15 @@ callers: renaming a tag rewrites it everywhere it is used, deleting strips it
 everywhere. Assignments live as JSONB text arrays on the tagged rows and are
 edited through each surface's own endpoints.
 
-The set of places a tag can appear is declared once, in TAG_ARRAY_TABLES and
-TAG_SCOPE_COLUMNS below. That is deliberate: propagation used to be two
-hand-written UPDATEs, so when alert_rules.scope_tag (migrate-077) and
+The set of places a tag can appear is declared once, in TAG_ARRAY_SURFACES
+and TAG_SCOPE_COLUMNS in tag_service. That is deliberate: propagation used to
+be two hand-written UPDATEs, so when alert_rules.scope_tag (migrate-077) and
 service_check_maintenance.scope_tag were added nobody updated this file, and a
 rename silently pointed those scopes at a name nothing carried any more —
 matching no devices, with no error. Adding a tagged surface means adding a line
-here, not remembering to.
+there, not remembering to. Since migrate-104 tags also gate visibility
+(users.scope_tags), so a missed surface would be an authorization bug, not
+just a cosmetic one.
 """
 
 from typing import Optional
@@ -26,26 +28,68 @@ from app.core.database import get_db
 from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
 from app.services.tag_service import (
-    MAX_TAG_LEN, TAG_ARRAY_TABLES, TAG_SCOPE_COLUMNS, adopt_device_tags, auto_color,
+    MAX_TAG_LEN, TAG_ARRAY_SURFACES, TAG_RENAME_ONLY_SURFACES, TAG_SCOPE_COLUMNS,
+    adopt_device_tags, auto_color,
 )
 
 router = APIRouter(prefix="/tags", tags=["Tags"])
 
 COLOR_RE = r"^#[0-9a-fA-F]{6}$"
 
-async def _rename_everywhere(db: AsyncSession, old: str, new: str) -> None:
-    for table in TAG_ARRAY_TABLES:
-        await db.execute(text(f"""
-            UPDATE {table} SET tags = (
+
+def _rename_sql(table: str, col: str, kind: str) -> str:
+    if kind == "jsonb":
+        return f"""
+            UPDATE {table} SET {col} = (
                 SELECT COALESCE(jsonb_agg(DISTINCT
                            CASE WHEN LOWER(el) = LOWER(:old) THEN :new ELSE el END),
                        '[]'::jsonb)
-                FROM jsonb_array_elements_text(COALESCE({table}.tags, '[]'::jsonb)) el
+                FROM jsonb_array_elements_text(COALESCE({table}.{col}, '[]'::jsonb)) el
             )
             WHERE EXISTS (
-                SELECT 1 FROM jsonb_array_elements_text(COALESCE({table}.tags, '[]'::jsonb)) el
+                SELECT 1 FROM jsonb_array_elements_text(COALESCE({table}.{col}, '[]'::jsonb)) el
                 WHERE LOWER(el) = LOWER(:old))
-        """), {"old": old, "new": new})
+        """
+    return f"""
+        UPDATE {table} SET {col} = (
+            SELECT COALESCE(array_agg(DISTINCT
+                       CASE WHEN LOWER(el) = LOWER(:old) THEN :new ELSE el END),
+                   ARRAY[]::text[])
+            FROM unnest({table}.{col}) el
+        )
+        WHERE EXISTS (
+            SELECT 1 FROM unnest(COALESCE({table}.{col}, ARRAY[]::text[])) el
+            WHERE LOWER(el) = LOWER(:old))
+    """
+
+
+def _strip_sql(table: str, col: str, kind: str) -> str:
+    if kind == "jsonb":
+        return f"""
+            UPDATE {table} SET {col} = (
+                SELECT COALESCE(jsonb_agg(el), '[]'::jsonb)
+                FROM jsonb_array_elements_text(COALESCE({table}.{col}, '[]'::jsonb)) el
+                WHERE LOWER(el) <> LOWER(:n)
+            )
+            WHERE EXISTS (
+                SELECT 1 FROM jsonb_array_elements_text(COALESCE({table}.{col}, '[]'::jsonb)) el
+                WHERE LOWER(el) = LOWER(:n))
+        """
+    return f"""
+        UPDATE {table} SET {col} = (
+            SELECT COALESCE(array_agg(el), ARRAY[]::text[])
+            FROM unnest({table}.{col}) el
+            WHERE LOWER(el) <> LOWER(:n)
+        )
+        WHERE EXISTS (
+            SELECT 1 FROM unnest(COALESCE({table}.{col}, ARRAY[]::text[])) el
+            WHERE LOWER(el) = LOWER(:n))
+    """
+
+
+async def _rename_everywhere(db: AsyncSession, old: str, new: str) -> None:
+    for table, col, kind in TAG_ARRAY_SURFACES + TAG_RENAME_ONLY_SURFACES:
+        await db.execute(text(_rename_sql(table, col, kind)), {"old": old, "new": new})
     for table, col, pred in TAG_SCOPE_COLUMNS:
         where = f"LOWER({col}) = LOWER(:old)" + (f" AND {pred}" if pred else "")
         await db.execute(
@@ -55,17 +99,11 @@ async def _rename_everywhere(db: AsyncSession, old: str, new: str) -> None:
 
 
 async def _delete_everywhere(db: AsyncSession, name: str) -> None:
-    for table in TAG_ARRAY_TABLES:
-        await db.execute(text(f"""
-            UPDATE {table} SET tags = (
-                SELECT COALESCE(jsonb_agg(el), '[]'::jsonb)
-                FROM jsonb_array_elements_text(COALESCE({table}.tags, '[]'::jsonb)) el
-                WHERE LOWER(el) <> LOWER(:n)
-            )
-            WHERE EXISTS (
-                SELECT 1 FROM jsonb_array_elements_text(COALESCE({table}.tags, '[]'::jsonb)) el
-                WHERE LOWER(el) = LOWER(:n))
-        """), {"n": name})
+    # Deliberately NOT stripped from TAG_RENAME_ONLY_SURFACES (users.scope_tags):
+    # a dangling scope tag matches nothing (fail-closed), while stripping it
+    # could widen a user whose last scope tag was deleted to unrestricted.
+    for table, col, kind in TAG_ARRAY_SURFACES:
+        await db.execute(text(_strip_sql(table, col, kind)), {"n": name})
     # A scope pointing at a deleted tag would match nothing forever; clearing it
     # makes the rule/window unscoped, which is visible in the UI.
     for table, col, pred in TAG_SCOPE_COLUMNS:
@@ -91,17 +129,36 @@ class TagResponse(BaseModel):
     color: Optional[str]
     description: Optional[str]
     device_count: int
+    server_count: int
+    service_count: int
+    app_count: int
+    link_count: int
+    user_count: int
     maintenance_count: int
 
 
-# device_count/maintenance_count are case-insensitive on purpose: rows
-# written before the registry existed may not match its spelling exactly.
-_SELECT = """
+def _count_jsonb(table: str, col: str = "tags") -> str:
+    return (f"(SELECT COUNT(*) FROM {table} _c WHERE EXISTS ("
+            f"SELECT 1 FROM jsonb_array_elements_text(COALESCE(_c.{col}, '[]'::jsonb)) el"
+            f" WHERE LOWER(el) = LOWER(t.name)))")
+
+
+def _count_text(table: str, col: str = "tags") -> str:
+    return (f"(SELECT COUNT(*) FROM {table} _c WHERE EXISTS ("
+            f"SELECT 1 FROM unnest(COALESCE(_c.{col}, ARRAY[]::text[])) el"
+            f" WHERE LOWER(el) = LOWER(t.name)))")
+
+
+# All counts are case-insensitive on purpose: rows written before the
+# registry existed may not match its spelling exactly.
+_SELECT = f"""
     SELECT t.id, t.name, t.color, t.description,
-           (SELECT COUNT(*) FROM devices d
-             WHERE EXISTS (
-                SELECT 1 FROM jsonb_array_elements_text(COALESCE(d.tags, '[]'::jsonb)) el
-                WHERE LOWER(el) = LOWER(t.name)))            AS device_count,
+           {_count_jsonb('devices')}                         AS device_count,
+           {_count_jsonb('servers')}                         AS server_count,
+           {_count_text('service_checks')}                   AS service_count,
+           {_count_jsonb('apm_services')}                    AS app_count,
+           {_count_jsonb('device_interfaces')}               AS link_count,
+           {_count_jsonb('users', 'scope_tags')}             AS user_count,
            (SELECT COUNT(*) FROM device_maintenance m
              WHERE m.scope_type = 'tag'
                AND LOWER(m.scope_tag) = LOWER(t.name))       AS maintenance_count

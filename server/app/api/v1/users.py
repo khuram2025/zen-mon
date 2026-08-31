@@ -12,6 +12,7 @@ from app.core.permissions import LEGACY_ROLE_PERMISSIONS, SUPERUSER_PERMISSION
 from app.core.security import get_current_user, hash_password, require_permission
 from app.models.role import Role
 from app.models.user import User
+from app.services import tag_service
 from app.services.audit_service import write_audit_log
 
 router = APIRouter(prefix="/users", tags=["User Management"])
@@ -100,6 +101,9 @@ class UserCreate(BaseModel):
     full_name: Optional[str] = Field(None, max_length=255)
     role: str = Field(default="viewer")
     is_active: bool = True
+    # Visibility scope: tag names limiting what this user sees. Empty =
+    # unrestricted. Canonicalized against the tag registry on write.
+    scope_tags: list[str] = Field(default_factory=list)
 
 
 class UserUpdate(BaseModel):
@@ -107,6 +111,7 @@ class UserUpdate(BaseModel):
     full_name: Optional[str] = Field(None, max_length=255)
     role: Optional[str] = None
     is_active: Optional[bool] = None
+    scope_tags: Optional[list[str]] = None
 
 
 class ResetPasswordRequest(BaseModel):
@@ -126,6 +131,7 @@ class UserOut(BaseModel):
     role: str
     is_active: bool
     auth_source: str = "local"
+    scope_tags: list[str] = []
     last_login: Optional[datetime]
     created_at: datetime
     updated_at: datetime
@@ -213,6 +219,7 @@ async def create_user(
         role=data.role,
         is_active=data.is_active,
         auth_source="local",
+        scope_tags=await tag_service.canonicalize_tags(db, data.scope_tags),
     )
     db.add(user)
     await db.flush()
@@ -222,7 +229,8 @@ async def create_user(
         action="user.create",
         resource_type="user",
         resource_id=str(user.id),
-        metadata={"username": user.username, "role": user.role, "is_active": user.is_active},
+        metadata={"username": user.username, "role": user.role, "is_active": user.is_active,
+                  "scope_tags": user.scope_tags},
     )
     await db.commit()
     await db.refresh(user)
@@ -278,6 +286,9 @@ async def update_user(
 
     if data.full_name is not None:
         user.full_name = data.full_name
+
+    if data.scope_tags is not None:
+        user.scope_tags = await tag_service.canonicalize_tags(db, data.scope_tags)
 
     if data.is_active is not None:
         # Prevent deactivating the last full administrator

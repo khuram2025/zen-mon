@@ -16,6 +16,8 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { UserFormDialog } from '@/components/forms/UserFormDialog'
 import { toast } from '@/components/ui/Toast'
 import { useCan } from '@/stores/auth'
+import { TagBadge } from '@/components/tags/TagBadge'
+import { tagColor, tagColorMap, useTags } from '@/hooks/useTags'
 
 const SOURCE_BADGE: Record<string, { label: string; variant: 'outline' | 'info' | 'warning' }> = {
   local: { label: 'Local', variant: 'outline' },
@@ -43,6 +45,8 @@ export function UsersSection() {
     queryKey: ['roles'],
     queryFn: async () => (await api.get('/roles')).data,
   })
+  const { data: tagDefs } = useTags()
+  const tagColors = useMemo(() => tagColorMap(tagDefs), [tagDefs])
 
   const roleLabel = useMemo(() => {
     const map: Record<string, string> = {}
@@ -99,7 +103,7 @@ export function UsersSection() {
           <Table>
             <THead className="bg-surface2/50">
               <Tr>
-                <Th>Username</Th><Th>Email</Th><Th>Role</Th><Th>Source</Th><Th>Active</Th><Th>Last login</Th>
+                <Th>Username</Th><Th>Email</Th><Th>Role</Th><Th>Visibility</Th><Th>Source</Th><Th>Active</Th><Th>Last login</Th>
                 {canManage && <Th className="w-32 text-right">Actions</Th>}
               </Tr>
             </THead>
@@ -114,6 +118,20 @@ export function UsersSection() {
                     </Td>
                     <Td className="text-sm">{u.email}</Td>
                     <Td><Badge variant={u.role === 'admin' ? 'success' : 'info'}>{roleLabel[u.role] || u.role}</Badge></Td>
+                    <Td>
+                      {(u.scope_tags || []).length === 0 ? (
+                        <span className="text-xs text-muted">All</span>
+                      ) : (
+                        <div className="flex max-w-[220px] flex-wrap gap-1">
+                          {(u.scope_tags || []).slice(0, 3).map((t) => (
+                            <TagBadge key={t} name={t} color={tagColor(t, tagColors)} />
+                          ))}
+                          {(u.scope_tags || []).length > 3 && (
+                            <span className="text-[10px] text-muted">+{(u.scope_tags || []).length - 3}</span>
+                          )}
+                        </div>
+                      )}
+                    </Td>
                     <Td><Badge variant={src.variant}>{src.label}</Badge></Td>
                     <Td><Badge variant={u.is_active ? 'success' : 'outline'}>{u.is_active ? 'yes' : 'no'}</Badge></Td>
                     <Td className="text-xs text-muted">{relativeTime(u.last_login)}</Td>
@@ -131,7 +149,7 @@ export function UsersSection() {
                   </Tr>
                 )
               })}
-              {filtered.length === 0 && <Tr><Td colSpan={canManage ? 7 : 6} className="py-8 text-center text-muted">No users</Td></Tr>}
+              {filtered.length === 0 && <Tr><Td colSpan={canManage ? 8 : 7} className="py-8 text-center text-muted">No users</Td></Tr>}
             </TBody>
           </Table>
         </CardContent>

@@ -7,7 +7,18 @@ export type TagDef = {
   color: string | null
   description: string | null
   device_count: number
+  server_count: number
+  service_count: number
+  app_count: number
+  link_count: number
+  user_count: number
   maintenance_count: number
+}
+
+/** Total assignments across every tagged surface. */
+export function tagUsage(t: TagDef): number {
+  return (t.device_count || 0) + (t.server_count || 0) + (t.service_count || 0)
+    + (t.app_count || 0) + (t.link_count || 0)
 }
 
 // Kept in sync with the server palette (app/services/tag_service.py).

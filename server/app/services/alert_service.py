@@ -2,11 +2,21 @@ from uuid import UUID
 from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import or_, select, func
+from sqlalchemy import text as sql_text
 from sqlalchemy.orm import selectinload
 
+from app.core import scoping
 from app.models.alert import Alert, AlertRule
 from app.models.device import Device
 from app.schemas.alert import AlertStats
+
+
+def _scope_clause(visible_tags: list[str]):
+    """An alert is visible when its device, server, or service check is."""
+    return (
+        sql_text(scoping.alert_visible("alerts"))
+        .bindparams(**{scoping.SCOPE_PARAM: visible_tags})
+    )
 
 
 async def get_alerts(
@@ -21,12 +31,15 @@ async def get_alerts(
     skip: int = 0,
     limit: int = 50,
     server_id: UUID | None = None,
+    visible_tags: list[str] | None = None,
 ) -> tuple[list[Alert], int]:
     query = select(Alert).options(
         selectinload(Alert.device),
         selectinload(Alert.service_check),
     )
 
+    if visible_tags is not None:
+        query = query.where(_scope_clause(visible_tags))
     if status:
         query = query.where(Alert.status == status)
     if severity:
@@ -87,16 +100,21 @@ async def resolve_alert(db: AsyncSession, alert_id: UUID) -> Alert | None:
     return alert
 
 
-async def get_alert_stats(db: AsyncSession) -> AlertStats:
+async def get_alert_stats(
+    db: AsyncSession, visible_tags: list[str] | None = None,
+) -> AlertStats:
+    def _scoped(query):
+        return query.where(_scope_clause(visible_tags)) if visible_tags is not None else query
+
     # Status counts
     result = await db.execute(
-        select(Alert.status, func.count(Alert.id)).group_by(Alert.status)
+        _scoped(select(Alert.status, func.count(Alert.id))).group_by(Alert.status)
     )
     status_counts = {row[0]: row[1] for row in result.all()}
 
     # Severity counts (active only)
     result = await db.execute(
-        select(Alert.severity, func.count(Alert.id))
+        _scoped(select(Alert.severity, func.count(Alert.id)))
         .where(Alert.status == "active")
         .group_by(Alert.severity)
     )
@@ -106,7 +124,7 @@ async def get_alert_stats(db: AsyncSession) -> AlertStats:
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     resolved_today = (
         await db.execute(
-            select(func.count(Alert.id))
+            _scoped(select(func.count(Alert.id)))
             .where(Alert.status == "resolved")
             .where(Alert.resolved_at >= today_start)
         )

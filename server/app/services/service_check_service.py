@@ -2,7 +2,11 @@ import math
 from uuid import UUID
 from urllib.parse import urlsplit
 from sqlalchemy import or_, select, func, delete, distinct
+from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core import scoping
+from app.services import tag_service
 
 from datetime import datetime, timedelta, timezone
 
@@ -99,9 +103,15 @@ async def get_service_checks(
     level: int | None = None,
     skip: int = 0,
     limit: int = 50,
+    visible_tags: list[str] | None = None,
 ):
     query = select(ServiceCheck)
 
+    if visible_tags is not None:
+        query = query.where(
+            sql_text(scoping.text_tags_visible("service_checks.tags"))
+            .bindparams(**{scoping.SCOPE_PARAM: visible_tags})
+        )
     if device_id:
         query = query.where(ServiceCheck.device_id == device_id)
     if check_type:
@@ -286,8 +296,12 @@ async def create_service_check(db: AsyncSession, data: ServiceCheckCreate, user_
         data.workflow_steps,
         data.http_allow_insecure_auth,
     )
+    payload = data.model_dump()
+    # Registry spellings only; unknown labels auto-register — the same
+    # contract devices and servers already follow.
+    payload["tags"] = await tag_service.canonicalize_tags(db, payload.get("tags"))
     sc = ServiceCheck(
-        **data.model_dump(),
+        **payload,
         created_by=user_id,
     )
     if credential:
@@ -330,6 +344,8 @@ async def update_service_check(db: AsyncSession, check_id: UUID, data: ServiceCh
         effective_steps,
         bool(update_data.get("http_allow_insecure_auth", sc.http_allow_insecure_auth)),
     )
+    if "tags" in update_data:
+        update_data["tags"] = await tag_service.canonicalize_tags(db, update_data["tags"])
     for key, value in update_data.items():
         setattr(sc, key, value)
     if "credential_id" in update_data:
@@ -451,11 +467,19 @@ async def delete_service_check(db: AsyncSession, check_id: UUID) -> bool:
     return result.rowcount > 0
 
 
-async def get_service_check_summary(db: AsyncSession) -> ServiceCheckSummary:
-    result = await db.execute(
+async def get_service_check_summary(
+    db: AsyncSession, visible_tags: list[str] | None = None,
+) -> ServiceCheckSummary:
+    query = (
         select(ServiceCheck.status, func.count(ServiceCheck.id))
         .group_by(ServiceCheck.status)
     )
+    if visible_tags is not None:
+        query = query.where(
+            sql_text(scoping.text_tags_visible("service_checks.tags"))
+            .bindparams(**{scoping.SCOPE_PARAM: visible_tags})
+        )
+    result = await db.execute(query)
     counts = {row[0]: row[1] for row in result.all()}
     total = sum(counts.values())
     return ServiceCheckSummary(

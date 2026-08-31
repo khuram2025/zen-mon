@@ -107,6 +107,8 @@ export interface User {
   role: string
   is_active?: boolean
   auth_source?: 'local' | 'ldap' | 'radius'
+  /** Visibility scope: tag names this user is limited to. Empty = unrestricted. */
+  scope_tags?: string[]
   last_login: string | null
   created_at?: string
   updated_at?: string

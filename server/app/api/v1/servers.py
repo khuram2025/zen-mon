@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
 
 from app.api.v1.apm import invalidate_ingest_key_cache
+from app.core import scoping
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.services.tag_service import canonicalize_tags
@@ -373,6 +374,10 @@ async def list_servers(
 
     where = ["1=1"]
     params: dict[str, Any] = {"limit": page_size, "offset": offset}
+    scope = await scoping.visible_tags(db, user)
+    if scope is not None:
+        where.append(scoping.jsonb_tags_visible("s.tags"))
+        params[scoping.SCOPE_PARAM] = scope
     if site_id:
         where.append("s.site_id = :site"); params["site"] = site_id
     if os_type:
@@ -433,25 +438,31 @@ async def server_facets(
     user: User = Depends(get_current_user),
 ):
     """Distinct filter values + counts for the inventory list sidebar."""
+    scope = await scoping.visible_tags(db, user)
+    scope_sql = f" AND {scoping.jsonb_tags_visible('s.tags')}" if scope is not None else ""
+    scope_params = {scoping.SCOPE_PARAM: scope} if scope is not None else {}
+
     async def _group(col: str) -> list[dict]:
         rows = (await db.execute(text(
-            f"""SELECT {col} AS value, COUNT(*) AS count FROM servers
-                WHERE {col} IS NOT NULL AND {col}::text != ''
+            f"""SELECT {col} AS value, COUNT(*) AS count FROM servers s
+                WHERE {col} IS NOT NULL AND {col}::text != ''{scope_sql}
                 GROUP BY {col} ORDER BY count DESC, value"""
-        ))).all()
+        ), scope_params)).all()
         return [{"value": r[0], "count": int(r[1])} for r in rows]
 
     tags = (await db.execute(text(
-        """SELECT t.tag AS value, COUNT(*) AS count
+        f"""SELECT t.tag AS value, COUNT(*) AS count
            FROM servers s, jsonb_array_elements_text(s.tags) AS t(tag)
+           WHERE TRUE{scope_sql}
            GROUP BY t.tag ORDER BY count DESC, value LIMIT 100"""
-    ))).all()
+    ), scope_params)).all()
 
     sites = (await db.execute(text(
-        """SELECT st.id, st.name, COUNT(*) AS count
+        f"""SELECT st.id, st.name, COUNT(*) AS count
            FROM servers s JOIN sites st ON st.id = s.site_id
+           WHERE TRUE{scope_sql}
            GROUP BY st.id, st.name ORDER BY count DESC"""
-    ))).all()
+    ), scope_params)).all()
 
     return {
         "status": await _group("status"),
@@ -478,6 +489,13 @@ async def servers_latest_metrics(
         window_minutes,
         freshness_seconds_by_server=freshness,
     )
+    scope = await scoping.visible_tags(db, user)
+    if scope is not None:
+        # The metric map is keyed by server id; drop out-of-scope servers so
+        # a scoped list view cannot receive metrics for hidden hosts.
+        allowed = await scoping.visible_server_ids(db, scope)
+        latest = {sid: m for sid, m in latest.items() if sid in allowed} \
+            if isinstance(latest, dict) else latest
     return {
         "servers": latest,
         "telemetry": _host_telemetry_readiness(latest, freshness),
@@ -630,6 +648,9 @@ async def get_server(
     )).mappings().first()
     if not row:
         raise HTTPException(404, "Server not found")
+    if not scoping.entity_visible(row["tags"], await scoping.visible_tags(db, user)):
+        # 404, not 403: out-of-scope ids must not be confirmable.
+        raise HTTPException(404, "Server not found")
     return _server_row_to_response(dict(row))
 
 
@@ -650,8 +671,10 @@ async def update_server(
             sets.append(f"{field} = :{field}")
             params[field] = v
     if data.tags is not None:
-        sets.append("tags = :tags")
-        params["tags"] = json.dumps(data.tags)
+        sets.append("tags = CAST(:tags AS jsonb)")
+        # Same contract as the bulk path: registry spellings only, unknown
+        # labels auto-register. This PATCH used to bypass canonicalization.
+        params["tags"] = json.dumps(await canonicalize_tags(db, data.tags))
     if not sets:
         return await get_server(server_id, db, user)
     sql = f"UPDATE servers SET {', '.join(sets)}, updated_at = NOW() WHERE id = :id RETURNING *"
@@ -3281,29 +3304,44 @@ async def overview(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    scope = await scoping.visible_tags(db, user)
+    scope_sql = f" WHERE {scoping.jsonb_tags_visible('s.tags')}" if scope is not None else ""
+    scope_params = {scoping.SCOPE_PARAM: scope} if scope is not None else {}
+
     counts = (await db.execute(
-        text("""SELECT status, COUNT(*) FROM servers GROUP BY status""")
+        text(f"SELECT s.status, COUNT(*) FROM servers s{scope_sql} GROUP BY s.status"),
+        scope_params,
     )).all()
     status_counts = {r[0]: r[1] for r in counts}
-    total_row = (await db.execute(text("SELECT COUNT(*) FROM servers"))).first()
+    total_row = (await db.execute(
+        text(f"SELECT COUNT(*) FROM servers s{scope_sql}"), scope_params,
+    )).first()
     total = total_row[0] if total_row else 0
 
     os_counts_rows = (await db.execute(
-        text("SELECT os_type, COUNT(*) FROM servers GROUP BY os_type")
+        text(f"SELECT s.os_type, COUNT(*) FROM servers s{scope_sql} GROUP BY s.os_type"),
+        scope_params,
     )).all()
     os_counts = {r[0]: r[1] for r in os_counts_rows}
 
+    agent_scope_sql = (
+        f" JOIN servers s ON s.id = a.server_id WHERE {scoping.jsonb_tags_visible('s.tags')}"
+        if scope is not None else ""
+    )
     agent_counts_rows = (await db.execute(
-        text("SELECT status, COUNT(*) FROM agents GROUP BY status")
+        text(f"SELECT a.status, COUNT(*) FROM agents a{agent_scope_sql} GROUP BY a.status"),
+        scope_params,
     )).all()
     agent_counts = {r[0]: r[1] for r in agent_counts_rows}
 
+    site_scope_sql = f" AND {scoping.jsonb_tags_visible('srv.tags')}" if scope is not None else ""
     sites_rows = (await db.execute(
-        text("""SELECT s.id, s.name, COUNT(srv.id) AS cnt
+        text(f"""SELECT s.id, s.name, COUNT(srv.id) AS cnt
                 FROM sites s
-                LEFT JOIN servers srv ON srv.site_id = s.id
+                LEFT JOIN servers srv ON srv.site_id = s.id{site_scope_sql}
                 GROUP BY s.id, s.name
-                ORDER BY cnt DESC LIMIT 10""")
+                ORDER BY cnt DESC LIMIT 10"""),
+        scope_params,
     )).all()
     sites = [{"id": str(r[0]), "name": r[1], "server_count": r[2]} for r in sites_rows]
 
@@ -3314,14 +3352,18 @@ async def overview(
         asyncio.to_thread(query_top_pressure, "network", 5),
     )
 
-    # Enrich with display names
+    # Enrich with display names; under a visibility scope this join is also
+    # the filter — ClickHouse rows for hidden servers are dropped, not
+    # passed through unhydrated.
     async def _hydrate(items: list[dict]) -> list[dict]:
         if not items:
             return []
         ids = [it["server_id"] for it in items]
         rows = (await db.execute(
-            text("SELECT id, display_name, hostname FROM servers WHERE id = ANY(:ids)"),
-            {"ids": ids},
+            text(f"""SELECT id, display_name, hostname FROM servers s
+                     WHERE id = ANY(:ids){' AND ' + scoping.jsonb_tags_visible('s.tags')
+                                          if scope is not None else ''}"""),
+            {"ids": ids, **scope_params},
         )).mappings().all()
         by_id = {str(r["id"]): r for r in rows}
         out = []
@@ -3333,7 +3375,7 @@ async def overview(
                     "display_name": r["display_name"],
                     "hostname": r.get("hostname"),
                 })
-            else:
+            elif scope is None:
                 out.append(it)
         return out
 
