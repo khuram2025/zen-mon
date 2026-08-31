@@ -344,4 +344,16 @@ async def escalation_sweeper_loop() -> None:
             raise
         except Exception:
             logger.exception("alert escalation sweep failed")
+        # min_duration holds ride the same cadence: pending status alerts are
+        # confirmed (still breaching -> dispatch) or cancelled (blip -> silent)
+        # once their hold expires. Separate session so a failure in either
+        # sweep never poisons the other's transaction.
+        try:
+            from app.services.alert_hold_service import sweep_pending_holds
+            async with AsyncSessionLocal() as db:
+                await sweep_pending_holds(db)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("alert hold sweep failed")
         await asyncio.sleep(EVAL_INTERVAL_S)

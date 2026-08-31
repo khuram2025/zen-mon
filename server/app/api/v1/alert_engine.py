@@ -7,7 +7,7 @@ import httpx
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 from typing import Optional
 
@@ -459,6 +459,31 @@ def _recovery_map(closed_rows) -> dict:
     return out
 
 
+_PENDING_STATUS_SUPPORTED: bool | None = None
+
+
+async def _pending_supported(db: AsyncSession) -> bool:
+    """Whether alerts.status accepts 'pending' (migrate-103).
+
+    min_duration holds park the alert row as status='pending' until the hold
+    sweeper confirms the condition survived. On a DB whose CHECK constraint
+    predates migrate-103 that insert would blow up the whole evaluation, so
+    holds silently degrade to the old fire-immediately behaviour until the
+    migration runs.
+    """
+    global _PENDING_STATUS_SUPPORTED
+    if _PENDING_STATUS_SUPPORTED is None:
+        _PENDING_STATUS_SUPPORTED = bool((await db.execute(text("""
+            SELECT COALESCE(bool_and(pg_get_constraintdef(oid) LIKE '%pending%'), true)
+            FROM pg_constraint
+            WHERE conrelid = 'alerts'::regclass AND contype = 'c'
+              AND pg_get_constraintdef(oid) LIKE '%status%'
+        """))).scalar())
+        if not _PENDING_STATUS_SUPPORTED:
+            print("WARN alert hold (min_duration) disabled: run migrate-103-alert-pending-status.sql")
+    return _PENDING_STATUS_SUPPORTED
+
+
 async def _within_cooldown(db: AsyncSession, rule, *, device_id: str | None = None,
                            service_check_id: str | None = None,
                            exclude_alert_id=None) -> bool:
@@ -489,6 +514,24 @@ async def _within_cooldown(db: AsyncSession, rule, *, device_id: str | None = No
          "aid": str(exclude_alert_id) if exclude_alert_id else None, "cd": cd},
     )).first()
     return row is not None
+
+
+def _trigger_matches(trigger: str, new_status: str) -> bool:
+    """Does a rule's trigger_on own this transition's new state?
+
+    'down' means DOWN only: degraded is its own state with its own trigger and
+    recovery pair — lumping it into 'down' made every latency blip page the
+    Devices-Down rules. 'degraded' also owns the service checks' 'warning'
+    state (same degraded class), so every state has exactly one trigger that
+    owns it, and 'any' matches every transition.
+    """
+    if trigger == "down":
+        return new_status == "down"
+    if trigger == "up":
+        return new_status == "up"
+    if trigger == "degraded":
+        return new_status in ("degraded", "warning")
+    return True
 
 
 def _conditions_match(rule, values: dict) -> bool:
@@ -590,7 +633,7 @@ async def evaluate_status_change(
         text("""
             SELECT id, name, trigger_on, recovery_alert, severity,
                    device_id, group_id, device_type, location, scope_tag,
-                   notify_channels, cooldown,
+                   notify_channels, cooldown, min_duration,
                    metric, operator, threshold, conditions, condition_logic,
                    email_subject, email_body, sms_template,
                    recovery_email_subject, recovery_email_body, recovery_sms_template,
@@ -648,7 +691,7 @@ async def evaluate_status_change(
                 SET status = 'resolved',
                     resolved_at = :resolved_at,
                     metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:resolution_metadata AS jsonb)
-                WHERE status IN ('active', 'acknowledged')
+                WHERE status IN ('pending', 'active', 'acknowledged')
                   AND device_id = :device_id
                   AND service_check_id IS NULL
                   AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
@@ -696,14 +739,8 @@ async def evaluate_status_change(
                 continue
             variables["duration"] = duration_between(recovered[str(rule.id)]["since"], now)
         else:
-            # Check trigger_on match
-            if trigger == "down" and not is_down:
+            if not _trigger_matches(trigger, event.new_status):
                 continue
-            if trigger == "up" and event.new_status != "up":
-                continue
-            if trigger == "degraded" and event.new_status != "degraded":
-                continue
-            # "any" matches everything
             if is_recovery:
                 if not rule.recovery_alert:
                     continue
@@ -817,7 +854,7 @@ async def evaluate_status_change(
                     SET status = 'resolved', resolved_at = :now,
                         metadata = COALESCE(metadata, '{}'::jsonb) ||
                                    CAST(:m AS jsonb)
-                    WHERE status IN ('active', 'acknowledged')
+                    WHERE status IN ('pending', 'active', 'acknowledged')
                       AND device_id = :device_id AND rule_id = :rule_id
                       AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded')
                 """),
@@ -827,10 +864,23 @@ async def evaluate_status_change(
             )
             resolved_alerts += superseded.rowcount or 0
 
+        # "Condition must exist for" hold: the row is parked as 'pending' —
+        # invisible to active-alert counters, nothing dispatched — and the hold
+        # sweeper (alert_hold_service, 30s cadence) fires it only if the device
+        # is still in this state once min_duration has passed. A recovery in
+        # the meantime resolves it silently: a 59-second blip under a
+        # 100-second hold produces no alert and no pages.
+        hold_s = 0 if is_recovery else int(rule.min_duration or 0)
+        held = hold_s > 0 and await _pending_supported(db)
+
         # Create alert record in DB. The stored message is a clean human
         # sentence — the rendered SMS/email templates are transport payloads
         # only (persisting sms_body here put "[ZenPlus WARNING] ..." template
         # text all over the alert UIs).
+        row_metadata = {"old_status": event.old_status, "new_status": event.new_status, "is_recovery": is_recovery}
+        if held:
+            row_metadata["notified"] = False
+            row_metadata["hold_until"] = (now + timedelta(seconds=hold_s)).isoformat()
         inserted = await db.execute(
             text("""
                 INSERT INTO alerts (device_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata)
@@ -840,7 +890,7 @@ async def evaluate_status_change(
             {
                 "device_id": event.device_id,
                 "rule_id": str(rule.id),
-                "status": "resolved" if is_recovery else "active",
+                "status": "resolved" if is_recovery else ("pending" if held else "active"),
                 "severity": rule.severity or "warning",
                 "message": (
                     f"{rule.name}: {event.hostname} ({event.ip_address}) recovered — UP"
@@ -849,11 +899,15 @@ async def evaluate_status_change(
                 ),
                 "triggered_at": now,
                 "resolved_at": now if is_recovery else None,
-                "metadata": json.dumps({"old_status": event.old_status, "new_status": event.new_status, "is_recovery": is_recovery}),
+                "metadata": json.dumps(row_metadata),
             },
         )
 
         new_alert_id = (inserted.first() or [None])[0]
+        if held:
+            # Quiet hours and cooldown are the sweeper's problem at confirm
+            # time — evaluating them now would gate on the wrong moment.
+            continue
 
         # Quiet hours: suppress outbound notifications outside the rule's
         # schedule window. The alert row above is always recorded regardless.
@@ -1051,7 +1105,7 @@ async def evaluate_service_status_change(
         text("""
             SELECT id, name, trigger_on, recovery_alert, severity,
                    service_check_id, service_check_group_id, metric,
-                   notify_channels, cooldown,
+                   notify_channels, cooldown, min_duration,
                    email_subject, email_body, sms_template,
                    recovery_email_subject, recovery_email_body, recovery_sms_template,
                    schedule_start, schedule_end, schedule_days
@@ -1107,7 +1161,7 @@ async def evaluate_service_status_change(
                 SET status = 'resolved',
                     resolved_at = :resolved_at,
                     metadata = COALESCE(metadata, '{}'::jsonb) || CAST(:resolution_metadata AS jsonb)
-                WHERE status IN ('active', 'acknowledged')
+                WHERE status IN ('pending', 'active', 'acknowledged')
                   AND service_check_id = :service_check_id
                   AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
                   AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded', 'warning')
@@ -1141,11 +1195,7 @@ async def evaluate_service_status_change(
                 continue
             variables["duration"] = duration_between(recovered[str(rule.id)]["since"], now)
         else:
-            if trigger == "down" and not is_down:
-                continue
-            if trigger == "up" and event.new_status != "up":
-                continue
-            if trigger == "degraded" and event.new_status != "degraded":
+            if not _trigger_matches(trigger, event.new_status):
                 continue
             if is_recovery:
                 if not rule.recovery_alert:
@@ -1227,6 +1277,22 @@ async def evaluate_service_status_change(
                 "ZenPlus {severity} — {rule_name}: {check_name} is {status} ({target})."),
                 variables)
 
+        # "Condition must exist for" hold, exactly as on the device path: park
+        # the row as 'pending' and let the hold sweeper confirm the check is
+        # still failing after min_duration before anything is dispatched.
+        hold_s = 0 if is_recovery else int(rule.min_duration or 0)
+        held = hold_s > 0 and await _pending_supported(db)
+
+        row_metadata = {
+            "old_status": event.old_status,
+            "new_status": event.new_status,
+            "is_recovery": is_recovery,
+            "check_type": event.check_type,
+            "error": event.error,
+        }
+        if held:
+            row_metadata["notified"] = False
+            row_metadata["hold_until"] = (now + timedelta(seconds=hold_s)).isoformat()
         inserted = await db.execute(
             text("""
                 INSERT INTO alerts (device_id, service_check_id, rule_id, status, severity, message, triggered_at, resolved_at, metadata)
@@ -1237,7 +1303,7 @@ async def evaluate_service_status_change(
                 "device_id": event.device_id,
                 "service_check_id": event.service_check_id,
                 "rule_id": str(rule.id),
-                "status": "resolved" if is_recovery else "active",
+                "status": "resolved" if is_recovery else ("pending" if held else "active"),
                 "severity": rule.severity or "warning",
                 # A clean human sentence, as on the device path — the rendered
                 # SMS is a transport payload and made every alert list read
@@ -1249,18 +1315,14 @@ async def evaluate_service_status_change(
                 ),
                 "triggered_at": now,
                 "resolved_at": now if is_recovery else None,
-                "metadata": json.dumps({
-                    "old_status": event.old_status,
-                    "new_status": event.new_status,
-                    "is_recovery": is_recovery,
-                    "check_type": event.check_type,
-                    "error": event.error,
-                }),
+                "metadata": json.dumps(row_metadata),
             },
         )
 
         # Quiet hours, and a recovery follows its trigger's fate (see device path).
         svc_alert_id = (inserted.first() or [None])[0]
+        if held:
+            continue
         if not is_recovery:
             allowed = notifications_allowed(
                 rule.schedule_start, rule.schedule_end,

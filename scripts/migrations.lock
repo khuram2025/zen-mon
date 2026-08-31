@@ -111,3 +111,4 @@ ba6755a745984a4a6c24f6810fb7184a364e6339757c121ec0261abcf32696b8  migrate-098-ru
 b3d8731ff2b17a14aa66129407eed6cfa2dcb1f5b1b4bc4e1683b05edb0d96d1  migrate-100-alert-escalations.sql
 359a5f6cf516d080f254bc28beb4e3ed8d4977973ec63773b4ac2da2a39a50c3  migrate-101-apm-rum-key-recall.sql
 340bd682b5831cad7aa043d868e13d2f511237046c22db8364c9b4186d1b12c2  migrate-102-rum-request-timing-clickhouse.sql
+bad42e05fa26b949106194ad7f2ec78efe9f596ced9b7b26e836194412e6b7c2  migrate-103-alert-pending-status.sql
