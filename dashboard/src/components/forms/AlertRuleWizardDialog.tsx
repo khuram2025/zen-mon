@@ -2,7 +2,7 @@
  * SolarWinds-style alert rule wizard — properties, trigger, reset, scope,
  * trigger actions, reset actions, schedule, and review.
  */
-import { FormEvent, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { FormEvent, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Bell,
@@ -152,10 +152,18 @@ const TEMPLATE_VARS = [
   '{rtt}', '{packet_loss}',
 ]
 
-// Mirrors the defaults in server/app/services/alert_phrasing.py. Shown as
-// placeholders only — an empty field is stored as NULL and rendered by the
-// server, so these never go stale in the database.
-const DEFAULTS = {
+// The six template fields, in the order the editor shows them.
+const TEMPLATE_FIELDS = [
+  'email_subject', 'email_body', 'sms_template',
+  'recovery_email_subject', 'recovery_email_body', 'recovery_sms_template',
+] as const
+type TemplateField = typeof TEMPLATE_FIELDS[number]
+type TemplateSet = Partial<Record<TemplateField, string | null>>
+
+// Offline fallback only. The live text comes from GET /alert-rules/template-
+// defaults, which is also what the alert engine sends — a service-check or
+// trap rule has different wording, and a copy kept here would drift from it.
+const DEFAULTS: Record<TemplateField, string> = {
   email_subject: '[{severity}] {status}: {rule_name}',
   email_body: '{event_sentence}',
   sms_template: 'ZenPlus {severity} — {rule_name}: {event_sentence}',
@@ -255,16 +263,22 @@ function ruleToState(rule: any): WizardState {
     schedule_start: rule.schedule_start || '',
     schedule_end: rule.schedule_end || '',
     schedule_days: Array.isArray(rule.schedule_days) ? rule.schedule_days : [],
-    email_subject: rule.email_subject || '',
-    email_body: rule.email_body || '',
-    sms_template: rule.sms_template || '',
-    recovery_email_subject: rule.recovery_email_subject || DEFAULT_STATE.recovery_email_subject,
-    recovery_email_body: rule.recovery_email_body || '',
-    recovery_sms_template: rule.recovery_sms_template || '',
+    // The effective text — what this rule actually sends — not the stored
+    // column, which is NULL on any rule using the built-in wording and left
+    // the editor showing six empty boxes.
+    ...templateState(rule.effective_templates || rule),
   }
 }
 
-function stateToPayload(s: WizardState) {
+/** The six template fields as editor state: real text, never null. */
+function templateState(source: TemplateSet | any): Record<TemplateField, string> {
+  return TEMPLATE_FIELDS.reduce((acc, f) => {
+    acc[f] = (source?.[f] as string) || ''
+    return acc
+  }, {} as Record<TemplateField, string>)
+}
+
+function stateToPayload(s: WizardState, defaults: TemplateSet = DEFAULTS) {
   const isService = s.source === 'service'
   const isTrap = s.source === 'trap'
   const isDevice = s.source === 'device'
@@ -314,13 +328,22 @@ function stateToPayload(s: WizardState) {
     schedule_start: s.schedule_start || null,
     schedule_end: s.schedule_end || null,
     schedule_days: s.schedule_days.length ? s.schedule_days : null,
-    email_subject: s.email_subject || null,
-    email_body: s.email_body || null,
-    sms_template: s.sms_template || null,
-    recovery_email_subject: recovery ? s.recovery_email_subject || null : null,
-    recovery_email_body: recovery ? s.recovery_email_body || null : null,
-    recovery_sms_template: recovery ? s.recovery_sms_template || null : null,
+    // Text still equal to the built-in default is stored as NULL, so the rule
+    // keeps tracking the wording instead of freezing the copy the editor
+    // displayed. (The server re-applies this too — see normalize_stored_template.)
+    email_subject: customOrNull(s.email_subject, defaults.email_subject),
+    email_body: customOrNull(s.email_body, defaults.email_body),
+    sms_template: customOrNull(s.sms_template, defaults.sms_template),
+    recovery_email_subject: recovery ? customOrNull(s.recovery_email_subject, defaults.recovery_email_subject) : null,
+    recovery_email_body: recovery ? customOrNull(s.recovery_email_body, defaults.recovery_email_body) : null,
+    recovery_sms_template: recovery ? customOrNull(s.recovery_sms_template, defaults.recovery_sms_template) : null,
   }
+}
+
+function customOrNull(value: string, fallback?: string | null): string | null {
+  const text = (value || '').trim()
+  if (!text) return null
+  return text === (fallback || '').trim() ? null : value
 }
 
 export function AlertRuleWizardDialog({
@@ -338,7 +361,43 @@ export function AlertRuleWizardDialog({
   const [s, setS] = useState<WizardState>(DEFAULT_STATE)
   const [scopeMode, setScopeMode] = useState<'all' | 'device' | 'group' | 'type' | 'location' | 'tag'>('all')
   const [preview, setPreview] = useState<any>(null)
+  const [livePreview, setLivePreview] = useState<any>(null)
   const isRumMetric = s.source === 'apm' && s.conditions[0]?.metric.startsWith('apm_rum_')
+
+  // Which default wording this rule's notifications are built from. Service
+  // checks and traps lead with different sentences than a device does, so the
+  // editor has to show the set that will actually be sent.
+  const templateKind = s.source === 'service' ? 'service' : s.source === 'trap' ? 'trap' : 'device'
+  const { data: templateDefaultsMap } = useQuery<any>({
+    queryKey: ['alert-rules', 'template-defaults'],
+    queryFn: async () => (await api.get('/alert-rules/template-defaults')).data,
+    staleTime: Infinity,
+  })
+  const tplDefaults: TemplateSet = templateDefaultsMap?.[templateKind] || DEFAULTS
+  const hasResetTemplates = tplDefaults.recovery_email_subject != null
+
+  // Re-seed the message fields when the rule kind changes — but only the ones
+  // still holding a default, so switching source never discards text the
+  // operator wrote. `appliedDefaults` is the set the current text was seeded
+  // from, which is what makes "did they edit this?" answerable.
+  const appliedDefaults = useRef<TemplateSet>(DEFAULTS)
+  const tplDefaultsKey = JSON.stringify(tplDefaults)
+  useEffect(() => {
+    if (!open) return
+    const prev = appliedDefaults.current
+    setS((st) => {
+      const next = { ...st }
+      for (const f of TEMPLATE_FIELDS) {
+        const current = (st[f] || '').trim()
+        if (!current || current === ((prev?.[f] as string) || '').trim()) {
+          next[f] = (tplDefaults[f] as string) || ''
+        }
+      }
+      return next
+    })
+    appliedDefaults.current = tplDefaults
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, templateKind, tplDefaultsKey])
 
   const stepIdx = STEPS.findIndex((st) => st.id === step)
 
@@ -406,14 +465,19 @@ export function AlertRuleWizardDialog({
     if (rule) {
       const st = ruleToState(rule)
       setS(st)
+      // The loaded text is this rule's own defaults resolved server-side, so
+      // that is the set to judge later edits against.
+      appliedDefaults.current = rule.default_templates || DEFAULTS
       setScopeMode(
         st.group_id ? 'group' : st.device_type ? 'type' : st.location ? 'location'
           : st.scope_tag ? 'tag' : st.device_id ? 'device' : 'all',
       )
     } else {
-      setS(DEFAULT_STATE)
+      setS({ ...DEFAULT_STATE, ...templateState(tplDefaults) })
+      appliedDefaults.current = tplDefaults
       setScopeMode('all')
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, rule])
 
   const save = useMutation({
@@ -430,17 +494,11 @@ export function AlertRuleWizardDialog({
   })
 
   const previewMut = useMutation({
-    mutationFn: async () => {
-      if (isEdit) return (await api.post(`/alert-rules/${rule.id}/preview`)).data
-      // No id yet: preview via a disabled throwaway rule, deleted even when
-      // the preview call fails (it used to leak into the rules list).
-      const created = (await api.post('/alert-rules', { ...stateToPayload(s), enabled: false })).data
-      try {
-        return (await api.post(`/alert-rules/${created.id}/preview`)).data
-      } finally {
-        await api.delete(`/alert-rules/${created.id}`).catch(() => {})
-      }
-    },
+    // Rendered from the draft itself — no id needed, nothing written. This
+    // used to create a disabled throwaway rule and delete it again for every
+    // preview, which leaked a rule into the list whenever the delete failed.
+    mutationFn: async () =>
+      (await api.post('/alert-rules/preview', stateToPayload(s, tplDefaults))).data,
     onSuccess: (data) => setPreview(data),
     onError: (e: any) => toast.error('Preview failed', apiErrorMessage(e)),
   })
@@ -510,12 +568,35 @@ export function AlertRuleWizardDialog({
         : [...st.schedule_days, n].sort((a, b) => a - b),
     }))
 
+  const setTemplate = (field: TemplateField, value: string) =>
+    setS((st) => ({ ...st, [field]: value }))
+
+  // Live rendered mail on the two steps where the wording is written. The
+  // template field is one sentence inside a branded HTML layout — without
+  // seeing the layout around it, "{event_sentence}" tells an operator nothing
+  // about the mail that lands in their inbox.
+  const onMessageStep = step === 'actions' || step === 'reset_actions'
+  const draftPayload = useMemo(
+    () => JSON.stringify(stateToPayload(s, tplDefaults)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [s, tplDefaultsKey],
+  )
+  useEffect(() => {
+    if (!open || !onMessageStep) return
+    const t = setTimeout(() => {
+      api.post('/alert-rules/preview', JSON.parse(draftPayload))
+        .then((r) => setLivePreview(r.data))
+        .catch(() => {})
+    }, 400)
+    return () => clearTimeout(t)
+  }, [open, onMessageStep, draftPayload])
+
   const copyTriggerToReset = () => {
     setS((st) => ({
       ...st,
-      recovery_email_subject: st.recovery_email_subject || `RESOLVED: ${st.email_subject}`,
-      recovery_email_body: st.recovery_email_body || st.email_body,
-      recovery_sms_template: st.recovery_sms_template || st.sms_template,
+      recovery_email_subject: `RESOLVED: ${st.email_subject}`,
+      recovery_email_body: st.email_body,
+      recovery_sms_template: st.sms_template,
     }))
     toast.success('Trigger templates copied to reset actions')
   }
@@ -571,7 +652,7 @@ export function AlertRuleWizardDialog({
         return
       }
     }
-    save.mutate(stateToPayload(s))
+    save.mutate(stateToPayload(s, tplDefaults))
   }
   const isService = s.source === 'service'
 
@@ -1009,19 +1090,19 @@ export function AlertRuleWizardDialog({
                 </div>
                 <TemplateVars />
                 <p className="text-[11px] text-muted">
-                  Leave a field empty to use the built-in wording, which names the metric and
-                  threshold in plain English. Open <span className="text-text">Preview message</span> on
-                  the rule to see exactly what is sent.
+                  This is the wording that will be sent. Edit any field to word it yourself; a field
+                  left as the built-in text keeps tracking it, so improvements to the default wording
+                  still reach this rule. Open <span className="text-text">Preview message</span> on the
+                  rule to see it rendered with sample readings.
                 </p>
-                <FormField label="Email subject">
-                  <Input value={s.email_subject} onChange={(e) => setS({ ...s, email_subject: e.target.value })} className="font-mono text-xs" placeholder={DEFAULTS.email_subject} />
-                </FormField>
-                <FormField label="Email body">
-                  <Textarea value={s.email_body} onChange={(e) => setS({ ...s, email_body: e.target.value })} rows={5} className="font-mono text-xs" placeholder={DEFAULTS.email_body} />
-                </FormField>
-                <FormField label="SMS template">
-                  <Textarea value={s.sms_template} onChange={(e) => setS({ ...s, sms_template: e.target.value })} rows={2} className="font-mono text-xs" placeholder={DEFAULTS.sms_template} />
-                </FormField>
+                <TemplateField label="Email subject" field="email_subject"
+                  value={s.email_subject} defaults={tplDefaults} onChange={setTemplate} />
+                <TemplateField label="Email body" field="email_body" rows={5}
+                  value={s.email_body} defaults={tplDefaults} onChange={setTemplate}
+                  hint="The sentence in the highlighted callout. The rule, severity, device and time are added by the email layout." />
+                <TemplateField label="SMS template" field="sms_template" rows={2}
+                  value={s.sms_template} defaults={tplDefaults} onChange={setTemplate} />
+                <LiveMail msg={livePreview?.alert} label="Trigger email" />
               </div>
             )}
 
@@ -1107,26 +1188,30 @@ export function AlertRuleWizardDialog({
                     <Copy className="h-3.5 w-3.5" />Copy from trigger
                   </Button>
                 </div>
-                {s.reset_mode !== 'auto' ? (
+                {!hasResetTemplates ? (
+                  <p className="rounded-lg border border-border bg-surface2 p-3 text-xs text-muted">
+                    An SNMP trap is an event, not a state — nothing ever clears it, so there is no
+                    reset notification to word.
+                  </p>
+                ) : s.reset_mode !== 'auto' ? (
                   <p className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
                     Reset notifications are disabled — enable &quot;Reset when trigger clears&quot; on the Reset step.
                   </p>
                 ) : (
                   <>
+                    <TemplateVars />
                     <p className="text-[11px] text-muted">
-                      The built-in reset wording states how long the condition was active
-                      &mdash; <span className="text-text">{'{duration_sentence}'}</span> renders as
-                      &ldquo;The condition was active for 12 minutes.&rdquo;
+                      The wording sent when the condition clears. The built-in text states how long the
+                      condition was active &mdash; <span className="text-text">{'{duration_sentence}'}</span>{' '}
+                      renders as &ldquo;The condition was active for 12 minutes.&rdquo;
                     </p>
-                    <FormField label="Recovery email subject">
-                      <Input value={s.recovery_email_subject} onChange={(e) => setS({ ...s, recovery_email_subject: e.target.value })} className="font-mono text-xs" placeholder={DEFAULTS.recovery_email_subject} />
-                    </FormField>
-                    <FormField label="Recovery email body">
-                      <Textarea value={s.recovery_email_body} onChange={(e) => setS({ ...s, recovery_email_body: e.target.value })} rows={4} className="font-mono text-xs" placeholder={DEFAULTS.recovery_email_body} />
-                    </FormField>
-                    <FormField label="Recovery SMS">
-                      <Textarea value={s.recovery_sms_template} onChange={(e) => setS({ ...s, recovery_sms_template: e.target.value })} rows={2} className="font-mono text-xs" placeholder={DEFAULTS.recovery_sms_template} />
-                    </FormField>
+                    <TemplateField label="Recovery email subject" field="recovery_email_subject"
+                      value={s.recovery_email_subject} defaults={tplDefaults} onChange={setTemplate} />
+                    <TemplateField label="Recovery email body" field="recovery_email_body" rows={4}
+                      value={s.recovery_email_body} defaults={tplDefaults} onChange={setTemplate} />
+                    <TemplateField label="Recovery SMS" field="recovery_sms_template" rows={2}
+                      value={s.recovery_sms_template} defaults={tplDefaults} onChange={setTemplate} />
+                    <LiveMail msg={livePreview?.recovery} label="Reset email" accent />
                   </>
                 )}
               </div>
@@ -1260,6 +1345,113 @@ function EmailPreviewCard({ title, msg, accent }: { title: string; msg: any; acc
       ) : (
         <pre className="max-h-48 overflow-auto whitespace-pre-wrap p-4 text-xs text-muted">{msg.email_body}</pre>
       )}
+    </div>
+  )
+}
+
+/**
+ * The mail as it will arrive, rendered live while the wording is edited.
+ *
+ * What the fields above control is the one sentence in the highlighted
+ * callout and the subject line. Everything framing it — the branded header,
+ * the severity pill, the readings block, the details table, the "View in
+ * ZenPlus" button and the footer — is built by the email layout and is not
+ * template text, which is exactly the thing an editor full of
+ * "{event_sentence}" boxes cannot convey.
+ */
+function LiveMail({ msg, label, accent }: { msg: any; label: string; accent?: boolean }) {
+  const [open, setOpen] = useState(true)
+  if (!msg) {
+    return (
+      <div className="rounded-lg border border-border bg-surface2/40 px-4 py-3 text-[11px] text-muted">
+        Rendering {label.toLowerCase()}…
+      </div>
+    )
+  }
+  return (
+    <div className="overflow-hidden rounded-lg border border-border">
+      <button type="button" onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between gap-3 border-b border-border bg-surface2/40 px-4 py-2.5 text-left">
+        <div className="min-w-0">
+          <div className={cn('text-xs font-semibold', accent ? 'text-emerald-600' : 'text-text')}>
+            {label} — as it will arrive
+          </div>
+          <div className="mt-0.5 truncate text-xs text-muted">Subject: {msg.subject}</div>
+        </div>
+        <ChevronRight className={cn('h-4 w-4 shrink-0 text-muted transition-transform', open && 'rotate-90')} />
+      </button>
+      {open && (
+        <>
+          {/* The real HTML mail, sandboxed — scripts off, no navigation out. */}
+          <iframe title={label} sandbox="" srcDoc={msg.email_html} className="h-[26rem] w-full bg-white" />
+          <div className="border-t border-border bg-surface2/40 px-4 py-2">
+            <div className="text-[10px] uppercase tracking-wider text-muted">SMS</div>
+            <div className="mt-1 text-xs">{msg.sms_body}</div>
+            <p className="mt-2 text-[11px] text-muted">
+              Sample device and readings. The header, severity pill, readings, details table and
+              button are added by the layout — the fields above set the subject and the highlighted
+              sentence.
+            </p>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+/**
+ * One message template, shown as the real text that will be sent.
+ *
+ * The field is never blank: it carries the built-in wording until someone
+ * edits it, which is the whole point — an empty box with a grey placeholder
+ * told an operator nothing about what their alerts actually say, and gave them
+ * nothing to edit but a blank line. "Default"/"Custom" says which state it is
+ * in, and "Reset to default" puts the built-in text back (which is stored as
+ * NULL, so the rule tracks later improvements to the wording).
+ */
+function TemplateField({
+  label,
+  field,
+  value,
+  defaults,
+  onChange,
+  rows,
+  hint,
+}: {
+  label: string
+  field: TemplateField
+  value: string
+  defaults: TemplateSet
+  onChange: (field: TemplateField, value: string) => void
+  rows?: number
+  hint?: string
+}) {
+  const fallback = (defaults[field] as string) || ''
+  const isCustom = value.trim() !== fallback.trim()
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center justify-between gap-3">
+        <label className="text-xs font-medium text-muted">{label}</label>
+        <div className="flex items-center gap-2">
+          <span className={cn('text-[10px] uppercase tracking-wider', isCustom ? 'text-primary' : 'text-muted')}>
+            {isCustom ? 'Custom' : 'Default'}
+          </span>
+          {isCustom && (
+            <button type="button" className="text-[10px] text-muted underline-offset-2 hover:text-primary hover:underline"
+              onClick={() => onChange(field, fallback)}>
+              Reset to default
+            </button>
+          )}
+        </div>
+      </div>
+      {rows ? (
+        <Textarea value={value} rows={rows} className="font-mono text-xs"
+          onChange={(e) => onChange(field, e.target.value)} />
+      ) : (
+        <Input value={value} className="font-mono text-xs"
+          onChange={(e) => onChange(field, e.target.value)} />
+      )}
+      {hint && <p className="mt-1 text-[11px] text-muted">{hint}</p>}
     </div>
   )
 }

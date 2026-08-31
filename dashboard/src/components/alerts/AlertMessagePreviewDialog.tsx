@@ -50,15 +50,26 @@ const EMPTY: Edits = {
   recovery_sms_template: '',
 }
 
+/** The rule's message text as editor state: what it actually sends.
+ *
+ * Reads `effective_templates` (resolved server-side) rather than the stored
+ * columns, which are NULL on any rule using the built-in wording — that left
+ * every field blank behind a grey placeholder, so the text an operator wanted
+ * to adjust was never actually on screen to adjust. */
 function editsFromRule(rule: any): Edits {
+  const eff = rule?.effective_templates || rule || {}
   return {
-    email_subject: rule?.email_subject || '',
-    email_body: rule?.email_body || '',
-    sms_template: rule?.sms_template || '',
-    recovery_email_subject: rule?.recovery_email_subject || '',
-    recovery_email_body: rule?.recovery_email_body || '',
-    recovery_sms_template: rule?.recovery_sms_template || '',
+    email_subject: eff.email_subject || '',
+    email_body: eff.email_body || '',
+    sms_template: eff.sms_template || '',
+    recovery_email_subject: eff.recovery_email_subject || '',
+    recovery_email_body: eff.recovery_email_body || '',
+    recovery_sms_template: eff.recovery_sms_template || '',
   }
+}
+
+function defaultsFromRule(rule: any): Partial<Edits> {
+  return rule?.default_templates || {}
 }
 
 export function AlertMessagePreviewDialog({
@@ -134,7 +145,7 @@ export function AlertMessagePreviewDialog({
   if (!rule?.id) return null
 
   const msg = mode === 'recovery' ? data?.recovery : data?.alert
-  const effective = data?.templates?.effective || {}
+  const defaults: any = data?.templates?.defaults || defaultsFromRule(rule)
   const subjectKey = mode === 'recovery' ? 'recovery_email_subject' : 'email_subject'
   const bodyKey = mode === 'recovery' ? 'recovery_email_body' : 'email_body'
   const smsKey = mode === 'recovery' ? 'recovery_sms_template' : 'sms_template'
@@ -151,19 +162,19 @@ export function AlertMessagePreviewDialog({
     }
     const start = el.selectionStart ?? cur.length
     const end = el.selectionEnd ?? start
-    // A cleared field is showing the default as a placeholder; typing into it
-    // starts from that default so the user edits real text, not an empty box.
-    const base = cur || (effective[key] || '')
-    const next = cur ? base.slice(0, start) + v + base.slice(end) : base + v
+    const next = cur.slice(0, start) + v + cur.slice(end)
     setField(key, next)
     requestAnimationFrame(() => {
       el.focus()
-      const pos = cur ? start + v.length : next.length
+      const pos = start + v.length
       el.setSelectionRange(pos, pos)
     })
   }
 
-  const isCustom = (key: keyof Edits) => !!edits[key].trim()
+  // The field holds real text now, so "custom" means it differs from the
+  // built-in wording rather than merely being non-empty.
+  const isCustom = (key: keyof Edits) =>
+    edits[key].trim() !== ((defaults[key] as string) || '').trim()
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -200,13 +211,11 @@ export function AlertMessagePreviewDialog({
                   {mode === 'recovery' ? 'Recovery subject' : 'Email subject'}
                 </label>
                 <FieldState custom={isCustom(subjectKey)}
-                  onReset={() => setField(subjectKey, '')}
-                  onLoadDefault={() => setField(subjectKey, effective[subjectKey] || '')} />
+                  onReset={() => setField(subjectKey, (defaults[subjectKey] as string) || '')} />
               </div>
               <Input
                 ref={(el) => { fieldRefs.current[subjectKey] = el }}
                 value={edits[subjectKey]}
-                placeholder={effective[subjectKey] || ''}
                 onFocus={() => { lastFocused.current = subjectKey }}
                 onChange={(e) => setField(subjectKey, e.target.value)}
                 className="font-mono text-xs"
@@ -219,13 +228,11 @@ export function AlertMessagePreviewDialog({
                   {mode === 'recovery' ? 'Recovery message' : 'Email message'}
                 </label>
                 <FieldState custom={isCustom(bodyKey)}
-                  onReset={() => setField(bodyKey, '')}
-                  onLoadDefault={() => setField(bodyKey, effective[bodyKey] || '')} />
+                  onReset={() => setField(bodyKey, (defaults[bodyKey] as string) || '')} />
               </div>
               <Textarea
                 ref={(el) => { fieldRefs.current[bodyKey] = el }}
                 value={edits[bodyKey]}
-                placeholder={effective[bodyKey] || ''}
                 onFocus={() => { lastFocused.current = bodyKey }}
                 onChange={(e) => setField(bodyKey, e.target.value)}
                 rows={6}
@@ -243,13 +250,11 @@ export function AlertMessagePreviewDialog({
                   {mode === 'recovery' ? 'Recovery SMS' : 'SMS'}
                 </label>
                 <FieldState custom={isCustom(smsKey)}
-                  onReset={() => setField(smsKey, '')}
-                  onLoadDefault={() => setField(smsKey, effective[smsKey] || '')} />
+                  onReset={() => setField(smsKey, (defaults[smsKey] as string) || '')} />
               </div>
               <Textarea
                 ref={(el) => { fieldRefs.current[smsKey] = el }}
                 value={edits[smsKey]}
-                placeholder={effective[smsKey] || ''}
                 onFocus={() => { lastFocused.current = smsKey }}
                 onChange={(e) => setField(smsKey, e.target.value)}
                 rows={3}
@@ -380,24 +385,18 @@ export function AlertMessagePreviewDialog({
   )
 }
 
-function FieldState({
-  custom,
-  onReset,
-  onLoadDefault,
-}: {
-  custom: boolean
-  onReset: () => void
-  onLoadDefault: () => void
-}) {
+function FieldState({ custom, onReset }: { custom: boolean; onReset: () => void }) {
   return (
     <div className="flex items-center gap-2">
       <span className={cn('text-[10px] uppercase tracking-wider', custom ? 'text-primary' : 'text-muted')}>
         {custom ? 'Custom' : 'Default'}
       </span>
-      <button type="button" className="text-[10px] text-muted underline-offset-2 hover:text-primary hover:underline"
-        onClick={custom ? onReset : onLoadDefault}>
-        {custom ? 'Use default' : 'Customise'}
-      </button>
+      {custom && (
+        <button type="button" className="text-[10px] text-muted underline-offset-2 hover:text-primary hover:underline"
+          onClick={onReset}>
+          Reset to default
+        </button>
+      )}
     </div>
   )
 }

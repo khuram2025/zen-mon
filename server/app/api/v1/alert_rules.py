@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -202,6 +202,40 @@ _TEMPLATE_FIELDS = (
 )
 
 
+class AlertRuleDraft(BaseModel):
+    """A rule still being composed — enough of one to render its notifications.
+
+    Everything is optional and unknown keys are ignored, so the wizard can post
+    its whole in-progress payload (scope ids, channels, schedule) and get back
+    the mail those settings would produce without saving anything.
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    name: Optional[str] = None
+    severity: str = "warning"
+    metric: Optional[str] = "ping_status"
+    operator: Optional[str] = None
+    threshold: Optional[float] = None
+    conditions: Optional[list] = None
+    condition_logic: Optional[str] = "AND"
+    trigger_on: Optional[str] = None
+    recovery_alert: bool = False
+    device_type: Optional[str] = None
+    location: Optional[str] = None
+    scope_tag: Optional[str] = None
+    group_id: Optional[str] = None
+    service_check_id: Optional[str] = None
+    service_check_group_id: Optional[str] = None
+    target: Optional[str] = None
+    trap_oid: Optional[str] = None
+    email_subject: Optional[str] = None
+    email_body: Optional[str] = None
+    sms_template: Optional[str] = None
+    recovery_email_subject: Optional[str] = None
+    recovery_email_body: Optional[str] = None
+    recovery_sms_template: Optional[str] = None
+
+
 class AlertRulePreview(BaseModel):
     """Unsaved template edits to render the preview with (all optional)."""
     email_subject: Optional[str] = None
@@ -282,9 +316,49 @@ def _row_to_dict(row) -> dict:
     }
 
 
+def _normalized_templates(submitted: dict, kind: str) -> dict:
+    """Submitted template fields, with "same as the default" reduced to NULL."""
+    defaults = ap.default_templates(kind)
+    return {
+        name: ap.normalize_stored_template(submitted.get(name), defaults.get(name))
+        for name in _TEMPLATE_FIELDS
+    }
+
+
+def _with_templates(rule: dict) -> dict:
+    """Attach the message text this rule actually sends.
+
+    The six template columns are NULL on almost every rule — that is how a rule
+    tracks the built-in wording instead of freezing a copy of it. But a NULL is
+    not something an editor can show, so the rule carries its resolved text
+    alongside: ``template_kind`` names the default set, ``effective_templates``
+    is what will be sent per field, and ``default_templates`` is what "reset to
+    default" restores. The stored columns stay exactly as they are, so the
+    editor can still tell customised from default.
+    """
+    kind = ap.template_kind(rule)
+    rule["template_kind"] = kind
+    rule["default_templates"] = ap.default_templates(kind)
+    rule["effective_templates"] = ap.effective_templates(rule, kind)
+    return rule
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+@router.get("/template-defaults")
+async def get_template_defaults(user: User = Depends(get_current_user)):
+    """The built-in message templates, per rule kind.
+
+    A rule being created has no id to preview against, and the wizard switches
+    kind as the user picks a source — so it reads the whole map once and shows
+    the set matching the current source. Keeping the text here rather than in
+    the client is what stops the editor advertising device wording on a
+    service-check rule.
+    """
+    return {kind: ap.default_templates(kind) for kind in ("device", "service", "trap")}
+
 
 @router.get("")
 async def list_alert_rules(
@@ -295,7 +369,7 @@ async def list_alert_rules(
         text(f"SELECT {_RULE_COLUMNS} FROM alert_rules ORDER BY created_at DESC")
     )
     rows = result.fetchall()
-    return {"data": [_row_to_dict(r) for r in rows]}
+    return {"data": [_with_templates(_row_to_dict(r)) for r in rows]}
 
 
 @router.post("", status_code=201)
@@ -347,12 +421,15 @@ async def create_alert_rule(
         "schedule_start": data.schedule_start,
         "schedule_end": data.schedule_end,
         "schedule_days": json.dumps(data.schedule_days) if data.schedule_days else None,
-        "email_subject": getattr(data, 'email_subject', None),
-        "email_body": getattr(data, 'email_body', None),
-        "sms_template": getattr(data, 'sms_template', None),
-        "recovery_email_subject": getattr(data, 'recovery_email_subject', None),
-        "recovery_email_body": getattr(data, 'recovery_email_body', None),
-        "recovery_sms_template": getattr(data, 'recovery_sms_template', None),
+        # The editors show the default as real, editable text, so text that
+        # matches it is posted back untouched — store NULL for those so the
+        # rule keeps tracking the built-in wording (see normalize_stored_template).
+        **_normalized_templates(
+            {f: getattr(data, f, None) for f in _TEMPLATE_FIELDS},
+            ap.template_kind({"metric": metric,
+                              "service_check_id": data.service_check_id,
+                              "service_check_group_id": data.service_check_group_id}),
+        ),
         "created_at": now,
         "updated_at": now,
         "created_by": user.id,
@@ -391,7 +468,7 @@ async def create_alert_rule(
     row = result.first()
     if not row:
         raise HTTPException(status_code=500, detail="Failed to create alert rule")
-    return _row_to_dict(row)
+    return _with_templates(_row_to_dict(row))
 
 
 @router.get("/{rule_id}")
@@ -407,7 +484,7 @@ async def get_alert_rule(
     row = result.first()
     if not row:
         raise HTTPException(status_code=404, detail="Alert rule not found")
-    return _row_to_dict(row)
+    return _with_templates(_row_to_dict(row))
 
 
 @router.put("/{rule_id}")
@@ -428,6 +505,29 @@ async def update_alert_rule(
         fields["metric"] = c0["metric"]
         fields["operator"] = c0["operator"]
         fields["threshold"] = c0["threshold"]
+
+    # Templates equal to the built-in default are stored as NULL, so a rule
+    # keeps tracking the wording rather than freezing a copy the editor merely
+    # displayed. Which default applies depends on the rule's kind, which this
+    # request may itself be changing — so classify the merged rule.
+    if any(f in fields for f in _TEMPLATE_FIELDS):
+        current = (await db.execute(
+            text("SELECT metric, service_check_id, service_check_group_id "
+                 "FROM alert_rules WHERE id = :id"),
+            {"id": rule_id},
+        )).first()
+        if not current:
+            raise HTTPException(status_code=404, detail="Alert rule not found")
+        kind = ap.template_kind({
+            "metric": fields.get("metric", current.metric),
+            "service_check_id": fields.get("service_check_id", current.service_check_id),
+            "service_check_group_id": fields.get(
+                "service_check_group_id", current.service_check_group_id),
+        })
+        defaults = ap.default_templates(kind)
+        for name in _TEMPLATE_FIELDS:
+            if name in fields:
+                fields[name] = ap.normalize_stored_template(fields[name], defaults.get(name))
 
     set_parts = []
     params: dict = {"id": rule_id, "updated_at": datetime.now(timezone.utc)}
@@ -486,7 +586,7 @@ async def update_alert_rule(
     row = result.first()
     if not row:
         raise HTTPException(status_code=404, detail="Alert rule not found")
-    return _row_to_dict(row)
+    return _with_templates(_row_to_dict(row))
 
 
 @router.delete("/{rule_id}", status_code=204)
@@ -696,6 +796,64 @@ def _preview_email_ctx(rule_dict: dict, msg: dict, is_recovery: bool,
     return ctx
 
 
+async def _preview_payload(db: AsyncSession, rule: dict, stored: dict) -> dict:
+    """Render a rule's trigger and reset notifications as the engine builds them.
+
+    Shared by the saved-rule preview and the draft preview the wizard uses
+    while a rule is still being composed, so what an editor shows is never a
+    second implementation of what the sender does.
+    """
+    from app.api.v1.alert_engine import _dashboard_url
+    from app.services.email_render import (
+        build_alert_email_html, build_alert_email_text,
+    )
+    action_url = await _dashboard_url(db, "/alerts")
+
+    def _render(is_recovery: bool) -> dict:
+        msg = _build_alert_message(rule, is_recovery=is_recovery)
+        ctx = _preview_email_ctx(rule, msg, is_recovery, action_url)
+        msg["email_html"] = build_alert_email_html(ctx)
+        msg["email_text"] = build_alert_email_text(ctx)
+        return msg
+
+    alert_msg = _render(False)
+    # The reset mail is rendered whenever the rule has reset wording at all —
+    # not only once recovery notifications are switched on. Deciding whether to
+    # switch them on means reading what they would say.
+    kind = ap.template_kind(rule)
+    recovery_msg = _render(True) if ap.default_templates(kind)["recovery_email_body"] else None
+
+    return {
+        "alert": alert_msg,
+        "recovery": recovery_msg,
+        "recovery_enabled": bool(rule.get("recovery_alert")),
+        "templates": {
+            "stored": stored,
+            "kind": kind,
+            "defaults": ap.default_templates(kind),
+            "effective": ap.effective_templates(rule, kind),
+        },
+    }
+
+
+@router.post("/preview")
+async def preview_alert_rule_draft(
+    draft: AlertRuleDraft,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Render the notifications for a rule that has not been saved yet.
+
+    The wizard previews as its templates are typed, and a rule that does not
+    exist has no id to preview against. It used to create a disabled throwaway
+    rule and delete it again for every preview — one write, one delete and a
+    leaked rule whenever the delete failed. This renders from the draft alone
+    and touches nothing.
+    """
+    rule = draft.model_dump()
+    return await _preview_payload(db, rule, {k: rule.get(k) for k in _TEMPLATE_FIELDS})
+
+
 @router.post("/{rule_id}/preview")
 async def preview_alert_rule(
     rule_id: UUID,
@@ -724,39 +882,7 @@ async def preview_alert_rule(
         for key, value in overrides.model_dump(exclude_unset=True).items():
             rule[key] = value or None
 
-    from app.api.v1.alert_engine import _dashboard_url
-    from app.services.email_render import (
-        build_alert_email_html, build_alert_email_text,
-    )
-    action_url = await _dashboard_url(db, "/alerts")
-
-    def _render(is_recovery: bool) -> dict:
-        msg = _build_alert_message(rule, is_recovery=is_recovery)
-        ctx = _preview_email_ctx(rule, msg, is_recovery, action_url)
-        msg["email_html"] = build_alert_email_html(ctx)
-        msg["email_text"] = build_alert_email_text(ctx)
-        return msg
-
-    alert_msg = _render(False)
-    recovery_msg = _render(True) if rule.get("recovery_alert") else None
-
-    return {
-        "alert": alert_msg,
-        "recovery": recovery_msg,
-        # What is stored on the rule (null = using the default) alongside the
-        # effective text, so the editor can tell "customised" from "default".
-        "templates": {
-            "stored": stored,
-            "effective": {
-                "email_subject": alert_msg["email_subject_template"],
-                "email_body": alert_msg["email_body_template"],
-                "sms_template": alert_msg["sms_template"],
-                "recovery_email_subject": recovery_msg["email_subject_template"] if recovery_msg else None,
-                "recovery_email_body": recovery_msg["email_body_template"] if recovery_msg else None,
-                "recovery_sms_template": recovery_msg["sms_template"] if recovery_msg else None,
-            },
-        },
-    }
+    return await _preview_payload(db, rule, stored)
 
 
 @router.post("/{rule_id}/simulate")

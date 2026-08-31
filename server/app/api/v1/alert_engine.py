@@ -23,7 +23,8 @@ from app.services.alert_schedule import notifications_allowed, get_configured_ti
 from app.services.alert_phrasing import (
     DEFAULT_EMAIL_BODY, DEFAULT_EMAIL_SUBJECT, DEFAULT_RECOVERY_EMAIL_BODY,
     DEFAULT_RECOVERY_EMAIL_SUBJECT, DEFAULT_RECOVERY_SMS, DEFAULT_SMS,
-    conditions_label, duration_between, effective_template, rule_phrasing,
+    conditions_label, default_templates, duration_between, effective_template,
+    rule_phrasing,
 )
 from pydantic import BaseModel
 
@@ -1256,26 +1257,17 @@ async def evaluate_service_status_change(
         # A service check reports its own failure reason, so the phrasing leads
         # with the check and the error rather than with a threshold.
         variables["error_sentence"] = f" {event.error.strip().rstrip('.')}." if event.error else ""
+        # Defaults live in alert_phrasing so the rule editors advertise exactly
+        # the text this path sends.
+        svc_defaults = default_templates("service")
         if is_recovery:
-            email_subject = _render(effective_template(rule.recovery_email_subject, DEFAULT_RECOVERY_EMAIL_SUBJECT), variables)
-            email_body = _render(effective_template(
-                rule.recovery_email_body,
-                "The {check_type} check “{check_name}” on {target} is passing again."
-                "{duration_sentence}"), variables)
-            sms_body = _render(effective_template(
-                rule.recovery_sms_template,
-                "ZenPlus resolved — {rule_name}: {check_name} is passing again."
-                "{duration_suffix}"), variables)
+            email_subject = _render(effective_template(rule.recovery_email_subject, svc_defaults["recovery_email_subject"]), variables)
+            email_body = _render(effective_template(rule.recovery_email_body, svc_defaults["recovery_email_body"]), variables)
+            sms_body = _render(effective_template(rule.recovery_sms_template, svc_defaults["recovery_sms_template"]), variables)
         else:
-            email_subject = _render(effective_template(rule.email_subject, "[{severity}] {status}: {check_name}"), variables)
-            email_body = _render(effective_template(
-                rule.email_body,
-                "The {check_type} check “{check_name}” on {target} is {status}."
-                "{error_sentence}"), variables)
-            sms_body = _render(effective_template(
-                rule.sms_template,
-                "ZenPlus {severity} — {rule_name}: {check_name} is {status} ({target})."),
-                variables)
+            email_subject = _render(effective_template(rule.email_subject, svc_defaults["email_subject"]), variables)
+            email_body = _render(effective_template(rule.email_body, svc_defaults["email_body"]), variables)
+            sms_body = _render(effective_template(rule.sms_template, svc_defaults["sms_template"]), variables)
 
         # "Condition must exist for" hold, exactly as on the device path: park
         # the row as 'pending' and let the hold sweeper confirm the check is
@@ -1569,9 +1561,10 @@ async def evaluate_trap(
             "trap_message": message,
             **rule_phrasing(rule, hostname=subject_name),
         }
-        email_subject = _render(effective_template(rule.email_subject, DEFAULT_EMAIL_SUBJECT), variables)
-        email_body = _render(effective_template(rule.email_body, "{event_sentence} {trap_message}"), variables)
-        sms_body = _render(effective_template(rule.sms_template, DEFAULT_SMS), variables)
+        trap_defaults = default_templates("trap")
+        email_subject = _render(effective_template(rule.email_subject, trap_defaults["email_subject"]), variables)
+        email_body = _render(effective_template(rule.email_body, trap_defaults["email_body"]), variables)
+        sms_body = _render(effective_template(rule.sms_template, trap_defaults["sms_template"]), variables)
 
         try:
             from app.services.host_alert_service import dispatch_to_channels

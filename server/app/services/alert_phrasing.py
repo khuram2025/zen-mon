@@ -98,7 +98,12 @@ METRICS: dict[str, dict] = {
                                  "up": "passes its check again"},
                        "state_label": {"down": "Service check failing",
                                        "up": "Service check passing"}},
-    "trap": {"noun": "SNMP trap", "subject": "the device",
+    # `event`: fires on arrival, not on a threshold. A trap rule matches an OID
+    # and stores a placeholder `== 0` because the wizard needs *something* in
+    # the operator/threshold columns — probing that placeholder concluded the
+    # rule watched the healthy state, so every trap alert announced itself as
+    # "has cleared the trap condition", the opposite of what happened.
+    "trap": {"noun": "SNMP trap", "subject": "the device", "event": True,
              "narrative": {"down": "has sent a matching SNMP trap", "up": "has cleared the trap condition"},
              "state": {"down": "sends a matching SNMP trap",
                        "up": "clears the trap condition"},
@@ -274,11 +279,16 @@ def _alerts_on_unhealthy(metric: str, operator: str, threshold) -> bool:
     known-healthy reading — if a healthy device would satisfy the condition, the
     rule is watching for the healthy state (a trigger_on='up' rule).
     """
+    info = METRICS[metric]
+    if info.get("event"):
+        # No condition to probe: the rule fires when the event arrives, so it
+        # always describes the side where it happened.
+        return True
     try:
         thr = float(threshold)
     except (TypeError, ValueError):
         thr = 0.0
-    healthy = float(METRICS[metric].get("healthy", 0.0))
+    healthy = float(info.get("healthy", 0.0))
     return not _cmp(healthy, operator or "==", thr)
 
 
@@ -468,6 +478,124 @@ def is_default_template(stored: Optional[str]) -> bool:
 def effective_template(stored: Optional[str], default: str) -> str:
     """The template to render: the user's if they wrote one, else the default."""
     return default if is_default_template(stored) else stored
+
+
+# ── Per-source default template sets ─────────────────────────────────────────
+#
+# A service check reports its own failure reason, and a trap carries its own
+# message, so those paths lead with different sentences than a device does.
+# The senders in alert_engine read these, and so do the rule editors — showing
+# a device-shaped default on a service rule advertises text that will never be
+# sent.
+
+_SERVICE_TEMPLATES = {
+    "email_subject": "[{severity}] {status}: {check_name}",
+    "email_body": "The {check_type} check “{check_name}” on {target} is {status}."
+                  "{error_sentence}",
+    "sms_template": "ZenPlus {severity} — {rule_name}: {check_name} is {status} ({target}).",
+    "recovery_email_subject": DEFAULT_RECOVERY_EMAIL_SUBJECT,
+    "recovery_email_body": "The {check_type} check “{check_name}” on {target} is "
+                           "passing again.{duration_sentence}",
+    "recovery_sms_template": "ZenPlus resolved — {rule_name}: {check_name} is "
+                             "passing again.{duration_suffix}",
+}
+
+_TRAP_TEMPLATES = {
+    "email_subject": DEFAULT_EMAIL_SUBJECT,
+    "email_body": "{event_sentence} {trap_message}",
+    "sms_template": DEFAULT_SMS,
+    # A trap is an event, not a state: nothing ever "clears" it, so the trap
+    # path has no recovery notification to describe.
+    "recovery_email_subject": None,
+    "recovery_email_body": None,
+    "recovery_sms_template": None,
+}
+
+_DEVICE_TEMPLATES = {
+    "email_subject": DEFAULT_EMAIL_SUBJECT,
+    "email_body": DEFAULT_EMAIL_BODY,
+    "sms_template": DEFAULT_SMS,
+    "recovery_email_subject": DEFAULT_RECOVERY_EMAIL_SUBJECT,
+    "recovery_email_body": DEFAULT_RECOVERY_EMAIL_BODY,
+    "recovery_sms_template": DEFAULT_RECOVERY_SMS,
+}
+
+TEMPLATE_FIELDS = (
+    "email_subject", "email_body", "sms_template",
+    "recovery_email_subject", "recovery_email_body", "recovery_sms_template",
+)
+
+
+def template_kind(rule) -> str:
+    """Which default set a rule's notifications are built from.
+
+    Mirrors the routing in alert_engine: metric='trap' goes to the trap path,
+    anything bound to a service check goes to the service path, and everything
+    else (device ping, SNMP, host, network, APM) uses the device wording.
+    """
+    def field(name):
+        if isinstance(rule, dict):
+            return rule.get(name)
+        return getattr(rule, name, None)
+
+    if (field("metric") or "") == "trap":
+        return "trap"
+    if (field("service_check_id") or field("service_check_group_id")
+            or (field("metric") or "") == "service_status"):
+        return "service"
+    return "device"
+
+
+def default_templates(kind: str = "device") -> dict:
+    """The six default message templates for a source kind.
+
+    Values may be None (a trap has no recovery notification); callers rendering
+    an editor should hide those fields rather than offer text nobody sends.
+    """
+    if kind == "service":
+        return dict(_SERVICE_TEMPLATES)
+    if kind == "trap":
+        return dict(_TRAP_TEMPLATES)
+    return dict(_DEVICE_TEMPLATES)
+
+
+def effective_templates(rule, kind: Optional[str] = None) -> dict:
+    """What this rule will actually send, per field.
+
+    Resolves each stored template through ``effective_template`` against its
+    own default, so a rule storing NULL (the common case) reports the built-in
+    wording rather than a blank the editor cannot show.
+    """
+    def field(name):
+        if isinstance(rule, dict):
+            return rule.get(name)
+        return getattr(rule, name, None)
+
+    defaults = default_templates(kind or template_kind(rule))
+    out = {}
+    for name in TEMPLATE_FIELDS:
+        default = defaults.get(name)
+        out[name] = None if default is None else effective_template(field(name), default)
+    return out
+
+
+def normalize_stored_template(value: Optional[str], default: Optional[str]) -> Optional[str]:
+    """What to persist for a submitted template.
+
+    An editor that shows the default as real, editable text posts it back
+    unchanged whenever the user did not touch it. Storing that would bake a
+    copy onto the rule and freeze it at today's wording, so text equal to the
+    default (or blank, or a legacy pre-filled default) is stored as NULL and
+    keeps tracking the built-in.
+    """
+    if value is None:
+        return None
+    text_value = value.strip()
+    if not text_value or is_default_template(text_value):
+        return None
+    if default is not None and text_value == default.strip():
+        return None
+    return value
 
 
 def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] = None,
