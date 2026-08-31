@@ -271,10 +271,10 @@ export function RumPage() {
   })()
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-2.5">
       <ApmPageHeader
         title="Real User Monitoring"
-        description="Field performance, JavaScript reliability and user journeys — from Core Web Vitals down to a correlated backend trace."
+        description="Field performance, JavaScript reliability and user journeys, correlated to backend traces."
         article="rum"
         actions={
           <>

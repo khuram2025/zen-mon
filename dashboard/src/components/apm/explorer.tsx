@@ -6,7 +6,7 @@ import { cn } from '@/lib/utils'
 import { fmtMs } from '@/components/apm/shared'
 import { fmtCount } from '@/components/apm/viz'
 
-/** Avi-style underline tabs used by APM chrome and explorers. */
+/** Underline tab strip used by APM module chrome and the explorer views. */
 export function ApmUnderlineNav({
   items,
   className,
@@ -68,7 +68,7 @@ export function ApmUnderlineNav({
   )
 }
 
-/** Horizontal duration bar used in explorer tables (Avi timeline column). */
+/** Horizontal duration bar used in the explorer tables' timeline column. */
 export function DurationTimeline({
   ms,
   maxMs,
@@ -118,7 +118,7 @@ const HOP_TONE = {
   muted: 'border-border bg-surface2 text-muted',
 }
 
-/** Client → service → app request path, inspired by NSX ALB log drill-down. */
+/** Client → service → app request path shown when drilling into a single record. */
 export function RequestFlow({ hops, totalLabel }: { hops: RequestHop[]; totalLabel?: string }) {
   if (!hops.length) return null
   return (
@@ -170,25 +170,25 @@ export function ApmFacetSidebar({ title = 'Analytics', groups }: { title?: strin
   const visible = groups.filter((group) => group.items.length > 0)
   if (!visible.length) return null
   return (
-    <aside className="rounded-lg border border-border bg-surface">
-      <div className="border-b border-border px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-muted">{title}</div>
+    <aside className="h-max rounded-lg border border-border bg-surface">
+      <div className="border-b border-border bg-surface2/30 px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">{title}</div>
       <div className="divide-y divide-border">
         {visible.map((group) => (
-          <details key={group.title} open className="px-3 py-2">
+          <details key={group.title} open className="px-2.5 py-1.5">
             <summary className="cursor-pointer list-none text-[11px] font-semibold text-text2 [&::-webkit-details-marker]:hidden">
               <span className="inline-flex items-center gap-1">
                 <ChevronDown className="h-3 w-3 text-muted" />
                 {group.title}
               </span>
             </summary>
-            <div className="mt-1.5 space-y-0.5">
+            <div className="mt-1 space-y-px">
               {group.items.slice(0, 8).map((item) => (
                 <button
                   key={item.value}
                   type="button"
                   onClick={item.onSelect}
                   className={cn(
-                    'flex w-full items-center justify-between gap-2 rounded px-1.5 py-1 text-left text-[11px]',
+                    'flex w-full items-center justify-between gap-2 rounded px-1.5 py-0.5 text-left text-[11px]',
                     item.active ? 'bg-primary/15 text-text' : 'text-muted hover:bg-surface2 hover:text-text',
                   )}
                 >
@@ -220,21 +220,21 @@ export function VolumeHistogram({
   const max = Math.max(...buckets.map((b) => b.ok + (b.err ?? 0)), 1)
   const hasErr = buckets.some((b) => (b.err ?? 0) > 0)
   return (
-    <div className="border-b border-border px-3 pt-2 pb-1">
-      <div className="flex h-14 items-end gap-px">
+    <div className="flex items-end gap-3 border-b border-border px-3 py-1.5">
+      <div className="flex h-8 min-w-0 flex-1 items-end gap-px">
         {buckets.map((bucket, index) => {
           const err = bucket.err ?? 0
           const total = bucket.ok + err
-          const height = Math.max(4, (total / max) * 100)
+          const height = Math.max(6, (total / max) * 100)
           return (
-            <div key={index} className="flex min-w-0 flex-1 flex-col justify-end" style={{ height: `${height}%` }}>
+            <div key={index} className="flex min-w-0 flex-1 flex-col justify-end rounded-t-sm" style={{ height: `${height}%` }}>
               {err > 0 && <div className="w-full bg-warning" style={{ height: `${(err / total) * 100}%` }} />}
               {bucket.ok > 0 && <div className="w-full bg-success/70" style={{ height: `${(bucket.ok / total) * 100}%` }} />}
             </div>
           )
         })}
       </div>
-      <div className="mt-1 flex items-center gap-3 text-[10px] text-muted">
+      <div className="flex shrink-0 items-center gap-2.5 pb-0.5 text-[10px] text-muted">
         <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-success/70" /> {okLabel}</span>
         {hasErr && <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-warning" /> {errLabel}</span>}
       </div>
@@ -258,16 +258,18 @@ export function ApmExplorerFrame({
   children: ReactNode
 }) {
   return (
-    <div className="space-y-3">
+    <div className="space-y-2">
       {(search || actions) && (
         <div className="flex flex-wrap items-center gap-2">
           {search}
           <div className="ml-auto flex flex-wrap items-center gap-2">{actions}</div>
         </div>
       )}
-      {summary && <div className="text-[11px] text-muted">{summary}</div>}
-      <div className={cn('grid gap-3', sidebar && 'xl:grid-cols-[minmax(0,1fr),240px]')}>
-        <div className="min-w-0 overflow-hidden rounded-lg border border-border bg-surface">
+      <div className={cn('grid gap-2', sidebar && 'xl:grid-cols-[minmax(0,1fr),216px]')}>
+        <div className="min-w-0 self-start overflow-hidden rounded-lg border border-border bg-surface">
+          {summary && (
+            <div className="border-b border-border bg-surface2/30 px-3 py-1.5 text-[11px] text-muted">{summary}</div>
+          )}
           {histogram}
           {children}
         </div>
@@ -277,7 +279,10 @@ export function ApmExplorerFrame({
   )
 }
 
-export const EXPLORER_HEAD = 'bg-surface3/80 [&_th]:h-9 [&_th]:text-[10px] [&_th]:font-semibold [&_th]:text-text2'
+export const EXPLORER_HEAD = 'bg-surface3/80 [&_th]:h-8 [&_th]:text-[10px] [&_th]:font-semibold [&_th]:text-text2'
+
+/** Tightened row padding so explorer tables show more records per screen. */
+export const EXPLORER_ROWS = '[&_td]:py-2'
 
 export function ExpandToggle({ open, onClick }: { open: boolean; onClick: () => void }) {
   const Icon = open ? ChevronDown : ChevronRight

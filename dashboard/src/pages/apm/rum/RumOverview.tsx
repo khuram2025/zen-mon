@@ -15,6 +15,7 @@ import {
 import { relativeTime } from '@/lib/utils'
 import { fmtPct } from '@/components/apm/shared'
 import { APM_SERIES, ApmKpi, ApmTimeChart, ChartPanel, RankBar, errorTone, fmtCount } from '@/components/apm/viz'
+import { EXPLORER_HEAD, EXPLORER_ROWS } from '@/components/apm/explorer'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
@@ -91,10 +92,10 @@ function HealthPanel({ overview, health }: { overview: RumOverview; health?: Rum
   const sdkVersions = details?.sdk_versions?.filter(Boolean) ?? (details?.sdk_version ? [details.sdk_version] : [])
   return (
     <Card className="h-full">
-      <CardHeader className="border-b border-border px-4 py-3">
-        <CardTitle className="flex items-center gap-2 text-sm"><ServerCog className="h-4 w-4 text-primary" /> Collection health</CardTitle>
+      <CardHeader className="border-b border-border px-3 py-2">
+        <CardTitle className="flex items-center gap-2 text-[13px]"><ServerCog className="h-3.5 w-3.5 text-primary" /> Collection health</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3 p-4">
+      <CardContent className="space-y-2.5 p-3">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <span className={`flex h-8 w-8 items-center justify-center rounded-lg ${good ? 'bg-success/10 text-success' : warn ? 'bg-warning/10 text-warning' : 'bg-surface2 text-muted'}`}>
@@ -107,7 +108,7 @@ function HealthPanel({ overview, health }: { overview: RumOverview; health?: Rum
           </div>
           {!!sdkVersions.length && <Badge variant="outline" title={sdkVersions.join(', ')}>SDK {sdkVersions.slice(0, 2).join(', ')}{sdkVersions.length > 2 ? ` +${sdkVersions.length - 2}` : ''}</Badge>}
         </div>
-        <div className="grid grid-cols-3 gap-2 rounded-lg bg-surface2/50 p-3 text-center">
+        <div className="grid grid-cols-3 gap-2 rounded-lg bg-surface2/50 p-2 text-center">
           <div><div className="font-mono text-sm font-semibold text-text">{fmtCount(details?.accepted)}</div><div className="text-[9px] uppercase tracking-wider text-muted">Accepted</div></div>
           <div><div className="font-mono text-sm font-semibold text-warning">{fmtCount(details?.rejected)}</div><div className="text-[9px] uppercase tracking-wider text-muted">Rejected</div></div>
           <div><div className="font-mono text-sm font-semibold text-danger">{fmtCount(details?.dropped)}</div><div className="text-[9px] uppercase tracking-wider text-muted">Dropped</div></div>
@@ -154,13 +155,13 @@ function BreakdownCard({ title, hint, side }: { title: string; hint: string; sid
   const hasServer = (side?.server_samples ?? 0) > 0
   return (
     <Card className="h-full">
-      <CardHeader className="border-b border-border px-4 py-3">
+      <CardHeader className="border-b border-border px-3 py-2">
         <div className="flex items-center justify-between gap-2">
-          <CardTitle className="text-sm">{title}</CardTitle>
+          <CardTitle className="text-[13px]">{title}</CardTitle>
           <span className="text-[10px] text-muted">{hint}</span>
         </div>
       </CardHeader>
-      <CardContent className="space-y-3 p-4">
+      <CardContent className="space-y-2.5 p-3">
         {segments.length ? (
           <>
             <div className="flex items-baseline justify-between gap-2">
@@ -170,7 +171,7 @@ function BreakdownCard({ title, hint, side }: { title: string; hint: string; sid
             <PhaseBar segments={segments} height={12} />
             <PhaseLegend segments={segments} />
             {hasServer && (
-              <div className="grid grid-cols-3 gap-2 rounded-lg bg-surface2/50 p-2.5 text-center">
+              <div className="grid grid-cols-3 gap-2 rounded-lg bg-surface2/50 p-2 text-center">
                 <div><div className="font-mono text-sm font-semibold" style={{ color: PHASE_COLORS.network }}>{formatDurationMs(Math.max(0, (side!.phases.wait ?? 0) - Math.min(side!.server_p75 ?? 0, side!.phases.wait ?? 0)))}</div><div className="text-[9px] uppercase tracking-wider text-muted">Network</div></div>
                 <div><div className="font-mono text-sm font-semibold" style={{ color: PHASE_COLORS.server }}>{formatDurationMs(Math.max(0, (side!.server_p75 ?? 0) - (side!.db_p75 ?? 0)))}</div><div className="text-[9px] uppercase tracking-wider text-muted">App execution</div></div>
                 <div><div className="font-mono text-sm font-semibold" style={{ color: PHASE_COLORS.db }}>{formatDurationMs(side!.db_p75)}</div><div className="text-[9px] uppercase tracking-wider text-muted">Database</div></div>
@@ -191,8 +192,8 @@ function FacetCard({ title, items, onSelect }: { title: string; items?: Array<{ 
   const max = Math.max(...visible.map((item) => item.count), 1)
   return (
     <Card className="h-full">
-      <CardHeader className="border-b border-border px-4 py-3"><CardTitle className="text-xs">{title}</CardTitle></CardHeader>
-      <CardContent className="space-y-2 p-3">
+      <CardHeader className="border-b border-border bg-surface2/30 px-3 py-1.5"><CardTitle className="text-[11px] uppercase tracking-wider text-muted">{title}</CardTitle></CardHeader>
+      <CardContent className="space-y-1 p-2">
         {visible.map((item) => (
           <button key={item.value} type="button" onClick={() => onSelect(item.value)} className="block w-full rounded-md px-1.5 py-1 text-left hover:bg-surface2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40">
             <div className="flex items-center justify-between gap-2 text-[11px]"><span className="truncate text-text2">{item.value || 'Unknown'}</span><span className="font-mono tabular-nums text-muted">{fmtCount(item.count)}</span></div>
@@ -210,10 +211,10 @@ export function RumOverviewPanel(props: OverviewProps) {
   const errorRate = d.rates.error_session_rate
   const series = props.timeseries?.series ?? []
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       <section aria-labelledby="rum-volume-heading">
-        <RumSectionHeader id="rum-volume-heading" title="Experience volume" description="Sampled traffic, reliability and interaction load for the selected segment. Open a tile to inspect the matching explorer." />
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
+        <RumSectionHeader id="rum-volume-heading" title="Experience volume" description="Open a tile to inspect the matching explorer." />
+        <div className="grid grid-cols-2 gap-2.5 md:grid-cols-3 xl:grid-cols-6">
           <ApmKpi
             to={exploreTo.sessions}
             label="Sessions"
@@ -271,21 +272,21 @@ export function RumOverviewPanel(props: OverviewProps) {
         <RumSectionHeader
           id="rum-vitals-heading"
           title="Core Web Vitals"
-          description="75th percentile across finalized view measurements. Score uses the share of good LCP, INP and CLS samples."
-          action={<Button asChild variant="ghost" size="sm"><Link to={exploreTo['web-vitals']}>Open Web Vitals</Link></Button>}
+          description="p75 across finalized view measurements."
+          action={<Button asChild variant="ghost" size="sm" className="h-7 px-2 text-[11px]"><Link to={exploreTo['web-vitals']}>Open Web Vitals</Link></Button>}
         />
-        <div className="grid gap-3 xl:grid-cols-4">
+        <div className="grid gap-2.5 xl:grid-cols-4">
           <RumExperienceCard vitals={d.vitals} href={exploreTo['web-vitals']} />
           <RumVitalCard name="lcp" metric={d.vitals.lcp} />
           <RumVitalCard name="inp" metric={d.vitals.inp} />
           <RumVitalCard name="cls" metric={d.vitals.cls} />
         </div>
-        <div className="mt-3 grid gap-3 sm:grid-cols-3">
+        <div className="mt-2.5 grid grid-cols-3 divide-x divide-border overflow-hidden rounded-lg border border-border bg-surface">
           {(['fcp', 'ttfb', 'load'] as const).map((name) => (
-            <div key={name} className="rounded-lg border border-border bg-surface px-4 py-3">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{name.toUpperCase()} p75</div>
-              <div className="mt-1 text-lg font-semibold tabular-nums text-text">{formatRumVital(name, d.vitals[name].p75)}</div>
-              <div className="mt-1 text-[10px] text-muted">{d.vitals[name].samples.toLocaleString()} samples · supporting navigation metric</div>
+            <div key={name} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-3 py-2">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">{name.toUpperCase()} p75</span>
+              <span className="text-base font-semibold tabular-nums text-text">{formatRumVital(name, d.vitals[name].p75)}</span>
+              <span className="text-[10px] text-muted">{d.vitals[name].samples.toLocaleString()} samples</span>
             </div>
           ))}
         </div>
@@ -295,20 +296,20 @@ export function RumOverviewPanel(props: OverviewProps) {
         <RumSectionHeader
           id="rum-breakdown-heading"
           title="End-to-end latency"
-          description="Where real-user time goes across the request path: DNS, connection, network round trip, application execution, database and data transfer — the NSX-style split at p75."
+          description="p75 split of real-user time across DNS, connection, network, application execution, database and transfer."
         />
         {props.breakdownError ? <QueryErrorPanel label="latency breakdown" error={props.breakdownError} onRetry={props.onRetryBreakdown} /> : (
           <>
-            <div className="grid gap-3 xl:grid-cols-2">
+            <div className="grid gap-2.5 xl:grid-cols-2">
               <BreakdownCard title="Page loads" hint="finalized navigations" side={props.breakdown?.page_loads} />
               <BreakdownCard title="API requests" hint="fetch and XHR calls" side={props.breakdown?.api_requests} />
             </div>
             {!!props.breakdown?.slowest_endpoints?.length && (
-              <div className="mt-3">
-                <RumTableCard title="Slowest endpoints" description="fetch/XHR targets ranked by p75 total time; app and database figures come from Server-Timing captures">
+              <div className="mt-2.5">
+                <RumTableCard title="Slowest endpoints" description="fetch/XHR targets by p75 total time; app and DB figures come from Server-Timing">
                   <Table>
-                    <THead><Tr><Th>Endpoint</Th><Th className="text-right">Requests</Th><Th className="text-right">Total p75</Th><Th className="text-right">Wait p75</Th><Th className="text-right">App p75</Th><Th className="text-right">DB p75</Th><Th className="text-right">Failures</Th></Tr></THead>
-                    <TBody>
+                    <THead className={EXPLORER_HEAD}><Tr><Th>Endpoint</Th><Th className="text-right">Requests</Th><Th className="text-right">Total p75</Th><Th className="text-right">Wait p75</Th><Th className="text-right">App p75</Th><Th className="text-right">DB p75</Th><Th className="text-right">Failures</Th></Tr></THead>
+                    <TBody className={EXPLORER_ROWS}>
                       {props.breakdown.slowest_endpoints.map((endpoint) => (
                         <Tr key={`${endpoint.method}:${endpoint.url}`}>
                           <Td><div className="max-w-[340px] truncate font-mono text-xs text-text" title={endpoint.url}>{endpoint.method ? `${endpoint.method} ` : ''}{endpoint.url}</div></Td>
@@ -329,14 +330,14 @@ export function RumOverviewPanel(props: OverviewProps) {
         )}
       </section>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,2fr),minmax(280px,1fr)]">
+      <div className="grid gap-2.5 xl:grid-cols-[minmax(0,2fr),minmax(280px,1fr)]">
         {props.trendsError ? <QueryErrorPanel label="experience trends" error={props.trendsError} onRetry={props.onRetryTrends} /> : (
           <ChartPanel title="Real-user experience over time" hint="Sampled views and sessions, plus all retained JavaScript errors">
             <ApmTimeChart
               data={series}
               loading={props.trendsLoading}
               empty="No experience samples match this segment."
-              height={280}
+              height={250}
               series={[
                 { key: 'views', name: 'Views', color: APM_SERIES.throughput, type: 'bar', fmt: fmtCount },
                 { key: 'sessions', name: 'Sessions', color: APM_SERIES.users, fmt: fmtCount },
@@ -350,15 +351,15 @@ export function RumOverviewPanel(props: OverviewProps) {
 
       {props.explorerCoverage?.partial && <div className="overflow-hidden rounded-lg border border-border"><RumCoverageNotice coverage={props.explorerCoverage} /></div>}
 
-      <div className="grid gap-4 xl:grid-cols-2">
+      <div className="grid gap-2.5 xl:grid-cols-2">
         <RumTableCard
           title="Slowest views"
           description="Highest p75 LCP in the selected segment"
           actions={<Button variant="ghost" size="sm" onClick={props.onShowViews}>View all</Button>}
         >
           <Table>
-            <THead><Tr><Th>View</Th><Th className="text-right">LCP p75</Th><Th className="text-right">INP p75</Th><Th className="text-right">Views</Th></Tr></THead>
-            <TBody>
+            <THead className={EXPLORER_HEAD}><Tr><Th>View</Th><Th className="text-right">LCP p75</Th><Th className="text-right">INP p75</Th><Th className="text-right">Views</Th></Tr></THead>
+            <TBody className={EXPLORER_ROWS}>
               {props.topViewsLoading ? <Tr><Td colSpan={4} className="py-10 text-center text-xs text-muted">Loading measured views…</Td></Tr> : props.topViewsError ? <Tr><Td colSpan={4} className="py-8 text-center text-xs text-danger">Could not load view performance. <button className="font-medium underline" onClick={props.onRetryViews}>Retry</button></Td></Tr> : (props.topViews ?? []).map((view) => (
                 <Tr key={`${view.application_id}:${view.env}:${view.view_name}`} className={INTERACTIVE_ROW} tabIndex={0} onClick={() => props.onOpenView(view)} onKeyDown={(event) => onRowKey(event, () => props.onOpenView(view))}>
                   <Td><div className="max-w-[260px] truncate font-mono text-xs text-text" title={view.view_name}>{view.view_name}</div><div className="text-[10px] text-muted">{view.application_id} · {view.env}</div></Td>
@@ -378,8 +379,8 @@ export function RumOverviewPanel(props: OverviewProps) {
           actions={<Button variant="ghost" size="sm" onClick={props.onShowErrors}>View all</Button>}
         >
           <Table>
-            <THead><Tr><Th>Error</Th><Th className="text-right">Sessions</Th><Th className="text-right">Events</Th><Th>Trace</Th></Tr></THead>
-            <TBody>
+            <THead className={EXPLORER_HEAD}><Tr><Th>Error</Th><Th className="text-right">Sessions</Th><Th className="text-right">Events</Th><Th>Trace</Th></Tr></THead>
+            <TBody className={EXPLORER_ROWS}>
               {props.topErrorsLoading ? <Tr><Td colSpan={4} className="py-10 text-center text-xs text-muted">Loading browser errors…</Td></Tr> : props.topErrorsError ? <Tr><Td colSpan={4} className="py-8 text-center text-xs text-danger">Could not load error groups. <button className="font-medium underline" onClick={props.onRetryErrors}>Retry</button></Td></Tr> : (props.topErrors ?? []).map((error) => (
                 <Tr key={error.fingerprint} className={INTERACTIVE_ROW} tabIndex={0} onClick={() => props.onOpenError(error)} onKeyDown={(event) => onRowKey(event, () => props.onOpenError(error))}>
                   <Td><div className="max-w-[280px] truncate text-xs font-medium text-text" title={error.message}>{error.message}</div><div className="text-[10px] text-muted">{error.view_name || 'Unknown view'}</div></Td>
@@ -397,8 +398,8 @@ export function RumOverviewPanel(props: OverviewProps) {
       {!!d.releases?.length && (
         <RumTableCard title="Release health" description="Compare real-user reliability and Core Web Vitals by deployed version. Select a release to segment the dashboard.">
           <Table>
-            <THead><Tr><Th>Release</Th><Th className="text-right">Sessions</Th><Th className="text-right">Views</Th><Th className="text-right">Error sessions</Th><Th className="text-right">LCP p75</Th><Th className="text-right">INP p75</Th><Th className="text-right">CLS p75</Th><Th className="text-right">Last seen</Th></Tr></THead>
-            <TBody>
+            <THead className={EXPLORER_HEAD}><Tr><Th>Release</Th><Th className="text-right">Sessions</Th><Th className="text-right">Views</Th><Th className="text-right">Error sessions</Th><Th className="text-right">LCP p75</Th><Th className="text-right">INP p75</Th><Th className="text-right">CLS p75</Th><Th className="text-right">Last seen</Th></Tr></THead>
+            <TBody className={EXPLORER_ROWS}>
               {d.releases.slice(0, 10).map((release) => (
                 <Tr
                   key={release.service_version}
@@ -425,7 +426,7 @@ export function RumOverviewPanel(props: OverviewProps) {
 
       <section aria-labelledby="rum-audience-heading">
         <RumSectionHeader id="rum-audience-heading" title="Audience and release context" description="Select a segment to apply it to every RUM view." />
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-5">
           <FacetCard title="Browsers" items={props.facets?.browser} onSelect={(value) => props.onFilter('browser', value)} />
           <FacetCard title="Devices" items={props.facets?.device_type} onSelect={(value) => props.onFilter('device_type', value)} />
           <FacetCard title="Countries" items={props.facets?.country} onSelect={(value) => props.onFilter('country', value)} />
@@ -448,37 +449,37 @@ export function RumWebVitalsPanel({ overview, timeseries, loading, error, onRetr
   const series = timeseries?.series ?? []
   const totalSamples = overview.vitals.lcp.samples + overview.vitals.inp.samples + overview.vitals.cls.samples
   return (
-    <div className="space-y-5">
-      <div className="grid gap-3 xl:grid-cols-4">
+    <div className="space-y-3">
+      <div className="grid gap-2.5 xl:grid-cols-4">
         <RumExperienceCard vitals={overview.vitals} href={exploreTo} />
         <RumVitalCard name="lcp" metric={overview.vitals.lcp} />
         <RumVitalCard name="inp" metric={overview.vitals.inp} />
         <RumVitalCard name="cls" metric={overview.vitals.cls} />
       </div>
-      <div className="grid gap-3 md:grid-cols-3">
+      <div className="grid gap-2.5 md:grid-cols-3">
         <RumVitalCard name="fcp" metric={overview.vitals.fcp} compact />
         <RumVitalCard name="ttfb" metric={overview.vitals.ttfb} compact />
         <RumVitalCard name="load" metric={overview.vitals.load} compact />
       </div>
-      <div className="rounded-lg border border-info/25 bg-info/5 px-4 py-3 text-xs text-text2">
-        <div className="flex items-start gap-2"><Gauge className="mt-0.5 h-4 w-4 shrink-0 text-info" /><p><span className="font-semibold text-text">Field performance at p75.</span> At least 75% of measured visits experienced a value at or below each result. Missing samples remain “No data” and are excluded from scoring.</p></div>
+      <div className="rounded-md border border-info/25 bg-info/5 px-3 py-1.5 text-[11px] leading-snug text-text2">
+        <div className="flex items-start gap-2"><Gauge className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" /><p><span className="font-semibold text-text">Field performance at p75.</span> At least 75% of measured visits experienced a value at or below each result. Missing samples remain “No data” and are excluded from scoring.</p></div>
       </div>
 
       {error ? <QueryErrorPanel label="Web Vital trends" error={error} onRetry={onRetry} /> : totalSamples === 0 && !loading ? (
         <Card><RumEmptyState icon={Gauge} title="No finalized Web Vital samples" description="Keep the page open long enough for the browser to finalize its view, then refresh this dashboard. Unsupported browsers are excluded rather than reported as zero." /></Card>
       ) : (
-        <div className="grid gap-4 xl:grid-cols-2">
+        <div className="grid gap-2.5 xl:grid-cols-2">
           <ChartPanel title="Largest Contentful Paint" hint="Good ≤ 2.5s · poor > 4s">
-            <ApmTimeChart data={series} loading={loading} empty="No LCP samples in this window." height={250} series={[{ key: 'lcp_p75', name: 'LCP p75', color: '#7c3aed', fmt: (value) => formatRumVital('lcp', value) }]} />
+            <ApmTimeChart data={series} loading={loading} empty="No LCP samples in this window." height={220} series={[{ key: 'lcp_p75', name: 'LCP p75', color: '#7c3aed', fmt: (value) => formatRumVital('lcp', value) }]} />
           </ChartPanel>
           <ChartPanel title="Interaction to Next Paint" hint="Good ≤ 200ms · poor > 500ms">
-            <ApmTimeChart data={series} loading={loading} empty="No INP samples in this window." height={250} series={[{ key: 'inp_p75', name: 'INP p75', color: '#0284c7', fmt: (value) => formatRumVital('inp', value) }]} />
+            <ApmTimeChart data={series} loading={loading} empty="No INP samples in this window." height={220} series={[{ key: 'inp_p75', name: 'INP p75', color: '#0284c7', fmt: (value) => formatRumVital('inp', value) }]} />
           </ChartPanel>
           <ChartPanel title="Cumulative Layout Shift" hint="Good ≤ 0.1 · poor > 0.25">
-            <ApmTimeChart data={series} loading={loading} empty="No CLS samples in this window." height={250} series={[{ key: 'cls_p75', name: 'CLS p75', color: '#db2777', fmt: (value) => formatRumVital('cls', value) }]} />
+            <ApmTimeChart data={series} loading={loading} empty="No CLS samples in this window." height={220} series={[{ key: 'cls_p75', name: 'CLS p75', color: '#db2777', fmt: (value) => formatRumVital('cls', value) }]} />
           </ChartPanel>
           <ChartPanel title="Navigation timing" hint="FCP, TTFB and full page load">
-            <ApmTimeChart data={series} loading={loading} empty="No navigation timing samples in this window." height={250} series={[
+            <ApmTimeChart data={series} loading={loading} empty="No navigation timing samples in this window." height={220} series={[
               { key: 'fcp_p75', name: 'FCP p75', color: '#0891b2', fmt: (value) => formatRumVital('fcp', value) },
               { key: 'ttfb_p75', name: 'TTFB p75', color: '#f59e0b', fmt: (value) => formatRumVital('ttfb', value) },
               { key: 'load_p75', name: 'Load p75', color: '#6366f1', fmt: (value) => formatRumVital('load', value) },

@@ -11,7 +11,7 @@ import {
 import { formatBytes, relativeTime } from '@/lib/utils'
 import { fmtPct } from '@/components/apm/shared'
 import { fmtCount } from '@/components/apm/viz'
-import { DurationTimeline, EXPLORER_HEAD } from '@/components/apm/explorer'
+import { DurationTimeline, EXPLORER_HEAD, EXPLORER_ROWS } from '@/components/apm/explorer'
 import { Badge } from '@/components/ui/Badge'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import type {
@@ -101,7 +101,7 @@ export function RumViewsTable({ data, onOpen, ...props }: SharedProps & { data?:
           <SortableTh label="Error sessions" sortKey="error_session_rate" activeSort={props.sort} order={props.order} onSort={props.onSort} className="text-right" />
           <SortableTh label="Last seen" sortKey="last_seen" activeSort={props.sort} order={props.order} onSort={props.onSort} className="text-right" />
         </Tr></THead>
-        <TBody>
+        <TBody className={EXPLORER_ROWS}>
           {props.loading ? <LoadingRow columns={8} /> : !data?.items.length ? <EmptyRow columns={8} filtered={props.filtered} noun="views" icon={Layers3} /> : data.items.map((view) => (
             <Tr key={viewRowKey(view)} className={INTERACTIVE_ROW} tabIndex={0} aria-label={`Open view ${view.view_name || '/'}`} onClick={() => onOpen(view)} onKeyDown={(event) => onRowKey(event, () => onOpen(view))}>
               <Td>
@@ -140,7 +140,7 @@ export function RumSessionsTable({ data, onOpen, ...props }: SharedProps & { dat
           <SortableTh label="Last seen" sortKey="last_seen" activeSort={props.sort} order={props.order} onSort={props.onSort} className="text-right" />
           <Th>Backend trace</Th>
         </Tr></THead>
-        <TBody>
+        <TBody className={EXPLORER_ROWS}>
           {props.loading ? <LoadingRow columns={8} /> : !data?.items.length ? <EmptyRow columns={8} filtered={props.filtered} noun="sessions" icon={Users} /> : data.items.map((session) => (
             <Tr key={session.session_id} className={INTERACTIVE_ROW} tabIndex={0} aria-label={`Open session ${session.session_id.slice(0, 14)}`} onClick={() => onOpen(session)} onKeyDown={(event) => onRowKey(event, () => onOpen(session))}>
               <Td>
@@ -177,7 +177,7 @@ export function RumErrorsTable({ data, onOpen, ...props }: SharedProps & { data?
           <SortableTh label="Last seen" sortKey="last_seen" activeSort={props.sort} order={props.order} onSort={props.onSort} className="text-right" />
           <Th>Trace</Th>
         </Tr></THead>
-        <TBody>
+        <TBody className={EXPLORER_ROWS}>
           {props.loading ? <LoadingRow columns={7} /> : !data?.items.length ? <EmptyRow columns={7} filtered={props.filtered} noun="errors" icon={FileWarning} /> : data.items.map((error) => (
             <Tr key={errorRowKey(error)} className={INTERACTIVE_ROW} tabIndex={0} aria-label={`Open error ${error.error_type || error.message}`} onClick={() => onOpen(error)} onKeyDown={(event) => onRowKey(event, () => onOpen(error))}>
               <Td>
@@ -215,7 +215,7 @@ export function RumResourcesTable({ data, onOpen, ...props }: SharedProps & { da
           <SortableTh label="Last seen" sortKey="last_seen" activeSort={props.sort} order={props.order} onSort={props.onSort} className="text-right" />
           <Th>Trace</Th>
         </Tr></THead>
-        <TBody>
+        <TBody className={EXPLORER_ROWS}>
           {props.loading ? <LoadingRow columns={8} /> : !data?.items.length ? <EmptyRow columns={8} filtered={props.filtered} noun="resources" icon={Network} /> : data.items.map((resource) => {
             const failedRate = resource.failure_rate ?? (resource.count ? resource.failed_count / resource.count : null)
             return (
@@ -256,7 +256,7 @@ export function RumActionsTable({ data, onOpen, ...props }: SharedProps & { data
           <SortableTh label="Last seen" sortKey="last_seen" activeSort={props.sort} order={props.order} onSort={props.onSort} className="text-right" />
           <Th>Trace</Th>
         </Tr></THead>
-        <TBody>
+        <TBody className={EXPLORER_ROWS}>
           {props.loading ? <LoadingRow columns={7} /> : !data?.items.length ? <EmptyRow columns={7} filtered={props.filtered} noun="actions" icon={MousePointerClick} /> : data.items.map((action) => {
             const frustration = ['rage_click', 'dead_click', 'error_click'].includes(action.action_type)
             return (

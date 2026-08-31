@@ -53,7 +53,6 @@ import type {
 } from '@/types/apm'
 import type { RumSortOrder } from './useRumUrlState'
 import {
-  RUM_FILTER_KEYS,
   RUM_FILTER_LABEL,
   coreWebVitalsAssessment,
   formatDurationMs,
@@ -194,10 +193,10 @@ function FilterSelect({
 }) {
   const values = facetOptions(facets?.[filterKey], filters[filterKey])
   return (
-    <label className="min-w-[148px] flex-1">
+    <label className="min-w-[132px] flex-1">
       <span className="sr-only">{RUM_FILTER_LABEL[filterKey]}</span>
       <Select value={filters[filterKey] || ALL} onValueChange={(value) => onChange(filterKey, value === ALL ? '' : value)}>
-        <SelectTrigger className="h-8 min-w-0 bg-surface text-xs" aria-label={`Filter by ${RUM_FILTER_LABEL[filterKey].toLowerCase()}`}>
+        <SelectTrigger className="h-7 min-w-0 bg-surface text-[11px]" aria-label={`Filter by ${RUM_FILTER_LABEL[filterKey].toLowerCase()}`}>
           <SelectValue placeholder={placeholder} />
         </SelectTrigger>
         <SelectContent>
@@ -236,21 +235,36 @@ export function RumFilterBar({
 }) {
   const advancedActive = ADVANCED_FILTERS.filter(({ key }) => filters[key]).length
   const [advancedOpen, setAdvancedOpen] = useState(advancedActive > 0)
-  const chips = RUM_FILTER_KEYS.filter((key) => filters[key])
+  // The three primary filters already read back from their own selects, so only
+  // the secondary ones (set from "More" or the facet sidebar) need a chip.
+  const chips = ADVANCED_FILTERS.map(({ key }) => key).filter((key) => filters[key])
   return (
-    <div className="rounded-lg border border-border bg-surface2/35">
-      <div className="flex flex-wrap items-center gap-2 px-3 py-2">
-        <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-muted">
-          <Filter className="h-3.5 w-3.5 text-primary" aria-hidden />
+    <div className="rounded-md border border-border bg-surface2/35">
+      <div className="flex flex-wrap items-center gap-1.5 px-2 py-1.5">
+        <span className="inline-flex shrink-0 items-center gap-1 pl-0.5 pr-0.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
+          <Filter className="h-3 w-3 text-primary" aria-hidden />
           Segment
         </span>
         {PRIMARY_FILTERS.map((filter) => (
           <FilterSelect key={filter.key} filterKey={filter.key} placeholder={filter.placeholder} filters={filters} facets={facets} onChange={onChange} />
         ))}
-        <div className="ml-auto flex items-center gap-1">
-          {loading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted" aria-label="Loading filter values" />}
+        {chips.map((key) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => onChange(key, '')}
+            className="inline-flex h-7 shrink-0 items-center gap-1 rounded border border-primary/25 bg-primary/10 px-1.5 text-[11px] font-medium text-primary hover:bg-primary/15"
+            aria-label={`Remove ${RUM_FILTER_LABEL[key]} filter`}
+            title={`${RUM_FILTER_LABEL[key]}: ${filters[key]}`}
+          >
+            <span className="max-w-[140px] truncate">{filters[key]}</span>
+            <X className="h-3 w-3 shrink-0" />
+          </button>
+        ))}
+        <div className="ml-auto flex shrink-0 items-center gap-0.5">
+          {loading && <Loader2 className="h-3 w-3 animate-spin text-muted" aria-label="Loading filter values" />}
           {error && (
-            <button type="button" className="text-[10px] text-warning hover:underline" onClick={onRetry}>
+            <button type="button" className="px-1 text-[10px] text-warning hover:underline" onClick={onRetry}>
               Filter values unavailable · retry
             </button>
           )}
@@ -258,43 +272,26 @@ export function RumFilterBar({
             <Button
               variant="ghost"
               size="sm"
-              className="h-8 px-2 text-[11px] text-muted"
+              className="h-7 gap-1 px-1.5 text-[11px] text-muted"
               onClick={() => setAdvancedOpen((open) => !open)}
-              aria-expanded={advancedOpen || advancedActive > 0}
+              aria-expanded={advancedOpen}
             >
               <SlidersHorizontal className="h-3 w-3" />
               More{advancedActive > 0 ? ` (${advancedActive})` : ''}
-              {advancedOpen || advancedActive > 0 ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+              {advancedOpen ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
             </Button>
           )}
           {activeCount > 0 && (
-            <Button variant="ghost" size="sm" className="h-8 px-2 text-[11px] text-muted" onClick={onClear}>
+            <Button variant="ghost" size="sm" className="h-7 gap-1 px-1.5 text-[11px] text-muted" onClick={onClear}>
               <RotateCcw className="h-3 w-3" /> Clear
             </Button>
           )}
         </div>
       </div>
-      {!compact && (advancedOpen || advancedActive > 0) && (
-        <div className="grid grid-cols-2 gap-2 border-t border-border/60 px-3 py-2 md:grid-cols-3 xl:grid-cols-6">
+      {!compact && advancedOpen && (
+        <div className="grid grid-cols-2 gap-1.5 border-t border-border/60 px-2 py-1.5 md:grid-cols-4 xl:grid-cols-7">
           {ADVANCED_FILTERS.map((filter) => (
             <FilterSelect key={filter.key} filterKey={filter.key} placeholder={filter.placeholder} filters={filters} facets={facets} onChange={onChange} />
-          ))}
-        </div>
-      )}
-      {chips.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5 border-t border-border/60 px-3 py-2">
-          {chips.map((key) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => onChange(key, '')}
-              className="inline-flex items-center gap-1 rounded-full border border-primary/25 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/15"
-              aria-label={`Remove ${RUM_FILTER_LABEL[key]} filter`}
-            >
-              <span className="text-muted">{RUM_FILTER_LABEL[key]}</span>
-              {filters[key]}
-              <X className="h-3 w-3" />
-            </button>
           ))}
         </div>
       )}
@@ -320,32 +317,32 @@ export function RumVitalCard({ name, metric, compact = false }: { name: RumVital
   return (
     <Card className={cn('relative h-full overflow-hidden', style.border)}>
       <div className={cn('absolute inset-x-0 top-0 h-0.5', style.bar)} />
-      <CardContent className={cn('p-4', compact && 'p-3.5')}>
+      <CardContent className={cn('p-3', compact && 'p-2.5')}>
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{VITAL_SHORT[name]} p75</div>
-            <div className={cn('mt-1 font-bold tabular-nums tracking-tight', compact ? 'text-xl' : 'text-[1.65rem] leading-none', style.text)}>
+            <div className={cn('mt-0.5 font-bold tabular-nums tracking-tight', compact ? 'text-xl' : 'text-[1.5rem] leading-none', style.text)}>
               {formatRumVital(name, metric.p75)}
             </div>
-            <div className="mt-1 truncate text-[11px] text-muted">{VITAL_LABEL[name]}</div>
+            <div className="mt-0.5 truncate text-[10px] text-muted">{VITAL_LABEL[name]}</div>
           </div>
           <Badge variant={style.badge}>{style.label}</Badge>
         </div>
-        <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-surface2" aria-hidden>
+        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface2" aria-hidden>
           <div className={cn('h-full rounded-full', style.bar)} style={{ width: `${width}%` }} />
         </div>
-        <div className="mt-1.5 flex items-center justify-between gap-2 text-[10px] text-muted">
+        <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-muted">
           <span>{metric.samples.toLocaleString()} {metric.samples === 1 ? 'sample' : 'samples'}</span>
           <span>Good ≤ {formatRumVital(name, limits.good)}</span>
         </div>
         {hasDistribution && (
-          <div className="mt-3">
+          <div className="mt-2">
             <div className="flex h-1.5 overflow-hidden rounded-full bg-surface2" aria-label="Experience distribution">
               <div className="bg-success" style={{ width: `${Math.max(0, distribution.good ?? 0)}%` }} />
               <div className="bg-warning" style={{ width: `${Math.max(0, distribution.needsImprovement ?? 0)}%` }} />
               <div className="bg-danger" style={{ width: `${Math.max(0, distribution.poor ?? 0)}%` }} />
             </div>
-            <div className="mt-1.5 flex justify-between text-[10px] text-muted">
+            <div className="mt-1 flex justify-between text-[10px] text-muted">
               <span>{distribution.good == null ? '—' : `${distribution.good.toFixed(0)}% good`}</span>
               <span>{distribution.poor == null ? '—' : `${distribution.poor.toFixed(0)}% poor`}</span>
             </div>
@@ -372,8 +369,8 @@ export function RumExperienceCard({
   const inner = (
     <Card className={cn('relative h-full overflow-hidden', style.border, href && 'transition hover:border-primary/40')}>
       <div className={cn('absolute inset-x-0 top-0 h-0.5', style.bar)} />
-      <CardContent className="flex h-full items-center gap-4 p-4">
-        <div className="relative h-[88px] w-[88px] shrink-0">
+      <CardContent className="flex h-full items-center gap-3 p-3">
+        <div className="relative h-[76px] w-[76px] shrink-0">
           <svg viewBox="0 0 88 88" className="-rotate-90" aria-hidden>
             <circle cx="44" cy="44" r={radius} fill="none" strokeWidth="8" className="stroke-surface2" />
             <circle
@@ -397,13 +394,13 @@ export function RumExperienceCard({
         </div>
         <div className="min-w-0">
           <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Field experience</div>
-          <div className="mt-1 text-base font-semibold text-text">{style.label}</div>
-          <p className="mt-1 text-[11px] leading-relaxed text-muted">
+          <div className="text-sm font-semibold text-text">{style.label}</div>
+          <p className="mt-0.5 text-[10px] leading-snug text-muted">
             {assessment.rated === 0
               ? 'Waiting for finalized Core Web Vital samples.'
               : `${assessment.goodCount} of ${assessment.rated} Core Web Vitals are in the good range at p75.`}
           </p>
-          <div className="mt-2 flex flex-wrap gap-1.5">
+          <div className="mt-1.5 flex flex-wrap gap-1">
             {assessment.parts.map((part) => (
               <Badge key={part.name} variant={BAND_STYLE[part.band].badge} className="uppercase">
                 {part.name} {part.band === 'no-data' ? 'n/a' : BAND_STYLE[part.band].label}
@@ -436,7 +433,7 @@ export function RumMetricCell({ name, value, samples }: { name: RumVitalName; va
 export function QueryErrorPanel({ error, label = 'RUM data', onRetry }: { error: unknown; label?: string; onRetry?: () => void }) {
   return (
     <Card className="border-danger/30">
-      <CardContent className="flex flex-col items-center py-10 text-center">
+      <CardContent className="flex flex-col items-center py-8 text-center">
         <AlertTriangle className="h-7 w-7 text-danger/70" aria-hidden />
         <div className="mt-2 text-sm font-semibold text-text">Could not load {label}</div>
         <p className="mt-1 max-w-lg text-xs text-muted">{apiErrorMessage(error, 'The analytics service did not respond.')}</p>
@@ -476,11 +473,11 @@ export function RumEmptyState({
   icon?: LucideIcon
 }) {
   return (
-    <div className="flex flex-col items-center justify-center px-4 py-14 text-center">
-      <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary"><Icon className="h-5 w-5" /></span>
-      <h3 className="mt-3 text-sm font-semibold text-text">{title}</h3>
-      <p className="mt-1 max-w-xl text-xs leading-relaxed text-muted">{description}</p>
-      {action && <div className="mt-4">{action}</div>}
+    <div className="flex flex-col items-center justify-center px-4 py-10 text-center">
+      <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary"><Icon className="h-4 w-4" /></span>
+      <h3 className="mt-2.5 text-[13px] font-semibold text-text">{title}</h3>
+      <p className="mt-1 max-w-xl text-[11px] leading-relaxed text-muted">{description}</p>
+      {action && <div className="mt-3">{action}</div>}
     </div>
   )
 }
@@ -497,10 +494,10 @@ export function RumSectionHeader({
   action?: ReactNode
 }) {
   return (
-    <div className="mb-2 flex items-end justify-between gap-3">
+    <div className="mb-1.5 flex items-end justify-between gap-3">
       <div className="min-w-0">
-        <h3 id={id} className="text-sm font-semibold tracking-tight text-text">{title}</h3>
-        {description && <p className="mt-0.5 text-[11px] text-muted">{description}</p>}
+        <h3 id={id} className="text-[13px] font-semibold tracking-tight text-text">{title}</h3>
+        {description && <p className="text-[11px] text-muted">{description}</p>}
       </div>
       {action}
     </div>
@@ -584,10 +581,10 @@ export function RumTableCard({ title, description, actions, notice, children, fo
   }
   return (
     <Card className="overflow-hidden">
-      <CardHeader className="flex-row items-center justify-between gap-3 border-b border-border px-4 py-3">
+      <CardHeader className="flex-row items-center justify-between gap-3 border-b border-border px-3 py-2">
         <div className="min-w-0">
-          <CardTitle className="text-sm">{title}</CardTitle>
-          {description && <p className="mt-0.5 text-[11px] text-muted">{description}</p>}
+          <CardTitle className="text-[13px]">{title}</CardTitle>
+          {description && <p className="text-[11px] text-muted">{description}</p>}
         </div>
         {actions}
       </CardHeader>
@@ -601,7 +598,7 @@ export function RumTableCard({ title, description, actions, notice, children, fo
 export function RumCoverageNotice({ coverage, showRetention = false }: { coverage?: RumCoverage; showRetention?: boolean }) {
   if (!coverage || (!coverage.partial && !showRetention)) return null
   return (
-    <div role="status" className="flex items-start gap-2 border-b border-warning/25 bg-warning/10 px-4 py-2.5 text-[11px] leading-relaxed text-text2">
+    <div role="status" className="flex items-start gap-2 border-b border-warning/25 bg-warning/10 px-3 py-1.5 text-[11px] leading-snug text-text2">
       <Clock3 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" aria-hidden />
       {coverage.partial ? <span>
         <span className="font-semibold text-text">90-day rollup:</span>{' '}
@@ -614,7 +611,7 @@ export function RumCoverageNotice({ coverage, showRetention = false }: { coverag
 export function RumSamplingNotice({ sampling }: { sampling?: RumSamplingMetadata }) {
   if (!sampling?.includes_retained_unsampled_errors) return null
   return (
-    <div role="status" className="flex items-start gap-2 border-b border-info/25 bg-info/5 px-4 py-2.5 text-[11px] leading-relaxed text-text2">
+    <div role="status" className="flex items-start gap-2 border-b border-info/25 bg-info/5 px-3 py-1.5 text-[11px] leading-snug text-text2">
       <Activity className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" aria-hidden />
       <span><span className="font-semibold text-text">Sampling-aware errors:</span> forced unsampled errors remain visible here; aggregate session-impact rates use the sampled cohort.</span>
     </div>
@@ -672,7 +669,7 @@ export function RumPager({
   const last = Math.min(total, safePage * pageSize)
   const nounLabel = total === 1 && noun.endsWith('s') ? noun.slice(0, -1) : noun
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-4 py-2.5 text-xs">
+    <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-3 py-1.5 text-[11px]">
       <span className="text-muted">{first.toLocaleString()}–{last.toLocaleString()} of <span className="font-medium text-text2">{total.toLocaleString()}</span> {nounLabel}</span>
       <div className="flex items-center gap-2">
         <select
@@ -726,7 +723,7 @@ export function SignalTile({ icon: Icon = Activity, label, value, hint, tone = '
   }
   return (
     <Card>
-      <CardContent className="flex items-start gap-3 p-4">
+      <CardContent className="flex items-start gap-2.5 p-3">
         <span className={cn('flex h-8 w-8 shrink-0 items-center justify-center rounded-lg', colors[tone])}><Icon className="h-4 w-4" /></span>
         <div className="min-w-0">
           <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>

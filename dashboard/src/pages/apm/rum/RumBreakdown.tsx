@@ -6,7 +6,7 @@ import type { RumBackendTiming, RumRequestTiming } from '@/types/apm'
 import { formatDurationMs } from './model'
 
 /**
- * NSX-ALB-style request path decomposition. A browser measurement splits into
+ * Request path decomposition. A browser measurement splits into
  * network phases (Resource Timing) and, when the backend responded with
  * Server-Timing or a correlated APM trace exists, into application execution
  * and database time. `wait_ms` (request sent → first byte) contains one
@@ -101,8 +101,7 @@ export function PhaseLegend({ segments, className }: { segments: PhaseSegment[];
 }
 
 /**
- * Client → Network → Application → Database hop chain for one request,
- * mirroring the NSX ALB significant-log drill-down.
+ * Client → Network → Application → Database hop chain for one request.
  */
 export function RequestPathFlow({
   timing,

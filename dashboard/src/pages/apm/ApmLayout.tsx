@@ -16,7 +16,7 @@ const tabs = [
 ]
 
 /**
- * Module chrome for APM. List views use an NSX-ALB-style underline tab strip.
+ * Module chrome for APM. List views use an underline tab strip.
  * Detail views keep a slimmer context so back-navigation stays first.
  */
 export function ApmLayout() {
