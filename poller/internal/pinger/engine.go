@@ -24,6 +24,9 @@ type DeviceLoader interface {
 	LoadDevices(ctx context.Context) ([]*Device, error)
 	UpdateDeviceStatus(ctx context.Context, deviceID uuid.UUID, status string, lastSeen time.Time, rttMs float64) error
 	LoadActiveMaintenanceDeviceIDs(ctx context.Context) (map[uuid.UUID]struct{}, error)
+	// LoadDegradedThresholds returns the admin-set degraded RTT (ms) and
+	// packet-loss (%) thresholds; zeros mean unset (keep config defaults).
+	LoadDegradedThresholds(ctx context.Context) (float64, float64, error)
 }
 
 // MetricWriter writes ping results to the metrics store.
@@ -123,6 +126,11 @@ type Engine struct {
 	lastServiceAt map[uuid.UUID]time.Time
 	lastUdtAt     map[uuid.UUID]time.Time
 	udtInterval   time.Duration
+	// Effective degraded thresholds: config defaults, overridden by the
+	// admin-set values in system_settings (key 'monitoring'). Written under
+	// e.mu in syncDevices, read under e.mu in processStatusChange.
+	degradedRTTMs   float64
+	degradedLossPct float64
 	startTime     time.Time
 	lastCycleMs   int64
 	activePings   int
@@ -178,9 +186,11 @@ func NewEngine(
 		snmpDevices:    make(map[uuid.UUID]*snmp.Device),
 		lastPingAt:     make(map[uuid.UUID]time.Time),
 		lastServiceAt:  make(map[uuid.UUID]time.Time),
-		lastUdtAt:      make(map[uuid.UUID]time.Time),
-		udtInterval:    udtIntervalFromEnv(),
-		startTime:      time.Now(),
+		lastUdtAt:       make(map[uuid.UUID]time.Time),
+		udtInterval:     udtIntervalFromEnv(),
+		degradedRTTMs:   cfg.Poller.DegradedRTTMs,
+		degradedLossPct: cfg.Poller.DegradedLossPct,
+		startTime:       time.Now(),
 	}, nil
 }
 
@@ -317,8 +327,28 @@ func (e *Engine) syncDevices(ctx context.Context) error {
 		return err
 	}
 
+	// Admin-set degraded thresholds ride the same sync cadence. On error the
+	// previous values are kept — never clobbered with the defaults.
+	rttMs, lossPct, thrErr := e.loader.LoadDegradedThresholds(ctx)
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	if thrErr != nil {
+		e.logger.Warnf("Failed to load degraded thresholds: %v", thrErr)
+	} else {
+		newRTT, newLoss := e.cfg.Poller.DegradedRTTMs, e.cfg.Poller.DegradedLossPct
+		if rttMs > 0 {
+			newRTT = rttMs
+		}
+		if lossPct > 0 {
+			newLoss = lossPct
+		}
+		if newRTT != e.degradedRTTMs || newLoss != e.degradedLossPct {
+			e.logger.Infof("Degraded thresholds now rtt>%.0fms or loss>%.0f%%", newRTT, newLoss)
+		}
+		e.degradedRTTMs, e.degradedLossPct = newRTT, newLoss
+	}
 
 	seen := make(map[uuid.UUID]bool)
 	for _, d := range devices {
@@ -435,7 +465,7 @@ func (e *Engine) processStatusChange(ctx context.Context, result *PingResult) {
 		device.DownCount = 0
 		rttMs := float64(result.RTT.Microseconds()) / 1000.0
 
-		if rttMs > e.cfg.Poller.DegradedRTTMs || result.PacketLoss > float32(e.cfg.Poller.DegradedLossPct)/100.0 {
+		if rttMs > e.degradedRTTMs || result.PacketLoss > float32(e.degradedLossPct)/100.0 {
 			newStatus = "degraded"
 		} else {
 			newStatus = "up"

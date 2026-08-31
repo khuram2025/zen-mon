@@ -172,6 +172,48 @@ class GrafanaSettings(BaseModel):
     dashboard_template: str = ""  # e.g. "/d/abc123?var-host={hostname}&var-device_id={device_id}"
 
 
+class MonitoringSettings(BaseModel):
+    """Operator-tunable thresholds for what counts as a DEGRADED device.
+
+    The poller reads these from system_settings (key 'monitoring') on its
+    device-sync cadence (~60s); unset/zero falls back to its built-in defaults
+    (100 ms / 10 %). These are the values that decide the Up -> Degraded
+    transition, and with it every degraded-trigger alert.
+    """
+    # Loss floor is 1%: the poller reads 0 as "unset, keep defaults", and with
+    # a 3-packet sample the real granularity is ~33% anyway.
+    degraded_rtt_ms: float = Field(default=100.0, gt=0, le=10000)
+    degraded_loss_pct: float = Field(default=10.0, ge=1, le=100)
+
+
+@router.get("/monitoring")
+async def get_monitoring_settings(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_admin_user),
+):
+    raw = await _get_system_setting(db, "monitoring")
+    return MonitoringSettings(**(raw or {})).model_dump()
+
+
+@router.put("/monitoring")
+async def update_monitoring_settings(
+    data: MonitoringSettings,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_admin_user),
+):
+    await _upsert_system_setting(db, "monitoring", data.model_dump())
+    await write_audit_log(
+        db,
+        actor=user,
+        action="settings.monitoring.update",
+        resource_type="system_setting",
+        resource_id="monitoring",
+        metadata=data.model_dump(),
+    )
+    await db.commit()
+    return {"message": "Monitoring thresholds updated. The poller applies them within about a minute."}
+
+
 @router.get("/integrations/grafana")
 async def get_grafana_settings(
     db: AsyncSession = Depends(get_db),

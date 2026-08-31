@@ -65,6 +65,10 @@ func (f *fakeDeviceLoader) LoadActiveMaintenanceDeviceIDs(ctx context.Context) (
 	return map[uuid.UUID]struct{}{}, nil
 }
 
+func (f *fakeDeviceLoader) LoadDegradedThresholds(ctx context.Context) (float64, float64, error) {
+	return 0, 0, nil
+}
+
 type fakeMetricWriter struct {
 	mu            sync.Mutex
 	statusChanges []*StatusChange
@@ -160,7 +164,9 @@ func testEngine() *Engine {
 	}
 
 	return &Engine{
-		cfg:           cfg,
+		cfg:             cfg,
+		degradedRTTMs:   cfg.Poller.DegradedRTTMs,
+		degradedLossPct: cfg.Poller.DegradedLossPct,
 		loader:        &fakeDeviceLoader{},
 		writer:        &fakeMetricWriter{},
 		publisher:     &fakeEventPublisher{},

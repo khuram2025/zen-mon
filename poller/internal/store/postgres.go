@@ -314,6 +314,26 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 	return devices, rows.Err()
 }
 
+// LoadDegradedThresholds returns the operator-configured degraded
+// thresholds from system_settings (key 'monitoring'): the RTT (ms) and
+// packet-loss (%) beyond which a responding device counts as DEGRADED.
+// Zeros mean unset — the engine then keeps its config defaults.
+func (s *PostgresStore) LoadDegradedThresholds(ctx context.Context) (float64, float64, error) {
+	var rttMs, lossPct float64
+	err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE((value->>'degraded_rtt_ms')::float8, 0),
+		       COALESCE((value->>'degraded_loss_pct')::float8, 0)
+		FROM system_settings WHERE key = 'monitoring'
+	`).Scan(&rttMs, &lossPct)
+	if err == pgx.ErrNoRows {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, err
+	}
+	return rttMs, lossPct, nil
+}
+
 // LoadUdtGlobalInterval returns the operator-configured global UDT
 // poll interval in seconds from system_settings (key 'udt'), or 0
 // when unset — the engine then falls back to UDT_POLL_INTERVAL / 5m.

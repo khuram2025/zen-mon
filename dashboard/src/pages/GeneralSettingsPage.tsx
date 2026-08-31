@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Building2, Download, HardDrive, KeyRound, LayoutTemplate, LifeBuoy, Loader2, Mail, Palette, Plug, Save, Send, Settings, ShieldCheck, Upload, User as UserIcon, Users } from 'lucide-react'
+import { Activity, Building2, Download, HardDrive, KeyRound, LayoutTemplate, LifeBuoy, Loader2, Mail, Palette, Plug, Save, Send, Settings, ShieldCheck, Upload, User as UserIcon, Users } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
@@ -29,6 +29,7 @@ import { AccessTabContent } from '@/components/access/AccessTabContent'
 // always passes). Tabs without one are visible to everyone.
 const TABS = [
   { value: 'company', label: 'Company', icon: Building2, permission: 'settings.manage' },
+  { value: 'monitoring', label: 'Monitoring', icon: Activity, permission: 'settings.manage' },
   { value: 'smtp', label: 'SMTP / Email', icon: Mail, permission: 'settings.manage' },
   { value: 'appearance', label: 'Appearance', icon: Palette },
   { value: 'users', label: 'Users & Access', icon: Users, permission: 'users.view' },
@@ -83,6 +84,9 @@ export function GeneralSettingsPage() {
 
         <TabsContent value="company">
           <CompanyCard />
+        </TabsContent>
+        <TabsContent value="monitoring">
+          <MonitoringCard />
         </TabsContent>
         <TabsContent value="users">
           <AccessTabContent />
@@ -163,6 +167,57 @@ function CompanyCard() {
           </FormField>
           <FormField label="Address" className="col-span-2">
             <Textarea value={form.company_address || ''} onChange={(e) => setForm({ ...form, company_address: e.target.value })} />
+          </FormField>
+          <div className="col-span-2 flex justify-end">
+            <Button type="submit" disabled={save.isPending}>
+              {save.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save
+            </Button>
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  )
+}
+
+function MonitoringCard() {
+  const qc = useQueryClient()
+  const { data } = useQuery<any>({
+    queryKey: ['settings', 'monitoring'],
+    queryFn: async () => (await api.get('/settings/monitoring')).data,
+  })
+  const [form, setForm] = useState<any>({})
+  useEffect(() => { if (data) setForm(data) }, [data])
+
+  const save = useMutation({
+    mutationFn: async () => (await api.put('/settings/monitoring', {
+      degraded_rtt_ms: Number(form.degraded_rtt_ms),
+      degraded_loss_pct: Number(form.degraded_loss_pct),
+    })).data,
+    onSuccess: () => { toast.success('Monitoring thresholds saved', 'The poller applies them within about a minute.'); qc.invalidateQueries({ queryKey: ['settings', 'monitoring'] }) },
+    onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
+  })
+
+  return (
+    <Card>
+      <CardHeader><CardTitle>Degraded thresholds</CardTitle></CardHeader>
+      <CardContent>
+        <p className="mb-4 text-sm text-muted">
+          A device that still answers ping is marked <span className="font-medium text-text">Degraded</span> when
+          its round-trip time or packet loss crosses these thresholds. This drives the Up → Degraded transition
+          and every alert rule that triggers on it.
+        </p>
+        <form onSubmit={(e: FormEvent) => { e.preventDefault(); save.mutate() }} className="grid grid-cols-2 gap-3">
+          <FormField label="Round-trip time above" hint="Latency beyond which a responding device counts as degraded (default 100 ms)">
+            <div className="flex items-center gap-2">
+              <Input type="number" min={1} max={10000} value={form.degraded_rtt_ms ?? ''} onChange={(e) => setForm({ ...form, degraded_rtt_ms: e.target.value })} className="w-32" />
+              <span className="text-sm text-muted">ms</span>
+            </div>
+          </FormField>
+          <FormField label="Packet loss above" hint="Loss beyond which a responding device counts as degraded (default 10%)">
+            <div className="flex items-center gap-2">
+              <Input type="number" min={1} max={100} value={form.degraded_loss_pct ?? ''} onChange={(e) => setForm({ ...form, degraded_loss_pct: e.target.value })} className="w-32" />
+              <span className="text-sm text-muted">%</span>
+            </div>
           </FormField>
           <div className="col-span-2 flex justify-end">
             <Button type="submit" disabled={save.isPending}>
