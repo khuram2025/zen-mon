@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,6 +28,25 @@ def test_sensor_appliance_manifest_reports_artifact_slots(client):
         "enrollment_token",
         "sensor_name",
     ]
+
+
+def test_sensor_appliance_manifest_uses_configured_https_base_url(client, monkeypatch):
+    monkeypatch.setattr(
+        sensor_api,
+        "get_settings",
+        lambda: SimpleNamespace(APP_BASE_URL="https://controller.example/"),
+    )
+
+    response = client.get(
+        "/api/v1/sensor/appliance/manifest",
+        headers={"host": "insecure.example"},
+    )
+
+    assert response.status_code == 200
+    for artifact in response.json()["artifacts"]:
+        assert artifact["url"] == (
+            f"https://controller.example/api/v1/sensor/appliance/{artifact['kind']}"
+        )
 
 
 def test_unpublished_sensor_appliance_download_returns_clear_404(client, tmp_path, monkeypatch):

@@ -1694,7 +1694,11 @@ def _artifact_path(kind: str) -> Path:
 
 def _artifact_info(kind: str, request: Request) -> dict:
     path = _artifact_path(kind)
-    url = str(request.url_for("download_sensor_appliance_artifact", kind=kind))
+    url = _public_route_url(
+        request,
+        "download_sensor_appliance_artifact",
+        kind=kind,
+    )
     available = path.exists() and path.is_file()
     sha_file = SENSOR_ARTIFACT_DIR / "SHA256SUMS"
     sha256 = None
