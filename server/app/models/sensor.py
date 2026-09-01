@@ -57,10 +57,15 @@ class Sensor(Base):
     api_key_rotated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
 
     status: Mapped[str] = mapped_column(String(20), default="pending")
+    status_reason: Mapped[str] = mapped_column(Text, nullable=True)
     version: Mapped[str] = mapped_column(String(32), nullable=True)
+    min_supported_version: Mapped[str] = mapped_column(String(32), nullable=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     last_ip: Mapped[str] = mapped_column(INET, nullable=True)
+    heartbeat_interval_s: Mapped[int] = mapped_column(Integer, default=30)
+    degraded_after_s: Mapped[int] = mapped_column(Integer, default=90)
+    offline_after_s: Mapped[int] = mapped_column(Integer, default=180)
     queue_depth: Mapped[int] = mapped_column(Integer, default=0)
     queue_dropped_count: Mapped[int] = mapped_column(BigInteger, default=0)
 
@@ -68,6 +73,7 @@ class Sensor(Base):
     os_info: Mapped[str] = mapped_column(String(255), nullable=True)
     uptime_seconds: Mapped[int] = mapped_column(BigInteger, nullable=True)
 
+    bootstrap_config: Mapped[dict] = mapped_column(JSONB, default=dict)
     tags: Mapped[list] = mapped_column(JSONB, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

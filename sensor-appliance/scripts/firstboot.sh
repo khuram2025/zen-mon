@@ -20,23 +20,37 @@ if [[ -z "$SERVER_URL" || -z "$SENSOR_NAME" || -z "$ENROLLMENT_TOKEN" ]]; then
   exit 1
 fi
 
-install -d -m 0750 -o root -g zenplus-sensor /etc/zenplus-sensor
-cat > "$ENV_FILE" <<EOF
-ZENPLUS_SERVER_URL=$SERVER_URL
-ZENPLUS_ENROLLMENT_TOKEN=$ENROLLMENT_TOKEN
-ZENPLUS_SENSOR_NAME=$SENSOR_NAME
-ZENPLUS_VERIFY_TLS=1
-ZENPLUS_SENSOR_STATE_DIR=/var/lib/zenplus-sensor
-ZENPLUS_SENSOR_LOG_LEVEL=info
-ZENPLUS_HEARTBEAT_INTERVAL_SECONDS=30
-ZENPLUS_CONFIG_POLL_INTERVAL_SECONDS=60
-ZENPLUS_UPLOAD_INTERVAL_SECONDS=10
-ZENPLUS_MAX_WORKERS=100
-ZENPLUS_SPOOL_MAX_MB=512
-ZENPLUS_SPOOL_RETENTION_HOURS=72
-EOF
-chown root:zenplus-sensor "$ENV_FILE"
-chmod 0640 "$ENV_FILE"
+for value in "$SERVER_URL" "$SENSOR_NAME" "$ENROLLMENT_TOKEN"; do
+  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    echo "setup values must not contain newlines" >&2
+    exit 1
+  fi
+done
+
+install -d -m 0770 -o root -g zenplus-sensor /etc/zenplus-sensor
+install -d -m 0700 -o zenplus-sensor -g zenplus-sensor /var/lib/zenplus-sensor /var/lib/zenplus-sensor/bin
+: > "$ENV_FILE"
+write_env_line() {
+  local key="$1" value="$2"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '%s="%s"\n' "$key" "$value" >> "$ENV_FILE"
+}
+write_env_line ZENPLUS_SERVER_URL "$SERVER_URL"
+write_env_line ZENPLUS_ENROLLMENT_TOKEN "$ENROLLMENT_TOKEN"
+write_env_line ZENPLUS_SENSOR_NAME "$SENSOR_NAME"
+write_env_line ZENPLUS_VERIFY_TLS 1
+write_env_line ZENPLUS_SENSOR_STATE_DIR /var/lib/zenplus-sensor
+write_env_line ZENPLUS_SENSOR_ENV_FILE /etc/zenplus-sensor/sensor.env
+write_env_line ZENPLUS_SENSOR_LOG_LEVEL info
+write_env_line ZENPLUS_HEARTBEAT_INTERVAL_SECONDS 30
+write_env_line ZENPLUS_CONFIG_POLL_INTERVAL_SECONDS 60
+write_env_line ZENPLUS_UPLOAD_INTERVAL_SECONDS 10
+write_env_line ZENPLUS_MAX_WORKERS 100
+write_env_line ZENPLUS_SPOOL_MAX_MB 512
+write_env_line ZENPLUS_SPOOL_RETENTION_HOURS 72
+chown zenplus-sensor:zenplus-sensor "$ENV_FILE"
+chmod 0600 "$ENV_FILE"
 
 systemctl enable --now zenplus-sensor.service
 echo "Sensor service started. Check status with: systemctl status zenplus-sensor"

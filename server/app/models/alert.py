@@ -44,6 +44,7 @@ class Alert(Base):
     # this metadata at mapper-config time. The DB FK (migrate-035) enforces it.
     server_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=True)
     service_check_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("service_checks.id", ondelete="CASCADE"), nullable=True)
+    sensor_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("sensors.id", ondelete="SET NULL"), nullable=True)
 
     status: Mapped[str] = mapped_column(String(20), default="active")
     severity: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -60,3 +61,4 @@ class Alert(Base):
     rule: Mapped["AlertRule | None"] = relationship("AlertRule", lazy="selectin", foreign_keys=[rule_id])
     device: Mapped["Device"] = relationship("Device", lazy="selectin", foreign_keys=[device_id])
     service_check = relationship("ServiceCheck", lazy="selectin", foreign_keys=[service_check_id])
+    sensor = relationship("Sensor", lazy="selectin", foreign_keys=[sensor_id])

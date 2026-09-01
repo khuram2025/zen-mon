@@ -69,6 +69,12 @@ type ServiceCheckResult struct {
 	CheckType        string
 	IsUp             bool
 	ResponseTime     time.Duration
+	PacketLoss       float64
+	Jitter           time.Duration
+	MinRTT           time.Duration
+	MaxRTT           time.Duration
+	PacketsSent      int
+	PacketsReceived  int
 	StatusCode       int   // HTTP only
 	ContentMatched   *bool // HTTP only
 	TLSDaysRemaining *int  // TLS only

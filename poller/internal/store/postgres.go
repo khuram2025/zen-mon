@@ -52,9 +52,11 @@ func (s *PostgresStore) LoadDevices(ctx context.Context) ([]*pinger.Device, erro
 		SELECT id, hostname, host(ip_address)::text, ping_interval, ping_enabled, status,
 		       COALESCE(last_seen, '1970-01-01'::timestamptz),
 		       COALESCE(last_rtt_ms, 0)
-		FROM devices
-		WHERE ping_enabled = TRUE
-		  AND ip_address IS NOT NULL
+		FROM devices d
+		JOIN device_polling_owner owner
+		  ON owner.device_id = d.id AND owner.owner_kind = 'central'
+		WHERE d.ping_enabled = TRUE
+		  AND d.ip_address IS NOT NULL
 		ORDER BY hostname
 	`)
 	if err != nil {
@@ -90,6 +92,11 @@ func (s *PostgresStore) UpdateDeviceStatus(ctx context.Context, deviceID uuid.UU
 		UPDATE devices
 		SET status = $1, last_seen = $2, last_rtt_ms = $3
 		WHERE id = $4
+		  AND EXISTS (
+		      SELECT 1 FROM device_polling_owner owner
+		       WHERE owner.device_id = devices.id
+		         AND owner.owner_kind = 'central'
+		  )
 	`, status, lastSeen, rttMs, deviceID)
 	return err
 }
@@ -119,6 +126,23 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 		FROM service_checks sc
 		LEFT JOIN service_credentials cred ON cred.id = sc.credential_id
 		WHERE sc.enabled = TRUE
+		  AND NOT EXISTS (
+		      SELECT 1 FROM sensors s
+		       WHERE s.id = sc.default_sensor_id
+		         AND s.status IN ('online', 'degraded', 'offline')
+		         AND sc.credential_id IS NULL
+		         AND jsonb_array_length(COALESCE(sc.workflow_steps, '[]'::jsonb)) = 0
+		  )
+		  AND NOT EXISTS (
+		      SELECT 1
+		        FROM sensor_assignments a
+		        JOIN sensors s ON s.id = a.sensor_id
+		       WHERE a.target_type = 'service_check'
+		         AND a.target_id = sc.id
+		         AND s.status IN ('online', 'degraded', 'offline')
+		         AND sc.credential_id IS NULL
+		         AND jsonb_array_length(COALESCE(sc.workflow_steps, '[]'::jsonb)) = 0
+		  )
 		ORDER BY sc.name
 	`)
 	if err != nil {
@@ -200,10 +224,41 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 	return checks, rows.Err()
 }
 
+// IsServiceCheckCentrallyOwned closes the short race between an assignment
+// change and the next in-memory service-check refresh.
+func (s *PostgresStore) IsServiceCheckCentrallyOwned(ctx context.Context, id uuid.UUID) (bool, error) {
+	var central bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT NOT EXISTS (
+			SELECT 1
+			  FROM service_checks sc
+			  JOIN sensors sensor ON sensor.id = sc.default_sensor_id
+			 WHERE sc.id = $1
+			   AND sensor.status IN ('online', 'degraded', 'offline')
+			   AND sc.credential_id IS NULL
+			   AND jsonb_array_length(COALESCE(sc.workflow_steps, '[]'::jsonb)) = 0
+			UNION ALL
+			SELECT 1
+			  FROM sensor_assignments a
+			  JOIN service_checks sc ON sc.id = a.target_id
+			  JOIN sensors sensor ON sensor.id = a.sensor_id
+			 WHERE a.target_type = 'service_check'
+			   AND a.target_id = $1
+			   AND sensor.status IN ('online', 'degraded', 'offline')
+			   AND sc.credential_id IS NULL
+			   AND jsonb_array_length(COALESCE(sc.workflow_steps, '[]'::jsonb)) = 0
+		)
+	`, id).Scan(&central)
+	return central, err
+}
+
 // --- SNMP ---
 
 // LoadSNMPDevices returns all SNMP-enabled devices with credentials
-// already decrypted in memory. The SNMP_ENC_KEY env var must be set;
+// already decrypted in memory. SNMP remains centrally owned until the remote
+// sensor has a secure credential/config channel and a real SNMP scheduler;
+// device_polling_owner currently governs ICMP only for that reason. The
+// SNMP_ENC_KEY env var must be set;
 // devices with credentials that fail to decrypt are skipped and logged
 // by the caller (we still return a nil error so one bad row does not
 // stall the whole sync).

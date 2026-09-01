@@ -829,16 +829,23 @@ def build_package(version: str, changelog: str, severity: str,
             sensor_binary = sensor_dir / "zenplus-sensor"
             sensor_sha = sha256_file(str(sensor_binary))
             (sensor_dir / "zenplus-sensor.sha256").write_text(f"{sensor_sha}  zenplus-sensor\n")
-            (sensor_dir / "manifest.json").write_text(json.dumps({
+            sensor_manifest = (json.dumps({
                 "product": "ZenPlus Remote Sensor",
                 "platform": "linux-amd64",
+                "os": "linux",
+                "arch": "amd64",
                 "version": f"sensor-{version}",
                 "commit": commit,
                 "built_at": build_date,
                 "binary": "zenplus-sensor",
+                "binary_url": "zenplus-sensor",
                 "sha256_file": "zenplus-sensor.sha256",
                 "sha256": sensor_sha,
-            }, indent=2) + "\n")
+            }, indent=2) + "\n").encode()
+            (sensor_dir / "manifest.json").write_bytes(sensor_manifest)
+            (sensor_dir / "manifest.json.sig").write_bytes(
+                sign_manifest(sensor_manifest, PRIVATE_KEY_PATH)
+            )
             print(f"  Built: zenplus-sensor ({sensor_binary.stat().st_size / 1024 / 1024:.1f} MB)")
         else:
             print("  ERROR: No Go sensor source found")
@@ -889,7 +896,7 @@ def build_package(version: str, changelog: str, severity: str,
     # apt-get install line so fresh installs and OTA upgrades converge.
     steps.append({
         "type": "apt_install",
-        "packages": ["snmp", "iputils-ping"],
+        "packages": ["snmp", "iputils-ping", "cloud-image-utils"],
         "update_first": True,
         "timeout": 300,
     })
@@ -1028,6 +1035,9 @@ def build_package(version: str, changelog: str, severity: str,
         steps.append({"type": "install_config",
                       "source": "sensor-artifacts/bin/linux-amd64/manifest.json",
                       "dest": "/opt/zenplus/artifacts/sensors/bin/linux-amd64/manifest.json"})
+        steps.append({"type": "install_config",
+                      "source": "sensor-artifacts/bin/linux-amd64/manifest.json.sig",
+                      "dest": "/opt/zenplus/artifacts/sensors/bin/linux-amd64/manifest.json.sig"})
 
     # Restart services
     steps.append({"type": "start_services",

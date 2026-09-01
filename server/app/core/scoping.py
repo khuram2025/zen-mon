@@ -79,7 +79,10 @@ def alert_visible(alert_alias: str = "alerts", param: str = SCOPE_PARAM) -> str:
         f" AND {jsonb_tags_visible('_vs.tags', param)}))"
         f" OR ({a}.service_check_id IS NOT NULL AND EXISTS ("
         f"SELECT 1 FROM service_checks _vc WHERE _vc.id = {a}.service_check_id"
-        f" AND {text_tags_visible('_vc.tags', param)})))"
+        f" AND {text_tags_visible('_vc.tags', param)}))"
+        f" OR ({a}.sensor_id IS NOT NULL AND EXISTS ("
+        f"SELECT 1 FROM sensors _vsen WHERE _vsen.id = {a}.sensor_id"
+        f" AND {jsonb_tags_visible('_vsen.tags', param)})))"
     )
 
 

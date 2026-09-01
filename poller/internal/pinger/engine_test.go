@@ -117,6 +117,10 @@ func (f *fakeServiceLoader) UpdateServiceCheckStatus(ctx context.Context, id uui
 	return nil
 }
 
+func (f *fakeServiceLoader) IsServiceCheckCentrallyOwned(context.Context, uuid.UUID) (bool, error) {
+	return true, nil
+}
+
 func (f *fakeServiceLoader) LoadActiveMaintenanceCheckIDs(ctx context.Context) (map[uuid.UUID]struct{}, error) {
 	return map[uuid.UUID]struct{}{}, nil
 }
@@ -167,18 +171,18 @@ func testEngine() *Engine {
 		cfg:             cfg,
 		degradedRTTMs:   cfg.Poller.DegradedRTTMs,
 		degradedLossPct: cfg.Poller.DegradedLossPct,
-		loader:        &fakeDeviceLoader{},
-		writer:        &fakeMetricWriter{},
-		publisher:     &fakeEventPublisher{},
-		svcLoader:     &fakeServiceLoader{},
-		svcWriter:     &fakeServiceMetricWriter{},
-		svcPublisher:  &fakeServiceEventPublisher{},
-		logger:        zap.NewNop().Sugar(),
-		devices:       make(map[uuid.UUID]*Device),
-		serviceChecks: make(map[uuid.UUID]*checker.ServiceCheck),
-		lastPingAt:    make(map[uuid.UUID]time.Time),
-		lastServiceAt: make(map[uuid.UUID]time.Time),
-		startTime:     time.Now(),
+		loader:          &fakeDeviceLoader{},
+		writer:          &fakeMetricWriter{},
+		publisher:       &fakeEventPublisher{},
+		svcLoader:       &fakeServiceLoader{},
+		svcWriter:       &fakeServiceMetricWriter{},
+		svcPublisher:    &fakeServiceEventPublisher{},
+		logger:          zap.NewNop().Sugar(),
+		devices:         make(map[uuid.UUID]*Device),
+		serviceChecks:   make(map[uuid.UUID]*checker.ServiceCheck),
+		lastPingAt:      make(map[uuid.UUID]time.Time),
+		lastServiceAt:   make(map[uuid.UUID]time.Time),
+		startTime:       time.Now(),
 	}
 }
 

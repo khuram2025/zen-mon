@@ -44,6 +44,7 @@ python3 - "$CONFIG_JSON" "$TMP" <<'PY'
 import ipaddress
 import json
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -54,19 +55,41 @@ name = cfg["sensor_name"]
 server_url = cfg["server_url"]
 token = cfg["enrollment_token"]
 proxy_url = cfg.get("proxy_url") or ""
+controller_ca_pem = cfg.get("controller_ca_pem") or ""
 
-env_lines = [
-    f"ZENPLUS_SERVER_URL={server_url}",
-    f"ZENPLUS_ENROLLMENT_TOKEN={token}",
-    f"ZENPLUS_SENSOR_NAME={name}",
-    "ZENPLUS_VERIFY_TLS=1",
+if controller_ca_pem:
+    if len(controller_ca_pem) > 128_000 or "-----BEGIN CERTIFICATE-----" not in controller_ca_pem:
+        raise SystemExit("invalid controller CA certificate")
+    (tmp / "zenplus-controller.crt").write_text(controller_ca_pem.rstrip() + "\n")
+
+def env_line(key, value):
+    value = str(value)
+    if any(char in value for char in "\r\n\x00"):
+        raise SystemExit(f"{key} must be a single-line environment value")
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'{key}="{escaped}"'
+
+env_values = [
+    ("ZENPLUS_SERVER_URL", server_url),
+    ("ZENPLUS_ENROLLMENT_TOKEN", token),
+    ("ZENPLUS_SENSOR_NAME", name),
+    ("ZENPLUS_VERIFY_TLS", 1),
+    ("ZENPLUS_SENSOR_STATE_DIR", "/var/lib/zenplus-sensor"),
+    ("ZENPLUS_SENSOR_ENV_FILE", "/etc/zenplus-sensor/sensor.env"),
+    ("ZENPLUS_HEARTBEAT_INTERVAL_SECONDS", 30),
+    ("ZENPLUS_CONFIG_POLL_INTERVAL_SECONDS", 60),
+    ("ZENPLUS_UPLOAD_INTERVAL_SECONDS", 10),
+    ("ZENPLUS_MAX_WORKERS", 100),
+    ("ZENPLUS_SPOOL_MAX_MB", 512),
+    ("ZENPLUS_SPOOL_RETENTION_HOURS", 72),
 ]
 if proxy_url:
-    env_lines.extend([
-        f"HTTP_PROXY={proxy_url}",
-        f"HTTPS_PROXY={proxy_url}",
-        "NO_PROXY=localhost,127.0.0.1,::1",
+    env_values.extend([
+        ("HTTP_PROXY", proxy_url),
+        ("HTTPS_PROXY", proxy_url),
+        ("NO_PROXY", "localhost,127.0.0.1,::1"),
     ])
+env_lines = [env_line(key, value) for key, value in env_values]
 (tmp / "sensor.env").write_text("\n".join(env_lines) + "\n")
 
 network_mode = cfg.get("network_mode") or "dhcp"
@@ -98,11 +121,21 @@ if network_mode == "static":
         addresses: [{dns_yaml}]
 """)
 
-console_user = cfg.get("console_username") or "zenadmin"
-console_password = cfg.get("console_password") or "Read@123"
-if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", console_user):
-    raise SystemExit("invalid console username")
-(tmp / "console.env").write_text(f"CONSOLE_USER={console_user}\nCONSOLE_PASSWORD={console_password}\n")
+if cfg.get("enable_console_user"):
+    console_user = cfg.get("console_username") or ""
+    console_password = cfg.get("console_password") or ""
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", console_user):
+        raise SystemExit("invalid console username")
+    if len(console_password) < 8 or any(c in console_password for c in "\r\n\x00"):
+        raise SystemExit("invalid console password")
+    script = f"""#!/bin/sh
+set -eu
+id {shlex.quote(console_user)} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash --groups sudo {shlex.quote(console_user)}
+printf '%s:%s\\n' {shlex.quote(console_user)} {shlex.quote(console_password)} | chpasswd
+rm -f /etc/sudoers.d/90-zenplus-console
+"""
+    (tmp / "configure-console.sh").write_text(script)
+    (tmp / "configure-console.sh").chmod(0o700)
 PY
 
 WORK_QCOW2="$OUT_DIR/zenplus-sensor-configured.qcow2"
@@ -114,19 +147,27 @@ OVA="$OUT_DIR/zenplus-sensor-configured.ova"
 rm -f "$WORK_QCOW2" "$VMDK" "$OVF" "$MF" "$OVA"
 cp "$BASE_QCOW2" "$WORK_QCOW2"
 
-source "$TMP/console.env"
-
 export LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}"
-virt-customize -a "$WORK_QCOW2" \
+VIRT_ARGS=(
   --copy-in "$TMP/sensor.env:/etc/zenplus-sensor" \
-  --run-command 'chown root:zenplus-sensor /etc/zenplus-sensor/sensor.env' \
-  --run-command 'chmod 0640 /etc/zenplus-sensor/sensor.env' \
-  --run-command "id $CONSOLE_USER >/dev/null 2>&1 || useradd --create-home --shell /bin/bash --groups sudo $CONSOLE_USER" \
-  --run-command "printf '%s:%s\n' '$CONSOLE_USER' '$CONSOLE_PASSWORD' | chpasswd" \
-  --run-command "install -d -m 0755 /etc/sudoers.d" \
-  --run-command "printf '%s ALL=(ALL) NOPASSWD:ALL\n' '$CONSOLE_USER' > /etc/sudoers.d/90-zenplus-console" \
-  --run-command "chmod 0440 /etc/sudoers.d/90-zenplus-console" \
+  --run-command 'chown root:zenplus-sensor /etc/zenplus-sensor && chmod 0770 /etc/zenplus-sensor' \
+  --run-command 'chown zenplus-sensor:zenplus-sensor /etc/zenplus-sensor/sensor.env' \
+  --run-command 'chmod 0600 /etc/zenplus-sensor/sensor.env' \
   --run-command 'systemctl enable zenplus-sensor.service'
+)
+if [[ -f "$TMP/configure-console.sh" ]]; then
+  VIRT_ARGS+=(
+    --copy-in "$TMP/configure-console.sh:/tmp"
+    --run-command 'sh /tmp/configure-console.sh && rm -f /tmp/configure-console.sh'
+  )
+fi
+if [[ -f "$TMP/zenplus-controller.crt" ]]; then
+  VIRT_ARGS+=(
+    --copy-in "$TMP/zenplus-controller.crt:/usr/local/share/ca-certificates"
+    --run-command 'chown root:root /usr/local/share/ca-certificates/zenplus-controller.crt && chmod 0644 /usr/local/share/ca-certificates/zenplus-controller.crt && update-ca-certificates'
+  )
+fi
+virt-customize -a "$WORK_QCOW2" "${VIRT_ARGS[@]}"
 
 if [[ -f "$TMP/99-zenplus-sensor.yaml" ]]; then
   virt-customize -a "$WORK_QCOW2" \

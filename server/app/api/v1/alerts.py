@@ -89,6 +89,8 @@ def _serialize_alert(alert: Alert) -> dict:
         "device_ip": str(alert.device.ip_address) if alert.device else None,
         "service_check_id": alert.service_check_id,
         "service_check_name": alert.service_check.name if getattr(alert, "service_check", None) else None,
+        "sensor_id": alert.sensor_id,
+        "sensor_name": alert.sensor.name if getattr(alert, "sensor", None) else None,
         "status": alert.status,
         "severity": alert.severity,
         "message": alert.message,
@@ -240,7 +242,7 @@ async def get_alert_detail(
 ):
     result = await db.execute(
         select(Alert)
-        .options(selectinload(Alert.device), selectinload(Alert.service_check), selectinload(Alert.rule))
+        .options(selectinload(Alert.device), selectinload(Alert.service_check), selectinload(Alert.sensor), selectinload(Alert.rule))
         .where(Alert.id == alert_id)
     )
     alert = result.scalar_one_or_none()
@@ -252,7 +254,7 @@ async def get_alert_detail(
 
     related_query = (
         select(Alert)
-        .options(selectinload(Alert.device), selectinload(Alert.service_check))
+        .options(selectinload(Alert.device), selectinload(Alert.service_check), selectinload(Alert.sensor))
         .where(Alert.id != alert.id)
         .order_by(Alert.triggered_at.desc())
         .limit(8)
@@ -261,6 +263,8 @@ async def get_alert_detail(
         related_query = related_query.where(Alert.device_id == alert.device_id)
     elif alert.service_check_id:
         related_query = related_query.where(Alert.service_check_id == alert.service_check_id)
+    elif alert.sensor_id:
+        related_query = related_query.where(Alert.sensor_id == alert.sensor_id)
     elif alert.rule_id:
         related_query = related_query.where(Alert.rule_id == alert.rule_id)
     else:
@@ -297,9 +301,9 @@ async def get_alert_detail(
                 "conditions": rrow.conditions or None,
             }
     payload["entity"] = {
-        "kind": "device" if alert.device_id else "service_check" if alert.service_check_id else "system",
-        "id": alert.device_id or alert.service_check_id,
-        "name": alert.device.hostname if alert.device else alert.service_check.name if getattr(alert, "service_check", None) else "System",
+        "kind": "device" if alert.device_id else "service_check" if alert.service_check_id else "sensor" if alert.sensor_id else "system",
+        "id": alert.device_id or alert.service_check_id or alert.sensor_id,
+        "name": alert.device.hostname if alert.device else alert.service_check.name if getattr(alert, "service_check", None) else alert.sensor.name if getattr(alert, "sensor", None) else "System",
     }
     payload["related_alerts"] = [_serialize_alert(item) for item in related]
     await _attach_channels_and_silences(db, [payload])

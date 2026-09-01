@@ -45,6 +45,7 @@ type EventPublisher interface {
 // ServiceCheckLoader loads service checks from the database.
 type ServiceCheckLoader interface {
 	LoadServiceChecks(ctx context.Context) ([]*checker.ServiceCheck, error)
+	IsServiceCheckCentrallyOwned(ctx context.Context, id uuid.UUID) (bool, error)
 	UpdateServiceCheckStatus(ctx context.Context, id uuid.UUID, status string, lastCheckAt time.Time, responseMs float64, lastError string, tlsExpiry *time.Time, tlsDaysRemaining *int, tlsIssuer string, tlsSubject string) error
 	LoadActiveMaintenanceCheckIDs(ctx context.Context) (map[uuid.UUID]struct{}, error)
 }
@@ -131,11 +132,11 @@ type Engine struct {
 	// e.mu in syncDevices, read under e.mu in processStatusChange.
 	degradedRTTMs   float64
 	degradedLossPct float64
-	startTime     time.Time
-	lastCycleMs   int64
-	activePings   int
-	snmpActive    int
-	snmpRunning   bool
+	startTime       time.Time
+	lastCycleMs     int64
+	activePings     int
+	snmpActive      int
+	snmpRunning     bool
 }
 
 // NewEngine creates a new monitoring engine.
@@ -165,27 +166,27 @@ func NewEngine(
 	classifier := snmp.NewClassifier()
 
 	return &Engine{
-		cfg:            cfg,
-		pinger:         p,
-		loader:         loader,
-		writer:         writer,
-		publisher:      publisher,
-		svcLoader:      svcLoader,
-		svcWriter:      svcWriter,
-		svcPublisher:   svcPublisher,
-		checker:        checker.NewChecker(logger),
-		snmpLoader:     snmpLoader,
-		snmpWriter:     snmpWriter,
-		snmpLookup:     snmpLookup,
-		snmpCollector:  collector,
-		snmpSessions:   sessions,
-		snmpClassifier: classifier,
-		logger:         logger,
-		devices:        make(map[uuid.UUID]*Device),
-		serviceChecks:  make(map[uuid.UUID]*checker.ServiceCheck),
-		snmpDevices:    make(map[uuid.UUID]*snmp.Device),
-		lastPingAt:     make(map[uuid.UUID]time.Time),
-		lastServiceAt:  make(map[uuid.UUID]time.Time),
+		cfg:             cfg,
+		pinger:          p,
+		loader:          loader,
+		writer:          writer,
+		publisher:       publisher,
+		svcLoader:       svcLoader,
+		svcWriter:       svcWriter,
+		svcPublisher:    svcPublisher,
+		checker:         checker.NewChecker(logger),
+		snmpLoader:      snmpLoader,
+		snmpWriter:      snmpWriter,
+		snmpLookup:      snmpLookup,
+		snmpCollector:   collector,
+		snmpSessions:    sessions,
+		snmpClassifier:  classifier,
+		logger:          logger,
+		devices:         make(map[uuid.UUID]*Device),
+		serviceChecks:   make(map[uuid.UUID]*checker.ServiceCheck),
+		snmpDevices:     make(map[uuid.UUID]*snmp.Device),
+		lastPingAt:      make(map[uuid.UUID]time.Time),
+		lastServiceAt:   make(map[uuid.UUID]time.Time),
 		lastUdtAt:       make(map[uuid.UUID]time.Time),
 		udtInterval:     udtIntervalFromEnv(),
 		degradedRTTMs:   cfg.Poller.DegradedRTTMs,
@@ -867,6 +868,15 @@ func due(now time.Time, last time.Time, interval time.Duration) bool {
 }
 
 func (e *Engine) processServiceStatusChange(ctx context.Context, result *checker.ServiceCheckResult, maintIDs map[uuid.UUID]struct{}) {
+	central, err := e.svcLoader.IsServiceCheckCentrallyOwned(ctx, result.ServiceCheckID)
+	if err != nil {
+		e.logger.Errorf("Failed to resolve service-check polling owner: %v", err)
+		return
+	}
+	if !central {
+		return
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 

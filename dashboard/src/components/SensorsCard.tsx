@@ -35,12 +35,17 @@ type Sensor = {
   site_name: string | null
   location: string | null
   status: 'pending' | 'online' | 'degraded' | 'offline' | 'disabled'
+  status_reason: string | null
   version: string | null
   last_seen_at: string | null
   last_heartbeat_at: string | null
   last_ip: string | null
   queue_depth: number
   queue_dropped_count: number
+  heartbeat_interval_s: number
+  degraded_after_s: number
+  offline_after_s: number
+  min_supported_version: string | null
   hostname: string | null
   os_info: string | null
   uptime_seconds: number | null
@@ -67,6 +72,7 @@ type TokenInfo = {
   bootstrap_network_config?: string | null
   bootstrap_iso_url?: string | null
   configured_ova_url?: string | null
+  bootstrap_warning?: string | null
 }
 
 type SensorDownloads = {
@@ -86,6 +92,7 @@ type SensorDownloads = {
 
 type Site = { id: string; name: string; region: string | null; sensor_count: number }
 type Device = { id: string; hostname: string; ip_address: string }
+type DeviceGroup = { id: string; name: string }
 type ServiceCheck = { id: string; name: string; check_type: string }
 type Assignment = {
   sensor_id: string
@@ -94,6 +101,39 @@ type Assignment = {
   target_name: string | null
   priority: number
   created_at: string
+}
+
+type SensorEvent = {
+  id: string
+  sensor_id: string
+  ts: string
+  kind: string
+  detail: Record<string, unknown>
+}
+
+type SensorCommand = {
+  id: string
+  sensor_id: string
+  verb: 'update' | 'flush_buffer' | 'reload_config' | 'set_log_level'
+  payload: Record<string, unknown>
+  status: 'pending' | 'delivered' | 'succeeded' | 'failed' | 'expired'
+  delivery_count: number
+  last_delivered_at: string | null
+  completed_at: string | null
+  expires_at: string
+  result: string | null
+  created_at: string
+}
+
+type SensorVantage = {
+  service_check_id: string
+  service_check_name: string
+  check_type: string
+  state: string
+  last_result_at: string
+  last_latency_ms: number | null
+  last_error: string | null
+  tls_days_remaining: number | null
 }
 
 type ApplianceArtifact = {
@@ -125,6 +165,18 @@ const statusVariant: Record<Sensor['status'], 'success' | 'warning' | 'danger' |
 
 const NO_SITE_VALUE = '__none__'
 
+function isVersionBehind(version: string | null, minimum: string | null) {
+  if (!version || !minimum) return false
+  const parts = (value: string) => (value.match(/\d+/g) || []).slice(0, 3).map(Number)
+  const current = parts(version)
+  const required = parts(minimum)
+  for (let i = 0; i < Math.max(current.length, required.length); i += 1) {
+    const delta = (current[i] || 0) - (required[i] || 0)
+    if (delta !== 0) return delta < 0
+  }
+  return false
+}
+
 
 async function copyToClipboard(s: string, label: string) {
   if (await copyText(s)) toast.success(`${label} copied`)
@@ -151,12 +203,20 @@ export function SensorsCard() {
   const [downloads, setDownloads] = useState<SensorDownloads | null>(null)
   const [detail, setDetail] = useState<Sensor | null>(null)
   const [deleting, setDeleting] = useState<Sensor | null>(null)
+  const [siteFilter, setSiteFilter] = useState('all')
 
   const { data: sensors, isLoading } = useQuery<Sensor[]>({
     queryKey: ['sensors'],
     queryFn: async () => (await api.get('/sensors')).data,
     refetchInterval: 5_000,
   })
+
+  useEffect(() => {
+    if (!sensors) return
+    setDetail((selected) => (
+      selected ? sensors.find((sensor) => sensor.id === selected.id) || null : null
+    ))
+  }, [sensors])
 
   const { data: sites } = useQuery<Site[]>({
     queryKey: ['sites'],
@@ -168,6 +228,14 @@ export function SensorsCard() {
     queryFn: async () => (await api.get('/sensor/appliance/manifest')).data,
     refetchInterval: 30_000,
   })
+
+  const visibleSensors = useMemo(
+    () => (sensors || []).filter((sensor) => (
+      siteFilter === 'all'
+      || (siteFilter === NO_SITE_VALUE ? !sensor.site_id : sensor.site_id === siteFilter)
+    )),
+    [sensors, siteFilter],
+  )
 
   const del = useMutation({
     mutationFn: async (id: string) => api.delete(`/sensors/${id}`),
@@ -205,6 +273,17 @@ export function SensorsCard() {
       <CardContent>
         <ApplianceDownloadPanel manifest={appliance} loading={applianceLoading} />
 
+        <div className="mb-3 flex justify-end">
+          <Select value={siteFilter} onValueChange={setSiteFilter}>
+            <SelectTrigger className="w-56"><SelectValue placeholder="Filter by site" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All sites</SelectItem>
+              <SelectItem value={NO_SITE_VALUE}>Unassigned site</SelectItem>
+              {(sites || []).map((site) => <SelectItem key={site.id} value={site.id}>{site.name}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
+
         <Table>
           <THead className="bg-surface2/50">
             <Tr>
@@ -213,6 +292,7 @@ export function SensorsCard() {
               <Th>Site</Th>
               <Th>Location</Th>
               <Th>Last heartbeat</Th>
+              <Th>Buffer</Th>
               <Th>Version</Th>
               <Th>Assignments</Th>
               <Th className="w-44 text-right">Actions</Th>
@@ -221,19 +301,21 @@ export function SensorsCard() {
           <TBody>
             {isLoading && (
               <Tr>
-                <Td colSpan={8} className="py-6 text-center text-muted">
+                <Td colSpan={9} className="py-6 text-center text-muted">
                   <Loader2 className="mx-auto h-4 w-4 animate-spin" />
                 </Td>
               </Tr>
             )}
-            {!isLoading && (sensors || []).length === 0 && (
+            {!isLoading && visibleSensors.length === 0 && (
               <Tr>
-                <Td colSpan={8} className="py-8 text-center text-muted">
-                  No sensors yet — click <span className="font-medium text-text">Add Sensor</span> to register the first one.
+                <Td colSpan={9} className="py-8 text-center text-muted">
+                  {(sensors || []).length === 0
+                    ? <>No sensors yet — click <span className="font-medium text-text">Add Sensor</span> to register the first one.</>
+                    : 'No sensors match this site filter.'}
                 </Td>
               </Tr>
             )}
-            {(sensors || []).map((s) => (
+            {visibleSensors.map((s) => (
               <Tr key={s.id} className="hover:bg-surface2/40">
                 <Td>
                   <button
@@ -252,14 +334,24 @@ export function SensorsCard() {
                   )}
                 </Td>
                 <Td>
-                  <Badge variant={statusVariant[s.status]}>{s.status}</Badge>
+                  <Badge variant={statusVariant[s.status]} title={s.status_reason || undefined}>{s.status}</Badge>
+                  {s.status_reason && <div className="mt-1 max-w-48 text-xs text-muted">{s.status_reason}</div>}
                 </Td>
                 <Td className="text-sm">{s.site_name || '—'}</Td>
                 <Td className="text-sm">{s.location || '—'}</Td>
                 <Td className="text-xs text-muted">
                   {relativeTime(s.last_heartbeat_at)}
                 </Td>
-                <Td className="text-xs">{s.version || '—'}</Td>
+                <Td className="text-xs tabular-nums">
+                  {s.queue_depth} queued
+                  {s.queue_dropped_count > 0 && <div className="text-danger">{s.queue_dropped_count} dropped</div>}
+                </Td>
+                <Td className="text-xs">
+                  {s.version || '—'}
+                  {isVersionBehind(s.version, s.min_supported_version) && (
+                    <div className="mt-1"><Badge variant="warning">update required</Badge></div>
+                  )}
+                </Td>
                 <Td className="text-xs">{s.assignment_count}</Td>
                 <Td>
                   <div className="flex justify-end gap-1">
@@ -514,7 +606,7 @@ function AddSensorDialog({
           </FormField>
           <div className="grid gap-3 md:grid-cols-2">
             <FormField label="Controller URL" hint="Leave blank to use this controller URL">
-              <Input value={controllerUrl} onChange={(e) => setControllerUrl(e.target.value)} placeholder="http://10.12.50.81" />
+              <Input value={controllerUrl} onChange={(e) => setControllerUrl(e.target.value)} placeholder="https://zenplus.example.com" />
             </FormField>
             <FormField label="Proxy URL" hint="Optional outbound proxy for sensor HTTPS">
               <Input value={proxyUrl} onChange={(e) => setProxyUrl(e.target.value)} placeholder="http://proxy.local:8080" />
@@ -554,7 +646,7 @@ function AddSensorDialog({
                 <Input required value={sensorIp} onChange={(e) => setSensorIp(e.target.value)} placeholder="10.12.50.90" />
               </FormField>
               <FormField label="CIDR" required>
-                <Input required type="number" min={1} max={32} value={sensorCidr} onChange={(e) => setSensorCidr(e.target.value)} />
+                <Input required type="number" min={1} max={sensorIp.includes(':') ? 128 : 32} value={sensorCidr} onChange={(e) => setSensorCidr(e.target.value)} />
               </FormField>
               <FormField label="Gateway" required>
                 <Input required value={gateway} onChange={(e) => setGateway(e.target.value)} placeholder="10.12.50.1" />
@@ -596,6 +688,11 @@ function TokenDialog({ info, onClose }: { info: TokenInfo | null; onClose: () =>
         </DialogHeader>
         {info && (
           <div className="space-y-4">
+            {info.bootstrap_warning && (
+              <div className="rounded-md border border-danger/40 bg-danger/10 p-3 text-xs text-danger">
+                {info.bootstrap_warning} Use the Ubuntu install command below or repair the controller dependency and regenerate the token.
+              </div>
+            )}
             <div className="rounded-md border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
               <strong>Token shown only once.</strong> Download the seed ISO and attach it to the sensor VM
               before <span className="font-medium">{new Date(info.expires_at).toLocaleString()}</span>.
@@ -810,6 +907,35 @@ function SensorDetailDialog({
     queryFn: async () => (await api.get(`/sensors/${sensor!.id}/assignments`)).data,
   })
 
+  const { data: events } = useQuery<SensorEvent[]>({
+    queryKey: ['sensor-events', sensor?.id],
+    enabled: !!sensor?.id,
+    queryFn: async () => (await api.get(`/sensors/${sensor!.id}/events?limit=20`)).data,
+    refetchInterval: open ? 10_000 : false,
+  })
+
+  const { data: commands } = useQuery<SensorCommand[]>({
+    queryKey: ['sensor-commands', sensor?.id],
+    enabled: !!sensor?.id,
+    queryFn: async () => (await api.get(`/sensors/${sensor!.id}/commands?limit=20`)).data,
+    refetchInterval: open ? 5_000 : false,
+  })
+
+  const { data: updateManifest } = useQuery<Record<string, unknown>>({
+    queryKey: ['sensor-binary-update-manifest'],
+    enabled: open,
+    queryFn: async () => (await api.get('/sensor/bin/linux-amd64/manifest.json')).data,
+    staleTime: 60_000,
+  })
+  const signedUpdateAvailable = typeof updateManifest?.signed_manifest === 'string'
+
+  const { data: vantages } = useQuery<SensorVantage[]>({
+    queryKey: ['sensor-vantages', sensor?.id],
+    enabled: !!sensor?.id,
+    queryFn: async () => (await api.get(`/sensors/${sensor!.id}/vantages`)).data,
+    refetchInterval: open ? 10_000 : false,
+  })
+
   const { data: devices } = useQuery<Device[]>({
     queryKey: ['devices-light'],
     enabled: open,
@@ -830,19 +956,16 @@ function SensorDetailDialog({
     },
   })
 
+  const { data: deviceGroups } = useQuery<DeviceGroup[]>({
+    queryKey: ['device-groups'],
+    enabled: open,
+    queryFn: async () => (await api.get('/devices/groups')).data,
+  })
+
   const regen = useMutation({
     mutationFn: async () => (await api.post(`/sensors/${sensor!.id}/regenerate-token`)).data,
     onSuccess: (t) => { onShowToken(t); onChanged() },
     onError: (e: any) => toast.error('Token regen failed', apiErrorMessage(e)),
-  })
-
-  const rotate = useMutation({
-    mutationFn: async () => (await api.post(`/sensors/${sensor!.id}/rotate-key`)).data,
-    onSuccess: (r) => {
-      toast.success('API key rotated')
-      copyToClipboard(r.api_key, 'New API key')
-    },
-    onError: (e: any) => toast.error('Rotate failed', apiErrorMessage(e)),
   })
 
   const disable = useMutation({
@@ -868,9 +991,20 @@ function SensorDetailDialog({
     onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
   })
 
+  const queueCommand = useMutation({
+    mutationFn: async ({ verb, payload = {} }: { verb: SensorCommand['verb']; payload?: Record<string, unknown> }) =>
+      (await api.post(`/sensors/${sensor!.id}/commands`, { verb, payload })).data,
+    onSuccess: (_data, variables) => {
+      toast.success(`${variables.verb.replace(/_/g, ' ')} queued`)
+      qc.invalidateQueries({ queryKey: ['sensor-commands', sensor!.id] })
+    },
+    onError: (e: any) => toast.error('Command failed', apiErrorMessage(e)),
+  })
+
   // Local editable state for assignments
   const [editing, setEditing] = useState(false)
   const [picked, setPicked] = useState<Set<string>>(new Set())
+  const [logLevel, setLogLevel] = useState('info')
   useEffect(() => {
     if (!editing && assignments) {
       setPicked(new Set(assignments.map((a) => `${a.target_type}:${a.target_id}`)))
@@ -899,13 +1033,14 @@ function SensorDetailDialog({
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-3xl">
+      <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{sensor.name}</DialogTitle>
         </DialogHeader>
 
         <div className="grid grid-cols-2 gap-3 text-sm">
-          <Row k="Status" v={<Badge variant={statusVariant[sensor.status]}>{sensor.status}</Badge>} />
+          <Row k="Status" v={<Badge variant={statusVariant[sensor.status]} title={sensor.status_reason || undefined}>{sensor.status}</Badge>} />
+          <Row k="Status reason" v={sensor.status_reason || '—'} />
           <Row k="Site" v={sensor.site_name || '—'} />
           <Row k="Location" v={sensor.location || '—'} />
           <Row k="Last heartbeat" v={relativeTime(sensor.last_heartbeat_at)} />
@@ -913,8 +1048,119 @@ function SensorDetailDialog({
           <Row k="Hostname" v={sensor.hostname || '—'} />
           <Row k="Last IP" v={sensor.last_ip || '—'} />
           <Row k="Queue depth" v={String(sensor.queue_depth)} />
+          <Row k="Dropped results" v={String(sensor.queue_dropped_count)} />
+          <Row k="Health policy" v={`${sensor.degraded_after_s}s degraded · ${sensor.offline_after_s}s offline`} />
+          <Row k="Minimum version" v={sensor.min_supported_version || '—'} />
           <Row k="API key" v={sensor.api_key_prefix ? `${sensor.api_key_prefix}…` : '— (not enrolled)'} />
           <Row k="Created" v={new Date(sensor.created_at).toLocaleString()} />
+        </div>
+
+        <div className="my-4 border-t border-border" />
+
+        <div>
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium">Remote commands</div>
+              <div className="text-xs text-muted">Delivered over the next heartbeat; outcomes are retained below.</div>
+            </div>
+            <div className="flex flex-wrap justify-end gap-1">
+              <Button size="sm" variant="outline" disabled={!sensor.api_key_prefix || sensor.status === 'disabled' || queueCommand.isPending} onClick={() => queueCommand.mutate({ verb: 'reload_config' })}>
+                Reload config
+              </Button>
+              <Button size="sm" variant="outline" disabled={!sensor.api_key_prefix || sensor.status === 'disabled' || queueCommand.isPending} onClick={() => queueCommand.mutate({ verb: 'flush_buffer' })}>
+                Drain buffer
+              </Button>
+              <Button size="sm" variant="outline" disabled={!signedUpdateAvailable || !sensor.api_key_prefix || sensor.status === 'disabled' || queueCommand.isPending} onClick={() => queueCommand.mutate({ verb: 'update' })}>
+                <Download className="h-3.5 w-3.5" /> Upgrade
+              </Button>
+            </div>
+          </div>
+          <div className="mb-2 flex items-center gap-2">
+            <Select value={logLevel} onValueChange={setLogLevel}>
+              <SelectTrigger className="h-8 w-32"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {['debug', 'info', 'warn', 'error'].map((level) => <SelectItem key={level} value={level}>{level}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Button size="sm" variant="outline" disabled={!sensor.api_key_prefix || sensor.status === 'disabled' || queueCommand.isPending} onClick={() => queueCommand.mutate({ verb: 'set_log_level', payload: { level: logLevel } })}>
+              Set log level
+            </Button>
+            {!signedUpdateAvailable && <span className="text-xs text-muted">No release-signed update is published.</span>}
+          </div>
+          <div className="max-h-36 overflow-y-auto rounded-md border border-border">
+            {(commands || []).length === 0 ? (
+              <div className="px-3 py-4 text-center text-xs text-muted">No commands queued</div>
+            ) : (
+              <ul className="divide-y divide-border">
+                {(commands || []).map((command) => (
+                  <li key={command.id} className="flex items-start justify-between gap-3 px-3 py-2 text-xs">
+                    <div className="min-w-0">
+                      <div className="font-medium text-text">{command.verb.replace(/_/g, ' ')}</div>
+                      {command.result && <div className="truncate text-muted" title={command.result}>{command.result}</div>}
+                    </div>
+                    <div className="shrink-0 text-right">
+                      <Badge variant={command.status === 'succeeded' ? 'success' : command.status === 'failed' || command.status === 'expired' ? 'danger' : 'outline'}>{command.status}</Badge>
+                      <div className="mt-1 text-muted">{relativeTime(command.completed_at || command.last_delivered_at || command.created_at)}</div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+
+        <div className="my-4 border-t border-border" />
+
+        <div>
+          <div className="mb-2 text-sm font-medium">Service-check vantages</div>
+          <div className="max-h-40 overflow-y-auto rounded-md border border-border">
+            {(vantages || []).length === 0 ? (
+              <div className="px-3 py-4 text-center text-xs text-muted">No service results from this sensor yet</div>
+            ) : (
+              <ul className="divide-y divide-border">
+                {(vantages || []).map((vantage) => (
+                  <li key={vantage.service_check_id} className="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+                    <div className="min-w-0">
+                      <div className="truncate font-medium text-text">{vantage.service_check_name}</div>
+                      <div className="truncate text-muted">
+                        {vantage.check_type} · {vantage.last_latency_ms == null ? '—' : `${vantage.last_latency_ms.toFixed(1)} ms`}
+                        {vantage.tls_days_remaining == null ? '' : ` · TLS ${vantage.tls_days_remaining}d`}
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <Badge variant={statusVariant[vantage.state as keyof typeof statusVariant] || 'outline'}>{vantage.state}</Badge>
+                      <div className="mt-1 text-muted">{relativeTime(vantage.last_result_at)}</div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+
+        <div className="my-4 border-t border-border" />
+
+        <div>
+          <div className="mb-2 text-sm font-medium">Recent events</div>
+          <div className="max-h-40 overflow-y-auto rounded-md border border-border">
+            {(events || []).length === 0 ? (
+              <div className="px-3 py-4 text-center text-xs text-muted">No lifecycle events yet</div>
+            ) : (
+              <ul className="divide-y divide-border">
+                {(events || []).map((event) => (
+                  <li key={event.id} className="flex items-start justify-between gap-3 px-3 py-2 text-xs">
+                    <div>
+                      <div className="font-medium text-text">{event.kind.replace(/_/g, ' ')}</div>
+                      {typeof event.detail.reason === 'string' && (
+                        <div className="mt-0.5 text-muted">{event.detail.reason}</div>
+                      )}
+                    </div>
+                    <span className="shrink-0 text-muted">{relativeTime(event.ts)}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </div>
 
         <div className="my-4 border-t border-border" />
@@ -958,6 +1204,7 @@ function SensorDetailDialog({
           ) : (
             <AssignmentPicker
               devices={devices || []}
+              groups={deviceGroups || []}
               serviceChecks={serviceChecks || []}
               picked={picked}
               onToggle={togglePick}
@@ -968,9 +1215,6 @@ function SensorDetailDialog({
         <DialogFooter className="flex flex-wrap gap-2">
           <Button variant="outline" onClick={() => regen.mutate()} disabled={regen.isPending}>
             <RotateCw className="h-3.5 w-3.5" /> Regenerate enrollment token
-          </Button>
-          <Button variant="outline" onClick={() => rotate.mutate()} disabled={rotate.isPending}>
-            <Activity className="h-3.5 w-3.5" /> Rotate API key
           </Button>
           {sensor.status === 'disabled' ? (
             <Button variant="outline" onClick={() => enable.mutate()}>Enable</Button>
@@ -988,9 +1232,10 @@ function SensorDetailDialog({
 }
 
 function AssignmentPicker({
-  devices, serviceChecks, picked, onToggle,
+  devices, groups, serviceChecks, picked, onToggle,
 }: {
   devices: Device[]
+  groups: DeviceGroup[]
   serviceChecks: ServiceCheck[]
   picked: Set<string>
   onToggle: (key: string) => void
@@ -1005,6 +1250,10 @@ function AssignmentPicker({
   const filteredChecks = useMemo(
     () => (f ? serviceChecks.filter((s) => s.name.toLowerCase().includes(f)) : serviceChecks),
     [serviceChecks, f],
+  )
+  const filteredGroups = useMemo(
+    () => (f ? groups.filter((g) => g.name.toLowerCase().includes(f)) : groups),
+    [groups, f],
   )
 
   return (
@@ -1028,6 +1277,21 @@ function AssignmentPicker({
             })}
           </>
         )}
+        {filteredGroups.length > 0 && (
+          <>
+            <div className="mt-2 px-1 pb-1 text-xs font-medium uppercase tracking-wider text-muted">Device Groups</div>
+            {filteredGroups.map((g) => {
+              const key = `group:${g.id}`
+              return (
+                <label key={key} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 hover:bg-surface2">
+                  <input type="checkbox" checked={picked.has(key)} onChange={() => onToggle(key)} />
+                  <span className="text-sm">{g.name}</span>
+                  <Badge variant="outline" className="ml-auto">group</Badge>
+                </label>
+              )
+            })}
+          </>
+        )}
         {filteredChecks.length > 0 && (
           <>
             <div className="mt-2 px-1 pb-1 text-xs font-medium uppercase tracking-wider text-muted">Service Checks</div>
@@ -1043,7 +1307,7 @@ function AssignmentPicker({
             })}
           </>
         )}
-        {filteredDevices.length === 0 && filteredChecks.length === 0 && (
+        {filteredDevices.length === 0 && filteredGroups.length === 0 && filteredChecks.length === 0 && (
           <div className="py-4 text-center text-xs text-muted">No matches</div>
         )}
       </div>

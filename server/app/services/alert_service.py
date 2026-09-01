@@ -36,6 +36,7 @@ async def get_alerts(
     query = select(Alert).options(
         selectinload(Alert.device),
         selectinload(Alert.service_check),
+        selectinload(Alert.sensor),
     )
 
     if visible_tags is not None:

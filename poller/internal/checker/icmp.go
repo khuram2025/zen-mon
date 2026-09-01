@@ -73,6 +73,12 @@ func (c *ICMPChecker) Check(ctx context.Context, sc *ServiceCheck, pollerID stri
 	}
 
 	stats := pinger.Statistics()
+	result.PacketLoss = stats.PacketLoss / 100.0
+	result.Jitter = stats.StdDevRtt
+	result.MinRTT = stats.MinRtt
+	result.MaxRTT = stats.MaxRtt
+	result.PacketsSent = stats.PacketsSent
+	result.PacketsReceived = stats.PacketsRecv
 	if stats.PacketsRecv == 0 {
 		result.IsUp = false
 		result.Error = fmt.Sprintf("%d/%d packets lost", stats.PacketsSent-stats.PacketsRecv, stats.PacketsSent)

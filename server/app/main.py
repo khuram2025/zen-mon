@@ -147,6 +147,14 @@ def create_app() -> FastAPI:
         # Agent/server staleness sweep (online → stale → offline + alerts).
         from app.services.server_health_service import health_sweeper_loop
         app.state.health_sweeper = asyncio.create_task(health_sweeper_loop())
+        # Remote probes: online -> degraded -> offline, lifecycle events and
+        # one site-level alert instead of a storm of dependent device alerts.
+        from app.services.sensor_health_service import (
+            sensor_health_sweeper_loop,
+            sensor_transition_outbox_loop,
+        )
+        app.state.sensor_health_sweeper = asyncio.create_task(sensor_health_sweeper_loop())
+        app.state.sensor_transition_outbox = asyncio.create_task(sensor_transition_outbox_loop())
         # On-demand network captures: reconcile expired commands and runs that
         # lost their final agent upload.  The loop uses a Postgres advisory
         # lock, so it is safe when every Uvicorn worker starts one.
@@ -231,7 +239,7 @@ def create_app() -> FastAPI:
 
     @app.on_event("shutdown")
     async def _stop_background_tasks():
-        for attr in ("health_sweeper", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator"):
+        for attr in ("health_sweeper", "sensor_health_sweeper", "sensor_transition_outbox", "network_capture_sweeper", "discovery_scheduler", "host_alert_evaluator", "network_alert_evaluator", "report_scheduler", "apm_service_registry", "storage_sweeper", "apm_service_graph", "apm_alert_evaluator", "apm_slo_burn", "apm_synthetic_runner", "udt_sweeper", "udt_alert_evaluator", "udt_ad_poller", "managed_device_sync", "netpath_enrichment", "netpath_alert_evaluator"):
             task = getattr(app.state, attr, None)
             if task:
                 task.cancel()

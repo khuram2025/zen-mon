@@ -589,6 +589,24 @@ async def _device_in_maintenance(db: AsyncSession, device_id: str) -> bool:
         return False
 
 
+async def _offline_sensor_owner(db: AsyncSession, device_id: str):
+    """Return the owning offline sensor, if this device must be treated stale."""
+    try:
+        return (await db.execute(
+            text("""SELECT s.id, s.name, s.last_heartbeat_at
+                      FROM device_polling_owner owner
+                      JOIN sensors s ON s.id = owner.sensor_id
+                     WHERE owner.device_id = :did
+                       AND owner.owner_kind = 'sensor'
+                       AND s.status = 'offline'
+                     LIMIT 1"""),
+            {"did": device_id},
+        )).mappings().first()
+    except Exception:
+        # Rolling-upgrade compatibility before migrate-105 is applied.
+        return None
+
+
 @router.post("/evaluate")
 async def evaluate_status_change(
     event: StatusChangeEvent,
@@ -618,6 +636,16 @@ async def evaluate_status_change(
     # maintenance window. Recovery events still pass so open alerts resolve.
     if not is_recovery and await _device_in_maintenance(db, event.device_id):
         return {"evaluated": 0, "matched": 0, "suppressed": "maintenance"}
+    if is_down:
+        offline_owner = await _offline_sensor_owner(db, event.device_id)
+        if offline_owner:
+            return {
+                "evaluated": 0,
+                "matched": 0,
+                "suppressed": "sensor_offline",
+                "sensor_id": str(offline_owner["id"]),
+                "sensor_name": offline_owner["name"],
+            }
 
     # Get group name
     group_name = ""

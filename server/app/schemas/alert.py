@@ -47,6 +47,8 @@ class AlertResponse(BaseModel):
     device_ip: Optional[str] = None
     service_check_id: Optional[UUID] = None
     service_check_name: Optional[str] = None
+    sensor_id: Optional[UUID] = None
+    sensor_name: Optional[str] = None
     status: str
     severity: str
     message: str

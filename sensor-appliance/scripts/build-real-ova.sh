@@ -18,8 +18,8 @@ DISK_GB="${ZENPLUS_SENSOR_DISK_GB:-12}"
 MEMORY_MB="${ZENPLUS_SENSOR_MEMORY_MB:-1024}"
 VCPU="${ZENPLUS_SENSOR_VCPU:-1}"
 VERSION="${ZENPLUS_SENSOR_VERSION:-0.1.0}"
-DEFAULT_CONSOLE_USER="${ZENPLUS_SENSOR_DEFAULT_CONSOLE_USER:-zenadmin}"
-DEFAULT_CONSOLE_PASSWORD="${ZENPLUS_SENSOR_DEFAULT_CONSOLE_PASSWORD:-Read@123}"
+SENSOR_COMMIT="$(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+SENSOR_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 require() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -44,7 +44,9 @@ fi
 echo "Building zenplus-sensor runtime"
 (
   cd "$ROOT/poller"
-  /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -o "$SENSOR_BIN" ./cmd/sensor
+  /usr/local/go/bin/go build -trimpath \
+    -ldflags="-s -w -X main.version=sensor-$VERSION -X main.commit=$SENSOR_COMMIT -X main.buildDate=$SENSOR_BUILD_DATE" \
+    -o "$SENSOR_BIN" ./cmd/sensor
 )
 
 rm -f "$WORK_QCOW2" "$VMDK" "$OVF" "$MF" "$OVA" "$METADATA"
@@ -53,28 +55,22 @@ qemu-img resize "$WORK_QCOW2" "${DISK_GB}G"
 
 export LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}"
 virt-customize -a "$WORK_QCOW2" \
-  --copy-in "$SENSOR_BIN:/usr/local/bin" \
   --copy-in "$APPLIANCE_DIR/systemd/zenplus-sensor.service:/etc/systemd/system" \
   --mkdir /etc/zenplus-sensor \
   --mkdir /var/lib/zenplus-sensor \
+  --mkdir /var/lib/zenplus-sensor/bin \
   --mkdir /var/log/zenplus-sensor \
+  --copy-in "$SENSOR_BIN:/var/lib/zenplus-sensor/bin" \
   --copy-in "$APPLIANCE_DIR/config/zenplus-sensor.env.example:/etc/zenplus-sensor" \
   --run-command 'groupadd --system zenplus-sensor || true' \
   --run-command 'id zenplus-sensor >/dev/null 2>&1 || useradd --system --home /var/lib/zenplus-sensor --shell /usr/sbin/nologin --gid zenplus-sensor zenplus-sensor' \
-  --run-command 'chmod 0755 /usr/local/bin/zenplus-sensor' \
-  --run-command 'chmod 0750 /etc/zenplus-sensor /var/lib/zenplus-sensor /var/log/zenplus-sensor' \
-  --run-command 'chown root:root /etc/zenplus-sensor' \
+  --run-command 'chmod 0700 /var/lib/zenplus-sensor/bin/zenplus-sensor' \
+  --run-command 'chmod 0770 /etc/zenplus-sensor && chmod 0700 /var/lib/zenplus-sensor /var/lib/zenplus-sensor/bin && chmod 0750 /var/log/zenplus-sensor' \
+  --run-command 'chown root:zenplus-sensor /etc/zenplus-sensor' \
   --run-command 'chown -R zenplus-sensor:zenplus-sensor /var/lib/zenplus-sensor /var/log/zenplus-sensor' \
   --run-command 'mv /etc/zenplus-sensor/zenplus-sensor.env.example /etc/zenplus-sensor/sensor.env.example' \
   --run-command 'chown root:zenplus-sensor /etc/zenplus-sensor/sensor.env.example' \
   --run-command 'chmod 0640 /etc/zenplus-sensor/sensor.env.example' \
-  --run-command 'setcap cap_net_raw+ep /usr/local/bin/zenplus-sensor || true' \
-  --run-command "id $DEFAULT_CONSOLE_USER >/dev/null 2>&1 || useradd --create-home --shell /bin/bash --groups sudo $DEFAULT_CONSOLE_USER" \
-  --run-command "printf '%s:%s\n' '$DEFAULT_CONSOLE_USER' '$DEFAULT_CONSOLE_PASSWORD' | chpasswd" \
-  --run-command "install -d -m 0755 /etc/sudoers.d" \
-  --run-command "printf '%s ALL=(ALL) NOPASSWD:ALL\n' '$DEFAULT_CONSOLE_USER' > /etc/sudoers.d/90-zenplus-console" \
-  --run-command "chmod 0440 /etc/sudoers.d/90-zenplus-console" \
-  --run-command 'systemctl enable zenplus-sensor.service' \
   --run-command 'systemctl enable cloud-init.service cloud-config.service cloud-final.service || true' \
   --run-command 'cloud-init clean --logs || true'
 

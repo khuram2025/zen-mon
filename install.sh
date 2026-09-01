@@ -307,7 +307,7 @@ install_prerequisites() {
         curl wget git apt-transport-https ca-certificates \
         gnupg lsb-release software-properties-common \
         python3 python3-pip python3-venv \
-        build-essential jq openssl \
+        build-essential jq openssl cloud-image-utils \
         libcap2-bin snmp iputils-ping \
         postgresql postgresql-client redis-server nginx \
         > /dev/null 2>&1
@@ -329,10 +329,13 @@ install_prerequisites() {
         apt-get install -y -qq docker-compose-plugin 2>/dev/null || true
     fi
 
-    # Go 1.22+
-    if ! command -v go &>/dev/null || [[ "$(go version 2>/dev/null | grep -oP '\d+\.\d+' | head -1)" < "1.22" ]]; then
-        info "Installing Go 1.22..."
-        GO_VERSION="1.22.5"
+    # Go 1.24+ (poller/go.mod declares this minimum toolchain).
+    GO_REQUIRED="1.24.0"
+    GO_INSTALLED="$(go version 2>/dev/null | grep -oP 'go\K\d+\.\d+(?:\.\d+)?' | head -1 || true)"
+    if ! command -v go &>/dev/null || [[ -z "$GO_INSTALLED" ]] || \
+       [[ "$(printf '%s\n%s\n' "$GO_REQUIRED" "$GO_INSTALLED" | sort -V | head -1)" != "$GO_REQUIRED" ]]; then
+        info "Installing Go ${GO_REQUIRED}..."
+        GO_VERSION="$GO_REQUIRED"
         ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
         wget -q --timeout=60 "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" -O /tmp/go.tar.gz
         rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tar.gz && rm -f /tmp/go.tar.gz
@@ -702,13 +705,17 @@ build_components() {
     mkdir -p "$SENSOR_ARTIFACT_DIR"
     SENSOR_COMMIT=$(cd "$ZENPLUS_HOME" && git rev-parse --short HEAD 2>/dev/null || echo unknown)
     SENSOR_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    SENSOR_VERSION=$(head -1 "$ZENPLUS_HOME/.version" 2>/dev/null || echo 0.1.0)
+    [[ "$SENSOR_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || SENSOR_VERSION=0.1.0
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false \
-        -ldflags "-X main.version=sensor-0.1.0 -X main.commit=$SENSOR_COMMIT -X main.buildDate=$SENSOR_BUILD_DATE" \
+        -ldflags "-X main.version=sensor-$SENSOR_VERSION -X main.commit=$SENSOR_COMMIT -X main.buildDate=$SENSOR_BUILD_DATE" \
         -o "$SENSOR_ARTIFACT_DIR/zenplus-sensor" ./cmd/sensor || err "Go sensor build failed"
     [[ -x "$SENSOR_ARTIFACT_DIR/zenplus-sensor" ]] || err "Go sensor binary was not created"
     ( cd "$SENSOR_ARTIFACT_DIR" && sha256sum zenplus-sensor > zenplus-sensor.sha256 )
+    rm -f "$SENSOR_ARTIFACT_DIR/manifest.json.sig"
+    SENSOR_SHA=$(cut -d' ' -f1 "$SENSOR_ARTIFACT_DIR/zenplus-sensor.sha256")
     cat > "$SENSOR_ARTIFACT_DIR/manifest.json" <<EOF
-{"product":"ZenPlus Remote Sensor","platform":"linux-amd64","version":"sensor-0.1.0","commit":"$SENSOR_COMMIT","built_at":"$SENSOR_BUILD_DATE","binary":"zenplus-sensor","sha256_file":"zenplus-sensor.sha256"}
+{"product":"ZenPlus Remote Sensor","platform":"linux-amd64","os":"linux","arch":"amd64","version":"sensor-$SENSOR_VERSION","commit":"$SENSOR_COMMIT","built_at":"$SENSOR_BUILD_DATE","binary":"zenplus-sensor","binary_url":"zenplus-sensor","sha256_file":"zenplus-sensor.sha256","sha256":"$SENSOR_SHA"}
 EOF
     log "Go remote sensor built"
 
@@ -1185,6 +1192,11 @@ case "${1:-help}" in
         NEW=$(git rev-parse --short HEAD)
         if [[ "$OLD" == "$NEW" ]]; then echo "Already up to date ($OLD)"; exit 0; fi
         echo "  $OLD -> $NEW"
+        if ! command -v cloud-localds >/dev/null 2>&1; then
+            echo "  installing sensor seed-ISO dependency..."
+            apt-get update -qq && apt-get install -y -qq cloud-image-utils >/dev/null || {
+                echo "cloud-image-utils installation failed"; exit 1; }
+        fi
         # Converge and verify the schema before replacing any generated runtime
         # artifacts or restarting services.  The previous order restarted the
         # newly checked-out API even when migration failed, then returned an
@@ -1212,13 +1224,17 @@ case "${1:-help}" in
         mkdir -p "$SENSOR_ARTIFACT_DIR"
         SENSOR_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
         SENSOR_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        SENSOR_VERSION=$(head -1 "$ZENPLUS_HOME/.version" 2>/dev/null || echo 0.1.0)
+        [[ "$SENSOR_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || SENSOR_VERSION=0.1.0
         ( cd "$ZENPLUS_HOME/poller" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false \
-            -ldflags "-X main.version=sensor-0.1.0 -X main.commit=$SENSOR_COMMIT -X main.buildDate=$SENSOR_BUILD_DATE" \
+            -ldflags "-X main.version=sensor-$SENSOR_VERSION -X main.commit=$SENSOR_COMMIT -X main.buildDate=$SENSOR_BUILD_DATE" \
             -o "$SENSOR_ARTIFACT_DIR/zenplus-sensor" ./cmd/sensor ) || { echo "Sensor build failed"; exit 1; }
         [[ -x "$SENSOR_ARTIFACT_DIR/zenplus-sensor" ]] || { echo "Sensor binary was not created"; exit 1; }
         ( cd "$SENSOR_ARTIFACT_DIR" && sha256sum zenplus-sensor > zenplus-sensor.sha256 )
+        rm -f "$SENSOR_ARTIFACT_DIR/manifest.json.sig"
+        SENSOR_SHA=$(cut -d' ' -f1 "$SENSOR_ARTIFACT_DIR/zenplus-sensor.sha256")
         cat > "$SENSOR_ARTIFACT_DIR/manifest.json" <<EOF
-{"product":"ZenPlus Remote Sensor","platform":"linux-amd64","version":"sensor-0.1.0","commit":"$SENSOR_COMMIT","built_at":"$SENSOR_BUILD_DATE","binary":"zenplus-sensor","sha256_file":"zenplus-sensor.sha256"}
+{"product":"ZenPlus Remote Sensor","platform":"linux-amd64","os":"linux","arch":"amd64","version":"sensor-$SENSOR_VERSION","commit":"$SENSOR_COMMIT","built_at":"$SENSOR_BUILD_DATE","binary":"zenplus-sensor","binary_url":"zenplus-sensor","sha256_file":"zenplus-sensor.sha256","sha256":"$SENSOR_SHA"}
 EOF
         echo "  installing python deps..."
         "$ZENPLUS_HOME/venv/bin/pip" install -q -r "$ZENPLUS_HOME/server/requirements.txt"
