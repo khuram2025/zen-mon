@@ -53,10 +53,13 @@ import type {
 } from '@/types/apm'
 import type { RumSortOrder } from './useRumUrlState'
 import {
+  MIN_CONFIDENT_SAMPLES,
   RUM_FILTER_LABEL,
+  confidenceTitle,
   coreWebVitalsAssessment,
   formatDurationMs,
   formatRumVital,
+  isLowConfidence,
   normalizeVitalDistribution,
   vitalBand,
   VITAL_LIMITS,
@@ -308,6 +311,7 @@ const BAND_STYLE = {
 
 export function RumVitalCard({ name, metric, compact = false }: { name: RumVitalName; metric: RumVitalMetric; compact?: boolean }) {
   const band = vitalBand(name, metric.p75)
+  const lowConfidence = isLowConfidence(metric.samples)
   const style = BAND_STYLE[band]
   const limits = VITAL_LIMITS[name]
   const max = limits.poor * 1.35 || 1
@@ -326,13 +330,13 @@ export function RumVitalCard({ name, metric, compact = false }: { name: RumVital
             </div>
             <div className="mt-0.5 truncate text-[10px] text-muted">{VITAL_LABEL[name]}</div>
           </div>
-          <Badge variant={style.badge}>{style.label}</Badge>
+          <Badge variant={lowConfidence ? 'outline' : style.badge} title={confidenceTitle(metric.samples)}>{lowConfidence ? `${style.label} · indicative` : style.label}</Badge>
         </div>
         <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface2" aria-hidden>
           <div className={cn('h-full rounded-full', style.bar)} style={{ width: `${width}%` }} />
         </div>
         <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-muted">
-          <span>{metric.samples.toLocaleString()} {metric.samples === 1 ? 'sample' : 'samples'}</span>
+          <span title={confidenceTitle(metric.samples)}>{metric.samples.toLocaleString()} {metric.samples === 1 ? 'sample' : 'samples'}{lowConfidence ? ` · fewer than ${MIN_CONFIDENT_SAMPLES}` : ''}</span>
           <span>Good ≤ {formatRumVital(name, limits.good)}</span>
         </div>
         {hasDistribution && (
@@ -416,16 +420,18 @@ export function RumExperienceCard({
 
 export function RumMetricCell({ name, value, samples }: { name: RumVitalName; value: number | null | undefined; samples?: number }) {
   const band = vitalBand(name, value)
+  const lowConfidence = isLowConfidence(samples)
   return (
-    <div className="text-right">
+    <div className="text-right" title={confidenceTitle(samples)}>
       <div className={cn(
         'whitespace-nowrap font-mono text-xs tabular-nums',
         band === 'good' && 'text-success',
         band === 'needs-improvement' && 'text-warning',
         band === 'poor' && 'text-danger',
         band === 'no-data' && 'text-muted',
-      )}>{value == null ? '—' : formatRumVital(name, value)}</div>
-      {samples != null && <div className="text-[9px] text-muted">n={samples.toLocaleString()}</div>}
+        lowConfidence && 'opacity-60',
+      )}>{value == null ? '—' : formatRumVital(name, value)}{lowConfidence && <span aria-hidden className="ml-0.5 text-muted">~</span>}</div>
+      {samples != null && <div className="text-[9px] text-muted">n={samples.toLocaleString()}{lowConfidence ? ' · low' : ''}</div>}
     </div>
   )
 }
@@ -434,15 +440,16 @@ export function RumMetricCell({ name, value, samples }: { name: RumVitalName; va
 export function RumVitalTile({ name, value, samples }: { name: RumVitalName; value: number | null | undefined; samples?: number }) {
   const band = vitalBand(name, value)
   const style = BAND_STYLE[band]
+  const lowConfidence = isLowConfidence(samples)
   return (
-    <div className={cn('rounded-lg border bg-surface2/35 p-2.5', style.border)}>
+    <div className={cn('rounded-lg border bg-surface2/35 p-2.5', lowConfidence ? 'border-dashed border-border' : style.border)} title={confidenceTitle(samples)}>
       <div className="flex items-center justify-between gap-2">
         <span className="text-[9px] font-semibold uppercase tracking-wider text-muted">{VITAL_SHORT[name]} p75</span>
-        <span className={cn('h-1.5 w-1.5 rounded-full', style.bar)} aria-hidden />
+        <span className={cn('h-1.5 w-1.5 rounded-full', style.bar, lowConfidence && 'opacity-50')} aria-hidden />
       </div>
-      <div className={cn('mt-1 font-mono text-sm font-semibold tabular-nums', style.text)}>{formatRumVital(name, value)}</div>
+      <div className={cn('mt-1 font-mono text-sm font-semibold tabular-nums', style.text, lowConfidence && 'opacity-70')}>{formatRumVital(name, value)}{lowConfidence && <span aria-hidden className="ml-0.5 text-muted">~</span>}</div>
       <div className="mt-0.5 truncate text-[10px] text-muted" title={VITAL_LABEL[name]}>
-        {band === 'no-data' ? VITAL_LABEL[name] : `${style.label}${samples != null ? ` · n=${samples.toLocaleString()}` : ''}`}
+        {band === 'no-data' ? VITAL_LABEL[name] : lowConfidence ? `Indicative · n=${samples!.toLocaleString()}` : `${style.label}${samples != null ? ` · n=${samples.toLocaleString()}` : ''}`}
       </div>
     </div>
   )

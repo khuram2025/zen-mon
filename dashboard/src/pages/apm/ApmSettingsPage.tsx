@@ -30,6 +30,8 @@ interface RumSdkOptions {
   track_long_tasks: boolean
   consent: 'granted' | 'pending'
   privacy: 'mask-user-input' | 'strict'
+  /** Route grouping applied at intake: `match` glob → `name`. */
+  route_rules?: Array<{ match: string; name: string }>
 }
 
 interface IngestKey {
@@ -854,7 +856,7 @@ function IngestKeyFormDialog({ open, onOpenChange, onCreated, defaultKind, defau
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button disabled={!name.trim() || create.isPending || (kind === 'rum' && (
-            !!originError || !!applicationError || !rumForm.serviceName.trim() || !!errors.sampling || !!errors.replaySampling
+            !!originError || !!applicationError || !rumForm.serviceName.trim() || !!errors.sampling || !!errors.replaySampling || !!errors.routeRules
           ))} onClick={() => create.mutate()}>
             {create.isPending && <Loader2 className="w-4 h-4 mr-1 animate-spin" />}
             Create {kind === 'rum' ? 'RUM key' : 'SDK key'}
@@ -901,6 +903,28 @@ interface RumFormState {
   trackLongTasks: boolean
   consent: 'granted' | 'pending'
   privacy: 'mask-user-input' | 'strict'
+  /** One rule per line: `/products/* => /products/:slug`. */
+  routeRules: string
+}
+
+/** Parse the textarea form of route rules; returns the rules and the first bad line. */
+function parseRouteRules(text: string): { rules: Array<{ match: string; name: string }>; error: string | null } {
+  const rules: Array<{ match: string; name: string }> = []
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (!line || line.startsWith('#')) continue
+    const parts = line.split(/\s*(?:=>|->)\s*/)
+    if (parts.length !== 2 || !parts[0].startsWith('/') || !parts[1].startsWith('/')) {
+      return { rules, error: `"${line}" — write each rule as /path/pattern => /route/name (both sides start with "/").` }
+    }
+    rules.push({ match: parts[0], name: parts[1] })
+  }
+  if (rules.length > 50) return { rules, error: 'At most 50 rules per application.' }
+  return { rules, error: null }
+}
+
+function routeRulesToText(rules: Array<{ match: string; name: string }> | undefined): string {
+  return (rules ?? []).map((rule) => `${rule.match} => ${rule.name}`).join('\n')
 }
 
 function emptyRumForm(): RumFormState {
@@ -915,6 +939,7 @@ function emptyRumForm(): RumFormState {
     trackLongTasks: true,
     consent: 'granted',
     privacy: 'mask-user-input',
+    routeRules: '',
   }
 }
 
@@ -931,6 +956,7 @@ function rumFormFromKey(k: IngestKey): RumFormState {
     trackLongTasks: o?.track_long_tasks ?? true,
     consent: o?.consent ?? 'granted',
     privacy: o?.privacy ?? 'mask-user-input',
+    routeRules: routeRulesToText(o?.route_rules),
   }
 }
 
@@ -950,6 +976,7 @@ function rumFormErrors(s: RumFormState) {
     replaySampling: !Number.isFinite(replayRateNumber) || replayRateNumber !== 0
       ? 'Session replay capture and storage are not enabled in this release; keep this at 0%.'
       : null,
+    routeRules: parseRouteRules(s.routeRules).error,
     sampleRateNumber,
     replayRateNumber,
   }
@@ -965,6 +992,7 @@ function rumOptionsPayload(s: RumFormState, e: ReturnType<typeof rumFormErrors>)
     track_long_tasks: s.trackLongTasks,
     consent: s.consent,
     privacy: s.privacy,
+    route_rules: parseRouteRules(s.routeRules).rules,
   }
 }
 
@@ -1048,6 +1076,17 @@ function RumConfigFields({ state, set, errors }: {
           <Switch checked={state.trackLongTasks} onCheckedChange={(v) => set({ trackLongTasks: v })} aria-label="Track long tasks" />
         </label>
       </div>
+
+      <FormField label="Route grouping" error={errors.routeRules}
+        hint={<>Numeric, UUID and e-mail path segments already become <code className="rounded bg-surface2 px-1">:id</code>. Add one rule per line for slugs and sections: <code className="rounded bg-surface2 px-1">*</code> matches one segment, <code className="rounded bg-surface2 px-1">**</code> the rest of the path. First match wins.</>}>
+        <textarea
+          className="min-h-20 w-full rounded-md border border-border bg-surface px-3 py-2 font-mono text-xs text-text outline-none placeholder:text-muted focus:border-primary focus:ring-2 focus:ring-primary/20"
+          value={state.routeRules}
+          onChange={(e) => set({ routeRules: e.target.value })}
+          spellCheck={false}
+          placeholder={'/products/* => /products/:slug\n/docs/** => /docs\n/users/*/orders/* => /users/:user/orders/:order'}
+        />
+      </FormField>
     </div>
   )
 }
@@ -1206,6 +1245,12 @@ function KeyDetailsDialog({ keyRow, onClose, onEdit }: {
       { label: 'Session replay', value: `${o.replay_sample_rate_percent}% (not enabled)` },
       { label: 'User actions', value: o.track_actions ? 'Tracked' : 'Off' },
       { label: 'Long tasks', value: o.track_long_tasks ? 'Tracked' : 'Off' },
+      {
+        label: 'Route grouping',
+        value: o.route_rules?.length
+          ? <div className="space-y-0.5">{o.route_rules.map((rule) => <div key={`${rule.match}>${rule.name}`} className="font-mono text-xs">{rule.match} <span className="text-muted">→</span> {rule.name}</div>)}</div>
+          : <span className="text-muted">Identifier scrubbing only (numeric, UUID, e-mail segments → :id)</span>,
+      },
       { label: 'Consent at startup', value: o.consent === 'granted' ? 'Granted' : 'Pending consent' },
       { label: 'Privacy mode', value: o.privacy === 'strict' ? 'Strict minimization' : 'Mask user input' },
     ] : []),
@@ -1363,7 +1408,7 @@ function EditKeyDialog({ keyRow, onClose }: { keyRow: IngestKey | null; onClose:
   })
 
   const blocked = !name.trim() || save.isPending || (isRum && (
-    !!errors.origin || !!errors.application || !rumForm.serviceName.trim() || !!errors.sampling || !!errors.replaySampling
+    !!errors.origin || !!errors.application || !rumForm.serviceName.trim() || !!errors.sampling || !!errors.replaySampling || !!errors.routeRules
   ))
 
   return (

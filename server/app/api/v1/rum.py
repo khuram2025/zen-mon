@@ -31,6 +31,8 @@ from app.api.v1.rum_sdk import RUM_SDK
 from app.core.config import get_settings
 from app.core.database import get_ch_client, get_db
 from app.core.security import get_current_user
+from app.services import geoip
+from app.services.rum_routes import apply_route_rules, rules_from_options
 
 router = APIRouter(tags=["APM RUM"])
 
@@ -132,7 +134,8 @@ SELECT
     countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '')
             AND (has_ttfb = 1 OR (sdk_version = '' AND r.ttfb > 0))) AS ttfb_samples,
     countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '')
-            AND (has_load = 1 OR (sdk_version = '' AND r.load_ms > 0))) AS load_samples
+            AND (has_load = 1 OR (sdk_version = '' AND r.load_ms > 0))) AS load_samples,
+    __ROLLUP_BAND_COLUMNS__
 FROM zenplus.apm_rum_events AS r
 WHERE r.timestamp >= fromUnixTimestamp64Milli({batch_from_ms:Int64})
   AND r.timestamp <= fromUnixTimestamp64Milli({batch_to_ms:Int64})
@@ -140,6 +143,37 @@ WHERE r.timestamp >= fromUnixTimestamp64Milli({batch_from_ms:Int64})
 GROUP BY bucket_timestamp, application_id, env, service_version, view_name,
          browser, browser_version, os, device_type, country
 """
+
+# Core Web Vitals rating thresholds (web.dev): value <= good is "good",
+# value > poor is "poor", anything between "needs improvement".
+VITAL_THRESHOLDS: dict[str, tuple[float, float]] = {
+    "lcp": (2500, 4000), "inp": (200, 500), "cls": (0.1, 0.25),
+    "fcp": (1800, 3000), "ttfb": (800, 1800), "load": (2500, 4000),
+}
+_VITAL_RAW_COLUMN = {"load": "load_ms"}
+
+
+def _rollup_band_columns() -> str:
+    """Good / poor sample counters per vital for the 5-minute rollup.
+
+    Stored as plain sums next to the t-digests so the 30- and 90-day ranges
+    can show the same good / needs-improvement / poor distribution as the raw
+    ranges (a digest alone cannot answer "share of samples under 2.5 s").
+    Column order must follow migrate-106 (appended after load_samples).
+    """
+    parts = []
+    for name, (good, poor) in VITAL_THRESHOLDS.items():
+        column = _VITAL_RAW_COLUMN.get(name, name)
+        present = (
+            f"sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') "
+            f"AND (has_{name} = 1 OR (sdk_version = '' AND r.{column} > 0))"
+        )
+        parts.append(f"countIf({present} AND r.{column} <= {good}) AS {name}_good")
+        parts.append(f"countIf({present} AND r.{column} > {poor}) AS {name}_poor")
+    return ",\n    ".join(parts)
+
+
+_RUM_ROLLUP_INSERT_SQL = _RUM_ROLLUP_INSERT_SQL.replace("__ROLLUP_BAND_COLUMNS__", _rollup_band_columns())
 
 _TRACE_ID = re.compile(r"^[0-9a-fA-F]{32}$")
 _EVENT_ID = re.compile(r"^[A-Za-z0-9_.:-]{8,128}$")
@@ -662,6 +696,23 @@ def _client_ip(request: Request) -> str:
     return (request.client.host if request.client else "")[:45]
 
 
+def _resolve_country(request: Request, client_ip: str) -> str:
+    """ISO 3166-1 alpha-2 country for the visitor.
+
+    A CDN in front of the site is authoritative (Cloudflare's CF-IPCountry or a
+    generic X-Country-Code); otherwise the client address is resolved against
+    the on-box DB-IP database shared with NetFlow. Private and reserved
+    addresses (lab traffic, TEST-NET) have no country and stay blank.
+    """
+    raw_country = request.headers.get("cf-ipcountry") or request.headers.get("x-country-code") or ""
+    if _SAFE_COUNTRY.fullmatch(raw_country):
+        return raw_country.upper()
+    if not client_ip:
+        return ""
+    iso, _name = geoip.country_of(client_ip)
+    return iso.upper() if iso and _SAFE_COUNTRY.fullmatch(iso) else ""
+
+
 def _row(event: RumEvent, key: dict, request: Request) -> list[object]:
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     event_ms = event.timestamp_ms or now_ms
@@ -671,8 +722,8 @@ def _row(event: RumEvent, key: dict, request: Request) -> list[object]:
     browser, browser_version, os_name, device = _user_agent(
         request.headers.get("user-agent", "")[:512]
     )
-    raw_country = request.headers.get("cf-ipcountry") or request.headers.get("x-country-code") or ""
-    country = raw_country.upper() if _SAFE_COUNTRY.fullmatch(raw_country) else ""
+    client_ip = _client_ip(request)
+    country = _resolve_country(request, client_ip)
     return [
         timestamp, event.application_id, event.service_name,
         key.get("env_name") or "prod", event.event_type, event.session_id,
@@ -692,7 +743,7 @@ def _row(event: RumEvent, key: dict, request: Request) -> list[object]:
         int(event.cls is not None), int(event.fcp is not None),
         int(event.ttfb is not None), int(event.load_ms is not None),
         int(event.sampled),
-        _client_ip(request),
+        client_ip,
         event.redirect_ms, event.dns_ms, event.connect_ms, event.tls_ms,
         event.wait_ms, event.download_ms, event.blocked_ms, event.processing_ms,
         event.server_ms, event.db_ms, int(event.has_timing),
@@ -751,6 +802,12 @@ async def _ingest_rum(request: Request, db: AsyncSession):
     if bound_app and any(event.application_id != bound_app for event in events):
         _HEALTH["rejected"] += len(events)
         raise HTTPException(403, "RUM key is bound to a different application")
+    # Fold URLs into routes per the key's grouping rules. Runs after the
+    # validator's identifier scrubbing, so rules see "/orders/:id" not "/orders/42".
+    route_rules = rules_from_options(key.get("rum_options"))
+    if route_rules:
+        for event in events:
+            event.view_name = apply_route_rules(event.view_name, route_rules)
     try:
         client_ip = _client_ip(request) or "unknown"
         await _enforce_quota(
@@ -1003,13 +1060,26 @@ def _vitals_payload(row: list | tuple) -> dict[str, dict[str, object]]:
 
 
 def _rollup_vitals_payload(row: list | tuple) -> dict[str, dict[str, object]]:
+    """Rollup vitals: 12 digest/sample pairs, then good/poor counters per vital.
+
+    Rows written before migrate-106 have zero counters; a distribution is only
+    reported when the counters cover the samples, so old buckets show p75 alone
+    instead of a fabricated 0 % good.
+    """
     result = {}
-    for index, name in enumerate(("lcp", "inp", "cls", "fcp", "ttfb", "load")):
+    names = tuple(VITAL_THRESHOLDS)
+    for index, name in enumerate(names):
         value, samples = row[index * 2], int(row[index * 2 + 1] or 0)
-        result[name] = {
-            "p75": _nullable(value, samples), "samples": samples,
-            "good_pct": None, "needs_improvement_pct": None, "poor_pct": None,
-        }
+        band_offset = len(names) * 2 + index * 2
+        good = int(row[band_offset] or 0) if len(row) > band_offset + 1 else 0
+        poor = int(row[band_offset + 1] or 0) if len(row) > band_offset + 1 else 0
+        if samples and (good or poor):
+            result[name] = _vital(value, samples, good, poor)
+        else:
+            result[name] = {
+                "p75": _nullable(value, samples), "samples": samples,
+                "good_pct": None, "needs_improvement_pct": None, "poor_pct": None,
+            }
     return result
 
 
@@ -1043,13 +1113,17 @@ async def rum_overview(
                        sum(sampled_errors), sum(unsampled_errors)
                 FROM zenplus.apm_rum_metrics_5m WHERE {scope_sql}
             """, parameters=params).result_rows[0]
+            band_sums = ", ".join(
+                f"sum({name}_good), sum({name}_poor)" for name in VITAL_THRESHOLDS
+            )
             vitals = _ch().query(f"""
                 SELECT quantileTDigestMerge(0.75)(lcp), sum(lcp_samples),
                        quantileTDigestMerge(0.75)(inp), sum(inp_samples),
                        quantileTDigestMerge(0.75)(cls), sum(cls_samples),
                        quantileTDigestMerge(0.75)(fcp), sum(fcp_samples),
                        quantileTDigestMerge(0.75)(ttfb), sum(ttfb_samples),
-                       quantileTDigestMerge(0.75)(load_ms), sum(load_samples)
+                       quantileTDigestMerge(0.75)(load_ms), sum(load_samples),
+                       {band_sums}
                 FROM zenplus.apm_rum_metrics_5m WHERE {scope_sql}
             """, parameters=params).result_rows[0]
             releases = _ch().query(f"""
@@ -2162,13 +2236,17 @@ async def rum_health(
         row = await asyncio.to_thread(lambda: _ch().query(f"""
             SELECT count(), max(timestamp),
                    sum(toUInt64OrZero(attributes['sdk.dropped_events'])),
-                   groupUniqArrayIf(20)(sdk_version, sdk_version != '')
+                   groupUniqArrayIf(20)(sdk_version, sdk_version != ''),
+                   countIf(country != ''),
+                   uniqExactIf(client_ip, client_ip != '')
             FROM zenplus.apm_rum_events WHERE {scope_sql}
         """, parameters=params).result_rows[0])
         accepted, last_event, dropped, versions = int(row[0]), row[1], int(row[2] or 0), list(row[3] or [])
+        with_country, distinct_ips = int(row[4] or 0), int(row[5] or 0)
         storage_ok = True
     except Exception:
         accepted, last_event, dropped, versions, storage_ok = 0, None, 0, [], False
+        with_country, distinct_ips = 0, 0
     issues = []
     if not storage_ok:
         issues.append("RUM storage query failed")
@@ -2176,8 +2254,18 @@ async def rum_health(
         issues.append("Recent RUM writes failed")
     if int(_HEALTH["rate_limited"]):
         issues.append("Recent RUM events exceeded an intake quota")
+    geoip_available = geoip.available()
+    if not geoip_available:
+        issues.append("GeoIP database missing: visitor countries are not resolved (run scripts/fetch-geoip.py)")
     return {
         "status": "healthy" if not issues else "degraded",
+        "geoip": {
+            "available": geoip_available,
+            "directory": geoip.GEOIP_DIR,
+            "events_with_country": with_country,
+            "events_total": accepted,
+            "distinct_client_ips": distinct_ips,
+        },
         "accepted": accepted,
         "accepted_since_process_start": int(_HEALTH["accepted"]),
         "rejected": int(_HEALTH["rejected"]),

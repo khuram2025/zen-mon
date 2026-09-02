@@ -34,6 +34,23 @@ export function formatRumVital(name: RumVitalName, value: number | null | undefi
   return `${value.toFixed(value < 10 ? 1 : 0)} ms`
 }
 
+/**
+ * Below this many finalized samples a p75 is dominated by individual visits
+ * (one slow load moves it by whole seconds), so the UI presents it as
+ * indicative rather than as a rating.
+ */
+export const MIN_CONFIDENT_SAMPLES = 20
+
+export function isLowConfidence(samples: number | null | undefined): boolean {
+  return samples != null && samples > 0 && samples < MIN_CONFIDENT_SAMPLES
+}
+
+export function confidenceTitle(samples: number | null | undefined): string | undefined {
+  return isLowConfidence(samples)
+    ? `Low confidence: ${samples} sample${samples === 1 ? '' : 's'} (fewer than ${MIN_CONFIDENT_SAMPLES}). A single visit can move this figure.`
+    : undefined
+}
+
 export function vitalBand(name: RumVitalName, value: number | null | undefined): RumVitalBand {
   if (value == null || !Number.isFinite(value)) return 'no-data'
   const limits = VITAL_LIMITS[name]

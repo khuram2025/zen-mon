@@ -601,4 +601,12 @@ export interface RumIngestHealth {
   sdk_version?: string | null
   sdk_versions?: string[]
   issues?: string[]
+  /** Visitor-country resolution status (CDN header first, then the on-box GeoIP database). */
+  geoip?: {
+    available: boolean
+    directory?: string
+    events_with_country: number
+    events_total: number
+    distinct_client_ips: number
+  }
 }

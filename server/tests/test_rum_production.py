@@ -695,3 +695,75 @@ def test_rum_aggregate_queries_do_not_shadow_raw_trace_columns():
     for column in ("client_ip", "view_name", "browser", "browser_version", "os",
                    "device_type", "country", "application_id", "env"):
         assert re.search(rf"\)\s+AS {column}\b", source) is None, column
+
+
+# ── Phase 1: route grouping, GeoIP, rollup bands ─────────────────────────────
+
+def test_route_rules_group_slugs_and_sections_after_id_scrubbing():
+    from app.services.rum_routes import apply_route_rules, rules_from_options
+
+    rules = rules_from_options({
+        "route_rules": [
+            {"match": "/products/*", "name": "/products/:slug"},
+            {"match": "/docs/**", "name": "/docs"},
+            {"match": "/users/*/orders/*", "name": "/users/:user/orders/:order"},
+            {"match": "relative", "name": "/ignored"},   # must start with "/"
+        ]
+    })
+    assert len(rules) == 3
+    assert apply_route_rules("/products/blue-shoes", rules) == "/products/:slug"
+    assert apply_route_rules("/products/blue-shoes/", rules) == "/products/:slug"
+    assert apply_route_rules("/products/a/b", rules) == "/products/a/b"  # "*" is one segment
+    assert apply_route_rules("/docs/getting-started/install", rules) == "/docs"
+    assert apply_route_rules("/users/:id/orders/:id", rules) == "/users/:user/orders/:order"
+    assert apply_route_rules("/cart", rules) == "/cart"
+    # asyncpg hands jsonb back as text through SQLAlchemy text(); still parsed.
+    assert rules_from_options('{"route_rules": [{"match": "/a/*", "name": "/a/:x"}]}') == (("/a/*", "/a/:x"),)
+    assert rules_from_options(None) == ()
+    # Numeric identifiers are grouped by the intake validator without any rule.
+    event = _event(view_name="/orders/1234/items/9")
+    assert event.view_name == "/orders/:id/items/:id"
+
+
+def test_route_rules_are_validated_on_the_key_options():
+    from app.api.v1.apm import RumSdkOptions
+
+    options = RumSdkOptions(service_name="web", route_rules=[{"match": "/p/*", "name": "/p/:slug"}])
+    assert options.model_dump()["route_rules"] == [{"match": "/p/*", "name": "/p/:slug"}]
+    with pytest.raises(ValidationError):
+        RumSdkOptions(service_name="web", route_rules=[{"match": "p/*", "name": "/p/:slug"}])
+
+
+def test_country_falls_back_to_geoip_when_no_cdn_header(monkeypatch):
+    from app.services import geoip
+
+    class Req:
+        def __init__(self, headers, host):
+            self.headers = headers
+            self.client = type("C", (), {"host": host})()
+
+    monkeypatch.setattr(geoip, "country_of", lambda ip: ("sa", "Saudi Arabia") if ip == "203.0.113.9" else (None, None))
+    assert rum._resolve_country(Req({"cf-ipcountry": "DE"}, "203.0.113.9"), "203.0.113.9") == "DE"
+    assert rum._resolve_country(Req({}, "203.0.113.9"), "203.0.113.9") == "SA"
+    assert rum._resolve_country(Req({}, "10.0.0.5"), "10.0.0.5") == ""
+    assert rum._resolve_country(Req({"cf-ipcountry": "XXX"}, ""), "") == ""
+
+
+def test_rollup_insert_writes_vital_band_counters():
+    sql = rum._RUM_ROLLUP_INSERT_SQL
+    assert "__ROLLUP_BAND_COLUMNS__" not in sql
+    for name in ("lcp", "inp", "cls", "fcp", "ttfb", "load"):
+        assert f"AS {name}_good" in sql and f"AS {name}_poor" in sql
+    assert "r.lcp <= 2500) AS lcp_good" in sql
+    assert "r.cls > 0.25) AS cls_poor" in sql
+    # Band counters follow load_samples, matching the migrate-106 column order.
+    assert sql.index("AS load_samples") < sql.index("AS lcp_good") < sql.index("FROM zenplus.apm_rum_events")
+
+    digests = [2100.0, 10, 150.0, 10, 0.05, 10, 900.0, 10, 400.0, 10, 2000.0, 10]
+    bands = [8, 1, 10, 0, 5, 2, 10, 0, 10, 0, 6, 3]
+    payload = rum._rollup_vitals_payload(digests + bands)
+    assert payload["lcp"]["good_pct"] == 80.0 and payload["lcp"]["poor_pct"] == 10.0
+    assert payload["cls"]["needs_improvement_pct"] == 30.0
+    # Buckets written before the migration carry zero counters → no distribution.
+    legacy = rum._rollup_vitals_payload(digests + [0] * 12)
+    assert legacy["lcp"]["p75"] == 2100.0 and legacy["lcp"]["good_pct"] is None

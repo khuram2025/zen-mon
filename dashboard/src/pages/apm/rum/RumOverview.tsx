@@ -187,6 +187,15 @@ function BreakdownCard({ title, hint, side }: { title: string; hint: string; sid
   )
 }
 
+/** Explain an empty Countries card from what the collector actually knows. */
+function countryEmptyHint(health?: RumIngestHealth): string {
+  const geo = health?.geoip
+  if (!geo) return 'No country data in this segment.'
+  if (!geo.available) return 'GeoIP database not installed — countries come only from a CDN header (CF-IPCountry / X-Country-Code). Run scripts/fetch-geoip.py on the controller to resolve visitor addresses.'
+  if (geo.distinct_client_ips > 0 && geo.events_with_country === 0) return `GeoIP is active, but the ${geo.distinct_client_ips.toLocaleString()} client address${geo.distinct_client_ips === 1 ? '' : 'es'} in this segment are private or reserved (lab traffic) and have no country.`
+  return 'No country data in this segment.'
+}
+
 function FacetCard({ title, items, onSelect, empty = 'No breakdown data' }: { title: string; items?: Array<{ value: string; count: number }>; onSelect: (value: string) => void; empty?: string }) {
   const visible = (items ?? []).slice(0, 6)
   const max = Math.max(...visible.map((item) => item.count), 1)
@@ -429,7 +438,7 @@ export function RumOverviewPanel(props: OverviewProps) {
         <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-5">
           <FacetCard title="Browsers" items={props.facets?.browser} onSelect={(value) => props.onFilter('browser', value)} />
           <FacetCard title="Devices" items={props.facets?.device_type} onSelect={(value) => props.onFilter('device_type', value)} />
-          <FacetCard title="Countries" items={props.facets?.country} onSelect={(value) => props.onFilter('country', value)} empty="No country data — the collector reads the CDN country header (CF-IPCountry / X-Country-Code); GeoIP lookup is not configured." />
+          <FacetCard title="Countries" items={props.facets?.country} onSelect={(value) => props.onFilter('country', value)} empty={countryEmptyHint(props.health)} />
           <FacetCard title="Client IPs" items={props.facets?.client_ip} onSelect={(value) => props.onFilter('client_ip', value)} />
           <FacetCard title="Releases" items={props.facets?.service_version} onSelect={(value) => props.onFilter('service_version', value)} />
         </div>

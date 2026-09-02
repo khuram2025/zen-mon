@@ -119,7 +119,7 @@ async def authenticate_ingest_key(
                 """
                 SELECT k.id, k.kind, k.key_hash, k.enabled, k.revoked_at,
                        k.env_id, e.name AS env_name, k.origin_allowlist,
-                       k.application_id
+                       k.application_id, k.rum_options
                 FROM apm_ingest_keys k
                 LEFT JOIN apm_environments e ON e.id = k.env_id
                 WHERE k.key_hash = :h
@@ -145,6 +145,16 @@ async def authenticate_ingest_key(
 
 # ── schemas ──────────────────────────────────────────────────────────────────
 
+class RumRouteRule(BaseModel):
+    """One view-name grouping rule: a path glob and the route name it maps to.
+
+    ``*`` matches one path segment, ``**`` the rest of the path. Rules run at
+    intake after identifier scrubbing, first match wins.
+    """
+    match: str = Field(..., min_length=1, max_length=512, pattern=r"^/")
+    name: str = Field(..., min_length=1, max_length=512, pattern=r"^/")
+
+
 class RumSdkOptions(BaseModel):
     """Browser RUM snippet settings.
 
@@ -161,6 +171,8 @@ class RumSdkOptions(BaseModel):
     track_long_tasks: bool = True
     consent: Literal["granted", "pending"] = "granted"
     privacy: Literal["mask-user-input", "strict"] = "mask-user-input"
+    # Per-application route grouping applied at intake (see services/rum_routes.py).
+    route_rules: list[RumRouteRule] = Field(default_factory=list, max_length=50)
 
 
 class IngestKeyCreate(BaseModel):
