@@ -76,6 +76,7 @@ export function useRumUrlState() {
   const sort = oneOf(params.get('sort'), RUM_SORTS[tab], defaults.sort)
   const order = oneOf(params.get('order'), ['asc', 'desc'] as const, defaults.order)
   const detailKind = oneOf(params.get('detail_kind'), ['view', 'session', 'error', 'resource', 'action'] as const, 'view')
+  const issueStatus = oneOf(params.get('issue'), ['', 'open', 'new', 'regressed', 'resolved', 'ignored'] as const, '')
   const detailId = params.get('detail') || ''
 
   const update = useCallback((mutate: (next: URLSearchParams) => void, replace = true) => {
@@ -122,6 +123,12 @@ export function useRumUrlState() {
     next.delete('page')
     next.delete('detail')
     next.delete('detail_kind')
+  }), [update])
+
+  const setIssueStatus = useCallback((value: string) => update((next) => {
+    if (value) next.set('issue', value)
+    else next.delete('issue')
+    next.delete('page')
   }), [update])
 
   const setPage = useCallback((value: number) => update((next) => {
@@ -178,6 +185,8 @@ export function useRumUrlState() {
     order,
     detailKind,
     detailId,
+    issueStatus,
+    setIssueStatus,
     activeFilterCount: RUM_FILTER_KEYS.filter((key) => filters[key]).length,
     query: (extra?: Record<string, string | number | undefined>) => buildRumQuery(range, filters, extra, bounds),
     setTab,

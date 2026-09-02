@@ -461,8 +461,91 @@ export interface RumSession {
   viewport?: string
 }
 
+export type RumIssueStatus = 'new' | 'open' | 'regressed' | 'resolved' | 'ignored'
+
+export interface RumIssueState {
+  /** Effective state: stored status plus "new" / "regressed" derived from occurrences. */
+  status: RumIssueStatus
+  stored_status: 'open' | 'resolved' | 'ignored'
+  note: string
+  first_seen_release: string
+  resolved_at: string | null
+  resolved_release: string
+  updated_by: string
+  updated_at: string | null
+  first_seen_ever: string | null
+}
+
+export interface RumStackFrame {
+  raw: string
+  function: string
+  url: string
+  line: number | null
+  column: number | null
+  file_name: string
+  symbolicated: boolean
+  original: { source: string; line: number; column: number; name: string } | null
+  context: Array<{ line: number; code: string; current: boolean }>
+}
+
+export interface RumErrorDetail {
+  fingerprint: string
+  range: RumRange
+  window: RumWindow
+  application_id: string
+  env: string
+  message: string
+  error_type: string
+  source: string
+  count: number
+  sessions: number
+  users: number
+  unsampled_count: number
+  first_seen: string
+  last_seen: string
+  first_seen_ever: string | null
+  first_seen_release: string
+  issue: RumIssueState
+  trend: { bucket_seconds: number; series: Array<{ timestamp: string; errors: number; sessions: number }> }
+  facets: Record<'view_name' | 'browser' | 'os' | 'service_version' | 'country' | 'device_type', Array<{ value: string; count: number; sessions: number }>>
+  releases: Array<{ service_version: string; count: number; first_seen: string; last_seen: string }>
+  recent_sessions: Array<{ session_id: string; last_seen: string; count: number; user_id: string; browser: string; view_name: string }>
+  latest: {
+    timestamp: string
+    session_id: string
+    view_name: string
+    url: string
+    browser: string
+    browser_version: string
+    os: string
+    service_version: string
+    backend_trace_id: string
+    user_id: string
+    client_ip: string
+    country: string
+    device_type: string
+    stack: string
+  }
+  backend_trace_ids: string[]
+  frames: RumStackFrame[]
+  symbolication: { frames: number; resolved: number; maps_available: number; release: string }
+  breadcrumbs: Array<{ timestamp: string; event_type: RumEventType; title: string; view_name: string; target: string | null; duration_ms: number | null; status_code: number | null }>
+}
+
+export interface RumSourceMap {
+  id: string
+  application_id: string
+  release: string
+  file_name: string
+  size_bytes: number
+  sources_count: number
+  uploaded_by: string
+  created_at: string
+}
+
 export interface RumError {
   fingerprint: string
+  issue?: RumIssueState
   message: string
   error_type?: string
   source?: string

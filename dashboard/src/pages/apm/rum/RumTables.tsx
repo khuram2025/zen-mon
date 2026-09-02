@@ -8,7 +8,7 @@ import {
   Network,
   Users,
 } from 'lucide-react'
-import { formatBytes, relativeTime } from '@/lib/utils'
+import { cn, formatBytes, relativeTime } from '@/lib/utils'
 import { fmtPct } from '@/components/apm/shared'
 import { fmtCount } from '@/components/apm/viz'
 import { DurationTimeline, EXPLORER_HEAD, EXPLORER_ROWS } from '@/components/apm/explorer'
@@ -17,6 +17,8 @@ import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import type {
   RumAction,
   RumError,
+  RumIssueState,
+  RumIssueStatus,
   RumListResponse,
   RumResource,
   RumSession,
@@ -167,13 +169,27 @@ export function RumSessionsTable({ data, onOpen, ...props }: SharedProps & { dat
   )
 }
 
+export const ISSUE_STATUS_STYLE: Record<RumIssueStatus, { label: string; variant: 'danger' | 'warning' | 'outline' | 'success' | 'info'; hint: string }> = {
+  new: { label: 'New', variant: 'danger', hint: 'First seen in the last 24 hours and never before that within retention' },
+  regressed: { label: 'Regressed', variant: 'warning', hint: 'Marked resolved, but it happened again afterwards' },
+  open: { label: 'Open', variant: 'outline', hint: 'Occurring; no lifecycle decision recorded' },
+  resolved: { label: 'Resolved', variant: 'success', hint: 'Marked resolved and not seen since' },
+  ignored: { label: 'Ignored', variant: 'info', hint: 'Deliberately muted; still counted in totals' },
+}
+
+export function IssueStatusBadge({ issue, className }: { issue?: RumIssueState; className?: string }) {
+  const status = issue?.status ?? 'open'
+  const style = ISSUE_STATUS_STYLE[status]
+  return <Badge variant={style.variant} className={className} title={issue?.note ? `${style.hint}. Note: ${issue.note}` : style.hint}>{style.label}</Badge>
+}
+
 export function RumErrorsTable({ data, onOpen, ...props }: SharedProps & { data?: RumListResponse<RumError>; onOpen: (row: RumError) => void }) {
   if (props.error) return <QueryErrorPanel label="browser errors" error={props.error} onRetry={props.onRetry} />
   return (
     <RumTableCard embedded={props.embedded} title="JavaScript errors" description="Grouped browser failures ranked by affected sessions. Open a row for stack, client context and the correlated trace." notice={<><RumCoverageNotice coverage={data?.coverage} /><RumSamplingNotice sampling={data?.sampling} /></>} footer={pageFooter(data, props, 'issues')}>
       <Table>
         <THead className={EXPLORER_HEAD}><Tr>
-          <Th>Error</Th><Th>Application / view</Th>
+          <Th>Error</Th><Th>State</Th><Th>Application / view</Th>
           <SortableTh label="Events" sortKey="count" activeSort={props.sort} order={props.order} onSort={props.onSort} className="text-right" />
           <SortableTh label="Sessions" sortKey="sessions" activeSort={props.sort} order={props.order} onSort={props.onSort} className="text-right" />
           <SortableTh label="First seen" sortKey="first_seen" activeSort={props.sort} order={props.order} onSort={props.onSort} className="text-right" />
@@ -181,14 +197,15 @@ export function RumErrorsTable({ data, onOpen, ...props }: SharedProps & { data?
           <Th>Trace</Th>
         </Tr></THead>
         <TBody className={EXPLORER_ROWS}>
-          {props.loading ? <LoadingRow columns={7} /> : !data?.items.length ? <EmptyRow columns={7} filtered={props.filtered} noun="errors" icon={FileWarning} /> : data.items.map((error) => (
-            <Tr key={errorRowKey(error)} className={INTERACTIVE_ROW} tabIndex={0} aria-label={`Open error ${error.error_type || error.message}`} onClick={() => onOpen(error)} onKeyDown={(event) => onRowKey(event, () => onOpen(error))}>
+          {props.loading ? <LoadingRow columns={8} /> : !data?.items.length ? <EmptyRow columns={8} filtered={props.filtered} noun="errors" icon={FileWarning} /> : data.items.map((error) => (
+            <Tr key={errorRowKey(error)} className={cn(INTERACTIVE_ROW, (error.issue?.status === 'resolved' || error.issue?.status === 'ignored') && 'opacity-60')} tabIndex={0} aria-label={`Open error ${error.error_type || error.message}`} onClick={() => onOpen(error)} onKeyDown={(event) => onRowKey(event, () => onOpen(error))}>
               <Td>
                 <button type="button" className="max-w-[360px] truncate text-xs font-medium text-text hover:underline" title={error.message} onClick={(event) => { event.stopPropagation(); onOpen(error) }}>
                   {error.message}
                 </button>
                 <div className="max-w-[360px] truncate font-mono text-[10px] text-muted" title={error.source || undefined}>{[error.error_type, error.source].filter(Boolean).join(' · ') || 'Unclassified error'}</div>
               </Td>
+              <Td><IssueStatusBadge issue={error.issue} /></Td>
               <Td><div className="text-xs text-text2">{error.application_id} · {error.env}{error.service_version ? ` · ${error.service_version}` : ''}</div><div className="max-w-[220px] truncate font-mono text-[10px] text-muted">{error.view_name || '/'}</div></Td>
               <Td className="text-right"><div className="font-mono text-xs font-semibold tabular-nums text-danger">{fmtCount(error.count)}</div>{(error.sampled_count != null || error.unsampled_count != null) && <div className="text-[9px] text-muted">{fmtCount(error.sampled_count)} sampled{(error.unsampled_count ?? 0) > 0 ? ` · ${fmtCount(error.unsampled_count)} retained` : ''}</div>}</Td>
               <Td className="text-right font-mono text-xs tabular-nums">{fmtCount(error.sessions)}</Td>

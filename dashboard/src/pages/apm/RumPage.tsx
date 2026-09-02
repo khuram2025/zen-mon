@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Globe2, Radio, Settings2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
@@ -12,6 +12,7 @@ import type {
   RumAction,
   RumBreakdown,
   RumError,
+  RumErrorDetail,
   RumFacets,
   RumIngestHealth,
   RumListResponse,
@@ -50,6 +51,8 @@ import {
 } from './rum/RumUi'
 import { useRumUrlState } from './rum/useRumUrlState'
 import { buildRumHref, formatWindowLabel, parseUtc, volumeBuckets, type RumVitalName } from './rum/model'
+import { ISSUE_STATUS_STYLE } from './rum/RumTables'
+import { toast } from '@/components/ui/Toast'
 import { relativeTime } from '@/lib/utils'
 
 const REFRESH_MS = 30_000
@@ -146,6 +149,7 @@ export function RumPage() {
     page_size: overviewMode ? 5 : state.pageSize,
     sort: overviewMode ? 'count' : state.sort,
     order: overviewMode ? 'desc' : state.order,
+    status: overviewMode ? undefined : state.issueStatus || undefined,
   })
   const errorsQ = useQuery<RumListResponse<RumError>>({
     queryKey: ['apm', 'rum', 'errors', errorsQuery],
@@ -174,6 +178,24 @@ export function RumPage() {
     refetchInterval: REFRESH_MS,
   })
 
+  const queryClient = useQueryClient()
+  const errorDetailQ = useQuery<RumErrorDetail>({
+    queryKey: ['apm', 'rum', 'error', state.detailId, commonQuery],
+    queryFn: () => get(`/apm/rum/errors/${encodeURIComponent(state.detailId)}?${commonQuery}`),
+    enabled: state.detailKind === 'error' && !!state.detailId,
+  })
+  const issueMutation = useMutation({
+    mutationFn: async (input: { fingerprint: string; application_id: string; env: string; status: 'open' | 'resolved' | 'ignored'; note: string; release: string }) => {
+      const { fingerprint, ...body } = input
+      return (await api.patch(`/apm/rum/errors/${encodeURIComponent(fingerprint)}/status`, body)).data
+    },
+    onSuccess: (_data, input) => {
+      toast.success(`Error group marked ${input.status}`)
+      queryClient.invalidateQueries({ queryKey: ['apm', 'rum', 'errors'] })
+      queryClient.invalidateQueries({ queryKey: ['apm', 'rum', 'error', input.fingerprint] })
+    },
+    onError: () => toast.error('Could not update the error group'),
+  })
   const sessionDetailQ = useQuery<RumSessionDetail>({
     queryKey: ['apm', 'rum', 'session', state.detailId, commonQuery],
     queryFn: () => getRumSessionDetail(state.detailId, commonQuery),
@@ -330,7 +352,12 @@ export function RumPage() {
       </RumExplorerShell>
     )
     if (state.tab === 'errors') return (
-      <RumExplorerShell noun="issues" onExport={() => exportCsv('errors')} exporting={exporting} total={errorsQ.data?.total} volume={volume(totals?.errors, 'error events')} rangeLabel={rangeLabel} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { err: 'errors' }, { ok: 'Events', err: 'JS errors' }, state.bounds)} okLabel="Events" errLabel="JS errors">
+      <RumExplorerShell noun="issues" onExport={() => exportCsv('errors')} exporting={exporting} toolbar={(
+        <select aria-label="Issue state" value={state.issueStatus} onChange={(event) => state.setIssueStatus(event.target.value)} className="h-6 rounded border border-border bg-surface px-1.5 text-[10px] text-text2">
+          <option value="">All states</option>
+          {(Object.keys(ISSUE_STATUS_STYLE) as Array<keyof typeof ISSUE_STATUS_STYLE>).map((key) => <option key={key} value={key}>{ISSUE_STATUS_STYLE[key].label}</option>)}
+        </select>
+      )} total={errorsQ.data?.total} volume={volume(totals?.errors, 'error events')} rangeLabel={rangeLabel} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { err: 'errors' }, { ok: 'Events', err: 'JS errors' }, state.bounds)} okLabel="Events" errLabel="JS errors">
         <RumErrorsTable embedded {...sharedTableProps} data={errorsQ.data} loading={errorsQ.isLoading} error={errorsQ.error} onRetry={() => errorsQ.refetch()} onOpen={(row) => state.openDetail('error', errorRowKey(row))} />
       </RumExplorerShell>
     )
@@ -386,6 +413,13 @@ export function RumPage() {
         sessionLoading={sessionDetailQ.isLoading}
         sessionError={sessionDetailQ.error}
         onRetrySession={() => sessionDetailQ.refetch()}
+        errorDetail={errorDetailQ.data}
+        errorLoading={errorDetailQ.isLoading}
+        errorError={errorDetailQ.error}
+        onRetryError={() => errorDetailQ.refetch()}
+        onIssueStatus={(input) => issueMutation.mutate(input)}
+        issueUpdating={issueMutation.isPending}
+        onOpenSession={(sessionId) => state.openDetail('session', sessionId)}
         onClose={state.closeDetail}
         onDrill={(tab, viewName) => state.drillTo(tab, { view_name: viewName })}
       />

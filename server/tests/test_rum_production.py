@@ -898,3 +898,70 @@ async def test_vitals_endpoint_shapes_distribution_breakdown_attribution_and_rel
     # type) still groups one view once.
     assert any("anyIf(raw.view_name, raw.view_name != '') AS dim_value" in sql for sql in statements)
     assert any("ORDER BY poor / greatest(rated, 1) DESC" in sql for sql in statements)
+
+
+# ── Phase 3: issue lifecycle and symbolication ───────────────────────────────
+
+def _vlq(n: int) -> str:
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    value = (-n << 1) | 1 if n < 0 else n << 1
+    out = ""
+    while True:
+        digit = value & 31
+        value >>= 5
+        if value:
+            digit |= 32
+        out += alphabet[digit]
+        if not value:
+            return out
+
+
+def test_symbolication_parses_v8_and_gecko_frames_and_maps_positions():
+    import gzip as _gzip
+    from app.services import rum_symbolicate as sym
+
+    stack = (
+        "TypeError: Cannot read properties of undefined (reading 'total')\n"
+        "    at renderTotals (https://demo.zenplus.local/ZenPlusApmDemo/orders.3f2a.js:42:1)\n"
+        "    at https://demo.zenplus.local/vendor.js:1:9\n"
+        "boot@https://demo.zenplus.local/app.js?v=3:2:5\n"
+    )
+    frames = sym.parse_stack(stack + "    at renderTotals (orders.js:42)\n")
+    assert [f.file_name for f in frames] == ["", "orders.3f2a.js", "vendor.js", "app.js", "orders.js"]
+    assert frames[4].line == 42 and frames[4].column == 1          # column omitted → 1
+    frames = frames[:4]
+    assert frames[1].function == "renderTotals" and frames[1].line == 42 and frames[1].column == 1
+    assert frames[2].function == "<anonymous>"
+    assert frames[3].function == "boot" and frames[3].line == 2
+
+    # generated 42:1 → src/orders.ts 7:3 (name renderTotals); segment on line 42, column 0.
+    mappings = ";" * 41 + _vlq(0) + _vlq(0) + _vlq(6) + _vlq(2) + _vlq(0)
+    payload = {
+        "version": 3, "sources": ["src/orders.ts"], "names": ["renderTotals"], "mappings": mappings,
+        "sourcesContent": ["\n".join(f"line{i}" if i != 7 else "  const total = order.total.amount" for i in range(1, 12))],
+    }
+    blob = _gzip.compress(json.dumps(payload).encode())
+    frames, resolved = sym.symbolicate(stack, {"orders.3f2a.js": ("map-1", blob)})
+    assert resolved == 1
+    hit = frames[1]
+    assert hit.symbolicated and hit.original == {"source": "src/orders.ts", "line": 7, "column": 3, "name": "renderTotals"}
+    assert [c["line"] for c in hit.context] == [4, 5, 6, 7, 8, 9, 10]
+    assert next(c for c in hit.context if c["current"])["code"].strip().startswith("const total")
+    assert frames[2].symbolicated is False          # no map for vendor.js
+    assert sym.frame_payload(hit)["original"]["name"] == "renderTotals"
+
+
+def test_issue_lifecycle_state_is_derived_from_stored_status_and_recurrence():
+    now = datetime.now(timezone.utc)
+    window = rum._resolve_window("24h")
+    # Brand new: first ever occurrence inside the window and under a day old.
+    fresh = rum._issue_payload(None, now, now - timedelta(hours=2), window)
+    assert fresh["status"] == "new" and fresh["stored_status"] == "open"
+    # Seen days ago: plain open even though it occurred in this window.
+    old = rum._issue_payload(None, now, now - timedelta(days=5), window)
+    assert old["status"] == "open"
+    # Resolved, then occurred again → regressed; resolved with no recurrence stays resolved.
+    stored = {"status": "resolved", "resolved_at": now - timedelta(hours=3), "note": "fixed"}
+    assert rum._issue_payload(stored, now, now - timedelta(days=5), window)["status"] == "regressed"
+    assert rum._issue_payload(stored, now - timedelta(hours=4), now - timedelta(days=5), window)["status"] == "resolved"
+    assert rum._issue_payload({"status": "ignored"}, now, now - timedelta(hours=1), window)["status"] == "ignored"

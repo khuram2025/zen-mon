@@ -138,6 +138,7 @@ const APM_METRICS = [
   { value: 'apm_rum_cls_p75', label: 'Browser RUM — CLS p75' },
   { value: 'apm_rum_error_session_rate', label: 'Browser RUM — error-affected sessions (0.05 = 5%)' },
   { value: 'apm_rum_resource_failure_rate', label: 'Browser RUM — failed resources (0.05 = 5%)' },
+  { value: 'apm_rum_new_error_groups', label: 'Browser RUM — new error groups in window (count)' },
 ] as const
 
 // Ordered by how often a template needs them. The phrasing variables at the

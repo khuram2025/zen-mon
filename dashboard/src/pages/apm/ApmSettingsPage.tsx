@@ -76,6 +76,7 @@ const SETTINGS_TABS = [
   { key: 'agents', label: 'APM agents' },
   { key: 'start', label: 'Getting started' },
   { key: 'keys', label: 'Ingest keys' },
+  { key: 'maps', label: 'Source maps' },
   { key: 'quality', label: 'Data quality' },
 ] as const
 type SettingsTab = typeof SETTINGS_TABS[number]['key']
@@ -164,6 +165,7 @@ export function ApmSettingsPage() {
       {tab === 'agents' && <ApmAgentsTab />}
       {tab === 'start' && <GettingStartedTab keys={keys} onCreateKey={() => openCreateKey('sdk')} />}
       {tab === 'quality' && <DataQualityCard />}
+      {tab === 'maps' && <SourceMapsTab />}
 
       {tab === 'keys' && (
         <>
@@ -1446,5 +1448,137 @@ function EditKeyDialog({ keyRow, onClose }: { keyRow: IngestKey | null; onClose:
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+
+/* ─── Source maps ────────────────────────────────────────────────────────── */
+
+interface SourceMapRow {
+  id: string
+  application_id: string
+  release: string
+  file_name: string
+  size_bytes: number
+  sources_count: number
+  uploaded_by: string
+  created_at: string
+}
+
+function formatSize(bytes: number): string {
+  if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(0)} KB`
+  return `${bytes} B`
+}
+
+/**
+ * Upload and manage JavaScript source maps. A map is matched to an error by
+ * application, release and the minified file name the browser loaded, so the
+ * error dialog can show original file, line and function names.
+ */
+function SourceMapsTab() {
+  const qc = useQueryClient()
+  const [applicationId, setApplicationId] = useState('')
+  const [release, setRelease] = useState('')
+  const [fileName, setFileName] = useState('')
+  const [file, setFile] = useState<File | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<SourceMapRow | null>(null)
+  const maps = useQuery<{ items: SourceMapRow[] }>({
+    queryKey: ['apm', 'rum', 'source-maps'],
+    queryFn: async () => (await api.get('/apm/rum/source-maps')).data,
+  })
+  const upload = useMutation({
+    mutationFn: async () => {
+      if (!file) throw new Error('Choose a .map file')
+      const body = await file.text()
+      const params = new URLSearchParams({ application_id: applicationId.trim(), release: release.trim(), file_name: (fileName.trim() || file.name) })
+      return (await api.post(`/apm/rum/source-maps?${params}`, body, { headers: { 'Content-Type': 'application/json' } })).data as SourceMapRow
+    },
+    onSuccess: (row) => {
+      toast.success('Source map uploaded', `${row.file_name} for ${row.application_id}${row.release ? ` · ${row.release}` : ' · any release'}`)
+      setFile(null)
+      qc.invalidateQueries({ queryKey: ['apm', 'rum', 'source-maps'] })
+    },
+    onError: (error) => toast.error('Upload failed', apiErrorMessage(error)),
+  })
+  const remove = useMutation({
+    mutationFn: async (id: string) => { await api.delete(`/apm/rum/source-maps/${id}`) },
+    onSuccess: () => { toast.success('Source map deleted'); qc.invalidateQueries({ queryKey: ['apm', 'rum', 'source-maps'] }) },
+    onError: (error) => toast.error('Could not delete', apiErrorMessage(error)),
+  })
+  const canUpload = !!file && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(applicationId.trim()) && !upload.isPending
+  const inferredName = (fileName.trim() || file?.name || '').replace(/\.map$/, '')
+  const uploadUrl = `${window.location.origin}/api/v1/apm/rum/source-maps?application_id=<app>&release=<version>&file_name=app.3f2a1c.js`
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>Upload a source map</CardTitle>
+          <p className="text-xs text-muted">Errors reported for the same application and release whose stack frames reference this minified file are shown with original file names, line numbers and functions. Maps stay on this controller and are never sent to browsers.</p>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 sm:grid-cols-3">
+            <FormField label="Application ID" required hint="Matches the RUM key's application binding.">
+              <Input value={applicationId} onChange={(e) => setApplicationId(e.target.value)} placeholder="customer-portal" autoComplete="off" />
+            </FormField>
+            <FormField label="Release" hint="The data-version the snippet reports. Leave empty to apply to every release.">
+              <Input value={release} onChange={(e) => setRelease(e.target.value)} placeholder="2026.09.02" autoComplete="off" />
+            </FormField>
+            <FormField label="Minified file name" hint={`Defaults to the map's name without .map${inferredName ? ` → ${inferredName}` : ''}.`}>
+              <Input value={fileName} onChange={(e) => setFileName(e.target.value)} placeholder="app.3f2a1c.js" autoComplete="off" />
+            </FormField>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <input type="file" accept=".map,application/json" onChange={(e) => setFile(e.target.files?.[0] ?? null)} className="text-xs text-text2 file:mr-3 file:rounded-md file:border file:border-border file:bg-surface file:px-3 file:py-1.5 file:text-xs file:text-text" aria-label="Source map file" />
+            <Button disabled={!canUpload} onClick={() => upload.mutate()}>
+              {upload.isPending && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}Upload{file ? ` (${formatSize(file.size)})` : ''}
+            </Button>
+          </div>
+          <details className="rounded-md border border-border px-3 py-2">
+            <summary className="cursor-pointer text-xs font-medium text-text">Upload from a build pipeline</summary>
+            <pre className="mt-2 overflow-x-auto rounded-md bg-surface2/60 p-3 text-[11px] leading-relaxed text-text"><code>{`curl -X POST "${uploadUrl}" \\
+  -H "Authorization: Bearer $ZENPLUS_TOKEN" -H "Content-Type: application/json" \\
+  --data-binary @dist/app.3f2a1c.js.map`}</code></pre>
+            <p className="mt-2 text-xs text-muted">Re-uploading the same application, release and file replaces the earlier map. Maps up to 25 MB are accepted.</p>
+          </details>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle>Uploaded maps</CardTitle></CardHeader>
+        <CardContent className="p-0">
+          {maps.isError ? (
+            <div className="px-4 py-6 text-sm text-danger">Failed to load source maps — {apiErrorMessage(maps.error)}</div>
+          ) : !maps.data?.items.length ? (
+            <div className="px-4 py-8 text-center text-sm text-muted">No source maps uploaded yet. Stack traces show minified positions until a map for the release is added.</div>
+          ) : (
+            <Table>
+              <THead><Tr><Th>Application</Th><Th>Release</Th><Th>Minified file</Th><Th className="text-right">Size</Th><Th className="text-right">Sources</Th><Th>Uploaded</Th><Th /></Tr></THead>
+              <TBody>
+                {maps.data.items.map((row) => (
+                  <Tr key={row.id}>
+                    <Td className="font-mono text-xs">{row.application_id}</Td>
+                    <Td className="font-mono text-xs">{row.release || <span className="text-muted">any release</span>}</Td>
+                    <Td className="font-mono text-xs">{row.file_name}</Td>
+                    <Td className="text-right text-xs tabular-nums">{formatSize(row.size_bytes)}</Td>
+                    <Td className="text-right text-xs tabular-nums">{row.sources_count}</Td>
+                    <Td className="text-xs text-muted">{relativeTime(row.created_at)}{row.uploaded_by ? ` by ${row.uploaded_by}` : ''}</Td>
+                    <Td className="text-right"><Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-danger" onClick={() => setPendingDelete(row)}>Delete</Button></Td>
+                  </Tr>
+                ))}
+              </TBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+      <ConfirmDialog
+        open={!!pendingDelete}
+        title="Delete source map?"
+        description={pendingDelete ? `Errors for ${pendingDelete.application_id}${pendingDelete.release ? ` · ${pendingDelete.release}` : ''} will show minified positions for ${pendingDelete.file_name} again.` : ''}
+        confirmLabel="Delete"
+        onConfirm={() => { if (pendingDelete) remove.mutate(pendingDelete.id); setPendingDelete(null) }}
+        onOpenChange={(open) => { if (!open) setPendingDelete(null) }}
+      />
+    </div>
   )
 }

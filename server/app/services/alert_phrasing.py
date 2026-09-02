@@ -140,6 +140,7 @@ METRICS: dict[str, dict] = {
     "apm_rum_cls_p75": {"noun": "Field CLS p75", "unit": "", "decimals": 3},
     "apm_rum_error_session_rate": {"noun": "Error-affected sessions", "unit": "%", "scale": 0.01, "decimals": 2},
     "apm_rum_resource_failure_rate": {"noun": "Failed browser resources", "unit": "%", "scale": 0.01, "decimals": 2},
+    "apm_rum_new_error_groups": {"noun": "New browser error groups", "unit": "", "decimals": 0},
     "apm_slo_burn": {"noun": "SLO burn rate", "unit": "x", "decimals": 1},
     "apm_synthetic_down": {"noun": "Synthetic journey", "subject": "the service",
                            "narrative": {"down": "is failing its synthetic journey", "up": "is passing its synthetic journey again"},

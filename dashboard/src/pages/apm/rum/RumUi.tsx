@@ -668,6 +668,7 @@ export function RumExplorerShell({
   errLabel = 'Significant',
   onExport,
   exporting,
+  toolbar,
   children,
 }: {
   noun: string
@@ -685,6 +686,8 @@ export function RumExplorerShell({
   /** Download the whole explorer (current filters and sort) as CSV. */
   onExport?: () => void
   exporting?: boolean
+  /** Extra controls (filters specific to this explorer) shown next to the export button. */
+  toolbar?: ReactNode
   children: ReactNode
 }) {
   const shown = total ?? 0
@@ -694,6 +697,8 @@ export function RumExplorerShell({
       summary={(
         <span className="flex flex-wrap items-center justify-between gap-2">
           <span>Displaying {fmtCount(shown)} {label}{volume ? ` · ${volume}` : ''}{rangeLabel ? ` · ${rangeLabel}` : ''}</span>
+          <span className="flex items-center gap-1.5">
+          {toolbar}
           {onExport && (
             <button
               type="button"
@@ -706,6 +711,7 @@ export function RumExplorerShell({
               Export CSV
             </button>
           )}
+          </span>
         </span>
       )}
       histogram={<VolumeHistogram buckets={buckets} okLabel={okLabel} errLabel={errLabel} />}

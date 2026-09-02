@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   Activity,
   Clock3,
@@ -18,7 +18,7 @@ import {
 } from 'lucide-react'
 import { cn, formatBytes, relativeTime } from '@/lib/utils'
 import { fmtPct } from '@/components/apm/shared'
-import { fmtCount } from '@/components/apm/viz'
+import { ApmTimeChart, fmtCount } from '@/components/apm/viz'
 import { RequestFlow } from '@/components/apm/explorer'
 import {
   BreakdownInline,
@@ -36,6 +36,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import type {
   RumAction,
   RumError,
+  RumErrorDetail,
   RumResource,
   RumSession,
   RumSessionDetail,
@@ -43,6 +44,7 @@ import type {
   RumView,
 } from '@/types/apm'
 import type { RumDetailKind } from './useRumUrlState'
+import { ISSUE_STATUS_STYLE, IssueStatusBadge } from './RumTables'
 import { QueryErrorPanel, RumCoverageNotice, RumVitalTile, TracePivot, formatDurationMs, formatRumVital } from './RumUi'
 
 type Selected = RumView | RumSession | RumError | RumResource | RumAction | undefined
@@ -103,19 +105,206 @@ function ViewDetail({ view, onDrill }: { view: RumView; onDrill: (tab: 'sessions
   )
 }
 
-function ErrorDetail({ error }: { error: RumError }) {
+const ISSUE_ACTIONS: Array<{ status: 'open' | 'resolved' | 'ignored'; label: string; hint: string }> = [
+  { status: 'resolved', label: 'Resolve', hint: 'Fixed; reappearances will be flagged as regressed' },
+  { status: 'ignored', label: 'Ignore', hint: 'Mute this group; it stays in the totals' },
+  { status: 'open', label: 'Reopen', hint: 'Back to open' },
+]
+
+function CrumbIcon({ type }: { type: RumTimelineEvent['event_type'] }) {
+  const meta = EVENT_META[type] || EVENT_META.view
+  const Icon = meta.icon
+  return <span className={cn('flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-border', meta.tone)}><Icon className="h-2.5 w-2.5" /></span>
+}
+
+function StackFrames({ detail }: { detail: RumErrorDetail }) {
+  const [showRaw, setShowRaw] = useState(false)
+  const parsed = detail.frames.filter((frame) => frame.line != null)
+  if (!detail.latest.stack) return <div className="rounded-lg border border-border bg-surface2/40 p-3 text-[11px] text-muted">No stack trace was captured with this error.</div>
+  const symb = detail.symbolication
+  return (
+    <div>
+      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Latest stack trace</div>
+        <div className="flex items-center gap-2 text-[10px] text-muted">
+          {symb.resolved > 0
+            ? <span className="text-success">{symb.resolved} of {symb.frames} frames symbolicated{symb.release ? ` · release ${symb.release}` : ''}</span>
+            : symb.maps_available > 0
+              ? <span className="text-warning">{symb.maps_available} source map{symb.maps_available === 1 ? '' : 's'} uploaded for this release, none match these file names</span>
+              : <span>Minified. Upload source maps under APM Settings → Source maps{symb.release ? ` for release ${symb.release}` : ''}.</span>}
+          {parsed.length > 0 && <button type="button" className="underline hover:text-text" onClick={() => setShowRaw((value) => !value)}>{showRaw ? 'Show parsed' : 'Show raw'}</button>}
+        </div>
+      </div>
+      {showRaw || !parsed.length ? (
+        <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-border bg-surface2 p-3 font-mono text-[11px] leading-relaxed text-text2">{detail.latest.stack}</pre>
+      ) : (
+        <ol className="divide-y divide-border/60 overflow-hidden rounded-lg border border-border bg-surface2/40">
+          {detail.frames.map((frame, index) => (
+            <li key={index} className="px-3 py-2 font-mono text-[11px]">
+              {frame.line == null ? (
+                <div className="text-text2">{frame.raw.trim()}</div>
+              ) : frame.symbolicated && frame.original ? (
+                <>
+                  <div className="flex flex-wrap items-baseline gap-x-2">
+                    <span className="font-semibold text-text">{frame.original.name || frame.function}</span>
+                    <span className="text-primary">{frame.original.source}:{frame.original.line}:{frame.original.column}</span>
+                    <span className="text-[10px] text-muted">from {frame.file_name}:{frame.line}:{frame.column}</span>
+                  </div>
+                  {frame.context.length > 0 && (
+                    <div className="mt-1 overflow-x-auto rounded bg-surface px-2 py-1">
+                      {frame.context.map((row) => (
+                        <div key={row.line} className={cn('flex gap-3 whitespace-pre text-[10px] leading-relaxed', row.current ? 'bg-danger/10 text-text' : 'text-muted')}>
+                          <span className="w-8 shrink-0 select-none text-right tabular-nums opacity-70">{row.line}</span>
+                          <span>{row.code}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="flex flex-wrap items-baseline gap-x-2">
+                  <span className="text-text">{frame.function}</span>
+                  <span className="text-muted">{frame.file_name || frame.url}:{frame.line}{frame.column != null ? `:${frame.column}` : ''}</span>
+                </div>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  )
+}
+
+function ErrorDetail({ row: error, detail, loading, loadError, onRetry, onIssueStatus, issueUpdating, onOpenSession, onDrill }: {
+  row?: RumError
+  detail?: RumErrorDetail
+  loading?: boolean
+  loadError?: unknown
+  onRetry?: () => void
+  onIssueStatus?: (input: { fingerprint: string; application_id: string; env: string; status: 'open' | 'resolved' | 'ignored'; note: string; release: string }) => void
+  issueUpdating?: boolean
+  onOpenSession?: (sessionId: string) => void
+  onDrill: (tab: 'sessions' | 'errors' | 'resources', viewName: string) => void
+}) {
+  const [note, setNote] = useState('')
+  const issue = detail?.issue ?? error?.issue
+  useEffect(() => { setNote(issue?.note ?? '') }, [issue?.note])
+  const message = detail?.message ?? error?.message ?? ''
+  const fingerprint = detail?.fingerprint ?? error?.fingerprint ?? ''
+  const applicationId = detail?.application_id ?? error?.application_id ?? ''
+  const env = detail?.env ?? error?.env ?? ''
+  const viewName = detail?.latest.view_name ?? error?.view_name ?? ''
+  const status = issue?.status ?? 'open'
+  const style = ISSUE_STATUS_STYLE[status]
+  if (loadError && !detail) return <QueryErrorPanel label="error group" error={loadError} onRetry={onRetry} />
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3"><Stat label="Occurrences" value={fmtCount(error.count)} hint={(error.sampled_count != null || error.unsampled_count != null) ? `${fmtCount(error.sampled_count)} sampled · ${fmtCount(error.unsampled_count)} retained unsampled` : undefined} /><Stat label="Affected sessions" value={fmtCount(error.sessions)} /><Stat label="Last seen" value={relativeTime(error.last_seen)} /></div>
-      <RequestFlow
-        hops={[
-          { id: 'client', label: 'Client', hint: [error.browser, error.os, error.device_type].filter(Boolean).join(' · ') || 'Unknown', icon: UserRound, tone: 'warn' },
-          { id: 'view', label: 'View', hint: error.view_name || '/', icon: Layers3, tone: 'muted' },
-          { id: 'err', label: 'JS error', hint: error.error_type || 'Exception', icon: FileWarning, tone: 'err' },
-        ]}
-      />
-      <Card><CardContent className="p-4"><Fact label="Type">{error.error_type || 'JavaScript error'}</Fact><Fact label="Message"><span className="font-medium text-text">{error.message}</span></Fact><Fact label="Source"><span className="font-mono text-[11px]">{error.source || 'Not captured'}</span></Fact><Fact label="Fingerprint"><span className="font-mono text-[11px]">{error.fingerprint}</span></Fact><Fact label="Release">{error.service_version || 'Not captured'}</Fact><Fact label="View">{error.view_name || '/'}</Fact><Fact label="Client">{[error.browser && `${error.browser}${error.browser_version ? ` ${error.browser_version}` : ''}`, error.os, error.device_type, error.country].filter(Boolean).join(' · ') || 'Unknown'}</Fact><Fact label="Backend trace"><TracePivot traceId={error.backend_trace_id} /></Fact></CardContent></Card>
-      {error.stack && <div><div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">Latest stack trace</div><pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-border bg-surface2 p-3 font-mono text-[11px] leading-relaxed text-text2">{error.stack}</pre></div>}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <Stat label="Occurrences" value={fmtCount(detail?.count ?? error?.count)} hint={detail && detail.unsampled_count > 0 ? `${fmtCount(detail.unsampled_count)} retained unsampled` : undefined} />
+        <Stat label="Sessions" value={fmtCount(detail?.sessions ?? error?.sessions)} hint={detail ? `${fmtCount(detail.users)} identified user${detail.users === 1 ? '' : 's'}` : undefined} />
+        <Stat label="First seen" value={detail?.first_seen_ever ? relativeTime(detail.first_seen_ever) : error?.first_seen ? relativeTime(error.first_seen) : '—'} hint={detail?.first_seen_release ? `release ${detail.first_seen_release}` : undefined} />
+        <Stat label="Last seen" value={relativeTime(detail?.last_seen ?? error?.last_seen)} hint={detail?.latest.service_version ? `release ${detail.latest.service_version}` : undefined} />
+      </div>
+
+      <Card className={cn('border', status === 'new' && 'border-danger/40', status === 'regressed' && 'border-warning/40')}><CardContent className="p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <IssueStatusBadge issue={issue} />
+            <span className="text-[11px] text-muted">{style.hint}{issue?.updated_by ? ` · ${issue.stored_status} by ${issue.updated_by}${issue.updated_at ? ` ${relativeTime(issue.updated_at)}` : ''}` : ''}</span>
+          </div>
+          <div className="flex items-center gap-1">
+            {ISSUE_ACTIONS.filter((action) => action.status !== issue?.stored_status || (action.status === 'open' && status === 'regressed')).map((action) => (
+              <Button key={action.status} size="sm" variant={action.status === 'resolved' ? 'default' : 'outline'} className="h-7 px-2 text-[11px]" disabled={!onIssueStatus || issueUpdating || !fingerprint} title={action.hint}
+                onClick={() => onIssueStatus?.({ fingerprint, application_id: applicationId, env, status: action.status, note: note.trim(), release: detail?.latest.service_version ?? error?.service_version ?? '' })}>
+                {issueUpdating ? <Loader2 className="h-3 w-3 animate-spin" /> : null}{action.label}
+              </Button>
+            ))}
+          </div>
+        </div>
+        <input value={note} onChange={(event) => setNote(event.target.value)} placeholder="Note for the team (ticket, cause, fix version)…" maxLength={2000} className="mt-2 h-7 w-full rounded-md border border-border bg-surface px-2 text-[11px] text-text outline-none placeholder:text-muted focus:border-primary" />
+      </CardContent></Card>
+
+      <Card><CardContent className="p-4">
+        <Fact label="Message"><span className="font-medium text-text">{message}</span></Fact>
+        <Fact label="Type">{detail?.error_type ?? error?.error_type ?? 'JavaScript error'}</Fact>
+        <Fact label="Source"><span className="font-mono text-[11px]">{detail?.source ?? error?.source ?? 'Not captured'}</span></Fact>
+        <Fact label="Fingerprint"><span className="font-mono text-[11px]">{fingerprint}</span></Fact>
+        <Fact label="Application">{applicationId}{env ? ` · ${env}` : ''}</Fact>
+      </CardContent></Card>
+
+      {loading && !detail ? <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted"><Loader2 className="h-4 w-4 animate-spin" /> Loading impact…</div> : detail && (
+        <>
+          <Card><CardContent className="p-3">
+            <div className="mb-1 flex items-center justify-between gap-2 text-xs font-semibold uppercase tracking-wider text-muted"><span>Occurrences over time</span><span className="font-normal normal-case">{detail.trend.series.length} bucket{detail.trend.series.length === 1 ? '' : 's'}</span></div>
+            <ApmTimeChart data={detail.trend.series} height={140} empty="No occurrences in this window." series={[
+              { key: 'errors', name: 'Errors', color: '#ef4444', type: 'bar', fmt: fmtCount },
+              { key: 'sessions', name: 'Sessions', color: '#f59e0b', fmt: fmtCount },
+            ]} />
+          </CardContent></Card>
+
+          <div className="grid gap-2 sm:grid-cols-2">
+            {([['view_name', 'Routes'], ['browser', 'Browsers'], ['service_version', 'Releases'], ['os', 'Operating systems']] as const).map(([key, title]) => (
+              <Card key={key}><CardContent className="p-3">
+                <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">{title}</div>
+                {detail.facets[key].length ? (
+                  <ul className="space-y-1">
+                    {detail.facets[key].map((row) => (
+                      <li key={row.value || '∅'} className="flex items-center justify-between gap-2 text-[11px]">
+                        {key === 'view_name' ? <button type="button" className="truncate font-mono text-text2 hover:text-text hover:underline" onClick={() => onDrill('errors', row.value)} title={`Filter errors by ${row.value}`}>{row.value || '/'}</button> : <span className="truncate text-text2">{row.value || 'Unknown'}</span>}
+                        <span className="shrink-0 font-mono tabular-nums text-muted">{fmtCount(row.count)} · {fmtCount(row.sessions)} sess.</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : <div className="text-[11px] text-muted">—</div>}
+              </CardContent></Card>
+            ))}
+          </div>
+
+          <StackFrames detail={detail} />
+
+          <Card><CardContent className="p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">What the user did before the latest occurrence</div>
+              {onOpenSession && detail.latest.session_id && <button type="button" className="text-[10px] text-primary hover:underline" onClick={() => onOpenSession(detail.latest.session_id)}>Open session {detail.latest.session_id.slice(0, 8)}…</button>}
+            </div>
+            {detail.breadcrumbs.length ? (
+              <ol className="relative ml-2 space-y-1.5 border-l border-border/70 pl-4">
+                {detail.breadcrumbs.map((crumb, index) => {
+                  const isError = crumb.event_type === 'error' && index === detail.breadcrumbs.length - 1
+                  return (
+                    <li key={`${crumb.timestamp}:${index}`} className="relative text-[11px]">
+                      <span className="absolute -left-[25px] top-0"><CrumbIcon type={crumb.event_type} /></span>
+                      <div className="flex flex-wrap items-baseline gap-x-2">
+                        <span className={cn('truncate', isError ? 'font-medium text-danger' : 'text-text')}>{crumb.title}</span>
+                        {crumb.status_code != null && crumb.status_code >= 400 && <span className="font-mono text-[10px] text-danger">{crumb.status_code}</span>}
+                        {crumb.duration_ms != null && crumb.duration_ms > 0 && <span className="font-mono text-[10px] text-muted">{formatDurationMs(crumb.duration_ms)}</span>}
+                        <span className="text-[10px] text-muted">{crumb.view_name ? `on ${crumb.view_name} · ` : ''}{new Date(crumb.timestamp).toLocaleTimeString()}</span>
+                      </div>
+                    </li>
+                  )
+                })}
+              </ol>
+            ) : <div className="text-[11px] text-muted">No earlier activity was recorded in that session.</div>}
+          </CardContent></Card>
+
+          <Card><CardContent className="p-4">
+            <Fact label="Latest client">{[detail.latest.browser && `${detail.latest.browser}${detail.latest.browser_version ? ` ${detail.latest.browser_version}` : ''}`, detail.latest.os, detail.latest.device_type, detail.latest.country].filter(Boolean).join(' · ') || 'Unknown'}</Fact>
+            <Fact label="Page"><span className="font-mono text-[11px]">{detail.latest.url || viewName || '/'}</span></Fact>
+            <Fact label="User">{detail.latest.user_id || 'Anonymous'}{detail.latest.client_ip ? <span className="ml-2 font-mono text-[10px] text-muted">{detail.latest.client_ip}</span> : null}</Fact>
+            <Fact label="Backend trace"><TracePivot traceId={detail.latest.backend_trace_id || detail.backend_trace_ids[0]} /></Fact>
+            <Fact label="Recent sessions">{detail.recent_sessions.length ? (
+              <div className="flex flex-wrap gap-1.5">
+                {detail.recent_sessions.map((session) => (
+                  <button key={session.session_id} type="button" className="rounded border border-border bg-surface px-1.5 py-0.5 font-mono text-[10px] text-text2 hover:border-primary/40 hover:text-text" title={`${session.count} occurrence${session.count === 1 ? '' : 's'} · ${session.browser} · ${relativeTime(session.last_seen)}`} onClick={() => onOpenSession?.(session.session_id)}>{session.session_id.slice(0, 10)}…</button>
+                ))}
+              </div>
+            ) : '—'}</Fact>
+          </CardContent></Card>
+        </>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <Button variant="outline" size="sm" onClick={() => onDrill('sessions', viewName)}><UserRound className="h-3.5 w-3.5" /> Sessions on this view</Button>
+      </div>
     </div>
   )
 }
@@ -405,6 +594,7 @@ function TimelineChild({ event, sessionStart }: { event: RumTimelineEvent; sessi
 }
 
 function SegmentRow({ seg, sessionStart, hidden }: { seg: ViewSegment; sessionStart: number; hidden: Set<ChildType> }) {
+  const [mode, setMode] = useState<'list' | 'waterfall'>('list')
   const duration = seg.endMs - seg.startMs
   const vitals = seg.vitals
   const summary = childSummary(seg.children)
@@ -455,13 +645,78 @@ function SegmentRow({ seg, sessionStart, hidden }: { seg: ViewSegment; sessionSt
         )
       })()}
       {visibleChildren.length > 0 && (
-        <ol className="relative ml-5 border-l border-border/70 py-1 pl-4 pr-3">
-          {visibleChildren.map((event, index) => (
-            <TimelineChild key={`${event.timestamp}:${event.event_type}:${index}`} event={event} sessionStart={sessionStart} />
-          ))}
-        </ol>
+        <>
+          <div className="flex items-center justify-end gap-1 border-b border-border/40 px-3 py-1 text-[10px] text-muted">
+            <button type="button" className={cn('rounded px-1.5 py-0.5', mode === 'list' ? 'bg-primary/10 text-primary' : 'hover:text-text')} onClick={() => setMode('list')}>List</button>
+            <button type="button" className={cn('rounded px-1.5 py-0.5', mode === 'waterfall' ? 'bg-primary/10 text-primary' : 'hover:text-text')} onClick={() => setMode('waterfall')} title="Requests and interactions laid out on the view's timeline">Waterfall</button>
+          </div>
+          {mode === 'waterfall' ? (
+            <Waterfall events={visibleChildren} startMs={seg.startMs} />
+          ) : (
+            <ol className="relative ml-5 border-l border-border/70 py-1 pl-4 pr-3">
+              {visibleChildren.map((event, index) => (
+                <TimelineChild key={`${event.timestamp}:${event.event_type}:${index}`} event={event} sessionStart={sessionStart} />
+              ))}
+            </ol>
+          )}
+        </>
       )}
     </li>
+  )
+}
+
+/**
+ * Gantt-style layout of one view's requests and interactions: each row starts
+ * at its offset from the view start and spans its duration, split into the
+ * request phases when the SDK captured them. Resource events are recorded at
+ * completion, so their bar is placed to end at the event timestamp.
+ */
+function Waterfall({ events, startMs }: { events: RumTimelineEvent[]; startMs: number }) {
+  const rows = events.map((event) => {
+    const ts = new Date(event.timestamp).getTime()
+    const duration = Math.max(0, event.duration_ms ?? 0)
+    const endsAt = event.event_type === 'resource' ? ts : ts + duration
+    const beginsAt = event.event_type === 'resource' ? ts - duration : ts
+    return { event, begin: Math.max(0, beginsAt - startMs), end: Math.max(0, endsAt - startMs), duration }
+  })
+  const span = Math.max(1, ...rows.map((row) => row.end))
+  const tickCount = 5
+  return (
+    <div className="px-3 py-2">
+      <div className="relative ml-[200px] mb-1 h-3 text-[9px] text-muted">
+        {Array.from({ length: tickCount + 1 }, (_, index) => {
+          const value = (span / tickCount) * index
+          return <span key={index} className="absolute -translate-x-1/2 whitespace-nowrap" style={{ left: `${(index / tickCount) * 100}%` }}>{offsetLabel(value)}</span>
+        })}
+      </div>
+      <ol className="space-y-0.5">
+        {rows.map(({ event, begin, end, duration }, index) => {
+          const meta = EVENT_META[event.event_type] || EVENT_META.view
+          const segments = event.timing && event.event_type === 'resource' ? phaseSegments(event.timing, event.backend) : []
+          const left = (begin / span) * 100
+          const width = Math.max(0.6, ((end - begin) / span) * 100)
+          const failed = event.event_type === 'error' || (event.status_code != null && event.status_code >= 400)
+          return (
+            <li key={`${event.timestamp}:${index}`} className="flex items-center gap-2 text-[10px]">
+              <div className="flex w-[192px] shrink-0 items-center gap-1.5 overflow-hidden">
+                <span className={cn('flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border border-border', meta.tone)}><meta.icon className="h-2 w-2" /></span>
+                <span className={cn('truncate', failed ? 'text-danger' : 'text-text2')} title={timelineTitle(event)}>{timelineTitle(event)}</span>
+              </div>
+              <div className="relative h-3.5 flex-1 rounded bg-surface2/60" title={`${timelineTitle(event)} · starts ${offsetLabel(begin)} · ${duration > 0 ? formatDurationMs(duration) : 'instant'}`}>
+                {duration > 0 ? (
+                  <div className="absolute top-0 h-full overflow-hidden rounded" style={{ left: `${left}%`, width: `${width}%` }}>
+                    {segments.length ? <PhaseBar segments={segments} height={14} className="rounded" /> : <div className={cn('h-full w-full rounded', failed ? 'bg-danger/70' : event.event_type === 'action' ? 'bg-info/70' : event.event_type === 'long_task' ? 'bg-warning/70' : 'bg-accent/60')} />}
+                  </div>
+                ) : (
+                  <div className={cn('absolute top-0.5 h-2.5 w-2.5 rotate-45 rounded-sm', failed ? 'bg-danger' : 'bg-info')} style={{ left: `calc(${left}% - 5px)` }} />
+                )}
+              </div>
+              <span className="w-14 shrink-0 text-right font-mono tabular-nums text-muted">{duration > 0 ? formatDurationMs(duration) : ''}</span>
+            </li>
+          )
+        })}
+      </ol>
+    </div>
   )
 }
 
@@ -602,12 +857,12 @@ function SessionDetailPanel({ fallback, detail, loading, error, onRetry }: { fal
   )
 }
 
-function titleFor(kind: RumDetailKind, selected: Selected, detail?: RumSessionDetail): { title: string; description: string; icon: typeof Activity } {
+function titleFor(kind: RumDetailKind, selected: Selected, detail?: RumSessionDetail, errorDetail?: RumErrorDetail): { title: string; description: string; icon: typeof Activity } {
   if (kind === 'session') {
     const sessionId = (detail?.session ?? selected as RumSession | undefined)?.session_id ?? ''
     return { title: `Session ${sessionId.length > 12 ? `${sessionId.slice(0, 8)}…` : sessionId}`, description: 'Chronological real-user journey and backend correlation.', icon: UserRound }
   }
-  if (kind === 'error') return { title: (selected as RumError | undefined)?.error_type || 'JavaScript error', description: 'Impact, source context and representative backend trace.', icon: FileWarning }
+  if (kind === 'error') return { title: (selected as RumError | undefined)?.error_type || errorDetail?.error_type || 'JavaScript error', description: 'Impact, lifecycle, symbolicated stack and what the user did before it.', icon: FileWarning }
   if (kind === 'resource') return { title: (selected as RumResource | undefined)?.name || 'Resource', description: 'Real-user request performance and failure context.', icon: Network }
   if (kind === 'action') return { title: (selected as RumAction | undefined)?.name || 'User action', description: 'Interaction volume, latency and frustration context.', icon: MousePointerClick }
   return { title: (selected as RumView | undefined)?.view_name || 'View details', description: 'Route-level performance and user impact.', icon: Layers3 }
@@ -621,6 +876,13 @@ export function RumDetailDialog({
   sessionLoading,
   sessionError,
   onRetrySession,
+  errorDetail,
+  errorLoading,
+  errorError,
+  onRetryError,
+  onIssueStatus,
+  issueUpdating,
+  onOpenSession,
   onClose,
   onDrill,
 }: {
@@ -631,10 +893,17 @@ export function RumDetailDialog({
   sessionLoading?: boolean
   sessionError?: unknown
   onRetrySession?: () => void
+  errorDetail?: RumErrorDetail
+  errorLoading?: boolean
+  errorError?: unknown
+  onRetryError?: () => void
+  onIssueStatus?: (input: { fingerprint: string; application_id: string; env: string; status: 'open' | 'resolved' | 'ignored'; note: string; release: string }) => void
+  issueUpdating?: boolean
+  onOpenSession?: (sessionId: string) => void
   onClose: () => void
   onDrill: (tab: 'sessions' | 'errors' | 'resources', viewName: string) => void
 }) {
-  const meta = titleFor(kind, selected, sessionDetail)
+  const meta = titleFor(kind, selected, sessionDetail, errorDetail)
   const Icon = meta.icon
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next) onClose() }}>
@@ -649,7 +918,7 @@ export function RumDetailDialog({
         <div className="p-5">
           {kind === 'session' ? <SessionDetailPanel fallback={selected as RumSession | undefined} detail={sessionDetail} loading={sessionLoading} error={sessionError} onRetry={onRetrySession} />
             : kind === 'view' && selected ? <ViewDetail view={selected as RumView} onDrill={onDrill} />
-              : kind === 'error' && selected ? <ErrorDetail error={selected as RumError} />
+              : kind === 'error' && (selected || errorDetail || errorLoading || errorError) ? <ErrorDetail row={selected as RumError | undefined} detail={errorDetail} loading={errorLoading} loadError={errorError} onRetry={onRetryError} onIssueStatus={onIssueStatus} issueUpdating={issueUpdating} onOpenSession={onOpenSession} onDrill={onDrill} />
                 : kind === 'resource' && selected ? <ResourceDetail resource={selected as RumResource} />
                   : kind === 'action' && selected ? <ActionDetail action={selected as RumAction} />
                     : <div className="py-16 text-center text-xs text-muted">This record is not on the current result page. Return to the list and open it again.</div>}

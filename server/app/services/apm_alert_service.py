@@ -67,6 +67,7 @@ RED_PULL_METRICS = {
 RUM_PULL_METRICS = {
     "apm_rum_lcp_p75", "apm_rum_inp_p75", "apm_rum_cls_p75",
     "apm_rum_error_session_rate", "apm_rum_resource_failure_rate",
+    "apm_rum_new_error_groups",
 }
 APM_PULL_METRICS = RED_PULL_METRICS | RUM_PULL_METRICS
 _RUM_SCOPE_SEPARATOR = " @ "
@@ -191,6 +192,24 @@ def _rum_fleet(window_s: int) -> dict[str, dict]:
             """,
             parameters={"s": win.start_str},
         ).result_rows
+        # Error groups first seen inside this window (never seen in the 14-day
+        # raw retention before it) — "a new kind of error appeared".
+        new_groups = client.query(
+            """
+            SELECT application_id, env, count() FROM (
+                SELECT application_id, env,
+                       if(error_fingerprint != '', error_fingerprint,
+                          lower(hex(MD5(concat(error_type, ':', error_message))))) AS fp,
+                       min(timestamp) AS first_seen
+                FROM zenplus.apm_rum_events
+                WHERE timestamp >= now() - INTERVAL 14 DAY AND event_type = 'error'
+                  AND application_id != ''
+                GROUP BY application_id, env, fp
+                HAVING first_seen >= %(s)s
+            ) GROUP BY application_id, env
+            """,
+            parameters={"s": win.start_str},
+        ).result_rows
     except Exception as exc:
         logger.warning("RUM alert: ClickHouse field-metric query failed: %s", exc)
         return {}
@@ -221,6 +240,14 @@ def _rum_fleet(window_s: int) -> dict[str, dict]:
             metrics["apm_rum_inp_p75"] = float(inp)
         if int(cls_samples or 0) > 0:
             metrics["apm_rum_cls_p75"] = float(cls)
+    for app, env, groups in new_groups:
+        scope = f"{app}{_RUM_SCOPE_SEPARATOR}{env or 'unknown'}"
+        metrics = out.setdefault(scope, {"application_id": str(app), "env": str(env or "unknown")})
+        metrics["apm_rum_new_error_groups"] = float(groups or 0)
+    # Scopes with sessions but no new groups must still evaluate to 0 so a
+    # "> 0" rule resolves once the burst is over.
+    for scope, metrics in out.items():
+        metrics.setdefault("apm_rum_new_error_groups", 0.0)
     return out
 
 
@@ -246,6 +273,8 @@ def _detail(metric: str, value: float) -> str:
         return f"error-affected sessions {value * 100:.2f}%"
     if metric == "apm_rum_resource_failure_rate":
         return f"failed browser resources {value * 100:.2f}%"
+    if metric == "apm_rum_new_error_groups":
+        return f"{value:.0f} new browser error group{'' if value == 1 else 's'}"
     return f"{value:.3f}"
 
 

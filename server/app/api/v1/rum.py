@@ -9,6 +9,7 @@ read APIs -- never from treating the token as a secret.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import hmac
 import json
@@ -18,13 +19,14 @@ import time
 import uuid
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.apm import authenticate_ingest_key
@@ -34,6 +36,8 @@ from app.core.database import get_ch_client, get_db
 from app.core.security import get_current_user
 from app.services import geoip
 from app.services.rum_routes import apply_route_rules, rules_from_options
+from app.services import rum_symbolicate
+from app.core.security import require_operator_user
 
 router = APIRouter(tags=["APM RUM"])
 
@@ -2429,6 +2433,8 @@ async def rum_errors(
     page_size: int = Query(default=25, ge=1, le=100),
     sort: str = "count",
     order: OrderName = "desc",
+    status: IssueStatusFilter | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
     _user=Depends(get_current_user),
 ):
     sort_sql = _ERROR_SORTS.get(sort)
@@ -2441,6 +2447,30 @@ async def rum_errors(
     )
     params.update(limit=page_size, offset=(page - 1) * page_size)
     fingerprint = _ERROR_FINGERPRINT_SQL
+    status = _str_param(status)
+    # Lifecycle state lives in Postgres; translate a status filter into a
+    # fingerprint allow/deny list for the ClickHouse query.
+    issue_rows = await _issue_rows(db, application_id, env)
+    status_of = {(r["application_id"], r["env"], r["fingerprint"]): r for r in issue_rows}
+    known_filter = ""
+    if status in ("resolved", "ignored", "regressed"):
+        wanted = [r["fingerprint"] for r in issue_rows if r["status"] == ("resolved" if status == "regressed" else status)]
+        params["status_fps"] = wanted or ["__none__"]
+        known_filter = f" AND {fingerprint} IN {{status_fps:Array(String)}}"
+    elif status == "open":
+        closed = [r["fingerprint"] for r in issue_rows if r["status"] in ("resolved", "ignored")]
+        if closed:
+            params["status_fps"] = closed
+            known_filter = f" AND {fingerprint} NOT IN {{status_fps:Array(String)}}"
+    elif status == "new":
+        params["retention_from"] = datetime.now(timezone.utc) - timedelta(seconds=RAW_RETENTION_SECONDS)
+        known_filter = f"""
+            AND {fingerprint} IN (
+                SELECT {fingerprint} FROM zenplus.apm_rum_events
+                WHERE timestamp >= {{retention_from:DateTime64(3)}} AND event_type = 'error'
+                GROUP BY {fingerprint} HAVING min(timestamp) >= {{frm:DateTime64(3)}}
+            )"""
+    scope_sql = scope_sql + known_filter
 
     def query():
         total = _ch().query(f"""
@@ -2467,9 +2497,30 @@ async def rum_errors(
             ORDER BY {sort_sql} {order.upper()}, fingerprint ASC
             LIMIT {{limit:UInt32}} OFFSET {{offset:UInt64}}
         """, parameters=params).result_rows
-        return int(total), rows
+        # Earliest occurrence within raw retention, to tell a brand-new group
+        # from one that merely re-appeared in this window.
+        earliest: dict[tuple, datetime] = {}
+        if rows:
+            fps = [r[0] for r in rows]
+            for app_, env_, fp_, first in _ch().query(f"""
+                SELECT application_id, env, {fingerprint} AS fp, min(timestamp)
+                FROM zenplus.apm_rum_events
+                WHERE timestamp >= now() - INTERVAL {RAW_RETENTION_SECONDS} SECOND
+                  AND event_type = 'error' AND fp IN {{fps:Array(String)}}
+                GROUP BY application_id, env, fp
+            """, parameters={"fps": fps}).result_rows:
+                earliest[(app_, env_, fp_)] = first
+        return int(total), rows, earliest
 
-    total, rows = await asyncio.to_thread(query)
+    total, rows, earliest = await asyncio.to_thread(query)
+    items = []
+    for r in rows:
+        issue = _issue_payload(status_of.get((r[10], r[11], r[0])), r[8], earliest.get((r[10], r[11], r[0])), window)
+        if status == "regressed" and issue["status"] != "regressed":
+            continue
+        items.append({"issue": issue, "_row": r})
+    if status == "regressed":
+        total = len(items)
     return {
         "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(window),
         "sampling": {
@@ -2478,6 +2529,7 @@ async def rum_errors(
         },
         "items": [
             {
+                "issue": item["issue"],
                 "fingerprint": r[0], "message": r[1], "source": r[2], "stack": r[3],
                 "error_type": r[4], "count": int(r[5]), "sessions": int(r[6]),
                 "first_seen": r[7], "last_seen": r[8], "view_name": r[9],
@@ -2487,7 +2539,7 @@ async def rum_errors(
                 "backend_trace_ids": list(r[19] or []), "sampled_count": int(r[20]),
                 "unsampled_count": int(r[21]),
             }
-            for r in rows
+            for item in items for r in [item["_row"]]
         ],
     }
 
@@ -2496,6 +2548,377 @@ _RESOURCE_SORTS = {
     "count": "event_count", "failed_count": "failed_count",
     "duration_p75": "duration_p75", "size_avg": "size_avg", "last_seen": "last_seen",
 }
+
+
+# ── Error groups: lifecycle, detail, source maps ─────────────────────────────
+
+IssueStatus = Literal["open", "resolved", "ignored"]
+IssueStatusFilter = Literal["open", "new", "regressed", "resolved", "ignored"]
+NEW_ISSUE_WINDOW_SECONDS = 24 * 3600
+SOURCE_MAP_MAX_BYTES = 25 * 1024 * 1024
+
+
+async def _issue_rows(db: AsyncSession, application_id: str | None, env: str | None) -> list[dict]:
+    clauses, params = [], {}
+    if _str_param(application_id):
+        clauses.append("application_id = :app"); params["app"] = application_id
+    if _str_param(env):
+        clauses.append("env = :env"); params["env"] = env
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    try:
+        rows = (await db.execute(text(f"""
+            SELECT application_id, env, fingerprint, status, note, first_seen_release,
+                   resolved_at, resolved_release, updated_by, updated_at
+            FROM rum_issues {where}
+        """), params)).mappings().all()
+    except Exception:
+        return []
+    return [dict(r) for r in rows]
+
+
+def _issue_payload(row: dict | None, last_seen, earliest, window: RumWindow) -> dict:
+    """Effective lifecycle state of one group.
+
+    ``new``: first ever occurrence (within raw retention) is inside the window
+    and less than a day old. ``regressed``: an operator resolved it, and it
+    has occurred again since. Everything else is the stored status.
+    """
+    stored = (row or {}).get("status") or "open"
+    resolved_at = (row or {}).get("resolved_at")
+    effective = stored
+    if stored == "resolved" and resolved_at is not None and last_seen is not None:
+        last = last_seen if last_seen.tzinfo else last_seen.replace(tzinfo=timezone.utc)
+        if last > resolved_at:
+            effective = "regressed"
+    elif stored == "open" and earliest is not None:
+        first = earliest if earliest.tzinfo else earliest.replace(tzinfo=timezone.utc)
+        if first >= window.frm and (datetime.now(timezone.utc) - first).total_seconds() <= NEW_ISSUE_WINDOW_SECONDS:
+            effective = "new"
+    return {
+        "status": effective,
+        "stored_status": stored,
+        "note": (row or {}).get("note") or "",
+        "first_seen_release": (row or {}).get("first_seen_release") or "",
+        "resolved_at": resolved_at,
+        "resolved_release": (row or {}).get("resolved_release") or "",
+        "updated_by": (row or {}).get("updated_by") or "",
+        "updated_at": (row or {}).get("updated_at"),
+        "first_seen_ever": earliest,
+    }
+
+
+class IssueStatusUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: IssueStatus
+    note: str = Field(default="", max_length=2000)
+    application_id: str = Field(..., min_length=1, max_length=128)
+    env: str = Field(default="", max_length=64)
+    release: str = Field(default="", max_length=128)
+
+
+@router.patch("/api/v1/apm/rum/errors/{fingerprint}/status")
+async def rum_error_status(
+    fingerprint: str,
+    body: IssueStatusUpdate,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Resolve, ignore or reopen an error group."""
+    if not 1 <= len(fingerprint) <= 128:
+        raise HTTPException(400, "Invalid fingerprint")
+    actor = str(getattr(user, "username", "") or getattr(user, "email", "") or "")
+    resolving = body.status == "resolved"
+    await db.execute(text("""
+        INSERT INTO rum_issues (application_id, env, fingerprint, status, note, first_seen_release,
+                                resolved_at, resolved_release, updated_by, updated_at)
+        VALUES (:app, :env, :fp, :status, :note, CAST(:release AS VARCHAR),
+                CASE WHEN CAST(:resolving AS BOOLEAN) THEN now() END,
+                CASE WHEN CAST(:resolving AS BOOLEAN) THEN CAST(:release AS VARCHAR) ELSE '' END,
+                :actor, now())
+        ON CONFLICT (application_id, env, fingerprint) DO UPDATE SET
+            status = EXCLUDED.status,
+            note = EXCLUDED.note,
+            resolved_at = CASE WHEN CAST(:resolving AS BOOLEAN) THEN now() ELSE NULL END,
+            resolved_release = CASE WHEN CAST(:resolving AS BOOLEAN) THEN CAST(:release AS VARCHAR) ELSE '' END,
+            updated_by = EXCLUDED.updated_by,
+            updated_at = now()
+    """), {
+        "app": body.application_id, "env": body.env, "fp": fingerprint, "status": body.status,
+        "note": body.note.strip(), "release": body.release, "resolving": resolving, "actor": actor,
+    })
+    await db.commit()
+    row = (await db.execute(text("""
+        SELECT application_id, env, fingerprint, status, note, first_seen_release,
+               resolved_at, resolved_release, updated_by, updated_at
+        FROM rum_issues WHERE application_id = :app AND env = :env AND fingerprint = :fp
+    """), {"app": body.application_id, "env": body.env, "fp": fingerprint})).mappings().first()
+    return {"fingerprint": fingerprint, "issue": _issue_payload(dict(row) if row else None, None, None, _resolve_window("24h"))}
+
+
+async def _source_maps_for(db: AsyncSession, application_id: str, release: str) -> dict[str, tuple[str, bytes]]:
+    """Minified file name → (map id, gzipped map) for a release, falling back to
+    maps uploaded without a release."""
+    try:
+        rows = (await db.execute(text("""
+            SELECT id, file_name, release, map_gzip FROM rum_source_maps
+            WHERE application_id = :app AND (release = :release OR release = '')
+            ORDER BY (release = '') ASC
+        """), {"app": application_id, "release": release or ""})).all()
+    except Exception:
+        return {}
+    maps: dict[str, tuple[str, bytes]] = {}
+    for map_id, file_name, _release, blob in rows:
+        maps.setdefault(file_name, (str(map_id), bytes(blob)))
+    return maps
+
+
+@router.get("/api/v1/apm/rum/errors/{fingerprint}")
+async def rum_error_detail(
+    fingerprint: str,
+    range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    client_ip: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
+    """Everything about one error group: impact, trend, breakdowns, the latest
+    occurrence with a symbolicated stack, and what the user did just before."""
+    if not 1 <= len(fingerprint) <= 128:
+        raise HTTPException(400, "Invalid fingerprint")
+    window = _resolve_window(range_, frm, to)
+    params, scope_sql = _scope(
+        window, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os, client_ip, q=q, user_id=user_id,
+    )
+    params["fp"] = fingerprint
+    params["retention_from"] = datetime.now(timezone.utc) - timedelta(seconds=RAW_RETENTION_SECONDS)
+    group_sql = f"{scope_sql} AND event_type = 'error' AND {_ERROR_FINGERPRINT_SQL} = {{fp:String}}"
+    bucket = window.bucket_seconds
+
+    def query():
+        ch = _ch()
+        summary = ch.query(f"""
+            SELECT count(), uniqExact(session_id), uniqExactIf(user_id, user_id != ''),
+                   min(timestamp), max(timestamp),
+                   argMax(error_message, timestamp), argMax(error_type, timestamp),
+                   argMax(error_source, timestamp), argMax(error_stack, timestamp),
+                   argMax(session_id, timestamp), argMax(view_name, timestamp), argMax(url, timestamp),
+                   argMax(browser, timestamp), argMax(browser_version, timestamp), argMax(os, timestamp),
+                   argMax(service_version, timestamp), argMax(backend_trace_id, timestamp),
+                   argMax(user_id, timestamp), argMax(client_ip, timestamp), argMax(country, timestamp),
+                   any(application_id), any(env), countIf(sampled = 0),
+                   groupUniqArrayIf(50)(backend_trace_id, backend_trace_id != ''),
+                   argMax(device_type, timestamp)
+            FROM zenplus.apm_rum_events WHERE {group_sql}
+        """, parameters=params).result_rows[0]
+        if not int(summary[0] or 0):
+            return None
+        earliest = ch.query(f"""
+            SELECT min(timestamp), argMin(service_version, timestamp) FROM zenplus.apm_rum_events
+            WHERE timestamp >= {{retention_from:DateTime64(3)}} AND event_type = 'error'
+              AND {_ERROR_FINGERPRINT_SQL} = {{fp:String}}
+              AND application_id = {{app:String}} AND env = {{env:String}}
+        """, parameters={**params, "app": summary[20], "env": summary[21]}).result_rows[0]
+        trend = ch.query(f"""
+            SELECT toStartOfInterval(timestamp, INTERVAL {bucket} SECOND) AS b, count(), uniqExact(session_id)
+            FROM zenplus.apm_rum_events WHERE {group_sql} GROUP BY b ORDER BY b
+        """, parameters=params).result_rows
+        def facet(column):
+            return ch.query(f"""
+                SELECT {column}, count(), uniqExact(session_id) FROM zenplus.apm_rum_events
+                WHERE {group_sql} GROUP BY {column} ORDER BY count() DESC LIMIT 8
+            """, parameters=params).result_rows
+        facets = {name: facet(name) for name in ("view_name", "browser", "os", "service_version", "country", "device_type")}
+        releases = ch.query(f"""
+            SELECT service_version, count(), min(timestamp), max(timestamp) FROM zenplus.apm_rum_events
+            WHERE {group_sql} GROUP BY service_version ORDER BY min(timestamp)
+        """, parameters=params).result_rows
+        sessions = ch.query(f"""
+            SELECT session_id, max(timestamp), count(), any(user_id), any(browser), any(view_name)
+            FROM zenplus.apm_rum_events WHERE {group_sql}
+            GROUP BY session_id ORDER BY max(timestamp) DESC LIMIT 6
+        """, parameters=params).result_rows
+        # What the user did in the seconds before the latest occurrence.
+        crumbs = ch.query("""
+            SELECT timestamp, event_type, view_name, action_name, action_type, target,
+                   resource_url, method, status_code, duration_ms, error_message, url
+            FROM zenplus.apm_rum_events
+            WHERE session_id = {sid:String} AND application_id = {app:String} AND env = {env:String}
+              AND timestamp <= {at:DateTime64(3)} AND timestamp >= {at:DateTime64(3)} - INTERVAL 10 MINUTE
+              AND NOT (event_type = 'view' AND is_final = 0 AND end_reason = 'checkpoint')
+            ORDER BY timestamp DESC, is_final ASC LIMIT 12
+        """, parameters={"sid": summary[9], "app": summary[20], "env": summary[21], "at": summary[4]}).result_rows
+        return summary, earliest, trend, facets, releases, sessions, crumbs
+
+    result = await asyncio.to_thread(query)
+    if result is None:
+        raise HTTPException(404, "Error group not found in this window")
+    summary, earliest, trend, facets, releases, sessions, crumbs = result
+    app_id, env_id = summary[20], summary[21]
+    issue_rows = await _issue_rows(db, app_id, env_id)
+    stored = next((r for r in issue_rows if r["fingerprint"] == fingerprint), None)
+    issue = _issue_payload(stored, summary[4], earliest[0], window)
+    issue["first_seen_release"] = issue["first_seen_release"] or (earliest[1] or "")
+
+    stack = summary[8] or ""
+    maps = await _source_maps_for(db, app_id, summary[15] or "")
+    frames, resolved = rum_symbolicate.symbolicate(stack, maps) if stack else ([], 0)
+    frame_rows = [rum_symbolicate.frame_payload(f) for f in frames]
+    breadcrumbs = []
+    for r in reversed(crumbs):
+        kind = r[1]
+        if kind == "error":
+            title = r[10] or "JavaScript error"
+        elif kind == "action":
+            title = r[3] or r[4] or "User action"
+        elif kind == "resource":
+            title = f"{r[7] or 'GET'} {r[6]}" + (f" → {int(r[8])}" if r[8] else "")
+        elif kind == "long_task":
+            title = "Main thread blocked"
+        else:
+            title = r[2] or r[11] or "Page view"
+        breadcrumbs.append({
+            "timestamp": r[0], "event_type": kind, "title": title, "view_name": r[2],
+            "target": r[5] or None, "duration_ms": float(r[9] or 0) or None,
+            "status_code": int(r[8]) if r[8] else None,
+        })
+    return {
+        "fingerprint": fingerprint,
+        "range": window.range,
+        "window": window.payload(),
+        "application_id": app_id,
+        "env": env_id,
+        "message": summary[5], "error_type": summary[6], "source": summary[7],
+        "count": int(summary[0]), "sessions": int(summary[1]), "users": int(summary[2]),
+        "unsampled_count": int(summary[22]),
+        "first_seen": summary[3], "last_seen": summary[4],
+        "first_seen_ever": earliest[0], "first_seen_release": earliest[1] or "",
+        "issue": issue,
+        "trend": {
+            "bucket_seconds": bucket,
+            "series": [{"timestamp": r[0], "errors": int(r[1]), "sessions": int(r[2])} for r in trend],
+        },
+        "facets": {
+            name: [{"value": r[0], "count": int(r[1]), "sessions": int(r[2])} for r in rows]
+            for name, rows in facets.items()
+        },
+        "releases": [
+            {"service_version": r[0], "count": int(r[1]), "first_seen": r[2], "last_seen": r[3]} for r in releases
+        ],
+        "recent_sessions": [
+            {"session_id": r[0], "last_seen": r[1], "count": int(r[2]), "user_id": r[3], "browser": r[4], "view_name": r[5]}
+            for r in sessions
+        ],
+        "latest": {
+            "timestamp": summary[4], "session_id": summary[9], "view_name": summary[10], "url": summary[11],
+            "browser": summary[12], "browser_version": summary[13], "os": summary[14],
+            "service_version": summary[15], "backend_trace_id": summary[16], "user_id": summary[17],
+            "client_ip": summary[18], "country": summary[19], "device_type": summary[24],
+            "stack": stack,
+        },
+        "backend_trace_ids": list(summary[23] or []),
+        "frames": frame_rows,
+        "symbolication": {
+            "frames": len([f for f in frame_rows if f["line"] is not None]),
+            "resolved": resolved,
+            "maps_available": len(maps),
+            "release": summary[15] or "",
+        },
+        "breadcrumbs": breadcrumbs,
+    }
+
+
+@router.get("/api/v1/apm/rum/source-maps")
+async def rum_source_maps(
+    application_id: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
+    clause = "WHERE application_id = :app" if _str_param(application_id) else ""
+    rows = (await db.execute(text(f"""
+        SELECT id, application_id, release, file_name, size_bytes, sources_count, uploaded_by, created_at
+        FROM rum_source_maps {clause} ORDER BY created_at DESC LIMIT 500
+    """), {"app": application_id} if clause else {})).mappings().all()
+    return {"items": [{**dict(r), "id": str(r["id"])} for r in rows]}
+
+
+@router.post("/api/v1/apm/rum/source-maps", status_code=201)
+async def rum_upload_source_map(
+    request: Request,
+    application_id: str = Query(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"),
+    file_name: str = Query(..., min_length=1, max_length=512),
+    release: str = Query(default="", max_length=128),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_operator_user),
+):
+    """Upload one source map. The request body is the map file itself:
+
+        curl -X POST "$ZENPLUS/api/v1/apm/rum/source-maps?application_id=web&release=1.4.0&file_name=app.3f2a1c.js" \\
+             -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \\
+             --data-binary @dist/app.3f2a1c.js.map
+
+    ``file_name`` is the minified file the browser loads (a trailing ``.map``
+    is stripped). Re-uploading the same application/release/file replaces it.
+    """
+    body = await request.body()
+    if len(body) > SOURCE_MAP_MAX_BYTES:
+        raise HTTPException(413, "Source map exceeds 25 MB")
+    try:
+        payload = json.loads(body)
+        assert isinstance(payload, dict) and isinstance(payload.get("mappings"), str)
+    except Exception as exc:
+        raise HTTPException(400, "Body must be a Source Map v3 JSON document") from exc
+    name = rum_symbolicate.file_name_of(file_name)
+    if name.endswith(".map"):
+        name = name[:-4]
+    if not name:
+        raise HTTPException(400, "file_name must be the minified file's name, e.g. app.3f2a1c.js")
+    gz = gzip.compress(body, compresslevel=6)
+    actor = str(getattr(user, "username", "") or getattr(user, "email", "") or "")
+    row = (await db.execute(text("""
+        INSERT INTO rum_source_maps (application_id, release, file_name, map_gzip, size_bytes, sources_count, uploaded_by)
+        VALUES (:app, :release, :file_name, :blob, :size, :sources, :actor)
+        ON CONFLICT (application_id, release, file_name) DO UPDATE SET
+            map_gzip = EXCLUDED.map_gzip, size_bytes = EXCLUDED.size_bytes,
+            sources_count = EXCLUDED.sources_count, uploaded_by = EXCLUDED.uploaded_by, created_at = now()
+        RETURNING id, created_at
+    """), {
+        "app": application_id, "release": release, "file_name": name, "blob": gz,
+        "size": len(body), "sources": len(payload.get("sources") or []), "actor": actor,
+    })).first()
+    await db.commit()
+    rum_symbolicate.decoded_map.cache_clear() if hasattr(rum_symbolicate.decoded_map, "cache_clear") else None
+    rum_symbolicate._decoded.cache_clear()
+    return {
+        "id": str(row[0]), "application_id": application_id, "release": release, "file_name": name,
+        "size_bytes": len(body), "sources_count": len(payload.get("sources") or []), "created_at": row[1],
+    }
+
+
+@router.delete("/api/v1/apm/rum/source-maps/{map_id}", status_code=204)
+async def rum_delete_source_map(
+    map_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(require_operator_user),
+):
+    result = await db.execute(text("DELETE FROM rum_source_maps WHERE id = :id"), {"id": str(map_id)})
+    await db.commit()
+    if not result.rowcount:
+        raise HTTPException(404, "Source map not found")
+    rum_symbolicate._decoded.cache_clear()
+    return Response(status_code=204)
 
 
 @router.get("/api/v1/apm/rum/resources")
