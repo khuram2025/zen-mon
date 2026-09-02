@@ -222,6 +222,8 @@ export type RumFacets = Record<keyof RumFilters, RumFacetValue[]>
 export interface RumVitalMetric {
   p75: number | null
   samples: number
+  /** Rollup windows: samples that carry band counters; the shares below are over these. */
+  rated_samples?: number
   /** Percentage points in the inclusive 0–100 range. */
   good_pct?: number | null
   needs_improvement_pct?: number | null
@@ -291,6 +293,60 @@ export interface RumRelease {
   cls_p75: number | null
   cls_samples: number
   last_seen: string
+  /** First event carrying this release inside the window; drawn as a deploy marker. */
+  first_seen?: string | null
+}
+
+export type RumVitalDimension = 'view_name' | 'device_type' | 'browser' | 'browser_version' | 'os' | 'country' | 'connection_type' | 'service_version'
+
+export interface RumVitalDistribution {
+  samples: number
+  rated_samples?: number
+  thresholds: { good: number; poor: number }
+  percentiles: { p50: number | null; p75: number | null; p90: number | null; p95: number | null }
+  good_pct: number | null
+  needs_improvement_pct: number | null
+  poor_pct: number | null
+  /** Empty on rollup windows (only percentiles and shares are available there). */
+  buckets: Array<{ from: number; to: number | null; count: number }>
+}
+
+export interface RumVitalBreakdownRow {
+  value: string
+  views: number
+  samples: number
+  rated_samples?: number
+  p75: number | null
+  good_pct: number | null
+  needs_improvement_pct: number | null
+  poor_pct: number | null
+  vitals: Record<'lcp' | 'inp' | 'cls', { p75: number | null; samples: number }>
+}
+
+export interface RumVitalAttribution {
+  view_name: string
+  element: string
+  detail: string | null
+  count: number
+  p75: number | null
+  good_pct: number | null
+  needs_improvement_pct: number | null
+  poor_pct: number | null
+}
+
+export interface RumVitalsResponse {
+  range: RumRange
+  window: RumWindow
+  coverage: RumCoverage
+  distribution: Record<'lcp' | 'inp' | 'cls' | 'fcp' | 'ttfb' | 'load', RumVitalDistribution>
+  breakdown: {
+    dimension: RumVitalDimension
+    vital: 'lcp' | 'inp' | 'cls' | 'fcp' | 'ttfb' | 'load'
+    available: boolean
+    rows: RumVitalBreakdownRow[]
+  }
+  attribution: Record<'lcp' | 'cls' | 'inp', RumVitalAttribution[]>
+  releases: Array<{ service_version: string; first_seen: string; views: number }>
 }
 
 export interface RumTimeseriesPoint {

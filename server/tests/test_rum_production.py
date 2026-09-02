@@ -759,13 +759,19 @@ def test_rollup_insert_writes_vital_band_counters():
     # Band counters follow load_samples, matching the migrate-106 column order.
     assert sql.index("AS load_samples") < sql.index("AS lcp_good") < sql.index("FROM zenplus.apm_rum_events")
 
+    for name in ("lcp", "inp", "cls", "fcp", "ttfb", "load"):
+        assert f"AS {name}_rated" in sql
+    assert sql.index("AS load_poor") < sql.index("AS lcp_rated")   # migrate-107 appends after the bands
     digests = [2100.0, 10, 150.0, 10, 0.05, 10, 900.0, 10, 400.0, 10, 2000.0, 10]
-    bands = [8, 1, 10, 0, 5, 2, 10, 0, 10, 0, 6, 3]
+    bands = [8, 1, 10, 10, 0, 10, 5, 2, 10, 10, 0, 10, 10, 0, 10, 6, 3, 10]   # (good, poor, rated) per vital
     payload = rum._rollup_vitals_payload(digests + bands)
     assert payload["lcp"]["good_pct"] == 80.0 and payload["lcp"]["poor_pct"] == 10.0
     assert payload["cls"]["needs_improvement_pct"] == 30.0
-    # Buckets written before the migration carry zero counters → no distribution.
-    legacy = rum._rollup_vitals_payload(digests + [0] * 12)
+    # Shares divide by the rated samples, so buckets that predate the
+    # migration (rated = 0) never drag a window toward "0 % good".
+    mixed = rum._rollup_vitals_payload([2100.0, 100, *digests[2:]] + [4, 1, 5] + bands[3:])
+    assert mixed["lcp"]["samples"] == 100 and mixed["lcp"]["rated_samples"] == 5 and mixed["lcp"]["good_pct"] == 80.0
+    legacy = rum._rollup_vitals_payload(digests + [0] * 18)
     assert legacy["lcp"]["p75"] == 2100.0 and legacy["lcp"]["good_pct"] is None
 
 
@@ -830,3 +836,65 @@ async def test_export_streams_csv_of_the_explorer(monkeypatch):
     assert header == "application_id,env,view_name,views,lcp_p75,last_seen"   # trace-id arrays are skipped
     assert row.startswith("portal,prod,/orders/:id,3,2100.5,")
     assert response.headers["content-disposition"].startswith('attachment; filename="rum-views-24h-')
+
+
+# ── Phase 2: Web Vitals depth ────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_vitals_endpoint_shapes_distribution_breakdown_attribution_and_releases(monkeypatch):
+    now = datetime.now(timezone.utc)
+    statements = []
+
+    class Result:
+        def __init__(self, rows):
+            self.result_rows = rows
+
+    edges = rum.VITAL_HISTOGRAM_EDGES
+
+    def dist_row():
+        row = []
+        for name in rum._VITAL_NAMES:
+            counts = [0] * len(edges[name])
+            counts[0] = 3
+            row += [4, 3, 1, [100.0, 200.0, 300.0, 400.0], *counts]
+        return row
+
+    class CH:
+        def query(self, sql, parameters=None):
+            statements.append(sql)
+            if "quantilesTDigestIf" in sql:
+                return Result([dist_row()])
+            if "dim_value" in sql:
+                return Result([["/checkout", 40, 38, 2339.0, 30, 4, 38, 2339.0, 38, 230.0, 38, 0.15, 38]])
+            if "vital_attribution[" in sql:
+                return Result([["/checkout", "img.hero", "https://cdn/hero.jpg", 12, 4100.0, 7, 2]])
+            if "service_version != ''" in sql:
+                return Result([["2026.09.01", now, 40]])
+            return Result([])
+
+    monkeypatch.setattr(rum, "_ch", lambda: CH())
+    result = await rum.rum_vitals(
+        range_="24h", frm=None, to=None, q=None, user_id=None, application_id=None, env=None,
+        view_name=None, browser=None, device_type=None, country=None, service_version=None,
+        browser_version=None, os=None, client_ip=None, dimension="view_name", vital="lcp",
+        _user=object(),
+    )
+    lcp = result["distribution"]["lcp"]
+    assert lcp["samples"] == 4 and lcp["good_pct"] == 75.0 and lcp["poor_pct"] == 25.0
+    assert lcp["percentiles"] == {"p50": 100.0, "p75": 200.0, "p90": 300.0, "p95": 400.0}
+    assert lcp["buckets"][0] == {"from": 0, "to": 500, "count": 3}
+    assert lcp["buckets"][-1]["to"] is None                     # overflow bucket
+    assert lcp["thresholds"] == {"good": 2500, "poor": 4000}
+    row = result["breakdown"]["rows"][0]
+    assert row["value"] == "/checkout" and row["poor_pct"] == pytest.approx(4 / 38 * 100)
+    assert row["vitals"]["inp"]["p75"] == 230.0
+    assert result["breakdown"]["available"] is True
+    lcp_attr = result["attribution"]["lcp"][0]
+    assert lcp_attr["element"] == "img.hero" and lcp_attr["detail"] == "https://cdn/hero.jpg"
+    assert lcp_attr["poor_pct"] == pytest.approx(7 / 12 * 100)
+    assert result["releases"][0]["service_version"] == "2026.09.01"
+    # Per-view dedupe feeds both the histogram and the breakdown; the breakdown
+    # carries the dimension in via anyIf so a partially-empty column (connection
+    # type) still groups one view once.
+    assert any("anyIf(raw.view_name, raw.view_name != '') AS dim_value" in sql for sql in statements)
+    assert any("ORDER BY poor / greatest(rated, 1) DESC" in sql for sql in statements)

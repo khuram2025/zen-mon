@@ -171,6 +171,16 @@ def _rollup_band_columns() -> str:
         )
         parts.append(f"countIf({present} AND r.{column} <= {good}) AS {name}_good")
         parts.append(f"countIf({present} AND r.{column} > {poor}) AS {name}_poor")
+    for name, _ in VITAL_THRESHOLDS.items():
+        column = _VITAL_RAW_COLUMN.get(name, name)
+        present = (
+            f"sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') "
+            f"AND (has_{name} = 1 OR (sdk_version = '' AND r.{column} > 0))"
+        )
+        # Samples that carry band counters (migrate-107); shares divide by this,
+        # never by the digest sample count, so pre-migration buckets cannot
+        # drag a distribution toward 0 % good.
+        parts.append(f"countIf({present}) AS {name}_rated")
     return ",\n    ".join(parts)
 
 
@@ -1101,7 +1111,9 @@ _VITAL_NAMES = ("lcp", "inp", "cls", "fcp", "ttfb", "load")
 _VITAL_COLUMNS = {"load": "load_ms"}
 
 
-def _per_view_vitals_sql(scope_sql: str, group_by: str = "application_id, env, view_id") -> str:
+def _per_view_vitals_sql(
+    scope_sql: str, group_by: str = "application_id, env, view_id", extra_select: str = "",
+) -> str:
     """One row per page view with its finalized Web Vitals.
 
     Collapses the view lifecycle (view_start, checkpoints, pagehide, final) —
@@ -1116,6 +1128,8 @@ def _per_view_vitals_sql(scope_sql: str, group_by: str = "application_id, env, v
         present = f"raw.final_view AND (raw.has_{name} = 1 OR (raw.sdk_version = '' AND raw.{column} > 0))"
         selects.append(f"argMaxIf(raw.{column}, raw.timestamp, {present}) AS {name}_value")
         selects.append(f"max({present}) AS {name}_present")
+    if extra_select:
+        selects.append(extra_select)
     joined = ",\n                ".join(selects)
     return f"""
             SELECT {group_by},
@@ -1180,26 +1194,27 @@ def _vitals_payload(row: list | tuple) -> dict[str, dict[str, object]]:
 
 
 def _rollup_vitals_payload(row: list | tuple) -> dict[str, dict[str, object]]:
-    """Rollup vitals: 12 digest/sample pairs, then good/poor counters per vital.
+    """Rollup vitals: 12 digest/sample pairs, then (good, poor, rated) per vital.
 
-    Rows written before migrate-106 have zero counters; a distribution is only
-    reported when the counters cover the samples, so old buckets show p75 alone
-    instead of a fabricated 0 % good.
+    Shares are computed over the *rated* samples — those written with band
+    counters (migrate-106/107) — so buckets from before the migration show
+    p75 alone instead of a fabricated 0 % good.
     """
     result = {}
     names = tuple(VITAL_THRESHOLDS)
     for index, name in enumerate(names):
         value, samples = row[index * 2], int(row[index * 2 + 1] or 0)
-        band_offset = len(names) * 2 + index * 2
-        good = int(row[band_offset] or 0) if len(row) > band_offset + 1 else 0
-        poor = int(row[band_offset + 1] or 0) if len(row) > band_offset + 1 else 0
-        if samples and (good or poor):
-            result[name] = _vital(value, samples, good, poor)
+        band_offset = len(names) * 2 + index * 3
+        good = int(row[band_offset] or 0) if len(row) > band_offset + 2 else 0
+        poor = int(row[band_offset + 1] or 0) if len(row) > band_offset + 2 else 0
+        rated = int(row[band_offset + 2] or 0) if len(row) > band_offset + 2 else 0
+        entry = {"p75": _nullable(value, samples), "samples": samples}
+        if rated:
+            entry.update(_band_pcts(rated, good, poor))
+            entry["rated_samples"] = rated
         else:
-            result[name] = {
-                "p75": _nullable(value, samples), "samples": samples,
-                "good_pct": None, "needs_improvement_pct": None, "poor_pct": None,
-            }
+            entry.update({"good_pct": None, "needs_improvement_pct": None, "poor_pct": None})
+        result[name] = entry
     return result
 
 
@@ -1242,7 +1257,7 @@ async def rum_overview(
                 FROM zenplus.apm_rum_metrics_5m WHERE {scope_sql}
             """, parameters=params).result_rows[0]
             band_sums = ", ".join(
-                f"sum({name}_good), sum({name}_poor)" for name in VITAL_THRESHOLDS
+                f"sum({name}_good), sum({name}_poor), sum({name}_rated)" for name in VITAL_THRESHOLDS
             )
             vitals = _ch().query(f"""
                 SELECT quantileTDigestMerge(0.75)(lcp), sum(lcp_samples),
@@ -1260,7 +1275,8 @@ async def rum_overview(
                        uniqCombined64Merge(error_sessions) / greatest(sessions, 1) AS error_session_rate,
                        quantileTDigestMerge(0.75)(lcp), sum(lcp_samples),
                        quantileTDigestMerge(0.75)(inp), sum(inp_samples),
-                       quantileTDigestMerge(0.75)(cls), sum(cls_samples), max(timestamp)
+                       quantileTDigestMerge(0.75)(cls), sum(cls_samples), max(timestamp),
+                       min(timestamp)
                 FROM zenplus.apm_rum_metrics_5m
                 WHERE {scope_sql} AND service_version != ''
                 GROUP BY service_version ORDER BY max(timestamp) DESC LIMIT 20
@@ -1292,7 +1308,8 @@ async def rum_overview(
                    quantileTDigestIf(0.75)(inp, sampled = 1 AND event_type = 'view' AND is_final = 1 AND has_inp = 1),
                    countIf(sampled = 1 AND event_type = 'view' AND is_final = 1 AND has_inp = 1),
                    quantileTDigestIf(0.75)(cls, sampled = 1 AND event_type = 'view' AND is_final = 1 AND has_cls = 1),
-                   countIf(sampled = 1 AND event_type = 'view' AND is_final = 1 AND has_cls = 1), max(timestamp)
+                   countIf(sampled = 1 AND event_type = 'view' AND is_final = 1 AND has_cls = 1), max(timestamp),
+                   min(timestamp)
             FROM zenplus.apm_rum_events
             WHERE {scope_sql} AND service_version != ''
             GROUP BY service_version ORDER BY max(timestamp) DESC LIMIT 20
@@ -1380,7 +1397,7 @@ async def rum_overview(
                 "lcp_p75": _nullable(r[5], r[6]), "lcp_samples": int(r[6]),
                 "inp_p75": _nullable(r[7], r[8]), "inp_samples": int(r[8]),
                 "cls_p75": _nullable(r[9], r[10]), "cls_samples": int(r[10]),
-                "last_seen": r[11],
+                "last_seen": r[11], "first_seen": r[12] if len(r) > 12 else None,
             }
             for r in releases
         ],
@@ -1634,6 +1651,266 @@ def _phase_payload(row: list | tuple) -> dict[str, object]:
         "server_samples": server_samples,
         "duration_p75": _nullable(row[offset + 3], row[offset + 4]),
         "duration_samples": int(row[offset + 4] or 0),
+    }
+
+
+# ── Web Vitals depth ─────────────────────────────────────────────────────────
+
+# Histogram edges per vital; the last edge opens an overflow bucket. Edges are
+# placed so the good / poor thresholds fall on a boundary.
+VITAL_HISTOGRAM_EDGES: dict[str, list[float]] = {
+    "lcp": [0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000, 6000, 8000, 10000],
+    "inp": [0, 50, 100, 150, 200, 300, 400, 500, 750, 1000, 1500, 2000],
+    "cls": [0, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.25, 0.35, 0.5, 0.75, 1.0],
+    "fcp": [0, 500, 1000, 1500, 1800, 2200, 2600, 3000, 4000, 5000, 7000],
+    "ttfb": [0, 200, 400, 600, 800, 1000, 1300, 1600, 1800, 2500, 3500],
+    "load": [0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000, 6000, 8000, 10000],
+}
+_PERCENTILES = (0.5, 0.75, 0.9, 0.95)
+VitalDimension = Literal[
+    "view_name", "device_type", "browser", "browser_version", "os", "country",
+    "connection_type", "service_version",
+]
+VitalName = Literal["lcp", "inp", "cls", "fcp", "ttfb", "load"]
+# Rollup rows carry every dimension except the client's connection type.
+_ROLLUP_DIMENSIONS = {"view_name", "device_type", "browser", "browser_version", "os", "country", "service_version"}
+_ATTRIBUTION = {
+    "lcp": ("lcp.element", "lcp.url"),
+    "cls": ("cls.element", None),
+    "inp": ("inp.target", "inp.event_type"),
+}
+
+
+def _band_pcts(samples: int, good: int, poor: int) -> dict[str, float | None]:
+    if not samples:
+        return {"good_pct": None, "needs_improvement_pct": None, "poor_pct": None}
+    return {
+        "good_pct": good / samples * 100,
+        "needs_improvement_pct": max(samples - good - poor, 0) / samples * 100,
+        "poor_pct": poor / samples * 100,
+    }
+
+
+def _distribution_select(name: str) -> str:
+    good, poor = VITAL_THRESHOLDS[name]
+    edges = VITAL_HISTOGRAM_EDGES[name]
+    present = f"{name}_present = 1"
+    buckets = [
+        f"countIf({present} AND {name}_value >= {lo} AND {name}_value < {hi})"
+        for lo, hi in zip(edges, edges[1:])
+    ]
+    buckets.append(f"countIf({present} AND {name}_value >= {edges[-1]})")
+    return ", ".join([
+        f"countIf({present})",
+        f"countIf({present} AND {name}_value <= {good})",
+        f"countIf({present} AND {name}_value > {poor})",
+        f"quantilesTDigestIf({', '.join(map(str, _PERCENTILES))})({name}_value, {present})",
+        *buckets,
+    ])
+
+
+def _distribution_payload(name: str, row: list | tuple, offset: int) -> tuple[dict[str, object], int]:
+    edges = VITAL_HISTOGRAM_EDGES[name]
+    samples, good, poor = int(row[offset] or 0), int(row[offset + 1] or 0), int(row[offset + 2] or 0)
+    quantiles = list(row[offset + 3] or [])
+    counts = [int(value or 0) for value in row[offset + 4: offset + 4 + len(edges)]]
+    good_limit, poor_limit = VITAL_THRESHOLDS[name]
+    buckets = [
+        {"from": lo, "to": hi, "count": count}
+        for (lo, hi), count in zip(zip(edges, edges[1:]), counts)
+    ]
+    buckets.append({"from": edges[-1], "to": None, "count": counts[-1] if len(counts) == len(edges) else 0})
+    return {
+        "samples": samples,
+        "thresholds": {"good": good_limit, "poor": poor_limit},
+        "percentiles": {
+            f"p{int(q * 100)}": (_nullable(quantiles[i], samples) if i < len(quantiles) else None)
+            for i, q in enumerate(_PERCENTILES)
+        },
+        **_band_pcts(samples, good, poor),
+        "buckets": buckets,
+    }, offset + 4 + len(edges)
+
+
+@router.get("/api/v1/apm/rum/vitals")
+async def rum_vitals(
+    range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    client_ip: str | None = None,
+    dimension: VitalDimension = "view_name",
+    vital: VitalName = "lcp",
+    _user=Depends(get_current_user),
+):
+    """Web Vitals depth: value distributions, a slow-segment breakdown by one
+    dimension, the page elements behind poor LCP / CLS / INP, and release
+    first-seen markers for the trend charts.
+
+    Raw windows measure one sample per page view (see _per_view_vitals_sql);
+    windows beyond raw retention read the rollup, which carries percentiles
+    and good/poor counters but no histogram or attribution.
+    """
+    window = _resolve_window(range_, frm, to)
+    params, scope_sql = _scope(
+        window, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os, client_ip, q=q, user_id=user_id,
+    )
+    good_limit, poor_limit = VITAL_THRESHOLDS[vital]
+    raw_column = _VITAL_RAW_COLUMN.get(vital, vital)
+
+    def query():
+        ch = _ch()
+        if window.rollup:
+            selects = ", ".join(
+                f"quantilesTDigestMerge({', '.join(map(str, _PERCENTILES))})({_VITAL_RAW_COLUMN.get(n, n)}), "
+                f"sum({n}_samples), sum({n}_good), sum({n}_poor), sum({n}_rated)"
+                for n in _VITAL_NAMES
+            )
+            dist_row = ch.query(f"""
+                SELECT {selects} FROM zenplus.apm_rum_metrics_5m WHERE {scope_sql}
+            """, parameters=params).result_rows[0]
+            if dimension in _ROLLUP_DIMENSIONS:
+                breakdown_rows = ch.query(f"""
+                    SELECT {dimension} AS dim_value, uniqCombined64Merge(views) AS views,
+                           sum({vital}_samples) AS samples,
+                           quantileTDigestMerge(0.75)({raw_column}) AS p75,
+                           sum({vital}_good) AS good, sum({vital}_poor) AS poor,
+                           sum({vital}_rated) AS rated,
+                           quantileTDigestMerge(0.75)(lcp), sum(lcp_samples),
+                           quantileTDigestMerge(0.75)(inp), sum(inp_samples),
+                           quantileTDigestMerge(0.75)(cls), sum(cls_samples)
+                    FROM zenplus.apm_rum_metrics_5m WHERE {scope_sql}
+                    GROUP BY dim_value HAVING samples > 0
+                    ORDER BY poor / greatest(rated, 1) DESC, samples DESC LIMIT 50
+                """, parameters=params).result_rows
+            else:
+                breakdown_rows = []
+            release_rows = ch.query(f"""
+                SELECT service_version, min(timestamp), uniqCombined64Merge(views)
+                FROM zenplus.apm_rum_metrics_5m WHERE {scope_sql} AND service_version != ''
+                GROUP BY service_version ORDER BY min(timestamp)
+            """, parameters=params).result_rows
+        else:
+            dist_row = ch.query(f"""
+                SELECT {', '.join(_distribution_select(n) for n in _VITAL_NAMES)}
+                FROM ({_per_view_vitals_sql(scope_sql)})
+            """, parameters=params).result_rows[0]
+            per_view = _per_view_vitals_sql(
+                scope_sql, extra_select=f"anyIf(raw.{dimension}, raw.{dimension} != '') AS dim_value",
+            )
+            breakdown_rows = ch.query(f"""
+                SELECT dim_value, count() AS views,
+                       countIf({vital}_present = 1) AS samples,
+                       quantileTDigestIf(0.75)({vital}_value, {vital}_present = 1) AS p75,
+                       countIf({vital}_present = 1 AND {vital}_value <= {good_limit}) AS good,
+                       countIf({vital}_present = 1 AND {vital}_value > {poor_limit}) AS poor,
+                       countIf({vital}_present = 1) AS rated,
+                       quantileTDigestIf(0.75)(lcp_value, lcp_present = 1), countIf(lcp_present = 1),
+                       quantileTDigestIf(0.75)(inp_value, inp_present = 1), countIf(inp_present = 1),
+                       quantileTDigestIf(0.75)(cls_value, cls_present = 1), countIf(cls_present = 1)
+                FROM ({per_view})
+                GROUP BY dim_value HAVING samples > 0
+                ORDER BY poor / greatest(rated, 1) DESC, samples DESC LIMIT 50
+            """, parameters=params).result_rows
+            release_rows = ch.query(f"""
+                SELECT service_version, min(timestamp),
+                       uniqExactIf((application_id, env, view_id), event_type = 'view')
+                FROM zenplus.apm_rum_events WHERE {scope_sql} AND service_version != '' AND sampled = 1
+                GROUP BY service_version ORDER BY min(timestamp)
+            """, parameters=params).result_rows
+        # Attribution lives on raw final view events only (14-day retention).
+        attribution: dict[str, list] = {}
+        raw_params, raw_scope = params, scope_sql
+        for name, (primary, secondary) in _ATTRIBUTION.items():
+            column = _VITAL_RAW_COLUMN.get(name, name)
+            good_n, poor_n = VITAL_THRESHOLDS[name]
+            secondary_sql = f"vital_attribution['{secondary}']" if secondary else "''"
+            rows = ch.query(f"""
+                SELECT view_name, vital_attribution['{primary}'] AS element, {secondary_sql} AS detail,
+                       count() AS n, quantileTDigest(0.75)({column}) AS p75,
+                       countIf({column} > {poor_n}) AS poor, countIf({column} <= {good_n}) AS good
+                FROM zenplus.apm_rum_events
+                WHERE {raw_scope} AND sampled = 1 AND event_type = 'view' AND is_final = 1
+                  AND has_{name} = 1 AND vital_attribution['{primary}'] != ''
+                GROUP BY view_name, element, detail
+                ORDER BY poor DESC, n DESC LIMIT 12
+            """, parameters=raw_params).result_rows
+            attribution[name] = [
+                {
+                    "view_name": r[0], "element": r[1], "detail": r[2] or None,
+                    "count": int(r[3]), "p75": _nullable(r[4], r[3]),
+                    **_band_pcts(int(r[3]), int(r[6]), int(r[5])),
+                }
+                for r in rows
+            ]
+        return dist_row, breakdown_rows, release_rows, attribution
+
+    dist_row, breakdown_rows, release_rows, attribution = await asyncio.to_thread(query)
+
+    distribution: dict[str, object] = {}
+    if window.rollup:
+        for index, name in enumerate(_VITAL_NAMES):
+            quantiles = list(dist_row[index * 5] or [])
+            samples = int(dist_row[index * 5 + 1] or 0)
+            good, poor = int(dist_row[index * 5 + 2] or 0), int(dist_row[index * 5 + 3] or 0)
+            rated = int(dist_row[index * 5 + 4] or 0)
+            good_limit_n, poor_limit_n = VITAL_THRESHOLDS[name]
+            distribution[name] = {
+                "samples": samples,
+                "rated_samples": rated,
+                "thresholds": {"good": good_limit_n, "poor": poor_limit_n},
+                "percentiles": {
+                    f"p{int(q_ * 100)}": (_nullable(quantiles[i], samples) if i < len(quantiles) else None)
+                    for i, q_ in enumerate(_PERCENTILES)
+                },
+                **_band_pcts(rated, good, poor),
+                "buckets": [],
+            }
+    else:
+        offset = 0
+        for name in _VITAL_NAMES:
+            distribution[name], offset = _distribution_payload(name, dist_row, offset)
+
+    return {
+        "range": window.range,
+        "window": window.payload(),
+        "coverage": _raw_coverage(window),
+        "distribution": distribution,
+        "breakdown": {
+            "dimension": dimension,
+            "vital": vital,
+            "available": not window.rollup or dimension in _ROLLUP_DIMENSIONS,
+            "rows": [
+                {
+                    "value": r[0], "views": int(r[1]), "samples": int(r[2]),
+                    "p75": _nullable(r[3], r[2]),
+                    "rated_samples": int(r[6]),
+                    **_band_pcts(int(r[6]), int(r[4]), int(r[5])),
+                    "vitals": {
+                        "lcp": {"p75": _nullable(r[7], r[8]), "samples": int(r[8])},
+                        "inp": {"p75": _nullable(r[9], r[10]), "samples": int(r[10])},
+                        "cls": {"p75": _nullable(r[11], r[12]), "samples": int(r[12])},
+                    },
+                }
+                for r in breakdown_rows
+            ],
+        },
+        "attribution": attribution,
+        "releases": [
+            {"service_version": r[0], "first_seen": r[1], "views": int(r[2] or 0)}
+            for r in release_rows
+        ],
     }
 
 

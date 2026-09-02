@@ -20,10 +20,13 @@ import type {
   RumSession,
   RumSessionDetail,
   RumTimeseries,
+  RumVitalDimension,
+  RumVitalsResponse,
   RumView,
 } from '@/types/apm'
 import { RumDetailDialog } from './rum/RumDetailDialog'
-import { RumOverviewPanel, RumWebVitalsPanel } from './rum/RumOverview'
+import { RumOverviewPanel } from './rum/RumOverview'
+import { RumWebVitalsPanel } from './rum/RumVitals'
 import {
   RumActionsTable,
   RumErrorsTable,
@@ -46,7 +49,7 @@ import {
   RumTabBar,
 } from './rum/RumUi'
 import { useRumUrlState } from './rum/useRumUrlState'
-import { buildRumHref, formatWindowLabel, parseUtc, volumeBuckets } from './rum/model'
+import { buildRumHref, formatWindowLabel, parseUtc, volumeBuckets, type RumVitalName } from './rum/model'
 import { relativeTime } from '@/lib/utils'
 
 const REFRESH_MS = 30_000
@@ -108,6 +111,14 @@ export function RumPage() {
   const healthQ = useQuery<RumIngestHealth>({
     queryKey: ['apm', 'rum', 'health', commonQuery],
     queryFn: () => get(`/apm/rum/health?${commonQuery}`),
+    refetchInterval: REFRESH_MS,
+  })
+  const [vitalDimension, setVitalDimension] = useState<RumVitalDimension>('view_name')
+  const [vitalMetric, setVitalMetric] = useState<RumVitalName>('lcp')
+  const vitalsQ = useQuery<RumVitalsResponse>({
+    queryKey: ['apm', 'rum', 'vitals', commonQuery, vitalDimension, vitalMetric],
+    queryFn: () => get(`/apm/rum/vitals?${commonQuery}&dimension=${vitalDimension}&vital=${vitalMetric}`),
+    enabled: state.tab === 'web-vitals',
     refetchInterval: REFRESH_MS,
   })
   const breakdownQ = useQuery<RumBreakdown>({
@@ -215,7 +226,7 @@ export function RumPage() {
     return undefined
   }, [actionsQ.data?.items, errorsQ.data?.items, resourcesQ.data?.items, sessionsQ.data?.items, state.detailId, state.detailKind, viewsQ.data?.items])
 
-  const anyFetching = overviewQ.isFetching || timeseriesQ.isFetching || facetsQ.isFetching || viewsQ.isFetching || errorsQ.isFetching || sessionsQ.isFetching || resourcesQ.isFetching || actionsQ.isFetching
+  const anyFetching = overviewQ.isFetching || timeseriesQ.isFetching || vitalsQ.isFetching || facetsQ.isFetching || viewsQ.isFetching || errorsQ.isFetching || sessionsQ.isFetching || resourcesQ.isFetching || actionsQ.isFetching
   const noTelemetry = !filtered && overviewQ.data?.totals.events === 0
   const lastEventAt = healthQ.data?.last_event_at
   const lastEventAge = lastEventAt ? Date.now() - parseUtc(lastEventAt) : Number.NaN
@@ -290,7 +301,24 @@ export function RumPage() {
         exploreTo={exploreTo}
       />
     )
-    if (state.tab === 'web-vitals' && overviewQ.data) return <RumWebVitalsPanel overview={overviewQ.data} timeseries={timeseriesQ.data} loading={timeseriesQ.isLoading} error={timeseriesQ.error} onRetry={() => timeseriesQ.refetch()} />
+    if (state.tab === 'web-vitals' && overviewQ.data) return (
+      <RumWebVitalsPanel
+        overview={overviewQ.data}
+        timeseries={timeseriesQ.data}
+        vitals={vitalsQ.data}
+        vitalsLoading={vitalsQ.isLoading}
+        vitalsError={vitalsQ.error}
+        onRetryVitals={() => vitalsQ.refetch()}
+        loading={timeseriesQ.isLoading}
+        error={timeseriesQ.error}
+        onRetry={() => timeseriesQ.refetch()}
+        dimension={vitalDimension}
+        vital={vitalMetric}
+        onDimension={setVitalDimension}
+        onVital={setVitalMetric}
+        onFilter={state.setFilter}
+      />
+    )
     if (state.tab === 'views') return (
       <RumExplorerShell noun="routes" onExport={() => exportCsv('views')} exporting={exporting} total={viewsQ.data?.total} volume={volume(totals?.views, 'page views')} rangeLabel={rangeLabel} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { ok: 'views', err: 'errors' }, { ok: 'Page views', err: 'JS errors' }, state.bounds)} okLabel="Page views" errLabel="JS errors">
         <RumViewsTable embedded {...sharedTableProps} data={viewsQ.data} loading={viewsQ.isLoading} error={viewsQ.error} onRetry={() => viewsQ.refetch()} onOpen={(row) => state.openDetail('view', viewRowKey(row))} />

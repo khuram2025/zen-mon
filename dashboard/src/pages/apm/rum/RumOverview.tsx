@@ -35,6 +35,7 @@ import {
   formatRumVital,
 } from './RumUi'
 import { PHASE_COLORS, PhaseBar, PhaseLegend, phaseSegments } from './RumBreakdown'
+import { releaseMarkers } from './RumVitals'
 
 interface OverviewProps {
   overview: RumOverview
@@ -393,12 +394,13 @@ export function RumOverviewPanel(props: OverviewProps) {
 
       <div className="grid gap-2.5 xl:grid-cols-[minmax(0,2fr),minmax(280px,1fr)]">
         {props.trendsError ? <QueryErrorPanel label="experience trends" error={props.trendsError} onRetry={props.onRetryTrends} /> : (
-          <ChartPanel title="Real-user experience over time" hint="Sampled views and sessions, plus all retained JavaScript errors">
+          <ChartPanel title="Real-user experience over time" hint="Sampled views and sessions, plus all retained JavaScript errors. Dashed markers: first traffic of a release.">
             <ApmTimeChart
               data={series}
               loading={props.trendsLoading}
               empty="No experience samples match this segment."
               height={250}
+              markers={releaseMarkers(d.releases, d.window)}
               series={[
                 { key: 'views', name: 'Views', color: APM_SERIES.throughput, type: 'bar', fmt: fmtCount },
                 { key: 'sessions', name: 'Sessions', color: APM_SERIES.users, fmt: fmtCount },
@@ -495,59 +497,6 @@ export function RumOverviewPanel(props: OverviewProps) {
           <FacetCard title="Releases" items={props.facets?.service_version} onSelect={(value) => props.onFilter('service_version', value)} />
         </div>
       </section>
-    </div>
-  )
-}
-
-export function RumWebVitalsPanel({ overview, timeseries, loading, error, onRetry, exploreTo }: {
-  overview: RumOverview
-  timeseries?: RumTimeseries
-  loading?: boolean
-  error?: unknown
-  onRetry?: () => void
-  exploreTo?: string
-}) {
-  const series = timeseries?.series ?? []
-  const totalSamples = overview.vitals.lcp.samples + overview.vitals.inp.samples + overview.vitals.cls.samples
-  return (
-    <div className="space-y-3">
-      <div className="grid gap-2.5 xl:grid-cols-4">
-        <RumExperienceCard vitals={overview.vitals} href={exploreTo} />
-        <RumVitalCard name="lcp" metric={overview.vitals.lcp} />
-        <RumVitalCard name="inp" metric={overview.vitals.inp} />
-        <RumVitalCard name="cls" metric={overview.vitals.cls} />
-      </div>
-      <div className="grid gap-2.5 md:grid-cols-3">
-        <RumVitalCard name="fcp" metric={overview.vitals.fcp} compact />
-        <RumVitalCard name="ttfb" metric={overview.vitals.ttfb} compact />
-        <RumVitalCard name="load" metric={overview.vitals.load} compact />
-      </div>
-      <div className="rounded-md border border-info/25 bg-info/5 px-3 py-1.5 text-[11px] leading-snug text-text2">
-        <div className="flex items-start gap-2"><Gauge className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" /><p><span className="font-semibold text-text">Field performance at p75.</span> At least 75% of measured visits experienced a value at or below each result. Missing samples remain “No data” and are excluded from scoring.</p></div>
-      </div>
-
-      {error ? <QueryErrorPanel label="Web Vital trends" error={error} onRetry={onRetry} /> : totalSamples === 0 && !loading ? (
-        <Card><RumEmptyState icon={Gauge} title="No finalized Web Vital samples" description="Keep the page open long enough for the browser to finalize its view, then refresh this dashboard. Unsupported browsers are excluded rather than reported as zero." /></Card>
-      ) : (
-        <div className="grid gap-2.5 xl:grid-cols-2">
-          <ChartPanel title="Largest Contentful Paint" hint="Good ≤ 2.5s · poor > 4s">
-            <ApmTimeChart data={series} loading={loading} empty="No LCP samples in this window." height={220} series={[{ key: 'lcp_p75', name: 'LCP p75', color: '#7c3aed', fmt: (value) => formatRumVital('lcp', value) }]} />
-          </ChartPanel>
-          <ChartPanel title="Interaction to Next Paint" hint="Good ≤ 200ms · poor > 500ms">
-            <ApmTimeChart data={series} loading={loading} empty="No INP samples in this window." height={220} series={[{ key: 'inp_p75', name: 'INP p75', color: '#0284c7', fmt: (value) => formatRumVital('inp', value) }]} />
-          </ChartPanel>
-          <ChartPanel title="Cumulative Layout Shift" hint="Good ≤ 0.1 · poor > 0.25">
-            <ApmTimeChart data={series} loading={loading} empty="No CLS samples in this window." height={220} series={[{ key: 'cls_p75', name: 'CLS p75', color: '#db2777', fmt: (value) => formatRumVital('cls', value) }]} />
-          </ChartPanel>
-          <ChartPanel title="Navigation timing" hint="FCP, TTFB and full page load">
-            <ApmTimeChart data={series} loading={loading} empty="No navigation timing samples in this window." height={220} series={[
-              { key: 'fcp_p75', name: 'FCP p75', color: '#0891b2', fmt: (value) => formatRumVital('fcp', value) },
-              { key: 'ttfb_p75', name: 'TTFB p75', color: '#f59e0b', fmt: (value) => formatRumVital('ttfb', value) },
-              { key: 'load_p75', name: 'Load p75', color: '#6366f1', fmt: (value) => formatRumVital('load', value) },
-            ]} />
-          </ChartPanel>
-        </div>
-      )}
     </div>
   )
 }

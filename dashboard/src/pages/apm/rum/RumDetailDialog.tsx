@@ -312,6 +312,10 @@ interface ViewSegment {
  */
 function buildSegments(events: RumTimelineEvent[]): ViewSegment[] {
   const segments: ViewSegment[] = []
+  // Lifecycle events of one navigation may arrive out of order when they
+  // share a millisecond (a finalized record sorted ahead of its view_start);
+  // keying by view_id keeps every event of a view in its own segment.
+  const byViewId = new Map<string, ViewSegment>()
   const open = (event: RumTimelineEvent, ts: number, index: number, isView: boolean): ViewSegment => {
     const seg: ViewSegment = {
       key: `${event.view_id || event.view_name || (isView ? 'view' : 'activity')}:${ts}:${index}`,
@@ -324,14 +328,17 @@ function buildSegments(events: RumTimelineEvent[]): ViewSegment[] {
       children: [],
     }
     segments.push(seg)
+    if (isView && event.view_id) byViewId.set(event.view_id, seg)
     return seg
   }
   events.forEach((event, index) => {
     const ts = new Date(event.timestamp).getTime()
     const last = segments[segments.length - 1]
     if (event.event_type === 'view') {
-      const startsNew = !last || event.end_reason === 'view_start' || (!!event.view_id && event.view_id !== last.viewId)
-      const seg = startsNew ? open(event, ts, index, true) : last!
+      const known = event.view_id ? byViewId.get(event.view_id) : undefined
+      const startsNew = !known && (!last || event.end_reason === 'view_start' || (!!event.view_id && event.view_id !== last.viewId))
+      const seg = known ?? (startsNew ? open(event, ts, index, true) : last!)
+      seg.startMs = Math.min(seg.startMs, ts)
       seg.endMs = Math.max(seg.endMs, ts)
       if (!seg.backendTraceId && event.backend_trace_id) seg.backendTraceId = event.backend_trace_id
       const hasVitals = event.lcp != null || event.inp != null || event.cls != null || event.fcp != null || event.ttfb != null || event.load_ms != null
@@ -428,6 +435,14 @@ function SegmentRow({ seg, sessionStart, hidden }: { seg: ViewSegment; sessionSt
           {seg.backendTraceId && <TracePivot traceId={seg.backendTraceId} compact />}
         </div>
       </div>
+      {vitals?.vital_attribution && Object.keys(vitals.vital_attribution).length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 border-b border-border/60 bg-surface2/20 px-3 py-1.5 text-[10px] text-muted">
+          <span className="font-semibold uppercase tracking-wider">Attribution</span>
+          {vitals.vital_attribution['lcp.element'] && <span title={vitals.vital_attribution['lcp.url'] ? `LCP resource: ${vitals.vital_attribution['lcp.url']}` : 'Largest Contentful Paint element'}>LCP <span className="font-mono text-text2">{vitals.vital_attribution['lcp.element']}</span></span>}
+          {vitals.vital_attribution['cls.element'] && <span title="Element that shifted most">CLS <span className="font-mono text-text2">{vitals.vital_attribution['cls.element']}</span></span>}
+          {vitals.vital_attribution['inp.target'] && <span title="Slowest interaction target">INP <span className="font-mono text-text2">{vitals.vital_attribution['inp.target']}</span>{vitals.vital_attribution['inp.event_type'] ? ` (${vitals.vital_attribution['inp.event_type']})` : ''}</span>}
+        </div>
+      )}
       {vitals?.timing && (() => {
         const segments = phaseSegments(vitals.timing, vitals.backend)
         if (!segments.length) return null

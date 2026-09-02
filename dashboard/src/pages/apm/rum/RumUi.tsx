@@ -455,6 +455,9 @@ export function RumVitalCard({ name, metric, compact = false, delta }: { name: R
             </div>
             <div className="mt-1 flex justify-between text-[10px] text-muted">
               <span>{distribution.good == null ? '—' : `${distribution.good.toFixed(0)}% good`}</span>
+              {metric.rated_samples != null && metric.rated_samples < metric.samples && (
+                <span title="Buckets written before the distribution counters existed contribute to p75 but not to this split.">split over {metric.rated_samples.toLocaleString()} rated</span>
+              )}
               <span>{distribution.poor == null ? '—' : `${distribution.poor.toFixed(0)}% poor`}</span>
             </div>
           </div>
