@@ -176,6 +176,9 @@ async def rum_sdk():
         headers={
             "Cache-Control": "public, max-age=300",
             "Access-Control-Allow-Origin": "*",
+            # Lets the customer's page read DNS/connect/TTFB phases for this
+            # cross-origin script instead of an opaque duration-only entry.
+            "Timing-Allow-Origin": "*",
             "X-Content-Type-Options": "nosniff",
             "Cross-Origin-Resource-Policy": "cross-origin",
         },
@@ -869,6 +872,16 @@ def _scope(
     return params, " AND ".join(clauses)
 
 
+# Grouping expressions shared by the explorers and the overview tab counts, so
+# "Displaying N issues" and the Errors tab badge are computed the same way.
+_ERROR_FINGERPRINT_SQL = (
+    "if(error_fingerprint != '', error_fingerprint, "
+    "lower(hex(MD5(concat(error_type, ':', error_message)))))"
+)
+_ACTION_NAME_SQL = "if(event_type = 'long_task', 'Long task', action_name)"
+_ACTION_TYPE_SQL = "if(event_type = 'long_task', 'long_task', action_type)"
+
+
 def _filters_payload(**values) -> dict[str, str]:
     return {key: value for key, value in values.items() if value not in (None, "")}
 
@@ -907,6 +920,38 @@ def _vital(value: object, samples: object, good: object, poor: object) -> dict[s
     }
 
 
+_VITAL_NAMES = ("lcp", "inp", "cls", "fcp", "ttfb", "load")
+_VITAL_COLUMNS = {"load": "load_ms"}
+
+
+def _per_view_vitals_sql(scope_sql: str, group_by: str = "application_id, env, view_id") -> str:
+    """One row per page view with its finalized Web Vitals.
+
+    Collapses the view lifecycle (view_start, checkpoints, pagehide, final) —
+    and legacy clients that re-sent a finalized record under a new event_id —
+    into a single sample per view_id, so every aggregate that reads from it
+    counts each navigation exactly once. `group_by` may carry extra grouping
+    columns (view_name, service_version, …) for the callers that need them.
+    """
+    selects = []
+    for name in _VITAL_NAMES:
+        column = _VITAL_COLUMNS.get(name, name)
+        present = f"raw.final_view AND (raw.has_{name} = 1 OR (raw.sdk_version = '' AND raw.{column} > 0))"
+        selects.append(f"argMaxIf(raw.{column}, raw.timestamp, {present}) AS {name}_value")
+        selects.append(f"max({present}) AS {name}_present")
+    joined = ",\n                ".join(selects)
+    return f"""
+            SELECT {group_by},
+                {joined}
+            FROM (
+                SELECT *, event_type = 'view' AND (is_final = 1 OR sdk_version = '') AS final_view
+                FROM zenplus.apm_rum_events
+                WHERE {scope_sql} AND view_id != '' AND sampled = 1
+            ) AS raw
+            GROUP BY {group_by}
+    """
+
+
 def _vitals_query(scope_sql: str) -> str:
     # The nested query enforces one sample per view even for legacy clients that
     # retried a finalized record with a different event_id.
@@ -925,26 +970,24 @@ def _vitals_query(scope_sql: str) -> str:
             quantileTDigestIf(0.75)(load_value, load_present = 1), countIf(load_present = 1),
             countIf(load_present = 1 AND load_value <= 2500), countIf(load_present = 1 AND load_value > 4000)
         FROM (
-            SELECT application_id, env, view_id,
-                argMaxIf(raw.lcp, raw.timestamp, raw.final_view AND (raw.has_lcp = 1 OR (raw.sdk_version = '' AND raw.lcp > 0))) AS lcp_value,
-                max(raw.final_view AND (raw.has_lcp = 1 OR (raw.sdk_version = '' AND raw.lcp > 0))) AS lcp_present,
-                argMaxIf(raw.inp, raw.timestamp, raw.final_view AND (raw.has_inp = 1 OR (raw.sdk_version = '' AND raw.inp > 0))) AS inp_value,
-                max(raw.final_view AND (raw.has_inp = 1 OR (raw.sdk_version = '' AND raw.inp > 0))) AS inp_present,
-                argMaxIf(raw.cls, raw.timestamp, raw.final_view AND (raw.has_cls = 1 OR (raw.sdk_version = '' AND raw.cls > 0))) AS cls_value,
-                max(raw.final_view AND (raw.has_cls = 1 OR (raw.sdk_version = '' AND raw.cls > 0))) AS cls_present,
-                argMaxIf(raw.fcp, raw.timestamp, raw.final_view AND (raw.has_fcp = 1 OR (raw.sdk_version = '' AND raw.fcp > 0))) AS fcp_value,
-                max(raw.final_view AND (raw.has_fcp = 1 OR (raw.sdk_version = '' AND raw.fcp > 0))) AS fcp_present,
-                argMaxIf(raw.ttfb, raw.timestamp, raw.final_view AND (raw.has_ttfb = 1 OR (raw.sdk_version = '' AND raw.ttfb > 0))) AS ttfb_value,
-                max(raw.final_view AND (raw.has_ttfb = 1 OR (raw.sdk_version = '' AND raw.ttfb > 0))) AS ttfb_present,
-                argMaxIf(raw.load_ms, raw.timestamp, raw.final_view AND (raw.has_load = 1 OR (raw.sdk_version = '' AND raw.load_ms > 0))) AS load_value,
-                max(raw.final_view AND (raw.has_load = 1 OR (raw.sdk_version = '' AND raw.load_ms > 0))) AS load_present
-            FROM (
-                SELECT *, event_type = 'view' AND (is_final = 1 OR sdk_version = '') AS final_view
-                FROM zenplus.apm_rum_events
-                WHERE {scope_sql} AND view_id != '' AND sampled = 1
-            ) AS raw
-            GROUP BY application_id, env, view_id
+            {_per_view_vitals_sql(scope_sql)}
         )
+    """
+
+
+def _per_route_vitals_sql(scope_sql: str) -> str:
+    """Per (application, env, view_name) p75 + sample counts, one sample per view_id."""
+    selects = ", ".join(
+        f"quantileTDigestIf(0.75)({name}_value, {name}_present = 1) AS {name}_p75, "
+        f"countIf({name}_present = 1) AS {name}_samples"
+        for name in _VITAL_NAMES
+    )
+    return f"""
+        SELECT application_id, env, view_name, {selects}
+        FROM (
+            {_per_view_vitals_sql(scope_sql, "application_id, env, view_name, view_id")}
+        )
+        GROUP BY application_id, env, view_name
     """
 
 
@@ -987,7 +1030,7 @@ async def rum_overview(
 ):
     params, scope_sql = _scope(
         range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os,
+        service_version, browser_version, os, client_ip,
     )
 
     def query():
@@ -1054,7 +1097,28 @@ async def rum_overview(
         """, parameters=params).result_rows
         return totals, vitals, releases
 
-    totals, vital_row, releases = await asyncio.to_thread(query)
+    def explorer_query():
+        # Row counts of the explorer tabs (routes, sessions, error groups, …).
+        # Always read from raw events because that is what the explorers list,
+        # so the tab badges agree with "Displaying N" even on rollup ranges.
+        return _ch().query(f"""
+            SELECT uniqExactIf((application_id, env, view_name), sampled = 1),
+                   uniqExactIf((application_id, env, session_id), sampled = 1),
+                   uniqExactIf((application_id, env, {_ERROR_FINGERPRINT_SQL}), event_type = 'error'),
+                   uniqExactIf(
+                       (application_id, env, view_name, resource_url, resource_type, method, status_code),
+                       event_type = 'resource' AND sampled = 1
+                   ),
+                   uniqExactIf(
+                       (application_id, env, view_name, {_ACTION_NAME_SQL}, {_ACTION_TYPE_SQL}, target),
+                       event_type IN ('action', 'long_task') AND sampled = 1
+                   )
+            FROM zenplus.apm_rum_events WHERE {scope_sql}
+        """, parameters=params).result_rows[0]
+
+    (totals, vital_row, releases), explorer = await asyncio.to_thread(
+        lambda: (query(), explorer_query())
+    )
     sessions = int(totals[1])
     return {
         "range": range_,
@@ -1070,6 +1134,11 @@ async def rum_overview(
             "resources": int(totals[5]), "actions": int(totals[6]),
             "long_tasks": int(totals[7]), "resource_failures": int(totals[8]),
             "sampled_errors": int(totals[9]), "unsampled_errors": int(totals[10]),
+        },
+        "explorer": {
+            "views": int(explorer[0]), "sessions": int(explorer[1]),
+            "errors": int(explorer[2]), "resources": int(explorer[3]),
+            "actions": int(explorer[4]),
         },
         "rates": {
             "error_session_rate": (int(totals[4]) / sessions) if sessions else None,
@@ -1120,7 +1189,7 @@ async def rum_timeseries(
 ):
     params, scope_sql = _scope(
         range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os,
+        service_version, browser_version, os, client_ip,
     )
     bucket = RANGE_BUCKET_SECONDS[range_]
     if range_ in {"30d", "90d"}:
@@ -1132,7 +1201,9 @@ async def rum_timeseries(
                    quantileTDigestMerge(0.75)(cls), sum(cls_samples),
                    quantileTDigestMerge(0.75)(fcp), sum(fcp_samples),
                    quantileTDigestMerge(0.75)(ttfb), sum(ttfb_samples),
-                   quantileTDigestMerge(0.75)(load_ms), sum(load_samples)
+                   quantileTDigestMerge(0.75)(load_ms), sum(load_samples),
+                   sum(resources), sum(resource_failures), sum(actions), sum(long_tasks),
+                   uniqCombined64Merge(error_sessions)
             FROM zenplus.apm_rum_metrics_5m WHERE {scope_sql}
             GROUP BY bucket ORDER BY bucket
         """, parameters=params).result_rows)
@@ -1157,7 +1228,12 @@ async def rum_timeseries(
                quantileTDigestIf(0.75)(ttfb, sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_ttfb = 1 OR (sdk_version = '' AND ttfb > 0))),
                countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_ttfb = 1 OR (sdk_version = '' AND ttfb > 0))),
                quantileTDigestIf(0.75)(load_ms, sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_load = 1 OR (sdk_version = '' AND load_ms > 0))),
-               countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_load = 1 OR (sdk_version = '' AND load_ms > 0)))
+               countIf(sampled = 1 AND event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_load = 1 OR (sdk_version = '' AND load_ms > 0))),
+               countIf(event_type = 'resource' AND sampled = 1) AS resources,
+               countIf(event_type = 'resource' AND sampled = 1 AND (status_code >= 400 OR attributes['failed'] = 'true')) AS resource_failures,
+               countIf(event_type = 'action' AND sampled = 1) AS actions,
+               countIf(event_type = 'long_task' AND sampled = 1) AS long_tasks,
+               uniqExactIf((application_id, env, session_id), event_type = 'error' AND sampled = 1) AS error_sessions
         FROM zenplus.apm_rum_events WHERE {scope_sql}
         GROUP BY bucket ORDER BY bucket
         """, parameters=params).result_rows)
@@ -1173,6 +1249,9 @@ async def rum_timeseries(
                 "fcp_samples": int(row[11]), "ttfb_p75": _nullable(row[12], row[13]),
                 "ttfb_samples": int(row[13]), "load_p75": _nullable(row[14], row[15]),
                 "load_samples": int(row[15]),
+                "resources": int(row[16] or 0), "resource_failures": int(row[17] or 0),
+                "actions": int(row[18] or 0), "long_tasks": int(row[19] or 0),
+                "error_sessions": int(row[20] or 0),
             }
             for row in rows
         ],
@@ -1196,7 +1275,7 @@ async def rum_facets(
 ):
     params, scope_sql = _scope(
         range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os,
+        service_version, browser_version, os, client_ip,
     )
 
     def query():
@@ -1221,6 +1300,64 @@ async def rum_facets(
     return await asyncio.to_thread(query)
 
 
+def _trace_timings(trace_ids: list[str]) -> dict[str, dict[str, object]]:
+    """Server / database execution time per correlated APM trace.
+
+    Server time is the longest SERVER span (the request handler); database
+    time is the sum of spans that carry a db_system. Missing or expired traces
+    are simply absent from the result, and a storage failure yields {} so the
+    RUM read path never fails because APM is unavailable.
+    """
+    ids = sorted({t for t in trace_ids if t})[:300]
+    if not ids:
+        return {}
+    try:
+        span_rows = _ch().query("""
+            SELECT lower(toString(trace_id)) AS tid,
+                   maxIf(duration_nano, span_kind_str = 'SERVER') / 1e6,
+                   sumIf(duration_nano, db_system != '') / 1e6,
+                   countIf(db_system != ''), count(),
+                   argMaxIf(service_name, duration_nano, span_kind_str = 'SERVER'),
+                   groupUniqArrayIf(3)(db_system, db_system != ''),
+                   max(has_error)
+            FROM zenplus.apm_spans
+            WHERE trace_id IN {tids:Array(String)}
+            GROUP BY tid
+        """, parameters={"tids": ids}).result_rows
+    except Exception:
+        return {}
+    return {
+        row[0]: {
+            "server_ms": float(row[1] or 0), "db_ms": float(row[2] or 0),
+            "db_calls": int(row[3]), "spans": int(row[4]),
+            "service": row[5], "db_systems": list(row[6] or []),
+            "has_error": bool(row[7]),
+        }
+        for row in span_rows
+    }
+
+
+def _summarize_traces(
+    trace_ids: list[str], timings: dict[str, dict[str, object]],
+) -> dict[str, object] | None:
+    """Average execution split over the correlated traces of one resource group."""
+    found = [timings[t] for t in trace_ids if t in timings]
+    with_server = [t for t in found if float(t["server_ms"]) > 0]
+    if not with_server:
+        return None
+    services = Counter(str(t["service"]) for t in with_server if t["service"])
+    return {
+        "server_ms": sum(float(t["server_ms"]) for t in with_server) / len(with_server),
+        "db_ms": sum(float(t["db_ms"]) for t in with_server) / len(with_server),
+        "db_calls": sum(int(t["db_calls"]) for t in with_server),
+        "spans": sum(int(t["spans"]) for t in with_server),
+        "service": services.most_common(1)[0][0] if services else "",
+        "db_systems": sorted({s for t in with_server for s in t["db_systems"]}),
+        "has_error": any(bool(t["has_error"]) for t in with_server),
+        "traces": len(with_server),
+    }
+
+
 _PHASE_COLUMNS = (
     ("redirect", "redirect_ms"), ("dns", "dns_ms"), ("connect", "connect_ms"),
     ("tls", "tls_ms"), ("wait", "wait_ms"), ("download", "download_ms"),
@@ -1235,13 +1372,16 @@ def _phase_select(duration_column: str = "duration_ms") -> str:
         f"quantileTDigestIf(0.75)({column}, has_timing = 1)"
         for _, column in _PHASE_COLUMNS
     )
+    # The headline duration is measured over the same timing-capable rows as
+    # the phases, so the number above the phase bar and the bar itself describe
+    # one population (older SDKs report a duration but no phase split).
     return f"""
         countIf(has_timing = 1), {phase_sql},
         quantileTDigestIf(0.75)(server_ms, has_server_timing = 1),
         quantileTDigestIf(0.75)(db_ms, has_server_timing = 1),
         countIf(has_server_timing = 1),
-        quantileTDigestIf(0.75)({duration_column}, {duration_column} > 0),
-        countIf({duration_column} > 0)
+        quantileTDigestIf(0.75)({duration_column}, has_timing = 1 AND {duration_column} > 0),
+        countIf(has_timing = 1 AND {duration_column} > 0)
     """
 
 
@@ -1311,7 +1451,8 @@ async def rum_breakdown(
                    quantileTDigestIf(0.75)(server_ms, has_server_timing = 1) AS server_p75,
                    quantileTDigestIf(0.75)(db_ms, has_server_timing = 1) AS db_p75,
                    countIf(has_server_timing = 1) AS server_samples,
-                   countIf(status_code >= 400 OR attributes['failed'] = 'true') AS failures
+                   countIf(status_code >= 400 OR attributes['failed'] = 'true') AS failures,
+                   groupUniqArrayIf(50)(backend_trace_id, backend_trace_id != '') AS trace_ids
             FROM zenplus.apm_rum_events
             WHERE {scope_sql} AND sampled = 1 AND event_type = 'resource'
               AND resource_type IN ('fetch', 'xhr') AND resource_url != ''
@@ -1320,26 +1461,38 @@ async def rum_breakdown(
             ORDER BY duration_p75 DESC
             LIMIT 8
         """, parameters=params).result_rows
-        return nav, api, slow
+        timings = _trace_timings([t for row in slow for t in (row[11] or [])])
+        return nav, api, slow, timings
 
-    nav, api, slow = await asyncio.to_thread(query)
+    nav, api, slow, timings = await asyncio.to_thread(query)
+
+    def endpoint(row):
+        server_samples = int(row[9])
+        item = {
+            "url": row[0], "method": row[1], "count": int(row[2]),
+            "duration_p75": _nullable(row[3], row[4]),
+            "wait_p75": _nullable(row[5], row[6]),
+            "server_p75": _nullable(row[7], server_samples),
+            "db_p75": _nullable(row[8], server_samples),
+            "server_samples": server_samples,
+            "server_source": "server-timing" if server_samples else None,
+            "failures": int(row[10]),
+        }
+        backend = _summarize_traces(list(row[11] or []), timings)
+        if not server_samples and backend:
+            # Fall back to the correlated APM traces for the execution split.
+            item.update(
+                server_p75=backend["server_ms"], db_p75=backend["db_ms"],
+                server_samples=int(backend["traces"]), server_source="trace",
+            )
+        return item
+
     return {
         "range": range_,
         "coverage": _raw_coverage(range_),
         "page_loads": _phase_payload(nav),
         "api_requests": _phase_payload(api),
-        "slowest_endpoints": [
-            {
-                "url": row[0], "method": row[1], "count": int(row[2]),
-                "duration_p75": _nullable(row[3], row[4]),
-                "wait_p75": _nullable(row[5], row[6]),
-                "server_p75": _nullable(row[7], row[9]),
-                "db_p75": _nullable(row[8], row[9]),
-                "server_samples": int(row[9]),
-                "failures": int(row[10]),
-            }
-            for row in slow
-        ],
+        "slowest_endpoints": [endpoint(row) for row in slow],
     }
 
 
@@ -1386,30 +1539,42 @@ async def rum_views(
                 WHERE {scope_sql} AND sampled = 1 GROUP BY application_id, env, view_name
             )
         """, parameters=params).result_rows[0][0]
+        # Traffic/error figures aggregate every sampled event on the route; the
+        # Web Vitals come from the per-view dedupe so a navigation that emitted
+        # several finalized records (legacy SDKs, retries) is one sample, matching
+        # the overview and Web Vitals tabs.
+        vital_columns = ", ".join(
+            f"vitals.{name}_p75 AS {name}_p75, vitals.{name}_samples AS {name}_samples"
+            for name in _VITAL_NAMES
+        )
         rows = _ch().query(f"""
-            SELECT application_id, env, view_name, argMax(url, timestamp) AS latest_url,
-                   uniqExactIf(view_id, event_type = 'view') AS views,
-                   uniqExact(session_id) AS sessions,
-                   countIf(event_type = 'error') AS error_count,
-                   uniqExactIf(session_id, event_type = 'error') / greatest(uniqExact(session_id), 1) AS error_session_rate,
-                   quantileTDigestIf(0.75)(lcp, event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_lcp = 1 OR (sdk_version = '' AND lcp > 0))) AS lcp_p75,
-                   countIf(event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_lcp = 1 OR (sdk_version = '' AND lcp > 0))) AS lcp_samples,
-                   quantileTDigestIf(0.75)(inp, event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_inp = 1 OR (sdk_version = '' AND inp > 0))) AS inp_p75,
-                   countIf(event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_inp = 1 OR (sdk_version = '' AND inp > 0))) AS inp_samples,
-                   quantileTDigestIf(0.75)(cls, event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_cls = 1 OR (sdk_version = '' AND cls > 0))) AS cls_p75,
-                   countIf(event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_cls = 1 OR (sdk_version = '' AND cls > 0))) AS cls_samples,
-                   quantileTDigestIf(0.75)(fcp, event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_fcp = 1 OR (sdk_version = '' AND fcp > 0))) AS fcp_p75,
-                   countIf(event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_fcp = 1 OR (sdk_version = '' AND fcp > 0))) AS fcp_samples,
-                   quantileTDigestIf(0.75)(ttfb, event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_ttfb = 1 OR (sdk_version = '' AND ttfb > 0))) AS ttfb_p75,
-                   countIf(event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_ttfb = 1 OR (sdk_version = '' AND ttfb > 0))) AS ttfb_samples,
-                   quantileTDigestIf(0.75)(load_ms, event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_load = 1 OR (sdk_version = '' AND load_ms > 0))) AS load_p75,
-                   countIf(event_type = 'view' AND (is_final = 1 OR sdk_version = '') AND (has_load = 1 OR (sdk_version = '' AND load_ms > 0))) AS load_samples,
-                   max(timestamp) AS last_seen,
-                   anyIf(backend_trace_id, backend_trace_id != '') AS primary_trace_id,
-                   groupUniqArrayIf(20)(backend_trace_id, backend_trace_id != '') AS backend_trace_ids,
-                   argMax(service_version, timestamp) AS latest_service_version
-            FROM zenplus.apm_rum_events WHERE {scope_sql} AND sampled = 1
-            GROUP BY application_id, env, view_name
+            SELECT base.application_id AS application_id, base.env AS env,
+                   base.view_name AS view_name, base.latest_url AS latest_url,
+                   base.views AS views, base.sessions AS sessions,
+                   base.error_count AS error_count,
+                   base.error_session_rate AS error_session_rate,
+                   {vital_columns},
+                   base.last_seen AS last_seen, base.primary_trace_id AS primary_trace_id,
+                   base.backend_trace_ids AS backend_trace_ids,
+                   base.latest_service_version AS latest_service_version
+            FROM (
+                SELECT application_id, env, view_name, argMax(url, timestamp) AS latest_url,
+                       uniqExactIf(view_id, event_type = 'view') AS views,
+                       uniqExact(session_id) AS sessions,
+                       countIf(event_type = 'error') AS error_count,
+                       uniqExactIf(session_id, event_type = 'error') / greatest(uniqExact(session_id), 1) AS error_session_rate,
+                       max(timestamp) AS last_seen,
+                       anyIf(backend_trace_id, backend_trace_id != '') AS primary_trace_id,
+                       groupUniqArrayIf(20)(backend_trace_id, backend_trace_id != '') AS backend_trace_ids,
+                       argMax(service_version, timestamp) AS latest_service_version
+                FROM zenplus.apm_rum_events WHERE {scope_sql} AND sampled = 1
+                GROUP BY application_id, env, view_name
+            ) AS base
+            LEFT JOIN (
+                {_per_route_vitals_sql(scope_sql)}
+            ) AS vitals
+            ON base.application_id = vitals.application_id
+               AND base.env = vitals.env AND base.view_name = vitals.view_name
             ORDER BY {sort_sql} {order.upper()}, view_name ASC
             LIMIT {{limit:UInt32}} OFFSET {{offset:UInt64}}
         """, parameters=params).result_rows
@@ -1493,7 +1658,7 @@ async def rum_sessions(
                    anyIf(backend_trace_id, backend_trace_id != '') AS primary_trace_id,
                    groupUniqArrayIf(100)(backend_trace_id, backend_trace_id != '') AS backend_trace_ids,
                    argMax(sdk_version, timestamp), argMax(service_version, timestamp),
-                   anyIf(client_ip, client_ip != '') AS client_ip
+                   anyIf(client_ip, client_ip != '') AS session_client_ip
             FROM zenplus.apm_rum_events WHERE {scope_sql} AND sampled = 1
             GROUP BY session_id, application_id, env
             ORDER BY {sort_sql} {order.upper()}, session_id ASC
@@ -1605,33 +1770,7 @@ async def rum_session_detail(
             {row[21] for row in events if row[21]}
             | set(list(summary_rows[0][15] or [])[:100])
         )[:300]
-        trace_timings: dict[str, dict[str, object]] = {}
-        if trace_ids:
-            try:
-                span_rows = _ch().query("""
-                    SELECT lower(toString(trace_id)) AS tid,
-                           maxIf(duration_nano, span_kind_str = 'SERVER') / 1e6,
-                           sumIf(duration_nano, db_system != '') / 1e6,
-                           countIf(db_system != ''), count(),
-                           argMaxIf(service_name, duration_nano, span_kind_str = 'SERVER'),
-                           groupUniqArrayIf(3)(db_system, db_system != ''),
-                           max(has_error)
-                    FROM zenplus.apm_spans
-                    WHERE trace_id IN {tids:Array(String)}
-                    GROUP BY tid
-                """, parameters={"tids": trace_ids}).result_rows
-                trace_timings = {
-                    row[0]: {
-                        "server_ms": float(row[1] or 0), "db_ms": float(row[2] or 0),
-                        "db_calls": int(row[3]), "spans": int(row[4]),
-                        "service": row[5], "db_systems": list(row[6] or []),
-                        "has_error": bool(row[7]),
-                    }
-                    for row in span_rows
-                }
-            except Exception:
-                trace_timings = {}
-        return summary_rows[0], events, total, trace_timings
+        return summary_rows[0], events, total, _trace_timings(trace_ids)
 
     summary, events, total, trace_timings = await asyncio.to_thread(query)
     if summary is None:
@@ -1765,7 +1904,7 @@ async def rum_errors(
         service_version, browser_version, os, client_ip,
     )
     params.update(limit=page_size, offset=(page - 1) * page_size)
-    fingerprint = "if(error_fingerprint != '', error_fingerprint, lower(hex(MD5(concat(error_type, ':', error_message)))))"
+    fingerprint = _ERROR_FINGERPRINT_SQL
 
     def query():
         total = _ch().query(f"""
@@ -1878,16 +2017,24 @@ async def rum_resources(
                    quantileTDigestIf(0.75)(server_ms, has_server_timing = 1) AS server_p75,
                    quantileTDigestIf(0.75)(db_ms, has_server_timing = 1) AS db_p75,
                    countIf(has_server_timing = 1) AS server_samples,
-                   anyIf(protocol, protocol != '') AS protocol
+                   anyIf(protocol, protocol != '') AS protocol,
+                   groupUniqArray(5)(sdk_version) AS sdk_versions,
+                   countIf(
+                       has_timing = 1 AND wait_ms = 0 AND dns_ms = 0 AND connect_ms = 0
+                       AND redirect_ms = 0 AND download_ms = 0
+                   ) AS opaque_samples
             FROM zenplus.apm_rum_events
             WHERE {scope_sql} AND event_type = 'resource' AND sampled = 1
             GROUP BY {group}
             ORDER BY {sort_sql} {order.upper()}, resource_url ASC
             LIMIT {{limit:UInt32}} OFFSET {{offset:UInt64}}
         """, parameters=params).result_rows
-        return int(total), rows
+        # Resources without Server-Timing still get an app/db split when their
+        # requests carried a trace header into an APM-instrumented backend.
+        timings = _trace_timings([t for r in rows for t in (r[17] or [])])
+        return int(total), rows, timings
 
-    total, rows = await asyncio.to_thread(query)
+    total, rows, timings = await asyncio.to_thread(query)
     return {
         "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(range_),
         "items": [
@@ -1907,6 +2054,9 @@ async def rum_resources(
                 "download_p75": _nullable(r[22], r[23]), "timing_samples": int(r[23]),
                 "server_p75": _nullable(r[24], r[26]), "db_p75": _nullable(r[25], r[26]),
                 "server_samples": int(r[26]), "protocol": r[27],
+                "sdk_versions": sorted(v for v in (r[28] if len(r) > 28 else []) if v),
+                "opaque_samples": int(r[29]) if len(r) > 29 else 0,
+                "backend": _summarize_traces(list(r[17] or []), timings),
             }
             for r in rows
         ],
@@ -1946,8 +2096,8 @@ async def rum_actions(
         service_version, browser_version, os, client_ip,
     )
     params.update(limit=page_size, offset=(page - 1) * page_size)
-    name_expr = "if(event_type = 'long_task', 'Long task', action_name)"
-    type_expr = "if(event_type = 'long_task', 'long_task', action_type)"
+    name_expr = _ACTION_NAME_SQL
+    type_expr = _ACTION_TYPE_SQL
     group = f"application_id, env, view_name, {name_expr}, {type_expr}, target"
 
     def query():
@@ -2006,7 +2156,7 @@ async def rum_health(
 ):
     params, scope_sql = _scope(
         range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os,
+        service_version, browser_version, os, client_ip,
     )
     try:
         row = await asyncio.to_thread(lambda: _ch().query(f"""

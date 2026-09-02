@@ -125,6 +125,9 @@ export function RequestPathFlow({
     ? timing.db_ms
     : (backend && backend.db_ms > 0 ? backend.db_ms : null)
   const wait = timing?.wait_ms ?? null
+  // When the backend figure is an average over traces it can exceed a p75
+  // browser total; the network share is then not separable rather than zero.
+  const inseparable = serverMs != null && wait != null && wait > 0 && serverMs >= wait
   const networkMs = serverMs != null && wait != null && wait > 0
     ? Math.max(0, wait - Math.min(serverMs, wait))
     : wait
@@ -133,8 +136,10 @@ export function RequestPathFlow({
     {
       id: 'network',
       label: 'Network',
-      hint: [timing?.protocol, serverMs != null ? 'wait − app time' : 'first-byte wait'].filter(Boolean).join(' · '),
-      metric: networkMs != null ? formatDurationMs(networkMs) : undefined,
+      hint: inseparable
+        ? 'backend time ≥ browser total'
+        : [timing?.protocol, serverMs != null ? 'wait − app time' : 'first-byte wait'].filter(Boolean).join(' · '),
+      metric: inseparable ? undefined : networkMs != null ? formatDurationMs(networkMs) : undefined,
       icon: Waypoints,
       tone: 'muted',
     },

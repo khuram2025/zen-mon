@@ -204,7 +204,7 @@ export function ApmFacetSidebar({ title = 'Analytics', groups }: { title?: strin
   )
 }
 
-export type HistogramBucket = { ok: number; err?: number }
+export type HistogramBucket = { ok: number; err?: number; label?: string }
 
 /** Compact volume histogram sitting above an explorer table. */
 export function VolumeHistogram({
@@ -219,6 +219,7 @@ export function VolumeHistogram({
   if (buckets.length < 2) return null
   const max = Math.max(...buckets.map((b) => b.ok + (b.err ?? 0)), 1)
   const hasErr = buckets.some((b) => (b.err ?? 0) > 0)
+  const hasOk = buckets.some((b) => b.ok > 0)
   return (
     <div className="flex items-end gap-3 border-b border-border px-3 py-1.5">
       <div className="flex h-8 min-w-0 flex-1 items-end gap-px">
@@ -227,7 +228,7 @@ export function VolumeHistogram({
           const total = bucket.ok + err
           const height = Math.max(6, (total / max) * 100)
           return (
-            <div key={index} className="flex min-w-0 flex-1 flex-col justify-end rounded-t-sm" style={{ height: `${height}%` }}>
+            <div key={index} title={bucket.label} className="flex min-w-0 flex-1 flex-col justify-end rounded-t-sm" style={{ height: `${height}%` }}>
               {err > 0 && <div className="w-full bg-warning" style={{ height: `${(err / total) * 100}%` }} />}
               {bucket.ok > 0 && <div className="w-full bg-success/70" style={{ height: `${(bucket.ok / total) * 100}%` }} />}
             </div>
@@ -235,8 +236,8 @@ export function VolumeHistogram({
         })}
       </div>
       <div className="flex shrink-0 items-center gap-2.5 pb-0.5 text-[10px] text-muted">
-        <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-success/70" /> {okLabel}</span>
-        {hasErr && <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-warning" /> {errLabel}</span>}
+        {(hasOk || !hasErr) && <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-success/70" /> {okLabel}</span>}
+        {hasErr &&<span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-warning" /> {errLabel}</span>}
       </div>
     </div>
   )

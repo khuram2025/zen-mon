@@ -23,6 +23,9 @@ import type {
   RumView,
 } from '@/types/apm'
 import type { RumSortOrder } from './useRumUrlState'
+import { PhaseBar } from './RumBreakdown'
+import { resourceTimingModel } from './RumDetailDialog'
+import { formatDurationMs } from './model'
 import {
   QueryErrorPanel,
   RumCoverageNotice,
@@ -184,7 +187,7 @@ export function RumErrorsTable({ data, onOpen, ...props }: SharedProps & { data?
                 <button type="button" className="max-w-[360px] truncate text-xs font-medium text-text hover:underline" title={error.message} onClick={(event) => { event.stopPropagation(); onOpen(error) }}>
                   {error.message}
                 </button>
-                <div className="max-w-[360px] truncate font-mono text-[10px] text-muted">{error.error_type || error.source || error.fingerprint}</div>
+                <div className="max-w-[360px] truncate font-mono text-[10px] text-muted" title={error.source || undefined}>{[error.error_type, error.source].filter(Boolean).join(' · ') || 'Unclassified error'}</div>
               </Td>
               <Td><div className="text-xs text-text2">{error.application_id} · {error.env}{error.service_version ? ` · ${error.service_version}` : ''}</div><div className="max-w-[220px] truncate font-mono text-[10px] text-muted">{error.view_name || '/'}</div></Td>
               <Td className="text-right"><div className="font-mono text-xs font-semibold tabular-nums text-danger">{fmtCount(error.count)}</div>{(error.sampled_count != null || error.unsampled_count != null) && <div className="text-[9px] text-muted">{fmtCount(error.sampled_count)} sampled{(error.unsampled_count ?? 0) > 0 ? ` · ${fmtCount(error.unsampled_count)} retained` : ''}</div>}</Td>
@@ -229,7 +232,18 @@ export function RumResourcesTable({ data, onOpen, ...props }: SharedProps & { da
                 <Td><div className="max-w-[220px] truncate font-mono text-xs text-text2">{resource.view_name || '/'}</div><div className="text-[10px] text-muted">{resource.application_id} · {resource.env}</div></Td>
                 <Td className="text-right font-mono text-xs tabular-nums">{fmtCount(resource.count)}</Td>
                 <Td className="text-right"><span className={resource.failed_count ? 'font-mono text-xs text-danger' : 'font-mono text-xs text-success'}>{fmtCount(resource.failed_count)}</span><div className="text-[9px] text-muted">{fmtPct(failedRate)}</div></Td>
-                <Td className="text-right">{resource.duration_p75 == null ? <span className="text-xs text-muted">—</span> : <DurationTimeline ms={resource.duration_p75} maxMs={maxDuration} significant={(resource.failed_count > 0) || resource.duration_p75 >= 1000} />}</Td>
+                <Td className="text-right">{resource.duration_p75 == null ? <span className="text-xs text-muted">—</span> : (() => {
+                  const segments = resourceTimingModel(resource).segments
+                  if (!segments.length) return <DurationTimeline ms={resource.duration_p75} maxMs={maxDuration} significant={(resource.failed_count > 0) || resource.duration_p75 >= 1000} />
+                  return (
+                    <div className="min-w-[5.5rem]">
+                      <div className="text-right font-mono text-[11px] tabular-nums text-text">{formatDurationMs(resource.duration_p75)}</div>
+                      <div className="mt-1" style={{ width: `${Math.max(8, Math.min(100, (resource.duration_p75 / maxDuration) * 100))}%`, marginLeft: 'auto' }}>
+                        <PhaseBar segments={segments} height={8} className="rounded-sm" />
+                      </div>
+                    </div>
+                  )
+                })()}</Td>
                 <Td className="text-right"><div className="font-mono text-xs tabular-nums">{resource.size_avg == null ? '—' : formatBytes(resource.size_avg)}</div>{resource.size_samples != null && <div className="text-[9px] text-muted">n={resource.size_samples.toLocaleString()}</div>}</Td>
                 <Td className="whitespace-nowrap text-right text-xs text-muted">{relativeTime(resource.last_seen)}</Td>
                 <Td><TracePivot traceId={resource.backend_trace_id} compact /></Td>

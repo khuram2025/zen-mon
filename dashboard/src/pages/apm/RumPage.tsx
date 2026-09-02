@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Globe2, Radio, Settings2 } from 'lucide-react'
 import { api } from '@/lib/api'
 import { ApmPageHeader } from '@/components/apm/ApmPageHeader'
+import { fmtCount } from '@/components/apm/viz'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Card } from '@/components/ui/Card'
@@ -45,9 +46,12 @@ import {
   RumTabBar,
 } from './rum/RumUi'
 import { useRumUrlState } from './rum/useRumUrlState'
-import { buildRumHref } from './rum/model'
+import { buildRumHref, parseUtc, volumeBuckets } from './rum/model'
+import { relativeTime } from '@/lib/utils'
 
 const REFRESH_MS = 30_000
+/** An ingest pipeline is "live" when the newest event is at most this old. */
+const LIVE_WINDOW_MS = 15 * 60_000
 const SESSION_PAGE_SIZE = 500
 const MAX_SESSION_TIMELINE_EVENTS = 2_000
 
@@ -92,7 +96,6 @@ export function RumPage() {
   const timeseriesQ = useQuery<RumTimeseries>({
     queryKey: ['apm', 'rum', 'timeseries', commonQuery],
     queryFn: () => get(`/apm/rum/timeseries?${commonQuery}`),
-    enabled: overviewMode || state.tab === 'web-vitals',
     refetchInterval: REFRESH_MS,
   })
   const facetsQ = useQuery<RumFacets>({
@@ -104,7 +107,6 @@ export function RumPage() {
   const healthQ = useQuery<RumIngestHealth>({
     queryKey: ['apm', 'rum', 'health', commonQuery],
     queryFn: () => get(`/apm/rum/health?${commonQuery}`),
-    enabled: overviewMode,
     refetchInterval: REFRESH_MS,
   })
   const breakdownQ = useQuery<RumBreakdown>({
@@ -187,6 +189,25 @@ export function RumPage() {
 
   const anyFetching = overviewQ.isFetching || timeseriesQ.isFetching || facetsQ.isFetching || viewsQ.isFetching || errorsQ.isFetching || sessionsQ.isFetching || resourcesQ.isFetching || actionsQ.isFetching
   const noTelemetry = !filtered && overviewQ.data?.totals.events === 0
+  const lastEventAt = healthQ.data?.last_event_at
+  const lastEventAge = lastEventAt ? Date.now() - parseUtc(lastEventAt) : Number.NaN
+  const receiving = Number.isFinite(lastEventAge) && lastEventAge >= 0 && lastEventAge <= LIVE_WINDOW_MS
+  const ingestBadge = receiving
+    ? { variant: 'success' as const, label: 'Receiving data' }
+    : overviewQ.data?.totals.events
+      ? { variant: 'outline' as const, label: `Last event ${relativeTime(lastEventAt || overviewQ.data.releases?.[0]?.last_seen)}` }
+      : overviewQ.isLoading
+        ? { variant: 'outline' as const, label: 'Checking ingest' }
+        : { variant: 'outline' as const, label: 'No recent data' }
+  const explorerCounts = overviewQ.data?.explorer ?? (overviewQ.data ? {
+    views: overviewQ.data.totals.views,
+    sessions: overviewQ.data.totals.sessions,
+    errors: overviewQ.data.totals.errors,
+    resources: overviewQ.data.totals.resources,
+    actions: overviewQ.data.totals.actions,
+  } : undefined)
+  const totals = overviewQ.data?.totals
+  const volume = (count: number | undefined, noun: string) => (count == null ? undefined : `${fmtCount(count)} ${noun}`)
   const sharedTableProps = {
     page: state.page,
     pageSize: state.pageSize,
@@ -243,27 +264,27 @@ export function RumPage() {
     )
     if (state.tab === 'web-vitals' && overviewQ.data) return <RumWebVitalsPanel overview={overviewQ.data} timeseries={timeseriesQ.data} loading={timeseriesQ.isLoading} error={timeseriesQ.error} onRetry={() => timeseriesQ.refetch()} />
     if (state.tab === 'views') return (
-      <RumExplorerShell noun="views" total={viewsQ.data?.total} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} items={viewsQ.data?.items} getTime={(row) => row.last_seen || ''} isErr={(row) => (row.error_session_rate ?? 0) >= 0.05 || row.errors > 0}>
+      <RumExplorerShell noun="routes" total={viewsQ.data?.total} volume={volume(totals?.views, 'page views')} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { ok: 'views', err: 'errors' }, { ok: 'Page views', err: 'JS errors' })} okLabel="Page views" errLabel="JS errors">
         <RumViewsTable embedded {...sharedTableProps} data={viewsQ.data} loading={viewsQ.isLoading} error={viewsQ.error} onRetry={() => viewsQ.refetch()} onOpen={(row) => state.openDetail('view', viewRowKey(row))} />
       </RumExplorerShell>
     )
     if (state.tab === 'sessions') return (
-      <RumExplorerShell noun="sessions" total={sessionsQ.data?.total} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} items={sessionsQ.data?.items} getTime={(row) => row.last_seen} isErr={(row) => row.errors > 0}>
+      <RumExplorerShell noun="sessions" total={sessionsQ.data?.total} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { ok: 'sessions', err: 'error_sessions', errWithinOk: true }, { ok: 'Sessions', err: 'Sessions with errors' })} okLabel="Healthy" errLabel="With errors">
         <RumSessionsTable embedded {...sharedTableProps} data={sessionsQ.data} loading={sessionsQ.isLoading} error={sessionsQ.error} onRetry={() => sessionsQ.refetch()} onOpen={(row) => state.openDetail('session', row.session_id)} />
       </RumExplorerShell>
     )
     if (state.tab === 'errors') return (
-      <RumExplorerShell noun="issues" total={errorsQ.data?.total} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} items={errorsQ.data?.items} getTime={(row) => row.last_seen} isErr={() => true} okLabel="Other" errLabel="JS errors">
+      <RumExplorerShell noun="issues" total={errorsQ.data?.total} volume={volume(totals?.errors, 'error events')} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { err: 'errors' }, { ok: 'Events', err: 'JS errors' })} okLabel="Events" errLabel="JS errors">
         <RumErrorsTable embedded {...sharedTableProps} data={errorsQ.data} loading={errorsQ.isLoading} error={errorsQ.error} onRetry={() => errorsQ.refetch()} onOpen={(row) => state.openDetail('error', errorRowKey(row))} />
       </RumExplorerShell>
     )
     if (state.tab === 'resources') return (
-      <RumExplorerShell noun="resources" total={resourcesQ.data?.total} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} items={resourcesQ.data?.items} getTime={(row) => row.last_seen} isErr={(row) => row.failed_count > 0}>
+      <RumExplorerShell noun="resources" total={resourcesQ.data?.total} volume={volume(totals?.resources, 'requests')} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { ok: 'resources', err: 'resource_failures', errWithinOk: true }, { ok: 'Requests', err: 'Failed requests' })} okLabel="Succeeded" errLabel="Failed">
         <RumResourcesTable embedded {...sharedTableProps} data={resourcesQ.data} loading={resourcesQ.isLoading} error={resourcesQ.error} onRetry={() => resourcesQ.refetch()} onOpen={(row) => state.openDetail('resource', resourceRowKey(row))} />
       </RumExplorerShell>
     )
     if (state.tab === 'actions') return (
-      <RumExplorerShell noun="actions" total={actionsQ.data?.total} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} items={actionsQ.data?.items} getTime={(row) => row.last_seen} isErr={(row) => row.error_count > 0 || ['rage_click', 'dead_click', 'error_click'].includes(row.action_type)}>
+      <RumExplorerShell noun="actions" total={actionsQ.data?.total} volume={volume(totals?.actions, 'interactions')} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { ok: 'actions', err: 'long_tasks' }, { ok: 'Interactions', err: 'Long tasks' })} okLabel="Interactions" errLabel="Long tasks">
         <RumActionsTable embedded {...sharedTableProps} data={actionsQ.data} loading={actionsQ.isLoading} error={actionsQ.error} onRetry={() => actionsQ.refetch()} onOpen={(row) => state.openDetail('action', actionRowKey(row))} />
       </RumExplorerShell>
     )
@@ -279,9 +300,9 @@ export function RumPage() {
         actions={
           <>
             <RefreshIndicator active={anyFetching && !overviewQ.isLoading} />
-            <Badge variant={overviewQ.data?.totals.events ? 'success' : 'outline'}>
+            <Badge variant={ingestBadge.variant} title={lastEventAt ? `Last event received ${relativeTime(lastEventAt)}` : undefined}>
               <Radio className="h-3 w-3" />
-              {overviewQ.data?.totals.events ? 'Receiving data' : overviewQ.isLoading ? 'Checking ingest' : 'No recent data'}
+              {ingestBadge.label}
             </Badge>
             <Button asChild variant="outline" size="sm">
               <Link to="/apm/settings?tab=keys&create=rum"><Settings2 className="h-4 w-4" /> Setup</Link>
@@ -294,13 +315,7 @@ export function RumPage() {
       <RumTabBar
         value={state.tab}
         onChange={state.setTab}
-        counts={overviewQ.data ? {
-          views: overviewQ.data.totals.views,
-          sessions: overviewQ.data.totals.sessions,
-          errors: overviewQ.data.totals.errors,
-          resources: overviewQ.data.totals.resources,
-          actions: overviewQ.data.totals.actions,
-        } : undefined}
+        counts={explorerCounts}
       />
 
       <RumFilterBar compact={state.tab !== 'overview' && state.tab !== 'web-vitals'} filters={state.filters} facets={facetsQ.data} loading={facetsQ.isLoading} error={facetsQ.isError} activeCount={state.activeFilterCount} onChange={state.setFilter} onClear={state.clearFilters} onRetry={() => facetsQ.refetch()} />

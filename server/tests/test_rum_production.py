@@ -690,3 +690,8 @@ def test_rum_aggregate_queries_do_not_shadow_raw_trace_columns():
     source = (Path(__file__).resolve().parents[1] / "app/api/v1/rum.py").read_text()
     assert re.search(r"\bAS backend_trace_id\b", source) is None
     assert "argMax(service_version, timestamp) AS service_version" not in source
+    # An aggregate aliased to a filter column is resolved inside WHERE by
+    # ClickHouse (ILLEGAL_AGGREGATION) as soon as that filter is applied.
+    for column in ("client_ip", "view_name", "browser", "browser_version", "os",
+                   "device_type", "country", "application_id", "env"):
+        assert re.search(rf"\)\s+AS {column}\b", source) is None, column

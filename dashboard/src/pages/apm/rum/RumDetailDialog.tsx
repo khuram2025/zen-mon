@@ -43,7 +43,7 @@ import type {
   RumView,
 } from '@/types/apm'
 import type { RumDetailKind } from './useRumUrlState'
-import { QueryErrorPanel, RumCoverageNotice, RumMetricCell, TracePivot, formatDurationMs, formatRumVital } from './RumUi'
+import { QueryErrorPanel, RumCoverageNotice, RumVitalTile, TracePivot, formatDurationMs, formatRumVital } from './RumUi'
 
 type Selected = RumView | RumSession | RumError | RumResource | RumAction | undefined
 
@@ -78,14 +78,17 @@ function ViewDetail({ view, onDrill }: { view: RumView; onDrill: (tab: 'sessions
         ]}
       />
       <Card><CardContent className="p-4">
-        <div className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted"><Gauge className="h-3.5 w-3.5 text-primary" /> Experience</div>
-        <div className="grid grid-cols-3 gap-3">
-          <RumMetricCell name="lcp" value={view.lcp_p75} samples={view.lcp_samples} />
-          <RumMetricCell name="inp" value={view.inp_p75} samples={view.inp_samples} />
-          <RumMetricCell name="cls" value={view.cls_p75} samples={view.cls_samples} />
-          <RumMetricCell name="fcp" value={view.fcp_p75} samples={view.fcp_samples} />
-          <RumMetricCell name="ttfb" value={view.ttfb_p75} samples={view.ttfb_samples} />
-          <RumMetricCell name="load" value={view.load_p75} samples={view.load_samples} />
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted"><Gauge className="h-3.5 w-3.5 text-primary" /> Experience</div>
+          <span className="text-[10px] text-muted">p75 · one sample per page view</span>
+        </div>
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          <RumVitalTile name="lcp" value={view.lcp_p75} samples={view.lcp_samples} />
+          <RumVitalTile name="inp" value={view.inp_p75} samples={view.inp_samples} />
+          <RumVitalTile name="cls" value={view.cls_p75} samples={view.cls_samples} />
+          <RumVitalTile name="fcp" value={view.fcp_p75} samples={view.fcp_samples} />
+          <RumVitalTile name="ttfb" value={view.ttfb_p75} samples={view.ttfb_samples} />
+          <RumVitalTile name="load" value={view.load_p75} samples={view.load_samples} />
         </div>
       </CardContent></Card>
       <Card><CardContent className="p-4">
@@ -117,10 +120,23 @@ function ErrorDetail({ error }: { error: RumError }) {
   )
 }
 
-function ResourceDetail({ resource }: { resource: RumResource }) {
-  const failureRate = resource.failure_rate ?? (resource.count ? resource.failed_count / resource.count : null)
-  const hasTiming = (resource.timing_samples ?? 0) > 0
-  const p75Timing: RumRequestTiming | null = hasTiming ? {
+/**
+ * Everything the resource explorer knows about one request group, folded
+ * into the same shape the session timeline uses. Three data sources feed it,
+ * each of which can be missing independently:
+ *  - Resource Timing phases (DNS, connect, wait, download): SDK 2.1+ and,
+ *    for cross-origin hosts, a Timing-Allow-Origin header from that host.
+ *  - Server-Timing header from the backend: app / db execution split.
+ *  - Correlated APM traces: the same split, derived from the SERVER and
+ *    database spans of the traces this request carried.
+ */
+export function resourceTimingModel(resource: RumResource) {
+  const timingSamples = resource.timing_samples ?? 0
+  const opaque = timingSamples > 0 && (resource.opaque_samples ?? 0) >= timingSamples
+  const hasPhases = timingSamples > 0 && !opaque
+  const hasServerTiming = (resource.server_samples ?? 0) > 0
+  const backend = resource.backend ?? null
+  const timing: RumRequestTiming | null = hasPhases ? {
     redirect_ms: 0,
     dns_ms: resource.dns_p75 ?? 0,
     connect_ms: resource.connect_p75 ?? 0,
@@ -131,16 +147,55 @@ function ResourceDetail({ resource }: { resource: RumResource }) {
     processing_ms: 0,
     server_ms: resource.server_p75 ?? 0,
     db_ms: resource.db_p75 ?? 0,
-    has_server_timing: (resource.server_samples ?? 0) > 0,
+    has_server_timing: hasServerTiming,
     protocol: resource.protocol,
   } : null
-  const segments = p75Timing ? phaseSegments(p75Timing) : []
+  let segments = timing ? phaseSegments(timing, backend) : []
+  // No browser phases, but a backend split and a total: derive the network
+  // share as total − server so the bar still tells where the time went.
+  if (!segments.length && backend && backend.server_ms > 0 && (resource.duration_p75 ?? 0) > 0) {
+    const total = resource.duration_p75 ?? 0
+    const server = Math.min(backend.server_ms, total)
+    const db = Math.min(backend.db_ms, server)
+    segments = phaseSegments({
+      redirect_ms: 0, dns_ms: 0, connect_ms: 0, tls_ms: 0, blocked_ms: 0, processing_ms: 0, download_ms: 0,
+      wait_ms: total, server_ms: server, db_ms: db, has_server_timing: true,
+    })
+  }
+  const isStaticAsset = !['fetch', 'xhr'].includes(String(resource.resource_type || '').toLowerCase())
+  const oldSdk = (resource.sdk_versions ?? []).some((version) => !version || Number(version.split('.')[0]) < 2 || (version.startsWith('2.0')))
+  const reasons: string[] = []
+  if (timingSamples === 0) {
+    reasons.push(oldSdk
+      ? `Recorded by browser SDK ${resource.sdk_versions?.filter(Boolean).join(', ') || '2.0'} — phase timing (DNS, connect, wait, download) needs SDK 2.1 or newer. New page loads pick up the current SDK automatically.`
+      : 'No Resource Timing entry was captured for these requests.')
+  } else if (opaque) {
+    reasons.push('The browser reported this cross-origin request as opaque: only the total duration is exposed until that host responds with a Timing-Allow-Origin header.')
+  }
+  if (!hasServerTiming && !backend && !isStaticAsset) {
+    reasons.push('No application / database split: the backend sent no Server-Timing header and none of these requests carried a trace into an APM-instrumented service.')
+  }
+  if (!hasPhases && backend && backend.server_ms > 0 && (resource.duration_p75 ?? 0) > 0 && backend.server_ms >= (resource.duration_p75 ?? 0)) {
+    reasons.push(`The backend average (${formatDurationMs(backend.server_ms)} over ${backend.traces} trace${backend.traces === 1 ? '' : 's'}) is at or above the browser p75 total, so no network share can be separated for this group.`)
+  }
+  return { timing, segments, backend, hasPhases, hasServerTiming, opaque, isStaticAsset, reasons }
+}
+
+function ResourceDetail({ resource }: { resource: RumResource }) {
+  const failureRate = resource.failure_rate ?? (resource.count ? resource.failed_count / resource.count : null)
+  const model = resourceTimingModel(resource)
+  const { timing, segments, backend } = model
+  const showFlow = !!timing || !!backend
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4"><Stat label="Requests" value={fmtCount(resource.count)} /><Stat label="Failed" value={fmtCount(resource.failed_count)} hint={fmtPct(failureRate)} /><Stat label="Duration p75" value={formatDurationMs(resource.duration_p75)} /><Stat label="Average size" value={resource.size_avg == null ? '—' : formatBytes(resource.size_avg)} /></div>
-      {p75Timing ? (
+      {showFlow ? (
         <RequestPathFlow
-          timing={p75Timing}
+          timing={timing ?? (backend && (resource.duration_p75 ?? 0) > 0 ? {
+            redirect_ms: 0, dns_ms: 0, connect_ms: 0, tls_ms: 0, blocked_ms: 0, processing_ms: 0, download_ms: 0,
+            wait_ms: resource.duration_p75 ?? 0, server_ms: 0, db_ms: 0, has_server_timing: false, protocol: resource.protocol,
+          } : null)}
+          backend={backend}
           clientHint={resource.view_name || '/'}
           totalMs={resource.duration_p75}
           status={resource.status_code}
@@ -150,22 +205,34 @@ function ResourceDetail({ resource }: { resource: RumResource }) {
           hops={[
             { id: 'client', label: 'Client', icon: UserRound, tone: 'ok' },
             { id: 'resource', label: String(resource.method || resource.resource_type || 'GET'), hint: resource.name, metric: formatDurationMs(resource.duration_p75), status: resource.status_code, icon: Network, tone: resource.failed_count ? 'err' : 'ok' },
-            { id: 'app', label: 'App', hint: resource.view_name || '/', icon: Server, tone: 'muted' },
+            { id: 'app', label: model.isStaticAsset ? 'Static asset' : 'App', hint: model.isStaticAsset ? 'no server execution' : resource.view_name || '/', icon: Server, tone: 'muted' },
           ]}
           totalLabel={formatDurationMs(resource.duration_p75)}
         />
       )}
-      {segments.length > 0 && (
-        <Card><CardContent className="p-4">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted"><Waypoints className="h-3.5 w-3.5 text-primary" /> Where the time goes</div>
-            <span className="text-[10px] text-muted">p75 across {fmtCount(resource.timing_samples)} measured requests{(resource.server_samples ?? 0) > 0 ? ` · ${fmtCount(resource.server_samples)} with server timing` : ''}</span>
-          </div>
-          <PhaseBar segments={segments} height={10} />
-          <PhaseLegend segments={segments} className="mt-2" />
-          {(resource.server_samples ?? 0) === 0 && <p className="mt-2 text-[10px] text-muted">Server execution vs. network split appears when the backend sends a <span className="font-mono">Server-Timing</span> header or a correlated APM trace exists.</p>}
-        </CardContent></Card>
-      )}
+      <Card><CardContent className="p-4">
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted"><Waypoints className="h-3.5 w-3.5 text-primary" /> Where the time goes</div>
+          <span className="text-[10px] text-muted">
+            {model.hasPhases ? `p75 across ${fmtCount(resource.timing_samples)} measured requests` : `${fmtCount(resource.count)} requests`}
+            {model.hasServerTiming ? ` · ${fmtCount(resource.server_samples)} with Server-Timing` : backend ? ` · ${fmtCount(backend.traces)} correlated trace${backend.traces === 1 ? '' : 's'}` : ''}
+          </span>
+        </div>
+        {segments.length > 0 ? (
+          <>
+            <PhaseBar segments={segments} height={10} />
+            <PhaseLegend segments={segments} className="mt-2" />
+            {!model.hasPhases && backend && <p className="mt-2 text-[10px] text-muted">Browser phases are unavailable for these requests, so the network share is derived as total time minus the backend&apos;s execution time from {backend.service ? <span className="font-mono">{backend.service}</span> : 'the correlated traces'}.</p>}
+          </>
+        ) : (
+          <p className="text-[11px] text-muted">Only the total duration is known for these requests.</p>
+        )}
+        {model.reasons.length > 0 && (
+          <ul className="mt-2 space-y-1 border-t border-border/60 pt-2 text-[10px] leading-snug text-muted">
+            {model.reasons.map((reason) => <li key={reason}>• {reason}</li>)}
+          </ul>
+        )}
+      </CardContent></Card>
       <Card><CardContent className="p-4"><Fact label="Name"><span className="font-mono text-[11px]">{resource.name}</span></Fact><Fact label="URL"><span className="font-mono text-[11px]">{resource.url || 'Not captured'}</span></Fact><Fact label="Kind">{resource.resource_type || 'resource'}{resource.protocol ? ` · ${resource.protocol}` : ''}</Fact><Fact label="HTTP">{[resource.method, resource.status_code].filter((value) => value != null).join(' ') || 'Not captured'}</Fact><Fact label="View">{resource.view_name || '/'}</Fact><Fact label="Application">{resource.application_id} · {resource.env}</Fact><Fact label="Release">{resource.service_version || 'Not captured'}</Fact><Fact label="Last seen">{relativeTime(resource.last_seen)}</Fact><Fact label="Backend trace"><TracePivot traceId={resource.backend_trace_id} /></Fact></CardContent></Card>
     </div>
   )
@@ -521,7 +588,10 @@ function SessionDetailPanel({ fallback, detail, loading, error, onRetry }: { fal
 }
 
 function titleFor(kind: RumDetailKind, selected: Selected, detail?: RumSessionDetail): { title: string; description: string; icon: typeof Activity } {
-  if (kind === 'session') return { title: `Session ${(detail?.session ?? selected as RumSession | undefined)?.session_id?.slice(0, 14) ?? ''}`, description: 'Chronological real-user journey and backend correlation.', icon: UserRound }
+  if (kind === 'session') {
+    const sessionId = (detail?.session ?? selected as RumSession | undefined)?.session_id ?? ''
+    return { title: `Session ${sessionId.length > 12 ? `${sessionId.slice(0, 8)}…` : sessionId}`, description: 'Chronological real-user journey and backend correlation.', icon: UserRound }
+  }
   if (kind === 'error') return { title: (selected as RumError | undefined)?.error_type || 'JavaScript error', description: 'Impact, source context and representative backend trace.', icon: FileWarning }
   if (kind === 'resource') return { title: (selected as RumResource | undefined)?.name || 'Resource', description: 'Real-user request performance and failure context.', icon: Network }
   if (kind === 'action') return { title: (selected as RumAction | undefined)?.name || 'User action', description: 'Interaction volume, latency and frustration context.', icon: MousePointerClick }

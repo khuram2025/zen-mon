@@ -91,8 +91,14 @@ function spanMs(times: Array<string | number>): number {
 export function formatChartTick(t: string | number, windowMs: number): string {
   const d = new Date(t)
   if (Number.isNaN(d.getTime())) return ''
-  if (windowMs >= 3 * 86_400_000) {
+  if (windowMs >= 14 * 86_400_000) {
     return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+  }
+  if (windowMs >= 3 * 86_400_000) {
+    // Multi-day windows with sub-day buckets: label midnight ticks with the
+    // date and intraday ticks with the time, so consecutive ticks never repeat.
+    if (d.getHours() === 0 && d.getMinutes() === 0) return d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   }
   if (windowMs >= 12 * 3_600_000) {
     return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })

@@ -29,6 +29,8 @@ export function HealthBadge({ health }: { health: string }) {
 
 export function fmtMs(v: number | null | undefined): string {
   if (v == null) return '—'
+  if (v >= 3_600_000) return `${Math.floor(v / 3_600_000)}h ${Math.floor((v % 3_600_000) / 60_000)}m`
+  if (v >= 60_000) return `${Math.floor(v / 60_000)}m ${Math.floor((v % 60_000) / 1000)}s`
   if (v >= 1000) return `${(v / 1000).toFixed(2)} s`
   return `${v.toFixed(v < 10 ? 1 : 0)} ms`
 }

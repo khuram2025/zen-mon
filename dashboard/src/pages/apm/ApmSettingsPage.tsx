@@ -1112,6 +1112,15 @@ function CopyOnceDialog({ value, lastUsedAt = null, onClose }: {
             <p className="mt-1 text-xs text-muted">
               If your site uses Content Security Policy, allow <code className="rounded bg-surface2 px-1">{window.location.origin}</code> in both <code className="rounded bg-surface2 px-1">script-src</code> and <code className="rounded bg-surface2 px-1">connect-src</code>.
             </p>
+            <details className="mt-3 rounded-md border border-border px-3 py-2">
+              <summary className="cursor-pointer text-xs font-medium text-text">Get the full request timeline (network → app → database)</summary>
+              <ul className="mt-2 space-y-1.5 text-xs text-muted">
+                <li><strong className="text-text2">Same-origin requests</strong> report DNS, connect, TLS, wait and download phases automatically.</li>
+                <li><strong className="text-text2">Cross-origin APIs and CDNs</strong> must respond with <code className="rounded bg-surface2 px-1">Timing-Allow-Origin: https://your-site.example</code> (or <code className="rounded bg-surface2 px-1">*</code>), otherwise the browser exposes only the total duration.</li>
+                <li><strong className="text-text2">Application vs. database time</strong> comes from a <code className="rounded bg-surface2 px-1">Server-Timing: app;dur=12, db;dur=4</code> response header, or automatically from ZenPlus APM traces when the backend is instrumented (the SDK sends <code className="rounded bg-surface2 px-1">traceparent</code> on fetch/XHR).</li>
+                <li>Server-Timing on cross-origin responses also needs the <code className="rounded bg-surface2 px-1">Timing-Allow-Origin</code> header above.</li>
+              </ul>
+            </details>
           </>
         )}
         <details className="mt-3 rounded-md border border-border px-3 py-2">

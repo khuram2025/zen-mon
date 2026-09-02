@@ -231,6 +231,14 @@ export interface RumOverview {
     long_tasks: number
     resource_failures?: number
   }
+  /** Row counts of the explorer tabs (routes, sessions, error groups, resource groups, action groups). */
+  explorer?: {
+    views: number
+    sessions: number
+    errors: number
+    resources: number
+    actions: number
+  }
   rates: {
     error_session_rate: number | null
     resource_failure_rate?: number | null
@@ -268,8 +276,10 @@ export interface RumTimeseriesPoint {
   sessions: number
   errors: number
   resources?: number
+  resource_failures?: number
   actions?: number
   long_tasks?: number
+  error_sessions?: number
   lcp_p75: number | null
   lcp_samples: number
   inp_p75: number | null
@@ -427,6 +437,12 @@ export interface RumResource {
   db_p75?: number | null
   server_samples?: number
   protocol?: string
+  /** SDK versions that reported this resource; phase timing needs 2.1+. */
+  sdk_versions?: string[]
+  /** Timing-capable samples whose phases were all zero: cross-origin without Timing-Allow-Origin. */
+  opaque_samples?: number
+  /** Execution split averaged over the correlated APM traces, when no Server-Timing was sent. */
+  backend?: (RumBackendTiming & { traces: number }) | null
 }
 
 export interface RumAction {
@@ -555,6 +571,8 @@ export interface RumBreakdown {
     server_p75: number | null
     db_p75: number | null
     server_samples: number
+    /** Where the app/db split came from: the Server-Timing header or correlated APM traces. */
+    server_source?: 'server-timing' | 'trace' | null
     failures: number
   }>
 }

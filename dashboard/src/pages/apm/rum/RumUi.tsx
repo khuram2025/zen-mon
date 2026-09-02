@@ -32,8 +32,8 @@ import {
   ApmFacetSidebar,
   ApmUnderlineNav,
   VolumeHistogram,
-  bucketByTime,
   type FacetGroup,
+  type HistogramBucket,
 } from '@/components/apm/explorer'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -430,6 +430,24 @@ export function RumMetricCell({ name, value, samples }: { name: RumVitalName; va
   )
 }
 
+/** Labelled p75 tile with its Core Web Vitals rating, for detail panels. */
+export function RumVitalTile({ name, value, samples }: { name: RumVitalName; value: number | null | undefined; samples?: number }) {
+  const band = vitalBand(name, value)
+  const style = BAND_STYLE[band]
+  return (
+    <div className={cn('rounded-lg border bg-surface2/35 p-2.5', style.border)}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[9px] font-semibold uppercase tracking-wider text-muted">{VITAL_SHORT[name]} p75</span>
+        <span className={cn('h-1.5 w-1.5 rounded-full', style.bar)} aria-hidden />
+      </div>
+      <div className={cn('mt-1 font-mono text-sm font-semibold tabular-nums', style.text)}>{formatRumVital(name, value)}</div>
+      <div className="mt-0.5 truncate text-[10px] text-muted" title={VITAL_LABEL[name]}>
+        {band === 'no-data' ? VITAL_LABEL[name] : `${style.label}${samples != null ? ` · n=${samples.toLocaleString()}` : ''}`}
+      </div>
+    </div>
+  )
+}
+
 export function QueryErrorPanel({ error, label = 'RUM data', onRetry }: { error: unknown; label?: string; onRetry?: () => void }) {
   return (
     <Card className="border-danger/30">
@@ -520,16 +538,15 @@ export function rumClientFacetGroups(
   }))
 }
 
-export function RumExplorerShell<T>({
+export function RumExplorerShell({
   noun,
   total,
   rangeLabel,
+  volume,
   filters,
   facets,
   onFilter,
-  items,
-  getTime,
-  isErr,
+  buckets,
   okLabel = 'Healthy',
   errLabel = 'Significant',
   children,
@@ -537,23 +554,23 @@ export function RumExplorerShell<T>({
   noun: string
   total?: number
   rangeLabel?: string
+  /** Event-level volume behind the grouped rows, e.g. "176 page views". */
+  volume?: string
   filters: RumFilters
   facets?: Partial<RumFacets>
   onFilter: (key: keyof RumFilters, value: string) => void
-  items?: T[]
-  getTime: (item: T) => string
-  isErr: (item: T) => boolean
+  /** Volume over time for the whole range, from the RUM timeseries. */
+  buckets: HistogramBucket[]
   okLabel?: string
   errLabel?: string
   children: ReactNode
 }) {
-  const rows = items ?? []
-  const shown = total ?? rows.length
+  const shown = total ?? 0
   const label = shown === 1 && noun.endsWith('s') ? noun.slice(0, -1) : noun
   return (
     <ApmExplorerFrame
-      summary={<>Displaying {fmtCount(shown)} {label}{rangeLabel ? ` · ${rangeLabel}` : ''}</>}
-      histogram={<VolumeHistogram buckets={bucketByTime(rows, getTime, isErr)} okLabel={okLabel} errLabel={errLabel} />}
+      summary={<>Displaying {fmtCount(shown)} {label}{volume ? ` · ${volume}` : ''}{rangeLabel ? ` · ${rangeLabel}` : ''}</>}
+      histogram={<VolumeHistogram buckets={buckets} okLabel={okLabel} errLabel={errLabel} />}
       sidebar={<ApmFacetSidebar title="Client analytics" groups={rumClientFacetGroups(filters, facets, onFilter)} />}
     >
       {children}

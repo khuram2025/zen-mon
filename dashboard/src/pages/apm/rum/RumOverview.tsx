@@ -187,7 +187,7 @@ function BreakdownCard({ title, hint, side }: { title: string; hint: string; sid
   )
 }
 
-function FacetCard({ title, items, onSelect }: { title: string; items?: Array<{ value: string; count: number }>; onSelect: (value: string) => void }) {
+function FacetCard({ title, items, onSelect, empty = 'No breakdown data' }: { title: string; items?: Array<{ value: string; count: number }>; onSelect: (value: string) => void; empty?: string }) {
   const visible = (items ?? []).slice(0, 6)
   const max = Math.max(...visible.map((item) => item.count), 1)
   return (
@@ -200,7 +200,7 @@ function FacetCard({ title, items, onSelect }: { title: string; items?: Array<{ 
             <RankBar value={item.count} max={max} />
           </button>
         ))}
-        {!visible.length && <div className="py-6 text-center text-[11px] text-muted">No breakdown data</div>}
+        {!visible.length && <div className="px-2 py-6 text-center text-[11px] leading-snug text-muted">{empty}</div>}
       </CardContent>
     </Card>
   )
@@ -221,7 +221,7 @@ export function RumOverviewPanel(props: OverviewProps) {
             icon={<Users className="h-4 w-4" />}
             tone="info"
             value={fmtCount(d.totals.sessions)}
-            sub={`${fmtCount(d.totals.views)} sampled views`}
+            sub={d.totals.sessions > 0 ? `${(d.totals.views / d.totals.sessions).toFixed(1)} views per session` : 'no sampled sessions yet'}
           />
           <ApmKpi
             to={exploreTo.views}
@@ -306,7 +306,7 @@ export function RumOverviewPanel(props: OverviewProps) {
             </div>
             {!!props.breakdown?.slowest_endpoints?.length && (
               <div className="mt-2.5">
-                <RumTableCard title="Slowest endpoints" description="fetch/XHR targets by p75 total time; app and DB figures come from Server-Timing">
+                <RumTableCard title="Slowest endpoints" description="fetch/XHR targets by p75 total time; app and DB figures come from Server-Timing headers or correlated APM traces">
                   <Table>
                     <THead className={EXPLORER_HEAD}><Tr><Th>Endpoint</Th><Th className="text-right">Requests</Th><Th className="text-right">Total p75</Th><Th className="text-right">Wait p75</Th><Th className="text-right">App p75</Th><Th className="text-right">DB p75</Th><Th className="text-right">Failures</Th></Tr></THead>
                     <TBody className={EXPLORER_ROWS}>
@@ -316,8 +316,8 @@ export function RumOverviewPanel(props: OverviewProps) {
                           <Td className="text-right font-mono text-xs tabular-nums">{fmtCount(endpoint.count)}</Td>
                           <Td className="text-right font-mono text-xs tabular-nums">{formatDurationMs(endpoint.duration_p75)}</Td>
                           <Td className="text-right font-mono text-xs tabular-nums">{formatDurationMs(endpoint.wait_p75)}</Td>
-                          <Td className="text-right font-mono text-xs tabular-nums">{endpoint.server_samples ? formatDurationMs(endpoint.server_p75) : '—'}</Td>
-                          <Td className="text-right font-mono text-xs tabular-nums">{endpoint.server_samples ? formatDurationMs(endpoint.db_p75) : '—'}</Td>
+                          <Td className="text-right font-mono text-xs tabular-nums" title={endpoint.server_source === 'trace' ? `Average over ${endpoint.server_samples} correlated APM traces` : endpoint.server_source ? 'From the Server-Timing header' : undefined}>{endpoint.server_p75 != null ? formatDurationMs(endpoint.server_p75) : '—'}{endpoint.server_source === 'trace' && <span className="ml-1 text-[9px] text-muted">trace</span>}</Td>
+                          <Td className="text-right font-mono text-xs tabular-nums">{endpoint.server_p75 != null ? formatDurationMs(endpoint.db_p75) : '—'}</Td>
                           <Td className="text-right"><span className={endpoint.failures ? 'font-mono text-xs text-danger' : 'font-mono text-xs text-muted'}>{fmtCount(endpoint.failures)}</span></Td>
                         </Tr>
                       ))}
@@ -429,7 +429,7 @@ export function RumOverviewPanel(props: OverviewProps) {
         <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-5">
           <FacetCard title="Browsers" items={props.facets?.browser} onSelect={(value) => props.onFilter('browser', value)} />
           <FacetCard title="Devices" items={props.facets?.device_type} onSelect={(value) => props.onFilter('device_type', value)} />
-          <FacetCard title="Countries" items={props.facets?.country} onSelect={(value) => props.onFilter('country', value)} />
+          <FacetCard title="Countries" items={props.facets?.country} onSelect={(value) => props.onFilter('country', value)} empty="No country data — the collector reads the CDN country header (CF-IPCountry / X-Country-Code); GeoIP lookup is not configured." />
           <FacetCard title="Client IPs" items={props.facets?.client_ip} onSelect={(value) => props.onFilter('client_ip', value)} />
           <FacetCard title="Releases" items={props.facets?.service_version} onSelect={(value) => props.onFilter('service_version', value)} />
         </div>
