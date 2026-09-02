@@ -70,12 +70,12 @@ export function releaseMarkers(
     .filter((release) => release.first_seen && parseUtc(release.first_seen) > from + 60_000)
     .map((release) => ({ ts: parseUtc(release.first_seen as string), timestamp: release.first_seen as string, label: release.service_version }))
     .sort((a, b) => a.ts - b.ts)
-  // Releases closer together than ~3 % of the window would draw on top of
+  // Releases closer together than ~6 % of the window would draw on top of
   // each other; fold them into one marker that names them all.
   const merged: Array<{ ts: number; timestamp: string; labels: string[] }> = []
   for (const marker of sorted) {
     const last = merged[merged.length - 1]
-    if (last && marker.ts - last.ts < span * 0.03) last.labels.push(marker.label)
+    if (last && marker.ts - last.ts < span * 0.06) last.labels.push(marker.label)
     else merged.push({ ts: marker.ts, timestamp: marker.timestamp, labels: [marker.label] })
   }
   return merged.map((marker) => ({ timestamp: marker.timestamp, label: marker.labels.length > 2 ? `${marker.labels[0]} +${marker.labels.length - 1}` : marker.labels.join(', ') }))
