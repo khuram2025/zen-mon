@@ -767,3 +767,66 @@ def test_rollup_insert_writes_vital_band_counters():
     # Buckets written before the migration carry zero counters → no distribution.
     legacy = rum._rollup_vitals_payload(digests + [0] * 12)
     assert legacy["lcp"]["p75"] == 2100.0 and legacy["lcp"]["good_pct"] is None
+
+
+# ── Phase 1: custom windows, search, comparison, export ──────────────────────
+
+def test_windows_resolve_presets_custom_bounds_and_previous_period():
+    preset = rum._resolve_window("7d")
+    assert preset.range == "7d" and not preset.rollup and preset.bucket_seconds == 21600
+    assert abs(preset.seconds - 7 * 86400) < 5
+    prev = preset.previous()
+    assert prev.to == preset.frm and abs(prev.seconds - preset.seconds) < 1
+
+    custom = rum._resolve_window("custom", "2026-09-01T00:00:00Z", "2026-09-01T06:00:00Z")
+    assert custom.range == "custom" and custom.seconds == 6 * 3600 and custom.bucket_seconds == 900
+    assert not custom.rollup
+    long = rum._resolve_window("custom", "2026-08-01T00:00:00Z", "2026-08-31T00:00:00Z")
+    assert long.rollup and long.bucket_seconds == 86400
+    end_ms = int(datetime.now(timezone.utc).timestamp() * 1000) - 60_000
+    epoch = rum._resolve_window("7d", str(end_ms - 6 * 3_600_000), str(end_ms))   # epoch ms wins over the preset
+    assert epoch.range == "custom" and abs(epoch.seconds - 6 * 3600) < 1
+    with pytest.raises(HTTPException):
+        rum._resolve_window("custom")                       # needs both bounds
+    with pytest.raises(HTTPException):
+        rum._resolve_window("custom", "2026-09-02T00:00:00Z", "2026-09-01T00:00:00Z")
+    with pytest.raises(HTTPException):
+        rum._resolve_window("custom", "2026-05-01T00:00:00Z", "2026-08-30T00:00:00Z")   # > 90 days
+    # FastAPI FieldInfo defaults (direct calls) are treated as "not supplied".
+    from fastapi import Query
+    assert rum._resolve_window("24h", Query(default=None), Query(default=None)).range == "24h"
+
+
+def test_scope_adds_search_and_user_filters():
+    params, sql = rum._scope("24h", q=" abc ", user_id="usr_1")
+    assert "user_id = {user_id:String}" in sql and params["user_id"] == "usr_1"
+    assert params["q"] == "abc"
+    assert "positionCaseInsensitiveUTF8(session_id, {q:String}) > 0" in sql
+    assert "positionCaseInsensitiveUTF8(error_message, {q:String}) > 0" in sql
+    _, plain = rum._scope("24h")
+    assert "{q:String}" not in plain and "user_id" not in plain
+
+
+@pytest.mark.asyncio
+async def test_export_streams_csv_of_the_explorer(monkeypatch):
+    now = datetime.now(timezone.utc)
+
+    async def fake_views(**kwargs):
+        assert kwargs["page_size"] == 100 and kwargs["sort"] == "views"
+        return {"total": 1, "items": [{
+            "application_id": "portal", "env": "prod", "view_name": "/orders/:id",
+            "views": 3, "lcp_p75": 2100.5, "last_seen": now, "backend_trace_ids": ["a", "b"],
+        }]}
+
+    monkeypatch.setattr(rum, "rum_views", fake_views)
+    response = await rum.rum_export(
+        tab="views", range_="24h", frm=None, to=None, q=None, user_id=None,
+        application_id=None, env=None, view_name=None, browser=None, device_type=None,
+        country=None, service_version=None, browser_version=None, os=None, client_ip=None,
+        sort=None, order="desc", limit=5000, _user=object(),
+    )
+    body = response.body.decode()
+    header, row = body.strip().splitlines()
+    assert header == "application_id,env,view_name,views,lcp_p75,last_seen"   # trace-id arrays are skipped
+    assert row.startswith("portal,prod,/orders/:id,3,2100.5,")
+    assert response.headers["content-disposition"].startswith('attachment; filename="rum-views-24h-')

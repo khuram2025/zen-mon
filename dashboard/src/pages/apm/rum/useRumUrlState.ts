@@ -7,7 +7,7 @@ import {
   type RumRange,
   type RumTab,
 } from '@/types/apm'
-import { buildRumQuery, RUM_FILTER_KEYS } from './model'
+import { buildRumQuery, RUM_FILTER_KEYS, type RumCustomBounds } from './model'
 
 export type RumSortOrder = 'asc' | 'desc'
 export type RumDetailKind = 'view' | 'session' | 'error' | 'resource' | 'action'
@@ -44,7 +44,6 @@ function positiveInt(value: string | null, fallback: number, max: number): numbe
 export function useRumUrlState() {
   const [params, setParams] = useSearchParams()
   const tab = oneOf(params.get('tab'), RUM_TABS, 'overview')
-  const range = oneOf(params.get('range'), RUM_RANGES, '24h')
   const filters = useMemo<RumFilters>(() => ({
     application_id: params.get('application_id') || '',
     env: params.get('env') || '',
@@ -56,7 +55,21 @@ export function useRumUrlState() {
     country: params.get('country') || '',
     service_version: params.get('service_version') || '',
     client_ip: params.get('client_ip') || '',
+    user_id: params.get('user_id') || '',
+    q: params.get('q') || '',
   }), [params])
+  // A custom window is only real when both bounds parse; otherwise fall back
+  // to the default preset so a mangled link never yields an empty dashboard.
+  const bounds = useMemo<RumCustomBounds | undefined>(() => {
+    const from = params.get('from') || ''
+    const to = params.get('to') || ''
+    if (!from || !to) return undefined
+    const start = new Date(from).getTime()
+    const end = new Date(to).getTime()
+    return Number.isFinite(start) && Number.isFinite(end) && end > start ? { from, to } : undefined
+  }, [params])
+  const rangeParam = oneOf(params.get('range'), RUM_RANGES, '24h')
+  const range: RumRange = rangeParam === 'custom' ? (bounds ? 'custom' : '24h') : rangeParam
   const page = positiveInt(params.get('page'), 1, 1_000_000)
   const pageSize = oneOf(params.get('page_size'), ['25', '50', '100'] as const, '25')
   const defaults = RUM_DEFAULT_SORT[tab]
@@ -82,7 +95,17 @@ export function useRumUrlState() {
   }), [update])
 
   const setRange = useCallback((value: RumRange) => update((next) => {
+    if (value === 'custom') return
     next.set('range', value)
+    next.delete('from')
+    next.delete('to')
+    next.delete('page')
+  }), [update])
+
+  const setCustomRange = useCallback((from: string, to: string) => update((next) => {
+    next.set('range', 'custom')
+    next.set('from', from)
+    next.set('to', to)
     next.delete('page')
   }), [update])
 
@@ -147,6 +170,7 @@ export function useRumUrlState() {
   return {
     tab,
     range,
+    bounds,
     filters,
     page,
     pageSize: Number(pageSize),
@@ -155,9 +179,10 @@ export function useRumUrlState() {
     detailKind,
     detailId,
     activeFilterCount: RUM_FILTER_KEYS.filter((key) => filters[key]).length,
-    query: (extra?: Record<string, string | number | undefined>) => buildRumQuery(range, filters, extra),
+    query: (extra?: Record<string, string | number | undefined>) => buildRumQuery(range, filters, extra, bounds),
     setTab,
     setRange,
+    setCustomRange,
     setFilter,
     clearFilters,
     setPage,

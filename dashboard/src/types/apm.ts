@@ -177,8 +177,19 @@ export interface DataQuality {
 
 /* ── Browser Real User Monitoring ─────────────────────────────────────── */
 
-export const RUM_RANGES = ['15m', '1h', '6h', '24h', '7d', '30d', '90d'] as const
+export const RUM_RANGES = ['15m', '1h', '6h', '24h', '7d', '30d', '90d', 'custom'] as const
 export type RumRange = typeof RUM_RANGES[number]
+export const RUM_PRESET_RANGES = RUM_RANGES.filter((range) => range !== 'custom') as Exclude<RumRange, 'custom'>[]
+
+/** Absolute bounds resolved by the backend for the current request. */
+export interface RumWindow {
+  range: RumRange
+  from: string
+  to: string
+  seconds: number
+  bucket_seconds: number
+  rollup: boolean
+}
 
 export const RUM_TABS = ['overview', 'web-vitals', 'views', 'sessions', 'errors', 'resources', 'actions'] as const
 export type RumTab = typeof RUM_TABS[number]
@@ -194,6 +205,10 @@ export interface RumFilters {
   country: string
   service_version: string
   client_ip: string
+  /** Pseudonymous user identifier (usr_…) as stored. */
+  user_id: string
+  /** Free-text search across session, user, view, URL and error text. */
+  q: string
 }
 
 export interface RumFacetValue {
@@ -215,6 +230,14 @@ export interface RumVitalMetric {
 
 export interface RumOverview {
   range: RumRange
+  window?: RumWindow
+  /** Same totals/rates/vitals for the window of equal length immediately before. */
+  previous?: {
+    window: RumWindow
+    totals: RumOverview['totals']
+    rates: RumOverview['rates']
+    vitals: RumOverview['vitals']
+  } | null
   filters: Partial<RumFilters>
   totals: {
     events: number

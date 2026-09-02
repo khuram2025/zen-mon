@@ -17,6 +17,7 @@ import re
 import time
 import uuid
 from collections import Counter, defaultdict, deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Literal
 from urllib.parse import unquote, urlsplit, urlunsplit
@@ -891,12 +892,116 @@ async def _ingest_rum(request: Request, db: AsyncSession):
 
 # ── authenticated analytics ─────────────────────────────────────────────────
 
-RangeName = Literal["15m", "1h", "6h", "24h", "7d", "30d", "90d"]
+
+RangeName = Literal["15m", "1h", "6h", "24h", "7d", "30d", "90d", "custom"]
 OrderName = Literal["asc", "desc"]
+
+# Bucket widths for custom windows: the widest preset step that still yields
+# at least ~40 points over the span, so charts stay readable at any length.
+_CUSTOM_BUCKET_STEPS = (60, 300, 900, 1800, 3600, 21600, 86400)
+MAX_CUSTOM_WINDOW_SECONDS = 90 * 86_400
+RAW_RETENTION_SECONDS = 14 * 86_400
+
+
+@dataclass(frozen=True)
+class RumWindow:
+    """The time span every analytics query is scoped to.
+
+    Either a preset (``range=7d``: the trailing seven days) or an absolute
+    ``from``/``to`` pair. Windows longer than the raw-event retention read the
+    5-minute rollup, exactly like the 30d / 90d presets always did.
+    """
+    range: str
+    frm: datetime
+    to: datetime
+
+    @property
+    def seconds(self) -> float:
+        return max(1.0, (self.to - self.frm).total_seconds())
+
+    @property
+    def rollup(self) -> bool:
+        return self.range in {"30d", "90d"} or (self.range == "custom" and self.seconds > RAW_RETENTION_SECONDS)
+
+    @property
+    def bucket_seconds(self) -> int:
+        if self.range in RANGE_BUCKET_SECONDS:
+            return RANGE_BUCKET_SECONDS[self.range]
+        target = self.seconds / 40
+        for step in _CUSTOM_BUCKET_STEPS:
+            if step >= target:
+                return step
+        return _CUSTOM_BUCKET_STEPS[-1]
+
+    def previous(self) -> "RumWindow":
+        """The window of equal length immediately before this one."""
+        span = self.to - self.frm
+        return RumWindow(self.range, self.frm - span, self.frm)
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "range": self.range, "from": self.frm, "to": self.to,
+            "seconds": int(self.seconds), "bucket_seconds": self.bucket_seconds,
+            "rollup": self.rollup,
+        }
+
+
+def _parse_timestamp(value: str, name: str) -> datetime:
+    text_value = value.strip()
+    try:
+        if re.fullmatch(r"\d{10,13}", text_value):
+            number = int(text_value)
+            return datetime.fromtimestamp(number / 1000 if number > 10**11 else number, tz=timezone.utc)
+        parsed = datetime.fromisoformat(text_value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(400, f"'{name}' must be an ISO 8601 timestamp or epoch milliseconds") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _str_param(value: object) -> str | None:
+    """Query parameters called directly (tests, the legacy summary) arrive as
+    FastAPI FieldInfo defaults rather than None; only real strings count."""
+    return value if isinstance(value, str) and value != "" else None
+
+
+def _resolve_window(range_: str, frm: str | None = None, to: str | None = None) -> RumWindow:
+    """Turn the ``range`` / ``from`` / ``to`` query parameters into a RumWindow.
+
+    Absolute bounds win whenever both are supplied (the UI sends
+    ``range=custom`` with them); a preset alone is the trailing window.
+    """
+    frm, to = _str_param(frm), _str_param(to)
+    if frm or to:
+        if not (frm and to):
+            raise HTTPException(400, "Custom windows need both 'from' and 'to'")
+        start, end = _parse_timestamp(frm, "from"), _parse_timestamp(to, "to")
+        now = datetime.now(timezone.utc)
+        end = min(end, now)
+        if end <= start:
+            raise HTTPException(400, "'to' must be after 'from'")
+        if (end - start).total_seconds() > MAX_CUSTOM_WINDOW_SECONDS:
+            raise HTTPException(400, "Custom windows are limited to 90 days")
+        if (now - start).total_seconds() > MAX_CUSTOM_WINDOW_SECONDS + 86_400:
+            raise HTTPException(400, "RUM data is retained for 90 days")
+        return RumWindow("custom", start, end)
+    if range_ == "custom":
+        raise HTTPException(400, "range=custom requires 'from' and 'to'")
+    start, end = _window(range_)
+    return RumWindow(range_, start, end)
+
+
+
+
+# Columns searched by the free-text `q` filter, in the order a person would
+# expect a hit: the identifiers they copied from somewhere, then page and
+# request URLs, then error text.
+_SEARCH_COLUMNS = ("session_id", "user_id", "view_name", "url", "resource_url", "error_message", "action_name")
 
 
 def _scope(
-    range_: str,
+    range_: str | RumWindow,
     application_id: str | None = None,
     env: str | None = None,
     view_name: str | None = None,
@@ -907,10 +1012,24 @@ def _scope(
     browser_version: str | None = None,
     os: str | None = None,
     client_ip: str | None = None,
+    *,
+    q: str | None = None,
+    user_id: str | None = None,
 ) -> tuple[dict[str, object], str]:
-    frm, to = _window(range_)
+    window = range_ if isinstance(range_, RumWindow) else _resolve_window(range_)
+    frm, to = window.frm, window.to
     params: dict[str, object] = {"frm": frm, "to": to}
     clauses = ["timestamp >= {frm:DateTime64(3)}", "timestamp < {to:DateTime64(3)}"]
+    user_id, q = _str_param(user_id), _str_param(q)
+    if user_id:
+        params["user_id"] = user_id
+        clauses.append("user_id = {user_id:String}")
+    needle = (q or "").strip()[:200]
+    if needle:
+        params["q"] = needle
+        clauses.append("(" + " OR ".join(
+            f"positionCaseInsensitiveUTF8({column}, {{q:String}}) > 0" for column in _SEARCH_COLUMNS
+        ) + ")")
     for column, value in (
         ("application_id", application_id),
         ("env", env),
@@ -943,14 +1062,15 @@ def _filters_payload(**values) -> dict[str, str]:
     return {key: value for key, value in values.items() if value not in (None, "")}
 
 
-def _raw_coverage(range_: str) -> dict[str, object]:
+def _raw_coverage(window: RumWindow | str) -> dict[str, object]:
+    partial = window.rollup if isinstance(window, RumWindow) else window in {"30d", "90d"}
     return {
         "raw_retention_days": 14,
         "rollup_retention_days": 90,
-        "partial": range_ in {"30d", "90d"},
+        "partial": partial,
         "message": (
             "Event-level drill-down is limited to the most recent 14 days."
-            if range_ in {"30d", "90d"} else None
+            if partial else None
         ),
     }
 
@@ -1086,6 +1206,10 @@ def _rollup_vitals_payload(row: list | tuple) -> dict[str, dict[str, object]]:
 @router.get("/api/v1/apm/rum/overview")
 async def rum_overview(
     range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
     application_id: str | None = None,
     env: str | None = None,
     view_name: str | None = None,
@@ -1096,15 +1220,19 @@ async def rum_overview(
     browser_version: str | None = None,
     os: str | None = None,
     client_ip: str | None = None,
+    compare: bool = Query(default=False),
     _user=Depends(get_current_user),
 ):
-    params, scope_sql = _scope(
-        range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os, client_ip,
+    window = _resolve_window(range_, frm, to)
+    filters = dict(
+        application_id=application_id, env=env, view_name=view_name, browser=browser,
+        device_type=device_type, country=country, service_version=service_version,
+        browser_version=browser_version, os=os, client_ip=client_ip,
     )
 
-    def query():
-        if range_ in {"30d", "90d"}:
+    def query(window: RumWindow):
+        params, scope_sql = _scope(window, q=q, user_id=user_id, **filters)
+        if window.rollup:
             totals = _ch().query(f"""
                 SELECT sum(events), uniqCombined64Merge(sessions),
                        uniqCombined64Merge(views), sum(errors),
@@ -1175,6 +1303,7 @@ async def rum_overview(
         # Row counts of the explorer tabs (routes, sessions, error groups, …).
         # Always read from raw events because that is what the explorers list,
         # so the tab badges agree with "Displaying N" even on rollup ranges.
+        params, scope_sql = _scope(window, q=q, user_id=user_id, **filters)
         return _ch().query(f"""
             SELECT uniqExactIf((application_id, env, view_name), sampled = 1),
                    uniqExactIf((application_id, env, session_id), sampled = 1),
@@ -1190,40 +1319,60 @@ async def rum_overview(
             FROM zenplus.apm_rum_events WHERE {scope_sql}
         """, parameters=params).result_rows[0]
 
-    (totals, vital_row, releases), explorer = await asyncio.to_thread(
-        lambda: (query(), explorer_query())
-    )
-    sessions = int(totals[1])
+    def totals_payload(window: RumWindow, totals, vital_row) -> dict[str, object]:
+        sessions = int(totals[1])
+        return {
+            "totals": {
+                "events": int(totals[0]), "sessions": sessions, "views": int(totals[2]),
+                "errors": int(totals[3]), "error_sessions": int(totals[4]),
+                "resources": int(totals[5]), "actions": int(totals[6]),
+                "long_tasks": int(totals[7]), "resource_failures": int(totals[8]),
+                "sampled_errors": int(totals[9]), "unsampled_errors": int(totals[10]),
+            },
+            "rates": {
+                "error_session_rate": (int(totals[4]) / sessions) if sessions else None,
+                "resource_failure_rate": (
+                    int(totals[8]) / int(totals[5]) if int(totals[5]) else None
+                ),
+            },
+            "vitals": (
+                _rollup_vitals_payload(vital_row)
+                if window.rollup else _vitals_payload(vital_row)
+            ),
+        }
+
+    def run():
+        current = query(window)
+        explorer = explorer_query()
+        # The same figures for the window of equal length just before, so the
+        # dashboard can show "+12 % vs. the previous 7 days" on every tile.
+        previous = query(window.previous()) if compare else None
+        return current, explorer, previous
+
+    (totals, vital_row, releases), explorer, previous = await asyncio.to_thread(run)
+    previous_payload = None
+    if previous is not None:
+        previous_window = window.previous()
+        previous_payload = {
+            "window": previous_window.payload(),
+            **totals_payload(previous_window, previous[0], previous[1]),
+        }
     return {
-        "range": range_,
+        "range": window.range,
+        "window": window.payload(),
+        "previous": previous_payload,
+        **totals_payload(window, totals, vital_row),
         "filters": _filters_payload(
             application_id=application_id, env=env, view_name=view_name,
             browser=browser, device_type=device_type, country=country,
             service_version=service_version, browser_version=browser_version, os=os,
-            client_ip=client_ip,
+            client_ip=client_ip, user_id=user_id, q=q,
         ),
-        "totals": {
-            "events": int(totals[0]), "sessions": sessions, "views": int(totals[2]),
-            "errors": int(totals[3]), "error_sessions": int(totals[4]),
-            "resources": int(totals[5]), "actions": int(totals[6]),
-            "long_tasks": int(totals[7]), "resource_failures": int(totals[8]),
-            "sampled_errors": int(totals[9]), "unsampled_errors": int(totals[10]),
-        },
         "explorer": {
             "views": int(explorer[0]), "sessions": int(explorer[1]),
             "errors": int(explorer[2]), "resources": int(explorer[3]),
             "actions": int(explorer[4]),
         },
-        "rates": {
-            "error_session_rate": (int(totals[4]) / sessions) if sessions else None,
-            "resource_failure_rate": (
-                int(totals[8]) / int(totals[5]) if int(totals[5]) else None
-            ),
-        },
-        "vitals": (
-            _rollup_vitals_payload(vital_row)
-            if range_ in {"30d", "90d"} else _vitals_payload(vital_row)
-        ),
         "releases": [
             {
                 "service_version": r[0], "sessions": int(r[1]), "views": int(r[2]),
@@ -1249,6 +1398,10 @@ async def rum_overview(
 @router.get("/api/v1/apm/rum/timeseries")
 async def rum_timeseries(
     range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
     application_id: str | None = None,
     env: str | None = None,
     view_name: str | None = None,
@@ -1261,12 +1414,13 @@ async def rum_timeseries(
     client_ip: str | None = None,
     _user=Depends(get_current_user),
 ):
+    window = _resolve_window(range_, frm, to)
     params, scope_sql = _scope(
-        range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os, client_ip,
+        window, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os, client_ip, q=q, user_id=user_id,
     )
-    bucket = RANGE_BUCKET_SECONDS[range_]
-    if range_ in {"30d", "90d"}:
+    bucket = window.bucket_seconds
+    if window.rollup:
         rows = await asyncio.to_thread(lambda: _ch().query(f"""
             SELECT toStartOfInterval(timestamp, INTERVAL {bucket} SECOND) AS bucket,
                    uniqCombined64Merge(views), uniqCombined64Merge(sessions), sum(errors),
@@ -1312,7 +1466,7 @@ async def rum_timeseries(
         GROUP BY bucket ORDER BY bucket
         """, parameters=params).result_rows)
     return {
-        "range": range_, "bucket_seconds": bucket,
+        "range": window.range, "window": window.payload(), "bucket_seconds": bucket,
         "series": [
             {
                 "timestamp": row[0], "views": int(row[1]), "sessions": int(row[2]),
@@ -1335,6 +1489,10 @@ async def rum_timeseries(
 @router.get("/api/v1/apm/rum/facets")
 async def rum_facets(
     range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
     application_id: str | None = None,
     env: str | None = None,
     view_name: str | None = None,
@@ -1347,20 +1505,21 @@ async def rum_facets(
     client_ip: str | None = None,
     _user=Depends(get_current_user),
 ):
+    window = _resolve_window(range_, frm, to)
     params, scope_sql = _scope(
-        range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os, client_ip,
+        window, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os, client_ip, q=q, user_id=user_id,
     )
 
     def query():
         result = {}
         for column in (
             "application_id", "env", "view_name", "browser", "browser_version",
-            "os", "device_type", "country", "service_version", "client_ip",
+            "os", "device_type", "country", "service_version", "client_ip", "user_id",
         ):
-            # client_ip only lives on raw events (never in the 5m rollup), so it
-            # always reads from apm_rum_events regardless of the selected range.
-            use_rollup = range_ in {"30d", "90d"} and column != "client_ip"
+            # client_ip and user_id only live on raw events (never in the 5m
+            # rollup), so they always read from apm_rum_events.
+            use_rollup = window.rollup and column not in ("client_ip", "user_id")
             table = "zenplus.apm_rum_metrics_5m" if use_rollup else "zenplus.apm_rum_events"
             weight = "sum(events)" if use_rollup else "count()"
             rows = _ch().query(f"""
@@ -1481,6 +1640,10 @@ def _phase_payload(row: list | tuple) -> dict[str, object]:
 @router.get("/api/v1/apm/rum/breakdown")
 async def rum_breakdown(
     range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
     application_id: str | None = None,
     env: str | None = None,
     view_name: str | None = None,
@@ -1498,9 +1661,10 @@ async def rum_breakdown(
     Aggregates the Navigation/Resource Timing phases plus the Server-Timing
     execution split (raw events only, so drill-down retention applies).
     """
+    window = _resolve_window(range_, frm, to)
     params, scope_sql = _scope(
-        range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os, client_ip,
+        window, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os, client_ip, q=q, user_id=user_id,
     )
 
     def query():
@@ -1562,8 +1726,9 @@ async def rum_breakdown(
         return item
 
     return {
-        "range": range_,
-        "coverage": _raw_coverage(range_),
+        "range": window.range,
+        "window": window.payload(),
+        "coverage": _raw_coverage(window),
         "page_loads": _phase_payload(nav),
         "api_requests": _phase_payload(api),
         "slowest_endpoints": [endpoint(row) for row in slow],
@@ -1581,6 +1746,10 @@ _VIEW_SORTS = {
 @router.get("/api/v1/apm/rum/views")
 async def rum_views(
     range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
     application_id: str | None = None,
     env: str | None = None,
     view_name: str | None = None,
@@ -1600,9 +1769,10 @@ async def rum_views(
     sort_sql = _VIEW_SORTS.get(sort)
     if sort_sql is None:
         raise HTTPException(400, f"Unsupported views sort '{sort}'")
+    window = _resolve_window(range_, frm, to)
     params, scope_sql = _scope(
-        range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os, client_ip,
+        window, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os, client_ip, q=q, user_id=user_id,
     )
     params.update(limit=page_size, offset=(page - 1) * page_size)
 
@@ -1656,7 +1826,7 @@ async def rum_views(
 
     total, rows = await asyncio.to_thread(query)
     return {
-        "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(range_),
+        "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(window),
         "items": [
             {
                 "application_id": r[0], "env": r[1], "view_name": r[2], "url": r[3],
@@ -1687,6 +1857,10 @@ _SESSION_SORTS = {
 @router.get("/api/v1/apm/rum/sessions")
 async def rum_sessions(
     range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
     application_id: str | None = None,
     env: str | None = None,
     view_name: str | None = None,
@@ -1706,9 +1880,10 @@ async def rum_sessions(
     sort_sql = _SESSION_SORTS.get(sort)
     if sort_sql is None:
         raise HTTPException(400, f"Unsupported sessions sort '{sort}'")
+    window = _resolve_window(range_, frm, to)
     params, scope_sql = _scope(
-        range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os, client_ip,
+        window, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os, client_ip, q=q, user_id=user_id,
     )
     params.update(limit=page_size, offset=(page - 1) * page_size)
 
@@ -1742,7 +1917,7 @@ async def rum_sessions(
 
     total, rows = await asyncio.to_thread(query)
     return {
-        "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(range_),
+        "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(window),
         "items": [
             {
                 "session_id": r[0], "application_id": r[1], "env": r[2],
@@ -1763,6 +1938,10 @@ async def rum_sessions(
 async def rum_session_detail(
     session_id: str,
     range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
     application_id: str | None = None,
     env: str | None = None,
     view_name: str | None = None,
@@ -1779,9 +1958,10 @@ async def rum_session_detail(
 ):
     if not 1 <= len(session_id) <= 128:
         raise HTTPException(400, "Invalid RUM session identifier")
+    window = _resolve_window(range_, frm, to)
     params, scope_sql = _scope(
-        range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os, client_ip,
+        window, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os, client_ip, q=q, user_id=user_id,
     )
     params.update(
         session=session_id, limit=page_size, offset=(page - 1) * page_size,
@@ -1941,7 +2121,7 @@ async def rum_session_detail(
         ),
         "total": total, "page": page, "page_size": page_size,
         "coverage": {
-            **_raw_coverage(range_),
+            **_raw_coverage(window),
             "message": "Session event detail is retained for the most recent 14 days.",
         },
         "timeline": timeline,
@@ -1954,6 +2134,10 @@ _ERROR_SORTS = {"count": "event_count", "sessions": "sessions", "first_seen": "f
 @router.get("/api/v1/apm/rum/errors")
 async def rum_errors(
     range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
     application_id: str | None = None,
     env: str | None = None,
     view_name: str | None = None,
@@ -1973,9 +2157,10 @@ async def rum_errors(
     sort_sql = _ERROR_SORTS.get(sort)
     if sort_sql is None:
         raise HTTPException(400, f"Unsupported errors sort '{sort}'")
+    window = _resolve_window(range_, frm, to)
     params, scope_sql = _scope(
-        range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os, client_ip,
+        window, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os, client_ip, q=q, user_id=user_id,
     )
     params.update(limit=page_size, offset=(page - 1) * page_size)
     fingerprint = _ERROR_FINGERPRINT_SQL
@@ -2009,7 +2194,7 @@ async def rum_errors(
 
     total, rows = await asyncio.to_thread(query)
     return {
-        "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(range_),
+        "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(window),
         "sampling": {
             "includes_retained_unsampled_errors": True,
             "aggregate_error_session_rates_use_sampled_sessions_only": True,
@@ -2039,6 +2224,10 @@ _RESOURCE_SORTS = {
 @router.get("/api/v1/apm/rum/resources")
 async def rum_resources(
     range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
     application_id: str | None = None,
     env: str | None = None,
     view_name: str | None = None,
@@ -2058,9 +2247,10 @@ async def rum_resources(
     sort_sql = _RESOURCE_SORTS.get(sort)
     if sort_sql is None:
         raise HTTPException(400, f"Unsupported resources sort '{sort}'")
+    window = _resolve_window(range_, frm, to)
     params, scope_sql = _scope(
-        range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os, client_ip,
+        window, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os, client_ip, q=q, user_id=user_id,
     )
     params.update(limit=page_size, offset=(page - 1) * page_size)
     group = "application_id, env, view_name, resource_url, resource_type, method, status_code"
@@ -2110,7 +2300,7 @@ async def rum_resources(
 
     total, rows, timings = await asyncio.to_thread(query)
     return {
-        "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(range_),
+        "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(window),
         "items": [
             {
                 "application_id": r[0], "env": r[1], "view_name": r[2],
@@ -2146,6 +2336,10 @@ _ACTION_SORTS = {
 @router.get("/api/v1/apm/rum/actions")
 async def rum_actions(
     range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
     application_id: str | None = None,
     env: str | None = None,
     view_name: str | None = None,
@@ -2165,9 +2359,10 @@ async def rum_actions(
     sort_sql = _ACTION_SORTS.get(sort)
     if sort_sql is None:
         raise HTTPException(400, f"Unsupported actions sort '{sort}'")
+    window = _resolve_window(range_, frm, to)
     params, scope_sql = _scope(
-        range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os, client_ip,
+        window, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os, client_ip, q=q, user_id=user_id,
     )
     params.update(limit=page_size, offset=(page - 1) * page_size)
     name_expr = _ACTION_NAME_SQL
@@ -2198,7 +2393,7 @@ async def rum_actions(
 
     total, rows = await asyncio.to_thread(query)
     return {
-        "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(range_),
+        "total": total, "page": page, "page_size": page_size, "coverage": _raw_coverage(window),
         "items": [
             {
                 "application_id": r[0], "env": r[1], "view_name": r[2],
@@ -2216,6 +2411,10 @@ async def rum_actions(
 @router.get("/api/v1/apm/rum/health")
 async def rum_health(
     range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
     application_id: str | None = None,
     env: str | None = None,
     view_name: str | None = None,
@@ -2228,9 +2427,10 @@ async def rum_health(
     client_ip: str | None = None,
     _user=Depends(get_current_user),
 ):
+    window = _resolve_window(range_, frm, to)
     params, scope_sql = _scope(
-        range_, application_id, env, view_name, browser, device_type, country,
-        service_version, browser_version, os, client_ip,
+        window, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os, client_ip, q=q, user_id=user_id,
     )
     try:
         row = await asyncio.to_thread(lambda: _ch().query(f"""
@@ -2280,9 +2480,107 @@ async def rum_health(
     }
 
 
+_EXPORT_TABS = {
+    "views": ("rum_views", "views"),
+    "sessions": ("rum_sessions", "last_seen"),
+    "errors": ("rum_errors", "count"),
+    "resources": ("rum_resources", "count"),
+    "actions": ("rum_actions", "count"),
+}
+EXPORT_MAX_ROWS = 5000
+_EXPORT_SKIP = {"backend_trace_ids", "backend", "stack", "sdk_versions"}
+
+
+def _csv_cell(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=value.tzinfo or timezone.utc).isoformat()
+    if isinstance(value, (list, tuple, set)):
+        return ";".join(str(item) for item in value)
+    if isinstance(value, dict):
+        return json.dumps(value, separators=(",", ":"))
+    return str(value)
+
+
+@router.get("/api/v1/apm/rum/export")
+async def rum_export(
+    tab: Literal["views", "sessions", "errors", "resources", "actions"],
+    range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    client_ip: str | None = None,
+    sort: str | None = None,
+    order: OrderName = "desc",
+    limit: int = Query(default=EXPORT_MAX_ROWS, ge=1, le=EXPORT_MAX_ROWS),
+    _user=Depends(get_current_user),
+):
+    """CSV of one explorer at the current window and filters (up to 5 000 rows).
+
+    Reuses the explorer queries page by page so the file matches what the
+    table shows, including sort order.
+    """
+    import csv
+    import io
+
+    function_name, default_sort = _EXPORT_TABS[tab]
+    fetch = globals()[function_name]
+    common = {
+        "range_": range_, "frm": frm, "to": to, "q": q, "user_id": user_id,
+        "application_id": application_id, "env": env, "view_name": view_name,
+        "browser": browser, "device_type": device_type, "country": country,
+        "service_version": service_version, "browser_version": browser_version,
+        "os": os, "client_ip": client_ip, "_user": _user,
+    }
+    rows: list[dict] = []
+    page = 1
+    while len(rows) < limit:
+        result = await fetch(**common, page=page, page_size=100, sort=sort or default_sort, order=order)
+        items = result.get("items") or []
+        rows.extend(items)
+        if len(items) < 100 or len(rows) >= int(result.get("total") or 0):
+            break
+        page += 1
+    rows = rows[:limit]
+    columns: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in _EXPORT_SKIP and key not in columns:
+                columns.append(key)
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(columns)
+    for row in rows:
+        writer.writerow([_csv_cell(row.get(column)) for column in columns])
+    window = _resolve_window(range_, frm, to)
+    stamp = window.to.strftime("%Y%m%d-%H%M")
+    return PlainTextResponse(
+        buffer.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="rum-{tab}-{window.range}-{stamp}.csv"'},
+    )
+
+
 @router.get("/api/v1/apm/rum/summary")
 async def rum_summary(
     range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
     application_id: str | None = None,
     env: str | None = None,
     view_name: str | None = None,
@@ -2297,12 +2595,14 @@ async def rum_summary(
 ):
     """Legacy dashboard contract backed by the corrected analytics queries."""
     common = {
-        "range_": range_, "application_id": application_id, "env": env,
+        "range_": range_, "frm": frm, "to": to, "q": q, "user_id": user_id,
+        "application_id": application_id, "env": env,
         "view_name": view_name, "browser": browser, "device_type": device_type,
         "country": country, "service_version": service_version,
         "browser_version": browser_version, "os": os, "client_ip": client_ip,
         "_user": _user,
     }
+    window = _resolve_window(range_, frm, to)
     overview = await rum_overview(**common)
     views = await rum_views(**common, page=1, page_size=100, sort="views", order="desc")
     sessions = await rum_sessions(
@@ -2318,5 +2618,5 @@ async def rum_summary(
         "ttfb_p75": vital["ttfb"]["p75"], "ttfb_samples": vital["ttfb"]["samples"],
         "load_p75": vital["load"]["p75"], "load_samples": vital["load"]["samples"],
         "routes": views["items"], "recent_sessions": sessions["items"],
-        "coverage": _raw_coverage(range_),
+        "coverage": _raw_coverage(window),
     }

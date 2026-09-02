@@ -1,15 +1,17 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import type { LucideIcon } from 'lucide-react'
 import {
   Activity,
   AlertTriangle,
   BarChart3,
+  CalendarRange,
   ChevronLeft,
   ChevronRight,
   ChevronDown,
   ChevronUp,
   Clock3,
+  Download,
   ExternalLink,
   FileWarning,
   Filter,
@@ -21,6 +23,7 @@ import {
   Network,
   RefreshCw,
   RotateCcw,
+  Search,
   SlidersHorizontal,
   Users,
   X,
@@ -59,10 +62,14 @@ import {
   coreWebVitalsAssessment,
   formatDurationMs,
   formatRumVital,
+  formatWindowLabel,
   isLowConfidence,
+  isoToLocalInput,
+  localInputToIso,
   normalizeVitalDistribution,
   vitalBand,
   VITAL_LIMITS,
+  type RumCustomBounds,
   type RumVitalName,
 } from './model'
 
@@ -83,7 +90,7 @@ const VITAL_SHORT: Record<RumVitalName, string> = {
   lcp: 'LCP', inp: 'INP', cls: 'CLS', fcp: 'FCP', ttfb: 'TTFB', load: 'Load',
 }
 
-const RANGES: Array<{ value: RumRange; label: string; short: string }> = [
+const RANGES: Array<{ value: Exclude<RumRange, 'custom'>; label: string; short: string }> = [
   { value: '15m', label: 'Last 15 minutes', short: '15m' },
   { value: '1h', label: 'Last hour', short: '1h' },
   { value: '6h', label: 'Last 6 hours', short: '6h' },
@@ -116,37 +123,134 @@ const ADVANCED_FILTERS: Array<{ key: keyof RumFilters; placeholder: string }> = 
   { key: 'device_type', placeholder: 'All devices' },
   { key: 'country', placeholder: 'All countries' },
   { key: 'client_ip', placeholder: 'All client IPs' },
+  { key: 'user_id', placeholder: 'All users' },
   { key: 'service_version', placeholder: 'All releases' },
 ]
 
-export function RumRangePicker({ value, onChange }: { value: RumRange; onChange: (value: RumRange) => void }) {
+/** Free-text search box: commits on Enter or after a short pause, clears with the × button. */
+function SearchBox({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const [draft, setDraft] = useState(value)
+  useEffect(() => { setDraft(value) }, [value])
+  useEffect(() => {
+    if (draft === value) return
+    const handle = window.setTimeout(() => onChange(draft.trim()), 450)
+    return () => window.clearTimeout(handle)
+  }, [draft, onChange, value])
   return (
-    <div
-      role="tablist"
-      aria-label="Time range"
-      className="inline-flex items-center gap-0.5 rounded-md border border-border bg-surface2/40 p-0.5"
-    >
-      <Clock3 className="ml-1 mr-0.5 h-3 w-3 text-muted" aria-hidden />
-      {RANGES.map((range) => {
-        const active = value === range.value
-        return (
-          <button
-            key={range.value}
-            type="button"
-            role="tab"
-            title={range.label}
-            aria-label={range.label}
-            aria-selected={active}
-            onClick={() => onChange(range.value)}
-            className={cn(
-              'rounded px-2 py-1 text-[11px] font-semibold transition-colors',
-              active ? 'bg-primary text-black' : 'text-muted hover:text-text',
-            )}
-          >
-            {range.short}
-          </button>
-        )
-      })}
+    <label className="relative min-w-[180px] flex-1">
+      <span className="sr-only">Search sessions, users, views, URLs and errors</span>
+      <Search className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted" aria-hidden />
+      <input
+        type="search"
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => { if (event.key === 'Enter') onChange(draft.trim()) }}
+        placeholder="Search session, user, URL, error…"
+        className="h-7 w-full rounded-md border border-border bg-surface pl-6 pr-6 text-[11px] text-text outline-none placeholder:text-muted focus:border-primary focus:ring-2 focus:ring-primary/20"
+      />
+      {draft && (
+        <button type="button" aria-label="Clear search" onClick={() => { setDraft(''); onChange('') }} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted hover:text-text">
+          <X className="h-3 w-3" />
+        </button>
+      )}
+    </label>
+  )
+}
+
+export function RumRangePicker({ value, bounds, onChange, onCustom }: {
+  value: RumRange
+  bounds?: RumCustomBounds
+  onChange: (value: RumRange) => void
+  onCustom: (from: string, to: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const openEditor = () => {
+    const end = bounds ? new Date(bounds.to) : new Date()
+    const start = bounds ? new Date(bounds.from) : new Date(end.getTime() - 24 * 3_600_000)
+    setFrom(isoToLocalInput(start.toISOString()))
+    setTo(isoToLocalInput(end.toISOString()))
+    setError(null)
+    setOpen(true)
+  }
+  const apply = () => {
+    const startIso = localInputToIso(from)
+    const endIso = localInputToIso(to)
+    if (!startIso || !endIso) return setError('Pick both a start and an end.')
+    const span = new Date(endIso).getTime() - new Date(startIso).getTime()
+    if (span <= 0) return setError('The end must be after the start.')
+    if (span > 90 * 86_400_000) return setError('Windows are limited to 90 days.')
+    if (Date.now() - new Date(startIso).getTime() > 91 * 86_400_000) return setError('RUM data is retained for 90 days.')
+    setOpen(false)
+    onCustom(startIso, endIso)
+  }
+  const custom = value === 'custom'
+  return (
+    <div className="relative">
+      <div
+        role="tablist"
+        aria-label="Time range"
+        className="inline-flex items-center gap-0.5 rounded-md border border-border bg-surface2/40 p-0.5"
+      >
+        <Clock3 className="ml-1 mr-0.5 h-3 w-3 text-muted" aria-hidden />
+        {RANGES.map((range) => {
+          const active = value === range.value
+          return (
+            <button
+              key={range.value}
+              type="button"
+              role="tab"
+              title={range.label}
+              aria-label={range.label}
+              aria-selected={active}
+              onClick={() => onChange(range.value)}
+              className={cn(
+                'rounded px-2 py-1 text-[11px] font-semibold transition-colors',
+                active ? 'bg-primary text-black' : 'text-muted hover:text-text',
+              )}
+            >
+              {range.short}
+            </button>
+          )
+        })}
+        <button
+          type="button"
+          role="tab"
+          aria-selected={custom}
+          aria-expanded={open}
+          title={custom ? formatWindowLabel(bounds) : 'Pick an absolute start and end'}
+          onClick={openEditor}
+          className={cn(
+            'inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-semibold transition-colors',
+            custom ? 'bg-primary text-black' : 'text-muted hover:text-text',
+          )}
+        >
+          <CalendarRange className="h-3 w-3" aria-hidden />
+          {custom ? formatWindowLabel(bounds) : 'Custom'}
+        </button>
+      </div>
+      {open && (
+        <div className="absolute right-0 z-30 mt-1 w-[300px] rounded-md border border-border bg-surface p-3 shadow-lg" role="dialog" aria-label="Custom time range">
+          <div className="grid gap-2">
+            <label className="text-[10px] font-semibold uppercase tracking-wider text-muted">
+              From
+              <input type="datetime-local" value={from} onChange={(event) => setFrom(event.target.value)} className="mt-1 h-8 w-full rounded-md border border-border bg-surface2 px-2 text-xs font-normal normal-case tracking-normal text-text" />
+            </label>
+            <label className="text-[10px] font-semibold uppercase tracking-wider text-muted">
+              To
+              <input type="datetime-local" value={to} onChange={(event) => setTo(event.target.value)} className="mt-1 h-8 w-full rounded-md border border-border bg-surface2 px-2 text-xs font-normal normal-case tracking-normal text-text" />
+            </label>
+            {error && <p className="text-[11px] text-danger">{error}</p>}
+            <p className="text-[10px] text-muted">Times are in your local zone. Windows longer than 14 days read the 5-minute rollup.</p>
+            <div className="flex justify-end gap-1.5">
+              <Button variant="ghost" size="sm" className="h-7 px-2 text-[11px]" onClick={() => setOpen(false)}>Cancel</Button>
+              <Button size="sm" className="h-7 px-2.5 text-[11px]" onClick={apply}>Apply</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -238,8 +342,9 @@ export function RumFilterBar({
 }) {
   const advancedActive = ADVANCED_FILTERS.filter(({ key }) => filters[key]).length
   const [advancedOpen, setAdvancedOpen] = useState(advancedActive > 0)
-  // The three primary filters already read back from their own selects, so only
-  // the secondary ones (set from "More" or the facet sidebar) need a chip.
+  // The three primary filters and the search box already read back from their
+  // own controls, so only the secondary ones (set from "More" or the facet
+  // sidebar) need a chip.
   const chips = ADVANCED_FILTERS.map(({ key }) => key).filter((key) => filters[key])
   return (
     <div className="rounded-md border border-border bg-surface2/35">
@@ -251,6 +356,7 @@ export function RumFilterBar({
         {PRIMARY_FILTERS.map((filter) => (
           <FilterSelect key={filter.key} filterKey={filter.key} placeholder={filter.placeholder} filters={filters} facets={facets} onChange={onChange} />
         ))}
+        <SearchBox value={filters.q} onChange={(value) => onChange('q', value)} />
         {chips.map((key) => (
           <button
             key={key}
@@ -309,7 +415,7 @@ const BAND_STYLE = {
   'no-data': { label: 'No data', text: 'text-muted', bar: 'bg-muted/40', fill: 'stroke-muted', border: 'border-border', badge: 'outline' as const },
 } as const
 
-export function RumVitalCard({ name, metric, compact = false }: { name: RumVitalName; metric: RumVitalMetric; compact?: boolean }) {
+export function RumVitalCard({ name, metric, compact = false, delta }: { name: RumVitalName; metric: RumVitalMetric; compact?: boolean; delta?: ReactNode }) {
   const band = vitalBand(name, metric.p75)
   const lowConfidence = isLowConfidence(metric.samples)
   const style = BAND_STYLE[band]
@@ -337,6 +443,7 @@ export function RumVitalCard({ name, metric, compact = false }: { name: RumVital
         </div>
         <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-muted">
           <span title={confidenceTitle(metric.samples)}>{metric.samples.toLocaleString()} {metric.samples === 1 ? 'sample' : 'samples'}{lowConfidence ? ` · fewer than ${MIN_CONFIDENT_SAMPLES}` : ''}</span>
+          {delta}
           <span>Good ≤ {formatRumVital(name, limits.good)}</span>
         </div>
         {hasDistribution && (
@@ -556,6 +663,8 @@ export function RumExplorerShell({
   buckets,
   okLabel = 'Healthy',
   errLabel = 'Significant',
+  onExport,
+  exporting,
   children,
 }: {
   noun: string
@@ -570,13 +679,32 @@ export function RumExplorerShell({
   buckets: HistogramBucket[]
   okLabel?: string
   errLabel?: string
+  /** Download the whole explorer (current filters and sort) as CSV. */
+  onExport?: () => void
+  exporting?: boolean
   children: ReactNode
 }) {
   const shown = total ?? 0
   const label = shown === 1 && noun.endsWith('s') ? noun.slice(0, -1) : noun
   return (
     <ApmExplorerFrame
-      summary={<>Displaying {fmtCount(shown)} {label}{volume ? ` · ${volume}` : ''}{rangeLabel ? ` · ${rangeLabel}` : ''}</>}
+      summary={(
+        <span className="flex flex-wrap items-center justify-between gap-2">
+          <span>Displaying {fmtCount(shown)} {label}{volume ? ` · ${volume}` : ''}{rangeLabel ? ` · ${rangeLabel}` : ''}</span>
+          {onExport && (
+            <button
+              type="button"
+              onClick={onExport}
+              disabled={exporting || shown === 0}
+              className="inline-flex items-center gap-1 rounded border border-border bg-surface px-1.5 py-0.5 text-[10px] font-medium text-text2 hover:border-primary/40 hover:text-text disabled:cursor-not-allowed disabled:opacity-50"
+              title={`Download up to 5,000 ${noun} matching the current filters as CSV`}
+            >
+              {exporting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+              Export CSV
+            </button>
+          )}
+        </span>
+      )}
       histogram={<VolumeHistogram buckets={buckets} okLabel={okLabel} errLabel={errLabel} />}
       sidebar={<ApmFacetSidebar title="Client analytics" groups={rumClientFacetGroups(filters, facets, onFilter)} />}
     >

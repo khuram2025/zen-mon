@@ -12,7 +12,7 @@ import {
   ServerCog,
   Users,
 } from 'lucide-react'
-import { relativeTime } from '@/lib/utils'
+import { cn, relativeTime } from '@/lib/utils'
 import { fmtPct } from '@/components/apm/shared'
 import { APM_SERIES, ApmKpi, ApmTimeChart, ChartPanel, RankBar, errorTone, fmtCount } from '@/components/apm/viz'
 import { EXPLORER_HEAD, EXPLORER_ROWS } from '@/components/apm/explorer'
@@ -215,14 +215,59 @@ function FacetCard({ title, items, onSelect, empty = 'No breakdown data' }: { ti
   )
 }
 
+/**
+ * Change against the previous window of equal length. `lowerIsBetter` flips the
+ * colouring for error rates and latencies; percentage points are used for
+ * rates because "+2 pp" reads better than "+18 %" of a small rate.
+ */
+function Delta({ current, previous, lowerIsBetter = false, pointsOf, format, label, detail = true }: {
+  current: number | null | undefined
+  previous: number | null | undefined
+  lowerIsBetter?: boolean
+  /** When set, express the change as percentage points of this scale (1 = fraction, 100 = percent). */
+  pointsOf?: number
+  format?: (value: number) => string
+  label: string
+  /** Show "(before → after)" inline; off for tight cards, where it stays in the tooltip. */
+  detail?: boolean
+}) {
+  if (current == null || previous == null || !Number.isFinite(current) || !Number.isFinite(previous)) {
+    return <span className="text-[10px] text-muted">no prior data</span>
+  }
+  const diff = current - previous
+  if (Math.abs(diff) < 1e-9) return <span className="text-[10px] text-muted">unchanged vs. {label}</span>
+  const better = lowerIsBetter ? diff < 0 : diff > 0
+  const text = pointsOf != null
+    ? `${diff > 0 ? '+' : '−'}${(Math.abs(diff) * pointsOf).toFixed(1)} pp`
+    : previous === 0
+      ? (format ? `${diff > 0 ? '+' : '−'}${format(Math.abs(diff))}` : 'new')
+      : `${diff > 0 ? '+' : '−'}${Math.abs((diff / previous) * 100).toFixed(Math.abs(diff / previous) >= 1 ? 0 : 1)}%`
+  const change = format ? `${format(previous)} → ${format(current)}` : `${previous} → ${current}`
+  return (
+    <span className={cn('whitespace-nowrap text-[10px] tabular-nums', better ? 'text-success' : 'text-danger')} title={`${label}: ${change}`}>
+      {diff > 0 ? '▲' : '▼'} {text} vs. {label}{detail && format && <span className="text-muted"> ({change})</span>}
+    </span>
+  )
+}
+
+function previousLabel(d: RumOverview): string {
+  const range = d.range === 'custom' && d.window ? `${Math.max(1, Math.round(d.window.seconds / 3600))} h` : d.range
+  return d.range === 'custom' ? `prior ${range}` : `prior ${range}`
+}
+
 export function RumOverviewPanel(props: OverviewProps) {
   const { overview: d, exploreTo } = props
   const errorRate = d.rates.error_session_rate
   const series = props.timeseries?.series ?? []
+  const prev = d.previous ?? null
+  const prior = previousLabel(d)
+  const kpiDelta = (current: number | null | undefined, previous: number | null | undefined, options: { lowerIsBetter?: boolean; pointsOf?: number; format?: (value: number) => string } = {}) => (
+    prev ? <Delta current={current} previous={previous} label={prior} {...options} /> : undefined
+  )
   return (
     <div className="space-y-4">
       <section aria-labelledby="rum-volume-heading">
-        <RumSectionHeader id="rum-volume-heading" title="Experience volume" description="Open a tile to inspect the matching explorer." />
+        <RumSectionHeader id="rum-volume-heading" title="Experience volume" description={prev ? `Compared with the ${prior} window. Open a tile to inspect the matching explorer.` : 'Open a tile to inspect the matching explorer.'} />
         <div className="grid grid-cols-2 gap-2.5 md:grid-cols-3 xl:grid-cols-6">
           <ApmKpi
             to={exploreTo.sessions}
@@ -231,6 +276,7 @@ export function RumOverviewPanel(props: OverviewProps) {
             tone="info"
             value={fmtCount(d.totals.sessions)}
             sub={d.totals.sessions > 0 ? `${(d.totals.views / d.totals.sessions).toFixed(1)} views per session` : 'no sampled sessions yet'}
+            foot={kpiDelta(d.totals.sessions, prev?.totals.sessions)}
           />
           <ApmKpi
             to={exploreTo.views}
@@ -239,6 +285,7 @@ export function RumOverviewPanel(props: OverviewProps) {
             tone="primary"
             value={fmtCount(d.totals.views)}
             sub={`${fmtCount(d.totals.events)} collected events`}
+            foot={kpiDelta(d.totals.views, prev?.totals.views)}
           />
           <ApmKpi
             to={exploreTo.errors}
@@ -249,6 +296,7 @@ export function RumOverviewPanel(props: OverviewProps) {
             sub={(d.totals.unsampled_errors ?? 0) > 0
               ? `${fmtCount(d.totals.sampled_errors ?? 0)} sampled · ${fmtCount(d.totals.unsampled_errors ?? 0)} retained`
               : `${fmtCount(d.totals.error_sessions)} affected sessions`}
+            foot={kpiDelta(d.totals.errors, prev?.totals.errors, { lowerIsBetter: true })}
           />
           <ApmKpi
             to={exploreTo.errors}
@@ -257,6 +305,7 @@ export function RumOverviewPanel(props: OverviewProps) {
             tone={errorTone(errorRate ?? 0)}
             value={fmtPct(errorRate)}
             sub="sampled sessions with ≥1 error"
+            foot={kpiDelta(errorRate, prev?.rates.error_session_rate, { lowerIsBetter: true, pointsOf: 100 })}
           />
           <ApmKpi
             to={exploreTo.resources}
@@ -265,6 +314,7 @@ export function RumOverviewPanel(props: OverviewProps) {
             tone={(d.rates.resource_failure_rate ?? 0) >= 0.05 ? 'danger' : 'accent'}
             value={fmtCount(d.totals.resources)}
             sub={d.rates.resource_failure_rate == null ? 'fetch, XHR and assets' : `${fmtPct(d.rates.resource_failure_rate)} failed`}
+            foot={kpiDelta(d.rates.resource_failure_rate, prev?.rates.resource_failure_rate, { lowerIsBetter: true, pointsOf: 100 })}
           />
           <ApmKpi
             to={exploreTo.actions}
@@ -273,6 +323,7 @@ export function RumOverviewPanel(props: OverviewProps) {
             tone="warning"
             value={fmtCount(d.totals.actions)}
             sub={`${fmtCount(d.totals.long_tasks)} long tasks`}
+            foot={kpiDelta(d.totals.actions, prev?.totals.actions)}
           />
         </div>
       </section>
@@ -286,9 +337,9 @@ export function RumOverviewPanel(props: OverviewProps) {
         />
         <div className="grid gap-2.5 xl:grid-cols-4">
           <RumExperienceCard vitals={d.vitals} href={exploreTo['web-vitals']} />
-          <RumVitalCard name="lcp" metric={d.vitals.lcp} />
-          <RumVitalCard name="inp" metric={d.vitals.inp} />
-          <RumVitalCard name="cls" metric={d.vitals.cls} />
+          <RumVitalCard name="lcp" metric={d.vitals.lcp} delta={prev ? <Delta current={d.vitals.lcp.p75} previous={prev.vitals.lcp.p75} lowerIsBetter label={prior} format={(value) => formatRumVital('lcp', value)} detail={false} /> : undefined} />
+          <RumVitalCard name="inp" metric={d.vitals.inp} delta={prev ? <Delta current={d.vitals.inp.p75} previous={prev.vitals.inp.p75} lowerIsBetter label={prior} format={(value) => formatRumVital('inp', value)} detail={false} /> : undefined} />
+          <RumVitalCard name="cls" metric={d.vitals.cls} delta={prev ? <Delta current={d.vitals.cls.p75} previous={prev.vitals.cls.p75} lowerIsBetter label={prior} format={(value) => formatRumVital('cls', value)} detail={false} /> : undefined} />
         </div>
         <div className="mt-2.5 grid grid-cols-3 divide-x divide-border overflow-hidden rounded-lg border border-border bg-surface">
           {(['fcp', 'ttfb', 'load'] as const).map((name) => (
@@ -296,6 +347,7 @@ export function RumOverviewPanel(props: OverviewProps) {
               <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">{name.toUpperCase()} p75</span>
               <span className="text-base font-semibold tabular-nums text-text">{formatRumVital(name, d.vitals[name].p75)}</span>
               <span className="text-[10px] text-muted">{d.vitals[name].samples.toLocaleString()} samples</span>
+              {prev && <Delta current={d.vitals[name].p75} previous={prev.vitals[name].p75} lowerIsBetter label={prior} format={(value) => formatRumVital(name, value)} />}
             </div>
           ))}
         </div>

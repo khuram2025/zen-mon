@@ -3,7 +3,7 @@ import type { RumFilters, RumRange, RumTab, RumTimeseries, RumTimeseriesPoint, R
 export type RumVitalName = 'lcp' | 'inp' | 'cls' | 'fcp' | 'ttfb' | 'load'
 export type RumVitalBand = 'good' | 'needs-improvement' | 'poor' | 'no-data'
 
-export const RUM_FILTER_KEYS = ['application_id', 'env', 'view_name', 'browser', 'browser_version', 'os', 'device_type', 'country', 'service_version', 'client_ip'] as const satisfies readonly (keyof RumFilters)[]
+export const RUM_FILTER_KEYS = ['application_id', 'env', 'view_name', 'browser', 'browser_version', 'os', 'device_type', 'country', 'service_version', 'client_ip', 'user_id', 'q'] as const satisfies readonly (keyof RumFilters)[]
 
 export const RUM_FILTER_LABEL: Record<keyof RumFilters, string> = {
   application_id: 'Application',
@@ -16,6 +16,39 @@ export const RUM_FILTER_LABEL: Record<keyof RumFilters, string> = {
   country: 'Country',
   service_version: 'Release',
   client_ip: 'Client IP',
+  user_id: 'User',
+  q: 'Search',
+}
+
+/** Custom window bounds carried in the URL alongside `range=custom`. */
+export interface RumCustomBounds {
+  from: string
+  to: string
+}
+
+/** `datetime-local` input value (viewer's zone, no seconds) → ISO with offset. */
+export function localInputToIso(value: string): string {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString()
+}
+
+/** ISO → `datetime-local` input value in the viewer's zone. */
+export function isoToLocalInput(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+export function formatWindowLabel(bounds: RumCustomBounds | undefined): string {
+  if (!bounds) return ''
+  const from = new Date(bounds.from)
+  const to = new Date(bounds.to)
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return 'Custom'
+  const sameDay = from.toDateString() === to.toDateString()
+  const day = (d: Date) => d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+  const time = (d: Date) => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return sameDay ? `${day(from)} ${time(from)} → ${time(to)}` : `${day(from)} ${time(from)} → ${day(to)} ${time(to)}`
 }
 
 export const VITAL_LIMITS: Record<RumVitalName, { good: number; poor: number }> = {
@@ -117,8 +150,13 @@ export function buildRumQuery(
   range: RumRange,
   filters: RumFilters,
   extra: Record<string, string | number | undefined> = {},
+  bounds?: RumCustomBounds,
 ): string {
   const query = new URLSearchParams({ range })
+  if (range === 'custom' && bounds) {
+    query.set('from', bounds.from)
+    query.set('to', bounds.to)
+  }
   RUM_FILTER_KEYS.forEach((key) => {
     if (filters[key]) query.set(key, filters[key])
   })
@@ -128,15 +166,24 @@ export function buildRumQuery(
   return query.toString()
 }
 
-export function buildRumHref(tab: RumTab, range: RumRange, filters: RumFilters): string {
-  const query = new URLSearchParams(buildRumQuery(range, filters))
+export function buildRumHref(tab: RumTab, range: RumRange, filters: RumFilters, bounds?: RumCustomBounds): string {
+  const query = new URLSearchParams(buildRumQuery(range, filters, {}, bounds))
   if (tab === 'overview') query.delete('tab')
   else query.set('tab', tab)
   const encoded = query.toString()
   return encoded ? `/apm/rum?${encoded}` : '/apm/rum'
 }
 
-export const RUM_RANGE_MS: Record<RumRange, number> = {
+/** Length of the selected window in milliseconds (custom windows use their bounds). */
+export function rangeMs(range: RumRange, bounds?: RumCustomBounds): number {
+  if (range === 'custom' && bounds) {
+    const span = new Date(bounds.to).getTime() - new Date(bounds.from).getTime()
+    if (Number.isFinite(span) && span > 0) return span
+  }
+  return RUM_RANGE_MS[range === 'custom' ? '24h' : range]
+}
+
+export const RUM_RANGE_MS: Record<Exclude<RumRange, 'custom'>, number> = {
   '15m': 15 * 60_000,
   '1h': 3_600_000,
   '6h': 6 * 3_600_000,
@@ -170,11 +217,13 @@ export function volumeBuckets(
   range: RumRange,
   keys: { ok?: keyof RumTimeseriesPoint; err?: keyof RumTimeseriesPoint; errWithinOk?: boolean },
   labels: { ok: string; err: string },
+  bounds?: RumCustomBounds,
 ): VolumeBucket[] {
   if (!timeseries || !timeseries.bucket_seconds || !timeseries.series.length) return []
   const bucketMs = timeseries.bucket_seconds * 1000
-  const now = Date.now()
-  const start = Math.floor((now - RUM_RANGE_MS[range]) / bucketMs) * bucketMs
+  const end = range === 'custom' && bounds ? new Date(bounds.to).getTime() : Date.now()
+  const now = Number.isFinite(end) ? end : Date.now()
+  const start = Math.floor((now - rangeMs(range, bounds)) / bucketMs) * bucketMs
   const slots = Math.min(400, Math.max(2, Math.ceil((now - start) / bucketMs)))
   const buckets: VolumeBucket[] = Array.from({ length: slots }, (_, index) => ({ ok: 0, err: 0, label: formatBucketLabel(start + index * bucketMs, bucketMs) }))
   timeseries.series.forEach((point) => {

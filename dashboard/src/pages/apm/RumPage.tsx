@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Globe2, Radio, Settings2 } from 'lucide-react'
@@ -46,7 +46,7 @@ import {
   RumTabBar,
 } from './rum/RumUi'
 import { useRumUrlState } from './rum/useRumUrlState'
-import { buildRumHref, parseUtc, volumeBuckets } from './rum/model'
+import { buildRumHref, formatWindowLabel, parseUtc, volumeBuckets } from './rum/model'
 import { relativeTime } from '@/lib/utils'
 
 const REFRESH_MS = 30_000
@@ -90,7 +90,8 @@ export function RumPage() {
 
   const overviewQ = useQuery<RumOverview>({
     queryKey: ['apm', 'rum', 'overview', commonQuery],
-    queryFn: () => get(`/apm/rum/overview?${commonQuery}`),
+    // compare=1 adds the same figures for the previous window of equal length.
+    queryFn: () => get(`/apm/rum/overview?${commonQuery}&compare=1`),
     refetchInterval: REFRESH_MS,
   })
   const timeseriesQ = useQuery<RumTimeseries>({
@@ -169,13 +170,40 @@ export function RumPage() {
   })
 
   const exploreTo = useMemo(() => ({
-    'web-vitals': buildRumHref('web-vitals', state.range, state.filters),
-    views: buildRumHref('views', state.range, state.filters),
-    sessions: buildRumHref('sessions', state.range, state.filters),
-    errors: buildRumHref('errors', state.range, state.filters),
-    resources: buildRumHref('resources', state.range, state.filters),
-    actions: buildRumHref('actions', state.range, state.filters),
-  }), [state.filters, state.range])
+    'web-vitals': buildRumHref('web-vitals', state.range, state.filters, state.bounds),
+    views: buildRumHref('views', state.range, state.filters, state.bounds),
+    sessions: buildRumHref('sessions', state.range, state.filters, state.bounds),
+    errors: buildRumHref('errors', state.range, state.filters, state.bounds),
+    resources: buildRumHref('resources', state.range, state.filters, state.bounds),
+    actions: buildRumHref('actions', state.range, state.filters, state.bounds),
+  }), [state.bounds, state.filters, state.range])
+  const rangeLabel = state.range === 'custom' ? formatWindowLabel(state.bounds) : state.range
+
+  // CSV export of the active explorer: fetch through the authenticated API
+  // client and hand the file to the browser (a plain link cannot carry the
+  // bearer token).
+  const [exporting, setExporting] = useState(false)
+  const exportCsv = async (tab: 'views' | 'sessions' | 'errors' | 'resources' | 'actions') => {
+    if (exporting) return
+    setExporting(true)
+    try {
+      const params = new URLSearchParams(state.query({ sort: state.sort, order: state.order }))
+      params.set('tab', tab)
+      const response = await api.get<Blob>(`/apm/rum/export?${params}`, { responseType: 'blob' })
+      const disposition = String(response.headers['content-disposition'] || '')
+      const name = /filename="([^"]+)"/.exec(disposition)?.[1] || `rum-${tab}.csv`
+      const url = URL.createObjectURL(response.data)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = name
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.setTimeout(() => URL.revokeObjectURL(url), 10_000)
+    } finally {
+      setExporting(false)
+    }
+  }
 
   const selected = useMemo(() => {
     if (!state.detailId) return undefined
@@ -264,27 +292,27 @@ export function RumPage() {
     )
     if (state.tab === 'web-vitals' && overviewQ.data) return <RumWebVitalsPanel overview={overviewQ.data} timeseries={timeseriesQ.data} loading={timeseriesQ.isLoading} error={timeseriesQ.error} onRetry={() => timeseriesQ.refetch()} />
     if (state.tab === 'views') return (
-      <RumExplorerShell noun="routes" total={viewsQ.data?.total} volume={volume(totals?.views, 'page views')} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { ok: 'views', err: 'errors' }, { ok: 'Page views', err: 'JS errors' })} okLabel="Page views" errLabel="JS errors">
+      <RumExplorerShell noun="routes" onExport={() => exportCsv('views')} exporting={exporting} total={viewsQ.data?.total} volume={volume(totals?.views, 'page views')} rangeLabel={rangeLabel} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { ok: 'views', err: 'errors' }, { ok: 'Page views', err: 'JS errors' }, state.bounds)} okLabel="Page views" errLabel="JS errors">
         <RumViewsTable embedded {...sharedTableProps} data={viewsQ.data} loading={viewsQ.isLoading} error={viewsQ.error} onRetry={() => viewsQ.refetch()} onOpen={(row) => state.openDetail('view', viewRowKey(row))} />
       </RumExplorerShell>
     )
     if (state.tab === 'sessions') return (
-      <RumExplorerShell noun="sessions" total={sessionsQ.data?.total} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { ok: 'sessions', err: 'error_sessions', errWithinOk: true }, { ok: 'Sessions', err: 'Sessions with errors' })} okLabel="Healthy" errLabel="With errors">
+      <RumExplorerShell noun="sessions" onExport={() => exportCsv('sessions')} exporting={exporting} total={sessionsQ.data?.total} rangeLabel={rangeLabel} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { ok: 'sessions', err: 'error_sessions', errWithinOk: true }, { ok: 'Sessions', err: 'Sessions with errors' }, state.bounds)} okLabel="Healthy" errLabel="With errors">
         <RumSessionsTable embedded {...sharedTableProps} data={sessionsQ.data} loading={sessionsQ.isLoading} error={sessionsQ.error} onRetry={() => sessionsQ.refetch()} onOpen={(row) => state.openDetail('session', row.session_id)} />
       </RumExplorerShell>
     )
     if (state.tab === 'errors') return (
-      <RumExplorerShell noun="issues" total={errorsQ.data?.total} volume={volume(totals?.errors, 'error events')} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { err: 'errors' }, { ok: 'Events', err: 'JS errors' })} okLabel="Events" errLabel="JS errors">
+      <RumExplorerShell noun="issues" onExport={() => exportCsv('errors')} exporting={exporting} total={errorsQ.data?.total} volume={volume(totals?.errors, 'error events')} rangeLabel={rangeLabel} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { err: 'errors' }, { ok: 'Events', err: 'JS errors' }, state.bounds)} okLabel="Events" errLabel="JS errors">
         <RumErrorsTable embedded {...sharedTableProps} data={errorsQ.data} loading={errorsQ.isLoading} error={errorsQ.error} onRetry={() => errorsQ.refetch()} onOpen={(row) => state.openDetail('error', errorRowKey(row))} />
       </RumExplorerShell>
     )
     if (state.tab === 'resources') return (
-      <RumExplorerShell noun="resources" total={resourcesQ.data?.total} volume={volume(totals?.resources, 'requests')} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { ok: 'resources', err: 'resource_failures', errWithinOk: true }, { ok: 'Requests', err: 'Failed requests' })} okLabel="Succeeded" errLabel="Failed">
+      <RumExplorerShell noun="resources" onExport={() => exportCsv('resources')} exporting={exporting} total={resourcesQ.data?.total} volume={volume(totals?.resources, 'requests')} rangeLabel={rangeLabel} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { ok: 'resources', err: 'resource_failures', errWithinOk: true }, { ok: 'Requests', err: 'Failed requests' }, state.bounds)} okLabel="Succeeded" errLabel="Failed">
         <RumResourcesTable embedded {...sharedTableProps} data={resourcesQ.data} loading={resourcesQ.isLoading} error={resourcesQ.error} onRetry={() => resourcesQ.refetch()} onOpen={(row) => state.openDetail('resource', resourceRowKey(row))} />
       </RumExplorerShell>
     )
     if (state.tab === 'actions') return (
-      <RumExplorerShell noun="actions" total={actionsQ.data?.total} volume={volume(totals?.actions, 'interactions')} rangeLabel={state.range} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { ok: 'actions', err: 'long_tasks' }, { ok: 'Interactions', err: 'Long tasks' })} okLabel="Interactions" errLabel="Long tasks">
+      <RumExplorerShell noun="actions" onExport={() => exportCsv('actions')} exporting={exporting} total={actionsQ.data?.total} volume={volume(totals?.actions, 'interactions')} rangeLabel={rangeLabel} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { ok: 'actions', err: 'long_tasks' }, { ok: 'Interactions', err: 'Long tasks' }, state.bounds)} okLabel="Interactions" errLabel="Long tasks">
         <RumActionsTable embedded {...sharedTableProps} data={actionsQ.data} loading={actionsQ.isLoading} error={actionsQ.error} onRetry={() => actionsQ.refetch()} onOpen={(row) => state.openDetail('action', actionRowKey(row))} />
       </RumExplorerShell>
     )
@@ -307,7 +335,7 @@ export function RumPage() {
             <Button asChild variant="outline" size="sm">
               <Link to="/apm/settings?tab=keys&create=rum"><Settings2 className="h-4 w-4" /> Setup</Link>
             </Button>
-            <RumRangePicker value={state.range} onChange={state.setRange} />
+            <RumRangePicker value={state.range} bounds={state.bounds} onChange={state.setRange} onCustom={state.setCustomRange} />
           </>
         }
       />
