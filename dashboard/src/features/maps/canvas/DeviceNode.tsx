@@ -1,11 +1,12 @@
 import { memo } from 'react'
 import { Handle, Position, useStore, type NodeProps } from '@xyflow/react'
+import { Lock } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { NetworkIcon } from '@/components/network-icons'
 import {
-  DISC, DISC_CX, DISC_CY, DISC_RADIUS, NODE_W, STATUS_COLOR,
+  DISC, DISC_CX, DISC_CY, NODE_W, STATUS_COLOR,
   iconFillFor,
-  formatAgo, formatUptime, iconForNode, statusKey, utilHex,
+  formatAgo, formatUptime, iconForNode, statusKey, textScaleFor, utilHex,
   type ManualMapNode, type NodeLiveData,
 } from '../core'
 import { useMapMode } from './MapModeContext'
@@ -21,7 +22,6 @@ export type DeviceNodeData = {
 
 // Default label anchor within the node box (centred just below the disc).
 const LABEL_X = DISC_CX
-const LABEL_Y = DISC + 8
 
 const STATUS_GLOW: Record<string, string> = {
   up: '0 0 14px rgb(34 197 94 / 0.35)',
@@ -35,11 +35,16 @@ const STATUS_GLOW: Record<string, string> = {
  * The label can be dragged to any offset (persisted in node metadata) so dense
  * maps stay readable; a faint leader line connects it back to the disc.
  * In live mode the disc glows with status, carries an alert badge, shows
- * CPU/MEM micro-gauges and reveals a full health card on hover. */
+ * CPU/MEM micro-gauges and reveals a full health card on hover.
+ *
+ * Text (label, gauges) counter-scales when the map is zoomed out so a
+ * wall-sized map stays readable — the disc itself keeps true scale so the
+ * topology geometry never lies. */
 function DeviceNodeImpl({ data, selected }: NodeProps) {
   const { node, live, nodeLive, onLabelMove } = data as DeviceNodeData
   const { connectMode } = useMapMode()
   const zoom = useStore((s) => s.transform[2])
+  const ts = textScaleFor(zoom)
   const iconKey = iconForNode(node)
   // Live status feed (15s poll) wins over the map snapshot when present.
   const sk = statusKey(live ? (nodeLive?.status ?? node.status) : node.status)
@@ -51,6 +56,7 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
   const off = node.metadata?.label_offset || { dx: 0, dy: 0 }
   const scale = node.metadata?.size_scale || 1
   const ls = node.metadata?.label_style || {}
+  const locked = !!node.metadata?.locked
   const discSize = DISC * scale
   const iconFill = iconFillFor(node.metadata)
   // Outer frame: a full circle (default) or a rounded-corner square.
@@ -58,11 +64,12 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
   const lx = LABEL_X + off.dx
   const ly = (DISC_CY + discSize / 2 + 8) + off.dy
   const moved = Math.hypot(off.dx, off.dy) > 6
-  const editable = !live && !!onLabelMove
+  const editable = !live && !!onLabelMove && !locked
   const hasGauges = live && (nodeLive?.cpu_pct != null || nodeLive?.mem_pct != null)
+  const gaugeW = Math.max(52, discSize * 0.85)
 
   const startLabelDrag = (e: React.PointerEvent) => {
-    if (!editable) return
+    if (!editable || e.button !== 0) return
     e.stopPropagation()
     e.preventDefault()
     const sx = e.clientX
@@ -79,22 +86,54 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
   }
 
   // In connect mode the handles grow to cover the whole disc so a link can be
-  // dragged from/to anywhere on the device; otherwise they're a 1px anchor.
+  // dragged from/to anywhere on the device; otherwise they're a 1px anchor at
+  // the disc centre (the drop target — React Flow snaps within connectionRadius).
   const handleStyle = connectMode
-    ? { left: DISC_CX, top: DISC_CY, width: DISC, height: DISC, borderRadius: '50%', background: 'transparent', border: 'none', transform: 'translate(-50%, -50%)', opacity: 0, cursor: 'crosshair', zIndex: 5 } as const
+    ? { left: DISC_CX, top: DISC_CY, width: discSize, height: discSize, borderRadius: '50%', background: 'transparent', border: 'none', transform: 'translate(-50%, -50%)', opacity: 0, cursor: 'crosshair', zIndex: 5 } as const
     : { left: DISC_CX, top: DISC_CY, width: 1, height: 1, minWidth: 1, minHeight: 1, background: 'transparent', border: 'none', transform: 'translate(-50%, -50%)', opacity: 0 } as const
+
+  // draw.io-style hover connector: a small blue plug on the disc rim that
+  // starts a cable when dragged, without leaving Select mode.
+  // Sits on the LEFT rim (the hover card opens on the right) and grows as the
+  // map is zoomed out so it stays grabbable on a wall-sized layout.
+  const quickHandleVisible = !live && !connectMode && !locked
+  const plug = Math.round(14 * Math.min(2.2, Math.max(1, 0.9 / Math.max(0.15, zoom))))
+  const quickHandleStyle = {
+    left: DISC_CX - discSize / 2 - plug * 0.55,
+    top: DISC_CY,
+    width: plug,
+    height: plug,
+    borderRadius: '50%',
+    transform: 'translate(-50%, -50%)',
+    background: 'rgb(var(--primary))',
+    border: '2px solid rgb(var(--surface))',
+    cursor: 'crosshair',
+    zIndex: 6,
+    opacity: 0,
+  } as const
 
   return (
     <div className="group relative" style={{ width: NODE_W, height: DISC }}>
-      <Handle type="target" position={Position.Top} id="c" style={handleStyle} isConnectable={connectMode} />
-      <Handle type="source" position={Position.Top} id="c" style={handleStyle} isConnectable={connectMode} />
+      <Handle type="target" position={Position.Top} id="c" style={handleStyle} isConnectable={!live} />
+      <Handle type="source" position={Position.Top} id="c" style={handleStyle} isConnectable={!live} />
+      {quickHandleVisible && (
+        <Handle
+          type="source"
+          position={Position.Left}
+          id="q"
+          title="Drag to connect"
+          className="nm-quick-handle"
+          style={quickHandleStyle}
+          isConnectable
+        />
+      )}
 
       {/* Connect-mode affordance ring */}
       {connectMode && !live && (
         <span
           aria-hidden
           className="pointer-events-none absolute rounded-full ring-2 ring-primary/0 transition group-hover:ring-primary/70"
-          style={{ left: DISC_CX, top: DISC_CY, width: DISC + 8, height: DISC + 8, transform: 'translate(-50%, -50%)' }}
+          style={{ left: DISC_CX, top: DISC_CY, width: discSize + 8, height: discSize + 8, transform: 'translate(-50%, -50%)' }}
         />
       )}
 
@@ -122,8 +161,16 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
                 'absolute -left-1.5 -top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full border border-surface px-0.5 font-mono text-[9px] font-bold leading-none text-white shadow',
                 (alerts?.critical || 0) > 0 ? 'bg-danger' : 'bg-warning',
               )}
+              style={{ transform: `scale(${ts})`, transformOrigin: 'top left' }}
             >
               {alertCount > 99 ? '99+' : alertCount}
+            </span>
+          )}
+
+          {/* Lock badge (design mode) */}
+          {locked && !live && (
+            <span className="absolute -bottom-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full border border-surface bg-surface2 text-muted shadow" title="Locked — unlock from the right-click menu">
+              <Lock className="h-2.5 w-2.5" />
             </span>
           )}
         </div>
@@ -133,22 +180,22 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
       {hasGauges && (
         <div
           className="pointer-events-none absolute flex flex-col gap-[3px]"
-          style={{ left: DISC_CX, top: DISC_CY + discSize / 2 + 3, width: Math.max(46, discSize * 0.8), transform: 'translateX(-50%)' }}
+          style={{ left: DISC_CX, top: DISC_CY + discSize / 2 + 3, width: gaugeW, transform: `translateX(-50%) scale(${ts})`, transformOrigin: 'top center' }}
         >
           {nodeLive?.cpu_pct != null && <MicroGauge label="C" pct={nodeLive.cpu_pct} />}
           {nodeLive?.mem_pct != null && <MicroGauge label="M" pct={nodeLive.mem_pct} />}
         </div>
       )}
 
-      {/* Movable, styleable label */}
+      {/* Movable, styleable label (counter-scaled when zoomed out) */}
       <div
         onPointerDown={startLabelDrag}
         className={cn(
-          'nodrag absolute max-w-[10rem] rounded-md border border-border bg-surface/90 px-2 py-0.5 text-center leading-tight shadow-sm backdrop-blur',
+          'nodrag absolute max-w-[11rem] rounded-md border border-border bg-surface/90 px-2 py-0.5 text-center leading-tight shadow-sm backdrop-blur',
           editable && 'cursor-move hover:border-primary/60',
         )}
         style={{
-          left: lx, top: hasGauges ? ly + 14 : ly, transform: 'translateX(-50%)',
+          left: lx, top: hasGauges ? ly + 16 * ts : ly, transform: `translateX(-50%) scale(${ts})`, transformOrigin: 'top center',
           fontFamily: ls.fontFamily || undefined,
           fontSize: ls.fontSize ? `${ls.fontSize}px` : '11px',
           fontWeight: ls.bold === false ? 400 : 600,
@@ -156,7 +203,9 @@ function DeviceNodeImpl({ data, selected }: NodeProps) {
         }}
       >
         <div className="truncate" style={{ color: ls.color || 'rgb(var(--text))' }}>{node.label || node.hostname}</div>
-        <div className="truncate font-normal text-muted" style={{ fontSize: ls.fontSize ? `${Math.max(9, ls.fontSize - 1)}px` : '10px' }}>{node.ip_address}</div>
+        {!node.metadata?.hide_ip && (
+          <div className="truncate font-normal text-muted" style={{ fontSize: ls.fontSize ? `${Math.max(9, ls.fontSize - 1)}px` : '10px' }}>{node.ip_address}</div>
+        )}
       </div>
 
       {/* Hover health card (counter-scaled so it stays readable at any zoom) */}
@@ -183,7 +232,7 @@ function MicroGauge({ label, pct }: { label: string; pct: number }) {
   )
 }
 
-function DeviceHoverCard({ node, nodeLive, sk }: { node: ManualMapNode; nodeLive?: NodeLiveData; sk: string }) {
+export function DeviceHoverCard({ node, nodeLive, sk }: { node: ManualMapNode; nodeLive?: NodeLiveData; sk: string }) {
   const badge =
     sk === 'up' ? 'bg-success/15 text-success' :
     sk === 'down' ? 'bg-danger/15 text-danger' :

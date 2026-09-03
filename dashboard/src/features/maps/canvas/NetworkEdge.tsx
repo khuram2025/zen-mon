@@ -5,6 +5,7 @@ import {
   DISC,
   DISC_CX,
   DISC_CY,
+  LINK_DASH_PATTERN,
   LINK_KIND_STYLE,
   STATUS_COLOR,
   anchorOnCircle,
@@ -21,6 +22,7 @@ import {
   pruneOrthoWaypoints,
   pruneStraightWaypoints,
   routeOrthoEdge,
+  textScaleFor,
   utilHex,
   utilizationColor,
   particleSpec,
@@ -40,6 +42,10 @@ export type NetworkEdgeData = {
   live?: LiveLinkData
   liveMode: boolean
   showThroughput: boolean
+  /** Global port-chip visibility (live-mode toggle). Default on. */
+  showIfaceLabels?: boolean
+  /** Traffic particle animation (live-mode toggle). Default on. */
+  animate?: boolean
   /** Perpendicular px offset so parallel links between the same pair don't overlap. */
   parallelOffset?: number
   setWaypoints?: (wpsPx: Pt[], commit: boolean) => void
@@ -91,9 +97,13 @@ function ParticleStream({ pathId, count, dur, color, r, reverse }: {
 
 function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, data, selected }: EdgeProps) {
   const d = data as NetworkEdgeData
-  const { link, sourceStatus, targetStatus, live, liveMode, showThroughput, parallelOffset = 0, setWaypoints, setIfacePos, reconnectEnd } = d
+  const {
+    link, sourceStatus, targetStatus, live, liveMode, showThroughput,
+    showIfaceLabels = true, animate = true, parallelOffset = 0, setWaypoints, setIfacePos, reconnectEnd,
+  } = d
   const rf = useReactFlow()
   const zoom = useStore((s) => s.transform[2])
+  const ts = textScaleFor(zoom)
   const [hover, setHover] = useState(false)
   /** While dragging a bend, freeze anchor positions so the port doesn't chase the cursor. */
   const [anchorFreeze, setAnchorFreeze] = useState<{ sa: Pt; ta: Pt } | null>(null)
@@ -125,9 +135,6 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
   let srcAnchor: Pt
   let tgtAnchor: Pt
   if (isOrtho) {
-    // draw.io-style: route centre-to-centre through the waypoints with right
-    // angles, then clip at the shape borders — the cable always exits a
-    // device/shape axis-aligned, and the anchor glides along the border.
     const srcPt = endDrag?.which === 'src' ? endDrag.pt : shift(sc)
     const tgtPt = endDrag?.which === 'dst' ? endDrag.pt : shift(tc)
     const res = routeOrthoEdge(
@@ -151,28 +158,56 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
   const pathId = `nme-${link.id}`
 
   const health = linkHealth(sourceStatus, targetStatus)
-  const color = STATUS_COLOR[health].line
   const kind = linkKindOf(link)
   const kindStyle = LINK_KIND_STYLE[kind] || {}
   const widthScale = Math.max(0.4, Math.min(4, Number(link.metadata?.width_scale) || 1))
   const baseWidth = (kindStyle.widthMul || 1) * 3 * widthScale
+  const customColor = link.metadata?.color || null
+  const dashOverride = link.metadata?.dash ? LINK_DASH_PATTERN[link.metadata.dash] : undefined
+  const arrows = link.metadata?.arrows || 'none'
 
   const flow = liveMode ? linkFlow(live) : null
   const utilPct = flow?.utilPct ?? null
-  const utilStroke = flow ? utilizationColor(utilPct) : null
+  // Both ends unbound → we know nothing about this cable in live mode.
+  const unbound = liveMode && !!live && !live.source.matched && !live.target.matched
+  const halfBound = liveMode && !!live && !unbound && (!live.source.matched || !live.target.matched)
+  const hasTraffic = !!flow && flow.total >= 1000
   // A matched-but-down interface overrides everything: the cable is in fault.
   const faulted = !!flow?.ifaceDown || health === 'down'
-  const idle = !!flow && !faulted && flow.total < 1000
+  // Idle = bound but quiet. Rendered in status colour at reduced weight so a
+  // silent map still reads as healthy rather than "dead".
+  const idle = liveMode && !unbound && !faulted && !hasTraffic
 
   const srcIf = link.metadata?.src_interface || live?.source.if_name
   const dstIf = link.metadata?.dst_interface || live?.target.if_name
+  const chipsVisible = showIfaceLabels && !link.metadata?.hide_iface_labels
 
   // Particle streams: forward (src→tgt) rides source-out, reverse rides source-in.
-  const fwdSpec = flow && !faulted ? particleSpec(flow.fwd, utilPct) : { count: 0, dur: 0 }
-  const revSpec = flow && !faulted ? particleSpec(flow.rev, utilPct) : { count: 0, dur: 0 }
+  const fwdSpec = flow && !faulted && animate ? particleSpec(flow.fwd, utilPct) : { count: 0, dur: 0 }
+  const revSpec = flow && !faulted && animate ? particleSpec(flow.rev, utilPct) : { count: 0, dur: 0 }
   const particleColor = utilHex(utilPct)
   const particleR = 3.2 / Math.max(0.55, Math.min(1.4, zoom))
   const hot = utilPct != null && utilPct >= 60
+
+  // Stroke class/colour resolution. Live utilisation colour wins when there is
+  // traffic data; otherwise the design colour override; otherwise link health.
+  let strokeClass: string | undefined
+  let strokeColor: string | undefined
+  let dashArray: string | undefined = dashOverride ?? kindStyle.dash
+  if (liveMode && faulted) {
+    strokeClass = 'stroke-danger'
+    dashArray = '7 5'
+  } else if (unbound) {
+    strokeClass = 'stroke-muted/60'
+    dashArray = '3 6'
+  } else if (liveMode && hasTraffic) {
+    strokeClass = utilizationColor(utilPct)
+  } else if (customColor) {
+    strokeColor = customColor
+  } else {
+    strokeClass = STATUS_COLOR[health].line
+  }
+  const strokeOpacity = idle ? 0.6 : 0.85
 
   const editable = !!selected && !liveMode && !!setWaypoints
   // Port labels can be dragged (and rotated when the link is selected) in design mode.
@@ -180,9 +215,7 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
   const ipos = link.metadata?.iface_pos || {}
 
   // On commit, drop bends that no longer affect the route (e.g. dragged onto a
-  // straight segment). Orthogonal pruning compares centre-routed polylines, so
-  // it matches exactly what is rendered. Tolerances are in screen px (scaled
-  // to flow units) so "drop the dot on the line to remove it" works by hand.
+  // straight segment). Tolerances are in screen px (scaled to flow units).
   const commitWps = (pts: Pt[], commit: boolean) => {
     if (!commit) {
       setWaypoints!(pts, false)
@@ -225,10 +258,7 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
     dragStoredWp(insertAt, base)
   }
 
-  /* ── Orthogonal editing ── handles live on the RENDERED polyline: corner
-   * dots move a bend freely; mid-segment handles slide the whole segment
-   * perpendicular (the draw.io interaction). Both materialise the current
-   * route into waypoints first so the rest of the cable stays put. */
+  /* ── Orthogonal editing ── handles live on the RENDERED polyline. */
   const orthoCorners = isOrtho ? clipped.slice(1, -1) : []
 
   const dragOrthoCorner = (idx: number) => {
@@ -246,8 +276,6 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
     let W = P.slice(1, -1)
     let a = s - 1
     let b = s
-    // End segments are bounded by the anchor itself — materialise a copy of
-    // the anchor point so sliding the segment grows a right-angle jog there.
     if (s === 0) { W = [{ ...P[0] }, ...W]; a = 0; b = 1 }
     if (s === P.length - 2) { W = [...W, { ...P[P.length - 1] }]; b = W.length - 1 }
     const horizontal = Math.abs(P[s].y - P[s + 1].y) < 0.5
@@ -259,8 +287,6 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
     })
   }
 
-  // Detach a cable end: the tip follows the cursor; on drop MapCanvas hit-tests
-  // the target device/shape and reconnects (or snaps back if dropped on nothing).
   const startEndDrag = (which: 'src' | 'dst') => (e: React.PointerEvent) => {
     if (e.button !== 0) return
     e.stopPropagation()
@@ -280,10 +306,8 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
     window.addEventListener('pointerup', up)
   }
 
-  // Grab the selected link to reshape it: ortho slides the grabbed segment,
-  // straight/curve drops a new bend right under the cursor and drags it.
   const onPathPointerDown = (e: React.PointerEvent) => {
-    if (!editable || e.button !== 0) return // not selected: let the click select the edge
+    if (!editable || e.button !== 0) return
     e.stopPropagation()
     e.preventDefault()
     const fp0 = rf.screenToFlowPosition({ x: e.clientX, y: e.clientY })
@@ -294,7 +318,6 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
     insertWpDrag(nearestSegmentIndex(path.vertices, fp0), fp0)
   }
 
-  // Double-click the cable → drop a bend point at that spot.
   const onPathDoubleClick = (e: React.MouseEvent) => {
     if (!editable) return
     e.stopPropagation()
@@ -335,11 +358,6 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
     else insertWpDrag(m.index, { x: m.x, y: m.y })
   }
 
-  // Mid-segment handles: ortho gets one per rendered segment (slide), the
-  // others get one per user segment (insert a bend). Tiny segments skipped.
-  // The smooth curve passes exactly through each segment midpoint, so the
-  // handles sit ON the cable — except the no-waypoint arc, which uses the
-  // arc's own midpoint.
   const editVerts = isOrtho ? clipped : path.vertices
   const midHandles = !editable
     ? []
@@ -356,14 +374,32 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
           }
         }).filter((m) => m.len > 30)
 
-  // Real bend handles: ortho corners on the rendered route, otherwise the
-  // stored waypoints themselves.
   const bendHandles = isOrtho ? orthoCorners : storedWps
-
   const r = 9 / zoom
+
+  // Arrowheads follow the resolved stroke colour.
+  const markerColor = strokeColor || (liveMode && faulted ? '#ef4444' : liveMode && hasTraffic ? particleColor : undefined)
+  const markerId = `nma-${link.id}`
+  const markerStart = arrows === 'backward' || arrows === 'both' ? `url(#${markerId}-s)` : undefined
+  const markerEnd = arrows === 'forward' || arrows === 'both' ? `url(#${markerId}-e)` : undefined
+  const markerCls = markerColor ? undefined : strokeClass?.replace('stroke-', 'fill-')
+
+  // The traffic pill sits on the cable midpoint; a design label stacks above it.
+  const labelOffsetY = showThroughput && liveMode && flow && (hasTraffic || faulted) ? -22 * ts : 0
 
   return (
     <>
+      {arrows !== 'none' && (
+        <defs>
+          <marker id={`${markerId}-e`} viewBox="0 0 10 10" refX="8" refY="5" markerWidth={6 + baseWidth} markerHeight={6 + baseWidth} orient="auto" markerUnits="userSpaceOnUse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill={markerColor} className={markerCls} />
+          </marker>
+          <marker id={`${markerId}-s`} viewBox="0 0 10 10" refX="2" refY="5" markerWidth={6 + baseWidth} markerHeight={6 + baseWidth} orient="auto" markerUnits="userSpaceOnUse">
+            <path d="M 10 0 L 0 5 L 10 10 z" fill={markerColor} className={markerCls} />
+          </marker>
+        </defs>
+      )}
+
       {/* Wide invisible hit area — selects when unselected, grabs-to-bend when
           selected, and reveals the live inspection card on hover. */}
       <path
@@ -399,14 +435,14 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
         d={path.d}
         fill="none"
         vectorEffect="non-scaling-stroke"
-        strokeWidth={faulted ? baseWidth : hover && liveMode ? baseWidth + 1 : baseWidth}
-        strokeDasharray={faulted && liveMode ? '7 5' : kindStyle.dash}
+        stroke={strokeColor}
+        strokeOpacity={strokeOpacity}
+        strokeWidth={hover && liveMode ? baseWidth + 1 : baseWidth}
+        strokeDasharray={dashArray}
         strokeLinecap="round"
-        className={cn(
-          faulted && liveMode ? 'stroke-danger' : utilStroke || color,
-          idle ? 'opacity-35' : 'opacity-80',
-          'transition-opacity',
-        )}
+        markerStart={markerStart}
+        markerEnd={markerEnd}
+        className={cn(strokeClass, unbound && 'nm-ants', 'transition-opacity')}
         style={{ pointerEvents: 'none' }}
       />
 
@@ -423,10 +459,6 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
       {liveMode && flow?.dstDown && <FaultMark x={path.far.x} y={path.far.y} zoom={zoom} />}
 
       <EdgeLabelRenderer>
-        {/* Bend handles render in the HTML overlay so they stay above device
-            nodes — SVG handles near a device disc were buried and felt stuck. */}
-        {/* Mid-segment handles (draw.io): ortho slides the segment, others
-            insert a bend. Rendered under the corner dots. */}
         {midHandles.map((m) => (
           <MidHandle
             key={`mid-${m.index}`}
@@ -450,29 +482,38 @@ function NetworkEdgeImpl({ source, target, sourceX, sourceY, targetX, targetY, d
             onRemove={removeWp(i)}
           />
         ))}
-        {/* Cable-end plugs — drag one off its device/shape and drop it on
-            another item to reconnect the link. */}
         {editable && !!reconnectEnd && (
           <>
             <EndpointHandle x={srcAnchor.x} y={srcAnchor.y} r={r} hit={handleHit} active={endDrag?.which === 'src'} onPointerDown={startEndDrag('src')} />
             <EndpointHandle x={tgtAnchor.x} y={tgtAnchor.y} r={r} hit={handleHit} active={endDrag?.which === 'dst'} onPointerDown={startEndDrag('dst')} />
           </>
         )}
-        {srcIf && (
-          <IfaceChip x={path.near.x} y={path.near.y} value={srcIf} pos={ipos.src} editable={editChip} showRotate={editChip && !!selected} zoom={zoom}
-            down={liveMode && !!flow?.srcDown}
+        {chipsVisible && srcIf && (
+          <IfaceChip x={path.near.x} y={path.near.y} value={srcIf} pos={ipos.src} editable={editChip} showRotate={editChip && !!selected} zoom={zoom} ts={ts}
+            down={liveMode && !!flow?.srcDown} unmatched={liveMode && !!live && !live.source.matched}
             onMove={(p, commit) => setIfacePos!('src', p, commit)} onRotate={(rot, commit) => setIfacePos!('src', { rot }, commit)} />
         )}
-        {dstIf && (
-          <IfaceChip x={path.far.x} y={path.far.y} value={dstIf} pos={ipos.dst} editable={editChip} showRotate={editChip && !!selected} zoom={zoom}
-            down={liveMode && !!flow?.dstDown}
+        {chipsVisible && dstIf && (
+          <IfaceChip x={path.far.x} y={path.far.y} value={dstIf} pos={ipos.dst} editable={editChip} showRotate={editChip && !!selected} zoom={zoom} ts={ts}
+            down={liveMode && !!flow?.dstDown} unmatched={liveMode && !!live && !live.target.matched}
             onMove={(p, commit) => setIfacePos!('dst', p, commit)} onRotate={(rot, commit) => setIfacePos!('dst', { rot }, commit)} />
         )}
-        {showThroughput && liveMode && flow && (flow.total > 0 || faulted) && (
-          <TrafficChip x={path.mid.x} y={path.mid.y} flow={flow} faulted={faulted} />
+        {/* Free-text link label (design + live). Previously stored but never drawn. */}
+        {link.label && (
+          <div className="nodrag nopan pointer-events-none absolute" style={{ transform: `translate(-50%, -50%) translate(${path.mid.x}px, ${path.mid.y + labelOffsetY}px) scale(${ts})` }}>
+            <span className="rounded-md border border-border bg-surface/95 px-1.5 py-px text-[10px] font-semibold leading-tight text-text2 shadow-sm backdrop-blur" style={customColor ? { borderColor: customColor, color: customColor } : undefined}>{link.label}</span>
+          </div>
+        )}
+        {showThroughput && liveMode && flow && (hasTraffic || faulted) && (
+          <TrafficChip x={path.mid.x} y={path.mid.y} flow={flow} faulted={faulted} ts={ts} />
+        )}
+        {liveMode && unbound && (
+          <div className="nodrag nopan pointer-events-none absolute" style={{ transform: `translate(-50%, -50%) translate(${path.mid.x}px, ${path.mid.y}px) scale(${ts})` }}>
+            <span className="rounded border border-dashed border-border bg-surface/90 px-1 py-px font-mono text-[8.5px] leading-none text-muted">no interface bound</span>
+          </div>
         )}
         {liveMode && hover && live && (
-          <LinkHoverCard x={path.mid.x} y={path.mid.y} link={link} live={live} flow={flow} />
+          <LinkHoverCard x={path.mid.x} y={path.mid.y} link={link} live={live} flow={flow} unbound={unbound} halfBound={halfBound} />
         )}
       </EdgeLabelRenderer>
     </>
@@ -505,9 +546,6 @@ function BendHandle({ x, y, r, hit, onPointerDown, onRemove }: {
   )
 }
 
-/* Mid-segment handle (draw.io's translucent dot): on orthogonal cables it
- * slides the whole segment perpendicular; on straight/curved cables it
- * inserts a new bend right where it sits. */
 function MidHandle({ x, y, r, hit, cursor, title, onPointerDown }: {
   x: number; y: number; r: number; hit: number; cursor: string; title: string
   onPointerDown: (e: React.PointerEvent) => void
@@ -532,8 +570,6 @@ function MidHandle({ x, y, r, hit, cursor, title, onPointerDown }: {
   )
 }
 
-/* Cable-end plug: hollow ring (vs the solid bend dot) that detaches the
- * endpoint when dragged, so a link can be re-plugged into another item. */
 function EndpointHandle({ x, y, r, hit, active, onPointerDown }: {
   x: number; y: number; r: number; hit: number; active: boolean
   onPointerDown: (e: React.PointerEvent) => void
@@ -573,13 +609,13 @@ function FaultMark({ x, y, zoom }: { x: number; y: number; zoom: number }) {
 
 /* Directional throughput pill: ▲ fwd ▼ rev with a utilisation bar underneath.
  * This is the at-a-glance "weathermap" reading for NOC walls. */
-function TrafficChip({ x, y, flow, faulted }: { x: number; y: number; flow: ReturnType<typeof linkFlow>; faulted: boolean }) {
+function TrafficChip({ x, y, flow, faulted, ts }: { x: number; y: number; flow: ReturnType<typeof linkFlow>; faulted: boolean; ts: number }) {
   if (!flow) return null
   const u = flow.utilPct
   const tone = faulted ? 'danger' : u != null && u >= 85 ? 'danger' : u != null && u >= 60 ? 'warning' : 'success'
   const cls = tone === 'danger' ? 'border-danger/50 text-danger' : tone === 'warning' ? 'border-warning/50 text-warning' : 'border-success/40 text-success'
   return (
-    <div className="nodrag nopan pointer-events-none absolute" style={{ transform: `translate(-50%, -50%) translate(${x}px, ${y}px)` }}>
+    <div className="nodrag nopan pointer-events-none absolute" style={{ transform: `translate(-50%, -50%) translate(${x}px, ${y}px) scale(${ts})` }}>
       <div className={cn('overflow-hidden rounded-md border bg-surface/95 shadow-md backdrop-blur', cls)}>
         <div className="flex items-center gap-1.5 px-1.5 py-0.5 font-mono text-[9.5px] font-semibold leading-none tracking-tight">
           {faulted ? (
@@ -603,7 +639,9 @@ function TrafficChip({ x, y, flow, faulted }: { x: number; y: number; flow: Retu
 }
 
 /* Full link inspection card shown while hovering a cable in live mode. */
-function LinkHoverCard({ x, y, link, live, flow }: { x: number; y: number; link: ManualMapLink; live: LiveLinkData; flow: ReturnType<typeof linkFlow> }) {
+function LinkHoverCard({ x, y, link, live, flow, unbound, halfBound }: {
+  x: number; y: number; link: ManualMapLink; live: LiveLinkData; flow: ReturnType<typeof linkFlow>; unbound: boolean; halfBound: boolean
+}) {
   return (
     <div className="nodrag nopan pointer-events-none absolute z-50" style={{ transform: `translate(-50%, -110%) translate(${x}px, ${y - 14}px)` }}>
       <div className="w-64 rounded-lg border border-border bg-surface/95 p-2.5 shadow-xl backdrop-blur animate-fade-in">
@@ -611,6 +649,16 @@ function LinkHoverCard({ x, y, link, live, flow }: { x: number; y: number; link:
           <span className="truncate text-[11px] font-semibold text-text">{link.label || 'Link'}</span>
           <span className="rounded bg-surface2 px-1 py-px font-mono text-[9px] uppercase text-muted">{link.metadata?.kind || link.link_type}{link.metadata?.speed ? ` · ${link.metadata.speed}` : ''}</span>
         </div>
+        {unbound && (
+          <div className="mb-2 rounded-md border border-warning/40 bg-warning/10 px-2 py-1 text-[9.5px] leading-snug text-warning">
+            No interface is bound on either end, so this cable has no live data. Switch to Design, right-click the link → Edit link, and pick the ports.
+          </div>
+        )}
+        {halfBound && (
+          <div className="mb-2 rounded-md border border-border bg-surface2/60 px-2 py-1 text-[9.5px] leading-snug text-muted">
+            Only one end is bound to an interface — throughput comes from that side.
+          </div>
+        )}
         {flow && flow.utilPct != null && (
           <div className="mb-2 flex items-center gap-2">
             <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface2">
@@ -620,8 +668,8 @@ function LinkHoverCard({ x, y, link, live, flow }: { x: number; y: number; link:
           </div>
         )}
         <div className="grid grid-cols-2 gap-2">
-          <HoverIface title="A-END" iface={live.source} />
-          <HoverIface title="B-END" iface={live.target} />
+          <HoverIface title="A-END" iface={live.source} typed={link.metadata?.src_interface} />
+          <HoverIface title="B-END" iface={live.target} typed={link.metadata?.dst_interface} />
         </div>
         <div className="mt-1.5 text-right text-[9px] text-muted">window {Math.round(live.window_seconds / 60)}m</div>
       </div>
@@ -629,23 +677,27 @@ function LinkHoverCard({ x, y, link, live, flow }: { x: number; y: number; link:
   )
 }
 
-function HoverIface({ title, iface }: { title: string; iface: LiveInterface }) {
+function HoverIface({ title, iface, typed }: { title: string; iface: LiveInterface; typed?: string | null }) {
   const down = iface.matched && iface.oper_status != null && iface.oper_status !== 'up'
   return (
     <div className="rounded-md border border-border/70 bg-surface2/50 p-1.5">
       <div className="mb-1 flex items-center justify-between">
         <span className="text-[8.5px] font-bold tracking-wider text-muted">{title}</span>
         <span className={cn('rounded px-1 py-px text-[8.5px] font-bold uppercase leading-none', down ? 'bg-danger/15 text-danger' : iface.matched ? 'bg-success/15 text-success' : 'bg-surface3 text-muted')}>
-          {iface.matched ? (iface.oper_status || '?') : 'n/a'}
+          {iface.matched ? (iface.oper_status || '?') : 'unbound'}
         </span>
       </div>
-      <div className="truncate font-mono text-[10px] font-semibold text-text">{iface.if_name || '—'}</div>
+      <div className="truncate font-mono text-[10px] font-semibold text-text">{iface.if_name || typed || '—'}</div>
       {iface.if_alias ? <div className="truncate text-[8.5px] italic text-muted" title={iface.if_alias}>{iface.if_alias}</div> : null}
-      <div className="mt-1 space-y-px font-mono text-[9px] leading-tight text-text2">
-        <div>in&nbsp;&nbsp;{formatBps(iface.in_bps)}</div>
-        <div>out&nbsp;{formatBps(iface.out_bps)}</div>
-        {iface.if_speed ? <div className="text-muted">spd {formatBps(iface.if_speed)}</div> : null}
-      </div>
+      {iface.matched ? (
+        <div className="mt-1 space-y-px font-mono text-[9px] leading-tight text-text2">
+          <div>in&nbsp;&nbsp;{formatBps(iface.in_bps)}</div>
+          <div>out&nbsp;{formatBps(iface.out_bps)}</div>
+          {iface.if_speed ? <div className="text-muted">spd {formatBps(iface.if_speed)}</div> : null}
+        </div>
+      ) : (
+        <div className="mt-1 text-[8.5px] leading-tight text-muted">{typed ? 'Port name not found on this device' : 'No port selected'}</div>
+      )}
     </div>
   )
 }
@@ -653,11 +705,12 @@ function HoverIface({ title, iface }: { title: string; iface: LiveInterface }) {
 /* Port (interface) label that the admin can drag along/around the cable and
  * rotate. Position = cable anchor (x,y) + persisted offset; a rotate grip
  * appears above it when the link is selected. */
-function IfaceChip({ x, y, value, pos, editable, showRotate, zoom, down, onMove, onRotate }: {
+function IfaceChip({ x, y, value, pos, editable, showRotate, zoom, ts, down, unmatched, onMove, onRotate }: {
   x: number; y: number; value: string
   pos?: { dx?: number; dy?: number; rot?: number }
-  editable: boolean; showRotate: boolean; zoom: number
+  editable: boolean; showRotate: boolean; zoom: number; ts: number
   down?: boolean
+  unmatched?: boolean
   onMove: (p: { dx: number; dy: number }, commit: boolean) => void
   onRotate: (rot: number, commit: boolean) => void
 }) {
@@ -695,13 +748,16 @@ function IfaceChip({ x, y, value, pos, editable, showRotate, zoom, down, onMove,
     <div
       ref={ref}
       className={cn('nodrag nopan absolute', editable ? 'pointer-events-auto' : 'pointer-events-none')}
-      style={{ transform: `translate(-50%, -50%) translate(${x + dx}px, ${y + dy}px) rotate(${rot}deg)` }}
+      style={{ transform: `translate(-50%, -50%) translate(${x + dx}px, ${y + dy}px) rotate(${rot}deg) scale(${ts})` }}
     >
       <div
         onPointerDown={startMove}
+        title={unmatched ? `"${value}" was not found on this device — edit the link to pick a valid port` : value}
         className={cn(
           'relative rounded border px-1 py-px font-mono text-[9px] font-semibold leading-none tracking-tight shadow-sm backdrop-blur',
-          down ? 'border-danger/60 bg-danger/15 text-danger' : 'border-border bg-surface/95 text-text2',
+          down ? 'border-danger/60 bg-danger/15 text-danger'
+            : unmatched ? 'border-dashed border-warning/60 bg-warning/10 text-warning'
+            : 'border-border bg-surface/95 text-text2',
           editable && 'cursor-move hover:border-primary/60',
         )}
       >

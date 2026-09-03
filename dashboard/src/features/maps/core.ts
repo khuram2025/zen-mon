@@ -41,6 +41,10 @@ export type NodeMetadata = {
   label_style?: NodeLabelStyle
   /** Outer frame shape of the device tile. */
   frame?: 'circle' | 'rounded'
+  /** Locked items can't be dragged/nudged/aligned (draw.io "Lock"). */
+  locked?: boolean
+  /** Hide the IP line under the label. */
+  hide_ip?: boolean
   [k: string]: unknown
 }
 
@@ -73,6 +77,9 @@ export type Waypoint = { x_pct: number; y_pct: number }
  *  + rotation (deg). Lets admins drag/rotate the interface chips off the line. */
 export type IfaceLabelPos = { dx?: number; dy?: number; rot?: number }
 
+export type LinkArrows = 'none' | 'forward' | 'backward' | 'both'
+export type LinkDash = 'solid' | 'dashed' | 'dotted'
+
 export type LinkMetadata = {
   src_interface?: string | null
   dst_interface?: string | null
@@ -85,6 +92,14 @@ export type LinkMetadata = {
   width_scale?: number | null
   /** Manual placement for the source/target interface chips. */
   iface_pos?: { src?: IfaceLabelPos; dst?: IfaceLabelPos } | null
+  /** Design-time colour override (hex). Live utilisation colour still wins. */
+  color?: string | null
+  /** Dash pattern override (defaults follow the link kind). */
+  dash?: LinkDash | null
+  /** Arrowheads at the ends of the cable. */
+  arrows?: LinkArrows | null
+  /** Hide this link's port chips (global toggle also exists in live mode). */
+  hide_iface_labels?: boolean | null
 }
 
 export type LiveInterface = {
@@ -165,6 +180,15 @@ export type ShapeStyle = {
   limit?: number            // top-N rows for widgets
   hours?: number            // lookback window for widgets
   exporter?: string | null  // bind widget to one exporter/device IP
+  /* draw.io-style geometry/style controls */
+  rotation?: number         // degrees
+  opacity?: number          // 0–1
+  strokeWidth?: number      // px
+  dash?: LinkDash
+  locked?: boolean
+  /** Group membership (shared with device nodes). */
+  group_id?: string | null
+  [k: string]: unknown
 }
 
 export type MapShape = {
@@ -255,12 +279,35 @@ export function pctToPx(p: { x_pct: number; y_pct: number }) {
   return { x: (p.x_pct / 100) * LOGICAL_W, y: (p.y_pct / 100) * LOGICAL_H }
 }
 
-/** Logical pixel of the disc centre → clamped percent position. */
+/** Logical pixel → clamped percent (0–100). Used for waypoints. */
 export function pxToPct(x: number, y: number): Waypoint {
   return {
     x_pct: clamp((x / LOGICAL_W) * 100, 0, 100),
     y_pct: clamp((y / LOGICAL_H) * 100, 0, 100),
   }
+}
+
+/** Device-node position → percent clamped to the API's accepted 2–98 range
+ *  (the server rejects positions outside it, which used to surface as a
+ *  silent "Failed to save layout" when a device was dragged to the edge). */
+export function pxToNodePct(x: number, y: number): Waypoint {
+  return {
+    x_pct: clamp((x / LOGICAL_W) * 100, 2, 98),
+    y_pct: clamp((y / LOGICAL_H) * 100, 2, 98),
+  }
+}
+
+/** Counter-scale factor for on-canvas text (labels, port chips, traffic
+ *  pills) so they stay legible when the whole map is zoomed out to fit a
+ *  wall display. 1 at normal zoom, growing as the map shrinks, capped so
+ *  chips never dwarf their nodes. */
+export function textScaleFor(zoom: number): number {
+  if (!zoom || zoom >= 0.9) return 1
+  return Math.min(2.4, 0.9 / Math.max(0.15, zoom))
+}
+
+export function isLocked(md?: { locked?: boolean } | null): boolean {
+  return !!md?.locked
 }
 
 /** Shape rect (x_pct/y_pct = top-left, w/h_pct = size) → logical px rect. */
@@ -320,6 +367,8 @@ export const TYPE_TO_ICON: Record<string, IconKey> = {
   storage: 'storage', workstation: 'workstation', printer: 'printer',
   cloud: 'cloud', internet: 'internet', camera: 'camera', other: 'other',
 }
+
+export const LINK_DASH_PATTERN: Record<LinkDash, string | undefined> = { solid: undefined, dashed: '8 5', dotted: '2 4' }
 
 export const LINK_KIND_STYLE: Record<LinkKind, { dash?: string; widthMul?: number; accent?: string; arrow?: boolean }> = {
   ethernet: {},

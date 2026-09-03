@@ -11,11 +11,14 @@ import {
   iconForNode,
   linkKindOf,
   linkShapeOf,
+  type LinkArrows,
+  type LinkDash,
   type LinkKind,
   type LinkShape,
   type ManualMapLink,
   type ManualMapNode,
 } from '../core'
+import { ColorInput } from './Annotations'
 import { useDevices } from '../useMapData'
 
 type DeviceInterface = { if_index: number; if_name: string | null; if_descr: string | null; if_alias: string | null }
@@ -67,6 +70,7 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
   const [scale, setScale] = useState(md.size_scale || 1)
   const [iconFill, setIconFill] = useState(md.icon_fill ?? DEFAULT_ICON_FILL)
   const [frame, setFrame] = useState<'circle' | 'rounded'>(md.frame === 'rounded' ? 'rounded' : 'circle')
+  const [hideIp, setHideIp] = useState(!!md.hide_ip)
   const [deviceId, setDeviceId] = useState(node.device_id)
   const devices = useDevices()
   const deviceList = (devices.data?.data || []).slice().sort((a, b) => a.hostname.localeCompare(b.hostname))
@@ -85,7 +89,7 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
   const save = () => onSave({
     label: effectiveLabel(),
     icon,
-    metadata: { ...md, size_scale: scale, icon_fill: iconFill, frame, label_style: { color, fontFamily: font, fontSize, bold } },
+    metadata: { ...md, size_scale: scale, icon_fill: iconFill, frame, hide_ip: hideIp, label_style: { color, fontFamily: font, fontSize, bold } },
     ...(profileChanged ? { device_id: deviceId } : {}),
   })
 
@@ -141,6 +145,7 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
           <div className="flex items-center gap-3">
             <button type="button" onClick={() => setBold((v) => !v)}
               className={cn('h-8 rounded border px-3 text-xs font-bold', bold ? 'border-primary bg-primary/15 text-primary' : 'border-border text-muted')}>B</button>
+            <label className="flex items-center gap-1.5 text-xs text-muted"><input type="checkbox" checked={hideIp} onChange={(e) => setHideIp(e.target.checked)} className="accent-primary" /> hide IP</label>
             <div className="flex flex-1 items-center gap-2">
               <span className="text-xs text-muted">Tile size</span>
               <input type="range" min={0.6} max={2.2} step={0.1} value={scale} onChange={(e) => setScale(Number(e.target.value))} className="flex-1 accent-primary" />
@@ -237,6 +242,10 @@ export function LinkEditDialog({ link, source, target, sourceLabel, targetLabel,
   const [srcIf, setSrcIf] = useState((meta as any).src_interface || '')
   const [dstIf, setDstIf] = useState((meta as any).dst_interface || '')
   const [widthScale, setWidthScale] = useState(Number((meta as any).width_scale) || 1)
+  const [color, setColor] = useState<string>((meta as any).color || '')
+  const [dash, setDash] = useState<LinkDash>(((meta as any).dash as LinkDash) || 'solid')
+  const [arrows, setArrows] = useState<LinkArrows>(((meta as any).arrows as LinkArrows) || 'none')
+  const [hideLabels, setHideLabels] = useState(!!(meta as any).hide_iface_labels)
 
   const srcIfaces = useInterfaces(source?.device_id)
   const dstIfaces = useInterfaces(target?.device_id)
@@ -246,7 +255,10 @@ export function LinkEditDialog({ link, source, target, sourceLabel, targetLabel,
   const submit = () => onSave({
     label: label.trim() || null,
     link_type: kind,
-    metadata: { ...meta, kind, shape, width_scale: widthScale, src_interface: srcIf || null, dst_interface: dstIf || null },
+    metadata: {
+      ...meta, kind, shape, width_scale: widthScale, src_interface: srcIf || null, dst_interface: dstIf || null,
+      color: color || null, dash: dash === 'solid' ? null : dash, arrows: arrows === 'none' ? null : arrows, hide_iface_labels: hideLabels || null,
+    },
   })
 
   return (
@@ -297,9 +309,34 @@ export function LinkEditDialog({ link, source, target, sourceLabel, targetLabel,
           </div>
         </Field>
 
+        <div className="grid grid-cols-3 gap-3">
+          <Field label="Colour (design)">
+            <div className="flex items-center gap-1">
+              <ColorInput value={color || '#64748b'} onChange={(c, commit) => { if (commit) setColor(c) }} />
+              {color ? <button type="button" className="text-[10px] text-muted hover:text-text" onClick={() => setColor('')}>auto</button> : <span className="text-[10px] text-muted">auto</span>}
+            </div>
+          </Field>
+          <Field label="Line style">
+            <select className={inputCls} value={dash} onChange={(e) => setDash(e.target.value as LinkDash)}>
+              <option value="solid">By type</option>
+              <option value="dashed">Dashed</option>
+              <option value="dotted">Dotted</option>
+            </select>
+          </Field>
+          <Field label="Arrows">
+            <select className={inputCls} value={arrows} onChange={(e) => setArrows(e.target.value as LinkArrows)}>
+              <option value="none">None</option>
+              <option value="forward">A → B</option>
+              <option value="backward">A ← B</option>
+              <option value="both">Both</option>
+            </select>
+          </Field>
+        </div>
+
         <Field label="Label (optional)">
           <input className={inputCls} value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. uplink" />
         </Field>
+        <label className="flex items-center gap-1.5 text-xs text-muted"><input type="checkbox" checked={hideLabels} onChange={(e) => setHideLabels(e.target.checked)} className="accent-primary" /> Hide port labels on this link</label>
 
         <DialogFooter>
           <Button variant="outline" onClick={onCancel} disabled={saving}>Cancel</Button>

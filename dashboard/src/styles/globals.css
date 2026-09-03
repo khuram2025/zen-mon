@@ -198,3 +198,12 @@ body {
 
 /* Hovered device rises above its neighbours so the health card isn't clipped. */
 .react-flow__node:hover { z-index: 1000 !important; }
+
+/* Network map: draw.io-style quick-connect plug on device/shape hover */
+.react-flow__node:hover .nm-quick-handle,
+.react-flow__node.selected .nm-quick-handle,
+.nm-quick-handle:hover { opacity: 1 !important; }
+.nm-quick-handle { transition: opacity 120ms ease; }
+/* Marching-ants stroke for unbound links in live mode */
+@keyframes nm-ants { to { stroke-dashoffset: -24; } }
+.nm-ants { animation: nm-ants 1.4s linear infinite; }
