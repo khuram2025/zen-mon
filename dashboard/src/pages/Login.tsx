@@ -70,10 +70,6 @@ export function LoginPage() {
           >
             {loading ? 'Signing in...' : 'Sign In'}
           </button>
-
-          <p className="text-xs text-[var(--text-muted)] text-center mt-4">
-            Default: admin / admin123
-          </p>
         </form>
       </div>
     </div>

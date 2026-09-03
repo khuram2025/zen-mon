@@ -76,7 +76,6 @@ export function LoginPage() {
                 {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
                 Sign In
               </Button>
-              <p className="text-center text-xs text-muted">Default: admin / admin123</p>
             </form>
           </CardContent>
         </Card>
