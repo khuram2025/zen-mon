@@ -74,6 +74,12 @@ class RadiusConfigIn(BaseModel):
 class TestCredentialsIn(BaseModel):
     username: str = ""
     password: str = ""
+    # Optional unsaved form values. When present the test runs against
+    # them (merged over the stored config) so an admin can verify a
+    # server before committing it. Blank secrets fall back to the stored
+    # secret, matching PUT semantics.
+    ldap: Optional[LdapConfigIn] = None
+    radius: Optional[RadiusConfigIn] = None
 
 
 def _masked(cfg: dict, secret_field: str) -> dict:
@@ -85,6 +91,17 @@ def _masked(cfg: dict, secret_field: str) -> dict:
 
 async def _load(db: AsyncSession, key: str, defaults: dict) -> dict:
     return merge_config(defaults, await _get_system_setting(db, key))
+
+
+def _with_override(stored: dict, override: Optional[BaseModel], secret_field: str) -> dict:
+    """Stored config, replaced by unsaved form values when the caller sent
+    them. A blank secret in the override keeps the stored one."""
+    if override is None:
+        return stored
+    incoming = override.model_dump()
+    if not incoming.get(secret_field):
+        incoming[secret_field] = stored.get(secret_field, "")
+    return merge_config(stored, incoming)
 
 
 @router.get("/providers")
@@ -174,10 +191,11 @@ async def test_ldap(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin_user),
 ):
-    """Test the saved LDAP settings. Without credentials, only the
-    service bind is verified; with credentials, a full user
-    authentication is performed and the mapped role reported."""
-    cfg = await _load(db, LDAP_SETTINGS_KEY, LDAP_DEFAULTS)
+    """Test the LDAP settings (saved, or the unsaved form values when the
+    request carries them). Without credentials, only the service bind is
+    verified; with credentials, a full user authentication is performed
+    and the mapped role reported."""
+    cfg = _with_override(await _load(db, LDAP_SETTINGS_KEY, LDAP_DEFAULTS), data.ldap, "bind_password")
     try:
         if not data.username:
             # Bind-only check: authenticate with an unresolvable user to
@@ -225,6 +243,11 @@ async def test_ldap(
         }
     except ExternalAuthError as exc:
         return {"success": False, "message": str(exc)}
+    except Exception as exc:  # ldap3 socket/TLS errors surface as a readable failure, not a 500
+        return {
+            "success": False,
+            "message": f"Cannot reach LDAP server {cfg.get('server')}:{cfg.get('port')}: {exc}",
+        }
 
 
 @router.post("/radius/test")
@@ -233,10 +256,11 @@ async def test_radius(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin_user),
 ):
-    """Test the saved RADIUS settings with a real Access-Request."""
+    """Test the RADIUS settings (saved, or the unsaved form values when
+    the request carries them) with a real Access-Request."""
     if not data.username or not data.password:
         raise HTTPException(status_code=400, detail="Username and password are required for a RADIUS test")
-    cfg = await _load(db, RADIUS_SETTINGS_KEY, RADIUS_DEFAULTS)
+    cfg = _with_override(await _load(db, RADIUS_SETTINGS_KEY, RADIUS_DEFAULTS), data.radius, "secret")
     try:
         info = await asyncio.to_thread(radius_authenticate, cfg, data.username, data.password)
     except ExternalAuthError as exc:

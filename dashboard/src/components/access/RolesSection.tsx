@@ -1,17 +1,17 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Copy, Loader2, Lock, Pencil, Plus, ShieldAlert, Trash2 } from 'lucide-react'
+import { Check, Copy, Loader2, Lock, Minus, Pencil, Plus, ShieldAlert, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage } from '@/lib/utils'
+import { apiErrorMessage, cn } from '@/lib/utils'
 import type { PermissionCatalogModule, Role } from '@/types'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
-import { Textarea } from '@/components/ui/Textarea'
 import { FormField } from '@/components/ui/FormField'
-import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
+import { Skeleton } from '@/components/ui/Skeleton'
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/Dialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { toast } from '@/components/ui/Toast'
 import { useCan } from '@/stores/auth'
@@ -28,7 +28,7 @@ export function RolesSection() {
   const [deleting, setDeleting] = useState<Role | null>(null)
   const [viewing, setViewing] = useState<Role | null>(null)
 
-  const { data: roles } = useQuery<Role[]>({
+  const { data: roles, isLoading } = useQuery<Role[]>({
     queryKey: ['roles'],
     queryFn: async () => (await api.get('/roles')).data,
   })
@@ -36,6 +36,8 @@ export function RolesSection() {
     queryKey: ['roles', 'catalog'],
     queryFn: async () => (await api.get('/roles/catalog')).data,
   })
+  const superPerm = catalog?.superuser_permission || 'system.admin'
+  const totalPerms = useMemo(() => (catalog?.modules || []).reduce((n, m) => n + m.permissions.length, 0), [catalog])
 
   const del = useMutation({
     mutationFn: async (id: string) => api.delete(`/roles/${id}`),
@@ -48,12 +50,20 @@ export function RolesSection() {
     setTemplate(from || null)
     setEditorOpen(true)
   }
+  function openEdit(r: Role) {
+    setEditing(r)
+    setTemplate(null)
+    setEditorOpen(true)
+  }
+
+  const custom = (roles || []).filter((r) => !r.is_system).length
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs text-muted">
-          Roles bundle per-module permissions. Built-in roles are locked — duplicate one to customize it.
+          {!isLoading && <>{(roles || []).length} roles · {custom} custom. </>}
+          Built-in roles are read-only; duplicate one to start a custom role.
         </p>
         {canManage && (
           <Button onClick={() => openCreate()}><Plus className="h-4 w-4" /> New role</Button>
@@ -65,45 +75,61 @@ export function RolesSection() {
           <Table>
             <THead className="bg-surface2/50">
               <Tr>
-                <Th>Role</Th><Th>Description</Th><Th>Permissions</Th><Th>Users</Th><Th>Type</Th>
+                <Th>Role</Th>
+                <Th>Description</Th>
+                <Th>Access</Th>
+                <Th className="text-right">Users</Th>
+                <Th>Type</Th>
                 {canManage && <Th className="w-28 text-right">Actions</Th>}
               </Tr>
             </THead>
             <TBody>
-              {(roles || []).map((r) => (
-                <Tr key={r.id}>
-                  <Td className="font-medium">
-                    {r.display_name}
-                    <div className="text-[11px] font-normal text-muted">{r.name}</div>
-                  </Td>
-                  <Td className="max-w-md text-xs text-muted">{r.description}</Td>
-                  <Td>
-                    <button className="text-xs text-primary hover:underline" onClick={() => setViewing(r)}>
-                      {r.permissions.includes('system.admin') ? 'Full access' : `${r.permissions.length} permissions`}
-                    </button>
-                  </Td>
-                  <Td><Badge variant={r.user_count ? 'info' : 'outline'}>{r.user_count}</Badge></Td>
-                  <Td>
-                    {r.is_system
-                      ? <Badge variant="outline"><Lock className="mr-1 h-3 w-3" /> Built-in</Badge>
-                      : <Badge variant="success">Custom</Badge>}
-                  </Td>
-                  {canManage && (
-                    <Td>
-                      <div className="flex justify-end gap-0.5">
-                        <Button variant="ghost" size="icon" className="h-7 w-7" title="Duplicate" onClick={() => openCreate(r)}><Copy className="h-3.5 w-3.5" /></Button>
-                        {!r.is_system && (
-                          <>
-                            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setEditing(r); setTemplate(null); setEditorOpen(true) }}><Pencil className="h-3.5 w-3.5" /></Button>
-                            <Button variant="ghost" size="icon" className="h-7 w-7 text-muted hover:text-danger" onClick={() => setDeleting(r)}><Trash2 className="h-3.5 w-3.5" /></Button>
-                          </>
-                        )}
-                      </div>
-                    </Td>
-                  )}
-                </Tr>
+              {isLoading && Array.from({ length: 4 }).map((_, i) => (
+                <Tr key={i}><Td colSpan={canManage ? 6 : 5} className="py-2.5"><Skeleton className="h-8 w-full" /></Td></Tr>
               ))}
-              {(!roles || roles.length === 0) && <Tr><Td colSpan={canManage ? 6 : 5} className="py-8 text-center text-muted">No roles</Td></Tr>}
+              {!isLoading && (roles || []).map((r) => {
+                const full = r.permissions.includes(superPerm)
+                return (
+                  <Tr key={r.id} className="cursor-pointer" onClick={() => setViewing(r)}>
+                    <Td>
+                      <div className="text-sm font-medium">{r.display_name}</div>
+                      <div className="font-mono text-[11px] text-muted">{r.name}</div>
+                    </Td>
+                    <Td className="max-w-md text-xs text-muted">{r.description || <span className="italic">No description</span>}</Td>
+                    <Td>
+                      {full ? (
+                        <span className="inline-flex items-center gap-1.5 text-xs font-medium text-warning">
+                          <ShieldAlert className="h-3.5 w-3.5" /> Full administration
+                        </span>
+                      ) : (
+                        <AccessBar granted={r.permissions.length} total={totalPerms} />
+                      )}
+                    </Td>
+                    <Td className="text-right text-sm tabular-nums">{r.user_count}</Td>
+                    <Td>
+                      {r.is_system
+                        ? <Badge variant="outline"><Lock className="h-3 w-3" /> Built-in</Badge>
+                        : <Badge variant="info">Custom</Badge>}
+                    </Td>
+                    {canManage && (
+                      <Td onClick={(e) => e.stopPropagation()}>
+                        <div className="flex justify-end gap-0.5">
+                          <Button variant="ghost" size="icon" className="h-7 w-7" title="Duplicate" onClick={() => openCreate(r)}><Copy className="h-3.5 w-3.5" /></Button>
+                          <Button variant="ghost" size="icon" className="h-7 w-7" title={r.is_system ? 'Built-in roles cannot be edited' : 'Edit'} disabled={r.is_system} onClick={() => openEdit(r)}><Pencil className="h-3.5 w-3.5" /></Button>
+                          <Button variant="ghost" size="icon" className="h-7 w-7 text-muted hover:text-danger"
+                            title={r.is_system ? 'Built-in roles cannot be deleted' : r.user_count ? 'Reassign its users first' : 'Delete'}
+                            disabled={r.is_system || r.user_count > 0} onClick={() => setDeleting(r)}>
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+                      </Td>
+                    )}
+                  </Tr>
+                )
+              })}
+              {!isLoading && (!roles || roles.length === 0) && (
+                <Tr><Td colSpan={canManage ? 6 : 5} className="py-8 text-center text-muted">No roles</Td></Tr>
+              )}
             </TBody>
           </Table>
         </CardContent>
@@ -118,13 +144,19 @@ export function RolesSection() {
         canGrantSuperuser={can('system.admin')}
       />
 
-      <PermissionsViewDialog role={viewing} onClose={() => setViewing(null)} catalog={catalog} />
+      <PermissionsViewDialog
+        role={viewing}
+        onClose={() => setViewing(null)}
+        catalog={catalog}
+        onDuplicate={canManage ? (r) => { setViewing(null); openCreate(r) } : undefined}
+        onEdit={canManage ? (r) => { setViewing(null); openEdit(r) } : undefined}
+      />
 
       <ConfirmDialog
         open={!!deleting}
         onOpenChange={(o) => !o && setDeleting(null)}
         title="Delete role"
-        description={<>Delete role <span className="font-semibold text-text">{deleting?.display_name}</span>?</>}
+        description={<>Delete the role <span className="font-semibold text-text">{deleting?.display_name}</span>? This cannot be undone.</>}
         confirmText="Delete" destructive loading={del.isPending}
         onConfirm={() => { if (deleting) del.mutate(deleting.id) }}
       />
@@ -132,27 +164,142 @@ export function RolesSection() {
   )
 }
 
-function PermissionsViewDialog({ role, onClose, catalog }: { role: Role | null; onClose: () => void; catalog?: Catalog }) {
-  const granted = new Set(role?.permissions || [])
-  const full = granted.has('system.admin')
+function AccessBar({ granted, total }: { granted: number; total: number }) {
+  const pct = total ? Math.round((granted / total) * 100) : 0
   return (
-    <Dialog open={!!role} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader><DialogTitle>{role?.display_name} — permissions</DialogTitle></DialogHeader>
-        <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1">
-          {(catalog?.modules || []).map((m) => {
-            const hits = m.permissions.filter((p) => full || granted.has(p.id))
-            if (!hits.length) return null
+    <div className="flex items-center gap-2 text-xs">
+      <div className="h-1.5 w-20 overflow-hidden rounded-full bg-surface2">
+        <div className="h-full rounded-full bg-primary/70" style={{ width: `${pct}%` }} />
+      </div>
+      <span className="tabular-nums text-muted">{granted} / {total}</span>
+    </div>
+  )
+}
+
+// ─── Permission matrix ──────────────────────────────────────────────────────
+
+/** Module × permission grid used by both the read-only view and the editor. */
+function PermissionMatrix({ catalog, granted, superPerm, readOnly, canGrantSuperuser, onToggle, onToggleModule }: {
+  catalog?: Catalog
+  granted: Set<string>
+  superPerm: string
+  readOnly?: boolean
+  canGrantSuperuser?: boolean
+  onToggle?: (id: string) => void
+  onToggleModule?: (m: PermissionCatalogModule, on: boolean) => void
+}) {
+  const full = granted.has(superPerm)
+  const modules = catalog?.modules || []
+  return (
+    <div className="overflow-hidden rounded-md border border-border">
+      <table className="w-full text-sm">
+        <thead className="bg-surface2/50 text-[11px] uppercase tracking-wider text-muted">
+          <tr>
+            <th className="w-48 px-3 py-2 text-left font-medium">Module</th>
+            <th className="px-3 py-2 text-left font-medium">Permissions</th>
+            {!readOnly && <th className="w-16 px-3 py-2 text-center font-medium">All</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {modules.map((m) => {
+            const isSystemModule = m.permissions.some((p) => p.id === superPerm)
+            const allOn = m.permissions.every((p) => granted.has(p.id))
+            const anyOn = m.permissions.some((p) => granted.has(p.id))
+            const moduleLocked = isSystemModule && !canGrantSuperuser
             return (
-              <div key={m.module}>
-                <div className="mb-1 text-[11px] font-semibold uppercase tracking-wider text-muted">{m.label}</div>
-                <div className="flex flex-wrap gap-1">
-                  {hits.map((p) => <Badge key={p.id} variant="info">{p.label}</Badge>)}
-                </div>
-              </div>
+              <tr key={m.module} className={cn('border-t border-border', isSystemModule && 'bg-warning/[0.04]')}>
+                <td className="px-3 py-2 align-top">
+                  <div className="flex items-center gap-1.5 text-sm font-medium">
+                    {m.label}
+                    {isSystemModule && <ShieldAlert className="h-3.5 w-3.5 text-warning" />}
+                  </div>
+                </td>
+                <td className="px-3 py-2">
+                  <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+                    {m.permissions.map((p) => {
+                      const isSuper = p.id === superPerm
+                      const implied = full && !isSuper
+                      const on = granted.has(p.id) || implied
+                      if (readOnly) {
+                        return (
+                          <span key={p.id} title={p.description}
+                            className={cn('inline-flex items-center gap-1.5 text-xs', on ? 'text-text' : 'text-muted/60')}>
+                            {on ? <Check className="h-3.5 w-3.5 text-success" /> : <Minus className="h-3.5 w-3.5" />}
+                            {p.label}
+                          </span>
+                        )
+                      }
+                      const disabled = implied || (isSuper && !canGrantSuperuser)
+                      return (
+                        <label key={p.id} title={p.description}
+                          className={cn('inline-flex items-center gap-1.5 text-xs', disabled ? 'cursor-not-allowed opacity-70' : 'cursor-pointer')}>
+                          <input
+                            type="checkbox"
+                            className="h-3.5 w-3.5 accent-primary"
+                            checked={on}
+                            disabled={disabled}
+                            onChange={() => onToggle?.(p.id)}
+                          />
+                          {p.label}
+                        </label>
+                      )
+                    })}
+                  </div>
+                </td>
+                {!readOnly && (
+                  <td className="px-3 py-2 text-center">
+                    <input
+                      type="checkbox"
+                      className="h-3.5 w-3.5 accent-primary"
+                      checked={allOn || (full && !isSystemModule)}
+                      ref={(el) => { if (el) el.indeterminate = !allOn && anyOn && !full }}
+                      disabled={moduleLocked || (full && !isSystemModule)}
+                      onChange={(e) => onToggleModule?.(m, e.target.checked)}
+                      title={`Toggle all ${m.label} permissions`}
+                    />
+                  </td>
+                )}
+              </tr>
             )
           })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function PermissionsViewDialog({ role, onClose, catalog, onDuplicate, onEdit }: {
+  role: Role | null; onClose: () => void; catalog?: Catalog
+  onDuplicate?: (r: Role) => void; onEdit?: (r: Role) => void
+}) {
+  const granted = new Set(role?.permissions || [])
+  const superPerm = catalog?.superuser_permission || 'system.admin'
+  return (
+    <Dialog open={!!role} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="max-w-3xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            {role?.display_name}
+            {role?.is_system ? <Badge variant="outline"><Lock className="h-3 w-3" /> Built-in</Badge> : <Badge variant="info">Custom</Badge>}
+          </DialogTitle>
+          <DialogDescription>
+            <span className="font-mono text-xs">{role?.name}</span>
+            {role?.description && <> · {role.description}</>}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="max-h-[60vh] overflow-y-auto pr-1">
+          {granted.has(superPerm) && (
+            <p className="mb-2 flex items-center gap-1.5 text-xs text-warning">
+              <ShieldAlert className="h-3.5 w-3.5" /> Full administration: every permission below is implied.
+            </p>
+          )}
+          <PermissionMatrix catalog={catalog} granted={granted} superPerm={superPerm} readOnly />
         </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Close</Button>
+          {onDuplicate && role && <Button variant="outline" onClick={() => onDuplicate(role)}><Copy className="h-4 w-4" /> Duplicate</Button>}
+          {onEdit && role && !role.is_system && <Button onClick={() => onEdit(role)}><Pencil className="h-4 w-4" /> Edit</Button>}
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -193,6 +340,7 @@ function RoleEditorDialog({
 
   const superPerm = catalog?.superuser_permission || 'system.admin'
   const isFullAdmin = granted.has(superPerm)
+  const total = (catalog?.modules || []).reduce((n, m) => n + m.permissions.length, 0)
 
   function toggle(id: string) {
     setGranted((prev) => {
@@ -207,9 +355,19 @@ function RoleEditorDialog({
     setGranted((prev) => {
       const next = new Set(prev)
       for (const p of m.permissions) {
+        if (p.id === superPerm && !canGrantSuperuser) continue
         if (on) next.add(p.id)
         else next.delete(p.id)
       }
+      return next
+    })
+  }
+
+  function setAll(on: boolean) {
+    setGranted(() => {
+      if (!on) return new Set()
+      const next = new Set<string>()
+      for (const m of catalog?.modules || []) for (const p of m.permissions) if (p.id !== superPerm) next.add(p.id)
       return next
     })
   }
@@ -236,60 +394,52 @@ function RoleEditorDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
-        <DialogHeader><DialogTitle>{isEdit ? `Edit role: ${role?.display_name}` : 'New role'}</DialogTitle></DialogHeader>
+      <DialogContent className="max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>{isEdit ? `Edit role: ${role?.display_name}` : template ? `New role from ${template.display_name}` : 'New role'}</DialogTitle>
+          <DialogDescription>
+            {isEdit && role?.user_count
+              ? `${role.user_count} ${role.user_count === 1 ? 'user has' : 'users have'} this role; changes apply on their next request.`
+              : 'A role is a named set of permissions you assign to users.'}
+          </DialogDescription>
+        </DialogHeader>
         <form onSubmit={(e) => { e.preventDefault(); save.mutate() }} className="space-y-4">
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <FormField label="Display name" required>
-              <Input required minLength={2} value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Helpdesk" />
+              <Input required minLength={2} value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Helpdesk" autoFocus={!isEdit} />
             </FormField>
             <FormField label="Identifier" hint="Lowercase letters, digits, _ or -">
-              <Input value={slug} onChange={(e) => { setName(e.target.value); setNameTouched(true) }} placeholder="helpdesk" />
+              <Input value={slug} onChange={(e) => { setName(e.target.value); setNameTouched(true) }} placeholder="helpdesk" className="font-mono text-xs" />
             </FormField>
           </div>
           <FormField label="Description">
-            <Textarea rows={2} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What this role is for…" />
+            <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What this role is for…" />
           </FormField>
 
           <div className="space-y-2">
-            <div className="text-xs font-semibold uppercase tracking-wider text-muted">Permissions</div>
-            <div className="max-h-[42vh] space-y-2 overflow-y-auto rounded-md border border-border p-3">
-              {(catalog?.modules || []).map((m) => {
-                const isSystemModule = m.permissions.some((p) => p.id === superPerm)
-                const allOn = m.permissions.every((p) => granted.has(p.id))
-                return (
-                  <div key={m.module} className="rounded-md bg-surface2/30 p-2">
-                    <label className="flex cursor-pointer items-center gap-2">
-                      <input
-                        type="checkbox"
-                        className="h-3.5 w-3.5 accent-primary"
-                        checked={allOn}
-                        onChange={(e) => toggleModule(m, e.target.checked)}
-                        disabled={isSystemModule && !canGrantSuperuser}
-                      />
-                      <span className="text-sm font-medium">{m.label}</span>
-                      {isSystemModule && <ShieldAlert className="h-3.5 w-3.5 text-warning" />}
-                    </label>
-                    <div className="ml-5 mt-1 grid grid-cols-1 gap-1 md:grid-cols-2">
-                      {m.permissions.map((p) => (
-                        <label key={p.id} className="flex cursor-pointer items-start gap-2" title={p.description}>
-                          <input
-                            type="checkbox"
-                            className="mt-0.5 h-3.5 w-3.5 accent-primary"
-                            checked={granted.has(p.id) || (isFullAdmin && p.id !== superPerm)}
-                            disabled={(isFullAdmin && p.id !== superPerm) || (p.id === superPerm && !canGrantSuperuser)}
-                            onChange={() => toggle(p.id)}
-                          />
-                          <span className="text-xs">
-                            {p.label}
-                            <span className="block text-[10px] leading-tight text-muted">{p.description}</span>
-                          </span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                )
-              })}
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-semibold uppercase tracking-wider text-muted">
+                Permissions
+                <span className="ml-2 font-normal normal-case tracking-normal">
+                  {isFullAdmin ? 'full administration' : `${granted.size} of ${total} selected`}
+                </span>
+              </div>
+              {!isFullAdmin && (
+                <div className="flex gap-1">
+                  <Button type="button" variant="ghost" size="sm" onClick={() => setAll(true)}>Select all</Button>
+                  <Button type="button" variant="ghost" size="sm" onClick={() => setAll(false)}>Clear</Button>
+                </div>
+              )}
+            </div>
+            <div className="max-h-[46vh] overflow-y-auto">
+              <PermissionMatrix
+                catalog={catalog}
+                granted={granted}
+                superPerm={superPerm}
+                canGrantSuperuser={canGrantSuperuser}
+                onToggle={toggle}
+                onToggleModule={toggleModule}
+              />
             </div>
             {isFullAdmin && (
               <p className="flex items-center gap-1.5 text-[11px] text-warning">
@@ -300,7 +450,7 @@ function RoleEditorDialog({
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-            <Button type="submit" disabled={save.isPending || !displayName.trim()}>
+            <Button type="submit" disabled={save.isPending || displayName.trim().length < 2}>
               {save.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
               {isEdit ? 'Save changes' : 'Create role'}
             </Button>
