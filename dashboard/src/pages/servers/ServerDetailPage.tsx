@@ -16,12 +16,14 @@ import {
   CheckCircle2,
   ChevronRight,
   ClipboardCheck,
+  Clock3,
   CloudOff,
   Cpu,
   Database,
   FileDown,
   Gauge,
   HardDrive,
+  Info,
   KeyRound,
   ListTree,
   MemoryStick,
@@ -64,7 +66,7 @@ import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
 import { InstallTokenDialog } from '@/components/servers/InstallTokenDialog'
 import { ServerFormDialog } from '@/components/servers/ServerFormDialog'
 import {
-  AgentStatusBadge, KpiTile, OsIcon, ServerStatusBadge, TagList,
+  AgentStatusBadge, OsIcon, ServerStatusBadge, TagList,
 } from '@/components/servers/shared'
 import type {
   AgentItem, ComplianceResult, ComplianceSummary, ServerCommand, ServerEventRow,
@@ -378,9 +380,12 @@ export function ServerDetailPage() {
 
   const svcItems = services?.items || []
   const svcRunning = svcItems.filter((s) => (s.state || '').toLowerCase() === 'running').length
+  // A Windows host idles with 100+ manual services stopped; only an
+  // auto-start service that is not running is a signal worth a badge.
   const svcStopped = svcItems.filter((s) => {
     const st = (s.state || '').toLowerCase()
-    return st !== '' && st !== 'running' && st !== 'not_found'
+    const auto = /auto|enabled/i.test(s.start_mode || '')
+    return auto && st !== '' && st !== 'running' && st !== 'not_found'
   }).length
   const fsItems = filesystems?.items || []
   const fsCritical = fsItems.filter((fs) => (fs.used_pct || 0) >= 90).length
@@ -411,111 +416,137 @@ export function ServerDetailPage() {
 
   return (
     <div className="space-y-4">
-      {/* Header */}
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
-          <Link
-            to="/servers/inventory"
-            className="mt-1 flex h-8 w-8 items-center justify-center rounded-md border border-border text-muted transition-colors hover:bg-surface2 hover:text-text"
-          >
-            <ArrowLeft className="h-4 w-4" />
-          </Link>
-          <div>
-            <div className="flex flex-wrap items-center gap-2.5">
+      {/* Identity header: who this host is, its health, and the live
+          resource strip — one card so the page opens on a single, scannable
+          block instead of a loose row of tiles. */}
+      <Card className="overflow-hidden">
+        <div className="flex flex-wrap items-start justify-between gap-4 px-5 pb-4 pt-4">
+          <div className="flex min-w-0 items-start gap-3">
+            <Link
+              to="/servers/inventory"
+              aria-label="Back to inventory"
+              className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border text-muted transition-colors hover:bg-surface2 hover:text-text"
+            >
+              <ArrowLeft className="h-4 w-4" />
+            </Link>
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-border bg-surface2/60">
               <OsIcon os={server.os_type} className="h-5 w-5" />
-              <h1 className="text-2xl font-semibold">{server.display_name}</h1>
-              <ServerStatusBadge status={server.status} reasons={server.status_reasons} />
-              <AgentStatusBadge status={server.agent_status} />
-            </div>
-            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted">
-              {server.primary_ip && <span className="font-mono">{server.primary_ip}</span>}
-              {server.fqdn && <span>{server.fqdn}</span>}
-              <span>{server.os_name || server.os_type} {server.os_version || ''}</span>
-              {server.architecture && <span>{server.architecture}</span>}
-              {server.boot_time && <span title={`Booted ${new Date(server.boot_time).toLocaleString()}`}>up {formatUptime(server.boot_time)}</span>}
-              {server.environment && <Badge variant="outline" className="text-[10px]">{server.environment}</Badge>}
-              {server.owner && <span>owner: {server.owner}</span>}
-              <span>seen {relativeTime(server.last_seen)}</span>
-            </div>
-            {server.status_reasons.length > 0 && (
-              <div className="mt-1.5 flex flex-wrap gap-1.5">
-                {server.status_reasons.map((r) => (
-                  <span
-                    key={r}
-                    className={cn(
-                      'inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px]',
-                      server.status === 'critical' ? 'bg-danger/10 text-danger' : 'bg-warning/10 text-warning',
-                    )}
-                  >
-                    <AlertTriangle className="h-3 w-3" /> {r}
-                  </span>
-                ))}
+            </span>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                <h1 className="text-xl font-semibold leading-tight tracking-tight">{server.display_name}</h1>
+                <ServerStatusBadge status={server.status} reasons={server.status_reasons} />
+                <AgentStatusBadge status={server.agent_status} />
+                {server.environment && <Badge variant="outline">{server.environment}</Badge>}
               </div>
-            )}
-            <div className="mt-1.5">
-              <TagList tags={server.tags} max={8} />
+              <dl className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+                {server.primary_ip && <MetaItem label="IP" value={<span className="font-mono">{server.primary_ip}</span>} />}
+                {server.hostname && server.hostname !== server.display_name && (
+                  <MetaItem label="Host" value={server.hostname} />
+                )}
+                <MetaItem label="OS" value={`${server.os_name || server.os_type}${server.os_version ? ` ${server.os_version}` : ''}`} />
+                {server.architecture && <MetaItem label="Arch" value={server.architecture} />}
+                {server.site_name && <MetaItem label="Site" value={server.site_name} />}
+                {server.owner && <MetaItem label="Owner" value={server.owner} />}
+              </dl>
+              {server.status_reasons.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {server.status_reasons.map((r) => (
+                    <span
+                      key={r}
+                      className={cn(
+                        'inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px]',
+                        server.status === 'critical' ? 'bg-danger/10 text-danger' : 'bg-warning/10 text-warning',
+                      )}
+                    >
+                      <AlertTriangle className="h-3 w-3" /> {r}
+                    </span>
+                  ))}
+                </div>
+              )}
+              {server.tags.length > 0 && (
+                <div className="mt-2">
+                  <TagList tags={server.tags} max={8} />
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="flex shrink-0 flex-col items-end gap-2">
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => setEditOpen(true)}>
+                <Pencil className="h-3.5 w-3.5" /> Edit
+              </Button>
+              <Button size="sm" onClick={() => setDeployOpen(true)}>
+                <KeyRound className="h-3.5 w-3.5" /> Install agent
+              </Button>
+            </div>
+            <div className="flex items-center gap-3 text-[11px] text-muted">
+              <span className="inline-flex items-center gap-1" title={server.boot_time ? `Booted ${new Date(server.boot_time).toLocaleString()}` : undefined}>
+                <Clock3 className="h-3 w-3" />
+                {server.boot_time ? `up ${formatUptime(server.boot_time)}` : 'uptime unknown'}
+              </span>
+              <span className="inline-flex items-center gap-1" title={server.last_seen ? new Date(server.last_seen).toLocaleString() : undefined}>
+                <RefreshCw className="h-3 w-3" />
+                seen {relativeTime(server.last_seen)}
+              </span>
             </div>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => setEditOpen(true)}>
-            <Pencil className="h-3.5 w-3.5" /> Edit
-          </Button>
-          <Button size="sm" onClick={() => setDeployOpen(true)}>
-            <KeyRound className="h-3.5 w-3.5" /> Install agent
-          </Button>
-        </div>
-      </div>
 
-      {/* KPI tiles */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-        <KpiTile
-          icon={Cpu} label="CPU"
-          value={isLive && lm.cpu_pct != null ? `${lm.cpu_pct.toFixed(1)}%` : '—'}
-          tone={lm.cpu_pct != null && lm.cpu_pct >= 90 ? 'danger' : 'default'}
-          sub={isLive && lm.cpu_pct == null ? 'not reported by agent' : undefined}
-        />
-        <KpiTile
-          icon={MemoryStick} label="Memory"
-          value={isLive && lm.memory_pct != null ? `${lm.memory_pct.toFixed(1)}%` : '—'}
-          tone={lm.memory_pct != null && lm.memory_pct >= 90 ? 'danger' : 'default'}
-          sub={isLive && lm.memory_pct == null ? 'not reported by agent' : undefined}
-        />
-        <KpiTile
-          icon={HardDrive} label="Disk (max)"
-          value={isLive && lm.disk_max_pct != null ? `${lm.disk_max_pct.toFixed(1)}%` : '—'}
-          tone={lm.disk_max_pct != null && lm.disk_max_pct >= 95 ? 'danger' : lm.disk_max_pct != null && lm.disk_max_pct >= 85 ? 'warning' : 'default'}
-          sub={fsItems.length ? `${fsItems.length} volumes` : undefined}
-        />
-        <KpiTile
-          icon={NetworkIcon} label="Network"
-          value={isLive && lm.net_bps != null ? formatBps(lm.net_bps * 8) : '—'}
-        />
-        {/* The agent reports a top-N sample, not every PID on the host —
-            labelling it "Processes" implied a full count. */}
-        <KpiTile
-          icon={ListTree} label="Top processes"
-          value={processes ? runningProcessCount : '—'}
-          sub={missingWatchlistCount
-            ? `${missingWatchlistCount} watched not running`
-            : runningProcessCount
-              ? 'sampled by CPU / memory'
-              : processes ? 'not reported by agent' : undefined}
-          tone={missingWatchlistCount ? 'warning' : 'default'}
-        />
-        <KpiTile
-          icon={Wrench} label="Services"
-          value={svcItems.length ? `${svcRunning}/${svcItems.length}` : '—'}
-          sub={svcItems.length ? 'running / reported' : undefined}
-          tone={svcStopped > 0 ? 'warning' : 'default'}
-        />
-      </div>
+        {/* Live resource strip */}
+        <div className="grid grid-cols-2 border-t border-border bg-surface2/20 sm:grid-cols-3 xl:grid-cols-6">
+          <HeaderStat
+            icon={Cpu} label="CPU"
+            value={isLive && lm.cpu_pct != null ? `${lm.cpu_pct.toFixed(1)}%` : '—'}
+            pct={isLive ? lm.cpu_pct : undefined}
+            tone={lm.cpu_pct != null && lm.cpu_pct >= 90 ? 'danger' : lm.cpu_pct != null && lm.cpu_pct >= 80 ? 'warning' : 'default'}
+            sub={isLive && lm.cpu_pct == null ? 'not reported' : server.cpu_cores ? `${server.cpu_cores} logical cores` : undefined}
+          />
+          <HeaderStat
+            icon={MemoryStick} label="Memory"
+            value={isLive && lm.memory_pct != null ? `${lm.memory_pct.toFixed(1)}%` : '—'}
+            pct={isLive ? lm.memory_pct : undefined}
+            tone={lm.memory_pct != null && lm.memory_pct >= 90 ? 'danger' : lm.memory_pct != null && lm.memory_pct >= 80 ? 'warning' : 'default'}
+            sub={isLive && lm.memory_pct == null ? 'not reported' : server.memory_total_bytes ? `of ${formatBytes(server.memory_total_bytes)}` : undefined}
+          />
+          <HeaderStat
+            icon={HardDrive} label="Disk (max)"
+            value={isLive && lm.disk_max_pct != null ? `${lm.disk_max_pct.toFixed(1)}%` : '—'}
+            pct={isLive ? lm.disk_max_pct : undefined}
+            tone={lm.disk_max_pct != null && lm.disk_max_pct >= 95 ? 'danger' : lm.disk_max_pct != null && lm.disk_max_pct >= 85 ? 'warning' : 'default'}
+            sub={fsItems.length ? `${fsItems.length} volume${fsItems.length === 1 ? '' : 's'}` : undefined}
+          />
+          <HeaderStat
+            icon={NetworkIcon} label="Network"
+            value={isLive && lm.net_bps != null ? formatBps(lm.net_bps * 8) : '—'}
+            sub="rx + tx"
+          />
+          {/* The agent reports a top-N sample, not every PID on the host —
+              labelling it "Processes" implied a full count. */}
+          <HeaderStat
+            icon={ListTree} label="Top processes"
+            value={processes ? runningProcessCount : '—'}
+            sub={missingWatchlistCount
+              ? `${missingWatchlistCount} watched not running`
+              : runningProcessCount
+                ? 'sampled by CPU / memory'
+                : processes ? 'not reported' : undefined}
+            tone={missingWatchlistCount ? 'warning' : 'default'}
+          />
+          <HeaderStat
+            icon={Wrench} label="Services"
+            value={svcItems.length ? `${svcRunning}/${svcItems.length}` : '—'}
+            sub={svcStopped ? `${svcStopped} auto-start stopped` : svcItems.length ? 'running / reported' : undefined}
+            tone={svcStopped > 0 ? 'warning' : 'default'}
+          />
+        </div>
+      </Card>
 
       <TabBar tab={tab} setTab={setTab} badges={tabBadges} />
 
       {tab === 'overview' && (
         <OverviewTab
-          serverId={server.id}
+          server={server}
           filesystems={fsItems}
           processes={processItems}
           onGoTo={(t, s) => { setTab(t); if (s) setTimeout(() => setSub(s), 0) }}
@@ -715,6 +746,73 @@ function diskIoStats(rows: ChartRow[]) {
 
 const CHART_H = 240
 
+/** Labelled fact in the identity header's meta line. */
+function MetaItem({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <dt className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</dt>
+      <dd className="text-text2">{value}</dd>
+    </div>
+  )
+}
+
+/** One cell of the identity card's live resource strip. */
+function HeaderStat({ icon: Icon, label, value, sub, tone = 'default', pct }: {
+  icon: React.ComponentType<{ className?: string }>
+  label: string
+  value: React.ReactNode
+  sub?: React.ReactNode
+  tone?: 'default' | 'warning' | 'danger'
+  /** When given, a hairline gauge under the value shows the percentage. */
+  pct?: number | null
+}) {
+  const valueTone = tone === 'danger' ? 'text-danger' : tone === 'warning' ? 'text-warning' : 'text-text'
+  const barTone = tone === 'danger' ? 'bg-danger' : tone === 'warning' ? 'bg-warning' : 'bg-primary'
+  return (
+    <div className="flex flex-col gap-1.5 border-b border-r border-border/60 px-4 py-3 last:border-r-0 sm:[&:nth-child(3n)]:border-r-0 xl:border-b-0 xl:[&:nth-child(3n)]:border-r xl:last:border-r-0">
+      <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
+        <Icon className="h-3.5 w-3.5" />
+        <span className="truncate">{label}</span>
+      </div>
+      <div className={cn('truncate text-xl font-semibold leading-none tabular-nums', valueTone)}>{value}</div>
+      {pct != null ? (
+        <div className="h-1 w-full overflow-hidden rounded-full bg-surface2">
+          <div className={cn('h-full rounded-full transition-all', barTone)} style={{ width: `${Math.max(0, Math.min(100, pct))}%` }} />
+        </div>
+      ) : null}
+      {sub && <div className="truncate text-[11px] text-muted">{sub}</div>}
+    </div>
+  )
+}
+
+/** Section heading row inside a tab: eyebrow title on the left, controls on
+ *  the right. Replaces the loose "<label> for Last 1h" sentence. */
+function SectionBar({ title, hint, children }: { title: string; hint?: React.ReactNode; children?: React.ReactNode }) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="flex items-baseline gap-2">
+        <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
+        {hint && <span className="text-xs text-muted">{hint}</span>}
+      </div>
+      {children}
+    </div>
+  )
+}
+
+/** Compact label/value list for small fact panels (system, hardware). */
+function KeyValueList({ rows }: { rows: [string, React.ReactNode][] }) {
+  return (
+    <dl className="divide-y divide-border/50">
+      {rows.map(([label, value]) => (
+        <div key={label} className="flex items-start justify-between gap-3 py-1.5 text-xs">
+          <dt className="shrink-0 text-muted">{label}</dt>
+          <dd className="min-w-0 text-right text-text2 [overflow-wrap:anywhere]">{value}</dd>
+        </div>
+      ))}
+    </dl>
+  )
+}
+
 function PanelHeader({
   icon, title, hint, right,
 }: {
@@ -740,15 +838,6 @@ function PanelMiniStat({ label, value, tone = 'text-text2' }: { label: string; v
     <div className="rounded-lg border border-border/60 bg-surface2/30 px-2 py-2">
       <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
       <div className={cn('mt-0.5 text-sm font-bold tabular-nums leading-none', tone)}>{value}</div>
-    </div>
-  )
-}
-
-function PanelToolbar({ label, children }: { label?: React.ReactNode; children: React.ReactNode }) {
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-3">
-      {label && <p className="text-xs text-muted">{label}</p>}
-      {children}
     </div>
   )
 }
@@ -813,9 +902,9 @@ function TablePanel({
 
 function InfoGrid({ rows }: { rows: [string, React.ReactNode][] }) {
   return (
-    <div className="grid grid-cols-2 gap-x-4 gap-y-3 md:grid-cols-3 xl:grid-cols-4">
+    <div className="grid grid-cols-2 gap-x-6 gap-y-4 md:grid-cols-3 xl:grid-cols-4">
       {rows.map(([label, value]) => (
-        <div key={label} className="rounded-lg border border-border/50 bg-surface2/20 px-3 py-2.5">
+        <div key={label} className="min-w-0 border-l-2 border-border/70 pl-3">
           <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
           <div className="mt-1 break-words text-sm text-text">{value}</div>
         </div>
@@ -827,8 +916,8 @@ function InfoGrid({ rows }: { rows: [string, React.ReactNode][] }) {
 /* ── Overview ────────────────────────────────────────────────────── */
 
 /** Actionable summary: what on this host needs a human, and where to go.
- *  Replaces the old Overview habit of repeating panels that already exist
- *  verbatim on other tabs. */
+ *  One strip, not a grid — the items are a short list of links, and a grid
+ *  left an orphaned cell whenever the count was odd. */
 function NeedsAttention({
   openAlertCount, complianceFailures, stoppedServices, fullVolumes, onGoTo,
 }: {
@@ -839,57 +928,61 @@ function NeedsAttention({
   onGoTo: (tab: TabKey, sub?: string) => void
 }) {
   const rows = [
-    { n: openAlertCount, label: 'open alert', tone: 'danger' as const, icon: Bell, go: () => onGoTo('alerts') },
-    { n: fullVolumes, label: 'volume over 90% full', tone: 'danger' as const, icon: HardDrive, go: () => onGoTo('inventory', 'storage') },
-    { n: complianceFailures, label: 'compliance failure', tone: 'warning' as const, icon: ClipboardCheck, go: () => onGoTo('compliance') },
-    { n: stoppedServices, label: 'stopped service', tone: 'warning' as const, icon: Wrench, go: () => onGoTo('inventory', 'services') },
+    { n: openAlertCount, one: 'open alert', many: 'open alerts', tone: 'danger' as const, icon: Bell, go: () => onGoTo('alerts') },
+    { n: fullVolumes, one: 'volume over 90% full', many: 'volumes over 90% full', tone: 'danger' as const, icon: HardDrive, go: () => onGoTo('inventory', 'storage') },
+    { n: complianceFailures, one: 'compliance failure', many: 'compliance failures', tone: 'warning' as const, icon: ClipboardCheck, go: () => onGoTo('compliance') },
+    { n: stoppedServices, one: 'auto-start service stopped', many: 'auto-start services stopped', tone: 'warning' as const, icon: Wrench, go: () => onGoTo('inventory', 'services') },
   ].filter((r) => r.n > 0)
 
+  if (rows.length === 0) {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-success/25 bg-success/5 px-4 py-2.5 text-sm">
+        <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />
+        <span className="font-medium text-success">All clear</span>
+        <span className="text-xs text-muted">No open alerts, compliance failures, full volumes or stopped auto-start services.</span>
+      </div>
+    )
+  }
+
+  const worst = rows.some((r) => r.tone === 'danger') ? 'danger' : 'warning'
   return (
-    <Card className="overflow-hidden">
-      <PanelHeader
-        icon={<AlertTriangle className="h-3.5 w-3.5" />}
-        title="Needs attention"
-        hint={rows.length ? undefined : 'all clear'}
-      />
-      <CardContent className="px-4 pb-4 pt-3">
-        {rows.length === 0 ? (
-          <div className="flex items-center gap-2 text-sm text-success">
-            <CheckCircle2 className="h-4 w-4" />
-            Nothing outstanding on this server.
-          </div>
-        ) : (
-          <div className="grid gap-2 sm:grid-cols-2">
-            {rows.map((r) => (
-              <button
-                key={r.label}
-                type="button"
-                onClick={r.go}
-                className={cn(
-                  'flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm transition-colors',
-                  r.tone === 'danger'
-                    ? 'border-danger/30 bg-danger/5 hover:bg-danger/10'
-                    : 'border-warning/30 bg-warning/5 hover:bg-warning/10',
-                )}
-              >
-                <r.icon className={cn('h-4 w-4 shrink-0', r.tone === 'danger' ? 'text-danger' : 'text-warning')} />
-                <span className="font-semibold tabular-nums">{r.n}</span>
-                <span className="text-text2">{r.label}{r.n === 1 ? '' : 's'}</span>
-                <ChevronRight className="ml-auto h-3.5 w-3.5 text-muted" />
-              </button>
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
+    <div
+      className={cn(
+        'flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2.5',
+        worst === 'danger' ? 'border-danger/25 bg-danger/5' : 'border-warning/25 bg-warning/5',
+      )}
+    >
+      <span className="mr-1 inline-flex items-center gap-1.5 text-sm font-medium">
+        <AlertTriangle className={cn('h-4 w-4', worst === 'danger' ? 'text-danger' : 'text-warning')} />
+        Needs attention
+      </span>
+      {rows.map((r) => (
+        <button
+          key={r.one}
+          type="button"
+          onClick={r.go}
+          className={cn(
+            'inline-flex items-center gap-1.5 rounded-md border bg-surface px-2.5 py-1 text-xs transition-colors',
+            r.tone === 'danger'
+              ? 'border-danger/30 hover:bg-danger/10'
+              : 'border-warning/30 hover:bg-warning/10',
+          )}
+        >
+          <r.icon className={cn('h-3.5 w-3.5', r.tone === 'danger' ? 'text-danger' : 'text-warning')} />
+          <span className="font-semibold tabular-nums">{r.n}</span>
+          <span className="text-text2">{r.n === 1 ? r.one : r.many}</span>
+          <ChevronRight className="h-3 w-3 text-muted" />
+        </button>
+      ))}
+    </div>
   )
 }
 
 function OverviewTab({
-  serverId, filesystems, processes, onGoTo,
+  server, filesystems, processes, onGoTo,
   openAlertCount, complianceFailures, stoppedServices, telemetryEmptyMessage,
 }: {
-  serverId: string
+  server: ServerItem
   filesystems: ServerFilesystem[]
   processes: ServerProcess[]
   onGoTo: (tab: TabKey, sub?: string) => void
@@ -898,6 +991,7 @@ function OverviewTab({
   stoppedServices: number
   telemetryEmptyMessage: string
 }) {
+  const serverId = server.id
   const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
   // Only what this tab actually plots — the network chart lived here and on
   // Performance identically, so it is requested and drawn once now.
@@ -921,7 +1015,7 @@ function OverviewTab({
   const topProcs = processes
     .filter((p) => p.running !== false)
     .sort((a, b) => (b.cpu_pct || 0) - (a.cpu_pct || 0))
-    .slice(0, 8)
+    .slice(0, 10)
   const maxProcCpu = Math.max(1, ...topProcs.map((p) => p.cpu_pct || 0))
   const tick = timeAxisTickFormatter(range.hours)
   const chartH = 240
@@ -938,6 +1032,28 @@ function OverviewTab({
     minTickGap: 42,
   }
 
+  const disks = server.physical_disks || []
+  const skew = server.agent_clock_skew_s ?? 0
+  const systemRows: [string, React.ReactNode][] = [
+    ['Processor', server.cpu_model || '—'],
+    ['Cores', server.cpu_cores
+      ? `${server.cpu_cores} logical${server.cpu_physical_cores && server.cpu_physical_cores !== server.cpu_cores ? ` · ${server.cpu_physical_cores} physical` : ''}`
+      : '—'],
+    ['Memory', server.memory_total_bytes ? formatBytes(server.memory_total_bytes) : '—'],
+    ['Physical disks', disks.length
+      ? disks.map((d) => `${formatBytes(d.size_bytes)} ${d.model || d.media_type || ''}`.trim()).join(', ')
+      : '—'],
+    ['Build', server.kernel_or_build || '—'],
+    ['Collection', server.collection_mode === 'agent'
+      ? `Agent${server.agent_version ? ` v${server.agent_version}` : ''}`
+      : server.collection_mode],
+    ['Heartbeat', relativeTime(server.agent_last_heartbeat_at)],
+    ['Last metrics', relativeTime(server.agent_last_metric_at ?? null)],
+    ['Clock', Math.abs(skew) < 60
+      ? <span className="text-success">in sync</span>
+      : <span className="text-warning">{skew > 0 ? '+' : ''}{Math.round(skew / 60)} min offset</span>],
+  ]
+
   return (
     <div className="space-y-4">
       <NeedsAttention
@@ -948,118 +1064,87 @@ function OverviewTab({
         onGoTo={onGoTo}
       />
 
-      <PanelToolbar label={<>Resource trends for <span className="font-medium text-text2">{range.label}</span></>}>
+      <SectionBar title="Resource trends" hint={range.label}>
         <TimeRangePicker
           rangeIdx={rangeIdx} isCustom={isCustom}
           customFrom={range.fromISO} customTo={range.toISO}
           onPreset={setPreset} onCustom={setCustom}
         />
-      </PanelToolbar>
+      </SectionBar>
 
-      <div className="grid gap-4">
-        <Card className="overflow-hidden">
-          <PanelHeader
-            icon={<Cpu className="h-3.5 w-3.5" />}
-            title="CPU & Memory"
-            hint={range.label}
-            right={(
-              <button
-                type="button"
-                onClick={() => onGoTo('performance')}
-                className="text-[11px] font-medium text-primary hover:underline"
-              >
-                Full charts →
-              </button>
-            )}
-          />
-          <div className="grid grid-cols-2 gap-2 px-4 pt-3 sm:grid-cols-4">
-            <PanelMiniStat label="CPU now" value={cpuStats ? `${cpuStats.current.toFixed(1)}%` : '—'} tone="text-info" />
-            <PanelMiniStat label="CPU avg" value={cpuStats ? `${cpuStats.avg.toFixed(1)}%` : '—'} />
-            <PanelMiniStat label="Memory now" value={memStats ? `${memStats.current.toFixed(1)}%` : '—'} tone="text-primary" />
-            <PanelMiniStat label="Memory peak" value={memStats ? `${memStats.peak.toFixed(1)}%` : '—'} />
-          </div>
-          <CardContent className="px-2 pb-3 pt-2" style={{ height: chartH }}>
-            {isLoading ? <Skeleton className="mx-2 h-full w-[calc(100%-1rem)]" /> : cpuMem.length === 0 ? <NoData message={telemetryEmptyMessage} /> : (
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={cpuMem} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
-                  <defs>
-                    <linearGradient id="srvOverviewCpu" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="rgb(var(--info))" stopOpacity={0.35} />
-                      <stop offset="100%" stopColor="rgb(var(--info))" stopOpacity={0} />
-                    </linearGradient>
-                    <linearGradient id="srvOverviewMem" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="rgb(var(--primary))" stopOpacity={0.28} />
-                      <stop offset="100%" stopColor="rgb(var(--primary))" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.45} strokeDasharray="3 3" vertical={false} />
-                  <XAxis {...axisProps} />
-                  <YAxis domain={[0, 100]} width={36} tickFormatter={(v) => `${v}%`} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
-                  <ReferenceLine y={85} stroke="rgb(var(--warning))" strokeDasharray="4 4" strokeOpacity={0.55} />
-                  <ReferenceLine y={95} stroke="rgb(var(--danger))" strokeDasharray="4 4" strokeOpacity={0.55} />
-                  <Tooltip {...ttStyle()} formatter={(v: number, n: string) => [`${Number(v).toFixed(1)}%`, n]} />
-                  <Legend
-                    verticalAlign="top" align="right" iconType="circle" iconSize={8}
-                    wrapperStyle={{ fontSize: 11, paddingBottom: 4 }}
-                    formatter={(v) => <span className="text-text2">{v}</span>}
-                  />
-                  <Area type="monotone" dataKey="cpu" name="CPU" stroke="rgb(var(--info))" strokeWidth={2} fill="url(#srvOverviewCpu)" dot={false} isAnimationActive={false} activeDot={{ r: 3.5, strokeWidth: 0 }} connectNulls />
-                  <Area type="monotone" dataKey="mem" name="Memory" stroke="rgb(var(--primary))" strokeWidth={2} fill="url(#srvOverviewMem)" dot={false} isAnimationActive={false} activeDot={{ r: 3.5, strokeWidth: 0 }} connectNulls />
-                </AreaChart>
-              </ResponsiveContainer>
-            )}
-          </CardContent>
-        </Card>
+      <Card className="overflow-hidden">
+        <PanelHeader
+          icon={<Cpu className="h-3.5 w-3.5" />}
+          title="CPU & Memory"
+          hint={range.label}
+          right={(
+            <button
+              type="button"
+              onClick={() => onGoTo('performance')}
+              className="text-[11px] font-medium text-primary hover:underline"
+            >
+              Full charts →
+            </button>
+          )}
+        />
+        <div className="grid grid-cols-2 gap-2 px-4 pt-3 sm:grid-cols-4">
+          <PanelMiniStat label="CPU now" value={cpuStats ? `${cpuStats.current.toFixed(1)}%` : '—'} tone="text-info" />
+          <PanelMiniStat label="CPU avg" value={cpuStats ? `${cpuStats.avg.toFixed(1)}%` : '—'} />
+          <PanelMiniStat label="Memory now" value={memStats ? `${memStats.current.toFixed(1)}%` : '—'} tone="text-primary" />
+          <PanelMiniStat label="Memory peak" value={memStats ? `${memStats.peak.toFixed(1)}%` : '—'} />
+        </div>
+        <CardContent className="px-2 pb-3 pt-2" style={{ height: chartH }}>
+          {isLoading ? <Skeleton className="mx-2 h-full w-[calc(100%-1rem)]" /> : cpuMem.length === 0 ? <NoData message={telemetryEmptyMessage} /> : (
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={cpuMem} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
+                <defs>
+                  <linearGradient id="srvOverviewCpu" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="rgb(var(--info))" stopOpacity={0.35} />
+                    <stop offset="100%" stopColor="rgb(var(--info))" stopOpacity={0} />
+                  </linearGradient>
+                  <linearGradient id="srvOverviewMem" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="rgb(var(--primary))" stopOpacity={0.28} />
+                    <stop offset="100%" stopColor="rgb(var(--primary))" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.45} strokeDasharray="3 3" vertical={false} />
+                <XAxis {...axisProps} />
+                <YAxis domain={[0, 100]} width={36} tickFormatter={(v) => `${v}%`} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
+                <ReferenceLine y={85} stroke="rgb(var(--warning))" strokeDasharray="4 4" strokeOpacity={0.55} />
+                <ReferenceLine y={95} stroke="rgb(var(--danger))" strokeDasharray="4 4" strokeOpacity={0.55} />
+                <Tooltip {...ttStyle()} formatter={(v: number, n: string) => [`${Number(v).toFixed(1)}%`, n]} />
+                <Legend
+                  verticalAlign="top" align="right" iconType="circle" iconSize={8}
+                  wrapperStyle={{ fontSize: 11, paddingBottom: 4 }}
+                  formatter={(v) => <span className="text-text2">{v}</span>}
+                />
+                <Area type="monotone" dataKey="cpu" name="CPU" stroke="rgb(var(--info))" strokeWidth={2} fill="url(#srvOverviewCpu)" dot={false} isAnimationActive={false} activeDot={{ r: 3.5, strokeWidth: 0 }} connectNulls />
+                <Area type="monotone" dataKey="mem" name="Memory" stroke="rgb(var(--primary))" strokeWidth={2} fill="url(#srvOverviewMem)" dot={false} isAnimationActive={false} activeDot={{ r: 3.5, strokeWidth: 0 }} connectNulls />
+              </AreaChart>
+            </ResponsiveContainer>
+          )}
+        </CardContent>
+      </Card>
 
-      </div>
+      <SectionBar title="Live snapshot" hint="refreshed every 30s" />
 
-      <div className="grid gap-4 xl:grid-cols-2">
-        <Card className="overflow-hidden">
-          <PanelHeader
-            icon={<HardDrive className="h-3.5 w-3.5" />}
-            title="Filesystems"
-            hint={`${filesystems.length} volume${filesystems.length === 1 ? '' : 's'}`}
-          />
-          <CardContent className="space-y-3 px-4 pb-4 pt-3">
-            {filesystems.length === 0 ? <NoData /> : (
-              filesystems.map((fs) => {
-                const pct = Math.min(100, fs.used_pct || 0)
-                const tone = pct >= 95 ? 'danger' : pct >= 85 ? 'warning' : 'primary'
-                const barTone = pct >= 95 ? 'from-danger to-danger/70' : pct >= 85 ? 'from-warning to-warning/70' : 'from-primary to-info'
-                return (
-                  <div key={fs.mount} className="rounded-lg border border-border/50 bg-surface2/20 px-3 py-2.5">
-                    <div className="mb-2 flex items-center justify-between gap-2">
-                      <span className="font-mono text-xs font-semibold text-text">{fs.mount}</span>
-                      <span className={cn(
-                        'text-xs font-bold tabular-nums',
-                        tone === 'danger' ? 'text-danger' : tone === 'warning' ? 'text-warning' : 'text-text2',
-                      )}>
-                        {pct.toFixed(1)}%
-                      </span>
-                    </div>
-                    <div className="h-2 overflow-hidden rounded-full bg-surface2">
-                      <div
-                        className={cn('h-full rounded-full bg-gradient-to-r transition-all', barTone)}
-                        style={{ width: `${pct}%` }}
-                      />
-                    </div>
-                    <div className="mt-1.5 flex justify-between text-[10px] tabular-nums text-muted">
-                      <span>{formatBytes(fs.used_bytes || 0)} used</span>
-                      <span>{formatBytes(fs.total_bytes || 0)} total</span>
-                    </div>
-                  </div>
-                )
-              })
-            )}
-          </CardContent>
-        </Card>
-
-        <Card className="overflow-hidden">
+      {/* Processes take the wide column; storage and system facts stack in
+          the narrow one so neither side is left with a tall empty card. */}
+      <div className="grid gap-4 xl:grid-cols-3">
+        <Card className="overflow-hidden xl:col-span-2">
           <PanelHeader
             icon={<ListTree className="h-3.5 w-3.5" />}
             title="Top processes"
             hint="by CPU"
-            right={<span className="text-[10px] text-muted">live snapshot</span>}
+            right={(
+              <button
+                type="button"
+                onClick={() => onGoTo('inventory', 'processes')}
+                className="text-[11px] font-medium text-primary hover:underline"
+              >
+                All processes →
+              </button>
+            )}
           />
           <CardContent className="px-0 pb-2 pt-1">
             {topProcs.length === 0 ? <div className="px-4"><NoData message={telemetryEmptyMessage} /></div> : (
@@ -1067,7 +1152,7 @@ function OverviewTab({
                 <THead>
                   <Tr className="hover:bg-transparent">
                     <Th className="h-8 pl-4">Process</Th>
-                    <Th className="h-8 w-28">CPU</Th>
+                    <Th className="h-8 w-36">CPU</Th>
                     <Th className="h-8 text-right">Memory</Th>
                     <Th className="h-8 pr-4">User</Th>
                   </Tr>
@@ -1105,6 +1190,76 @@ function OverviewTab({
             )}
           </CardContent>
         </Card>
+
+        <div className="grid gap-4 content-start">
+          <Card className="overflow-hidden">
+            <PanelHeader
+              icon={<HardDrive className="h-3.5 w-3.5" />}
+              title="Filesystems"
+              hint={`${filesystems.length} volume${filesystems.length === 1 ? '' : 's'}`}
+              right={(
+                <button
+                  type="button"
+                  onClick={() => onGoTo('inventory', 'storage')}
+                  className="text-[11px] font-medium text-primary hover:underline"
+                >
+                  Storage →
+                </button>
+              )}
+            />
+            <CardContent className="space-y-2.5 px-4 pb-4 pt-3">
+              {filesystems.length === 0 ? <NoData /> : (
+                filesystems.map((fs) => {
+                  const pct = Math.min(100, fs.used_pct || 0)
+                  const tone = pct >= 95 ? 'danger' : pct >= 85 ? 'warning' : 'primary'
+                  const barTone = pct >= 95 ? 'from-danger to-danger/70' : pct >= 85 ? 'from-warning to-warning/70' : 'from-primary to-info'
+                  return (
+                    <div key={fs.mount}>
+                      <div className="mb-1 flex items-center justify-between gap-2">
+                        <span className="font-mono text-xs font-semibold text-text">{fs.mount}</span>
+                        <span className="text-[11px] tabular-nums text-muted">
+                          {formatBytes(fs.used_bytes || 0)} / {formatBytes(fs.total_bytes || 0)}
+                          <span className={cn(
+                            'ml-2 font-bold',
+                            tone === 'danger' ? 'text-danger' : tone === 'warning' ? 'text-warning' : 'text-text2',
+                          )}>
+                            {pct.toFixed(1)}%
+                          </span>
+                        </span>
+                      </div>
+                      <div className="h-1.5 overflow-hidden rounded-full bg-surface2">
+                        <div
+                          className={cn('h-full rounded-full bg-gradient-to-r transition-all', barTone)}
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    </div>
+                  )
+                })
+              )}
+            </CardContent>
+          </Card>
+
+          <Card className="overflow-hidden">
+            <PanelHeader
+              icon={<Info className="h-3.5 w-3.5" />}
+              title="System"
+              hint="hardware & agent"
+              right={(
+                <button
+                  type="button"
+                  onClick={() => onGoTo('manage', 'agent')}
+                  className="text-[11px] font-medium text-primary hover:underline"
+                >
+                  Agent →
+                </button>
+              )}
+            />
+            <CardContent className="px-4 pb-3 pt-1">
+              <KeyValueList rows={systemRows} />
+            </CardContent>
+          </Card>
+        </div>
       </div>
     </div>
   )
@@ -1144,13 +1299,13 @@ function PerformanceTab({ serverId, telemetryEmptyMessage }: { serverId: string;
 
   return (
     <div className="space-y-4">
-      <PanelToolbar label={<>Detailed metrics for <span className="font-medium text-text2">{range.label}</span></>}>
+      <SectionBar title="Detailed metrics" hint={range.label}>
         <TimeRangePicker
           rangeIdx={rangeIdx} isCustom={isCustom}
           customFrom={range.fromISO} customTo={range.toISO}
           onPreset={setPreset} onCustom={setCustom}
         />
-      </PanelToolbar>
+      </SectionBar>
 
       <div className="grid gap-4 xl:grid-cols-2">
         <MetricChartCard
@@ -1242,7 +1397,7 @@ function PerformanceTab({ serverId, telemetryEmptyMessage }: { serverId: string;
             </defs>
             <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.45} strokeDasharray="3 3" vertical={false} />
             <XAxis {...axis} />
-            <YAxis width={48} tickFormatter={(v) => formatBps(Number(v) * 8)} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
+            <YAxis width={64} tickFormatter={(v) => formatBps(Number(v) * 8).replace(' ', '\u00A0')} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
             <Tooltip {...ttStyle()} formatter={(v: number, n: string) => [formatBps(Number(v) * 8), n]} />
             <Legend verticalAlign="top" align="right" iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11, paddingBottom: 4 }} />
             <Area type="monotone" dataKey="rx" name="Receive" stroke="rgb(var(--primary))" strokeWidth={2} fill="url(#perfRx)" dot={false} isAnimationActive={false} activeDot={{ r: 3.5, strokeWidth: 0 }} connectNulls />
@@ -1277,7 +1432,7 @@ function PerformanceTab({ serverId, telemetryEmptyMessage }: { serverId: string;
             </defs>
             <CartesianGrid stroke="rgb(var(--border))" strokeOpacity={0.45} strokeDasharray="3 3" vertical={false} />
             <XAxis {...axis} />
-            <YAxis width={52} tickFormatter={(v) => `${formatBytes(Number(v))}/s`} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
+            <YAxis width={68} tickFormatter={(v) => `${formatBytes(Number(v))}/s`.replace(' ', '\u00A0')} tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }} axisLine={false} tickLine={false} />
             <Tooltip {...ttStyle()} formatter={(v: number, n: string) => [`${formatBytes(Number(v))}/s`, n]} />
             <Legend verticalAlign="top" align="right" iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11, paddingBottom: 4 }} />
             <Area type="monotone" dataKey="read" name="Read" stroke="rgb(var(--info))" strokeWidth={2} fill="url(#perfRead)" dot={false} isAnimationActive={false} activeDot={{ r: 3.5, strokeWidth: 0 }} connectNulls />
@@ -1617,6 +1772,8 @@ function ServicesTab({ serverId, serverName, items }: {
   const qc = useQueryClient()
   const [filter, setFilter] = useState('all')
   const [q, setQ] = useState('')
+  const [sortBy, setSortBy] = useState<'attention' | 'name' | 'state' | 'start_mode'>('attention')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
   const [createOpen, setCreateOpen] = useState(false)
   const [prefill, setPrefill] = useState<HostRulePrefill | undefined>()
 
@@ -1648,29 +1805,54 @@ function ServicesTab({ serverId, serverName, items }: {
     const st = (state || '').toLowerCase()
     return st !== 'running' && st !== 'not_found' && !!st
   }
+  // Windows reports "auto"/"manual"/"disabled"; systemd-style agents report
+  // "enabled"/"disabled". Only an auto-start service that is not running is
+  // a problem — a stopped manual service is the normal idle state.
+  const isAutoStart = (s: ServerService) => /auto|enabled/i.test(s.start_mode || '')
+  const hasRule = (s: ServerService) => ruleByService.has(s.service_name.toLowerCase())
+  // 0 = alert rule breached, 1 = auto-start stopped, 2 = everything else.
+  const attention = (s: ServerService) =>
+    isStopped(s.state) ? (hasRule(s) ? 0 : isAutoStart(s) ? 1 : 2) : 2
 
-  const filtered = useMemo(() => items.filter((s) => {
-    const st = (s.state || '').toLowerCase()
-    const hasRule = ruleByService.has(s.service_name.toLowerCase())
+  const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase()
-    if (needle && !(
-      s.service_name.toLowerCase().includes(needle) ||
-      (s.display_name || '').toLowerCase().includes(needle)
-    )) return false
-    if (filter === 'running') return st === 'running'
-    if (filter === 'stopped') return isStopped(s.state)
-    if (filter === 'not_found') return st === 'not_found'
-    if (filter === 'alert_enabled') return hasRule
-    return true
-  }), [items, filter, q, ruleByService])
+    const base = items.filter((s) => {
+      const st = (s.state || '').toLowerCase()
+      if (needle && !(
+        s.service_name.toLowerCase().includes(needle) ||
+        (s.display_name || '').toLowerCase().includes(needle)
+      )) return false
+      if (filter === 'running') return st === 'running'
+      if (filter === 'auto_stopped') return isAutoStart(s) && isStopped(s.state)
+      if (filter === 'stopped') return isStopped(s.state)
+      if (filter === 'not_found') return st === 'not_found'
+      if (filter === 'alert_enabled') return hasRule(s)
+      return true
+    })
+    const dir = sortDir === 'asc' ? 1 : -1
+    const label = (s: ServerService) => s.display_name || s.service_name
+    return [...base].sort((a, b) => {
+      if (sortBy === 'attention') {
+        const d = attention(a) - attention(b)
+        return d !== 0 ? d : label(a).localeCompare(label(b))
+      }
+      if (sortBy === 'name') return dir * label(a).localeCompare(label(b))
+      if (sortBy === 'state') return dir * cmp(a.state, b.state) || label(a).localeCompare(label(b))
+      return dir * cmp(a.start_mode, b.start_mode) || label(a).localeCompare(label(b))
+    })
+  }, [items, filter, q, sortBy, sortDir, ruleByService])
   const pager = usePagedRows(filtered, 50)
+  const toggleSort = (col: typeof sortBy) => {
+    if (sortBy === col) setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    else { setSortBy(col); setSortDir('asc') }
+    pager.reset()
+  }
   // Inventory rows persist after an agent stops reporting; say so rather
   // than presenting a dead host's last snapshot as current state.
   const stale = items.some((s) => s.is_stale)
   const running = items.filter((s) => (s.state || '').toLowerCase() === 'running').length
-  const alertBreaches = items.filter(
-    (s) => ruleByService.has(s.service_name.toLowerCase()) && isStopped(s.state),
-  ).length
+  const autoStopped = items.filter((s) => isAutoStart(s) && isStopped(s.state)).length
+  const alertBreaches = items.filter((s) => hasRule(s) && isStopped(s.state)).length
 
   const openAlertDialog = (serviceName: string) => {
     setPrefill({
@@ -1681,18 +1863,21 @@ function ServicesTab({ serverId, serverName, items }: {
     setCreateOpen(true)
   }
 
-  const stateBadge = (state: string | null) => {
-    const st = (state || '').toLowerCase()
+  const titleCase = (v: string | null) => (v ? v.charAt(0).toUpperCase() + v.slice(1) : '—')
+
+  const stateBadge = (s: ServerService) => {
+    const st = (s.state || '').toLowerCase()
     if (st === 'running') return <Badge variant="success">Running</Badge>
     if (st === 'not_found') return <Badge variant="outline">Not installed</Badge>
     if (!st) return <Badge variant="outline">Unknown</Badge>
-    return <Badge variant="danger">{state}</Badge>
+    // Red only where it means something: a stopped auto-start service.
+    if (isAutoStart(s)) return <Badge variant="danger">{titleCase(s.state)}</Badge>
+    return <Badge variant="outline" className="text-muted">{titleCase(s.state)}</Badge>
   }
 
-  const alertBadge = (serviceName: string, state: string | null) => {
-    const rule = ruleByService.get(serviceName.toLowerCase())
-    if (!rule) return <span className="text-xs text-muted">—</span>
-    if (isStopped(state)) return <Badge variant="danger">Alert firing</Badge>
+  const alertBadge = (s: ServerService) => {
+    if (!hasRule(s)) return <span className="text-xs text-muted">—</span>
+    if (isStopped(s.state)) return <Badge variant="danger">Alert firing</Badge>
     return <Badge variant="outline">Monitored</Badge>
   }
 
@@ -1700,8 +1885,13 @@ function ServicesTab({ serverId, serverName, items }: {
     <>
       <TablePanel
         icon={<Wrench className="h-3.5 w-3.5" />}
-        title="Reported services"
+        title="Services"
         hint={`${items.length} in inventory · ${serviceRules.length} alert rule${serviceRules.length === 1 ? '' : 's'}`}
+        right={(
+          <span className="text-[10px] text-muted">
+            Alerts fire only for services with a rule — use <Bell className="inline h-3 w-3" /> Alert on a row
+          </span>
+        )}
         toolbar={(
           <div className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
@@ -1715,11 +1905,12 @@ function ServicesTab({ serverId, serverName, items }: {
                 />
               </div>
               <Select value={filter} onValueChange={(v) => { setFilter(v); pager.reset() }}>
-                <SelectTrigger className="h-8 w-[180px]"><SelectValue /></SelectTrigger>
+                <SelectTrigger className="h-8 w-[190px]"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">All states</SelectItem>
+                  <SelectItem value="auto_stopped">Auto-start, stopped</SelectItem>
                   <SelectItem value="running">Running</SelectItem>
-                  <SelectItem value="stopped">Stopped / failed</SelectItem>
+                  <SelectItem value="stopped">Any stopped / failed</SelectItem>
                   <SelectItem value="not_found">Not installed</SelectItem>
                   <SelectItem value="alert_enabled">Alert enabled</SelectItem>
                 </SelectContent>
@@ -1728,7 +1919,11 @@ function ServicesTab({ serverId, serverName, items }: {
             </div>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               <PanelMiniStat label="Running" value={`${running}/${items.length}`} tone="text-success" />
-              <PanelMiniStat label="Filtered" value={String(filtered.length)} />
+              <PanelMiniStat
+                label="Auto-start stopped"
+                value={String(autoStopped)}
+                tone={autoStopped > 0 ? 'text-warning' : undefined}
+              />
               <PanelMiniStat label="Alert rules" value={String(serviceRules.length)} />
               <PanelMiniStat
                 label="Alert breaches"
@@ -1748,21 +1943,33 @@ function ServicesTab({ serverId, serverName, items }: {
             </span>
           </div>
         )}
-        <p className="border-b border-border/50 px-4 py-2 text-[11px] text-muted">
-          Services are reported for visibility. Alerts fire only for services you configure — use
-          {' '}<Bell className="inline h-3 w-3" /> Alert when stopped on a row, or create a rule on the Alerts tab.
-        </p>
         <div className="overflow-hidden">
           <Table>
             <THead className="bg-surface2/40">
               <Tr>
-                <Th className="pl-4">Service</Th>
-                <Th>State</Th>
-                <Th>Start mode</Th>
+                <Th className={cn('pl-4', sortableTh)} onClick={() => toggleSort('name')}>
+                  Service{sortIndicator(sortBy === 'name', sortDir)}
+                </Th>
+                <Th className={sortableTh} onClick={() => toggleSort('state')}>
+                  State{sortIndicator(sortBy === 'state', sortDir)}
+                </Th>
+                <Th className={sortableTh} onClick={() => toggleSort('start_mode')}>
+                  Start mode{sortIndicator(sortBy === 'start_mode', sortDir)}
+                </Th>
                 <Th>Alert</Th>
                 <Th className="text-right">PID</Th>
                 <Th>Updated</Th>
-                <Th className="pr-4 text-right">Actions</Th>
+                <Th className="pr-4 text-right">
+                  {sortBy !== 'attention' && (
+                    <button
+                      type="button"
+                      className="text-[10px] font-medium normal-case tracking-normal text-primary hover:underline"
+                      onClick={() => { setSortBy('attention'); setSortDir('asc'); pager.reset() }}
+                    >
+                      Problems first
+                    </button>
+                  )}
+                </Th>
               </Tr>
             </THead>
             <TBody>
@@ -1779,15 +1986,21 @@ function ServicesTab({ serverId, serverName, items }: {
               )}
               {pager.pageRows.map((s, i) => {
                 const rule = ruleByService.get(s.service_name.toLowerCase())
+                const problem = attention(s) < 2
                 return (
-                  <Tr key={s.service_name} className={i % 2 === 0 ? 'bg-surface2/10' : undefined}>
+                  <Tr
+                    key={s.service_name}
+                    className={cn(
+                      problem ? 'bg-warning/[0.04]' : i % 2 === 0 ? 'bg-surface2/10' : undefined,
+                    )}
+                  >
                     <Td className="py-2 pl-4">
                       <div className="text-sm font-medium">{s.display_name || s.service_name}</div>
                       <div className="text-[11px] text-muted">{s.service_name}</div>
                     </Td>
-                    <Td>{stateBadge(s.state)}</Td>
-                    <Td className="text-xs">{s.start_mode || '—'}</Td>
-                    <Td>{alertBadge(s.service_name, s.state)}</Td>
+                    <Td>{stateBadge(s)}</Td>
+                    <Td className="text-xs">{titleCase(s.start_mode)}</Td>
+                    <Td>{alertBadge(s)}</Td>
                     <Td className="text-right text-xs tabular-nums text-muted">{s.pid || '—'}</Td>
                     <Td className="text-xs text-muted">{relativeTime(s.updated_at)}</Td>
                     <Td className="pr-4 text-right">
@@ -1795,7 +2008,9 @@ function ServicesTab({ serverId, serverName, items }: {
                         rule.server_id ? (
                           <Button
                             size="sm"
-                            variant="outline"
+                            variant="ghost"
+                            className="text-muted hover:text-danger"
+                            title="Remove the alert rule for this service"
                             onClick={() => delRule.mutate(rule.id)}
                           >
                             Remove alert
@@ -1804,8 +2019,14 @@ function ServicesTab({ serverId, serverName, items }: {
                           <span className="text-[11px] text-muted">Global rule</span>
                         )
                       ) : (
-                        <Button size="sm" variant="outline" onClick={() => openAlertDialog(s.service_name)}>
-                          <Bell className="h-3 w-3" /> Alert when stopped
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-muted hover:text-primary"
+                          title="Create an alert rule that fires when this service is stopped"
+                          onClick={() => openAlertDialog(s.service_name)}
+                        >
+                          <Bell className="h-3 w-3" /> Alert
                         </Button>
                       )}
                     </Td>
@@ -1891,8 +2112,8 @@ function StorageTab({ server, items }: { server: ServerItem; items: ServerFilesy
                     <Td className="text-xs">{disk.media_type || '—'}</Td>
                     <Td className="text-right text-xs tabular-nums">{disk.size_bytes ? formatBytes(disk.size_bytes) : '—'}</Td>
                     <Td className="pr-4">
-                      <Badge variant={disk.status.toLowerCase() === 'ok' ? 'success' : 'outline'}>
-                        {disk.status || 'Unknown'}
+                      <Badge variant={(disk.status || '').toLowerCase() === 'ok' ? 'success' : 'outline'}>
+                        {disk.status ? disk.status.charAt(0).toUpperCase() + disk.status.slice(1) : 'Unknown'}
                       </Badge>
                     </Td>
                   </Tr>
@@ -2024,6 +2245,26 @@ function formatLinkSpeed(mbps: number | null): string {
   return `${mbps} Mbps`
 }
 
+/** IPv4 first — it is what an operator looks up — then link-local and global
+ *  IPv6, one per line, so a NIC with three addresses no longer truncates to
+ *  its longest IPv6 one. */
+function InterfaceAddresses({ addresses }: { addresses: string[] }) {
+  if (!addresses.length) return <span className="text-muted">—</span>
+  const v4 = addresses.filter((a) => !a.includes(':'))
+  const v6 = addresses.filter((a) => a.includes(':')).sort((a, b) => Number(a.startsWith('fe80')) - Number(b.startsWith('fe80')))
+  const ordered = [...v4, ...v6]
+  const shown = ordered.slice(0, 3)
+  const extra = ordered.length - shown.length
+  return (
+    <div className="flex flex-col gap-0.5" title={ordered.join('\n')}>
+      {shown.map((a) => (
+        <span key={a} className={cn('truncate', a.includes(':') ? 'text-muted' : 'text-text')}>{a}</span>
+      ))}
+      {extra > 0 && <span className="text-[10px] text-muted">+{extra} more</span>}
+    </div>
+  )
+}
+
 function NetworkTab({ server }: { server: ServerItem }) {
   const [showPseudo, setShowPseudo] = useState(false)
   const { data, isLoading, isError, error, refetch } = useQuery<{ items: ServerNetworkInterface[] }>({
@@ -2042,15 +2283,6 @@ function NetworkTab({ server }: { server: ServerItem }) {
 
   return (
     <div className="space-y-4">
-    <NetworkCapturePanel
-      serverId={server.id}
-      serverName={server.display_name}
-      interfaces={items}
-      agentStatus={server.agent_status}
-      agentVersion={server.agent_version}
-      platform={server.os_type}
-      agentCapabilities={server.agent_capabilities ?? []}
-    />
     <TablePanel
       icon={<NetworkIcon className="h-3.5 w-3.5" />}
       title="Network interfaces"
@@ -2108,10 +2340,8 @@ function NetworkTab({ server }: { server: ServerItem }) {
               <Tr key={nic.if_name} className={i % 2 === 0 ? 'bg-surface2/10' : undefined}>
                 <Td className="py-2 pl-4 text-sm font-medium">{nic.if_name}</Td>
                 <Td>{nic.is_up ? <Badge variant="success">Up</Badge> : <Badge variant="danger">Down</Badge>}</Td>
-                <Td className="max-w-[260px] font-mono text-xs">
-                  <div className="truncate" title={(nic.ip_addresses || []).join(', ')}>
-                    {(nic.ip_addresses || []).join(', ') || '—'}
-                  </div>
+                <Td className="max-w-[300px] font-mono text-xs">
+                  <InterfaceAddresses addresses={nic.ip_addresses || []} />
                 </Td>
                 <Td className="font-mono text-xs text-muted">{nic.mac_address || '—'}</Td>
                 {hasSpeed && (
@@ -2128,6 +2358,15 @@ function NetworkTab({ server }: { server: ServerItem }) {
         </Table>
       </div>
     </TablePanel>
+    <NetworkCapturePanel
+      serverId={server.id}
+      serverName={server.display_name}
+      interfaces={items}
+      agentStatus={server.agent_status}
+      agentVersion={server.agent_version}
+      platform={server.os_type}
+      agentCapabilities={server.agent_capabilities ?? []}
+    />
     </div>
   )
 }
@@ -2230,7 +2469,7 @@ function SoftwareTab({ serverId, serverName }: { serverId: string; serverName: s
                 />
               </TableStateRow>
             ) : pager.pageRows.map((s, i) => (
-              <Tr key={s.package_name} className={i % 2 === 0 ? 'bg-surface2/10' : undefined}>
+              <Tr key={`${s.package_name}::${s.version || ''}`} className={i % 2 === 0 ? 'bg-surface2/10' : undefined}>
                 <Td className="py-2 pl-4 text-sm font-medium">{s.package_name}</Td>
                 <Td className="text-xs tabular-nums">{s.version || '—'}</Td>
                 <Td className="text-xs text-muted">{s.vendor || '—'}</Td>
@@ -2334,11 +2573,7 @@ function ComplianceTab({ serverId }: { serverId: string }) {
                   {r.found_package ? <>{r.found_package} <span className="tabular-nums text-muted">{r.found_version}</span></> : '—'}
                 </Td>
                 <Td className="text-xs text-muted">{r.expected}</Td>
-                <Td>
-                  <Badge variant={r.severity === 'critical' ? 'danger' : r.severity === 'warning' ? 'warning' : 'info'}>
-                    {r.severity}
-                  </Badge>
-                </Td>
+                <Td>{sevBadge(r.severity)}</Td>
                 <Td className="pr-4 text-xs text-muted">{r.first_failed_at ? relativeTime(r.first_failed_at) : '—'}</Td>
               </Tr>
             ))}
@@ -2390,7 +2625,7 @@ function ruleCondition(r: HostRule): string {
 function sevBadge(sev: string) {
   if (sev === 'critical') return <Badge variant="danger">Critical</Badge>
   if (sev === 'warning') return <Badge variant="warning">Warning</Badge>
-  return <Badge variant="info">{sev}</Badge>
+  return <Badge variant="info">{sev ? sev.charAt(0).toUpperCase() + sev.slice(1) : 'Info'}</Badge>
 }
 
 function statusBadge(st: string) {
@@ -2540,146 +2775,150 @@ function ServerAlertsTab({
       )}
 
       {/* Active alerts */}
-      <Card>
-        <CardContent className="pt-4">
-          <div className="mb-3 flex flex-wrap items-center gap-2">
-            <span className="text-sm font-medium">Alerts</span>
-            <span className="text-xs text-muted">
-              {counts.active} active · {counts.acknowledged} acknowledged · {counts.critical} critical · {counts.warning} warning
-            </span>
-            <div className="ml-auto flex items-center gap-2">
-              <Select value={status} onValueChange={setStatus}>
-                <SelectTrigger className="h-8 w-[150px]"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="active">Active</SelectItem>
-                  <SelectItem value="acknowledged">Acknowledged</SelectItem>
-                  <SelectItem value="resolved">Resolved</SelectItem>
-                  <SelectItem value="all">All</SelectItem>
-                </SelectContent>
-              </Select>
-              <Button size="sm" onClick={() => setCreateOpen(true)}>New alert rule</Button>
-            </div>
+      <TablePanel
+        icon={<Bell className="h-3.5 w-3.5" />}
+        title="Alerts"
+        hint={`${counts.active} active · ${counts.acknowledged} acknowledged · ${counts.critical} critical · ${counts.warning} warning`}
+        right={(
+          <div className="flex items-center gap-2">
+            <Select value={status} onValueChange={setStatus}>
+              <SelectTrigger className="h-8 w-[150px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="active">Active</SelectItem>
+                <SelectItem value="acknowledged">Acknowledged</SelectItem>
+                <SelectItem value="resolved">Resolved</SelectItem>
+                <SelectItem value="all">All</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button size="sm" onClick={() => setCreateOpen(true)}>New alert rule</Button>
           </div>
-          <div className="overflow-hidden rounded-md border border-border">
-            <Table>
-              <THead className="bg-surface2/50">
-                <Tr><Th>Severity</Th><Th>Alert</Th><Th>Status</Th><Th>Triggered</Th><Th className="text-right">Actions</Th></Tr>
-              </THead>
-              <TBody>
-                {alerts.length === 0 && (
-                  <Tr><Td colSpan={5}><div className="py-8 text-center text-xs text-muted">
-                    No {status === 'all' ? '' : status} alerts
-                    {status === 'active' && acknowledgedCount > 0 && (
-                      <> — {acknowledgedCount} acknowledged alert{acknowledgedCount === 1 ? '' : 's'} still open (switch to “Acknowledged”)</>
-                    )}
-                    {status === 'active' && acknowledgedCount === 0 && ' — switch to “All” to see resolved history'}
-                  </div></Td></Tr>
-                )}
-                {alerts.map((a) => (
-                  <Tr key={a.id}>
-                    <Td>{sevBadge(a.severity)}</Td>
-                    <Td className="text-sm">{a.message}</Td>
-                    <Td>{statusBadge(a.status)}</Td>
-                    <Td className="text-xs text-muted">{relativeTime(a.triggered_at)}</Td>
-                    <Td className="text-right">
-                      <div className="flex justify-end gap-1">
-                        {a.status === 'active' && (
-                          <Button size="sm" variant="outline" onClick={() => ack.mutate(a.id)}>Ack</Button>
-                        )}
-                        {a.status !== 'resolved' && a.server_id && (
-                          <Select value="" onValueChange={(v) => snooze.mutate({ id: a.id, minutes: v === 'forever' ? null : Number(v) })}>
-                            <SelectTrigger className="h-8 w-[100px]"><SelectValue placeholder="Snooze" /></SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="60">1 hour</SelectItem>
-                              <SelectItem value="240">4 hours</SelectItem>
-                              <SelectItem value="1440">24 hours</SelectItem>
-                              <SelectItem value="forever">Mute forever</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        )}
-                        {a.status !== 'resolved' && (
-                          <Button size="sm" variant="outline" onClick={() => resolve.mutate(a.id)}>Resolve</Button>
-                        )}
-                      </div>
-                    </Td>
-                  </Tr>
-                ))}
-              </TBody>
-            </Table>
-          </div>
-        </CardContent>
-      </Card>
+        )}
+      >
+        <div className="overflow-hidden">
+          <Table>
+            <THead className="bg-surface2/40">
+              <Tr>
+                <Th className="pl-4">Severity</Th><Th>Alert</Th><Th>Status</Th><Th>Triggered</Th>
+                <Th className="pr-4 text-right">Actions</Th>
+              </Tr>
+            </THead>
+            <TBody>
+              {alerts.length === 0 && (
+                <Tr><Td colSpan={5}><div className="py-8 text-center text-xs text-muted">
+                  No {status === 'all' ? '' : status} alerts
+                  {status === 'active' && acknowledgedCount > 0 && (
+                    <> — {acknowledgedCount} acknowledged alert{acknowledgedCount === 1 ? '' : 's'} still open (switch to “Acknowledged”)</>
+                  )}
+                  {status === 'active' && acknowledgedCount === 0 && ' — switch to “All” to see resolved history'}
+                </div></Td></Tr>
+              )}
+              {alerts.map((a, i) => (
+                <Tr key={a.id} className={i % 2 === 0 ? 'bg-surface2/10' : undefined}>
+                  <Td className="pl-4">{sevBadge(a.severity)}</Td>
+                  <Td className="text-sm">{a.message}</Td>
+                  <Td>{statusBadge(a.status)}</Td>
+                  <Td className="whitespace-nowrap text-xs text-muted" title={new Date(a.triggered_at).toLocaleString()}>{relativeTime(a.triggered_at)}</Td>
+                  <Td className="pr-4 text-right">
+                    <div className="flex justify-end gap-1">
+                      {a.status === 'active' && (
+                        <Button size="sm" variant="outline" onClick={() => ack.mutate(a.id)}>Ack</Button>
+                      )}
+                      {a.status !== 'resolved' && a.server_id && (
+                        <Select value="" onValueChange={(v) => snooze.mutate({ id: a.id, minutes: v === 'forever' ? null : Number(v) })}>
+                          <SelectTrigger className="h-8 w-[100px]"><SelectValue placeholder="Snooze" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="60">1 hour</SelectItem>
+                            <SelectItem value="240">4 hours</SelectItem>
+                            <SelectItem value="1440">24 hours</SelectItem>
+                            <SelectItem value="forever">Mute forever</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      )}
+                      {a.status !== 'resolved' && (
+                        <Button size="sm" variant="outline" onClick={() => resolve.mutate(a.id)}>Resolve</Button>
+                      )}
+                    </div>
+                  </Td>
+                </Tr>
+              ))}
+            </TBody>
+          </Table>
+        </div>
+      </TablePanel>
 
       {/* Snoozed / muted conditions */}
       {silences.length > 0 && (
-        <Card>
-          <CardContent className="pt-4">
-            <div className="mb-3 text-sm font-medium">Snoozed &amp; muted</div>
-            <div className="flex flex-col gap-1.5">
-              {silences.map((s) => {
-                const rid = s.dedupe.startsWith('rule:') ? s.dedupe.slice(5) : null
-                const label = rid
-                  ? (rules.find((r) => r.id === rid)?.name || 'Alert rule')
-                  : s.dedupe === 'agent_offline'
-                    ? 'Agent offline'
-                    : s.dedupe.startsWith('health:')
-                      ? 'Health threshold'
-                      : s.dedupe
-                return (
-                  <div key={s.id} className="flex items-center gap-2 text-xs">
-                    <Badge variant="info">{s.forever ? 'Muted' : 'Snoozed'}</Badge>
-                    <span className="font-medium">{label}</span>
-                    <span className="text-muted">
-                      {s.forever ? 'until removed' : `until ${s.until ? new Date(s.until).toLocaleString() : ''}`}
-                    </span>
-                    <Button size="sm" variant="outline" className="ml-auto" onClick={() => removeSilence.mutate(s.id)}>
-                      Remove
-                    </Button>
-                  </div>
-                )
-              })}
-            </div>
+        <Card className="overflow-hidden">
+          <PanelHeader
+            icon={<CloudOff className="h-3.5 w-3.5" />}
+            title="Snoozed & muted"
+            hint={`${silences.length} condition${silences.length === 1 ? '' : 's'}`}
+          />
+          <CardContent className="divide-y divide-border/50 px-4 pb-2 pt-1">
+            {silences.map((s) => {
+              const rid = s.dedupe.startsWith('rule:') ? s.dedupe.slice(5) : null
+              const label = rid
+                ? (rules.find((r) => r.id === rid)?.name || 'Alert rule')
+                : s.dedupe === 'agent_offline'
+                  ? 'Agent offline'
+                  : s.dedupe.startsWith('health:')
+                    ? 'Health threshold'
+                    : s.dedupe
+              return (
+                <div key={s.id} className="flex items-center gap-2 py-2 text-xs">
+                  <Badge variant="info">{s.forever ? 'Muted' : 'Snoozed'}</Badge>
+                  <span className="font-medium">{label}</span>
+                  <span className="text-muted">
+                    {s.forever ? 'until removed' : `until ${s.until ? new Date(s.until).toLocaleString() : ''}`}
+                  </span>
+                  <Button size="sm" variant="outline" className="ml-auto" onClick={() => removeSilence.mutate(s.id)}>
+                    Remove
+                  </Button>
+                </div>
+              )
+            })}
           </CardContent>
         </Card>
       )}
 
       {/* Alert rules */}
-      <Card>
-        <CardContent className="pt-4">
-          <div className="mb-3 flex items-center gap-2">
-            <span className="text-sm font-medium">Alert rules</span>
-            <span className="text-xs text-muted">applying to this server (global + server-specific)</span>
-          </div>
-          <div className="overflow-hidden rounded-md border border-border">
-            <Table>
-              <THead className="bg-surface2/50">
-                <Tr><Th>On</Th><Th>Name</Th><Th>Condition</Th><Th>Severity</Th><Th>Scope</Th><Th className="text-right">Actions</Th></Tr>
-              </THead>
-              <TBody>
-                {rules.length === 0 && (
-                  <Tr><Td colSpan={6}><div className="py-8 text-center text-xs text-muted">No host alert rules</div></Td></Tr>
-                )}
-                {rules.map((r) => (
-                  <Tr key={r.id}>
-                    <Td><Switch checked={r.enabled} onCheckedChange={() => toggleRule.mutate(r.id)} /></Td>
-                    <Td className="text-sm font-medium">{r.name}</Td>
-                    <Td className="text-xs text-muted">{ruleCondition(r)}</Td>
-                    <Td>{sevBadge(r.severity)}</Td>
-                    <Td className="text-xs text-muted">{r.server_id ? 'This server' : 'All servers'}</Td>
-                    <Td className="text-right">
-                      {r.server_id ? (
-                        <Button size="sm" variant="outline" onClick={() => delRule.mutate(r.id)}>Delete</Button>
-                      ) : (
-                        <span className="text-xs text-muted">global</span>
-                      )}
-                    </Td>
-                  </Tr>
-                ))}
-              </TBody>
-            </Table>
-          </div>
-        </CardContent>
-      </Card>
+      <TablePanel
+        icon={<Settings2 className="h-3.5 w-3.5" />}
+        title="Alert rules"
+        hint="global + server-specific"
+      >
+        <div className="overflow-hidden">
+          <Table>
+            <THead className="bg-surface2/40">
+              <Tr>
+                <Th className="w-16 pl-4">On</Th><Th>Name</Th><Th>Condition</Th><Th>Severity</Th><Th>Scope</Th>
+                <Th className="pr-4 text-right">Actions</Th>
+              </Tr>
+            </THead>
+            <TBody>
+              {rules.length === 0 && (
+                <Tr><Td colSpan={6}><div className="py-8 text-center text-xs text-muted">No host alert rules</div></Td></Tr>
+              )}
+              {rules.map((r, i) => (
+                <Tr key={r.id} className={i % 2 === 0 ? 'bg-surface2/10' : undefined}>
+                  <Td className="pl-4"><Switch checked={r.enabled} onCheckedChange={() => toggleRule.mutate(r.id)} /></Td>
+                  <Td className="text-sm font-medium">{r.name}</Td>
+                  <Td className="text-xs text-muted">{ruleCondition(r)}</Td>
+                  <Td>{sevBadge(r.severity)}</Td>
+                  <Td className="text-xs text-muted">{r.server_id ? 'This server' : 'All servers'}</Td>
+                  <Td className="pr-4 text-right">
+                    {r.server_id ? (
+                      <Button size="sm" variant="outline" onClick={() => delRule.mutate(r.id)}>Delete</Button>
+                    ) : (
+                      <span className="text-xs text-muted">global</span>
+                    )}
+                  </Td>
+                </Tr>
+              ))}
+            </TBody>
+          </Table>
+        </div>
+      </TablePanel>
 
       <CreateHostRuleDialog
         serverId={serverId}
@@ -2966,7 +3205,13 @@ function EventsTab({ serverId, serverName }: { serverId: string; serverName: str
                     : 'No event log data collected'}
                   hint={channels.length
                     ? `The agent checked ${channels.join(', ')} and found nothing matching.`
-                    : 'Enable the event log collector in this server’s agent policy to collect Windows Event Log summaries.'}
+                    : (
+                      <>
+                        Enable the event log collector in this server’s{' '}
+                        <Link to="/agent-policies" className="font-medium text-primary hover:underline">agent policy</Link>
+                        {' '}to collect Windows Event Log summaries.
+                      </>
+                    )}
                 />
               </TableStateRow>
             ) : items.map((e, i) => (
@@ -3208,7 +3453,7 @@ function SettingsTab({ server, onEdit, onDecommission, onDelete }: {
     ['OS', `${server.os_name || server.os_type} ${server.os_version || ''}`],
     ['Build', server.kernel_or_build || '—'],
     ['Architecture', server.architecture || '—'],
-    ['Collection mode', server.collection_mode],
+    ['Collection mode', server.collection_mode.charAt(0).toUpperCase() + server.collection_mode.slice(1)],
     ['Uptime', server.boot_time
       ? <span key="up">{formatUptime(server.boot_time)} <span className="text-muted">· booted {new Date(server.boot_time).toLocaleString()}</span></span>
       : '—'],
@@ -3226,7 +3471,7 @@ function SettingsTab({ server, onEdit, onDecommission, onDelete }: {
         <PanelHeader
           icon={<Settings2 className="h-3.5 w-3.5" />}
           title="Server record"
-          hint={server.collection_mode}
+          hint={`${server.collection_mode} collection`}
           right={(
             <Button variant="outline" size="sm" onClick={onEdit}>
               <Pencil className="h-3.5 w-3.5" /> Edit
