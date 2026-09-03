@@ -935,7 +935,8 @@ class RumWindow:
 
     @property
     def rollup(self) -> bool:
-        return self.range in {"30d", "90d"} or (self.range == "custom" and self.seconds > RAW_RETENTION_SECONDS)
+        raw_seconds = int(_RETENTION_CACHE.get("raw", 14)) * 86_400
+        return self.range in {"30d", "90d"} or (self.range == "custom" and self.seconds > raw_seconds)
 
     @property
     def bucket_seconds(self) -> int:
@@ -1078,15 +1079,21 @@ def _filters_payload(**values) -> dict[str, str]:
 
 def _raw_coverage(window: RumWindow | str) -> dict[str, object]:
     partial = window.rollup if isinstance(window, RumWindow) else window in {"30d", "90d"}
+    days = _retention_days_cached()
     return {
-        "raw_retention_days": 14,
-        "rollup_retention_days": 90,
+        "raw_retention_days": days["raw"],
+        "rollup_retention_days": days["rollup"],
         "partial": partial,
         "message": (
-            "Event-level drill-down is limited to the most recent 14 days."
+            f"Event-level drill-down is limited to the most recent {days['raw']} days."
             if partial else None
         ),
     }
+
+
+def _retention_days_cached() -> dict[str, int]:
+    """Retention as last read from ClickHouse (see _retention_days); never blocks a read path."""
+    return {"raw": int(_RETENTION_CACHE["raw"]), "rollup": int(_RETENTION_CACHE["rollup"])}
 
 
 def _nullable(value: object, samples: object) -> float | None:
@@ -2919,6 +2926,421 @@ async def rum_delete_source_map(
         raise HTTPException(404, "Source map not found")
     rum_symbolicate._decoded.cache_clear()
     return Response(status_code=204)
+
+
+# ── Journeys, geography, funnels, retention (phase 4) ────────────────────────
+
+# One ordered list of distinct consecutive routes per session, built from the
+# view_start records (legacy SDKs: every view record, collapsed when equal).
+def _session_paths_sql(scope_sql: str) -> str:
+    return f"""
+        SELECT session_id,
+               arrayMap(x -> x.2, arraySort(x -> x.1, groupArrayIf(
+                   (timestamp, view_name),
+                   event_type = 'view' AND (end_reason = 'view_start' OR sdk_version = '')
+               ))) AS v0,
+               arrayFilter((x, i) -> i = 1 OR x != v0[i - 1], v0, arrayEnumerate(v0)) AS path
+        FROM zenplus.apm_rum_events
+        WHERE {scope_sql} AND sampled = 1
+        GROUP BY session_id
+        HAVING length(path) > 0
+    """
+
+
+@router.get("/api/v1/apm/rum/journeys")
+async def rum_journeys(
+    range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    client_ip: str | None = None,
+    start: str | None = Query(default=None, max_length=512),
+    depth: int = Query(default=4, ge=2, le=8),
+    _user=Depends(get_current_user),
+):
+    """Where users go: entry and exit routes, route-to-route transitions and a
+    step-by-step journey map from a chosen start route (raw events only)."""
+    window = _resolve_window(range_, frm, to)
+    params, scope_sql = _scope(
+        window, application_id, env, None, browser, device_type, country,
+        service_version, browser_version, os, client_ip, q=q, user_id=user_id,
+    )
+    paths_sql = _session_paths_sql(scope_sql)
+
+    def query():
+        ch = _ch()
+        totals = ch.query(f"""
+            SELECT count(), avg(length(path)), countIf(length(path) = 1)
+            FROM ({paths_sql})
+        """, parameters=params).result_rows[0]
+        entries = ch.query(f"""
+            SELECT path[1] AS route, count() AS sessions, countIf(length(path) = 1) AS bounced
+            FROM ({paths_sql}) GROUP BY route ORDER BY sessions DESC LIMIT 12
+        """, parameters=params).result_rows
+        exits = ch.query(f"""
+            SELECT path[-1] AS route, count() AS sessions
+            FROM ({paths_sql}) GROUP BY route ORDER BY sessions DESC LIMIT 12
+        """, parameters=params).result_rows
+        transitions = ch.query(f"""
+            SELECT pair.1 AS src, pair.2 AS dst, count() AS sessions
+            FROM ({paths_sql}) ARRAY JOIN arrayZip(arrayPopBack(path), arrayPopFront(path)) AS pair
+            GROUP BY src, dst ORDER BY sessions DESC LIMIT 40
+        """, parameters=params).result_rows
+        start_route = _str_param(start) or (entries[0][0] if entries else None)
+        steps = []
+        if start_route:
+            steps = ch.query(f"""
+                SELECT k, sub[k] AS src, if(k < length(sub), sub[k + 1], '') AS dst, count() AS sessions
+                FROM (
+                    SELECT arraySlice(path, indexOf(path, {{start:String}}), {{depth:UInt8}} + 1) AS sub
+                    FROM ({paths_sql}) WHERE has(path, {{start:String}})
+                )
+                ARRAY JOIN range(1, least(length(sub), {{depth:UInt8}}) + 1) AS k
+                GROUP BY k, src, dst ORDER BY k, sessions DESC
+            """, parameters={**params, "start": start_route, "depth": depth}).result_rows
+        return totals, entries, exits, transitions, start_route, steps
+
+    totals, entries, exits, transitions, start_route, steps = await asyncio.to_thread(query)
+    # Keep the journey readable: at most 6 destinations per step, the rest folded into "other".
+    per_step: dict[int, list] = {}
+    for k, src, dst, count in steps:
+        per_step.setdefault(int(k), []).append((src, dst, int(count)))
+    journey = []
+    for k in sorted(per_step):
+        rows = per_step[k]
+        by_dst: dict[tuple, int] = {}
+        for src, dst, count in rows:
+            by_dst[(src, dst)] = by_dst.get((src, dst), 0) + count
+        ordered = sorted(by_dst.items(), key=lambda item: -item[1])
+        kept, other = ordered[:6], ordered[6:]
+        for (src, dst), count in kept:
+            journey.append({"step": k, "from": src, "to": dst or None, "sessions": count})
+        if other:
+            journey.append({"step": k, "from": ordered[0][0][0], "to": "…", "sessions": sum(c for _, c in other)})
+    return {
+        "range": window.range,
+        "window": window.payload(),
+        "coverage": _raw_coverage(window),
+        "sessions": int(totals[0] or 0),
+        "avg_path_length": float(totals[1] or 0),
+        "bounced_sessions": int(totals[2] or 0),
+        "entries": [{"route": r[0], "sessions": int(r[1]), "bounced": int(r[2])} for r in entries],
+        "exits": [{"route": r[0], "sessions": int(r[1])} for r in exits],
+        "transitions": [{"from": r[0], "to": r[1], "sessions": int(r[2])} for r in transitions],
+        "journey": {"start": start_route, "depth": depth, "steps": journey},
+    }
+
+
+@router.get("/api/v1/apm/rum/geo")
+async def rum_geo(
+    range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    q: str | None = Query(default=None, max_length=200),
+    user_id: str | None = Query(default=None, max_length=255),
+    application_id: str | None = None,
+    env: str | None = None,
+    view_name: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    browser_version: str | None = None,
+    os: str | None = None,
+    client_ip: str | None = None,
+    _user=Depends(get_current_user),
+):
+    """Sessions, errors and Core Web Vitals per visitor country."""
+    window = _resolve_window(range_, frm, to)
+    params, scope_sql = _scope(
+        window, application_id, env, view_name, browser, device_type, country,
+        service_version, browser_version, os, client_ip, q=q, user_id=user_id,
+    )
+
+    def query():
+        ch = _ch()
+        if window.rollup:
+            return ch.query(f"""
+                SELECT country, uniqCombined64Merge(sessions), uniqCombined64Merge(views),
+                       sum(sampled_errors), uniqCombined64Merge(error_sessions),
+                       quantileTDigestMerge(0.75)(lcp), sum(lcp_samples),
+                       quantileTDigestMerge(0.75)(inp), sum(inp_samples),
+                       quantileTDigestMerge(0.75)(cls), sum(cls_samples),
+                       sum(lcp_poor), sum(lcp_rated)
+                FROM zenplus.apm_rum_metrics_5m WHERE {scope_sql}
+                GROUP BY country ORDER BY uniqCombined64Merge(sessions) DESC LIMIT 250
+            """, parameters=params).result_rows
+        traffic = {r[0]: r for r in ch.query(f"""
+            SELECT country, uniqExactIf((application_id, env, session_id), sampled = 1),
+                   uniqExactIf((application_id, env, view_id), event_type = 'view' AND sampled = 1),
+                   countIf(event_type = 'error' AND sampled = 1),
+                   uniqExactIf((application_id, env, session_id), event_type = 'error' AND sampled = 1)
+            FROM zenplus.apm_rum_events WHERE {scope_sql}
+            GROUP BY country ORDER BY 2 DESC LIMIT 250
+        """, parameters=params).result_rows}
+        vitals = {r[0]: r for r in ch.query(f"""
+            SELECT dim_value,
+                   quantileTDigestIf(0.75)(lcp_value, lcp_present = 1), countIf(lcp_present = 1),
+                   quantileTDigestIf(0.75)(inp_value, inp_present = 1), countIf(inp_present = 1),
+                   quantileTDigestIf(0.75)(cls_value, cls_present = 1), countIf(cls_present = 1),
+                   countIf(lcp_present = 1 AND lcp_value > 4000), countIf(lcp_present = 1)
+            FROM ({_per_view_vitals_sql(scope_sql, extra_select="anyIf(raw.country, raw.country != '') AS dim_value")})
+            GROUP BY dim_value
+        """, parameters=params).result_rows}
+        rows = []
+        for code, t in traffic.items():
+            v = vitals.get(code, (code, None, 0, None, 0, None, 0, 0, 0))
+            rows.append((code, t[1], t[2], t[3], t[4], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8]))
+        return rows
+
+    rows = await asyncio.to_thread(query)
+    countries = []
+    for r in rows:
+        sessions = int(r[1] or 0)
+        countries.append({
+            "country": r[0] or "", "sessions": sessions, "views": int(r[2] or 0),
+            "errors": int(r[3] or 0),
+            "error_session_rate": (int(r[4] or 0) / sessions) if sessions else None,
+            "lcp_p75": _nullable(r[5], r[6]), "lcp_samples": int(r[6] or 0),
+            "inp_p75": _nullable(r[7], r[8]), "inp_samples": int(r[8] or 0),
+            "cls_p75": _nullable(r[9], r[10]), "cls_samples": int(r[10] or 0),
+            "lcp_poor_pct": (int(r[11] or 0) / int(r[12]) * 100) if int(r[12] or 0) else None,
+        })
+    known = [c for c in countries if c["country"]]
+    unknown = next((c for c in countries if not c["country"]), None)
+    return {
+        "range": window.range,
+        "window": window.payload(),
+        "countries": known,
+        "unresolved": unknown,
+        "geoip_available": geoip.available(),
+    }
+
+
+class FunnelStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["view", "action"] = "view"
+    match: str = Field(..., min_length=1, max_length=512)
+    label: str = Field(default="", max_length=120)
+
+
+class FunnelBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    application_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+    name: str = Field(..., min_length=1, max_length=255)
+    description: str = Field(default="", max_length=2000)
+    steps: list[FunnelStep] = Field(..., min_length=2, max_length=10)
+    window_seconds: int = Field(default=3600, ge=60, le=604800)
+
+
+def _funnel_row(r) -> dict:
+    return {
+        "id": str(r["id"]), "application_id": r["application_id"], "name": r["name"],
+        "description": r["description"], "steps": r["steps"] if isinstance(r["steps"], list) else json.loads(r["steps"]),
+        "window_seconds": int(r["window_seconds"]), "created_by": r["created_by"],
+        "created_at": r["created_at"], "updated_at": r["updated_at"],
+    }
+
+
+@router.get("/api/v1/apm/rum/funnels")
+async def rum_funnels(application_id: str | None = None, db: AsyncSession = Depends(get_db), _user=Depends(get_current_user)):
+    clause = "WHERE application_id = :app" if _str_param(application_id) else ""
+    rows = (await db.execute(text(f"SELECT * FROM rum_funnels {clause} ORDER BY name"), {"app": application_id} if clause else {})).mappings().all()
+    return {"items": [_funnel_row(r) for r in rows]}
+
+
+@router.post("/api/v1/apm/rum/funnels", status_code=201)
+async def rum_create_funnel(body: FunnelBody, db: AsyncSession = Depends(get_db), user=Depends(require_operator_user)):
+    actor = str(getattr(user, "username", "") or "")
+    try:
+        row = (await db.execute(text("""
+            INSERT INTO rum_funnels (application_id, name, description, steps, window_seconds, created_by)
+            VALUES (:app, :name, :description, CAST(:steps AS jsonb), :window, :actor) RETURNING *
+        """), {"app": body.application_id, "name": body.name.strip(), "description": body.description.strip(),
+               "steps": json.dumps([s.model_dump() for s in body.steps]), "window": body.window_seconds, "actor": actor})).mappings().first()
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        if "rum_funnels_application_id_name_key" in str(exc):
+            raise HTTPException(409, "A funnel with this name already exists for the application") from exc
+        raise
+    return _funnel_row(row)
+
+
+@router.put("/api/v1/apm/rum/funnels/{funnel_id}")
+async def rum_update_funnel(funnel_id: uuid.UUID, body: FunnelBody, db: AsyncSession = Depends(get_db), _user=Depends(require_operator_user)):
+    row = (await db.execute(text("""
+        UPDATE rum_funnels SET application_id = :app, name = :name, description = :description,
+               steps = CAST(:steps AS jsonb), window_seconds = :window, updated_at = now()
+        WHERE id = :id RETURNING *
+    """), {"id": str(funnel_id), "app": body.application_id, "name": body.name.strip(), "description": body.description.strip(),
+           "steps": json.dumps([s.model_dump() for s in body.steps]), "window": body.window_seconds})).mappings().first()
+    await db.commit()
+    if not row:
+        raise HTTPException(404, "Funnel not found")
+    return _funnel_row(row)
+
+
+@router.delete("/api/v1/apm/rum/funnels/{funnel_id}", status_code=204)
+async def rum_delete_funnel(funnel_id: uuid.UUID, db: AsyncSession = Depends(get_db), _user=Depends(require_operator_user)):
+    result = await db.execute(text("DELETE FROM rum_funnels WHERE id = :id"), {"id": str(funnel_id)})
+    await db.commit()
+    if not result.rowcount:
+        raise HTTPException(404, "Funnel not found")
+    return Response(status_code=204)
+
+
+def _funnel_step_condition(step: dict, index: int, params: dict) -> str:
+    match = str(step.get("match") or "")
+    key = f"step{index}"
+    if step.get("type") == "action":
+        params[key] = match
+        return f"(event_type = 'action' AND action_name = {{{key}:String}})"
+    if "*" in match:
+        regex = "^" + re.escape(match).replace(r"\*\*", ".*").replace(r"\*", "[^/]+") + "/?$"
+        params[key] = regex
+        return f"(event_type = 'view' AND match(view_name, {{{key}:String}}))"
+    params[key] = match
+    return f"(event_type = 'view' AND view_name = {{{key}:String}})"
+
+
+@router.get("/api/v1/apm/rum/funnels/{funnel_id}/results")
+async def rum_funnel_results(
+    funnel_id: uuid.UUID,
+    range_: RangeName = Query(default="24h", alias="range"),
+    frm: str | None = Query(default=None, alias="from"),
+    to: str | None = Query(default=None),
+    env: str | None = None,
+    browser: str | None = None,
+    device_type: str | None = None,
+    country: str | None = None,
+    service_version: str | None = None,
+    os: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
+    """Sessions reaching each step in order within the funnel's window
+    (ClickHouse windowFunnel), plus conversion and drop-off per step."""
+    row = (await db.execute(text("SELECT * FROM rum_funnels WHERE id = :id"), {"id": str(funnel_id)})).mappings().first()
+    if not row:
+        raise HTTPException(404, "Funnel not found")
+    funnel = _funnel_row(row)
+    window = _resolve_window(range_, frm, to)
+    params, scope_sql = _scope(
+        window, funnel["application_id"], env, None, browser, device_type, country,
+        service_version, None, os, None,
+    )
+    conditions = [_funnel_step_condition(step, index, params) for index, step in enumerate(funnel["steps"])]
+    params["window_ms"] = int(funnel["window_seconds"]) * 1000
+    level_counts = ", ".join(f"countIf(level >= {index + 1})" for index in range(len(conditions)))
+
+    def query():
+        return _ch().query(f"""
+            SELECT {level_counts}, count()
+            FROM (
+                SELECT session_id,
+                       windowFunnel({{window_ms:UInt64}})(toUInt64(toUnixTimestamp64Milli(timestamp)), {', '.join(conditions)}) AS level
+                FROM zenplus.apm_rum_events
+                WHERE {scope_sql} AND sampled = 1 AND event_type IN ('view', 'action')
+                GROUP BY session_id
+            )
+        """, parameters=params).result_rows[0]
+
+    counts = await asyncio.to_thread(query)
+    reached = [int(c or 0) for c in counts[:-1]]
+    entered = reached[0] if reached else 0
+    steps = []
+    for index, step in enumerate(funnel["steps"]):
+        count = reached[index]
+        previous = reached[index - 1] if index else count
+        steps.append({
+            "index": index + 1,
+            "type": step.get("type", "view"), "match": step.get("match"), "label": step.get("label") or step.get("match"),
+            "sessions": count,
+            "conversion_pct": (count / entered * 100) if entered else None,
+            "step_conversion_pct": (count / previous * 100) if previous else None,
+            "drop_off": max(previous - count, 0) if index else 0,
+        })
+    return {
+        "funnel": funnel,
+        "range": window.range,
+        "window": window.payload(),
+        "coverage": _raw_coverage(window),
+        "sessions_considered": int(counts[-1] or 0),
+        "entered": entered,
+        "converted": reached[-1] if reached else 0,
+        "conversion_pct": (reached[-1] / entered * 100) if entered and reached else None,
+        "steps": steps,
+    }
+
+
+_TTL_RE = re.compile(r"toIntervalDay\((\d+)\)|INTERVAL (\d+) DAY")
+_RETENTION_CACHE: dict[str, object] = {"raw": 14, "rollup": 90, "loaded": 0.0}
+
+
+def _read_retention() -> dict[str, int]:
+    rows = _ch().query("""
+        SELECT name, engine_full FROM system.tables
+        WHERE database = 'zenplus' AND name IN ('apm_rum_events', 'apm_rum_metrics_5m')
+    """).result_rows
+    out = {}
+    for name, engine in rows:
+        found = _TTL_RE.search(engine or "")
+        if found:
+            out["raw" if name == "apm_rum_events" else "rollup"] = int(found.group(1) or found.group(2))
+    return out
+
+
+def _retention_days() -> dict[str, int]:
+    if time.monotonic() - float(_RETENTION_CACHE["loaded"]) > 600:
+        try:
+            _RETENTION_CACHE.update(_read_retention())
+        except Exception:
+            pass
+        _RETENTION_CACHE["loaded"] = time.monotonic()
+    return {"raw": int(_RETENTION_CACHE["raw"]), "rollup": int(_RETENTION_CACHE["rollup"])}
+
+
+class RetentionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    raw_days: int = Field(..., ge=3, le=60)
+    rollup_days: int = Field(..., ge=30, le=730)
+
+
+@router.get("/api/v1/apm/rum/retention")
+async def rum_retention(_user=Depends(get_current_user)):
+    days = await asyncio.to_thread(_retention_days)
+    return {"raw_days": days["raw"], "rollup_days": days["rollup"], "raw_table": "zenplus.apm_rum_events", "rollup_table": "zenplus.apm_rum_metrics_5m"}
+
+
+@router.patch("/api/v1/apm/rum/retention")
+async def rum_set_retention(body: RetentionBody, _user=Depends(require_operator_user)):
+    """Change how long raw events and 5-minute rollups are kept (ClickHouse TTL).
+
+    Shortening a window drops the excess parts on the next merge; lengthening
+    only affects data written from now on (expired parts are gone).
+    """
+    if body.rollup_days < body.raw_days:
+        raise HTTPException(400, "Rollup retention must be at least as long as raw retention")
+
+    def apply():
+        ch = _ch()
+        ch.command(f"ALTER TABLE zenplus.apm_rum_events MODIFY TTL toDateTime(timestamp) + toIntervalDay({int(body.raw_days)})")
+        ch.command(f"ALTER TABLE zenplus.apm_rum_metrics_5m MODIFY TTL timestamp + toIntervalDay({int(body.rollup_days)})")
+        _RETENTION_CACHE.update({"raw": body.raw_days, "rollup": body.rollup_days, "loaded": time.monotonic()})
+
+    await asyncio.to_thread(apply)
+    return {"raw_days": body.raw_days, "rollup_days": body.rollup_days}
 
 
 @router.get("/api/v1/apm/rum/resources")

@@ -23,6 +23,7 @@ import {
   Network,
   RefreshCw,
   RotateCcw,
+  Route,
   Search,
   SlidersHorizontal,
   Users,
@@ -108,6 +109,8 @@ export const RUM_TABS: Array<{ value: RumTab; label: string; hint: string; icon:
   { value: 'errors', label: 'Errors', hint: 'JavaScript failures', icon: FileWarning },
   { value: 'resources', label: 'Resources', hint: 'Assets and XHR', icon: Network },
   { value: 'actions', label: 'Actions', hint: 'Clicks and frustration', icon: MousePointerClick },
+  { value: 'journeys', label: 'Journeys', hint: 'Paths and funnels', icon: Route },
+  { value: 'geo', label: 'Geography', hint: 'Experience by country', icon: Globe2 },
 ]
 
 const PRIMARY_FILTERS: Array<{ key: keyof RumFilters; placeholder: string }> = [

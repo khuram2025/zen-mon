@@ -55,7 +55,7 @@ interface OverviewProps {
   facets?: Partial<RumFacets>
   trendsLoading?: boolean
   trendsError?: unknown
-  exploreTo: Record<Extract<RumTab, 'web-vitals' | 'views' | 'sessions' | 'errors' | 'resources' | 'actions'>, string>
+  exploreTo: Record<Extract<RumTab, 'web-vitals' | 'views' | 'sessions' | 'errors' | 'resources' | 'actions' | 'journeys' | 'geo'>, string>
   onRetryTrends?: () => void
   onRetryViews?: () => void
   onRetryErrors?: () => void

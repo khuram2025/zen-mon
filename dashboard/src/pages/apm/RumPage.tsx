@@ -14,6 +14,10 @@ import type {
   RumError,
   RumErrorDetail,
   RumFacets,
+  RumFunnel,
+  RumFunnelResults,
+  RumGeo,
+  RumJourneys,
   RumIngestHealth,
   RumListResponse,
   RumOverview,
@@ -28,6 +32,8 @@ import type {
 import { RumDetailDialog } from './rum/RumDetailDialog'
 import { RumOverviewPanel } from './rum/RumOverview'
 import { RumWebVitalsPanel } from './rum/RumVitals'
+import { RumJourneysPanel } from './rum/RumJourneys'
+import { RumGeoPanel } from './rum/RumGeo'
 import {
   RumActionsTable,
   RumErrorsTable,
@@ -178,7 +184,44 @@ export function RumPage() {
     refetchInterval: REFRESH_MS,
   })
 
+  const [journeyStart, setJourneyStart] = useState('')
+  const journeysQ = useQuery<RumJourneys>({
+    queryKey: ['apm', 'rum', 'journeys', commonQuery, journeyStart],
+    queryFn: () => get(`/apm/rum/journeys?${commonQuery}${journeyStart ? `&start=${encodeURIComponent(journeyStart)}` : ''}&depth=4`),
+    enabled: state.tab === 'journeys',
+    refetchInterval: REFRESH_MS,
+  })
+  const geoQ = useQuery<RumGeo>({
+    queryKey: ['apm', 'rum', 'geo', commonQuery],
+    queryFn: () => get(`/apm/rum/geo?${commonQuery}`),
+    enabled: state.tab === 'geo',
+    refetchInterval: REFRESH_MS,
+  })
+  const funnelsQ = useQuery<{ items: RumFunnel[] }>({
+    queryKey: ['apm', 'rum', 'funnels', state.filters.application_id],
+    queryFn: () => get(`/apm/rum/funnels${state.filters.application_id ? `?application_id=${encodeURIComponent(state.filters.application_id)}` : ''}`),
+    enabled: state.tab === 'journeys',
+  })
+  const [selectedFunnel, setSelectedFunnel] = useState('')
+  const activeFunnel = selectedFunnel && funnelsQ.data?.items.some((funnel) => funnel.id === selectedFunnel) ? selectedFunnel : (funnelsQ.data?.items[0]?.id ?? '')
+  const funnelQuery = state.query()
+  const funnelResultsQ = useQuery<RumFunnelResults>({
+    queryKey: ['apm', 'rum', 'funnel-results', activeFunnel, funnelQuery],
+    queryFn: () => get(`/apm/rum/funnels/${activeFunnel}/results?${funnelQuery}`),
+    enabled: state.tab === 'journeys' && !!activeFunnel,
+    refetchInterval: REFRESH_MS,
+  })
   const queryClient = useQueryClient()
+  const createFunnel = useMutation({
+    mutationFn: async (body: { application_id: string; name: string; description: string; steps: RumFunnel['steps']; window_seconds: number }) => (await api.post<RumFunnel>('/apm/rum/funnels', body)).data,
+    onSuccess: (funnel) => { toast.success('Funnel created', funnel.name); setSelectedFunnel(funnel.id); queryClient.invalidateQueries({ queryKey: ['apm', 'rum', 'funnels'] }) },
+    onError: () => toast.error('Could not create the funnel'),
+  })
+  const deleteFunnel = useMutation({
+    mutationFn: async (id: string) => { await api.delete(`/apm/rum/funnels/${id}`) },
+    onSuccess: () => { toast.success('Funnel deleted'); queryClient.invalidateQueries({ queryKey: ['apm', 'rum', 'funnels'] }) },
+    onError: () => toast.error('Could not delete the funnel'),
+  })
   const errorDetailQ = useQuery<RumErrorDetail>({
     queryKey: ['apm', 'rum', 'error', state.detailId, commonQuery],
     queryFn: () => get(`/apm/rum/errors/${encodeURIComponent(state.detailId)}?${commonQuery}`),
@@ -204,6 +247,8 @@ export function RumPage() {
 
   const exploreTo = useMemo(() => ({
     'web-vitals': buildRumHref('web-vitals', state.range, state.filters, state.bounds),
+    journeys: buildRumHref('journeys', state.range, state.filters, state.bounds),
+    geo: buildRumHref('geo', state.range, state.filters, state.bounds),
     views: buildRumHref('views', state.range, state.filters, state.bounds),
     sessions: buildRumHref('sessions', state.range, state.filters, state.bounds),
     errors: buildRumHref('errors', state.range, state.filters, state.bounds),
@@ -366,6 +411,28 @@ export function RumPage() {
         <RumResourcesTable embedded {...sharedTableProps} data={resourcesQ.data} loading={resourcesQ.isLoading} error={resourcesQ.error} onRetry={() => resourcesQ.refetch()} onOpen={(row) => state.openDetail('resource', resourceRowKey(row))} />
       </RumExplorerShell>
     )
+    if (state.tab === 'journeys') return (
+      <RumJourneysPanel
+        data={journeysQ.data}
+        loading={journeysQ.isLoading}
+        error={journeysQ.error}
+        onRetry={() => journeysQ.refetch()}
+        start={journeyStart}
+        onStart={setJourneyStart}
+        onFilter={state.setFilter}
+        funnels={funnelsQ.data?.items}
+        funnelResults={funnelResultsQ.data}
+        selectedFunnel={activeFunnel}
+        onSelectFunnel={setSelectedFunnel}
+        onCreateFunnel={(body) => createFunnel.mutate(body)}
+        onDeleteFunnel={(id) => deleteFunnel.mutate(id)}
+        creatingFunnel={createFunnel.isPending}
+        applications={(facetsQ.data?.application_id ?? []).map((item) => item.value).filter(Boolean)}
+      />
+    )
+    if (state.tab === 'geo') return (
+      <RumGeoPanel data={geoQ.data} loading={geoQ.isLoading} error={geoQ.error} onRetry={() => geoQ.refetch()} onFilter={state.setFilter} />
+    )
     if (state.tab === 'actions') return (
       <RumExplorerShell noun="actions" onExport={() => exportCsv('actions')} exporting={exporting} total={actionsQ.data?.total} volume={volume(totals?.actions, 'interactions')} rangeLabel={rangeLabel} filters={state.filters} facets={facetsQ.data} onFilter={state.setFilter} buckets={volumeBuckets(timeseriesQ.data, state.range, { ok: 'actions', err: 'long_tasks' }, { ok: 'Interactions', err: 'Long tasks' }, state.bounds)} okLabel="Interactions" errLabel="Long tasks">
         <RumActionsTable embedded {...sharedTableProps} data={actionsQ.data} loading={actionsQ.isLoading} error={actionsQ.error} onRetry={() => actionsQ.refetch()} onOpen={(row) => state.openDetail('action', actionRowKey(row))} />
@@ -401,7 +468,7 @@ export function RumPage() {
         counts={explorerCounts}
       />
 
-      <RumFilterBar compact={state.tab !== 'overview' && state.tab !== 'web-vitals'} filters={state.filters} facets={facetsQ.data} loading={facetsQ.isLoading} error={facetsQ.isError} activeCount={state.activeFilterCount} onChange={state.setFilter} onClear={state.clearFilters} onRetry={() => facetsQ.refetch()} />
+      <RumFilterBar compact={!['overview', 'web-vitals', 'journeys', 'geo'].includes(state.tab)} filters={state.filters} facets={facetsQ.data} loading={facetsQ.isLoading} error={facetsQ.isError} activeCount={state.activeFilterCount} onChange={state.setFilter} onClear={state.clearFilters} onRetry={() => facetsQ.refetch()} />
 
       {content}
 

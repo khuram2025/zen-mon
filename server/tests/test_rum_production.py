@@ -965,3 +965,47 @@ def test_issue_lifecycle_state_is_derived_from_stored_status_and_recurrence():
     assert rum._issue_payload(stored, now, now - timedelta(days=5), window)["status"] == "regressed"
     assert rum._issue_payload(stored, now - timedelta(hours=4), now - timedelta(days=5), window)["status"] == "resolved"
     assert rum._issue_payload({"status": "ignored"}, now, now - timedelta(hours=1), window)["status"] == "ignored"
+
+
+# ── Phase 4: journeys, funnels, retention ────────────────────────────────────
+
+def test_funnel_step_conditions_bind_parameters_and_expand_globs():
+    params: dict = {}
+    assert rum._funnel_step_condition({"type": "view", "match": "/checkout"}, 0, params) == "(event_type = 'view' AND view_name = {step0:String})"
+    assert params["step0"] == "/checkout"
+    glob = rum._funnel_step_condition({"type": "view", "match": "/products/*"}, 1, params)
+    assert glob == "(event_type = 'view' AND match(view_name, {step1:String}))"
+    assert re.match(params["step1"], "/products/blue-shoes") and not re.match(params["step1"], "/products/a/b")
+    assert rum._funnel_step_condition({"type": "action", "match": "Place order"}, 2, params) == "(event_type = 'action' AND action_name = {step2:String})"
+
+
+def test_session_paths_collapse_repeated_routes_and_read_view_starts():
+    sql = rum._session_paths_sql("timestamp >= {frm:DateTime64(3)}")
+    assert "end_reason = 'view_start' OR sdk_version = ''" in sql
+    assert "arrayFilter((x, i) -> i = 1 OR x != v0[i - 1], v0, arrayEnumerate(v0)) AS path" in sql
+    assert "HAVING length(path) > 0" in sql
+
+
+def test_retention_is_parsed_from_table_ttl_and_drives_coverage(monkeypatch):
+    class Result:
+        result_rows = [
+            ("apm_rum_events", "MergeTree ORDER BY x TTL toDateTime(timestamp) + toIntervalDay(21) SETTINGS a = 1"),
+            ("apm_rum_metrics_5m", "AggregatingMergeTree ORDER BY y TTL timestamp + toIntervalDay(180) SETTINGS b = 2"),
+        ]
+
+    class CH:
+        def query(self, sql, parameters=None):
+            return Result()
+
+    monkeypatch.setattr(rum, "_ch", lambda: CH())
+    rum._RETENTION_CACHE["loaded"] = 0.0
+    assert rum._retention_days() == {"raw": 21, "rollup": 180}
+    coverage = rum._raw_coverage(rum._resolve_window("30d"))
+    assert coverage["raw_retention_days"] == 21 and coverage["rollup_retention_days"] == 180
+    assert "21 days" in coverage["message"]
+    # A custom window longer than the raw retention reads the rollup.
+    long = rum._resolve_window("custom", "2026-08-01T00:00:00Z", "2026-08-25T00:00:00Z")
+    assert long.rollup is True
+    short = rum._resolve_window("custom", "2026-08-10T00:00:00Z", "2026-08-25T00:00:00Z")
+    assert short.rollup is False
+    rum._RETENTION_CACHE.update({"raw": 14, "rollup": 90, "loaded": 0.0})

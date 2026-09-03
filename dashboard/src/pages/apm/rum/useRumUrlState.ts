@@ -20,6 +20,8 @@ export const RUM_SORTS: Record<RumTab, readonly string[]> = {
   errors: ['count', 'sessions', 'first_seen', 'last_seen'],
   resources: ['count', 'failed_count', 'duration_p75', 'size_avg', 'last_seen'],
   actions: ['count', 'error_count', 'duration_p75', 'last_seen'],
+  journeys: [],
+  geo: ['sessions', 'error_session_rate', 'lcp_p75'],
 }
 
 export const RUM_DEFAULT_SORT: Record<RumTab, { sort: string; order: RumSortOrder }> = {
@@ -30,6 +32,8 @@ export const RUM_DEFAULT_SORT: Record<RumTab, { sort: string; order: RumSortOrde
   errors: { sort: 'count', order: 'desc' },
   resources: { sort: 'count', order: 'desc' },
   actions: { sort: 'count', order: 'desc' },
+  journeys: { sort: '', order: 'desc' },
+  geo: { sort: 'sessions', order: 'desc' },
 }
 
 function oneOf<T extends string>(value: string | null, allowed: readonly T[], fallback: T): T {

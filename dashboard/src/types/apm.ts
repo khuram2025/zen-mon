@@ -191,7 +191,7 @@ export interface RumWindow {
   rollup: boolean
 }
 
-export const RUM_TABS = ['overview', 'web-vitals', 'views', 'sessions', 'errors', 'resources', 'actions'] as const
+export const RUM_TABS = ['overview', 'web-vitals', 'views', 'sessions', 'errors', 'resources', 'actions', 'journeys', 'geo'] as const
 export type RumTab = typeof RUM_TABS[number]
 
 export interface RumFilters {
@@ -771,4 +771,78 @@ export interface RumIngestHealth {
     events_total: number
     distinct_client_ips: number
   }
+}
+
+
+export interface RumJourneys {
+  range: RumRange
+  window: RumWindow
+  coverage: RumCoverage
+  sessions: number
+  avg_path_length: number
+  bounced_sessions: number
+  entries: Array<{ route: string; sessions: number; bounced: number }>
+  exits: Array<{ route: string; sessions: number }>
+  transitions: Array<{ from: string; to: string; sessions: number }>
+  journey: { start: string | null; depth: number; steps: Array<{ step: number; from: string; to: string | null; sessions: number }> }
+}
+
+export interface RumGeoCountry {
+  country: string
+  sessions: number
+  views: number
+  errors: number
+  error_session_rate: number | null
+  lcp_p75: number | null
+  lcp_samples: number
+  inp_p75: number | null
+  inp_samples: number
+  cls_p75: number | null
+  cls_samples: number
+  lcp_poor_pct: number | null
+}
+
+export interface RumGeo {
+  range: RumRange
+  window: RumWindow
+  countries: RumGeoCountry[]
+  unresolved: RumGeoCountry | null
+  geoip_available: boolean
+}
+
+export interface RumFunnelStep {
+  type: 'view' | 'action'
+  match: string
+  label?: string
+}
+
+export interface RumFunnel {
+  id: string
+  application_id: string
+  name: string
+  description: string
+  steps: RumFunnelStep[]
+  window_seconds: number
+  created_by: string
+  created_at: string
+  updated_at: string
+}
+
+export interface RumFunnelResults {
+  funnel: RumFunnel
+  range: RumRange
+  window: RumWindow
+  coverage: RumCoverage
+  sessions_considered: number
+  entered: number
+  converted: number
+  conversion_pct: number | null
+  steps: Array<{ index: number; type: 'view' | 'action'; match: string; label: string; sessions: number; conversion_pct: number | null; step_conversion_pct: number | null; drop_off: number }>
+}
+
+export interface RumRetention {
+  raw_days: number
+  rollup_days: number
+  raw_table: string
+  rollup_table: string
 }

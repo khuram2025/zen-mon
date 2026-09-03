@@ -164,7 +164,7 @@ export function ApmSettingsPage() {
 
       {tab === 'agents' && <ApmAgentsTab />}
       {tab === 'start' && <GettingStartedTab keys={keys} onCreateKey={() => openCreateKey('sdk')} />}
-      {tab === 'quality' && <DataQualityCard />}
+      {tab === 'quality' && <><RumRetentionCard /><DataQualityCard /></>}
       {tab === 'maps' && <SourceMapsTab />}
 
       {tab === 'keys' && (
@@ -1580,5 +1580,47 @@ function SourceMapsTab() {
         onOpenChange={(open) => { if (!open) setPendingDelete(null) }}
       />
     </div>
+  )
+}
+
+
+/* ─── Browser RUM retention ──────────────────────────────────────────────── */
+
+function RumRetentionCard() {
+  const qc = useQueryClient()
+  const retention = useQuery<{ raw_days: number; rollup_days: number }>({
+    queryKey: ['apm', 'rum', 'retention'],
+    queryFn: async () => (await api.get('/apm/rum/retention')).data,
+  })
+  const [raw, setRaw] = useState('')
+  const [rollup, setRollup] = useState('')
+  useEffect(() => {
+    if (retention.data) { setRaw(String(retention.data.raw_days)); setRollup(String(retention.data.rollup_days)) }
+  }, [retention.data])
+  const save = useMutation({
+    mutationFn: async () => (await api.patch('/apm/rum/retention', { raw_days: Number(raw), rollup_days: Number(rollup) })).data,
+    onSuccess: () => { toast.success('RUM retention updated'); qc.invalidateQueries({ queryKey: ['apm', 'rum', 'retention'] }) },
+    onError: (error) => toast.error('Could not change retention', apiErrorMessage(error)),
+  })
+  const rawN = Number(raw), rollupN = Number(rollup)
+  const valid = Number.isInteger(rawN) && rawN >= 3 && rawN <= 60 && Number.isInteger(rollupN) && rollupN >= 30 && rollupN <= 730 && rollupN >= rawN
+  const dirty = retention.data && (rawN !== retention.data.raw_days || rollupN !== retention.data.rollup_days)
+  return (
+    <Card className="mb-4">
+      <CardHeader>
+        <CardTitle>Browser RUM retention</CardTitle>
+        <p className="text-xs text-muted">Raw events power sessions, errors, resources, journeys and everything under 14 days; the 5-minute rollup powers long-range overviews and trends. Shortening a window drops the excess at the next ClickHouse merge; lengthening applies to data written from now on.</p>
+      </CardHeader>
+      <CardContent className="flex flex-wrap items-end gap-4">
+        <FormField label="Raw events (days)" hint="3–60. Sessions, errors, resources, journeys.">
+          <Input type="number" min={3} max={60} value={raw} onChange={(e) => setRaw(e.target.value)} className="w-32" />
+        </FormField>
+        <FormField label="5-minute rollup (days)" hint="30–730, at least the raw window.">
+          <Input type="number" min={30} max={730} value={rollup} onChange={(e) => setRollup(e.target.value)} className="w-32" />
+        </FormField>
+        <Button disabled={!valid || !dirty || save.isPending} onClick={() => save.mutate()}>{save.isPending && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}Apply retention</Button>
+        {retention.isError && <span className="text-xs text-danger">Could not read the current retention.</span>}
+      </CardContent>
+    </Card>
   )
 }
