@@ -123,3 +123,6 @@ bin/*.bak
 
 # ─── Per-appliance schema verdict, written by scripts/sync-schema.py ───
 .schema-status.json
+
+# ─── Local agent state ───
+.claude/
