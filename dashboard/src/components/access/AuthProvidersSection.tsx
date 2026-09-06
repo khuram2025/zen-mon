@@ -27,7 +27,7 @@ type Mapping = { group?: string; value?: string; role: string }
 
 type LdapConfig = {
   enabled: boolean; server: string; port: number; use_ssl: boolean; use_starttls: boolean
-  bind_dn: string; bind_password: string; has_bind_password?: boolean
+  ca_certificate_pem?: string; bind_dn: string; bind_password: string; has_bind_password?: boolean
   base_dn: string; user_filter: string; email_attr: string; name_attr: string; group_attr: string
   group_mappings: Mapping[]; default_role: string; auto_provision: boolean
 }
@@ -646,12 +646,14 @@ function LdapDialog({ open, onOpenChange, initial, roles, initialTab }: {
                     <SelectContent>
                       <SelectItem value="ldaps">LDAPS (TLS, port 636)</SelectItem>
                       <SelectItem value="starttls">StartTLS (port 389)</SelectItem>
-                      <SelectItem value="none">None (plaintext)</SelectItem>
                     </SelectContent>
                   </Select>
                 </FormField>
               </div>
 
+              <FormField label="Directory CA certificate (PEM)" hint="Certificate verification is required. Leave blank to use the appliance trust store.">
+                <textarea className="min-h-24 w-full rounded border border-border bg-surface p-2 font-mono text-xs" value={form.ca_certificate_pem || ''} onChange={e => f({ ca_certificate_pem: e.target.value })} />
+              </FormField>
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 <FormField label="Bind DN" hint="Service account used to search the directory">
                   <Input value={form.bind_dn} onChange={(e) => f({ bind_dn: e.target.value })} placeholder="CN=svc-zenplus,OU=Service,DC=corp,DC=local" autoComplete="off" className="font-mono text-xs" />

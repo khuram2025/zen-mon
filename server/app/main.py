@@ -9,8 +9,9 @@ from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service
 from app.api.v1 import settings as settings_api
 from app.api.v1 import storage_management as storage_api
 from app.api.v1 import security_settings as security_api
+from app.api.v1 import management_access
 from app.api.v1 import sensors as sensors_admin_api
-from app.api.v1 import sensor_api
+from app.api.v1 import sensor_api, monitoring_sites
 from app.api.v1 import agents as agents_runtime_api
 from app.api.v1 import servers as servers_admin_api
 from app.api.v1 import apm as apm_control_api
@@ -68,6 +69,7 @@ def create_app() -> FastAPI:
 
     # API routes
     app.include_router(auth.router, prefix="/api/v1")
+    app.include_router(monitoring_sites.router, prefix="/api/v1")
     app.include_router(devices.router, prefix="/api/v1")
     app.include_router(devices.maintenance_router, prefix="/api/v1")
     app.include_router(tags.router, prefix="/api/v1")
@@ -96,6 +98,7 @@ def create_app() -> FastAPI:
     app.include_router(system_updates.router, prefix="/api/v1")
     app.include_router(storage_api.router, prefix="/api/v1")
     app.include_router(security_api.router, prefix="/api/v1")
+    app.include_router(management_access.router, prefix="/api/v1")
     app.include_router(support.router, prefix="/api/v1")
     app.include_router(snmp.router, prefix="/api/v1")
     app.include_router(snmp_credentials.router, prefix="/api/v1")

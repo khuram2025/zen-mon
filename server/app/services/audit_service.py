@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from sqlalchemy import text
@@ -50,4 +51,5 @@ async def write_audit_log(
             )
     except Exception:
         # Audit must never block the requested admin operation.
+        logging.getLogger(__name__).exception("Could not persist audit event %s", action)
         return

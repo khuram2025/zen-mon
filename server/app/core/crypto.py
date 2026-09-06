@@ -1,8 +1,6 @@
 """SNMP credential encryption.
 
-Uses AES-256-GCM from the `cryptography` package (already a transitive
-dependency via python-jose). The plan calls for libsodium secretbox, but
-reusing `cryptography` avoids pulling in pynacl.
+Uses AES-256-GCM from the explicitly pinned cryptography package.
 
 Ciphertext layout: 1-byte version || 12-byte nonce || ciphertext+tag.
 
@@ -98,16 +96,14 @@ def decrypt_secret(value: bytes | memoryview | str | None) -> str | None:
     if value is None:
         return None
     if isinstance(value, str):
-        s = value.strip()
-        return s or None
+        if value.startswith("enc:v1:"):
+            return decrypt(base64.b64decode(value[7:], validate=True))
+        return value or None
     buf = bytes(value)
     if not buf:
         return None
     if len(buf) >= 1 + _NONCE_LEN + 16 and buf[0] == _VERSION:
-        try:
-            return decrypt(buf)
-        except CryptoError:
-            pass
+        return decrypt(buf)
     return buf.decode("utf-8")
 
 
@@ -118,3 +114,29 @@ def is_configured() -> bool:
         return True
     except CryptoError:
         return False
+
+
+def encrypt_text(value: str | None) -> str | None:
+    """Encrypt a plaintext secret for a text/JSON column."""
+    token = encrypt(value)
+    return 'enc:v1:' + base64.b64encode(token).decode('ascii') if token else None
+
+
+def encrypt_config(value: dict | None) -> dict:
+    """Protect complete integration configs, including secrets inside URLs/templates."""
+    import json
+    return {'_encrypted_v1': encrypt_text(json.dumps(value or {}))}
+
+
+def decrypt_config(value: dict | None) -> dict:
+    import json
+    if not value:
+        return {}
+    if '_encrypted_v1' not in value:
+        return dict(value)
+    result = json.loads(decrypt_secret(value['_encrypted_v1']))
+    if not isinstance(result, dict):
+        raise CryptoError('Invalid encrypted configuration')
+    # Metadata-only updates may override enabled without decrypting in SQL.
+    result.update({k: v for k, v in value.items() if k != '_encrypted_v1'})
+    return result

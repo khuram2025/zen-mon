@@ -60,6 +60,8 @@ export const useAuth = create<AuthState>()(
       },
 
       logout() {
+        const token = get().token
+        if (token) void fetch('/api/v1/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, keepalive: true }).catch(() => {})
         setApiToken(null)
         set({ token: null, user: null, error: null })
       },

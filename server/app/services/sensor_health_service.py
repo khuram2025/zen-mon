@@ -162,16 +162,10 @@ async def _suppress_unverifiable_service_alerts(
         text("""WITH assigned AS MATERIALIZED (
                     SELECT sc.id
                       FROM service_checks sc
-                     WHERE sc.credential_id IS NULL
-                       AND jsonb_array_length(
-                             COALESCE(sc.workflow_steps, '[]'::jsonb)
-                           ) = 0
-                       AND (sc.default_sensor_id = :sid
-                        OR sc.id IN (
-                            SELECT a.target_id FROM sensor_assignments a
-                             WHERE a.sensor_id = :sid
-                               AND a.target_type = 'service_check'
-                        ))
+                     WHERE EXISTS (SELECT 1 FROM service_monitoring_vantages assigned
+                         WHERE assigned.service_check_id=sc.id AND assigned.sensor_id=:sid)
+                       AND NOT EXISTS (SELECT 1 FROM service_monitoring_vantages central
+                         WHERE central.service_check_id=sc.id AND central.poller_id='central')
                 ), unverifiable AS MATERIALIZED (
                     SELECT sc.id
                       FROM service_checks sc
@@ -180,6 +174,7 @@ async def _suppress_unverifiable_service_alerts(
                          SELECT 1
                            FROM service_check_vantage_status v
                            LEFT JOIN sensors s ON s.id::text = v.poller_id
+                           JOIN service_monitoring_vantages selected ON selected.service_check_id=v.service_check_id AND selected.poller_id=v.poller_id
                           WHERE v.service_check_id = sc.id
                             AND (v.poller_id = 'central'
                                  OR s.status IN ('online', 'degraded'))

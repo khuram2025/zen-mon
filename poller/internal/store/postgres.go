@@ -126,23 +126,7 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 		FROM service_checks sc
 		LEFT JOIN service_credentials cred ON cred.id = sc.credential_id
 		WHERE sc.enabled = TRUE
-		  AND NOT EXISTS (
-		      SELECT 1 FROM sensors s
-		       WHERE s.id = sc.default_sensor_id
-		         AND s.status IN ('online', 'degraded', 'offline')
-		         AND sc.credential_id IS NULL
-		         AND jsonb_array_length(COALESCE(sc.workflow_steps, '[]'::jsonb)) = 0
-		  )
-		  AND NOT EXISTS (
-		      SELECT 1
-		        FROM sensor_assignments a
-		        JOIN sensors s ON s.id = a.sensor_id
-		       WHERE a.target_type = 'service_check'
-		         AND a.target_id = sc.id
-		         AND s.status IN ('online', 'degraded', 'offline')
-		         AND sc.credential_id IS NULL
-		         AND jsonb_array_length(COALESCE(sc.workflow_steps, '[]'::jsonb)) = 0
-		  )
+		  AND EXISTS (SELECT 1 FROM service_monitoring_vantages v WHERE v.service_check_id=sc.id AND v.poller_id='central')
 		ORDER BY sc.name
 	`)
 	if err != nil {
@@ -229,25 +213,7 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 func (s *PostgresStore) IsServiceCheckCentrallyOwned(ctx context.Context, id uuid.UUID) (bool, error) {
 	var central bool
 	err := s.pool.QueryRow(ctx, `
-		SELECT NOT EXISTS (
-			SELECT 1
-			  FROM service_checks sc
-			  JOIN sensors sensor ON sensor.id = sc.default_sensor_id
-			 WHERE sc.id = $1
-			   AND sensor.status IN ('online', 'degraded', 'offline')
-			   AND sc.credential_id IS NULL
-			   AND jsonb_array_length(COALESCE(sc.workflow_steps, '[]'::jsonb)) = 0
-			UNION ALL
-			SELECT 1
-			  FROM sensor_assignments a
-			  JOIN service_checks sc ON sc.id = a.target_id
-			  JOIN sensors sensor ON sensor.id = a.sensor_id
-			 WHERE a.target_type = 'service_check'
-			   AND a.target_id = $1
-			   AND sensor.status IN ('online', 'degraded', 'offline')
-			   AND sc.credential_id IS NULL
-			   AND jsonb_array_length(COALESCE(sc.workflow_steps, '[]'::jsonb)) = 0
-		)
+		SELECT EXISTS (SELECT 1 FROM service_monitoring_vantages WHERE service_check_id=$1 AND poller_id='central')
 	`, id).Scan(&central)
 	return central, err
 }
@@ -255,10 +221,8 @@ func (s *PostgresStore) IsServiceCheckCentrallyOwned(ctx context.Context, id uui
 // --- SNMP ---
 
 // LoadSNMPDevices returns all SNMP-enabled devices with credentials
-// already decrypted in memory. SNMP remains centrally owned until the remote
-// sensor has a secure credential/config channel and a real SNMP scheduler;
-// device_polling_owner currently governs ICMP only for that reason. The
-// SNMP_ENC_KEY env var must be set;
+// already decrypted in memory, limited to targets selecting the controller.
+// The SNMP_ENC_KEY env var must be set;
 // devices with credentials that fail to decrypt are skipped and logged
 // by the caller (we still return a nil error so one bad row does not
 // stall the whole sync).
@@ -293,6 +257,7 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 		LEFT JOIN udt_device_settings us ON us.device_id = d.id
 		LEFT JOIN snmp_credentials sc ON sc.id = us.snmp_credential_id
 		WHERE d.snmp_enabled = TRUE
+		  AND EXISTS (SELECT 1 FROM device_monitoring_vantages v WHERE v.device_id=d.id AND v.poller_id='central')
 		  AND d.ip_address IS NOT NULL
 		ORDER BY d.hostname
 	`)
@@ -335,6 +300,18 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 		d.Enabled = true
 		d.PollInterval = time.Duration(intervalSec) * time.Second
 		d.UdtInterval = time.Duration(udtIntervalSec) * time.Second
+		secretFailed := false
+		for _, value := range []*string{&d.Community, &uc.Community, &uc.AuthPassphrase, &uc.PrivPassphrase} {
+			decoded, err := snmp.DecryptText(*value)
+			if err != nil {
+				secretFailed = true
+				break
+			}
+			*value = decoded
+		}
+		if secretFailed {
+			continue
+		}
 		if hasUdtCred {
 			d.UdtCredential = &uc
 		}

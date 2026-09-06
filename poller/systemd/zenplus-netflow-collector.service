@@ -12,7 +12,7 @@ WorkingDirectory=/opt/zenplus/poller
 EnvironmentFile=/opt/zenplus/.env
 Environment=NETFLOW_COLLECTOR_ID=netflow-01
 Environment=NETFLOW_LISTEN=:2055
-Environment=NETFLOW_HEALTH_LISTEN=:8091
+Environment=NETFLOW_HEALTH_LISTEN=127.0.0.1:8091
 ExecStart=/opt/zenplus/bin/zenplus-netflow-collector
 Restart=always
 RestartSec=10

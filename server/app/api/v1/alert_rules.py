@@ -1,3 +1,6 @@
+from app.services.notification_transport import NotificationHTTPClient
+from app.core.crypto import encrypt_config, decrypt_config
+import ssl
 import json
 from uuid import UUID
 from datetime import datetime, timezone
@@ -926,7 +929,7 @@ async def simulate_alert_rule(
             results.append({"channel": ch_row.name, "status": "skipped", "detail": "Channel disabled"})
             continue
 
-        ch_config = ch_row.config or {}
+        ch_config = decrypt_config(ch_row.config)
 
         try:
             if ch_row.type == "sms":
@@ -945,9 +948,9 @@ async def simulate_alert_rule(
                 if not gw_row:
                     gw_raw = await db.execute(text("SELECT value FROM system_settings WHERE key = 'sms'"))
                     gw_row2 = gw_raw.first()
-                    gw_cfg = gw_row2[0] if gw_row2 else None
+                    gw_cfg = decrypt_config(gw_row2[0]) if gw_row2 else None
                 else:
-                    gw_cfg = gw_row.config
+                    gw_cfg = decrypt_config(gw_row.config)
 
                 if not gw_cfg:
                     results.append({"channel": ch_row.name, "status": "error", "detail": "No SMS gateway"})
@@ -967,7 +970,7 @@ async def simulate_alert_rule(
                     if gw_cfg.get("auth_type") == "basic":
                         auth = (gw_cfg.get("auth_username", ""), gw_cfg.get("auth_password", ""))
 
-                    async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+                    async with NotificationHTTPClient(timeout=15.0, verify=True) as client:
                         if gw_cfg.get("http_method", "GET").upper() == "POST":
                             resp = await client.post(gw_cfg["api_url"], content=template, headers=headers, auth=auth)
                         else:
@@ -995,9 +998,9 @@ async def simulate_alert_rule(
                 if not gw_row:
                     gw_raw = await db.execute(text("SELECT value FROM system_settings WHERE key = 'smtp'"))
                     gw_row2 = gw_raw.first()
-                    gw_cfg = gw_row2[0] if gw_row2 else None
+                    gw_cfg = decrypt_config(gw_row2[0]) if gw_row2 else None
                 else:
-                    gw_cfg = gw_row.config
+                    gw_cfg = decrypt_config(gw_row.config)
 
                 if not gw_cfg or not gw_cfg.get("host"):
                     results.append({"channel": ch_row.name, "status": "error", "detail": "No SMTP gateway configured"})
@@ -1049,11 +1052,10 @@ async def simulate_alert_rule(
 
                 enc = gw_cfg.get("encryption", "tls")
                 if enc == "ssl":
-                    server = smtplib.SMTP_SSL(gw_cfg["host"], gw_cfg.get("port", 465), timeout=10)
+                    server = smtplib.SMTP_SSL(gw_cfg["host"], gw_cfg.get("port", 465), timeout=10, context=ssl.create_default_context())
                 else:
                     server = smtplib.SMTP(gw_cfg["host"], gw_cfg.get("port", 587), timeout=10)
-                    if enc == "tls":
-                        server.starttls()
+                    server.starttls(context=ssl.create_default_context())
                 if gw_cfg.get("username"):
                     server.login(gw_cfg["username"], gw_cfg.get("password", ""))
                 server.sendmail(gw_cfg.get("from_email", ""), recipient_list, msg.as_string())

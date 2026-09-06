@@ -16,6 +16,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -241,6 +242,9 @@ def evidence_of(migration: Migration, present: set[str], sql: str | None = None)
     answerable one.
     """
     text = migration.path.read_text() if sql is None else sql
+    # An existing view/function says nothing about its replacement definition.
+    if re.search(r"\bCREATE\s+OR\s+REPLACE\s+(VIEW|FUNCTION)\b", text, re.IGNORECASE):
+        return False
     objects = migration_order.created_objects(text)
     columns = migration_order.added_columns(text)
     indexes = migration_order.created_indexes(text)

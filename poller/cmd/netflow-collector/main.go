@@ -390,9 +390,9 @@ func (c *collector) runHealth(ctx context.Context) {
 
 func loadConfig() collectorConfig {
 	return collectorConfig{
-		ID:            env("NETFLOW_COLLECTOR_ID", "netflow-01"),
-		Listen:        env("NETFLOW_LISTEN", ":2055"),
-		HealthListen:  env("NETFLOW_HEALTH_LISTEN", ":8091"),
+		ID:               env("NETFLOW_COLLECTOR_ID", "netflow-01"),
+		Listen:           env("NETFLOW_LISTEN", ":2055"),
+		HealthListen:     env("NETFLOW_HEALTH_LISTEN", "127.0.0.1:8091"),
 		BatchSize:        envInt("NETFLOW_BATCH_SIZE", 1000),
 		FlushInterval:    time.Duration(envInt("NETFLOW_FLUSH_SECONDS", 5)) * time.Second,
 		AllowedExporters: parseExporterAllowlist(env("NETFLOW_ALLOWED_EXPORTERS", "")),
@@ -404,7 +404,7 @@ func loadConfig() collectorConfig {
 				Username: env("CLICKHOUSE_USER", "default"),
 				Password: env("CLICKHOUSE_PASSWORD", "clickhouse_dev"),
 			},
-			Settings: clickhouse.Settings{"max_execution_time": 60},
+			Settings:    clickhouse.Settings{"max_execution_time": 60},
 			Compression: &clickhouse.Compression{Method: clickhouse.CompressionLZ4},
 		},
 	}

@@ -1,11 +1,12 @@
 import asyncio
 import logging
+import hashlib
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from app.core.database import get_db
 from app.core.security import (
@@ -129,8 +130,7 @@ async def _external_login(
     return None
 
 
-@router.post("/login", response_model=TokenResponse)
-async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def _login_impl(data: LoginRequest, db: AsyncSession = Depends(get_db)):
     username = data.username.strip()
     result = await db.execute(select(User).where(User.username == username))
     user = result.scalar_one_or_none()
@@ -160,13 +160,46 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(user)
 
-    token = create_access_token(data={"sub": str(user.id), "role": user.role})
+    token = create_access_token(data={"sub": str(user.id), "role": user.role, "ver": getattr(user, "token_version", 0) or 0})
 
     return TokenResponse(
         access_token=token,
         expires_in=settings.JWT_EXPIRE_MINUTES * 60,
         user=await _user_response(db, user),
     )
+
+
+@router.post("/login", response_model=TokenResponse)
+async def login(data: LoginRequest, db: AsyncSession = Depends(get_db), request: Request = None):
+    from app.services.sensor_rate_limit import enforce_sensor_quota
+    from app.services.audit_service import write_audit_log
+    from app.services.management_access import check_web_access
+    source = request.client.host if request and request.client else 'unknown'
+    if request:
+        check_web_access(source)
+        try:
+            await enforce_sensor_quota('login-ip', hashlib.sha256(source.encode()).hexdigest(), amount=1, limit=30)
+            await enforce_sensor_quota('login-account', hashlib.sha256(data.username.strip().lower().encode()).hexdigest(), amount=1, limit=10)
+        except HTTPException as exc:
+            raise HTTPException(429, 'Too many sign-in attempts; retry in one minute', headers={'Retry-After':'60'}) from exc
+    try:
+        result = await _login_impl(data, db)
+    except HTTPException:
+        await write_audit_log(db, actor=None, action='auth.login_failed', resource_type='session', metadata={'username': data.username[:100], 'source_ip':source})
+        await db.commit()
+        raise
+    await write_audit_log(db, actor=None, action='auth.login_succeeded', resource_type='session', resource_id=str(result.user.id), metadata={'username':result.user.username, 'source_ip':source})
+    await db.commit()
+    return result
+
+
+@router.post('/logout')
+async def logout(db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    from app.services.audit_service import write_audit_log
+    await db.execute(text('UPDATE users SET token_version=token_version+1 WHERE id=:id'), {'id':user.id})
+    await write_audit_log(db, actor=user, action='auth.logout', resource_type='session', metadata={'all_sessions':True})
+    await db.commit()
+    return {'message':'All sessions signed out'}
 
 
 @router.get("/me", response_model=UserResponse)

@@ -1034,7 +1034,7 @@ def _get_lvm_info() -> dict:
     try:
         # VG info
         result = subprocess.run(
-            ["sudo", "/usr/sbin/vgs", VG_NAME, "--noheadings", "--nosuffix", "--units", "b",
+            ["sudo", "-n", "/usr/local/sbin/zenplus-lvm-helper", "vgs", VG_NAME, "--noheadings", "--nosuffix", "--units", "b",
              "-o", "vg_size,vg_free,pv_count"],
             capture_output=True, text=True, timeout=5,
         )
@@ -1047,7 +1047,7 @@ def _get_lvm_info() -> dict:
 
         # LV info
         result = subprocess.run(
-            ["sudo", "/usr/sbin/lvs", f"{VG_NAME}/{LV_NAME}", "--noheadings", "--nosuffix",
+            ["sudo", "-n", "/usr/local/sbin/zenplus-lvm-helper", "lvs", f"{VG_NAME}/{LV_NAME}", "--noheadings", "--nosuffix",
              "--units", "b", "-o", "lv_size"],
             capture_output=True, text=True, timeout=5,
         )
@@ -1056,7 +1056,7 @@ def _get_lvm_info() -> dict:
 
         # PV list with size + free
         result = subprocess.run(
-            ["sudo", "/usr/sbin/pvs", "--noheadings", "--nosuffix", "--units", "b",
+            ["sudo", "-n", "/usr/local/sbin/zenplus-lvm-helper", "pvs", "--noheadings", "--nosuffix", "--units", "b",
              "-o", "pv_name,pv_size,pv_free,vg_name"],
             capture_output=True, text=True, timeout=5,
         )
@@ -1270,7 +1270,7 @@ def _get_available_disks() -> list[dict]:
     pvs_in_vg = set()
     try:
         result = subprocess.run(
-            ["sudo", "/usr/sbin/pvs", "--noheadings", "-o", "pv_name,vg_name"],
+            ["sudo", "-n", "/usr/local/sbin/zenplus-lvm-helper", "pvs", "--noheadings", "-o", "pv_name,vg_name"],
             capture_output=True, text=True, timeout=5,
         )
         if result.returncode == 0:
@@ -1485,7 +1485,7 @@ async def add_disk(
 
     # Check it's not already a PV in our VG
     check = subprocess.run(
-        ["sudo", "/usr/sbin/pvs", disk, "--noheadings", "-o", "vg_name"],
+        ["sudo", "-n", "/usr/local/sbin/zenplus-lvm-helper", "pvs", disk, "--noheadings", "-o", "vg_name"],
         capture_output=True, text=True, timeout=5,
     )
     if check.returncode == 0:
@@ -1544,7 +1544,7 @@ async def grow_volume(
     lvm_info = _get_lvm_info()
     for pv in lvm_info["physical_volumes"]:
         subprocess.run(
-            ["sudo", "/usr/sbin/pvresize", pv],
+            ["sudo", "-n", "/usr/local/sbin/zenplus-lvm-helper", "pvresize", pv],
             capture_output=True, text=True, timeout=30,
         )
 

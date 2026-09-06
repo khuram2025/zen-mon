@@ -24,6 +24,8 @@ export const useAuthStore = create<AuthState>((set) => ({
   },
 
   logout: () => {
+    const token = api.getToken()
+    if (token) void fetch('/api/v1/auth/logout', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, keepalive: true }).catch(() => {})
     api.setToken(null)
     set({ user: null, isAuthenticated: false })
   },

@@ -6,7 +6,7 @@ from typing import Optional
 
 class LoginRequest(BaseModel):
     username: str = Field(..., max_length=100)
-    password: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1, max_length=1024)
 
 
 class TokenResponse(BaseModel):

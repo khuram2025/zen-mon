@@ -1,3 +1,6 @@
+from app.services.notification_transport import NotificationHTTPClient
+from app.core.crypto import encrypt_config, decrypt_config
+import ssl
 import base64
 from uuid import UUID
 from datetime import datetime, timezone
@@ -109,10 +112,18 @@ async def _get_system_setting(db: AsyncSession, key: str) -> Optional[dict]:
         {"key": key},
     )
     row = result.first()
-    return row[0] if row else None
+    value = row[0] if row else None
+    if value and key in ('auth.ldap', 'auth.radius'):
+        from app.core.crypto import decrypt_secret
+        value = dict(value)
+        field = 'bind_password' if key == 'auth.ldap' else 'secret'
+        value[field] = decrypt_secret(value.get(field)) or ''
+    return decrypt_config(value) if value and key in ("smtp", "sms") else value
 
 
 async def _upsert_system_setting(db: AsyncSession, key: str, value: dict) -> None:
+    if key in ("smtp", "sms"):
+        value = encrypt_config(value)
     await db.execute(
         text(
             "INSERT INTO system_settings (key, value) VALUES (:key, CAST(:value AS jsonb)) "
@@ -145,7 +156,7 @@ async def _sync_default_notification_gateway(
         {
             "name": name,
             "type": gateway_type,
-            "config": _json_dumps(config),
+            "config": _json_dumps(encrypt_config(config)),
             "enabled": bool(config.get("enabled")),
         },
     )
@@ -328,7 +339,7 @@ def _row_to_channel(row) -> dict:
         "id": str(row.id),
         "name": row.name,
         "type": row.type,
-        "config": row.config if row.config else {},
+        "config": decrypt_config(row.config),
         "enabled": row.enabled,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
@@ -345,7 +356,7 @@ def _row_to_gateway(row) -> dict:
         "id": str(row.id),
         "name": row.name,
         "type": row.type,
-        "config": row.config if row.config else {},
+        "config": decrypt_config(row.config),
         "is_default": row.is_default,
         "enabled": row.enabled,
         "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -408,11 +419,10 @@ def _do_smtp_test(raw_config: dict, recipient: str) -> dict:
         msg.attach(MIMEText(build_notification_email_html(test_ctx), "html"))
 
         if config.encryption == "ssl":
-            server = smtplib.SMTP_SSL(config.host, config.port or 465, timeout=15)
+            server = smtplib.SMTP_SSL(config.host, config.port or 465, timeout=15, context=ssl.create_default_context())
         else:
             server = smtplib.SMTP(config.host, config.port or 587, timeout=15)
-            if config.encryption == "tls":
-                server.starttls()
+            server.starttls(context=ssl.create_default_context())
         try:
             if config.username:
                 server.login(config.username, config.password)
@@ -459,7 +469,7 @@ async def _do_sms_test(raw_config: dict, recipient: str) -> dict:
             headers["Authorization"] = f"Bearer {config.auth_token_value}"
 
         try:
-            async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+            async with NotificationHTTPClient(timeout=15.0, verify=True) as client:
                 if config.http_method.upper() == "POST":
                     if config.content_type == "application/json":
                         try:
@@ -635,7 +645,7 @@ async def create_gateway(
         {
             "name": data.get("name", ""),
             "type": gw_type,
-            "config": _json_dumps(data.get("config", {})),
+            "config": _json_dumps(encrypt_config(data.get("config", {}))),
             "is_default": is_default,
             "enabled": data.get("enabled", True),
             "created_at": now,
@@ -683,7 +693,7 @@ async def update_gateway(
     for key, value in fields.items():
         if key == "config":
             set_parts.append("config = CAST(:config AS jsonb)")
-            params["config"] = _json_dumps(value)
+            params["config"] = _json_dumps(encrypt_config(value))
         else:
             set_parts.append(f"{key} = :{key}")
             params[key] = value
@@ -702,7 +712,7 @@ async def update_gateway(
     elif "enabled" in fields and "config" in fields:
         merged = dict(fields.get("config") or {})
         merged["enabled"] = bool(fields["enabled"])
-        params["config"] = _json_dumps(merged)
+        params["config"] = _json_dumps(encrypt_config(merged))
 
     result = await db.execute(
         text(f"UPDATE notification_gateways SET {', '.join(set_parts)} WHERE id = :id "
@@ -762,7 +772,7 @@ async def test_gateway(
     if not row:
         raise HTTPException(status_code=404, detail="Gateway not found")
 
-    config = dict(row.config or {})
+    config = decrypt_config(row.config)
     if row.type == "smtp":
         return _do_smtp_test(config, data.recipient)
     if row.type == "sms":
@@ -807,7 +817,7 @@ async def create_channel(
         {
             "name": data.name,
             "type": data.type,
-            "config": _json_dumps(data.config),
+            "config": _json_dumps(encrypt_config(data.config)),
             "enabled": data.enabled,
             "gateway_id": gateway_id,
             "created_at": now,
@@ -848,7 +858,7 @@ async def update_channel(
     for key, value in fields.items():
         if key == "config":
             set_parts.append("config = CAST(:config AS jsonb)")
-            params["config"] = _json_dumps(value)
+            params["config"] = _json_dumps(encrypt_config(value))
             set_parts.append("gateway_id = :gateway_id")
             params["gateway_id"] = (value.get("gateway_id") or None) if isinstance(value, dict) else None
         else:
@@ -928,7 +938,7 @@ async def test_channel(
     if not row.enabled:
         raise HTTPException(status_code=400, detail="Channel is disabled")
 
-    config = row.config or {}
+    config = decrypt_config(row.config)
     channel_type = row.type
     test_message = "ZenPlus Test: This is a test notification from your monitoring system."
 
@@ -958,7 +968,7 @@ async def test_channel(
                 raise HTTPException(status_code=400, detail="No SMS gateway configured")
             gw_enabled = bool(gw_config.get("enabled", True))
         else:
-            gw_config = gw_row.config
+            gw_config = decrypt_config(gw_row.config)
             gw_enabled = bool(gw_row.enabled)
 
         sms_cfg = SmsConfig(**gw_config)
@@ -985,7 +995,7 @@ async def test_channel(
                 headers["Authorization"] = f"Bearer {sms_cfg.auth_token_value}"
 
             try:
-                async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+                async with NotificationHTTPClient(timeout=15.0, verify=True) as client:
                     if sms_cfg.http_method.upper() == "POST":
                         if sms_cfg.content_type == "application/json":
                             try:
@@ -1042,7 +1052,7 @@ async def test_channel(
             # is what the sending path assumes too.
             gw_enabled = bool(gw_config.get("enabled", True))
         else:
-            gw_config = gw_row.config
+            gw_config = decrypt_config(gw_row.config)
             gw_enabled = bool(gw_row.enabled)
 
         smtp_cfg = SmtpConfig(**_normalize_smtp_config(gw_config))
@@ -1072,11 +1082,10 @@ async def test_channel(
             msg.attach(MIMEText(build_notification_email_html(test_ctx), "html"))
 
             if smtp_cfg.encryption == "ssl":
-                server = smtplib.SMTP_SSL(smtp_cfg.host, smtp_cfg.port, timeout=10)
+                server = smtplib.SMTP_SSL(smtp_cfg.host, smtp_cfg.port, timeout=10, context=ssl.create_default_context())
             else:
                 server = smtplib.SMTP(smtp_cfg.host, smtp_cfg.port, timeout=10)
-                if smtp_cfg.encryption == "tls":
-                    server.starttls()
+                server.starttls(context=ssl.create_default_context())
             if smtp_cfg.username:
                 server.login(smtp_cfg.username, smtp_cfg.password)
             server.sendmail(smtp_cfg.from_email, recipient_list, msg.as_string())
@@ -1091,7 +1100,7 @@ async def test_channel(
         if not url:
             raise HTTPException(status_code=400, detail="Webhook URL not configured")
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with NotificationHTTPClient(timeout=10.0) as client:
                 resp = await client.post(url, json={"text": test_message, "source": "zenplus_test"})
             return {"message": f"Webhook sent. Status: {resp.status_code}"}
         except Exception as e:
@@ -1103,7 +1112,7 @@ async def test_channel(
         if not webhook_url:
             raise HTTPException(status_code=400, detail="Slack webhook URL not configured")
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with NotificationHTTPClient(timeout=10.0) as client:
                 resp = await client.post(webhook_url, json={"text": test_message})
             return {"message": f"Slack message sent. Status: {resp.status_code}"}
         except Exception as e:
@@ -1116,7 +1125,7 @@ async def test_channel(
         if not bot_token or not chat_id:
             raise HTTPException(status_code=400, detail="Telegram bot_token or chat_id missing")
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with NotificationHTTPClient(timeout=10.0) as client:
                 resp = await client.post(
                     f"https://api.telegram.org/bot{bot_token}/sendMessage",
                     json={"chat_id": chat_id, "text": test_message},

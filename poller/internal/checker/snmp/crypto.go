@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -109,4 +110,16 @@ func Decrypt(token []byte) (string, error) {
 func CryptoConfigured() bool {
 	_, err := getAEAD()
 	return err == nil
+}
+
+// DecryptText supports the versioned text envelope used by credential stores.
+func DecryptText(value string) (string, error) {
+	if !strings.HasPrefix(value, "enc:v1:") {
+		return value, nil
+	}
+	token, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(value, "enc:v1:"))
+	if err != nil {
+		return "", errors.New("invalid encrypted secret encoding")
+	}
+	return Decrypt(token)
 }

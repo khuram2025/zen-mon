@@ -24,6 +24,7 @@ so every other part of the app (audit, FKs, sessions) works unchanged.
 from __future__ import annotations
 
 import logging
+import ssl
 from pathlib import Path
 from typing import Optional
 
@@ -41,7 +42,8 @@ LDAP_DEFAULTS: dict = {
     "server": "",
     "port": 389,
     "use_ssl": False,
-    "use_starttls": False,
+    "use_starttls": True,
+    "ca_certificate_pem": "",
     "bind_dn": "",
     "bind_password": "",
     "base_dn": "",
@@ -102,6 +104,37 @@ def map_ldap_role(cfg: dict, groups: list[str]) -> Optional[str]:
     return cfg.get("default_role") or None
 
 
+def ldap_open(cfg: dict, user: Optional[str], password: Optional[str]):
+    """Verify directory identity and finish TLS before any credential bind."""
+    import ldap3
+    if not cfg.get('use_ssl') and not cfg.get('use_starttls'):
+        raise ExternalAuthError('LDAP requires LDAPS or StartTLS with certificate verification')
+    tls = ldap3.Tls(validate=ssl.CERT_REQUIRED, ca_certs_data=cfg.get('ca_certificate_pem') or None)
+    server = ldap3.Server(cfg['server'], port=int(cfg.get('port') or (636 if cfg.get('use_ssl') else 389)),
+                          use_ssl=bool(cfg.get('use_ssl')), tls=tls, connect_timeout=10)
+    conn = ldap3.Connection(server, user=user or None, password=password or None,
+                           receive_timeout=10, auto_bind=False, raise_exceptions=False, auto_referrals=False)
+    try:
+        conn.open()
+        if conn.closed:
+            raise ExternalAuthError('LDAP connection could not be established')
+        if not cfg.get('use_ssl') and not conn.start_tls():
+            raise ExternalAuthError('LDAP StartTLS failed; no credentials were sent')
+        return conn
+    except Exception:
+        conn.unbind()
+        raise
+
+
+def ldap_test_bind(cfg: dict):
+    conn = ldap_open(cfg, cfg.get('bind_dn'), cfg.get('bind_password'))
+    try:
+        if not conn.bind():
+            raise ExternalAuthError('LDAP service bind failed')
+    finally:
+        conn.unbind()
+
+
 def ldap_authenticate(cfg: dict, username: str, password: str) -> Optional[dict]:
     """Verify credentials against LDAP.
 
@@ -122,17 +155,8 @@ def ldap_authenticate(cfg: dict, username: str, password: str) -> Optional[dict]
     port = int(cfg.get("port") or (636 if use_ssl else 389))
 
     try:
-        server = ldap3.Server(cfg["server"], port=port, use_ssl=use_ssl, connect_timeout=10)
-
-        def _open(user: Optional[str], pwd: Optional[str]) -> ldap3.Connection:
-            conn = ldap3.Connection(
-                server, user=user or None, password=pwd or None,
-                receive_timeout=10, auto_bind=False, raise_exceptions=False,
-            )
-            conn.open()
-            if cfg.get("use_starttls") and not use_ssl:
-                conn.start_tls()
-            return conn
+        def _open(user, pwd):
+            return ldap_open(cfg, user, pwd)
 
         search_conn = _open(cfg.get("bind_dn"), cfg.get("bind_password"))
         if not search_conn.bind():
@@ -145,7 +169,7 @@ def ldap_authenticate(cfg: dict, username: str, password: str) -> Optional[dict]
         )
         attrs = [a for a in (cfg.get("email_attr"), cfg.get("name_attr"), cfg.get("group_attr")) if a]
         search_conn.search(cfg["base_dn"], flt, search_scope=ldap3.SUBTREE, attributes=attrs)
-        if not search_conn.entries:
+        if len(search_conn.entries) != 1:
             search_conn.unbind()
             return None
 
@@ -227,7 +251,14 @@ def radius_authenticate(cfg: dict, username: str, password: str) -> Optional[dic
         if cfg.get("nas_identifier"):
             req["NAS-Identifier"] = str(cfg["nas_identifier"])
 
+        req.add_message_authenticator()
         reply = client.SendPacket(req)
+        try:
+            verified = reply.verify_message_authenticator(secret=client.secret, original_authenticator=req.authenticator)
+        except Exception:
+            verified = False
+        if not verified:
+            raise ExternalAuthError("RADIUS response is missing a valid Message-Authenticator")
     except Timeout as exc:
         raise ExternalAuthError(
             f"RADIUS server {cfg['server']} did not respond (check server, port, and shared secret)"

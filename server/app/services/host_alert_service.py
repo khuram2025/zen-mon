@@ -15,6 +15,8 @@ sweep's approach). Agent-offline is already handled by that sweep.
 """
 
 from __future__ import annotations
+from app.core.crypto import encrypt_config, decrypt_config
+import ssl
 
 import asyncio
 import json
@@ -97,7 +99,7 @@ async def _servers(db: AsyncSession) -> dict[str, str]:
 
 
 async def _gateway_config(db: AsyncSession, ch, gw_type: str) -> dict | None:
-    gw_id = ch.gateway_id or (ch.config or {}).get("gateway_id")
+    gw_id = ch.gateway_id or (decrypt_config(ch.config)).get("gateway_id")
     if gw_id:
         row = (await db.execute(
             text("SELECT config, enabled FROM notification_gateways WHERE id = :id"),
@@ -114,7 +116,7 @@ async def _gateway_config(db: AsyncSession, ch, gw_type: str) -> dict | None:
     # what makes "disable this gateway" actually stop delivery.
     if not row.enabled:
         return None
-    return dict(row.config)
+    return decrypt_config(row.config)
 
 
 async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -> int:
@@ -129,7 +131,7 @@ async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -
             ), {"id": ch_id})).first()
             if not ch or not ch.enabled:
                 continue
-            cfg = ch.config or {}
+            cfg = decrypt_config(ch.config)
             if ch.type == "email":
                 rcpt = cfg.get("recipients", "")
                 gw = await _gateway_config(db, ch, "smtp")

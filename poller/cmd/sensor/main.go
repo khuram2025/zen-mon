@@ -41,6 +41,11 @@ var (
 	version   = "sensor-0.1.0"
 	commit    = "unknown"
 	buildDate = "unknown"
+	// May be set at build time for a private sensor release channel. The key
+	// is fixed in the resulting binary and never supplied by a remote command.
+	releasePublicKeyPEM = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAhwZpk2+cPN57lhIbcsPAI3Xtx9MyfMPM5m3Ny81swF8=
+-----END PUBLIC KEY-----`
 )
 
 var errNotModified = errors.New("not modified")
@@ -73,38 +78,46 @@ type configResponse struct {
 }
 
 type configDevice struct {
-	ID           string `json:"id"`
-	Hostname     string `json:"hostname"`
-	IPAddress    string `json:"ip_address"`
-	PingEnabled  bool   `json:"ping_enabled"`
-	PingInterval int    `json:"ping_interval"`
-	SNMPEnabled  bool   `json:"snmp_enabled"`
+	ID           string      `json:"id"`
+	Hostname     string      `json:"hostname"`
+	IPAddress    string      `json:"ip_address"`
+	PingEnabled  bool        `json:"ping_enabled"`
+	PingInterval int         `json:"ping_interval"`
+	SNMPEnabled  bool        `json:"snmp_enabled"`
+	SNMP         *snmpConfig `json:"snmp,omitempty"`
 }
 
 type configServiceCheck struct {
-	ID                    string            `json:"id"`
-	Name                  string            `json:"name"`
-	CheckType             string            `json:"check_type"`
-	TargetHost            string            `json:"target_host"`
-	TargetPort            int               `json:"target_port"`
-	TargetURL             string            `json:"target_url"`
-	HTTPMethod            string            `json:"http_method"`
-	HTTPHeaders           map[string]string `json:"http_headers"`
-	HTTPBody              string            `json:"http_body"`
-	HTTPExpectedStatus    int               `json:"http_expected_status"`
-	HTTPExpectedStatuses  string            `json:"http_expected_statuses"`
-	HTTPContentMatch      string            `json:"http_content_match"`
-	HTTPFollowRedirects   *bool             `json:"http_follow_redirects"`
-	HTTPIgnoreTLSErrors   bool              `json:"http_ignore_tls_errors"`
-	HTTPAllowInsecureAuth bool              `json:"http_allow_insecure_auth"`
-	Config                map[string]any    `json:"config"`
-	TLSWarnDays           int               `json:"tls_warn_days"`
-	TLSCriticalDays       int               `json:"tls_critical_days"`
-	CheckInterval         int               `json:"check_interval"`
-	Timeout               int               `json:"timeout"`
-	RetryCount            int               `json:"retry_count"`
-	RetryDelayS           int               `json:"retry_delay_s"`
-	Enabled               bool              `json:"enabled"`
+	CredentialID          *uuid.UUID                 `json:"credential_id"`
+	CredentialAuthType    string                     `json:"credential_auth_type"`
+	CredentialUsername    string                     `json:"credential_username"`
+	CredentialSecret      string                     `json:"credential_secret"`
+	CredentialError       string                     `json:"credential_error"`
+	WorkflowOperator      string                     `json:"workflow_operator"`
+	WorkflowSteps         []checker.HTTPWorkflowStep `json:"workflow_steps"`
+	ID                    string                     `json:"id"`
+	Name                  string                     `json:"name"`
+	CheckType             string                     `json:"check_type"`
+	TargetHost            string                     `json:"target_host"`
+	TargetPort            int                        `json:"target_port"`
+	TargetURL             string                     `json:"target_url"`
+	HTTPMethod            string                     `json:"http_method"`
+	HTTPHeaders           map[string]string          `json:"http_headers"`
+	HTTPBody              string                     `json:"http_body"`
+	HTTPExpectedStatus    int                        `json:"http_expected_status"`
+	HTTPExpectedStatuses  string                     `json:"http_expected_statuses"`
+	HTTPContentMatch      string                     `json:"http_content_match"`
+	HTTPFollowRedirects   *bool                      `json:"http_follow_redirects"`
+	HTTPIgnoreTLSErrors   bool                       `json:"http_ignore_tls_errors"`
+	HTTPAllowInsecureAuth bool                       `json:"http_allow_insecure_auth"`
+	Config                map[string]any             `json:"config"`
+	TLSWarnDays           int                        `json:"tls_warn_days"`
+	TLSCriticalDays       int                        `json:"tls_critical_days"`
+	CheckInterval         int                        `json:"check_interval"`
+	Timeout               int                        `json:"timeout"`
+	RetryCount            int                        `json:"retry_count"`
+	RetryDelayS           int                        `json:"retry_delay_s"`
+	Enabled               bool                       `json:"enabled"`
 }
 
 type client struct {
@@ -178,10 +191,22 @@ func (c *configCache) Store(next configResponse) {
 func cloneConfig(in configResponse) configResponse {
 	out := in
 	out.Devices = append([]configDevice(nil), in.Devices...)
+	for i := range out.Devices {
+		if in.Devices[i].SNMP != nil {
+			copy := *in.Devices[i].SNMP
+			copy.OIDs = append([]string(nil), copy.OIDs...)
+			out.Devices[i].SNMP = &copy
+		}
+	}
 	out.ServiceChecks = append([]configServiceCheck(nil), in.ServiceChecks...)
 	for i := range out.ServiceChecks {
 		out.ServiceChecks[i].HTTPHeaders = cloneStringMap(in.ServiceChecks[i].HTTPHeaders)
 		out.ServiceChecks[i].Config = cloneJSONMap(in.ServiceChecks[i].Config)
+		out.ServiceChecks[i].WorkflowSteps = cloneWorkflowSteps(in.ServiceChecks[i].WorkflowSteps)
+		if in.ServiceChecks[i].CredentialID != nil {
+			id := *in.ServiceChecks[i].CredentialID
+			out.ServiceChecks[i].CredentialID = &id
+		}
 		if in.ServiceChecks[i].HTTPFollowRedirects != nil {
 			follow := *in.ServiceChecks[i].HTTPFollowRedirects
 			out.ServiceChecks[i].HTTPFollowRedirects = &follow
@@ -783,9 +808,6 @@ const (
 	completedCommandLimit    = 128
 	maxUpdateManifestBytes   = int64(1 * 1024 * 1024)
 	maxUpdateBinaryBytes     = int64(256 * 1024 * 1024)
-	releasePublicKeyPEM      = `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAhwZpk2+cPN57lhIbcsPAI3Xtx9MyfMPM5m3Ny81swF8=
------END PUBLIC KEY-----`
 )
 
 func run(
@@ -1849,6 +1871,12 @@ func (s *checkScheduler) Schedule(ctx context.Context, current configResponse, n
 	probes := make([]scheduledProbe, 0, len(current.Devices)+len(current.ServiceChecks))
 	for _, configured := range current.Devices {
 		device := configured
+		if device.ID != "" && device.SNMPEnabled && device.SNMP != nil {
+			probes = append(probes, scheduledProbe{
+				key: "snmp:" + device.ID, interval: secondsOrDefault(device.SNMP.Interval, time.Minute),
+				run: func() { s.runSNMP(ctx, device) },
+			})
+		}
 		if !device.PingEnabled || device.ID == "" {
 			continue
 		}
@@ -1982,6 +2010,14 @@ func (s *checkScheduler) runDevice(ctx context.Context, d configDevice, interval
 	}
 }
 
+func cloneWorkflowSteps(in []checker.HTTPWorkflowStep) []checker.HTTPWorkflowStep {
+	out := append([]checker.HTTPWorkflowStep(nil), in...)
+	for i := range out {
+		out[i].Headers = cloneStringMap(in[i].Headers)
+	}
+	return out
+}
+
 func (s *checkScheduler) runService(ctx context.Context, sc configServiceCheck, id uuid.UUID, interval time.Duration) {
 	followRedirects := true
 	if sc.HTTPFollowRedirects != nil {
@@ -2001,7 +2037,11 @@ func (s *checkScheduler) runService(ctx context.Context, sc configServiceCheck, 
 	}
 	check := &checker.ServiceCheck{
 		ID: id, Name: sc.Name, CheckType: sc.CheckType, Enabled: sc.Enabled,
-		TargetHost: sc.TargetHost, TargetPort: sc.TargetPort, TargetURL: sc.TargetURL,
+		CredentialID: sc.CredentialID, CredentialAuthType: sc.CredentialAuthType,
+		CredentialUsername: sc.CredentialUsername, CredentialSecret: sc.CredentialSecret,
+		CredentialError: sc.CredentialError, WorkflowOperator: sc.WorkflowOperator,
+		WorkflowSteps: cloneWorkflowSteps(sc.WorkflowSteps),
+		TargetHost:    sc.TargetHost, TargetPort: sc.TargetPort, TargetURL: sc.TargetURL,
 		HTTPMethod: defaultString(sc.HTTPMethod, "GET"), HTTPHeaders: cloneStringMap(sc.HTTPHeaders), HTTPBody: sc.HTTPBody,
 		HTTPExpectedStatus:   expectedStatus,
 		HTTPExpectedStatuses: sc.HTTPExpectedStatuses, HTTPContentMatch: sc.HTTPContentMatch,

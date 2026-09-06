@@ -807,7 +807,7 @@ Group=zenplus
 WorkingDirectory=/opt/zenplus/server
 EnvironmentFile=/opt/zenplus/.env
 Environment=MPLCONFIGDIR=/tmp/matplotlib
-ExecStart=/opt/zenplus/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+ExecStart=/opt/zenplus/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log --workers 2
 Restart=on-failure
 RestartSec=5
 StartLimitBurst=5

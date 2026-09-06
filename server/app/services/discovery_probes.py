@@ -245,6 +245,8 @@ def _ssh_auth_check_sync(
     except ImportError:
         return False, None, None, "netmiko not installed"
 
+    if (protocol or "ssh").lower() == "telnet":
+        return False, None, None, "Telnet credential authentication is disabled; use SSH with a trusted host key"
     conn_timeout = max(5, min(int(timeout_s), 30))
     base: dict[str, Any] = {
         "host": host,
@@ -254,6 +256,10 @@ def _ssh_auth_check_sync(
         "conn_timeout": conn_timeout,
         "timeout": conn_timeout + 10,
         "fast_cli": False,
+        "ssh_strict": True,
+        "disabled_algorithms": {"keys": ["ssh-rsa"], "pubkeys": ["ssh-rsa"]},
+        "alt_host_keys": True,
+        "alt_key_file": "/etc/zenplus/known_hosts",
     }
     if enable:
         base["secret"] = enable
@@ -449,7 +455,8 @@ async def winrm_probe(ip: str, credential: dict, timeout_s: float = 5.0) -> dict
         s = winrm.Session(
             endpoint, auth=(full_user, password),
             transport=auth,
-            server_cert_validation="ignore" if not credential.get("ssl_verify") else "validate",
+            server_cert_validation="validate",
+            message_encryption="always" if endpoint.startswith("http://") else "auto",
             operation_timeout_sec=int(timeout_s),
             read_timeout_sec=int(timeout_s + 2),
         )
@@ -569,7 +576,8 @@ async def winrm_capability_probe(host: str, credential: dict, timeout_s: float =
         s = winrm.Session(
             endpoint, auth=(full_user, credential.get("password", "")),
             transport=credential.get("auth_method", "ntlm"),
-            server_cert_validation="ignore" if not credential.get("ssl_verify") else "validate",
+            server_cert_validation="validate",
+            message_encryption="always" if endpoint.startswith("http://") else "auto",
             operation_timeout_sec=int(timeout_s),
             read_timeout_sec=int(timeout_s + 2),
         )

@@ -75,6 +75,41 @@ async def _ping_once(ip: str, timeout_s: float = 1.0) -> bool:
         return False
 
 
+async def _private_snmpget(args, timeout_s):
+    import os
+    import tempfile
+    from app.core.crypto import decrypt_secret
+    safe_args, lines = [], []
+    secret_flags = {'-c':'defCommunity', '-A':'defAuthPassphrase', '-X':'defPrivPassphrase'}
+    index = 0
+    while index < len(args):
+        flag = args[index]
+        if flag in secret_flags:
+            value = decrypt_secret(args[index + 1]) or ''
+            if any(c in value for c in ('\r', '\n', '\x00')):
+                raise ValueError('SNMP secret must be a single line')
+            escaped = value.replace('\\', '\\\\').replace('"', '\\"')
+            lines.append(secret_flags[flag] + ' "' + escaped + '"')
+            index += 2
+        else:
+            safe_args.append(flag)
+            index += 1
+    with tempfile.TemporaryDirectory(prefix='zenplus-snmp-') as directory:
+        path = os.path.join(directory, 'snmp.conf')
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'w') as stream:
+            stream.write('\n'.join(lines) + '\n')
+        proc = await asyncio.create_subprocess_exec(*safe_args, env={**os.environ, 'SNMPCONFPATH':directory},
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            output, error = await asyncio.wait_for(proc.communicate(), timeout=timeout_s * 3 + 5)
+        except BaseException:
+            proc.kill()
+            await proc.wait()
+            raise
+        return proc, output, error
+
+
 async def _snmpget_detail(
     ip: str, community: str, version: str, port: int, timeout_ms: int, oids: list[str],
     v3_username: str | None = None, v3_security_level: str | None = None,
@@ -134,12 +169,7 @@ async def _snmpget_detail(
         args += ["-c", community]
     args += [f"{ip}:{port}", *oids]
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out_b, err_b = await proc.communicate()
+        proc, out_b, err_b = await _private_snmpget(args, timeout_s)
         if proc.returncode != 0:
             err = (err_b.decode("utf-8", errors="replace").strip()
                    or out_b.decode("utf-8", errors="replace").strip()
@@ -481,7 +511,8 @@ async def create_discovery_job(
         )
 
     # Resolve credential: if credential_id is given, look it up and use its settings
-    community = data.community
+    from app.core.crypto import encrypt_text, decrypt_secret
+    community = encrypt_text(data.community)
     snmp_version = data.snmp_version
     snmp_port = data.snmp_port
     timeout_ms = data.timeout_ms
@@ -496,7 +527,7 @@ async def create_discovery_job(
         )).mappings().first()
         if not cred:
             raise HTTPException(status_code=404, detail="Credential not found")
-        community = cred["community"] or "public"
+        community = encrypt_text(decrypt_secret(cred["community"]) or "public")
         snmp_version = cred["snmp_version"]
         snmp_port = cred.get("port", 161) or 161
         timeout_ms = cred.get("timeout_ms", 2000) or 2000

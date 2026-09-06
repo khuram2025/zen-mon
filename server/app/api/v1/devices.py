@@ -43,7 +43,7 @@ async def _device_snmp_settings(db: AsyncSession, device) -> dict:
         "version": device.snmp_version or "2c",
         "port": device.snmp_port or 161,
         "timeout_ms": device.snmp_timeout_ms or 2000,
-        "community": device.snmp_community,
+        "community": decrypt_secret(device.snmp_community),
         "v3_username": device.snmp_v3_username,
         "v3_context": device.snmp_v3_context,
         "v3_auth_protocol": device.snmp_auth_protocol,
@@ -74,7 +74,7 @@ async def _device_snmp_settings(db: AsyncSession, device) -> dict:
             out["version"] = row["snmp_version"] or out["version"]
             out["port"] = row["port"] or out["port"]
             out["timeout_ms"] = row["timeout_ms"] or out["timeout_ms"]
-            out["community"] = row["community"] or out["community"]
+            out["community"] = decrypt_secret(row["community"]) or out["community"]
             out["v3_username"] = row["v3_username"] or out["v3_username"]
             out["v3_context"] = row["v3_context"] or out["v3_context"]
             out["v3_security_level"] = row["v3_security_level"] or out["v3_security_level"]
@@ -1708,7 +1708,7 @@ def _device_to_response(
         snmp_enabled=bool(device.snmp_enabled),
         snmp_version=device.snmp_version,
         snmp_port=device.snmp_port,
-        snmp_community=device.snmp_community,
+        snmp_community=None,
         snmp_v3_username=device.snmp_v3_username,
         snmp_v3_context=device.snmp_v3_context,
         snmp_auth_protocol=device.snmp_auth_protocol,

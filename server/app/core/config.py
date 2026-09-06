@@ -30,14 +30,14 @@ class Settings(BaseSettings):
     # JWT
     JWT_SECRET: str = "changeme"
     JWT_ALGORITHM: str = "HS256"
-    JWT_EXPIRE_MINUTES: int = 1440  # 24 hours
+    JWT_EXPIRE_MINUTES: int = 60  # one hour
 
     # SNMP credential encryption
     # 32-byte key, base64 or hex encoded. Rotated via scripts/rotate-snmp-key.sh.
     SNMP_ENC_KEY: str = ""
 
     # CORS — .env values override these defaults
-    CORS_ORIGINS: list[str] = ["*"]
+    CORS_ORIGINS: list[str] = []
 
     class Config:
         env_file = ".env"

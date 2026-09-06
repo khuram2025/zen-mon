@@ -1,3 +1,4 @@
+import { MonitoringSites } from '@/components/MonitoringSites'
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
@@ -1455,7 +1456,7 @@ function InterfaceStatusCard({
    ════════════════════════════════════════════════════════════ */
 
 function HealthScoreCard({
-  score, alerts, totalAlerts, deviceId, memVal, cpuVal, avgLoss, onViewDetails,
+  score, totalAlerts, deviceId, memVal, cpuVal, avgLoss, onViewDetails,
 }: {
   score: number
   alerts: Array<{ id: string; severity: 'critical' | 'warning' | 'info' | 'success'; title: string; ago: string; acknowledged: boolean; resolved?: boolean }>
@@ -1517,48 +1518,7 @@ function HealthScoreCard({
           </div>
         </div>
 
-        {/* Recent Alerts */}
-        <div className="mt-4 border-t border-border/60 pt-3">
-          <div className="mb-2 flex items-center justify-between">
-            <h4 className="text-xs font-semibold">
-              Recent Alerts
-              {totalAlerts > 0 && <span className="ml-1 font-normal text-muted">({totalAlerts})</span>}
-            </h4>
-            <Link to={`/alerts?device_id=${deviceId}`} className="text-[11px] text-primary hover:underline">
-              View All
-            </Link>
-          </div>
-          <div className="space-y-1.5">
-            {alerts.length === 0 && (
-              <div className="py-3 text-center text-[11px] text-muted">No alerts for this device</div>
-            )}
-            {alerts.map((a) => (
-              <Link
-                key={a.id}
-                to={`/alerts/${a.id}`}
-                className={`flex items-center gap-2 rounded px-1 py-0.5 -mx-1 hover:bg-surface2/60 ${a.resolved ? 'opacity-55' : ''}`}
-              >
-                <span className={`inline-flex items-center gap-0.5 rounded-sm px-1 text-[9px] font-semibold uppercase tracking-wider ${
-                  a.severity === 'critical' ? 'bg-danger/15 text-danger'
-                  : a.severity === 'warning' ? 'bg-warning/15 text-warning'
-                  : a.severity === 'success' ? 'bg-success/15 text-success'
-                  : 'bg-info/15 text-info'
-                }`}>
-                  {a.severity === 'critical' ? 'CRIT'
-                  : a.severity === 'warning' ? 'WARN'
-                  : a.severity === 'success' ? 'OK'
-                  : 'INFO'}
-                </span>
-                <span className="min-w-0 flex-1 truncate text-[11px]" title={a.title}>{a.title}</span>
-                {a.resolved && (
-                  <span className="shrink-0 rounded-sm bg-success/10 px-1 text-[9px] font-medium text-success">resolved</span>
-                )}
-                {a.acknowledged && <CheckCircle2 className="h-3 w-3 shrink-0 text-muted" aria-label="Acknowledged" />}
-                <span className="shrink-0 text-[10px] text-muted">{a.ago}</span>
-              </Link>
-            ))}
-          </div>
-        </div>
+        <MonitoringSites targetType="device" targetId={deviceId} compact />
       </CardContent>
     </Card>
   )
