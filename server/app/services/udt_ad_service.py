@@ -96,7 +96,8 @@ def _run_winrm(host: str, cred: dict, since_iso: str) -> list[dict]:
         endpoint,
         auth=(full_user, cred.get("password", "")),
         transport=cred.get("auth_method", "ntlm"),
-        server_cert_validation="ignore" if not cred.get("ssl_verify") else "validate",
+        server_cert_validation="validate",
+        message_encryption="always" if endpoint.startswith("http://") else "auto",
         operation_timeout_sec=30,
         read_timeout_sec=40,
     )

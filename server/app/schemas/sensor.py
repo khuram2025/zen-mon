@@ -136,6 +136,7 @@ class SensorUpdate(BaseModel):
 
 
 class SensorResponse(BaseModel):
+    authorization_pending: bool = False
     id: str
     name: str
     description: Optional[str]
@@ -328,6 +329,22 @@ class HeartbeatResponse(BaseModel):
     commands: List[HeartbeatCommand] = Field(default_factory=list)
 
 
+class ConfigSNMP(BaseModel):
+    version: str = "2c"
+    port: int = 161
+    community: Optional[str] = None
+    v3_username: Optional[str] = None
+    v3_context: Optional[str] = None
+    v3_auth_protocol: Optional[str] = None
+    v3_auth_passphrase: Optional[str] = None
+    v3_priv_protocol: Optional[str] = None
+    v3_priv_passphrase: Optional[str] = None
+    timeout_ms: int = 2000
+    retries: int = 1
+    interval: int = 60
+    oids: List[str] = Field(default_factory=lambda: ["1.3.6.1.2.1.1.3.0", "1.3.6.1.2.1.2.1.0"])
+
+
 class ConfigDevice(BaseModel):
     id: str
     hostname: str
@@ -335,9 +352,28 @@ class ConfigDevice(BaseModel):
     ping_enabled: bool
     ping_interval: int = 60
     snmp_enabled: bool = False
+    snmp: Optional[ConfigSNMP] = None
+
+
+class ConfigWorkflowStep(BaseModel):
+    name: str = ""
+    url: str
+    method: str = "GET"
+    headers: dict[str, str] = Field(default_factory=dict)
+    body: Optional[str] = None
+    expected_statuses: str = "200"
+    content_match: Optional[str] = None
+    follow_redirects: bool = True
 
 
 class ConfigServiceCheck(BaseModel):
+    credential_id: Optional[str] = None
+    credential_auth_type: str = ""
+    credential_username: str = Field(default="", repr=False)
+    credential_secret: str = Field(default="", repr=False)
+    credential_error: str = ""
+    workflow_operator: str = "all"
+    workflow_steps: List[ConfigWorkflowStep] = Field(default_factory=list)
     id: str
     name: str
     check_type: str

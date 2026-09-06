@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""Local-console configuration for a dedicated ZenPlus probe appliance."""
+import argparse
+import getpass
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import ssl
+import subprocess
+import tempfile
+import time
+import urllib.parse
+import urllib.request
+
+ENV = Path('/etc/zenplus-sensor/sensor.env')
+STATE = Path('/var/lib/zenplus-sensor/state.json')
+
+
+def command(*args, check=True):
+    return subprocess.run(args, check=check)
+
+
+def config():
+    values = {}
+    if ENV.exists():
+        for line in ENV.read_text().splitlines():
+            if '=' not in line or line.startswith('#'):
+                continue
+            key, value = line.split('=', 1)
+            # The appliance writes JSON-compatible double quoted values.
+            try:
+                values[key] = json.loads(value) if value.startswith('"') else value
+            except ValueError:
+                values[key] = value.strip('"')
+    return values
+
+
+def status():
+    values = config()
+    print('\nZenPlus Remote Sensor')
+    print('Controller:', values.get('ZENPLUS_SERVER_URL', '(not configured)'))
+    print('Name:', values.get('ZENPLUS_SENSOR_NAME', '(not configured)'))
+    if STATE.exists():
+        saved = json.loads(STATE.read_text())
+        print('Sensor ID:', saved.get('sensor_id', '(pending)'))
+        print('Authorization blocked:', bool(saved.get('authorization_blocked')))
+    command('ip', '-brief', 'address', check=False)
+    command('systemctl', '--no-pager', '--lines=0', 'status', 'zenplus-sensor', check=False)
+    command('/var/lib/zenplus-sensor/bin/zenplus-sensor', '--version', check=False)
+
+
+def write_config(values):
+    ENV.parent.mkdir(mode=0o770, parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=ENV.parent)
+    try:
+        with os.fdopen(fd, 'w') as stream:
+            for key, value in values.items():
+                if not re.fullmatch('[A-Z][A-Z0-9_]*', key) or '\n' in str(value) or '\r' in str(value):
+                    raise ValueError('Invalid configuration value')
+                stream.write(key + '=' + json.dumps(str(value), ensure_ascii=False) + '\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        shutil.chown(temporary, user='zenplus-sensor', group='zenplus-sensor')
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, ENV)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def controller():
+    values = config()
+    current = values.get('ZENPLUS_SERVER_URL', '')
+    url = input('Controller HTTPS URL [' + current + ']: ').strip().rstrip('/') or current
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in ('', '/'):
+        raise ValueError('Use an HTTPS controller origin, for example https://192.168.8.221')
+    ca = input('Trusted controller CA certificate file (blank for installed trust): ').strip()
+    context = ssl.create_default_context(cafile=ca or None)
+    # Never send the saved API key to a new controller while testing trust.
+    with urllib.request.urlopen(url + '/api/v1/sensor/appliance/manifest', context=context, timeout=15) as response:
+        if response.status != 200:
+            raise ValueError('Controller unavailable')
+    name = input('Sensor name [' + values.get('ZENPLUS_SENSOR_NAME', 'remote-probe') + ']: ').strip()
+    token = getpass.getpass('New enrollment token (blank to keep current enrollment): ').strip()
+    if STATE.exists() and current != url and not token:
+        raise ValueError('Changing controller requires a new enrollment token')
+    command('systemctl', 'stop', 'zenplus-sensor', check=False)
+    if ca:
+        target = Path('/usr/local/share/ca-certificates/zenplus-controller.crt')
+        shutil.copyfile(ca, target)
+        command('update-ca-certificates')
+    if token and STATE.exists():
+        # Retain prior controller credentials and buffered samples only in a
+        # root-only backup; never replay them to a different controller.
+        backup = Path('/var/backups/zenplus-sensor') / str(time.time_ns())
+        backup.mkdir(parents=True, mode=0o700)
+        STATE.rename(backup / 'state.json')
+        spool = STATE.parent / 'wal'
+        if spool.exists():
+            spool.rename(backup / 'spool')
+    values['ZENPLUS_SERVER_URL'] = url
+    values['ZENPLUS_SENSOR_NAME'] = name or values.get('ZENPLUS_SENSOR_NAME', 'remote-probe')
+    values['ZENPLUS_VERIFY_TLS'] = '1'
+    if token:
+        values['ZENPLUS_ENROLLMENT_TOKEN'] = token
+    write_config(values)
+    command('systemctl', 'enable', '--now', 'zenplus-sensor')
+    print('Configuration saved. Approve/assign this sensor in the controller Sensors page.')
+
+
+def network_document(interface, address=None, gateway=None, dns=None):
+    if not re.fullmatch(r'[a-zA-Z0-9_.:-]{1,32}', interface):
+        raise ValueError('Invalid interface name')
+    nic = {'dhcp4': True, 'dhcp6': False, 'optional': True}
+    if address:
+        ip = ipaddress.ip_interface(address)
+        route = ipaddress.ip_address(gateway)
+        if ip.version != route.version:
+            raise ValueError('Gateway and address must use the same IP version')
+        resolvers = [str(ipaddress.ip_address(x.strip())) for x in dns.split(',') if x.strip()]
+        nic = {'dhcp4': False, 'dhcp6': False, 'optional': True, 'addresses': [str(ip)],
+               'routes': [{'to': 'default', 'via': str(route)}], 'nameservers': {'addresses': resolvers}}
+    return {'network': {'version': 2, 'renderer': 'networkd', 'ethernets': {interface: nic}}}
+
+
+def network():
+    if os.environ.get('SSH_CONNECTION'):
+        raise ValueError('Change networking from the VM console so you can confirm connectivity')
+    command('ip', '-brief', 'address')
+    interface = input('Interface name: ').strip()
+    if not (Path('/sys/class/net') / interface).exists() or interface == 'lo':
+        raise ValueError('Choose an existing Ethernet interface')
+    mode = input('Address mode [dhcp/static]: ').strip().lower()
+    if mode not in ('dhcp', 'static'):
+        raise ValueError('Choose dhcp or static')
+    document = network_document(interface) if mode == 'dhcp' else network_document(
+        interface, input('IP address/prefix: ').strip(), input('Gateway: ').strip(), input('DNS IPs, comma separated: ').strip())
+    print(json.dumps(document, indent=2))
+    if input('Apply this configuration? [yes/no]: ').strip().lower() != 'yes':
+        return
+    import yaml
+    directory = Path('/etc/netplan')
+    backup = Path('/var/backups/zenplus-sensor/network') / str(time.time_ns())
+    backup.mkdir(parents=True, mode=0o700)
+    previous = list(directory.glob('*.yaml'))
+    for file in previous:
+        file.rename(backup / file.name)
+    target = directory / '90-zenplus-sensor.yaml'
+    target.write_text(yaml.safe_dump(document)); target.chmod(0o600)
+    try:
+        command('netplan', 'generate')
+        command('netplan', 'try', '--timeout', '90')
+        if input('Keep this working network configuration? [yes/no]: ').strip().lower() != 'yes':
+            raise ValueError('Network change cancelled')
+    except BaseException:
+        target.unlink(missing_ok=True)
+        for file in backup.glob('*.yaml'):
+            file.rename(directory / file.name)
+        command('netplan', 'apply', check=False)
+        raise
+    Path('/etc/cloud/cloud.cfg.d/99-disable-network-config.cfg').write_text('network: {config: disabled}\n')
+    print('Network saved. Previous configuration:', backup)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action', nargs='?', choices=['status', 'controller', 'network', 'menu'], default='menu')
+    args = parser.parse_args()
+    if os.geteuid() != 0:
+        parser.error('Run sudo sensor-config ' + args.action)
+    if args.action != 'menu':
+        return {'status': status, 'controller': controller, 'network': network}[args.action]()
+    while True:
+        print('\nZenPlus Sensor: 1 Status  2 Controller/enrollment  3 IP/DNS  4 Logs  0 Exit')
+        choice = input('Selection: ').strip()
+        if choice == '0':
+            break
+        try:
+            if choice == '1': status()
+            elif choice == '2': controller()
+            elif choice == '3': network()
+            elif choice == '4': command('journalctl', '-u', 'zenplus-sensor', '--no-pager', '-n', '25')
+        except (ValueError, OSError, subprocess.CalledProcessError) as error:
+            print('Configuration not completed:', error)
+
+
+if __name__ == '__main__':
+    main()

@@ -16,7 +16,8 @@ from app.api.v1 import sensor_api
 from app.api.v1.sensors import _bootstrap_cloud_init, _install_command, _sensor_env
 
 
-def test_sensor_appliance_manifest_reports_artifact_slots(client):
+def test_sensor_appliance_manifest_reports_artifact_slots(client, tmp_path, monkeypatch):
+    monkeypatch.setattr(sensor_api, "SENSOR_ARTIFACT_DIR", tmp_path)
     response = client.get("/api/v1/sensor/appliance/manifest")
 
     assert response.status_code == 200
@@ -28,6 +29,19 @@ def test_sensor_appliance_manifest_reports_artifact_slots(client):
         "enrollment_token",
         "sensor_name",
     ]
+
+
+@pytest.mark.parametrize("kind", ["qcow2", "vhdx"])
+def test_optional_hypervisor_download_is_advertised_when_published(client, tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(sensor_api, "SENSOR_ARTIFACT_DIR", tmp_path)
+    content = b"hypervisor image fixture"
+    (tmp_path / ("zenplus-sensor." + kind)).write_bytes(content)
+    manifest = client.get("/api/v1/sensor/appliance/manifest").json()
+    artifact = next(item for item in manifest["artifacts"] if item["kind"] == kind)
+    assert artifact["available"] is True
+    response = client.get("/api/v1/sensor/appliance/" + kind)
+    assert response.status_code == 200
+    assert response.content == content
 
 
 def test_sensor_appliance_manifest_uses_configured_https_base_url(client, monkeypatch):

@@ -275,7 +275,8 @@ def _console_user_cloud_init(data: Optional[SensorCreate]) -> str:
             "Console username must start with a lowercase letter or underscore and contain only lowercase letters, numbers, underscore, or dash",
         )
     username = json.dumps(data.console_username)
-    password = json.dumps(data.console_password)
+    from passlib.hash import sha512_crypt
+    password = json.dumps(sha512_crypt.using(rounds=200000).hash(data.console_password))
     return f"""
 users:
   - default
@@ -284,7 +285,7 @@ users:
     groups: [adm, sudo]
     shell: /bin/bash
     lock_passwd: false
-    plain_text_passwd: {password}
+    passwd: {password}
     sudo: ["ALL=(ALL) ALL"]
 chpasswd:
   expire: false
@@ -321,14 +322,28 @@ def _bootstrap_cloud_init(
         ca_command = "  - [ update-ca-certificates ]\n"
     return f"""#cloud-config
 {console_user}ssh_pwauth: {ssh_password_auth}
+disable_root: true
 write_files:
+  - path: /etc/ssh/sshd_config.d/00-zenplus-security.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      PermitRootLogin no
+      X11Forwarding no
+      AllowTcpForwarding no
+      AllowAgentForwarding no
+      PermitTunnel no
+      MaxAuthTries 3
+      LoginGraceTime 30
 {ca_file}  - path: /etc/zenplus-sensor/sensor.env
     owner: zenplus-sensor:zenplus-sensor
     permissions: '0600'
     content: |
 {env}
 runcmd:
-{ca_command}  - [ systemctl, enable, --now, zenplus-sensor.service ]
+{ca_command}  - [ /usr/sbin/sshd, -t ]
+  - [ systemctl, reload, ssh ]
+  - [ systemctl, enable, --now, zenplus-sensor.service ]
 """
 
 
@@ -367,6 +382,7 @@ def _nonsecret_bootstrap_config(data: SensorCreate) -> dict[str, object]:
     """Persist only values required to reproduce deployment media."""
     return {
         "controller_url": data.controller_url,
+        "authorization_pending": True,
         "proxy_url": data.proxy_url,
         "network_mode": data.network_mode,
         "sensor_ip": data.sensor_ip,
@@ -565,6 +581,7 @@ _SENSOR_LIST_SQL = """
 
 def _row_to_sensor(r: dict) -> SensorResponse:
     return SensorResponse(
+        authorization_pending=bool((r.get("bootstrap_config") or {}).get("authorization_pending")),
         id=str(r["id"]),
         name=r["name"],
         description=r.get("description"),
@@ -1120,6 +1137,10 @@ async def update_sensor(
     sets = ["updated_at = NOW()"]
     params: dict = {"id": sensor_id}
     update_data = data.model_dump(exclude_unset=True)
+    if update_data.get("site_id") is not None:
+        site = (await db.execute(text("SELECT id FROM sites WHERE id=:id"), {"id": update_data["site_id"]})).first()
+        if not site:
+            raise HTTPException(400, "Unknown site")
     for f in ("name", "description", "site_id", "location"):
         if f in update_data:
             sets.append(f"{f} = :{f}")
@@ -1226,6 +1247,24 @@ async def rotate_key(
         "the running sensor. Regenerate an enrollment token and reprovision the "
         "sensor VM instead.",
     )
+
+
+@router.post("/{sensor_id}/authorize", response_model=SensorResponse)
+async def authorize_sensor(
+    sensor_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(SENSOR_MANAGE),
+):
+    row = (await db.execute(text("""UPDATE sensors
+        SET bootstrap_config = COALESCE(bootstrap_config, '{}'::jsonb) || jsonb_build_object('authorization_pending', false),
+            status = 'online', status_reason = NULL, updated_at = NOW()
+        WHERE id = :id AND api_key_hash IS NOT NULL AND status != 'disabled'
+        RETURNING id"""), {"id": sensor_id})).first()
+    if not row:
+        raise HTTPException(409, "Sensor must be enrolled and enabled before authorization")
+    await write_audit_log(db, actor=user, action="sensor.authorize", resource_type="sensor", resource_id=str(sensor_id))
+    await db.commit()
+    return await get_sensor(sensor_id, db, user)
 
 
 @router.post("/{sensor_id}/disable", response_model=SensorResponse)
@@ -1368,9 +1407,9 @@ async def replace_assignments(
                                credential_id IS NULL
                                AND jsonb_array_length(
                                      COALESCE(workflow_steps, '[]'::jsonb)
-                                   ) = 0 AS remote_supported
+                                   ) = 0 OR sensor_supports_service_auth((SELECT version FROM sensors WHERE id=:sensor_id)) AS remote_supported
                           FROM service_checks WHERE id = :id"""),
-                {"id": item.target_id},
+                {"id": item.target_id, "sensor_id": sensor_id},
             )).mappings().first()
             if found and not found["remote_supported"]:
                 unsupported.append(str(item.target_id))
@@ -1385,7 +1424,7 @@ async def replace_assignments(
     if unsupported:
         raise HTTPException(
             400,
-            "Credential-backed and workflow service checks must remain on the central poller: "
+            "Update this sensor to 1.23.5 or later for authenticated and workflow service checks: "
             + ", ".join(unsupported),
         )
 
@@ -1418,3 +1457,26 @@ async def replace_assignments(
 def _json_dumps(value) -> str:
     import json
     return json.dumps(value)
+
+
+@router.get("/{sensor_id}/overview")
+async def sensor_overview(sensor_id: UUID, request: Request, db: AsyncSession = Depends(get_db), user: User = Depends(SENSOR_VIEW)):
+    from app.services.sensor_overview import assigned_targets, sensor_connection, sensor_measurements, target_results
+    import logging
+    row=(await db.execute(text(f"{_SENSOR_LIST_SQL} WHERE s.id=:id"),{'id':sensor_id})).mappings().first()
+    if not row: raise HTTPException(404, 'Sensor not found')
+    sensor=dict(row);now=datetime.now(timezone.utc)
+    sensor['status']=sensor_connection(sensor,now)
+    devices,services=await assigned_targets(db,sensor_id,user)
+    available=True
+    try:
+        measured=await asyncio.to_thread(sensor_measurements,sensor_id,devices,services)
+    except Exception:
+        logging.getLogger(__name__).exception('Sensor overview measurements unavailable for %s',sensor_id)
+        available=False;measured={}
+    devices,services=target_results(devices,services,measured,sensor['status'],sensor.get('version'),now)
+    from app.api.v1.sensor_api import _signed_binary_metadata, _binary_path
+    release,manifest,signature=_signed_binary_metadata('linux-amd64')
+    published={'version':release.get('version'), 'available':bool(manifest and signature and _binary_path('linux-amd64').is_file())}
+    return {'sensor':_row_to_sensor(sensor), 'controller_url':(sensor.get('bootstrap_config') or {}).get('controller_url') or _server_url(request),
+            'devices':devices,'services':services,'measurements_available':available,'observed_at':now,'release':published}

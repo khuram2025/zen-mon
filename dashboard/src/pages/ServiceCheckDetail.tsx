@@ -1,3 +1,4 @@
+import { MonitoringSites } from '@/components/MonitoringSites'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -763,6 +764,7 @@ export function ServiceCheckDetailPage() {
 
       {tab === 'overview' && (
         <div className="space-y-4">
+          <MonitoringSites targetType="service_check" targetId={check.id} />
           <AvailabilityTimeline
             points={points}
             statusHistory={seededHistory}

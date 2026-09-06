@@ -47,7 +47,7 @@ class WinCredCreate(BaseModel):
     auth_method: AuthMethod = "ntlm"
     transport: Transport = "http"
     port: int = Field(default=5985, ge=1, le=65535)
-    ssl_verify: bool = False
+    ssl_verify: bool = True
     dc_host: Optional[str] = Field(default=None, max_length=255)
     description: Optional[str] = None
 

@@ -1284,3 +1284,57 @@ func waitForWorkerCount(t *testing.T, scheduler *checkScheduler, want int) {
 	}
 	t.Fatalf("active worker count=%d, want %d", len(scheduler.sem), want)
 }
+
+// Exercise the remote wire configuration through the production shared HTTP checker.
+func TestRemoteAuthenticatedWorkflowUsesSharedChecker(t *testing.T) {
+	calls := 0
+	endpoint := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, password, ok := r.BasicAuth()
+		if !ok || user != "operator" || password != "test-secret" {
+			w.WriteHeader(401)
+			return
+		}
+		calls++
+		if r.URL.Path == "/login" {
+			http.SetCookie(w, &http.Cookie{Name: "session", Value: "ready", Path: "/"})
+			w.WriteHeader(204)
+			return
+		}
+		cookie, err := r.Cookie("session")
+		if err != nil || cookie.Value != "ready" {
+			w.WriteHeader(403)
+			return
+		}
+		fmt.Fprint(w, "healthy")
+	}))
+	defer endpoint.Close()
+	credentialID := uuid.New()
+	remote := configServiceCheck{ID: uuid.NewString(), CheckType: "http", Enabled: true,
+		CredentialID: &credentialID, CredentialAuthType: "basic", CredentialUsername: "operator", CredentialSecret: "test-secret",
+		HTTPIgnoreTLSErrors: true, Timeout: 2, WorkflowOperator: "all",
+		WorkflowSteps: []checker.HTTPWorkflowStep{
+			{Name: "Login", URL: endpoint.URL + "/login", Method: "GET", ExpectedStatuses: "204", Headers: map[string]string{"X-Test": "original"}},
+			{Name: "Health", URL: endpoint.URL + "/health", Method: "GET", ExpectedStatuses: "200", ContentMatch: "healthy"},
+		},
+	}
+	snapshot := cloneConfig(configResponse{ServiceChecks: []configServiceCheck{remote}})
+	snapshot.ServiceChecks[0].WorkflowSteps[0].Headers["X-Test"] = "changed"
+	if remote.WorkflowSteps[0].Headers["X-Test"] != "original" {
+		t.Fatal("mutable workflow config leaked across snapshots")
+	}
+	var payload map[string]any
+	scheduler := newCheckScheduler(checker.NewChecker(zap.NewNop().Sugar()), "site-a", 1, func(_ string, value any) error { payload = value.(map[string]any); return nil }, zap.NewNop().Sugar())
+	scheduler.runService(context.Background(), remote, uuid.MustParse(remote.ID), time.Minute)
+	if calls != 2 || payload["is_up"] != true {
+		t.Fatalf("authenticated workflow failed: calls=%d payload=%v", calls, payload)
+	}
+	wire, _ := json.Marshal(payload)
+	if strings.Contains(string(wire), "test-secret") {
+		t.Fatal("credential leaked into telemetry")
+	}
+	remote.CredentialError = "Service credential could not be decrypted"
+	scheduler.runService(context.Background(), remote, uuid.MustParse(remote.ID), time.Minute)
+	if calls != 2 || payload["is_up"] != false {
+		t.Fatal("credential error did not fail closed")
+	}
+}

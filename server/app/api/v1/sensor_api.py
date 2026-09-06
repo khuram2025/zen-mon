@@ -86,13 +86,15 @@ SENSOR_ARTIFACT_BASENAMES = {
     "ovf": "zenplus-sensor.ovf",
     "sha256": "SHA256SUMS",
     "metadata": "BUILD-METADATA.json",
+    "qcow2": "zenplus-sensor.qcow2",
+    "vhdx": "zenplus-sensor.vhdx",
 }
 SENSOR_BINARY_NAME = "zenplus-sensor"
 SENSOR_BINARY_SHA_NAME = "zenplus-sensor.sha256"
 SENSOR_RELEASE_PUBLIC_KEY = Path(
     os.getenv(
-        "ZENPLUS_RELEASE_PUBLIC_KEY",
-        "/opt/zenplus/updater/keys/zentryc-release.pub",
+        "ZENPLUS_SENSOR_RELEASE_PUBLIC_KEY",
+        os.getenv("ZENPLUS_RELEASE_PUBLIC_KEY", "/opt/zenplus/updater/keys/zentryc-release.pub"),
     )
 )
 SUPPORTED_SENSOR_BINARY_PLATFORMS = {
@@ -113,6 +115,7 @@ async def _authenticate(
     sensor_id: str,
     bearer: str,
     db: AsyncSession,
+    allow_pending: bool = False,
 ) -> dict:
     """Resolve & validate a sensor by its ID + bearer key.
     Returns the sensor row as a dict on success; raises 401 otherwise.
@@ -141,6 +144,9 @@ async def _authenticate(
 
     if not hmac.compare_digest(_sha256(bearer), str(expected)):
         raise HTTPException(401, "Invalid sensor api key")
+
+    if not allow_pending and (row.get("bootstrap_config") or {}).get("authorization_pending"):
+        raise HTTPException(403, "Sensor disabled: awaiting administrator authorization")
 
     return dict(row)
 
@@ -377,7 +383,8 @@ async def enroll(
                   last_seen_at = NOW(),
                   last_heartbeat_at = NOW(),
                   last_ip = :ip,
-                  status = 'online',
+                  status = CASE WHEN COALESCE((bootstrap_config->>'authorization_pending')::boolean, false)
+                                THEN 'pending' ELSE 'online' END,
                   status_reason = NULL,
                   updated_at = NOW()
                 WHERE id = :id"""),
@@ -538,8 +545,15 @@ async def heartbeat(
     x_sensor_id: str = Header(default=""),
     authorization: str = Header(default=""),
 ):
-    sensor = await _authenticate(x_sensor_id, _strip_bearer(authorization), db)
+    sensor = await _authenticate(x_sensor_id, _strip_bearer(authorization), db, allow_pending=True)
     await _limit_sensor_request(request, "heartbeat", sensor_id=x_sensor_id, limit=180)
+    if (sensor.get("bootstrap_config") or {}).get("authorization_pending"):
+        await db.execute(text("""UPDATE sensors SET last_heartbeat_at = NOW(), last_seen_at = NOW(),
+            last_ip = :ip, version = :version, hostname = :hostname,
+            status = 'pending', status_reason = 'Awaiting administrator authorization'
+            WHERE id = :id"""), {"id": sensor["id"], "ip": _client_ip(request), "version": data.version, "hostname": data.hostname})
+        await db.commit()
+        raise HTTPException(403, "Sensor disabled: awaiting administrator authorization")
     client_ip = _client_ip(request)
     if MIN_SUPPORTED_SENSOR_VERSION:
         sensor["min_supported_version"] = MIN_SUPPORTED_SENSOR_VERSION
@@ -631,8 +645,8 @@ async def _config_etag(sensor_id: UUID, db: AsyncSession) -> str:
                        host(d.ip_address)::text AS ip_address,
                        d.ping_enabled, d.ping_interval, d.snmp_enabled
                   FROM devices d
-                  JOIN device_polling_owner owner ON owner.device_id = d.id
-                 WHERE owner.owner_kind = 'sensor' AND owner.sensor_id = :id
+                  JOIN device_monitoring_vantages owner ON owner.device_id = d.id
+                 WHERE owner.sensor_id = :id
                  ORDER BY d.id"""),
         {"id": sensor_id},
     )).mappings().all()
@@ -646,20 +660,17 @@ async def _config_etag(sensor_id: UUID, db: AsyncSession) -> str:
                        sc.config, sc.tls_warn_days,
                        sc.tls_critical_days, sc.check_interval, sc.timeout,
                        sc.retry_count, COALESCE(sc.retry_delay_s, 30) AS retry_delay_s,
-                       sc.enabled
-                  FROM service_checks sc
-                 WHERE sc.credential_id IS NULL
-                   AND jsonb_array_length(COALESCE(sc.workflow_steps, '[]'::jsonb)) = 0
-                   AND (sc.default_sensor_id = :id
-                    OR sc.id IN (
-                        SELECT a.target_id FROM sensor_assignments a
-                         WHERE a.sensor_id = :id
-                           AND a.target_type = 'service_check'
-                    ))
+                       sc.enabled, sc.credential_id, sc.workflow_operator, sc.workflow_steps,
+                       cred.auth_type AS credential_auth_type, cred.username AS credential_username, cred.secret_cipher
+                  FROM service_checks sc LEFT JOIN service_credentials cred ON cred.id=sc.credential_id
+                 WHERE EXISTS (SELECT 1 FROM service_monitoring_vantages v WHERE v.service_check_id=sc.id AND v.sensor_id=:id)
                  ORDER BY sc.id"""),
         {"id": sensor_id},
     )).mappings().all()
+    from app.services.sensor_snmp import sensor_snmp_config
+    snmp = await sensor_snmp_config(sensor_id, db)
     material = {
+        "snmp": {key: value.model_dump() for key, value in snmp.items()},
         "sensor": dict(sensor) if sensor else None,
         "assignments": [dict(row) for row in assignments],
         "devices": [dict(row) for row in devices],
@@ -671,24 +682,28 @@ async def _config_etag(sensor_id: UUID, db: AsyncSession) -> str:
 @router.get("/config", response_model=ConfigResponse)
 async def get_config(
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
     x_sensor_id: str = Header(default=""),
     authorization: str = Header(default=""),
     if_none_match: str = Header(default=""),
 ):
+    if request.url.scheme != "https":
+        raise HTTPException(400, "Sensor configuration requires HTTPS")
+    response.headers["Cache-Control"] = "no-store"
     sensor = await _authenticate(x_sensor_id, _strip_bearer(authorization), db)
     await _limit_sensor_request(request, "config", sensor_id=x_sensor_id, limit=120)
     etag = await _config_etag(sensor["id"], db)
     if if_none_match and if_none_match.strip('"') == etag:
-        return Response(status_code=304)
+        return Response(status_code=304, headers={"Cache-Control": "no-store"})
 
     # Pull assigned devices.
     devices = (await db.execute(
         text("""SELECT DISTINCT d.id, d.hostname, host(d.ip_address)::text AS ip_address,
                        d.ping_enabled, d.ping_interval, d.snmp_enabled
                 FROM devices d
-                JOIN device_polling_owner owner ON owner.device_id = d.id
-                WHERE owner.owner_kind = 'sensor' AND owner.sensor_id = :sid
+                JOIN device_monitoring_vantages owner ON owner.device_id = d.id
+                WHERE owner.sensor_id = :sid
                 ORDER BY d.hostname"""),
         {"sid": sensor["id"]},
     )).mappings().all()
@@ -705,20 +720,18 @@ async def get_config(
                        sc.config,
                        sc.tls_warn_days, sc.tls_critical_days,
                        sc.check_interval, sc.timeout, sc.retry_count,
-                       COALESCE(sc.retry_delay_s, 30) AS retry_delay_s, sc.enabled
-                FROM service_checks sc
+                       COALESCE(sc.retry_delay_s, 30) AS retry_delay_s, sc.enabled, sc.credential_id, sc.workflow_operator, sc.workflow_steps,
+                       cred.auth_type AS credential_auth_type, cred.username AS credential_username, cred.secret_cipher
+                FROM service_checks sc LEFT JOIN service_credentials cred ON cred.id=sc.credential_id
                 WHERE sc.enabled = TRUE
-                  AND sc.credential_id IS NULL
-                  AND jsonb_array_length(COALESCE(sc.workflow_steps, '[]'::jsonb)) = 0
-                  AND (sc.id IN (
-                    SELECT a.target_id FROM sensor_assignments a
-                    WHERE a.sensor_id = :sid AND a.target_type = 'service_check'
-                )
-                   OR sc.default_sensor_id = :sid)
+                  AND EXISTS (SELECT 1 FROM service_monitoring_vantages v WHERE v.service_check_id=sc.id AND v.sensor_id=:sid)
                 ORDER BY sc.name"""),
         {"sid": sensor["id"]},
     )).mappings().all()
 
+    from app.services.sensor_snmp import sensor_snmp_config
+    from app.services.sensor_service_checks import service_auth_config
+    snmp = await sensor_snmp_config(sensor["id"], db)
     return ConfigResponse(
         etag=etag,
         sensor_id=str(sensor["id"]),
@@ -729,12 +742,14 @@ async def get_config(
                 ping_enabled=bool(d["ping_enabled"]),
                 ping_interval=d.get("ping_interval") or 60,
                 snmp_enabled=bool(d.get("snmp_enabled") or False),
+                snmp=snmp.get(str(d["id"])),
             )
             for d in devices
         ],
         service_checks=[
             ConfigServiceCheck(
                 id=str(sc["id"]), name=sc["name"], check_type=sc["check_type"],
+                **service_auth_config(sc),
                 target_host=sc.get("target_host"), target_port=sc.get("target_port"),
                 target_url=sc.get("target_url"),
                 http_method=sc.get("http_method"),
@@ -770,10 +785,8 @@ async def _allowed_device_ids(sensor_id: UUID, device_ids: set[UUID], db: AsyncS
         return set()
     rows = (await db.execute(
         text("""SELECT owner.device_id::text
-                  FROM device_polling_owner owner
-                 WHERE owner.device_id = ANY(:ids)
-                   AND owner.owner_kind = 'sensor'
-                   AND owner.sensor_id = :sid"""),
+                  FROM device_monitoring_vantages owner
+                 WHERE owner.device_id = ANY(:ids) AND owner.sensor_id = :sid"""),
         {"sid": sensor_id, "ids": list(device_ids)},
     )).all()
     return {str(r[0]) for r in rows}
@@ -786,15 +799,7 @@ async def _allowed_service_check_ids(sensor_id: UUID, check_ids: set[UUID], db: 
         text("""SELECT sc.id::text
                 FROM service_checks sc
                 WHERE sc.id = ANY(:ids)
-                  AND sc.credential_id IS NULL
-                  AND jsonb_array_length(COALESCE(sc.workflow_steps, '[]'::jsonb)) = 0
-                  AND (
-                    sc.default_sensor_id = :sid
-                    OR sc.id IN (
-                        SELECT a.target_id FROM sensor_assignments a
-                        WHERE a.sensor_id = :sid AND a.target_type = 'service_check'
-                    )
-                  )"""),
+                  AND EXISTS (SELECT 1 FROM service_monitoring_vantages v WHERE v.service_check_id=sc.id AND v.sensor_id=:sid)"""),
         {"sid": sensor_id, "ids": list(check_ids)},
     )).all()
     return {str(r[0]) for r in rows}
@@ -1297,6 +1302,7 @@ async def _update_service_vantage_and_consensus(
                       FROM service_check_vantage_status v
                       LEFT JOIN sensors s ON s.id::text = v.poller_id
                       JOIN policy p ON p.id = v.service_check_id
+                      JOIN service_monitoring_vantages selected ON selected.service_check_id=v.service_check_id AND selected.poller_id=v.poller_id
                      WHERE (v.poller_id = 'central' OR s.status IN ('online', 'degraded'))
                        AND v.last_result_at >= NOW() - make_interval(secs => p.freshness_s)
                 ), counts AS (
@@ -1336,6 +1342,7 @@ async def _update_service_vantage_and_consensus(
                        updated_at = NOW()
                  FROM verdict v
                  WHERE sc.id = :check_id AND v.state IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM service_monitoring_vantages central WHERE central.service_check_id=sc.id AND central.poller_id='central')
                    AND (sc.last_check_at IS NULL OR sc.last_check_at <= v.newest)
                 RETURNING sc.status AS new_status, sc.last_check_at,
                           sc.last_response_ms, sc.last_error,
@@ -1764,6 +1771,7 @@ async def sensor_appliance_manifest(request: Request):
             _artifact_info("ova", request),
             _artifact_info("ovf", request),
             _artifact_info("sha256", request),
+            *[_artifact_info(kind, request) for kind in ("qcow2", "vhdx") if _artifact_path(kind).is_file()],
         ],
         "bootstrap": {
             "method": "cloud-init NoCloud seed ISO",

@@ -1,0 +1,30 @@
+#!/usr/bin/python3
+"""Narrow LVM reporting and existing-PV resize boundary for the API."""
+import os
+import re
+import stat
+import subprocess
+import sys
+if os.geteuid()!=0 or len(sys.argv)<2: sys.exit('Root and a supported verb required')
+verb, args = sys.argv[1], sys.argv[2:]
+if verb not in {'vgs','lvs','pvs','pvresize'}: sys.exit('Unsupported LVM operation')
+def block(path):
+    return path.startswith('/dev/') and '..' not in path and stat.S_ISBLK(os.stat(path).st_mode)
+try:
+    if verb=='pvresize':
+        if len(args)!=1 or not block(args[0]): raise ValueError()
+        result=subprocess.run(['/usr/sbin/pvs',args[0],'--noheadings','-o','vg_name'],capture_output=True,text=True,check=True,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin'},timeout=15)
+        if not result.stdout.strip(): raise ValueError()
+    else:
+        index=0
+        while index<len(args):
+            arg=args[index]
+            if arg in ('--noheadings','--nosuffix'): index+=1; continue
+            if arg=='--units' and index+1<len(args) and args[index+1]=='b': index+=2; continue
+            if arg=='-o' and index+1<len(args) and re.fullmatch(r'(?:vg_name|vg_size|vg_free|pv_count|lv_size|pv_name|pv_size|pv_free)(?:,(?:vg_name|vg_size|vg_free|pv_count|lv_size|pv_name|pv_size|pv_free))*',args[index+1]): index+=2; continue
+            if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_+-]*(?:/[A-Za-z0-9][A-Za-z0-9_+-]*)?',arg) or (arg.startswith('/dev/') and block(arg)): index+=1; continue
+            raise ValueError()
+    result=subprocess.run(['/usr/sbin/'+verb,*args],env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin'},timeout=120)
+    sys.exit(result.returncode)
+except Exception:
+    sys.exit('LVM request rejected or failed')

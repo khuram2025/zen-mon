@@ -22,6 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.crypto import encrypt_text, decrypt_secret
 from app.core.security import require_admin_user
 from app.models.user import User
 from app.services.audit_service import write_audit_log
@@ -106,7 +107,7 @@ def _row_to_response(r: dict) -> CredentialResponse:
         name=r["name"],
         description=r.get("description"),
         snmp_version=r["snmp_version"],
-        community=r.get("community"),
+        community=None,
         v3_username=r.get("v3_username"),
         v3_context=r.get("v3_context"),
         v3_security_level=r.get("v3_security_level"),
@@ -189,11 +190,11 @@ async def create_credential(
         """),
         {
             "name": data.name, "desc": data.description, "ver": data.snmp_version,
-            "community": data.community,
+            "community": encrypt_text(data.community),
             "v3user": data.v3_username, "v3ctx": data.v3_context,
             "v3sec": data.v3_security_level if data.snmp_version == "3" else None,
-            "v3auth": data.v3_auth_protocol, "v3authpw": data.v3_auth_passphrase,
-            "v3priv": data.v3_priv_protocol, "v3privpw": data.v3_priv_passphrase,
+            "v3auth": data.v3_auth_protocol, "v3authpw": encrypt_text(data.v3_auth_passphrase),
+            "v3priv": data.v3_priv_protocol, "v3privpw": encrypt_text(data.v3_priv_passphrase),
             "port": data.port, "timeout": data.timeout_ms, "retries": data.retries,
             "is_default": data.is_default, "uid": user.id,
         },
@@ -236,8 +237,10 @@ async def update_credential(
     update_data = data.model_dump(exclude_unset=True)
     for py_field, db_col in field_map.items():
         if py_field in update_data:
+            if py_field in {"community", "v3_auth_passphrase", "v3_priv_passphrase"} and not update_data[py_field]:
+                continue
             sets.append(f"{db_col} = :{py_field}")
-            params[py_field] = update_data[py_field]
+            params[py_field] = encrypt_text(update_data[py_field]) if py_field in {"community", "v3_auth_passphrase", "v3_priv_passphrase"} else update_data[py_field]
 
     if data.is_default:
         await db.execute(text("UPDATE snmp_credentials SET is_default = FALSE WHERE is_default = TRUE AND id != :id"), {"id": cred_id})
@@ -336,8 +339,7 @@ async def get_credential_secrets(
     """Reveal the stored community/passphrases for an authenticated user.
 
     Used by the edit dialog so admins can review what they previously saved.
-    Passphrases on snmp_credentials are stored as plaintext (see
-    device_service._apply_credential), so no decryption step is needed here.
+    Secrets are decrypted only for this explicitly audited administrator request.
     """
     row = (await db.execute(
         text("SELECT community, v3_auth_passphrase, v3_priv_passphrase "
@@ -355,9 +357,9 @@ async def get_credential_secrets(
     )
     await db.commit()
     return CredentialSecrets(
-        community=row.get("community"),
-        v3_auth_passphrase=row.get("v3_auth_passphrase"),
-        v3_priv_passphrase=row.get("v3_priv_passphrase"),
+        community=decrypt_secret(row.get("community")),
+        v3_auth_passphrase=decrypt_secret(row.get("v3_auth_passphrase")),
+        v3_priv_passphrase=decrypt_secret(row.get("v3_priv_passphrase")),
     )
 
 

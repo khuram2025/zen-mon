@@ -48,6 +48,7 @@ import { SettingsPage as UdtSettingsPage } from '@/pages/udt/SettingsPage'
 import { ManualMapsEntry } from '@/pages/ManualMapsEntry'
 import { ReportsPage } from '@/pages/ReportsPage'
 import { SensorsPage } from '@/pages/SensorsPage'
+import { SensorDetailPage } from '@/pages/SensorDetailPage'
 import { NetflowPage, NetflowDevicePage, NetflowSectionPage } from '@/pages/NetflowPage'
 import { ApmLayout } from '@/pages/apm/ApmLayout'
 import { ApmSettingsPage } from '@/pages/apm/ApmSettingsPage'
@@ -195,6 +196,7 @@ export default function App() {
         <Route path="mibs" element={<Navigate to="/settings/general?tab=mibs" replace />} />
         <Route path="templates" element={<Navigate to="/settings/general?tab=templates" replace />} />
         <Route path="sensors" element={<SensorsPage />} />
+        <Route path="sensors/:id" element={<SensorDetailPage />} />
         <Route path="apm" element={<ApmLayout />}>
           <Route index element={<ApmOverviewPage />} />
           <Route path="services" element={<ApmServicesPage />} />

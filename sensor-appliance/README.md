@@ -36,6 +36,8 @@ The controller exposes:
 - `GET /api/v1/sensor/appliance/ova`
 - `GET /api/v1/sensor/appliance/ovf`
 - `GET /api/v1/sensor/appliance/sha256`
+- `GET /api/v1/sensor/appliance/qcow2` (KVM/cloud)
+- `GET /api/v1/sensor/appliance/vhdx` (Hyper-V)
 
 Artifacts are served from:
 
@@ -59,7 +61,8 @@ SHA256SUMS
 4. Admin downloads the OVA/OVF from the controller.
 5. Admin deploys the VM in the remote location.
 6. Admin attaches the downloaded NoCloud seed ISO before first boot. The seed carries controller trust, networking, and the one-time enrollment token.
-7. Sensor enrolls, heartbeats, pulls assigned configuration, and starts probing.
+7. Sensor enrolls and appears as pending. Confirm its hostname/address and click **Authorize sensor** in its details. Only then can it pull credentials, run assignments, and upload results.
+8. Select the required devices and service checks in Assignments. From the VM console, run `sudo sensor-config` to view status, configure DHCP/static IP/DNS, change the controller URL, or re-enroll. Enable a console administrator when creating the seed if console access is needed; the generic image has no shared password.
 
 ## Build Workflow
 
@@ -102,6 +105,7 @@ The initial binary implements:
 - ETag-aware config pull with an atomic last-known-good cache,
 - interval-aware bounded worker scheduling with per-target overlap prevention,
 - ICMP/TCP/HTTP/TLS/DNS probe workers,
+- SNMPv1/v2c/v3 scalar GET workers, using the assigned device's effective credentials, polling interval, and bounded timeout/retries; initial scalars are sysUpTime (seconds) and ifNumber,
 - a durable append-only result spool under `/var/lib/zenplus-sensor/wal`,
 - oldest-first batched ping and service-result upload with stable retry keys,
 - independent heartbeat, config, probe, and upload loops,
@@ -142,10 +146,34 @@ also pin that verified trust anchor.
 containing directory permits that account to atomically replace the file after
 enrollment, clearing the one-time token without a truncation window.
 
+## Private sensor release channel
+
+For an internally maintained sensor build, retain an Ed25519 signing key on a
+protected release host and build with `scripts/build-signed-runtime.py --key
+/secure/private.pem --version sensor-X.Y.Z --output /release/linux-amd64`.
+The public key is compiled into the sensor. Configure the controller's
+`ZENPLUS_SENSOR_RELEASE_PUBLIC_KEY` to the matching public key path (this is
+separate from the main controller OTA key). Publish the binary, checksum,
+manifest, and signature together under `artifacts/sensors/bin/linux-amd64`.
+The sensor details **Upgrade** action uses that signed manifest. The API does
+not possess or use the signing key. Keep the same signing identity for future
+releases, back it up securely, and never include its private key in VM images.
+
+For an image built with that release, set `ZENPLUS_SENSOR_BINARY` to the signed
+binary before running `build-real-ova.sh`. Run `finalize-vmware-ova.ps1` against
+its VMDK and OVF on a VMware Workstation build host, then validate a full OVA
+import before publishing. This normalizes QEMU's stream format using VMware's
+writer and emits a compliant SHA256 manifest. Hyper-V uses a Generation 1 VM
+with the VHDX attached to IDE; KVM uses the QCOW2 and NoCloud seed. These formats
+share the same userspace runtime and controller protocol.
+
+Binary updates cover probe features. OS packages and local administration
+tools require an appliance maintenance/rebuild cycle; the remote command
+channel deliberately does not run arbitrary root scripts.
+
 Still to add before a commercial release:
 
-- SNMP probe worker,
-- local status CLI,
+- SNMP table/interface/template collectors beyond the initial scalar checks,
 - signed config verification,
 - mTLS.
 

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal, Optional
 from uuid import UUID
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_serializer, model_validator
 
 SnmpVersion = Literal["1", "2c", "3"]
 SnmpAuthProtocol = Literal["MD5", "SHA", "SHA224", "SHA256", "SHA384", "SHA512"]
@@ -95,6 +95,10 @@ class DeviceUpdate(BaseModel):
 
 
 class DeviceResponse(BaseModel):
+    @field_serializer('snmp_community')
+    def mask_community(self, value):
+        return None
+
     id: UUID
     hostname: str
     # None for controller-reported children that expose no reachable IP.

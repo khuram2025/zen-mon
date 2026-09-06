@@ -42,12 +42,16 @@ if [[ ! -f "$BASE_IMG" ]]; then
 fi
 
 echo "Building zenplus-sensor runtime"
+if [[ -n "${ZENPLUS_SENSOR_BINARY:-}" ]]; then
+  install -m 0755 "$ZENPLUS_SENSOR_BINARY" "$SENSOR_BIN"
+else
 (
   cd "$ROOT/poller"
   /usr/local/go/bin/go build -trimpath \
     -ldflags="-s -w -X main.version=sensor-$VERSION -X main.commit=$SENSOR_COMMIT -X main.buildDate=$SENSOR_BUILD_DATE" \
     -o "$SENSOR_BIN" ./cmd/sensor
 )
+fi
 
 rm -f "$WORK_QCOW2" "$VMDK" "$OVF" "$MF" "$OVA" "$METADATA"
 qemu-img convert -O qcow2 "$BASE_IMG" "$WORK_QCOW2"
@@ -55,6 +59,8 @@ qemu-img resize "$WORK_QCOW2" "${DISK_GB}G"
 
 export LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}"
 virt-customize -a "$WORK_QCOW2" \
+  --copy-in "$APPLIANCE_DIR/scripts/sensor-config:/usr/local/sbin" \
+  --run-command 'chmod 0755 /usr/local/sbin/sensor-config' \
   --copy-in "$APPLIANCE_DIR/systemd/zenplus-sensor.service:/etc/systemd/system" \
   --mkdir /etc/zenplus-sensor \
   --mkdir /var/lib/zenplus-sensor \
@@ -161,7 +167,7 @@ EOF
 
 (
   cd "$OUT_DIR"
-  sha256sum zenplus-sensor.ovf zenplus-sensor-disk1.vmdk > "$(basename "$MF")"
+  sha256sum zenplus-sensor.ovf zenplus-sensor-disk1.vmdk | awk '{printf "SHA256(%s)= %s\n", $2, $1}' > "$(basename "$MF")"
   tar -cf "$(basename "$OVA")" zenplus-sensor.ovf zenplus-sensor.mf zenplus-sensor-disk1.vmdk
 )
 
@@ -178,4 +184,5 @@ cat > "$METADATA" <<EOF
 EOF
 
 echo "Built real bootable sensor appliance:"
+echo "Before VMware publication, normalize and validate with scripts/finalize-vmware-ova.ps1."
 ls -lh "$OVA" "$OVF" "$VMDK" "$METADATA"

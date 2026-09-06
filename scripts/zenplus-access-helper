@@ -1,0 +1,72 @@
+#!/usr/bin/python3
+"""Fixed-path root helper for management network policy. No command/path inputs."""
+import ipaddress
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+POLICY = Path('/etc/zenplus/access-policy.json')
+SNIPPET = Path('/etc/nginx/snippets/zenplus-management-access.conf')
+DEFAULT = {'web_restricted':False,'ssh_restricted':False,'allowed_cidrs':[]}
+
+def run(argv, **kwargs):
+    return subprocess.run(argv, check=True, capture_output=True, text=True, timeout=15, **kwargs)
+
+def write(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(dir=path.parent)
+    with os.fdopen(fd,'w') as f: f.write(value)
+    os.chmod(name,0o644)
+    os.replace(name,path)
+
+def firewall(policy):
+    for tool, family in [('iptables',4),('ip6tables',6)]:
+        subprocess.run([tool,'-w','-N','ZENPLUS_INTERNAL'], capture_output=True)
+        run([tool+'-restore','--noflush'], input='*filter\n-F ZENPLUS_INTERNAL\n-A ZENPLUS_INTERNAL -i lo -j RETURN\n-A ZENPLUS_INTERNAL -j DROP\nCOMMIT\n')
+        internal=[tool,'-w','-C','INPUT','-p','tcp','-m','multiport','--dports','8000,8001,8081,8091,5174','-j','ZENPLUS_INTERNAL']
+        if subprocess.run(internal,capture_output=True).returncode:
+            internal[2]='-I'; internal.insert(4,'1'); run(internal)
+        subprocess.run([tool,'-w','-N','ZENPLUS_SSH_ACCESS'], capture_output=True)
+        lines = ['*filter','-F ZENPLUS_SSH_ACCESS','-A ZENPLUS_SSH_ACCESS -i lo -j RETURN','-A ZENPLUS_SSH_ACCESS -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN']
+        for cidr in policy['allowed_cidrs']:
+            if ipaddress.ip_network(cidr).version == family:
+                lines.append('-A ZENPLUS_SSH_ACCESS -s '+cidr+' -j RETURN')
+        lines.extend(['-A ZENPLUS_SSH_ACCESS -j '+('DROP' if policy['ssh_restricted'] else 'RETURN'),'COMMIT',''])
+        run([tool+'-restore','--noflush'], input='\n'.join(lines))
+        args=[tool,'-w','-C','INPUT','-p','tcp','--dport','22','-j','ZENPLUS_SSH_ACCESS']
+        if subprocess.run(args,capture_output=True).returncode:
+            args[2]='-I'; args.insert(4,'1'); run(args)
+
+def apply(policy):
+    cidrs = policy['allowed_cidrs']
+    snippet = ''.join('allow '+cidr+';\n' for cidr in cidrs)+'deny all;\n' if policy['web_restricted'] else '# Management web access is open by administrator choice.\n'
+    write(SNIPPET,snippet)
+    run(['nginx','-t'])
+    firewall(policy)
+    write(POLICY,json.dumps(policy))
+    run(['systemctl','reload','nginx'])
+
+if os.geteuid()!=0 or sys.argv[1:] not in (['apply'],['restore']):
+    sys.exit('Expected root and apply or restore')
+old = json.loads(POLICY.read_text()) if POLICY.exists() else DEFAULT
+try:
+    if sys.argv[1]=='restore':
+        firewall(old)
+    else:
+        fd=os.open('/opt/zenplus/data/access-staging/policy.json',os.O_RDONLY|os.O_NOFOLLOW)
+        with os.fdopen(fd) as f: raw=f.read(16385)
+        if len(raw)>16384: raise ValueError('Oversized policy')
+        data=json.loads(raw)
+        if set(data)!=set(DEFAULT) or type(data['web_restricted']) is not bool or type(data['ssh_restricted']) is not bool or type(data['allowed_cidrs']) is not list or len(data['allowed_cidrs'])>50: raise ValueError('Invalid policy')
+        data['allowed_cidrs']=[str(ipaddress.ip_network(v,strict=False)) for v in data['allowed_cidrs']]
+        if (data['web_restricted'] or data['ssh_restricted']) and not data['allowed_cidrs']: raise ValueError('Empty allowlist')
+        try: apply(data)
+        except Exception:
+            apply(old)
+            raise
+    print('Access policy applied')
+except Exception as exc:
+    print('Access policy failed: '+type(exc).__name__,file=sys.stderr)
+    sys.exit(1)

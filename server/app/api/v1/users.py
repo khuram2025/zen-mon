@@ -1,3 +1,5 @@
+from app.core.crypto import encrypt_config, decrypt_config
+import ssl
 from datetime import datetime, timezone
 from uuid import UUID
 from typing import Optional
@@ -27,12 +29,12 @@ async def _send_account_notice(db: AsyncSession, user: User, *, subject: str,
             "SELECT config FROM notification_gateways "
             "WHERE type = 'smtp' AND is_default = true LIMIT 1"
         ))).first()
-        gw = dict(row.config) if row else None
+        gw = decrypt_config(row.config) if row else None
         if not gw:
             row = (await db.execute(text(
                 "SELECT value FROM system_settings WHERE key = 'smtp'"
             ))).first()
-            gw = row[0] if row and isinstance(row[0], dict) else None
+            gw = decrypt_config(row[0]) if row and isinstance(row[0], dict) else None
         if not gw or not gw.get("host") or not gw.get("enabled", True):
             return
         from app.api.v1.alert_engine import _send_email
@@ -97,7 +99,7 @@ async def _admin_role_names(db: AsyncSession) -> set[str]:
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=100)
     email: str = Field(..., max_length=255)
-    password: str = Field(..., min_length=6, max_length=128)
+    password: str = Field(..., min_length=12, max_length=128)
     full_name: Optional[str] = Field(None, max_length=255)
     role: str = Field(default="viewer")
     is_active: bool = True
@@ -115,12 +117,12 @@ class UserUpdate(BaseModel):
 
 
 class ResetPasswordRequest(BaseModel):
-    new_password: str = Field(..., min_length=6, max_length=128)
+    new_password: str = Field(..., min_length=12, max_length=128)
 
 
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(..., min_length=1)
-    new_password: str = Field(..., min_length=6, max_length=128)
+    new_password: str = Field(..., min_length=12, max_length=128)
 
 
 class UserOut(BaseModel):
@@ -303,6 +305,8 @@ async def update_user(
             raise HTTPException(status_code=400, detail="Cannot deactivate your own account")
         user.is_active = data.is_active
 
+    if data.role is not None or data.is_active is not None or data.scope_tags is not None:
+        user.token_version = (getattr(user, "token_version", 0) or 0) + 1
     user.updated_at = datetime.now(timezone.utc)
     await write_audit_log(
         db,
@@ -373,6 +377,7 @@ async def reset_password(
         )
 
     user.password_hash = hash_password(data.new_password)
+    user.token_version = (getattr(user, "token_version", 0) or 0) + 1
     user.updated_at = datetime.now(timezone.utc)
     await write_audit_log(
         db,
@@ -411,6 +416,7 @@ async def change_own_password(
         raise HTTPException(status_code=400, detail="Current password is incorrect")
 
     current_user.password_hash = hash_password(data.new_password)
+    current_user.token_version = (getattr(current_user, "token_version", 0) or 0) + 1
     current_user.updated_at = datetime.now(timezone.utc)
     await write_audit_log(
         db,
@@ -426,7 +432,7 @@ async def change_own_password(
         subject="[ZenPlus] Your password was changed",
         title="Your password was changed",
         message="The password for your ZenPlus account was just changed. "
-                "Your sessions on other devices remain signed in.",
+                "All existing sessions have been signed out. Sign in again with your new password.",
         changed_by="you",
     )
     return {"message": "Password changed successfully"}

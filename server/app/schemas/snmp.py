@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, field_serializer
 
 
 class DiscoveryJobCreate(BaseModel):
@@ -14,6 +14,10 @@ class DiscoveryJobCreate(BaseModel):
 
 
 class DiscoveryJobResponse(BaseModel):
+    @field_serializer("community")
+    def mask_community(self, value):
+        return None
+
     id: UUID
     cidr: str
     community: Optional[str]

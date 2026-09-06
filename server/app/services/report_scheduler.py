@@ -12,6 +12,8 @@ reuses the existing SMTP gateway resolution + report generators.
 """
 
 from __future__ import annotations
+from app.core.crypto import encrypt_config, decrypt_config
+import ssl
 
 import asyncio
 import json
@@ -113,7 +115,7 @@ def _days_in_month(year: int, month: int) -> int:
 
 async def _resolve_smtp(db: AsyncSession, channel_row) -> dict | None:
     """Return SMTP gateway config dict for an email channel, or None."""
-    cfg = channel_row.config or {}
+    cfg = decrypt_config(channel_row.config)
     gw_id = channel_row.gateway_id or cfg.get("gateway_id")
     if gw_id:
         gw = (await db.execute(
@@ -129,12 +131,12 @@ async def _resolve_smtp(db: AsyncSession, channel_row) -> dict | None:
     # otherwise keep sending.
     if gw is not None and not gw.enabled:
         return None
-    gw_config = gw.config if gw else None
+    gw_config = decrypt_config(gw.config) if gw else None
     if not gw_config:
         row = (await db.execute(
             text("SELECT value FROM system_settings WHERE key='smtp'")
         )).first()
-        gw_config = row[0] if row and isinstance(row[0], dict) else None
+        gw_config = decrypt_config(row[0]) if row and isinstance(row[0], dict) else None
     if not gw_config or not gw_config.get("host") or not gw_config.get("enabled", True):
         return None
     return gw_config
@@ -162,11 +164,10 @@ def _send_email_with_attachment(gw: dict, recipients: list[str], subject: str,
 
     enc = gw.get("encryption", "tls")
     if enc == "ssl":
-        server = smtplib.SMTP_SSL(gw["host"], int(gw.get("port", 465)), timeout=20)
+        server = smtplib.SMTP_SSL(gw["host"], int(gw.get("port", 465)), timeout=20, context=ssl.create_default_context())
     else:
         server = smtplib.SMTP(gw["host"], int(gw.get("port", 587)), timeout=20)
-        if enc == "tls":
-            server.starttls()
+        server.starttls(context=ssl.create_default_context())
     if gw.get("username"):
         server.login(gw["username"], gw.get("password", ""))
     server.sendmail(gw.get("from_email", ""), recipients, outer.as_string())
@@ -331,7 +332,7 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
             if not ch or not ch.enabled:
                 errors.append(f"{cid}: channel missing/disabled")
                 continue
-            cfg = ch.config or {}
+            cfg = decrypt_config(ch.config)
 
             if ch.type == "email":
                 # Email carries the full report as an attachment.

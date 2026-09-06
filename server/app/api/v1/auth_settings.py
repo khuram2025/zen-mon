@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.settings import _get_system_setting, _upsert_system_setting
 from app.core.database import get_db
+from app.core.crypto import encrypt_text, decrypt_secret
 from app.core.security import require_admin_user
 from app.models.user import User
 from app.services.audit_service import write_audit_log
@@ -25,6 +26,7 @@ from app.services.external_auth import (
     RADIUS_SETTINGS_KEY,
     ExternalAuthError,
     ldap_authenticate,
+    ldap_test_bind,
     map_ldap_role,
     map_radius_role,
     merge_config,
@@ -45,7 +47,8 @@ class LdapConfigIn(BaseModel):
     server: str = ""
     port: int = Field(389, ge=1, le=65535)
     use_ssl: bool = False
-    use_starttls: bool = False
+    use_starttls: bool = True
+    ca_certificate_pem: str = Field(default="", max_length=131072)
     bind_dn: str = ""
     bind_password: str = ""       # blank = keep stored
     base_dn: str = ""
@@ -138,7 +141,9 @@ async def _save_provider(
         resource_id=key,
         metadata={"enabled": merged["enabled"], "server": merged["server"]},
     )
-    await _upsert_system_setting(db, key, merged)  # commits
+    protected = dict(merged)
+    protected[secret_field] = encrypt_text(merged.get(secret_field))
+    await _upsert_system_setting(db, key, protected)  # commits
     return merged
 
 
@@ -148,6 +153,14 @@ async def save_ldap(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_admin_user),
 ):
+    if data.enabled and not (data.use_ssl or data.use_starttls):
+        raise HTTPException(400, 'Enable LDAPS or StartTLS; plaintext LDAP binds are not permitted')
+    if data.ca_certificate_pem:
+        import ssl
+        try:
+            ssl.create_default_context(cadata=data.ca_certificate_pem)
+        except (ssl.SSLError, ValueError):
+            raise HTTPException(400, 'Invalid directory CA certificate PEM')
     payload = data.model_dump()
     payload["group_mappings"] = [
         {"group": m.group or "", "role": m.role} for m in data.group_mappings if m.role
@@ -200,31 +213,9 @@ async def test_ldap(
         if not data.username:
             # Bind-only check: authenticate with an unresolvable user to
             # exercise server reachability and the service bind.
-            def bind_only():
-                import ldap3
-                use_ssl = bool(cfg.get("use_ssl"))
-                server = ldap3.Server(
-                    cfg["server"],
-                    port=int(cfg.get("port") or (636 if use_ssl else 389)),
-                    use_ssl=use_ssl, connect_timeout=10,
-                )
-                conn = ldap3.Connection(
-                    server, user=cfg.get("bind_dn") or None,
-                    password=cfg.get("bind_password") or None,
-                    receive_timeout=10, auto_bind=False,
-                )
-                conn.open()
-                if cfg.get("use_starttls") and not use_ssl:
-                    conn.start_tls()
-                if not conn.bind():
-                    raise ExternalAuthError(
-                        f"Service bind failed: {conn.result.get('description', 'invalid credentials')}"
-                    )
-                conn.unbind()
-
             if not cfg.get("server") or not cfg.get("base_dn"):
                 raise ExternalAuthError("LDAP server and base DN are required")
-            await asyncio.to_thread(bind_only)
+            await asyncio.to_thread(ldap_test_bind, cfg)
             return {"success": True, "message": "Connection and service bind OK"}
 
         info = await asyncio.to_thread(ldap_authenticate, cfg, data.username, data.password)

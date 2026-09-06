@@ -602,7 +602,10 @@ async def list_links(
     elif sort == "error_rate":
         # Links with no packet counters have no rate; sort them last rather
         # than letting a None rank above a measured 900 ppm.
-        items.sort(key=lambda x: x.get("error_ppm") or -1, reverse=True)
+        items.sort(
+            key=lambda x: -1 if x.get("error_ppm") is None else x["error_ppm"],
+            reverse=True,
+        )
     else:
         items.sort(key=lambda x: (x["util_pct"] or 0), reverse=True)
 

@@ -62,6 +62,8 @@ SUPPORTED_PLATFORMS = [
 def _netmiko_fetch(host: str, platform: str, username: str, password: str,
                    enable: str, port: int) -> tuple[str, str]:
     """Blocking SSH fetch — run via asyncio.to_thread. Returns (platform, config)."""
+    if "telnet" in (platform or "").lower():
+        raise ValueError("Configuration collection requires SSH")
     from netmiko import ConnectHandler, SSHDetect
 
     base = {
@@ -70,6 +72,10 @@ def _netmiko_fetch(host: str, platform: str, username: str, password: str,
         "password": password or "",
         "port": port or 22,
         "fast_cli": False,
+        "ssh_strict": True,
+        "disabled_algorithms": {"keys": ["ssh-rsa"], "pubkeys": ["ssh-rsa"]},
+        "alt_host_keys": True,
+        "alt_key_file": "/etc/zenplus/known_hosts",
         "conn_timeout": 20,
         "timeout": 60,
     }
@@ -307,7 +313,7 @@ async def _raise_change_alert(db: AsyncSession, device_id, config_type, prior,
 class CredentialIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     description: Optional[str] = None
-    protocol: str = Field(default="ssh", pattern="^(ssh|telnet)$")
+    protocol: str = Field(default="ssh", pattern="^ssh$")
     port: int = Field(default=22, ge=1, le=65535)
     username: str = Field(..., min_length=1, max_length=120)
     password: Optional[str] = None

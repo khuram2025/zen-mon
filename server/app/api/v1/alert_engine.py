@@ -1,3 +1,6 @@
+from app.services.notification_transport import NotificationHTTPClient
+from app.core.crypto import encrypt_config, decrypt_config
+import ssl
 """
 Alert evaluation engine - called by the Go poller on status changes.
 Evaluates matching alert rules and sends notifications.
@@ -110,7 +113,7 @@ async def _smtp_gateway(db: AsyncSession, gw_id) -> Optional[dict]:
             "WHERE type = 'smtp' AND is_default = true LIMIT 1"))).first()
     if not row or not row.enabled:
         return None
-    return dict(row.config)
+    return decrypt_config(row.config)
 
 
 def _clean_details(pairs: list) -> list:
@@ -174,7 +177,7 @@ async def _send_sms(gw_config: dict, phones: str, message: str):
     if gw_config.get("auth_type") == "basic":
         auth = (gw_config.get("auth_username", ""), gw_config.get("auth_password", ""))
 
-    async with httpx.AsyncClient(timeout=15.0, verify=False) as client:
+    async with NotificationHTTPClient(timeout=15.0, verify=True) as client:
         if not is_get:
             await client.post(gw_config["api_url"], content=template, headers=headers, auth=auth)
         else:
@@ -212,11 +215,10 @@ async def _send_email(gw_config: dict, recipients: str, subject: str, body: str,
 
     enc = gw_config.get("encryption", "tls")
     if enc == "ssl":
-        server = smtplib.SMTP_SSL(gw_config["host"], gw_config.get("port", 465), timeout=10)
+        server = smtplib.SMTP_SSL(gw_config["host"], gw_config.get("port", 465), timeout=10, context=ssl.create_default_context())
     else:
         server = smtplib.SMTP(gw_config["host"], gw_config.get("port", 587), timeout=10)
-        if enc == "tls":
-            server.starttls()
+        server.starttls(context=ssl.create_default_context())
     if gw_config.get("username"):
         server.login(gw_config["username"], gw_config.get("password", ""))
     server.sendmail(gw_config.get("from_email", ""), recipient_list, msg.as_string())
@@ -245,7 +247,7 @@ async def _send_webhook(ch_config: dict, ctx: dict) -> None:
     payload: dict | str = ctx
     if isinstance(body, str) and body.strip():
         payload = _render(body, ctx)
-    async with httpx.AsyncClient(timeout=10.0, verify=ch_config.get("tls_verify", True)) as client:
+    async with NotificationHTTPClient(timeout=10.0, verify=ch_config.get("tls_verify", True)) as client:
         if isinstance(payload, str):
             await client.post(url, content=payload, headers=headers)
         else:
@@ -276,7 +278,7 @@ async def _send_slack(ch_config: dict, ctx: dict) -> None:
             "ts": int(datetime.now(timezone.utc).timestamp()),
         }],
     }
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with NotificationHTTPClient(timeout=10.0) as client:
         await client.post(url, json=payload)
 
 
@@ -309,7 +311,7 @@ async def _send_teams(ch_config: dict, ctx: dict) -> None:
             },
         }],
     }
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with NotificationHTTPClient(timeout=10.0) as client:
         await client.post(url, json=card)
 
 
@@ -335,7 +337,7 @@ async def _send_discord(ch_config: dict, ctx: dict) -> None:
             "footer": {"text": "ZenPlus"},
         }],
     }
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with NotificationHTTPClient(timeout=10.0) as client:
         await client.post(url, json=payload)
 
 
@@ -359,7 +361,7 @@ async def _send_pagerduty(ch_config: dict, ctx: dict) -> None:
             "custom_details": {k: v for k, v in ctx.items() if k not in ("severity",)},
         },
     }
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with NotificationHTTPClient(timeout=10.0) as client:
         await client.post("https://events.pagerduty.com/v2/enqueue", json=payload)
 
 
@@ -972,7 +974,7 @@ async def evaluate_status_change(
                 if not ch or not ch.enabled:
                     continue
 
-                ch_config = ch.config or {}
+                ch_config = decrypt_config(ch.config)
 
                 if ch.type == "sms":
                     phones = ch_config.get("phone_numbers", "")
@@ -990,7 +992,7 @@ async def evaluate_status_change(
                         # Pre-fill device placeholders in the gateway template
                         # (encoded per HTTP method); {message}/{recipients}/
                         # {sender} are filled by _send_sms itself.
-                        gw_cfg = dict(gw_row.config)
+                        gw_cfg = decrypt_config(gw_row.config)
                         gw_cfg["request_template"] = _sms_fill(
                             gw_cfg.get("request_template", ""),
                             {"hostname": event.hostname,
@@ -1097,7 +1099,7 @@ async def evaluate_status_change(
                     "timestamp":   now.isoformat(),
                 }
                 try:
-                    async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
+                    async with NotificationHTTPClient(timeout=10.0, verify=True) as client:
                         await client.post(row.webhook_url, json=payload)
                 except Exception as exc:
                     print(f"ERROR map webhook {row.id}: {exc}")
@@ -1371,7 +1373,7 @@ async def evaluate_service_status_change(
                 if not ch or not ch.enabled:
                     continue
 
-                ch_config = ch.config or {}
+                ch_config = decrypt_config(ch.config)
 
                 if ch.type == "sms":
                     phones = ch_config.get("phone_numbers", "")
@@ -1384,7 +1386,7 @@ async def evaluate_service_status_change(
                         gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'sms' AND is_default = true LIMIT 1"))
                     gw_row = gw_res.first()
                     if gw_row:
-                        await _send_sms(dict(gw_row.config), phones, sms_body)
+                        await _send_sms(decrypt_config(gw_row.config), phones, sms_body)
                         notifications_sent += 1
 
                 elif ch.type == "email":

@@ -122,5 +122,5 @@ func startHealthServer(port int, engine *pinger.Engine) error {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(status)
 	})
-	return http.ListenAndServe(fmt.Sprintf(":%d", port), mux)
+	return http.ListenAndServe(fmt.Sprintf("127.0.0.1:%d", port), mux)
 }

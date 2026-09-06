@@ -66,3 +66,30 @@ install -o zenplus -g zenplus -m 0700 -d "${ZENPLUS_DIR}/data/tls-staging"
 log "Certificate store and staging directories ready"
 
 log "Security setup complete"
+
+if [ -f "${ZENPLUS_DIR}/scripts/zenplus-access-helper" ]; then
+    install -o root -g root -m 0755 "${ZENPLUS_DIR}/scripts/zenplus-access-helper" /usr/local/sbin/zenplus-access-helper
+    echo 'zenplus ALL=(root) NOPASSWD: /usr/local/sbin/zenplus-access-helper apply' > /etc/sudoers.d/zenplus-access
+    chmod 0440 /etc/sudoers.d/zenplus-access
+    visudo -cf /etc/sudoers.d/zenplus-access
+    cat > /etc/systemd/system/zenplus-management-access.service <<'EOF'
+[Unit]
+Description=Restore ZenPlus management access policy
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target ssh.socket ssh.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/zenplus-access-helper restore
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable zenplus-management-access.service
+fi
+
+# Install the maintained host-policy source; do not reset administrator allowlists.
+if [ -f "${ZENPLUS_DIR}/scripts/setup-management-hardening.py" ]; then
+    python3 "${ZENPLUS_DIR}/scripts/setup-management-hardening.py"
+fi

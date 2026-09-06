@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Boolean, DateTime
+from sqlalchemy import String, Boolean, DateTime, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 
@@ -21,6 +21,7 @@ class User(Base):
     # Visibility scope (migrate-104): tag names as a JSONB text array.
     # Empty = unrestricted; system.admin roles bypass. See app/core/scoping.py.
     scope_tags: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     last_login: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

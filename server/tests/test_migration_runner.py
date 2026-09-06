@@ -377,3 +377,9 @@ def test_shipped_superseded_checksums_match_the_real_history():
                 f"{filename}: superseded checksum {checksum[:12]} matches no "
                 f"revision in git history"
             )
+
+def test_existing_view_does_not_baseline_replacement_migration(tmp_path):
+    path = tmp_path / 'migrate-111-sensor-service-parity.sql'
+    write(path, 'CREATE OR REPLACE FUNCTION supports_auth() RETURNS BOOLEAN LANGUAGE SQL AS $$ SELECT TRUE $$; CREATE OR REPLACE VIEW service_monitoring_vantages AS SELECT 1;')
+    migration = runner.discover_migrations(tmp_path)[0]
+    assert runner.evidence_of(migration, {'service_monitoring_vantages'}) is False

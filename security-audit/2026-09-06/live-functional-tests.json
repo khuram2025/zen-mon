@@ -1,0 +1,287 @@
+{
+  "allowlist_self_lockout_prevented": {
+    "status": 400,
+    "expected": 400
+  },
+  "allowlist_invalid_cidr_rejected": {
+    "status": 422,
+    "expected": 422
+  },
+  "temporary_viewer_created": {
+    "status": 201,
+    "expected": 201
+  },
+  "temporary_viewer_login": {
+    "status": 200,
+    "expected": 200
+  },
+  "token_lifetime_seconds": 3600,
+  "viewer_cannot_read_policy": {
+    "status": 403,
+    "expected": 403
+  },
+  "viewer_cannot_change_policy": {
+    "status": 403,
+    "expected": 403
+  },
+  "viewer_cannot_get_saved_credentials": {
+    "status": 403,
+    "expected": 403
+  },
+  "logout_succeeds": {
+    "status": 200,
+    "expected": 200
+  },
+  "logout_revokes_token": {
+    "status": 401,
+    "expected": 401
+  },
+  "login_after_logout": {
+    "status": 200,
+    "expected": 200
+  },
+  "weak_new_password_rejected": {
+    "status": 422,
+    "expected": 422
+  },
+  "test_user_password_reset": {
+    "status": 200,
+    "expected": 200
+  },
+  "password_reset_revokes_token": {
+    "status": 401,
+    "expected": 401
+  },
+  "old_password_rejected": {
+    "status": 401,
+    "expected": 401
+  },
+  "new_password_works": {
+    "status": 200,
+    "expected": 200
+  },
+  "login_throttled": [
+    401,
+    401,
+    401,
+    401,
+    401,
+    401,
+    429
+  ],
+  "temporary_user_removed": {
+    "status": 204,
+    "expected": 204
+  },
+  "multisite_5b50ba8e-abb8-4c85-ad9a-e906ed49e4a7": {
+    "status": 200,
+    "expected": 200
+  },
+  "5b50ba8e-abb8-4c85-ad9a-e906ed49e4a7": {
+    "controller_enabled": true,
+    "sensor_ids": [
+      "bdb01c22-1ffe-43c4-9570-4eac4a96c3a9"
+    ],
+    "sites": [
+      {
+        "poller_id": "central",
+        "sensor_id": null,
+        "name": "Controller",
+        "sensor_name": null,
+        "location": null,
+        "probe_status": "online",
+        "checks": {
+          "service": {
+            "state": "up",
+            "last_result_at": "2026-09-06T10:36:18.941000+00:00",
+            "latency_ms": 4.482,
+            "availability_pct": 100.0,
+            "samples": 140
+          }
+        }
+      },
+      {
+        "poller_id": "bdb01c22-1ffe-43c4-9570-4eac4a96c3a9",
+        "sensor_id": "bdb01c22-1ffe-43c4-9570-4eac4a96c3a9",
+        "name": "VMware Workstation",
+        "sensor_name": "VMware-Probe-01",
+        "location": "Riyadh",
+        "probe_status": "online",
+        "checks": {
+          "service": {
+            "state": "up",
+            "last_result_at": "2026-09-06T10:36:15.504000+00:00",
+            "latency_ms": 286.993,
+            "availability_pct": 100.0,
+            "samples": 29
+          }
+        }
+      }
+    ],
+    "available_sensors": [
+      {
+        "id": "bdb01c22-1ffe-43c4-9570-4eac4a96c3a9",
+        "name": "VMware-Probe-01",
+        "site_id": "bc7a578c-2bb8-4cd4-9784-9e403d885f32",
+        "site_name": "VMware Workstation",
+        "location": "Riyadh",
+        "status": "online",
+        "available": true
+      }
+    ],
+    "window": "24h",
+    "remote_supported": true
+  },
+  "multisite_d677b0cc-d64e-410f-96f4-974ce2dad6d8": {
+    "status": 200,
+    "expected": 200
+  },
+  "d677b0cc-d64e-410f-96f4-974ce2dad6d8": {
+    "controller_enabled": true,
+    "sensor_ids": [
+      "bdb01c22-1ffe-43c4-9570-4eac4a96c3a9"
+    ],
+    "sites": [
+      {
+        "poller_id": "central",
+        "sensor_id": null,
+        "name": "Controller",
+        "sensor_name": null,
+        "location": null,
+        "probe_status": "online",
+        "checks": {
+          "service": {
+            "state": "up",
+            "last_result_at": "2026-09-06T10:36:18.939000+00:00",
+            "latency_ms": 2.289,
+            "availability_pct": 100.0,
+            "samples": 93
+          }
+        }
+      },
+      {
+        "poller_id": "bdb01c22-1ffe-43c4-9570-4eac4a96c3a9",
+        "sensor_id": "bdb01c22-1ffe-43c4-9570-4eac4a96c3a9",
+        "name": "VMware Workstation",
+        "sensor_name": "VMware-Probe-01",
+        "location": "Riyadh",
+        "probe_status": "online",
+        "checks": {
+          "service": {
+            "state": "up",
+            "last_result_at": "2026-09-06T10:36:22.508000+00:00",
+            "latency_ms": 5.003,
+            "availability_pct": 100.0,
+            "samples": 100
+          }
+        }
+      }
+    ],
+    "available_sensors": [
+      {
+        "id": "bdb01c22-1ffe-43c4-9570-4eac4a96c3a9",
+        "name": "VMware-Probe-01",
+        "site_id": "bc7a578c-2bb8-4cd4-9784-9e403d885f32",
+        "site_name": "VMware Workstation",
+        "location": "Riyadh",
+        "status": "online",
+        "available": true
+      }
+    ],
+    "window": "24h",
+    "remote_supported": true
+  },
+  "multisite_568cd587-6c24-43d6-bdc6-63afb8dbb927": {
+    "status": 200,
+    "expected": 200
+  },
+  "568cd587-6c24-43d6-bdc6-63afb8dbb927": {
+    "controller_enabled": true,
+    "sensor_ids": [
+      "bdb01c22-1ffe-43c4-9570-4eac4a96c3a9"
+    ],
+    "sites": [
+      {
+        "poller_id": "central",
+        "sensor_id": null,
+        "name": "Controller",
+        "sensor_name": null,
+        "location": null,
+        "probe_status": "online",
+        "checks": {
+          "ping": {
+            "state": "up",
+            "last_result_at": "2026-09-06T10:36:16.958000+00:00",
+            "latency_ms": 7.701,
+            "availability_pct": 100.0,
+            "samples": 141
+          },
+          "snmp": {
+            "state": "disabled",
+            "last_result_at": null,
+            "latency_ms": null,
+            "availability_pct": null,
+            "samples": 0
+          }
+        }
+      },
+      {
+        "poller_id": "bdb01c22-1ffe-43c4-9570-4eac4a96c3a9",
+        "sensor_id": "bdb01c22-1ffe-43c4-9570-4eac4a96c3a9",
+        "name": "VMware Workstation",
+        "sensor_name": "VMware-Probe-01",
+        "location": "Riyadh",
+        "probe_status": "online",
+        "checks": {
+          "ping": {
+            "state": "up",
+            "last_result_at": "2026-09-06T10:36:22.506000+00:00",
+            "latency_ms": 6.607,
+            "availability_pct": 100.0,
+            "samples": 56
+          },
+          "snmp": {
+            "state": "disabled",
+            "last_result_at": null,
+            "latency_ms": null,
+            "availability_pct": null,
+            "samples": 0
+          }
+        }
+      }
+    ],
+    "available_sensors": [
+      {
+        "id": "bdb01c22-1ffe-43c4-9570-4eac4a96c3a9",
+        "name": "VMware-Probe-01",
+        "site_id": "bc7a578c-2bb8-4cd4-9784-9e403d885f32",
+        "site_name": "VMware Workstation",
+        "location": "Riyadh",
+        "status": "online",
+        "available": true
+      }
+    ],
+    "window": "24h",
+    "remote_supported": true
+  },
+  "on_demand_SNMP": {
+    "status": 200,
+    "expected": 200
+  },
+  "on_demand_SNMP_result": {
+    "ok": true,
+    "snmp_responded": true,
+    "reachable": true,
+    "duration_ms": 21,
+    "sys_descr": "Cisco IOS Software [Cupertino], Catalyst L3 Switch Software (CAT9K_IOSXE), Version 17.9.4a, RELEASE SOFTWARE (fc3)",
+    "sys_object_id": "iso.3.6.1.4.1.9.1.2494",
+    "sys_name": "cisco-lab-01",
+    "sys_uptime_seconds": 11472903.21,
+    "sys_uptime_raw": "114:7:29:03.21",
+    "config": {
+      "version": "2c",
+      "port": 16161,
+      "timeout_ms": 2000
+    }
+  }
+}

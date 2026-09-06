@@ -1,10 +1,11 @@
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-from jose import JWTError, jwt
+import jwt
+from jwt.exceptions import InvalidTokenError as JWTError
 from passlib.context import CryptContext
 from passlib.exc import UnknownHashError
-from fastapi import Depends, HTTPException, Query, status
+from fastapi import Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
@@ -19,8 +20,8 @@ from app.core.permissions import (
 from app.models.user import User
 
 settings = get_settings()
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-security = HTTPBearer()
+pwd_context = CryptContext(schemes=["bcrypt_sha256", "bcrypt"], deprecated="auto")
+security = HTTPBearer(auto_error=False)
 
 # Legacy shortcuts, kept as a safety net for appliances whose roles table
 # has not landed yet (mid-update) and for test fixtures with fake users.
@@ -89,14 +90,20 @@ def hash_password(password: str) -> str:
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=settings.JWT_EXPIRE_MINUTES))
-    to_encode.update({"exp": expire})
+    to_encode.update({"exp": expire, "iat": datetime.now(timezone.utc)})
     return jwt.encode(to_encode, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
 
 async def get_current_user(
+    request: Request = None,
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: AsyncSession = Depends(get_db),
 ) -> User:
+    if credentials is None:
+        raise HTTPException(401, "Authentication required", headers={"WWW-Authenticate": "Bearer"})
+    if request:
+        from app.services.management_access import check_web_access
+        check_web_access(request.client.host if request.client else "unknown")
     token = credentials.credentials
     try:
         payload = jwt.decode(token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
@@ -111,6 +118,8 @@ async def get_current_user(
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
 
+    if payload.get("ver", 0) != (getattr(user, "token_version", 0) or 0):
+        raise HTTPException(401, "Session revoked; sign in again")
     return user
 
 
@@ -184,10 +193,14 @@ async def require_operator_user(
 # ─────────────────────────────────────────────────────────────────
 
 async def get_current_user_stream(
+    request: Request = None,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
     token: Optional[str] = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> User:
+    if request:
+        from app.services.management_access import check_web_access
+        check_web_access(request.client.host if request.client else "unknown")
     raw = credentials.credentials if credentials else token
     if not raw:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing token")
@@ -202,6 +215,8 @@ async def get_current_user_stream(
     user = result.scalar_one_or_none()
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found or inactive")
+    if payload.get("ver", 0) != (getattr(user, "token_version", 0) or 0):
+        raise HTTPException(401, "Session revoked; sign in again")
     return user
 
 

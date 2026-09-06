@@ -46,13 +46,13 @@ async def _apply_credential(db: AsyncSession, device: Device, credential_id: UUI
         device.snmp_auth_protocol = row["v3_auth_protocol"]
         device.snmp_priv_protocol = row["v3_priv_protocol"]
         device.snmp_auth_passphrase = (
-            crypto.encrypt(row["v3_auth_passphrase"]) if row["v3_auth_passphrase"] else None
+            crypto.encrypt(crypto.decrypt_secret(row["v3_auth_passphrase"])) if row["v3_auth_passphrase"] else None
         )
         device.snmp_priv_passphrase = (
-            crypto.encrypt(row["v3_priv_passphrase"]) if row["v3_priv_passphrase"] else None
+            crypto.encrypt(crypto.decrypt_secret(row["v3_priv_passphrase"])) if row["v3_priv_passphrase"] else None
         )
     else:
-        device.snmp_community = row["community"] or "public"
+        device.snmp_community = crypto.encrypt_text(crypto.decrypt_secret(row["community"]) or "public")
         # Clear any v3-specific residue so the poller picks the right auth mode.
         device.snmp_v3_username = None
         device.snmp_v3_context = None
@@ -67,7 +67,6 @@ _SNMP_PLAIN_FIELDS = (
     "snmp_enabled",
     "snmp_version",
     "snmp_port",
-    "snmp_community",
     "snmp_v3_username",
     "snmp_v3_context",
     "snmp_auth_protocol",
@@ -224,6 +223,7 @@ async def create_device(db: AsyncSession, data: DeviceCreate, user_id: UUID | No
         value = getattr(data, field, None)
         if value is not None:
             setattr(device, field, value)
+    device.snmp_community = crypto.encrypt_text(data.snmp_community)
     if data.snmp_auth_passphrase:
         device.snmp_auth_passphrase = crypto.encrypt(data.snmp_auth_passphrase)
     if data.snmp_priv_passphrase:
@@ -245,6 +245,10 @@ async def update_device(db: AsyncSession, device_id: UUID, data: DeviceUpdate) -
     if "tags" in update_data:
         update_data["tags"] = await tag_service.canonicalize_tags(db, update_data["tags"] or [])
     # Passphrases are write-only: encrypt then remove from the plain setattr loop.
+    if "snmp_community" in update_data:
+        community = update_data.pop("snmp_community")
+        if community:
+            device.snmp_community = crypto.encrypt_text(community)
     if "snmp_auth_passphrase" in update_data:
         raw = update_data.pop("snmp_auth_passphrase")
         device.snmp_auth_passphrase = crypto.encrypt(raw) if raw else None

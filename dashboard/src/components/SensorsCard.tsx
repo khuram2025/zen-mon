@@ -1,3 +1,5 @@
+import { Link } from 'react-router-dom'
+import { SensorSiteEditor } from '@/components/SensorSiteEditor'
 /**
  * SensorsCard — admin UI for remote sensors (Phase 1).
  *
@@ -27,7 +29,8 @@ import { toast } from '@/components/ui/Toast'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
 import { Switch } from '@/components/ui/Switch'
 
-type Sensor = {
+export type Sensor = {
+  authorization_pending: boolean
   id: string
   name: string
   description: string | null
@@ -58,7 +61,7 @@ type Sensor = {
   updated_at: string
 }
 
-type TokenInfo = {
+export type TokenInfo = {
   sensor_id: string
   enrollment_token: string
   expires_at: string
@@ -137,7 +140,7 @@ type SensorVantage = {
 }
 
 type ApplianceArtifact = {
-  kind: 'ova' | 'ovf' | 'sha256'
+  kind: 'ova' | 'ovf' | 'sha256' | 'qcow2' | 'vhdx'
   filename: string
   available: boolean
   url: string
@@ -318,12 +321,9 @@ export function SensorsCard() {
             {visibleSensors.map((s) => (
               <Tr key={s.id} className="hover:bg-surface2/40">
                 <Td>
-                  <button
-                    className="font-medium text-text hover:text-primary"
-                    onClick={() => setDetail(s)}
-                  >
+                  <Link className="font-medium text-primary hover:underline" to={`/sensors/${s.id}`}>
                     {s.name}
-                  </button>
+                  </Link>
                   {s.enrollment_pending && (
                     <div className="mt-0.5 text-xs text-warning">
                       Enrollment pending — token shown to operator
@@ -369,7 +369,7 @@ export function SensorsCard() {
                       )}
                       Download
                     </Button>
-                    <Button size="sm" variant="ghost" onClick={() => setDetail(s)}>
+                    <Button size="sm" variant="ghost" title="Manage sensor" aria-label={`Manage ${s.name}`} onClick={() => setDetail(s)}>
                       <Pencil className="h-3.5 w-3.5" />
                     </Button>
                     <Button
@@ -460,7 +460,8 @@ function ApplianceDownloadPanel({ manifest, loading }: { manifest?: ApplianceMan
             </Badge>
           </div>
           <p className="mt-1 text-xs text-muted">
-            OVA/OVF images are served by this controller. Create a sensor to get the one-time token and bootstrap file.
+            Download an image, create a sensor, and attach its enrollment seed ISO before the first boot.
+            Use OVA for VMware, QCOW2 for KVM/cloud, or VHDX for Hyper-V. Configure IP/DNS and the controller from the VM console with sudo sensor-config.
           </p>
           {manifest && (
             <div className="mt-2 text-xs text-muted">
@@ -493,6 +494,11 @@ function ApplianceDownloadPanel({ manifest, loading }: { manifest?: ApplianceMan
               </a>
             </Button>
           )}
+          {(['qcow2', 'vhdx'] as const).map((kind) => byKind[kind]?.available && (
+            <Button key={kind} size="sm" variant="outline" asChild>
+              <a href={byKind[kind]!.url}><Download className="h-3.5 w-3.5" />{kind === 'qcow2' ? 'KVM / Cloud' : 'Hyper-V'}</a>
+            </Button>
+          ))}
         </div>
       </div>
 
@@ -676,7 +682,7 @@ function AddSensorDialog({
 
 /* ───────── Token dialog (shown ONCE) ───────── */
 
-function TokenDialog({ info, onClose }: { info: TokenInfo | null; onClose: () => void }) {
+export function TokenDialog({ info, onClose }: { info: TokenInfo | null; onClose: () => void }) {
   return (
     <Dialog open={!!info} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="max-w-2xl">
@@ -890,7 +896,7 @@ function SensorDownloadsDialog({ info, onClose }: { info: SensorDownloads | null
 
 /* ───────── Sensor detail dialog ───────── */
 
-function SensorDetailDialog({
+export function SensorDetailDialog({
   sensor, onClose, onChanged, onShowToken,
 }: {
   sensor: Sensor | null
@@ -968,6 +974,12 @@ function SensorDetailDialog({
     onError: (e: any) => toast.error('Token regen failed', apiErrorMessage(e)),
   })
 
+  const authorize = useMutation({
+    mutationFn: async () => api.post(`/sensors/${sensor!.id}/authorize`),
+    onSuccess: () => { toast.success('Sensor authorized'); onChanged() },
+    onError: (e: any) => toast.error('Authorization failed', apiErrorMessage(e)),
+  })
+
   const disable = useMutation({
     mutationFn: async () => (await api.post(`/sensors/${sensor!.id}/disable`)).data,
     onSuccess: () => { toast.success('Sensor disabled'); onChanged() },
@@ -1039,6 +1051,10 @@ function SensorDetailDialog({
         </DialogHeader>
 
         <div className="grid grid-cols-2 gap-3 text-sm">
+          {sensor.authorization_pending && <div className="col-span-2 rounded border border-warning p-3">
+            <p className="mb-2">This probe is waiting for authorization. Confirm its hostname and address before enabling monitoring.</p>
+            <Button disabled={!sensor.api_key_prefix || sensor.status === 'disabled' || authorize.isPending} onClick={() => authorize.mutate()}>Authorize sensor</Button>
+          </div>}
           <Row k="Status" v={<Badge variant={statusVariant[sensor.status]} title={sensor.status_reason || undefined}>{sensor.status}</Badge>} />
           <Row k="Status reason" v={sensor.status_reason || '—'} />
           <Row k="Site" v={sensor.site_name || '—'} />
@@ -1057,6 +1073,7 @@ function SensorDetailDialog({
 
         <div className="my-4 border-t border-border" />
 
+        <SensorSiteEditor key={sensor.id} sensor={sensor} onChanged={onChanged} />
         <div>
           <div className="mb-2 flex items-center justify-between gap-3">
             <div>
