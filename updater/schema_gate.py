@@ -24,26 +24,6 @@ ZENPLUS_DIR = Path("/opt/zenplus")
 SYNC_SCRIPT = ZENPLUS_DIR / "scripts" / "sync-schema.py"
 
 
-def _fallback(scripts_dir: Path) -> dict:
-    """Converge ClickHouse only, for a payload without sync-schema.py.
-
-    PostgreSQL still has its own tracked runner invoked by the run_migration
-    step, so ClickHouse is the gap worth closing here.
-    """
-    from .clickhouse_sync import sync_clickhouse_migrations
-
-    summary = sync_clickhouse_migrations(scripts_dir)
-    problems: list[str] = []
-    if summary.get("error"):
-        problems.append(f"clickhouse: {summary['error']}")
-    for item in summary.get("failed", []):
-        problems.append(f"clickhouse: {item['filename']} failed")
-    for item in summary.get("unresolved", []):
-        problems.append(f"clickhouse: {item['filename']} {item.get('reason', 'unresolved')}")
-    return {"ok": not problems, "problems": problems, "clickhouse": summary,
-            "postgres": {}, "source": "fallback"}
-
-
 def sync_and_verify(scripts_dir: Path | None = None, *, timeout: int = 1800) -> dict:
     """Apply every pending migration on disk, then report whether drift remains.
 
@@ -54,9 +34,10 @@ def sync_and_verify(scripts_dir: Path | None = None, *, timeout: int = 1800) -> 
     scripts_dir = scripts_dir or (ZENPLUS_DIR / "scripts")
 
     if not SYNC_SCRIPT.exists():
-        logger.warning("Schema gate: %s missing, falling back to ClickHouse-only sync",
+        logger.error("Schema gate: required full verifier %s missing",
                        SYNC_SCRIPT)
-        return _fallback(scripts_dir)
+        return {"ok": False, "problems": ["Required full database schema verifier is missing"],
+                "postgres": {}, "clickhouse": {}, "source": "missing"}
 
     try:
         result = subprocess.run(
@@ -79,15 +60,12 @@ def sync_and_verify(scripts_dir: Path | None = None, *, timeout: int = 1800) -> 
         except (ValueError, json.JSONDecodeError):
             status = None
 
-    if status is None:
-        return {
-            "ok": result.returncode == 0,
-            "problems": [] if result.returncode == 0 else [
-                f"schema sync exited {result.returncode}: "
-                f"{(result.stderr or stdout).strip()[:500]}"
-            ],
-            "postgres": {}, "clickhouse": {}, "source": "exit-code",
-        }
+    if not isinstance(status, dict) or not isinstance(status.get("ok"), bool):
+        return {"ok": False, "problems": ["Schema sync did not return an explicit JSON verdict"],
+                "postgres": {}, "clickhouse": {}, "source": "invalid-verdict"}
+    if result.returncode != 0:
+        status["ok"] = False
+        status.setdefault("problems", []).append(f"Schema sync exited {result.returncode}")
 
     status.setdefault("source", "sync-schema")
     for line in (result.stderr or "").splitlines():

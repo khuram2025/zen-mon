@@ -77,6 +77,8 @@ def _apply_replace(step: dict, extract_dir: str) -> None:
         if src_file.is_dir():
             continue
         rel_path = src_file.relative_to(code_path)
+        if rel_path.as_posix() == ".version":
+            continue  # agent.run_update commits this only after schema/health checks
         dest_file = ZENPLUS_DIR / rel_path
         dest_file.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_file, dest_file)

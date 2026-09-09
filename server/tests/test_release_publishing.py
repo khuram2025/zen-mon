@@ -84,6 +84,7 @@ class _Client:
             {
                 "id": self.catalog_id,
                 "version": self.catalog_version,
+                "min_version": self.upload_fields.get("min_version"),
                 "package_sha256": (
                     self.catalog_hash
                     if self.catalog_hash is not None

@@ -97,7 +97,7 @@ def execute_manifest(
             logger.error("Step %d/%d failed, initiating rollback ...", i, len(steps))
 
             # Run rollback steps
-            if rollback_steps:
+            if rollback_steps and completed_steps:
                 _execute_rollback(rollback_steps, extract_dir, cfg)
             else:
                 logger.warning("No rollback steps defined in manifest")

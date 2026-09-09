@@ -644,6 +644,8 @@ def build_package(version: str, changelog: str, severity: str,
     print(f"{'='*60}\n")
 
     print("[0/7] Linting migrations against lockfile ...")
+    from release_policy import validate_policy
+    min_version = validate_policy(ZENPLUS_DIR, version, min_version)
     lint_migrations()
     migrations_src = ZENPLUS_DIR / "scripts"
     selected_migrations = _select_migrations(
@@ -884,7 +886,7 @@ def build_package(version: str, changelog: str, severity: str,
 
     # 6. Create manifest.json
     print("[6/7] Creating manifest ...")
-    steps = []
+    steps = [{"type": "run_hook", "script": "code/scripts/ota-preflight.py", "timeout": 30}]
 
     # Stop services before update
     steps.append({"type": "stop_services", "services": ["zenplus-api", "zenplus-poller", "zenplus-netflow-collector"]})
@@ -993,7 +995,7 @@ def build_package(version: str, changelog: str, severity: str,
             "timeout": 1800,
         })
     else:
-        print("  WARNING: scripts/sync-schema.py missing — release has no schema gate!")
+        raise RuntimeError("Required scripts/sync-schema.py missing; refusing release without schema gate")
 
     if (build_dir / "dashboard-dist.tar.gz").exists():
         steps.append({"type": "build_dashboard", "prebuilt": True, "source": "dashboard-dist.tar.gz"})
@@ -1284,6 +1286,7 @@ def publish_package(zup_path: Path, version: str, changelog: str,
             and str(published.get("id", published.get("release_id", ""))) == str(release_id)
             and published.get("is_published")
             and published.get("version") == version
+            and (published.get("min_version") or None) == signed_min_version
             and str(published.get("package_sha256", "")).lower() == pkg_hash.lower()
         )
         if not catalog_matches:

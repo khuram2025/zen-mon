@@ -58,6 +58,29 @@ def main() -> None:
         if installed_version != args.version:
             raise RuntimeError("code/.version does not match release version")
 
+        steps = manifest.get("steps", [])
+        if not steps or steps[0].get("script") != "code/scripts/ota-preflight.py":
+            raise RuntimeError("required version preflight must be the first update step")
+        schema_indices = [i for i, step in enumerate(steps)
+                          if step.get("script") == "code/scripts/sync-schema.py"]
+        start_indices = [i for i, step in enumerate(steps) if step.get("type") == "start_services"]
+        if not schema_indices or not start_indices or schema_indices[-1] >= start_indices[0]:
+            raise RuntimeError("full schema gate must precede service restart")
+        lock_lines = read_member(tar, "code/scripts/migrations.lock").decode().splitlines()
+        locked = set()
+        for line in lock_lines:
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            expected, name = line.split()
+            actual = hashlib.sha256(read_member(tar, "code/scripts/" + name)).hexdigest()
+            if actual != expected:
+                raise RuntimeError("locked migration missing or changed: " + name)
+            locked.add(name)
+        shipped = {PurePosixPath(name).name for name in members
+                   if name.startswith("code/scripts/migrate-") and name.endswith(".sql")}
+        if shipped != locked:
+            raise RuntimeError("migration inventory differs from the append-only ledger")
+
         checksum_lines = read_member(tar, "checksums.sha256").decode().splitlines()
         verified = 0
         for line in checksum_lines:

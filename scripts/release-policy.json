@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "minimum_supported_upgrade_base": "1.23.9",
+  "reason": "Preserve the verified prerequisite chain through service probe diagnostics and device status explanations. Raise this floor when a required bridge is introduced; do not lower it without an audited cumulative replacement.",
+  "required_payload_files": [
+    "scripts/ota-preflight.py",
+    "scripts/sync-schema.py",
+    "scripts/run-migrations.py",
+    "scripts/ch_migrate.py",
+    "scripts/migration_order.py",
+    "scripts/migrations.lock",
+    "updater/version_policy.py"
+  ]
+}

@@ -30,6 +30,9 @@ SEVERITY="${3:-normal}"
 ROLLOUT="${4:-none}"
 MIN_VERSION="${5:-${ZENPLUS_MIN_VERSION:-}}"
 RELEASE_SCOPE="${6:-${ZENPLUS_RELEASE_SCOPE:-bundled}}"
+if [ -z "$MIN_VERSION" ]; then
+    MIN_VERSION="$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["minimum_supported_upgrade_base"])' "$ZENPLUS_DIR/scripts/release-policy.json")"
+fi
 ZUP="${ZENPLUS_RELEASE_DIR:-/tmp/zenplus-releases}/update-${VERSION}.zup"
 
 case "$SEVERITY" in

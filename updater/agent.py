@@ -22,6 +22,7 @@ from pathlib import Path
 import httpx
 
 from . import __version__
+from .version_policy import VersionPolicyError, validate_transition, validate_manifest_transition
 from .config import AgentConfig, load_config, save_config, save_subscription
 from .crypto import (
     SecurityError,
@@ -413,6 +414,14 @@ def run_update(cfg: AgentConfig, release: dict) -> bool:
     logger.info("Starting update: %s → %s", from_version, version)
     logger.info("=" * 60)
 
+    # Enforce prerequisites for every caller, including direct/API execution.
+    try:
+        validate_transition(release, from_version)
+    except VersionPolicyError as exc:
+        report_status(cfg, release_id, "failed", from_version, version,
+                      error_message=str(exc), changelog=changelog, severity=severity)
+        return False
+
     # Report: downloading
     report_status(
         cfg, release_id, "downloading", from_version, version,
@@ -421,7 +430,9 @@ def run_update(cfg: AgentConfig, release: dict) -> bool:
 
     try:
         extract_dir, manifest = download_and_extract(cfg, release)
-    except (DownloadError, SecurityError) as e:
+        payload_version = (Path(extract_dir) / "code" / ".version").read_text().splitlines()[0].strip()
+        validate_manifest_transition(manifest, release, from_version, payload_version)
+    except (DownloadError, SecurityError, VersionPolicyError, OSError, ValueError, IndexError) as e:
         logger.error("Download/verification failed: %s", e)
         report_status(
             cfg, release_id, "failed", from_version, version,
@@ -568,7 +579,14 @@ def main(config_path: str | None = None, check_only: bool = False) -> int:
                 break
             if not _is_newer(release["version"], after):
                 break
-            logger.info("Continuing to next release: %s → %s", after, release["version"])
+            logger.info("Continuing with fresh updater code: %s → %s", after, release["version"])
+            # Each bridge may replace this process's imported handlers. Reload
+            # the installed updater before the next hop; never reuse old code.
+            lock.release()
+            args = [sys.executable, "-m", "updater"]
+            if config_path:
+                args.extend(["--config", str(Path(config_path).resolve())])
+            os.execv(sys.executable, args)
 
         if len(applied) > 1:
             print(f"Applied {len(applied)} releases in order: {' → '.join(applied)}")
