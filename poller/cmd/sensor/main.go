@@ -70,11 +70,12 @@ type state struct {
 }
 
 type configResponse struct {
-	ETag          string               `json:"etag"`
-	SensorID      string               `json:"sensor_id"`
-	SensorName    string               `json:"sensor_name"`
-	Devices       []configDevice       `json:"devices"`
-	ServiceChecks []configServiceCheck `json:"service_checks"`
+	ProbeTrust    *checker.ProbeTrustPolicy `json:"probe_trust"`
+	ETag          string                    `json:"etag"`
+	SensorID      string                    `json:"sensor_id"`
+	SensorName    string                    `json:"sensor_name"`
+	Devices       []configDevice            `json:"devices"`
+	ServiceChecks []configServiceCheck      `json:"service_checks"`
 }
 
 type configDevice struct {
@@ -88,6 +89,7 @@ type configDevice struct {
 }
 
 type configServiceCheck struct {
+	ProbeTrust            *checker.ProbeTrustPolicy  `json:"-"`
 	CredentialID          *uuid.UUID                 `json:"credential_id"`
 	CredentialAuthType    string                     `json:"credential_auth_type"`
 	CredentialUsername    string                     `json:"credential_username"`
@@ -190,6 +192,11 @@ func (c *configCache) Store(next configResponse) {
 
 func cloneConfig(in configResponse) configResponse {
 	out := in
+	if in.ProbeTrust != nil {
+		data, _ := json.Marshal(in.ProbeTrust)
+		out.ProbeTrust = new(checker.ProbeTrustPolicy)
+		_ = json.Unmarshal(data, out.ProbeTrust)
+	}
 	out.Devices = append([]configDevice(nil), in.Devices...)
 	for i := range out.Devices {
 		if in.Devices[i].SNMP != nil {
@@ -1888,6 +1895,7 @@ func (s *checkScheduler) Schedule(ctx context.Context, current configResponse, n
 	}
 	for _, configured := range current.ServiceChecks {
 		service := configured
+		service.ProbeTrust = current.ProbeTrust
 		if !service.Enabled || service.ID == "" {
 			continue
 		}
@@ -2046,7 +2054,7 @@ func (s *checkScheduler) runService(ctx context.Context, sc configServiceCheck, 
 		HTTPExpectedStatus:   expectedStatus,
 		HTTPExpectedStatuses: sc.HTTPExpectedStatuses, HTTPContentMatch: sc.HTTPContentMatch,
 		HTTPFollowRedirects: followRedirects, HTTPIgnoreTLSErrors: sc.HTTPIgnoreTLSErrors,
-		HTTPAllowInsecureAuth: sc.HTTPAllowInsecureAuth, Config: cloneJSONMap(sc.Config),
+		HTTPAllowInsecureAuth: sc.HTTPAllowInsecureAuth, Config: cloneJSONMap(sc.Config), ProbeTrust: sc.ProbeTrust,
 		TLSWarnDays: sc.TLSWarnDays, TLSCriticalDays: sc.TLSCriticalDays,
 		CheckInterval: interval, Timeout: timeout, RetryCount: sc.RetryCount, RetryDelay: retryDelay,
 	}

@@ -21,6 +21,7 @@ type HTTPWorkflowStep struct {
 
 // ServiceCheck represents a configured service check loaded from PostgreSQL.
 type ServiceCheck struct {
+	ProbeTrust            *ProbeTrustPolicy
 	ID                    uuid.UUID
 	DeviceID              *uuid.UUID
 	GroupID               *uuid.UUID

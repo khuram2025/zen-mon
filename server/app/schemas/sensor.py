@@ -400,6 +400,7 @@ class ConfigServiceCheck(BaseModel):
 
 
 class ConfigResponse(BaseModel):
+    probe_trust: dict[str, Any] = Field(default_factory=dict)
     etag: str
     sensor_id: str
     sensor_name: str

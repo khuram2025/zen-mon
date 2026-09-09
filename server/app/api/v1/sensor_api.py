@@ -62,6 +62,7 @@ from app.core.database import get_db, get_clickhouse_client
 from app.services.sensor_health_service import create_sensor_alert, resolve_sensor_alert
 from app.services.sensor_rate_limit import enforce_sensor_quota
 from app.services.audit_service import write_audit_log
+from app.services.probe_trust import load_probe_trust
 from app.schemas.sensor import (
     EnrollRequest,
     EnrollResponse,
@@ -675,6 +676,7 @@ async def _config_etag(sensor_id: UUID, db: AsyncSession) -> str:
         "assignments": [dict(row) for row in assignments],
         "devices": [dict(row) for row in devices],
         "service_checks": [dict(row) for row in service_checks],
+        "probe_trust": await load_probe_trust(db),
     }
     return _sha256(json.dumps(material, default=str, sort_keys=True, separators=(",", ":")))
 
@@ -732,7 +734,9 @@ async def get_config(
     from app.services.sensor_snmp import sensor_snmp_config
     from app.services.sensor_service_checks import service_auth_config
     snmp = await sensor_snmp_config(sensor["id"], db)
+    probe_trust = await load_probe_trust(db)
     return ConfigResponse(
+        probe_trust=probe_trust,
         etag=etag,
         sensor_id=str(sensor["id"]),
         sensor_name=sensor["name"],

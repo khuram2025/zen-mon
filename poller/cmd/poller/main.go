@@ -18,6 +18,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--verify-service-tls" {
+		if err := verifyServiceTLS(os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	// Initialize logger
 	logger, _ := zap.NewProduction()
 	if os.Getenv("LOG_LEVEL") == "debug" {

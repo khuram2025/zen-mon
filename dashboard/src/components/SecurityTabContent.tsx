@@ -12,6 +12,7 @@ import {
   Trash2,
   Upload,
 } from 'lucide-react'
+import { ProbeTrustCard } from '@/components/ProbeTrustCard'
 import { ManagementAccessCard } from '@/components/ManagementAccessCard'
 import { api } from '@/lib/api'
 import { apiErrorMessage, cn, copyText } from '@/lib/utils'
@@ -96,6 +97,7 @@ export function SecurityTabContent() {
       <StatusCard status={s} />
       <CertificateCard status={s} />
       <HardeningCard status={s} />
+      <ProbeTrustCard />
       <ManagementAccessCard />
       <AgentTrustNote status={s} />
     </div>

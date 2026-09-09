@@ -103,6 +103,14 @@ func (s *PostgresStore) UpdateDeviceStatus(ctx context.Context, deviceID uuid.UU
 
 // LoadServiceChecks returns all enabled service checks.
 func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.ServiceCheck, error) {
+	var trustJSON string
+	if err := s.pool.QueryRow(ctx, "SELECT COALESCE((SELECT value::text FROM system_settings WHERE key='security.probe_trust'), '{}')").Scan(&trustJSON); err != nil {
+		return nil, fmt.Errorf("load probe trust: %w", err)
+	}
+	var trust checker.ProbeTrustPolicy
+	if err := json.Unmarshal([]byte(trustJSON), &trust); err != nil {
+		return nil, fmt.Errorf("parse probe trust: %w", err)
+	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT sc.id, sc.device_id, sc.name, sc.check_type, sc.enabled,
 		       sc.target_host, COALESCE(sc.target_port, 0), COALESCE(sc.target_url, ''),
@@ -137,6 +145,7 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 	var checks []*checker.ServiceCheck
 	for rows.Next() {
 		var sc checker.ServiceCheck
+		sc.ProbeTrust = &trust
 		var deviceID, groupID, parentID, credentialID *uuid.UUID
 		var intervalSec, timeoutSec int
 		var retryCount, retryDelaySec int

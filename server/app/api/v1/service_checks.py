@@ -433,6 +433,8 @@ async def test_service_check_configuration(
 
         # The workflow runner consumes the same dict-shaped steps stored in JSONB.
         check = SimpleNamespace(**data.model_dump(mode="python"))
+        from app.services.probe_trust import load_probe_trust
+        check.probe_trust = await load_probe_trust(db)
         result = await execute_http_workflow(check, runtime_credential)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -618,6 +620,8 @@ async def test_service_check(
     try:
         if check.check_type == "http":
             from app.services.service_workflow import execute_http_workflow
+            from app.services.probe_trust import load_probe_trust
+            check.probe_trust = await load_probe_trust(db)
             workflow_result = await execute_http_workflow(check, runtime_credential)
             result.update(workflow_result)
 
@@ -636,7 +640,10 @@ async def test_service_check(
         elif check.check_type == "tls":
             host = check.target_host
             port = check.target_port or 443
-            ctx = ssl.create_default_context()
+            import asyncio
+            from app.services.probe_trust import load_probe_trust
+            from app.services.probe_tls import verified_context
+            ctx = await asyncio.to_thread(verified_context, host, port, max(1, min(int(check.timeout or 10), 60)), await load_probe_trust(db))
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(check.timeout)
             wrapped = ctx.wrap_socket(sock, server_hostname=host)

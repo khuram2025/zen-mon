@@ -36,15 +36,14 @@ func (c *TLSChecker) Check(ctx context.Context, sc *ServiceCheck, pollerID strin
 		port = 443
 	}
 
-	addr := fmt.Sprintf("%s:%d", sc.TargetHost, port)
+	addr := net.JoinHostPort(sc.TargetHost, fmt.Sprint(port))
 
 	dialer := &net.Dialer{Timeout: sc.Timeout}
-	tlsConfig := &tls.Config{
-		ServerName: sc.TargetHost,
-	}
+	tlsConfig := probeTLSConfig(ctx, sc.TargetHost, sc.ProbeTrust, nil, false)
 
 	start := time.Now()
-	conn, err := tls.DialWithDialer(dialer, "tcp", addr, tlsConfig)
+	tlsDialer := &tls.Dialer{NetDialer: dialer, Config: tlsConfig}
+	conn, err := tlsDialer.DialContext(ctx, "tcp", addr)
 	result.ResponseTime = time.Since(start)
 
 	if err != nil {
@@ -55,7 +54,7 @@ func (c *TLSChecker) Check(ctx context.Context, sc *ServiceCheck, pollerID strin
 	}
 	defer conn.Close()
 
-	certs := conn.ConnectionState().PeerCertificates
+	certs := conn.(*tls.Conn).ConnectionState().PeerCertificates
 	if len(certs) == 0 {
 		result.Error = "no certificates presented"
 		valid := false

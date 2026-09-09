@@ -2,7 +2,6 @@ package checker
 
 import (
 	"context"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
@@ -89,9 +88,8 @@ func (c *HTTPChecker) Check(ctx context.Context, sc *ServiceCheck, pollerID stri
 		return result
 	}
 
-	baseTransport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: sc.HTTPIgnoreTLSErrors, RootCAs: c.rootCAs},
-	}
+	baseTransport := probeTransport(sc, c.rootCAs)
+	defer baseTransport.CloseIdleConnections()
 	var transport http.RoundTripper = baseTransport
 	if strings.EqualFold(sc.CredentialAuthType, "ntlm") {
 		transport = ntlmssp.Negotiator{RoundTripper: baseTransport}
@@ -222,9 +220,8 @@ func (c *HTTPChecker) checkWorkflow(ctx context.Context, sc *ServiceCheck, polle
 	}
 
 	jar, _ := cookiejar.New(nil)
-	baseTransport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: sc.HTTPIgnoreTLSErrors, RootCAs: c.rootCAs},
-	}
+	baseTransport := probeTransport(sc, c.rootCAs)
+	defer baseTransport.CloseIdleConnections()
 	var transport http.RoundTripper = baseTransport
 	if strings.EqualFold(sc.CredentialAuthType, "ntlm") {
 		transport = ntlmssp.Negotiator{RoundTripper: baseTransport}
