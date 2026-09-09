@@ -196,9 +196,13 @@ type SlaStats = {
   max_response_ms: number | null
   error_rate_pct: number | null
   uptime_streak_sec: number | null
+  uptime_streak_started_at?: string | null
+  covered_sec?: number
+  coverage_pct?: number
+  unknown_sec?: number
 }
 
-type HourlyUptime = { ts: string; uptime_pct: number | null; sample_count: number }
+type HourlyUptime = { ts: string; uptime_pct: number | null; sample_count: number; covered_sec?: number }
 
 type Outage = {
   start: number
@@ -612,13 +616,14 @@ export function ServiceCheckDetailPage() {
 
   const lastCheckMs = check.last_check_at ? Date.parse(check.last_check_at) : null
   const intervalMs = (check.check_interval || 60) * 1000
+  const probeStale = !!lastCheckMs && nowTick - lastCheckMs > intervalMs * 2
   const nextPollMs = lastCheckMs ? lastCheckMs + intervalMs : null
   const secsToNext = nextPollMs ? Math.max(0, Math.floor((nextPollMs - nowTick) / 1000)) : null
 
-  const uptimePct = sla?.uptime_pct ?? derived.uptime_pct
-  const errorRatePct = sla?.error_rate_pct ?? derived.error_rate_pct
+  const uptimePct = sla ? sla.uptime_pct : null
+  const errorRatePct = sla ? sla.error_rate_pct : null
   const incidentCount = sla?.incident_count ?? derived.incident_count
-  const avgMs = sla?.avg_response_ms ?? derived.avg_ms ?? check.last_response_ms
+  const avgMs = sla?.avg_response_ms ?? derived.avg_ms
   const p95Ms = sla?.p95_response_ms ?? derived.p95_ms
   const streakSec = sla?.uptime_streak_sec ?? derived.streak_sec
   const downtimeSec = sla?.total_downtime_sec ?? 0
@@ -642,9 +647,18 @@ export function ServiceCheckDetailPage() {
 
   return (
     <div className="space-y-4 pb-10">
+      {slaQ.isError && (
+        <div role="alert" className="rounded-lg border border-danger/30 bg-danger/5 p-4 text-sm">Availability report could not be loaded. <button className="font-medium text-primary underline" onClick={() => slaQ.refetch()}>Retry</button></div>
+      )}
+      {probeStale && check.enabled && (
+        <div role="status" className="flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 p-4 text-sm">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+          <div><strong>Monitoring results are overdue</strong><p className="mt-1 text-muted">Last result {relativeTime(check.last_check_at!)}. Check the assigned sensor and its connection. Missing results are shown as no data and do not count as uptime or downtime.</p></div>
+        </div>
+      )}
       <ServiceHeader
         check={check}
-        secsToNext={secsToNext}
+        secsToNext={probeStale ? null : secsToNext}
         rangePicker={(
           <TimeRangePicker
             rangeIdx={rangeIdx}
@@ -724,6 +738,7 @@ export function ServiceCheckDetailPage() {
         nowTick={nowTick}
       />
 
+      <p className="text-xs text-muted">Availability uses observed time. Results remain valid for up to two check intervals; longer gaps are no data. Daily history uses local calendar days.</p>
       <ThirtyDayStrip
         days={days}
         fromTs={fromTs}
@@ -768,6 +783,7 @@ export function ServiceCheckDetailPage() {
           <AvailabilityTimeline
             points={points}
             statusHistory={seededHistory}
+            sla={sla}
             check={check}
             rangeLabel={range.label}
             fromTs={fromTs}
@@ -1021,7 +1037,7 @@ function ServiceHeader({
     ? 'Paused'
     : check.status === 'up' ? 'Up'
       : check.status === 'down' ? 'Down'
-        : check.status === 'unknown' ? 'Pending'
+        : check.status === 'unknown' ? (check.last_check_at ? 'No recent data' : 'Pending')
           : 'Warning'
   const statusTone = !check.enabled
     ? 'text-muted'
@@ -1135,6 +1151,8 @@ function HeroStrip({ check, sla24, slaRange, rangeLabel, sla7d, sla30d, loading,
   let statusCell: { label: string; value: string; tone: string; sub: string }
   if (!check.enabled) {
     statusCell = { label: 'Monitoring', value: 'Paused', tone: 'text-muted', sub: 'probes are not scheduled' }
+  } else if (check.last_check_at && nowTick - Date.parse(check.last_check_at) > (check.check_interval || 60) * 2000) {
+    statusCell = { label: 'Monitoring', value: 'Results overdue', tone: 'text-warning', sub: 'check the assigned sensor' }
   } else if (isDown) {
     statusCell = {
       label: check.status === 'down' ? 'Currently down for' : 'Degraded for',
@@ -1143,15 +1161,15 @@ function HeroStrip({ check, sla24, slaRange, rangeLabel, sla7d, sla30d, loading,
       sub: check.last_error ? check.last_error.slice(0, 60) : 'no error detail',
     }
   } else if (check.status === 'unknown') {
-    statusCell = { label: 'Monitoring', value: 'Pending', tone: 'text-muted', sub: 'waiting for the first probe' }
+    statusCell = { label: 'Monitoring', value: check.last_check_at ? 'No recent data' : 'Pending', tone: 'text-muted', sub: check.last_check_at ? 'check the assigned sensor' : 'waiting for the first probe' }
   } else {
     statusCell = {
       label: 'Currently up for',
-      value: formatDur(sla24?.uptime_streak_sec),
+      value: formatDur(sla24?.uptime_streak_started_at ? Math.max(0, (nowTick - Date.parse(sla24.uptime_streak_started_at)) / 1000) : null),
       tone: 'text-success',
-      sub: sla24?.uptime_streak_sec
-        ? `since ${new Date(nowTick - sla24.uptime_streak_sec * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
-        : 'no downtime recorded',
+      sub: sla24?.uptime_streak_started_at
+        ? `observed since ${new Date(sla24.uptime_streak_started_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
+        : 'recovery time unavailable',
     }
   }
 
@@ -1167,14 +1185,15 @@ function HeroStrip({ check, sla24, slaRange, rangeLabel, sla7d, sla30d, loading,
         ? 'no data in this window'
         : down > 0
           ? `${formatDur(down)} down · ${inc} incident${inc === 1 ? '' : 's'}`
-          : 'no downtime',
+          : 'no observed downtime',
+      coverage: s?.uptime_pct != null ? `${(s.coverage_pct ?? 0).toFixed(1)}% of window observed` : undefined,
     }
   }
 
   // The second cell tracks the range picker so the strip reacts to the selected window;
   // 7 days and 30 days stay as fixed reference points.
   const cells = [
-    { ...statusCell, selected: false },
+    { ...statusCell, coverage: undefined, selected: false },
     { ...windowCell(rangeLabel, slaRange), selected: true },
     { ...windowCell('Last 7 days', sla7d), selected: false },
     { ...windowCell('Last 30 days', sla30d), selected: false },
@@ -1200,7 +1219,7 @@ function HeroStrip({ check, sla24, slaRange, rangeLabel, sla7d, sla30d, loading,
             )}
           </div>
           <div className={cn('mt-1 text-[24px] font-bold leading-none tabular-nums', c.tone)}>{c.value}</div>
-          <div className="mt-1 truncate text-[10.5px] text-muted" title={c.sub}>{c.sub}</div>
+          <div className="mt-1 truncate text-[10.5px] text-muted" title={c.sub}>{c.sub}</div>{c.coverage && <div className="mt-1 text-[10px] text-muted">{c.coverage}</div>}
         </div>
       ))}
     </div>
@@ -1230,7 +1249,7 @@ function ThirtyDayStrip({ days, fromTs, toTs, onSelectDay }: {
     dim: dimOthers && !inRange(d),
     title:
       d.uptimePct == null
-        ? `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} — not monitored`
+        ? `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} — no data`
         : `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} — ${d.uptimePct.toFixed(2)}% up${d.downtimeSec > 0 ? ` · ${formatDur(d.downtimeSec)} down` : ''}`,
   }))
 
@@ -1374,8 +1393,9 @@ function StatusBanner({
 /* ─── Availability timeline ─────────────────────────────────────────────── */
 
 function AvailabilityTimeline({
-  points, statusHistory, check, rangeLabel, fromTs, toTs,
+  points, statusHistory, check, rangeLabel, fromTs, toTs, sla,
 }: {
+  sla?: SlaStats
   points: ServiceMetricPoint[]
   statusHistory: StatusHistoryEvent[]
   check: ServiceCheck
@@ -1388,10 +1408,9 @@ function AvailabilityTimeline({
     [points, statusHistory, check, fromTs, toTs],
   )
   const covered = buckets.filter((b) => b.state !== 'gap')
-  const upCount = covered.filter((b) => b.state === 'up').length
   const downCount = covered.filter((b) => b.state === 'down' || b.state === 'warn').length
-  const pctUp = covered.length ? (upCount / covered.length) * 100 : null
-  const coverage = buckets.length ? (covered.length / buckets.length) * 100 : 0
+  const pctUp = sla?.uptime_pct ?? null
+  const coverage = sla?.coverage_pct ?? 0
 
   return (
     <SectionCard
@@ -1399,15 +1418,15 @@ function AvailabilityTimeline({
       subtitle={
         <span>
           {rangeLabel}
-          {points.length > 0 && ` · ${points.length} probe${points.length === 1 ? '' : 's'}`}
-          {covered.length > 0 && coverage < 95 && ` · ${coverage.toFixed(0)}% of the window has data`}
+          {points.length > 0 && ` · ${points.length} chart point${points.length === 1 ? '' : 's'}`}
+          {coverage < 99.5 && ` · ${coverage.toFixed(0)}% of the window has data`}
         </span>
       }
       actions={
         <div className="flex items-baseline gap-3 text-xs">
           {downCount > 0 && <span className="font-medium text-danger">{downCount} bad interval{downCount === 1 ? '' : 's'}</span>}
           {pctUp != null && (
-            <span className={cn('font-mono font-semibold tabular-nums', BAND_TEXT[uptimeBand(pctUp)])}>{pctUp.toFixed(2)}% up</span>
+            <span className={cn('font-mono font-semibold tabular-nums', BAND_TEXT[uptimeBand(pctUp)])}>{pctUp.toFixed(2)}% availability</span>
           )}
         </div>
       }
@@ -1469,7 +1488,7 @@ function Swatch({ color, label }: { color: string; label: string }) {
 
 function buildAvailabilityBuckets(
   points: ServiceMetricPoint[],
-  history: StatusHistoryEvent[],
+  _history: StatusHistoryEvent[],
   check: ServiceCheck,
   fromTs: number,
   toTs: number,
@@ -1481,37 +1500,16 @@ function buildAvailabilityBuckets(
   const intervalMs = Math.max(1, (check.check_interval || 60) * 1000)
   const count = Math.max(12, Math.min(96, Math.floor(span / Math.max(span / 96, intervalMs))))
   const width = span / count
-  const slots: Array<{ start: number; end: number; up: number; down: number; warn: number; reason?: string; fromHistory?: 'up' | 'down' | 'warn' }> =
+  const slots: Array<{ start: number; end: number; up: number; down: number; warn: number; reason?: string }> =
     Array.from({ length: count }, (_, i) => ({ start: fromTs + i * width, end: fromTs + (i + 1) * width, up: 0, down: 0, warn: 0 }))
 
   for (const p of points) {
     const ts = Date.parse(p.timestamp)
-    if (!Number.isFinite(ts)) continue
+    if (!Number.isFinite(ts) || ts < fromTs || ts >= toTs) continue
     const i = Math.min(count - 1, Math.floor((ts - fromTs) / width))
     if (i < 0) continue
-    if (p.is_up) slots[i].up++
-    else slots[i].down++
-  }
-
-  const sorted = [...history].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
-  let cursor = fromTs
-  let state: 'up' | 'down' | 'warn' | null = null
-  let reason: string | undefined
-  for (const ev of sorted) {
-    const t = Date.parse(ev.timestamp)
-    if (!Number.isFinite(t)) continue
-    if (state && t > cursor) paintHistory(slots, width, fromTs, count, cursor, Math.min(t, toTs), state, reason)
-    state = ev.new_status === 'up' ? 'up' : ev.new_status === 'down' ? 'down' : 'warn'
-    reason = ev.reason || undefined
-    cursor = Math.max(t, fromTs)
-  }
-  if (state && cursor < toTs) paintHistory(slots, width, fromTs, count, cursor, toTs, state, reason)
-  if (!sorted.length && check.last_check_at) {
-    const live = check.status === 'up' ? 'up' : check.status === 'down' ? 'down' : 'warn'
-    const last = Date.parse(check.last_check_at)
-    if (Number.isFinite(last) && last >= fromTs && last <= toTs) {
-      paintHistory(slots, width, fromTs, count, last, toTs, live, check.last_error || undefined)
-    }
+    if (p.is_up === true) slots[i].up++
+    else if (p.is_up === false) slots[i].down++
   }
 
   return slots.map((s) => {
@@ -1519,29 +1517,9 @@ function buildAvailabilityBuckets(
     if (s.down > 0) st = 'down'
     else if (s.warn > 0) st = 'warn'
     else if (s.up > 0) st = 'up'
-    else if (s.fromHistory) st = s.fromHistory
+
     return { start: s.start, end: s.end, state: st, reason: s.reason }
   })
-}
-
-function paintHistory(
-  slots: Array<{ start: number; fromHistory?: 'up' | 'down' | 'warn'; reason?: string }>,
-  width: number,
-  fromTs: number,
-  count: number,
-  start: number,
-  end: number,
-  state: 'up' | 'down' | 'warn',
-  reason?: string,
-) {
-  const a = Math.max(0, Math.floor((start - fromTs) / width))
-  const b = Math.min(count - 1, Math.floor((end - 1 - fromTs) / width))
-  for (let i = a; i <= b; i++) {
-    if (!slots[i].fromHistory || state !== 'up') {
-      slots[i].fromHistory = state
-      if (reason) slots[i].reason = reason
-    }
-  }
 }
 
 /* ─── Performance chart ─────────────────────────────────────────────────── */
@@ -1868,7 +1846,7 @@ function ProbeStat({ label, value, sub, className }: { label: string; value: str
 /* ─── Health score ──────────────────────────────────────────────────────── */
 
 function HealthScoreCard({ score, tint, label, factors, onViewDetails }: {
-  score: number
+  score: number | null
   tint: string
   label: string
   factors: HealthFactor[]
@@ -1876,7 +1854,7 @@ function HealthScoreCard({ score, tint, label, factors, onViewDetails }: {
 }) {
   const radius = 36
   const circ = 2 * Math.PI * radius
-  const offset = circ - (score / 100) * circ
+  const offset = circ - ((score ?? 0) / 100) * circ
   return (
     <SectionCard
       title="Health score"
@@ -1889,11 +1867,12 @@ function HealthScoreCard({ score, tint, label, factors, onViewDetails }: {
             <circle cx="50" cy="50" r={radius} fill="none" stroke={tint} strokeWidth="8" strokeLinecap="round" strokeDasharray={circ} strokeDashoffset={offset} />
           </svg>
           <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-            <div className="text-2xl font-bold leading-none tabular-nums" style={{ color: tint }}>{score}</div>
+            <div className="text-2xl font-bold leading-none tabular-nums" style={{ color: tint }}>{score ?? '—'}</div>
             <div className="text-[9px] font-semibold" style={{ color: tint }}>{label}</div>
           </div>
         </div>
         <div className="min-w-0 flex-1 space-y-2">
+          {score == null && <p className="text-xs text-muted">No observed availability in this window. A health score will appear when results are available.</p>}
           {factors.map((f) => (
             <div key={f.key} className="flex items-center gap-2 text-[10px]">
               <span className="w-[68px] shrink-0 truncate text-muted">{f.label}</span>
@@ -1936,7 +1915,7 @@ function buildActivityEvents(
       timestamp: h.timestamp,
       kind: 'status',
       severity: up ? 'success' : down ? 'critical' : 'warning',
-      title: up ? 'Service recovered' : down ? 'Service went down' : `Status → ${statusOf(h.new_status).label}`,
+      title: up ? (h.old_status === 'unknown' ? 'Monitoring resumed' : 'Service recovered') : down ? 'Service went down' : `Status → ${statusOf(h.new_status).label}`,
       subtitle: [h.reason, h.old_status ? `${h.old_status} → ${h.new_status}` : null].filter(Boolean).join(' · ') || undefined,
     }
   })
@@ -2251,6 +2230,7 @@ type DayUptime = {
   date: Date
   uptimePct: number | null
   samples: number
+  coveredSec: number
   downtimeSec: number
   hours: Array<{ hour: number; uptimePct: number | null; samples: number }>
 }
@@ -2264,11 +2244,11 @@ function buildDailyUptime(hours: HourlyUptime[], dayCount: number): DayUptime[] 
     const key = dayKey(d)
     let entry = byDay.get(key)
     if (!entry) { entry = { pctSum: 0, pctN: 0, total: 0, hours: new Map() }; byDay.set(key, entry) }
-    // Hours reconstructed from the status log arrive with sample_count 0 but a real
-    // uptime_pct — they count toward availability like any measured hour.
+    // Weight each hour by observed seconds, including partial current hours.
     if (h.uptime_pct != null) {
-      entry.pctSum += h.uptime_pct
-      entry.pctN += 1
+      const weight = h.covered_sec ?? 0
+      entry.pctSum += h.uptime_pct * weight
+      entry.pctN += weight
       entry.total += h.sample_count || 0
     }
     entry.hours.set(d.getHours(), { pct: h.uptime_pct, samples: h.sample_count || 0 })
@@ -2283,9 +2263,11 @@ function buildDailyUptime(hours: HourlyUptime[], dayCount: number): DayUptime[] 
     const key = dayKey(date)
     const entry = byDay.get(key)
     const start = date.getTime()
-    const end = start + 86_400_000
+    const nextDay = new Date(date)
+    nextDay.setDate(nextDay.getDate() + 1)
+    const end = nextDay.getTime()
     const uptimePct = entry && entry.pctN > 0 ? entry.pctSum / entry.pctN : null
-    const coveredSec = entry ? Math.min(86_400, entry.pctN * 3600) : 0
+    const coveredSec = entry ? Math.min(86_400, entry.pctN) : 0
     const downtimeSec = uptimePct == null ? 0 : ((100 - uptimePct) / 100) * coveredSec
     out.push({
       key,
@@ -2295,6 +2277,7 @@ function buildDailyUptime(hours: HourlyUptime[], dayCount: number): DayUptime[] 
       uptimePct,
       samples: entry?.total ?? 0,
       downtimeSec,
+      coveredSec,
       hours: Array.from({ length: 24 }, (_, hour) => {
         const hv = entry?.hours.get(hour)
         return { hour, uptimePct: hv?.pct ?? null, samples: hv?.samples ?? 0 }
@@ -2311,7 +2294,7 @@ function coveredWeightedUptime(days: DayUptime[]): number | null {
   let weight = 0
   for (const d of days) {
     if (d.uptimePct == null) continue
-    const covered = d.hours.filter((h) => h.uptimePct != null).length
+    const covered = d.coveredSec
     if (covered === 0) continue
     up += d.uptimePct * covered
     weight += covered
@@ -2389,7 +2372,7 @@ function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectD
                     title={
                       d.uptimePct == null
                         ? `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} — no data`
-                        : `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}\n${d.uptimePct.toFixed(3)}% up · ${d.samples > 0 ? `${d.samples} samples` : 'from status log'}${d.downtimeSec > 0 ? `\n${formatDur(d.downtimeSec)} down` : ''}`
+                        : `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}\n${d.uptimePct.toFixed(3)}% up · ${d.samples > 0 ? `${d.samples} samples` : 'observed coverage'}${d.downtimeSec > 0 ? `\n${formatDur(d.downtimeSec)} down` : ''}`
                     }
                     className={cn(
                       'group relative flex h-[62px] flex-col items-center justify-center rounded-lg border transition-all',
@@ -2459,7 +2442,7 @@ function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectD
                       title={
                         h.uptimePct == null
                           ? `${String(h.hour).padStart(2, '0')}:00 — no data`
-                          : `${String(h.hour).padStart(2, '0')}:00 — ${h.uptimePct.toFixed(1)}% up · ${h.samples > 0 ? `${h.samples} samples` : 'from status log'}`
+                          : `${String(h.hour).padStart(2, '0')}:00 — ${h.uptimePct.toFixed(1)}% up · ${h.samples > 0 ? `${h.samples} samples` : 'observed coverage'}`
                       }
                     />
                   ))}
@@ -2660,33 +2643,14 @@ function buildOutages(history: StatusHistoryEvent[], fromTs: number, toTs: numbe
   const createdTs = Date.parse(check.created_at)
   const clampStart = (t: number) => Math.max(t, Number.isFinite(createdTs) ? createdTs : t)
 
-  // Without a seed, a leading recovery still implies the service entered the window down.
-  const inferredStart = clampStart(fromTs)
-  if (sorted.length > 0 && sorted[0].new_status === 'up' && Date.parse(sorted[0].timestamp) > fromTs) {
-    open = { start: inferredStart, kind: 'down', reason: undefined, clipped: true }
-  } else if (
-    sorted.length === 0 &&
-    check.status !== 'up' &&
-    check.status !== 'unknown' &&
-    // Live status only speaks for a window that reaches the present.
-    toTs >= Date.now() - 60_000
-  ) {
-    open = {
-      start: inferredStart,
-      kind: check.status === 'down' ? 'down' : 'warn',
-      reason: check.last_error || undefined,
-      clipped: true,
-    }
-  }
-
   for (const ev of sorted) {
     const t = Date.parse(ev.timestamp)
-    if (ev.new_status === 'up') {
+    if (ev.new_status === 'up' || !['down', 'warning', 'degraded'].includes(ev.new_status)) {
       if (open) {
         out.push({ start: open.start, end: t, kind: open.kind, reason: open.reason, clippedStart: open.clipped })
         open = null
       }
-    } else if (!open) {
+    } else if (['down', 'warning', 'degraded'].includes(ev.new_status) && !open) {
       open = {
         start: clampStart(t),
         kind: ev.new_status === 'down' ? 'down' : 'warn',
@@ -3198,7 +3162,8 @@ function computeHealthScore(
   args: { uptime_pct: number | null; error_rate_pct: number | null; incident_count: number; p95_response_ms: number | null },
   cfg: HealthScoreConfig = DEFAULT_HEALTH_SCORE_CONFIG,
 ) {
-  const up = args.uptime_pct ?? 100
+  if (args.uptime_pct == null) return { score: null, tint: 'rgb(var(--muted))', label: 'No data', factors: [] as HealthFactor[] }
+  const up = args.uptime_pct
   const err = args.error_rate_pct ?? 0
   const inc = args.incident_count || 0
   const p95 = args.p95_response_ms
@@ -3262,7 +3227,7 @@ function HealthScoreDetailsDialog({
 }: {
   open: boolean
   onOpenChange: (o: boolean) => void
-  score: number
+  score: number | null
   tint: string
   label: string
   factors: HealthFactor[]
@@ -3304,7 +3269,7 @@ function HealthScoreDetailsDialog({
             <div className="text-[11px]" style={{ color: tint }}>{label}</div>
           </div>
           <div className="text-3xl font-bold tabular-nums" style={{ color: tint }}>
-            {score}<span className="text-sm text-muted">/100</span>
+            {score ?? '—'}<span className="text-sm text-muted">/100</span>
           </div>
         </div>
         <Tabs value={tab} onValueChange={(v) => setTab(v as 'breakdown' | 'configure')}>

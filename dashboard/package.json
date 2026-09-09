@@ -10,7 +10,8 @@
     "smoke:routes": "node scripts/smoke-routes.mjs",
     "test:rum": "node scripts/test-rum-ui.mjs",
     "smoke:build": "vite build",
-    "smoke": "npm run smoke:routes && npm run smoke:build"
+    "smoke": "npm run smoke:routes && npm run smoke:build",
+    "test:service-availability": "node scripts/test-service-availability.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.2",
