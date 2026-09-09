@@ -1779,6 +1779,19 @@ function LatestProbeCard({ check, latest, recent, manualProbe }: {
           {latest?.error_message || check.last_error}
         </p>
       )}
+      {latest?.network_diagnostics && (
+        <div className="mt-3 rounded-md border border-border bg-surface2/30 p-2.5">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Connection diagnostics · scheduled probe</div>
+          <div className="mt-1 break-all text-xs">{latest.network_diagnostics.remote_ip || 'No connection established'} · {latest.network_diagnostics.ip_version === 'ipv4' ? 'IPv4 only' : latest.network_diagnostics.ip_version === 'ipv6' ? 'IPv6 only' : 'Auto'}</div>
+          <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
+            <span>DNS <b>{formatMs(latest.network_diagnostics.dns_ms)}</b></span>
+            <span>TCP <b>{formatMs(latest.network_diagnostics.connect_ms)}</b></span>
+            <span>TLS <b>{formatMs(latest.network_diagnostics.tls_ms)}</b></span>
+          </div>
+          {latest.network_diagnostics.failure_stage && <div className="mt-1 text-xs text-danger">Failed stage: {latest.network_diagnostics.failure_stage.toUpperCase()}</div>}
+          <p className="mt-1 text-[10px] text-muted">Phase times include connection attempts and redirects. A dash means the phase was not observed.</p>
+        </div>
+      )}
       {manualProbe && (
         <div className="mt-2 rounded-md border border-border bg-surface2/40 px-2.5 py-2">
           <div className="flex items-center justify-between text-[11px] font-semibold">
@@ -2908,7 +2921,9 @@ function ConfigTab({ check, onEdit, onExport }: { check: ServiceCheck; onEdit: (
           <InfoGrid rows={[
             { label: 'Interval', value: `${check.check_interval}s` },
             { label: 'Timeout', value: `${check.timeout}s` },
-            { label: 'Retries', value: `${check.retry_count ?? 1} × ${check.retry_delay_s ?? 30}s delay` },
+            { label: 'Failures before Down', value: String(check.retry_count ?? 1) },
+            { label: 'Sensor retry delay', value: `${check.retry_delay_s ?? 30}s` },
+            ...(check.check_type === 'http' ? [{ label: 'IP version', value: check.config?.ip_version === 'ipv4' ? 'IPv4 only' : check.config?.ip_version === 'ipv6' ? 'IPv6 only' : 'Auto' }] : []),
             { label: 'Level', value: `L${check.level ?? 1}` },
             { label: 'Enabled', value: check.enabled ? 'Yes' : 'Paused' },
             { label: 'Maintenance', value: check.in_maintenance ? 'Active window' : 'None' },

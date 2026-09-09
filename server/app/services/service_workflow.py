@@ -161,10 +161,11 @@ async def execute_http_workflow(
     if any(_origin(step["url"]) != base_origin for step in steps):
         raise ValueError("All workflow steps must use the same origin")
 
+    ip_version = (getattr(check, "config", None) or {}).get("ip_version", "auto")
     probe_trust = getattr(check, "probe_trust", None)
     if _transport is None and probe_trust is not None and not ignore_tls_errors and auth_type != "ntlm":
         from app.services.probe_tls import ProbeTrustTransport
-        _transport = ProbeTrustTransport(probe_trust, timeout)
+        _transport = ProbeTrustTransport(probe_trust, timeout, ip_version)
 
     if auth_type == "ntlm":
         if _transport is not None:
@@ -178,7 +179,12 @@ async def execute_http_workflow(
             values,
             base_origin,
             probe_trust,
+            ip_version,
         )
+
+    if _transport is None and ip_version != "auto":
+        from app.services.probe_tls import probe_local_address
+        _transport = httpx.AsyncHTTPTransport(verify=not ignore_tls_errors, local_address=probe_local_address(ip_version))
 
     client_auth = None
     if auth_type == "basic":
@@ -302,6 +308,7 @@ def _execute_ntlm_workflow(
     values: dict[str, str],
     base_origin: tuple[str, str | None, int | None],
     probe_trust: dict | None = None,
+    ip_version: str = "auto",
 ) -> dict[str, Any]:
     """Execute NTLM/Negotiate requests in a private worker thread.
 
@@ -312,9 +319,13 @@ def _execute_ntlm_workflow(
     started = time.monotonic()
     results: list[dict[str, Any]] = []
     session = requests.Session()
+    if ip_version != "auto":
+        from app.services.probe_tls import ProbeAddressAdapter
+        session.mount("http://", ProbeAddressAdapter(ip_version))
+        session.mount("https://", ProbeAddressAdapter(ip_version))
     if probe_trust is not None and not ignore_tls_errors:
         from app.services.probe_tls import ProbeTrustAdapter
-        session.mount("https://", ProbeTrustAdapter(probe_trust, timeout))
+        session.mount("https://", ProbeTrustAdapter(probe_trust, timeout, ip_version))
     session.auth = HttpNtlmAuth(values["username"], values["password"])
     session.headers["User-Agent"] = "ZenPlus-Monitor/1.0"
     try:

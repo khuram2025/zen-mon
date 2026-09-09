@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/netip"
 	"net/url"
 	"strings"
@@ -31,14 +32,35 @@ type ProbeTrustCertificate struct {
 }
 
 func probeTransport(sc *ServiceCheck, roots *x509.CertPool) *http.Transport {
-	return &http.Transport{DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dial := &net.Dialer{Timeout: sc.Timeout}
+	return &http.Transport{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return dial.DialContext(ctx, ProbeNetwork(probeIPVersion(sc)), addr)
+	}, DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, _, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, err
 		}
 		cfg := probeTLSConfig(ctx, host, sc.ProbeTrust, roots, sc.HTTPIgnoreTLSErrors)
-		d := tls.Dialer{NetDialer: &net.Dialer{Timeout: sc.Timeout}, Config: cfg}
-		return d.DialContext(ctx, network, addr)
+		raw, err := dial.DialContext(ctx, ProbeNetwork(probeIPVersion(sc)), addr)
+		if err != nil {
+			return nil, err
+		}
+		conn := tls.Client(raw, cfg)
+		trace := httptrace.ContextClientTrace(ctx)
+		if trace != nil && trace.TLSHandshakeStart != nil {
+			trace.TLSHandshakeStart()
+		}
+		handshakeCtx, cancel := context.WithTimeout(ctx, sc.Timeout)
+		defer cancel()
+		err = conn.HandshakeContext(handshakeCtx)
+		if trace != nil && trace.TLSHandshakeDone != nil {
+			trace.TLSHandshakeDone(conn.ConnectionState(), err)
+		}
+		if err != nil {
+			raw.Close()
+			return nil, err
+		}
+		return conn, nil
 	}}
 }
 
@@ -56,9 +78,13 @@ type issuerFetcher func(context.Context, string) ([]*x509.Certificate, error)
 
 // VerifyServiceTLS returns a leaf only after strict verification. The caller
 // may pin that leaf for its immediately following HTTP connection.
-func VerifyServiceTLS(ctx context.Context, host string, port int, policy *ProbeTrustPolicy) (*x509.Certificate, error) {
+func VerifyServiceTLS(ctx context.Context, host string, port int, policy *ProbeTrustPolicy, ipVersion ...string) (*x509.Certificate, error) {
 	d := tls.Dialer{Config: probeTLSConfig(ctx, host, policy, nil, false)}
-	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(host, fmt.Sprint(port)))
+	network := "tcp"
+	if len(ipVersion) > 0 {
+		network = ProbeNetwork(ipVersion[0])
+	}
+	conn, err := d.DialContext(ctx, network, net.JoinHostPort(host, fmt.Sprint(port)))
 	if err != nil {
 		return nil, err
 	}

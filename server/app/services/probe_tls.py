@@ -16,10 +16,10 @@ from requests.adapters import HTTPAdapter
 from requests.exceptions import SSLError as RequestSSLError
 
 
-def verified_context(host, port, timeout, policy):
+def verified_context(host, port, timeout, policy, ip_version="auto"):
     binary = os.environ.get("ZENPLUS_PROBE_TLS_BINARY", "/opt/zenplus/bin/zenplus-poller")
     try:
-        proc = subprocess.run([binary, "--verify-service-tls"], input=json.dumps({"host": host, "port": port, "timeout": timeout, "policy": policy}), capture_output=True, text=True, timeout=timeout + 1, check=False)
+        proc = subprocess.run([binary, "--verify-service-tls"], input=json.dumps({"host": host, "port": port, "timeout": timeout, "policy": policy, "ip_version": ip_version}), capture_output=True, text=True, timeout=timeout + 1, check=False)
     except subprocess.TimeoutExpired:
         raise ssl.SSLError("TLS verification timed out") from None
     except OSError:
@@ -39,7 +39,8 @@ def verified_context(host, port, timeout, policy):
 
 
 class ProbeTrustTransport(httpx.AsyncBaseTransport):
-    def __init__(self, policy, timeout):
+    def __init__(self, policy, timeout, ip_version="auto"):
+        self.ip_version = ip_version
         self.policy, self.timeout = policy, timeout
         self.transports = {}
 
@@ -49,10 +50,10 @@ class ProbeTrustTransport(httpx.AsyncBaseTransport):
             verify = True
             if request.url.scheme == "https":
                 try:
-                    verify = await asyncio.to_thread(verified_context, request.url.host, request.url.port or 443, self.timeout, self.policy)
+                    verify = await asyncio.to_thread(verified_context, request.url.host, request.url.port or 443, self.timeout, self.policy, self.ip_version)
                 except ssl.SSLError as exc:
                     raise httpx.ConnectError(str(exc), request=request) from exc
-            self.transports[origin] = httpx.AsyncHTTPTransport(verify=verify)
+            self.transports[origin] = httpx.AsyncHTTPTransport(verify=verify, local_address=probe_local_address(self.ip_version))
         return await self.transports[origin].handle_async_request(request)
 
     async def aclose(self):
@@ -60,12 +61,34 @@ class ProbeTrustTransport(httpx.AsyncBaseTransport):
             await transport.aclose()
 
 
-class ProbeTrustAdapter(HTTPAdapter):
+def probe_local_address(ip_version):
+    return {"ipv4": "0.0.0.0", "ipv6": "::"}.get(ip_version)
+
+
+class ProbeAddressAdapter(HTTPAdapter):
+    def __init__(self, ip_version="auto"):
+        self.ip_version = ip_version
+        super().__init__()
+
+    def init_poolmanager(self, connections, maxsize, block=False, **kwargs):
+        address = probe_local_address(self.ip_version)
+        if address:
+            kwargs["source_address"] = (address, 0)
+        return super().init_poolmanager(connections, maxsize, block=block, **kwargs)
+
+    def proxy_manager_for(self, proxy, **kwargs):
+        address = probe_local_address(self.ip_version)
+        if address:
+            kwargs["source_address"] = (address, 0)
+        return super().proxy_manager_for(proxy, **kwargs)
+
+
+class ProbeTrustAdapter(ProbeAddressAdapter):
     """Requests/NTLM equivalent, with a separate verified pin for every origin."""
-    def __init__(self, policy, timeout):
+    def __init__(self, policy, timeout, ip_version="auto"):
         self.policy, self.timeout = policy, timeout
         self.contexts = {}
-        super().__init__()
+        super().__init__(ip_version)
 
     def build_connection_pool_key_attributes(self, request, verify, cert=None):
         host_params, pool_kwargs = super().build_connection_pool_key_attributes(request, verify, cert)
@@ -73,7 +96,7 @@ class ProbeTrustAdapter(HTTPAdapter):
         origin = (parsed.hostname, parsed.port or 443)
         if origin not in self.contexts:
             try:
-                self.contexts[origin] = verified_context(*origin, self.timeout, self.policy)
+                self.contexts[origin] = verified_context(*origin, self.timeout, self.policy, self.ip_version)
             except ssl.SSLError as exc:
                 raise RequestSSLError(str(exc), request=request) from exc
         pool_kwargs["ssl_context"] = self.contexts[origin]

@@ -38,6 +38,7 @@ type State = {
   target_host: string
   target_port: number | ''
   target_url: string
+  ip_version: "auto" | "ipv4" | "ipv6"
   http_method: string
   http_expected_statuses: string
   http_content_match: string
@@ -127,12 +128,13 @@ const empty: State = {
   enabled: true,
   group_id: '',
   parent_check_id: '',
-  retry_count: 1,
+  retry_count: 2,
   retry_delay_s: 30,
   tags: [],
   target_host: '',
   target_port: '',
   target_url: '',
+  ip_version: 'auto',
   http_method: 'GET',
   http_expected_statuses: '200',
   http_content_match: '',
@@ -315,6 +317,7 @@ export function ServiceCheckFormDialog({
         target_host: sourceCheck.target_host || '',
         target_port: sourceCheck.target_port ?? '',
         target_url: sourceCheck.target_url || '',
+        ip_version: cfg.ip_version === 'ipv4' || cfg.ip_version === 'ipv6' ? cfg.ip_version : 'auto',
         http_method: sourceCheck.http_method || 'GET',
         http_expected_statuses:
           sourceCheck.http_expected_statuses || String(sourceCheck.http_expected_status || 200),
@@ -395,9 +398,10 @@ export function ServiceCheckFormDialog({
       check_interval: s.check_interval,
       timeout: s.timeout,
       description: s.description || null,
-      config: {},
+      config: { ...(sourceCheck?.config || {}) },
     }
     if (s.check_type === 'http') {
+      base.config.ip_version = s.ip_version
       base.target_url = s.target_url
       base.http_method = s.http_method
       base.http_expected_statuses = s.http_expected_statuses.trim() || null
@@ -504,8 +508,19 @@ export function ServiceCheckFormDialog({
           )}
 
           {s.check_type === 'http' && (
-            <div className="space-y-3 rounded-md border border-border p-3">
+          <div className="space-y-3 rounded-md border border-border p-3">
               <div className="text-xs font-semibold uppercase tracking-wider text-muted">HTTP options</div>
+            <FormField label="IP version">
+              <Select value={s.ip_version} onValueChange={(value) => setS({ ...s, ip_version: value as State['ip_version'] })}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">Auto (IPv4 / IPv6)</SelectItem>
+                  <SelectItem value="ipv4">IPv4 only</SelectItem>
+                  <SelectItem value="ipv6">IPv6 only</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="mt-1 text-xs text-muted">Use IPv4 only when the monitoring network has no IPv6 route. DNS resolution and certificate verification still apply.</p>
+            </FormField>
               <FormField label="URL" required>
                 <Input
                   required
@@ -831,7 +846,7 @@ export function ServiceCheckFormDialog({
               Reliability
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <FormField label="Retries before Down">
+              <FormField label="Failures before Down">
                 <Input
                   type="number"
                   min={1}
@@ -842,7 +857,7 @@ export function ServiceCheckFormDialog({
                   }
                 />
               </FormField>
-              <FormField label="Retry delay (seconds)">
+              <FormField label="Sensor retry delay (seconds)">
                 <Input
                   type="number"
                   min={1}
@@ -854,6 +869,7 @@ export function ServiceCheckFormDialog({
                 />
               </FormField>
             </div>
+            <p className="text-xs text-muted">1 marks Down on the first failure. The controller counts consecutive scheduled failures; sensors confirm with attempts within a run. The delay applies to sensor retries. Failed probes remain in availability history.</p>
             <FormField label="Depends on (parent)">
               <Select
                 value={s.parent_check_id || 'none'}

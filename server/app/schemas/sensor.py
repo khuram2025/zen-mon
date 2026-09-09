@@ -439,7 +439,17 @@ class PingResultItem(BaseModel):
         return self
 
 
+class ProbeNetworkDiagnostics(BaseModel):
+    ip_version: Literal["auto", "ipv4", "ipv6"] = "auto"
+    remote_ip: Optional[str] = Field(default=None, max_length=64)
+    dns_ms: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    connect_ms: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    tls_ms: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    failure_stage: Optional[Literal["dns", "connect", "tls", "response", "http", ""]] = None
+
+
 class ServiceResultItem(BaseModel):
+    network_diagnostics: Optional[ProbeNetworkDiagnostics] = None
     service_check_id: UUID
     timestamp: datetime
     check_type: str = Field(min_length=1, max_length=32, pattern=r"^[a-z0-9_-]+$")

@@ -17,15 +17,15 @@ import (
 
 // ClickHouseStore handles metric writes to ClickHouse.
 type ClickHouseStore struct {
-	conn            driver.Conn
-	batchSize       int
-	flushInterval   time.Duration
-	buffer          chan *pinger.PingResult
-	serviceBuffer   chan *checker.ServiceCheckResult
-	snmpBuffer      chan snmp.MetricSample
-	snmpIfBuffer    chan snmp.InterfaceSample
-	trapBuffer      chan snmp.TrapRecord
-	done            chan struct{}
+	conn          driver.Conn
+	batchSize     int
+	flushInterval time.Duration
+	buffer        chan *pinger.PingResult
+	serviceBuffer chan *checker.ServiceCheckResult
+	snmpBuffer    chan snmp.MetricSample
+	snmpIfBuffer  chan snmp.InterfaceSample
+	trapBuffer    chan snmp.TrapRecord
+	done          chan struct{}
 }
 
 // NewClickHouseStore connects to ClickHouse.
@@ -220,7 +220,7 @@ func (s *ClickHouseStore) insertServiceBatch(ctx context.Context, results []*che
 		INSERT INTO service_metrics (
 			service_check_id, device_id, timestamp, check_type, is_up,
 			response_ms, status_code, tls_days_remaining, tls_valid,
-			content_matched, error_message, poller_id
+			content_matched, error_message, poller_id, network_diagnostics
 		)
 	`)
 	if err != nil {
@@ -286,6 +286,7 @@ func (s *ClickHouseStore) insertServiceBatch(ctx context.Context, results []*che
 			contentMatched,
 			errMsg,
 			r.PollerID,
+			r.Diagnostics.JSON(),
 		)
 		if err != nil {
 			return fmt.Errorf("append to service batch: %w", err)

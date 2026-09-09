@@ -2002,7 +2002,8 @@ func (s *checkScheduler) runDevice(ctx context.Context, d configDevice, interval
 		result.Timestamp = time.Now().UTC()
 	}
 	payload := map[string]any{
-		"device_id": d.ID, "timestamp": result.Timestamp, "is_up": result.IsUp,
+		"device_id": d.ID, "timestamp": result.Timestamp, "network_diagnostics": result.Diagnostics,
+		"is_up":  result.IsUp,
 		"rtt_ms": float64(result.ResponseTime.Microseconds()) / 1000.0, "ip_address": d.IPAddress,
 	}
 	if result.PacketsSent > 0 {

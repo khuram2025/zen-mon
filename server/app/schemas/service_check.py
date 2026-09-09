@@ -122,7 +122,16 @@ class ServiceCredentialResponse(BaseModel):
     updated_at: Optional[datetime] = None
 
 
-class ServiceCheckCreate(BaseModel):
+class NetworkConfigMixin(BaseModel):
+    @field_validator("config", check_fields=False)
+    @classmethod
+    def validate_ip_version(cls, value):
+        if value is not None and value.get("ip_version", "auto") not in ("auto", "ipv4", "ipv6"):
+            raise ValueError("IP version must be auto, ipv4 or ipv6")
+        return value
+
+
+class ServiceCheckCreate(NetworkConfigMixin):
     device_id: Optional[UUID] = None
     group_id: Optional[UUID] = None
     parent_check_id: Optional[UUID] = None
@@ -168,7 +177,7 @@ class ServiceCheckCreate(BaseModel):
         return self
 
 
-class ServiceCheckUpdate(BaseModel):
+class ServiceCheckUpdate(NetworkConfigMixin):
     name: Optional[str] = Field(default=None, max_length=255)
     group_id: Optional[UUID] = None
     parent_check_id: Optional[UUID] = None
@@ -266,6 +275,7 @@ class ServiceCheckSummary(BaseModel):
 
 
 class ServiceMetricPoint(BaseModel):
+    network_diagnostics: Optional[dict] = None
     timestamp: datetime
     response_ms: Optional[float] = None
     is_up: Optional[bool] = None

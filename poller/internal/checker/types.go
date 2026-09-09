@@ -65,6 +65,7 @@ type ServiceCheck struct {
 
 // ServiceCheckResult holds the outcome of a single service check.
 type ServiceCheckResult struct {
+	Diagnostics      *NetworkDiagnostics
 	ServiceCheckID   uuid.UUID
 	DeviceID         *uuid.UUID
 	CheckType        string

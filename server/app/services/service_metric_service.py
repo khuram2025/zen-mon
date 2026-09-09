@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
@@ -38,7 +39,7 @@ def get_service_metrics(
         table = "service_metrics"
         query = f"""
             SELECT timestamp, response_ms, is_up, status_code,
-                   tls_days_remaining, error_message
+                   tls_days_remaining, error_message, network_diagnostics
             FROM {table}
             WHERE service_check_id = %(check_id)s
               AND timestamp >= %(from_time)s
@@ -114,6 +115,7 @@ def get_service_metrics(
             status_code=row[3],
             tls_days_remaining=row[4],
             error_message=row[5],
+            network_diagnostics=json.loads(row[6]) if granularity == "raw" and len(row) > 6 and row[6] else None,
         ))
 
     return ServiceMetricResponse(

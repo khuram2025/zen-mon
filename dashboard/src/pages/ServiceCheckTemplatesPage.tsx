@@ -538,7 +538,7 @@ export function ServiceCheckTemplatesPage() {
                   }
                 />
               </FormField>
-              <FormField label="Retries">
+              <FormField label="Failures before Down">
                 <Input
                   type="number"
                   min={1}
@@ -552,7 +552,7 @@ export function ServiceCheckTemplatesPage() {
                   }
                 />
               </FormField>
-              <FormField label="Retry delay (s)">
+              <FormField label="Sensor retry delay (s)">
                 <Input
                   type="number"
                   min={1}

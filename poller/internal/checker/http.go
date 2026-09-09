@@ -72,12 +72,16 @@ func (c *HTTPChecker) Check(ctx context.Context, sc *ServiceCheck, pollerID stri
 		Timestamp:      time.Now().UTC(),
 		PollerID:       pollerID,
 	}
+	ctx, finishTrace := traceProbe(ctx, sc, result)
+	defer finishTrace()
 	if sc.CredentialError != "" {
 		result.Error = sc.CredentialError
 		return result
 	}
 	if len(sc.WorkflowSteps) > 0 {
-		return c.checkWorkflow(ctx, sc, pollerID)
+		workflowResult := c.checkWorkflow(ctx, sc, pollerID)
+		*result = *workflowResult
+		return result
 	}
 	if sc.CredentialID != nil && strings.EqualFold(sc.CredentialAuthType, "form") {
 		result.Error = "form authentication requires a multi-step workflow"

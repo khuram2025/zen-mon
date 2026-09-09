@@ -1502,6 +1502,7 @@ async def post_service_results(
             bool(it["content_matched"]) if it.get("content_matched") is not None else None,
             err if err else None,
             str(sensor["id"]),
+            json.dumps(it.get("network_diagnostics") or {}),
         ])
         prior = last_status.get(sc_id)
         if prior is None or ts > prior["ts"]:
@@ -1526,7 +1527,7 @@ async def post_service_results(
                 "service_check_id", "device_id", "timestamp", "check_type",
                 "is_up", "response_ms", "status_code",
                 "tls_days_remaining", "tls_valid", "content_matched",
-                "error_message", "poller_id",
+                "error_message", "poller_id", "network_diagnostics",
             ],
         )
 
