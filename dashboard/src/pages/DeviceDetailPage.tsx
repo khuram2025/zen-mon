@@ -1,3 +1,4 @@
+import { DeviceStatusExplanation } from '@/components/devices/DeviceStatusExplanation'
 import { MonitoringSites } from '@/components/MonitoringSites'
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -196,6 +197,8 @@ export function DeviceDetailPage() {
 
       <MaintenanceBanner windows={maint?.active || []} onManage={() => setMaintOpen(true)} />
 
+      <DeviceStatusExplanation deviceId={id!} />
+
       <DashboardSection device={device} deviceId={id!} range={range} />
 
       <DeviceFormDialog open={editOpen} onOpenChange={setEditOpen} device={device} />
@@ -264,7 +267,7 @@ function DeviceHeader({
 
   const kind = {
     healthy: { pill: 'bg-success/15 text-success border-success/30', dot: 'bg-success', label: 'Healthy' },
-    warning: { pill: 'bg-warning/15 text-warning border-warning/30', dot: 'bg-warning', label: 'Warning' },
+    warning: { pill: 'bg-warning/15 text-warning border-warning/30', dot: 'bg-warning', label: device.status === 'degraded' ? 'Degraded' : 'Warning' },
     critical: { pill: 'bg-danger/15 text-danger border-danger/30', dot: 'bg-danger', label: 'Critical' },
     offline: { pill: 'bg-surface2 text-muted border-border', dot: 'bg-muted', label: 'Offline' },
     maintenance: { pill: 'bg-primary/15 text-primary border-primary/30', dot: 'bg-primary', label: 'Maintenance' },

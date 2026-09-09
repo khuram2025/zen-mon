@@ -456,6 +456,42 @@ async def export_devices(
     return JSONResponse(content={"devices": devices})
 
 
+@router.get("/{device_id}/status-explanation")
+async def get_device_status_explanation(
+    device_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    device = await device_service.get_device(db, device_id)
+    if not device or not scoping.entity_visible(device.tags, await scoping.visible_tags(db, user)):
+        raise HTTPException(status_code=404, detail="Device not found")
+    row = (await db.execute(text("SELECT value, updated_at FROM system_settings WHERE key = 'monitoring'"))).mappings().first()
+    raw = (row["value"] or {}) if row else {}
+    thresholds = {"degraded_rtt_ms": float(raw.get("degraded_rtt_ms") or 100),
+                  "degraded_loss_pct": float(raw.get("degraded_loss_pct") or 10)}
+    output = {"status": device.status, "mode": "ping", "thresholds": thresholds,
+              "source": "Controller", "latest": None, "recent_degraded": None}
+    if device.poll_mode == "via_controller":
+        return dict(output, mode="managed")
+    if not device.ping_enabled:
+        return dict(output, mode="disabled")
+    owner = (await db.execute(text("""SELECT o.owner_kind, o.sensor_id, s.name
+        FROM device_polling_owner o LEFT JOIN sensors s ON s.id = o.sensor_id
+        WHERE o.device_id = :id"""), {"id": device_id})).mappings().first()
+    if not owner or (owner["owner_kind"] != "central" and not owner["sensor_id"]):
+        return dict(output, mode="unassigned")
+    import os
+    from app.services.device_status_explanation import evidence
+    poller_id = os.getenv("POLLER_ID", "poller-01") if owner["owner_kind"] == "central" else str(owner["sensor_id"])
+    output["source"] = "Controller" if owner["owner_kind"] == "central" else (owner["name"] or "Assigned sensor")
+    try:
+        output.update(await asyncio.to_thread(evidence, device_id, poller_id, thresholds,
+                                             row["updated_at"] if row else None, device.ping_interval or 60))
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Status measurements are temporarily unavailable") from exc
+    return output
+
+
 @router.get("/{device_id}", response_model=DeviceResponse)
 async def get_device(
     device_id: UUID,

@@ -510,7 +510,7 @@ func (e *Engine) processStatusChange(ctx context.Context, result *PingResult) {
 		case "down":
 			reason = "No response for consecutive checks"
 		case "degraded":
-			reason = "High latency or packet loss"
+			reason = degradedReason(float64(result.RTT.Microseconds())/1000.0, float64(result.PacketLoss)*100, e.degradedRTTMs, e.degradedLossPct)
 		case "up":
 			reason = "Device responding normally"
 		}

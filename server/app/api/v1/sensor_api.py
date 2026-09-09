@@ -1119,6 +1119,7 @@ async def post_ping_results(
     """))).mappings().first()
     degraded_rtt_ms = float(threshold_row["rtt_ms"]) if threshold_row else 100.0
     degraded_loss = (float(threshold_row["loss_pct"]) / 100.0) if threshold_row else 0.10
+    from app.services.device_status_explanation import degraded_reason
     transitions: list[dict[str, Any]] = []
     for did, s in sorted(last_status.items()):
         try:
@@ -1187,7 +1188,7 @@ async def post_ping_results(
                     "rtt_ms": s["rtt"],
                     "packet_loss": s["packet_loss"],
                     "reason": (
-                        f"remote sensor {sensor['name']} reported high latency or packet loss"
+                        f"remote sensor {sensor['name']}: " + degraded_reason(s["rtt"], s["packet_loss"], degraded_rtt_ms, degraded_loss * 100)
                         if new_status == "degraded"
                         else f"remote sensor {sensor['name']}"
                     ),

@@ -203,8 +203,9 @@ function MonitoringCard() {
       <CardContent>
         <p className="mb-4 text-sm text-muted">
           A device that still answers ping is marked <span className="font-medium text-text">Degraded</span> when
-          its round-trip time or packet loss crosses these thresholds. This drives the Up → Degraded transition
-          and every alert rule that triggers on it.
+          either its round-trip time OR packet loss is strictly above the configured limit. Equality does not trigger degradation.
+          Each ping check is evaluated individually; chart averages do not determine this status. Changes apply after the controller configuration refresh (normally within a minute) and a subsequent check. Remote sensor results use these settings when received.
+          CPU, memory and hardware alerts use their own rules.
         </p>
         <form onSubmit={(e: FormEvent) => { e.preventDefault(); save.mutate() }} className="grid grid-cols-2 gap-3">
           <FormField label="Round-trip time above" hint="Latency beyond which a responding device counts as degraded (default 100 ms)">
