@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -76,6 +77,25 @@ func (s *supervisor) onError(err error, status *model.Status, logf func(string, 
 		}
 		s.authFailed = true
 		status.AuthState = "unauthorized"
+		return
+	}
+	var nonRetryable interface{ NonRetryable() bool }
+	if errors.As(err, &nonRetryable) && nonRetryable.NonRetryable() {
+		// A terminal record was isolated locally. The controller is reachable and
+		// unrelated heartbeat/config/upload traffic must continue normally.
+		logf("upload record isolated without controller backoff: %v", err)
+		return
+	}
+	var retryable *uploader.RetryableError
+	if errors.As(err, &retryable) && retryable.RetryAfter > 0 {
+		wait := retryable.RetryAfter
+		if wait > 24*time.Hour {
+			wait = 24 * time.Hour
+		}
+		s.notBefore = now.Add(wait)
+		next := s.notBefore
+		status.NextRetryAt = &next
+		logf("controller requested upload retry delay: next retry in %s", wait.Round(time.Second))
 		return
 	}
 	wait := s.comm.Next()
@@ -202,7 +222,9 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	runCollection(ctx, cfg, paths, store, &status, enrollment, log.Printf)
 	tickHeartbeat(ctx, opts.ConfigPath, &cfg, paths, store, &up, &poller, &status, &enrollment, apmManager, sup, log.Printf)
-	tickUpload(ctx, store, up, &status, &enrollment, sup, log.Printf)
+	if opts.Once {
+		tickUpload(ctx, store, up, &status, &enrollment, sup, log.Printf)
+	}
 	syncAuthStatus(&status, enrollment, sup)
 	_ = writeStatus(paths.StatusFile, status)
 	_ = runtime.WriteMachineDashboardSnapshot(cfg, enrollment.Identity, status)
@@ -210,6 +232,17 @@ func Run(ctx context.Context, opts Options) error {
 		log.Printf("one-shot run complete")
 		return nil
 	}
+
+	// Normal spool replay runs independently from collection and heartbeat. A
+	// slow or unavailable ingest endpoint therefore cannot make the agent look
+	// offline or delay fresh collection into the durable queue.
+	uploads := newUploadWorker(ctx, store)
+	defer uploads.Close()
+	workerGeneration := uploads.SetUploader(up)
+	uploads.SetNotBefore(sup.notBefore)
+	uploads.SetEnabled(enrollment.Enrolled && !sup.authFailed)
+	uploads.Wake()
+	workerUploader := up
 
 	collectInterval := config.Duration(cfg.CollectIntervalSeconds, time.Minute)
 	heartbeatInterval := config.Duration(cfg.HeartbeatIntervalSeconds, 30*time.Second)
@@ -229,6 +262,7 @@ func Run(ctx context.Context, opts Options) error {
 	defer apmTicker.Stop()
 	localHash := localSettingsFingerprint(cfg)
 	authStamp := authFileStamp(paths)
+	runtimeConnectionHash := runtimeConnectionFingerprint(cfg, enrollment)
 	syncTickers := func() {
 		if next := config.Duration(cfg.CollectIntervalSeconds, time.Minute); next != collectInterval {
 			collectTicker.Reset(next)
@@ -253,27 +287,43 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	for {
+		wakeUploads := false
 		select {
 		case <-ctx.Done():
 			log.Printf("agent stopping: %v", ctx.Err())
 			return nil
 		case <-collectTicker.C:
 			runCollection(ctx, cfg, paths, store, &status, enrollment, log.Printf)
+			wakeUploads = true
 		case <-heartbeatTicker.C:
 			tickHeartbeat(ctx, opts.ConfigPath, &cfg, paths, store, &up, &poller, &status, &enrollment, apmManager, sup, log.Printf)
+			// A collect_now command may have added a batch while handling the
+			// heartbeat. Schedule replay without doing upload I/O on this loop.
+			wakeUploads = true
 		case <-uploadTicker.C:
-			tickUpload(ctx, store, up, &status, &enrollment, sup, log.Printf)
+			wakeUploads = true
+		case outcome := <-uploads.Outcomes():
+			applyUploadOutcome(outcome, workerGeneration, &status, sup, log.Printf)
 		case <-configTicker.C:
 			if enrollment.Enrolled && sup.mayTalk(time.Now().UTC()) {
 				pollConfig(ctx, &cfg, poller, &status, log.Printf)
 			}
 		case <-localConfigTicker.C:
+			previousUploader := up
+			previousPoller := poller
 			rebuilt := refreshLocalRuntime(ctx, opts.ConfigPath, &cfg, paths, store, &enrollment, &up, &poller, &status, &localHash, &authStamp, log.Printf)
-			if rebuilt && enrollment.Enrolled && sup.authFailed {
-				// The appliance issued a new credential: resume traffic.
-				sup.authFailed = false
-				sup.enrollBO.Reset()
-				sup.onSuccess(&status)
+			if rebuilt {
+				nextRuntimeConnectionHash := runtimeConnectionFingerprint(cfg, enrollment)
+				if runtimeConnectionHash != nextRuntimeConnectionHash {
+					resetSupervisorAfterRuntimeClientRefresh(sup, &status, enrollment)
+				} else {
+					// A local feature-only change (currently APM) does not change
+					// controller authority. Keep the existing uploader generation so
+					// an active 429/503/schema cooldown remains enforceable.
+					up = previousUploader
+					poller = previousPoller
+				}
+				wakeUploads = true
 			}
 		case <-apmTicker.C:
 			var apmClient *client.Client
@@ -283,6 +333,23 @@ func Run(ctx context.Context, opts Options) error {
 			apmManager.Reconcile(ctx, cfg, enrollment.Identity.AgentID, enrollment.Identity.ServerID, apmClient)
 			status.LocalAPM = apmManager.Snapshot()
 		}
+		uploadEnabled := enrollment.Enrolled && !sup.authFailed
+		if !uploadEnabled {
+			uploads.SetEnabled(false)
+		}
+		if up != workerUploader {
+			workerGeneration = uploads.SetUploader(up)
+			workerUploader = up
+			runtimeConnectionHash = runtimeConnectionFingerprint(cfg, enrollment)
+			wakeUploads = true
+		}
+		uploads.SetNotBefore(sup.notBefore)
+		if uploadEnabled {
+			uploads.SetEnabled(true)
+			if wakeUploads {
+				uploads.Wake()
+			}
+		}
 		syncTickers()
 		status.ControllerURL = cfg.ControllerURL
 		status.AgentID = enrollment.Identity.AgentID
@@ -291,6 +358,21 @@ func Run(ctx context.Context, opts Options) error {
 		_ = writeStatus(paths.StatusFile, status)
 		_ = runtime.WriteMachineDashboardSnapshot(cfg, enrollment.Identity, status)
 	}
+}
+
+// resetSupervisorAfterRuntimeClientRefresh ensures outage/backpressure state
+// owned by an old controller URL or credential cannot delay the replacement.
+// Constructing the replacement client is enough to permit one immediate
+// attempt; subsequent failures establish a fresh bounded backoff.
+func resetSupervisorAfterRuntimeClientRefresh(sup *supervisor, status *model.Status, enrollment enroll.Result) {
+	if !enrollment.Enrolled {
+		return
+	}
+	if sup.authFailed {
+		sup.authFailed = false
+		sup.enrollBO.Reset()
+	}
+	sup.onSuccess(status)
 }
 
 func newRuntimeClients(cfg config.Config, paths runtime.Paths, store *spool.Store, enrollment enroll.Result) (*uploader.Uploader, *configpoller.Poller, error) {
@@ -557,6 +639,50 @@ func tickUpload(ctx context.Context, store *spool.Store, up *uploader.Uploader, 
 	} else {
 		sup.onSuccess(status)
 	}
+}
+
+func applyUploadOutcome(outcome uploadOutcome, currentGeneration uint64, status *model.Status, sup *supervisor, logf func(string, ...any)) {
+	status.QueueDepth = outcome.Queue.Depth
+	status.SpoolBytes = outcome.Queue.Bytes
+	status.QuarantinedBatches = outcome.Quarantine.Depth
+	status.QuarantinedBytes = outcome.Quarantine.Bytes
+	status.QuarantinedOriginalBytes = outcome.Quarantine.OriginalBytes
+	if outcome.Generation != currentGeneration {
+		if outcome.Err != nil {
+			logf("ignored stale upload outcome after runtime client refresh: %v", outcome.Err)
+		}
+		return
+	}
+	status.NextUploadRetryAt = outcome.NextUploadAttempt
+
+	if outcome.Uploaded > 0 {
+		now := time.Now().UTC()
+		status.LastUpload = &now
+	}
+	if outcome.Err == nil {
+		status.LastUploadError = ""
+		if outcome.Uploaded > 0 {
+			logf("uploaded %d batch(es); queue_depth=%d spool_bytes=%d", outcome.Uploaded, outcome.Queue.Depth, outcome.Queue.Bytes)
+		}
+		return
+	}
+
+	status.LastUploadError = outcome.Err.Error()
+	if client.IsUnauthorized(outcome.Err) {
+		sup.onError(outcome.Err, status, logf)
+		return
+	}
+	var quarantined *uploader.QuarantinedBatchError
+	if errors.As(outcome.Err, &quarantined) {
+		logf("upload isolated terminal batch(es); queue_depth=%d quarantined=%d: %v", outcome.Queue.Depth, outcome.Quarantine.Depth, outcome.Err)
+		return
+	}
+	var retryable *uploader.RetryableError
+	if errors.As(outcome.Err, &retryable) {
+		logf("upload deferred; queue_depth=%d next_retry=%s: %v", outcome.Queue.Depth, retryable.RetryAfter.Round(time.Second), retryable.Err)
+		return
+	}
+	logf("upload paused until the next scheduled attempt; queue_depth=%d: %v", outcome.Queue.Depth, outcome.Err)
 }
 
 // tryRecoverAuth polls the controller-managed authorization state, gated by
@@ -839,22 +965,36 @@ func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, 
 	switch cmd.Command {
 	case "status":
 		return model.CommandResult{Success: true, Output: map[string]any{
-			"agent_id":             status.AgentID,
-			"server_id":            status.ServerID,
-			"version":              model.AgentVersion,
-			"queue_depth":          status.QueueDepth,
-			"spool_bytes":          status.SpoolBytes,
-			"last_upload_error":    status.LastUploadError,
-			"last_heartbeat_error": status.LastHeartbeatError,
-			"last_config_error":    status.LastConfigError,
+			"agent_id":                   status.AgentID,
+			"server_id":                  status.ServerID,
+			"version":                    model.AgentVersion,
+			"queue_depth":                status.QueueDepth,
+			"spool_bytes":                status.SpoolBytes,
+			"quarantined_batches":        status.QuarantinedBatches,
+			"quarantined_bytes":          status.QuarantinedBytes,
+			"quarantined_original_bytes": status.QuarantinedOriginalBytes,
+			"next_upload_retry_at":       status.NextUploadRetryAt,
+			"last_upload_error":          status.LastUploadError,
+			"last_heartbeat_error":       status.LastHeartbeatError,
+			"last_config_error":          status.LastConfigError,
 		}}
 	case "collect_now":
+		before, _ := store.Stats()
 		runCollection(ctx, *cfg, paths, store, status, enrollment, logf)
-		count, err := up.Drain(ctx, 10)
+		after, err := store.Stats()
 		if err != nil {
-			return model.CommandResult{Success: false, ErrorMessage: err.Error(), Output: map[string]any{"uploaded_batches": count}}
+			return model.CommandResult{Success: false, ErrorMessage: err.Error()}
 		}
-		return model.CommandResult{Success: true, Output: map[string]any{"uploaded_batches": count}}
+		queued := after.Depth - before.Depth
+		if queued < 0 {
+			queued = 0
+		}
+		return model.CommandResult{Success: true, Output: map[string]any{
+			"uploaded_batches": 0,
+			"queued_batches":   queued,
+			"queue_depth":      after.Depth,
+			"upload_scheduled": true,
+		}}
 	case "refresh_config":
 		pollConfigWithForce(ctx, cfg, poller, status, true, logf)
 		if status.LastConfigError != "" {
@@ -1203,6 +1343,35 @@ func localSettingsFingerprint(cfg config.Config) string {
 		ControllerCAFile:    cfg.Security.ControllerCAFile,
 		ControllerCAFileSig: fileStamp(cfg.Security.ControllerCAFile),
 		APMEnabled:          cfg.APM.Enabled,
+	})
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// runtimeConnectionFingerprint excludes local features such as APM. Only a
+// controller/proxy/trust/credential/identity replacement is allowed to clear
+// cooldown state established by the current controller.
+func runtimeConnectionFingerprint(cfg config.Config, enrollment enroll.Result) string {
+	b, _ := json.Marshal(struct {
+		ControllerURL       string `json:"controller_url"`
+		ProxyURL            string `json:"proxy_url"`
+		VerifyTLS           bool   `json:"verify_tls"`
+		ControllerCAFile    string `json:"controller_ca_file"`
+		ControllerCAFileSig string `json:"controller_ca_file_sig"`
+		AgentID             string `json:"agent_id"`
+		ServerID            string `json:"server_id"`
+		APIKey              string `json:"api_key"`
+		Enrolled            bool   `json:"enrolled"`
+	}{
+		ControllerURL:       cfg.ControllerURL,
+		ProxyURL:            cfg.ProxyURL,
+		VerifyTLS:           cfg.VerifyTLS,
+		ControllerCAFile:    cfg.Security.ControllerCAFile,
+		ControllerCAFileSig: fileStamp(cfg.Security.ControllerCAFile),
+		AgentID:             enrollment.Identity.AgentID,
+		ServerID:            enrollment.Identity.ServerID,
+		APIKey:              enrollment.APIKey,
+		Enrolled:            enrollment.Enrolled,
 	})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
