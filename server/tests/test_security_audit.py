@@ -134,6 +134,10 @@ async def test_login_quota_returns_429_before_password_check(monkeypatch):
     from app.api.v1 import auth
     from app.schemas.auth import LoginRequest
     from app.services import sensor_rate_limit
+    # Exercise the quota after the independent source-address gate. A builder
+    # may have a real access policy at /etc/zenplus/access-policy.json.
+    from app.services import management_access
+    monkeypatch.setattr(management_access, 'check_web_access', lambda address: None)
     monkeypatch.setattr(sensor_rate_limit,'enforce_sensor_quota',AsyncMock(side_effect=HTTPException(429,'quota')))
     login_impl=AsyncMock();monkeypatch.setattr(auth,'_login_impl',login_impl)
     with pytest.raises(HTTPException) as e:

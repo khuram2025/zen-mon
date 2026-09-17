@@ -101,6 +101,11 @@ type Device = {
   os_version: string | null
   profile_id?: string | null
   profile_name?: string | null
+  managed_by_device_id?: string | null
+  managed_by_hostname?: string | null
+  managed_ip?: string | null
+  serial_number?: string | null
+  managed_children_count?: number
 }
 
 type Group = { id: string; name: string; color?: string | null; device_count?: number }

@@ -226,7 +226,7 @@ export function SlosPage() {
         confirmText="Delete"
         destructive
         loading={del.isPending}
-        onConfirm={() => deleting && del.mutate(deleting.id)}
+        onConfirm={() => { if (deleting) del.mutate(deleting.id) }}
       />
 
       <Dialog open={!!detail} onOpenChange={(v) => !v && setDetail(null)}>

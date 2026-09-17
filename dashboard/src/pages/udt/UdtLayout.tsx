@@ -46,8 +46,8 @@ export function UdtLayout() {
             <div>
               <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
                 <ScanSearch className="h-6 w-6 text-primary" />
-                User Device Tracker
-                <KbLink article={article} label="User Device Tracker documentation" />
+                Device Tracker
+                <KbLink article={article} label="Device Tracker documentation" />
               </h1>
               <p className="mt-1 text-xs text-muted">
                 Track every endpoint on the network — which MAC, IP, user, switch and port, live and historically.

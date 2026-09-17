@@ -13,6 +13,7 @@ import {
   Box,
   Bell,
   CheckCircle2,
+  ChevronRight,
   Clock,
   Cpu,
   Database,
@@ -50,7 +51,6 @@ import {
   TrendingDown,
   TrendingUp,
   Wifi,
-  Wrench,
   Zap,
   ZapOff,
 } from 'lucide-react'
@@ -67,8 +67,10 @@ import {
 } from 'recharts'
 import { api } from '@/lib/api'
 import { apiErrorMessage, axisRightPad, cn, formatBps, formatBpsAxis, formatBytes, formatDuration, relativeTime, timeAxisTickFormatter, timeTicks, timeTooltipLabelFormatter } from '@/lib/utils'
-import { Card, CardContent } from '@/components/ui/Card'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
+import { Badge } from '@/components/ui/Badge'
+import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/Dialog'
 import { Input } from '@/components/ui/Input'

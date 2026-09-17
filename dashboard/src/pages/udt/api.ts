@@ -1,6 +1,6 @@
 import { api } from '@/lib/api'
 import type {
-  CapacityRow, DomainController, Endpoint, EndpointDetail, EndpointList,
+  IpEvidence, IpHistoryPeriods, CapacityRow, DomainController, Endpoint, EndpointDetail, EndpointList,
   UdtClassRule, UdtCredentialOption, UdtDeviceSettings, UdtEvent,
   UdtGlobalSettings, UdtPort, UdtRule, UdtSummary, UdtTypeInfo,
 } from './types'
@@ -16,6 +16,12 @@ export const udtApi = {
   },
   async endpoint(id: string): Promise<EndpointDetail> {
     return (await api.get(`${base}/endpoints/${id}`)).data
+  },
+  async ipPeriods(id: string, ip: string, skip = 0): Promise<IpHistoryPeriods> {
+    return (await api.get(`${base}/endpoints/${id}/ip-history`, { params: { ip, skip, limit: 25 } })).data
+  },
+  async ipEvidence(id: string, ip: string, skip = 0): Promise<IpEvidence> {
+    return (await api.get(`${base}/endpoints/${id}/ip-evidence`, { params: { ip, skip, limit: 25 } })).data
   },
   async updateEndpoint(id: string, body: Record<string, any>) {
     return (await api.patch(`${base}/endpoints/${id}`, body)).data

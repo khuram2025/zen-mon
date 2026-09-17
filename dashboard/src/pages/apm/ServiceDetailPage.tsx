@@ -125,7 +125,7 @@ export function ServiceDetailPage() {
   )
   const maxOpReqs = Math.max(...(ops.data ?? []).map((o) => o.request_count), 1)
   const tracesQ = `mode=indexed&service=${encodeURIComponent(name)}&range=${range}`
-  const goExemplar = (ts: string, metric: 'p95' | 'error' | 'rps' = 'p95', targetMs?: number) => {
+  const goExemplar = (ts: string, metric: 'p95' | 'p50' | 'error' | 'rps' = 'p95', targetMs?: number) => {
     void openExemplarTrace(navigate, name, range, ts, metric, targetMs)
   }
 

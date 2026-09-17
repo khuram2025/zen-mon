@@ -716,7 +716,7 @@ function ExpansionCard() {
           confirmText="Add disk"
           destructive
           loading={add.isPending}
-          onConfirm={() => addDisk && add.mutate(addDisk)}
+          onConfirm={() => { if (addDisk) add.mutate(addDisk) }}
         />
       </CardContent>
     </Card>

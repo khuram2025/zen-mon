@@ -221,7 +221,7 @@ function endpoint(ip: string, port: number) {
   return port ? `${formattedIP}:${port}` : formattedIP
 }
 
-function sourceAndDestination(flow: Flow) {
+function sourceAndDestination(flow: Flow): { source: string; destination: string; direction: ReturnType<typeof inferredDirection> } {
   const direction = inferredDirection(flow)
   const local = endpoint(flow.local_ip, flow.local_port)
   const remote = endpoint(flow.remote_ip, flow.remote_port)

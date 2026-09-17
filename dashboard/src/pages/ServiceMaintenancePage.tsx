@@ -312,7 +312,7 @@ export function ServiceMaintenancePage() {
         confirmText="Delete"
         destructive
         loading={del.isPending}
-        onConfirm={() => deleting && del.mutate(deleting.id)}
+        onConfirm={() => { if (deleting) del.mutate(deleting.id) }}
       />
     </div>
   )

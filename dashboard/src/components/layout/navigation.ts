@@ -157,21 +157,6 @@ export const NAV_GROUPS: NavGroup[] = [
         ],
       },
       {
-        to: '/udt',
-        label: 'User Devices',
-        icon: ScanSearch,
-        hint: 'Track endpoints to switch and port',
-        children: [
-          { to: '/udt', label: 'Endpoints', icon: ScanSearch, end: true },
-          { to: '/udt/ports', label: 'Switch Ports', icon: Server },
-          { to: '/udt/users', label: 'User Logins', icon: UserRound },
-          { to: '/udt/classification', label: 'Classification', icon: Shapes },
-          { to: '/udt/watch-lists', label: 'Watch Lists', icon: ListChecks },
-          { to: '/udt/activity', label: 'Activity', icon: Activity },
-          { to: '/udt/settings', label: 'UDT Settings', icon: SlidersHorizontal },
-        ],
-      },
-      {
         to: '/netpath',
         label: 'NetPath',
         icon: Waypoints,
@@ -194,6 +179,21 @@ export const NAV_GROUPS: NavGroup[] = [
         ],
       },
       { to: '/maps/manual', label: 'Network Maps', icon: MapPinned, hint: 'Hand-drawn topology views' },
+    ],
+  },
+  {
+    id: 'device-tracker',
+    label: 'Device Tracker',
+    short: 'Tracker',
+    icon: ScanSearch,
+    items: [
+      { to: '/udt', label: 'Endpoints', icon: ScanSearch, end: true, extra: ['/udt/endpoints/'], hint: 'Track endpoints, IP history, switches and ports' },
+      { to: '/udt/ports', label: 'Switch Ports', icon: Server },
+      { to: '/udt/users', label: 'User Logins', icon: UserRound },
+      { to: '/udt/classification', label: 'Classification', icon: Shapes },
+      { to: '/udt/watch-lists', label: 'Watch Lists', icon: ListChecks },
+      { to: '/udt/activity', label: 'Activity', icon: Activity },
+      { to: '/udt/settings', label: 'Tracker Settings', icon: SlidersHorizontal },
     ],
   },
   {

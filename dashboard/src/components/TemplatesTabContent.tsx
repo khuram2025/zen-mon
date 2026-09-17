@@ -224,7 +224,7 @@ export function TemplatesTabContent() {
         title="Delete template?"
         description={<>“{toDelete?.name}” will be removed and {toDelete?.device_count || 0} attached device(s) fall back to Default monitoring.</>}
         confirmText="Delete" destructive loading={del.isPending}
-        onConfirm={() => toDelete && del.mutate(toDelete.id)} />
+        onConfirm={() => { if (toDelete) del.mutate(toDelete.id) }} />
     </div>
   )
 }

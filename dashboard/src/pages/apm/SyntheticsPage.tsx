@@ -193,7 +193,7 @@ export function SyntheticsPage() {
         confirmText="Delete"
         destructive
         loading={remove.isPending}
-        onConfirm={() => deleteTarget && remove.mutate(deleteTarget.id)}
+        onConfirm={() => { if (deleteTarget) remove.mutate(deleteTarget.id) }}
       />
     </div>
   )

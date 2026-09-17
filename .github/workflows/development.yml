@@ -1,0 +1,91 @@
+name: Development validation
+
+on:
+  pull_request:
+  push:
+    branches: [main, codex/rum-production]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      ZENPLUS_DIR: ${{ github.workspace }}
+      ZENPLUS_API: http://127.0.0.1:1
+      DATABASE_URL: postgresql+asyncpg://fixture@127.0.0.1:1/fixture
+      REDIS_URL: redis://127.0.0.1:1/15
+      CLICKHOUSE_HOST: 127.0.0.1
+      CLICKHOUSE_HTTP_PORT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: server/requirements.txt
+      - run: python -m pip install -r server/requirements.txt
+      - run: python -m pip check
+      - run: python scripts/build-release.py lint-migrations
+      - run: python -m pytest server/tests -q --disable-warnings
+
+  dashboard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm run smoke:routes
+      - run: node scripts/test-network-contracts.mjs
+      - run: npm run test:rum
+      - run: npm run test:service-availability
+      - run: node scripts/test-service-failures.mjs
+      - run: node scripts/test-daily-probe-failures.mjs
+
+  poller:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: poller
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: poller/go.mod
+          cache-dependency-path: poller/go.sum
+      - run: go test ./...
+      - run: go build ./cmd/poller ./cmd/netflow-collector ./cmd/sensor
+
+  agent:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ZenPlus_Agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ZenPlus_Agent/go.mod
+          cache-dependency-path: ZenPlus_Agent/go.sum
+      - run: go test ./internal/...
+      - if: runner.os == 'Windows'
+        run: go build ./...
+      # Installer creation/publication remains exclusively in the signing-gated
+      # Windows agent release workflow. This job publishes no agent artifacts.

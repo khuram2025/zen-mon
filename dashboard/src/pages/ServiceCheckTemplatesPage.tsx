@@ -171,7 +171,7 @@ export function ServiceCheckTemplatesPage() {
       name: t.name,
       description: t.description || '',
       check_type: t.check_type as any,
-      level: (t.level as any) || LEVEL_BY_TYPE[t.check_type as any],
+      level: (t.level as any) || LEVEL_BY_TYPE[t.check_type],
       default_interval: t.default_interval,
       default_timeout: t.default_timeout,
       default_retry_count: t.default_retry_count,
@@ -355,7 +355,7 @@ export function ServiceCheckTemplatesPage() {
               <FormField label="Type" required>
                 <Select
                   value={form.check_type}
-                  onValueChange={(v: any) =>
+                  onValueChange={(v: FormState["check_type"]) =>
                     setForm({ ...form, check_type: v, level: LEVEL_BY_TYPE[v] })
                   }
                   disabled={!!form.id}
@@ -481,7 +481,7 @@ export function ServiceCheckTemplatesPage() {
               <FormField label="Record type">
                 <Select
                   value={form.dns_record_type}
-                  onValueChange={(v: any) => setForm({ ...form, dns_record_type: v })}
+                  onValueChange={(v: FormState["dns_record_type"]) => setForm({ ...form, dns_record_type: v })}
                 >
                   <SelectTrigger>
                     <SelectValue />
@@ -611,7 +611,7 @@ export function ServiceCheckTemplatesPage() {
         confirmText="Delete"
         destructive
         loading={del.isPending}
-        onConfirm={() => deleting && del.mutate(deleting.id)}
+        onConfirm={() => { if (deleting) del.mutate(deleting.id) }}
       />
     </div>
   )

@@ -1,3 +1,6 @@
+import { DailyProbeFailures } from '@/components/services/DailyProbeFailures'
+import { explainServiceFailure } from '@/components/services/failureReason'
+import { ServiceFailureReason } from '@/components/services/ServiceFailureReason'
 import { MonitoringSites } from '@/components/MonitoringSites'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
@@ -184,6 +187,10 @@ type ActivityEvent = {
 }
 
 type SlaStats = {
+  availability_basis?: string
+  probe_uptime_pct?: number | null
+  probe_downtime_sec?: number
+  probe_error_rate_pct?: number | null
   uptime_pct: number | null
   sample_count: number
   incident_count: number
@@ -320,10 +327,10 @@ export function ServiceCheckDetailPage() {
   const slaQ = useQuery<SlaStats>({
     // Send explicit bounds: `hours` alone always ends at now, so a custom historical range
     // would silently be scored against the last N hours instead.
-    queryKey: ['service-sla', id, range.fromISO, range.toISO],
+    queryKey: ['service-sla', id, range.fromISO, range.toISO, 'confirmed'],
     queryFn: async () =>
       (await api.get(
-        `/service-checks/${id}/sla?hours=${range.hours}&from=${encodeURIComponent(range.fromISO)}&to=${encodeURIComponent(range.toISO)}`,
+        `/service-checks/${id}/sla?basis=confirmed&hours=${range.hours}&from=${encodeURIComponent(range.fromISO)}&to=${encodeURIComponent(range.toISO)}`,
       )).data,
     enabled: !!id && !!check,
     refetchInterval: 30_000,
@@ -333,27 +340,27 @@ export function ServiceCheckDetailPage() {
   // Fixed windows for the hero strip — always the last 24h/7d/30d ending now, independent
   // of the range picker, the way uptime products present a monitor.
   const sla24Q = useQuery<SlaStats>({
-    queryKey: ['service-sla-fixed', id, 24],
-    queryFn: async () => (await api.get(`/service-checks/${id}/sla?hours=24`)).data,
+    queryKey: ['service-sla-fixed', id, 24, 'confirmed'],
+    queryFn: async () => (await api.get(`/service-checks/${id}/sla?basis=confirmed&hours=24`)).data,
     enabled: !!id && !!check,
     refetchInterval: 60_000,
   })
   const sla7dQ = useQuery<SlaStats>({
-    queryKey: ['service-sla-fixed', id, 168],
-    queryFn: async () => (await api.get(`/service-checks/${id}/sla?hours=168`)).data,
+    queryKey: ['service-sla-fixed', id, 168, 'confirmed'],
+    queryFn: async () => (await api.get(`/service-checks/${id}/sla?basis=confirmed&hours=168`)).data,
     enabled: !!id && !!check,
     refetchInterval: 120_000,
   })
   const sla30dQ = useQuery<SlaStats>({
-    queryKey: ['service-sla-fixed', id, 720],
-    queryFn: async () => (await api.get(`/service-checks/${id}/sla?hours=720`)).data,
+    queryKey: ['service-sla-fixed', id, 720, 'confirmed'],
+    queryFn: async () => (await api.get(`/service-checks/${id}/sla?basis=confirmed&hours=720`)).data,
     enabled: !!id && !!check,
     refetchInterval: 300_000,
   })
 
   const hourlyQ = useQuery<{ hours: HourlyUptime[] }>({
-    queryKey: ['service-hourly-uptime', id],
-    queryFn: async () => (await api.get(`/service-checks/${id}/hourly-uptime?days=30`)).data,
+    queryKey: ['service-hourly-uptime', id, 'confirmed'],
+    queryFn: async () => (await api.get(`/service-checks/${id}/hourly-uptime?days=30&basis=confirmed`)).data,
     enabled: !!id && !!check,
     refetchInterval: 60_000,
   })
@@ -409,7 +416,7 @@ export function ServiceCheckDetailPage() {
   // contains zero transitions, so without the prior event every range-scoped panel would
   // claim the service was fine while its day renders red.
   const wideFrom = useMemo(() => new Date(Date.now() - 720 * 3600_000).toISOString(), [])
-  const { data: wideHistory = [] } = useQuery<StatusHistoryEvent[]>({
+  const { data: wideHistory = [], isLoading: wideHistoryLoading, isError: wideHistoryError } = useQuery<StatusHistoryEvent[]>({
     queryKey: ['service-status-history-wide', id],
     queryFn: async () =>
       (await api.get(
@@ -712,7 +719,7 @@ export function ServiceCheckDetailPage() {
           tone={check.status === 'down' ? 'danger' : 'warning'}
           icon={check.status === 'down' ? XCircle : AlertTriangle}
           title={check.status === 'down' ? 'Service is down' : 'Service is degraded'}
-          body={check.last_error}
+          body={explainServiceFailure(check.last_error, { timeoutSeconds: check.timeout })}
           meta={check.last_check_at ? `Last probe ${relativeTime(check.last_check_at)}` : undefined}
           mono
         />
@@ -804,7 +811,7 @@ export function ServiceCheckDetailPage() {
               stats={[
                 { label: 'Avg', value: formatMs(avgMs) },
                 { label: 'P95', value: formatMs(p95Ms) },
-                { label: 'Error', value: pct(errorRatePct, 2) },
+                { label: 'Probe error', value: pct(sla?.probe_error_rate_pct, 2) },
                 { label: 'Incidents', value: String(incidentCount) },
               ]}
             />
@@ -845,6 +852,10 @@ export function ServiceCheckDetailPage() {
             onRetry={() => hourlyQ.refetch()}
             onSelectDay={(d) => setCustom(new Date(d.start).toISOString(), new Date(Math.min(d.end, Date.now())).toISOString())}
             outagesFor={outagesForDay}
+            checkId={check.id}
+            intervalSeconds={check.check_interval || 60}
+            historyLoading={wideHistoryLoading}
+            historyError={wideHistoryError}
           />
           <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(300px,0.9fr)]">
             <DailyUptimeChart days={days} fromTs={fromTs} toTs={toTs} />
@@ -1158,7 +1169,7 @@ function HeroStrip({ check, sla24, slaRange, rangeLabel, sla7d, sla30d, loading,
       label: check.status === 'down' ? 'Currently down for' : 'Degraded for',
       value: downForSec != null ? `${ongoingOutage?.clippedStart ? '≥ ' : ''}${formatDur(downForSec)}` : '—',
       tone: check.status === 'down' ? 'text-danger' : 'text-warning',
-      sub: check.last_error ? check.last_error.slice(0, 60) : 'no error detail',
+      sub: check.last_error ? explainServiceFailure(check.last_error, { timeoutSeconds: check.timeout }) : 'no error detail',
     }
   } else if (check.status === 'unknown') {
     statusCell = { label: 'Monitoring', value: check.last_check_at ? 'No recent data' : 'Pending', tone: 'text-muted', sub: check.last_check_at ? 'check the assigned sensor' : 'waiting for the first probe' }
@@ -1409,12 +1420,12 @@ function AvailabilityTimeline({
   )
   const covered = buckets.filter((b) => b.state !== 'gap')
   const downCount = covered.filter((b) => b.state === 'down' || b.state === 'warn').length
-  const pctUp = sla?.uptime_pct ?? null
+  const pctUp = sla?.probe_uptime_pct ?? null
   const coverage = sla?.coverage_pct ?? 0
 
   return (
     <SectionCard
-      title="Availability timeline"
+      title="Probe availability timeline"
       subtitle={
         <span>
           {rangeLabel}
@@ -1426,7 +1437,7 @@ function AvailabilityTimeline({
         <div className="flex items-baseline gap-3 text-xs">
           {downCount > 0 && <span className="font-medium text-danger">{downCount} bad interval{downCount === 1 ? '' : 's'}</span>}
           {pctUp != null && (
-            <span className={cn('font-mono font-semibold tabular-nums', BAND_TEXT[uptimeBand(pctUp)])}>{pctUp.toFixed(2)}% availability</span>
+            <span className={cn('font-mono font-semibold tabular-nums', BAND_TEXT[uptimeBand(pctUp)])}>{pctUp.toFixed(2)}% probe availability</span>
           )}
         </div>
       }
@@ -1455,7 +1466,7 @@ function AvailabilityTimeline({
                 title={
                   b.state === 'gap'
                     ? `${timeTooltipLabelFormatter(b.start)} — no data`
-                    : `${timeTooltipLabelFormatter(b.start)} — ${b.state.toUpperCase()}${b.reason ? ` · ${b.reason}` : ''}`
+                    : `${timeTooltipLabelFormatter(b.start)} — ${b.state.toUpperCase()}${b.reason ? ` · ${explainServiceFailure(b.reason)}` : ''}`
                 }
               />
             ))}
@@ -1775,9 +1786,9 @@ function LatestProbeCard({ check, latest, recent, manualProbe }: {
         <ProbeStat label="Response" value={formatMs(latest?.response_ms)} className="text-info" sub={latest?.status_code != null ? `HTTP ${latest.status_code}` : authLabel} />
       </div>
       {(latest?.error_message || check.last_error) && latest?.is_up === false && (
-        <p className="mt-2 break-words rounded-md border border-danger/30 bg-danger/10 px-2 py-1.5 font-mono text-[11px] text-danger">
-          {latest?.error_message || check.last_error}
-        </p>
+        <div className="mt-2 rounded-md border border-danger/30 bg-danger/10 px-2 py-1.5 text-danger">
+          <ServiceFailureReason reason={latest?.error_message || check.last_error} failureStage={latest?.network_diagnostics?.failure_stage} timeoutSeconds={check.timeout} />
+        </div>
       )}
       {latest?.network_diagnostics && (
         <div className="mt-3 rounded-md border border-border bg-surface2/30 p-2.5">
@@ -1807,7 +1818,7 @@ function LatestProbeCard({ check, latest, recent, manualProbe }: {
             {formatMs(manualProbe.result.response_time_ms)}
             {manualProbe.result.details?.status_code != null ? ` · HTTP ${manualProbe.result.details.status_code}` : ''}
           </div>
-          {manualProbe.result.error && <div className="mt-1 break-words font-mono text-[11px] text-danger">{manualProbe.result.error}</div>}
+          {manualProbe.result.error && <div className="mt-1 text-danger"><ServiceFailureReason reason={manualProbe.result.error} timeoutSeconds={check.timeout} /></div>}
           {(manualProbe.result.details?.steps?.length || 0) > 1 && (
             <div className="mt-2 space-y-1 border-t border-border/60 pt-1.5">
               {manualProbe.result.details!.steps!.map((s) => (
@@ -1835,7 +1846,7 @@ function LatestProbeCard({ check, latest, recent, manualProbe }: {
                 <span className={cn('font-medium', p.is_up ? 'text-success' : 'text-danger')}>{p.is_up ? 'UP' : 'DOWN'}</span>
                 <span className="tabular-nums text-muted">{formatMs(p.response_ms)}</span>
                 <span className="min-w-0 flex-1 truncate text-muted" title={p.error_message || undefined}>
-                  {p.status_code != null ? `HTTP ${p.status_code}` : p.error_message || ''}
+                  {p.error_message ? explainServiceFailure(p.error_message, { failureStage: p.network_diagnostics?.failure_stage, timeoutSeconds: check.timeout }) : p.status_code != null ? `HTTP ${p.status_code}` : ''}
                 </span>
               </div>
             ))}
@@ -1929,7 +1940,7 @@ function buildActivityEvents(
       kind: 'status',
       severity: up ? 'success' : down ? 'critical' : 'warning',
       title: up ? (h.old_status === 'unknown' ? 'Monitoring resumed' : 'Service recovered') : down ? 'Service went down' : `Status → ${statusOf(h.new_status).label}`,
-      subtitle: [h.reason, h.old_status ? `${h.old_status} → ${h.new_status}` : null].filter(Boolean).join(' · ') || undefined,
+      subtitle: [h.reason ? explainServiceFailure(h.reason) : null, h.old_status ? `${h.old_status} → ${h.new_status}` : null].filter(Boolean).join(' · ') || undefined,
     }
   })
 
@@ -1958,7 +1969,7 @@ function buildActivityEvents(
       kind: 'status',
       severity: check.status === 'down' ? 'critical' : 'warning',
       title: check.status === 'down' ? 'Service is down' : 'Service is degraded',
-      subtitle: check.last_error,
+      subtitle: explainServiceFailure(check.last_error),
     })
   }
 
@@ -2321,7 +2332,7 @@ function dayKey(d: Date): string {
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
-function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectDay, outagesFor }: {
+function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectDay, outagesFor, checkId, intervalSeconds, historyLoading, historyError }: {
   days: DayUptime[]
   fromTs: number
   toTs: number
@@ -2330,6 +2341,10 @@ function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectD
   onRetry: () => void
   onSelectDay: (d: DayUptime) => void
   outagesFor: (d: DayUptime) => Outage[]
+  checkId: string
+  intervalSeconds: number
+  historyLoading: boolean
+  historyError: boolean
 }) {
   const [selected, setSelected] = useState<string | null>(null)
   const measured = days.filter((d) => d.uptimePct != null)
@@ -2350,7 +2365,7 @@ function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectD
   return (
     <SectionCard
       title="Uptime calendar"
-      subtitle="Last 30 days · click a day to zoom the whole page to it"
+      subtitle="Confirmed availability · last 30 days · select a day for incidents and failed checks"
       actions={
         <div className="flex items-center gap-3 text-xs">
           {overall != null && (
@@ -2464,20 +2479,20 @@ function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectD
                   <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span>
                 </div>
 
+                <DailyProbeFailures checkId={checkId} start={selectedDay.start} end={selectedDay.end}
+                  intervalSeconds={intervalSeconds} downtimeSeconds={selectedDay.downtimeSec}
+                  hasCoverage={selectedDay.coveredSec > 0} />
                 <div className="mt-3 border-t border-border/60 pt-2.5">
                   <div className="mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted">
-                    Failures this day
+                    Confirmed status incidents
                     {selectedOutages.length > 0 && (
                       <span className="ml-1.5 font-mono text-danger">{selectedOutages.length}</span>
                     )}
                   </div>
-                  {selectedOutages.length === 0 ? (
-                    <div className="flex items-center gap-1.5 text-[11px] text-muted">
-                      <CheckCircle2 className="h-3.5 w-3.5 text-success" />
-                      {selectedDay.uptimePct == null
-                        ? 'No status changes recorded for this day.'
-                        : 'No failures — the service stayed up all day.'}
-                    </div>
+                  {historyLoading ? <p className="text-[11px] text-muted">Loading confirmed status incidents…</p>
+                    : historyError ? <p className="text-[11px] text-danger">Could not load confirmed status incidents.</p>
+                    : selectedOutages.length === 0 ? (
+                    <p className="text-[11px] text-muted">No confirmed Down or Warning incidents recorded for this day.</p>
                   ) : (
                     <div className="space-y-1.5">
                       {selectedOutages.map((o, i) => {
@@ -2498,7 +2513,7 @@ function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectD
                               {o.clippedStart || o.clippedEnd ? '≥ ' : ''}{formatDur((end - o.start) / 1000)}
                             </span>
                             {o.reason && (
-                              <span className="min-w-0 flex-1 truncate text-muted" title={o.reason}>{o.reason}</span>
+                              <div className="basis-full pl-1 text-text2"><ServiceFailureReason reason={o.reason} /></div>
                             )}
                           </div>
                         )
@@ -2584,8 +2599,9 @@ function SlaSummaryCard({ sla, rangeLabel, loading, error, onRetry }: {
   onRetry: () => void
 }) {
   const rows: Array<{ label: string; value: string; tone?: string; hint?: string }> = [
-    { label: 'Availability', value: pct(sla?.uptime_pct, 3), tone: BAND_TEXT[uptimeBand(sla?.uptime_pct)] },
-    { label: 'Error rate', value: pct(sla?.error_rate_pct, 3) },
+    { label: 'Confirmed availability', value: pct(sla?.uptime_pct, 3), tone: BAND_TEXT[uptimeBand(sla?.uptime_pct)] },
+    { label: 'Raw probe availability', value: pct(sla?.probe_uptime_pct, 3), hint: 'includes unconfirmed failures' },
+    { label: 'Confirmed downtime rate', value: pct(sla?.error_rate_pct, 3) },
     // A clean window really has zero downtime; "—" would read as "unknown".
     { label: 'Total downtime', value: (sla?.total_downtime_sec || 0) > 0 ? formatDur(sla?.total_downtime_sec) : '0s', tone: (sla?.total_downtime_sec || 0) > 0 ? 'text-danger' : 'text-success' },
     { label: 'Incidents', value: String(sla?.incident_count ?? 0) },
@@ -2599,7 +2615,7 @@ function SlaSummaryCard({ sla, rangeLabel, loading, error, onRetry }: {
     { label: 'Current streak', value: formatDur(sla?.uptime_streak_sec), tone: 'text-success' },
   ]
   return (
-    <SectionCard title="SLA summary" subtitle={rangeLabel} bodyClassName="p-0">
+    <SectionCard title="SLA summary" subtitle={`${rangeLabel} · confirmed Down incidents only`} bodyClassName="p-0">
       <PanelState loading={loading} error={error} onRetry={onRetry} loadingText="Computing SLA…" errorText="Could not compute SLA for this window.">
         <dl className="divide-y divide-border/60">
           {rows.map((r) => (
@@ -2795,7 +2811,7 @@ function IncidentsTab({
                       {o.clippedStart || o.clippedEnd ? '≥ ' : ''}{formatDur((end - o.start) / 1000)}
                     </Td>
                     <Td>
-                      <div className="max-w-[380px] truncate text-[11px] text-muted" title={o.reason || undefined}>{o.reason || '—'}</div>
+                      <div className="max-w-[380px] text-muted"><ServiceFailureReason reason={o.reason} /></div>
                     </Td>
                   </Tr>
                 )

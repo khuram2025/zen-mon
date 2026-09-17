@@ -262,7 +262,7 @@ export async function generateDeviceReport(data: ReportData): Promise<void> {
   doc.setFontSize(14); doc.setTextColor(79, 70, 229); doc.setFont('helvetica', 'bold')
   doc.text(device.hostname, ml, y)
   doc.setFontSize(10); doc.setTextColor(107, 114, 128); doc.setFont('helvetica', 'normal')
-  doc.text(device.ip_address, ml + doc.getTextWidth(device.hostname) + 5, y)
+  doc.text(device.ip_address || device.managed_ip || "No address", ml + doc.getTextWidth(device.hostname) + 5, y)
 
   // Status badge
   doc.setFont('helvetica', 'bold'); doc.setFontSize(9)
