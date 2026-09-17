@@ -1,6 +1,6 @@
 # Development validation and release blockers — 17 September 2026
 
-Application commit: `af415860ed8844034e65a0847ec116e4c8cfc594` on
+Application commit: `0dfa55fa9fc99c1fd06831750c5c6d1e559484ea` on
 `codex/rum-production`, continuing the handoff at `9e7fc6f`.
 
 ## Source synchronization
@@ -34,6 +34,12 @@ Changes in this continuation:
   test while restoring Linux agent core validation.
 - Add independent server, dashboard, poller and Linux/Windows agent CI jobs.
   Installer creation remains in the existing signing-gated release workflow.
+- Fix RUM retention configuration loading during the first ten minutes after
+  boot, with regression coverage at multiple system uptimes.
+- Use concrete file read/execute rights for the Windows dashboard ACL and
+  retain the elevated native integration test that rejects writable ACLs.
+- Fetch full Git history in server CI so historical migration integrity checks
+  can inspect earlier commits.
 
 ## Executed validation
 
@@ -42,6 +48,7 @@ Changes in this continuation:
 | Fresh Python requirements install and `pip check` | Passed, including bcrypt 4.3.0 compatibility pin |
 | Dashboard `npm ci` | Passed; audit reported zero vulnerabilities |
 | Full isolated Python suite | 829 passed, 45 skipped; skips are not acceptance evidence |
+| Fresh GitHub server suite at the application commit above | 831 passed, 46 skipped; dependency and migration checks passed |
 | NCM PostgreSQL/loopback SSH fixture suite | 51 passed; 117/118 applied twice |
 | Network PostgreSQL/ClickHouse fixture suite | 22 passed |
 | Complete migration lint | Passed through new migration 119 |
@@ -51,7 +58,7 @@ Changes in this continuation:
 | Poller Go tests | All packages passed, including the database-backed UDT regression |
 | Poller, NetFlow collector and sensor Linux builds | Passed; poller rebuilt after UDT reconciliation |
 | Agent Linux core tests | All internal packages passed after platform-specific test correction |
-| Agent Windows cross-build | Passed; native Windows execution and installer signing remain separate gates |
+| Agent Windows cross-build and native Windows CI | Passed; installer signing remains a separate gate |
 | Strict dashboard `npm run build` | Passed; the handoff's 539 TypeScript diagnostics are resolved |
 | Dashboard route, RUM, network, availability, failure and daily-probe contracts | Passed |
 | Installed service-account dependency imports and `pip check` | Passed |
@@ -63,6 +70,16 @@ and a separate loopback ClickHouse container were used for integration tests.
 Tests did not use the installed application's databases as fixtures, enroll
 real NCM devices, change router configuration, or deliver real notifications.
 
+All five development CI jobs passed on the application commit above:
+server, dashboard, poller, Linux agent and Windows agent. See
+[the completed development run](https://github.com/khuram2025/zen-mon/actions/runs/35223655927).
+[PR #13](https://github.com/khuram2025/zen-mon/pull/13) is open for independent
+review. Main protection now requires those checks and one independent approval.
+The clean appliance-side review checkout matches the pushed application source;
+comparison with the tested staging tree found only normalized line endings and
+a trailing blank line. The disposable PostgreSQL fixtures were stopped after
+validation. The installed application tree was not replaced.
+
 ## Release is not complete
 
 The installed API, poller and NetFlow collector are running. The NCM worker and
@@ -72,7 +89,8 @@ under the appliance's administration policy; that policy was preserved.
 
 The following gates remain:
 
-1. Independent PR approval and passing GitHub checks before a reviewed merge.
+1. Independent PR approval before a reviewed merge. Development CI is green;
+   release signing configuration is still missing.
 2. Production Windows signing configuration. The earlier Windows workflow
    failed specifically at `Require production signing configuration`; no
    signing secrets were configured at inspection. Existing Azure signing PR
