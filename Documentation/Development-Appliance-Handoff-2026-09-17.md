@@ -1,5 +1,10 @@
 # Development appliance handoff — 17 September 2026
 
+Continuation results and outstanding release gates are recorded in
+[Development validation](Development-Validation-2026-09-17.md). The strict
+TypeScript build was subsequently repaired; the original baseline observations
+below remain historical evidence rather than the latest validation verdict.
+
 The destination appliance is at another location and has not been accessed or
 verified in this handoff. This document identifies the source to retrieve,
 requirements to provision locally, and the checks needed before continuing work.
