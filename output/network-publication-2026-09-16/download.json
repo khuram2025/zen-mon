@@ -1,0 +1,10 @@
+{
+  "checked_at": "2026-09-16T12:15:13.432772+00:00",
+  "version": "1.23.12",
+  "release_id": "4822db79-cc93-4689-84de-454c5ef9bed7",
+  "appliance_id": "7b23819f-efe7-497f-97bf-901842cb050c",
+  "download_verified": true,
+  "bytes": 119231549,
+  "sha256": "0ad09db0f4de39db291c26e8e962d68103f992f05966a2f82f8c44649e4df4e1",
+  "tls_verified": true
+}

@@ -590,6 +590,32 @@ func (s *PostgresStore) UpsertInterfaces(ctx context.Context, deviceID uuid.UUID
 	if len(ifs) == 0 {
 		return nil
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "interfaces:"+deviceID.String()); err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `SELECT if_index, COALESCE(if_name,''), monitored, configured_speed_bps, last_seen FROM device_interfaces WHERE device_id=$1 FOR UPDATE`, deviceID)
+	if err != nil {
+		return err
+	}
+	var previous []interfacePolicy
+	for rows.Next() {
+		var p interfacePolicy
+		if err := rows.Scan(&p.Index, &p.Name, &p.Monitored, &p.Speed, &p.LastSeen); err != nil {
+			rows.Close()
+			return err
+		}
+		previous = append(previous, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	policies := reconcileInterfacePolicy(previous, ifs)
 	batch := &pgx.Batch{}
 	for _, i := range ifs {
 		var macArg any
@@ -600,8 +626,8 @@ func (s *PostgresStore) UpsertInterfaces(ctx context.Context, deviceID uuid.UUID
 			INSERT INTO device_interfaces (
 			    device_id, if_index, if_name, if_descr, if_alias,
 			    if_type, if_speed, mac_address, admin_status, oper_status,
-			    first_seen, last_seen
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW())
+			    first_seen, last_seen, monitored, configured_speed_bps
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW(),$11,$12)
 			ON CONFLICT (device_id, if_index) DO UPDATE SET
 			    if_name = EXCLUDED.if_name,
 			    if_descr = EXCLUDED.if_descr,
@@ -611,20 +637,26 @@ func (s *PostgresStore) UpsertInterfaces(ctx context.Context, deviceID uuid.UUID
 			    mac_address = EXCLUDED.mac_address,
 			    admin_status = EXCLUDED.admin_status,
 			    oper_status = EXCLUDED.oper_status,
+			    monitored = EXCLUDED.monitored,
+			    configured_speed_bps = EXCLUDED.configured_speed_bps,
 			    last_seen = NOW()
 		`,
 			deviceID, i.IfIndex, i.IfName, i.IfDescr, i.IfAlias,
 			i.IfType, int64(i.IfSpeed), macArg, i.AdminStatus, i.OperStatus,
+			policies[i.IfIndex].Monitored, policies[i.IfIndex].Speed,
 		)
 	}
-	br := s.pool.SendBatch(ctx, batch)
+	br := tx.SendBatch(ctx, batch)
 	defer br.Close()
 	for i := 0; i < len(ifs); i++ {
 		if _, err := br.Exec(); err != nil {
 			return fmt.Errorf("upsert interface %d: %w", ifs[i].IfIndex, err)
 		}
 	}
-	return nil
+	if err := br.Close(); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // UpsertEntities upserts ENTITY-MIB inventory.

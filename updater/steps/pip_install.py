@@ -25,6 +25,9 @@ def pip_install(step: dict, extract_dir: str, cfg) -> None:
         capture_output=True,
         text=True,
         timeout=300,
+        # The updater may protect its own backups with umask 077. Package
+        # files must remain readable by the non-root API service account.
+        **({"umask": 0o022} if os.name == "posix" else {}),
     )
 
     if result.returncode != 0:

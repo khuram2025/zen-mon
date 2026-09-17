@@ -1,0 +1,21 @@
+{
+  "receiver_active_and_enabled": true,
+  "health": {
+    "status": "ok",
+    "version": "1.23.12",
+    "checks": {
+      "api": "ok",
+      "postgresql": "ok",
+      "clickhouse": "ok",
+      "redis": "ok",
+      "zenplus-api": "active",
+      "zenplus-poller": "active",
+      "nginx": "active",
+      "snmp_encryption": "ok"
+    }
+  },
+  "fixture_event_rows_remaining": 0,
+  "updater_backups_gzip_verified": 2,
+  "installation_staging_removed": true,
+  "free_disk_gib": 2.83
+}

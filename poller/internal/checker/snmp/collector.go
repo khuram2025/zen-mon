@@ -40,13 +40,17 @@ type Collector struct {
 	prevIfs      map[uuid.UUID]map[uint32]ifSnapshot
 	prevTpl      map[uuid.UUID]map[string]tplSnap
 	lastTplGroup map[uuid.UUID]map[string]time.Time
+	prevUptime   map[uuid.UUID]time.Duration
 }
 
 type ifSnapshot struct {
-	inOctets  uint64
-	outOctets uint64
-	at        time.Time
-	hc        bool
+	inOctets      uint64
+	outOctets     uint64
+	at            time.Time
+	hc            bool
+	name          string
+	speed         uint64
+	discontinuity uint64
 }
 
 func NewCollector(pollerID string, sessions *SessionCache) *Collector {
@@ -56,6 +60,7 @@ func NewCollector(pollerID string, sessions *SessionCache) *Collector {
 		prevIfs:      make(map[uuid.UUID]map[uint32]ifSnapshot),
 		prevTpl:      make(map[uuid.UUID]map[string]tplSnap),
 		lastTplGroup: make(map[uuid.UUID]map[string]time.Time),
+		prevUptime:   make(map[uuid.UUID]time.Duration),
 	}
 }
 
@@ -91,6 +96,13 @@ func (c *Collector) Collect(ctx context.Context, d *Device, r *Result) {
 	// persisted the device's identity (sysObjectID → vendor/model).
 	sys, sysErr := c.collectSystem(ctx, client)
 	if sysErr == nil {
+		c.mu.Lock()
+		if old, ok := c.prevUptime[d.ID]; ok && sys.SysUpTime < old {
+			delete(c.prevIfs, d.ID)
+			delete(c.prevTpl, d.ID)
+		}
+		c.prevUptime[d.ID] = sys.SysUpTime
+		c.mu.Unlock()
 		r.Mu.Lock()
 		r.System = sys
 		if sys.SysUpTime > 0 {
@@ -830,6 +842,7 @@ func (c *Collector) collectInterfaces(ctx context.Context, s *g.GoSNMP) ([]Inter
 
 	name := collect(OIDIfName)
 	alias := collect(OIDIfAlias)
+	discontinuity := collect("1.3.6.1.2.1.31.1.1.1.19")
 
 	out := make([]Interface, 0, len(descr))
 	for idx, d := range descr {
@@ -861,13 +874,18 @@ func (c *Collector) collectInterfaces(ctx context.Context, s *g.GoSNMP) ([]Inter
 		}
 
 		// Prefer HC counters when present.
-		if v, ok := hcInO[idx]; ok && asUint(*v) > 0 {
+		// A valid zero is still Counter64. Use one consistent width for
+		// both directions; never mix a 32-bit direction with a 64-bit one.
+		inHC, inOK := hcInO[idx]
+		outHC, outOK := hcOutO[idx]
+		bothHC := inOK && outOK && inHC.Type == g.Counter64 && outHC.Type == g.Counter64
+		if v, ok := hcInO[idx]; ok && bothHC {
 			iface.InOctets = asUint(*v)
 			iface.HasHC = true
 		} else if v, ok := inO[idx]; ok {
 			iface.InOctets = asUint(*v)
 		}
-		if v, ok := hcOutO[idx]; ok && asUint(*v) > 0 {
+		if v, ok := hcOutO[idx]; ok && bothHC {
 			iface.OutOctets = asUint(*v)
 			iface.HasHC = true
 		} else if v, ok := outO[idx]; ok {
@@ -902,6 +920,9 @@ func (c *Collector) collectInterfaces(ctx context.Context, s *g.GoSNMP) ([]Inter
 		}
 		if v, ok := alias[idx]; ok {
 			iface.IfAlias = asString(*v)
+		}
+		if v, ok := discontinuity[idx]; ok {
+			iface.Discontinuity = asUint(*v)
 		}
 		out = append(out, iface)
 	}
@@ -1046,25 +1067,39 @@ func (c *Collector) diffInterfaces(deviceID uuid.UUID, ifs []Interface, ts time.
 		iface := ifs[i]
 		idx := uint32(iface.IfIndex)
 		snap := ifSnapshot{
-			inOctets:  iface.InOctets,
-			outOctets: iface.OutOctets,
-			at:        ts,
-			hc:        iface.HasHC,
+			inOctets:      iface.InOctets,
+			outOctets:     iface.OutOctets,
+			at:            ts,
+			hc:            iface.HasHC,
+			name:          iface.IfName,
+			speed:         iface.IfSpeed,
+			discontinuity: iface.Discontinuity,
 		}
 		cur[idx] = snap
 
 		inBps, outBps := 0.0, 0.0
-		if p, ok := prev[idx]; ok {
+		if p, ok := prev[idx]; ok && p.hc == snap.hc && p.name == snap.name && p.speed == snap.speed && p.discontinuity == snap.discontinuity {
 			dt := ts.Sub(p.at).Seconds()
 			if dt > 0 {
 				inBps = rateBps(iface.InOctets, p.inOctets, dt, iface.HasHC)
 				outBps = rateBps(iface.OutOctets, p.outOctets, dt, iface.HasHC)
+				if iface.IfSpeed > 0 {
+					if inBps > float64(iface.IfSpeed)*1.05 {
+						inBps = 0
+					}
+					if outBps > float64(iface.IfSpeed)*1.05 {
+						outBps = 0
+					}
+				}
 			}
 		}
 
 		opStatus := uint8(0)
-		if iface.OperStatus == "up" {
-			opStatus = 1
+		for code, name := range IfStatusNames {
+			if name == iface.OperStatus {
+				opStatus = uint8(code)
+				break
+			}
 		}
 
 		samples = append(samples, InterfaceSample{
@@ -1095,11 +1130,14 @@ func (c *Collector) diffInterfaces(deviceID uuid.UUID, ifs []Interface, ts time.
 // In the reset case we return 0 rather than a negative or absurd
 // rate.
 func rateBps(cur, prev uint64, dtSec float64, hc bool) float64 {
+	if dtSec <= 0 || math.IsNaN(dtSec) || math.IsInf(dtSec, 0) {
+		return 0
+	}
 	var delta uint64
 	switch {
 	case cur >= prev:
 		delta = cur - prev
-	case !hc && prev < math.MaxUint32:
+	case !hc && prev <= math.MaxUint32 && cur <= math.MaxUint32:
 		// 32-bit wrap
 		delta = (math.MaxUint32 - prev) + cur + 1
 	default:

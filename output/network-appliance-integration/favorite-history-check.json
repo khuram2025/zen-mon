@@ -1,0 +1,11 @@
+{
+  "inserts": 6,
+  "deletes": 6,
+  "dead": 6,
+  "last_vacuum": null,
+  "last_autovacuum": null,
+  "retained_tuple_count": 18,
+  "session_inserted_tuple_count": 6,
+  "older_favorites_deleted_during_test_transactions": 0,
+  "non_normal_pointers": 0
+}

@@ -11,6 +11,19 @@ export function MibsTabContent() {
   const qc = useQueryClient()
   const fileInput = useRef<HTMLInputElement>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
+  const [search, setSearch] = useState('')
+  const [browse, setBrowse] = useState(false)
+  const [compileResult, setCompileResult] = useState<any>(null)
+
+  const compile = useMutation({
+    mutationFn: async () => (await api.post('/snmp/mibs/compile')).data,
+    onSuccess: (result) => { setCompileResult(result); setBrowse(true); qc.invalidateQueries({ queryKey: ['mib-objects'] }) },
+    onError: (e: any) => setUploadError(e?.response?.data?.detail || 'Compilation failed'),
+  })
+  const objects = useQuery<any>({
+    queryKey: ['mib-objects', search], enabled: browse,
+    queryFn: async () => (await api.get('/snmp/mibs/objects', { params: { search } })).data,
+  })
 
   const { data: mibs } = useQuery<any[]>({
     queryKey: ['mibs'],
@@ -56,7 +69,7 @@ export function MibsTabContent() {
             Upload MIB
           </CardTitle>
           <p className="text-xs text-muted">
-            Upload vendor MIB files. Files are stored on disk; runtime compilation lands in a later update.
+            Upload vendor MIB files and their imported dependencies, then compile the library to browse numeric OIDs for monitoring templates.
           </p>
         </CardHeader>
         <CardContent>
@@ -78,6 +91,26 @@ export function MibsTabContent() {
           <p className="mt-3 text-xs text-muted">
             Max 4 MB. Filename can only contain letters, digits, and <code>._-</code>. Duplicates overwrite.
           </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle>MIB symbols</CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex gap-3">
+            <Button onClick={() => compile.mutate()} disabled={compile.isPending}>{compile.isPending ? 'Compiling…' : 'Compile library'}</Button>
+            <Button variant="ghost" onClick={() => setBrowse(true)}>Browse compiled symbols</Button>
+          </div>
+          {compileResult && <p className="text-sm">{compileResult.compiled_modules.length} modules compiled; {compileResult.object_count} symbols.</p>}
+          {Object.entries(compileResult?.errors || {}).map(([file, error]) => <p key={file} className="text-sm text-danger">{file}: {String(error)}</p>)}
+          {browse && <>
+            <input aria-label="Search MIB symbols" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search module, symbol or OID" className="w-full rounded border border-border bg-background p-2 text-sm" />
+            {objects.isError && <p className="text-sm text-danger">{(objects.error as any)?.response?.data?.detail || 'Unable to load symbols'}</p>}
+            <div className="max-h-96 overflow-auto"><Table><THead><Tr><Th>Symbol</Th><Th>Numeric OID</Th></Tr></THead><TBody>
+              {(objects.data?.data || []).map((o: any) => <Tr key={`${o.module}::${o.symbol}`}><Td className="text-xs">{o.module}::{o.symbol}</Td><Td className="font-mono text-xs select-all">{o.oid}</Td></Tr>)}
+            </TBody></Table></div>
+            <p className="text-xs text-muted">Showing up to 500 matches. Scalar polling usually requires a .0 instance suffix; table columns use their row index.</p>
+          </>}
         </CardContent>
       </Card>
 

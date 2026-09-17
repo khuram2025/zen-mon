@@ -1,0 +1,14 @@
+{
+  "release_version": "1.23.12",
+  "signature": "valid",
+  "checksums_verified": 856,
+  "archive_members": 942,
+  "release_scope": "appliance-and-agent",
+  "agent_version": "1.12.4",
+  "agent_msi": "zenplus-agent-1.12.4.msi",
+  "agent_msi_size": 227241984,
+  "agent_msi_sha256": "5cb19c8430d3433c0ac51a55e61d321453b7e941c35b6f75ce325eed04c8bb08",
+  "agent_destination": "/opt/zenplus/artifacts/agents/windows/zenplus-agent-1.12.4.msi",
+  "authoritative_changed_files_verified": 66,
+  "forbidden_files": 0
+}

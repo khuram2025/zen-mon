@@ -1,0 +1,28 @@
+{
+  "counters": {
+    "enqueued": 1,
+    "in_flight": 0,
+    "invalid": 0,
+    "processed": 1,
+    "processing_failed": 0,
+    "queue_full": 0,
+    "queue_high_water": 1,
+    "received": 1,
+    "rejected_source": 0,
+    "retention_deleted": 0,
+    "retention_failed": 0,
+    "retention_runs": 1,
+    "shutdown_abandoned": 0,
+    "status_write_failed": 0,
+    "transport_errors": 0
+  },
+  "delivery": "best_effort",
+  "format_version": 1,
+  "pid": 310596,
+  "queue_capacity": 4096,
+  "queue_depth": 0,
+  "running": true,
+  "started_at": "2026-09-15T09:31:31.292651+00:00",
+  "transport": "udp",
+  "updated_at": "2026-09-15T09:32:41.326537+00:00"
+}

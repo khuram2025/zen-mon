@@ -651,6 +651,9 @@ func (s *trapAlertSink) WriteTrap(t snmp.TrapRecord) {
 // dispatch). Best-effort: failures are logged and ignored so trap persistence
 // is never blocked.
 func (e *Engine) evaluateTrapAlert(t snmp.TrapRecord) {
+	if t.EventID == uuid.Nil {
+		t.EventID = uuid.New()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -662,6 +665,7 @@ func (e *Engine) evaluateTrapAlert(t snmp.TrapRecord) {
 		"device_id": deviceID,
 		"source_ip": t.SourceIP.String(),
 		"trap_oid":  t.TrapOID,
+		"event_id":  t.EventID.String(),
 		"trap_name": t.TrapName,
 		"severity":  t.Severity,
 		"message":   t.Message,
@@ -1017,6 +1021,9 @@ func (e *Engine) syncSNMPDevices(ctx context.Context) error {
 	devices, err := e.snmpLoader.LoadSNMPDevices(ctx)
 	if err != nil {
 		return err
+	}
+	if e.snmpTrapListener != nil {
+		e.snmpTrapListener.SetV3Devices(devices)
 	}
 
 	// Operator-configured global UDT cadence (Settings → UDT). Falls

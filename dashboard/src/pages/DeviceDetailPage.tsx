@@ -1491,7 +1491,7 @@ function HealthScoreCard({
     <Card className="flex flex-col">
       <CardContent className="flex flex-1 flex-col p-4">
         <div className="mb-2 flex items-center justify-between">
-          <h3 className="text-sm font-semibold">Health Score</h3>
+          <h3 className="text-sm font-semibold">Performance Score</h3>
           <button
             type="button"
             onClick={onViewDetails}
@@ -1503,8 +1503,10 @@ function HealthScoreCard({
 
         <div className="flex items-center gap-4">
           <div className="flex shrink-0 flex-col items-center">
-            <HealthGauge value={score} color={color} />
-            <div className="mt-1 text-[11px] font-semibold" style={{ color }}>{label}</div>
+            {cpuVal != null && memVal != null && avgLoss != null ? <>
+              <HealthGauge value={score} color={color} />
+              <div className="mt-1 text-[11px] font-semibold" style={{ color }}>{label}</div>
+            </> : <div className="py-6 text-xs text-muted">Insufficient data</div>}
           </div>
           <div className="min-w-0 flex-1 text-[11px] leading-relaxed text-muted">
             {detractors.length > 0 ? (
@@ -1513,11 +1515,12 @@ function HealthScoreCard({
                 {detractors.join(', ')}.
               </>
             ) : (
-              <>CPU, memory and packet loss are all within their thresholds.</>
+              <>{cpuVal != null && memVal != null && avgLoss != null ? 'CPU, memory and packet loss are within their thresholds.' : 'Waiting for CPU, memory and packet-loss readings.'}</>
             )}
             {totalAlerts > 0 && (
               <> {totalAlerts} alert{totalAlerts === 1 ? '' : 's'} in this window.</>
             )}
+            <p className="mt-1">Score covers CPU, memory and packet loss. Component health is shown separately.</p>
           </div>
         </div>
 
@@ -2728,7 +2731,7 @@ function HealthDetailsDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <CheckCircle2 className="h-5 w-5 text-primary" />
-            Health Score Breakdown
+            Performance Score Breakdown
           </DialogTitle>
         </DialogHeader>
         <div className="space-y-3">

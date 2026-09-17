@@ -70,7 +70,13 @@ def stop_services(step: dict, extract_dir: str, cfg) -> None:
 
 @step_handler("start_services")
 def start_services(step: dict, extract_dir: str, cfg) -> None:
-    services = step.get("services", [])
+    services = list(step.get("services", []))
+    # Optional receivers must resume across upgrades only when operators have
+    # opted in. Installing a unit alone must not activate a network listener.
+    for service in step.get("enabled_services", []):
+        if subprocess.run(["systemctl", "is-enabled", "--quiet", service],
+                          capture_output=True, timeout=10).returncode == 0:
+            services.append(service)
     _systemctl("start", services)
 
 

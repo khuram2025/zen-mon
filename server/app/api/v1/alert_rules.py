@@ -19,6 +19,43 @@ from app.services import alert_phrasing as ap
 router = APIRouter(prefix="/alert-rules", tags=["Alert Rules"])
 
 
+def _validate_network_contract(metric, conditions):
+    from app.services.network_conditions import supported, UNMAPPED_METRICS, validate_conditions
+    items = conditions or [dict(metric=metric, operator='>', threshold=0)]
+    if any(c.get('reset_threshold') is not None and not supported(c.get('metric')) for c in items):
+        raise HTTPException(status_code=422, detail='Reset thresholds require a network metric')
+    if any(supported(c.get('metric')) or c.get('metric') in UNMAPPED_METRICS for c in items):
+        try:
+            validate_conditions(items)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _merge_condition_update(current, fields):
+    """A partial flat edit must not leave a different compound rule active."""
+    merged = dict(fields)
+    conditions = merged.get('conditions', current.get('conditions'))
+    if isinstance(conditions, str):
+        conditions = json.loads(conditions)
+    if conditions:
+        conditions = [dict(c) for c in conditions]
+        if 'conditions' not in merged:
+            for key in ('metric', 'operator', 'threshold'):
+                if key in merged:
+                    conditions[0][key] = merged[key]
+        merged.update({key: conditions[0][key] for key in ('metric', 'operator', 'threshold')})
+        merged['conditions'] = conditions
+    metric = merged.get('metric', current.get('metric'))
+    _validate_network_contract(metric, conditions)
+    if metric == 'syslog':
+        threshold = merged.get('threshold', current.get('threshold', 0))
+        if threshold is None or not 0 <= threshold <= 7 or int(threshold) != threshold:
+            raise HTTPException(status_code=422, detail='Syslog severity must be an integer from 0 to 7')
+        merged['recovery_alert'] = False
+        merged['min_duration'] = 0
+    return merged
+
+
 # ---------------------------------------------------------------------------
 # Pydantic schemas
 # ---------------------------------------------------------------------------
@@ -65,7 +102,8 @@ _CONDITION_METRICS = f"ping_status|rtt|packet_loss|jitter|service_status|{_NETWO
 class ConditionItem(BaseModel):
     metric: str = Field(..., pattern=f"^({_CONDITION_METRICS})$")
     operator: str = Field(..., pattern="^(>|<|>=|<=|==|!=)$")
-    threshold: float
+    threshold: float = Field(..., allow_inf_nan=False)
+    reset_threshold: Optional[float] = Field(None, allow_inf_nan=False)
 
 
 class EscalationLevel(BaseModel):
@@ -102,9 +140,9 @@ class AlertRuleCreate(BaseModel):
     description: Optional[str] = None
     enabled: bool = True
 
-    metric: str = Field(..., pattern=f"^({_CONDITION_METRICS}|trap)$")
+    metric: str = Field(..., pattern=f"^({_CONDITION_METRICS}|trap|syslog)$")
     operator: str = Field(..., pattern="^(>|<|>=|<=|==|!=)$")
-    threshold: float
+    threshold: float = Field(..., allow_inf_nan=False)
 
     # E2: optional trap-OID filter for metric='trap' rules (empty = any trap).
     trap_oid: Optional[str] = None
@@ -157,9 +195,9 @@ class AlertRuleUpdate(BaseModel):
     description: Optional[str] = None
     enabled: Optional[bool] = None
 
-    metric: Optional[str] = Field(None, pattern=f"^({_CONDITION_METRICS}|trap)$")
+    metric: Optional[str] = Field(None, pattern=f"^({_CONDITION_METRICS}|trap|syslog)$")
     operator: Optional[str] = Field(None, pattern="^(>|<|>=|<=|==|!=|eq|neq|gt|lt|gte|lte)$")
-    threshold: Optional[float] = None
+    threshold: Optional[float] = Field(None, allow_inf_nan=False)
     trap_oid: Optional[str] = None
     target: Optional[str] = None
 
@@ -360,7 +398,7 @@ async def get_template_defaults(user: User = Depends(get_current_user)):
     the client is what stops the editor advertising device wording on a
     service-check rule.
     """
-    return {kind: ap.default_templates(kind) for kind in ("device", "service", "trap")}
+    return {kind: ap.default_templates(kind) for kind in ("device", "service", "trap", "syslog")}
 
 
 @router.get("")
@@ -393,6 +431,10 @@ async def create_alert_rule(
         operator = conditions[0]["operator"]
         threshold = conditions[0]["threshold"]
 
+    _validate_network_contract(metric, conditions)
+    if metric == 'syslog':
+        _merge_condition_update({'metric': metric, 'threshold': threshold}, {})
+
     params: dict = {
         "name": data.name,
         "description": data.description,
@@ -404,7 +446,7 @@ async def create_alert_rule(
         "condition_logic": data.condition_logic or "AND",
         "trap_oid": (data.trap_oid or None),
         "target": (data.target or None),
-        "duration": data.min_duration,  # legacy column maps to min_duration
+        "duration": 0 if metric == 'syslog' else data.min_duration,
         "device_id": data.device_id,
         "group_id": data.group_id,
         "service_check_id": data.service_check_id,
@@ -416,8 +458,8 @@ async def create_alert_rule(
         "location": data.location,
         "scope_tag": (data.scope_tag or "").strip() or None,
         "trigger_on": data.trigger_on,
-        "recovery_alert": data.recovery_alert,
-        "min_duration": data.min_duration,
+        "recovery_alert": False if metric == 'syslog' else data.recovery_alert,
+        "min_duration": 0 if metric == 'syslog' else data.min_duration,
         "max_repeat": data.max_repeat,
         "escalation_levels": json.dumps(_validated_escalation(data.escalation_levels))
                              if data.escalation_levels else None,
@@ -508,6 +550,14 @@ async def update_alert_rule(
         fields["metric"] = c0["metric"]
         fields["operator"] = c0["operator"]
         fields["threshold"] = c0["threshold"]
+
+    if any(k in fields for k in ('metric', 'operator', 'threshold', 'conditions')):
+        current_rule = (await db.execute(text(
+            'SELECT metric, operator, threshold, conditions FROM alert_rules WHERE id = :id'),
+            {'id': rule_id})).mappings().first()
+        if not current_rule:
+            raise HTTPException(status_code=404, detail='Alert rule not found')
+        fields = _merge_condition_update(current_rule, fields)
 
     # Templates equal to the built-in default are stored as NULL, so a rule
     # keeps tracking the wording rather than freezing a copy the editor merely
@@ -702,6 +752,11 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
                            reading=reading, duration=sample_duration),
     }
 
+    if metric == 'syslog':
+        variables.update(event_message='Interface uplink changed state', syslog_severity=int(threshold or 0),
+                         event_sentence=f'{hostname} sent a matching syslog event.', status='SYSLOG')
+        device_status = 'SYSLOG'
+
     # `effective_template` also treats the wizard's old pre-filled templates as
     # "no template", so a rule created before this wording existed previews
     # (and sends) the current text rather than the field dump it was seeded with.
@@ -716,6 +771,11 @@ def _build_alert_message(rule_dict: dict, is_recovery: bool = False) -> dict:
         subject_tpl = ap.effective_template(rule_dict.get("email_subject"), ap.DEFAULT_EMAIL_SUBJECT)
         body_tpl = ap.effective_template(rule_dict.get("email_body"), ap.DEFAULT_EMAIL_BODY)
         sms_tpl = ap.effective_template(rule_dict.get("sms_template"), ap.DEFAULT_SMS)
+        if metric == 'syslog':
+            defaults = ap.default_templates('syslog')
+            subject_tpl = rule_dict.get('email_subject') or defaults['email_subject']
+            body_tpl = rule_dict.get('email_body') or defaults['email_body']
+            sms_tpl = rule_dict.get('sms_template') or defaults['sms_template']
 
     return {
         "subject": _render_template(subject_tpl, variables),

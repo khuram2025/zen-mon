@@ -56,6 +56,26 @@ func NewSession(d *Device) (*g.GoSNMP, error) {
 		s.Version = g.Version2c
 		s.Community = d.Community
 	case "3":
+		if strings.TrimSpace(d.V3Username) == "" {
+			return nil, fmt.Errorf("SNMPv3 username is required")
+		}
+		auth, err := parseAuthProtocol(d.AuthProtocol)
+		if err != nil {
+			return nil, err
+		}
+		priv, err := parsePrivProtocol(d.PrivProtocol)
+		if err != nil {
+			return nil, err
+		}
+		if (auth != g.NoAuth) != (d.AuthPassphrase != "") {
+			return nil, fmt.Errorf("SNMPv3 authentication protocol and passphrase must both be supplied")
+		}
+		if (priv != g.NoPriv) != (d.PrivPassphrase != "") {
+			return nil, fmt.Errorf("SNMPv3 privacy protocol and passphrase must both be supplied")
+		}
+		if priv != g.NoPriv && auth == g.NoAuth {
+			return nil, fmt.Errorf("SNMPv3 privacy requires authentication")
+		}
 		s.Version = g.Version3
 		s.SecurityModel = g.UserSecurityModel
 		s.MsgFlags = v3Flags(d)

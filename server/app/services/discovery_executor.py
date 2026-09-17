@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+from itertools import islice
 import re
 import time
 import uuid
@@ -50,22 +51,50 @@ _RUNNING_TASKS: dict[uuid.UUID, asyncio.Task] = {}
 # ────────────────────────────────────────────────────────────────────
 def expand_targets(targets: Iterable[str], exclusions: Iterable[str] | None = None,
                    cap: int = 4096) -> list[str]:
-    excl: set[str] = set()
-    for ex in exclusions or []:
-        for ip in _expand_one(ex):
-            excl.add(ip)
+    if cap <= 0:
+        return []
+    # Exclusions are address intervals, not expanded host lists. A /64 must
+    # neither allocate 2**64 entries nor exclude only its first 4096 hosts.
+    excluded = []
+    for value in exclusions or []:
+        try:
+            value = value.strip()
+            if '/' in value:
+                net = ipaddress.ip_network(value, strict=False)
+                excluded.append((net.version, int(net.network_address), int(net.broadcast_address)))
+            else:
+                a, b = _address_range(value)
+                excluded.append((a.version, int(a), int(b)))
+        except ValueError:
+            continue
 
     out: list[str] = []
     seen: set[str] = set()
     for t in targets:
         for ip in _expand_one(t):
-            if ip in excl or ip in seen:
+            addr = ipaddress.ip_address(ip)
+            if ip in seen or any(addr.version == ver and lo <= int(addr) <= hi
+                                 for ver, lo, hi in excluded):
                 continue
             seen.add(ip)
             out.append(ip)
             if len(out) >= cap:
                 return out
     return out
+
+
+def _address_range(value: str):
+    left, sep, right = value.partition('-')
+    a = ipaddress.ip_address(left.strip())
+    if not sep:
+        return a, a
+    right = right.strip()
+    if a.version == 4 and right.isdigit():
+        right = left.strip().rsplit('.', 1)[0] + '.' + right
+    b = ipaddress.ip_address(right)
+    if a.version != b.version:
+        raise ValueError('Range endpoints must use the same address family')
+    return (a, b) if int(a) <= int(b) else (b, a)
 
 
 def _expand_one(s: str) -> list[str]:
@@ -75,34 +104,20 @@ def _expand_one(s: str) -> list[str]:
     if "/" in s:
         try:
             net = ipaddress.ip_network(s, strict=False)
-            if net.num_addresses > 4096:
-                hosts = list(net.hosts())[:4096]
-            else:
-                hosts = list(net.hosts()) if net.num_addresses > 2 else [net.network_address]
-            return [str(h) for h in hosts]
+            return [str(h) for h in islice(net.hosts(), 4096)]
         except ValueError:
             return []
     if "-" in s:
         try:
-            left, right = s.split("-", 1)
-            left = left.strip()
-            right = right.strip()
-            if "." not in right:
-                base = left.rsplit(".", 1)[0]
-                right = f"{base}.{right}"
-            a = ipaddress.ip_address(left)
-            b = ipaddress.ip_address(right)
-            if int(b) < int(a):
-                a, b = b, a
+            a, b = _address_range(s)
             count = int(b) - int(a) + 1
             if count > 4096:
                 count = 4096
-            return [str(ipaddress.ip_address(int(a) + i)) for i in range(count)]
+            return [str(type(a)(int(a) + i)) for i in range(count)]
         except (ValueError, IndexError):
             return []
     try:
-        ipaddress.ip_address(s)
-        return [s]
+        return [str(ipaddress.ip_address(s))]
     except ValueError:
         return []
 

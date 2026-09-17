@@ -1,7 +1,17 @@
 [Unit]
 Description=ZenPlus NCM scheduled config backups
-After=zenplus-api.service
+After=network-online.target postgresql.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/curl -sS -m 600 -X POST http://127.0.0.1:8000/api/v1/ncm/run-scheduled
+User=zenplus
+Group=zenplus
+WorkingDirectory=/opt/zenplus/server
+EnvironmentFile=/opt/zenplus/.env
+ExecStart=/opt/zenplus/venv/bin/python -m app.services.ncm_maintenance schedule
+TimeoutStartSec=6h
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

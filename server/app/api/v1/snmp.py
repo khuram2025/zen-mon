@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import sys
 import ipaddress
 import os
 import re
@@ -727,15 +729,15 @@ async def upload_mib(
     name: Optional[str] = Form(default=None),
     description: Optional[str] = Form(default=None),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     # Filename must be safe — no path traversal.
     raw_name = file.filename or ""
     safe_name = os.path.basename(raw_name)
-    if not safe_name or not _MIB_NAME_RE.match(safe_name):
+    if not safe_name or not _MIB_NAME_RE.match(safe_name) or safe_name == 'compiled-index.json':
         raise HTTPException(status_code=400, detail="invalid filename")
 
-    content = await file.read()
+    content = await file.read(4 * 1024 * 1024 + 1)
     if len(content) == 0:
         raise HTTPException(status_code=400, detail="empty file")
     if len(content) > 4 * 1024 * 1024:
@@ -785,7 +787,7 @@ async def list_mibs(
 async def delete_mib(
     mib_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_operator_user),
 ):
     row = (await db.execute(
         text("SELECT filename FROM snmp_mibs WHERE id = :id"), {"id": mib_id}
@@ -800,6 +802,55 @@ async def delete_mib(
             pass
     await db.execute(text("DELETE FROM snmp_mibs WHERE id = :id"), {"id": mib_id})
     await db.commit()
+
+
+@router.post('/mibs/compile')
+async def compile_mibs(db: AsyncSession = Depends(get_db), user: User = Depends(require_operator_user)):
+    rows = (await db.execute(text('SELECT filename, sha256 FROM snmp_mibs ORDER BY filename'))).mappings().all()
+    # Run the untrusted ASN.1 parser in a bounded child process. Generated
+    # output is JSON, never executable Python; dependencies stay offline.
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, '-m', 'app.services.mib_compiler',
+        cwd=str(Path(__file__).resolve().parents[3]),
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    request = json.dumps({'directory': str(MIB_DIR), 'filenames': [r['filename'] for r in rows]}).encode()
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(request), timeout=30)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        raise HTTPException(422, 'MIB compilation exceeded 30 seconds')
+    if proc.returncode:
+        raise HTTPException(422, 'MIB compilation failed; check file encoding, dependencies and input limits')
+    result = json.loads(stdout)
+    if result.get('source_hashes') != {r['filename']: r['sha256'] for r in rows}:
+        raise HTTPException(409, 'MIB source changed during compilation; upload and compile again')
+    MIB_DIR.mkdir(parents=True, exist_ok=True)
+    pending = MIB_DIR / (str(uuid.uuid4()) + '.json.tmp')
+    pending.write_text(json.dumps(result), encoding='utf-8')
+    pending.replace(MIB_DIR / 'compiled-index.json')
+    return {'compiled_modules': result['compiled_modules'], 'errors': result['errors'], 'object_count': len(result['objects'])}
+
+
+@router.get('/mibs/objects')
+async def mib_objects(search: str = '', symbol: Optional[str] = None,
+                      db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
+    from app.services.mib_compiler import resolve_symbol
+    path = MIB_DIR / 'compiled-index.json'
+    if not path.exists():
+        raise HTTPException(409, 'Compile the uploaded MIBs first')
+    index = json.loads(path.read_text(encoding='utf-8'))
+    rows = (await db.execute(text('SELECT filename, sha256 FROM snmp_mibs'))).mappings().all()
+    if index.get('source_hashes') != {r['filename']: r['sha256'] for r in rows}:
+        raise HTTPException(409, 'MIB files changed; recompile the library')
+    if symbol:
+        try:
+            return resolve_symbol(index, symbol)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc))
+    query = search.lower()
+    objects = [o for o in index['objects'] if query in f"{o['module']}::{o['symbol']} {o['oid']}".lower()]
+    return {'data': objects[:500], 'total': len(objects), 'errors': index['errors']}
 
 
 # --------------------------------------------------------------------
@@ -997,6 +1048,29 @@ class ProfileAssignRequest(BaseModel):
     device_ids: list[uuid.UUID]
 
 
+class ProfileBundle(BaseModel):
+    format_version: int = 1
+    profile: ProfileCreate
+
+
+@router.get('/profiles/{profile_id}/export')
+async def export_profile(profile_id: uuid.UUID, db: AsyncSession = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    row = (await db.execute(text('SELECT name, vendor, description, match_rules, oid_groups '
+                                 'FROM device_profiles WHERE id = :id'), {'id': profile_id})).mappings().first()
+    if row is None:
+        raise HTTPException(404, 'Profile not found')
+    return {'format_version': 1, 'profile': ProfileCreate(**dict(row)).model_dump(mode='json')}
+
+
+@router.post('/profiles/import', response_model=ProfileResponse, status_code=201)
+async def import_profile(bundle: ProfileBundle, db: AsyncSession = Depends(get_db),
+                         user: User = Depends(require_operator_user)):
+    if bundle.format_version != 1:
+        raise HTTPException(422, 'Unsupported template format version')
+    return await create_profile(bundle.profile, db, user)
+
+
 @router.post("/profiles/{profile_id}/assign")
 async def assign_profile(
     profile_id: uuid.UUID,
@@ -1084,7 +1158,7 @@ async def list_traps(
 
     sql = f"""
         SELECT toString(device_id) AS device_id,
-               toString(source_ip) AS source_ip,
+               source_ip_text AS source_ip,
                trap_oid, trap_name, severity, message,
                bindings, toUnixTimestamp64Milli(timestamp) AS ts_ms
         FROM zenplus.snmp_traps

@@ -98,6 +98,9 @@ func printStatus(s model.Status) {
 	fmt.Printf("Started:      %s\n", s.StartedAt.Format(time.RFC3339))
 	fmt.Printf("Queue depth:  %d\n", s.QueueDepth)
 	fmt.Printf("Spool bytes:  %d\n", s.SpoolBytes)
+	fmt.Printf("Quarantined:  %d batch(es), %d metadata bytes (%d original payload bytes)\n",
+		s.QuarantinedBatches, s.QuarantinedBytes, s.QuarantinedOriginalBytes)
+	printTime("Upload retry", s.NextUploadRetryAt)
 	printTime("Collection", s.LastCollection)
 	printTime("Heartbeat", s.LastHeartbeat)
 	if s.LastHeartbeatError != "" {

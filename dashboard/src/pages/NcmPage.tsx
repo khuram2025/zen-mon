@@ -5,6 +5,7 @@ import {
   FileCode, RefreshCw, Save, Eye, X, KeyRound, Settings2, DownloadCloud, Download,
   Plus, Trash2, Pencil, Search, ChevronLeft, ChevronRight, Clock, GitCompare,
 } from 'lucide-react'
+import { useCan } from '@/stores/auth'
 import { api } from '@/lib/api'
 import { relativeTime, apiErrorMessage } from '@/lib/utils'
 import { Card, CardContent } from '@/components/ui/Card'
@@ -23,13 +24,14 @@ const PAGE_SIZES = [10, 25, 50, 100]
 const WEEKDAYS = [['Sun', 0], ['Mon', 1], ['Tue', 2], ['Wed', 3], ['Thu', 4], ['Fri', 5], ['Sat', 6]] as const
 type Filter = { key: 'status' | 'type' | 'location' | 'vendor'; value: string } | null
 
-function statusKey(d: any): 'backed_up' | 'failed' | 'pending' | 'unconfigured' {
-  if (!d.enrolled) return 'unconfigured'
-  if (d.last_status === 'failed') return 'failed'
-  if (d.versions) return 'backed_up'
-  return 'pending'
-}
+function statusKey(d: any): string { return d?.backup_state || 'pending' }
+
 const STATUS_META: Record<string, { label: string; cls: string; badge: any }> = {
+  fresh: { label: 'Fresh / validated', cls: 'bg-success', badge: 'success' },
+  stale: { label: 'Stale', cls: 'bg-warning', badge: 'warning' },
+  unverified: { label: 'Unverified', cls: 'bg-warning', badge: 'warning' },
+  excluded: { label: 'Excluded', cls: 'bg-border', badge: undefined },
+  disabled: { label: 'Disabled', cls: 'bg-border', badge: undefined },
   backed_up: { label: 'Backed up', cls: 'bg-success', badge: 'success' },
   failed: { label: 'Failed', cls: 'bg-danger', badge: 'danger' },
   pending: { label: 'Pending', cls: 'bg-warning', badge: 'warning' },
@@ -64,6 +66,7 @@ function Facet({ title, items, active, onPick }: { title: string; items: [string
 }
 
 export function NcmPage() {
+  const can = useCan()
   const qc = useQueryClient()
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
@@ -88,7 +91,7 @@ export function NcmPage() {
 
   const runScheduled = useMutation({
     mutationFn: async () => (await api.post('/ncm/run-scheduled', null, { timeout: 600000 })).data,
-    onSuccess: (d: any) => { toast.success(`Scheduled run: ${d.backed_up} backed up, ${d.failed} failed (${d.due} due)`); qc.invalidateQueries({ queryKey: ['ncm'] }) },
+    onSuccess: (d: any) => { toast.success(`Scheduled run: ${d.queued} queued, ${d.already_active} already active (${d.due} due)`); qc.invalidateQueries({ queryKey: ['ncm'] }) },
     onError: (e: any) => toast.error('Run failed', apiErrorMessage(e)),
   })
 
@@ -124,7 +127,7 @@ export function NcmPage() {
   useEffect(() => { setPage(1) }, [search, filter, pageSize])
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize))
   const pageRows = filtered.slice((page - 1) * pageSize, page * pageSize)
-  const coverage = overview ? Math.round((overview.backed_up / Math.max(1, overview.total_devices)) * 100) : 0
+  const coverage = overview ? Math.round((overview.fresh / Math.max(1, overview.eligible)) * 100) : 0
   const pick = (key: Filter extends null ? never : NonNullable<Filter>['key'], value: string) =>
     setFilter((f) => (f && f.key === key && f.value === value ? null : { key, value }))
 
@@ -144,13 +147,13 @@ export function NcmPage() {
     mutationFn: async () => {
       const ids = selectedDevices.filter((d) => d.enrolled).map((d) => d.device_id)
       const results = await Promise.allSettled(
-        ids.map((id) => api.post(`/devices/${id}/config-fetch`, null, { timeout: 240000 })),
+        ids.map((id) => api.post(`/devices/${id}/ncm-jobs`)),
       )
       const ok = results.filter((r) => r.status === 'fulfilled').length
       return { ok, failed: results.length - ok, skipped: selectedDevices.length - ids.length }
     },
     onSuccess: (r) => {
-      toast.success(`Bulk backup: ${r.ok} ok, ${r.failed} failed${r.skipped ? `, ${r.skipped} skipped (no profile)` : ''}`)
+      toast.success(`Bulk backup: ${r.ok} accepted, ${r.failed} failed to queue${r.skipped ? `, ${r.skipped} skipped (no profile)` : ''}`)
       qc.invalidateQueries({ queryKey: ['ncm'] })
     },
     onError: (e: any) => toast.error('Bulk backup failed', apiErrorMessage(e)),
@@ -166,17 +169,17 @@ export function NcmPage() {
           <p className="text-xs text-muted">Versioned device configuration archive with change diffs, over SSH</p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => runScheduled.mutate()} disabled={runScheduled.isPending}><Clock className="h-3.5 w-3.5" /> Run scheduled</Button>
-          <Button variant="outline" size="sm" onClick={() => setProfilesOpen(true)}><KeyRound className="h-3.5 w-3.5" /> Connection Profiles</Button>
+          <Button variant="outline" size="sm" onClick={() => runScheduled.mutate()} disabled={!can('ncm.manage') || runScheduled.isPending}><Clock className="h-3.5 w-3.5" /> Run scheduled</Button>
+          <Button variant="outline" size="sm" disabled={!can('ncm.credentials')} onClick={() => setProfilesOpen(true)}><KeyRound className="h-3.5 w-3.5" /> Connection Profiles</Button>
           <Button variant="outline" size="sm" onClick={() => refetch()}><RefreshCw className={`h-3.5 w-3.5 ${isFetching ? 'animate-spin' : ''}`} /> Refresh</Button>
         </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {[
-          { label: 'Devices', value: overview?.total_devices ?? 0, cls: 'text-text' },
+          { label: 'Eligible devices', value: overview?.eligible ?? 0, cls: 'text-text' },
           { label: 'Enrolled', value: overview?.enrolled ?? 0, cls: 'text-primary' },
-          { label: 'Backed up', value: overview?.backed_up ?? 0, cls: 'text-success' },
+          { label: 'Fresh / validated', value: overview?.fresh ?? 0, cls: 'text-success' },
           { label: 'Coverage', value: `${coverage}%`, cls: 'text-text' },
         ].map((c) => (
           <Card key={c.label}><CardContent className="py-3"><div className="text-xs text-muted">{c.label}</div><div className={`text-2xl font-semibold ${c.cls}`}>{c.value}</div></CardContent></Card>
@@ -227,18 +230,18 @@ export function NcmPage() {
             {selected.size > 0 && (
               <div className="flex flex-wrap items-center gap-2 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
                 <span className="font-medium text-primary">{selected.size} selected</span>
-                <Button variant="outline" size="sm" disabled={!credentials.length} onClick={() => setAssignOpen(true)}>
+                  <Button variant="outline" size="sm" disabled={!credentials.length || !can('ncm.manage')} onClick={() => setAssignOpen(true)}>
                   <KeyRound className="h-3.5 w-3.5" /> Assign profile
                 </Button>
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={!selectedDevices.some((d) => d.enrolled)}
-                  onClick={() => setSettingsOpen(true)}
+                    disabled={!can('ncm.manage') || !selectedDevices.some((d) => d.enrolled)}
+                    onClick={() => setSettingsOpen(true)}
                 >
                   <Clock className="h-3.5 w-3.5" /> Backup settings
                 </Button>
-                <Button variant="outline" size="sm" disabled={bulkBackup.isPending || !selectedDevices.some((d) => d.enrolled)} onClick={() => bulkBackup.mutate()}>
+                <Button variant="outline" size="sm" disabled={!can('ncm.manage') || bulkBackup.isPending || !selectedDevices.some((d) => d.enrolled)} onClick={() => bulkBackup.mutate()}>
                   <DownloadCloud className={`h-3.5 w-3.5 ${bulkBackup.isPending ? 'animate-pulse' : ''}`} /> {bulkBackup.isPending ? 'Backing up…' : 'Run backup now'}
                 </Button>
                 <button onClick={clearSelection} className="ml-auto flex items-center gap-1 text-muted hover:text-text">Clear <X className="h-3 w-3" /></button>

@@ -459,7 +459,7 @@ func (s *ClickHouseStore) RunTrapBatchWriter(ctx context.Context) {
 
 func (s *ClickHouseStore) insertTrapBatch(ctx context.Context, traps []snmp.TrapRecord) error {
 	batch, err := s.conn.PrepareBatch(ctx, `
-		INSERT INTO snmp_traps (device_id, source_ip, trap_oid, trap_name, bindings, severity, message, timestamp, poller_id)
+		INSERT INTO snmp_traps (device_id, source_ip, trap_oid, trap_name, bindings, severity, message, timestamp, poller_id, source_ip_text, event_id)
 	`)
 	if err != nil {
 		return fmt.Errorf("prepare trap batch: %w", err)
@@ -474,7 +474,7 @@ func (s *ClickHouseStore) insertTrapBatch(ctx context.Context, traps []snmp.Trap
 			ipv4 = net.IPv4(0, 0, 0, 0).To4()
 		}
 		err := batch.Append(
-			devID, ipv4, t.TrapOID, t.TrapName, t.Bindings, t.Severity, t.Message, t.Timestamp, t.PollerID,
+			devID, ipv4, t.TrapOID, t.TrapName, t.Bindings, t.Severity, t.Message, t.Timestamp, t.PollerID, t.SourceIP.String(), t.EventID,
 		)
 		if err != nil {
 			return fmt.Errorf("append trap: %w", err)

@@ -9,6 +9,8 @@ export const STATUS_HEX: Record<string, string> = {
   down: '#ef4444',
   unreached: '#ef4444',
   pending: '#94a3b8',
+  stale: '#94a3b8',
+  disabled: '#94a3b8',
 }
 export const LOSS_HEX = { none: '#22c55e', warn: '#f59e0b', crit: '#ef4444' }
 export const INTERNAL_HEX = '#3b82f6' // your network / monitored device

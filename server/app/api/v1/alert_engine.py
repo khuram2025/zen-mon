@@ -49,6 +49,7 @@ class StatusChangeEvent(BaseModel):
 
 
 class TrapEvent(BaseModel):
+    event_id: Optional[UUID] = None
     device_id: Optional[str] = None
     source_ip: str
     trap_oid: str
@@ -563,7 +564,7 @@ def _conditions_match(rule, values: dict) -> bool:
 
 
 async def _device_in_maintenance(db: AsyncSession, device_id: str) -> bool:
-    """True when the device is inside an active device_maintenance window.
+    """True for manual maintenance or an active device_maintenance window.
 
     Defense in depth: the poller already suppresses transitions for devices in
     maintenance, but this also covers events raised while a window was being
@@ -574,14 +575,16 @@ async def _device_in_maintenance(db: AsyncSession, device_id: str) -> bool:
         row = await db.execute(
             text("""
                 SELECT 1
-                FROM device_maintenance m
-                JOIN devices d ON d.id = :did AND (
+                FROM devices d
+                WHERE d.id = :did AND (d.status = 'maintenance' OR EXISTS (
+                    SELECT 1 FROM device_maintenance m WHERE (
                        (m.scope_type = 'device' AND m.scope_device_id = d.id)
                     OR (m.scope_type = 'group'  AND m.scope_group_id = d.group_id)
                     OR (m.scope_type = 'tag'    AND jsonb_exists(COALESCE(d.tags, '[]'::jsonb), m.scope_tag))
                     OR (m.scope_type = 'all')
                 )
-                WHERE m.starts_at <= now() AND m.ends_at >= now()
+                AND m.starts_at <= now() AND m.ends_at >= now()
+                ))
                 LIMIT 1
             """),
             {"did": device_id},
@@ -1484,6 +1487,9 @@ async def evaluate_trap(
         if await _device_in_maintenance(db, did):
             return {"alerts_created": 0, "suppressed": "maintenance"}
 
+        if await _find_suppressing_dependency(db, did):
+            return {"alerts_created": 0, "suppressed": "dependency"}
+
     rules = (await db.execute(
         text("""
             SELECT id, name, severity, device_id, group_id, scope_tag, trap_oid,
@@ -1509,6 +1515,15 @@ async def evaluate_trap(
             continue
         if not _trap_oid_matches(rule.trap_oid, event.trap_oid):
             continue
+
+        await db.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))'),
+                         {'key': f'trap:{rule.id}:{did or event.source_ip}'})
+        if event.event_id:
+            replayed = (await db.execute(text("SELECT 1 FROM alerts WHERE rule_id = :rid "
+                "AND metadata->>'trap_event_id' = :event_id LIMIT 1"),
+                {'rid': str(rule.id), 'event_id': str(event.event_id)})).first()
+            if replayed:
+                continue
 
         # Respect an active snooze for this rule on this device.
         if did:
@@ -1537,6 +1552,8 @@ async def evaluate_trap(
                 "triggered_at": now,
                 "metadata": json.dumps({
                     "trap": True,
+                    "trap_event_id": str(event.event_id) if event.event_id else None,
+                    "notified": False,
                     "trap_oid": event.trap_oid,
                     "trap_name": event.trap_name,
                     "source_ip": event.source_ip,
@@ -1562,17 +1579,17 @@ async def evaluate_trap(
                     SELECT 1 FROM alerts
                     WHERE rule_id = :rid
                       AND device_id IS NOT DISTINCT FROM CAST(:did AS uuid)
+                      AND metadata->>'source_ip' = :source_ip
                       AND id <> :aid
                       AND COALESCE(metadata->>'notified', 'true') = 'true'
                       AND COALESCE(metadata->>'trap', 'false') = 'true'
                       AND triggered_at > now() - make_interval(secs => :cd)
                     LIMIT 1
                 """),
-                {"rid": str(rule.id), "did": did, "aid": alert_id,
+                {"rid": str(rule.id), "did": did, "aid": alert_id, "source_ip": event.source_ip,
                  "cd": max(int(rule.cooldown or 0), 60)},
             )).first()
             allowed = prior is None
-        await ns.stamp(db, alert_id, allowed)
         if not allowed:
             continue
 
@@ -1598,7 +1615,7 @@ async def evaluate_trap(
 
         try:
             from app.services.host_alert_service import dispatch_to_channels
-            await dispatch_to_channels(db, channels, {
+            sent = await dispatch_to_channels(db, channels, {
                 "subject": email_subject,
                 "body": email_body,
                 "message": sms_body,
@@ -1618,6 +1635,7 @@ async def evaluate_trap(
                 "rule_id": str(rule.id),
                 "is_recovery": False,
             })
+            await ns.stamp(db, alert_id, bool(sent))
         except Exception as exc:
             print(f"ERROR trap notification for rule {rule.id}: {exc}")
 

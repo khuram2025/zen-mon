@@ -251,6 +251,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { to: '/alerts', label: 'Active Alerts', icon: AlertTriangle, badge: 'alerts', hint: 'Everything firing right now' },
       { to: '/alert-rules', label: 'Alert Rules', icon: Bell, hint: 'Thresholds and escalation' },
       { to: '/traps', label: 'SNMP Traps', icon: Inbox, hint: 'Unsolicited device events' },
+      { to: '/network-events', label: 'Network Syslog', icon: Inbox, hint: 'Device log events and alert rules' },
       { to: '/channels', label: 'Channels', icon: BellRing, hint: 'Where notifications are delivered' },
       { to: '/gateways', label: 'Gateways', icon: Mail, hint: 'SMTP, SMS and webhook transports' },
     ],

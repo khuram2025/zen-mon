@@ -107,24 +107,25 @@ type SystemInfo struct {
 
 // Interface is one row from IF-MIB / IF-MIB-extensions.
 type Interface struct {
-	IfIndex      int
-	IfName       string
-	IfDescr      string
-	IfAlias      string
-	IfType       int
-	IfSpeed      uint64
-	MACAddress   string
-	AdminStatus  string
-	OperStatus   string
-	InOctets     uint64
-	OutOctets    uint64
-	InUcastPkts  uint64
-	OutUcastPkts uint64
-	InErrors     uint64
-	OutErrors    uint64
-	InDiscards   uint64
-	OutDiscards  uint64
-	HasHC        bool // true if 64-bit HC counters were available
+	IfIndex       int
+	IfName        string
+	IfDescr       string
+	IfAlias       string
+	IfType        int
+	IfSpeed       uint64
+	MACAddress    string
+	AdminStatus   string
+	OperStatus    string
+	InOctets      uint64
+	OutOctets     uint64
+	InUcastPkts   uint64
+	OutUcastPkts  uint64
+	InErrors      uint64
+	OutErrors     uint64
+	InDiscards    uint64
+	OutDiscards   uint64
+	HasHC         bool   // true if 64-bit HC counters were available
+	Discontinuity uint64 // IF-MIB ifCounterDiscontinuityTime, in TimeTicks
 }
 
 // Entity is one row from ENTITY-MIB::entPhysicalTable.

@@ -50,6 +50,9 @@ PERMISSION_MODULES: list[tuple[str, str, list[tuple[str, str, str]]]] = [
     ("ncm", "Config Backup (NCM)", [
         ("ncm.view", "View", "View device configuration backups"),
         ("ncm.manage", "Manage", "Run backups and manage NCM settings"),
+        ("ncm.credentials", "Credentials", "Administer shared NCM connection profiles"),
+        ("ncm.export", "Export raw", "Read and export configurations including secrets"),
+        ("ncm.baseline", "Baselines", "Pin and approve configuration recovery points"),
     ]),
     ("apm", "APM & Servers", [
         ("apm.view", "View", "View APM services, traces, and server metrics"),

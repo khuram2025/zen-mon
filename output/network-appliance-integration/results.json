@@ -1,0 +1,276 @@
+{
+  "generated_at": "2026-09-10T15:59:36.598721+00:00",
+  "assessment": "Development integration passed; signed candidate prepared for review. Canary installation pending dependency-resolution and rollout checks.",
+  "source_commit": "06f823f0e07d76bed1b740e67dd11758f68051f3",
+  "source_branch": "codex/network-abc-integration",
+  "version": "1.23.11",
+  "package_sha256": "4db5dfd7a6748075154ec1b0092c1fea290dbf6b7bc7fa86cb92919062ebdce2",
+  "package_bytes": 119221004,
+  "signature_and_package_verification": {
+    "release_version": "1.23.11",
+    "signature": "valid",
+    "checksums_verified": 852,
+    "archive_members": 938,
+    "release_scope": "appliance-and-agent",
+    "agent_version": "1.12.4",
+    "agent_msi": "zenplus-agent-1.12.4.msi",
+    "agent_msi_size": 227241984,
+    "agent_msi_sha256": "5cb19c8430d3433c0ac51a55e61d321453b7e941c35b6f75ce325eed04c8bb08",
+    "agent_destination": "/opt/zenplus/artifacts/agents/windows/zenplus-agent-1.12.4.msi",
+    "authoritative_changed_files_verified": 59,
+    "forbidden_files": 0
+  },
+  "candidate_binary_sha256": {
+    "go-binaries/zenplus-netflow-collector": "8019deba4564e4447b6618f913cbc73f8010bdba0e47e29695e04eef34290f0c",
+    "go-binaries/zenplus-poller": "6c5142d1e7bce9df051b370a9fc6c71d0f6f62e28cad3dd2b70b66a9aaeedbb3",
+    "sensor-artifacts/bin/linux-amd64/zenplus-sensor": "87a0c9458620b8527bdab22ce38fd5e11176ef7e4f52aac42d2a9fb565b5e862"
+  },
+  "python_tests": {
+    "integration": {
+      "passed": 17,
+      "failed": 0,
+      "skipped": []
+    },
+    "python-linux": {
+      "passed": 772,
+      "failed": 0,
+      "skipped": [
+        {
+          "name": "test_every_link_carries_a_health_block",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_counters_are_deltas_not_raw_readings",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_issue_list_agrees_with_severity",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_no_link_reads_as_up_but_never_available",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_summary_counts_match_the_items",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_issue_filter_returns_only_matching_links[any]",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_issue_filter_returns_only_matching_links[errors]",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_issue_filter_returns_only_matching_links[discards]",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_issue_filter_returns_only_matching_links[flapping]",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_health_sorts_are_descending[errors-errors]",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_health_sorts_are_descending[discards-discards]",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_health_sorts_are_descending[flaps-flaps]",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_error_rate_sort_ranks_measured_links_above_unmeasurable_ones",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_detail_health_matches_the_fleet_row",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_detail_error_series_is_per_bucket_not_cumulative",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_device_interface_metrics_agree_with_link_utilization",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_every_link_reports_its_favorite_state",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_starred_link_is_pinned_to_the_top",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_starring_is_idempotent",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_favorites_only_filter_returns_just_the_starred_links",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_unstarring_is_safe_when_not_starred",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_cannot_star_an_unknown_interface",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_overview_shape",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_overview_minutes_window",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_top_talkers_by_src_ranking",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_top_endpoints_sorted_by_total",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_top_conversations_shape",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_applications_classify_portless_protocols",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_application_filter_partitions",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_network_classes_labels",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_forensics_csv_export",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_saved_views_roundtrip",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_device_status_exposes_honest_fields",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_heatmap_shape",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_real_interactive_transports_and_trust_removal",
+          "reason": "requires built poller TLS helper"
+        },
+        {
+          "name": "test_overview_endpoint",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_builtin_policies_seeded",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_install_token_lifecycle",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_enroll_rejects_invalid_token",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_agent_endpoints_require_credentials",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_servers_list_requires_auth",
+          "reason": "ZenPlus API not running"
+        },
+        {
+          "name": "test_agent_fleet_filter",
+          "reason": "ZenPlus API not running"
+        }
+      ]
+    },
+    "python-linux-with-legacy-smoke": {
+      "passed": 810,
+      "failed": 0,
+      "skipped": [
+        {
+          "name": "test_detail_health_matches_the_fleet_row",
+          "reason": "no interface with errors or discards in this window"
+        },
+        {
+          "name": "test_detail_error_series_is_per_bucket_not_cumulative",
+          "reason": "no interface with errors in this window"
+        },
+        {
+          "name": "test_device_interface_metrics_agree_with_link_utilization",
+          "reason": "no interface with errors in this window"
+        },
+        {
+          "name": "test_real_interactive_transports_and_trust_removal",
+          "reason": "requires built poller TLS helper"
+        }
+      ]
+    }
+  },
+  "go_packages_passed": [
+    "internal/checker/snmp",
+    "internal/store",
+    "internal/pinger",
+    "internal/sensorspool",
+    "cmd/sensor"
+  ],
+  "go_postgres_interface_integration": "passed",
+  "migrations_115_116_repeated": "passed",
+  "deployment": "not performed",
+  "publication": "not performed",
+  "hardware_tests": "not performed",
+  "cleanup": {
+    "fixture_postgres_stopped": true,
+    "fixture_clickhouse_removed": true,
+    "temporary_workspace_removed": true,
+    "installed_services": {
+      "zenplus-api": "active",
+      "zenplus-poller": "active"
+    },
+    "installed_version": "1.23.10"
+  },
+  "legacy_smoke_cleanup": {
+    "test_servers_remaining": 0,
+    "test_saved_views_remaining": 0,
+    "current_link_favorite_count": 0,
+    "new_network_events_table_installed": false
+  },
+  "favorite_history_check": {
+    "inserts": 6,
+    "deletes": 6,
+    "dead": 6,
+    "last_vacuum": null,
+    "last_autovacuum": null,
+    "retained_tuple_count": 18,
+    "session_inserted_tuple_count": 6,
+    "older_favorites_deleted_during_test_transactions": 0,
+    "non_normal_pointers": 0
+  },
+  "remaining_gates": [
+    "Clean Python dependency resolution: passlib/bcrypt compatibility",
+    "Source review and controlled updater canary",
+    "Existing TypeScript diagnostics",
+    "Hardware, load, durability and external notification certification"
+  ]
+}

@@ -1,0 +1,17 @@
+[Unit]
+Description=ZenPlus NCM notification delivery
+After=network-online.target postgresql.service
+
+[Service]
+Type=oneshot
+User=zenplus
+Group=zenplus
+WorkingDirectory=/opt/zenplus/server
+EnvironmentFile=/opt/zenplus/.env
+ExecStart=/opt/zenplus/venv/bin/python -m app.services.ncm_maintenance deliver
+TimeoutStartSec=20min
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

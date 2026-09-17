@@ -164,7 +164,7 @@ export function AlertRulesPage() {
                       </Badge>
                     </Td>
                     <Td className="text-xs text-muted">
-                      {r.recovery_alert ? (
+                      {['trap', 'syslog'].includes(r.metric) ? <span>Manual resolution</span> : r.recovery_alert ? (
                         <span className="text-emerald-600">Auto + notify</span>
                       ) : (
                         <span>Silent</span>

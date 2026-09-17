@@ -448,9 +448,9 @@ def test_favorites_only_filter_returns_just_the_starred_links(auth, unstarred_li
 
 
 @live
-def test_unstarring_is_safe_when_not_starred(auth, fleet):
+def test_unstarring_is_safe_when_not_starred(auth, unstarred_link):
     """The UI toggle must not wedge on a favourite another tab already cleared."""
-    target = fleet["items"][0]
+    target = unstarred_link
     path = f"{API}/api/v1/link-utilization/favorites/{target['device_id']}/{target['if_index']}"
     requests.delete(path, headers=auth, timeout=30)
     assert requests.delete(path, headers=auth, timeout=30).status_code == 204

@@ -1,0 +1,8 @@
+{
+  "baseline_count": 541,
+  "current_count": 539,
+  "added": [],
+  "removed": [
+    "src/components/forms/AlertRuleWizardDialog.tsx: error TS2345: Argument of type 'string' is not assignable to parameter of type '\"if_util_pct\" | \"if_in_bps\" | \"if_out_bps\" | \"if_errors\" | \"if_discards\" | \"if_oper_status\"'."
+  ]
+}

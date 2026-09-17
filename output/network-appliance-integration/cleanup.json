@@ -1,0 +1,1 @@
+{"fixture_postgres_stopped": true, "fixture_clickhouse_removed": true, "temporary_workspace_removed": true, "installed_services": {"zenplus-api": "active", "zenplus-poller": "active"}, "installed_version": "1.23.10"}

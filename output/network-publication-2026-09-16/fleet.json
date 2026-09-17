@@ -1,0 +1,183 @@
+{
+  "checked_at": "2026-09-16T12:13:49.026767+00:00",
+  "release_id": "4822db79-cc93-4689-84de-454c5ef9bed7",
+  "rollout_id": "bbce6b4b-4627-4911-b00a-048919a052ac",
+  "stage": "full",
+  "target_pct": 100,
+  "active": true,
+  "direct_offer_count": 3,
+  "bridge_offer_count": 15,
+  "already_current_count": 1,
+  "other_product_appliances_excluded": 12,
+  "zenplus_appliances": [
+    {
+      "id": "98940eda-c06f-4b1f-a9ee-b3f1fccbd241",
+      "hostname": "DJSPR-DNSlog01",
+      "current_version": "1.1.0",
+      "offered_version": null,
+      "offered_product": null,
+      "last_checkin": "2026-09-16T09:20:42.948881+00:00"
+    },
+    {
+      "id": "5bdf65ba-6053-4b54-9574-f4a886ef745d",
+      "hostname": "zen",
+      "current_version": "1.1.0",
+      "offered_version": "1.23.7",
+      "offered_product": "ota",
+      "last_checkin": "2026-04-09T09:42:04.119342+00:00"
+    },
+    {
+      "id": "4f40b3e3-b206-4035-9c77-bbf867d5c930",
+      "hostname": "zenplus",
+      "current_version": "1.2.26",
+      "offered_version": "1.23.7",
+      "offered_product": "ota",
+      "last_checkin": "2026-06-17T21:32:44.763047+00:00"
+    },
+    {
+      "id": "f4255f16-5f34-4440-be66-ae4531476b58",
+      "hostname": "zenplus",
+      "current_version": "1.1.0",
+      "offered_version": "1.23.7",
+      "offered_product": "ota",
+      "last_checkin": "2026-04-10T09:53:31.799732+00:00"
+    },
+    {
+      "id": "aa082d22-1c71-4e08-a144-072c4afb0a54",
+      "hostname": "test-appliance-01",
+      "current_version": "unknown",
+      "offered_version": null,
+      "offered_product": null,
+      "last_checkin": "2026-04-06T12:12:59.814451+00:00"
+    },
+    {
+      "id": "76393d01-24ef-4965-8b31-07d5949a42cc",
+      "hostname": "zenplus",
+      "current_version": "1.1.0",
+      "offered_version": "1.23.7",
+      "offered_product": "ota",
+      "last_checkin": null
+    },
+    {
+      "id": "9a7d805a-5234-4934-900c-55d52c164bb9",
+      "hostname": "zenplus",
+      "current_version": "1.2.29",
+      "offered_version": "1.23.7",
+      "offered_product": "ota",
+      "last_checkin": null
+    },
+    {
+      "id": "fedad289-25ad-4609-80a2-377f8c764159",
+      "hostname": "zenplus",
+      "current_version": "1.2.29",
+      "offered_version": "1.23.7",
+      "offered_product": "ota",
+      "last_checkin": null
+    },
+    {
+      "id": "b7a823cf-20a3-4080-aa7f-04184b2899a6",
+      "hostname": "zenplus",
+      "current_version": "1.1.1",
+      "offered_version": "1.23.7",
+      "offered_product": "ota",
+      "last_checkin": "2026-04-10T17:36:47.103251+00:00"
+    },
+    {
+      "id": "00ff7a17-e812-4163-b1ad-72ff0044cf72",
+      "hostname": "zenplus",
+      "current_version": "1.0.0",
+      "offered_version": "1.23.7",
+      "offered_product": "ota",
+      "last_checkin": "2026-04-10T11:08:52.313609+00:00"
+    },
+    {
+      "id": "e77e5efc-eb94-49f4-85d5-cf2ee44ecf8a",
+      "hostname": "zenplus",
+      "current_version": "1.1.3",
+      "offered_version": "1.23.7",
+      "offered_product": "ota",
+      "last_checkin": "2026-04-12T15:12:44.476113+00:00"
+    },
+    {
+      "id": "b86ec6f8-d527-40f4-b968-bcce76c96818",
+      "hostname": "zenplus",
+      "current_version": "1.1.0",
+      "offered_version": "1.23.7",
+      "offered_product": "ota",
+      "last_checkin": "2026-04-16T07:33:50.325106+00:00"
+    },
+    {
+      "id": "f1f04d81-9acc-464f-9900-fc3519ef061c",
+      "hostname": "oly-solarwinds-scan",
+      "current_version": "1.0.0",
+      "offered_version": "1.23.7",
+      "offered_product": "ota",
+      "last_checkin": null
+    },
+    {
+      "id": "1e3e72ba-d275-4b1e-a313-57f5a08af3b7",
+      "hostname": "zen",
+      "current_version": "1.1.0",
+      "offered_version": "1.23.7",
+      "offered_product": "ota",
+      "last_checkin": "2026-04-09T09:17:19.931226+00:00"
+    },
+    {
+      "id": "7b23819f-efe7-497f-97bf-901842cb050c",
+      "hostname": "zenplus",
+      "current_version": "1.23.12",
+      "offered_version": null,
+      "offered_product": null,
+      "last_checkin": "2026-09-16T11:15:52.897623+00:00"
+    },
+    {
+      "id": "93e958ba-ce6e-4ea1-b9ce-3776a8fa6c52",
+      "hostname": "oly-solarwinds-scan",
+      "current_version": "1.0.0",
+      "offered_version": "1.23.7",
+      "offered_product": "ota",
+      "last_checkin": "2026-06-02T09:58:03.728733+00:00"
+    },
+    {
+      "id": "6baa9829-cb0c-40f6-bddc-f617df5e121a",
+      "hostname": "zen",
+      "current_version": "1.23.10",
+      "offered_version": "1.23.12",
+      "offered_product": "ota",
+      "last_checkin": "2026-09-16T10:33:43.489563+00:00"
+    },
+    {
+      "id": "e8d562cc-676f-41dc-8080-828571b746c1",
+      "hostname": "zenplus",
+      "current_version": "1.2.24",
+      "offered_version": "1.23.7",
+      "offered_product": "ota",
+      "last_checkin": "2026-08-02T20:08:34.260214+00:00"
+    },
+    {
+      "id": "8615717a-3807-4bc9-ab2e-4d9eff008fa3",
+      "hostname": "zenplus",
+      "current_version": "1.2.29",
+      "offered_version": "1.23.7",
+      "offered_product": "ota",
+      "last_checkin": null
+    },
+    {
+      "id": "22a6e293-1f8d-4ee7-98da-2db1694c58c5",
+      "hostname": "oly-scan-app-ub",
+      "current_version": "1.23.10",
+      "offered_version": "1.23.12",
+      "offered_product": "ota",
+      "last_checkin": "2026-09-16T11:28:09.704216+00:00"
+    },
+    {
+      "id": "2469f2f0-2a0c-4f85-be9d-67d5590abb5d",
+      "hostname": "DJSPR-ZNPLSCor1",
+      "current_version": "1.23.10",
+      "offered_version": "1.23.12",
+      "offered_product": "ota",
+      "last_checkin": "2026-09-15T13:16:38.063625+00:00"
+    }
+  ],
+  "update_reports": []
+}

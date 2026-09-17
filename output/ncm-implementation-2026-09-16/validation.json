@@ -1,0 +1,47 @@
+{
+  "date": "2026-09-16",
+  "production_deployed": false,
+  "ncm_tests_passed": 51,
+  "additional_linux_security_tests_passed": 3,
+  "windows_broad_regression": {
+    "passed": 820,
+    "skipped": 45,
+    "platform_specific_failures": 3,
+    "note": "The three platform-specific cases passed on Linux. Three final SSH NCM cases passed separately."
+  },
+  "dashboard_vite_build": "passed",
+  "typescript_project_diagnostics": 539,
+  "ncm_page_typescript_diagnostics": 0,
+  "migration_lint": "passed",
+  "systemd_verify": "passed with existing API/poller unit warnings",
+  "fixture_cleanup": "completed",
+  "production_inventory_read_only": {
+    "devices": 40,
+    "profiles": 0,
+    "config_versions": 0,
+    "candidate_network_devices": 15
+  },
+  "files_sha256": {
+    "server/app/api/v1/ncm.py": "750a4e78cf99700b627854b71aa038efadc6100ea230b88b4dc00ff174162f59",
+    "server/app/core/permissions.py": "2c62a2851915cfd14ecd25b96ec749de7b59d732b0423477d66aff8ab98282f1",
+    "dashboard/src/pages/NcmPage.tsx": "ba6193908616b22e45d6157a3d34872420a6a1e614107a5dc1660f1d1882b38a",
+    "dashboard/src/pages/NcmDevicePage.tsx": "040437a381b6855938cbe08af667669071dcd1d2bd09026a1d1507c0bbb45194",
+    "scripts/migrate-117-ncm-assurance.sql": "dd04dd924543dfe410d8e2e46c24e011007a96861bfcdfb8be293940221f99df",
+    "scripts/migrate-118-ncm-jobs-baselines.sql": "4275a6f42cdbe162ecf887f3fa654a59d836e0ee6e38ec42f5bda0f88ac326e1",
+    "scripts/validate-ncm-integration.py": "13193f99a915eba50eb9dda10280019ec131362ea92851187a16507e74faa845",
+    "server/tests/test_ncm_assurance.py": "24222950972a78e4c31d6cc79b32f226a4d6f13b6904b2d4d772f162d70cce7b",
+    "server/tests/integration/test_ncm_contracts.py": "0a4134d34edbfc012492139019eaaec69eeef71b47e46a82ff44f4089c43403e",
+    "server/app/services/ncm_collection.py": "180b552e6532f87ed1291f0a47a2caaaa1c4b1543df9a13ddf9b6d9ce8892f66",
+    "server/app/services/ncm_content.py": "f981e661a23fc452a4867893acd5bf9433a4422b6682641cd33e2d63641952d8",
+    "server/app/services/ncm_delivery.py": "2793f84294e013899d0b7ff3f7ffea55b5cd9a75bfd519305888f6fa6a10e921",
+    "server/app/services/ncm_events.py": "03db0535144bc74e841f62b21e2522860f5d3efe7b95ac4355aab77ff990f28f",
+    "server/app/services/ncm_jobs.py": "4edaf373b9afff177da527591582359c621b27f333a82264ffeebd77b44caa4a",
+    "server/app/services/ncm_maintenance.py": "96f7c67cae783ebd4c289380bd6c4f6f413a2ac6a6fb462f06d8522a9ce67e9d",
+    "server/app/services/ncm_status.py": "91979c3c278f5a90a9e817fb11d87b62ba96e5943f1b38d63fb8184cfb371da2",
+    "scripts/systemd/zenplus-ncm-backup.service": "83eed6ab414b4281a975cf23b8c8bce27874344efe6e65a7b802a7f9f2be9c5b",
+    "scripts/systemd/zenplus-ncm-backup.timer": "ea9717c6b9ad6247804d7b63bd332082ecc44d297fd61733136945c56486eca7",
+    "scripts/systemd/zenplus-ncm-delivery.service": "cbeedaafaf7060c2c74b7eb98f5dda0a1f87b65ddb95fd4bc63f972837790030",
+    "scripts/systemd/zenplus-ncm-delivery.timer": "e9a0bfa76e516679726f653574b77d39edc59976cbd61a8c3cbcdfeb7b229c2e",
+    "scripts/systemd/zenplus-ncm-worker.service": "7f3327a7b923d603cfb503bf0e9ddc7fdbdb737eb04b60dd66feaf92019e89ed"
+  }
+}

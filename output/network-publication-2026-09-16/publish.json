@@ -1,0 +1,13 @@
+{
+  "id": "4822db79-cc93-4689-84de-454c5ef9bed7",
+  "product": "ota",
+  "version": "1.23.12",
+  "min_version": "1.23.9",
+  "package_size": 119231549,
+  "package_sha256": "0ad09db0f4de39db291c26e8e962d68103f992f05966a2f82f8c44649e4df4e1",
+  "is_published": true,
+  "published_at": "2026-09-16T12:13:19.605556+00:00",
+  "rollouts": [],
+  "update_stats": {},
+  "checked_at": "2026-09-16T12:13:19.836764+00:00"
+}

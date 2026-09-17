@@ -1,4 +1,4 @@
-export type ProbeStatus = 'ok' | 'degraded' | 'down' | 'unreached' | 'pending'
+export type ProbeStatus = 'ok' | 'degraded' | 'down' | 'unreached' | 'pending' | 'stale' | 'disabled'
 
 export interface Probe {
   id: string

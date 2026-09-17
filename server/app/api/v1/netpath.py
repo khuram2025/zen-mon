@@ -27,7 +27,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -94,9 +94,23 @@ _PROBE_COLS = """
 """
 
 
-def _probe_dict(r) -> dict:
+_CURRENT_STATUS_SQL = """CASE WHEN NOT enabled THEN 'disabled'
+    WHEN last_run_at IS NULL THEN 'pending'
+    WHEN last_run_at <= now() - make_interval(secs => GREATEST(180, interval_s * 3)) THEN 'stale'
+    ELSE COALESCE(last_status, 'pending') END"""
+
+
+def _probe_dict(r, now=None) -> dict:
     d = dict(r)
     d["id"] = str(d["id"])
+    now = now or datetime.now(timezone.utc)
+    d['last_observed_status'] = d.get('last_status')
+    if not d.get('enabled'):
+        d['last_status'] = 'disabled'
+    elif not d.get('last_run_at'):
+        d['last_status'] = 'pending'
+    elif (now - d['last_run_at']).total_seconds() >= max(180, int(d.get('interval_s') or 60) * 3):
+        d['last_status'] = 'stale'
     for k in ("last_run_at", "created_at", "updated_at"):
         if d.get(k):
             d[k] = d[k].isoformat()
@@ -117,8 +131,8 @@ def _validate_cidrs(cidrs: list[str]) -> list[str]:
 # ------------------------------------------------------------------ summary
 @router.get("/summary")
 async def summary(db: AsyncSession = Depends(get_db), user: User = Depends(VIEW)):
-    rows = (await db.execute(text("""
-        SELECT COALESCE(last_status, 'pending') AS status, COUNT(*) AS n
+    rows = (await db.execute(text(f"""
+        SELECT {_CURRENT_STATUS_SQL} AS status, COUNT(*) AS n
         FROM netpath_probes GROUP BY 1
     """))).mappings().all()
     by_status = {r["status"]: r["n"] for r in rows}
@@ -162,7 +176,7 @@ async def list_probes(
 ):
     where, params = [], {}
     if status:
-        where.append("COALESCE(last_status,'pending') = :status")
+        where.append(f"({_CURRENT_STATUS_SQL}) = :status")
         params["status"] = status
     if q:
         where.append("(name ILIKE :q OR target_host ILIKE :q)")

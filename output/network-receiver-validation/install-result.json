@@ -1,0 +1,8 @@
+{
+  "ok": true,
+  "from_version": "1.23.11",
+  "version": "1.23.12",
+  "package_sha256": "0ad09db0f4de39db291c26e8e962d68103f992f05966a2f82f8c44649e4df4e1",
+  "backup": "/opt/zenplus/updater/backups/network-dev-20260915",
+  "schema_ok": true
+}
