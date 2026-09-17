@@ -9,7 +9,8 @@
 ## Source and releases
 
 - The installed application lives under `/opt/zenplus`. Build and test in a separate checkout. Preserve appliance-local edits, compare fingerprints before deployment, and back up affected source and binaries.
-- Continue source work through branches and reviewed pull requests. Follow `Documentation/26-GITHUB-MULTI-MACHINE-AND-PUBLISHING-RUNBOOK.md` and `Documentation/15-RELEASE-RUNBOOK.md` for releases. Do not bypass independent review or signing gates.
+- Continue source work through branches and pull requests. The sole repository owner explicitly authorized zero required independent approvals; retain all five required CI checks, conversation resolution and force-push/deletion protections. Do not reintroduce a second-reviewer requirement for this solo workflow. Follow the release runbooks with this owner-approved policy. Never bypass signing verification.
+- Signed appliance-only releases are supported and preserve separately installed Windows agent packages. Windows installer signing is required when an installer is bundled, not for an appliance-only OTA package.
 - Migration files and historical lockfile entries are append-only. Add a forward migration for new schema; ship the complete migration set.
 - Run the strict dashboard build, route smoke checks, Python contracts and Go tests for the modules changed. Database integration tests require disposable fixtures, never installed application databases.
 - `dashboard/src/main.tsx` and `App.tsx` define the active UI. Avoid reintroducing superseded duplicate pages or a second auth store.

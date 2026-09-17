@@ -1,6 +1,6 @@
-# ZenPlus 1.23.13 release candidate
+# ZenPlus 1.23.13
 
-This candidate combines the existing development branch with the latest monitoring corrections. It is not yet a published OTA release.
+Published to Zentryc as a signed appliance-only update with full, 100% rollout. Source: merge commit `0d98fdf204cafbf11f16a1f272469ce3a0395fa0`, tag `v1.23.13`. Windows agent 1.12.5 is a separate release and is not bundled. See [publication evidence](../Documentation/Release-1.23.13-Publication.md).
 
 ## Changes
 
@@ -16,10 +16,10 @@ The minimum supported upgrade base remains 1.23.9. Ship the complete migration s
 
 Widget layouts are saved per user in browser storage, not synchronized between browsers. The new F5 system-memory series begins with corrected collection; old historical readings are preserved. Certificate inventory is not evidence of active TLS certificate bindings. Missing physical sensors remain unavailable.
 
-## Publication gates
+## Publication verification
 
 The OTA private key matches the repository public trust anchor and portal authentication succeeded. The portal's highest published version at preflight was 1.23.12, so 1.23.13 is the next candidate.
 
-GitHub requires all five development checks and one independent approval on PR #13. Production Windows signing still needs `ZENPLUS_CODE_SIGNING_PFX_BASE64` and `ZENPLUS_CODE_SIGNING_PFX_PASSWORD` as repository secrets. These values must never be stored in source.
+The sole repository owner explicitly authorized removing the independent-approval requirement for the solo workflow. All five required checks passed, and PR #13 merged normally. CI, conversation resolution, force-push/deletion protections and admin enforcement remain enabled. Production Windows signing remains separate; no unsigned Windows installer was published.
 
-The user requested full rollout. That authorization is recorded, but does not replace the protected-main review or artifact-signing gates. Build and verify the final signed package from the approved main commit before publishing and enabling rollout. Do not mark this candidate as released until the portal confirms publication and rollout state.
+The portal independently confirmed publication, exact package digest, minimum version 1.23.9 and full rollout without a target-group restriction. The development appliance receives the release offer, and its authenticated HTTPS download matched the package hash. Automatic updates remain disabled there; this evidence does not claim fleet installation completion.
