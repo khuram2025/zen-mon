@@ -4,6 +4,9 @@
 
 ## Documents
 
+Current development transfer: [17 September 2026 appliance handoff](Development-Appliance-Handoff-2026-09-17.md)
+identifies the pushed source baseline, destination requirements and validation gates.
+
 | # | Document | Description |
 |---|----------|-------------|
 | 01 | [Project Overview](01-PROJECT-OVERVIEW.md) | Vision, architecture, data flow, design decisions |
