@@ -21,12 +21,14 @@ const (
 	oidArubaControllerCPU = "1.3.6.1.4.1.14823.2.2.1.2.1.30.0" // wlsxSysExtCpuUsedPercent
 	oidArubaControllerMem = "1.3.6.1.4.1.14823.2.2.1.2.1.31.0" // wlsxSysExtMemoryUsedPercent
 
-	oidF5TMMCPU       = "1.3.6.1.4.1.3375.2.1.1.2.21.35.0"
-	oidF5HostCPU      = "1.3.6.1.4.1.3375.2.1.1.2.20.29.0"
-	oidF5TMMMemTotal  = "1.3.6.1.4.1.3375.2.1.1.2.1.44.0"
-	oidF5TMMMemUsed   = "1.3.6.1.4.1.3375.2.1.1.2.1.45.0"
-	oidF5HostMemTotal = "1.3.6.1.4.1.3375.2.1.1.2.20.44.0"
-	oidF5HostMemUsed  = "1.3.6.1.4.1.3375.2.1.1.2.20.45.0"
+	oidF5SystemMemTotal = "1.3.6.1.4.1.3375.2.1.1.2.20.2.0"
+	oidF5SystemMemUsed  = "1.3.6.1.4.1.3375.2.1.1.2.20.3.0"
+	oidF5TMMCPU         = "1.3.6.1.4.1.3375.2.1.1.2.21.35.0"
+	oidF5HostCPU        = "1.3.6.1.4.1.3375.2.1.1.2.20.29.0"
+	oidF5TMMMemTotal    = "1.3.6.1.4.1.3375.2.1.1.2.1.44.0"
+	oidF5TMMMemUsed     = "1.3.6.1.4.1.3375.2.1.1.2.1.45.0"
+	oidF5HostMemTotal   = "1.3.6.1.4.1.3375.2.1.1.2.20.44.0"
+	oidF5HostMemUsed    = "1.3.6.1.4.1.3375.2.1.1.2.20.45.0"
 )
 
 // Collector executes one full SNMP poll for a Device and returns a
@@ -457,7 +459,7 @@ func (c *Collector) collectVendorMetrics(
 			}
 		}
 		if !hasMem {
-			domain, tmmPct, hostPct := selectF5MemoryDomain(
+			_, tmmPct, hostPct := selectF5MemoryDomain(
 				getScalar(s, oidF5TMMMemUsed), getScalar(s, oidF5TMMMemTotal),
 				getScalar(s, oidF5HostMemUsed), getScalar(s, oidF5HostMemTotal),
 			)
@@ -467,12 +469,10 @@ func (c *Collector) collectVendorMetrics(
 			if hostPct >= 0 {
 				out = append(out, mk("f5_host_memory_pct", hostPct, "percent"))
 			}
-			if domain.valid {
-				out = append(out,
-					mk("memory_total_bytes", domain.total, "bytes"),
-					mk("memory_used_bytes", domain.used, "bytes"),
-					mk("memory", domain.pct, "percent"),
-				)
+			// Overall RAM comes from the system pair, not the highest domain.
+			total, used := getScalar(s, oidF5SystemMemTotal), getScalar(s, oidF5SystemMemUsed)
+			if pct := utilizationPct(used, total); pct >= 0 {
+				out = append(out, mk("memory_total_bytes", total, "bytes"), mk("memory_used_bytes", used, "bytes"), mk("memory", pct, "percent"), mk("f5_system_memory_pct", pct, "percent"))
 			}
 		}
 	}
@@ -526,7 +526,7 @@ type f5MemoryDomain struct {
 }
 
 func utilizationPct(used, total float64) float64 {
-	if used < 0 || total <= 0 {
+	if math.IsNaN(used) || math.IsNaN(total) || math.IsInf(used, 0) || math.IsInf(total, 0) || used < 0 || total <= 0 || used > total {
 		return -1
 	}
 	return used / total * 100
@@ -543,8 +543,8 @@ func maxValid(values ...float64) float64 {
 }
 
 // selectF5MemoryDomain calculates TMM and host/Other percentages separately.
-// These domains overlap conceptually and must never be summed. The more
-// utilized valid domain becomes the fleet-level headline.
+// The returned maximum is a domain diagnostic only. Overall physical RAM
+// must use the separate sysGlobalHostMemUsed / sysGlobalHostMemTotal pair.
 func selectF5MemoryDomain(tmmUsed, tmmTotal, hostUsed, hostTotal float64) (f5MemoryDomain, float64, float64) {
 	tmmPct := utilizationPct(tmmUsed, tmmTotal)
 	hostPct := utilizationPct(hostUsed, hostTotal)
@@ -699,19 +699,32 @@ func canonicalVendorMetrics(samples []MetricSample) []MetricSample {
 			ht = hostTotal.Value
 		}
 
-		domain, tmmPct, hostPct := selectF5MemoryDomain(tu, tt, hu, ht)
+		_, tmmPct, hostPct := selectF5MemoryDomain(tu, tt, hu, ht)
 		if tmmPct >= 0 {
 			out = append(out, clone(base, "f5_tmm_memory_pct", tmmPct, "percent"))
 		}
 		if hostPct >= 0 {
 			out = append(out, clone(base, "f5_host_memory_pct", hostPct, "percent"))
 		}
-		if domain.valid {
-			out = append(out,
-				clone(base, "memory_total_bytes", domain.total, "bytes"),
-				clone(base, "memory_used_bytes", domain.used, "bytes"),
-				clone(base, "memory", domain.pct, "percent"),
-			)
+
+	}
+
+	for _, pair := range []struct{ used, total, key string }{
+		{"tpl_f5_system_mem_used", "tpl_f5_system_mem_total", "f5_system_memory_pct"},
+		{"tpl_f5_swap_used", "tpl_f5_swap_total", "f5_swap_memory_pct"},
+	} {
+		u, hasU := byKey[pair.used]
+		t, hasT := byKey[pair.total]
+		if !hasU || !hasT || !u.Timestamp.Equal(t.Timestamp) {
+			continue
+		}
+		pct := utilizationPct(u.Value, t.Value)
+		if pct < 0 {
+			continue
+		}
+		out = append(out, clone(u, pair.key, pct, "percent"))
+		if pair.key == "f5_system_memory_pct" {
+			out = append(out, clone(u, "memory", pct, "percent"), clone(u, "memory_used_bytes", u.Value, "bytes"), clone(t, "memory_total_bytes", t.Value, "bytes"))
 		}
 	}
 

@@ -101,3 +101,52 @@ def continuous_up_start(segments, now):
             start = lo
         end = hi
     return start if end == now else None
+
+
+def confirmed_segments(observations, events):
+    """Intersect recorded monitor state with observed coverage, never fill probe gaps.
+
+    A failed probe while the confirmed state is Up is diagnostic evidence only.
+    Down starts at its recorded confirmation timestamp, not the first failed probe.
+    Successful observations can establish an initial Up state when no older state
+    record exists. Failures alone cannot establish either Up or confirmed Down.
+    """
+    events = sorted((aware(ts), status) for ts, status in events)
+    index, state = 0, None
+    output = []
+    for lo, hi, raw_up in observations:
+        lo, hi = aware(lo), aware(hi)
+        while index < len(events) and events[index][0] <= lo:
+            state = events[index][1]
+            index += 1
+        if state is None and raw_up == 1:
+            state = 'up'
+        cursor = lo
+        while cursor < hi:
+            boundary = min(hi, events[index][0]) if index < len(events) else hi
+            if boundary > cursor and state in ('up', 'warning', 'degraded', 'down'):
+                output.append((cursor, boundary, 0. if state == 'down' else 1.))
+            cursor = boundary
+            if index < len(events) and events[index][0] == cursor:
+                state = events[index][1]
+                index += 1
+    return output
+
+
+def read_confirmed_segments(ch, check_id, start, end, observations):
+    """Use historical state changes, not today's retry settings, to score confirmation."""
+    if not observations or end <= start:
+        return []
+    params = {'id': str(check_id), 'f': start.strftime('%Y-%m-%d %H:%M:%S'),
+              't': end.strftime('%Y-%m-%d %H:%M:%S')}
+    prior = ch.query("""
+        SELECT timestamp, new_status FROM zenplus.service_status_log
+        WHERE service_check_id = %(id)s AND timestamp < %(f)s
+        ORDER BY timestamp DESC LIMIT 1
+    """, parameters=params).result_rows
+    events = ch.query("""
+        SELECT timestamp, new_status FROM zenplus.service_status_log
+        WHERE service_check_id = %(id)s AND timestamp >= %(f)s AND timestamp < %(t)s
+        ORDER BY timestamp
+    """, parameters=params).result_rows
+    return confirmed_segments(observations, [*prior, *events])

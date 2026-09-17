@@ -1,3 +1,4 @@
+import { DeviceWidgetGrid, type DeviceLayoutContext } from './DeviceWidgetGrid'
 import { useMemo, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -5,6 +6,7 @@ import {
   Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
 import { ChevronDown, ChevronRight, LayoutTemplate, LineChart as LineChartIcon } from 'lucide-react'
+import { filterInsightRows, insightRowSeverity, readableInstanceLabel } from './templatePresentation'
 import { api } from '@/lib/api'
 import {
   axisRightPad, cn, formatBps, formatBytes, relativeTime,
@@ -42,13 +44,13 @@ type InsightRow = {
 type InsightColumn = { key: string; name: string; unit?: string | null; type: string }
 type InsightGroup = {
   key: string; name: string; kind: 'scalar' | 'table'
-  description?: string | null; status: string
+  description?: string | null; no_data_reason?: string; status: string
   children_capable?: boolean
   metrics?: InsightMetric[]
   columns?: InsightColumn[]
   rows?: InsightRow[]
 }
-type Insights = {
+export type Insights = {
   template: { id: string; name: string; vendor?: string | null } | null
   updated_at: string | null
   groups: InsightGroup[]
@@ -161,13 +163,14 @@ function formatValue(v: number | null, unit?: string | null): string {
   return unit ? `${num} ${unit}` : num
 }
 
-export function TemplateInsightsSection({ deviceId, rangeHours }: {
-  deviceId: string; rangeHours: number
-}) {
+export function TemplateInsightsSection({ deviceId, rangeHours, summary = false, onExplore, initialGroup, vendor, deviceType }: {
+  deviceId: string; rangeHours: number; summary?: boolean; onExplore?: (group?: string) => void; initialGroup?: string
+} & DeviceLayoutContext) {
   const [chart, setChart] = useState<{ seriesKey: string; title: string; unit?: string | null } | null>(null)
+  const [selectedGroup, setSelectedGroup] = useState(initialGroup || 'all')
   const queryClient = useQueryClient()
 
-  const { data } = useQuery<Insights>({
+  const { data, isLoading, isError } = useQuery<Insights>({
     queryKey: ['device', deviceId, 'template-insights'],
     queryFn: async () => (await api.get(`/devices/${deviceId}/template-insights`)).data,
     refetchInterval: 30_000,
@@ -182,7 +185,9 @@ export function TemplateInsightsSection({ deviceId, rangeHours }: {
     },
   })
 
-  if (!data?.template) return null
+  if (isLoading) return <Card><CardContent className="p-4 text-sm text-muted">Loading device metrics…</CardContent></Card>
+  if (isError) return <Card><CardContent className="p-4 text-sm text-warning">Device metrics could not be loaded. They will retry automatically.</CardContent></Card>
+  if (!data?.template) return summary ? null : <Card><CardContent className="p-6 text-sm text-muted">No monitoring template is assigned. Assign a template in Edit device to collect vendor-specific metrics.</CardContent></Card>
   const groups = (data.groups || []).filter((g) =>
     g.kind === 'table' ? (g.rows?.length || 0) > 0 : (g.metrics || []).some((m) => m.has_data),
   )
@@ -190,14 +195,30 @@ export function TemplateInsightsSection({ deviceId, rangeHours }: {
     .filter((g) => g.children_capable)
     .reduce((n, g) => n + (g.rows || []).filter((r) => r.child_device_id).length, 0)
 
+  if (summary) return <Card><CardContent className="p-4">
+    <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold">Device health & metrics</h3><button type="button" onClick={() => onExplore?.()} className="text-xs font-medium text-primary hover:underline">Explore device metrics →</button></div>
+    <p className="mt-1 text-xs text-muted">{data.template.name} · {data.updated_at ? `last collected ${new Date(data.updated_at).toLocaleString()}` : 'awaiting first poll'}</p>
+    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+      {[...groups].sort((a, b) => (SEV_RANK[b.status] || 0) - (SEV_RANK[a.status] || 0)).map(group => {
+        const attention = (group.rows || []).filter(row => insightRowSeverity(row) >= 3).length
+        const readings = (group.metrics || []).filter(metric => metric.has_data).slice(0, 2)
+        return <button key={group.key} type="button" onClick={() => onExplore?.(group.key)} className="min-w-0 rounded-lg border border-border bg-surface2/30 p-3 text-left transition-colors hover:border-primary/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary">
+          <div className="flex flex-wrap items-center gap-2"><span className="text-sm font-medium">{group.name}</span><GroupStatusBadge status={group.status} /></div>
+          <div className="mt-1 text-xs leading-relaxed text-muted">{group.kind === 'table' ? `${group.rows?.length || 0} entries${attention ? ` · ${attention} need attention` : ''}` : readings.map(metric => `${metric.name}: ${metric.text || formatValue(metric.value, metric.unit)}`).join(' · ') || 'No readings'}</div>
+        </button>
+      })}
+    </div>
+    {!groups.length && <p className="mt-3 text-sm text-muted">Template assigned; waiting for collected metrics.</p>}
+  </CardContent></Card>
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
         <LayoutTemplate className="h-4 w-4 text-primary" />
-        <h2 className="text-sm font-semibold">Vendor Insights</h2>
+        <h2 className="text-base font-semibold">Device metrics</h2>
         <Badge variant="info">{data.template.name}</Badge>
         {data.updated_at ? (
-          <span className="text-[11px] text-muted">updated {relativeTime(data.updated_at)}</span>
+          <span className="text-[11px] text-muted">Collected {new Date(data.updated_at).toLocaleString()}</span>
         ) : (
           <span className="text-[11px] text-muted">waiting for first template poll…</span>
         )}
@@ -224,26 +245,32 @@ export function TemplateInsightsSection({ deviceId, rangeHours }: {
         )}
       </div>
 
+      <p className="text-sm text-muted">Latest template readings and component states. Select a metric to view its history for the chosen time range.</p>
+      {groups.length > 1 && <div className="flex flex-wrap gap-2" aria-label="Metric groups">
+        {[{ key: 'all', name: 'All groups' }, ...groups].map(group => <button type="button" key={group.key} aria-pressed={selectedGroup === group.key} onClick={() => setSelectedGroup(group.key)} className={cn('rounded-lg border px-3 py-1.5 text-xs font-medium', selectedGroup === group.key ? 'border-primary/40 bg-primary/10 text-primary' : 'border-border bg-surface text-muted hover:text-text')}>{group.name}</button>)}
+      </div>}
+
       {groups.length === 0 ? (
         <Card><CardContent className="p-6 text-center text-xs text-muted">
           Template attached — collecting vendor metrics… data appears within one or two SNMP polls.
         </CardContent></Card>
       ) : (
-        /* One card width for every group, and rows that stretch so cards in a
-         * row share a bottom edge. Letting wide tables span both columns was
-         * worse than it looked: it produced two different card widths, and
-         * because a span-2 card cannot start in the second column, whichever
-         * card preceded it was left sitting alone against an empty half row. */
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-          {groups.map((g) => (
-            g.kind === 'table'
-              ? <TableGroupCard key={g.key} group={g}
-                  onChart={(cell, row, col) => setChart({ seriesKey: cell.series_key, title: `${col.name} — ${row.label}`, unit: col.unit })} />
-              : <ScalarGroupCard key={g.key} group={g}
-                  onChart={(m) => setChart({ seriesKey: m.series_key, title: m.name, unit: m.unit })} />
-          ))}
-        </div>
+        <DeviceWidgetGrid deviceId={deviceId} vendor={vendor || data.template.vendor || undefined} deviceType={deviceType} section="metrics"
+          visibleWidgetIds={selectedGroup === 'all' ? undefined : [selectedGroup]}
+          onStartEdit={() => setSelectedGroup('all')}
+          widgets={groups.map(g => ({
+            id: g.key, title: g.name, width: g.kind === 'table' ? 12 : 6,
+            height: g.kind === 'table' ? 12 : 7, minWidth: g.kind === 'table' ? 3 : 2, minHeight: 4,
+            content: g.kind === 'table'
+              ? <TableGroupCard group={g} onChart={(cell, row, col) => setChart({ seriesKey: cell.series_key, title: `${col.name} — ${row.label}`, unit: col.unit })} />
+              : <ScalarGroupCard group={g} onChart={m => setChart({ seriesKey: m.series_key, title: m.name, unit: m.unit })} />,
+          }))} />
       )}
+
+      {(data.groups || []).some(g => g.no_data_reason) && <details className="rounded-lg border border-border bg-surface p-3 text-xs text-muted">
+        <summary className="cursor-pointer font-medium">Unavailable hardware readings</summary>
+        <ul className="mt-2 space-y-1">{data.groups.filter(g => g.no_data_reason).map(g => <li key={g.key}>{g.name}: {g.no_data_reason}</li>)}</ul>
+      </details>}
 
       {chart && (
         <MetricChartDialog deviceId={deviceId} rangeHours={rangeHours}
@@ -256,14 +283,15 @@ export function TemplateInsightsSection({ deviceId, rangeHours }: {
 
 /* A row that has been materialized as a child device links to its page. */
 function RowLabelText({ row }: { row: InsightRow }) {
-  if (!row.child_device_id) return <>{row.label}</>
+  const label = readableInstanceLabel(row.label)
+  if (!row.child_device_id) return <span title={label !== row.label ? `SNMP instance: ${row.label}` : undefined}>{label}</span>
   return (
     <Link
       to={`/devices/${row.child_device_id}`}
       className="text-primary hover:underline"
       title={`Open the device page for ${row.label}`}
     >
-      {row.label}
+      {label}
     </Link>
   )
 }
@@ -324,7 +352,7 @@ function MetricTile({ label, value, status, onChart }: {
  * whether its group has two metrics or eight. */
 function TileGrid({ children }: { children: ReactNode }) {
   return (
-    <div className="grid auto-rows-fr grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-2">
+    <div className="grid auto-rows-fr grid-cols-[repeat(auto-fill,minmax(min(100%,11rem),1fr))] gap-2">
       {children}
     </div>
   )
@@ -362,12 +390,13 @@ function ScalarGroupCard({ group: g, onChart }: {
     <Card className="h-full">
       <CardContent className="p-4">
         <GroupHeader title={g.name} status={g.status} />
+        {g.description && <p className="mb-3 text-xs leading-relaxed text-muted">{g.description}</p>}
         {numeric.length > 0 && (
           <TileGrid>
             {numeric.map((m) => (
               <MetricTile key={m.key} label={m.name} status={m.status}
                 value={m.type === 'enum' && m.text ? m.text : formatValue(m.value, m.unit)}
-                onChart={m.type === 'enum' ? undefined : () => onChart(m)} />
+                onChart={m.type === 'enum' || !m.series_key ? undefined : () => onChart(m)} />
             ))}
           </TileGrid>
         )}
@@ -418,7 +447,7 @@ function CompactListGroup({ group: g, cols, rows, onChart }: {
           </span>
         </div>
         <div className="grid gap-x-6"
-          style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${track}, 1fr))` }}>
+          style={{ gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${track}), 1fr))` }}>
           {shown.map((r) => (
             <div key={r.instance}
               className="flex items-baseline justify-between gap-3 border-b border-border/30 py-1.5 text-xs">
@@ -478,7 +507,9 @@ function TableGroupCard({ group: g, onChart }: {
   group: InsightGroup
   onChart: (cell: InsightCell, row: InsightRow, col: InsightColumn) => void
 }) {
-  const [expanded, setExpanded] = useState(false)
+  const [search, setSearch] = useState('')
+  const [attentionOnly, setAttentionOnly] = useState(false)
+  const [page, setPage] = useState(0)
   const cols = visibleColumns(g)
   const rows = collapseRepeatedRows(g.rows || [], cols)
 
@@ -491,6 +522,7 @@ function TableGroupCard({ group: g, onChart }: {
       <Card className="h-full">
         <CardContent className="p-4">
           <GroupHeader title={g.name} status={g.status} />
+        {g.description && <p className="mb-3 text-xs leading-relaxed text-muted">{g.description}</p>}
           <TileGrid>
             {cols.map((c) => {
               const cell = r.cells[c.key]
@@ -513,23 +545,25 @@ function TableGroupCard({ group: g, onChart }: {
     )
   }
 
-  /* One or two value columns make a very narrow table — 175px of content
-   * adrift in a 748px card. Those read better as a wrapped list: the same
-   * label/value pairs flowing into as many columns as the card fits, which
-   * both fills the card and keeps each value beside its own label instead of
-   * a card's width away from it. */
-  if (cols.length <= 2) {
-    return <CompactListGroup group={g} cols={cols} rows={rows} onChart={onChart} />
-  }
-
-  const shown = expanded ? rows : rows.slice(0, 8)
+  const filtered = filterInsightRows(rows, search, attentionOnly)
+  const pageSize = 12
+  const lastPage = Math.max(0, Math.ceil(filtered.length / pageSize) - 1)
+  const activePage = Math.min(page, lastPage)
+  const shown = filtered.slice(activePage * pageSize, (activePage + 1) * pageSize)
+  const attentionCount = rows.filter(row => insightRowSeverity(row) >= 3).length
   return (
     <Card className="h-full">
       <CardContent className="p-4">
         <GroupHeader title={g.name} count={rows.length} status={g.status} />
+        {g.description && <p className="mb-3 text-xs leading-relaxed text-muted">{g.description}</p>}
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <input type="search" aria-label={`Search ${g.name}`} placeholder={`Search ${g.name.toLowerCase()}…`} value={search} onChange={event => { setSearch(event.target.value); setPage(0) }} className="h-9 w-full rounded-lg border border-border bg-surface2 px-3 text-sm sm:w-72" />
+          <label className="inline-flex cursor-pointer items-center gap-2 text-xs"><input type="checkbox" checked={attentionOnly} onChange={event => { setAttentionOnly(event.target.checked); setPage(0) }} />Needs attention ({attentionCount})</label>
+          <span className="text-xs text-muted sm:ml-auto">Attention first · {filtered.length} matching</span>
+        </div>
         {/* Three or more columns have enough of them to absorb the card width
          * without leaving the values stranded, so the table fills it. */}
-        <div className="overflow-x-auto">
+        <div className="max-w-full overflow-x-auto">
           <Table className="w-full">
             <THead>
               <Tr>
@@ -542,7 +576,7 @@ function TableGroupCard({ group: g, onChart }: {
             <TBody>
               {shown.map((r) => (
                 <Tr key={r.instance}>
-                  <Td className="max-w-[220px] truncate p-2 text-xs font-medium" title={r.label}>
+                  <Td className="min-w-[180px] max-w-[360px] break-words p-2 text-xs font-medium" title={r.label}>
                     <RowLabelText row={r} />
                     {r.dupCount && (
                       <span className="ml-1.5 font-normal text-muted"
@@ -563,13 +597,15 @@ function TableGroupCard({ group: g, onChart }: {
                             <span className={cn('h-1.5 w-1.5 rounded-full', statusDot[cell.status] || statusDot.none)} />
                             {cell.text || cell.value}
                           </span>
+                        ) : isNum && !cell.series_key ? (
+                          <span className={cn('tabular-nums', statusText[cell.status] || '')}>{formatValue(cell.value, c.unit)}</span>
                         ) : isNum ? (
                           <button type="button" title="Show history" onClick={() => onChart(cell, r, c)}
                             className={cn('cursor-pointer tabular-nums hover:underline', statusText[cell.status] || '')}>
                             {formatValue(cell.value, c.unit)}
                           </button>
                         ) : (
-                          <span className="block max-w-[200px] truncate text-muted" title={cell.text}>{cell.text || '—'}</span>
+                          <span className="block min-w-[160px] max-w-[320px] whitespace-normal text-muted" title={cell.text}>{cell.text || '—'}</span>
                         )}
                       </Td>
                     )
@@ -579,18 +615,11 @@ function TableGroupCard({ group: g, onChart }: {
             </TBody>
           </Table>
         </div>
-        {rows.length > shown.length && !expanded && (
-          <button type="button" onClick={() => setExpanded(true)}
-            className="mt-2 flex items-center gap-1 text-[11px] text-primary hover:underline">
-            <ChevronDown className="h-3 w-3" /> Show all {rows.length}
-          </button>
-        )}
-        {expanded && rows.length > 8 && (
-          <button type="button" onClick={() => setExpanded(false)}
-            className="mt-2 flex items-center gap-1 text-[11px] text-muted hover:underline">
-            <ChevronRight className="h-3 w-3" /> Collapse
-          </button>
-        )}
+        {!filtered.length && <p className="py-6 text-center text-sm text-muted">No entries match these filters.</p>}
+        {filtered.length > pageSize && <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3 text-xs">
+          <span className="text-muted">{activePage * pageSize + 1}–{Math.min((activePage + 1) * pageSize, filtered.length)} of {filtered.length}</span>
+          <div className="flex gap-2"><button type="button" disabled={!activePage} onClick={() => setPage(activePage - 1)} className="rounded border border-border px-3 py-1.5 disabled:opacity-40">Previous</button><button type="button" disabled={activePage === lastPage} onClick={() => setPage(activePage + 1)} className="rounded border border-border px-3 py-1.5 disabled:opacity-40">Next</button></div>
+        </div>}
       </CardContent>
     </Card>
   )
@@ -603,16 +632,20 @@ function MetricChartDialog({ deviceId, seriesKey, title, unit, rangeHours, onOpe
   rangeHours: number; onOpenChange: (o: boolean) => void
 }) {
   const hours = Math.max(rangeHours, 1)
-  const { data, isLoading } = useQuery<Record<string, { unit: string; points: { ts_ms: number; value: number }[] }>>({
-    queryKey: ['device', deviceId, 'snmp-metrics', hours],
-    queryFn: async () => (await api.get(`/devices/${deviceId}/snmp-metrics?hours=${hours}`)).data,
+  const { data, isLoading } = useQuery<{ series: Record<string, { unit: string; points: { ts: number; value: number }[] }>; serverTime: number }>({
+    queryKey: ['device', deviceId, 'template-metric-history', hours],
+    queryFn: async () => {
+      const response = await api.get(`/devices/${deviceId}/snmp-metrics?hours=${hours}`)
+      const timestamp = Date.parse(response.headers.date || '')
+      return { series: response.data, serverTime: Number.isFinite(timestamp) ? timestamp : Date.now() }
+    },
   })
 
   const points = useMemo(
-    () => (data?.[seriesKey]?.points || []).map((p) => ({ ts: p.ts_ms, value: p.value })),
+    () => (data?.series[seriesKey]?.points || []).map((p) => ({ ts: p.ts, value: p.value })),
     [data, seriesKey],
   )
-  const toTs = Date.now()
+  const toTs = data?.serverTime ?? Date.now()
   const fromTs = toTs - hours * 3600_000
   const ticks = useMemo(() => timeTicks(fromTs, toTs, hours), [fromTs, toTs, hours])
   const tickFormatter = useMemo(() => timeAxisTickFormatter(hours), [hours])

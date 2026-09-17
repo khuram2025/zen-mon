@@ -64,7 +64,8 @@ def get_device_metrics(
                 jitter_ms,
                 min_rtt_ms,
                 max_rtt_ms,
-                is_up
+                is_up,
+                1 AS sample_count
             FROM {table}
             WHERE device_id = %(device_id)s
               AND timestamp >= %(from_time)s
@@ -81,7 +82,8 @@ def get_device_metrics(
                 if(sum(sample_count) = 0, 0, sum(avg_jitter_ms * sample_count) / sum(sample_count)) AS jitter_ms,
                 min(min_rtt_ms) AS min_rtt_ms,
                 max(max_rtt_ms) AS max_rtt_ms,
-                if(sum(sample_count) = 0, 0, sum(uptime_pct * sample_count) / sum(sample_count)) AS is_up
+                if(sum(sample_count) = 0, NULL, sum(uptime_pct * sample_count) / sum(sample_count)) AS is_up,
+                sum(sample_count) AS samples
             FROM {table}
             WHERE device_id = %(device_id)s
               AND timestamp >= %(from_time)s
@@ -109,7 +111,8 @@ def get_device_metrics(
                 avg(jitter_ms) AS jitter_ms,
                 min(min_rtt_ms) AS min_rtt_ms,
                 max(max_rtt_ms) AS max_rtt_ms,
-                avg(is_up) AS is_up
+                avg(is_up) AS is_up,
+                count() AS sample_count
             FROM ping_metrics
             WHERE device_id = %(device_id)s
               AND timestamp >= %(from_time)s
@@ -124,7 +127,7 @@ def get_device_metrics(
     for row in result.result_rows:
         raw_is_up = row[6]
         if granularity == "raw":
-            is_up = bool(raw_is_up)  # 0/1 -> False/True
+            is_up = bool(raw_is_up) if raw_is_up is not None else None
         else:
             is_up = float(raw_is_up) > 0.5 if raw_is_up is not None else None
 
@@ -141,6 +144,8 @@ def get_device_metrics(
             min_rtt_ms=row[4],
             max_rtt_ms=row[5],
             is_up=is_up,
+            uptime_pct=max(0.0, min(100.0, float(raw_is_up) * 100)) if raw_is_up is not None else None,
+            sample_count=int(row[7]),
         ))
 
     return MetricResponse(

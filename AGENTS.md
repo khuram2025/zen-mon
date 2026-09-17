@@ -13,6 +13,10 @@
 - Migration files and historical lockfile entries are append-only. Add a forward migration for new schema; ship the complete migration set.
 - Run the strict dashboard build, route smoke checks, Python contracts and Go tests for the modules changed. Database integration tests require disposable fixtures, never installed application databases.
 - `dashboard/src/main.tsx` and `App.tsx` define the active UI. Avoid reintroducing superseded duplicate pages or a second auth store.
+- Service-detail SLA uses `basis=confirmed`: only confirmed incidents affect availability; isolated failed probes remain diagnostic evidence. Keep monitoring gaps unknown and retain configured retry thresholds.
+- Device list/detail availability headlines share `/devices/dashboard/uptime-stats` and two-decimal formatting. Use `uptime_pct` and `sample_count` for partial failures; legacy rollup `is_up` is only a majority flag.
+- Device widget layouts are scoped by user/device/tab in browser storage. Vendor/type templates match normalized vendor + device type + tab + user; device overrides win. Preserve layout preferences for temporarily absent widgets.
+- F5 overall RAM uses sysGlobalHostMemUsed / sysGlobalHostMemTotal, never the highest TMM/non-TMM percentage. Keep TMM, non-TMM and swap separate; use `f5_system_memory_pct` for corrected history. Missing sensors are not zero, and certificate inventory does not prove active TLS bindings.
 
 ## Device Tracker
 

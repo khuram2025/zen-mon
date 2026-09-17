@@ -1702,6 +1702,9 @@ async def device_template_insights(
                 "metrics": metrics_out,
             })
 
+    from app.services.f5_insights import enrich_f5_groups
+    groups_out = enrich_f5_groups(groups_out)
+
     return {
         "template": {
             "id": str(dev["profile_id"]),

@@ -60,6 +60,9 @@ jobs:
       - run: npm run test:service-availability
       - run: node scripts/test-service-failures.mjs
       - run: node scripts/test-daily-probe-failures.mjs
+      - run: node scripts/test-device-availability.mjs
+      - run: node scripts/test-device-template-presentation.mjs
+      - run: node scripts/test-device-widget-layout.mjs
 
   poller:
     runs-on: ubuntu-24.04

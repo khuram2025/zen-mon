@@ -869,7 +869,7 @@ export function ServiceCheckFormDialog({
                 />
               </FormField>
             </div>
-            <p className="text-xs text-muted">1 marks Down on the first failure. The controller counts consecutive scheduled failures; sensors confirm with attempts within a run. The delay applies to sensor retries. Failed probes remain in availability history.</p>
+            <p className="text-xs text-muted">1 marks Down on the first failure. The controller counts consecutive scheduled failures; sensors confirm with attempts within a run. The delay applies to sensor retries. Failed probes remain in diagnostics. Service-detail SLA counts confirmed Down incidents only.</p>
             <FormField label="Depends on (parent)">
               <Select
                 value={s.parent_check_id || 'none'}

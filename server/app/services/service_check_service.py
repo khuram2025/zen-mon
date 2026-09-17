@@ -904,6 +904,7 @@ async def get_service_sla(
     hours: int,
     from_dt: datetime | None = None,
     to_dt: datetime | None = None,
+    basis: str = "observed_time",
 ) -> dict:
     """Compute uptime %, MTTR, MTBF and incident stats for a service check.
 
@@ -943,10 +944,13 @@ async def get_service_sla(
     }
     WINDOW = "timestamp >= %(f)s AND timestamp < %(t)s"
 
-    from app.services.service_availability import read_segments, summarize, recovery_start, continuous_up_start
+    from app.services.service_availability import read_segments, read_confirmed_segments, summarize, recovery_start, continuous_up_start
     observed_start = max(win_from, _aware(sc.created_at)) if sc.created_at else win_from
     observed_end = min(win_to, datetime.now(timezone.utc))
     segments, sample_count = read_segments(ch, check_id, observed_start, observed_end, sc.check_interval or 60)
+    probe_availability = summarize(segments, observed_start, observed_end)
+    if basis == "confirmed":
+        segments = read_confirmed_segments(ch, check_id, observed_start, observed_end, segments)
     availability = summarize(segments, observed_start, observed_end)
     uptime_pct = availability["uptime_pct"]
     incident_count = availability["incident_count"]
@@ -1001,6 +1005,8 @@ async def get_service_sla(
         # The transition establishes recovery; subsequent missing results can still
         # break that streak. Bound the evidence to retained raw observations.
         streak_segments, _ = read_segments(ch, check_id, max(streak_start, as_of - timedelta(days=29)), as_of, sc.check_interval or 60)
+        if basis == "confirmed":
+            streak_segments = read_confirmed_segments(ch, check_id, max(streak_start, as_of - timedelta(days=29)), as_of, streak_segments)
         streak_start = continuous_up_start(streak_segments, as_of)
     uptime_streak_sec = (as_of - streak_start).total_seconds() if streak_start else None
 
@@ -1023,7 +1029,10 @@ async def get_service_sla(
         "uptime_streak_sec": _finite(uptime_streak_sec),
         "uptime_streak_started_at": streak_start.isoformat() if streak_start else None,
         "as_of": as_of.isoformat(),
-        "availability_basis": "observed_time",
+        "availability_basis": basis,
+        "probe_uptime_pct": _finite(probe_availability["uptime_pct"]),
+        "probe_downtime_sec": probe_availability["total_downtime_sec"],
+        "probe_error_rate_pct": _finite(100 - probe_availability["uptime_pct"]) if probe_availability["uptime_pct"] is not None else None,
         "covered_sec": availability["covered_sec"],
         "coverage_pct": availability["coverage_pct"],
         "unknown_sec": availability["unknown_sec"],
@@ -1178,17 +1187,21 @@ async def get_daily_uptime_all(db: AsyncSession, days: int) -> dict:
     return {"days": days, "checks": out}
 
 
-async def get_hourly_uptime(db: AsyncSession, check_id: UUID, days: int) -> dict:
+async def get_hourly_uptime(db: AsyncSession, check_id: UUID, days: int, basis: str = "observed_time") -> dict:
     """Calendar bins use exactly the same observed-time calculation as the SLA."""
     from app.core.database import get_clickhouse_client
-    from app.services.service_availability import read_segments, summarize
+    from app.services.service_availability import read_segments, read_confirmed_segments, summarize
     sc = (await db.execute(select(ServiceCheck).where(ServiceCheck.id == check_id))).scalar_one_or_none()
     if sc is None:
         return {"check_id": str(check_id), "days": days, "hours": []}
     now = datetime.now(timezone.utc)
     start = (now - timedelta(days=days)).replace(minute=0, second=0, microsecond=0)
     created = sc.created_at if sc.created_at is None or sc.created_at.tzinfo else sc.created_at.replace(tzinfo=timezone.utc)
-    segments, _ = read_segments(get_clickhouse_client(), check_id, max(start, created) if created else start, now, sc.check_interval or 60)
+    ch = get_clickhouse_client()
+    observed_start = max(start, created) if created else start
+    segments, _ = read_segments(ch, check_id, observed_start, now, sc.check_interval or 60)
+    if basis == "confirmed":
+        segments = read_confirmed_segments(ch, check_id, observed_start, now, segments)
     out = []
     # Split each segment once; avoid scanning 30 days of probes for every hour.
     bins = {}
@@ -1202,5 +1215,5 @@ async def get_hourly_uptime(db: AsyncSession, check_id: UUID, days: int) -> dict
         stats = summarize(values, max(hour, created) if created else hour, min(now, hour + timedelta(hours=1)))
         out.append({"ts": hour.isoformat(), "uptime_pct": stats["uptime_pct"],
                     "covered_sec": stats["covered_sec"], "sample_count": 0,
-                    "availability_basis": "observed_time"})
+                    "availability_basis": basis})
     return {"check_id": str(check_id), "days": days, "hours": out}

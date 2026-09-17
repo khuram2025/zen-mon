@@ -1,3 +1,4 @@
+import { formatDeviceAvailability } from '@/components/devices/availability'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
@@ -230,7 +231,8 @@ export function DevicesPage() {
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
 
-  const search = params.get('q') || ''
+  // Global search uses search; keep older q bookmarks working as well.
+  const search = params.get('search') ?? params.get('q') ?? ''
   const statusFilter = params.get('status') || ''
   const typeFilter = params.get('type') || ''
   const locationFilter = params.get('loc') || ''
@@ -672,7 +674,7 @@ export function DevicesPage() {
                 ref={searchRef}
                 placeholder="Search devices, IPs, tags…"
                 value={search}
-                onChange={(e) => patchParams({ q: e.target.value || null, page: '1' })}
+                onChange={(e) => patchParams({ search: e.target.value || null, q: null, page: '1' })}
                 className="h-10 pl-10 pr-14 text-sm"
               />
               <kbd className="pointer-events-none absolute right-2.5 top-1/2 hidden -translate-y-1/2 items-center gap-0.5 rounded border border-border bg-surface2 px-1.5 py-0.5 text-[10px] font-medium text-muted sm:inline-flex">
@@ -2522,7 +2524,7 @@ function UptimePctCell({ pct, fallback }: { pct: number | undefined; fallback: s
   return (
     <div className="flex flex-col gap-1">
       <span className={`font-mono text-sm font-semibold tabular-nums ${color}`}>
-        {pct.toFixed(2)}%
+        {formatDeviceAvailability(pct)}
       </span>
       <div className="h-1 w-24 overflow-hidden rounded-full bg-surface2">
         <div

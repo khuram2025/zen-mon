@@ -128,3 +128,4 @@ cdaed3a7a7ed6822acaa2811fcb0686374cdea61e899c41af7cd5e9a8d6dc57a  migrate-115-ne
 dd04dd924543dfe410d8e2e46c24e011007a96861bfcdfb8be293940221f99df  migrate-117-ncm-assurance.sql
 4275a6f42cdbe162ecf887f3fa654a59d836e0ee6e38ec42f5bda0f88ac326e1  migrate-118-ncm-jobs-baselines.sql
 2ada3fc24bde76fba9458d1f3d724a6988e7a435cfba6bb5066cb34d2dcb4e43  migrate-119-udt-ip-evidence.sql
+5fd572a8afbcfc1b8583afaddc4bf808acf7ecbab0dfc6fd686f7115b152bc34  migrate-120-f5-memory-and-coverage.sql
