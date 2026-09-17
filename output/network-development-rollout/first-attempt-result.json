@@ -1,0 +1,5 @@
+{
+  "ok": false,
+  "error": "Update failed at step 6/29 (run_hook): Step 'run_hook' failed: Hook script not found: /opt/zenplus/updater/tmp/network-dev-1.23.11/code/scripts/reconcile-code-payload.py",
+  "backup": "/opt/zenplus/updater/backups/network-dev-20260910"
+}

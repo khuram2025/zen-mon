@@ -1,0 +1,339 @@
+{
+  "checked_at": "2026-09-15T09:32:54.239534+00:00",
+  "version": "1.23.12",
+  "source_files": [
+    {
+      "path": "dashboard/scripts/test-network-contracts.mjs",
+      "matches": true
+    },
+    {
+      "path": "dashboard/src/App.tsx",
+      "matches": true
+    },
+    {
+      "path": "dashboard/src/components/MibsTabContent.tsx",
+      "matches": true
+    },
+    {
+      "path": "dashboard/src/components/TemplatesTabContent.tsx",
+      "matches": true
+    },
+    {
+      "path": "dashboard/src/components/forms/AlertRuleWizardDialog.tsx",
+      "matches": true
+    },
+    {
+      "path": "dashboard/src/components/layout/navigation.ts",
+      "matches": true
+    },
+    {
+      "path": "dashboard/src/pages/AlertRulesPage.tsx",
+      "matches": true
+    },
+    {
+      "path": "dashboard/src/pages/DeviceDetailPage.tsx",
+      "matches": true
+    },
+    {
+      "path": "dashboard/src/pages/NetworkEventsPage.tsx",
+      "matches": true
+    },
+    {
+      "path": "dashboard/src/pages/netpath/helpers.tsx",
+      "matches": true
+    },
+    {
+      "path": "dashboard/src/pages/netpath/types.ts",
+      "matches": true
+    },
+    {
+      "path": "poller/internal/checker/snmp/collector.go",
+      "matches": true
+    },
+    {
+      "path": "poller/internal/checker/snmp/polling_contract_test.go",
+      "matches": true
+    },
+    {
+      "path": "poller/internal/checker/snmp/session.go",
+      "matches": true
+    },
+    {
+      "path": "poller/internal/checker/snmp/traps.go",
+      "matches": true
+    },
+    {
+      "path": "poller/internal/checker/snmp/traps_contract_test.go",
+      "matches": true
+    },
+    {
+      "path": "poller/internal/checker/snmp/types.go",
+      "matches": true
+    },
+    {
+      "path": "poller/internal/pinger/engine.go",
+      "matches": true
+    },
+    {
+      "path": "poller/internal/store/clickhouse.go",
+      "matches": true
+    },
+    {
+      "path": "poller/internal/store/interface_policy.go",
+      "matches": true
+    },
+    {
+      "path": "poller/internal/store/interface_policy_test.go",
+      "matches": true
+    },
+    {
+      "path": "poller/internal/store/interface_postgres_integration_test.go",
+      "matches": true
+    },
+    {
+      "path": "poller/internal/store/postgres.go",
+      "matches": true
+    },
+    {
+      "path": "scripts/build-release.py",
+      "matches": true
+    },
+    {
+      "path": "scripts/migrate-115-network-events.sql",
+      "matches": true
+    },
+    {
+      "path": "scripts/migrate-116-network-trap-identity-clickhouse.sql",
+      "matches": true
+    },
+    {
+      "path": "scripts/migrations.lock",
+      "matches": true
+    },
+    {
+      "path": "scripts/network-build-identity.py",
+      "matches": true
+    },
+    {
+      "path": "scripts/systemd/zenplus-syslog.service",
+      "matches": true
+    },
+    {
+      "path": "scripts/validate-network-development.py",
+      "matches": true
+    },
+    {
+      "path": "scripts/validate-network-integration.py",
+      "matches": true
+    },
+    {
+      "path": "server/app/api/v1/alert_engine.py",
+      "matches": true
+    },
+    {
+      "path": "server/app/api/v1/alert_rules.py",
+      "matches": true
+    },
+    {
+      "path": "server/app/api/v1/discovery_v2.py",
+      "matches": true
+    },
+    {
+      "path": "server/app/api/v1/netpath.py",
+      "matches": true
+    },
+    {
+      "path": "server/app/api/v1/network_events.py",
+      "matches": true
+    },
+    {
+      "path": "server/app/api/v1/snmp.py",
+      "matches": true
+    },
+    {
+      "path": "server/app/main.py",
+      "matches": true
+    },
+    {
+      "path": "server/app/services/alert_phrasing.py",
+      "matches": true
+    },
+    {
+      "path": "server/app/services/discovery_executor.py",
+      "matches": true
+    },
+    {
+      "path": "server/app/services/discovery_probes.py",
+      "matches": true
+    },
+    {
+      "path": "server/app/services/mib_compiler.py",
+      "matches": true
+    },
+    {
+      "path": "server/app/services/network_alert_service.py",
+      "matches": true
+    },
+    {
+      "path": "server/app/services/network_conditions.py",
+      "matches": true
+    },
+    {
+      "path": "server/app/services/network_events.py",
+      "matches": true
+    },
+    {
+      "path": "server/app/services/network_history.py",
+      "matches": true
+    },
+    {
+      "path": "server/app/services/syslog_receiver.py",
+      "matches": true
+    },
+    {
+      "path": "server/requirements.txt",
+      "matches": true
+    },
+    {
+      "path": "server/tests/integration/snmp_simulator.py",
+      "matches": true
+    },
+    {
+      "path": "server/tests/integration/test_network_contracts.py",
+      "matches": true
+    },
+    {
+      "path": "server/tests/test_discovery_contracts.py",
+      "matches": true
+    },
+    {
+      "path": "server/tests/test_discovery_import_contract.py",
+      "matches": true
+    },
+    {
+      "path": "server/tests/test_link_utilization_api.py",
+      "matches": true
+    },
+    {
+      "path": "server/tests/test_mib_compiler.py",
+      "matches": true
+    },
+    {
+      "path": "server/tests/test_network_condition_contract.py",
+      "matches": true
+    },
+    {
+      "path": "server/tests/test_network_development_validation.py",
+      "matches": true
+    },
+    {
+      "path": "server/tests/test_network_rule_validation.py",
+      "matches": true
+    },
+    {
+      "path": "server/tests/test_network_trap_contract.py",
+      "matches": true
+    },
+    {
+      "path": "server/tests/test_network_worker_contract.py",
+      "matches": true
+    },
+    {
+      "path": "server/tests/test_password_hash_compatibility.py",
+      "matches": true
+    },
+    {
+      "path": "server/tests/test_syslog_contract.py",
+      "matches": true
+    },
+    {
+      "path": "server/tests/test_syslog_receiver_lifecycle.py",
+      "matches": true
+    },
+    {
+      "path": "server/tests/test_updater_dependency_permissions.py",
+      "matches": true
+    },
+    {
+      "path": "updater/steps/pip_install.py",
+      "matches": true
+    },
+    {
+      "path": "updater/steps/service_control.py",
+      "matches": true
+    }
+  ],
+  "units": {
+    "zenplus-api": {
+      "MainPID": "310111",
+      "ExecMainStartTimestamp": "Tue 2026-09-15 09:30:54 UTC",
+      "ActiveState": "active",
+      "running_executable_sha256": "e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f",
+      "running_executable": "/usr/bin/python3.12"
+    },
+    "zenplus-poller": {
+      "MainPID": "310115",
+      "ExecMainStartTimestamp": "Tue 2026-09-15 09:30:54 UTC",
+      "ActiveState": "active",
+      "running_executable_sha256": "9b8170b2adf4987f1817637347daaf6897da1016ccedca9cf8081d735bbfb383",
+      "running_executable": "/opt/zenplus/bin/zenplus-poller"
+    },
+    "zenplus-netflow-collector": {
+      "MainPID": "310124",
+      "ExecMainStartTimestamp": "Tue 2026-09-15 09:30:54 UTC",
+      "ActiveState": "active",
+      "running_executable_sha256": "619ca78b0c427e5cdf858d9358cdab7e0f285b06a3aac1d6707c69efb9327de9",
+      "running_executable": "/opt/zenplus/bin/zenplus-netflow-collector"
+    },
+    "zenplus-updater.timer": {
+      "ActiveState": "active"
+    },
+    "zenplus-syslog": {
+      "MainPID": "310959",
+      "ExecMainStartTimestamp": "Tue 2026-09-15 09:32:49 UTC",
+      "ActiveState": "active",
+      "running_executable_sha256": "e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f",
+      "running_executable": "/usr/bin/python3.12"
+    }
+  },
+  "binaries": {
+    "/opt/zenplus/bin/zenplus-poller": {
+      "sha256": "9b8170b2adf4987f1817637347daaf6897da1016ccedca9cf8081d735bbfb383",
+      "matches_package": true
+    },
+    "/opt/zenplus/bin/zenplus-netflow-collector": {
+      "sha256": "619ca78b0c427e5cdf858d9358cdab7e0f285b06a3aac1d6707c69efb9327de9",
+      "matches_package": true
+    },
+    "/opt/zenplus/artifacts/sensors/bin/linux-amd64/zenplus-sensor": {
+      "sha256": "52f4bcef9e0d2577ff3be40224b43188680d561e4706bf1603c7f0e2ead3430a",
+      "matches_package": true
+    }
+  },
+  "health": {
+    "status": "ok",
+    "version": "1.23.12",
+    "checks": {
+      "api": "ok",
+      "postgresql": "ok",
+      "clickhouse": "ok",
+      "redis": "ok",
+      "zenplus-api": "active",
+      "zenplus-poller": "active",
+      "nginx": "active",
+      "snmp_encryption": "ok"
+    }
+  },
+  "pip_check": "No broken requirements found.",
+  "dependencies": {
+    "bcrypt": "4.3.0",
+    "passlib": "1.7.4",
+    "pysmi": "2.0.0"
+  },
+  "schema_ok": true,
+  "package_sha256": "0ad09db0f4de39db291c26e8e962d68103f992f05966a2f82f8c44649e4df4e1",
+  "git_checkout_baseline": "b4256ff0f0646db137ad2250f8d441b11464e7ee",
+  "backup": "/opt/zenplus/updater/backups/network-dev-20260915",
+  "synthetic_live_event": "real loopback UDP persisted, authenticated API read, service restarted, fixture removed",
+  "syslog_listener_enabled": true
+}

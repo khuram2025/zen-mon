@@ -209,6 +209,8 @@ func TestF5TemplateMetricsReplaceGenericMemory(t *testing.T) {
 	const gib = 1024 * 1024 * 1024
 	generic := []MetricSample{{Key: "memory", Value: 99, Unit: "percent"}}
 	template := []MetricSample{
+		{Key: "tpl_f5_system_mem_used", Value: 15.6 * gib, Unit: "bytes"},
+		{Key: "tpl_f5_system_mem_total", Value: 31.4 * gib, Unit: "bytes"},
 		{Key: "tpl_f5_tmm_mem_used", Value: 1.7 * gib, Unit: "bytes"},
 		{Key: "tpl_f5_tmm_mem_total", Value: 13.3 * gib, Unit: "bytes"},
 		{Key: "tpl_f5_other_mem_used", Value: 13.9 * gib, Unit: "bytes"},
@@ -217,11 +219,11 @@ func TestF5TemplateMetricsReplaceGenericMemory(t *testing.T) {
 	got := upsertMetricSamples(generic, canonicalVendorMetrics(template))
 	values := metricValues(got)
 
-	assertClose(t, "canonical memory", values["memory"], 76.7955801105)
+	assertClose(t, "canonical memory", values["memory"], 49.6815286624)
 	assertClose(t, "TMM diagnostic", values["f5_tmm_memory_pct"], 12.7819548872)
 	assertClose(t, "host diagnostic", values["f5_host_memory_pct"], 76.7955801105)
-	if values["memory_used_bytes"] != 13.9*gib || values["memory_total_bytes"] != 18.1*gib {
-		t.Error("canonical numerator and denominator do not match selected host domain")
+	if values["memory_used_bytes"] != 15.6*gib || values["memory_total_bytes"] != 31.4*gib {
+		t.Error("canonical numerator and denominator do not match system RAM pair")
 	}
 
 	count := 0

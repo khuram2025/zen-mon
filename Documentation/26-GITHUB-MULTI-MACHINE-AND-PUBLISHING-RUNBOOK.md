@@ -1,5 +1,12 @@
 # ZenPlus GitHub, Multi-Machine Development, Release, and Publishing Runbook
 
+> **17 September 2026 transfer:** the originating workspace now has GitHub
+> `origin` configured and the current development work pushed on
+> `codex/rum-production`, including application baseline `865cde7`. This has not
+> been merged to `main`. Follow the [current appliance handoff](Development-Appliance-Handoff-2026-09-17.md)
+> when continuing that work; the initial remote inventory and `main`-based
+> examples below describe the earlier setup and general integration workflow.
+
 > **Purpose:** one operational source of truth for developing ZenPlus from two appliances, synchronizing through GitHub, merging safely, publishing signed ZenPlus OTA releases to zentryc.com, and publishing ZenPlus knowledge-base pages on zentryc.com.
 >
 > **Audience:** ZenPlus developers, reviewers, release engineers, and website/KB publishers.

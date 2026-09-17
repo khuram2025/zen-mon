@@ -1,0 +1,18 @@
+{
+  "id": "4822db79-cc93-4689-84de-454c5ef9bed7",
+  "product": "ota",
+  "version": "1.23.12",
+  "min_version": "1.23.9",
+  "is_published": true,
+  "package_sha256": "0ad09db0f4de39db291c26e8e962d68103f992f05966a2f82f8c44649e4df4e1",
+  "rollouts": [
+    {
+      "id": "bbce6b4b-4627-4911-b00a-048919a052ac",
+      "stage": "full",
+      "target_group": null,
+      "target_pct": 100,
+      "started_at": "2026-09-16T12:13:34.223916+00:00"
+    }
+  ],
+  "update_stats": {}
+}

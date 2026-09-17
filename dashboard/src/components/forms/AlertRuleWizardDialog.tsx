@@ -41,7 +41,7 @@ import {
 import { toast } from '@/components/ui/Toast'
 import { useTags, tagColor, tagColorMap } from '@/hooks/useTags'
 
-type Cond = { metric: string; operator: string; threshold: number }
+type Cond = { metric: string; operator: string; threshold: number; reset_threshold?: number | null }
 
 // One SLA escalation tier: if the alert is still active and unacknowledged
 // after_minutes after triggering, page notify_channels. repeat_every_minutes
@@ -53,7 +53,7 @@ type WizardState = {
   description: string
   enabled: boolean
   severity: 'info' | 'warning' | 'critical'
-  source: 'device' | 'service' | 'trap' | 'apm'
+  source: 'device' | 'service' | 'trap' | 'syslog' | 'apm'
   conditions: Cond[]
   condition_logic: 'AND' | 'OR'
   trigger_on: 'any' | 'down' | 'up' | 'degraded'
@@ -122,7 +122,7 @@ const NETWORK_METRICS = [
   { value: 'uptime_reset', label: 'Reboot detected', iface: false },
 ] as const
 
-const INTERFACE_METRICS = new Set(NETWORK_METRICS.filter((m) => m.iface).map((m) => m.value))
+const INTERFACE_METRICS = new Set<string>(NETWORK_METRICS.filter((m) => m.iface).map((m) => m.value))
 
 // Server APM metrics are evaluated per service; browser RUM metrics are
 // evaluated per application ID. Rates are fractions in 0–1.
@@ -215,7 +215,7 @@ const DEFAULT_STATE: WizardState = {
 
 function ruleToState(rule: any): WizardState {
   const source =
-    rule.metric === 'trap'
+    rule.metric === 'syslog' ? 'syslog' : rule.metric === 'trap'
       ? 'trap'
       : String(rule.metric || '').startsWith('apm_')
       ? 'apm'
@@ -235,6 +235,7 @@ function ruleToState(rule: any): WizardState {
             metric: c.metric,
             operator: c.operator,
             threshold: c.threshold ?? 0,
+            reset_threshold: c.reset_threshold ?? null,
           }))
         : [{ metric: rule.metric || 'ping_status', operator: rule.operator || '==', threshold: rule.threshold ?? 0 }],
     condition_logic: rule.condition_logic === 'OR' ? 'OR' : 'AND',
@@ -282,19 +283,20 @@ function templateState(source: TemplateSet | any): Record<TemplateField, string>
 function stateToPayload(s: WizardState, defaults: TemplateSet = DEFAULTS) {
   const isService = s.source === 'service'
   const isTrap = s.source === 'trap'
+  const isSyslog = s.source === 'syslog'
   const isDevice = s.source === 'device'
   const isApm = s.source === 'apm'
   const first = s.conditions[0]
-  const conditions = isDevice && s.conditions.length > 1 ? s.conditions : null
-  const recovery = s.reset_mode === 'auto'
+  const conditions = isDevice && (s.conditions.length > 1 || first.reset_threshold != null) ? s.conditions : null
+  const recovery = !isTrap && !isSyslog && s.reset_mode === 'auto'
 
   return {
     name: s.name,
     description: s.description || null,
     enabled: s.enabled,
-    metric: isService ? 'service_status' : isTrap ? 'trap' : first.metric,
-    operator: isDevice || isApm ? first.operator : '==',
-    threshold: isDevice || isApm ? first.threshold : 0,
+    metric: isService ? 'service_status' : isTrap ? 'trap' : isSyslog ? 'syslog' : first.metric,
+    operator: isDevice || isApm || isSyslog ? first.operator : '==',
+    threshold: isDevice || isApm || isSyslog ? first.threshold : 0,
     conditions,
     condition_logic: s.condition_logic,
     trigger_on: isService ? s.trigger_on : isDevice && first.metric === 'ping_status' ? s.trigger_on : 'any',
@@ -302,12 +304,12 @@ function stateToPayload(s: WizardState, defaults: TemplateSet = DEFAULTS) {
     trap_oid: isTrap ? s.trap_oid.trim() || null : null,
     // target: interface filter for device interface metrics; APM service name
     // for APM rules (empty = every reporting service).
-    target: isApm
+    target: isApm || isSyslog
       ? s.target.trim() || null
       : isDevice && s.conditions.some((c) => INTERFACE_METRICS.has(c.metric))
       ? s.target.trim() || null
       : null,
-    min_duration: s.min_duration,
+    min_duration: isSyslog || isTrap ? 0 : s.min_duration,
     severity: s.severity,
     cooldown: s.cooldown,
     max_repeat: s.max_repeat,
@@ -368,7 +370,7 @@ export function AlertRuleWizardDialog({
   // Which default wording this rule's notifications are built from. Service
   // checks and traps lead with different sentences than a device does, so the
   // editor has to show the set that will actually be sent.
-  const templateKind = s.source === 'service' ? 'service' : s.source === 'trap' ? 'trap' : 'device'
+  const templateKind = s.source === 'service' ? 'service' : s.source === 'syslog' ? 'syslog' : s.source === 'trap' ? 'trap' : 'device'
   const { data: templateDefaultsMap } = useQuery<any>({
     queryKey: ['alert-rules', 'template-defaults'],
     queryFn: async () => (await api.get('/alert-rules/template-defaults')).data,
@@ -742,7 +744,7 @@ export function AlertRuleWizardDialog({
               <div className="space-y-4">
                 <SectionTitle title="Trigger Conditions" hint="Define when this alert fires. Add multiple child conditions with AND/OR logic." />
                 <div className="flex rounded-lg border border-border bg-surface2 p-1 text-xs">
-                  {(['device', 'service', 'trap', 'apm'] as const).map((src) => (
+                  {(['device', 'service', 'trap', 'syslog', 'apm'] as const).map((src) => (
                     <button
                       key={src}
                       type="button"
@@ -750,9 +752,11 @@ export function AlertRuleWizardDialog({
                         if (src === s.source) return
                         // Entering/leaving APM swaps the condition metric domain,
                         // and `target` changes meaning (service name vs interface).
-                        if (src === 'apm') {
+                        if (src === 'syslog') {
+                          setS({ ...s, source: src, target: '', reset_mode: 'none', conditions: [{ metric: 'syslog', operator: '<=', threshold: 4 }] })
+                        } else if (src === 'apm') {
                           setS({ ...s, source: src, target: '', conditions: [{ metric: 'apm_latency_p95', operator: '>', threshold: 800 }] })
-                        } else if (s.source === 'apm') {
+                        } else if (s.source === 'apm' || s.source === 'syslog') {
                           setS({ ...s, source: src, target: '', conditions: [{ metric: 'ping_status', operator: '==', threshold: 0 }] })
                         } else {
                           setS({ ...s, source: src })
@@ -760,7 +764,7 @@ export function AlertRuleWizardDialog({
                       }}
                       className={cn('flex-1 rounded-md py-2 font-medium', s.source === src ? 'bg-primary text-white' : 'text-muted')}
                     >
-                      {src === 'device' ? 'Device / SNMP' : src === 'service' ? 'Service Check' : src === 'trap' ? 'SNMP Trap' : 'APM & RUM'}
+                      {src === 'device' ? 'Device / SNMP' : src === 'service' ? 'Service Check' : src === 'trap' ? 'SNMP Trap' : src === 'syslog' ? 'Syslog' : 'APM & RUM'}
                     </button>
                   ))}
                 </div>
@@ -785,6 +789,14 @@ export function AlertRuleWizardDialog({
                   </FormField>
                 )}
 
+                {s.source === 'syslog' && <div className="space-y-3">
+                  <FormField label="Message contains (optional)"><Input value={s.target} onChange={e => setS({ ...s, target: e.target.value })} /></FormField>
+                  <FormField label="Severity condition" hint="0 is emergency; 7 is debug. Events require manual resolution.">
+                    <div className="flex gap-2"><select aria-label="Syslog severity operator" value={s.conditions[0].operator} onChange={e => setS({ ...s, conditions: [{ ...s.conditions[0], operator: e.target.value }] })} className="rounded border border-border bg-surface p-2">
+                      {['<=', '<', '==', '!=', '>=', '>'].map(op => <option key={op}>{op}</option>)}
+                    </select><Input aria-label="Syslog severity threshold" type="number" min={0} max={7} value={s.conditions[0].threshold} onChange={e => setS({ ...s, conditions: [{ ...s.conditions[0], threshold: Number(e.target.value) }] })} /></div>
+                  </FormField>
+                </div>}
                 {s.source === 'device' && (
                   <>
                     {s.conditions.some((c) => c.metric === 'ping_status') && (
@@ -843,6 +855,9 @@ export function AlertRuleWizardDialog({
                           <FormField label={i === 0 ? 'Value' : ' '}>
                             <Input type="number" step="any" value={c.threshold} onChange={(e) => updateCond(i, { threshold: Number(e.target.value) })} />
                           </FormField>
+                          {NETWORK_METRICS.some(m => m.value === c.metric) && ['>', '>=', '<', '<='].includes(c.operator) && <FormField label="Reset value (optional)">
+                            <Input type="number" step="any" placeholder="Same as trigger" value={c.reset_threshold ?? ''} onChange={e => updateCond(i, { reset_threshold: e.target.value === '' ? null : Number(e.target.value) })} />
+                          </FormField>}
                         </div>
                         <Button type="button" variant="ghost" size="icon" className="h-9 w-9 text-muted hover:text-danger" disabled={s.conditions.length === 1} onClick={() => removeCond(i)}>
                           <Trash2 className="h-4 w-4" />
@@ -895,12 +910,12 @@ export function AlertRuleWizardDialog({
                   </div>
                 )}
 
-                <FormField label="Condition must exist for" hint="Hold time before firing — prevents flapping alerts (SolarWinds 'condition must exist for more than').">
+                {s.source !== 'trap' && s.source !== 'syslog' && <FormField label="Condition must exist for" hint="Hold time before firing — prevents flapping alerts (SolarWinds 'condition must exist for more than').">
                   <div className="flex items-center gap-3">
                     <Input type="number" min={0} value={s.min_duration} onChange={(e) => setS({ ...s, min_duration: Number(e.target.value) })} className="w-28" />
                     <span className="text-sm text-muted">seconds (0 = fire immediately)</span>
                   </div>
-                </FormField>
+                </FormField>}
               </div>
             )}
 
@@ -908,8 +923,8 @@ export function AlertRuleWizardDialog({
               <div className="space-y-4">
                 <SectionTitle title="Reset Conditions" hint="When should this alert clear from Active Alerts and optionally notify recovery?" />
                 <div className="space-y-2">
-                  {[
-                    { id: 'auto' as const, title: 'Reset when trigger condition is no longer true', desc: 'Recommended — alert auto-resolves when metrics recover or device comes back up.' },
+                  {s.source === 'syslog' || s.source === 'trap' ? <p className="text-sm text-muted">Event alerts require manual resolution. No automatic recovery notification is sent.</p> : [
+                    { id: 'auto' as const, title: 'Reset when trigger condition is no longer true', desc: 'Alert auto-resolves when metrics recover or device comes back up.' },
                     { id: 'none' as const, title: 'No reset notification', desc: 'Alert still resolves in the system but no recovery message is sent.' },
                   ].map((opt) => (
                     <button
@@ -1251,7 +1266,7 @@ export function AlertRuleWizardDialog({
                 <ReviewRow label="Severity" value={<Badge variant={s.severity === 'critical' ? 'danger' : s.severity === 'warning' ? 'warning' : 'info'}>{s.severity}</Badge>} />
                 <ReviewRow label="Trigger" value={summary.condText} />
                 <ReviewRow label="Hold time" value={s.min_duration ? `${s.min_duration}s` : 'Immediate'} />
-                <ReviewRow label="Reset" value={s.reset_mode === 'auto' ? 'Auto + recovery notify' : 'No recovery notify'} />
+                <ReviewRow label="Reset" value={s.source === 'trap' || s.source === 'syslog' ? 'Manual resolution' : s.reset_mode === 'auto' ? 'Auto + recovery notify' : 'No recovery notify'} />
                 <ReviewRow label="Channels" value={s.notify_channels.length ? `${s.notify_channels.length} selected` : 'None (alert only)'} />
                 <ReviewRow
                   label="Escalation"

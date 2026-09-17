@@ -60,6 +60,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.udt_history import address_history, address_periods, address_evidence
 from app.core.database import get_db
 from app.core.hostnames import normalize_host
 from app.core.security import (
@@ -391,10 +392,7 @@ async def endpoint_detail(endpoint_id: str, db: AsyncSession = Depends(get_db), 
            WHERE l.endpoint_id = :id ORDER BY l.active DESC, l.is_direct DESC, l.last_seen DESC LIMIT 200"""
     ), {"id": endpoint_id})).mappings().all()
 
-    ips = (await db.execute(text(
-        """SELECT host(ip) AS ip, source, active, first_seen, last_seen
-           FROM udt_ip_history WHERE endpoint_id = :id ORDER BY active DESC, last_seen DESC LIMIT 100"""
-    ), {"id": endpoint_id})).mappings().all()
+    ips = await address_history(db, endpoint_id)
 
     logins = (await db.execute(text(
         """SELECT user_name, user_domain, event_id, logon_type, host(ip) AS ip, hostname, event_time
@@ -425,6 +423,40 @@ async def endpoint_detail(endpoint_id: str, db: AsyncSession = Depends(get_db), 
         "logins": [dict(r) for r in logins] if see_users else [],
         "events": [_scrub_event(r, see_users) for r in _fix(events)],
     }
+
+
+@router.get("/endpoints/{endpoint_id}/ip-history")
+async def endpoint_ip_periods(
+    endpoint_id: uuid.UUID, ip: str,
+    skip: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100),
+    db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader),
+):
+    try:
+        address = str(ipaddress.ip_address(ip))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid IP address")
+    exists = (await db.execute(text("SELECT 1 FROM udt_endpoints WHERE id = :id"),
+                               {"id": str(endpoint_id)})).scalar()
+    if not exists:
+        raise HTTPException(status_code=404, detail="Endpoint not found")
+    return await address_periods(db, str(endpoint_id), address, skip, limit)
+
+
+@router.get("/endpoints/{endpoint_id}/ip-evidence")
+async def endpoint_ip_evidence(
+    endpoint_id: uuid.UUID, ip: str,
+    skip: int = Query(0, ge=0), limit: int = Query(25, ge=1, le=100),
+    db: AsyncSession = Depends(get_db), user: User = Depends(udt_reader),
+):
+    try:
+        address = str(ipaddress.ip_address(ip))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid IP address")
+    exists = (await db.execute(text("SELECT 1 FROM udt_endpoints WHERE id = :id"),
+                               {"id": str(endpoint_id)})).scalar()
+    if not exists:
+        raise HTTPException(status_code=404, detail="Endpoint not found")
+    return await address_evidence(db, str(endpoint_id), address, skip, limit)
 
 
 @router.patch("/endpoints/{endpoint_id}")

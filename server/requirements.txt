@@ -8,7 +8,11 @@ pydantic-settings==2.7.0
 PyJWT==2.13.0
 cryptography==50.0.1
 pyasn1==0.6.4
+pysmi==2.0.0
 passlib[bcrypt]==1.7.4
+# Passlib 1.7.4's backend self-test is incompatible with bcrypt 5's
+# over-72-byte rejection. Keep bcrypt_sha256 and legacy hash verification.
+bcrypt==4.3.0
 python-multipart==0.0.32
 sse-starlette==3.4.11
 redis[hiredis]==5.2.1

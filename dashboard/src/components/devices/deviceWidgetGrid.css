@@ -1,0 +1,19 @@
+.device-widget-grid { display:grid; align-items:stretch; position:relative; }
+.device-widget { min-width:0; min-height:0; position:relative; display:flex; flex-direction:column; border-radius:12px; }
+.device-widget-content { min-height:0; min-width:0; flex:1; }
+.is-desktop .device-widget-content { overflow:auto; scrollbar-width:thin; }
+.device-widget-content > * { min-height:100%; }
+.device-widget-content > .device-performance-card { height:100%; }
+.device-widget-toolbar { display:flex; flex-shrink:0; align-items:center; gap:4px; height:32px; padding:2px 6px; border-radius:10px 10px 0 0; background:rgb(var(--primary) / .09); border:1px solid rgb(var(--primary) / .3); color:rgb(var(--primary)); }
+.device-widget-move { display:flex; align-items:center; gap:6px; flex:1; min-width:0; height:28px; cursor:grab; touch-action:none; text-align:left; font-size:11px; font-weight:600; user-select:none; }
+.device-widget-move:active { cursor:grabbing; }
+.device-widget-resize { position:absolute; bottom:0; right:0; width:26px; height:26px; display:flex; align-items:center; justify-content:center; color:rgb(var(--primary)); background:rgb(var(--surface)); border:1px solid rgb(var(--primary) / .5); border-radius:6px 0 10px 0; cursor:nwse-resize; touch-action:none; z-index:5; }
+.device-widget.is-active { outline:2px solid rgb(var(--primary)); box-shadow:0 0 0 5px rgb(var(--primary) / .08); z-index:10; }
+.device-widget-move:focus-visible,.device-widget-resize:focus-visible { outline:2px solid rgb(var(--primary)); outline-offset:2px; }
+.is-editing .device-widget-content { border:1px dashed rgb(var(--primary) / .35); border-top:0; border-radius:0 0 12px 12px; }
+
+/* Small summary widgets must reflow within their user-selected width. */
+.device-boot-time { display:flex; flex-direction:column; justify-content:center; gap:4px; padding:8px; overflow-wrap:anywhere; }
+.device-boot-label { display:flex; align-items:flex-start; gap:5px; font-size:11px; line-height:1.2; }
+.device-boot-label span { min-width:0; }
+.device-boot-value { font-size:14px; line-height:1.25; }

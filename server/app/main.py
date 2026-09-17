@@ -11,6 +11,7 @@ from app.api.v1 import storage_management as storage_api
 from app.api.v1 import security_settings as security_api
 from app.api.v1.probe_trust import router as probe_trust_router
 from app.api.v1 import management_access
+from app.api.v1 import network_events
 from app.api.v1 import sensors as sensors_admin_api
 from app.api.v1 import sensor_api, monitoring_sites
 from app.api.v1 import agents as agents_runtime_api
@@ -80,6 +81,7 @@ def create_app() -> FastAPI:
     app.include_router(host_alert_rules.router, prefix="/api/v1")
     app.include_router(alert_engine.router, prefix="/api/v1")
     app.include_router(traps.router, prefix="/api/v1")
+    app.include_router(network_events.router, prefix="/api/v1")
     app.include_router(ncm.router, prefix="/api/v1")
     app.include_router(ncm.device_router, prefix="/api/v1")
     app.include_router(service_checks.router, prefix="/api/v1")

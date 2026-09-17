@@ -986,7 +986,8 @@ def test_session_paths_collapse_repeated_routes_and_read_view_starts():
     assert "HAVING length(path) > 0" in sql
 
 
-def test_retention_is_parsed_from_table_ttl_and_drives_coverage(monkeypatch):
+@pytest.mark.parametrize("uptime", [1.0, 30.0, 601.0, 30000.0])
+def test_retention_is_parsed_from_table_ttl_and_drives_coverage(monkeypatch, uptime):
     class Result:
         result_rows = [
             ("apm_rum_events", "MergeTree ORDER BY x TTL toDateTime(timestamp) + toIntervalDay(21) SETTINGS a = 1"),
@@ -998,7 +999,8 @@ def test_retention_is_parsed_from_table_ttl_and_drives_coverage(monkeypatch):
             return Result()
 
     monkeypatch.setattr(rum, "_ch", lambda: CH())
-    rum._RETENTION_CACHE["loaded"] = 0.0
+    monkeypatch.setattr(rum.time, "monotonic", lambda: uptime)
+    monkeypatch.setattr(rum, "_RETENTION_CACHE", {"raw": 14, "rollup": 90, "loaded": 0.0})
     assert rum._retention_days() == {"raw": 21, "rollup": 180}
     coverage = rum._raw_coverage(rum._resolve_window("30d"))
     assert coverage["raw_retention_days"] == 21 and coverage["rollup_retention_days"] == 180

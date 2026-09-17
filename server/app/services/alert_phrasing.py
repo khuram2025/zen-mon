@@ -512,6 +512,13 @@ _TRAP_TEMPLATES = {
     "recovery_sms_template": None,
 }
 
+_SYSLOG_TEMPLATES = {
+    **_TRAP_TEMPLATES,
+    'email_subject': '{rule_name}: syslog from {hostname}',
+    'email_body': '{hostname} sent a matching syslog event (severity {syslog_severity}). {event_message}',
+    'sms_template': '{rule_name}: {hostname}: {event_message}',
+}
+
 _DEVICE_TEMPLATES = {
     "email_subject": DEFAULT_EMAIL_SUBJECT,
     "email_body": DEFAULT_EMAIL_BODY,
@@ -539,6 +546,8 @@ def template_kind(rule) -> str:
             return rule.get(name)
         return getattr(rule, name, None)
 
+    if (field("metric") or "") == "syslog":
+        return "syslog"
     if (field("metric") or "") == "trap":
         return "trap"
     if (field("service_check_id") or field("service_check_group_id")
@@ -557,6 +566,8 @@ def default_templates(kind: str = "device") -> dict:
         return dict(_SERVICE_TEMPLATES)
     if kind == "trap":
         return dict(_TRAP_TEMPLATES)
+    if kind == "syslog":
+        return dict(_SYSLOG_TEMPLATES)
     return dict(_DEVICE_TEMPLATES)
 
 

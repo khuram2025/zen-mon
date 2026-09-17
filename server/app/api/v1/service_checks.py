@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from uuid import UUID
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -557,11 +558,12 @@ async def get_service_check_status_history(
 async def get_service_check_hourly_uptime(
     check_id: UUID,
     days: int = Query(default=30, ge=1, le=90),
+    basis: Literal["observed_time", "confirmed"] = Query(default="observed_time"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Hourly uptime % for the last N days (default 30). Powers the calendar."""
-    return await service_check_service.get_hourly_uptime(db, check_id, days)
+    return await service_check_service.get_hourly_uptime(db, check_id, days, basis=basis)
 
 
 @router.get("/{check_id}/sla")
@@ -570,6 +572,7 @@ async def get_service_check_sla(
     hours: int = Query(default=720, ge=1, le=8760),
     from_time: datetime | None = Query(default=None, alias="from"),
     to_time: datetime | None = Query(default=None, alias="to"),
+    basis: Literal["observed_time", "confirmed"] = Query(default="observed_time"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -579,7 +582,7 @@ async def get_service_check_sla(
     together to score an explicit span instead — `hours` alone always ends at now, which
     is the wrong window for a historical range.
     """
-    out = await service_check_service.get_service_sla(db, check_id, hours, from_time, to_time)
+    out = await service_check_service.get_service_sla(db, check_id, hours, from_time, to_time, basis=basis)
     if out.get("error") == "not_found":
         raise HTTPException(status_code=404, detail="Service check not found")
     return out

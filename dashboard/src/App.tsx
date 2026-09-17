@@ -16,6 +16,7 @@ import { AlertsPage } from '@/pages/AlertsPage'
 import { AlertDetailPage } from '@/pages/AlertDetailPage'
 import { AlertRulesPage } from '@/pages/AlertRulesPage'
 import { TrapsPage } from '@/pages/TrapsPage'
+import { NetworkEventsPage } from '@/pages/NetworkEventsPage'
 import { NcmPage } from '@/pages/NcmPage'
 import { NcmDevicePage } from '@/pages/NcmDevicePage'
 import { ServicesPage } from '@/pages/ServicesPage'
@@ -217,6 +218,7 @@ export default function App() {
         <Route path="alerts/:id" element={<AlertDetailPage />} />
         <Route path="alert-rules" element={<AlertRulesPage />} />
         <Route path="traps" element={<TrapsPage />} />
+        <Route path="network-events" element={<NetworkEventsPage />} />
         <Route path="ncm" element={<NcmPage />} />
         <Route path="ncm/:deviceId" element={<NcmDevicePage />} />
         <Route path="reports" element={<ReportsPage />}>

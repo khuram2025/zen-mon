@@ -1,0 +1,25 @@
+[Unit]
+Description=ZenPlus network syslog receiver
+After=network.target
+
+[Service]
+Type=simple
+User=zenplus
+WorkingDirectory=/opt/zenplus/server
+EnvironmentFile=/opt/zenplus/.env
+Environment=SYSLOG_HOST=127.0.0.1
+Environment=SYSLOG_PORT=1514
+Environment=SYSLOG_ALLOWED_NETWORKS=127.0.0.0/8,::1/128
+EnvironmentFile=-/etc/zenplus/syslog.env
+RuntimeDirectory=zenplus-syslog
+RuntimeDirectoryMode=0750
+UMask=0027
+ExecStart=/opt/zenplus/venv/bin/python -m app.services.syslog_receiver
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=150
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

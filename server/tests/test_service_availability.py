@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.service_availability import read_segments, summarize, recovery_start, continuous_up_start
+from app.services.service_availability import confirmed_segments, read_confirmed_segments
 
 
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
@@ -95,3 +96,84 @@ def test_healthy_streak_restarts_after_missing_results():
     assert continuous_up_start([(start, start + timedelta(minutes=2), 1), (recovery, NOW, 1)], NOW) == recovery
     assert continuous_up_start([(start, NOW - timedelta(minutes=5), 1)], NOW) is None
     assert continuous_up_start([(start, NOW, 0)], NOW) is None
+
+
+def test_isolated_failure_is_diagnostic_not_confirmed_downtime():
+    start = NOW - timedelta(seconds=180)
+    failure = start + timedelta(seconds=61.006)
+    recovery = start + timedelta(seconds=122.008)
+    raw = [(start, failure, 1), (failure, recovery, 0), (recovery, NOW, 1)]
+    confirmed = confirmed_segments(raw, [(start - timedelta(days=1), 'up')])
+    assert summarize(raw, start, NOW)['total_downtime_sec'] == pytest.approx(61.002)
+    stats = summarize(confirmed, start, NOW)
+    assert stats['uptime_pct'] == 100
+    assert stats['incident_count'] == 0
+    assert stats['total_downtime_sec'] == 0
+    assert stats['covered_sec'] == 180
+
+
+def test_confirmed_outage_uses_recorded_down_and_recovery_not_current_threshold():
+    start = NOW - timedelta(seconds=300)
+    down, up = start + timedelta(seconds=70), start + timedelta(seconds=190)
+    raw = [(start, start + timedelta(seconds=10), 1),
+           (start + timedelta(seconds=10), start + timedelta(seconds=180), 0),
+           (start + timedelta(seconds=180), NOW, 1)]
+    segments = confirmed_segments(raw, [(start, 'up'), (down, 'down'), (up, 'up')])
+    stats = summarize(segments, start, NOW)
+    assert stats['uptime_pct'] == 60
+    assert stats['total_downtime_sec'] == 120
+    assert stats['incident_count'] == 1
+
+
+def test_confirmed_policy_does_not_fill_monitoring_gaps():
+    start = NOW - timedelta(seconds=600)
+    raw = [(start, start + timedelta(seconds=120), 0), (NOW - timedelta(seconds=60), NOW, 1)]
+    stats = summarize(confirmed_segments(raw, [(start, 'up')]), start, NOW)
+    assert stats['covered_sec'] == 180
+    assert stats['unknown_sec'] == 420
+    assert stats['uptime_pct'] == 100
+
+
+def test_no_state_and_failed_probes_are_unknown_until_success_or_confirmation():
+    start = NOW - timedelta(seconds=120)
+    middle = start + timedelta(seconds=60)
+    raw = [(start, middle, 0), (middle, NOW, 1)]
+    stats = summarize(confirmed_segments(raw, []), start, NOW)
+    assert stats['covered_sec'] == 60
+    assert stats['unknown_sec'] == 60
+    assert stats['uptime_pct'] == 100
+    assert confirmed_segments([(start, NOW, 0)], []) == []
+    assert confirmed_segments([], [(start, 'down')]) == []
+
+
+def test_warning_is_available_and_historical_down_carries_into_window():
+    start = NOW - timedelta(seconds=120)
+    middle = start + timedelta(seconds=60)
+    stats = summarize(confirmed_segments([(start, NOW, 1)],
+        [(start - timedelta(days=1), 'down'), (middle, 'warning')]), start, NOW)
+    assert stats['total_downtime_sec'] == 60
+    assert stats['uptime_pct'] == 50
+
+
+def test_confirmed_hourly_bins_reconcile_with_sla():
+    start = NOW - timedelta(hours=2)
+    middle = start + timedelta(hours=1)
+    segments = confirmed_segments([(start, NOW, 1)],
+        [(start, 'up'), (middle - timedelta(seconds=30), 'down'), (middle + timedelta(seconds=31), 'up')])
+    whole = summarize(segments, start, NOW)
+    left = summarize(segments, start, middle)
+    right = summarize(segments, middle, NOW)
+    assert whole['total_downtime_sec'] == left['total_downtime_sec'] + right['total_downtime_sec'] == 61
+
+
+def test_read_confirmation_loads_prior_and_in_window_state():
+    start = NOW - timedelta(minutes=5)
+    class HistoryCH:
+        def query(self, sql, parameters):
+            assert parameters['id'] == 'check'
+            if 'LIMIT 1' in sql:
+                return SimpleNamespace(result_rows=[(start - timedelta(days=1), 'up')])
+            return SimpleNamespace(result_rows=[(start + timedelta(seconds=60), 'down'),
+                                                 (start + timedelta(seconds=120), 'up')])
+    segments = read_confirmed_segments(HistoryCH(), 'check', start, NOW, [(start, NOW, 1)])
+    assert summarize(segments, start, NOW)['total_downtime_sec'] == 60

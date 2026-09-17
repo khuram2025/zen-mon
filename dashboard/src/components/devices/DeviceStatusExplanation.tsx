@@ -22,7 +22,7 @@ function Breaches({ sample }: { sample: Sample }) {
   </p>)}</div>
 }
 
-export function DeviceStatusExplanation({ deviceId }: { deviceId: string }) {
+export function DeviceStatusExplanation({ deviceId, compact = false }: { deviceId: string; compact?: boolean }) {
   const { data, isError } = useQuery<Explanation>({
     queryKey: ['device-status-explanation', deviceId],
     queryFn: async () => (await api.get(`/devices/${deviceId}/status-explanation`)).data,
@@ -35,6 +35,10 @@ export function DeviceStatusExplanation({ deviceId }: { deviceId: string }) {
   const active = data.status === 'degraded'
   const recent = data.recent_degraded
   const currentEvidence = latest && !latest.stale && !latest.settings_pending
+  if (compact) return <details className={`rounded-xl border bg-surface p-4 ${active ? 'border-warning/40' : 'border-border'}`} open={active || undefined}>
+    <summary className="cursor-pointer text-sm font-semibold">{active ? 'Why this device is degraded' : 'Reachability details'}<span className="mt-1 block text-xs font-normal text-muted">{latest ? `Last check ${new Date(latest.timestamp).toLocaleString()} · ${latest.is_up ? 'Responded' : 'No response'}` : 'No recent check available'}</span></summary>
+    <div className="mt-3"><DeviceStatusExplanation deviceId={deviceId} /></div>
+  </details>
   return <section aria-label="Device status explanation" className={`rounded-xl border p-4 ${active ? 'border-warning/40 bg-warning/5' : 'border-border bg-surface'}`}>
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h3 className="flex items-center gap-2 text-sm font-semibold">{active ? <AlertTriangle className="h-4 w-4 text-warning" /> : <Info className="h-4 w-4 text-info" />} {active ? 'Why this device is degraded' : 'Reachability status details'}</h3>

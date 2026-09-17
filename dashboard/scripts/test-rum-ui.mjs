@@ -107,7 +107,7 @@ assert.match(settings, /<DialogDescription>/, 'RUM onboarding dialogs must expos
 assert.match(nav, /rumTab\('web-vitals'/, 'sidebar must expose RUM Web Vitals navigation')
 assert.match(nav, /rumTab\('sessions'/, 'sidebar must expose RUM session navigation')
 assert.match(page, /RumTabBar/, 'RUM page must keep in-page section navigation')
-assert.match(page, /isErr=\{\(row\) => row\.error_count/, 'actions explorer must classify rows without a free `action` identifier')
+assert.match(page, /ok: 'actions', err: 'long_tasks'/, 'actions histogram must use aggregate interactions and long-task series')
 assert.doesNotMatch(page, /isErr=\{\(row\) => action\./, 'actions histogram must not reference an undefined `action`')
 assert.match(tables, /DurationTimeline/, 'session and resource explorers must show duration timelines')
 assert.match(tables, /aria-label=\{`Open action/, 'action rows must be named so they can be opened from the keyboard and a11y tree')

@@ -3302,7 +3302,8 @@ def _read_retention() -> dict[str, int]:
 
 
 def _retention_days() -> dict[str, int]:
-    if time.monotonic() - float(_RETENTION_CACHE["loaded"]) > 600:
+    loaded = float(_RETENTION_CACHE["loaded"])
+    if loaded == 0.0 or time.monotonic() - loaded > 600:
         try:
             _RETENTION_CACHE.update(_read_retention())
         except Exception:

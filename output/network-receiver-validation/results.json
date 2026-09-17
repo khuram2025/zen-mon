@@ -1,0 +1,24 @@
+{
+  "version": "1.23.12",
+  "status": "installed on development appliance; unpublished",
+  "tests": {
+    "python": {
+      "passed": 793,
+      "failed": 0,
+      "skipped": 43
+    },
+    "integration": {
+      "passed": 22,
+      "failed": 0,
+      "skipped": 0
+    }
+  },
+  "go_packages_passed": 5,
+  "postgres_interface_reindex_repetitions": 3,
+  "service_account_dependencies": "passed",
+  "live_udp_and_authenticated_read": "passed",
+  "receiver_bind": "127.0.0.1:1514",
+  "hardware_certification": false,
+  "package_sha256": "0ad09db0f4de39db291c26e8e962d68103f992f05966a2f82f8c44649e4df4e1",
+  "source_commit": "c30e97f8ac240ddb093a1c49d6794d242c58aca1"
+}

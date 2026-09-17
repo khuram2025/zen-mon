@@ -1,0 +1,31 @@
+{
+  "checked_at": "2026-09-10T15:49:51.685027+00:00",
+  "version": "1.23.10\n2026-09-09T00:00:00Z",
+  "commit": "b4256ff0f0646db137ad2250f8d441b11464e7ee",
+  "working_tree_clean": true,
+  "units": [
+    {
+      "MainPID": "2755",
+      "Id": "zenplus-api.service",
+      "ActiveState": "active",
+      "FragmentPath": "/etc/systemd/system/zenplus-api.service",
+      "running_executable": "/usr/bin/python3.12",
+      "running_executable_sha256": "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118"
+    },
+    {
+      "MainPID": "2759",
+      "Id": "zenplus-poller.service",
+      "ActiveState": "active",
+      "FragmentPath": "/etc/systemd/system/zenplus-poller.service",
+      "running_executable": "/opt/zenplus/bin/zenplus-poller",
+      "running_executable_sha256": "88940c245e75ff9459ba2d741bade17755e9e7ebd7c282bd5bdd8e4085c12562"
+    },
+    {
+      "MainPID": "0",
+      "Id": "zenplus-syslog.service",
+      "ActiveState": "inactive",
+      "FragmentPath": ""
+    }
+  ],
+  "installed_poller_sha256": "88940c245e75ff9459ba2d741bade17755e9e7ebd7c282bd5bdd8e4085c12562"
+}

@@ -1575,7 +1575,7 @@ function SourceMapsTab() {
         open={!!pendingDelete}
         title="Delete source map?"
         description={pendingDelete ? `Errors for ${pendingDelete.application_id}${pendingDelete.release ? ` · ${pendingDelete.release}` : ''} will show minified positions for ${pendingDelete.file_name} again.` : ''}
-        confirmLabel="Delete"
+        confirmText="Delete"
         onConfirm={() => { if (pendingDelete) remove.mutate(pendingDelete.id); setPendingDelete(null) }}
         onOpenChange={(open) => { if (!open) setPendingDelete(null) }}
       />

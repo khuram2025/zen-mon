@@ -58,7 +58,7 @@ export function NocStatusBar({ detail, nodesLive, liveData, updatedAt, onOpenAle
       counts[sk] = (counts[sk] || 0) + 1
     }
     let totalBps = 0
-    let hot: { bps: number; util: number | null; label: string } | null = null
+    const hottest: { value: { bps: number; util: number | null; label: string } | null } = { value: null }
     const nodeById = new Map(detail.nodes.map((n) => [n.id, n]))
     const annLinks = annotationLinksOf(detail)
     const linkCount = detail.links.length + annLinks.length
@@ -70,8 +70,8 @@ export function NocStatusBar({ detail, nodesLive, liveData, updatedAt, onOpenAle
       const f = linkFlow(ld)
       if (!f) return
       totalBps += f.total
-      if (!hot || f.total > hot.bps) {
-        hot = { bps: f.total, util: f.utilPct, label }
+      if (!hottest.value || f.total > hottest.value.bps) {
+        hottest.value = { bps: f.total, util: f.utilPct, label }
       }
     }
 
@@ -98,7 +98,7 @@ export function NocStatusBar({ detail, nodesLive, liveData, updatedAt, onOpenAle
     const faulted =
       detail.links.reduce((acc, l) => acc + (linkFlow(liveData[l.id])?.ifaceDown ? 1 : 0), 0) +
       annLinks.reduce((acc, al) => acc + (linkFlow(liveData[al.id])?.ifaceDown ? 1 : 0), 0)
-    return { counts, totalBps, hot: hot && hot.bps > 0 ? hot : null, alerts, critical, faulted, linkCount, bound }
+    return { counts, totalBps, hot: hottest.value && hottest.value.bps > 0 ? hottest.value : null, alerts, critical, faulted, linkCount, bound }
   }, [detail, nodesLive, liveData])
 
   const age = Math.max(0, Math.round((now - updatedAt) / 1000))

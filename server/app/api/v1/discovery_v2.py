@@ -805,6 +805,9 @@ async def import_results(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_operator_user),
 ):
+    # Serialize inventory imports, including separate discovery runs. A
+    # read-before-insert check alone allows concurrent batches to duplicate IPs.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended('discovery-import', 0))"))
     run = await db.get(DiscoveryRun, run_id)
     if not run:
         raise HTTPException(404, "Run not found")
@@ -835,9 +838,8 @@ async def import_results(
     for rid in payload.result_ids:
         result = await db.get(DiscoveryResultV2, rid)
         if not result or result.run_id != run_id:
-            item = DiscoveryImportItem(batch_id=batch.id, result_id=rid, status="failed",
-                                       error_message="Result not found")
-            db.add(item)
+            # A missing result cannot be referenced by the item foreign key.
+            # Report the failure without poisoning valid items in this batch.
             failed += 1
             item_reports.append({"result_id": rid, "status": "failed",
                                  "error": "result not found"})
@@ -869,7 +871,18 @@ async def import_results(
         if existing_dev:
             linked_device_id = existing_dev[0]
         if want_device:
-            if existing_dev and payload.conflict_strategy == "skip":
+            if existing_dev and payload.conflict_strategy == "update":
+                # Rediscovery updates discovered identity, preserving operator
+                # monitoring, credentials, tags, groups and interface choices.
+                await db.execute(text('''UPDATE devices SET
+                    sys_object_id = COALESCE(:oid, sys_object_id),
+                    vendor = COALESCE(:vendor, vendor), model = COALESCE(:model, model),
+                    os_version = COALESCE(:os_version, os_version)
+                    WHERE id = :id'''), {'id': existing_dev[0], 'oid': result.sys_object_id,
+                    'vendor': result.vendor, 'model': result.model, 'os_version': result.os_version})
+                created_device_id = existing_dev[0]  # links the import result; not counted as a new node
+                report['updated_existing'] = True
+            elif existing_dev:
                 conflict_types.append("ip_exists")
             else:
                 try:
@@ -883,8 +896,8 @@ async def import_results(
                         tags=payload.tags or result.suggested_tags or [],
                         ping_enabled=payload.enable_monitoring,
                         ping_interval=payload.ping_interval,
-                        snmp_enabled=False,
-                        snmp_credential_id=payload.snmp_credential_id,
+                        snmp_enabled=bool(payload.enable_monitoring and (payload.snmp_credential_id or result.credential_used)),
+                        snmp_credential_id=payload.snmp_credential_id or result.credential_used,
                         sys_object_id=result.sys_object_id,
                         vendor=result.vendor,
                         model=result.model,
@@ -893,8 +906,9 @@ async def import_results(
                         status="unknown",
                         created_by=user.id,
                     )
-                    db.add(device)
-                    await db.flush()
+                    async with db.begin_nested():
+                        db.add(device)
+                        await db.flush()
                     created_device_id = device.id
                     linked_device_id = device.id
                     devices_created += 1
@@ -918,9 +932,10 @@ async def import_results(
                 conflict_types.append("server_exists")
             else:
                 try:
-                    created_server_id = await _create_server_from_result(
-                        db, result, payload, user, linked_device_id,
-                    )
+                    async with db.begin_nested():
+                        created_server_id = await _create_server_from_result(
+                            db, result, payload, user, linked_device_id,
+                        )
                     servers_created += 1
                 except Exception as e:
                     error = f"server: {e}"

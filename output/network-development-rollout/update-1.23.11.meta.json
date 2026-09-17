@@ -1,0 +1,22 @@
+{
+  "version": "1.23.11",
+  "changelog": "Development candidate: validated network discovery, polling and alert/event contracts. Not published.",
+  "severity": "normal",
+  "min_version": "1.23.9",
+  "package_sha256": "eb7737859c63cbe95890115a465e0ebf2d402bb96fbc16a83f9610586082776a",
+  "package_size": 119221716,
+  "built_at": "2026-09-10T16:53:07.901030+00:00",
+  "migrations": [
+    "migrate-115-network-events.sql",
+    "migrate-116-network-trap-identity-clickhouse.sql"
+  ],
+  "agent_packages": [
+    {
+      "platform": "windows",
+      "version": "1.12.4",
+      "file_name": "zenplus-agent-1.12.4.msi",
+      "file_size": 227241984,
+      "sha256": "5cb19c8430d3433c0ac51a55e61d321453b7e941c35b6f75ce325eed04c8bb08"
+    }
+  ]
+}

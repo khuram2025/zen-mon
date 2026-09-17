@@ -1,3 +1,4 @@
+import { DeviceWidgetGrid } from '@/components/devices/DeviceWidgetGrid'
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -311,10 +312,8 @@ export function DeviceInterfacesPage() {
         />
       </div>
 
-      {/* Main grid: table + sidebar */}
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-        {/* Table column */}
-        <div className="space-y-3">
+      <DeviceWidgetGrid deviceId={deviceId} vendor={device?.vendor} deviceType={device?.device_type} section="interfaces" widgets={[
+        { id: 'interface-table', title: 'Interface table', width: 9, height: 21, minWidth: 4, minHeight: 4, content: (<div className="space-y-3">
           {/* Toolbar */}
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2 text-xs">
@@ -530,11 +529,8 @@ export function DeviceInterfacesPage() {
               )}
             </CardContent>
           </Card>
-        </div>
-
-        {/* Sidebar */}
-        <div className="space-y-3">
-          <SummaryCard
+        </div>) },
+        { id: 'interface-inventory', title: 'Interface inventory', width: 3, height: 5, minWidth: 2, minHeight: 4, content: (<SummaryCard
             icon={<Network className="h-4 w-4" />}
             title="Inventory"
             tint="primary"
@@ -548,9 +544,8 @@ export function DeviceInterfacesPage() {
               <Stat label="Monitored" value={String(summary.monitored)} />
               <Stat label="Capacity" value={summary.totalCapacity > 0 ? formatBps(summary.totalCapacity) : '—'} />
             </div>
-          </SummaryCard>
-
-          <SummaryCard
+          </SummaryCard>) },
+        { id: 'interface-throughput', title: 'Throughput', width: 3, height: 5, minWidth: 2, minHeight: 4, content: (<SummaryCard
             icon={<Activity className="h-4 w-4" />}
             title="Throughput (now)"
             tint="success"
@@ -573,9 +568,8 @@ export function DeviceInterfacesPage() {
                 <UtilBar pct={summary.aggUtil} />
               </div>
             )}
-          </SummaryCard>
-
-          <SummaryCard
+          </SummaryCard>) },
+        { id: 'interface-talkers', title: 'Top talkers', width: 3, height: 7, minWidth: 2, minHeight: 4, content: (<SummaryCard
             icon={<TrendingUp className="h-4 w-4" />}
             title="Top talkers"
             tint="info"
@@ -595,9 +589,8 @@ export function DeviceInterfacesPage() {
                 ))}
               </div>
             )}
-          </SummaryCard>
-        </div>
-      </div>
+          </SummaryCard>) },
+      ]} />
 
       <SpeedDialog
         open={!!speedDialog}

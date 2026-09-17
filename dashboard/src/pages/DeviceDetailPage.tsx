@@ -1,8 +1,11 @@
+import { DeviceWidgetGrid, type DeviceWidget } from '@/components/devices/DeviceWidgetGrid'
+import { alignDeviceRange } from '@/components/devices/templatePresentation'
+import { deviceAvailabilityBuckets, formatDeviceAvailability, type DeviceAvailabilityPoint } from '@/components/devices/availability'
 import { DeviceStatusExplanation } from '@/components/devices/DeviceStatusExplanation'
 import { MonitoringSites } from '@/components/MonitoringSites'
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Activity,
   AlertTriangle,
@@ -13,6 +16,7 @@ import {
   Box,
   Bell,
   CheckCircle2,
+  ChevronRight,
   Clock,
   Cpu,
   Database,
@@ -50,7 +54,6 @@ import {
   TrendingDown,
   TrendingUp,
   Wifi,
-  Wrench,
   Zap,
   ZapOff,
 } from 'lucide-react'
@@ -67,7 +70,9 @@ import {
 } from 'recharts'
 import { api } from '@/lib/api'
 import { apiErrorMessage, axisRightPad, cn, formatBps, formatBpsAxis, formatBytes, formatDuration, relativeTime, timeAxisTickFormatter, timeTicks, timeTooltipLabelFormatter } from '@/lib/utils'
-import { Card, CardContent } from '@/components/ui/Card'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
+import { Badge } from '@/components/ui/Badge'
+import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { Button } from '@/components/ui/Button'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/Dialog'
@@ -75,7 +80,7 @@ import { Input } from '@/components/ui/Input'
 import { Textarea } from '@/components/ui/Textarea'
 import { DeviceFormDialog } from '@/components/forms/DeviceFormDialog'
 import { ConnectedEndpointsCard } from '@/components/udt/ConnectedEndpointsCard'
-import { TemplateInsightsSection } from '@/components/devices/TemplateInsightsSection'
+import { TemplateInsightsSection, type Insights } from '@/components/devices/TemplateInsightsSection'
 import { toast } from '@/components/ui/Toast'
 import { TimeRangePicker, rangePhrase, useTimeRange } from '@/components/TimeRangePicker'
 import { TagBadge } from '@/components/tags/TagBadge'
@@ -141,14 +146,29 @@ export function DeviceDetailPage() {
   const qc = useQueryClient()
   const [editOpen, setEditOpen] = useState(false)
   const [delOpen, setDelOpen] = useState(false)
-  const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
+  const { range: requestedRange, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
+  const [applianceTime, setApplianceTime] = useState<number | null>(null)
+  const range = alignDeviceRange(requestedRange, applianceTime)
 
   const { data: device, isLoading } = useQuery<any>({
     queryKey: ['device', id],
-    queryFn: async () => (await api.get(`/devices/${id}`)).data,
+    queryFn: async () => {
+      const response = await api.get(`/devices/${id}`)
+      const serverTime = Date.parse(response.headers.date || '')
+      if (Number.isFinite(serverTime)) setApplianceTime(Math.floor(serverTime / 60_000) * 60_000)
+      return response.data
+    },
     refetchInterval: 15_000,
     enabled: !!id,
   })
+
+  const { data: inventoryInsights } = useQuery<Insights>({
+    queryKey: ['device', id, 'template-insights'],
+    queryFn: async () => (await api.get(`/devices/${id}/template-insights`)).data,
+    refetchInterval: 30_000,
+    enabled: !!id && !!device?.snmp_enabled && /f5/i.test(device?.vendor || ''),
+  })
+  const collectedModel = inventoryInsights?.groups.flatMap(group => group.metrics || []).find(metric => metric.key === 'f5_model')?.text
 
   const [maintOpen, setMaintOpen] = useState(false)
   const { data: maint } = useQuery<{ active: any[]; upcoming: any[] }>({
@@ -179,10 +199,17 @@ export function DeviceDetailPage() {
   return (
     <div className="space-y-4">
       <DeviceHeader
-        device={device}
+        device={{ ...device, model: device.model || collectedModel }}
         onEdit={() => setEditOpen(true)}
         onDelete={() => setDelOpen(true)}
         onMaintenance={() => setMaintOpen(true)}
+
+      />
+
+      <MaintenanceBanner windows={maint?.active || []} onManage={() => setMaintOpen(true)} />
+
+
+      <DashboardSection key={id} device={device} deviceId={id!} range={range}
         rangePicker={(
           <TimeRangePicker
             rangeIdx={rangeIdx}
@@ -194,12 +221,6 @@ export function DeviceDetailPage() {
           />
         )}
       />
-
-      <MaintenanceBanner windows={maint?.active || []} onManage={() => setMaintOpen(true)} />
-
-      <DeviceStatusExplanation deviceId={id!} />
-
-      <DashboardSection device={device} deviceId={id!} range={range} />
 
       <DeviceFormDialog open={editOpen} onOpenChange={setEditOpen} device={device} />
       <DeviceMaintenanceDialog
@@ -231,21 +252,10 @@ export function DeviceDetailPage() {
    ════════════════════════════════════════════════════════════ */
 
 function DeviceHeader({
-  device, onEdit, onDelete, onMaintenance, rangePicker,
-}: { device: any; onEdit: () => void; onDelete: () => void; onMaintenance?: () => void; rangePicker?: React.ReactNode }) {
+  device, onEdit, onDelete, onMaintenance,
+}: { device: any; onEdit: () => void; onDelete: () => void; onMaintenance?: () => void }) {
   const health = healthOf(device.status)
   const Icon = typeIconMap[device.device_type] || Box
-
-  // Fetch availability % over the active window so the Uptime pill always has
-  // a value when ping data exists (system boot duration is often null).
-  const { range } = useTimeRange()
-  const { data: uptimeStats } = useQuery<{ devices: Record<string, number> }>({
-    queryKey: ['uptime-stats', range.hours],
-    queryFn: async () =>
-      (await api.get(`/devices/dashboard/uptime-stats?hours=${Math.max(1, Math.round(range.hours))}`)).data,
-    staleTime: 30_000,
-  })
-  const availabilityPct = device?.id && uptimeStats?.devices ? uptimeStats.devices[device.id] : undefined
 
   /* Diagnostics = the reachability checks we can actually run from the server:
      an ICMP probe plus, when SNMP is configured, a live SNMP GET. */
@@ -266,127 +276,58 @@ function DeviceHeader({
   })
 
   const kind = {
-    healthy: { pill: 'bg-success/15 text-success border-success/30', dot: 'bg-success', label: 'Healthy' },
+    healthy: { pill: 'bg-success/15 text-success border-success/30', dot: 'bg-success', label: 'Reachable' },
     warning: { pill: 'bg-warning/15 text-warning border-warning/30', dot: 'bg-warning', label: device.status === 'degraded' ? 'Degraded' : 'Warning' },
     critical: { pill: 'bg-danger/15 text-danger border-danger/30', dot: 'bg-danger', label: 'Critical' },
     offline: { pill: 'bg-surface2 text-muted border-border', dot: 'bg-muted', label: 'Offline' },
     maintenance: { pill: 'bg-primary/15 text-primary border-primary/30', dot: 'bg-primary', label: 'Maintenance' },
   }[health]
 
-  /* Primary row (5 metadata fields) */
-  const primary: Array<{ label: string; value: string }> = [
-    {
-      label: device.ip_address ? 'IP Address' : 'IP (from controller)',
-      value: device.ip_address || device.managed_ip || '—',
-    },
-    { label: 'Type', value: titleCase((device.device_type || 'other').replace('_', ' ')) },
-    { label: 'Location', value: device.location || '—' },
-    { label: 'Vendor / Model', value: [device.vendor, device.model].filter(Boolean).join(' ') || '—' },
-    { label: 'OS / Version', value: device.os_version || '—' },
+  const identity = [
+    { label: 'Management IP', value: device.ip_address || device.managed_ip || 'Not reported' },
+    { label: 'Device type', value: device.device_type === 'other' && device.profile_name ? device.profile_name : titleCase((device.device_type || 'other').replaceAll('_', ' ')) },
+    { label: 'Vendor / model', value: [device.vendor, device.model].filter(Boolean).join(' ') || 'Not reported' },
+    { label: 'Location', value: device.location || 'Not assigned' },
+    { label: 'Group', value: device.group_name || 'No group' },
   ]
-
-  /* Secondary row. Uptime is deliberately absent — the KPI row states both the
-   * availability percentage and the boot time, and carrying it here as well
-   * meant the same number appeared three times above the fold (header, KPI
-   * tile, availability timeline). Entries with nothing to show are dropped
-   * rather than rendered as a dash. */
-  const firmware = device.firmware_version && device.firmware_version !== device.os_version
-    ? device.firmware_version
-    : ''
-  const secondary: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; value: string; color?: string }> = [
-    { icon: Activity, label: 'Last Seen', value: relativeTime(device.last_seen), color: 'text-muted' },
-    { icon: HardDrive, label: 'Serial Number', value: device.serial_number || '', color: 'text-muted' },
-    { icon: GitBranch, label: 'Firmware Version', value: firmware, color: 'text-muted' },
-    { icon: MapPin, label: device.group_name ? '' : 'Group', value: device.group_name || '', color: 'text-muted' },
-  ].filter((s) => s.value)
-
   return (
     <Card>
       <CardContent className="p-4 md:p-5">
-        <div className="flex flex-wrap items-start gap-4">
-          {/* Left: identity + primary metadata */}
-          <div className="flex min-w-0 flex-1 items-center gap-3">
-            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-primary/30 bg-primary/10 text-primary">
-              <Icon className="h-6 w-6" />
-            </span>
-            <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex w-full min-w-0 items-start gap-3 sm:w-auto sm:flex-1">
+            <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary"><Icon className="h-5 w-5" /></span>
+            <div className="min-w-0">
+              <div className="mb-1 text-xs font-medium text-muted">Network device</div>
               <div className="flex flex-wrap items-center gap-2">
-                <h2 className="truncate text-[22px] font-bold tracking-tight">{device.hostname}</h2>
-                <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${kind.pill}`}>
-                  <span className={`h-1.5 w-1.5 rounded-full ${kind.dot}`} />
-                  {kind.label}
+                <h1 className="break-all text-xl font-semibold tracking-tight md:text-2xl">{device.hostname}</h1>
+                <span title="Last reported reachability; component and alert states are shown separately" className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${kind.pill}`}>
+                  <span className={`h-1.5 w-1.5 rounded-full ${kind.dot}`} />{kind.label}
                 </span>
-                {device.managed_by_device_id && (
-                  <Link
-                    to={`/devices/${device.managed_by_device_id}`}
-                    className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary hover:bg-primary/20"
-                    title="Status and metrics come from the managing controller"
-                  >
-                    via {device.managed_by_hostname || 'controller'}
-                  </Link>
-                )}
               </div>
-
-              {/* Primary metadata row */}
-              <div className="mt-2 flex flex-wrap items-start gap-x-6 gap-y-1">
-                {primary.map((m) => (
-                  <div key={m.label} className="min-w-0">
-                    <div className="truncate text-sm font-medium text-text" title={m.value}>{m.value}</div>
-                    <div className="text-[10px] uppercase tracking-wider text-muted">{m.label}</div>
-                  </div>
-                ))}
+              <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
+                <span title={device.last_seen ? new Date(device.last_seen).toLocaleString() : undefined}>Last device check: <span className="font-medium text-text">{device.last_seen ? new Date(device.last_seen).toLocaleString() : 'Not reported'}</span></span>
+                <span>{device.ping_enabled ? 'ICMP enabled' : 'ICMP disabled'} · {device.snmp_enabled ? `SNMP v${device.snmp_version}` : 'SNMP disabled'}</span>
+                {device.managed_by_device_id && <Link to={`/devices/${device.managed_by_device_id}`} className="text-primary hover:underline">Managed by {device.managed_by_hostname || 'controller'}</Link>}
               </div>
             </div>
           </div>
-
-          {/* Right: actions + secondary metadata stacked below */}
-          <div className="flex flex-col items-end gap-2">
-            <div className="flex flex-wrap items-center justify-end gap-2">
-              {rangePicker}
-              {rangePicker && <span className="hidden h-5 w-px bg-border sm:inline-block" />}
-              <Button variant="outline" size="default" className="h-9" onClick={onEdit}>
-                <Pencil className="h-4 w-4" />
-                Edit Device
-              </Button>
-              {onMaintenance && (
-                <Button variant="outline" size="default" className="h-9" onClick={onMaintenance}>
-                  <Wrench className="h-4 w-4" />
-                  Maintenance
-                </Button>
-              )}
-              <Button
-                variant="outline"
-                size="default"
-                className="h-9"
-                disabled={diagnostics.isPending}
-                onClick={() => { setDiagOpen(true); diagnostics.mutate() }}
-              >
-                {diagnostics.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
-                Run Diagnostics
-              </Button>
-              <Button
-                variant="outline"
-                size="icon"
-                className="h-9 w-9 text-muted hover:text-danger"
-                onClick={onDelete}
-                title="Delete device"
-              >
-                <Trash2 className="h-4 w-4" />
-              </Button>
-            </div>
-
-            {/* Secondary metadata — under the action buttons */}
-            <div className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1 text-[11px]">
-              {secondary.map((s, i) => (
-                <span key={i} className="inline-flex items-center gap-1.5">
-                  <s.icon className={`h-3 w-3 ${s.color || 'text-muted'}`} />
-                  {s.label && <span className="text-muted">{s.label}</span>}
-                  <span className="font-medium text-text">{s.value}</span>
-                </span>
-              ))}
-            </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" className="h-9" disabled={diagnostics.isPending} onClick={() => { setDiagOpen(true); diagnostics.mutate() }}>
+              {diagnostics.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}Run Diagnostics
+            </Button>
+            <details className="relative" onKeyDown={(event) => { if (event.key === 'Escape') event.currentTarget.open = false }}>
+              <summary className="flex h-9 cursor-pointer list-none items-center gap-1.5 rounded-lg border border-border px-3 text-sm font-medium hover:bg-surface2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary [&::-webkit-details-marker]:hidden"><SettingsIcon className="h-4 w-4" />Manage</summary>
+              <div className="absolute right-0 z-30 mt-2 w-52 rounded-lg border border-border bg-surface p-1 shadow-xl" onClick={(event) => { const details = event.currentTarget.closest('details'); if (details) details.open = false }}>
+                <button className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm hover:bg-surface2" onClick={onEdit}><Pencil className="h-4 w-4" />Edit device</button>
+                {onMaintenance && <button className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm hover:bg-surface2" onClick={onMaintenance}><Wrench className="h-4 w-4" />Maintenance</button>}
+                <button className="flex w-full items-center gap-2 rounded border-t border-border px-3 py-2 text-left text-sm text-danger hover:bg-danger/10" onClick={onDelete}><Trash2 className="h-4 w-4" />Delete device</button>
+              </div>
+            </details>
           </div>
         </div>
+        <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 border-t border-border/60 pt-4 lg:grid-cols-5">
+          {identity.map(item => <div key={item.label} className="min-w-0"><dt className="text-xs text-muted">{item.label}</dt><dd className="mt-1 break-words text-sm font-medium">{item.value}</dd></div>)}
+        </dl>
       </CardContent>
 
       <DiagnosticsDialog
@@ -554,12 +495,26 @@ type NetflowApplication = { name: string; bytes: number; packets: number; flows:
 type NetflowConversation = { src: string; dst: string; protocol_name: string; dst_port: number; service: string; bytes: number; packets: number; flows: number }
 
 function DashboardSection({
-  device, deviceId, range,
+  device, deviceId, range, rangePicker,
 }: {
   device: any
   deviceId: string
+  rangePicker: React.ReactNode
   range: { hours: number; fromISO: string; toISO: string; isCustom: boolean; label: string }
 }) {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const sections = [
+    { id: 'overview', label: 'Overview' },
+    ...(device.snmp_enabled ? [{ id: 'metrics', label: 'Device metrics' }] : []),
+    { id: 'events', label: 'Events & alerts' },
+    { id: 'inventory', label: 'Inventory & monitoring' },
+  ]
+  const section = sections.some(item => item.id === searchParams.get('tab')) ? searchParams.get('tab')! : 'overview'
+  const [metricGroup, setMetricGroup] = useState<string | undefined>()
+  function selectSection(value: string) {
+    setSearchParams(previous => { const next = new URLSearchParams(previous); next.set('tab', value); return next })
+  }
+  const exploreMetrics = (group?: string) => { setMetricGroup(group); selectSection('metrics') }
   const snmp = !!device.snmp_enabled
   const hoursRange = range.hours
   // Chart x-domains are the selected window, not the extent of the returned
@@ -571,7 +526,7 @@ function DashboardSection({
   const [inventoryOpen, setInventoryOpen] = useState(false)
 
   const { data: pingData } = useQuery<{
-    points: { timestamp: string; rtt_ms: number; packet_loss: number; jitter_ms: number; is_up: boolean }[]
+    points: (DeviceAvailabilityPoint & { rtt_ms: number; packet_loss: number; jitter_ms: number })[]
   }>({
     queryKey: ['device', deviceId, 'ping-metrics', range.fromISO, range.toISO],
     queryFn: async () =>
@@ -672,13 +627,16 @@ function DashboardSection({
 
   /* Derived series / KPIs */
   const cpu = metrics?.cpu
-  const mem = metrics?.memory
+  const isF5 = /f5/i.test(device.vendor || '') || /f5 big-ip/i.test(device.profile_name || '')
+  // Use a new series for the corrected system basis, so old maximum-domain
+  // history is never mixed into an "overall RAM" chart.
+  const mem = isF5 ? metrics?.f5_system_memory_pct : metrics?.memory
   const cpuVal = cpu?.points?.length ? cpu.points[cpu.points.length - 1].value : null
   const memVal = mem?.points?.length ? mem.points[mem.points.length - 1].value : null
 
   const pts = pingData?.points || []
   const rttPts = pts.map((p) => ({ ts: new Date(p.timestamp).getTime(), rtt: p.rtt_ms, loss: p.packet_loss, jitter: p.jitter_ms }))
-  const lastRtt = rttPts.length ? rttPts[rttPts.length - 1].rtt : device.last_rtt_ms
+  const lastRtt = rttPts.length ? rttPts[rttPts.length - 1].rtt : null
   const avgLoss = rttPts.length ? rttPts.reduce((s, p) => s + p.loss, 0) / rttPts.length : null
 
   /* Total bandwidth across interfaces (sum of last in+out bps) */
@@ -715,10 +673,7 @@ function DashboardSection({
     staleTime: 30_000,
   })
   const availabilityPct = deviceId && uptimeStats?.devices ? uptimeStats.devices[deviceId] : undefined
-  const availabilityLabel =
-    availabilityPct === undefined
-      ? '—'
-      : `${availabilityPct.toFixed(availabilityPct >= 99.95 ? 1 : 2)}%`
+  const availabilityLabel = formatDeviceAvailability(availabilityPct)
 
   const cpuTrend = percentTrend(cpu?.points?.map((p) => p.value) || [])
   const memTrend = percentTrend(mem?.points?.map((p) => p.value) || [])
@@ -741,7 +696,7 @@ function DashboardSection({
   const lossSeries = rttPts.map((p) => p.loss)
   const bwMbpsSeries = bwSeries.map((p) => p.value / 1_000_000)
   // Real availability sparkline: 100 when the check was up, 0 when it was down.
-  const uptimeSpark = pts.map((p) => (isUpPoint(p.is_up) ? 100 : 0))
+  const uptimeSpark = pts.filter(p => p.is_up != null).map(p => p.uptime_pct ?? (isUpPoint(p.is_up) ? 100 : 0))
 
   const perfStats = {
     cpu: { avg: avg(cpuSeries), max: Math.max(0, ...cpuSeries) },
@@ -754,7 +709,7 @@ function DashboardSection({
 
   /* Real alerts raised against this device. The card used to list SNMP traps
      under an "Alerts" heading, which is a different thing entirely. */
-  const { data: alertsResp } = useQuery<{ data: DeviceAlert[]; meta: { total: number } }>({
+  const { data: alertsResp, isPending: alertsLoading, isError: alertsError } = useQuery<{ data: DeviceAlert[]; meta: { total: number } }>({
     queryKey: ['device', deviceId, 'alerts'],
     queryFn: async () => (await api.get(`/alerts?device_id=${deviceId}&limit=20`)).data,
     refetchInterval: 30_000,
@@ -762,12 +717,13 @@ function DashboardSection({
   const deviceAlerts = alertsResp?.data || []
   // The list above is capped at 20 — ask the API for the real active count so
   // the Acknowledge button can't understate what it is about to change.
-  const { data: activeAlertsResp } = useQuery<{ meta: { total: number } }>({
+  const { data: activeAlertsResp } = useQuery<{ data: DeviceAlert[]; meta: { total: number } }>({
     queryKey: ['device', deviceId, 'alerts', 'active-count'],
-    queryFn: async () => (await api.get(`/alerts?device_id=${deviceId}&status=active&limit=1`)).data,
+    queryFn: async () => (await api.get(`/alerts?device_id=${deviceId}&status=active&limit=5`)).data,
     refetchInterval: 30_000,
   })
   const activeAlertCount = activeAlertsResp?.meta?.total ?? 0
+  const alertPreview = [...(activeAlertsResp?.data || []), ...deviceAlerts.filter(alert => !activeAlertsResp?.data?.some(active => active.id === alert.id))]
   // Open alerts first (that's what needs attention), then recent history.
   // Legacy rows stored the rendered SMS template as the message — strip the
   // "[ZenPlus SEVERITY]" transport prefix so the list reads as events.
@@ -815,152 +771,68 @@ function DashboardSection({
     [wantsEventFallback, fbTraps, fbStatus, wideFrom, range.toISO],
   )
 
+  const overviewWidgets: DeviceWidget[] = [
+    ...(device.ping_enabled ? [{ id: 'availability', title: 'Availability', width: 2, height: 4, minWidth: 2, minHeight: 4, compact: true, content: (<KpiTile icon={<Clock className="h-4 w-4" />} label="Availability" value={availabilityLabel} trend={null}
+            color={availabilityPct == null ? 'info' : availabilityPct >= 99.9 ? 'success' : availabilityPct >= 95 ? 'warning' : 'danger'} series={uptimeSpark} subtitle={range.label} />) }] : []),
+    ...(device.ping_enabled ? [{ id: 'latency', title: 'Latency', width: 2, height: 4, minWidth: 2, minHeight: 4, compact: true, content: (<KpiTile icon={<Activity className="h-4 w-4" />} label="Latency" value={lastRtt != null ? `${Number(lastRtt).toFixed(1)} ms` : '—'} trend={latTrend} color="info" invertTrend series={latSeries.slice(-22)} subtitle={lastRtt == null ? 'No samples in this range' : 'Latest sample in range'} />) }] : []),
+    ...(device.ping_enabled ? [{ id: 'packet-loss', title: 'Packet loss', width: 2, height: 4, minWidth: 2, minHeight: 4, compact: true, content: (<KpiTile icon={<ZapOff className="h-4 w-4" />} label="Packet loss" value={avgLoss != null ? `${avgLoss.toFixed(1)}%` : '—'} trend={lossTrend} color={avgLoss == null ? 'info' : avgLoss === 0 ? 'success' : avgLoss < 2 ? 'warning' : 'danger'} invertTrend series={lossSeries.slice(-22)} subtitle={`Average · ${range.label}`} />) }] : []),
+    ...(cpuVal != null ? [{ id: 'cpu', title: 'CPU usage', width: 2, height: 4, minWidth: 2, minHeight: 4, compact: true, content: (<KpiTile icon={<Cpu className="h-4 w-4" />} label="CPU usage" value={`${cpuVal.toFixed(0)}%`} trend={cpuTrend} color="info" invertTrend series={cpuSeries.slice(-22)} subtitle="Latest sample in range" />) }] : []),
+    ...(memVal != null ? [{ id: 'memory', title: isF5 ? 'System RAM' : 'Memory usage', width: 2, height: 4, minWidth: 2, minHeight: 4, compact: true, content: (<KpiTile icon={<MemoryStick className="h-4 w-4" />} label={isF5 ? "System RAM" : "Memory usage"} value={`${memVal.toFixed(0)}%`} trend={memTrend} color="accent" invertTrend series={memSeries.slice(-22)} subtitle={isF5 ? "System used / system total" : "Latest sample in range"} />) }] : []),
+    ...(snmp ? [{ id: 'interfaces-up', title: 'Interfaces up', width: 2, height: 4, minWidth: 2, minHeight: 4, compact: true, content: (<KpiTile icon={<Network className="h-4 w-4" />} label="Interfaces up" value={ifs ? `${ifUp} / ${ifTotal}` : '—'} trend={null} color="info" subtitle="Latest interface inventory" />) }] : []),
+    ...(isF5 ? [
+      { id: 'f5-tmm-memory', title: 'TMM memory', metric: 'f5_tmm_memory_pct', subtitle: 'Traffic processing RAM' },
+      { id: 'f5-host-memory', title: 'Non-TMM memory', metric: 'f5_host_memory_pct', subtitle: 'Host processes · separate from TMM' },
+      { id: 'f5-swap-memory', title: 'Swap usage', metric: 'f5_swap_memory_pct', subtitle: 'Occupancy · not paging activity' },
+    ].flatMap(item => {
+      const points = metrics?.[item.metric]?.points || []
+      const value = points.length ? points[points.length - 1].value : null
+      return value == null ? [] : [{ id: item.id, title: item.title, width: 2, height: 4, minWidth: 2, minHeight: 4, compact: true,
+        content: <KpiTile icon={<MemoryStick className="h-4 w-4" />} label={item.title} value={`${value.toFixed(1)}%`} trend={null} color="accent" series={points.map(p => p.value).slice(-22)} subtitle={item.subtitle} /> }]
+    }) : []),
+    ...(snmp && !!device.profile_name ? [{ id: 'device-health', title: 'Device health & metrics', width: 8, height: 10, minWidth: 2, minHeight: 5, compact: false, content: (<TemplateInsightsSection deviceId={deviceId} rangeHours={range.hours} summary onExplore={exploreMetrics} />) }] : []),
+    ...(true ? [{ id: 'alerts', title: 'Alerts', width: 4, height: 10, minWidth: 2, minHeight: 5, compact: false, content: (<DeviceAlertsCard alerts={alertPreview} activeCount={activeAlertsResp?.meta?.total} loading={alertsLoading} error={alertsError} deviceId={deviceId} />) }] : []),
+    ...(device.ping_enabled ? [{ id: 'availability-timeline', title: 'Availability timeline', width: 8, height: 5, minWidth: 2, minHeight: 4, compact: false, content: (<AvailabilityTimelineCard points={pts} rangeLabel={range.label} fromTs={fromTs} toTs={toTs} availabilityPct={availabilityPct} />) }] : []),
+    ...(true ? [{ id: 'reachability', title: 'Reachability details', width: 4, height: 5, minWidth: 2, minHeight: 3, compact: false, content: (<DeviceStatusExplanation deviceId={deviceId} compact />) }] : []),
+    ...(perfSeries.length > 0 ? [{ id: 'performance', title: 'Performance overview', width: 8, height: 10, minWidth: 3, minHeight: 8, compact: false, content: (<PerformanceOverviewCard series={perfSeries} stats={perfStats} rangeLabel={range.label} rangeHours={range.hours} fromTs={fromTs} toTs={toTs} />) }] : []),
+    ...(uptimeSec != null ? [{ id: 'boot-time', title: 'Time since reboot', width: 2, height: 2, minWidth: 1, minHeight: 2, compact: true, content: (<div className="device-boot-time rounded-lg border border-border bg-surface text-sm"><div className="device-boot-label text-muted"><Clock className="h-3.5 w-3.5 shrink-0" /><span>Time since reboot</span></div><span className="device-boot-value font-medium">{uptimeDaysCompact}</span></div>) }] : []),
+    ...(snmp ? [{ id: 'interfaces', title: 'Interface status', width: 12, height: 10, minWidth: 3, minHeight: 6, compact: false, content: (<InterfaceStatusCard ifs={ifs || []} ifMetrics={ifMetrics || {}} deviceId={deviceId} />) }] : []),
+    ...(hasNetflow ? [{ id: 'netflow', title: 'NetFlow', width: 12, height: 11, minWidth: 3, minHeight: 7, compact: false, content: (<DeviceNetflowCard exporterIp={netflowExporter} overview={netflowOverview!} series={netflowSeries || []} applications={netflowApplications || []} conversations={netflowConversations || []} rangeLabel={range.label} rangeHours={range.hours} fromTs={fromTs} toTs={toTs} />) }] : []),
+  ]
+
   return (
     <>
-      {/* ═══════════ KPI row (6 cards) ═══════════ */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
-        <KpiTile
-          icon={<Cpu className="h-4 w-4" />}
-          label="CPU Usage"
-          value={cpuVal != null ? `${cpuVal.toFixed(0)}%` : '—'}
-          trend={cpuTrend}
-          color="info"
-          invertTrend
-          series={cpuSeries.slice(-22)}
-        />
-        <KpiTile
-          icon={<MemoryStick className="h-4 w-4" />}
-          label="Memory Usage"
-          value={memVal != null ? `${memVal.toFixed(0)}%` : '—'}
-          trend={memTrend}
-          color="accent"
-          invertTrend
-          series={memSeries.slice(-22)}
-        />
-        <KpiTile
-          icon={<Network className="h-4 w-4" />}
-          label="Interface Utilization"
-          value={ifTotal ? formatUtilPct(ifUtilPct) : '—'}
-          trend={ifTrend}
-          trendLabel="total throughput vs. earlier in range"
-          color="success"
-          invertTrend
-          series={bwMbpsSeries.slice(-22)}
-          subtitle={ifTotal ? `Busiest of ${ifTotal} interfaces` : undefined}
-        />
-        <KpiTile
-          icon={<Activity className="h-4 w-4" />}
-          label="Latency"
-          value={lastRtt != null ? `${Number(lastRtt).toFixed(0)} ms` : '—'}
-          trend={latTrend}
-          color="info"
-          invertTrend
-          series={latSeries.slice(-22)}
-        />
-        <KpiTile
-          icon={<ZapOff className="h-4 w-4" />}
-          label="Packet Loss"
-          value={avgLoss != null ? `${avgLoss.toFixed(1)}%` : '—'}
-          trend={lossTrend}
-          // Zero loss is a healthy state — don't paint it in the danger colour.
-          color={avgLoss == null ? 'info' : avgLoss === 0 ? 'success' : avgLoss < 2 ? 'warning' : 'danger'}
-          invertTrend
-          series={lossSeries.slice(-22)}
-          subtitle={avgLoss != null ? `Avg over ${rangePhrase(range.label)}` : undefined}
-        />
-        <KpiTile
-          icon={<Clock className="h-4 w-4" />}
-          label={`Uptime (${range.label})`}
-          value={availabilityLabel}
-          trend={null}
-          color={
-            availabilityPct === undefined
-              ? 'warning'
-              : availabilityPct >= 99.9
-                ? 'success'
-                : availabilityPct >= 95
-                  ? 'warning'
-                  : 'danger'
-          }
-          series={uptimeSpark}
-          // Device boot time, distinct from the availability % above it.
-          subtitle={uptimeSec != null ? `Booted ${uptimeDaysCompact} ago` : undefined}
-        />
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-2">
+        <nav aria-label="Device sections" className="flex min-w-0 flex-wrap items-center gap-1">
+          {sections.map(item => <button key={item.id} type="button" aria-current={section === item.id ? 'page' : undefined}
+            className={cn('rounded-lg px-3 py-2 text-sm font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary', section === item.id ? 'bg-primary/10 text-primary' : 'text-muted hover:bg-surface2 hover:text-text')}
+            onClick={() => selectSection(item.id)}>{item.label}</button>)}
+          {snmp && <Link to={`/devices/${deviceId}/interfaces?${searchParams.toString()}`} className="inline-flex items-center gap-1 rounded-lg px-3 py-2 text-sm font-medium text-muted hover:bg-surface2 hover:text-text">Interfaces<ArrowRight className="h-3.5 w-3.5" /></Link>}
+        </nav>
+        {rangePicker}
       </div>
 
-      {/* ═══════════ Availability timeline (full width) ═══════════ */}
-      {device.ping_enabled && (
-        <AvailabilityTimelineCard points={pts} rangeLabel={range.label} fromTs={fromTs} toTs={toTs} />
-      )}
+      {section === 'overview' && <div className="space-y-4" aria-label="Device overview">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <h2 className="text-base font-semibold">Operational overview</h2>
+          <span className="text-xs text-muted">{range.label} · {new Date(range.fromISO).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}–{new Date(range.toISO).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · appliance time</span>
+        </div>
+        <DeviceWidgetGrid deviceId={deviceId} vendor={device.vendor} deviceType={device.device_type} widgets={overviewWidgets} />
+      </div>}
 
-      {/* ═══════════ Middle row (3 cols) ═══════════ */}
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,0.95fr)_minmax(0,0.8fr)]">
-        <PerformanceOverviewCard
-          series={perfSeries}
-          stats={perfStats}
-          rangeLabel={range.label}
-          rangeHours={range.hours}
-          fromTs={fromTs}
-          toTs={toTs}
-        />
-        <InterfaceStatusCard
-          ifs={ifs || []}
-          ifMetrics={ifMetrics || {}}
-          deviceId={deviceId}
-        />
-        <HealthScoreCard
-          score={healthScore}
-          alerts={recentAlerts}
-          totalAlerts={deviceAlerts.length}
-          deviceId={deviceId}
-          memVal={memVal}
-          cpuVal={cpuVal}
-          avgLoss={avgLoss}
-          onViewDetails={() => setHealthOpen(true)}
-        />
-      </div>
+      {section === 'metrics' && <TemplateInsightsSection deviceId={deviceId} vendor={device.vendor} deviceType={device.device_type} rangeHours={range.hours} initialGroup={metricGroup} />}
 
-      {/* ═══════════ Vendor template insights ═══════════ */}
-      {snmp && <TemplateInsightsSection deviceId={deviceId} rangeHours={range.hours} />}
+      {section === 'events' && <DeviceWidgetGrid deviceId={deviceId} vendor={device.vendor} deviceType={device.device_type} section="events" widgets={[
+        { id: 'alerts', title: 'Alerts', width: 6, height: 12, minWidth: 2, minHeight: 5, content: <DeviceAlertsCard alerts={alertPreview} activeCount={activeAlertsResp?.meta?.total} loading={alertsLoading} error={alertsError} deviceId={deviceId} /> },
+        { id: 'activity', title: 'Recent events', width: 6, height: 12, minWidth: 2, minHeight: 5, content: <ActivityLogCard events={activityEvents.length > 0 ? activityEvents : fallbackEvents} rangeLabel={range.label} showingFallback={activityEvents.length === 0 && fallbackEvents.length > 0} onViewAll={() => setEventsOpen(true)} /> },
+      ]} />}
 
-      {hasNetflow && (
-        <DeviceNetflowCard
-          exporterIp={netflowExporter}
-          overview={netflowOverview!}
-          series={netflowSeries || []}
-          applications={netflowApplications || []}
-          conversations={netflowConversations || []}
-          rangeLabel={range.label}
-          rangeHours={range.hours}
-          fromTs={fromTs}
-          toTs={toTs}
-        />
-      )}
-
-      {/* ═══════════ Bottom row ═══════════ */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        <InventoryConfigCard
-          device={device}
-          entities={entities || []}
-          onDetails={() => setInventoryOpen(true)}
-        />
-        <ActivityLogCard
-          events={activityEvents.length > 0 ? activityEvents : fallbackEvents}
-          rangeLabel={range.label}
-          showingFallback={activityEvents.length === 0 && fallbackEvents.length > 0}
-          onViewAll={() => setEventsOpen(true)}
-        />
-        <EnvironmentalActionsCard
-          deviceId={deviceId}
-          snmpEnabled={snmp}
-          metrics={metrics || {}}
-          sensors={sensors || []}
-          openAlerts={activeAlertCount}
-        />
-        {snmp && ['switch', 'router', 'firewall'].includes(device.device_type) && (
-          <ConnectedEndpointsCard deviceId={deviceId} />
-        )}
-      </div>
+      {section === 'inventory' && <DeviceWidgetGrid deviceId={deviceId} vendor={device.vendor} deviceType={device.device_type} section="inventory" widgets={[
+        { id: 'inventory', title: 'Inventory & configuration', width: 6, height: 10, minWidth: 2, minHeight: 4, content: <InventoryConfigCard device={device} entities={entities || []} onDetails={() => setInventoryOpen(true)} /> },
+        { id: 'monitoring-sites', title: 'Monitoring sites', width: 6, height: 7, minWidth: 2, minHeight: 3, content: <Card><CardContent className="p-4"><MonitoringSites targetType="device" targetId={deviceId} compact /></CardContent></Card> },
+        { id: 'environment', title: 'Environment & actions', width: 6, height: 9, minWidth: 2, minHeight: 4, content: <EnvironmentalActionsCard deviceId={deviceId} snmpEnabled={snmp} metrics={metrics || {}} sensors={sensors || []} openAlerts={activeAlertCount} /> },
+        ...(snmp && ['switch', 'router', 'firewall'].includes(device.device_type) ? [{ id: 'connected-endpoints', title: 'Connected endpoints', width: 6, height: 9, minWidth: 3, minHeight: 4, content: <ConnectedEndpointsCard deviceId={deviceId} /> }] : []),
+        { id: 'reachability', title: 'Reachability details', width: 12, height: 9, minWidth: 2, minHeight: 3, content: <DeviceStatusExplanation deviceId={deviceId} /> },
+      ]} />}
 
       <EventsDialog
         open={eventsOpen}
@@ -983,6 +855,18 @@ function DashboardSection({
       />
     </>
   )
+}
+
+function DeviceAlertsCard({ alerts, activeCount, deviceId, loading, error }: { alerts: DeviceAlert[]; activeCount?: number; deviceId: string; loading?: boolean; error?: boolean }) {
+  const recent = [...alerts].sort((a, b) => Number(b.status === 'active') - Number(a.status === 'active') || Date.parse(b.triggered_at) - Date.parse(a.triggered_at)).slice(0, 5)
+  return <Card><CardContent className="p-4">
+    <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="flex items-center gap-2 text-sm font-semibold"><BellRing className="h-4 w-4 text-muted" />Alerts<span className={cn('rounded-full px-2 py-0.5 text-xs', activeCount ? 'bg-danger/10 text-danger' : 'bg-surface2 text-muted')}>{activeCount == null ? '—' : activeCount} active</span></h3><Link className="text-xs text-primary hover:underline" to={`/alerts?device_id=${deviceId}`}>View all</Link></div>
+    <p className="mt-1 text-xs text-muted">Current alerts and latest history · independent of chart range</p>
+    <div className="mt-3 divide-y divide-border/50">{loading ? <p className="py-3 text-sm text-muted">Loading alerts…</p> : error ? <p className="py-3 text-sm text-warning">Alert history is temporarily unavailable.</p> : recent.length ? recent.map(alert => <div key={alert.id} className="py-3 first:pt-0 last:pb-0">
+      <div className="flex items-center gap-2 text-xs"><span className={cn('font-medium', alert.status === 'resolved' ? 'text-muted' : alert.severity === 'critical' ? 'text-danger' : 'text-warning')}>{titleCase(alert.severity)} · {titleCase(alert.status)}</span><span className="ml-auto shrink-0 text-muted" title={new Date(alert.triggered_at).toLocaleString()}>{relativeTime(alert.triggered_at)}</span></div>
+      <p className="mt-1 break-words text-sm leading-relaxed">{(alert.message || 'Alert').replace(/^\[ZenPlus\s+[A-Z]+\]\s*/, '')}</p>
+    </div>) : <p className="py-3 text-sm text-muted">No recorded alerts for this device.</p>}</div>
+  </CardContent></Card>
 }
 
 /* ════════════════════════════════════════════════════════════
@@ -1026,8 +910,8 @@ function KpiTile({
         <span className="text-[11px] font-semibold uppercase tracking-wider text-muted">{label}</span>
       </div>
 
-      <div className="flex items-baseline gap-2">
-        <div className="text-[26px] font-bold leading-none tabular-nums" style={{ color: c.stroke }}>{value}</div>
+      <div className="flex flex-wrap items-baseline gap-2">
+        <div className="text-2xl font-semibold leading-none tabular-nums" style={{ color: c.stroke }}>{value}</div>
         {trend != null && (
           <span
             className={`inline-flex items-center gap-0.5 text-[11px] font-medium tabular-nums ${
@@ -1083,14 +967,14 @@ function PerformanceOverviewCard({
   }, [series, fromTs, toTs])
 
   return (
-    <Card>
-      <CardContent className="p-4">
+    <Card className="device-performance-card">
+      <CardContent className="flex h-full min-h-[300px] flex-col p-4">
         <div className="mb-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Activity className="h-4 w-4 text-primary" />
             <h3 className="text-sm font-semibold">Performance Overview</h3>
           </div>
-          <div className="flex items-baseline gap-2">
+          <div className="flex flex-wrap items-baseline gap-2">
             {coverage != null && (
               <span
                 className="text-[10px] text-muted"
@@ -1109,7 +993,7 @@ function PerformanceOverviewCard({
           <LegendDot color="rgb(var(--accent))" label="Memory (%)" />
         </div>
 
-        <div className="mt-2 h-52">
+        <div className="mt-2 min-h-[160px] flex-1">
           {hasData ? (
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={series} margin={{ top: 4, right: axisRightPad(rangeHours), bottom: 0, left: 0 }}>
@@ -1491,7 +1375,7 @@ function HealthScoreCard({
     <Card className="flex flex-col">
       <CardContent className="flex flex-1 flex-col p-4">
         <div className="mb-2 flex items-center justify-between">
-          <h3 className="text-sm font-semibold">Health Score</h3>
+          <h3 className="text-sm font-semibold">Performance Score</h3>
           <button
             type="button"
             onClick={onViewDetails}
@@ -1503,8 +1387,10 @@ function HealthScoreCard({
 
         <div className="flex items-center gap-4">
           <div className="flex shrink-0 flex-col items-center">
-            <HealthGauge value={score} color={color} />
-            <div className="mt-1 text-[11px] font-semibold" style={{ color }}>{label}</div>
+            {cpuVal != null && memVal != null && avgLoss != null ? <>
+              <HealthGauge value={score} color={color} />
+              <div className="mt-1 text-[11px] font-semibold" style={{ color }}>{label}</div>
+            </> : <div className="py-6 text-xs text-muted">Insufficient data</div>}
           </div>
           <div className="min-w-0 flex-1 text-[11px] leading-relaxed text-muted">
             {detractors.length > 0 ? (
@@ -1513,11 +1399,12 @@ function HealthScoreCard({
                 {detractors.join(', ')}.
               </>
             ) : (
-              <>CPU, memory and packet loss are all within their thresholds.</>
+              <>{cpuVal != null && memVal != null && avgLoss != null ? 'CPU, memory and packet loss are within their thresholds.' : 'Waiting for CPU, memory and packet-loss readings.'}</>
             )}
             {totalAlerts > 0 && (
               <> {totalAlerts} alert{totalAlerts === 1 ? '' : 's'} in this window.</>
             )}
+            <p className="mt-1">Score covers CPU, memory and packet loss. Component health is shown separately.</p>
           </div>
         </div>
 
@@ -1607,6 +1494,14 @@ function HealthGauge({ value, color }: { value: number; color: string }) {
 function InventoryConfigCard({
   device, entities, onDetails,
 }: { device: any; entities: any[]; onDetails: () => void }) {
+  const { data: templateInsights } = useQuery<Insights>({
+    queryKey: ['device', device.id, 'template-insights'],
+    queryFn: async () => (await api.get(`/devices/${device.id}/template-insights`)).data,
+    enabled: !!device.snmp_enabled,
+    staleTime: 30_000,
+  })
+  const templateText = (names: string[]) => templateInsights?.groups.flatMap(group => group.metrics || [])
+    .find(metric => metric.has_data && metric.type === 'string' && names.includes(metric.name.toLowerCase()) && metric.text)?.text
   const snmp = !!device.snmp_enabled
   const { data: tagDefs } = useTags()
   const tagColors = useMemo(() => tagColorMap(tagDefs), [tagDefs])
@@ -1615,6 +1510,9 @@ function InventoryConfigCard({
   // source of duplicated content on the page. This card covers how the device
   // is *monitored*, which the header does not.
   const rows: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; value: React.ReactNode }> = [
+    { icon: HardDrive, label: 'Serial number', value: device.serial_number || templateText(['chassis serial', 'serial number', 'system serial number']) || 'Not reported' },
+    { icon: GitBranch, label: 'OS / version', value: device.os_version || templateText(['tmos version', 'os version', 'software version']) || 'Not reported' },
+    { icon: GitBranch, label: 'Firmware', value: device.firmware_version || templateText(['firmware version']) || 'Not reported' },
     { icon: Shield, label: 'SNMP', value: snmp ? `v${device.snmp_version} · port ${device.snmp_port}` : 'Disabled' },
     {
       icon: Layers, label: 'Monitoring Template',
@@ -1650,7 +1548,7 @@ function InventoryConfigCard({
                 <r.icon className="h-3.5 w-3.5" />
                 {r.label}
               </span>
-              <span className="min-w-0 truncate text-right font-medium">{r.value}</span>
+              <span className="min-w-0 break-words text-right font-medium">{r.value}</span>
             </div>
           ))}
           <div className="flex items-start justify-between gap-2 pt-1">
@@ -1688,62 +1586,23 @@ function InventoryConfigCard({
    Availability Timeline — horizontal green/red up/down strip
    ════════════════════════════════════════════════════════════ */
 
-const TIMELINE_MAX_BUCKETS = 96
-const TIMELINE_MIN_BUCKETS = 24
 const UP_COLOR = '#22C55E'
 const DOWN_COLOR = '#EF4444'
 
 function AvailabilityTimelineCard({
-  points, rangeLabel, fromTs, toTs,
+  points, rangeLabel, fromTs, toTs, availabilityPct,
 }: {
-  points: { timestamp: string; is_up: boolean }[]
+  points: DeviceAvailabilityPoint[]
+  availabilityPct?: number
   rangeLabel: string
   fromTs: number
   toTs: number
 }) {
-  const total = points.length
-  const upCount = points.filter((p) => isUpPoint(p.is_up)).length
-  const pct = total ? (upCount / total) * 100 : null
-  const pctColor =
-    pct == null ? 'text-muted' : pct > 99 ? 'text-success' : pct > 95 ? 'text-warning' : 'text-danger'
-
-  /* Lay the checks out on the real clock. Rendering one equal-width segment
-     per check made three hourly pings fill a whole month of timeline and read
-     as full coverage; gaps between checks must stay visibly empty. */
-  const buckets = useMemo(() => {
-    const span = Math.max(1, toTs - fromTs)
-    const stamps = points
-      .map((p) => Date.parse(p.timestamp))
-      .filter((t) => Number.isFinite(t))
-      .sort((a, b) => a - b)
-
-    /* Buckets must be at least one polling interval wide. Narrower than that
-       and a perfectly healthy device alternates bar/gap purely from aliasing. */
-    const gaps = stamps.slice(1).map((t, i) => t - stamps[i]).sort((a, b) => a - b)
-    const medianGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 0
-    const count = medianGap > 0
-      ? Math.max(TIMELINE_MIN_BUCKETS, Math.min(TIMELINE_MAX_BUCKETS, Math.round(span / medianGap)))
-      : TIMELINE_MAX_BUCKETS
-
-    const width = span / count
-    const slots: Array<{ up: number; down: number; start: number }> = Array.from(
-      { length: count },
-      (_, i) => ({ up: 0, down: 0, start: fromTs + i * width }),
-    )
-    points.forEach((p) => {
-      const ts = Date.parse(p.timestamp)
-      if (!Number.isFinite(ts)) return
-      const i = Math.min(count - 1, Math.floor((ts - fromTs) / width))
-      if (i < 0) return
-      if (isUpPoint(p.is_up)) slots[i].up += 1
-      else slots[i].down += 1
-    })
-    return slots.map((s) => ({
-      ...s,
-      end: s.start + width,
-      state: s.up + s.down === 0 ? 'gap' as const : s.down > 0 ? 'down' as const : 'up' as const,
-    }))
-  }, [points, fromTs, toTs])
+  // Headline shares the device-list calculation, including maintenance exclusions.
+  const pct = availabilityPct ?? null
+  const pctColor = pct == null ? 'text-muted' : pct > 99 ? 'text-success' : pct > 95 ? 'text-warning' : 'text-danger'
+  const buckets = useMemo(() => deviceAvailabilityBuckets(points, fromTs, toTs), [points, fromTs, toTs])
+  const total = Math.round(buckets.reduce((sum, bucket) => sum + bucket.up + bucket.down, 0))
 
   const coveredBuckets = buckets.filter((b) => b.state !== 'gap').length
   const coveragePct = buckets.length ? (coveredBuckets / buckets.length) * 100 : 0
@@ -1751,7 +1610,7 @@ function AvailabilityTimelineCard({
   return (
     <Card>
       <CardContent className="p-4">
-        <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div className="flex min-w-0 items-baseline gap-2">
             <h3 className="text-sm font-semibold">Availability Timeline</h3>
             <span className="truncate text-[11px] font-medium text-muted">
@@ -1759,16 +1618,16 @@ function AvailabilityTimelineCard({
             </span>
           </div>
           {pct != null && (
-            <div className="flex items-baseline gap-2">
+            <div className="flex flex-wrap items-baseline gap-2">
               {coveragePct < 95 && (
                 <span
                   className="text-[10px] text-muted"
-                  title="Share of the selected window that has ping data. Uptime is measured only over the checks that exist."
+                  title="Share of the selected window that has ping data. The timeline shows raw probe results; the headline uses the same maintenance-adjusted calculation as the device list."
                 >
                   {coveragePct < 1 ? '<1' : coveragePct.toFixed(0)}% of range covered
                 </span>
               )}
-              <span className={cn('text-xs font-mono font-medium', pctColor)}>{pct.toFixed(2)}% uptime</span>
+              <span className={cn('text-xs font-mono font-medium', pctColor)}>{formatDeviceAvailability(pct)} uptime</span>
             </div>
           )}
         </div>
@@ -1788,17 +1647,18 @@ function AvailabilityTimelineCard({
                   className="flex-1 transition-opacity hover:opacity-70"
                   style={{
                     backgroundColor:
-                      b.state === 'up' ? UP_COLOR : b.state === 'down' ? DOWN_COLOR : 'transparent',
+                      b.state === 'up' ? UP_COLOR : b.state === 'down' ? DOWN_COLOR : b.state === 'partial' ? '#F59E0B' : 'transparent',
                   }}
                   title={
                     b.state === 'gap'
                       ? `${timeTooltipLabelFormatter(b.start)} — no data`
-                      : `${timeTooltipLabelFormatter(b.start)} — ${b.state === 'up' ? 'UP' : `DOWN (${b.down} of ${b.up + b.down} checks)`}`
+                      : `${timeTooltipLabelFormatter(b.start)} — ${formatDeviceAvailability(b.pct)} up · ${Math.round(b.down)} failed of ${Math.round(b.up + b.down)} checks`
                   }
                 />
               ))}
             </div>
-            <div className="mt-1 flex items-center justify-between">
+            <p className="mt-1 text-[10px] text-muted">Timeline shows raw checks, including partial failures. The headline excludes scheduled maintenance, matching the device list.</p>
+            <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
               <span className="text-[10px] text-muted">{timeTooltipLabelFormatter(fromTs)}</span>
               <div className="flex items-center gap-3">
                 <span className="flex items-center gap-1 text-[10px] text-muted">
@@ -1806,6 +1666,9 @@ function AvailabilityTimelineCard({
                 </span>
                 <span className="flex items-center gap-1 text-[10px] text-muted">
                   <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: DOWN_COLOR }} />Down
+                </span>
+                <span className="flex items-center gap-1 text-[10px] text-muted">
+                  <span className="h-2 w-2 rounded-sm" style={{ backgroundColor: '#F59E0B' }} />Partial failure
                 </span>
                 <span className="flex items-center gap-1 text-[10px] text-muted">
                   <span className="h-2 w-2 rounded-sm bg-surface2 ring-1 ring-inset ring-border" />No data
@@ -1839,7 +1702,7 @@ function ActivityLogCard({
   return (
     <Card>
       <CardContent className="p-4">
-        <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <div className="flex min-w-0 items-baseline gap-2">
             <h3 className="text-sm font-semibold">Recent Events / Activity Log</h3>
             <span className="truncate text-[11px] font-medium text-muted">
@@ -2728,7 +2591,7 @@ function HealthDetailsDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <CheckCircle2 className="h-5 w-5 text-primary" />
-            Health Score Breakdown
+            Performance Score Breakdown
           </DialogTitle>
         </DialogHeader>
         <div className="space-y-3">

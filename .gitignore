@@ -19,6 +19,7 @@ dist/
 build/
 *.egg
 .venv/
+.venv-network-validation/
 venv/
 venv
 env/
@@ -34,6 +35,7 @@ dashboard/build/
 dashboard/dist.pre-*/
 dashboard/dist_old_*/
 dashboard/dist.failed-*/
+dashboard/dist-rum-final/
 .next/
 *.tsbuildinfo
 
@@ -83,6 +85,11 @@ cred.txt
 # ─── Build artifacts & local backups ───
 artifacts/
 backups/
+# Generated release packages and compiled validation binaries.
+output/**/*.zup
+output/**/*.bundle
+output/**/*.tar.gz
+output/**/zenplus-*-linux-amd64
 Documentation/keys/
 updater/keys/*.pub.old
 

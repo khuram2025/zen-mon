@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ipaddress
 import os
 import re
 import socket
@@ -107,7 +108,8 @@ async def http_probe(ip: str, port: int = 80, https: bool = False,
     the heuristics layer.
     """
     scheme = "https" if https else "http"
-    url = f"{scheme}://{ip}:{port}/"
+    host = f'[{ip}]' if ipaddress.ip_address(ip).version == 6 else ip
+    url = f"{scheme}://{host}:{port}/"
     data: dict[str, Any] = {"port": port, "scheme": scheme}
     try:
         # verify=False because management UIs almost always use self-signed certs

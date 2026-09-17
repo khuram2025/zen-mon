@@ -1,0 +1,40 @@
+{
+  "pdf": "C:\\Users\\user\\Documents\\ZenPlus\\output\\pdf\\ZenPlus-NPM-Assessment-and-Plan-2026-09-10.pdf",
+  "markdown": "C:\\Users\\user\\Documents\\ZenPlus\\output\\npm-assessment-2026-09-10\\ZenPlus-NPM-Assessment-and-Plan-2026-09-10.md",
+  "pages": 25,
+  "features": 71,
+  "status_counts": {
+    "Available / unproven": 17,
+    "Observed": 8,
+    "Unverified": 4,
+    "Partial": 25,
+    "Not found": 17
+  },
+  "page_text_lengths": [
+    2145,
+    3778,
+    2137,
+    1317,
+    2718,
+    2602,
+    2329,
+    2404,
+    2561,
+    2441,
+    2498,
+    2672,
+    1596,
+    2141,
+    2917,
+    2079,
+    3106,
+    2420,
+    2872,
+    2860,
+    2667,
+    1764,
+    2282,
+    1356,
+    1497
+  ]
+}

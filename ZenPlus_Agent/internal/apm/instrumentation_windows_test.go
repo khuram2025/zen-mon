@@ -7,6 +7,17 @@ import (
 	"testing"
 )
 
+func TestIISConfigurationScriptLoadsAdministrationAssemblyFromIIS(t *testing.T) {
+	for _, required := range []string{
+		`System32\inetsrv\Microsoft.Web.Administration.dll`,
+		`Add-Type -Path $administrationAssembly`,
+	} {
+		if !strings.Contains(iisConfigurationScript, required) {
+			t.Fatalf("IIS configuration script is missing %q", required)
+		}
+	}
+}
+
 func TestDecodeIISConfigurationResultIgnoresPowerShellObjectOutput(t *testing.T) {
 	output := []byte("Attributes : Microsoft.Web.Administration.ConfigurationAttributeCollection\r\n" +
 		iisConfigurationResultPrefix + `{"previous":{"OTEL_SERVICE_NAME":null},"restarted":true,"restart_error":""}` + "\r\n")

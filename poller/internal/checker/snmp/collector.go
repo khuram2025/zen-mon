@@ -21,12 +21,14 @@ const (
 	oidArubaControllerCPU = "1.3.6.1.4.1.14823.2.2.1.2.1.30.0" // wlsxSysExtCpuUsedPercent
 	oidArubaControllerMem = "1.3.6.1.4.1.14823.2.2.1.2.1.31.0" // wlsxSysExtMemoryUsedPercent
 
-	oidF5TMMCPU       = "1.3.6.1.4.1.3375.2.1.1.2.21.35.0"
-	oidF5HostCPU      = "1.3.6.1.4.1.3375.2.1.1.2.20.29.0"
-	oidF5TMMMemTotal  = "1.3.6.1.4.1.3375.2.1.1.2.1.44.0"
-	oidF5TMMMemUsed   = "1.3.6.1.4.1.3375.2.1.1.2.1.45.0"
-	oidF5HostMemTotal = "1.3.6.1.4.1.3375.2.1.1.2.20.44.0"
-	oidF5HostMemUsed  = "1.3.6.1.4.1.3375.2.1.1.2.20.45.0"
+	oidF5SystemMemTotal = "1.3.6.1.4.1.3375.2.1.1.2.20.2.0"
+	oidF5SystemMemUsed  = "1.3.6.1.4.1.3375.2.1.1.2.20.3.0"
+	oidF5TMMCPU         = "1.3.6.1.4.1.3375.2.1.1.2.21.35.0"
+	oidF5HostCPU        = "1.3.6.1.4.1.3375.2.1.1.2.20.29.0"
+	oidF5TMMMemTotal    = "1.3.6.1.4.1.3375.2.1.1.2.1.44.0"
+	oidF5TMMMemUsed     = "1.3.6.1.4.1.3375.2.1.1.2.1.45.0"
+	oidF5HostMemTotal   = "1.3.6.1.4.1.3375.2.1.1.2.20.44.0"
+	oidF5HostMemUsed    = "1.3.6.1.4.1.3375.2.1.1.2.20.45.0"
 )
 
 // Collector executes one full SNMP poll for a Device and returns a
@@ -40,13 +42,17 @@ type Collector struct {
 	prevIfs      map[uuid.UUID]map[uint32]ifSnapshot
 	prevTpl      map[uuid.UUID]map[string]tplSnap
 	lastTplGroup map[uuid.UUID]map[string]time.Time
+	prevUptime   map[uuid.UUID]time.Duration
 }
 
 type ifSnapshot struct {
-	inOctets  uint64
-	outOctets uint64
-	at        time.Time
-	hc        bool
+	inOctets      uint64
+	outOctets     uint64
+	at            time.Time
+	hc            bool
+	name          string
+	speed         uint64
+	discontinuity uint64
 }
 
 func NewCollector(pollerID string, sessions *SessionCache) *Collector {
@@ -56,6 +62,7 @@ func NewCollector(pollerID string, sessions *SessionCache) *Collector {
 		prevIfs:      make(map[uuid.UUID]map[uint32]ifSnapshot),
 		prevTpl:      make(map[uuid.UUID]map[string]tplSnap),
 		lastTplGroup: make(map[uuid.UUID]map[string]time.Time),
+		prevUptime:   make(map[uuid.UUID]time.Duration),
 	}
 }
 
@@ -91,6 +98,13 @@ func (c *Collector) Collect(ctx context.Context, d *Device, r *Result) {
 	// persisted the device's identity (sysObjectID → vendor/model).
 	sys, sysErr := c.collectSystem(ctx, client)
 	if sysErr == nil {
+		c.mu.Lock()
+		if old, ok := c.prevUptime[d.ID]; ok && sys.SysUpTime < old {
+			delete(c.prevIfs, d.ID)
+			delete(c.prevTpl, d.ID)
+		}
+		c.prevUptime[d.ID] = sys.SysUpTime
+		c.mu.Unlock()
 		r.Mu.Lock()
 		r.System = sys
 		if sys.SysUpTime > 0 {
@@ -445,7 +459,7 @@ func (c *Collector) collectVendorMetrics(
 			}
 		}
 		if !hasMem {
-			domain, tmmPct, hostPct := selectF5MemoryDomain(
+			_, tmmPct, hostPct := selectF5MemoryDomain(
 				getScalar(s, oidF5TMMMemUsed), getScalar(s, oidF5TMMMemTotal),
 				getScalar(s, oidF5HostMemUsed), getScalar(s, oidF5HostMemTotal),
 			)
@@ -455,12 +469,10 @@ func (c *Collector) collectVendorMetrics(
 			if hostPct >= 0 {
 				out = append(out, mk("f5_host_memory_pct", hostPct, "percent"))
 			}
-			if domain.valid {
-				out = append(out,
-					mk("memory_total_bytes", domain.total, "bytes"),
-					mk("memory_used_bytes", domain.used, "bytes"),
-					mk("memory", domain.pct, "percent"),
-				)
+			// Overall RAM comes from the system pair, not the highest domain.
+			total, used := getScalar(s, oidF5SystemMemTotal), getScalar(s, oidF5SystemMemUsed)
+			if pct := utilizationPct(used, total); pct >= 0 {
+				out = append(out, mk("memory_total_bytes", total, "bytes"), mk("memory_used_bytes", used, "bytes"), mk("memory", pct, "percent"), mk("f5_system_memory_pct", pct, "percent"))
 			}
 		}
 	}
@@ -514,7 +526,7 @@ type f5MemoryDomain struct {
 }
 
 func utilizationPct(used, total float64) float64 {
-	if used < 0 || total <= 0 {
+	if math.IsNaN(used) || math.IsNaN(total) || math.IsInf(used, 0) || math.IsInf(total, 0) || used < 0 || total <= 0 || used > total {
 		return -1
 	}
 	return used / total * 100
@@ -531,8 +543,8 @@ func maxValid(values ...float64) float64 {
 }
 
 // selectF5MemoryDomain calculates TMM and host/Other percentages separately.
-// These domains overlap conceptually and must never be summed. The more
-// utilized valid domain becomes the fleet-level headline.
+// The returned maximum is a domain diagnostic only. Overall physical RAM
+// must use the separate sysGlobalHostMemUsed / sysGlobalHostMemTotal pair.
 func selectF5MemoryDomain(tmmUsed, tmmTotal, hostUsed, hostTotal float64) (f5MemoryDomain, float64, float64) {
 	tmmPct := utilizationPct(tmmUsed, tmmTotal)
 	hostPct := utilizationPct(hostUsed, hostTotal)
@@ -687,19 +699,32 @@ func canonicalVendorMetrics(samples []MetricSample) []MetricSample {
 			ht = hostTotal.Value
 		}
 
-		domain, tmmPct, hostPct := selectF5MemoryDomain(tu, tt, hu, ht)
+		_, tmmPct, hostPct := selectF5MemoryDomain(tu, tt, hu, ht)
 		if tmmPct >= 0 {
 			out = append(out, clone(base, "f5_tmm_memory_pct", tmmPct, "percent"))
 		}
 		if hostPct >= 0 {
 			out = append(out, clone(base, "f5_host_memory_pct", hostPct, "percent"))
 		}
-		if domain.valid {
-			out = append(out,
-				clone(base, "memory_total_bytes", domain.total, "bytes"),
-				clone(base, "memory_used_bytes", domain.used, "bytes"),
-				clone(base, "memory", domain.pct, "percent"),
-			)
+
+	}
+
+	for _, pair := range []struct{ used, total, key string }{
+		{"tpl_f5_system_mem_used", "tpl_f5_system_mem_total", "f5_system_memory_pct"},
+		{"tpl_f5_swap_used", "tpl_f5_swap_total", "f5_swap_memory_pct"},
+	} {
+		u, hasU := byKey[pair.used]
+		t, hasT := byKey[pair.total]
+		if !hasU || !hasT || !u.Timestamp.Equal(t.Timestamp) {
+			continue
+		}
+		pct := utilizationPct(u.Value, t.Value)
+		if pct < 0 {
+			continue
+		}
+		out = append(out, clone(u, pair.key, pct, "percent"))
+		if pair.key == "f5_system_memory_pct" {
+			out = append(out, clone(u, "memory", pct, "percent"), clone(u, "memory_used_bytes", u.Value, "bytes"), clone(t, "memory_total_bytes", t.Value, "bytes"))
 		}
 	}
 
@@ -830,6 +855,7 @@ func (c *Collector) collectInterfaces(ctx context.Context, s *g.GoSNMP) ([]Inter
 
 	name := collect(OIDIfName)
 	alias := collect(OIDIfAlias)
+	discontinuity := collect("1.3.6.1.2.1.31.1.1.1.19")
 
 	out := make([]Interface, 0, len(descr))
 	for idx, d := range descr {
@@ -861,13 +887,18 @@ func (c *Collector) collectInterfaces(ctx context.Context, s *g.GoSNMP) ([]Inter
 		}
 
 		// Prefer HC counters when present.
-		if v, ok := hcInO[idx]; ok && asUint(*v) > 0 {
+		// A valid zero is still Counter64. Use one consistent width for
+		// both directions; never mix a 32-bit direction with a 64-bit one.
+		inHC, inOK := hcInO[idx]
+		outHC, outOK := hcOutO[idx]
+		bothHC := inOK && outOK && inHC.Type == g.Counter64 && outHC.Type == g.Counter64
+		if v, ok := hcInO[idx]; ok && bothHC {
 			iface.InOctets = asUint(*v)
 			iface.HasHC = true
 		} else if v, ok := inO[idx]; ok {
 			iface.InOctets = asUint(*v)
 		}
-		if v, ok := hcOutO[idx]; ok && asUint(*v) > 0 {
+		if v, ok := hcOutO[idx]; ok && bothHC {
 			iface.OutOctets = asUint(*v)
 			iface.HasHC = true
 		} else if v, ok := outO[idx]; ok {
@@ -902,6 +933,9 @@ func (c *Collector) collectInterfaces(ctx context.Context, s *g.GoSNMP) ([]Inter
 		}
 		if v, ok := alias[idx]; ok {
 			iface.IfAlias = asString(*v)
+		}
+		if v, ok := discontinuity[idx]; ok {
+			iface.Discontinuity = asUint(*v)
 		}
 		out = append(out, iface)
 	}
@@ -1046,25 +1080,39 @@ func (c *Collector) diffInterfaces(deviceID uuid.UUID, ifs []Interface, ts time.
 		iface := ifs[i]
 		idx := uint32(iface.IfIndex)
 		snap := ifSnapshot{
-			inOctets:  iface.InOctets,
-			outOctets: iface.OutOctets,
-			at:        ts,
-			hc:        iface.HasHC,
+			inOctets:      iface.InOctets,
+			outOctets:     iface.OutOctets,
+			at:            ts,
+			hc:            iface.HasHC,
+			name:          iface.IfName,
+			speed:         iface.IfSpeed,
+			discontinuity: iface.Discontinuity,
 		}
 		cur[idx] = snap
 
 		inBps, outBps := 0.0, 0.0
-		if p, ok := prev[idx]; ok {
+		if p, ok := prev[idx]; ok && p.hc == snap.hc && p.name == snap.name && p.speed == snap.speed && p.discontinuity == snap.discontinuity {
 			dt := ts.Sub(p.at).Seconds()
 			if dt > 0 {
 				inBps = rateBps(iface.InOctets, p.inOctets, dt, iface.HasHC)
 				outBps = rateBps(iface.OutOctets, p.outOctets, dt, iface.HasHC)
+				if iface.IfSpeed > 0 {
+					if inBps > float64(iface.IfSpeed)*1.05 {
+						inBps = 0
+					}
+					if outBps > float64(iface.IfSpeed)*1.05 {
+						outBps = 0
+					}
+				}
 			}
 		}
 
 		opStatus := uint8(0)
-		if iface.OperStatus == "up" {
-			opStatus = 1
+		for code, name := range IfStatusNames {
+			if name == iface.OperStatus {
+				opStatus = uint8(code)
+				break
+			}
 		}
 
 		samples = append(samples, InterfaceSample{
@@ -1095,11 +1143,14 @@ func (c *Collector) diffInterfaces(deviceID uuid.UUID, ifs []Interface, ts time.
 // In the reset case we return 0 rather than a negative or absurd
 // rate.
 func rateBps(cur, prev uint64, dtSec float64, hc bool) float64 {
+	if dtSec <= 0 || math.IsNaN(dtSec) || math.IsInf(dtSec, 0) {
+		return 0
+	}
 	var delta uint64
 	switch {
 	case cur >= prev:
 		delta = cur - prev
-	case !hc && prev < math.MaxUint32:
+	case !hc && prev <= math.MaxUint32 && cur <= math.MaxUint32:
 		// 32-bit wrap
 		delta = (math.MaxUint32 - prev) + cur + 1
 	default:

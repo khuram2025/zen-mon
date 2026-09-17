@@ -889,7 +889,8 @@ def build_package(version: str, changelog: str, severity: str,
     steps = [{"type": "run_hook", "script": "code/scripts/ota-preflight.py", "timeout": 30}]
 
     # Stop services before update
-    steps.append({"type": "stop_services", "services": ["zenplus-api", "zenplus-poller", "zenplus-netflow-collector"]})
+    steps.append({"type": "stop_services", "services": ["zenplus-api", "zenplus-poller", "zenplus-netflow-collector", "zenplus-syslog",
+        "zenplus-ncm-backup.timer", "zenplus-ncm-delivery.timer", "zenplus-ncm-backup.service", "zenplus-ncm-delivery.service", "zenplus-ncm-worker.service"]})
     steps.append({"type": "backup", "targets": ["code", "database"]})
 
     # Heal the OS prerequisites every appliance needs but older installers
@@ -1014,6 +1015,13 @@ def build_package(version: str, changelog: str, severity: str,
                        "source": "code/poller/systemd/zenplus-netflow-collector.service",
                        "enable": True})
 
+    steps.append({"type": "install_systemd", "source": "code/scripts/systemd/zenplus-syslog.service", "enable": False})
+    # NCM uses a local service identity; the HTTP scheduler requires RBAC.
+    for unit in ("zenplus-ncm-backup.service", "zenplus-ncm-backup.timer",
+                 "zenplus-ncm-delivery.service", "zenplus-ncm-delivery.timer", "zenplus-ncm-worker.service"):
+        steps.append({"type": "install_systemd", "source": f"code/scripts/systemd/{unit}",
+                      "enable": unit.endswith(".timer") or unit=="zenplus-ncm-worker.service"})
+
     agent_artifact_dir = build_dir / "agent-artifacts"
     if agent_artifact_dir.is_dir():
         for plat_dir in sorted(p for p in agent_artifact_dir.iterdir() if p.is_dir()):
@@ -1043,6 +1051,7 @@ def build_package(version: str, changelog: str, severity: str,
 
     # Restart services
     steps.append({"type": "start_services",
+                   "enabled_services": ["zenplus-syslog", "zenplus-ncm-backup.timer", "zenplus-ncm-delivery.timer", "zenplus-ncm-worker.service"],
                    "services": ["zenplus-api", "zenplus-poller", "zenplus-netflow-collector",
                                 "netmon-gunicorn", "netmon-celery", "netmon-celery-beat", "nginx"]})
     steps.append({"type": "health_check", "url": "http://localhost:8000/api/v1/system/health", "timeout": 30})
@@ -1070,6 +1079,7 @@ def build_package(version: str, changelog: str, severity: str,
              "script": "code/scripts/enforce-support-security-floor.sh",
              "timeout": 120},
             {"type": "start_services",
+             "enabled_services": ["zenplus-syslog"],
              "services": ["zenplus-api", "zenplus-poller",
                           "zenplus-netflow-collector", "netmon-gunicorn",
                           "netmon-celery", "netmon-celery-beat", "nginx"]},

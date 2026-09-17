@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-const AgentVersion = "1.12.4"
+const AgentVersion = "1.12.5"
 
 var AgentCapabilities = []string{
 	"network_capture_v1",
@@ -284,26 +284,30 @@ type DiagnosticsRequest struct {
 }
 
 type Status struct {
-	AgentID            string             `json:"agent_id"`
-	ServerID           string             `json:"server_id"`
-	ControllerURL      string             `json:"controller_url"`
-	AgentVersion       string             `json:"agent_version"`
-	StartedAt          time.Time          `json:"started_at"`
-	LastCollection     *time.Time         `json:"last_collection,omitempty"`
-	LastHeartbeat      *time.Time         `json:"last_heartbeat,omitempty"`
-	LastHeartbeatError string             `json:"last_heartbeat_error,omitempty"`
-	LastUpload         *time.Time         `json:"last_upload,omitempty"`
-	LastUploadError    string             `json:"last_upload_error,omitempty"`
-	LastConfigPoll     *time.Time         `json:"last_config_poll,omitempty"`
-	LastConfigError    string             `json:"last_config_error,omitempty"`
-	QueueDepth         int                `json:"queue_depth"`
-	SpoolBytes         int64              `json:"spool_bytes"`
-	CollectorErrors    map[string]string  `json:"collector_errors,omitempty"`
-	Enrolled           bool               `json:"enrolled"`
-	AuthState          string             `json:"auth_state,omitempty"` // ok | unenrolled | unauthorized
-	ClockSkewSeconds   float64            `json:"clock_skew_seconds,omitempty"`
-	NextRetryAt        *time.Time         `json:"next_retry_at,omitempty"`
-	UpgradeState       string             `json:"upgrade_state,omitempty"`
-	APM                *APMStatus         `json:"apm,omitempty"`
-	LocalAPM           *AgentAPMHeartbeat `json:"local_apm,omitempty"`
+	AgentID                  string             `json:"agent_id"`
+	ServerID                 string             `json:"server_id"`
+	ControllerURL            string             `json:"controller_url"`
+	AgentVersion             string             `json:"agent_version"`
+	StartedAt                time.Time          `json:"started_at"`
+	LastCollection           *time.Time         `json:"last_collection,omitempty"`
+	LastHeartbeat            *time.Time         `json:"last_heartbeat,omitempty"`
+	LastHeartbeatError       string             `json:"last_heartbeat_error,omitempty"`
+	LastUpload               *time.Time         `json:"last_upload,omitempty"`
+	LastUploadError          string             `json:"last_upload_error,omitempty"`
+	LastConfigPoll           *time.Time         `json:"last_config_poll,omitempty"`
+	LastConfigError          string             `json:"last_config_error,omitempty"`
+	QueueDepth               int                `json:"queue_depth"`
+	SpoolBytes               int64              `json:"spool_bytes"`
+	QuarantinedBatches       int                `json:"quarantined_batches"`
+	QuarantinedBytes         int64              `json:"quarantined_bytes"`
+	QuarantinedOriginalBytes int64              `json:"quarantined_original_bytes"`
+	NextUploadRetryAt        *time.Time         `json:"next_upload_retry_at,omitempty"`
+	CollectorErrors          map[string]string  `json:"collector_errors,omitempty"`
+	Enrolled                 bool               `json:"enrolled"`
+	AuthState                string             `json:"auth_state,omitempty"` // ok | unenrolled | unauthorized
+	ClockSkewSeconds         float64            `json:"clock_skew_seconds,omitempty"`
+	NextRetryAt              *time.Time         `json:"next_retry_at,omitempty"`
+	UpgradeState             string             `json:"upgrade_state,omitempty"`
+	APM                      *APMStatus         `json:"apm,omitempty"`
+	LocalAPM                 *AgentAPMHeartbeat `json:"local_apm,omitempty"`
 }

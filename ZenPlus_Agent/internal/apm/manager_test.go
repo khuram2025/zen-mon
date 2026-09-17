@@ -20,17 +20,6 @@ import (
 	agentruntime "zenplus-agent/internal/runtime"
 )
 
-func TestIISConfigurationScriptLoadsAdministrationAssemblyFromIIS(t *testing.T) {
-	for _, required := range []string{
-		`System32\inetsrv\Microsoft.Web.Administration.dll`,
-		`Add-Type -Path $administrationAssembly`,
-	} {
-		if !strings.Contains(iisConfigurationScript, required) {
-			t.Fatalf("IIS configuration script is missing %q", required)
-		}
-	}
-}
-
 func TestTransientAPMFailureDoesNotIncrementInstrumentationFailures(t *testing.T) {
 	m := New(agentruntime.NewPaths(t.TempDir()), func(string, ...any) {})
 	m.status.Failed = 2

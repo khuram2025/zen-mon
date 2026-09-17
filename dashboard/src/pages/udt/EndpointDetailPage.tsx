@@ -10,6 +10,7 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import { toast } from '@/components/ui/Toast'
 import { apiErrorMessage } from '@/lib/utils'
 import { udtApi } from './api'
+import { IpHistoryCard } from './IpHistoryCard'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
 import { KbLink } from '@/components/udt/KbLink'
 import type { EndpointLocation } from './types'
@@ -228,32 +229,7 @@ export function EndpointDetailPage() {
         {/* Connection history */}
         <ConnectionHistoryCard locations={data.locations} />
 
-        {/* IP history */}
-        <Card>
-          <CardContent className="p-0">
-            <h3 className="border-b border-border px-4 py-3 text-sm font-semibold">IP address history</h3>
-            {data.ip_history.length === 0 ? (
-              <div className="p-6 text-center text-sm text-muted">No IP bindings observed (needs ARP from an L3 device).</div>
-            ) : (
-              <Table>
-                <THead className="bg-surface2/40">
-                  <Tr><Th>IP</Th><Th>Source</Th><Th>State</Th><Th className="text-right">First</Th><Th className="text-right">Last</Th></Tr>
-                </THead>
-                <TBody>
-                  {data.ip_history.map((ip, i) => (
-                    <Tr key={i}>
-                      <Td className="font-mono text-xs tabular-nums">{ip.ip}</Td>
-                      <Td className="text-xs uppercase text-muted">{ip.source}</Td>
-                      <Td>{ip.active ? <Badge variant="success">active</Badge> : <Badge variant="outline">past</Badge>}</Td>
-                      <Td className="text-right text-xs text-muted">{relTime(ip.first_seen)}</Td>
-                      <Td className="text-right text-xs text-muted">{ip.active ? 'now' : relTime(ip.last_seen)}</Td>
-                    </Tr>
-                  ))}
-                </TBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
+        <IpHistoryCard key={id} endpointId={id} addresses={data.ip_history} />
 
         {/* User logins */}
         <Card>

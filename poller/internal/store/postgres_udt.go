@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"regexp"
 	"sort"
 	"strings"
@@ -19,9 +20,9 @@ import (
 //
 // Uplink classification order (first match wins; manual override
 // always wins via the ON CONFLICT clause):
-//   1. LLDP/CDP neighbor that is network infrastructure
-//   2. Cisco VTP trunk status
-//   3. MAC count >= udtUplinkMacThreshold
+//  1. LLDP/CDP neighbor that is network infrastructure
+//  2. Cisco VTP trunk status
+//  3. MAC count >= udtUplinkMacThreshold
 const udtUplinkMacThreshold = 8
 
 // infraSysDescrRe matches neighbor system descriptions/names that
@@ -525,6 +526,11 @@ func upsertEndpoints(ctx context.Context, tx pgx.Tx, macSet map[string]bool) (ma
 	randomized := make([]bool, 0, len(macSet))
 	for m := range macSet {
 		macs = append(macs, m)
+	}
+	// Overlapping router snapshots must acquire endpoint row locks in the
+	// same order; randomized map iteration otherwise causes poll deadlocks.
+	sort.Strings(macs)
+	for _, m := range macs {
 		randomized = append(randomized, isLocallyAdministered(m))
 	}
 
@@ -536,6 +542,7 @@ func upsertEndpoints(ctx context.Context, tx pgx.Tx, macSet map[string]bool) (ma
 		       NOW(), NOW()
 		FROM unnest($1::text[], $2::bool[]) AS t(mac, randomized)
 		LEFT JOIN udt_oui o ON o.prefix = replace(substring(t.mac, 1, 8), ':', '')
+		ORDER BY t.mac
 		ON CONFLICT (mac) DO UPDATE SET
 			last_seen = NOW(),
 			vendor = COALESCE(udt_endpoints.vendor, EXCLUDED.vendor),
@@ -650,6 +657,9 @@ func upsertSessions(ctx context.Context, tx pgx.Tx, deviceID uuid.UUID, sessions
 }
 
 func upsertIPHistory(ctx context.Context, tx pgx.Tx, deviceID uuid.UUID, arp []snmp.ArpEntry, endpointIDs map[string]uuid.UUID) error {
+	if err := upsertIPEvidence(ctx, tx, deviceID, arp, endpointIDs); err != nil {
+		return err
+	}
 	if len(arp) == 0 {
 		return nil
 	}
@@ -657,7 +667,6 @@ func upsertIPHistory(ctx context.Context, tx pgx.Tx, deviceID uuid.UUID, arp []s
 		epID   uuid.UUID
 		ip     string
 		source string
-		isV6   bool
 	}
 	rowsIn := make([]ipRow, 0, len(arp))
 	seen := make(map[string]bool, len(arp))
@@ -666,12 +675,17 @@ func upsertIPHistory(ctx context.Context, tx pgx.Tx, deviceID uuid.UUID, arp []s
 		if !ok {
 			continue
 		}
-		k := epID.String() + "|" + a.IP
+		parsed := net.ParseIP(a.IP)
+		if parsed == nil {
+			continue
+		}
+		ip := parsed.String()
+		k := epID.String() + "|" + ip
 		if seen[k] {
 			continue
 		}
 		seen[k] = true
-		rowsIn = append(rowsIn, ipRow{epID, a.IP, a.Source, a.IsIPv6})
+		rowsIn = append(rowsIn, ipRow{epID, ip, a.Source})
 	}
 	if len(rowsIn) == 0 {
 		return nil
@@ -685,48 +699,52 @@ func upsertIPHistory(ctx context.Context, tx pgx.Tx, deviceID uuid.UUID, arp []s
 		sources[i] = r.source
 	}
 
-	// An IP now seen on a different MAC closes the old binding.
-	if _, err := tx.Exec(ctx, `
-		UPDATE udt_ip_history h SET active = FALSE
-		FROM unnest($1::uuid[], $2::inet[]) AS t(endpoint_id, ip)
-		WHERE h.active AND h.ip = t.ip AND h.endpoint_id <> t.endpoint_id
-	`, epIDs, ips); err != nil {
-		return err
-	}
+	// ARP/ND is an observation, not proof of globally exclusive ownership.
+	// Different routers/VRFs, proxy ARP and stale caches can report the same
+	// address on different MACs. Closing the other binding on every poll
+	// caused perpetual close/reopen churn. Each binding expires independently
+	// in the sweeper after the observation grace period.
 
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO udt_ip_history (endpoint_id, ip, source, reporting_device_id, active, first_seen, last_seen)
 		SELECT t.endpoint_id, t.ip, t.source, $4, TRUE, NOW(), NOW()
 		FROM unnest($1::uuid[], $2::inet[], $3::text[]) AS t(endpoint_id, ip, source)
 		ON CONFLICT (endpoint_id, ip) WHERE active
-		DO UPDATE SET last_seen = NOW(), reporting_device_id = EXCLUDED.reporting_device_id
+		DO UPDATE SET last_seen = GREATEST(udt_ip_history.last_seen, EXCLUDED.last_seen),
+			source = CASE WHEN EXCLUDED.last_seen >= udt_ip_history.last_seen THEN EXCLUDED.source ELSE udt_ip_history.source END,
+			reporting_device_id = CASE WHEN EXCLUDED.last_seen >= udt_ip_history.last_seen
+				THEN EXCLUDED.reporting_device_id ELSE udt_ip_history.reporting_device_id END
 	`, epIDs, ips, sources, deviceID); err != nil {
 		return err
 	}
 
-	// Latest-IP on the endpoint row; IPv4 wins over IPv6.
-	for _, pass := range []bool{true, false} { // first IPv6, then IPv4 overwrites
-		var pEp []uuid.UUID
-		var pIP []string
-		for i, r := range rowsIn {
-			if r.isV6 == pass {
-				pEp = append(pEp, epIDs[i])
-				pIP = append(pIP, r.ip)
-			}
-		}
-		if len(pEp) == 0 {
-			continue
-		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE udt_endpoints e SET ip_address = t.ip, last_seen = NOW(), updated_at = NOW()
-			FROM (
-				SELECT DISTINCT ON (endpoint_id) endpoint_id, ip
-				FROM unnest($1::uuid[], $2::inet[]) AS x(endpoint_id, ip)
-			) t
-			WHERE e.id = t.endpoint_id
-		`, pEp, pIP); err != nil {
-			return err
-		}
+	// Prefer IPv4, retain a still-observed primary within that family, then
+	// use recency and the address as deterministic tie breakers. A poll from
+	// another reporter must not flip the displayed primary on every cycle.
+	if _, err := tx.Exec(ctx, `
+		UPDATE udt_endpoints e SET ip_address = choice.ip, updated_at = NOW()
+		FROM (
+			SELECT ep.id, candidate.ip
+			FROM udt_endpoints ep
+			CROSS JOIN LATERAL (
+				SELECT h.ip FROM udt_ip_history h
+				WHERE h.endpoint_id = ep.id AND h.active
+				  AND h.last_seen >= NOW() - INTERVAL '24 hours'
+				  AND (ep.ip_address IS NULL OR h.ip = ep.ip_address OR EXISTS (
+				      SELECT 1 FROM udt_ip_evidence evidence
+				      WHERE evidence.endpoint_id = ep.id AND evidence.ip = h.ip
+				        AND (SELECT count(*) FROM unnest(evidence.recent_sightings) observed_at
+				             WHERE observed_at >= NOW() - INTERVAL '24 hours') >= 3
+				  ))
+				ORDER BY family(h.ip), (h.ip = ep.ip_address) DESC NULLS LAST,
+				         h.last_seen DESC, h.ip
+				LIMIT 1
+			) candidate
+			WHERE ep.id = ANY($1::uuid[])
+		) choice
+		WHERE e.id = choice.id AND e.ip_address IS DISTINCT FROM choice.ip
+	`, epIDs); err != nil {
+		return err
 	}
 	return nil
 }

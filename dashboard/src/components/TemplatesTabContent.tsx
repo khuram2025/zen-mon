@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity, CheckCircle2, ChevronDown, ChevronRight, Copy, Layers,
@@ -88,6 +88,15 @@ const typeBadge: Record<string, string> = {
 
 export function TemplatesTabContent() {
   const qc = useQueryClient()
+  const importInput = useRef<HTMLInputElement>(null)
+  const importBundle = useMutation({
+    mutationFn: async (file: File) => {
+      if (file.size > 4 * 1024 * 1024) throw new Error('Template file must be under 4 MB')
+      return (await api.post('/snmp/profiles/import', JSON.parse(await file.text()))).data
+    },
+    onSuccess: () => { toast.success('Template imported'); qc.invalidateQueries({ queryKey: ['snmp-profiles'] }) },
+    onError: (e: any) => toast.error('Import failed', e.response ? apiErrorMessage(e) : e.message),
+  })
   const [search, setSearch] = useState('')
   const [detail, setDetail] = useState<Template | null>(null)
   const [editor, setEditor] = useState<{ open: boolean; template?: Template }>({ open: false })
@@ -151,6 +160,8 @@ export function TemplatesTabContent() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <input ref={importInput} type="file" accept=".json,application/json" className="hidden" aria-label="Import monitoring template" onChange={e => { const file = e.target.files?.[0]; if (file) importBundle.mutate(file); e.target.value = '' }} />
+          <Button variant="outline" disabled={importBundle.isPending} onClick={() => importInput.current?.click()}>Import JSON</Button>
           <div className="relative">
             <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
             <Input className="w-56 pl-8" placeholder="Search templates…" value={search}
@@ -213,7 +224,7 @@ export function TemplatesTabContent() {
         title="Delete template?"
         description={<>“{toDelete?.name}” will be removed and {toDelete?.device_count || 0} attached device(s) fall back to Default monitoring.</>}
         confirmText="Delete" destructive loading={del.isPending}
-        onConfirm={() => toDelete && del.mutate(toDelete.id)} />
+        onConfirm={() => { if (toDelete) del.mutate(toDelete.id) }} />
     </div>
   )
 }
@@ -298,6 +309,13 @@ function TemplateCard({ t, onOpen, onClone, onEdit, onDelete }: {
 function TemplateDetailDialog({ template: t, onOpenChange, onClone }: {
   template: Template; onOpenChange: (o: boolean) => void; onClone: () => void
 }) {
+  const exportBundle = useMutation({ mutationFn: async () => {
+    const data = (await api.get(`/snmp/profiles/${t.id}/export`)).data
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }))
+    const anchor = document.createElement('a')
+    anchor.href = url; anchor.download = `${t.name.replace(/[^a-z0-9_-]/gi, '_')}.json`
+    anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }, onError: (e: any) => toast.error('Export failed', apiErrorMessage(e)) })
   return (
     <Dialog open onOpenChange={onOpenChange}>
       <DialogContent className="max-w-3xl max-h-[88vh] overflow-y-auto">
@@ -311,7 +329,8 @@ function TemplateDetailDialog({ template: t, onOpenChange, onClone }: {
               </DialogTitle>
               <DialogDescription>{t.vendor || 'Custom template'} · v{t.version}</DialogDescription>
             </div>
-            <Button variant="outline" size="sm" className="ml-auto" onClick={onClone}>
+            <Button variant="outline" size="sm" className="ml-auto" disabled={exportBundle.isPending} onClick={() => exportBundle.mutate()}>Export JSON</Button>
+            <Button variant="outline" size="sm" onClick={onClone}>
               <Copy className="h-3.5 w-3.5" /> Clone
             </Button>
           </div>

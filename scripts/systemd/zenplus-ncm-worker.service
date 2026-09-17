@@ -1,0 +1,22 @@
+[Unit]
+Description=ZenPlus durable configuration backup workers
+After=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=zenplus
+Group=zenplus
+WorkingDirectory=/opt/zenplus/server
+EnvironmentFile=/opt/zenplus/.env
+ExecStart=/opt/zenplus/venv/bin/python -m app.services.ncm_maintenance worker
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

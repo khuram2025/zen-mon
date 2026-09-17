@@ -9,7 +9,7 @@ Runs every 60 s (Postgres advisory-locked, so multi-worker safe):
   5. apply watch rules (+ watch_seen events on reappearance)
   6. reverse-DNS hostname enrichment (budgeted)
   7. daily port-capacity snapshots
-  8. retention pruning (90 days of history)
+  8. retention pruning (90 days for activity, locations and logins; IP history is retained)
 """
 
 from __future__ import annotations
@@ -327,9 +327,7 @@ async def _prune(db: AsyncSession) -> None:
     await db.execute(text(
         f"DELETE FROM udt_user_logins WHERE event_time < NOW() - INTERVAL '{RETENTION}'"
     ))
-    await db.execute(text(
-        f"DELETE FROM udt_ip_history WHERE NOT active AND last_seen < NOW() - INTERVAL '{RETENTION}'"
-    ))
+    # IP binding history is durable audit data. Do not prune prior addresses.
 
 
 async def run_sweep_once(db: AsyncSession) -> bool:

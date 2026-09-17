@@ -3,6 +3,7 @@
 package secrets
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,6 +63,35 @@ func TestMachineACLsProtectAllServiceData(t *testing.T) {
 	}
 	if rendered := acls.dashboard.descriptor.String(); !containsBuiltinUsers(rendered) {
 		t.Fatalf("dashboard DACL %q does not grant BUILTIN\\Users read access", rendered)
+	}
+}
+
+func TestDashboardACLUsesConcreteReadOnlyFileRights(t *testing.T) {
+	acls, err := newMachineACLSet(zenPlusServiceName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry *windows.ACCESS_ALLOWED_ACE
+	if err := windows.GetAce(acls.dashboard.dacl, 3, &entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry.Mask != windows.FILE_GENERIC_READ|windows.FILE_GENERIC_EXECUTE {
+		t.Fatalf("dashboard user mask = %#x, want concrete read/execute rights", entry.Mask)
+	}
+	if entry.Mask&(windows.FILE_WRITE_DATA|windows.FILE_APPEND_DATA|windows.DELETE|windows.WRITE_DAC|windows.WRITE_OWNER) != 0 {
+		t.Fatal("ordinary users must not mutate the dashboard snapshot")
+	}
+	serviceSID, err := serviceSIDString(zenPlusServiceName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writable, err := newMachineACL(strings.Replace(fmt.Sprintf(machineDashboardSDDL, serviceSID), "FRFX;;;BU", "FRFWFX;;;BU", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	match, err := equalMachineACL(writable.dacl, acls.dashboard.dacl)
+	if err != nil || match {
+		t.Fatalf("writable dashboard ACL accepted: match=%t, err=%v", match, err)
 	}
 }
 

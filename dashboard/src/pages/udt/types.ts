@@ -86,10 +86,31 @@ export interface EndpointLocation {
   closed_at: string | null
 }
 
+export interface IpAddressHistory {
+  ip: string; source: string; active: boolean; first_seen: string; last_seen: string
+  period_count: number; active_endpoint_count: number
+}
+
+export interface IpHistoryPeriods {
+  data: { id: number; ip: string; source: string; active: boolean; first_seen: string; last_seen: string; reporting_device: string | null }[]
+  meta: { total: number; skip: number; limit: number }
+}
+
+export interface IpEvidence {
+  data: {
+    endpoint_id: string; mac: string; endpoint_name: string | null
+    reporting_device_id: string | null; reporter: string | null; reporter_ip: string | null
+    if_index: number | null; interface_name: string | null; source: string
+    first_seen: string; last_seen: string; observation_count: number | null
+    repeated: boolean; legacy: boolean
+  }[]
+  meta: { total: number; skip: number; limit: number }
+}
+
 export interface EndpointDetail {
   endpoint: Endpoint & { notes: string | null; user_seen_at: string | null; managed_hostname: string | null }
   locations: EndpointLocation[]
-  ip_history: { ip: string; source: string; active: boolean; first_seen: string; last_seen: string }[]
+  ip_history: IpAddressHistory[]
   logins: { user_name: string; user_domain: string | null; event_id: number | null; logon_type: number | null; ip: string | null; hostname: string | null; event_time: string }[]
   events: { event_type: string; device_id: string | null; switch: string | null; if_index: number | null; details: any; created_at: string }[]
 }

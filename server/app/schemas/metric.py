@@ -12,6 +12,9 @@ class MetricPoint(BaseModel):
     min_rtt_ms: Optional[float] = None
     max_rtt_ms: Optional[float] = None
     is_up: Optional[bool] = None
+    # is_up is a legacy majority flag; these fields retain rollup evidence.
+    uptime_pct: Optional[float] = None
+    sample_count: Optional[int] = None
 
 
 class MetricResponse(BaseModel):
