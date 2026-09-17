@@ -21,10 +21,12 @@ import (
 )
 
 const (
-	zenPlusServiceName    = "ZenPlusAgent"
-	machineDataSDDL       = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)"
-	machineSecretSDDL     = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)"
-	machineDashboardSDDL  = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)(A;OICI;GRGX;;;BU)"
+	zenPlusServiceName = "ZenPlusAgent"
+	machineDataSDDL    = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)"
+	machineSecretSDDL  = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)"
+	// Use file-specific rights: Windows maps GR/GX when applying them, which
+	// otherwise makes the installed DACL differ from the in-memory policy.
+	machineDashboardSDDL  = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;%s)(A;OICI;FRFX;;;BU)"
 	dpapiFilenameMarker   = ".dpapi"
 	dashboardDirectory    = "AgentDashboard"
 	dashboardSnapshotName = "snapshot.json"
