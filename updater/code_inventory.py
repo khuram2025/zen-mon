@@ -50,7 +50,24 @@ DEFAULT_PRESERVE_PATHS = (
     "updater/backups",
     "updater/config",
     "updater/keys",
+    "updater/updater.lock",
 )
+
+
+def ensure_code_permissions(code_path: Path, destination: Path) -> None:
+    """Normalize only paths in the incoming public payload, never local state."""
+    for source in code_path.rglob("*"):
+        if source.is_symlink():
+            raise ValueError(f"unsupported code symlink: {source.name}")
+        relative = source.relative_to(code_path)
+        if any(relative.as_posix() == p or relative.as_posix().startswith(p + "/")
+               for p in DEFAULT_PRESERVE_PATHS):
+            continue
+        target = destination / relative
+        if target.is_symlink() or not target.resolve().is_relative_to(destination.resolve()):
+            raise ValueError(f"unsafe code destination: {relative}")
+        if target.exists():
+            target.chmod(0o755 if source.is_dir() or source.stat().st_mode & 0o111 else 0o644)
 
 
 def _normalise_relative(value: str) -> str:

@@ -1,6 +1,8 @@
 # ZenPlus 1.23.13 publication
 
-ZenPlus 1.23.13 is published at https://zentryc.com/ota/releases/ as a signed appliance-only update with full, 100% rollout, without a target-group restriction. The user explicitly requested publication and full rollout. Windows installers remain separate; no unsigned installer was distributed.
+**Paused after an installation failure on 2026-09-17.** The archive retained private build-checkout permissions (0600 source files), preventing API startup. Rollback restored API availability on 1.23.12 but encountered `ETXTBSY` on a running collector binary; the remaining binary and inventory differences were subsequently restored from the pre-update backup. Version 1.23.14 contains the corrective changes. Do not resume this release or replace its immutable archive.
+
+ZenPlus 1.23.13 was published at https://zentryc.com/ota/releases/ as a signed appliance-only update with full, 100% rollout, without a target-group restriction. The user explicitly requested publication and full rollout. Windows installers remain separate; no unsigned installer was distributed.
 
 ## Identity
 

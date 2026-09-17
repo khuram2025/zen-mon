@@ -97,13 +97,18 @@ def execute_manifest(
             logger.error("Step %d/%d failed, initiating rollback ...", i, len(steps))
 
             # Run rollback steps
+            rollback_errors = []
             if rollback_steps and completed_steps:
-                _execute_rollback(rollback_steps, extract_dir, cfg)
+                rollback_errors = _execute_rollback(rollback_steps, extract_dir, cfg)
             else:
                 logger.warning("No rollback steps defined in manifest")
 
+            rollback_detail = (
+                "; rollback incomplete: " + "; ".join(rollback_errors)
+                if rollback_errors else ""
+            )
             raise ExecutionError(
-                f"Update failed at step {i}/{len(steps)} ({step.get('type')}): {e}"
+                f"Update failed at step {i}/{len(steps)} ({step.get('type')}): {e}{rollback_detail}"
             ) from e
 
     logger.info("All %d steps completed successfully", len(steps))
@@ -111,7 +116,7 @@ def execute_manifest(
 
 def rollback_manifest(
     manifest: dict, extract_dir: str, cfg: AgentConfig
-) -> None:
+) -> list[str]:
     """Roll back a manifest that already executed cleanly.
 
     Needed for failures detected *after* the last step — notably the schema
@@ -121,21 +126,23 @@ def rollback_manifest(
     rollback_steps = manifest.get("rollback_steps", [])
     if not rollback_steps:
         logger.warning("No rollback steps defined in manifest")
-        return
-    _execute_rollback(rollback_steps, extract_dir, cfg)
+        return ["No rollback steps defined in manifest"]
+    return _execute_rollback(rollback_steps, extract_dir, cfg)
 
 
 def _execute_rollback(
     rollback_steps: list[dict], extract_dir: str, cfg: AgentConfig
-) -> None:
+) -> list[str]:
     """Execute rollback steps. Errors are logged but don't stop the rollback."""
     logger.warning("Running %d rollback steps ...", len(rollback_steps))
+    errors = []
 
     for i, step in enumerate(rollback_steps, 1):
         try:
             logger.info("--- Rollback step %d/%d ---", i, len(rollback_steps))
             execute_step(step, extract_dir, cfg)
         except Exception as e:
+            errors.append(f"{step.get('type')}: {e}")
             logger.error(
                 "Rollback step %d failed (continuing): %s — %s",
                 i,
@@ -143,4 +150,8 @@ def _execute_rollback(
                 e,
             )
 
-    logger.warning("Rollback complete")
+    if errors:
+        logger.error("Rollback incomplete: %d step(s) failed", len(errors))
+    else:
+        logger.warning("Rollback complete")
+    return errors

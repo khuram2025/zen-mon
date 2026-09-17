@@ -88,6 +88,15 @@ MIGRATIONS_LOCK = ZENPLUS_DIR / "scripts" / "migrations.lock"
 
 # ─── Crypto ───────────────────────────────────────────────────────────────────
 
+def public_payload_member(member: tarfile.TarInfo) -> tarfile.TarInfo:
+    """Code/assets are public, regardless of the build account's private umask."""
+    if not (member.isfile() or member.isdir()):
+        raise RuntimeError(f"Unsupported release entry: {member.name}")
+    member.mode = 0o755 if member.isdir() or member.mode & 0o111 else 0o644
+    member.uid = member.gid = 0
+    member.uname = member.gname = "root"
+    return member
+
 def sign_manifest(manifest_data: bytes, key_path: Path) -> bytes:
     """Sign manifest.json with Ed25519 private key."""
     from cryptography.hazmat.primitives.serialization import load_pem_private_key
@@ -737,7 +746,7 @@ def build_package(version: str, changelog: str, severity: str,
         # Package dist as tar.gz
         dist_archive = build_dir / "dashboard-dist.tar.gz"
         with tarfile.open(dist_archive, "w:gz") as tar:
-            tar.add(str(dash_dir / "dist"), arcname=".")
+            tar.add(str(dash_dir / "dist"), arcname=".", filter=public_payload_member)
         print(f"  Dashboard dist: {dist_archive.stat().st_size / 1024 / 1024:.1f} MB")
     else:
         print("[2/7] Skipping dashboard build (--skip-dashboard)")
@@ -1071,6 +1080,11 @@ def build_package(version: str, changelog: str, severity: str,
         "agent_packages": agent_staged,
         "steps": steps,
         "rollback_steps": [
+            # Old updater processes retain their imported restore handler.
+            # Stop consumers before even legacy tar extraction touches binaries.
+            {"type": "stop_services", "services": next(
+                step["services"] for step in steps if step["type"] == "stop_services"
+            )},
             {"type": "restore_backup"},
             # Security floor: restoring older code must never resurrect the
             # legacy support worker's root execution path. This hook executes
@@ -1083,6 +1097,7 @@ def build_package(version: str, changelog: str, severity: str,
              "services": ["zenplus-api", "zenplus-poller",
                           "zenplus-netflow-collector", "netmon-gunicorn",
                           "netmon-celery", "netmon-celery-beat", "nginx"]},
+            {"type": "health_check", "url": "http://localhost:8000/api/v1/system/health", "timeout": 30},
         ],
     }
 
@@ -1121,7 +1136,7 @@ def build_package(version: str, changelog: str, severity: str,
     output_path = RELEASE_DIR / f"update-{version}.zup"
     with tarfile.open(output_path, "w:gz") as tar:
         for item in sorted(build_dir.iterdir()):
-            tar.add(str(item), arcname=item.name)
+            tar.add(str(item), arcname=item.name, filter=public_payload_member)
 
     pkg_hash = sha256_file(str(output_path))
     pkg_size = output_path.stat().st_size
