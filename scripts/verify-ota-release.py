@@ -4,11 +4,22 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import tarfile
 from pathlib import PurePosixPath
 
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
+
+
+def verify_public_permissions(tar: tarfile.TarFile) -> None:
+    """A root-verifiable package must also be readable by service accounts."""
+    for member in tar.getmembers():
+        if not (member.isfile() or member.isdir()):
+            raise RuntimeError(f"unsupported archive entry: {member.name}")
+        required = 0o555 if member.isdir() else 0o444
+        if member.mode & required != required or member.mode & 0o7022:
+            raise RuntimeError(f"unsafe public payload permissions: {member.name}")
 
 
 def read_member(tar: tarfile.TarFile, name: str) -> bytes:
@@ -38,6 +49,7 @@ def main() -> None:
     args = parser.parse_args()
 
     with tarfile.open(args.package, "r:gz") as tar:
+        verify_public_permissions(tar)
         members = {member.name: member for member in tar.getmembers()}
         for member in members.values():
             path = PurePosixPath(member.name)
@@ -51,6 +63,9 @@ def main() -> None:
         public_key = load_pem_public_key(open(args.public_key, "rb").read())
         public_key.verify(signature, manifest_bytes)
         manifest = json.loads(manifest_bytes)
+        if "dashboard-dist.tar.gz" in members:
+            with tarfile.open(fileobj=io.BytesIO(read_member(tar, "dashboard-dist.tar.gz"))) as dashboard:
+                verify_public_permissions(dashboard)
 
         if manifest.get("version") != args.version:
             raise RuntimeError("manifest version mismatch")

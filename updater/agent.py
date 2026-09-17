@@ -475,7 +475,9 @@ def run_update(cfg: AgentConfig, release: dict) -> bool:
             "Schema does not match the installed code after update — rolling back. %s",
             detail,
         )
-        rollback_manifest(manifest, extract_dir, cfg)
+        rollback_errors = rollback_manifest(manifest, extract_dir, cfg)
+        if rollback_errors:
+            detail += "; rollback incomplete: " + "; ".join(rollback_errors)
         report_status(
             cfg, release_id, "failed", from_version, version,
             error_message=f"Schema verification failed: {detail}",

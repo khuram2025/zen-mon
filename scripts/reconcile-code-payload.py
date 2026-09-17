@@ -20,9 +20,10 @@ def main() -> int:
     zenplus_dir = Path(os.environ.get("ZENPLUS_DIR", "/opt/zenplus")).resolve()
     sys.path.insert(0, str(zenplus_dir))
 
-    from updater.code_inventory import reconcile_code_tree
+    from updater.code_inventory import ensure_code_permissions, reconcile_code_tree
 
     removed = reconcile_code_tree(code_path, zenplus_dir)
+    ensure_code_permissions(code_path, zenplus_dir)
     print(f"Reconciled signed code payload; removed {removed} stale file(s)")
     return 0
 

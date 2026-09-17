@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
@@ -191,8 +192,10 @@ def restore_backup(backup_dir: str) -> None:
             members = tar.getmembers()
             for member in members:
                 _safe_relative(member.name)
-                if member.issym() or member.islnk() or member.isdev():
+                if not (member.isfile() or member.isdir()):
                     raise RuntimeError(f"unsupported entry in code backup: {member.name}")
+                if not (ZENPLUS_DIR / member.name).resolve().is_relative_to(ZENPLUS_DIR.resolve()):
+                    raise RuntimeError(f"unsafe restore destination: {member.name}")
 
             marker_path = backup_path / BACKUP_MANIFEST
             if marker_path.is_file():
@@ -218,7 +221,19 @@ def restore_backup(backup_dir: str) -> None:
                 )
                 logger.info("Removed %d post-backup code files", removed)
 
-            tar.extractall(str(ZENPLUS_DIR), members=members)
+            # Replacing an inode is safe even if an existing executable is
+            # running. Direct extraction truncates it and fails with ETXTBSY.
+            with tempfile.TemporaryDirectory(prefix=".restore-", dir=ZENPLUS_DIR) as stage:
+                tar.extractall(stage, members=members)
+                for member in members:
+                    source = Path(stage) / member.name
+                    target = ZENPLUS_DIR / member.name
+                    if member.isdir():
+                        target.mkdir(parents=True, exist_ok=True)
+                        shutil.copystat(source, target)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(source, target)
         logger.info("Code restored")
 
     # Restore version

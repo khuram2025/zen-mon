@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from ..code_inventory import reconcile_code_tree
+from ..code_inventory import ensure_code_permissions, reconcile_code_tree
 from ..executor import step_handler
 
 logger = logging.getLogger("zenplus.updater")
@@ -84,4 +84,5 @@ def _apply_replace(step: dict, extract_dir: str) -> None:
         shutil.copy2(src_file, dest_file)
         count += 1
 
+    ensure_code_permissions(code_path, ZENPLUS_DIR)
     logger.info("Replaced %d files; removed %d stale files", count, removed)
