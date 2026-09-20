@@ -146,16 +146,17 @@ export function ServicesPage() {
   const totalRecords = listData?.meta?.total || 0
   const totalPages = Math.max(1, Math.ceil(totalRecords / PAGE_SIZE))
 
-  const { data: uptimeStats } = useQuery<{ checks: Record<string, number> }>({
-    queryKey: ['service-checks', 'uptime-stats', 24],
-    queryFn: async () => (await api.get('/service-checks/uptime-stats?hours=24')).data,
+  const { data: uptimeStats } = useQuery<{ checks: Record<string, number | null> }>({
+    queryKey: ['service-checks', 'uptime-stats', 24, 'confirmed'],
+    queryFn: async () => (await api.get('/service-checks/uptime-stats?hours=24&basis=confirmed')).data,
     refetchInterval: 30_000,
   })
   const uptimeMap = uptimeStats?.checks || {}
 
+  const reportingTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone
   const { data: dailyUptime } = useQuery<DailyUptimeResponse>({
-    queryKey: ['service-checks', 'daily-uptime', BAR_DAYS],
-    queryFn: async () => (await api.get(`/service-checks/daily-uptime?days=${BAR_DAYS}`)).data,
+    queryKey: ['service-checks', 'daily-uptime', BAR_DAYS, 'confirmed', reportingTimezone],
+    queryFn: async () => (await api.get(`/service-checks/daily-uptime?days=${BAR_DAYS}&basis=confirmed&timezone=${encodeURIComponent(reportingTimezone)}`)).data,
     refetchInterval: 120_000,
   })
 
@@ -243,7 +244,7 @@ export function ServicesPage() {
     (search ? 1 : 0)
 
   const warnCount = (summary?.warning || 0) + (summary?.degraded || 0)
-  const uptimeValues = Object.values(uptimeMap)
+  const uptimeValues = Object.values(uptimeMap).filter((value): value is number => value != null)
   const fleetUptime = uptimeValues.length
     ? uptimeValues.reduce((s, v) => s + v, 0) / uptimeValues.length
     : null
@@ -547,7 +548,7 @@ function MonitorRow({
   check: ServiceCheck
   selected: boolean
   onToggle: () => void
-  uptime24h: number | undefined
+  uptime24h: number | null | undefined
   dailyRows?: Array<{ date: string; uptime_pct: number | null; sample_count: number }>
   onOpen: () => void
   onTest: () => void
@@ -627,7 +628,7 @@ function MonitorRow({
 
       {/* 24h uptime */}
       <span className={cn('w-16 shrink-0 text-right font-mono text-xs font-medium tabular-nums', BAND_TEXT[band])}>
-        {uptime24h != null ? `${uptime24h.toFixed(uptime24h >= 99.995 ? 0 : 2)}%` : '—'}
+        {uptime24h != null ? `${uptime24h.toFixed(2)}%` : '—'}
       </span>
 
       {/* Response */}
