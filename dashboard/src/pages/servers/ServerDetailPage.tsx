@@ -63,7 +63,7 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
 import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
-import { InstallTokenDialog } from '@/components/servers/InstallTokenDialog'
+import { DownloadAgentDialog } from '@/components/servers/DownloadAgentDialog'
 import { ServerFormDialog } from '@/components/servers/ServerFormDialog'
 import {
   AgentStatusBadge, OsIcon, ServerStatusBadge, TagList,
@@ -477,7 +477,7 @@ export function ServerDetailPage() {
                 <Pencil className="h-3.5 w-3.5" /> Edit
               </Button>
               <Button size="sm" onClick={() => setDeployOpen(true)}>
-                <KeyRound className="h-3.5 w-3.5" /> Install agent
+                <KeyRound className="h-3.5 w-3.5" /> Download agent
               </Button>
             </div>
             <div className="flex items-center gap-3 text-[11px] text-muted">
@@ -588,7 +588,7 @@ export function ServerDetailPage() {
       )}
 
       {/* Dialogs */}
-      <InstallTokenDialog open={deployOpen} onOpenChange={setDeployOpen} serverId={server.id} serverName={server.display_name} />
+      <DownloadAgentDialog open={deployOpen} onOpenChange={setDeployOpen} />
       <ServerFormDialog open={editOpen} onOpenChange={setEditOpen} server={server} />
       <ConfirmDialog
         open={Boolean(confirm)}
@@ -3301,7 +3301,7 @@ function AgentTab({
             authorization request in Agent Fleet. No endpoint token is required.
           </div>
           <Button size="sm" onClick={onDeployAgent}>
-            <KeyRound className="h-3.5 w-3.5" /> Install agent
+            <KeyRound className="h-3.5 w-3.5" /> Download agent
           </Button>
         </CardContent>
       </Card>
