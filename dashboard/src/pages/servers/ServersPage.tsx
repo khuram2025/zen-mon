@@ -12,7 +12,7 @@ import {
   ChevronRight,
   CloudOff,
   Gauge,
-  KeyRound,
+  Download,
   LayoutGrid,
   List,
   Plus,
@@ -35,7 +35,7 @@ import {
 import { Skeleton } from '@/components/ui/Skeleton'
 import { Table, TBody, Td, Th, THead, Tr } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
-import { InstallTokenDialog } from '@/components/servers/InstallTokenDialog'
+import { DownloadAgentDialog } from '@/components/servers/DownloadAgentDialog'
 import { ServerFormDialog } from '@/components/servers/ServerFormDialog'
 import {
   AgentStatusBadge, OsIcon, ServerStatusBadge, TagList,
@@ -301,7 +301,7 @@ export function ServerInventoryPage() {
             <Plus className="h-3.5 w-3.5" /> Register
           </Button>
           <Button size="sm" onClick={() => setDeployOpen(true)}>
-            <KeyRound className="h-3.5 w-3.5" /> Install agent
+            <Download className="h-3.5 w-3.5" /> Download agent
           </Button>
         </div>
       </div>
@@ -480,7 +480,7 @@ export function ServerInventoryPage() {
                           </div>
                           {!filtersActive && (
                             <Button size="sm" className="mt-1" onClick={() => setDeployOpen(true)}>
-                              <KeyRound className="h-3.5 w-3.5" /> Install agent
+                              <Download className="h-3.5 w-3.5" /> Download agent
                             </Button>
                           )}
                         </div>
@@ -624,7 +624,7 @@ export function ServerInventoryPage() {
         </div>
       )}
 
-      <InstallTokenDialog open={deployOpen} onOpenChange={setDeployOpen} />
+      <DownloadAgentDialog open={deployOpen} onOpenChange={setDeployOpen} />
       <ServerFormDialog open={formOpen} onOpenChange={setFormOpen} />
       <ConfirmDialog
         open={Boolean(deleteTarget)}
