@@ -1,7 +1,8 @@
+import { useMemo } from 'react'
 import { Download, Package } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import {
-  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@/components/ui/Dialog'
 
 // Use the same stable aliases as the official download page, so appliance
@@ -15,46 +16,31 @@ export function DownloadAgentDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
+  // The official latest aliases may carry a several-hour cache lifetime.
+  // Refresh the download URL each time this dialog opens.
+  const downloadQuery = useMemo(() => `?download=${Date.now()}`, [open])
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg w-[calc(100%_-_2rem)]">
+      <DialogContent className="max-w-sm w-[calc(100%_-_2rem)]">
         <DialogHeader>
           <DialogTitle>Download ZenPlus Agent</DialogTitle>
-          <DialogDescription>
-            Windows 10/11 and Windows Server · 64-bit
+          <DialogDescription className="sr-only">
+            Download the latest Windows agent as an EXE or MSI installer.
           </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-3">
-          <div className="rounded-lg border border-primary/30 bg-primary/5 p-4">
-            <div className="mb-3">
-              <h3 className="text-sm font-semibold">Guided installer</h3>
-              <p className="mt-1 text-sm text-muted">Recommended for installing on this computer.</p>
-            </div>
             <Button asChild className="w-full">
-              <a href={`${DOWNLOAD_BASE}ZenPlusAgentSetup-latest.exe`} download referrerPolicy="no-referrer">
+              <a href={`${DOWNLOAD_BASE}ZenPlusAgentSetup-latest.exe${downloadQuery}`} download referrerPolicy="no-referrer">
                 <Download aria-hidden="true" /> Download EXE
               </a>
             </Button>
-          </div>
-
-          <div className="rounded-lg border border-border p-4">
-            <div className="mb-3">
-              <h3 className="text-sm font-semibold">MSI package</h3>
-              <p className="mt-1 text-sm text-muted">For enterprise and silent deployment.</p>
-            </div>
             <Button asChild variant="outline" className="w-full">
-              <a href={`${DOWNLOAD_BASE}ZenPlusAgent-latest.msi`} download referrerPolicy="no-referrer">
+              <a href={`${DOWNLOAD_BASE}ZenPlusAgent-latest.msi${downloadQuery}`} download referrerPolicy="no-referrer">
                 <Package aria-hidden="true" /> Download MSI
               </a>
             </Button>
-          </div>
-          <p className="text-xs text-muted">Downloads the latest stable installer directly from Zentryc.</p>
         </div>
-
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>Close</Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   )

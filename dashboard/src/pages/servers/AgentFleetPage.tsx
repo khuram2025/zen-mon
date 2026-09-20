@@ -25,7 +25,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Switch } from '@/components/ui/Switch'
 import { toast } from '@/components/ui/Toast'
 import { AgentStatusBadge, AuthorizationBadge, KpiTile, TagList } from '@/components/servers/shared'
-import { InstallTokenDialog } from '@/components/servers/InstallTokenDialog'
+import { DownloadAgentDialog } from '@/components/servers/DownloadAgentDialog'
 import type { AgentItem, AgentPolicy, UpdateRing } from '@/types/servers'
 
 interface AgentFleetSummary {
@@ -364,7 +364,7 @@ export function AgentFleetPage() {
         <div className="flex items-center gap-2">
           <Button onClick={() => setDeployOpen(true)}>
             <Plus className="h-4 w-4" />
-            Install agent
+            Download agent
           </Button>
         </div>
       </div>
@@ -500,7 +500,7 @@ export function AgentFleetPage() {
               </div>
               <Button onClick={() => setDeployOpen(true)}>
                 <Plus className="h-4 w-4" />
-                Install agent
+                Download agent
               </Button>
             </div>
           ) : (
@@ -704,7 +704,7 @@ export function AgentFleetPage() {
         </CardContent>
       </Card>
 
-      <InstallTokenDialog open={deployOpen} onOpenChange={setDeployOpen} />
+      <DownloadAgentDialog open={deployOpen} onOpenChange={setDeployOpen} />
       <Dialog open={Boolean(conflictTarget)} onOpenChange={(o) => { if (!o && !resolveConflict.isPending) setConflictTarget(null) }}>
         <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
           <DialogHeader>

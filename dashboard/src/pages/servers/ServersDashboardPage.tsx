@@ -13,7 +13,7 @@ import {
   CloudOff,
   Cpu,
   HardDrive,
-  KeyRound,
+  Download,
   LayoutList,
   MemoryStick,
   Network,
@@ -27,7 +27,7 @@ import { Button } from '@/components/ui/Button'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { RingGauge } from '@/components/dashboard/RingGauge'
-import { InstallTokenDialog } from '@/components/servers/InstallTokenDialog'
+import { DownloadAgentDialog } from '@/components/servers/DownloadAgentDialog'
 import { ServerFormDialog } from '@/components/servers/ServerFormDialog'
 import {
   AgentStatusBadge, OsIcon, ServerStatusBadge, UsageBar,
@@ -223,7 +223,7 @@ export function ServersDashboardPage() {
             <Plus className="h-3.5 w-3.5" /> Register server
           </Button>
           <Button size="sm" onClick={() => setDeployOpen(true)}>
-            <KeyRound className="h-3.5 w-3.5" /> Install agent
+            <Download className="h-3.5 w-3.5" /> Download agent
           </Button>
         </div>
       </div>
@@ -449,7 +449,7 @@ export function ServersDashboardPage() {
         </Card>
       </div>
 
-      <InstallTokenDialog open={deployOpen} onOpenChange={setDeployOpen} />
+      <DownloadAgentDialog open={deployOpen} onOpenChange={setDeployOpen} />
       <ServerFormDialog open={formOpen} onOpenChange={setFormOpen} />
     </div>
   )
