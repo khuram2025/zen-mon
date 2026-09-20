@@ -333,9 +333,14 @@ async def service_check_summary(
 @router.get("/uptime-stats")
 async def service_check_uptime_stats(
     hours: int = Query(default=24, ge=1, le=8760),
+    basis: Literal["observed_time", "confirmed"] = Query(default="observed_time"),
+    db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Get uptime percentages per service check over a time range from ClickHouse metrics."""
+    if basis == "confirmed":
+        return await service_check_service.get_confirmed_uptime_all(
+            db, hours=hours, visible_tags=await scoping.visible_tags(db, current_user))
     from app.core.database import get_clickhouse_client
     client = get_clickhouse_client()
 
@@ -391,15 +396,20 @@ async def service_check_uptime_stats(
 @router.get("/daily-uptime")
 async def service_check_daily_uptime(
     days: int = Query(default=30, ge=1, le=90),
+    basis: Literal["observed_time", "confirmed"] = Query(default="observed_time"),
+    timezone: str = Query(default="UTC", max_length=100),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Daily uptime percentage per check, batched for every check at once.
-
-    Powers the per-row uptime bar strips on the services list — one rollup scan
-    instead of a request per check. Sample-less days are reconstructed from the
-    status log so an ingestion gap does not read as "not monitored".
-    """
+    """Daily list bars; confirmed reporting preserves unknown monitoring gaps."""
+    if basis == "confirmed":
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        try:
+            ZoneInfo(timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise HTTPException(status_code=422, detail="Invalid reporting timezone")
+        return await service_check_service.get_confirmed_uptime_all(
+            db, days=days, tz_name=timezone, visible_tags=await scoping.visible_tags(db, current_user))
     return await service_check_service.get_daily_uptime_all(db, days)
 
 

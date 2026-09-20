@@ -1084,6 +1084,45 @@ def _uptime_over(segments: list[tuple[datetime, datetime, bool | None]], b0: dat
     return up / known * 100.0
 
 
+async def get_confirmed_uptime_all(
+    db: AsyncSession, hours: int = 24, days: int | None = None,
+    tz_name: str = "UTC", visible_tags: list[str] | None = None,
+) -> dict:
+    """List headlines and calendar bars share the detail page's confirmed SLA."""
+    import asyncio
+    from zoneinfo import ZoneInfo
+    from app.core.database import get_clickhouse_client
+    from app.services.service_availability import read_fleet_segments, summarize, daily_summaries
+
+    zone = ZoneInfo(tz_name)
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(hours=hours)
+    if days is not None:
+        start = (end.astimezone(zone).replace(hour=0, minute=0, second=0, microsecond=0)
+                 - timedelta(days=days - 1)).astimezone(timezone.utc)
+    query = select(ServiceCheck.id, ServiceCheck.created_at, ServiceCheck.check_interval)
+    if visible_tags is not None:
+        query = query.where(
+            sql_text(scoping.text_tags_visible("service_checks.tags"))
+            .bindparams(**{scoping.SCOPE_PARAM: visible_tags})
+        )
+    checks = {str(cid): (created, interval or 60)
+              for cid, created, interval in (await db.execute(query)).all()}
+    def collect():
+        # Keep the history scan off the API event loop; clients are thread-local.
+        values = {}
+        for cid, segments, _, observed_start in read_fleet_segments(get_clickhouse_client(), checks, start, end):
+            if days is None:
+                values[cid] = _finite(summarize(segments, observed_start, end)["uptime_pct"])
+            else:
+                values[cid] = daily_summaries(segments, observed_start, end, zone)
+        return values
+
+    values = await asyncio.to_thread(collect)
+    return {"hours": hours, "days": days, "from": start.isoformat(), "to": end.isoformat(),
+            "availability_basis": "confirmed", "timezone": tz_name, "checks": values}
+
+
 async def get_daily_uptime_all(db: AsyncSession, days: int) -> dict:
     """Weighted daily uptime for every check in one rollup scan.
 
