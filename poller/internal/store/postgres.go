@@ -126,7 +126,7 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 		       COALESCE(sc.config::text, '{}'),
 		       COALESCE(sc.tags, ARRAY[]::text[]),
 		       sc.group_id, sc.parent_check_id,
-		       COALESCE(sc.retry_count, 1), COALESCE(sc.retry_delay_s, 30),
+		       COALESCE(sc.retry_count, 3), COALESCE(sc.retry_delay_s, 10), COALESCE(sc.down_check_interval, 30),
 		       sc.credential_id, COALESCE(sc.workflow_operator, 'all'),
 		       COALESCE(sc.workflow_steps::text, '[]'),
 		       COALESCE(cred.name, ''), COALESCE(cred.auth_type, ''),
@@ -148,7 +148,7 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 		sc.ProbeTrust = &trust
 		var deviceID, groupID, parentID, credentialID *uuid.UUID
 		var intervalSec, timeoutSec int
-		var retryCount, retryDelaySec int
+		var retryCount, retryDelaySec, downIntervalSec int
 		var headersJSON string
 		var configJSON string
 		var workflowJSON string
@@ -166,7 +166,7 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 			&sc.TLSWarnDays, &sc.TLSCriticalDays,
 			&intervalSec, &timeoutSec, &sc.Status,
 			&sc.Level, &configJSON, &tags,
-			&groupID, &parentID, &retryCount, &retryDelaySec,
+			&groupID, &parentID, &retryCount, &retryDelaySec, &downIntervalSec,
 			&credentialID, &sc.WorkflowOperator, &workflowJSON,
 			&sc.CredentialName, &sc.CredentialAuthType,
 			&sc.CredentialUsername, &credentialSecret,
@@ -183,6 +183,7 @@ func (s *PostgresStore) LoadServiceChecks(ctx context.Context) ([]*checker.Servi
 		sc.Timeout = time.Duration(timeoutSec) * time.Second
 		sc.RetryCount = retryCount
 		sc.RetryDelay = time.Duration(retryDelaySec) * time.Second
+		sc.DownCheckInterval = time.Duration(downIntervalSec) * time.Second
 		sc.Tags = tags
 
 		// Parse headers JSON
@@ -802,13 +803,15 @@ func (s *PostgresStore) UpdateServiceCheckStatus(
 	tlsDaysRemaining *int,
 	tlsIssuer string,
 	tlsSubject string,
+	verificationAttempt int,
 ) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE service_checks
 		SET status = $1, last_check_at = $2, last_response_ms = $3, last_error = $4,
-		    tls_expiry_date = $5, tls_days_remaining = $6, tls_issuer = $7, tls_subject = $8
-		WHERE id = $9
+		    tls_expiry_date = $5, tls_days_remaining = $6, tls_issuer = $7, tls_subject = $8, verification_attempt = $10
+		WHERE id = $9 AND (last_check_at IS NULL OR last_check_at <= $2)
+		  AND EXISTS (SELECT 1 FROM service_monitoring_vantages v WHERE v.service_check_id=service_checks.id AND v.poller_id='central')
 	`, status, lastCheckAt, responseMs, lastError,
-		tlsExpiry, tlsDaysRemaining, tlsIssuer, tlsSubject, id)
+		tlsExpiry, tlsDaysRemaining, tlsIssuer, tlsSubject, id, verificationAttempt)
 	return err
 }

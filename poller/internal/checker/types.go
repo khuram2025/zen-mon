@@ -50,6 +50,7 @@ type ServiceCheck struct {
 	Timeout               time.Duration
 	RetryCount            int
 	RetryDelay            time.Duration
+	DownCheckInterval     time.Duration
 	CredentialID          *uuid.UUID
 	CredentialName        string
 	CredentialAuthType    string

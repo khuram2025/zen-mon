@@ -26,3 +26,5 @@
 - Preserve prior IP observation periods. Summarize repeated addresses for display; do not delete history to remove duplicates.
 - ARP/ND sightings from separate reporters do not establish globally exclusive IP ownership. Interface indexes are reporter-local, not global subnet/VRF identifiers.
 - `udt_ip_evidence` retains endpoint/IP/reporter/interface/source observations. Replacement primary addresses require three observations within 24 hours from one reporter/interface/source. Never fabricate repeat evidence from legacy history counts.
+
+- Service confirmation uses 3 total attempts with a 10s completion-to-retry gap by default; healthy checks wait 60s and confirmed Down checks wait 30s. Preserve existing configured thresholds. Controller and capable sensors retain each attempt as diagnostics, publish progress without opening an incident, and recover on the first success. Legacy sensors submit final verdicts only. Migration 121 adds recovery interval and verification progress.

@@ -660,7 +660,7 @@ async def _config_etag(sensor_id: UUID, db: AsyncSession) -> str:
                        sc.http_ignore_tls_errors, sc.http_allow_insecure_auth,
                        sc.config, sc.tls_warn_days,
                        sc.tls_critical_days, sc.check_interval, sc.timeout,
-                       sc.retry_count, COALESCE(sc.retry_delay_s, 30) AS retry_delay_s,
+                       sc.retry_count, COALESCE(sc.retry_delay_s, 10) AS retry_delay_s, sc.down_check_interval,
                        sc.enabled, sc.credential_id, sc.workflow_operator, sc.workflow_steps,
                        cred.auth_type AS credential_auth_type, cred.username AS credential_username, cred.secret_cipher
                   FROM service_checks sc LEFT JOIN service_credentials cred ON cred.id=sc.credential_id
@@ -671,6 +671,7 @@ async def _config_etag(sensor_id: UUID, db: AsyncSession) -> str:
     from app.services.sensor_snmp import sensor_snmp_config
     snmp = await sensor_snmp_config(sensor_id, db)
     material = {
+        "service_confirmation_protocol": 1,
         "snmp": {key: value.model_dump() for key, value in snmp.items()},
         "sensor": dict(sensor) if sensor else None,
         "assignments": [dict(row) for row in assignments],
@@ -722,7 +723,7 @@ async def get_config(
                        sc.config,
                        sc.tls_warn_days, sc.tls_critical_days,
                        sc.check_interval, sc.timeout, sc.retry_count,
-                       COALESCE(sc.retry_delay_s, 30) AS retry_delay_s, sc.enabled, sc.credential_id, sc.workflow_operator, sc.workflow_steps,
+                       COALESCE(sc.retry_delay_s, 10) AS retry_delay_s, sc.down_check_interval, sc.enabled, sc.credential_id, sc.workflow_operator, sc.workflow_steps,
                        cred.auth_type AS credential_auth_type, cred.username AS credential_username, cred.secret_cipher
                 FROM service_checks sc LEFT JOIN service_credentials cred ON cred.id=sc.credential_id
                 WHERE sc.enabled = TRUE
@@ -774,7 +775,8 @@ async def get_config(
                 check_interval=sc.get("check_interval") or 60,
                 timeout=sc.get("timeout") or 10,
                 retry_count=sc.get("retry_count") or 1,
-                retry_delay_s=sc.get("retry_delay_s") or 30,
+                retry_delay_s=sc.get("retry_delay_s") or 10,
+                down_check_interval=sc.get("down_check_interval") or 30,
                 enabled=bool(sc.get("enabled", True)),
             )
             for sc in service_checks
@@ -1216,7 +1218,7 @@ async def _update_service_vantage_and_consensus(
     before = (await db.execute(
         text("""SELECT sc.status, sc.name, sc.check_type, sc.device_id,
                        sc.group_id, sc.tags, sc.tls_warn_days,
-                       sc.tls_critical_days,
+                       sc.tls_critical_days, sc.retry_count, sc.enabled,
                        COALESCE(sc.target_url, sc.target_host, sc.name) AS target,
                        d.hostname AS device_hostname, g.name AS group_name
                   FROM service_checks sc
@@ -1226,9 +1228,14 @@ async def _update_service_vantage_and_consensus(
                  FOR UPDATE OF sc"""),
         {"check_id": service_check_id},
     )).mappings().first()
-    if not before:
+    if not before or not before.get("enabled", True):
         return None
 
+    attempt = int(sample.get("confirmation_attempt") or 0)
+    complete = bool(sample.get("confirmation_complete", True))
+    # Legacy sensors send only the final result. New sensors include each attempt.
+    if not sample["is_up"] and attempt and attempt < (before.get("retry_count") or 1) and before["status"] != "down":
+        complete = False
     state = "up" if sample["is_up"] else "down"
     if state == "up" and before["check_type"] == "tls":
         if sample.get("tls_valid") is False:
@@ -1248,20 +1255,21 @@ async def _update_service_vantage_and_consensus(
                     last_result_at, last_latency_ms, last_error,
                     last_tls_expiry_date, last_tls_days_remaining,
                     last_tls_valid, last_tls_issuer, last_tls_subject,
-                    last_content_matched, updated_at
+                    last_content_matched, verification_attempt, updated_at
                 )
-                SELECT sc.id, :poller_id, :state, :ts, :ts, :latency, :error,
+                SELECT sc.id, :poller_id, CASE WHEN :complete THEN :state ELSE 'unknown' END, :ts, :ts, :latency, :error,
                        :tls_expiry, :tls_days, :tls_valid, :tls_issuer,
-                       :tls_subject, :content_matched, NOW()
+                       :tls_subject, :content_matched, :attempt, NOW()
                   FROM service_checks sc
                  WHERE sc.id = :check_id
                    AND :ts >= NOW() - make_interval(
                          secs => GREATEST(COALESCE(sc.check_interval, 60) * 2, 60)
                        )
                 ON CONFLICT (service_check_id, poller_id) DO UPDATE SET
-                    state = EXCLUDED.state,
+                    state = CASE WHEN :complete THEN EXCLUDED.state ELSE service_check_vantage_status.state END,
+                    verification_attempt = EXCLUDED.verification_attempt,
                     last_change_at = CASE
-                        WHEN service_check_vantage_status.state <> EXCLUDED.state
+                        WHEN :complete AND service_check_vantage_status.state <> EXCLUDED.state
                         THEN EXCLUDED.last_result_at
                         ELSE service_check_vantage_status.last_change_at
                     END,
@@ -1280,6 +1288,8 @@ async def _update_service_vantage_and_consensus(
             "check_id": service_check_id,
             "poller_id": str(sensor_id),
             "state": state,
+            "complete": complete,
+            "attempt": 0 if complete else attempt,
             "ts": sample["ts"],
             "latency": sample["response_ms"],
             "error": sample["error"] or None,
@@ -1303,7 +1313,7 @@ async def _update_service_vantage_and_consensus(
                            v.last_latency_ms, v.last_error,
                            v.last_tls_expiry_date, v.last_tls_days_remaining,
                            v.last_tls_valid, v.last_tls_issuer,
-                           v.last_tls_subject, v.last_content_matched
+                           v.last_tls_subject, v.last_content_matched, v.verification_attempt
                       FROM service_check_vantage_status v
                       LEFT JOIN sensors s ON s.id::text = v.poller_id
                       JOIN policy p ON p.id = v.service_check_id
@@ -1314,6 +1324,8 @@ async def _update_service_vantage_and_consensus(
                     SELECT COUNT(*)::INTEGER AS total,
                            COUNT(*) FILTER (WHERE state = 'down')::INTEGER AS down_count,
                            COUNT(*) FILTER (WHERE state = 'warning')::INTEGER AS warning_count,
+                           COUNT(*) FILTER (WHERE state IN ('up','down','warning','degraded'))::INTEGER AS known_count,
+                           MAX(verification_attempt) AS verification_attempt,
                            MAX(last_result_at) AS newest
                       FROM reporting
                 ), latest AS (
@@ -1323,13 +1335,14 @@ async def _update_service_vantage_and_consensus(
                 ), verdict AS (
                     SELECT CASE
                              WHEN c.total = 0 THEN NULL
+                             WHEN c.known_count = 0 THEN 'unknown'
                              WHEN p.mode = 'majority' AND c.down_count > c.total / 2.0 THEN 'down'
                              WHEN p.mode = 'threshold' AND c.down_count >= p.k THEN 'down'
                              WHEN p.mode = 'any' AND c.down_count >= 1 THEN 'down'
                              WHEN c.warning_count >= 1 THEN 'warning'
                              ELSE 'up'
                            END AS state,
-                           c.newest, l.last_latency_ms, l.last_error,
+                           c.newest, c.verification_attempt, l.last_latency_ms, l.last_error,
                            l.last_tls_expiry_date, l.last_tls_days_remaining,
                            l.last_tls_valid, l.last_tls_issuer,
                            l.last_tls_subject, l.last_content_matched
@@ -1337,6 +1350,7 @@ async def _update_service_vantage_and_consensus(
                 )
                 UPDATE service_checks sc
                    SET status = v.state,
+                       verification_attempt = CASE WHEN v.state = 'down' THEN 0 ELSE COALESCE(v.verification_attempt, 0) END,
                        last_check_at = v.newest,
                        last_response_ms = v.last_latency_ms,
                        last_error = v.last_error,
@@ -1456,7 +1470,7 @@ async def post_service_results(
         return {"inserted": 0, "dropped": 0, "duplicate": False}
 
     rows: list[list] = []
-    last_status: dict[str, dict] = {}
+    status_samples: list[tuple[str, dict]] = []
     normalized_items: list[tuple[dict, UUID, datetime, bool]] = []
     now = datetime.now(timezone.utc)
 
@@ -1505,9 +1519,9 @@ async def post_service_results(
             str(sensor["id"]),
             json.dumps(it.get("network_diagnostics") or {}),
         ])
-        prior = last_status.get(sc_id)
-        if prior is None or ts > prior["ts"]:
-            last_status[sc_id] = {
+        status_samples.append((sc_id, {
+                "confirmation_attempt": it.get("confirmation_attempt", 0),
+                "confirmation_complete": it.get("confirmation_complete", True),
                 "is_up": is_up,
                 "ts": ts,
                 "response_ms": resp_ms,
@@ -1518,7 +1532,7 @@ async def post_service_results(
                 "tls_issuer": it.get("tls_issuer"),
                 "tls_subject": it.get("tls_subject"),
                 "content_matched": it.get("content_matched"),
-            }
+            }))
 
     if rows:
         await _insert_clickhouse(
@@ -1533,7 +1547,7 @@ async def post_service_results(
         )
 
     transitions: list[dict[str, Any]] = []
-    for sc_id, s in sorted(last_status.items()):
+    for sc_id, s in sorted(status_samples, key=lambda item: (item[0], item[1]["ts"])):
         try:
             transition = await _update_service_vantage_and_consensus(
                 sc_id, sensor["id"], s, db

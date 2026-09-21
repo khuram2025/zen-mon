@@ -296,7 +296,7 @@ export function ServiceCheckDetailPage() {
     queryKey: ['service-check', id],
     queryFn: async () => (await api.get(`/service-checks/${id}`)).data,
     enabled: !!id,
-    refetchInterval: 15_000,
+    refetchInterval: 5_000,
   })
 
   const fromTs = Date.parse(range.fromISO)
@@ -622,8 +622,11 @@ export function ServiceCheckDetailPage() {
   }
 
   const lastCheckMs = check.last_check_at ? Date.parse(check.last_check_at) : null
-  const intervalMs = (check.check_interval || 60) * 1000
-  const probeStale = !!lastCheckMs && nowTick - lastCheckMs > intervalMs * 2
+  const currentInterval = check.status === 'down' ? (check.down_check_interval ?? 30)
+    : (check.verification_attempt ?? 0) > 0 ? (check.retry_delay_s ?? 10) : (check.check_interval || 60)
+  const intervalMs = currentInterval * 1000
+  const expectedRunMs = (check.timeout || 10) * Math.max(1, check.workflow_steps?.length || 0) * 1000
+  const probeStale = !!lastCheckMs && nowTick - lastCheckMs > Math.max(intervalMs * 2, intervalMs + expectedRunMs * 2)
   const nextPollMs = lastCheckMs ? lastCheckMs + intervalMs : null
   const secsToNext = nextPollMs ? Math.max(0, Math.floor((nextPollMs - nowTick) / 1000)) : null
 
@@ -1072,6 +1075,11 @@ function ServiceHeader({
             <PulseDot status={pulse} size="lg" />
             <h1 className="truncate text-xl font-semibold tracking-tight">{check.name}</h1>
             <span className={cn('text-sm font-semibold', statusTone)}>{statusWord}</span>
+            {check.enabled && secsToNext != null && check.status !== 'down' && (check.verification_attempt ?? 0) > 0 && (
+              <span className="rounded-full bg-warning/10 px-2 py-1 text-xs font-medium text-warning" role="status">
+                Verifying failure · attempt {check.verification_attempt}/{check.retry_count ?? 1}
+              </span>
+            )}
             <span className="inline-flex items-center gap-1 rounded border border-border bg-surface2/60 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-muted">
               <t.Icon className="h-2.5 w-2.5" />{t.label}
             </span>
@@ -2933,15 +2941,37 @@ function ConfigTab({ check, onEdit, onExport }: { check: ServiceCheck; onEdit: (
           ]} />
         </SectionCard>
 
-        <SectionCard title="Scheduling & retries">
+        <SectionCard title="Check schedule">
           <InfoGrid rows={[
-            { label: 'Interval', value: `${check.check_interval}s` },
-            { label: 'Timeout', value: `${check.timeout}s` },
-            { label: 'Failures before Down', value: String(check.retry_count ?? 1) },
-            { label: 'Sensor retry delay', value: `${check.retry_delay_s ?? 30}s` },
+            { label: 'Normal interval', value: `${check.check_interval}s` },
+            { label: 'Request timeout', value: `${check.timeout}s` },
             ...(check.check_type === 'http' ? [{ label: 'IP version', value: check.config?.ip_version === 'ipv4' ? 'IPv4 only' : check.config?.ip_version === 'ipv6' ? 'IPv6 only' : 'Auto' }] : []),
-            { label: 'Level', value: `L${check.level ?? 1}` },
             { label: 'Enabled', value: check.enabled ? 'Yes' : 'Paused' },
+          ]} />
+        </SectionCard>
+
+        <SectionCard title="Failure confirmation">
+          <InfoGrid rows={[
+            { label: 'Consecutive failures', value: `${check.retry_count ?? 1} total attempts` },
+            { label: 'Retry gap', value: `${check.retry_delay_s ?? 10}s after each failure` },
+            { label: 'On successful retry', value: 'Reset confirmation; remain Up' },
+            { label: 'SLA downtime', value: 'Starts when Down is confirmed' },
+          ]} />
+          <p className="mt-3 text-xs text-muted">Includes the initial attempt. Every failed probe remains in diagnostics. Controller and sensor checks use the same confirmation policy.</p>
+        </SectionCard>
+
+        <SectionCard title="Recovery">
+          <InfoGrid rows={[
+            { label: 'Check while Down', value: `Every ${check.down_check_interval ?? 30}s` },
+            { label: 'Mark recovered', value: 'First successful check' },
+            { label: 'After recovery', value: `Resume ${check.check_interval}s interval` },
+            { label: 'Overlapping checks', value: 'Prevented' },
+          ]} />
+        </SectionCard>
+
+        <SectionCard title="Monitoring context">
+          <InfoGrid rows={[
+            { label: 'Level', value: `L${check.level ?? 1}` },
             { label: 'Maintenance', value: check.in_maintenance ? 'Active window' : 'None' },
             { label: 'Group', value: check.group_name || 'Unassigned' },
             { label: 'Parent check', value: check.parent_check_name || '—' },

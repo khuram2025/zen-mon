@@ -74,8 +74,8 @@ const emptyForm: FormState = {
   level: 2,
   default_interval: 60,
   default_timeout: 10,
-  default_retry_count: 1,
-  default_retry_delay_s: 30,
+  default_retry_count: 3,
+  default_retry_delay_s: 10,
   target_url_template: 'http://{{ip}}/',
   target_port_default: '',
   http_method: 'GET',
@@ -538,7 +538,7 @@ export function ServiceCheckTemplatesPage() {
                   }
                 />
               </FormField>
-              <FormField label="Failures before Down">
+              <FormField label="Consecutive failures to confirm Down">
                 <Input
                   type="number"
                   min={1}
@@ -552,7 +552,7 @@ export function ServiceCheckTemplatesPage() {
                   }
                 />
               </FormField>
-              <FormField label="Sensor retry delay (s)">
+              <FormField label="Confirmation retry delay (s)">
                 <Input
                   type="number"
                   min={1}
@@ -561,7 +561,7 @@ export function ServiceCheckTemplatesPage() {
                   onChange={(e) =>
                     setForm({
                       ...form,
-                      default_retry_delay_s: Math.max(1, Math.min(600, Number(e.target.value) || 30)),
+                      default_retry_delay_s: Math.max(1, Math.min(600, Number(e.target.value) || 10)),
                     })
                   }
                 />

@@ -140,8 +140,9 @@ class ServiceCheckCreate(NetworkConfigMixin):
     level: int = Field(default=1, ge=1, le=3)
     config: dict = Field(default_factory=dict)
     tags: list[str] = Field(default_factory=list)
-    retry_count: int = Field(default=1, ge=1, le=10)
-    retry_delay_s: int = Field(default=30, ge=1, le=600)
+    retry_count: int = Field(default=3, ge=1, le=10)
+    retry_delay_s: int = Field(default=10, ge=1, le=600)
+    down_check_interval: int = Field(default=30, ge=10, le=3600)
     credential_id: Optional[UUID] = None
     workflow_operator: str = Field(default="all", pattern="^(all|any)$")
     workflow_steps: list[ServiceWorkflowStep] = Field(default_factory=list, max_length=10)
@@ -186,6 +187,7 @@ class ServiceCheckUpdate(NetworkConfigMixin):
     tags: Optional[list[str]] = None
     retry_count: Optional[int] = Field(default=None, ge=1, le=10)
     retry_delay_s: Optional[int] = Field(default=None, ge=1, le=600)
+    down_check_interval: Optional[int] = Field(default=None, ge=10, le=3600)
     credential_id: Optional[UUID] = None
     workflow_operator: Optional[str] = Field(default=None, pattern="^(all|any)$")
     workflow_steps: Optional[list[ServiceWorkflowStep]] = Field(default=None, max_length=10)
@@ -227,8 +229,10 @@ class ServiceCheckResponse(BaseModel):
     level: int = 1
     config: dict = Field(default_factory=dict)
     tags: list[str] = Field(default_factory=list)
-    retry_count: int = 1
-    retry_delay_s: int = 30
+    retry_count: int = 3
+    retry_delay_s: int = 10
+    down_check_interval: int = 30
+    verification_attempt: int = 0
     credential_id: Optional[UUID] = None
     credential_name: Optional[str] = None
     credential_auth_type: Optional[str] = None
@@ -335,8 +339,8 @@ class ServiceCheckTemplateCreate(BaseModel):
     tags: list[str] = Field(default_factory=list)
     default_interval: int = Field(default=60, ge=10, le=3600)
     default_timeout: int = Field(default=10, ge=1, le=60)
-    default_retry_count: int = Field(default=1, ge=1, le=10)
-    default_retry_delay_s: int = Field(default=30, ge=1, le=600)
+    default_retry_count: int = Field(default=3, ge=1, le=10)
+    default_retry_delay_s: int = Field(default=10, ge=1, le=600)
     target_url_template: Optional[str] = Field(default=None, max_length=2048)
     target_port_default: Optional[int] = Field(default=None, ge=1, le=65535)
     http_method: Optional[str] = Field(default=None, pattern="^(GET|POST|HEAD|PUT)$")

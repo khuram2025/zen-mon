@@ -395,7 +395,9 @@ class ConfigServiceCheck(BaseModel):
     check_interval: int = 60
     timeout: int = 10
     retry_count: int = 1
-    retry_delay_s: int = Field(default=30, ge=1, le=600)
+    retry_delay_s: int = Field(default=10, ge=1, le=600)
+    down_check_interval: int = 30
+    confirmation_progress: bool = True
     enabled: bool = True
 
 
@@ -449,6 +451,8 @@ class ProbeNetworkDiagnostics(BaseModel):
 
 
 class ServiceResultItem(BaseModel):
+    confirmation_attempt: int = Field(default=0, ge=0, le=10)
+    confirmation_complete: bool = True
     network_diagnostics: Optional[ProbeNetworkDiagnostics] = None
     service_check_id: UUID
     timestamp: datetime
