@@ -110,7 +110,7 @@ func (f *fakeServiceLoader) LoadServiceChecks(ctx context.Context) ([]*checker.S
 	return nil, nil
 }
 
-func (f *fakeServiceLoader) UpdateServiceCheckStatus(ctx context.Context, id uuid.UUID, status string, lastCheckAt time.Time, responseMs float64, lastError string, tlsExpiry *time.Time, tlsDaysRemaining *int, tlsIssuer string, tlsSubject string) error {
+func (f *fakeServiceLoader) UpdateServiceCheckStatus(ctx context.Context, id uuid.UUID, status string, lastCheckAt time.Time, responseMs float64, lastError string, tlsExpiry *time.Time, tlsDaysRemaining *int, tlsIssuer string, tlsSubject string, verificationAttempt int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.updates = append(f.updates, status)

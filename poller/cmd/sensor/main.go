@@ -119,6 +119,8 @@ type configServiceCheck struct {
 	Timeout               int                        `json:"timeout"`
 	RetryCount            int                        `json:"retry_count"`
 	RetryDelayS           int                        `json:"retry_delay_s"`
+	DownCheckInterval     int                        `json:"down_check_interval"`
+	ConfirmationProgress  bool                       `json:"confirmation_progress"`
 	Enabled               bool                       `json:"enabled"`
 }
 
@@ -809,7 +811,7 @@ const (
 	eventsPath               = "/api/v1/sensor/events"
 	uploadBatchSize          = 500
 	maxDrainBatches          = 100
-	defaultServiceRetryDelay = 30 * time.Second
+	defaultServiceRetryDelay = 10 * time.Second
 	maxServiceRetryDelay     = 10 * time.Minute
 	maxServiceCheckTimeout   = 60 * time.Second
 	completedCommandLimit    = 128
@@ -1810,6 +1812,7 @@ type probeRunner interface {
 }
 
 type targetSchedule struct {
+	serviceDown bool
 	lastStarted time.Time
 	notBefore   time.Time
 	initialized bool
@@ -1905,6 +1908,12 @@ func (s *checkScheduler) Schedule(ctx context.Context, current configResponse, n
 			continue
 		}
 		interval := secondsOrDefault(service.CheckInterval, time.Minute)
+		s.mu.Lock()
+		state := s.targets["service:"+service.ID]
+		if state != nil && state.serviceDown {
+			interval = secondsOrDefault(service.DownCheckInterval, 30*time.Second)
+		}
+		s.mu.Unlock()
 		probes = append(probes, scheduledProbe{
 			key: "service:" + service.ID, interval: interval,
 			run: func() { s.runService(ctx, service, id, interval) },
@@ -2059,19 +2068,59 @@ func (s *checkScheduler) runService(ctx context.Context, sc configServiceCheck, 
 		TLSWarnDays: sc.TLSWarnDays, TLSCriticalDays: sc.TLSCriticalDays,
 		CheckInterval: interval, Timeout: timeout, RetryCount: sc.RetryCount, RetryDelay: retryDelay,
 	}
-	result := s.runServiceWithRetries(ctx, check)
-	if result == nil {
-		s.logger.Errorf("service probe %s returned no result", sc.ID)
+	s.mu.Lock()
+	state := s.targets["service:"+sc.ID]
+	if state != nil && state.serviceDown {
+		check.RetryCount = 1
+	}
+	s.mu.Unlock()
+	emit := func(result *checker.ServiceCheckResult, attempt int, complete bool) {
+		if ctx.Err() != nil || result == nil {
+			return
+		}
+		// Mark observations at completion; confirmed Down never precedes its verdict.
+		result.Timestamp = time.Now().UTC()
+		s.emitServiceAttempt(sc, result, attempt, complete)
+	}
+	var result *checker.ServiceCheckResult
+	if sc.ConfirmationProgress {
+		result = s.runServiceWithRetries(ctx, check, emit)
+	} else {
+		// Older servers do not understand diagnostic-only attempts.
+		result = s.runServiceWithRetries(ctx, check)
+		if result != nil && ctx.Err() == nil {
+			s.emitServiceAttempt(sc, result, 0, true)
+		}
+	}
+	if result == nil || ctx.Err() != nil {
 		return
 	}
+	s.mu.Lock()
+	state = s.targets["service:"+sc.ID]
+	if state == nil {
+		state = &targetSchedule{}
+		s.targets["service:"+sc.ID] = state
+	}
+	state.serviceDown = !result.IsUp
+	if sc.CheckType == "tls" && result.IsUp {
+		state.serviceDown = (result.TLSValid != nil && !*result.TLSValid) ||
+			(result.TLSDaysRemaining != nil && *result.TLSDaysRemaining <= sc.TLSCriticalDays)
+	}
+	state.lastStarted = time.Now()
+	s.mu.Unlock()
+}
+
+func (s *checkScheduler) emitServiceAttempt(sc configServiceCheck, result *checker.ServiceCheckResult, attempt int, complete bool) {
 	if result.Timestamp.IsZero() {
 		result.Timestamp = time.Now().UTC()
 	}
 	payload := map[string]any{
 		"service_check_id": sc.ID, "timestamp": result.Timestamp, "check_type": result.CheckType,
 		"is_up": result.IsUp, "response_ms": float64(result.ResponseTime.Microseconds()) / 1000.0,
-		"error":              result.Error,
-		"tls_days_remaining": result.TLSDaysRemaining, "tls_valid": result.TLSValid,
+		"error":                result.Error,
+		"confirmation_attempt": attempt, "confirmation_complete": complete,
+		"network_diagnostics": result.Diagnostics,
+		"tls_days_remaining":  result.TLSDaysRemaining, "tls_valid": result.TLSValid,
 		"tls_expiry_date": result.TLSExpiry, "tls_issuer": result.TLSIssuer, "tls_subject": result.TLSSubject,
 		"content_matched": result.ContentMatched,
 	}
@@ -2083,7 +2132,7 @@ func (s *checkScheduler) runService(ctx context.Context, sc configServiceCheck, 
 	}
 }
 
-func (s *checkScheduler) runServiceWithRetries(ctx context.Context, check *checker.ServiceCheck) *checker.ServiceCheckResult {
+func (s *checkScheduler) runServiceWithRetries(ctx context.Context, check *checker.ServiceCheck, observe ...func(*checker.ServiceCheckResult, int, bool)) *checker.ServiceCheckResult {
 	attempts := check.RetryCount
 	if attempts < 1 {
 		attempts = 1
@@ -2091,13 +2140,18 @@ func (s *checkScheduler) runServiceWithRetries(ctx context.Context, check *check
 	if attempts > 10 {
 		attempts = 10
 	}
-	return s.runWithRetries(ctx, check, attempts-1)
+	return s.runWithRetries(ctx, check, attempts-1, observe...)
 }
 
-func (s *checkScheduler) runWithRetries(ctx context.Context, check *checker.ServiceCheck, retries int) *checker.ServiceCheckResult {
+func (s *checkScheduler) runWithRetries(ctx context.Context, check *checker.ServiceCheck, retries int, observe ...func(*checker.ServiceCheckResult, int, bool)) *checker.ServiceCheckResult {
 	var last *checker.ServiceCheckResult
 	for attempt := 0; attempt <= retries; attempt++ {
 		last = s.runner.CheckOne(ctx, check, s.sensorName)
+		if last != nil && ctx.Err() == nil {
+			for _, callback := range observe {
+				callback(last, attempt+1, last.IsUp || attempt == retries)
+			}
+		}
 		if last != nil && last.IsUp {
 			return last
 		}

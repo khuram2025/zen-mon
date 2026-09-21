@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"strconv"
 	"sync"
 	"time"
@@ -46,7 +47,7 @@ type EventPublisher interface {
 type ServiceCheckLoader interface {
 	LoadServiceChecks(ctx context.Context) ([]*checker.ServiceCheck, error)
 	IsServiceCheckCentrallyOwned(ctx context.Context, id uuid.UUID) (bool, error)
-	UpdateServiceCheckStatus(ctx context.Context, id uuid.UUID, status string, lastCheckAt time.Time, responseMs float64, lastError string, tlsExpiry *time.Time, tlsDaysRemaining *int, tlsIssuer string, tlsSubject string) error
+	UpdateServiceCheckStatus(ctx context.Context, id uuid.UUID, status string, lastCheckAt time.Time, responseMs float64, lastError string, tlsExpiry *time.Time, tlsDaysRemaining *int, tlsIssuer string, tlsSubject string, verificationAttempt int) error
 	LoadActiveMaintenanceCheckIDs(ctx context.Context) (map[uuid.UUID]struct{}, error)
 }
 
@@ -105,7 +106,9 @@ type Engine struct {
 	svcLoader    ServiceCheckLoader
 	svcWriter    ServiceMetricWriter
 	svcPublisher ServiceEventPublisher
-	checker      *checker.Checker
+	checker      interface {
+		CheckOne(context.Context, *checker.ServiceCheck, string) *checker.ServiceCheckResult
+	}
 
 	// SNMP
 	snmpLoader       SNMPLoader
@@ -118,15 +121,19 @@ type Engine struct {
 
 	logger *zap.SugaredLogger
 
-	mu            sync.RWMutex
-	devices       map[uuid.UUID]*Device
-	deviceMaint   map[uuid.UUID]struct{} // devices inside an active maintenance window
-	serviceChecks map[uuid.UUID]*checker.ServiceCheck
-	snmpDevices   map[uuid.UUID]*snmp.Device
-	lastPingAt    map[uuid.UUID]time.Time
-	lastServiceAt map[uuid.UUID]time.Time
-	lastUdtAt     map[uuid.UUID]time.Time
-	udtInterval   time.Duration
+	mu              sync.RWMutex
+	devices         map[uuid.UUID]*Device
+	deviceMaint     map[uuid.UUID]struct{} // devices inside an active maintenance window
+	serviceChecks   map[uuid.UUID]*checker.ServiceCheck
+	snmpDevices     map[uuid.UUID]*snmp.Device
+	lastPingAt      map[uuid.UUID]time.Time
+	lastServiceAt   map[uuid.UUID]time.Time
+	serviceFinished map[uuid.UUID]time.Time
+	serviceRunning  map[uuid.UUID]bool
+	serviceWorkers  sync.WaitGroup
+	serviceStopping bool
+	lastUdtAt       map[uuid.UUID]time.Time
+	udtInterval     time.Duration
 	// Effective degraded thresholds: config defaults, overridden by the
 	// admin-set values in system_settings (key 'monitoring'). Written under
 	// e.mu in syncDevices, read under e.mu in processStatusChange.
@@ -187,6 +194,8 @@ func NewEngine(
 		snmpDevices:     make(map[uuid.UUID]*snmp.Device),
 		lastPingAt:      make(map[uuid.UUID]time.Time),
 		lastServiceAt:   make(map[uuid.UUID]time.Time),
+		serviceFinished: make(map[uuid.UUID]time.Time),
+		serviceRunning:  make(map[uuid.UUID]bool),
 		lastUdtAt:       make(map[uuid.UUID]time.Time),
 		udtInterval:     udtIntervalFromEnv(),
 		degradedRTTMs:   cfg.Poller.DegradedRTTMs,
@@ -266,7 +275,17 @@ func (e *Engine) Run(ctx context.Context) {
 
 	// Run first cycles immediately
 	e.runPingCycle(ctx)
-	e.runServiceCheckCycle(ctx)
+	go func() {
+		e.runServiceCheckCycle(ctx)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-serviceCheckTicker.C:
+				e.runServiceCheckCycle(ctx)
+			}
+		}
+	}()
 	go e.runSNMPCycle(ctx)
 
 	for {
@@ -289,8 +308,6 @@ func (e *Engine) Run(ctx context.Context) {
 			}
 		case <-pingTicker.C:
 			e.runPingCycle(ctx)
-		case <-serviceCheckTicker.C:
-			e.runServiceCheckCycle(ctx)
 		case <-snmpTicker.C:
 			go e.runSNMPCycle(ctx)
 		}
@@ -300,6 +317,15 @@ func (e *Engine) Run(ctx context.Context) {
 // Shutdown performs graceful shutdown.
 func (e *Engine) Shutdown(ctx context.Context) {
 	e.logger.Info("Engine shutting down...")
+	e.mu.Lock()
+	e.serviceStopping = true
+	e.mu.Unlock()
+	done := make(chan struct{})
+	go func() { e.serviceWorkers.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 // HealthStatus returns the current health status.
@@ -764,7 +790,9 @@ func (e *Engine) syncServiceChecks(ctx context.Context) error {
 	for _, sc := range checks {
 		seen[sc.ID] = true
 		if existing, ok := e.serviceChecks[sc.ID]; ok {
-			sc.DownCount = existing.DownCount
+			if sameServiceDefinition(sc, existing) {
+				sc.DownCount = existing.DownCount
+			}
 			sc.Status = existing.Status
 		}
 		e.serviceChecks[sc.ID] = sc
@@ -774,6 +802,7 @@ func (e *Engine) syncServiceChecks(ctx context.Context) error {
 		if !seen[id] {
 			delete(e.serviceChecks, id)
 			delete(e.lastServiceAt, id)
+			delete(e.serviceFinished, id)
 		}
 	}
 
@@ -781,83 +810,109 @@ func (e *Engine) syncServiceChecks(ctx context.Context) error {
 	return nil
 }
 
-func (e *Engine) runServiceCheckCycle(ctx context.Context) {
-	// Snapshot enabled checks + the current parent-status map under the
-	// read lock, then filter out children whose parent is currently DOWN
-	// (parent-dependency suppression — avoids alert storms when an upstream
-	// fails and all its dependents would otherwise page simultaneously).
-	now := time.Now()
-	e.mu.RLock()
-	parentStatus := map[uuid.UUID]string{}
-	for id, sc := range e.serviceChecks {
-		parentStatus[id] = sc.Status
+// serviceCadence keeps confirmation delays separate from the healthy schedule.
+// All gaps start at completion, so slow checks never overlap the next attempt.
+func serviceCadence(sc *checker.ServiceCheck, started, finished time.Time) (time.Time, time.Duration) {
+	if sc.Status == "down" {
+		return finished, effectiveInterval(sc.DownCheckInterval, 30*time.Second)
 	}
+	if sc.DownCount > 0 {
+		return finished, effectiveInterval(sc.RetryDelay, 10*time.Second)
+	}
+	if !finished.IsZero() {
+		started = finished
+	}
+	return started, effectiveInterval(sc.CheckInterval, 60*time.Second)
+}
 
-	checkList := make([]*checker.ServiceCheck, 0, len(e.serviceChecks))
-	skipped := 0
+func (e *Engine) runServiceCheckCycle(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	now := time.Now()
+	e.mu.Lock()
+	if ctx.Err() != nil || e.serviceStopping {
+		e.mu.Unlock()
+		return
+	}
+	if e.serviceRunning == nil {
+		e.serviceRunning = make(map[uuid.UUID]bool)
+	}
+	if e.serviceFinished == nil {
+		e.serviceFinished = make(map[uuid.UUID]time.Time)
+	}
+	checks := make([]*checker.ServiceCheck, 0)
 	for _, sc := range e.serviceChecks {
-		if !sc.Enabled {
-			continue
+		if len(e.serviceRunning) >= 50 {
+			break
 		}
-		last := e.lastServiceAt[sc.ID]
-		interval := effectiveInterval(sc.CheckInterval, 60*time.Second)
-		if !due(now, last, interval) {
+		if !sc.Enabled || e.serviceRunning[sc.ID] {
 			continue
 		}
 		if sc.ParentCheckID != nil {
-			if ps, ok := parentStatus[*sc.ParentCheckID]; ok && ps == "down" {
-				skipped++
+			if parent := e.serviceChecks[*sc.ParentCheckID]; parent != nil && parent.Status == "down" {
 				continue
 			}
 		}
-		checkList = append(checkList, sc)
-	}
-	e.mu.RUnlock()
-
-	if len(checkList) == 0 {
-		return
-	}
-
-	// Load active maintenance windows once per cycle — used below to
-	// suppress status transitions for muted checks.
-	maintIDs, err := e.svcLoader.LoadActiveMaintenanceCheckIDs(ctx)
-	if err != nil {
-		e.logger.Warnf("Failed to load maintenance window ids: %v", err)
-		maintIDs = map[uuid.UUID]struct{}{}
-	}
-
-	e.logger.Infof("Starting service check cycle for %d checks (%d skipped via dependency, %d in maintenance)",
-		len(checkList), skipped, len(maintIDs))
-	start := time.Now()
-
-	e.mu.Lock()
-	for _, sc := range checkList {
+		last, interval := serviceCadence(sc, e.lastServiceAt[sc.ID], e.serviceFinished[sc.ID])
+		if !due(now, last, interval) {
+			continue
+		}
+		snapshot := *sc
+		checks = append(checks, &snapshot)
+		e.serviceRunning[sc.ID] = true
 		e.lastServiceAt[sc.ID] = now
-		sc.LastCheckAt = now
+		e.serviceWorkers.Add(1)
 	}
 	e.mu.Unlock()
-
-	maxWorkers := 50
-	if len(checkList) < maxWorkers {
-		maxWorkers = len(checkList)
+	for _, sc := range checks {
+		go e.runServiceAttempt(ctx, sc)
 	}
+}
 
-	results := e.checker.CheckBatch(ctx, checkList, e.cfg.Poller.ID, maxWorkers)
-
-	e.logger.Infof("Service check cycle complete: %d results in %dms", len(results), time.Since(start).Milliseconds())
-
-	for _, result := range results {
-		// Write to ClickHouse (always — SLA stays accurate even in maintenance)
-		e.svcWriter.WriteServiceResult(result)
-
-		// Publish to Redis
-		if err := e.svcPublisher.PublishServiceMetric(ctx, result); err != nil {
-			e.logger.Debugf("Failed to publish service metric: %v", err)
+func (e *Engine) runServiceAttempt(ctx context.Context, sc *checker.ServiceCheck) {
+	defer e.serviceWorkers.Done()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			e.logger.Errorf("Service check worker failed: %v", recovered)
 		}
-
-		// Process status change (with maintenance mute)
-		e.processServiceStatusChange(ctx, result, maintIDs)
+		e.mu.Lock()
+		delete(e.serviceRunning, sc.ID)
+		e.serviceFinished[sc.ID] = time.Now()
+		e.mu.Unlock()
+	}()
+	result := e.checker.CheckOne(ctx, sc, e.cfg.Poller.ID)
+	if result == nil || ctx.Err() != nil {
+		return
 	}
+	result.Timestamp = time.Now().UTC()
+	e.mu.RLock()
+	current := e.serviceChecks[sc.ID]
+	valid := current != nil && current.Enabled && sameServiceDefinition(current, sc)
+	e.mu.RUnlock()
+	if !valid {
+		return
+	}
+	// Retain every attempt in diagnostics, including failures that later recover.
+	e.svcWriter.WriteServiceResult(result)
+	if err := e.svcPublisher.PublishServiceMetric(ctx, result); err != nil {
+		e.logger.Debugf("Failed to publish service metric: %v", err)
+	}
+	// Maintenance may have changed while a slow workflow was running.
+	maintIDs, err := e.svcLoader.LoadActiveMaintenanceCheckIDs(ctx)
+	if err != nil {
+		e.logger.Warnf("Cannot evaluate service maintenance; keeping confirmed state: %v", err)
+		return
+	}
+	e.processServiceStatusChange(ctx, result, maintIDs)
+}
+
+func sameServiceDefinition(a, b *checker.ServiceCheck) bool {
+	left, right := *a, *b
+	left.Status, right.Status = "", ""
+	left.DownCount, right.DownCount = 0, 0
+	left.LastCheckAt, right.LastCheckAt = time.Time{}, time.Time{}
+	return reflect.DeepEqual(left, right)
 }
 
 func effectiveInterval(configured time.Duration, fallback time.Duration) time.Duration {
@@ -899,15 +954,18 @@ func (e *Engine) processServiceStatusChange(ctx context.Context, result *checker
 	}
 
 	if !result.IsUp {
-		sc.DownCount++
-		if sc.DownCount >= retryThreshold {
+		if sc.DownCount < retryThreshold {
+			sc.DownCount++
+		}
+		if sc.DownCount >= retryThreshold || oldStatus == "down" {
 			newStatus = "down"
 		} else {
-			// Not yet confirmed down — still update PG with latest result
+			// Not yet confirmed down — persist progress without opening an incident.
+			attempt := sc.DownCount
 			responseMs := float64(result.ResponseTime.Microseconds()) / 1000.0
 			go func() {
 				e.svcLoader.UpdateServiceCheckStatus(ctx, sc.ID, oldStatus, result.Timestamp, responseMs, result.Error,
-					result.TLSExpiry, result.TLSDaysRemaining, result.TLSIssuer, result.TLSSubject)
+					result.TLSExpiry, result.TLSDaysRemaining, result.TLSIssuer, result.TLSSubject, attempt)
 			}()
 			return
 		}
@@ -933,7 +991,7 @@ func (e *Engine) processServiceStatusChange(ctx context.Context, result *checker
 	responseMs := float64(result.ResponseTime.Microseconds()) / 1000.0
 	go func() {
 		if err := e.svcLoader.UpdateServiceCheckStatus(ctx, sc.ID, newStatus, result.Timestamp, responseMs, result.Error,
-			result.TLSExpiry, result.TLSDaysRemaining, result.TLSIssuer, result.TLSSubject); err != nil {
+			result.TLSExpiry, result.TLSDaysRemaining, result.TLSIssuer, result.TLSSubject, 0); err != nil {
 			e.logger.Errorf("Failed to update service check status in PG: %v", err)
 		}
 	}()

@@ -34,6 +34,7 @@ type State = {
   parent_check_id: string
   retry_count: number
   retry_delay_s: number
+  down_check_interval: number
   tags: string[]
   target_host: string
   target_port: number | ''
@@ -128,8 +129,9 @@ const empty: State = {
   enabled: true,
   group_id: '',
   parent_check_id: '',
-  retry_count: 2,
-  retry_delay_s: 30,
+  retry_count: 3,
+  retry_delay_s: 10,
+  down_check_interval: 30,
   tags: [],
   target_host: '',
   target_port: '',
@@ -312,7 +314,8 @@ export function ServiceCheckFormDialog({
         group_id: sourceCheck.group_id || '',
         parent_check_id: sourceCheck.parent_check_id || '',
         retry_count: sourceCheck.retry_count ?? 1,
-        retry_delay_s: sourceCheck.retry_delay_s ?? 30,
+        retry_delay_s: sourceCheck.retry_delay_s ?? 10,
+        down_check_interval: sourceCheck.down_check_interval ?? 30,
         tags: Array.isArray(sourceCheck.tags) ? sourceCheck.tags : [],
         target_host: sourceCheck.target_host || '',
         target_port: sourceCheck.target_port ?? '',
@@ -393,6 +396,7 @@ export function ServiceCheckFormDialog({
       parent_check_id: s.parent_check_id || null,
       retry_count: s.retry_count,
       retry_delay_s: s.retry_delay_s,
+      down_check_interval: s.down_check_interval,
       tags: s.tags,
       target_host: s.check_type === 'http' ? httpHost : s.target_host.trim(),
       check_interval: s.check_interval,
@@ -821,7 +825,7 @@ export function ServiceCheckFormDialog({
           </div>
 
           <div className="grid grid-cols-2 gap-3">
-            <FormField label="Interval (seconds)">
+            <FormField label="Normal check interval (seconds)">
               <Input
                 type="number"
                 min={10}
@@ -843,10 +847,10 @@ export function ServiceCheckFormDialog({
 
           <div className="space-y-3 rounded-md border border-border p-3">
             <div className="text-xs font-semibold uppercase tracking-wider text-muted">
-              Reliability
+              Failure confirmation
             </div>
             <div className="grid grid-cols-2 gap-3">
-              <FormField label="Failures before Down">
+              <FormField label="Consecutive failures to confirm Down">
                 <Input
                   type="number"
                   min={1}
@@ -857,19 +861,30 @@ export function ServiceCheckFormDialog({
                   }
                 />
               </FormField>
-              <FormField label="Sensor retry delay (seconds)">
+              <FormField label="Delay between confirmation attempts (seconds)">
                 <Input
                   type="number"
                   min={1}
                   max={600}
                   value={s.retry_delay_s}
                   onChange={(e) =>
-                    setS({ ...s, retry_delay_s: Math.max(1, Math.min(600, Number(e.target.value) || 30)) })
+                    setS({ ...s, retry_delay_s: Math.max(1, Math.min(600, Number(e.target.value) || 10)) })
                   }
                 />
               </FormField>
             </div>
-            <p className="text-xs text-muted">1 marks Down on the first failure. The controller counts consecutive scheduled failures; sensors confirm with attempts within a run. The delay applies to sensor retries. Failed probes remain in diagnostics. Service-detail SLA counts confirmed Down incidents only.</p>
+            <p className="text-xs text-muted">
+              {s.retry_count === 1 ? 'Down is confirmed on the first failed check.' : `The initial failed check plus ${s.retry_count - 1} ${s.retry_count === 2 ? 'retry' : 'retries'}, waiting ${s.retry_delay_s}s after each failed attempt. Any success resets confirmation.`}
+              {' '}Applies to controller and sensor checks. Each attempt is retained in diagnostics; SLA downtime begins when Down is confirmed.
+            </p>
+            <div className="border-t border-border pt-3">
+              <div className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted">Recovery</div>
+              <FormField label="Check interval while Down (seconds)">
+                <Input type="number" min={10} max={3600} value={s.down_check_interval}
+                  onChange={(e) => setS({ ...s, down_check_interval: Math.max(10, Math.min(3600, Number(e.target.value) || 30)) })} />
+              </FormField>
+              <p className="mt-2 text-xs text-muted">The first successful check closes the incident and restores the normal schedule. Checks never overlap.</p>
+            </div>
             <FormField label="Depends on (parent)">
               <Select
                 value={s.parent_check_id || 'none'}

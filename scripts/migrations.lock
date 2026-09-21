@@ -129,3 +129,4 @@ dd04dd924543dfe410d8e2e46c24e011007a96861bfcdfb8be293940221f99df  migrate-117-nc
 4275a6f42cdbe162ecf887f3fa654a59d836e0ee6e38ec42f5bda0f88ac326e1  migrate-118-ncm-jobs-baselines.sql
 2ada3fc24bde76fba9458d1f3d724a6988e7a435cfba6bb5066cb34d2dcb4e43  migrate-119-udt-ip-evidence.sql
 5fd572a8afbcfc1b8583afaddc4bf808acf7ecbab0dfc6fd686f7115b152bc34  migrate-120-f5-memory-and-coverage.sql
+0608f5949f0c147274a49376c68264ac6f9eab644a44b8ccffb5a2faf1d78299  migrate-121-service-confirmation.sql

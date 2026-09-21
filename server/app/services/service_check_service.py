@@ -56,7 +56,9 @@ def _to_response(sc: ServiceCheck, in_maintenance: bool = False, parent_name: st
         config=sc.config or {},
         tags=list(sc.tags or []),
         retry_count=sc.retry_count or 1,
-        retry_delay_s=sc.retry_delay_s or 30,
+        retry_delay_s=sc.retry_delay_s or 10,
+        down_check_interval=getattr(sc, "down_check_interval", None) or 30,
+        verification_attempt=getattr(sc, "verification_attempt", None) or 0,
         credential_id=sc.credential_id,
         credential_name=sc.credential.name if getattr(sc, "credential", None) else None,
         credential_auth_type=sc.credential.auth_type if getattr(sc, "credential", None) else None,
@@ -348,6 +350,8 @@ async def update_service_check(db: AsyncSession, check_id: UUID, data: ServiceCh
         update_data["tags"] = await tag_service.canonicalize_tags(db, update_data["tags"])
     for key, value in update_data.items():
         setattr(sc, key, value)
+    if update_data:
+        sc.verification_attempt = 0
     if "credential_id" in update_data:
         sc.credential = credential
 

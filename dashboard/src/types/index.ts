@@ -248,6 +248,8 @@ export interface ServiceCheck {
   tags: string[]
   retry_count?: number
   retry_delay_s?: number
+  down_check_interval?: number
+  verification_attempt?: number
   credential_id?: string | null
   credential_name?: string | null
   credential_auth_type?: 'basic' | 'bearer' | 'form' | 'ntlm' | null
