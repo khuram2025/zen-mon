@@ -1,5 +1,30 @@
 name: Windows agent release
 
+# Azure Artifact Signing Configuration
+# =====================================
+# This workflow signs Windows binaries using Azure Artifact Signing (Public Trust).
+# Publisher displayed to Windows: Zentryc
+#
+# Azure Resources (managed by Zentryc in Azure Portal):
+#   Account: zentrycsign (Basic SKU, East US, rg-zentryc-signing)
+#   Endpoint: https://eus.codesigning.azure.net
+#   Identity: Organization Public as "Zentryc"
+#
+# Required Secrets (Settings > Secrets and variables > Actions > Secrets):
+#   AZURE_CLIENT_ID       - App registration client ID with federated credential
+#   AZURE_TENANT_ID       - Azure AD tenant ID
+#   AZURE_SUBSCRIPTION_ID - Azure subscription containing rg-zentryc-signing
+#
+# Required Variables (Settings > Secrets and variables > Actions > Variables):
+#   AZURE_ARTIFACT_SIGNING_PROFILE - Certificate profile name (default: Zentryc)
+#
+# Remaining Azure Setup (once identity validation completes):
+# 1. Create Public Trust certificate profile in zentrycsign account
+# 2. Create App Registration with federated credential for GitHub Actions OIDC:
+#    - Subject: repo:khuram2025/zen-mon:ref:refs/heads/main (or environment/branch)
+# 3. Grant "Artifact Signing Certificate Profile Signer" role to the App Registration
+#    on the zentrycsign account
+
 on:
   push:
     paths:
@@ -14,6 +39,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   build-msi:
@@ -35,38 +61,43 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Require production signing configuration
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Require Azure Artifact Signing configuration
         shell: pwsh
         env:
-          SIGNING_PFX: ${{ secrets.ZENPLUS_CODE_SIGNING_PFX_BASE64 }}
-          SIGNING_PASSWORD: ${{ secrets.ZENPLUS_CODE_SIGNING_PFX_PASSWORD }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ARTIFACT_SIGNING_PROFILE: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX) -or
-              [string]::IsNullOrWhiteSpace($env:SIGNING_PASSWORD)) {
-            throw "Production agent builds require an Authenticode PFX. Configure the ZENPLUS_CODE_SIGNING_PFX_BASE64 and ZENPLUS_CODE_SIGNING_PFX_PASSWORD repository secrets."
+          $missing = @()
+          if ([string]::IsNullOrWhiteSpace($env:AZURE_CLIENT_ID)) { $missing += "AZURE_CLIENT_ID (secret)" }
+          if ([string]::IsNullOrWhiteSpace($env:AZURE_TENANT_ID)) { $missing += "AZURE_TENANT_ID (secret)" }
+          if ([string]::IsNullOrWhiteSpace($env:AZURE_SUBSCRIPTION_ID)) { $missing += "AZURE_SUBSCRIPTION_ID (secret)" }
+          if ([string]::IsNullOrWhiteSpace($env:ARTIFACT_SIGNING_PROFILE)) { $missing += "AZURE_ARTIFACT_SIGNING_PROFILE (variable, e.g. Zentryc)" }
+          if ($missing.Count -gt 0) {
+            throw "Production agent builds require Azure Artifact Signing. Missing: $($missing -join ', '). See workflow comments for setup instructions."
           }
 
-      - name: Import Authenticode certificate
-        shell: pwsh
-        env:
-          SIGNING_PFX: ${{ secrets.ZENPLUS_CODE_SIGNING_PFX_BASE64 }}
-          SIGNING_PASSWORD: ${{ secrets.ZENPLUS_CODE_SIGNING_PFX_PASSWORD }}
-        run: |
-          $pfxPath = Join-Path $env:RUNNER_TEMP "zenplus-codesign.pfx"
-          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:SIGNING_PFX))
-          try {
-            $password = ConvertTo-SecureString $env:SIGNING_PASSWORD -AsPlainText -Force
-            $certificate = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
-            if (-not $certificate.HasPrivateKey) { throw "Imported code-signing certificate has no private key" }
-            "ZENPLUS_SIGNING_THUMBPRINT=$($certificate.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          }
-          finally {
-            Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
-          }
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Build and test immutable x64 release
         shell: pwsh
         working-directory: ZenPlus_Agent
+        env:
+          # Azure Artifact Signing: zentrycsign account in East US
+          ZENPLUS_ARTIFACT_SIGNING_ENDPOINT: "https://eus.codesigning.azure.net"
+          ZENPLUS_ARTIFACT_SIGNING_ACCOUNT: "zentrycsign"
+          ZENPLUS_ARTIFACT_SIGNING_PROFILE: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          ZENPLUS_REQUIRED_SIGNER_SUBJECT: "Zentryc"
         run: |
           $python = (Get-Command python).Source
           $env:ZENPLUS_BUILD_PYTHON = $python
@@ -92,9 +123,17 @@ jobs:
           if ((Get-FileHash -Algorithm SHA256 $msi.FullName).Hash.ToLowerInvariant() -ne $manifest.msi_sha256) {
             throw "MSI SHA-256 does not match agent-manifest.json"
           }
+          $requiredSubject = "Zentryc"
           foreach ($package in @($msi, $setup)) {
             $signature = Get-AuthenticodeSignature $package.FullName
-            if ($signature.Status -ne 'Valid') { throw "$($package.Name) is not Authenticode trusted: $($signature.Status)" }
+            if ($signature.Status -ne 'Valid') {
+              throw "$($package.Name) is not Authenticode trusted: $($signature.Status)"
+            }
+            $subject = $signature.SignerCertificate.Subject
+            if ($subject -notmatch [regex]::Escape($requiredSubject)) {
+              throw "$($package.Name) signer subject '$subject' does not contain '$requiredSubject'. Production builds must be signed as Zentryc, not a personal name."
+            }
+            Write-Host "$($package.Name): Valid signature, subject contains '$requiredSubject'"
           }
 
       - uses: actions/upload-artifact@v4

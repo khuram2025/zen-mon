@@ -17,15 +17,31 @@ param(
   [switch]$SkipLanguagePacks,
   # Reuse the checked-in Windows resource objects on application-controlled
   # build hosts where `go run` cannot execute the temporary rsrc binary.
-  [switch]$UseExistingResources
+  [switch]$UseExistingResources,
+  # Azure Artifact Signing parameters (for production CI signing via OIDC).
+  # When set, these take precedence over local certificate store signing.
+  [string]$ArtifactSigningEndpoint = $env:ZENPLUS_ARTIFACT_SIGNING_ENDPOINT,
+  [string]$ArtifactSigningAccount = $env:ZENPLUS_ARTIFACT_SIGNING_ACCOUNT,
+  [string]$ArtifactSigningProfile = $env:ZENPLUS_ARTIFACT_SIGNING_PROFILE,
+  # Expected signer subject substring for verification (e.g., "Zentryc").
+  # Production builds fail if the signed artifact's subject does not contain this.
+  [string]$RequiredSignerSubject = $env:ZENPLUS_REQUIRED_SIGNER_SUBJECT
 )
 
 $ErrorActionPreference = "Stop"
 
 $root = Resolve-Path "$PSScriptRoot\.."
-if (-not $TimestampUrl) {
+
+# Determine signing mode: Azure Artifact Signing, local thumbprint, or unsigned dev
+$UseArtifactSigning = $false
+if ($ArtifactSigningEndpoint -and $ArtifactSigningAccount -and $ArtifactSigningProfile) {
+  $UseArtifactSigning = $true
+  $TimestampUrl = "http://timestamp.acs.microsoft.com"
+  Write-Host "Azure Artifact Signing enabled: $ArtifactSigningEndpoint / $ArtifactSigningAccount / $ArtifactSigningProfile"
+} elseif (-not $TimestampUrl) {
   $TimestampUrl = "http://timestamp.digicert.com"
 }
+
 $SigningThumbprint = ($SigningThumbprint -replace '\s', '').ToUpperInvariant()
 if ($RequireSigning -and $AllowUnsignedDevelopmentBuild) {
   throw "-RequireSigning and -AllowUnsignedDevelopmentBuild cannot be used together"
@@ -36,8 +52,12 @@ if ($SkipPayloadExecutionVerification -and -not $AllowUnsignedDevelopmentBuild) 
 if ($SkipLanguagePacks) {
   throw "Installer builds always require the complete offline APM bundle. Run prepare-apm-bundle.ps1 -SkipLanguagePacks directly for gateway-only development work."
 }
-if (-not $SigningThumbprint -and -not $AllowUnsignedDevelopmentBuild) {
-  throw "Production builds require -SigningThumbprint or ZENPLUS_SIGNING_THUMBPRINT. Use -AllowUnsignedDevelopmentBuild only for local test artifacts."
+if (-not $UseArtifactSigning -and -not $SigningThumbprint -and -not $AllowUnsignedDevelopmentBuild) {
+  throw "Production builds require Azure Artifact Signing configuration, -SigningThumbprint, or ZENPLUS_SIGNING_THUMBPRINT. Use -AllowUnsignedDevelopmentBuild only for local test artifacts."
+}
+if ($UseArtifactSigning -and $SigningThumbprint) {
+  Write-Host "Azure Artifact Signing takes precedence over local thumbprint signing."
+  $SigningThumbprint = $null
 }
 $portableGo = Join-Path $root ".tools\go\bin\go.exe"
 if (Test-Path $portableGo) {
@@ -158,24 +178,172 @@ function Assert-CompleteApmBundle {
 }
 
 function Find-SignTool {
+  param([switch]$RequireArtifactSigningCompatible)
   $command = Get-Command signtool.exe -ErrorAction SilentlyContinue
   if ($null -ne $command) {
     return $command.Path
   }
   $kits = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
   if (Test-Path $kits) {
-    $candidate = Get-ChildItem -Path (Join-Path $kits "*\x64\signtool.exe") -ErrorAction SilentlyContinue |
-      Sort-Object FullName -Descending |
-      Select-Object -First 1
-    if ($null -ne $candidate) {
+    $candidates = Get-ChildItem -Path (Join-Path $kits "*\x64\signtool.exe") -ErrorAction SilentlyContinue |
+      Sort-Object FullName -Descending
+    foreach ($candidate in $candidates) {
+      $versionMatch = $candidate.FullName -match '\\(\d+\.\d+\.\d+\.\d+)\\'
+      if ($versionMatch) {
+        $version = [version]$Matches[1]
+        # SDK 20348 is known broken with Artifact Signing dlib; require 10.0.2261.755+
+        if ($RequireArtifactSigningCompatible -and $version.Build -eq 20348) {
+          Write-Host "Skipping incompatible Windows SDK version $version (20348 not supported)"
+          continue
+        }
+      }
       return $candidate.FullName
     }
   }
   throw "signtool.exe was not found in PATH or the Windows 10 SDK"
 }
 
+function Ensure-ArtifactSigningTools {
+  $toolsDir = Join-Path $root ".tools\artifact-signing"
+  $dlibPath = Join-Path $toolsDir "Microsoft.ArtifactSigning.Client\bin\x64\Azure.CodeSigning.Dlib.dll"
+  $signToolPath = Join-Path $toolsDir "Microsoft.Windows.SDK.BuildTools\bin\10.0.26100.0\x64\signtool.exe"
+
+  if ((Test-Path $dlibPath) -and (Test-Path $signToolPath)) {
+    return @{ Dlib = $dlibPath; SignTool = $signToolPath }
+  }
+
+  Write-Host "Installing Azure Artifact Signing tools..."
+  New-Item -ItemType Directory -Force -Path $toolsDir | Out-Null
+
+  $nugetExe = Join-Path $toolsDir "nuget.exe"
+  if (-not (Test-Path $nugetExe)) {
+    Invoke-WebRequest -Uri "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" -OutFile $nugetExe
+  }
+
+  Push-Location $toolsDir
+  try {
+    & $nugetExe install Microsoft.ArtifactSigning.Client -x -NonInteractive
+    if ($LASTEXITCODE -ne 0) {
+      throw "Failed to install Microsoft.ArtifactSigning.Client"
+    }
+    & $nugetExe install Microsoft.Windows.SDK.BuildTools -x -NonInteractive
+    if ($LASTEXITCODE -ne 0) {
+      throw "Failed to install Microsoft.Windows.SDK.BuildTools"
+    }
+  }
+  finally {
+    Pop-Location
+  }
+
+  $dlibDir = Get-ChildItem -Path $toolsDir -Directory -Filter "Microsoft.ArtifactSigning.Client*" |
+    Sort-Object Name -Descending | Select-Object -First 1
+  if ($null -eq $dlibDir) {
+    throw "Microsoft.ArtifactSigning.Client package not found after install"
+  }
+  $dlibPath = Join-Path $dlibDir.FullName "bin\x64\Azure.CodeSigning.Dlib.dll"
+
+  $sdkDir = Get-ChildItem -Path $toolsDir -Directory -Filter "Microsoft.Windows.SDK.BuildTools*" |
+    Sort-Object Name -Descending | Select-Object -First 1
+  if ($null -eq $sdkDir) {
+    throw "Microsoft.Windows.SDK.BuildTools package not found after install"
+  }
+  $signToolCandidates = Get-ChildItem -Path (Join-Path $sdkDir.FullName "bin\*\x64\signtool.exe") -ErrorAction SilentlyContinue |
+    Sort-Object FullName -Descending
+  foreach ($candidate in $signToolCandidates) {
+    $versionMatch = $candidate.FullName -match '\\(\d+\.\d+\.\d+\.\d+)\\'
+    if ($versionMatch) {
+      $version = [version]$Matches[1]
+      if ($version.Build -ne 20348) {
+        $signToolPath = $candidate.FullName
+        break
+      }
+    }
+  }
+  if (-not $signToolPath -or -not (Test-Path $signToolPath)) {
+    throw "Compatible signtool.exe not found in SDK package"
+  }
+
+  if (-not (Test-Path $dlibPath)) {
+    throw "Azure.CodeSigning.Dlib.dll not found at $dlibPath"
+  }
+
+  Write-Host "Artifact Signing tools ready: SignTool=$signToolPath, Dlib=$dlibPath"
+  return @{ Dlib = $dlibPath; SignTool = $signToolPath }
+}
+
+function New-ArtifactSigningMetadata {
+  $metadataPath = Join-Path $root ".tools\artifact-signing-metadata.json"
+  $metadata = [ordered]@{
+    Endpoint = $ArtifactSigningEndpoint
+    CodeSigningAccountName = $ArtifactSigningAccount
+    CertificateProfileName = $ArtifactSigningProfile
+    ExcludeCredentials = @(
+      "ManagedIdentityCredential",
+      "SharedTokenCacheCredential",
+      "VisualStudioCredential",
+      "VisualStudioCodeCredential",
+      "AzurePowerShellCredential",
+      "AzureDeveloperCliCredential",
+      "InteractiveBrowserCredential"
+    )
+  }
+  $json = $metadata | ConvertTo-Json -Depth 4
+  [IO.File]::WriteAllText($metadataPath, $json, (New-Object Text.UTF8Encoding($false)))
+  return $metadataPath
+}
+
+function Assert-SignerSubject {
+  param([string]$Path)
+  if (-not $RequiredSignerSubject) {
+    return
+  }
+  $signature = Get-AuthenticodeSignature $Path
+  if ($null -eq $signature.SignerCertificate) {
+    throw "No signer certificate found for $Path"
+  }
+  $subject = $signature.SignerCertificate.Subject
+  if ($subject -notmatch [regex]::Escape($RequiredSignerSubject)) {
+    throw "Signer subject '$subject' does not contain required substring '$RequiredSignerSubject' for $Path. This may indicate a personal certificate was used instead of the organization certificate."
+  }
+  Write-Host "Verified signer subject contains '$RequiredSignerSubject': $subject"
+}
+
 function Invoke-SignArtifacts {
   param([string[]]$Paths)
+
+  # Azure Artifact Signing mode (production CI)
+  if ($UseArtifactSigning) {
+    $tools = Ensure-ArtifactSigningTools
+    $metadataPath = New-ArtifactSigningMetadata
+    $signTool = $tools.SignTool
+    $dlib = $tools.Dlib
+    foreach ($path in $Paths) {
+      $resolved = (Resolve-Path $path).Path
+      Write-Host "Signing with Azure Artifact Signing: $resolved"
+      $signArgs = @(
+        "sign",
+        "/v",
+        "/fd", "SHA256",
+        "/tr", $TimestampUrl,
+        "/td", "SHA256",
+        "/dlib", $dlib,
+        "/dmdf", $metadataPath,
+        $resolved
+      )
+      & $signTool @signArgs
+      if ($LASTEXITCODE -ne 0) {
+        throw "signtool sign (Artifact Signing) failed for $resolved with exit code $LASTEXITCODE"
+      }
+      & $signTool verify /pa /all $resolved
+      if ($LASTEXITCODE -ne 0) {
+        throw "signtool verification failed for $resolved with exit code $LASTEXITCODE"
+      }
+      Assert-SignerSubject -Path $resolved
+    }
+    return
+  }
+
+  # Local certificate store mode (dev/hardware token)
   if (-not $SigningThumbprint) {
     return
   }
@@ -212,6 +380,7 @@ function Invoke-SignArtifacts {
     if ($LASTEXITCODE -ne 0) {
       throw "signtool verification failed for $resolved with exit code $LASTEXITCODE"
     }
+    Assert-SignerSubject -Path $resolved
   }
 }
 
