@@ -123,13 +123,13 @@ export function NcmDevicePage() {
   }
 
   if (!device) {
-    return <div className="space-y-3"><Link to="/ncm" className="inline-flex items-center gap-1 text-sm text-primary"><ArrowLeft className="h-4 w-4" /> Config Backup</Link><Card><CardContent className="py-10 text-center text-muted">Loading device…</CardContent></Card></div>
+    return <div className="space-y-3"><Link to="/ncm" className="inline-flex items-center gap-1 text-sm text-primary"><ArrowLeft className="h-4 w-4" /> NCCM Overview</Link><Card><CardContent className="py-10 text-center text-muted">Loading device…</CardContent></Card></div>
   }
   const sk = SB[statusKey(device)]
 
   return (
     <div className="space-y-4">
-      <Link to="/ncm" className="inline-flex items-center gap-1 text-sm text-primary hover:underline"><ArrowLeft className="h-4 w-4" /> Config Backup</Link>
+      <Link to="/ncm" className="inline-flex items-center gap-1 text-sm text-primary hover:underline"><ArrowLeft className="h-4 w-4" /> NCCM Overview</Link>
 
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>

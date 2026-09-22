@@ -164,9 +164,9 @@ export function NcmPage() {
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-semibold tracking-tight">
-            <FileCode className="h-5 w-5 text-primary" /> Config Backup (NCM)
+            <FileCode className="h-5 w-5 shrink-0 text-primary" /> Network Configuration &amp; Compliance Manager (NCCM)
           </h1>
-          <p className="text-xs text-muted">Versioned device configuration archive with change diffs, over SSH</p>
+          <p className="text-xs text-muted">Device configuration backups, change tracking and compliance</p>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => runScheduled.mutate()} disabled={!can('ncm.manage') || runScheduled.isPending}><Clock className="h-3.5 w-3.5" /> Run scheduled</Button>
