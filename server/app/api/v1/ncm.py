@@ -473,18 +473,22 @@ async def _do_fetch(db, device_id, *, actor=None, trigger='manual', config_type=
     run=(await db.execute(text("""INSERT INTO ncm_backup_runs(device_id,config_type,trigger,actor_id,status)
         VALUES (:d,:t,:trigger,:actor,'running') RETURNING id"""),
         {'d':device_id,'t':config_type,'trigger':trigger,'actor':getattr(actor,'id',None)})).first()
+    stage='credentials'
     try:
         password=crypto.decrypt(row.password_enc) if row.password_enc else ''
         enable=crypto.decrypt(row.enable_password_enc) if row.enable_password_enc else ''
+        stage='collection'
         platform,content=await asyncio.to_thread(_netmiko_fetch,row.ip,row.platform or 'autodetect',
                                                row.username,password,enable,row.port or 22,config_type)
         # The savepoint ensures a storage failure cannot publish an alert or
         # prune the last good snapshot while the attempt is recorded as failed.
+        stage='archive'
         async with db.begin_nested():
             result=await _save_config_version(db,device_id,config_type,content,'ssh',f'ssh:{platform}',
                                              actor=actor,validated=True)
     except Exception as exc:
-        msg=str(exc) if isinstance(exc,CaptureError) else 'Collection or archive failed; verify connection, trust, permissions and encryption key'
+        from app.services.ncm_errors import failure_message
+        msg=failure_message(exc,stage)
         await db.execute(text("""UPDATE ncm_backup_runs SET status='failed',finished_at=now(),error_code=:error WHERE id=:id"""),{'id':run.id,'error':msg})
         await db.execute(text("""UPDATE device_ncm SET last_status='failed',last_error=:error,last_attempt_at=now() WHERE device_id=:d"""),{'d':device_id,'error':msg})
         await ncm_events.event(db,device_id,'backup.failed',str(run.id),message='Configuration backup failed')
@@ -652,7 +656,8 @@ async def ncm_overview(db: AsyncSession = Depends(get_db), user: User = Depends(
                n.schedule_interval_hours, n.schedule_type, n.schedule_time, n.schedule_days, n.schedule_timezone,
                n.keep_versions, n.alert_on_change, n.notify_channels, n.freshness_hours, n.eligible_override, n.config_types,
                n.last_status, n.last_error, n.last_attempt_at, n.last_success_at,
-               cr.name AS credential_name,
+               cr.name AS credential_name, cr.port AS credential_port,
+               (coalesce(cr.username,'')<>'' AND coalesce(octet_length(cr.password_enc),0)>0) AS profile_configured,
                c.versions, c.last_capture, c.last_by, c.validated_at, c.legacy_plaintext,
                (SELECT jsonb_object_agg(t.config_type,t.finished_at) FROM
                  (SELECT br.config_type,max(br.finished_at) AS finished_at
@@ -674,6 +679,7 @@ async def ncm_overview(db: AsyncSession = Depends(get_db), user: User = Depends(
     """),{"vis_tags":scope})).fetchall()
     data, backed_up, enrolled = [], 0, 0
     from app.services.ncm_status import backup_status
+    from app.services.ncm_readiness import support_details
     for r in rows:
         state=backup_status(r)
         if r.versions:
@@ -688,6 +694,8 @@ async def ncm_overview(db: AsyncSession = Depends(get_db), user: User = Depends(
             "enrolled": is_enrolled, "ncm_enabled":bool(r.ncm_enabled),
             "credential_id": str(r.credential_id) if r.credential_id else None,
             "credential_name": r.credential_name,
+            "credential_port": r.credential_port or 22, "profile_configured":bool(r.profile_configured),
+            "support":support_details(r.vendor,r.platform,r.config_types),
             "platform": r.platform,
             "schedule_enabled": r.schedule_enabled,
             "schedule_interval_hours": r.schedule_interval_hours,
@@ -707,6 +715,25 @@ async def ncm_overview(db: AsyncSession = Depends(get_db), user: User = Depends(
     return {"data":data,"total_devices":len(rows),"backed_up":backed_up,"enrolled":enrolled,
             "eligible":sum(d['eligible'] for d in data),"fresh":sum(d['eligible'] and d['fresh'] for d in data),
             "legacy_plaintext":sum(r.legacy_plaintext or 0 for r in rows)}
+
+
+@router.get('/health')
+async def ncm_health(user:User=Depends(require_permission('ncm.view'))):
+    from app.services.ncm_readiness import runtime_health
+    return await asyncio.to_thread(runtime_health)
+
+
+@device_router.get('/{device_id}/ncm-readiness')
+async def ncm_readiness(device_id:UUID,db:AsyncSession=Depends(get_db),user:User=Depends(require_permission('ncm.view'))):
+    await _device_access(db,user,device_id)
+    from app.services.ncm_readiness import runtime_health, saved_trust, device_readiness
+    overview=await ncm_overview(db,user)
+    device=next((d for d in overview['data'] if d['device_id']==str(device_id)),None)
+    if device is None:
+        raise HTTPException(status_code=404,detail='Device not found')
+    runtime,trust=await asyncio.gather(asyncio.to_thread(runtime_health),
+        asyncio.to_thread(saved_trust,device['ip'],device['credential_port']))
+    return device_readiness(device,runtime,trust)
 
 
 @device_router.post('/{device_id}/ncm-jobs',status_code=202)

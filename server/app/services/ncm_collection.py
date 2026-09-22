@@ -80,7 +80,7 @@ def validate_config(content: str, platform: str) -> str:
     if re.search(r'(?im)^\s*(?:%\s*(?:invalid|error|unknown|incomplete|ambiguous|access denied)|'
                  r'(?:error:|syntax error|permission denied|command not found|unknown command|'
                  r'invalid command|authorization failed|access denied|command fail))', content):
-        raise CaptureError('Device rejected the configuration command')
+        raise CaptureError('Device rejected the configuration command: verify read permissions and the selected driver')
     if is_paged(content):
         raise CaptureError('Incomplete capture: unresolved pager')
     markers = {
@@ -173,7 +173,10 @@ def fetch_config(host, platform, username, password, enable, port, config_type='
         conn = ConnectHandler(**base, device_type=resolved)
     try:
         if enable:
-            conn.enable()  # denied privilege is a failed capture, never ignored
+            try:
+                conn.enable()  # denied privilege is a failed capture, never ignored
+            except Exception:
+                raise CaptureError('Privilege elevation failed: verify the enable secret and command authorization; do not grant unrestricted write access') from None
         disable_paging(conn, resolved)
         output = run_command(conn, commands[resolved], conn.find_prompt())
         return resolved, validate_config(output, resolved)

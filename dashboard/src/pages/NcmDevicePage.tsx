@@ -1,3 +1,4 @@
+import { NcmReadiness } from '@/components/ncm/NcmReadiness'
 import { useState } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -50,10 +51,10 @@ export function NcmDevicePage() {
   const [cmp, setCmp] = useState<{ older: any; newer: any } | null>(null)
   const [lastRun, setLastRun] = useState<{ ok: boolean; change: boolean; msg: string } | null>(null)
 
-  const { data: overview } = useQuery<any>({ queryKey: ['ncm', 'overview'], queryFn: async () => (await api.get('/ncm/overview')).data, refetchInterval: 30000 })
+  const { data: overview, isPending: overviewPending, isError: overviewError, refetch: reloadOverview } = useQuery<any>({ queryKey: ['ncm', 'overview'], queryFn: async () => (await api.get('/ncm/overview')).data, refetchInterval: 30000 })
   const device = (overview?.data || []).find((d: any) => d.device_id === deviceId)
-  const { data: creds } = useQuery<any>({ queryKey: ['ncm', 'credentials'], queryFn: async () => (await api.get('/ncm/credentials')).data })
-  const { data: platforms } = useQuery<any>({ queryKey: ['ncm', 'platforms'], queryFn: async () => (await api.get('/ncm/platforms')).data })
+  const { data: creds, isError: credsError } = useQuery<any>({ queryKey: ['ncm', 'credentials'], queryFn: async () => (await api.get('/ncm/credentials')).data })
+  const { data: platforms, isError: platformsError } = useQuery<any>({ queryKey: ['ncm', 'platforms'], queryFn: async () => (await api.get('/ncm/platforms')).data })
   const credentials: any[] = creds?.data || []
   const platformList: any[] = platforms?.data || [{ value: 'autodetect', label: 'Auto-detect' }]
 
@@ -63,23 +64,23 @@ export function NcmDevicePage() {
   const [baselineName, setBaselineName] = useState('')
   const [baselineReason, setBaselineReason] = useState('')
   const [baselineVersion, setBaselineVersion] = useState<any>(null)
-  const { data: jobData } = useQuery<any>({ queryKey: ['ncm', 'jobs', deviceId], queryFn: async () => (await api.get(`/devices/${deviceId}/ncm-jobs`)).data, refetchInterval: 5000, enabled: !!deviceId })
-  const { data: baselineData } = useQuery<any>({ queryKey: ['ncm', 'baselines', deviceId], queryFn: async () => (await api.get(`/devices/${deviceId}/ncm-baselines`)).data, enabled: !!deviceId })
+  const { data: jobData, isError: jobDataError } = useQuery<any>({ queryKey: ['ncm', 'jobs', deviceId], queryFn: async () => (await api.get(`/devices/${deviceId}/ncm-jobs`)).data, refetchInterval: 5000, enabled: !!deviceId })
+  const { data: baselineData, isError: baselineDataError } = useQuery<any>({ queryKey: ['ncm', 'baselines', deviceId], queryFn: async () => (await api.get(`/devices/${deviceId}/ncm-baselines`)).data, enabled: !!deviceId })
   const { data: channelData } = useQuery<any>({ queryKey: ['ncm', 'notification-channels'], queryFn: async () => (await api.get('/ncm/notification-channels')).data, enabled: can('ncm.manage') })
-  const { data: deliveryData } = useQuery<any>({ queryKey: ['ncm', 'deliveries', deviceId], queryFn: async () => (await api.get(`/devices/${deviceId}/ncm-deliveries`)).data, refetchInterval: 30000, enabled: !!deviceId })
+  const { data: deliveryData, isError: deliveryDataError } = useQuery<any>({ queryKey: ['ncm', 'deliveries', deviceId], queryFn: async () => (await api.get(`/devices/${deviceId}/ncm-deliveries`)).data, refetchInterval: 30000, enabled: !!deviceId })
   const baseline = baselineData?.data?.find((b: any) => !b.retired_at && b.config_type === configType)
-  const { data: versions } = useQuery<any>({ queryKey: ['ncm', 'configs', deviceId, configType], queryFn: async () => (await api.get(`/devices/${deviceId}/configs?config_type=${configType}`)).data, enabled: !!deviceId, refetchInterval: 5000 })
+  const { data: versions, isError: versionsError } = useQuery<any>({ queryKey: ['ncm', 'configs', deviceId, configType], queryFn: async () => (await api.get(`/devices/${deviceId}/configs?config_type=${configType}`)).data, enabled: !!deviceId, refetchInterval: 5000 })
   const vlist: any[] = versions?.data || []
-  const { data: diff } = useQuery<any>({ queryKey: ['ncm', 'diff', deviceId, vlist[0]?.id, vlist[1]?.id], queryFn: async () => (await api.get(`/devices/${deviceId}/configs-diff?a=${vlist[1].id}&b=${vlist[0].id}`)).data, enabled: vlist.length >= 2 })
-  const { data: viewContent } = useQuery<any>({ queryKey: ['ncm', 'view', selected?.id], queryFn: async () => (await api.get(`/devices/${deviceId}/configs/${selected.id}`)).data, enabled: !!selected })
-  const { data: cmpDiff } = useQuery<any>({ queryKey: ['ncm', 'cmp', deviceId, cmp?.older?.id, cmp?.newer?.id], queryFn: async () => (await api.get(`/devices/${deviceId}/configs-diff?a=${cmp!.older.id}&b=${cmp!.newer.id}`)).data, enabled: !!cmp })
+  const { data: diff, isError: diffError } = useQuery<any>({ queryKey: ['ncm', 'diff', deviceId, vlist[0]?.id, vlist[1]?.id], queryFn: async () => (await api.get(`/devices/${deviceId}/configs-diff?a=${vlist[1].id}&b=${vlist[0].id}`)).data, enabled: vlist.length >= 2 })
+  const { data: viewContent, isError: viewContentError } = useQuery<any>({ queryKey: ['ncm', 'view', selected?.id], queryFn: async () => (await api.get(`/devices/${deviceId}/configs/${selected.id}`)).data, enabled: !!selected })
+  const { data: cmpDiff, isError: cmpDiffError } = useQuery<any>({ queryKey: ['ncm', 'cmp', deviceId, cmp?.older?.id, cmp?.newer?.id], queryFn: async () => (await api.get(`/devices/${deviceId}/configs-diff?a=${cmp!.older.id}&b=${cmp!.newer.id}`)).data, enabled: !!cmp })
 
   const def = credentials.find((c) => c.is_default)
   const [form, setForm] = useState<any>(null)
   const f = form || {
     credential_id: device?.credential_id || def?.id || (credentials[0]?.id ?? ''),
     platform: device?.platform || 'autodetect',
-    enabled: device?.ncm_enabled ?? true,
+    enabled: device?.enrolled ? device.ncm_enabled : true,
     freshness_hours: device?.freshness_hours || 24,
     eligible_override: device?.eligible_override ?? null,
     notify_channels: device?.notify_channels || [],
@@ -122,10 +123,10 @@ export function NcmDevicePage() {
     } catch (e: any) { toast.error('Download failed', apiErrorMessage(e)) }
   }
 
-  if (!device) {
-    return <div className="space-y-3"><Link to="/ncm" className="inline-flex items-center gap-1 text-sm text-primary"><ArrowLeft className="h-4 w-4" /> NCCM Overview</Link><Card><CardContent className="py-10 text-center text-muted">Loading device…</CardContent></Card></div>
+  if (!device || overviewError) {
+    return <div className="space-y-3"><Link to="/ncm" className="inline-flex items-center gap-1 text-sm text-primary"><ArrowLeft className="h-4 w-4" /> NCCM Overview</Link><Card><CardContent className="py-10 text-center text-muted">{overviewError ? 'Could not load this device. Check your connection and retry.' : overviewPending ? 'Loading device…' : 'Device not found or not available in your access scope.'}{overviewError && <Button className="ml-3" onClick={() => reloadOverview()}>Retry</Button>}</CardContent></Card></div>
   }
-  const sk = SB[statusKey(device)]
+  const sk = SB[statusKey(device)] || { label: 'Unknown', v: 'warning' }
 
   return (
     <div className="space-y-4">
@@ -140,13 +141,13 @@ export function NcmDevicePage() {
           <p className="text-xs text-muted">{[device.ip, device.device_type, device.vendor, device.location].filter(Boolean).join(' · ')}</p>
         </div>
         <div className="flex flex-col items-end gap-1">
-          <Button variant="outline" disabled={!can('ncm.manage') || !device.enrolled || fetchNow.isPending} onClick={() => fetchNow.mutate()}>
+          <Button variant="outline" disabled={!can('ncm.manage') || !device.enrolled || !device.ncm_enabled || !device.profile_configured || device.support?.state === 'unsupported' || fetchNow.isPending} onClick={() => fetchNow.mutate()}>
             {fetchNow.isPending
-              ? <><Loader2 className="h-4 w-4 animate-spin" /> Backing up…</>
+              ? <><Loader2 className="h-4 w-4 animate-spin" /> Queueing…</>
               : <><DownloadCloud className="h-4 w-4" /> Backup now (SSH)</>}
           </Button>
           {fetchNow.isPending
-            ? <div className="text-[11px] text-muted">Pulling running-config over SSH — large configs take ~30–60s</div>
+            ? <div className="text-[11px] text-muted">Submitting a job; follow its progress below.</div>
             : lastRun
               ? <div className={`text-[11px] ${lastRun.ok ? (lastRun.change ? 'text-emerald-600' : 'text-muted') : 'text-rose-600'}`}>
                   {lastRun.ok ? (lastRun.change ? '✓ ' : '✓ ') : '✕ '}{lastRun.msg}
@@ -155,6 +156,8 @@ export function NcmDevicePage() {
         </div>
       </div>
 
+      <NcmReadiness deviceId={deviceId!} />
+      {(credsError || platformsError || jobDataError || baselineDataError || deliveryDataError || versionsError) && <div role="alert" className="rounded border border-warning/30 p-3 text-xs text-warning">Some NCCM data could not be loaded: {[credsError && 'profiles', platformsError && 'platforms', jobDataError && 'jobs', baselineDataError && 'baselines', deliveryDataError && 'deliveries', versionsError && 'versions'].filter(Boolean).join(', ')}. Previously loaded data may be stale. <Button size="sm" variant="outline" onClick={() => inv()}>Retry</Button></div>}
       {!!jobData?.data?.length && <Card><CardContent className="space-y-2 pt-4"><div className="text-sm font-semibold">Backup jobs</div>{jobData.data.slice(0, 5).map((j: any) => <div key={j.id} className="flex items-center justify-between text-xs"><span>{relativeTime(j.created_at)} · {j.config_types.join(', ')} · {j.status} · attempt {j.attempts}{j.error_code ? ` · ${j.error_code}` : ''}</span>{can('ncm.manage') && ['queued', 'running'].includes(j.status) && <Button size="sm" variant="ghost" onClick={() => cancelJob.mutate(j.id)}>Cancel</Button>}</div>)}</CardContent></Card>}
       {!!deliveryData?.data?.length && <Card><CardContent className="space-y-1 pt-4"><div className="text-sm font-semibold">Notification delivery</div>{deliveryData.data.slice(0, 5).map((d: any) => <div key={d.id} className="text-xs">{relativeTime(d.created_at)} · {d.status} · {d.attempts} attempts {d.last_error || ''}</div>)}</CardContent></Card>}
       <Dialog open={!!baselineVersion} onOpenChange={(open) => { if (!open) setBaselineVersion(null) }}><DialogContent><DialogHeader><DialogTitle>Approve protected baseline</DialogTitle></DialogHeader><FormField label="Name"><Input value={baselineName} onChange={(e) => setBaselineName(e.target.value)} /></FormField><FormField label="Reason"><Input value={baselineReason} onChange={(e) => setBaselineReason(e.target.value)} /></FormField><Button disabled={!baselineName.trim() || baselineReason.trim().length < 3 || approveBaseline.isPending} onClick={() => approveBaseline.mutate()}>Approve baseline</Button></DialogContent></Dialog>
@@ -162,6 +165,8 @@ export function NcmDevicePage() {
         {/* settings */}
         <Card><CardContent className="space-y-2 pt-4">
           <div className="text-xs font-semibold uppercase tracking-wider text-muted">Backup settings</div>
+          <div className="flex items-center justify-between text-xs"><span>Collection enabled</span><Switch checked={f.enabled} onCheckedChange={(v) => set({ enabled: v })} /></div>
+          <Link to="/ncm" className="block text-xs text-primary underline">Create profiles and review vendor access requirements in NCCM Overview</Link>
           <FormField label="Connection profile">
             <Select value={f.credential_id} onValueChange={(v) => set({ credential_id: v })}>
               <SelectTrigger><SelectValue placeholder="Select a profile" /></SelectTrigger>
@@ -233,7 +238,7 @@ export function NcmDevicePage() {
         {/* versions */}
         <Card><CardContent className="space-y-2 pt-4">
           <div className="flex items-center justify-between">
-            <div className="text-xs font-semibold uppercase tracking-wider text-muted">Versions ({vlist.length})</div>
+            <div className="text-xs font-semibold uppercase tracking-wider text-muted">Versions ({versionsError || !versions ? 'unknown' : vlist.length})</div>
             <Select value={configType} onValueChange={(v) => { setConfigType(v); setSelected(null); setView('none') }}><SelectTrigger className="w-32"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="running">Running</SelectItem><SelectItem value="startup">Startup</SelectItem></SelectContent></Select>
             {baseline && vlist[0] && <Button size="sm" variant="outline" onClick={() => setCmp({ older: { id: baseline.version_id, label: `Baseline: ${baseline.name}` }, newer: vlist[0] })}>Compare baseline</Button>}
             {vlist.length >= 2 && <Button size="sm" variant="outline" onClick={() => { setView(view === 'diff' ? 'none' : 'diff'); setSelected(null) }}><GitCompare className="h-3.5 w-3.5" /> Diff latest{diff ? ` (+${diff.added} −${diff.removed})` : ''}</Button>}
@@ -264,7 +269,7 @@ export function NcmDevicePage() {
                 </div>
               </div>
             ))}
-            {!vlist.length && <div className="text-xs text-muted">No backups yet. Set a profile and use “Backup now”.</div>}
+            {versions && !versionsError && !vlist.length && <div className="text-xs text-muted">No backups yet. Set a profile and use “Backup now”.</div>}
           </div>
         </CardContent></Card>
       </div>
@@ -275,13 +280,13 @@ export function NcmDevicePage() {
             <div className="text-sm font-medium">Config · {relativeTime(selected.captured_at)} <span className="text-xs text-muted">({selected.line_count} lines)</span></div>
             <div className="flex gap-2"><Button size="sm" variant="outline" onClick={() => download(selected)}><Download className="h-3.5 w-3.5" /> Redacted copy</Button>{can('ncm.export') && <Button size="sm" variant="outline" onClick={() => download(selected, true)}>Export raw recovery copy</Button>}<Button size="sm" variant="ghost" onClick={() => setView('none')}>Close</Button></div>
           </div>
-          <pre className="max-h-[65vh] overflow-auto rounded-md border border-border bg-surface2/40 p-2 text-[11px] font-mono">{viewContent?.content || 'Loading…'}</pre>
+          <pre className="max-h-[65vh] overflow-auto rounded-md border border-border bg-surface2/40 p-2 text-[11px] font-mono">{viewContentError ? 'Configuration could not be loaded. Close and reopen to retry.' : viewContent?.content ?? 'Loading…'}</pre>
         </CardContent></Card>
       )}
       {view === 'diff' && (
         <Card><CardContent className="space-y-2 pt-4">
           <div className="flex items-center justify-between"><div className="text-sm font-medium">Diff — latest two versions {diff ? <span className="text-xs text-muted">(+{diff.added} −{diff.removed})</span> : ''}</div><Button size="sm" variant="ghost" onClick={() => setView('none')}>Close</Button></div>
-          {diff ? <DiffView diff={diff.diff} /> : <div className="text-xs text-muted">Loading comparison…</div>}
+          {diffError ? <div role="alert" className="text-xs text-warning">Comparison unavailable. <Button size="sm" onClick={() => inv()}>Retry</Button></div> : diff ? <DiffView diff={diff.diff} /> : <div className="text-xs text-muted">Loading comparison…</div>}
         </CardContent></Card>
       )}
 
@@ -299,7 +304,7 @@ export function NcmDevicePage() {
               {cmp.older.label || `${relativeTime(cmp.older.captured_at)} (${cmp.older.hash})`} → {relativeTime(cmp.newer.captured_at)} ({cmp.newer.hash})
             </div>
           )}
-          {cmpDiff && cmpDiff.identical
+          {cmpDiffError ? <div role="alert" className="text-xs text-warning">Comparison unavailable. <Button size="sm" onClick={() => inv()}>Retry</Button></div> : cmpDiff && cmpDiff.identical
             ? <div className="text-xs text-muted">No configuration differences after excluding known runtime metadata.</div>
             : <DiffView diff={cmpDiff?.diff || 'Loading…'} />}
         </DialogContent>

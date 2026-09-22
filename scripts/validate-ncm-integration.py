@@ -23,4 +23,4 @@ for pattern in ('023-ncm','024-ncm','025-ncm','026-ncm','027-ncm','028-ncm','029
     subprocess.run(psql+['-f',str(filename)],check=True,stdout=subprocess.DEVNULL)
 os.chdir(root/'server')
 import pytest
-raise SystemExit(pytest.main(['tests/integration/test_ncm_contracts.py','tests/test_ncm_assurance.py','-q','--disable-warnings','--tb=short',*sys.argv[1:]]))
+raise SystemExit(pytest.main(['tests/integration/test_ncm_contracts.py','tests/test_ncm_assurance.py','tests/test_ncm_readiness.py','-q','--disable-warnings','--tb=short',*sys.argv[1:]]))
