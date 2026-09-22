@@ -20,7 +20,7 @@ const guides = {
   paloalto: {
     label: 'Palo Alto Networks / PAN-OS',
     role: 'Use a dedicated administrator with Device scope and CLI superreader for full read-only visibility. Disable unneeded Web UI and API access. Do not select superuser or deviceadmin for backup collection.',
-    commands: 'show config running; set cli pager off; set cli scripting-mode on; set cli terminal width 500. These set cli commands prepare the session, not device policy. No enable secret is required.',
+    commands: 'show config running; show system info; set cli pager off; set cli scripting-mode on; set cli terminal width 500. These set cli commands prepare the session, not device policy. No enable secret is required.',
     limit: 'devicereader excludes password profiles and other administrator accounts; vsysreader is scoped and omits device/network settings. Choose these only for an explicitly partial capture. Running configuration is not a device-state bundle, candidate configuration or certificate/private-key recovery package.',
     url: 'https://docs.paloaltonetworks.com/ngfw/help/12-2/configure-an-admin-role-profile-pan-os',
   },
