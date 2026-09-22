@@ -127,6 +127,30 @@ async def test_success_run_refreshes_coverage_without_new_snapshot(env,monkeypat
 
 
 @pytest.mark.asyncio
+async def test_readiness_is_scoped_readonly_and_does_not_expose_credentials(env,monkeypatch):
+    from app.services import ncm_readiness
+    from app.core import crypto
+    db,_,actor=env
+    visible=await device(db,'a')
+    hidden=await device(db,'b')
+    actor.role='operator'; actor.scope_tags=['a']
+    await db.execute(text('UPDATE ncm_credentials SET password_enc=:p'),{'p':crypto.encrypt('fixture-secret-never-return')})
+    await db.commit()
+    monkeypatch.setattr(ncm_readiness,'runtime_health',lambda:dict(worker='active',scheduler='active',delivery='active',encryption='configured'))
+    monkeypatch.setattr(ncm_readiness,'saved_trust',lambda *a:dict(state='pass',message='fixture trust'))
+    overview=await ncm.ncm_overview(db,actor)
+    assert len(overview['data'])==1 and overview['data'][0]['profile_configured']
+    assert 'fixture-secret' not in str(overview)
+    result=await ncm.ncm_readiness(visible,db,actor)
+    assert result['can_capture'] and not result['capture_verified']
+    with pytest.raises(HTTPException) as denied:
+        await ncm.ncm_readiness(hidden,db,actor)
+    assert denied.value.status_code==404
+    assert (await db.execute(text('SELECT count(*) FROM ncm_jobs'))).scalar()==0
+    assert (await db.execute(text('SELECT count(*) FROM ncm_backup_runs'))).scalar()==0
+
+
+@pytest.mark.asyncio
 async def test_archive_migration_is_resumable_and_audit_append_only(env):
     db,_,_=env
     did=await device(db)
@@ -177,9 +201,13 @@ async def test_http_permissions_and_raw_export(env):
     app.dependency_overrides[get_db]=database
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://fixture') as client:
         assert (await client.post('/ncm/run-scheduled')).status_code==401
+        assert (await client.get('/ncm/health')).status_code==401
+        assert (await client.get(f'/devices/{did}/ncm-readiness')).status_code==401
         app.dependency_overrides[security.get_current_user]=lambda:actor
         actor.role='devices'
         assert (await client.get('/ncm/overview')).status_code==403
+        assert (await client.get('/ncm/health')).status_code==403
+        assert (await client.get(f'/devices/{did}/ncm-readiness')).status_code==403
         actor.role='viewer'
         assert (await client.post('/ncm/run-scheduled')).status_code==403
         route=f'/devices/{did}/configs/{version}'

@@ -1,3 +1,5 @@
+import { ConnectionAccessGuide } from '@/components/ncm/ConnectionAccessGuide'
+import { NcmHealth } from '@/components/ncm/NcmReadiness'
 import { useMemo, useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -27,6 +29,7 @@ type Filter = { key: 'status' | 'type' | 'location' | 'vendor'; value: string } 
 function statusKey(d: any): string { return d?.backup_state || 'pending' }
 
 const STATUS_META: Record<string, { label: string; cls: string; badge: any }> = {
+  unknown: { label: 'Unknown', cls: 'bg-warning', badge: 'warning' },
   fresh: { label: 'Fresh / validated', cls: 'bg-success', badge: 'success' },
   stale: { label: 'Stale', cls: 'bg-warning', badge: 'warning' },
   unverified: { label: 'Unverified', cls: 'bg-warning', badge: 'warning' },
@@ -39,7 +42,7 @@ const STATUS_META: Record<string, { label: string; cls: string; badge: any }> = 
 }
 
 function StatusBadge({ d }: { d: any }) {
-  const m = STATUS_META[statusKey(d)]
+  const m = STATUS_META[statusKey(d)] || STATUS_META.unknown
   return m.badge ? <Badge variant={m.badge}>{m.label}{d.versions ? ` · ${d.versions}v` : ''}</Badge> : <span className="text-xs text-muted">{m.label}</span>
 }
 
@@ -80,10 +83,10 @@ export function NcmPage() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const openDevice = (d: any) => navigate(`/ncm/${d.device_id}`)
 
-  const { data: overview, isFetching, refetch } = useQuery<any>({
+  const { data: overview, isFetching, isPending, isError, refetch } = useQuery<any>({
     queryKey: ['ncm', 'overview'], queryFn: async () => (await api.get('/ncm/overview')).data, refetchInterval: 30000,
   })
-  const { data: creds } = useQuery<any>({ queryKey: ['ncm', 'credentials'], queryFn: async () => (await api.get('/ncm/credentials')).data })
+  const { data: creds, isError: profilesError } = useQuery<any>({ queryKey: ['ncm', 'credentials'], queryFn: async () => (await api.get('/ncm/credentials')).data })
   const { data: platforms } = useQuery<any>({ queryKey: ['ncm', 'platforms'], queryFn: async () => (await api.get('/ncm/platforms')).data })
   const devices: any[] = overview?.data || []
   const credentials: any[] = creds?.data || []
@@ -102,7 +105,7 @@ export function NcmPage() {
       return [...m.entries()].sort((a, b) => b[1] - a[1])
     }
     return {
-      status: by((d) => STATUS_META[statusKey(d)].label),
+      status: by((d) => (STATUS_META[statusKey(d)] || STATUS_META.unknown).label),
       type: by((d) => d.device_type || 'unknown'),
       location: by((d) => d.location || 'unassigned'),
       vendor: by((d) => d.vendor || 'unknown'),
@@ -115,7 +118,7 @@ export function NcmPage() {
       if (q && ![d.hostname, d.ip, d.vendor, d.device_type, d.location, d.credential_name, d.platform]
         .some((v) => (v || '').toString().toLowerCase().includes(q))) return false
       if (filter) {
-        if (filter.key === 'status' && STATUS_META[statusKey(d)].label !== filter.value) return false
+        if (filter.key === 'status' && (STATUS_META[statusKey(d)] || STATUS_META.unknown).label !== filter.value) return false
         if (filter.key === 'type' && (d.device_type || 'unknown') !== filter.value) return false
         if (filter.key === 'location' && (d.location || 'unassigned') !== filter.value) return false
         if (filter.key === 'vendor' && (d.vendor || 'unknown') !== filter.value) return false
@@ -159,6 +162,9 @@ export function NcmPage() {
     onError: (e: any) => toast.error('Bulk backup failed', apiErrorMessage(e)),
   })
 
+  if (isError) return <div role="alert" className="space-y-3"><h1 className="text-xl font-semibold">NCCM unavailable</h1><p>Could not load backup coverage. Availability and device counts are unknown.</p><Button onClick={() => refetch()}>Retry</Button></div>
+  if (isPending) return <p className="p-4 text-muted">Loading NCCM coverage…</p>
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -175,18 +181,21 @@ export function NcmPage() {
         </div>
       </div>
 
+      <NcmHealth />
+      <p className="text-xs text-muted">{devices.filter((d) => d.eligible && d.support?.state === 'unsupported').length} eligible devices lack an implemented collector · {devices.filter((d) => d.eligibility_review).length} devices need eligibility review. Open a device for setup checks. Eligibility is separate from collector support; validated means format-checked, not restore-certified.</p>
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {[
           { label: 'Eligible devices', value: overview?.eligible ?? 0, cls: 'text-text' },
           { label: 'Enrolled', value: overview?.enrolled ?? 0, cls: 'text-primary' },
           { label: 'Fresh / validated', value: overview?.fresh ?? 0, cls: 'text-success' },
-          { label: 'Coverage', value: `${coverage}%`, cls: 'text-text' },
+          { label: 'Coverage', value: overview?.eligible ? `${coverage}%` : 'N/A', cls: 'text-text' },
         ].map((c) => (
           <Card key={c.label}><CardContent className="py-3"><div className="text-xs text-muted">{c.label}</div><div className={`text-2xl font-semibold ${c.cls}`}>{c.value}</div></CardContent></Card>
         ))}
       </div>
 
-      {!credentials.length && (
+      {profilesError && <p role="alert" className="text-sm text-warning">Connection profiles could not be loaded. Refresh before creating or assigning profiles.</p>}
+      {creds && !credentials.length && (
         <div className="rounded-md border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
           No connection profiles yet. Create one (<span className="font-medium">Connection Profiles</span>) with the device CLI/SSH username &amp; password, then add devices to backup.
         </div>
@@ -268,7 +277,7 @@ export function NcmPage() {
                       <Td className="text-xs text-muted">{d.device_type || '—'}{d.vendor ? ` · ${d.vendor}` : ''}</Td>
                       <Td className="text-xs text-muted">{d.location || '—'}</Td>
                       <Td className="text-xs">{d.enrolled ? <div><div>{d.credential_name || <span className="text-warning">no profile</span>}</div><div className="text-muted">{d.platform}{d.schedule_enabled ? ` · ${d.schedule_interval_hours}h` : ''}</div></div> : <span className="text-muted">not configured</span>}</Td>
-                      <Td><StatusBadge d={d} /></Td>
+                      <Td><StatusBadge d={d} /><div className="mt-1 max-w-64 text-[11px] text-muted" title={d.eligibility_reason}>{d.eligibility_review ? 'Review inventory / backup scope' : !d.eligible ? d.eligibility_reason : d.support?.state === 'unsupported' ? d.support.message : d.support?.state === 'needs_detection' ? 'Collector needs verification' : 'Collector implemented; pilot pending'}</div></Td>
                       <Td onClick={(e) => e.stopPropagation()}>
                         <div className="flex justify-end">
                           <Button variant="ghost" size="sm" onClick={() => openDevice(d)}><Settings2 className="h-3.5 w-3.5" /> Details</Button>
@@ -551,7 +560,7 @@ function ProfilesDialog({ open, onOpenChange, credentials }: { open: boolean; on
 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) { setForm(empty); setEditing(null) } onOpenChange(o) }}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
         <DialogHeader><DialogTitle>Connection profiles (CLI credentials)</DialogTitle></DialogHeader>
         <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-1">
@@ -569,6 +578,7 @@ function ProfilesDialog({ open, onOpenChange, credentials }: { open: boolean; on
           </div>
           <div className="space-y-2">
             <div className="text-xs font-semibold uppercase tracking-wider text-muted">{editing ? 'Edit profile' : 'New profile'}</div>
+            <ConnectionAccessGuide />
             <FormField label="Name"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Core switches SSH" /></FormField>
             <div className="grid grid-cols-2 gap-2">
               <FormField label="Username"><Input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} /></FormField>
@@ -579,7 +589,7 @@ function ProfilesDialog({ open, onOpenChange, credentials }: { open: boolean; on
             <div className="flex items-center justify-between rounded-md border border-border px-3 py-2"><span className="text-xs font-medium uppercase tracking-wider text-muted">Default profile</span><Switch checked={form.is_default} onCheckedChange={(v) => setForm({ ...form, is_default: v })} /></div>
             <div className="flex justify-end gap-2">
               {editing && <Button variant="outline" onClick={() => { setEditing(null); setForm(empty) }}>New</Button>}
-              <Button disabled={!form.name || !form.username || save.isPending} onClick={() => save.mutate()}><Plus className="h-3.5 w-3.5" /> {editing ? 'Update' : 'Create'}</Button>
+              <Button disabled={!form.name.trim() || !form.username.trim() || (!editing && !form.password) || save.isPending} onClick={() => save.mutate()}><Plus className="h-3.5 w-3.5" /> {editing ? 'Update' : 'Create'}</Button>
             </div>
           </div>
         </div>

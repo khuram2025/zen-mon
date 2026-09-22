@@ -16,8 +16,22 @@ def backup_status(row,now=None):
     # artifact. Manual imports and old success flags cannot refresh coverage.
     types=getattr(row,'config_types',None) or ['running']
     verified=getattr(row,'verified_types',None) or {}
-    times=[datetime.fromisoformat(verified[t]) for t in types if verified.get(t)]
+    times=[]
+    for t in types:
+        try:
+            stamp=datetime.fromisoformat(verified[t])
+            if stamp.tzinfo is not None and stamp <= now:
+                times.append(stamp)
+        except (KeyError, TypeError, ValueError):
+            pass  # Malformed evidence is unknown, never fresh coverage.
     checked=min(times) if len(times)==len(types) else None
     fresh=bool(row.ncm_enabled and checked and checked <= now and now-checked <= timedelta(hours=row.freshness_hours or 24))
     state='excluded' if not eligible else 'unconfigured' if not row.platform else 'disabled' if not row.ncm_enabled else 'failed' if row.last_status=='failed' else 'fresh' if fresh else 'stale' if row.validated_at else 'unverified' if row.versions else 'pending'
-    return {'eligible':bool(eligible),'fresh':fresh,'backup_state':state,'validated_at':row.validated_at.isoformat() if row.validated_at else None}
+    review=bool(row.eligible_override is None and not candidate and
+                (getattr(row,'vendor','') or '').strip().lower().startswith(('f5','aruba','fortinet','palo alto','cisco','juniper','arista')))
+    reason=('Explicitly included in backup scope.' if eligible else 'Explicitly excluded from backup scope.') if row.eligible_override is not None else (
+        'Network device type and address are eligible; collector support is checked separately.' if candidate else
+        'Review inventory type and address before including this network vendor in backup scope.' if review else
+        'Inventory type or address is outside automatic network backup scope.')
+    return {'eligible':bool(eligible),'eligibility_review':review,'eligibility_reason':reason,
+            'fresh':fresh,'backup_state':state,'validated_at':row.validated_at.isoformat() if row.validated_at else None}
