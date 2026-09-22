@@ -182,6 +182,15 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    id: 'nccm',
+    label: 'Network Configuration & Compliance Manager (NCCM)',
+    short: 'NCCM',
+    icon: FileCode,
+    items: [
+      { to: '/ncm', label: 'NCCM Overview', icon: FileCode, hint: 'NCM configuration backups, change tracking and compliance' },
+    ],
+  },
+  {
     id: 'device-tracker',
     label: 'Device Tracker',
     short: 'Tracker',
@@ -278,7 +287,6 @@ export const NAV_GROUPS: NavGroup[] = [
           { to: '/reports/schedules', label: 'Schedules', icon: CalendarClock },
         ],
       },
-      { to: '/ncm', label: 'Config Backup', icon: FileCode, hint: 'Device configuration archive' },
       { to: '/credentials', label: 'Credentials', icon: KeyRound, hint: 'SNMP, Windows, and service credentials' },
       {
         to: '/settings/general',

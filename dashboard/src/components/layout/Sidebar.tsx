@@ -220,7 +220,7 @@ function RailFlyout({
     >
       <div className="w-[248px] overflow-hidden rounded-xl border border-sidebar-border bg-sidebar-bg shadow-2xl animate-fade-in">
         <div className="flex items-center gap-2 border-b border-sidebar-border px-3 py-2">
-          <group.icon className="h-4 w-4 text-primary" />
+          <group.icon className="h-4 w-4 shrink-0 text-primary" />
           <span className="text-[11px] font-semibold uppercase tracking-[0.1em] text-sidebar-text">
             {group.label}
           </span>
@@ -351,7 +351,8 @@ export function Sidebar({
     for (const group of groups) {
       const items: NavNode[] = []
       for (const item of group.items) {
-        const selfHit = item.label.toLowerCase().includes(q)
+        const selfHit = [group.label, group.short, item.label, item.hint ?? '']
+          .some((label) => label.toLowerCase().includes(q))
         const kids = (item.children || []).filter((c) => c.label.toLowerCase().includes(q))
         if (selfHit) items.push({ ...item, children: item.children })
         else if (kids.length) items.push({ ...item, children: kids })
@@ -411,7 +412,7 @@ export function Sidebar({
             >
               <span
                 className={cn(
-                  'text-[10px] font-bold uppercase tracking-[0.11em] transition-colors',
+                  'min-w-0 flex-1 text-[10px] font-bold uppercase leading-relaxed tracking-[0.11em] transition-colors',
                   groupActive ? 'text-primary' : 'text-sidebar-text-muted',
                 )}
               >
