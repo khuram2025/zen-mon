@@ -4,8 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"image"
-	"image/color"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,6 +19,7 @@ import (
 	"zenplus-agent/internal/agent"
 	apmruntime "zenplus-agent/internal/apm"
 	"zenplus-agent/internal/appstate"
+	"zenplus-agent/internal/brand"
 	"zenplus-agent/internal/client"
 	"zenplus-agent/internal/config"
 	"zenplus-agent/internal/model"
@@ -54,9 +53,16 @@ type appUI struct {
 	window *walk.MainWindow
 	tray   *walk.NotifyIcon
 
-	statusBadge    *walk.Label
-	topStatus      *walk.Label
-	topConnection  *walk.Label
+	statusBadge   *walk.Label
+	topStatus     *walk.Label
+	topConnection *walk.Label
+	topSeparator  *walk.Label
+	profileLine   *walk.Label
+	// apmTiles are hidden on a server-monitoring-only installation.
+	apmTiles [4]*walk.Composite
+	// trayIcons caches the status variants of the tray icon.
+	trayIcons      map[brand.Status]*walk.Icon
+	trayStatus     brand.Status
 	hostName       *walk.Label
 	agentID        *walk.Label
 	policyID       *walk.Label
@@ -190,7 +196,7 @@ func loadAppIcon() *walk.Icon {
 	if icon, err := walk.NewIconFromResourceId(3); err == nil {
 		return icon
 	}
-	icon, _ := walk.NewIconFromImage(makeIcon(64))
+	icon, _ := walk.NewIconFromImageForDPI(brand.Mark(64), 96)
 	return icon
 }
 
@@ -221,14 +227,12 @@ func (a *appUI) header() Widget {
 		MaxSize:    Size{Height: 54},
 		Layout:     HBox{Margins: Margins{Left: 2, Top: 2, Right: 2, Bottom: 2}, Spacing: 10},
 		Children: []Widget{
-			Label{
-				Text:          "Z",
-				MinSize:       Size{Width: 42, Height: 42},
-				MaxSize:       Size{Width: 42, Height: 42},
-				Background:    SolidColorBrush{Color: teal},
-				TextColor:     walk.RGB(255, 255, 255),
-				Font:          Font{Family: "Segoe UI", PointSize: 18, Bold: true},
-				TextAlignment: AlignCenter,
+			ImageView{
+				Image:      brandBitmap(48),
+				Mode:       ImageViewModeIdeal,
+				MinSize:    Size{Width: 44, Height: 44},
+				MaxSize:    Size{Width: 44, Height: 44},
+				Background: SolidColorBrush{Color: bg},
 			},
 			Composite{
 				Background:    SolidColorBrush{Color: bg},
@@ -248,7 +252,7 @@ func (a *appUI) header() Widget {
 						Layout:     HBox{MarginsZero: true, Spacing: 8},
 						Children: []Widget{
 							Label{AssignTo: &a.topStatus, Text: "Checking agent", TextColor: amber, Font: Font{Family: "Segoe UI", PointSize: 10, Bold: true}},
-							Label{Text: "|", TextColor: faint, Font: Font{Family: "Segoe UI", PointSize: 10}},
+							Label{AssignTo: &a.topSeparator, Text: "|", TextColor: faint, Font: Font{Family: "Segoe UI", PointSize: 10}},
 							Label{AssignTo: &a.topConnection, Text: "Controller pending", TextColor: muted, Font: Font{Family: "Segoe UI", PointSize: 10}},
 						},
 					},
@@ -278,12 +282,12 @@ func (a *appUI) statusCard() Widget {
 		Children: []Widget{
 			Label{
 				AssignTo:      &a.statusBadge,
-				Text:          "OK",
+				Text:          "…",
 				MinSize:       Size{Width: 54, Height: 54},
 				MaxSize:       Size{Width: 54, Height: 54},
 				Background:    SolidColorBrush{Color: surface2},
-				TextColor:     green,
-				Font:          Font{Family: "Segoe UI", PointSize: 14, Bold: true},
+				TextColor:     muted,
+				Font:          Font{Family: "Segoe UI Symbol", PointSize: 20, Bold: true},
 				TextAlignment: AlignCenter,
 			},
 			Composite{
@@ -292,13 +296,7 @@ func (a *appUI) statusCard() Widget {
 				Layout:        VBox{Margins: Margins{Left: 0, Top: 2, Right: 0, Bottom: 0}, Spacing: 6},
 				Children: []Widget{
 					Label{AssignTo: &a.hostName, Text: "Windows host", TextColor: text, Font: Font{Family: "Segoe UI", PointSize: 12, Bold: true}},
-					Composite{
-						Background: SolidColorBrush{Color: surface},
-						Layout:     HBox{MarginsZero: true, Spacing: 8},
-						Children: []Widget{
-							Label{Text: "Background monitoring", TextColor: muted, Font: Font{Family: "Segoe UI", PointSize: 10, Bold: true}},
-						},
-					},
+					Label{AssignTo: &a.profileLine, Text: "Server monitoring", MinSize: Size{Width: 320}, TextColor: muted, Font: Font{Family: "Segoe UI", PointSize: 10, Bold: true}},
 					Label{AssignTo: &a.actionStatus, Text: "Agent status is loading.", TextColor: muted, Font: Font{Family: "Segoe UI", PointSize: 9}},
 				},
 			},
@@ -307,62 +305,44 @@ func (a *appUI) statusCard() Widget {
 }
 
 func (a *appUI) detailsCard() Widget {
+	// One grid keeps every column aligned; separate rows sized each tile to
+	// its content, so tiles in different rows did not line up.
 	return Composite{
 		Background:    SolidColorBrush{Color: surface},
 		StretchFactor: 1,
-		Layout:        VBox{Margins: Margins{Left: 12, Top: 12, Right: 12, Bottom: 12}, Spacing: 8},
+		Layout:        Grid{Columns: 4, Margins: Margins{Left: 12, Top: 12, Right: 12, Bottom: 12}, Spacing: 8},
 		Children: []Widget{
-			Composite{
-				Background: SolidColorBrush{Color: surface},
-				Layout:     HBox{MarginsZero: true, Spacing: 8},
-				Children: []Widget{
-					a.detailTile("Agent ID", &a.agentID),
-					a.detailTile("Controller", &a.controllerURL),
-					a.detailTile("Version", &a.versionStatus),
-					a.detailTile("Updates", &a.updateStatus),
-				},
-			},
-			Composite{
-				Background: SolidColorBrush{Color: surface},
-				Layout:     HBox{MarginsZero: true, Spacing: 8},
-				Children: []Widget{
-					a.detailTile("Policy", &a.policyID),
-					a.detailTile("Service", &a.serviceStatus),
-					a.detailTile("Queue", &a.queueDepth),
-					a.detailTile("Collection", &a.lastCollection),
-				},
-			},
-			Composite{
-				Background: SolidColorBrush{Color: surface},
-				Layout:     HBox{MarginsZero: true, Spacing: 8},
-				Children: []Widget{
-					a.detailTile("Local APM", &a.apmService),
-					a.detailTile("APM activity", &a.apmActivity),
-					a.detailTile("Ingest endpoint", &a.apmEndpoint),
-					a.detailTile("Appliance APM", &a.apmQueue),
-				},
-			},
-			Composite{
-				Background: SolidColorBrush{Color: surface},
-				Layout:     HBox{MarginsZero: true, Spacing: 8},
-				Children: []Widget{
-					a.detailTile("Server collectors", &a.collectorState),
-					a.detailTile("Collector health", &a.collectorIssue),
-				},
-			},
+			a.detailTile("Agent ID", &a.agentID, nil, 1),
+			a.detailTile("Controller", &a.controllerURL, nil, 1),
+			a.detailTile("Version", &a.versionStatus, nil, 1),
+			a.detailTile("Updates", &a.updateStatus, nil, 1),
+			a.detailTile("Policy", &a.policyID, nil, 1),
+			a.detailTile("Service", &a.serviceStatus, nil, 1),
+			a.detailTile("Queue", &a.queueDepth, nil, 1),
+			a.detailTile("Collection", &a.lastCollection, nil, 1),
+			a.detailTile("Server collectors", &a.collectorState, nil, 2),
+			a.detailTile("Collector health", &a.collectorIssue, nil, 2),
+			a.detailTile("Local APM", &a.apmService, &a.apmTiles[0], 1),
+			a.detailTile("APM activity", &a.apmActivity, &a.apmTiles[1], 1),
+			a.detailTile("Ingest endpoint", &a.apmEndpoint, &a.apmTiles[2], 1),
+			a.detailTile("Appliance APM", &a.apmQueue, &a.apmTiles[3], 1),
 		},
 	}
 }
 
-func (a *appUI) detailTile(title string, value **walk.Label) Widget {
+func (a *appUI) detailTile(title string, value **walk.Label, tile **walk.Composite, columns int) Widget {
 	return Composite{
+		AssignTo:      tile,
 		Background:    SolidColorBrush{Color: surface2},
 		MinSize:       Size{Width: 150, Height: 54},
+		ColumnSpan:    columns,
 		StretchFactor: 1,
 		Layout:        VBox{Margins: Margins{Left: 9, Top: 7, Right: 9, Bottom: 7}, Spacing: 3},
 		Children: []Widget{
 			Label{Text: title, TextColor: muted, Font: Font{Family: "Segoe UI", PointSize: 8}},
 			Label{AssignTo: value, Text: "-", TextColor: text, Font: Font{Family: "Segoe UI", PointSize: 9, Bold: true}},
+			// Lets the tile fill its grid cell instead of shrinking to its text.
+			HSpacer{},
 		},
 	}
 }
@@ -997,8 +977,26 @@ func (a *appUI) applySnapshot(snap appstate.Snapshot) {
 	a.color(a.statusBadge, healthColor)
 	a.set(a.topStatus, health)
 	a.color(a.topStatus, healthColor)
-	a.set(a.topConnection, controllerText)
+	// Show the connection only when it adds something to the health text
+	// (it previously read "Controller unreachable | Controller unreachable").
+	if controllerText == health {
+		a.set(a.topSeparator, "")
+		a.set(a.topConnection, "")
+	} else {
+		a.set(a.topSeparator, "|")
+		a.set(a.topConnection, controllerText)
+	}
 	a.color(a.topConnection, controllerColor)
+	showAPM := snap.Config.MonitoringProfile != "infrastructure" && apmComponentsInstalled()
+	a.set(a.profileLine, friendlyProfile(snap.Config.MonitoringProfile))
+	for _, tile := range a.apmTiles {
+		if tile != nil {
+			if tile.Visible() != showAPM {
+				tile.SetVisible(showAPM)
+			}
+		}
+	}
+	a.setTrayStatus(trayStatusFor(snap, healthTone))
 	a.set(a.hostName, hostname)
 	a.set(a.agentID, compactMiddle(agentID, 36))
 	a.set(a.policyID, compactMiddle(policyLine, 36))
@@ -1008,7 +1006,7 @@ func (a *appUI) applySnapshot(snap appstate.Snapshot) {
 	a.set(a.lastCollection, lastCollection)
 	a.set(a.collectorState, collectorCoverageLine(snap.Config.CollectorEnabled))
 	collectorIssue, collectorColor := collectorIssueLine(snap.Status)
-	a.set(a.collectorIssue, compactMiddle(collectorIssue, 74))
+	a.set(a.collectorIssue, compactMiddle(collectorIssue, 56))
 	a.color(a.collectorIssue, collectorColor)
 	apmService, apmActivity, apmEndpoint, apmQueue, apmColor := apmSummary(snap.Status)
 	if strings.HasPrefix(apmEndpoint, "/") && snap.Config.ControllerURL != "" {
@@ -1203,22 +1201,20 @@ func toneColor(tone string) walk.Color {
 	}
 }
 
+// badgeText is the symbol in the status card; the words beside it carry the
+// detail, so the badge stays a quick visual cue.
 func badgeText(health string, tone string) string {
 	switch health {
-	case "Pending authorization":
-		return "WAIT"
-	case "Authorization revoked", "Authorization required":
-		return "AUTH"
-	case "Connecting":
-		return "SYNC"
+	case "Pending authorization", "Connecting", "Waiting for agent":
+		return "…"
 	}
 	switch tone {
 	case "ok":
-		return "OK"
+		return "✓"
 	case "warn":
-		return "WARN"
+		return "!"
 	default:
-		return "ERR"
+		return "✕"
 	}
 }
 
@@ -1294,50 +1290,6 @@ func collectorIssueLine(status *model.Status) (string, walk.Color) {
 	return strings.ReplaceAll(name, "_", " ") + ": " + message, red
 }
 
-func makeIcon(size int) image.Image {
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
-			img.Set(x, y, color.RGBA{R: 0, G: 137, B: 129, A: 255})
-		}
-	}
-	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
-	thick := max(2, size/7)
-	left := size / 4
-	right := size - left
-	top := size / 4
-	bottom := size - top - thick
-	fillRect(img, left, top, right, top+thick, white)
-	fillRect(img, left, bottom, right, bottom+thick, white)
-	for i := 0; i < right-left; i++ {
-		x := right - i - thick
-		y := top + i*(bottom-top)/(right-left)
-		fillRect(img, x, y, x+thick, y+thick, white)
-	}
-	return img
-}
-
-func fillRect(img *image.RGBA, left, top, right, bottom int, c color.RGBA) {
-	bounds := img.Bounds()
-	if left < bounds.Min.X {
-		left = bounds.Min.X
-	}
-	if top < bounds.Min.Y {
-		top = bounds.Min.Y
-	}
-	if right > bounds.Max.X {
-		right = bounds.Max.X
-	}
-	if bottom > bounds.Max.Y {
-		bottom = bounds.Max.Y
-	}
-	for y := top; y < bottom; y++ {
-		for x := left; x < right; x++ {
-			img.Set(x, y, c)
-		}
-	}
-}
-
 func max(a int, b int) int {
 	if a > b {
 		return a
@@ -1399,4 +1351,49 @@ func formatTime(t time.Time) string {
 		return "-"
 	}
 	return t.Local().Format("Jan 02, 2006 03:04 PM")
+}
+
+// brandBitmap renders the ZenPlus mark for in-window use.
+func brandBitmap(size int) walk.Image {
+	bitmap, err := walk.NewBitmapFromImageForDPI(brand.Mark(size), 96)
+	if err != nil {
+		return nil
+	}
+	return bitmap
+}
+
+// trayStatusFor maps dashboard health to the tray badge.
+func trayStatusFor(snap appstate.Snapshot, tone string) brand.Status {
+	if snap.Service.Installed && !snap.Service.Running {
+		return brand.StatusStopped
+	}
+	switch tone {
+	case "ok":
+		return brand.StatusOK
+	case "warn":
+		return brand.StatusWarning
+	default:
+		return brand.StatusError
+	}
+}
+
+// setTrayStatus swaps the tray icon only when the status changes.
+func (a *appUI) setTrayStatus(status brand.Status) {
+	if a.tray == nil || (a.trayIcons != nil && status == a.trayStatus) {
+		return
+	}
+	if a.trayIcons == nil {
+		a.trayIcons = map[brand.Status]*walk.Icon{}
+	}
+	icon, ok := a.trayIcons[status]
+	if !ok {
+		var err error
+		if icon, err = walk.NewIconFromImageForDPI(brand.TrayImage(32, status), 96); err != nil {
+			return
+		}
+		a.trayIcons[status] = icon
+	}
+	if a.tray.SetIcon(icon) == nil {
+		a.trayStatus = status
+	}
 }

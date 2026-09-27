@@ -5,8 +5,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"image"
-	"image/color"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +14,7 @@ import (
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
 
+	"zenplus-agent/internal/brand"
 	"zenplus-agent/internal/config"
 	"zenplus-agent/internal/model"
 )
@@ -190,7 +189,7 @@ func (u *setupWindow) scopePanel(defaultUser, defaultMachine bool) Widget {
 	return GroupBox{
 		Title:      "Installation Scope",
 		Background: SolidColorBrush{Color: setupPanel},
-		Layout:     VBox{Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 10}, Spacing: 5},
+		Layout:     VBox{Alignment: AlignHNearVNear, Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 10}, Spacing: 5},
 		Children: []Widget{
 			TextLabel{Text: scopeNote, MinSize: Size{Width: 560, Height: 34}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
 			RadioButton{AssignTo: &u.userScope, Text: "Current user - evaluation only (no Windows service)", OnClicked: func() {
@@ -239,7 +238,7 @@ func (u *setupWindow) settingsPanel() Widget {
 		)
 	} else {
 		children = append(children,
-			RadioButton{AssignTo: &u.profileInfrastructure, Text: "Server monitoring"},
+			Label{Text: "Server monitoring (this package does not include APM)", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9}},
 			TextLabel{Text: "This lightweight package monitors the server only. To add application performance monitoring (APM), install the ZenPlus Agent package with APM over this installation at any time.", MinSize: Size{Width: 560, Height: 34}, TextColor: setupMuted, Font: muted},
 		)
 	}
@@ -250,7 +249,7 @@ func (u *setupWindow) settingsPanel() Widget {
 	return GroupBox{
 		Title:      "Connect to ZenPlus",
 		Background: SolidColorBrush{Color: setupPanel},
-		Layout:     VBox{Margins: Margins{Left: 12, Top: 10, Right: 12, Bottom: 10}, Spacing: 8},
+		Layout:     VBox{Alignment: AlignHNearVNear, Margins: Margins{Left: 12, Top: 10, Right: 12, Bottom: 10}, Spacing: 8},
 		Children:   children,
 	}
 }
@@ -382,7 +381,7 @@ func (u *setupWindow) optionsFromUI() options {
 	opts.noStartMenu = u.noStartMenu != nil && !u.noStartMenu.Checked()
 	opts.controllerURL = strings.TrimSpace(textOf(u.controllerURL))
 	switch {
-	case u.profileInfrastructure != nil && u.profileInfrastructure.Checked():
+	case !payloadIncludesAPM() || (u.profileInfrastructure != nil && u.profileInfrastructure.Checked()):
 		opts.profile, opts.apmMode = "infrastructure", "disabled"
 	case u.profileAPM != nil && u.profileAPM.Checked():
 		opts.profile, opts.apmMode = "apm", "enabled"
@@ -563,7 +562,7 @@ func (u *uninstallWindow) uninstallScopePanel(defaultUser, defaultMachine bool) 
 	return GroupBox{
 		Title:      "Remove Installation",
 		Background: SolidColorBrush{Color: setupPanel},
-		Layout:     VBox{Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 10}, Spacing: 7},
+		Layout:     VBox{Alignment: AlignHNearVNear, Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 10}, Spacing: 7},
 		Children: []Widget{
 			TextLabel{Text: scopeNote, MinSize: Size{Width: 530, Height: 34}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
 			RadioButton{AssignTo: &u.userScope, Text: "Current user installation", OnClicked: func() {
@@ -765,91 +764,49 @@ func (u *uninstallWindow) withUI(fn func()) {
 	u.window.Synchronize(fn)
 }
 
+// setupBanner matches the navy of the ZenPlus mark.
+var setupBanner = walk.RGB(11, 31, 51)
+
 func setupHeader(title, subtitle string) Widget {
 	return Composite{
-		Background: SolidColorBrush{Color: setupAccent},
+		Background: SolidColorBrush{Color: setupBanner},
 		MinSize:    Size{Height: 78},
 		MaxSize:    Size{Height: 78},
 		Layout:     HBox{Margins: Margins{Left: 18, Top: 13, Right: 18, Bottom: 12}, Spacing: 12},
 		Children: []Widget{
-			Label{
-				Text:          "Z",
-				MinSize:       Size{Width: 48, Height: 48},
-				MaxSize:       Size{Width: 48, Height: 48},
-				Background:    SolidColorBrush{Color: setupOverlay},
-				TextColor:     setupAccent,
-				Font:          Font{Family: "Segoe UI", PointSize: 22, Bold: true},
-				TextAlignment: AlignCenter,
+			ImageView{
+				Image:      setupBrandBitmap(48),
+				Mode:       ImageViewModeIdeal,
+				MinSize:    Size{Width: 50, Height: 50},
+				MaxSize:    Size{Width: 50, Height: 50},
+				Background: SolidColorBrush{Color: setupBanner},
 			},
 			Composite{
-				Background: SolidColorBrush{Color: setupAccent},
+				Background: SolidColorBrush{Color: setupBanner},
 				Layout:     VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}, Spacing: 3},
 				Children: []Widget{
 					Label{Text: title, TextColor: walk.RGB(255, 255, 255), Font: Font{Family: "Segoe UI", PointSize: 16, Bold: true}},
-					TextLabel{Text: subtitle, TextColor: walk.RGB(226, 255, 252), Font: Font{Family: "Segoe UI", PointSize: 9}, MinSize: Size{Width: 430, Height: 22}},
+					TextLabel{Text: subtitle, TextColor: walk.RGB(191, 219, 254), Font: Font{Family: "Segoe UI", PointSize: 9}, MinSize: Size{Width: 430, Height: 22}},
 				},
 			},
 		},
 	}
 }
 
+func setupBrandBitmap(size int) walk.Image {
+	bitmap, err := walk.NewBitmapFromImageForDPI(brand.Mark(size), 96)
+	if err != nil {
+		return nil
+	}
+	return bitmap
+}
+
 func setupIcon() *walk.Icon {
 	if icon, err := walk.NewIconFromResourceId(3); err == nil {
 		return icon
 	}
-	icon, _ := walk.NewIconFromImage(makeSetupIcon(64))
+	icon, _ := walk.NewIconFromImageForDPI(brand.Mark(64), 96)
 	return icon
-}
-
-func makeSetupIcon(size int) image.Image {
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
-			img.Set(x, y, color.RGBA{R: 0, G: 137, B: 129, A: 255})
-		}
-	}
-	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
-	thick := maxInt(2, size/7)
-	left := size / 4
-	right := size - left
-	top := size / 4
-	bottom := size - top - thick
-	fillSetupRect(img, left, top, right, top+thick, white)
-	fillSetupRect(img, left, bottom, right, bottom+thick, white)
-	for i := 0; i < right-left; i++ {
-		x := right - i - thick
-		y := top + i*(bottom-top)/(right-left)
-		fillSetupRect(img, x, y, x+thick, y+thick, white)
-	}
-	return img
-}
-
-func fillSetupRect(img *image.RGBA, left, top, right, bottom int, c color.RGBA) {
-	bounds := img.Bounds()
-	if left < bounds.Min.X {
-		left = bounds.Min.X
-	}
-	if top < bounds.Min.Y {
-		top = bounds.Min.Y
-	}
-	if right > bounds.Max.X {
-		right = bounds.Max.X
-	}
-	if bottom > bounds.Max.Y {
-		bottom = bounds.Max.Y
-	}
-	for y := top; y < bottom; y++ {
-		for x := left; x < right; x++ {
-			img.Set(x, y, c)
-		}
-	}
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func commandArgsFromOptions(opts options, uninstall bool, quiet bool) []string {
