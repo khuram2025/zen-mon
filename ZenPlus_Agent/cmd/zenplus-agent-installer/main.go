@@ -65,14 +65,49 @@ type options struct {
 	logPath       string
 }
 
+// errorShownInWindow is set when Setup's own window already displayed the
+// failure, so main does not repeat it in a message box.
+var errorShownInWindow bool
+
 func main() {
-	if err := run(); err != nil {
+	args := os.Args[1:]
+	quiet := hasQuietArg(args)
+	// The temporary copy Setup relaunches reports through its parent.
+	var console *os.File
+	if quiet && !hasArg(args, "from-temp") {
+		console = parentConsole()
+	}
+	err := run()
+	if console != nil {
+		action := "setup"
+		if hasArg(args, "uninstall") {
+			action = "removal"
+		}
+		if err != nil {
+			fmt.Fprintf(console, "\r\n%s %s failed (exit code %d): %v\r\n", productName, action, exitCodeFor(err), err)
+		} else {
+			fmt.Fprintf(console, "\r\n%s %s %s completed successfully.\r\n", productName, model.AgentVersion, action)
+		}
+		_ = console.Close()
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s setup failed: %v\n", productName, err)
-		if !hasQuietArg(os.Args[1:]) {
+		if !quiet && !errorShownInWindow {
 			showMessage(productName+" Setup", fmt.Sprintf("%s setup failed:\n\n%v", productName, err), true)
 		}
 		os.Exit(exitCodeFor(err))
 	}
+}
+
+// hasArg reports whether a switch (without / or -) is present.
+func hasArg(args []string, name string) bool {
+	for _, arg := range args {
+		key, _, _ := strings.Cut(strings.TrimLeft(strings.ToLower(strings.TrimSpace(arg)), "-/"), "=")
+		if key == name {
+			return true
+		}
+	}
+	return false
 }
 
 func run() (returnErr error) {
@@ -1554,60 +1589,6 @@ func scopeArg(l layout) string {
 func isElevated() bool {
 	token := windows.GetCurrentProcessToken()
 	return token.IsElevated()
-}
-
-func relaunchElevated(args []string) error {
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	argv := make([]string, len(args))
-	for i, arg := range args {
-		argv[i] = windows.EscapeArg(arg)
-	}
-	verb, err := windows.UTF16PtrFromString("runas")
-	if err != nil {
-		return err
-	}
-	file, err := windows.UTF16PtrFromString(exe)
-	if err != nil {
-		return err
-	}
-	parameters, err := windows.UTF16PtrFromString(strings.Join(argv, " "))
-	if err != nil {
-		return err
-	}
-	info := shellExecuteInfo{
-		Mask:       seeMaskNoCloseProcess,
-		Verb:       verb,
-		File:       file,
-		Parameters: parameters,
-		Show:       int32(windows.SW_SHOWNORMAL),
-	}
-	info.Size = uint32(unsafe.Sizeof(info))
-	ok, _, callErr := shellExecuteExW.Call(uintptr(unsafe.Pointer(&info)))
-	if ok == 0 {
-		return fmt.Errorf("administrator approval is required: %w", callErr)
-	}
-	if info.Process == 0 {
-		return fmt.Errorf("elevated setup did not return a process handle")
-	}
-	defer windows.CloseHandle(info.Process)
-	waitResult, err := windows.WaitForSingleObject(info.Process, windows.INFINITE)
-	if err != nil {
-		return fmt.Errorf("wait for elevated setup: %w", err)
-	}
-	if waitResult != windows.WAIT_OBJECT_0 {
-		return fmt.Errorf("wait for elevated setup returned status 0x%x", waitResult)
-	}
-	var exitCode uint32
-	if err := windows.GetExitCodeProcess(info.Process, &exitCode); err != nil {
-		return fmt.Errorf("read elevated setup result: %w", err)
-	}
-	if exitCode != 0 {
-		return withExitCode(int(exitCode), fmt.Errorf("elevated setup failed with exit code %d", exitCode))
-	}
-	return nil
 }
 
 const seeMaskNoCloseProcess = 0x00000040

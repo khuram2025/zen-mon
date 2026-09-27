@@ -54,6 +54,11 @@ echo Exit code %ERRORLEVEL%
 As the install command of a deployment tool, use the same line without
 `start "" /wait`.
 
+From agent 1.14.3, a silent install started from a Command Prompt or PowerShell
+also prints its result in that window (for example "setup failed (exit code
+740): ... requires an administrator").
+
+
 | Switch or property | Meaning |
 | --- | --- |
 | `/machine` (`/allusers`) | All-users installation with the Windows service. Use it for servers. |
