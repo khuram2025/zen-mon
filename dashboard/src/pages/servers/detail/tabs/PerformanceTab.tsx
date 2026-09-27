@@ -210,7 +210,10 @@ export function PerformanceTab({ server }: { server: ServerItem }) {
   const utilStats = stats(dPoints.map((p) => p.util_pct))
   // Stored as zero when the agent does not report them (Windows agents
   // report throughput and operations only), so all-zero means unreported.
-  const hasLatency = dPoints.some((p) => (p.read_ms ?? 0) > 0 || (p.write_ms ?? 0) > 0)
+  // The Windows agent's disk timings come from a library that truncates
+  // them to whole seconds, so they are noise rather than latency.
+  const latencyTrusted = server.os_type !== 'windows'
+  const hasLatency = latencyTrusted && dPoints.some((p) => (p.read_ms ?? 0) > 0 || (p.write_ms ?? 0) > 0)
   const hasBusy = dPoints.some((p) => (p.util_pct ?? 0) > 0 || (p.queue ?? 0) > 0)
 
   /* Volumes */
@@ -398,7 +401,7 @@ export function PerformanceTab({ server }: { server: ServerItem }) {
           {(!hasLatency || !hasBusy) && (
             <p className="text-xs text-muted">
               {!hasLatency && !hasBusy ? 'Latency and busy time are' : !hasLatency ? 'Latency is' : 'Busy time is'} not
-              reported by this agent for {activeDisk.device}.
+              reported by {latencyTrusted ? 'this agent' : 'the Windows agent yet'} for {activeDisk.device}.
             </p>
           )}
         </>
