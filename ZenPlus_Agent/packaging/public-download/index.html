@@ -18,6 +18,7 @@
     .back { color:var(--muted); text-decoration:none; }
     .back:hover { color:var(--text); }
     main { display:grid; grid-template-columns:1.25fr .75fr; gap:28px; align-items:start; }
+    main > * { min-width:0; }
     .eyebrow { color:var(--teal); font-size:12px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; }
     h1 { margin:12px 0 18px; max-width:720px; font-size:clamp(38px,6vw,66px); line-height:1.04; letter-spacing:-.045em; }
     .lead { max-width:700px; margin:0 0 30px; color:#bfd0d4; font-size:18px; }
@@ -44,6 +45,16 @@
     .check span { color:var(--muted); font-size:13px; }
     footer { display:flex; justify-content:space-between; gap:16px; margin-top:70px; padding-top:22px; border-top:1px solid var(--line); color:var(--muted); font-size:13px; }
     code { overflow-wrap:anywhere; color:#d7e8eb; }
+    .deploy { margin-top:34px; padding:22px 24px; border:1px solid var(--line); border-radius:18px; background:#091b21cc; }
+    .deploy h2 { margin:0 0 6px; font-size:20px; }
+    .deploy p { margin:0 0 12px; color:#bfd0d4; }
+    .cmd { position:relative; margin:10px 0; border:1px solid var(--line); border-radius:12px; background:#051116; }
+    .cmd .label { display:block; padding:8px 14px 0; color:var(--muted); font-size:11px; font-weight:800; letter-spacing:.1em; text-transform:uppercase; }
+    .cmd pre { margin:0; padding:8px 14px 12px; overflow-x:auto; font:12.5px/1.55 "JetBrains Mono",Consolas,monospace; color:#d7e8eb; white-space:pre; }
+    .copy { position:absolute; top:7px; right:8px; padding:4px 10px; border:1px solid #3e646d; border-radius:8px; background:#0b2027; color:var(--text); font:12px Inter,"Segoe UI",sans-serif; cursor:pointer; }
+    .copy:hover { border-color:var(--teal); }
+    .deploy .links { display:flex; flex-wrap:wrap; gap:10px 18px; margin-top:12px; font-size:14px; }
+    .deploy .links a { color:var(--teal); font-weight:700; text-decoration:none; }
     @media (max-width:800px) { header{margin-bottom:44px} main{grid-template-columns:1fr}.checks{grid-template-columns:1fr} footer{flex-direction:column} }
   </style>
 </head>
@@ -55,9 +66,17 @@
         <div class="eyebrow">Official Windows release</div>
         <h1>ZenPlus Agent for Windows</h1>
         <p class="lead">Install endpoint monitoring with a guided setup, Windows service, tray dashboard, and a verified update channel.</p>
+        <h2>Server monitoring</h2>
+        <p>CPU, memory, disks, network, processes, services, and event logs. Small download, about 20 MB.</p>
         <div class="downloads">
-          <a id="exe-download" class="button" href="stable/ZenPlusAgentSetup-latest.exe">Download guided installer</a>
-          <a id="msi-download" class="button secondary" href="stable/ZenPlusAgent-latest.msi">Download MSI for deployment</a>
+          <a id="core-exe-download" class="button" href="stable/ZenPlusAgentCoreSetup-latest.exe">Download server installer</a>
+          <a id="core-msi-download" class="button secondary" href="stable/ZenPlusAgentCore-latest.msi">Server MSI</a>
+        </div>
+        <h2>Server monitoring + APM</h2>
+        <p>Add application traces and the offline instrumentation toolkit. About 87 MB. Install over the server package to add APM, then select Server monitoring + APM in Setup.</p>
+        <div class="downloads">
+          <a id="exe-download" class="button" href="stable/ZenPlusAgentSetup-latest.exe">Download installer with APM</a>
+          <a id="msi-download" class="button secondary" href="stable/ZenPlusAgent-latest.msi">MSI with APM</a>
         </div>
         <div class="meta"><span>Windows 10/11 &amp; Windows Server</span><span>x64</span><span id="release-date">Stable channel</span></div>
         <div id="trust" class="trust"><strong>Checking publisher signature...</strong><span>The page is validating the current release manifest.</span></div>
@@ -65,6 +84,19 @@
           <div class="check"><strong>Tray dashboard</strong><span>Live health, version, controller status, logs, and update checks.</span></div>
           <div class="check"><strong>Enterprise MSI</strong><span>Silent deployment, major upgrades, Apps &amp; Features registration, and uninstall support.</span></div>
           <div class="check"><strong>Safe updates</strong><span>HTTPS manifest, SHA-256 verification, and trusted Authenticode enforcement.</span></div>
+        </div>
+        <div class="deploy" id="deploy">
+          <h2>Deploy at scale</h2>
+          <p>Install silently on many servers with Group Policy, Intune, Configuration Manager or PowerShell. Every installation registers as pending, and you approve them together in Agent Fleet. Setup returns standard Windows Installer exit codes: 0 success, 1618 retry, 1639 invalid switches, 740 not elevated, 1603 failed. At a prompt, keep <code>start "" /wait</code> so the prompt waits for Setup.</p>
+          <div class="cmd"><span class="label">Command Prompt (elevated) · server monitoring</span><button class="copy" type="button">Copy</button><pre>start "" /wait zenplus-agent-core-<span class="ver">x.y.z</span>.exe /machine /quiet /norestart CONTROLLER_URL=https://zenplus.example.com INSTALL_PROFILE=infrastructure</pre></div>
+          <div class="cmd"><span class="label">Command Prompt (elevated) · MSI with APM</span><button class="copy" type="button">Copy</button><pre>start "" /wait msiexec /i zenplus-agent-<span class="ver">x.y.z</span>.msi /qn /norestart CONTROLLER_URL=https://zenplus.example.com INSTALL_PROFILE=combined</pre></div>
+          <div class="links">
+            <a href="deploy/">Full deployment guide &rarr;</a>
+            <a href="deploy/#switches">All switches</a>
+            <a href="deploy/#exit-codes">Exit codes</a>
+            <a href="deploy/#intune">Intune</a>
+            <a href="deploy/#gpo">Group Policy</a>
+          </div>
         </div>
       </section>
       <aside class="card">
@@ -81,19 +113,26 @@
     <footer><span>&copy; 2026 Zentryc. Official distribution channel.</span><span><a href="/security/">Security</a> &nbsp; <a href="/contact/">Support</a> &nbsp; <a href="/privacy/">Privacy</a></span></footer>
   </div>
   <script>
+    document.querySelectorAll('.copy').forEach(function(button){
+      button.addEventListener('click', function(){
+        navigator.clipboard.writeText(button.parentElement.querySelector('pre').innerText).then(function(){ button.textContent='Copied'; setTimeout(function(){ button.textContent='Copy'; }, 1500); });
+      });
+    });
     fetch('stable/manifest.json', {cache:'no-store'}).then(function(response){ if(!response.ok) throw new Error('manifest unavailable'); return response.json(); }).then(function(m){
       document.getElementById('version').textContent='v'+m.latest_version;
+      document.querySelectorAll('.ver').forEach(function(el){ el.textContent=m.latest_version; });
       document.getElementById('channel').textContent=m.channel || 'stable';
       document.getElementById('arch').textContent=(m.arch || 'amd64').toUpperCase();
-      document.getElementById('sha').textContent=m.sha256;
+      document.getElementById('sha').textContent=m.msi_sha256 || m.sha256;
       document.getElementById('exe-download').href=m.setup_download_url;
-      document.getElementById('msi-download').href=m.download_url;
+      document.getElementById('msi-download').href=m.msi_download_url || m.download_url;
+      if(m.flavors && m.flavors.core) { document.getElementById('core-exe-download').href=m.flavors.core.setup_download_url; document.getElementById('core-msi-download').href=m.flavors.core.msi_download_url; }
       if(m.released_at) document.getElementById('release-date').textContent='Released '+new Date(m.released_at).toLocaleDateString();
-      var valid=m.signature_status==='Valid' && m.setup_signature_status==='Valid';
+      var valid=m.signature_status==='Valid' && m.setup_signature_status==='Valid' && (m.msi_signature_status || m.signature_status)==='Valid';
       var trust=document.getElementById('trust');
       document.getElementById('publisher').textContent=valid ? (m.signing_subject || 'Verified') : 'Not verified';
       trust.className=valid ? 'trust' : 'trust warning';
-      trust.innerHTML=valid ? '<strong>Verified Zentryc publisher</strong><span>Both installers are Authenticode signed and the agent verifies the MSI again before an automatic update.</span>' : '<strong>Publisher signing pending</strong><span>This preview release is available for testing, but automatic installation remains blocked until trusted signing is applied.</span>';
+      trust.innerHTML=valid ? '<strong>Verified Zentryc publisher</strong><span>All four packages are signed through Microsoft Azure Artifact Signing. Windows verifies the Zentryc LLC publisher, and the agent verifies the installer before updating.</span>' : '<strong>Publisher signing pending</strong><span>This preview release is available for testing, but automatic installation remains blocked until trusted signing is applied.</span>';
     }).catch(function(){
       document.getElementById('version').textContent='Unavailable';
       document.getElementById('trust').className='trust warning';

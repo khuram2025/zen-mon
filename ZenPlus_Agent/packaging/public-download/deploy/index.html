@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Deploy ZenPlus Agent at scale | Zentryc</title>
+  <meta name="description" content="Silent installation switches, MSI properties, exit codes, and Group Policy, Intune, Configuration Manager and PowerShell recipes for the ZenPlus Agent for Windows.">
+  <style>
+    :root { color-scheme: dark; --bg:#061419; --panel:#0b2027; --line:#1d3b43; --text:#f2f8f9; --muted:#9db1b7; --teal:#18b8a7; --blue:#5da9ff; --warn:#f4b860; --ok:#64d897; --bad:#ff8b7b; }
+    * { box-sizing: border-box; }
+    html { scroll-behavior:smooth; }
+    body { margin:0; min-height:100vh; background:radial-gradient(circle at 80% 0,#123b42 0,transparent 34%),linear-gradient(145deg,#041014,#071a20 62%,#09262c); color:var(--text); font:15px/1.6 Inter,"Segoe UI",system-ui,sans-serif; }
+    a { color:var(--teal); }
+    .shell { width:min(1080px,calc(100% - 36px)); margin:auto; padding:32px 0 48px; }
+    header { display:flex; align-items:center; justify-content:space-between; gap:20px; margin-bottom:52px; }
+    .brand { display:flex; align-items:center; gap:12px; text-decoration:none; color:var(--text); font-size:18px; font-weight:700; letter-spacing:.2px; }
+    .mark { display:grid; place-items:center; width:38px; height:38px; border-radius:11px; background:linear-gradient(145deg,var(--teal),#087c76); box-shadow:0 10px 30px #00a89833; }
+    .back { color:var(--muted); text-decoration:none; }
+    .back:hover { color:var(--text); }
+    .eyebrow { color:var(--teal); font-size:12px; font-weight:800; letter-spacing:.14em; text-transform:uppercase; }
+    h1 { margin:12px 0 16px; font-size:clamp(34px,5vw,54px); line-height:1.06; letter-spacing:-.04em; }
+    .lead { max-width:760px; margin:0 0 28px; color:#bfd0d4; font-size:18px; }
+    .layout { display:grid; grid-template-columns:220px 1fr; gap:36px; align-items:start; }
+    .layout > * { min-width:0; }
+    nav.toc { position:sticky; top:20px; display:flex; flex-direction:column; gap:2px; padding:14px; border:1px solid var(--line); border-radius:14px; background:#091b21aa; font-size:14px; }
+    nav.toc a { color:var(--muted); text-decoration:none; padding:5px 8px; border-radius:8px; }
+    nav.toc a:hover { color:var(--text); background:#0f2a31; }
+    section { margin-bottom:44px; scroll-margin-top:20px; }
+    h2 { margin:0 0 12px; font-size:24px; letter-spacing:-.02em; }
+    h3 { margin:22px 0 8px; font-size:17px; }
+    p, li { color:#c9d9dc; }
+    .muted { color:var(--muted); }
+    table { width:100%; border-collapse:collapse; margin:10px 0 6px; font-size:14px; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+    th, td { padding:10px 12px; border-bottom:1px solid #17333a; text-align:left; vertical-align:top; }
+    th { background:#0b2027; color:var(--muted); font-size:12px; letter-spacing:.06em; text-transform:uppercase; }
+    tr:last-child td { border-bottom:0; }
+    td code, p code, li code { padding:1px 6px; border-radius:6px; background:#0b2a31; color:#d7e8eb; font-size:13px; }
+    .code { position:relative; margin:10px 0 14px; border:1px solid var(--line); border-radius:12px; background:#051116; }
+    .code pre { margin:0; padding:14px 16px; overflow-x:auto; font:13px/1.6 "JetBrains Mono",Consolas,monospace; color:#d7e8eb; white-space:pre; }
+    .code .label { display:block; padding:8px 16px 0; color:var(--muted); font-size:12px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
+    .copy { position:absolute; top:8px; right:8px; padding:5px 10px; border:1px solid #3e646d; border-radius:8px; background:#0b2027; color:var(--text); font:12px Inter,"Segoe UI",sans-serif; cursor:pointer; }
+    .copy:hover { border-color:var(--teal); }
+    .cards { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; margin:12px 0; }
+    .card { padding:18px; border:1px solid var(--line); border-radius:14px; background:#091b21aa; }
+    .card strong { display:block; margin-bottom:4px; }
+    .card span { color:var(--muted); font-size:14px; }
+    .note { margin:14px 0; padding:14px 16px; border:1px solid #24534d; border-radius:12px; background:#0b2928; color:#c5dedb; font-size:14px; }
+    .note.warn { border-color:#624b25; background:#2b2213; color:#f1dcb5; }
+    .pill { display:inline-block; min-width:52px; padding:1px 8px; border-radius:999px; font-weight:800; font-size:13px; text-align:center; }
+    .pill.ok { background:#123b2b; color:var(--ok); } .pill.retry { background:#2b2213; color:var(--warn); } .pill.bad { background:#3a1715; color:var(--bad); }
+    footer { display:flex; justify-content:space-between; gap:16px; margin-top:40px; padding-top:22px; border-top:1px solid var(--line); color:var(--muted); font-size:13px; }
+    footer a { color:var(--muted); }
+    @media (max-width:860px) { .layout{grid-template-columns:1fr} nav.toc{position:static; flex-direction:row; flex-wrap:wrap} .cards{grid-template-columns:1fr} footer{flex-direction:column} }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header><a class="brand" href="/"><span class="mark">Z</span><span>Zentryc</span></a><a class="back" href="../">&larr; Download ZenPlus Agent</a></header>
+
+    <div class="eyebrow">Deployment guide · Agent <span class="ver">latest</span></div>
+    <h1>Deploy ZenPlus Agent at scale</h1>
+    <p class="lead">Install silently from Group Policy, Microsoft Intune, Configuration Manager, PDQ Deploy or a PowerShell loop. No enrollment secret is placed on the endpoint or the command line: every installation registers as <em>pending</em>, and you approve them together in Agent Fleet.</p>
+
+    <div class="layout">
+      <nav class="toc" aria-label="Contents">
+        <a href="#package">1. Choose a package</a>
+        <a href="#commands">2. Silent install</a>
+        <a href="#switches">3. Switches &amp; properties</a>
+        <a href="#exit-codes">4. Exit codes</a>
+        <a href="#gpo">Group Policy</a>
+        <a href="#intune">Microsoft Intune</a>
+        <a href="#mecm">Configuration Manager</a>
+        <a href="#powershell">PDQ &amp; PowerShell</a>
+        <a href="#appliance">From the appliance</a>
+        <a href="#uninstall">Uninstall</a>
+        <a href="#approve">Approve &amp; manage</a>
+      </nav>
+
+      <div>
+        <section id="package">
+          <h2>1. Choose a package</h2>
+          <table>
+            <tr><th>Servers need</th><th>Package</th><th>Size</th><th><code>INSTALL_PROFILE</code></th></tr>
+            <tr><td>Server monitoring</td><td><code>zenplus-agent-core-<span class="ver">x.y.z</span>.exe</code> / <code>.msi</code></td><td>~21 MB</td><td><code>infrastructure</code></td></tr>
+            <tr><td>Server monitoring + APM</td><td><code>zenplus-agent-<span class="ver">x.y.z</span>.exe</code> / <code>.msi</code></td><td>~87 MB</td><td><code>combined</code></td></tr>
+            <tr><td>APM only</td><td><code>zenplus-agent-<span class="ver">x.y.z</span>.exe</code> / <code>.msi</code></td><td>~87 MB</td><td><code>apm</code></td></tr>
+          </table>
+          <p>Download the packages from the <a href="../">download page</a> or from your ZenPlus appliance (<strong>Agent Fleet → Download agent</strong>, no internet access needed). All packages are Authenticode-signed by <strong>Zentryc LLC</strong>. You can switch a server between profiles later from Agent Fleet (<strong>Change monitoring profile</strong>), so start with server monitoring if unsure.</p>
+        </section>
+
+        <section id="commands">
+          <h2>2. Silent install</h2>
+          <p>Run as <strong>SYSTEM</strong> or from an elevated prompt. Replace the appliance address with yours.</p>
+          <div class="note warn">Setup is a Windows program, so a Command Prompt or PowerShell does not wait for it. Typed on its own, the command returns at once with no output while Setup works (or fails) in the background. At a prompt use <code>Start-Process -Wait</code> (PowerShell) or <code>start "" /wait</code> (Command Prompt) as shown, then check the exit code and the log. Deployment tools such as Intune and Configuration Manager wait on their own and take the plain command.</div>
+          <div class="code"><span class="label">PowerShell (elevated) · server monitoring</span><button class="copy">Copy</button><pre>$p = Start-Process .\zenplus-agent-core-<span class="ver">x.y.z</span>.exe -Wait -PassThru -ArgumentList '/machine','/quiet','/norestart','CONTROLLER_URL=https://zenplus.example.com','INSTALL_PROFILE=infrastructure','/log','C:\Windows\Temp\ZenPlusAgent-install.log'
+"Exit code: $($p.ExitCode)"</pre></div>
+          <div class="code"><span class="label">Command Prompt (elevated) · server monitoring</span><button class="copy">Copy</button><pre>start "" /wait zenplus-agent-core-<span class="ver">x.y.z</span>.exe /machine /quiet /norestart CONTROLLER_URL=https://zenplus.example.com INSTALL_PROFILE=infrastructure /log "C:\Windows\Temp\ZenPlusAgent-install.log"
+echo Exit code %ERRORLEVEL%</pre></div>
+          <div class="code"><span class="label">MSI · server monitoring</span><button class="copy">Copy</button><pre>start "" /wait msiexec /i zenplus-agent-core-<span class="ver">x.y.z</span>.msi /qn /norestart CONTROLLER_URL=https://zenplus.example.com INSTALL_PROFILE=infrastructure /L*v "C:\Windows\Temp\ZenPlusAgent-install.log"</pre></div>
+          <div class="code"><span class="label">EXE · server monitoring + APM</span><button class="copy">Copy</button><pre>start "" /wait zenplus-agent-<span class="ver">x.y.z</span>.exe /machine /quiet /norestart CONTROLLER_URL=https://zenplus.example.com INSTALL_PROFILE=combined /log "C:\Windows\Temp\ZenPlusAgent-install.log"</pre></div>
+          <div class="code"><span class="label">MSI · server monitoring + APM</span><button class="copy">Copy</button><pre>start "" /wait msiexec /i zenplus-agent-<span class="ver">x.y.z</span>.msi /qn /norestart CONTROLLER_URL=https://zenplus.example.com INSTALL_PROFILE=combined /L*v "C:\Windows\Temp\ZenPlusAgent-install.log"</pre></div>
+          <p class="muted">Upgrades use the same command: an installed agent keeps its identity, credential, configuration and profile unless you pass a new one.</p>
+        </section>
+
+        <section id="switches">
+          <h2>3. Switches and properties</h2>
+          <table>
+            <tr><th>Switch or property</th><th>Meaning</th></tr>
+            <tr><td><code>/machine</code> (<code>/allusers</code>)</td><td>All-users installation with the Windows service. Use this for servers.</td></tr>
+            <tr><td><code>/user</code> (<code>/currentuser</code>)</td><td>Current-user installation without the service, for evaluation.</td></tr>
+            <tr><td><code>/quiet</code> (<code>/silent</code>, <code>/verysilent</code>, <code>/S</code>, <code>/qn</code>)</td><td>No user interface.</td></tr>
+            <tr><td><code>/norestart</code></td><td>Accepted for compatibility. Setup never restarts Windows.</td></tr>
+            <tr><td><code>CONTROLLER_URL=</code> (<code>/controller-url</code>)</td><td>Appliance address. Required on a first install; an upgrade keeps the saved one unless given.</td></tr>
+            <tr><td><code>INSTALL_PROFILE=</code> (<code>/profile</code>)</td><td><code>infrastructure</code>, <code>combined</code> or <code>apm</code>. A first install defaults to <code>infrastructure</code>; an upgrade keeps the installed profile.</td></tr>
+            <tr><td><code>CONTROLLER_CA_FILE=</code> (<code>/controller-ca-file</code>)</td><td>PEM bundle for an appliance certificate issued by a private CA. TLS verification stays on.</td></tr>
+            <tr><td><code>/log &lt;path&gt;</code> (EXE) · <code>/L*v &lt;path&gt;</code> (MSI)</td><td>Write Setup's log. The folder must exist.</td></tr>
+            <tr><td><code>/no-start-menu</code></td><td>Skip the Start Menu shortcut.</td></tr>
+            <tr><td><code>/uninstall</code> · <code>/purge</code> (<code>PURGE=1</code>)</td><td>Remove the agent; with purge, also its data. See <a href="#uninstall">Uninstall</a>.</td></tr>
+          </table>
+          <p>Switches are case-insensitive and accept <code>/</code> or <code>-</code>. Unknown switches and properties are rejected (exit code 1639) rather than ignored. The server-monitoring package refuses the <code>combined</code> and <code>apm</code> profiles, and refuses to replace an installation whose applications are instrumented by APM.</p>
+        </section>
+
+        <section id="exit-codes">
+          <h2>4. Exit codes</h2>
+          <p>Setup uses Windows Installer exit codes, which deployment tools already understand.</p>
+          <table>
+            <tr><th>Code</th><th>Meaning</th><th>Action</th></tr>
+            <tr><td><span class="pill ok">0</span></td><td>Installed, upgraded or removed</td><td>None</td></tr>
+            <tr><td><span class="pill retry">1618</span></td><td>Another ZenPlus installation is running, for example a self-update</td><td>Retry later. Intune and Configuration Manager do this automatically.</td></tr>
+            <tr><td><span class="pill bad">1639</span></td><td>Invalid switch, property or profile for this package</td><td>Fix the command line</td></tr>
+            <tr><td><span class="pill bad">740</span></td><td>Not elevated</td><td>Run as SYSTEM or an administrator</td></tr>
+            <tr><td><span class="pill bad">1603</span></td><td>Installation failed and was rolled back</td><td>Read the log file</td></tr>
+          </table>
+          <div class="note">A failed installation or upgrade is rolled back automatically: the previous version, its configuration and the Windows service are restored. Exit codes other than 0 and 1 require agent 1.14.2 or later; earlier versions return 1 for every failure.</div>
+        </section>
+
+        <section id="gpo">
+          <h2>Group Policy</h2>
+          <p>Use a <strong>computer startup script</strong> (runs as SYSTEM) that installs from a file share when the agent is missing:</p>
+          <div class="code"><span class="label">PowerShell startup script</span><button class="copy">Copy</button><pre>$key = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\ZenPlus Agent'
+if (-not (Test-Path $key)) {
+  $p = Start-Process '\\fileserver\software\zenplus-agent-core-<span class="ver">x.y.z</span>.exe' -Wait -PassThru -ArgumentList @(
+    '/machine', '/quiet', '/norestart',
+    'CONTROLLER_URL=https://zenplus.example.com', 'INSTALL_PROFILE=infrastructure',
+    '/log', 'C:\Windows\Temp\ZenPlusAgent-install.log')
+  exit $p.ExitCode
+}</pre></div>
+          <p>You can also assign the MSI with Group Policy Software Installation, setting <code>CONTROLLER_URL</code> and <code>INSTALL_PROFILE</code> in a transform.</p>
+        </section>
+
+        <section id="intune">
+          <h2>Microsoft Intune (Win32 app)</h2>
+          <p>Wrap the EXE with the Microsoft Win32 Content Prep Tool, then configure:</p>
+          <table>
+            <tr><th>Setting</th><th>Value</th></tr>
+            <tr><td>Install command</td><td><code>zenplus-agent-core-<span class="ver">x.y.z</span>.exe /machine /quiet /norestart CONTROLLER_URL=https://zenplus.example.com INSTALL_PROFILE=infrastructure</code></td></tr>
+            <tr><td>Uninstall command</td><td><code>"%ProgramFiles%\ZenPlus\Agent\ZenPlusAgentSetup.exe" /uninstall /quiet</code></td></tr>
+            <tr><td>Install behavior</td><td>System</td></tr>
+            <tr><td>Detection rule</td><td>Registry · <code>HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\ZenPlus Agent</code> · value <code>DisplayVersion</code> · string equals <code class="ver">x.y.z</code></td></tr>
+            <tr><td>Return codes</td><td>The defaults already treat 0 as Success and 1618 as Retry; other codes are failures.</td></tr>
+          </table>
+        </section>
+
+        <section id="mecm">
+          <h2>Configuration Manager (MECM / SCCM)</h2>
+          <p>Create an application with a <strong>Script Installer</strong> deployment type. Use the install and uninstall commands above, detect with the same registry value, and set installation behavior to <em>Install for system</em>. Return code 1618 is a <em>Fast retry</em> by default.</p>
+        </section>
+
+        <section id="powershell">
+          <h2>PDQ Deploy and remote PowerShell</h2>
+          <p>PDQ Deploy: add an Install step with the EXE and the silent parameters above; success code 0.</p>
+          <div class="code"><span class="label">PowerShell remoting across many servers</span><button class="copy">Copy</button><pre>$servers = Get-Content .\servers.txt
+Invoke-Command -ComputerName $servers -ThrottleLimit 20 -ScriptBlock {
+  $p = Start-Process '\\fileserver\software\zenplus-agent-core-<span class="ver">x.y.z</span>.exe' -Wait -PassThru -ArgumentList @(
+    '/machine', '/quiet', '/norestart', 'CONTROLLER_URL=https://zenplus.example.com',
+    'INSTALL_PROFILE=infrastructure', '/log', 'C:\Windows\Temp\ZenPlusAgent-install.log')
+  [pscustomobject]@{ Server = $env:COMPUTERNAME; ExitCode = $p.ExitCode }
+}</pre></div>
+        </section>
+
+        <section id="appliance">
+          <h2>Install straight from the appliance</h2>
+          <p>Without a file share, each server can download from your ZenPlus appliance. The script checks the SHA-256 and the Zentryc LLC signature, then exits with Setup's exit code. Run it in an elevated PowerShell:</p>
+          <div class="code"><span class="label">PowerShell</span><button class="copy">Copy</button><pre>$s = Join-Path $env:TEMP 'zenplus-agent-install.ps1'
+Invoke-WebRequest -UseBasicParsing -Uri 'https://zenplus.example.com/api/v1/agents/install.ps1' -OutFile $s
+&amp; $s -ControllerUrl 'https://zenplus.example.com' -InstallProfile infrastructure</pre></div>
+          <p class="muted">The same command, filled in for your appliance, is in the appliance's <strong>Install agent</strong> dialog.</p>
+        </section>
+
+        <section id="uninstall">
+          <h2>Uninstall</h2>
+          <div class="code"><span class="label">Remove the agent</span><button class="copy">Copy</button><pre>"%ProgramFiles%\ZenPlus\Agent\ZenPlusAgentSetup.exe" /uninstall /quiet</pre></div>
+          <p>Add <code>/purge</code> to also delete <code>%ProgramData%\ZenPlus\Agent</code> (queued data, identity and logs). Uninstall first restores any applications ZenPlus instrumented for APM.</p>
+        </section>
+
+        <section id="approve">
+          <h2>Approve and manage centrally</h2>
+          <div class="cards">
+            <div class="card"><strong>Approve in one step</strong><span>In Agent Fleet, filter <em>Pending authorization</em>, select all, and choose <em>Authorize</em>. Each agent receives its own credential, protected with Windows DPAPI.</span></div>
+            <div class="card"><strong>Upgrade from the appliance</strong><span><em>Trigger upgrade</em> installs a published version on the selected agents and shows progress for each one.</span></div>
+            <div class="card"><strong>Add or remove APM</strong><span><em>Change monitoring profile</em> installs the APM package or the server-monitoring package. Instrumented applications are restored first, with your consent.</span></div>
+            <div class="card"><strong>Policies and rings</strong><span>Apply collection policies and update rings to groups of agents from Agent Fleet.</span></div>
+          </div>
+          <div class="note warn">Until an administrator approves an installation, the agent collects and queues data locally but does not send it to the appliance.</div>
+        </section>
+      </div>
+    </div>
+
+    <footer><span>&copy; 2026 Zentryc. Official distribution channel.</span><span><a href="../">Downloads</a> &nbsp; <a href="/security/">Security</a> &nbsp; <a href="/contact/">Support</a></span></footer>
+  </div>
+  <script>
+    document.querySelectorAll('.copy').forEach(function(button){
+      button.addEventListener('click', function(){
+        var text = button.parentElement.querySelector('pre').innerText;
+        navigator.clipboard.writeText(text).then(function(){ button.textContent='Copied'; setTimeout(function(){ button.textContent='Copy'; }, 1500); });
+      });
+    });
+    fetch('../stable/manifest.json', {cache:'no-store'}).then(function(r){ if(!r.ok) throw new Error(); return r.json(); }).then(function(m){
+      document.querySelectorAll('.ver').forEach(function(el){ el.textContent = m.latest_version; });
+    }).catch(function(){});
+  </script>
+</body>
+</html>

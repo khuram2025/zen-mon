@@ -24,17 +24,40 @@ monitoring profile**), so start with server monitoring if unsure.
 
 ## 2. Command line
 
-EXE (recommended):
+Setup is a Windows (GUI-subsystem) program. A Command Prompt or PowerShell does
+not wait for it: typed on its own, the command returns at once with no output
+while Setup runs, or fails, in the background. At a prompt, wait for it and
+read the exit code. Deployment tools (Intune, Configuration Manager, PDQ) wait
+on their own and take the plain command.
 
-```cmd
-zenplus-agent-core-1.14.2.exe /machine /quiet /norestart CONTROLLER_URL=https://192.168.8.221 INSTALL_PROFILE=infrastructure /log "C:\Windows\Temp\ZenPlusAgent-install.log"
+PowerShell (elevated):
+
+```powershell
+$p = Start-Process .\zenplus-agent-core-1.14.2.exe -Wait -PassThru -ArgumentList '/machine','/quiet','/norestart','CONTROLLER_URL=https://192.168.8.221','INSTALL_PROFILE=infrastructure','/log','C:\Windows\Temp\ZenPlusAgent-install.log'
+"Exit code: $($p.ExitCode)"
 ```
 
-MSI:
+Command Prompt (elevated), EXE:
 
 ```cmd
-msiexec /i zenplus-agent-core-1.14.2.msi /qn /norestart CONTROLLER_URL=https://192.168.8.221 INSTALL_PROFILE=infrastructure /L*v "C:\Windows\Temp\ZenPlusAgent-install.log"
+start "" /wait zenplus-agent-core-1.14.2.exe /machine /quiet /norestart CONTROLLER_URL=https://192.168.8.221 INSTALL_PROFILE=infrastructure /log "C:\Windows\Temp\ZenPlusAgent-install.log"
+echo Exit code %ERRORLEVEL%
 ```
+
+Command Prompt (elevated), MSI:
+
+```cmd
+start "" /wait msiexec /i zenplus-agent-core-1.14.2.msi /qn /norestart CONTROLLER_URL=https://192.168.8.221 INSTALL_PROFILE=infrastructure /L*v "C:\Windows\Temp\ZenPlusAgent-install.log"
+echo Exit code %ERRORLEVEL%
+```
+
+As the install command of a deployment tool, use the same line without
+`start "" /wait`.
+
+From agent 1.14.3, a silent install started from a Command Prompt or PowerShell
+also prints its result in that window (for example "setup failed (exit code
+740): ... requires an administrator").
+
 
 | Switch or property | Meaning |
 | --- | --- |

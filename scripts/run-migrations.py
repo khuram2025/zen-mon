@@ -75,7 +75,7 @@ SUPERSEDED_CHECKSUMS: dict[str, set[str]] = {
 # tables exist even when its final constraint statement never ran. Each entry
 # points at a constraint-only, idempotent migration that is safe to replay.
 CANONICAL_CONSTRAINTS: dict[str, dict[str, object]] = {
-    "migrate-092-agent-command-check-canonical.sql": {
+    "migrate-125-agent-command-set-monitoring-profile.sql": {
         "table": "agent_commands",
         "constraint": "agent_commands_command_check",
         "required_values": (
@@ -92,6 +92,7 @@ CANONICAL_CONSTRAINTS: dict[str, dict[str, object]] = {
             "apm_uninstrument",
             "apm_restart_target",
             "apm_set_config",
+            "set_monitoring_profile",
         ),
     },
 }

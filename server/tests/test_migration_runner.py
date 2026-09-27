@@ -310,7 +310,7 @@ def _canonical_constraint_psql(migration, *, canonical: bool, calls: list):
 
 
 def test_status_detects_canonical_constraint_definition_drift(tmp_path):
-    filename = "migrate-092-agent-command-check-canonical.sql"
+    filename = "migrate-125-agent-command-set-monitoring-profile.sql"
     write(tmp_path / filename, "SELECT 1;")
     migration = runner.discover_migrations(tmp_path)[0]
     report = runner.new_report()
@@ -331,7 +331,7 @@ def test_status_detects_canonical_constraint_definition_drift(tmp_path):
 
 
 def test_apply_heals_canonical_constraint_definition_drift(tmp_path):
-    filename = "migrate-092-agent-command-check-canonical.sql"
+    filename = "migrate-125-agent-command-set-monitoring-profile.sql"
     write(tmp_path / filename, "SELECT 1;")
     migration = runner.discover_migrations(tmp_path)[0]
     report = runner.new_report()
@@ -383,3 +383,39 @@ def test_existing_view_does_not_baseline_replacement_migration(tmp_path):
     write(path, 'CREATE OR REPLACE FUNCTION supports_auth() RETURNS BOOLEAN LANGUAGE SQL AS $$ SELECT TRUE $$; CREATE OR REPLACE VIEW service_monitoring_vantages AS SELECT 1;')
     migration = runner.discover_migrations(tmp_path)[0]
     assert runner.evidence_of(migration, {'service_monitoring_vantages'}) is False
+
+
+def test_every_command_the_server_queues_is_allowed_by_the_constraint():
+    """A command inserted into agent_commands but missing from the canonical
+    CHECK constraint fails with HTTP 500 on the appliance (it happened with
+    set_monitoring_profile). Keep the server code, the canonical list and the
+    canonical migration in step."""
+    import re
+
+    repo = Path(__file__).resolve().parents[2]
+    queued: set[str] = set()
+    for source in (repo / "server" / "app").rglob("*.py"):
+        text = source.read_text(encoding="utf-8")
+        for statement in re.findall(r"INSERT INTO agent_commands[^;]*?VALUES\s*\(([^)]*)\)", text, re.S):
+            queued.update(re.findall(r"'([a-z_]+)'", statement))
+    assert "set_monitoring_profile" in queued, "scan found no queued commands; update the pattern"
+
+    (filename, spec), = runner.CANONICAL_CONSTRAINTS.items()
+    allowed = set(spec["required_values"])
+    assert queued <= allowed, f"queued but not allowed: {sorted(queued - allowed)}"
+
+    migration_sql = (repo / "scripts" / filename).read_text(encoding="utf-8")
+    for value in allowed:
+        assert f"'{value}'" in migration_sql, f"{value} missing from {filename}"
+
+
+def test_support_bundle_checks_the_canonical_command_list():
+    """The support bundle flags a drifted constraint; its list must match."""
+    import re
+
+    repo = Path(__file__).resolve().parents[2]
+    source = (repo / "support" / "collectors" / "database.py").read_text(encoding="utf-8")
+    block = source.split("CRITICAL_CONSTRAINT_CHECKS", 1)[1].split("def collect", 1)[0]
+    listed = set(re.findall(r'"([a-z_]+)"', block)) - {"agent_commands", "agent_commands_command_check"}
+    (_, spec), = runner.CANONICAL_CONSTRAINTS.items()
+    assert listed == set(spec["required_values"])
