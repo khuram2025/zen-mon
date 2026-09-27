@@ -25,6 +25,8 @@ interface AgentPackage {
   version: string
   file_name: string
   file_size: number
+  // "core" is server monitoring only; "full" adds APM. Absent before 1.13.
+  flavor?: 'core' | 'full'
   sha256?: string | null
   is_latest: boolean
 }
@@ -84,8 +86,10 @@ export function InstallTokenDialog({
     queryFn: async () => (await api.get('/agent-fleet/packages')).data,
     enabled: open,
   })
+  // Server monitoring only needs the small core package.
+  const flavor = installProfile === 'infrastructure' && platform === 'windows' ? 'core' : 'full'
   const published = (packages?.items ?? []).find(
-    (item) => item.platform === platform && item.is_latest,
+    (item) => item.platform === platform && item.is_latest && (item.flavor ?? 'full') === flavor,
   )
   const command = useMemo(
     () => deploymentCommand(platform, controllerUrl, installProfile, windowsShell),
@@ -95,7 +99,7 @@ export function InstallTokenDialog({
   const download = useMutation({
     mutationFn: async () => api.post(
       '/agent-fleet/packages/download',
-      { platform },
+      { platform, flavor },
       { responseType: 'blob', timeout: 10 * 60_000 },
     ),
     onSuccess: (response) => {
