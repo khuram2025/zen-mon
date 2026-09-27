@@ -161,6 +161,8 @@ export interface AgentItem {
     checked_at?: string | null
     last_error?: string | null
   }
+  /** Feature flags the agent advertises, e.g. monitoring_profile_v1. */
+  capabilities?: string[]
   // Progress of an upgrade requested from Agent Fleet, reported by agents
   // 1.14.1+. Empty when none has been reported.
   update_status?: AgentUpdateStatus
