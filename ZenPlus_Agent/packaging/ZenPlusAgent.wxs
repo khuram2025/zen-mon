@@ -113,7 +113,8 @@
 
     <UIRef Id="WixUI_Minimal" />
     <WixVariable Id="WixUILicenseRtf" Value="$(var.AssetsDir)\license.rtf" />
-    <WixVariable Id="WixUIBannerBmp" Value="$(var.AssetsDir)\installer-banner.bmp" />
+    <!-- Use WiX's title-safe banner. The custom bitmap contained a baked-in
+         product title underneath each wizard page's own title control. -->
     <WixVariable Id="WixUIDialogBmp" Value="$(var.AssetsDir)\installer-dialog.bmp" />
   </Product>
 </Wix>

@@ -134,6 +134,7 @@ type localSettings struct {
 	ControllerCAFile    string `json:"controller_ca_file"`
 	ControllerCAFileSig string `json:"controller_ca_file_sig"`
 	APMEnabled          bool   `json:"apm_enabled"`
+	APMProfile          string `json:"apm_profile"`
 }
 
 func Run(ctx context.Context, opts Options) error {
@@ -418,6 +419,12 @@ func refreshLocalRuntime(ctx context.Context, configPath string, cfg *config.Con
 		cfg.ProxyURL = diskCfg.ProxyURL
 		cfg.VerifyTLS = diskCfg.VerifyTLS
 		cfg.Security.ControllerCAFile = diskCfg.Security.ControllerCAFile
+		if diskCfg.APM.Profile != cfg.APM.Profile && diskCfg.APM.Profile != "" {
+			if err := config.ApplyProfile(cfg, diskCfg.APM.Profile); err != nil {
+				status.LastConfigError = err.Error()
+				return false
+			}
+		}
 		cfg.APM.Enabled = diskCfg.APM.Enabled
 		if connectionChanged {
 			cfg.ConfigETag = ""
@@ -1343,6 +1350,7 @@ func localSettingsFingerprint(cfg config.Config) string {
 		ControllerCAFile:    cfg.Security.ControllerCAFile,
 		ControllerCAFileSig: fileStamp(cfg.Security.ControllerCAFile),
 		APMEnabled:          cfg.APM.Enabled,
+		APMProfile:          cfg.APM.Profile,
 	})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])

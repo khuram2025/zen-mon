@@ -3,6 +3,9 @@ param(
   # Enrollment credentials are never compiled into or patched into artifacts.
   [string]$ControllerUrl = $env:ZENPLUS_EMBED_CONTROLLER_URL,
   [string]$SigningThumbprint = $env:ZENPLUS_SIGNING_THUMBPRINT,
+  [string]$ArtifactSigningMetadata = $env:ZENPLUS_ARTIFACT_SIGNING_METADATA,
+  [string]$ArtifactSigningDlib = $env:ZENPLUS_ARTIFACT_SIGNING_DLIB,
+  [string]$SignToolPath = $env:ZENPLUS_SIGNTOOL_PATH,
   [string]$TimestampUrl = $env:ZENPLUS_TIMESTAMP_URL,
   [string]$PublicBaseUrl = "https://zentryc.com/downloads/zenplus-agent",
   [switch]$RequireSigning,
@@ -24,9 +27,26 @@ $ErrorActionPreference = "Stop"
 
 $root = Resolve-Path "$PSScriptRoot\.."
 if (-not $TimestampUrl) {
-  $TimestampUrl = "http://timestamp.digicert.com"
+  $TimestampUrl = if ($ArtifactSigningMetadata) { "http://timestamp.acs.microsoft.com" } else { "http://timestamp.digicert.com" }
 }
 $SigningThumbprint = ($SigningThumbprint -replace '\s', '').ToUpperInvariant()
+$signingEnabled = [bool]($SigningThumbprint -or $ArtifactSigningMetadata)
+if ($SigningThumbprint -and $ArtifactSigningMetadata) {
+  throw "Select either certificate-store signing or Azure Artifact Signing, not both"
+}
+if ($ArtifactSigningMetadata) {
+  if (-not (Test-Path -LiteralPath $ArtifactSigningMetadata -PathType Leaf) -or
+      -not (Test-Path -LiteralPath $ArtifactSigningDlib -PathType Leaf)) {
+    throw "Azure Artifact Signing requires an existing metadata JSON file and Azure.CodeSigning.Dlib.dll"
+  }
+  $ArtifactSigningMetadata = (Resolve-Path -LiteralPath $ArtifactSigningMetadata).Path
+  $ArtifactSigningDlib = (Resolve-Path -LiteralPath $ArtifactSigningDlib).Path
+  $signingMetadata = Get-Content -LiteralPath $ArtifactSigningMetadata -Raw | ConvertFrom-Json
+  if ($signingMetadata.Endpoint -notmatch '^https://[a-z0-9-]+\.codesigning\.azure\.net/?$' -or
+      -not $signingMetadata.CodeSigningAccountName -or -not $signingMetadata.CertificateProfileName) {
+    throw "Invalid Azure Artifact Signing endpoint, account, or certificate profile metadata"
+  }
+}
 if ($RequireSigning -and $AllowUnsignedDevelopmentBuild) {
   throw "-RequireSigning and -AllowUnsignedDevelopmentBuild cannot be used together"
 }
@@ -36,8 +56,8 @@ if ($SkipPayloadExecutionVerification -and -not $AllowUnsignedDevelopmentBuild) 
 if ($SkipLanguagePacks) {
   throw "Installer builds always require the complete offline APM bundle. Run prepare-apm-bundle.ps1 -SkipLanguagePacks directly for gateway-only development work."
 }
-if (-not $SigningThumbprint -and -not $AllowUnsignedDevelopmentBuild) {
-  throw "Production builds require -SigningThumbprint or ZENPLUS_SIGNING_THUMBPRINT. Use -AllowUnsignedDevelopmentBuild only for local test artifacts."
+if (-not $signingEnabled -and -not $AllowUnsignedDevelopmentBuild) {
+  throw "Production builds require -SigningThumbprint or -ArtifactSigningMetadata and -ArtifactSigningDlib. Use -AllowUnsignedDevelopmentBuild only for local test artifacts."
 }
 $portableGo = Join-Path $root ".tools\go\bin\go.exe"
 if (Test-Path $portableGo) {
@@ -158,6 +178,9 @@ function Assert-CompleteApmBundle {
 }
 
 function Find-SignTool {
+  if ($SignToolPath) {
+    return (Resolve-Path -LiteralPath $SignToolPath).Path
+  }
   $command = Get-Command signtool.exe -ErrorAction SilentlyContinue
   if ($null -ne $command) {
     return $command.Path
@@ -176,32 +199,38 @@ function Find-SignTool {
 
 function Invoke-SignArtifacts {
   param([string[]]$Paths)
-  if (-not $SigningThumbprint) {
+  if (-not $signingEnabled) {
     return
   }
-  $currentUserCert = "Cert:\CurrentUser\My\$SigningThumbprint"
-  $localMachineCert = "Cert:\LocalMachine\My\$SigningThumbprint"
-  $useMachineStore = $false
-  if (Test-Path $currentUserCert) {
-    $certificate = Get-Item $currentUserCert
-  } elseif (Test-Path $localMachineCert) {
-    $certificate = Get-Item $localMachineCert
-    $useMachineStore = $true
-  } else {
-    throw "code-signing certificate $SigningThumbprint was not found in CurrentUser or LocalMachine My store"
-  }
-  if (-not $certificate.HasPrivateKey) {
-    throw "code-signing certificate $SigningThumbprint has no accessible private key"
-  }
-  if ($certificate.NotAfter -le (Get-Date)) {
-    throw "code-signing certificate $SigningThumbprint expired at $($certificate.NotAfter.ToString('o'))"
+  if ($SigningThumbprint) {
+    $currentUserCert = "Cert:\CurrentUser\My\$SigningThumbprint"
+    $localMachineCert = "Cert:\LocalMachine\My\$SigningThumbprint"
+    $useMachineStore = $false
+    if (Test-Path $currentUserCert) {
+      $certificate = Get-Item $currentUserCert
+    } elseif (Test-Path $localMachineCert) {
+      $certificate = Get-Item $localMachineCert
+      $useMachineStore = $true
+    } else {
+      throw "code-signing certificate $SigningThumbprint was not found in CurrentUser or LocalMachine My store"
+    }
+    if (-not $certificate.HasPrivateKey) {
+      throw "code-signing certificate $SigningThumbprint has no accessible private key"
+    }
+    if ($certificate.NotAfter -le (Get-Date)) {
+      throw "code-signing certificate $SigningThumbprint expired at $($certificate.NotAfter.ToString('o'))"
+    }
   }
   $signTool = Find-SignTool
   foreach ($path in $Paths) {
     $resolved = (Resolve-Path $path).Path
-    $signArgs = @("sign", "/sha1", $SigningThumbprint, "/fd", "SHA256", "/tr", $TimestampUrl, "/td", "SHA256")
-    if ($useMachineStore) {
-      $signArgs += "/sm"
+    $signArgs = @("sign", "/fd", "SHA256", "/tr", $TimestampUrl, "/td", "SHA256")
+    if ($ArtifactSigningMetadata) {
+      $signArgs += @("/dlib", (Resolve-Path -LiteralPath $ArtifactSigningDlib).Path,
+        "/dmdf", (Resolve-Path -LiteralPath $ArtifactSigningMetadata).Path)
+    } else {
+      $signArgs += @("/sha1", $SigningThumbprint)
+      if ($useMachineStore) { $signArgs += "/sm" }
     }
     $signArgs += $resolved
     & $signTool @signArgs
@@ -211,6 +240,10 @@ function Invoke-SignArtifacts {
     & $signTool verify /pa /all $resolved
     if ($LASTEXITCODE -ne 0) {
       throw "signtool verification failed for $resolved with exit code $LASTEXITCODE"
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $resolved
+    if ($signature.Status -ne 'Valid' -or $null -eq $signature.TimeStamperCertificate) {
+      throw "Artifact must have a trusted, timestamped Authenticode signature: $resolved"
     }
   }
 }
@@ -277,7 +310,10 @@ try {
   if (-not $SkipTests) {
     Invoke-Go test ./...
   }
-  & (Join-Path $root "scripts\prepare-apm-bundle.ps1")
+  & (Join-Path $root "scripts\prepare-apm-bundle.ps1") -BeforeGatewayValidation {
+    param($GatewayPath)
+    Invoke-SignArtifacts @($GatewayPath)
+  }
   if ($LASTEXITCODE -ne 0) {
     throw "APM bundle preparation failed with exit code $LASTEXITCODE"
   }
@@ -359,6 +395,9 @@ try {
   $setupHash = (Get-FileHash -Algorithm SHA256 $setup.FullName).Hash.ToLowerInvariant()
   $msiSignature = Get-AuthenticodeSignature $msi.FullName
   $setupSignature = Get-AuthenticodeSignature $setup.FullName
+  if ($signingEnabled -and ($msiSignature.Status -ne 'Valid' -or $setupSignature.Status -ne 'Valid')) {
+    throw "Refusing to generate a production manifest for untrusted release artifacts"
+  }
   $releasedAt = (Get-Date).ToUniversalTime().ToString("o")
   $manifest = [ordered]@{
     latest_version = $Version
@@ -386,6 +425,7 @@ try {
     msi_file_name = $msi.Name
     msi_size_bytes = [int64]$msi.Length
     msi_sha256 = $msiHash
+    msi_download_url = "$normalizedPublicBaseUrl/stable/$($msi.Name)"
     msi_signature_status = $msiSignature.Status.ToString()
     released_at = $releasedAt
     built_at_utc = $releasedAt

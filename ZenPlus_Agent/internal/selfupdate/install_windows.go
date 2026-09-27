@@ -5,6 +5,7 @@ package selfupdate
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -29,4 +30,28 @@ func launchInstaller(pkgPath string) error {
 		CreationFlags: windows.CREATE_NO_WINDOW | windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
 	}
 	return cmd.Start()
+}
+
+// OpenInstaller opens the verified package's normal Setup UI. Machine scope
+// requests Windows administrator approval before Setup loads the protected
+// existing configuration; user scope stays user.
+func OpenInstaller(pkgPath string, machine bool) error {
+	if !strings.EqualFold(filepath.Ext(pkgPath), ".exe") {
+		return fmt.Errorf("interactive updates require the EXE installer")
+	}
+	scope := "/user"
+	if machine {
+		file, err := windows.UTF16PtrFromString(pkgPath)
+		if err != nil {
+			return err
+		}
+		return windows.ShellExecute(0, windows.StringToUTF16Ptr("runas"), file,
+			windows.StringToUTF16Ptr("/machine /norestart"), nil, windows.SW_SHOWNORMAL)
+	}
+	cmd := exec.Command(pkgPath, scope, "/norestart")
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
 }

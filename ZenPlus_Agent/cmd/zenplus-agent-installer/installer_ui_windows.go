@@ -227,7 +227,7 @@ func (u *setupWindow) settingsPanel() Widget {
 		Layout:     VBox{Margins: Margins{Left: 12, Top: 10, Right: 12, Bottom: 10}, Spacing: 8},
 		Children: []Widget{
 			Label{Text: "Controller URL or IP address", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9, Bold: true}},
-			LineEdit{AssignTo: &u.controllerURL, CueBanner: "https://192.168.8.221", Text: controllerValue, Background: SolidColorBrush{Color: setupField}, TextColor: setupText, MinSize: Size{Height: 30}},
+			LineEdit{AssignTo: &u.controllerURL, CueBanner: config.DefaultControllerURL, Text: controllerValue, Background: SolidColorBrush{Color: setupField}, TextColor: setupText, MinSize: Size{Height: 30}},
 			Label{Text: "Monitoring profile", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9, Bold: true}},
 			RadioButton{AssignTo: &u.profileCombined, Text: "Server monitoring + APM (recommended)"},
 			RadioButton{AssignTo: &u.profileInfrastructure, Text: "Server monitoring only"},
@@ -880,6 +880,9 @@ func commandArgsFromOptions(opts options, uninstall bool, quiet bool) []string {
 	}
 	if opts.profile != "" {
 		args = append(args, "INSTALL_PROFILE="+opts.profile)
+	}
+	if opts.logPath != "" {
+		args = append(args, "LOG="+opts.logPath)
 	}
 	return args
 }

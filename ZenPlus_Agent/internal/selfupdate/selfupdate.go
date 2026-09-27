@@ -242,38 +242,61 @@ func Apply(ctx context.Context, c *client.Client, m Manifest, currentVersion str
 		mu.Unlock()
 	}()
 
-	download := m.DownloadURL
-	if download == "" {
-		download = fmt.Sprintf("/api/v1/agents/packages/%s/latest?arch=%s", platformName(), archName())
-	}
-	stagingDir := filepath.Join(os.TempDir(), "zenplus-agent-update")
-	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
-		return err
-	}
-	pkgPath := filepath.Join(stagingDir, m.FileName)
-	logf("self-update: downloading %s (%s) from controller", m.FileName, m.LatestVersion)
-	if err := c.Download(ctx, download, pkgPath); err != nil {
-		return fmt.Errorf("download package: %w", err)
-	}
-	sum, err := sha256File(pkgPath)
+	logf("self-update: downloading %s (%s)", m.FileName, m.LatestVersion)
+	pkgPath, err := PreparePackage(ctx, c, m)
 	if err != nil {
 		return err
 	}
-	if !strings.EqualFold(sum, m.SHA256) {
-		os.Remove(pkgPath)
-		return fmt.Errorf("package checksum mismatch: manifest %s, downloaded %s", m.SHA256, sum)
-	}
-	if requiresPackageSignature(m) {
-		if err := verifyPackageSignature(pkgPath); err != nil {
-			os.Remove(pkgPath)
-			return fmt.Errorf("package signature verification failed: %w", err)
-		}
-	}
-	logf("self-update: checksum verified; launching installer for %s", m.LatestVersion)
+	logf("self-update: checksum and signature verified; launching installer for %s", m.LatestVersion)
 	if err := launchInstaller(pkgPath); err != nil {
+		_ = os.RemoveAll(filepath.Dir(pkgPath))
 		return fmt.Errorf("launch installer: %w", err)
 	}
 	return nil
+}
+
+// PreparePackage stages and verifies a package without executing it. Both the
+// service and the interactive dashboard use this same verification path.
+// The caller owns the returned temporary directory until Setup takes over.
+func PreparePackage(ctx context.Context, c *client.Client, m Manifest) (path string, err error) {
+	if err := normalizeManifest(&m); err != nil {
+		return "", err
+	}
+	stagingDir, err := os.MkdirTemp("", "zenplus-agent-update-")
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		if err != nil {
+			_ = os.RemoveAll(stagingDir)
+		}
+	}()
+	pkgPath := filepath.Join(stagingDir, m.FileName)
+	if err := c.Download(ctx, m.DownloadURL, pkgPath); err != nil {
+		return "", fmt.Errorf("download package: %w", err)
+	}
+	if m.FileSize > 0 {
+		info, err := os.Stat(pkgPath)
+		if err != nil {
+			return "", err
+		}
+		if info.Size() != m.FileSize {
+			return "", fmt.Errorf("package size mismatch: manifest %d, downloaded %d", m.FileSize, info.Size())
+		}
+	}
+	sum, err := sha256File(pkgPath)
+	if err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(sum, m.SHA256) {
+		return "", fmt.Errorf("package checksum mismatch: manifest %s, downloaded %s", m.SHA256, sum)
+	}
+	if requiresPackageSignature(m) {
+		if err := verifyPackageSignature(pkgPath); err != nil {
+			return "", fmt.Errorf("package signature verification failed: %w", err)
+		}
+	}
+	return pkgPath, nil
 }
 
 func requiresPackageSignature(m Manifest) bool {

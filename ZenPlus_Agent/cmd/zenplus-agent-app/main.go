@@ -7,7 +7,6 @@ import (
 	"image"
 	"image/color"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -49,6 +48,7 @@ type appUI struct {
 	closing         bool
 	refreshInFlight atomic.Bool
 	updateInFlight  atomic.Bool
+	installInFlight atomic.Bool
 	notifiedVersion string
 
 	window *walk.MainWindow
@@ -90,8 +90,31 @@ func run() error {
 	configPath := fs.String("config", appstate.DefaultConfigPath(), "agent config path")
 	startHidden := fs.Bool("start-hidden", false, "start minimized to tray")
 	smoke := fs.Bool("smoke", false, "load state and exit")
+	settingsOnly := fs.Bool("settings", false, "open only agent settings")
+	applySettings := fs.Bool("apply-settings", false, "save controller and profile without installation")
+	controller := fs.String("controller", "", "controller address for settings save")
+	profile := fs.String("profile", "", "monitoring profile for settings save")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
+	}
+	if *applySettings {
+		err := saveSettingsFile(*configPath, *controller, *profile)
+		if err != nil {
+			win.MessageBox(0, windows.StringToUTF16Ptr(err.Error()), windows.StringToUTF16Ptr("ZenPlus Settings could not be saved"), win.MB_OK|win.MB_ICONERROR)
+		}
+		return err
+	}
+	if *settingsOnly {
+		ui := &appUI{configPath: *configPath, closing: true}
+		if err := ui.create(true); err != nil {
+			return err
+		}
+		go ui.window.Synchronize(func() { ui.showSettings(); _ = ui.window.Close() })
+		ui.window.Run()
+		if ui.tray != nil {
+			_ = ui.tray.Dispose()
+		}
+		return nil
 	}
 	if *smoke {
 		if appstate.Load(context.Background(), *configPath).Config.ControllerURL == "" {
@@ -411,6 +434,9 @@ func (a *appUI) updateLoop() {
 }
 
 func (a *appUI) checkForUpdates(interactive bool) {
+	if a.installInFlight.Load() {
+		return
+	}
 	if !a.updateInFlight.CompareAndSwap(false, true) {
 		return
 	}
@@ -485,7 +511,7 @@ func (a *appUI) showUpdateResult(manifest selfupdate.Manifest, updateErr error) 
 		statusText += "\r\n\r\n" + compactMiddle(updateErr.Error(), 180)
 	} else {
 		signed := strings.EqualFold(manifest.SignatureStatus, "Valid")
-		signatureText := "Publisher signature: verified"
+		signatureText := "Signed release. The downloaded installer will be verified before opening Setup."
 		if !signed {
 			signatureText = "Publisher signature: not verified (automatic installation is blocked)"
 		}
@@ -514,13 +540,9 @@ func (a *appUI) showUpdateResult(manifest selfupdate.Manifest, updateErr error) 
 			TextLabel{Text: statusText, TextColor: muted, MinSize: Size{Height: 100}},
 			Composite{Background: SolidColorBrush{Color: bg}, Layout: HBox{MarginsZero: true, Spacing: 8}, Children: []Widget{
 				HSpacer{},
-				PushButton{AssignTo: &downloadButton, Text: "Download update", Enabled: canDownload, MinSize: Size{Width: 118, Height: 30}, OnClicked: func() {
-					if err := openURL(manifest.DownloadURL); err != nil {
-						a.set(a.actionStatus, "Unable to open update: "+compactMiddle(err.Error(), 90))
-						a.color(a.actionStatus, red)
-						return
-					}
+				PushButton{AssignTo: &downloadButton, Text: "Install update", Enabled: canDownload, MinSize: Size{Width: 118, Height: 30}, OnClicked: func() {
 					dlg.Close(walk.DlgCmdOK)
+					a.installUpdate(manifest)
 				}},
 				PushButton{AssignTo: &closeButton, Text: "Close", MinSize: Size{Width: 86, Height: 30}, OnClicked: func() { dlg.Close(walk.DlgCmdClose) }},
 			}},
@@ -531,11 +553,71 @@ func (a *appUI) showUpdateResult(manifest selfupdate.Manifest, updateErr error) 
 	}
 }
 
-func openURL(raw string) error {
-	if !strings.HasPrefix(strings.ToLower(raw), "https://") {
-		return fmt.Errorf("update URL is not HTTPS")
+func (a *appUI) installUpdate(manifest selfupdate.Manifest) {
+	if !selfupdate.IsNewer(manifest.LatestVersion, model.AgentVersion) || !a.installInFlight.CompareAndSwap(false, true) {
+		return
 	}
-	return windows.ShellExecute(0, nil, windows.StringToUTF16Ptr(raw), nil, nil, windows.SW_SHOWNORMAL)
+	defer a.installInFlight.Store(false)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	var dlg *walk.Dialog
+	var status *walk.TextLabel
+	var closeButton *walk.PushButton
+	err := Dialog{
+		AssignTo: &dlg, Title: "ZenPlus Agent Update", Icon: loadAppIcon(),
+		Size: Size{Width: 520, Height: 220}, CancelButton: &closeButton,
+		Layout: VBox{Margins: Margins{Left: 16, Top: 16, Right: 16, Bottom: 16}, Spacing: 12},
+		Children: []Widget{
+			TextLabel{AssignTo: &status, Text: "Downloading version " + manifest.LatestVersion + " from Zentryc and verifying its signature.\r\n\r\nSetup will open when the download is verified. Windows may ask for administrator approval.", MinSize: Size{Height: 110}},
+			PushButton{AssignTo: &closeButton, Text: "Cancel", OnClicked: func() { cancel(); dlg.Close(walk.DlgCmdCancel) }},
+		},
+	}.Create(a.window)
+	if err != nil {
+		a.set(a.actionStatus, "Unable to open update: "+err.Error())
+		return
+	}
+	go func() {
+		cfg, err := config.Load(a.configPath)
+		if err != nil {
+			cfg = config.Default()
+		}
+		api, err := client.New(selfupdate.PublicUpdateBaseURL(), cfg.ProxyURL, true, "", "")
+		var path string
+		if err == nil {
+			path, err = selfupdate.PreparePackage(ctx, api, manifest)
+		}
+		if a.window == nil || a.window.IsDisposed() {
+			if path != "" {
+				_ = os.RemoveAll(filepath.Dir(path))
+			}
+			return
+		}
+		a.window.Synchronize(func() {
+			if dlg.IsDisposed() {
+				if path != "" {
+					_ = os.RemoveAll(filepath.Dir(path))
+				}
+				return
+			}
+			if ctx.Err() != nil {
+				err = ctx.Err()
+			}
+			if err == nil {
+				err = selfupdate.OpenInstaller(path, isMachineConfigPath(a.configPath))
+			}
+			if err != nil {
+				if path != "" {
+					_ = os.RemoveAll(filepath.Dir(path))
+				}
+				_ = status.SetText("Update could not start. Your installed agent is unchanged.\r\n\r\n" + compactMiddle(err.Error(), 240))
+				_ = closeButton.SetText("Close")
+				return
+			}
+			a.set(a.actionStatus, "Verified update opened in Setup. Complete Setup to install version "+manifest.LatestVersion+".")
+			dlg.Close(walk.DlgCmdOK)
+		})
+	}()
+	dlg.Run()
 }
 
 func (a *appUI) showSettings() {
@@ -557,6 +639,14 @@ func (a *appUI) showSettings() {
 		}
 	}
 	if err != nil {
+		if machineConfig && !windows.GetCurrentProcessToken().IsElevated() {
+			if setupErr := openElevatedSettings(a.configPath); setupErr == nil {
+				a.set(a.actionStatus, "Settings opened with administrator approval.")
+				return
+			} else {
+				err = setupErr
+			}
+		}
 		a.set(a.actionStatus, "Unable to open settings: "+compactMiddle(err.Error(), 90))
 		a.color(a.actionStatus, red)
 		return
@@ -583,12 +673,11 @@ func (a *appUI) showSettings() {
 			credentialLabel = "Not issued yet"
 		}
 	}
-	openedSetup := false
 	saveSettings := func() (config.Config, error) {
 		next := cfg
 		normalized, err := config.NormalizeControllerURL(remoteURL.Text())
 		if err != nil {
-			return next, fmt.Errorf("invalid controller URL")
+			return next, fmt.Errorf("invalid controller URL: %w", err)
 		}
 		next.ControllerURL = normalized
 		profile := "combined"
@@ -607,20 +696,18 @@ func (a *appUI) showSettings() {
 			}
 		}
 		if err := config.ApplyProfile(&next, profile); err != nil {
-			return next, fmt.Errorf("invalid monitoring profile")
+			return next, fmt.Errorf("invalid monitoring profile: %w", err)
 		}
 		if err := next.Validate(); err != nil {
-			return next, fmt.Errorf("invalid settings")
+			return next, fmt.Errorf("invalid settings: %w", err)
 		}
-		if isMachineConfigPath(a.configPath) {
-			if err := launchRepairSetup(next); err != nil {
-				return next, fmt.Errorf("open elevated repair setup: %w", err)
-			}
-			openedSetup = true
-			return next, nil
+		if machineConfig && !windows.GetCurrentProcessToken().IsElevated() {
+			err = saveElevatedSettings(a.configPath, next.ControllerURL, profile)
+		} else {
+			err = saveSettingsFile(a.configPath, next.ControllerURL, profile)
 		}
-		if err := config.Save(a.configPath, next); err != nil {
-			return next, fmt.Errorf("save failed")
+		if err != nil {
+			return next, fmt.Errorf("save failed: %w", err)
 		}
 		return next, nil
 	}
@@ -641,14 +728,14 @@ func (a *appUI) showSettings() {
 				Layout:     Grid{Margins: Margins{Left: 12, Top: 10, Right: 12, Bottom: 10}, Spacing: 8, Columns: 2},
 				Children: []Widget{
 					Label{Text: "Controller URL", TextColor: text, MinSize: Size{Width: 140}},
-					LineEdit{AssignTo: &remoteURL, Text: cfg.ControllerURL, ReadOnly: true, Background: SolidColorBrush{Color: fieldBg}, TextColor: text, MinSize: Size{Height: 28}},
+					LineEdit{AssignTo: &remoteURL, Text: cfg.ControllerURL, Background: SolidColorBrush{Color: fieldBg}, TextColor: text, MinSize: Size{Height: 28}},
 					Label{Text: "Authorization", TextColor: text},
 					TextLabel{Text: registrationLabel, TextColor: muted, MinSize: Size{Height: 24}},
 					Label{Text: "Appliance credential", TextColor: text},
 					TextLabel{Text: credentialLabel, TextColor: muted, MinSize: Size{Height: 24}},
 				},
 			},
-			TextLabel{Text: "All-users profile changes open Setup for administrator approval. Moving to another appliance also uses Setup so enrollment credentials are renewed safely.", TextColor: muted, MinSize: Size{Width: 520, Height: 32}, Font: Font{Family: "Segoe UI", PointSize: 9}},
+			TextLabel{Text: "Save applies these settings directly. All-users changes require administrator approval. The running agent picks up changes within a few seconds. A different appliance may require authorization.", TextColor: muted, MinSize: Size{Width: 520, Height: 32}, Font: Font{Family: "Segoe UI", PointSize: 9}},
 			GroupBox{
 				Title:      "Monitoring Profile",
 				Background: SolidColorBrush{Color: surface},
@@ -674,11 +761,7 @@ func (a *appUI) showSettings() {
 							status.SetTextColor(red)
 							return
 						}
-						if openedSetup {
-							a.set(a.actionStatus, "Setup opened to apply the all-users monitoring profile.")
-						} else {
-							a.set(a.actionStatus, "Settings saved.")
-						}
+						a.set(a.actionStatus, "Settings saved. The running agent will apply them shortly.")
 						a.color(a.actionStatus, green)
 						dlg.Close(walk.DlgCmdOK)
 						a.refresh()
@@ -720,23 +803,6 @@ func isMachineConfigPath(configPath string) bool {
 	}
 	relative, err := filepath.Rel(absRoot, absConfig)
 	return err == nil && (relative == "." || (!filepath.IsAbs(relative) && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))))
-}
-
-func launchRepairSetup(cfg config.Config) error {
-	programFiles := os.Getenv("ProgramFiles")
-	if programFiles == "" {
-		programFiles = `C:\Program Files`
-	}
-	setup := filepath.Join(programFiles, "ZenPlus", "Agent", "ZenPlusAgentSetup.exe")
-	if info, err := os.Stat(setup); err != nil || info.IsDir() {
-		return fmt.Errorf("installed setup was not found at %s", setup)
-	}
-	args := []string{"/machine", "CONTROLLER_URL=" + cfg.ControllerURL, "INSTALL_PROFILE=" + cfg.APM.Profile}
-	if cfg.Security.ControllerCAFile != "" {
-		args = append(args, "CONTROLLER_CA_FILE="+cfg.Security.ControllerCAFile)
-	}
-	cmd := exec.Command(setup, args...)
-	return cmd.Start()
 }
 
 func (a *appUI) showLogs() {

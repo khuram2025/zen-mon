@@ -61,6 +61,7 @@ type options struct {
 	controllerCA  string
 	apmMode       string
 	profile       string
+	logPath       string
 }
 
 func main() {
@@ -73,10 +74,27 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (returnErr error) {
 	opts, err := parseOptions(os.Args[1:])
 	if err != nil {
 		return err
+	}
+	if opts.logPath != "" {
+		log, err := os.OpenFile(opts.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			return fmt.Errorf("open setup log: %w", err)
+		}
+		previous := os.Stdout
+		os.Stdout = log
+		defer func() {
+			if returnErr != nil {
+				fmt.Fprintf(log, "Setup failed: %v\n", returnErr)
+			} else {
+				fmt.Fprintln(log, "Setup completed successfully.")
+			}
+			os.Stdout = previous
+			_ = log.Close()
+		}()
 	}
 	if opts.verifyPayload {
 		return verifyEmbeddedInstallerPayload()
@@ -100,7 +118,7 @@ func run() error {
 		return err
 	}
 	if layout.Scope == "machine" && !elevated {
-		return relaunchElevated(ensureArg(os.Args[1:], "/machine"))
+		return fmt.Errorf("silent machine installation requires an administrator or SYSTEM process; run the deployment command elevated")
 	}
 	if opts.uninstall {
 		if !opts.fromTemp {
@@ -155,10 +173,29 @@ func relaunchSetupFromTempIfInstalled(elevated bool, args []string, wait bool) (
 func parseOptions(args []string) (options, error) {
 	var opts options
 	normalized := make([]string, 0, len(args))
-	for _, arg := range args {
+	aliases := map[string]string{"s": "quiet", "silent": "quiet", "verysilent": "quiet", "allusers": "machine", "currentuser": "user", "controller": "controller-url", "controller_url": "controller-url", "controller_ca_file": "controller-ca-file", "install_profile": "profile"}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		switch {
-		case strings.HasPrefix(arg, "/"):
-			normalized = append(normalized, "-"+strings.TrimLeft(arg, "/"))
+		case strings.HasPrefix(arg, "/") || strings.HasPrefix(arg, "-"):
+			key, value, hasValue := strings.Cut(strings.TrimLeft(arg, "/-"), "=")
+			key = strings.ToLower(key)
+			if alias, ok := aliases[key]; ok {
+				key = alias
+			}
+			if hasValue {
+				normalized = append(normalized, "-"+key+"="+value)
+			} else {
+				normalized = append(normalized, "-"+key)
+				switch key {
+				case "controller-url", "controller-ca-file", "apm-enabled", "profile", "log":
+					if i+1 >= len(args) {
+						return opts, fmt.Errorf("%s requires a value", arg)
+					}
+					i++
+					normalized = append(normalized, args[i])
+				}
+			}
 		case strings.Contains(arg, "="):
 			key, value, _ := strings.Cut(arg, "=")
 			switch strings.ToUpper(strings.TrimSpace(key)) {
@@ -170,12 +207,14 @@ func parseOptions(args []string) (options, error) {
 				normalized = append(normalized, "-apm-enabled", value)
 			case "INSTALL_PROFILE":
 				normalized = append(normalized, "-profile", value)
+			case "LOG":
+				normalized = append(normalized, "-log", value)
 			case "PURGE":
-				if value == "1" || strings.EqualFold(value, "true") {
-					normalized = append(normalized, "-purge")
+				if value != "" {
+					normalized = append(normalized, "-purge="+value)
 				}
 			default:
-				normalized = append(normalized, arg)
+				return opts, fmt.Errorf("unknown installer property %q", key)
 			}
 		default:
 			normalized = append(normalized, arg)
@@ -199,9 +238,16 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&opts.controllerCA, "controller-ca-file", "", "PEM CA bundle for the controller TLS certificate")
 	fs.StringVar(&opts.apmMode, "apm-enabled", "", "enable or disable local APM monitoring")
 	fs.StringVar(&opts.profile, "profile", "", "installation profile: infrastructure, apm, or combined")
+	fs.StringVar(&opts.logPath, "log", "", "append setup results to this existing-directory log path")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(normalized); err != nil {
 		return opts, err
+	}
+	if fs.NArg() != 0 {
+		return opts, fmt.Errorf("unexpected installer argument %q", fs.Arg(0))
+	}
+	if opts.machine && opts.user {
+		return opts, fmt.Errorf("select either machine or user installation scope")
 	}
 	if opts.apmMode != "" {
 		switch strings.ToLower(strings.TrimSpace(opts.apmMode)) {
@@ -1536,7 +1582,7 @@ func ensureArg(args []string, required string) []string {
 }
 
 func logStep(opts options, format string, args ...any) {
-	if opts.quiet {
+	if opts.quiet && opts.logPath == "" {
 		return
 	}
 	fmt.Printf("[%s] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
@@ -1545,7 +1591,8 @@ func logStep(opts options, format string, args ...any) {
 func hasQuietArg(args []string) bool {
 	for _, arg := range args {
 		arg = strings.TrimLeft(strings.ToLower(strings.TrimSpace(arg)), "-/")
-		if arg == "quiet" || arg == "qn" {
+		key, value, hasValue := strings.Cut(arg, "=")
+		if (key == "quiet" || key == "qn" || key == "s" || key == "silent" || key == "verysilent") && (!hasValue || value == "true" || value == "1") {
 			return true
 		}
 	}

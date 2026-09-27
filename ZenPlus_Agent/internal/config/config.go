@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	DefaultControllerURL = "https://192.168.8.221"
+	DefaultControllerURL = "https://10.11.40.31"
 	DefaultConfigPath    = "config/agent.yaml"
 )
 
