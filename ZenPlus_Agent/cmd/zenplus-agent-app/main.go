@@ -407,13 +407,27 @@ func (a *appUI) show() {
 	a.refresh()
 }
 
+// While the dashboard is hidden in the tray (its usual state) only the tray
+// tooltip shows health, so it refreshes every minute instead of every five
+// seconds. Opening the window refreshes immediately (see show).
+const (
+	visibleRefreshInterval = 5 * time.Second
+	hiddenRefreshInterval  = time.Minute
+)
+
 func (a *appUI) refreshLoop() {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(visibleRefreshInterval)
 	defer ticker.Stop()
-	for range ticker.C {
+	var lastRefresh time.Time
+	for now := range ticker.C {
 		if a.window == nil || a.window.IsDisposed() {
 			return
 		}
+		// IsWindowVisible is safe to call from any thread.
+		if !a.window.Visible() && now.Sub(lastRefresh) < hiddenRefreshInterval {
+			continue
+		}
+		lastRefresh = now
 		a.refresh()
 	}
 }
