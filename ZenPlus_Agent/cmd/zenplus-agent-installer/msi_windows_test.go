@@ -58,14 +58,19 @@ func TestInstallerIncludesNuGetPlaceholderFilesAndVerifiesBuiltPayload(t *testin
 	if err != nil {
 		t.Fatalf("read payload embed source: %v", err)
 	}
-	if !strings.Contains(strings.ReplaceAll(string(embedSource), "\r\n", "\n"), "//go:embed all:payload") {
-		t.Fatal("installer embed must include NuGet `_._` placeholder files")
+	if !strings.Contains(strings.ReplaceAll(string(embedSource), "\r\n", "\n"), "//go:embed payload.zip") {
+		t.Fatal("installer must embed the compressed payload archive")
 	}
 
 	buildPath := filepath.Join("..", "..", "scripts", "build.ps1")
 	buildSource, err := os.ReadFile(buildPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", buildPath, err)
+	}
+	// ZipFile.CreateFromDirectory archives every file, including the NuGet
+	// `_._` placeholders that a filtered directory walk would skip.
+	if !strings.Contains(string(buildSource), "[System.IO.Compression.ZipFile]::CreateFromDirectory(") {
+		t.Fatal("build must archive the complete payload tree, including NuGet `_._` placeholder files")
 	}
 	if !strings.Contains(strings.ReplaceAll(string(buildSource), "\r\n", "\n"), `@("/verify-payload", "/quiet")`) {
 		t.Fatal("build must execute the finished setup's embedded-payload verification gate")

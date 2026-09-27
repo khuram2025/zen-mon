@@ -20,3 +20,7 @@ dist/
 # metric spool, and logs. Machine-specific and not reproducible; committing it
 # would also leak the enrolled host's identity into the repo.
 data/
+
+# Installer payload staged by scripts/build.ps1 (never committed).
+cmd/zenplus-agent-installer/payload/
+cmd/zenplus-agent-installer/payload.zip

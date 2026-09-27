@@ -16,7 +16,7 @@
       InstallPrivileges="elevated"
       Description="ZenPlus Agent Windows installer" />
 
-    <MajorUpgrade Schedule="afterInstallExecute" DowngradeErrorMessage="A newer version of ZenPlus Agent is already installed." />
+    <MajorUpgrade Schedule="afterInstallExecute" AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of ZenPlus Agent is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <Icon Id="ProductIcon" SourceFile="$(var.AssetsDir)\zenplus-agent.ico" />

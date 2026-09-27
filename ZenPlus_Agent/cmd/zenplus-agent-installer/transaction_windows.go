@@ -116,10 +116,14 @@ func stageInstallPayloads(l layout, payloads []payloadFile) (string, error) {
 			_ = os.RemoveAll(stage)
 		}
 	}()
+	hasUninstaller := false
 	for _, payload := range payloads {
 		name, err := canonicalPayloadName(payload.Name)
 		if err != nil {
 			return "", err
+		}
+		if name == uninstallerPayloadName {
+			hasUninstaller = true
 		}
 		target := filepath.Join(stage, filepath.FromSlash(name))
 		if !pathWithin(stage, target) {
@@ -132,8 +136,13 @@ func stageInstallPayloads(l layout, payloads []payloadFile) (string, error) {
 			return "", fmt.Errorf("stage installer payload %q: %w", payload.Name, err)
 		}
 	}
-	if err := copySelf(filepath.Join(stage, "ZenPlusAgentSetup.exe")); err != nil {
-		return "", fmt.Errorf("stage uninstaller: %w", err)
+	// Release builds ship a payload-free build of this setup program as the
+	// uninstaller. Keeping a copy of the full setup instead would leave the
+	// entire embedded product (hundreds of MB with APM) in Program Files.
+	if !hasUninstaller {
+		if err := copySelf(filepath.Join(stage, "ZenPlusAgentSetup.exe")); err != nil {
+			return "", fmt.Errorf("stage uninstaller: %w", err)
+		}
 	}
 	keep = true
 	return stage, nil

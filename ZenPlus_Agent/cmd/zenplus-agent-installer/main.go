@@ -401,6 +401,10 @@ func verifiedEmbeddedInstallerPayloads() ([]payloadFile, error) {
 }
 
 func validateEmbeddedPayloads(payloads []payloadFile) error {
+	return validateEmbeddedPayloadsForFlavor(payloads, payloadIncludesAPM())
+}
+
+func validateEmbeddedPayloadsForFlavor(payloads []payloadFile, includesAPM bool) error {
 	byName := make(map[string][]byte, len(payloads))
 	for _, payload := range payloads {
 		name, err := canonicalPayloadName(payload.Name)
@@ -418,11 +422,26 @@ func validateEmbeddedPayloads(payloads []payloadFile) error {
 		}
 		byName[name] = payload.Data
 	}
-	requiredFiles := []string{
+	serverFiles := []string{
 		"zenplus-agent.exe",
 		"zenplus-agentctl.exe",
 		"zenplus-agent-app.exe",
 		"zenplus-agent-user.exe",
+	}
+	if !includesAPM {
+		for _, name := range serverFiles {
+			if len(byName[name]) == 0 {
+				return fmt.Errorf("installer server payload is incomplete: required file %q is missing", name)
+			}
+		}
+		for name := range byName {
+			if strings.HasPrefix(name, "apm/") {
+				return fmt.Errorf("server-monitoring installer payload unexpectedly contains APM file %q", name)
+			}
+		}
+		return nil
+	}
+	requiredFiles := append(serverFiles,
 		"apm/bundle-manifest.json",
 		"apm/gateway/zenplus-telemetry-gateway.exe",
 		"apm/instrumentation/dotnet/net/opentelemetry.autoinstrumentation.startuphook.dll",
@@ -436,7 +455,7 @@ func validateEmbeddedPayloads(payloads []payloadFile) error {
 		"apm/instrumentation/python/install-zenpluspythontracing.ps1",
 		"apm/instrumentation/python/constraints.txt",
 		"apm/instrumentation/python/readme.txt",
-	}
+	)
 	for _, name := range requiredFiles {
 		if len(byName[name]) == 0 {
 			return fmt.Errorf("installer APM/server payload is incomplete: required file %q is missing", name)
@@ -706,8 +725,19 @@ func install(l layout, opts options) (returnErr error) {
 	// Validate the requested configuration while the old installation is still
 	// fully available. It is rebuilt after quiescing the agent so a policy
 	// update that lands during payload staging is not overwritten.
-	if _, err := buildInstalledConfig(l, opts); err != nil {
+	plannedConfig, err := buildInstalledConfig(l, opts)
+	if err != nil {
 		return fmt.Errorf("prepare installed configuration: %w", err)
+	}
+	apmPaths := agentruntime.NewPaths(l.DataDir)
+	if !payloadIncludesAPM() {
+		managed, err := apmruntime.ManagedInstrumentationCount(apmPaths.APMInstrumentationState)
+		if err != nil {
+			return fmt.Errorf("inspect APM instrumentation before installing server monitoring only: %w", err)
+		}
+		if err := requireFlavorSupportsConfig(plannedConfig, managed); err != nil {
+			return err
+		}
 	}
 	stageDir, err := stageInstallPayloads(l, payloads)
 	if err != nil {
@@ -719,7 +749,6 @@ func install(l layout, opts options) (returnErr error) {
 			_ = os.RemoveAll(stageDir)
 		}
 	}()
-	apmPaths := agentruntime.NewPaths(l.DataDir)
 	managedPools, err := apmruntime.ManagedIISTargets(apmPaths.APMInstrumentationState)
 	if err != nil {
 		return fmt.Errorf("inspect managed IIS instrumentation before upgrade: %w", err)
@@ -814,6 +843,11 @@ func install(l layout, opts options) (returnErr error) {
 	nextConfig, err = buildInstalledConfig(l, opts)
 	if err != nil {
 		return fmt.Errorf("prepare quiesced installed configuration: %w", err)
+	}
+	// Re-check with the quiesced state: a controller command may have
+	// instrumented an application while the payload was being staged.
+	if err := requireFlavorSupportsConfig(nextConfig, len(managedPools)+len(managedServices)); err != nil {
+		return err
 	}
 	stoppedServices, err = stopManagedWindowsServices(managedServices)
 	if err != nil {
