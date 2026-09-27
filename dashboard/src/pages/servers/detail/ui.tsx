@@ -7,7 +7,7 @@
 
 import type { ComponentType, ReactNode } from 'react'
 import {
-  Area, AreaChart, CartesianGrid, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
+  Area, AreaChart, CartesianGrid, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
 import { Inbox } from 'lucide-react'
 import { cn, timeTooltipLabelFormatter } from '@/lib/utils'
@@ -380,7 +380,8 @@ export function TimeSeries({
         </div>
       )}
       <ResponsiveContainer width="100%" height={height}>
-        <AreaChart data={data} syncId={SYNC_ID} margin={{ top: 6, right: 8, bottom: 0, left: 0 }}>
+        {/* ComposedChart, not AreaChart: an AreaChart silently drops Line children. */}
+        <ComposedChart data={data} syncId={SYNC_ID} margin={{ top: 6, right: 8, bottom: 0, left: 0 }}>
           <defs>
             {series.map((s) => (
               <linearGradient key={s.key} id={`fill-${s.key}`} x1="0" y1="0" x2="0" y2="1">
@@ -421,7 +422,7 @@ export function TimeSeries({
               />
             ),
           )}
-        </AreaChart>
+        </ComposedChart>
       </ResponsiveContainer>
     </div>
   )
@@ -456,7 +457,9 @@ export function fmtNum(v: number | null | undefined, digits = 1): string {
 
 export function fmtMs(v: number | null | undefined): string {
   if (v == null || Number.isNaN(v)) return '—'
-  return v >= 100 ? `${v.toFixed(0)} ms` : `${v.toFixed(1)} ms`
+  // Fast disks answer in hundredths of a millisecond.
+  if (v >= 100) return `${v.toFixed(0)} ms`
+  return v >= 1 ? `${v.toFixed(1)} ms` : `${v.toFixed(2)} ms`
 }
 
 /** Series statistics over non-null values. */
