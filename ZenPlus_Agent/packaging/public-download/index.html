@@ -87,9 +87,9 @@
         </div>
         <div class="deploy" id="deploy">
           <h2>Deploy at scale</h2>
-          <p>Install silently on many servers with Group Policy, Intune, Configuration Manager or PowerShell. Every installation registers as pending, and you approve them together in Agent Fleet. Setup returns standard Windows Installer exit codes: 0 success, 1618 retry, 1639 invalid switches, 740 not elevated, 1603 failed.</p>
-          <div class="cmd"><span class="label">EXE · server monitoring</span><button class="copy" type="button">Copy</button><pre>zenplus-agent-core-<span class="ver">x.y.z</span>.exe /machine /quiet /norestart CONTROLLER_URL=https://zenplus.example.com INSTALL_PROFILE=infrastructure</pre></div>
-          <div class="cmd"><span class="label">MSI · server monitoring + APM</span><button class="copy" type="button">Copy</button><pre>msiexec /i zenplus-agent-<span class="ver">x.y.z</span>.msi /qn /norestart CONTROLLER_URL=https://zenplus.example.com INSTALL_PROFILE=combined</pre></div>
+          <p>Install silently on many servers with Group Policy, Intune, Configuration Manager or PowerShell. Every installation registers as pending, and you approve them together in Agent Fleet. Setup returns standard Windows Installer exit codes: 0 success, 1618 retry, 1639 invalid switches, 740 not elevated, 1603 failed. At a prompt, keep <code>start "" /wait</code> so the prompt waits for Setup.</p>
+          <div class="cmd"><span class="label">Command Prompt (elevated) · server monitoring</span><button class="copy" type="button">Copy</button><pre>start "" /wait zenplus-agent-core-<span class="ver">x.y.z</span>.exe /machine /quiet /norestart CONTROLLER_URL=https://zenplus.example.com INSTALL_PROFILE=infrastructure</pre></div>
+          <div class="cmd"><span class="label">Command Prompt (elevated) · MSI with APM</span><button class="copy" type="button">Copy</button><pre>start "" /wait msiexec /i zenplus-agent-<span class="ver">x.y.z</span>.msi /qn /norestart CONTROLLER_URL=https://zenplus.example.com INSTALL_PROFILE=combined</pre></div>
           <div class="links">
             <a href="deploy/">Full deployment guide &rarr;</a>
             <a href="deploy/#switches">All switches</a>

@@ -303,7 +303,9 @@ function MassDeployment({
         <div className="space-y-2 border-t border-border px-3 py-2">
           {commands.map((c) => <CopyableCommand key={c.label} label={c.label} text={c.text} />)}
           <p className="text-[11px] leading-relaxed text-muted">
-            Run as SYSTEM or an administrator. Exit codes: <strong className="text-text">0</strong> installed,{' '}
+            These are the commands for deployment tools, which wait for Setup. At a Command Prompt, prefix
+            them with <code>start "" /wait</code> (PowerShell: <code>Start-Process -Wait</code>), otherwise the
+            prompt returns at once while Setup runs in the background. Run as SYSTEM or an administrator. Exit codes: <strong className="text-text">0</strong> installed,{' '}
             <strong className="text-text">1618</strong> another installation is running (retry),{' '}
             <strong className="text-text">1639</strong> invalid switches,{' '}
             <strong className="text-text">740</strong> not elevated,{' '}
