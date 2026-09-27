@@ -2,10 +2,12 @@ package uploader
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -897,5 +899,69 @@ func enqueueBatch(t *testing.T, store *spool.Store, batchID string) {
 	}
 	if _, err := store.Enqueue(batch.BatchID, payload, 1024*1024); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDrainCompressesOnlyAfterControllerAdvertisesGzip(t *testing.T) {
+	var encodings []string
+	var sizes []int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		encodings = append(encodings, r.Header.Get("Content-Encoding"))
+		var body bytes.Buffer
+		_, _ = body.ReadFrom(r.Body)
+		sizes = append(sizes, body.Len())
+		reader := io.Reader(&body)
+		if r.Header.Get("Content-Encoding") == "gzip" {
+			gz, err := gzip.NewReader(&body)
+			if err != nil {
+				t.Fatalf("invalid gzip upload: %v", err)
+			}
+			reader = gz
+		}
+		var batch model.Batch
+		if err := json.NewDecoder(reader).Decode(&batch); err != nil || batch.BatchID == "" {
+			t.Fatalf("upload is not a valid batch: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"accepted":1,"rejected":0}`))
+	}))
+	defer server.Close()
+	api, err := client.New(server.URL, "", true, "agent-1", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := spool.Open(filepath.Join(t.TempDir(), "spool.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	enqueue := func(id string) {
+		metrics := make([]model.Metric, 0, 50)
+		for i := 0; i < 50; i++ {
+			metrics = append(metrics, model.Metric{Kind: "service_state", Timestamp: time.Now().UTC(),
+				Data: map[string]any{"service_name": fmt.Sprintf("Service%d", i), "state": "running"}})
+		}
+		batch := model.Batch{AgentID: "agent-1", ServerID: "server-1", BatchID: id, Metrics: metrics}
+		payload, _ := json.Marshal(batch)
+		if _, err := store.Enqueue(id, payload, 1024*1024); err != nil {
+			t.Fatal(err)
+		}
+	}
+	up := New(api, store, "agent-1", "server-1")
+
+	enqueue("plain")
+	if _, err := up.Drain(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	up.SetGzipUploads(true)
+	enqueue("compressed")
+	if _, err := up.Drain(context.Background(), 10); err != nil {
+		t.Fatal(err)
+	}
+	if len(encodings) != 2 || encodings[0] != "" || encodings[1] != "gzip" {
+		t.Fatalf("Content-Encoding per upload = %q, want plain then gzip", encodings)
+	}
+	if sizes[1]*3 > sizes[0] {
+		t.Fatalf("compressed upload is %d bytes vs %d plain; expected a large reduction", sizes[1], sizes[0])
 	}
 }

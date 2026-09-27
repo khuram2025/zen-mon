@@ -925,6 +925,7 @@ func pollConfigWithForce(ctx context.Context, cfg *config.Config, poller *config
 
 func handleHeartbeatResponse(ctx context.Context, hb *model.HeartbeatResponse, cfg *config.Config, poller *configpoller.Poller, paths runtime.Paths, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, apmManager *apmruntime.Manager, sup *supervisor, logf func(string, ...any)) {
 	sup.applyBackpressure(hb.Backpressure, status, logf)
+	up.SetGzipUploads(hb.AcceptsGzip)
 	if hb.APM != nil {
 		status.APM = hb.APM
 	}

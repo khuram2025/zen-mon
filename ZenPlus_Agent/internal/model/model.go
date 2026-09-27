@@ -108,6 +108,8 @@ type HeartbeatResponse struct {
 	DesiredVersion *string       `json:"desired_version"`
 	Backpressure   *Backpressure `json:"backpressure"`
 	APM            *APMStatus    `json:"apm,omitempty"`
+	// AcceptsGzip is advertised by controllers that decompress agent uploads.
+	AcceptsGzip bool `json:"accepts_gzip,omitempty"`
 }
 
 // APMStatus is a read-only appliance health snapshot. The local APM monitoring
