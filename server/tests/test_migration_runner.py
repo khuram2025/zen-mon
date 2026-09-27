@@ -407,3 +407,15 @@ def test_every_command_the_server_queues_is_allowed_by_the_constraint():
     migration_sql = (repo / "scripts" / filename).read_text(encoding="utf-8")
     for value in allowed:
         assert f"'{value}'" in migration_sql, f"{value} missing from {filename}"
+
+
+def test_support_bundle_checks_the_canonical_command_list():
+    """The support bundle flags a drifted constraint; its list must match."""
+    import re
+
+    repo = Path(__file__).resolve().parents[2]
+    source = (repo / "support" / "collectors" / "database.py").read_text(encoding="utf-8")
+    block = source.split("CRITICAL_CONSTRAINT_CHECKS", 1)[1].split("def collect", 1)[0]
+    listed = set(re.findall(r'"([a-z_]+)"', block)) - {"agent_commands", "agent_commands_command_check"}
+    (_, spec), = runner.CANONICAL_CONSTRAINTS.items()
+    assert listed == set(spec["required_values"])

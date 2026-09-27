@@ -104,6 +104,7 @@ CRITICAL_CONSTRAINT_CHECKS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "rotate_certificate", "restart_agent", "upgrade_agent",
             "start_network_capture", "stop_network_capture", "apm_instrument",
             "apm_uninstrument", "apm_restart_target", "apm_set_config",
+            "set_monitoring_profile",
         ),
     ),
 )
