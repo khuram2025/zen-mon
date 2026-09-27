@@ -1156,13 +1156,14 @@ func connectionState(s appstate.Snapshot) (string, walk.Color) {
 			return "Authorization required", red
 		}
 	}
-	if !s.Controller.Reachable {
+	switch {
+	case !s.Controller.Known && !s.Controller.Reachable:
+		return "Connecting to controller", amber
+	case !s.Controller.Reachable:
 		return "Controller unreachable", red
-	}
-	if s.Status != nil && s.Status.LastHeartbeat != nil && s.Status.LastHeartbeatError == "" {
+	default:
 		return "Connected and reporting", green
 	}
-	return "Controller reachable", blue
 }
 
 func statusSummary(s appstate.Snapshot, started string, controllerDetail string) string {
