@@ -321,6 +321,8 @@ func Run(ctx context.Context, opts Options) error {
 				nextRuntimeConnectionHash := runtimeConnectionFingerprint(cfg, enrollment)
 				if runtimeConnectionHash != nextRuntimeConnectionHash {
 					resetSupervisorAfterRuntimeClientRefresh(sup, &status, enrollment)
+					// A different controller or credential starts without our inventory.
+					collectors.ResetSchedule()
 				} else {
 					// A local feature-only change (currently APM) does not change
 					// controller authority. Keep the existing uploader generation so
@@ -738,6 +740,7 @@ func tryRecoverAuth(ctx context.Context, configPath string, cfg *config.Config, 
 		return
 	}
 	*enrollment = res
+	collectors.ResetSchedule() // re-enrolled: the controller needs full inventory
 	*up = nextUp
 	*poller = nextPoller
 	status.AgentID = res.Identity.AgentID

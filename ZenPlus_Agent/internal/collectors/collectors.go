@@ -3,6 +3,8 @@ package collectors
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -94,6 +96,11 @@ func ResetSchedule() {
 	lastRun.Lock()
 	lastRun.at = map[string]time.Time{}
 	lastRun.Unlock()
+	// A new policy or controller must receive complete inventory again.
+	sentInventory.Lock()
+	sentInventory.digest = map[string][sha256.Size]byte{}
+	sentInventory.at = map[string]time.Time{}
+	sentInventory.Unlock()
 }
 
 type serviceInfo struct {
@@ -152,7 +159,46 @@ func Collect(ctx context.Context, cfg config.Config) Result {
 	if cfg.Collectors.Inventory.Enabled && due("inventory", cfg.Collectors.Inventory.IntervalSeconds, now) {
 		collectInventory(ctx, &r)
 	}
+	omitUnchangedInventory(r.Inventory, now)
 	return r
+}
+
+// inventoryRefreshInterval bounds how long an unchanged per-cycle inventory
+// section may be omitted. The controller treats an omitted section as "no
+// update", but marks rows stale after at least 15 minutes without a refresh.
+const inventoryRefreshInterval = 10 * time.Minute
+
+// refreshedInventorySections are rebuilt on every collection. Sending them
+// unchanged every cycle made the services list most of each upload and cost
+// the controller one database upsert per service per cycle.
+var refreshedInventorySections = []string{"services", "filesystems", "network_interfaces"}
+
+var sentInventory = struct {
+	sync.Mutex
+	digest map[string][sha256.Size]byte
+	at     map[string]time.Time
+}{digest: map[string][sha256.Size]byte{}, at: map[string]time.Time{}}
+
+func omitUnchangedInventory(inv map[string]any, now time.Time) {
+	sentInventory.Lock()
+	defer sentInventory.Unlock()
+	for _, key := range refreshedInventorySections {
+		section, ok := inv[key]
+		if !ok {
+			continue
+		}
+		body, err := json.Marshal(section)
+		if err != nil {
+			continue
+		}
+		digest := sha256.Sum256(body)
+		if digest == sentInventory.digest[key] && now.Sub(sentInventory.at[key]) < inventoryRefreshInterval {
+			delete(inv, key)
+			continue
+		}
+		sentInventory.digest[key] = digest
+		sentInventory.at[key] = now
+	}
 }
 
 // cpuState keeps the previous CPU time counters so each collection reports

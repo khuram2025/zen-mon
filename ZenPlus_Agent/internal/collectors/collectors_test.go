@@ -65,6 +65,7 @@ func TestCollectIncludesWindowsServiceInventoryAndState(t *testing.T) {
 }
 
 func resetServiceTestState() {
+	ResetSchedule()
 	rateState.Lock()
 	defer rateState.Unlock()
 	rateState.services = map[string]string{}
@@ -212,5 +213,57 @@ func TestEventLogPolicyRejectsInvalidOrOversizedFilters(t *testing.T) {
 				t.Fatalf("error = %v, want containing %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestUnchangedInventorySectionsAreOmittedUntilRefresh(t *testing.T) {
+	ResetSchedule()
+	t.Cleanup(ResetSchedule)
+	start := time.Date(2026, 9, 27, 10, 0, 0, 0, time.UTC)
+	section := func() map[string]any {
+		return map[string]any{
+			"services":    []map[string]any{{"service_name": "W3SVC", "state": "running"}},
+			"filesystems": []map[string]any{{"mount": "C:"}},
+			"os":          map[string]any{"name": "Windows"},
+		}
+	}
+
+	first := section()
+	omitUnchangedInventory(first, start)
+	if _, ok := first["services"]; !ok {
+		t.Fatal("first inventory must be sent in full")
+	}
+
+	unchanged := section()
+	omitUnchangedInventory(unchanged, start.Add(time.Minute))
+	if _, ok := unchanged["services"]; ok {
+		t.Fatal("unchanged services section was resent")
+	}
+	if _, ok := unchanged["os"]; !ok {
+		t.Fatal("sections outside the per-cycle set must never be dropped")
+	}
+
+	changed := section()
+	changed["services"] = []map[string]any{{"service_name": "W3SVC", "state": "stopped"}}
+	omitUnchangedInventory(changed, start.Add(2*time.Minute))
+	if _, ok := changed["services"]; !ok {
+		t.Fatal("changed services section was omitted")
+	}
+	if _, ok := changed["filesystems"]; ok {
+		t.Fatal("unchanged filesystems section was resent with a changed services section")
+	}
+
+	refresh := section()
+	refresh["services"] = changed["services"]
+	omitUnchangedInventory(refresh, start.Add(2*time.Minute+inventoryRefreshInterval))
+	if _, ok := refresh["services"]; !ok {
+		t.Fatal("unchanged section was not refreshed before the controller marks it stale")
+	}
+
+	ResetSchedule()
+	afterReset := section()
+	omitUnchangedInventory(afterReset, start.Add(3*time.Minute))
+	if _, ok := afterReset["filesystems"]; !ok {
+		t.Fatal("a schedule reset (new policy or controller) must resend full inventory")
 	}
 }
