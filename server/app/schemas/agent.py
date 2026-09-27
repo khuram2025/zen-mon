@@ -369,6 +369,8 @@ class AgentHeartbeatResponse(BaseModel):
     backpressure: Optional[Dict[str, Any]] = None
     capabilities: List[str] = Field(default_factory=list)
     apm: Optional[ApplianceAPMStatus] = None
+    # The controller accepts Content-Encoding: gzip on agent uploads.
+    accepts_gzip: bool = True
 
 
 class AgentConfigResponse(BaseModel):
