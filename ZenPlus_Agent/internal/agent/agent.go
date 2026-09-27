@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -137,7 +138,15 @@ type localSettings struct {
 	APMProfile          string `json:"apm_profile"`
 }
 
+// agentMemoryLimit is a soft limit for the Go heap. The runtime collects
+// garbage more eagerly as it is approached, instead of letting the heap grow
+// to twice the live data between collections. GOMEMLIMIT overrides it.
+const agentMemoryLimit = 64 << 20
+
 func Run(ctx context.Context, opts Options) error {
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(agentMemoryLimit)
+	}
 	cfg, err := config.Load(opts.ConfigPath)
 	if err != nil {
 		return err
@@ -267,6 +276,9 @@ func Run(ctx context.Context, opts Options) error {
 	defer apmTicker.Stop()
 	localHash := localSettingsFingerprint(cfg)
 	authStamp := authFileStamp(paths)
+	// Stat the local files before re-reading the config every tick.
+	localFiles := fileStamp(opts.ConfigPath) + "|" + authStamp
+	publisher := &statusPublisher{}
 	runtimeConnectionHash := runtimeConnectionFingerprint(cfg, enrollment)
 	syncTickers := func() {
 		if next := config.Duration(cfg.CollectIntervalSeconds, time.Minute); next != collectInterval {
@@ -314,6 +326,11 @@ func Run(ctx context.Context, opts Options) error {
 				pollConfig(ctx, &cfg, poller, &status, log.Printf)
 			}
 		case <-localConfigTicker.C:
+			stamp := fileStamp(opts.ConfigPath) + "|" + authFileStamp(paths)
+			if stamp == localFiles {
+				break // nothing changed on disk since the last check
+			}
+			localFiles = stamp
 			previousUploader := up
 			previousPoller := poller
 			rebuilt := refreshLocalRuntime(ctx, opts.ConfigPath, &cfg, paths, store, &enrollment, &up, &poller, &status, &localHash, &authStamp, log.Printf)
@@ -365,8 +382,7 @@ func Run(ctx context.Context, opts Options) error {
 		status.AgentID = enrollment.Identity.AgentID
 		status.ServerID = enrollment.Identity.ServerID
 		syncAuthStatus(&status, enrollment, sup)
-		_ = writeStatus(paths.StatusFile, status)
-		_ = runtime.WriteMachineDashboardSnapshot(cfg, enrollment.Identity, status)
+		publisher.publish(paths, cfg, enrollment.Identity, status)
 	}
 }
 
