@@ -139,6 +139,9 @@ token or rewrite any MSI bytes.
 
 ## 3. Perform a scalable rollout
 
+For Group Policy, Intune, Configuration Manager and PDQ recipes, exit codes and
+the full switch reference, see [bulk-deployment.md](bulk-deployment.md).
+
 Download the setup executable once and install it with the appliance address. Each new
 installation creates its own protected registration proof and appears in
 Agent Fleet as **Pending authorization**.

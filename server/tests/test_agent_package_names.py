@@ -79,3 +79,34 @@ def test_heartbeat_accepts_update_progress_and_older_agents():
     assert hb.update.state == "failed" and hb.update.target_version == "1.14.1"
     with pytest.raises(ValidationError):
         AgentHeartbeatRequest(version="1.14.0", update={"state": "exploded", "target_version": "1.14.1"})
+
+
+def test_profile_change_skips_agents_that_cannot_take_it():
+    from app.api.v1.servers import profile_change_skip_reason
+
+    ready = {"platform": "windows", "status": "online", "package_flavor": "full",
+             "capabilities": ["apm_status_v1", "monitoring_profile_v1"]}
+    both = {"core", "full"}
+    assert profile_change_skip_reason(ready, "core", both) is None
+    assert profile_change_skip_reason(ready, "full", set()) is None  # no swap needed
+    assert "1.14.2" in profile_change_skip_reason({**ready, "capabilities": ["apm_status_v1"]}, "core", both)
+    assert "server-monitoring package" in profile_change_skip_reason(ready, "core", {"full"})
+    assert "Windows" in profile_change_skip_reason({**ready, "platform": "linux"}, "core", both)
+    assert "disabled" in profile_change_skip_reason({**ready, "status": "disabled"}, "core", both)
+
+
+def test_heartbeat_accepts_profile_and_package():
+    from pydantic import ValidationError
+
+    from app.schemas.agent import AgentHeartbeatRequest
+
+    hb = AgentHeartbeatRequest(
+        version="1.14.2", package_flavor="core", monitoring_profile="infrastructure",
+        update={"kind": "profile", "state": "installing", "target_version": "1.14.2",
+                "target_flavor": "full", "target_profile": "combined"},
+    )
+    assert hb.update.kind == "profile" and hb.update.target_profile == "combined"
+    # 1.14.1 status blocks have no kind and are upgrades.
+    assert AgentHeartbeatRequest(version="1.14.1", update={"state": "failed", "target_version": "1.14.2"}).update.kind == "upgrade"
+    with pytest.raises(ValidationError):
+        AgentHeartbeatRequest(version="1.14.2", package_flavor="huge")

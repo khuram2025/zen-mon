@@ -26,7 +26,7 @@ import { Switch } from '@/components/ui/Switch'
 import { toast } from '@/components/ui/Toast'
 import { AgentStatusBadge, AuthorizationBadge, KpiTile, TagList } from '@/components/servers/shared'
 import { DownloadAgentDialog } from '@/components/servers/DownloadAgentDialog'
-import type { AgentItem, AgentPolicy, UpdateRing } from '@/types/servers'
+import type { AgentItem, AgentPolicy, MonitoringProfile, UpdateRing } from '@/types/servers'
 
 interface AgentFleetSummary {
   online: number
@@ -58,6 +58,7 @@ type BulkAction =
   | 'trigger_upgrade'
   | 'disable'
   | 'enable'
+  | 'change_monitoring_profile'
 
 type ConflictResolutionAction = 'replace' | 'register_clone' | 'block'
 
@@ -69,8 +70,22 @@ const BULK_ACTIONS: { value: BulkAction; label: string }[] = [
   { value: 'request_diagnostics', label: 'Request diagnostics' },
   { value: 'rotate_certificate', label: 'Rotate certificate' },
   { value: 'trigger_upgrade', label: 'Trigger upgrade' },
+  { value: 'change_monitoring_profile', label: 'Change monitoring profile' },
   { value: 'disable', label: 'Disable' },
   { value: 'enable', label: 'Enable' },
+]
+
+interface BulkResult {
+  ok: boolean
+  affected: number
+  // Agents the action could not be applied to, with the reason.
+  skipped?: { agent_id: string; hostname: string | null; reason: string }[]
+}
+
+const MONITORING_PROFILES: { value: MonitoringProfile; label: string; short: string }[] = [
+  { value: 'infrastructure', label: 'Server monitoring only', short: 'Server monitoring' },
+  { value: 'combined', label: 'Server monitoring + APM', short: 'Server + APM' },
+  { value: 'apm', label: 'APM only', short: 'APM only' },
 ]
 
 /** Clocks off by more than this get a visible warning in the fleet table. */
@@ -129,6 +144,9 @@ export function AgentFleetPage() {
   const [bulkPolicy, setBulkPolicy] = useState('')
   const [bulkRing, setBulkRing] = useState<UpdateRing>('stable')
   const [bulkVersion, setBulkVersion] = useState('')
+  const [bulkProfile, setBulkProfile] = useState<MonitoringProfile>('infrastructure')
+  const [bulkRemoveInstrumentation, setBulkRemoveInstrumentation] = useState(false)
+  const [confirmProfile, setConfirmProfile] = useState(false)
   // Upgrades install a package this appliance serves, so offer exactly the
   // published Windows versions, newest first.
   const { data: packageList } = useQuery<{ items: { platform: string; version: string }[] }>({
@@ -329,15 +347,33 @@ export function AgentFleetPage() {
         policy_id?: string
         update_ring?: UpdateRing
         target_version?: string
+        monitoring_profile?: MonitoringProfile
+        remove_instrumentation?: boolean
       } = { agent_ids: Array.from(selected), action: bulkAction }
       if (bulkAction === 'change_policy') body.policy_id = bulkPolicy
       if (bulkAction === 'change_update_ring') body.update_ring = bulkRing
       if (bulkAction === 'trigger_upgrade' && bulkVersion.trim()) body.target_version = bulkVersion.trim()
-      return api.post('/agent-fleet/bulk', body)
+      if (bulkAction === 'change_monitoring_profile') {
+        body.monitoring_profile = bulkProfile
+        body.remove_instrumentation = bulkProfile === 'infrastructure' && bulkRemoveInstrumentation
+      }
+      return (await api.post<BulkResult>('/agent-fleet/bulk', body)).data
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       const label = BULK_ACTIONS.find((a) => a.value === bulkAction)?.label || 'Action'
-      toast.success(`${label} applied to ${selected.size} agent${selected.size === 1 ? '' : 's'}`)
+      const affected = result?.affected ?? selected.size
+      const skipped = result?.skipped ?? []
+      if (affected > 0) toast.success(`${label} applied to ${affected} agent${affected === 1 ? '' : 's'}`)
+      if (skipped.length > 0) {
+        // Agents that cannot take the action are named with the reason, so
+        // the operator knows what to fix (usually: upgrade the agent first).
+        toast.error(
+          `${skipped.length} agent${skipped.length === 1 ? ' was' : 's were'} skipped`,
+          skipped.slice(0, 3).map((s) => `${s.hostname || 'Agent'}: ${s.reason}`).join(' · ')
+            + (skipped.length > 3 ? ` (+${skipped.length - 3} more)` : ''),
+        )
+      }
+      setConfirmProfile(false)
       invalidate()
       clearSelection()
       setConfirmDisable(false)
@@ -347,6 +383,10 @@ export function AgentFleetPage() {
   })
 
   const applyBulk = () => {
+    if (bulkAction === 'change_monitoring_profile') {
+      setConfirmProfile(true)
+      return
+    }
     if (bulkAction === 'disable') {
       setConfirmDisable(true)
       return
@@ -505,6 +545,27 @@ export function AgentFleetPage() {
                   </span>
                 )
               )}
+              {bulkAction === 'change_monitoring_profile' && (
+                <>
+                  <Select value={bulkProfile} onValueChange={(v) => setBulkProfile(v as MonitoringProfile)}>
+                    <SelectTrigger className="h-8 w-[200px]"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {MONITORING_PROFILES.map((p) => <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                  {bulkProfile === 'infrastructure' && (
+                    <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted" title="Applications ZenPlus instrumented are restored to their original settings, which restarts them">
+                      <input
+                        type="checkbox"
+                        className="h-3.5 w-3.5 cursor-pointer accent-primary"
+                        checked={bulkRemoveInstrumentation}
+                        onChange={(e) => setBulkRemoveInstrumentation(e.target.checked)}
+                      />
+                      Also remove APM instrumentation (restarts those apps)
+                    </label>
+                  )}
+                </>
+              )}
               <Button size="sm" onClick={applyBulk} disabled={applyDisabled}>
                 {bulk.isPending ? 'Applying…' : 'Apply'}
               </Button>
@@ -549,7 +610,7 @@ export function AgentFleetPage() {
                     <Th>Policy</Th>
                     <Th>Ring</Th>
                     <Th>Heartbeat</Th>
-                    <Th>Local APM</Th>
+                    <Th>Monitoring</Th>
                     <Th>Queue</Th>
                     <Th>Last IP</Th>
                     <Th className="w-28 text-right">Actions</Th>
@@ -638,7 +699,10 @@ export function AgentFleetPage() {
                         <Badge variant="outline" className="capitalize">{agent.update_ring}</Badge>
                       </Td>
                       <Td className="text-xs text-muted">{relativeTime(agent.last_heartbeat_at)}</Td>
-                      <Td><AgentApmStatusBadge status={agent.apm_status} /></Td>
+                      <Td>
+                        <MonitoringProfileLine agent={agent} />
+                        {agent.monitoring_profile !== 'infrastructure' && <AgentApmStatusBadge status={agent.apm_status} />}
+                      </Td>
                       <Td>
                         <div className="text-xs tabular-nums">{agent.queue_depth.toLocaleString()}</div>
                         <div className="text-[11px] tabular-nums text-muted">{formatBytes(agent.spool_bytes)}</div>
@@ -855,6 +919,41 @@ export function AgentFleetPage() {
         }}
       />
       <ConfirmDialog
+        open={confirmProfile}
+        onOpenChange={setConfirmProfile}
+        title="Change monitoring profile"
+        description={
+          <div className="space-y-2">
+            <p>
+              Switch <span className="font-semibold text-text">{selected.size}</span> selected
+              agent{selected.size === 1 ? '' : 's'} to{' '}
+              <span className="font-semibold text-text">
+                {MONITORING_PROFILES.find((p) => p.value === bulkProfile)?.label}
+              </span>?
+            </p>
+            {bulkProfile === 'infrastructure' ? (
+              <p>
+                Agents with APM installed replace it with the server-monitoring package, which removes the APM
+                components. Monitoring continues throughout; each agent restarts once.{' '}
+                {bulkRemoveInstrumentation
+                  ? 'Applications instrumented by ZenPlus APM are restored to their original settings and restarted.'
+                  : 'Agents with applications instrumented by ZenPlus APM are left unchanged and report why.'}
+              </p>
+            ) : (
+              <p>
+                Agents without APM download the APM package (about 90 MB) from this appliance and install it.
+                Monitoring continues throughout; each agent restarts once. Instrument applications afterwards
+                from APM.
+              </p>
+            )}
+            <p className="text-xs">Progress appears next to each agent&apos;s version.</p>
+          </div>
+        }
+        confirmText="Change profile"
+        loading={bulk.isPending}
+        onConfirm={() => bulk.mutate()}
+      />
+      <ConfirmDialog
         open={confirmDisable}
         onOpenChange={setConfirmDisable}
         title="Disable agents"
@@ -922,36 +1021,54 @@ function compareVersionsDesc(a: string, b: string): number {
 // A successful upgrade stays visible for a day, then the version speaks for itself.
 const UPDATE_SUCCESS_VISIBLE_MS = 24 * 60 * 60 * 1000
 
+function profileChangeLabel(status: NonNullable<AgentItem['update_status']>) {
+  if (status.target_flavor === 'full' && status.target_profile !== 'infrastructure') return 'APM'
+  const profile = MONITORING_PROFILES.find((p) => p.value === status.target_profile)
+  return profile?.short ?? 'profile'
+}
+
 function AgentUpdateBadge({ status, version }: { status: AgentItem['update_status']; version: string | null }) {
   if (!status?.state || !status.target_version) return null
   const when = status.updated_at ? ` · ${relativeTime(status.updated_at)}` : ''
+  const profileChange = status.kind === 'profile'
+  const target = profileChangeLabel(status)
+  const adding = profileChange && target === 'APM'
+  const removing = profileChange && status.target_profile === 'infrastructure'
   switch (status.state) {
     case 'requested':
     case 'downloading':
-    case 'installing':
+    case 'installing': {
+      const text = !profileChange
+        ? `${status.state === 'installing' ? 'Installing' : 'Downloading'} ${status.target_version}`
+        : adding ? 'Adding APM' : removing ? 'Removing APM' : `Switching to ${target}`
       return (
         <div className="mt-1">
-          <Badge variant="warning" title={`Upgrade from ${status.from_version || version || 'current'} requested by this appliance${when}`}>
-            <RefreshCw className="h-3 w-3 animate-spin" />
-            {status.state === 'installing' ? 'Installing' : 'Downloading'} {status.target_version}
+          <Badge variant="warning" title={`${profileChange ? 'Monitoring-profile change' : `Upgrade from ${status.from_version || version || 'current'}`} requested by this appliance${when}`}>
+            <RefreshCw className="h-3 w-3 animate-spin" /> {text}
           </Badge>
         </div>
       )
-    case 'failed':
+    }
+    case 'failed': {
+      const text = !profileChange
+        ? `Update to ${status.target_version} failed`
+        : adding ? 'Adding APM failed' : removing ? 'Removing APM failed' : 'Profile change failed'
       return (
         <div className="mt-1">
-          <Badge variant="danger" title={`${status.error || 'The upgrade failed'}${when}`}>
-            <AlertTriangle className="h-3 w-3" /> Update to {status.target_version} failed
+          <Badge variant="danger" title={`${status.error || 'The change failed'}${when}`}>
+            <AlertTriangle className="h-3 w-3" /> {text}
           </Badge>
         </div>
       )
+    }
     case 'succeeded': {
       const at = status.updated_at ? Date.parse(status.updated_at) : NaN
       if (version !== status.target_version || !(Date.now() - at < UPDATE_SUCCESS_VISIBLE_MS)) return null
+      const text = !profileChange ? 'Updated' : adding ? 'APM added' : removing ? 'APM removed' : `Now ${target}`
       return (
         <div className="mt-1">
-          <Badge variant="success" title={`Upgraded from ${status.from_version || 'the previous version'}${when}`}>
-            <CheckCircle2 className="h-3 w-3" /> Updated
+          <Badge variant="success" title={`${profileChange ? 'Monitoring profile changed' : `Upgraded from ${status.from_version || 'the previous version'}`}${when}`}>
+            <CheckCircle2 className="h-3 w-3" /> {text}
           </Badge>
         </div>
       )
@@ -959,6 +1076,23 @@ function AgentUpdateBadge({ status, version }: { status: AgentItem['update_statu
     default:
       return null
   }
+}
+
+/** The agent's monitoring profile, and a hint when its package does not match. */
+function MonitoringProfileLine({ agent }: { agent: AgentItem }) {
+  if (!agent.monitoring_profile) return null
+  const profile = MONITORING_PROFILES.find((p) => p.value === agent.monitoring_profile)
+  const unusedAPM = agent.monitoring_profile === 'infrastructure' && agent.package_flavor === 'full'
+  return (
+    <div className="mb-1 text-xs">
+      {profile?.short ?? agent.monitoring_profile}
+      {unusedAPM && (
+        <span className="ml-1 text-muted" title="The APM components are installed but not used. Change the monitoring profile to Server monitoring only to remove them.">
+          · APM installed, unused
+        </span>
+      )}
+    </div>
+  )
 }
 
 function AgentApmStatusBadge({ status }: { status: AgentItem['apm_status'] }) {

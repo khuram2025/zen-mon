@@ -1135,6 +1135,8 @@ def _agent_response(row: dict) -> AgentResponse:
         capabilities=[str(v) for v in _json_list(row.get("capabilities"))],
         apm_status=_apm_status_with_binding(row),
         update_status=_json_object(row.get("update_status")),
+        package_flavor=row.get("package_flavor"),
+        monitoring_profile=row.get("monitoring_profile"),
         tags=list(tags) if isinstance(tags, (list, tuple)) else [],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -3189,6 +3191,66 @@ async def delete_agent(
     return {"ok": True}
 
 
+PROFILE_CHANGE_CAPABILITY = "monitoring_profile_v1"
+
+
+def profile_change_skip_reason(agent: dict, target_flavor: str, published_flavors: set[str]) -> Optional[str]:
+    """Why an agent cannot take a monitoring-profile change, or None."""
+    if agent.get("platform") != "windows":
+        return "Only Windows agents support monitoring-profile changes"
+    if agent.get("status") == "disabled":
+        return "The agent is disabled"
+    if PROFILE_CHANGE_CAPABILITY not in {str(c) for c in _json_list(agent.get("capabilities"))}:
+        return ("Upgrade the agent to 1.14.2 or later first; current-user "
+                "installations cannot change their profile remotely")
+    if agent.get("package_flavor") != target_flavor and target_flavor not in published_flavors:
+        package = "server-monitoring" if target_flavor == "core" else "APM"
+        return f"No {package} package is published on this appliance"
+    return None
+
+
+async def _queue_profile_change(
+    ids: list, data: AgentBulkAction, user_id: Any, db: AsyncSession,
+) -> tuple[int, list[dict]]:
+    """Queue set_monitoring_profile for every agent that can take it.
+
+    Server monitoring only runs on the core package and any profile with APM
+    on the full package; agents swap packages themselves, downloading from
+    this appliance, so the needed package must be published here.
+    """
+    if not data.monitoring_profile:
+        raise HTTPException(400, "monitoring_profile required")
+    target_flavor = "core" if data.monitoring_profile == "infrastructure" else "full"
+    published_flavors = {
+        row[0] for row in (await db.execute(
+            text("""SELECT DISTINCT flavor FROM agent_packages
+                    WHERE platform = 'windows' AND channel = 'stable'"""),
+        )).all()
+    }
+    agents = (await db.execute(
+        text("""SELECT id, hostname, platform, status, capabilities, package_flavor
+                FROM agents WHERE id = ANY(:ids)"""),
+        {"ids": ids},
+    )).mappings().all()
+    params = json.dumps({
+        "profile": data.monitoring_profile,
+        "remove_instrumentation": data.remove_instrumentation,
+    })
+    queued, skipped = 0, []
+    for agent in agents:
+        reason = profile_change_skip_reason(dict(agent), target_flavor, published_flavors)
+        if reason:
+            skipped.append({"agent_id": str(agent["id"]), "hostname": agent["hostname"], "reason": reason})
+            continue
+        await db.execute(
+            text("""INSERT INTO agent_commands (agent_id, command, params, requested_by)
+                    VALUES (:aid, 'set_monitoring_profile', :p, :u)"""),
+            {"aid": agent["id"], "p": params, "u": user_id},
+        )
+        queued += 1
+    return queued, skipped
+
+
 @fleet_router.post("/bulk")
 async def fleet_bulk_action(
     data: AgentBulkAction,
@@ -3199,6 +3261,7 @@ async def fleet_bulk_action(
         return {"ok": True, "affected": 0}
     ids = list(data.agent_ids)
     affected = len(ids)
+    skipped: list[dict] = []
     apm_keys_changed = False
     if data.action == "authorize":
         affected = await _authorize_agents(ids, user.id, db)
@@ -3265,6 +3328,8 @@ async def fleet_bulk_action(
                         VALUES (:aid, 'rotate_certificate', :u)"""),
                 {"aid": aid, "u": user.id},
             )
+    elif data.action == "change_monitoring_profile":
+        affected, skipped = await _queue_profile_change(ids, data, user.id, db)
     elif data.action == "disable":
         await db.execute(
             text("UPDATE agents SET status = 'disabled', updated_at = NOW() WHERE id = ANY(:ids)"),
@@ -3281,7 +3346,7 @@ async def fleet_bulk_action(
     await db.commit()
     if apm_keys_changed:
         invalidate_ingest_key_cache()
-    return {"ok": True, "affected": affected}
+    return {"ok": True, "affected": affected, "skipped": skipped}
 
 
 # ── Server monitoring overview KPIs ─────────────────────────────────

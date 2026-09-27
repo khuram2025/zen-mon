@@ -891,6 +891,8 @@ async def heartbeat(
                   update_status = CASE WHEN :upd_present
                                        THEN CAST(:upd AS jsonb)
                                        ELSE update_status END,
+                  package_flavor = COALESCE(CAST(:pkg_flavor AS VARCHAR), package_flavor),
+                  monitoring_profile = COALESCE(CAST(:mon_profile AS VARCHAR), monitoring_profile),
                   -- A reached target is no longer desired. Clearing it stops
                   -- the fleet view showing a pending upgrade.
                   desired_version = CASE WHEN ltrim(desired_version, 'vV') = ltrim(CAST(:v AS TEXT), 'vV')
@@ -908,6 +910,8 @@ async def heartbeat(
             "apm": json.dumps(data.apm.model_dump(mode="json") if data.apm else {}),
             "upd_present": data.update is not None,
             "upd": json.dumps(data.update.model_dump(mode="json") if data.update else {}),
+            "pkg_flavor": data.package_flavor,
+            "mon_profile": data.monitoring_profile,
             "ip": client_ip, "id": agent["id"],
         },
     )
@@ -1645,6 +1649,15 @@ if ($actualSha -ne $expectedSha) {
 }
 Write-Host "[zenplus] Checksum OK."
 
+# The checksum proves the file is what this appliance published; the
+# signature proves Zentryc built it.
+$signature = Get-AuthenticodeSignature -FilePath $installer
+if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch "(^|, )CN=Zentryc LLC(,|$)") {
+    Remove-Item -Force $installer
+    throw "[zenplus] The installer is not validly signed by Zentryc LLC ($($signature.Status)) - aborting install."
+}
+Write-Host "[zenplus] Signature OK (Zentryc LLC)."
+
 Write-Host "[zenplus] Installing ..."
 $extension = [System.IO.Path]::GetExtension($installer).ToLowerInvariant()
 if ($extension -eq ".exe") {
@@ -1661,7 +1674,10 @@ if ($extension -eq ".exe") {
     throw "[zenplus] Unsupported Windows installer type: $extension"
 }
 if ($proc.ExitCode -ne 0) {
-    throw "[zenplus] msiexec exited with code $($proc.ExitCode)."
+    # Pass Setup's Windows Installer exit code through, so deployment tools
+    # can tell 1618 (retry later) from 1603 (failed).
+    Write-Error "[zenplus] Setup exited with code $($proc.ExitCode)."
+    exit $proc.ExitCode
 }
 Write-Host "[zenplus] Installed. New hosts appear as Pending authorization in Agent Fleet; previously approved hosts resume automatically."
 '''

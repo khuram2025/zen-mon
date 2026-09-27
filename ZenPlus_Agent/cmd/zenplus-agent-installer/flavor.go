@@ -46,7 +46,9 @@ func requireFlavorSupportsConfig(cfg config.Config, managedTargets int) error {
 	}
 	profile := strings.ToLower(strings.TrimSpace(cfg.APM.Profile))
 	if cfg.APM.Enabled && profile != "infrastructure" {
-		return fmt.Errorf("the %q monitoring profile needs APM, which this server-monitoring package does not include; install the ZenPlus Agent package with APM, or choose the infrastructure profile", profile)
+		// A command-line problem for deployment tools: the wrong package
+		// or profile was chosen.
+		return withExitCode(exitInvalidCommandLine, fmt.Errorf("the %q monitoring profile needs APM, which this server-monitoring package does not include; install the ZenPlus Agent package with APM, or choose the infrastructure profile", profile))
 	}
 	return nil
 }
