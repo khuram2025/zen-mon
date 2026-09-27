@@ -3,11 +3,10 @@
 package main
 
 import (
-	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
-	"net/http"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -626,22 +625,26 @@ func (w *setupWizard) testConnection() {
 		_ = w.testResult.SetText("Enter a valid appliance address, for example https://zenplus.example.com.")
 		return
 	}
+	parsed, err := url.Parse(target)
+	if err != nil {
+		w.testResult.SetTextColor(setupRed)
+		_ = w.testResult.SetText("Enter a valid appliance address, for example https://zenplus.example.com.")
+		return
+	}
+	address := parsed.Host
+	if parsed.Port() == "" {
+		address = net.JoinHostPort(parsed.Hostname(), "443")
+	}
 	w.testButton.SetEnabled(false)
 	w.testResult.SetTextColor(setupMuted)
-	_ = w.testResult.SetText("Connecting to " + target + "...")
+	_ = w.testResult.SetText("Connecting to " + address + "...")
 	go func() {
-		// Reachability only: the agent verifies the appliance's certificate
-		// with its own trust settings when it connects.
-		client := &http.Client{
-			Timeout:   8 * time.Second,
-			Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, // #nosec G402 -- reachability probe, no data sent
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		defer cancel()
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, target+"/api/v1/agents/packages/manifest?platform=windows", nil)
-		resp, err := client.Do(req)
-		if resp != nil {
-			resp.Body.Close()
+		// A TCP connection proves the address resolves and the appliance
+		// accepts connections; the agent verifies its certificate itself.
+		// An HTTP client would add megabytes to Setup for no extra signal.
+		conn, err := net.DialTimeout("tcp", address, 8*time.Second)
+		if conn != nil {
+			conn.Close()
 		}
 		w.window.Synchronize(func() {
 			w.testButton.SetEnabled(true)
@@ -651,15 +654,16 @@ func (w *setupWizard) testConnection() {
 				return
 			}
 			w.testResult.SetTextColor(setupGreen)
-			_ = w.testResult.SetText("Connected. The appliance at " + target + " is reachable.")
+			_ = w.testResult.SetText("Connected. The appliance at " + address + " accepts connections.")
 		})
 	}()
 }
 
 func friendlyNetError(err error) string {
 	msg := err.Error()
+	var netErr net.Error
 	switch {
-	case errors.Is(err, context.DeadlineExceeded) || strings.Contains(msg, "Client.Timeout"):
+	case errors.As(err, &netErr) && netErr.Timeout():
 		return "the connection timed out. Check the address and that this computer can reach the appliance on port 443."
 	case strings.Contains(msg, "no such host"):
 		return "the name could not be resolved. Check the address or use the appliance's IP address."
