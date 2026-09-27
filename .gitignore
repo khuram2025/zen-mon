@@ -113,6 +113,7 @@ poller/internal/checker/.netpath-presync-backup/
 .playwright-mcp/
 .deploy-inspect/
 *.png
+!ZenPlus_Agent/internal/brand/mark-*.png
 Documentation/prv.txt
 Documentation/srv_response.txt
 Documentation/test.txt
