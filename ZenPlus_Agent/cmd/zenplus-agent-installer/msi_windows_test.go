@@ -48,8 +48,8 @@ func TestMSIInvokesSetupForInstallAndRepair(t *testing.T) {
 	if end < 0 || !strings.Contains(wxs[start:start+end], "Return=\"check\"") {
 		t.Fatal("MSI uninstall custom action must fail when the managed uninstaller fails")
 	}
-	if got := config.Default().APM.Profile; got != "combined" {
-		t.Fatalf("fresh-install config profile = %q, want %q", got, "combined")
+	if got := config.Default().APM; got.Profile != "infrastructure" || got.Enabled {
+		t.Fatalf("fresh-install APM = %+v, want opt-in (infrastructure, disabled)", got)
 	}
 }
 

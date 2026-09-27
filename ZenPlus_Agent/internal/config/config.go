@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -152,8 +153,11 @@ func Default() Config {
 		CollectorTimeoutSeconds:  20,
 		UpdateRing:               "stable",
 		CompressUploads:          false,
+		// APM is opt-in: most servers only need infrastructure monitoring, and
+		// an idle APM stack still costs a gateway process, discovery scans and
+		// controller credential traffic.
 		APM: APMConfig{
-			Enabled: true, Profile: "combined", Environment: "prod", BindAddress: "127.0.0.1",
+			Enabled: false, Profile: "infrastructure", Environment: "prod", BindAddress: "127.0.0.1",
 		},
 		Collectors: CollectorConfig{
 			CPU:        CollectorSwitch{Enabled: true, IntervalSeconds: 60},
@@ -218,6 +222,11 @@ func LoadForEdit(path string) (Config, error) {
 		}
 		return Config{}, err
 	}
+	if len(bytes.TrimSpace(b)) > 0 && !hasTopLevelKey(b, "apm") {
+		// Written before APM became opt-in: those agents ran with APM on by
+		// default and may be sending traces today, so keep that behaviour.
+		cfg.APM = legacyDefaultAPM()
+	}
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
@@ -234,6 +243,20 @@ func LoadForEdit(path string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// legacyDefaultAPM is the APM default shipped up to 1.12.9.
+func legacyDefaultAPM() APMConfig {
+	return APMConfig{Enabled: true, Profile: "combined", Environment: "prod", BindAddress: "127.0.0.1"}
+}
+
+func hasTopLevelKey(document []byte, key string) bool {
+	var fields map[string]yaml.Node
+	if err := yaml.Unmarshal(document, &fields); err != nil {
+		return false
+	}
+	_, ok := fields[key]
+	return ok
 }
 
 func migrateLegacyControllerURL(rawURL string, allowInsecure bool) (string, bool) {

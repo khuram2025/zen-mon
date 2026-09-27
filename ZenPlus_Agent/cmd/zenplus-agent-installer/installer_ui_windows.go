@@ -136,10 +136,10 @@ func (u *setupWindow) run() error {
 		u.machineScope.SetChecked(defaultMachine)
 	}
 	if u.profileCombined != nil {
-		u.profileCombined.SetChecked(u.opts.profile == "" || u.opts.profile == "combined")
+		u.profileCombined.SetChecked(u.opts.profile == "combined")
 	}
 	if u.profileInfrastructure != nil {
-		u.profileInfrastructure.SetChecked(u.opts.profile == "infrastructure")
+		u.profileInfrastructure.SetChecked(u.opts.profile == "" || u.opts.profile == "infrastructure")
 	}
 	if u.profileAPM != nil {
 		u.profileAPM.SetChecked(u.opts.profile == "apm")
@@ -214,10 +214,10 @@ func (u *setupWindow) settingsPanel() Widget {
 	}
 	profile := u.opts.profile
 	if profile == "" {
-		if u.opts.apmMode == "disabled" {
-			profile = "infrastructure"
-		} else {
+		if u.opts.apmMode == "enabled" {
 			profile = "combined"
+		} else {
+			profile = "infrastructure"
 		}
 	}
 	u.opts.profile = profile
@@ -229,8 +229,8 @@ func (u *setupWindow) settingsPanel() Widget {
 			Label{Text: "Controller URL or IP address", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9, Bold: true}},
 			LineEdit{AssignTo: &u.controllerURL, CueBanner: config.DefaultControllerURL, Text: controllerValue, Background: SolidColorBrush{Color: setupField}, TextColor: setupText, MinSize: Size{Height: 30}},
 			Label{Text: "Monitoring profile", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9, Bold: true}},
-			RadioButton{AssignTo: &u.profileCombined, Text: "Server monitoring + APM (recommended)"},
-			RadioButton{AssignTo: &u.profileInfrastructure, Text: "Server monitoring only"},
+			RadioButton{AssignTo: &u.profileCombined, Text: "Server monitoring + APM"},
+			RadioButton{AssignTo: &u.profileInfrastructure, Text: "Server monitoring only (recommended)"},
 			RadioButton{AssignTo: &u.profileAPM, Text: "APM only (keeps agent health and inventory)"},
 			TextLabel{Text: "Every package includes the managed OpenTelemetry gateway plus offline .NET, Java, Node.js, and Python assets. ZenPlus can manage IIS/.NET, Java, and Node Windows-service instrumentation; Python and other applications can send OTLP to 127.0.0.1:4317/4318.", MinSize: Size{Width: 560, Height: 48}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
 			TextLabel{Text: "During an upgrade or removal, Setup briefly stops only application pools and Windows services already managed by ZenPlus, then restores their prior running state. Windows itself is never restarted.", MinSize: Size{Width: 560, Height: 34}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},

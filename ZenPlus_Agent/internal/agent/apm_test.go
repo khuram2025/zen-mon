@@ -44,6 +44,9 @@ func TestExecuteCommandRejectsInstrumentationWhenAPMDisabled(t *testing.T) {
 
 func TestCapabilitiesAdvertiseInstrumentationOnlyWhenUsable(t *testing.T) {
 	cfg := config.Default()
+	if err := config.ApplyProfile(&cfg, "combined"); err != nil {
+		t.Fatal(err)
+	}
 	privileged := capabilitiesForConfig(cfg, true)
 	if !containsCapability(privileged, "apm_iis_instrumentation_v1") || !containsCapability(privileged, "apm_windows_service_instrumentation_v1") {
 		t.Fatalf("privileged combined profile is missing instrumentation capabilities: %v", privileged)

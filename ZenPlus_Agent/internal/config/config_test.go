@@ -303,3 +303,63 @@ func TestLegacyEventLogChannelsAndLevelsRemainSupported(t *testing.T) {
 		t.Fatalf("legacy event-log policy changed: %#v", loaded.Collectors.EventLog)
 	}
 }
+
+func TestAPMIsOptInForNewInstalls(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	for name, cfg := range map[string]func() (Config, error){
+		"default":      func() (Config, error) { return Default(), nil },
+		"missing file": func() (Config, error) { return LoadForEdit(path) },
+		"empty file": func() (Config, error) {
+			if err := os.WriteFile(path, []byte("\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return LoadForEdit(path)
+		},
+	} {
+		got, err := cfg()
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got.APM.Enabled || got.APM.Profile != "infrastructure" {
+			t.Fatalf("%s: APM = %+v, want disabled infrastructure profile", name, got.APM)
+		}
+	}
+}
+
+func TestExistingConfigWithoutAPMSectionKeepsLegacyAPMDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	if err := os.WriteFile(path, []byte("controller_url: https://appliance.example\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadForEdit(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.APM.Enabled || got.APM.Profile != "combined" {
+		t.Fatalf("upgraded pre-opt-in config lost APM: %+v", got.APM)
+	}
+}
+
+func TestExplicitAPMSectionIsRespected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	for _, tc := range []struct {
+		yaml    string
+		enabled bool
+		profile string
+	}{
+		{"apm:\n  enabled: false\n  profile: infrastructure\n", false, "infrastructure"},
+		{"apm:\n  enabled: true\n  profile: combined\n", true, "combined"},
+		{"apm:\n  enabled: true\n  profile: apm\n", true, "apm"},
+	} {
+		if err := os.WriteFile(path, []byte("controller_url: https://appliance.example\n"+tc.yaml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, err := LoadForEdit(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.APM.Enabled != tc.enabled || got.APM.Profile != tc.profile {
+			t.Fatalf("%q loaded as %+v", tc.yaml, got.APM)
+		}
+	}
+}

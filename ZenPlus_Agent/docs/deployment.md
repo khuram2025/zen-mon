@@ -130,7 +130,11 @@ are aliases for `/quiet`; `/allusers` means `/machine`, and `/currentuser`
 means `/user`. `--controller-url`, `/controller`, `CONTROLLER_URL=...`,
 `--profile`, `INSTALL_PROFILE=...`, `CONTROLLER_CA_FILE=...`, `/log path`,
 `/no-start-menu` and `/norestart` are supported. Profiles are `combined`,
-`infrastructure` and `apm`. The log's parent directory must already exist.
+`infrastructure` and `apm`. A fresh install without a profile uses
+`infrastructure` (server monitoring only; APM is opt-in). An upgrade keeps the
+installed profile; a config written before APM became opt-in and with no `apm`
+section keeps its previous `combined` behaviour. The log's parent directory
+must already exist.
 Unknown switches/properties and conflicting scope choices return an error.
 
 MSI deployment supports standard Windows Installer logging and UI switches:
