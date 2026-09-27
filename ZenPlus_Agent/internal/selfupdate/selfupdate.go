@@ -48,6 +48,10 @@ var (
 
 const retryCooldown = time.Hour
 
+// MaxPackageBytes caps any agent package. The combined APM release is about
+// 230 MB; the ceiling leaves headroom without letting a manifest fill a disk.
+const MaxPackageBytes int64 = 512 << 20
+
 // publicUpdateBaseURL is the vendor-controlled, TLS-only update channel. It
 // may be replaced at build time for staging with -X, but enrollment secrets
 // are never part of this URL or the public manifest.
@@ -262,6 +266,11 @@ func PreparePackage(ctx context.Context, c *client.Client, m Manifest) (path str
 	if err := normalizeManifest(&m); err != nil {
 		return "", err
 	}
+	// The declared size bounds the download, so it must be present and sane
+	// before a single byte is written to disk.
+	if m.FileSize <= 0 || m.FileSize > MaxPackageBytes {
+		return "", fmt.Errorf("package size %d is outside the accepted range 1..%d bytes", m.FileSize, MaxPackageBytes)
+	}
 	stagingDir, err := os.MkdirTemp("", "zenplus-agent-update-")
 	if err != nil {
 		return "", err
@@ -272,17 +281,15 @@ func PreparePackage(ctx context.Context, c *client.Client, m Manifest) (path str
 		}
 	}()
 	pkgPath := filepath.Join(stagingDir, m.FileName)
-	if err := c.Download(ctx, m.DownloadURL, pkgPath); err != nil {
+	if err := c.Download(ctx, m.DownloadURL, pkgPath, m.FileSize); err != nil {
 		return "", fmt.Errorf("download package: %w", err)
 	}
-	if m.FileSize > 0 {
-		info, err := os.Stat(pkgPath)
-		if err != nil {
-			return "", err
-		}
-		if info.Size() != m.FileSize {
-			return "", fmt.Errorf("package size mismatch: manifest %d, downloaded %d", m.FileSize, info.Size())
-		}
+	info, err := os.Stat(pkgPath)
+	if err != nil {
+		return "", err
+	}
+	if info.Size() != m.FileSize {
+		return "", fmt.Errorf("package size mismatch: manifest %d, downloaded %d", m.FileSize, info.Size())
 	}
 	sum, err := sha256File(pkgPath)
 	if err != nil {

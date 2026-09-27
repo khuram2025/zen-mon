@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -156,7 +157,7 @@ func TestAuthenticationHeadersNeverLeaveControllerAuthority(t *testing.T) {
 	if _, _, err := c.GetJSON(context.Background(), "/redirect", "", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Download(context.Background(), externalServer.URL+"/download", filepath.Join(t.TempDir(), "package.bin")); err != nil {
+	if err := c.Download(context.Background(), externalServer.URL+"/download", filepath.Join(t.TempDir(), "package.bin"), 1<<20); err != nil {
 		t.Fatal(err)
 	}
 
@@ -172,5 +173,26 @@ func TestAuthenticationHeadersNeverLeaveControllerAuthority(t *testing.T) {
 		if got.authorization != "" || got.agentID != "" {
 			t.Errorf("request %s leaked controller auth: Authorization=%q X-Agent-Id=%q", got.path, got.authorization, got.agentID)
 		}
+	}
+}
+
+func TestDownloadRejectsBodyOverLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(make([]byte, 2048))
+	}))
+	defer server.Close()
+	c, err := New(server.URL, "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "package.bin")
+	if err := c.Download(context.Background(), "/pkg", dest, 1024); !errors.Is(err, ErrDownloadTooLarge) {
+		t.Fatalf("oversized download error = %v, want ErrDownloadTooLarge", err)
+	}
+	if _, err := os.Stat(dest); !os.IsNotExist(err) {
+		t.Fatalf("oversized download left a file behind: %v", err)
+	}
+	if err := c.Download(context.Background(), "/pkg", dest, 2048); err != nil {
+		t.Fatalf("download at exactly the limit failed: %v", err)
 	}
 }

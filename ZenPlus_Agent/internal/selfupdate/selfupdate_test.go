@@ -27,6 +27,9 @@ func TestPreparePackageRejectsFailuresAndCleansStaging(t *testing.T) {
 	}{
 		{"HTTP error", 503, int64(len(body)), digest, "503"},
 		{"truncated download", 200, int64(len(body) + 1), digest, "size mismatch"},
+		{"body longer than declared", 200, int64(len(body) - 1), digest, "exceeds the maximum allowed size"},
+		{"missing size", 200, 0, digest, "outside the accepted range"},
+		{"oversized manifest", 200, MaxPackageBytes + 1, digest, "outside the accepted range"},
 		{"wrong checksum", 200, int64(len(body)), strings.Repeat("a", 64), "checksum mismatch"},
 		{"unsigned installer", 200, int64(len(body)), digest, "signature verification failed"},
 	} {

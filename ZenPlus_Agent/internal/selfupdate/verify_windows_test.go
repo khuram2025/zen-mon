@@ -6,6 +6,7 @@ import (
 	"debug/pe"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -65,5 +66,50 @@ func TestVerifyPackageSignatureReleaseIntegration(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Uses signed binaries already present on the host: the installed ZenPlus
+// agent must pass the publisher pin and any other vendor's validly signed EXE
+// must fail it, even though Windows trusts both.
+func TestVerifyPackageSignaturePinsPublisher(t *testing.T) {
+	zenplus := `C:\Program Files\ZenPlus\Agent\zenplus-agent.exe`
+	if _, err := os.Stat(zenplus); err == nil {
+		if err := verifyPackageSignature(zenplus); err != nil {
+			t.Errorf("installed ZenPlus agent rejected: %v", err)
+		}
+	} else {
+		t.Log("no installed ZenPlus agent; skipping the positive case")
+	}
+	others := []string{
+		`C:\Program Files\PuTTY\plink.exe`,
+		`C:\Program Files\Git\git-bash.exe`,
+		`C:\Program Files\nodejs\node.exe`,
+		`C:\Program Files\Mozilla Firefox\firefox.exe`,
+		`C:\Program Files\Google\Chrome\Application\chrome.exe`,
+	}
+	checked := 0
+	for _, path := range others {
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		if err := verifyPackageSignatureWithPolicy(path, signerPolicy{}); err == nil {
+			t.Errorf("%s accepted with an empty publisher policy", path)
+		}
+		err := verifyPackageSignature(path)
+		if err == nil {
+			t.Errorf("%s (another publisher) passed the ZenPlus publisher pin", path)
+			continue
+		}
+		if strings.Contains(err.Error(), "does not trust") {
+			continue // not validly signed on this host; says nothing about the pin
+		}
+		if !strings.Contains(err.Error(), "publisher is not trusted") {
+			t.Errorf("%s rejected for an unexpected reason: %v", path, err)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Skip("no validly signed third-party executable found on this host")
 	}
 }
