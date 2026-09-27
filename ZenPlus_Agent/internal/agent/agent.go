@@ -210,9 +210,13 @@ func Run(ctx context.Context, opts Options) error {
 		ctx, timeout = context.WithTimeout(ctx, opts.Duration)
 		defer timeout()
 	}
+	// Deferred after apmManager.Close so the worker stops first.
+	apmReconciles := startAPMWorker(ctx, apmManager)
+	defer apmReconciles.Close()
 	if enrollment.Enrolled {
-		apmManager.Reconcile(ctx, cfg, enrollment.Identity.AgentID, enrollment.Identity.ServerID, up.Client())
-		status.LocalAPM = apmManager.Snapshot()
+		apmReconciles.Submit(apmReconcileRequest{
+			cfg: cfg, agentID: enrollment.Identity.AgentID, serverID: enrollment.Identity.ServerID, api: up.Client(),
+		})
 	}
 
 	sup := newSupervisor()
@@ -331,7 +335,10 @@ func Run(ctx context.Context, opts Options) error {
 			if enrollment.Enrolled && up != nil {
 				apmClient = up.Client()
 			}
-			apmManager.Reconcile(ctx, cfg, enrollment.Identity.AgentID, enrollment.Identity.ServerID, apmClient)
+			apmReconciles.Submit(apmReconcileRequest{
+				cfg: cfg, agentID: enrollment.Identity.AgentID, serverID: enrollment.Identity.ServerID, api: apmClient,
+			})
+			// Reports the most recent completed reconcile.
 			status.LocalAPM = apmManager.Snapshot()
 		}
 		uploadEnabled := enrollment.Enrolled && !sup.authFailed

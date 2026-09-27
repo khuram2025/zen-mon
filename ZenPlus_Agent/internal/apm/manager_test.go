@@ -847,3 +847,56 @@ func TestQuoteYAMLEscapesCollectorExpansion(t *testing.T) {
 		}
 	}
 }
+
+func TestCredentialEnrollmentFailuresBackOffAndLogOnce(t *testing.T) {
+	paths := agentruntime.NewPaths(t.TempDir())
+	if err := paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts.Add(1)
+		http.Error(w, "appliance busy", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	api, err := client.New(server.URL, "", true, "agent-a", "agent-api-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs atomic.Int32
+	m := New(paths, func(format string, _ ...any) {
+		if strings.HasPrefix(format, "APM: %s") {
+			logs.Add(1)
+		}
+	})
+	cfg := config.Default()
+	cfg.ControllerURL = server.URL
+	if err := config.ApplyProfile(&cfg, "combined"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		m.Reconcile(context.Background(), cfg, "agent-a", "server-a", api)
+	}
+	if got := posts.Load(); got != 1 {
+		t.Fatalf("appliance was asked for a credential %d times in one backoff window, want 1", got)
+	}
+	if got := logs.Load(); got != 1 {
+		t.Fatalf("persistent credential failure logged %d times, want 1", got)
+	}
+	if state := m.Snapshot().State; state != "credential_error" {
+		t.Fatalf("state = %q, want credential_error", state)
+	}
+
+	// Once the backoff expires the next reconcile retries.
+	m.credentialRetryAt = time.Now().Add(-time.Second)
+	m.Reconcile(context.Background(), cfg, "agent-a", "server-a", api)
+	if got := posts.Load(); got != 2 {
+		t.Fatalf("expired backoff did not retry: posts = %d", got)
+	}
+
+	// A new binding (re-enrollment) must not inherit the old backoff.
+	m.Reconcile(context.Background(), cfg, "agent-b", "server-b", api)
+	if got := posts.Load(); got != 3 {
+		t.Fatalf("new binding waited on the previous binding's backoff: posts = %d", got)
+	}
+}

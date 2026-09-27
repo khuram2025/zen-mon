@@ -22,6 +22,7 @@ import (
 
 	"github.com/shirou/gopsutil/v4/process"
 
+	"zenplus-agent/internal/backoff"
 	"zenplus-agent/internal/client"
 	"zenplus-agent/internal/config"
 	"zenplus-agent/internal/model"
@@ -69,7 +70,13 @@ type rotatingGatewayLog struct {
 
 type Manager struct {
 	reconcileMu                 sync.Mutex
+	instrumentMu                sync.Mutex // serializes instrumentation state changes
 	mu                          sync.Mutex
+	credentialRetryAt           time.Time
+	credentialBackoff           *backoff.Backoff
+	credentialBindingKey        string
+	credentialErr               error
+	loggedFailureState          string
 	paths                       agentruntime.Paths
 	installDir                  string
 	cmd                         *exec.Cmd
@@ -120,9 +127,10 @@ type discoveredProcess struct {
 func New(paths agentruntime.Paths, logf func(string, ...any)) *Manager {
 	exe, _ := os.Executable()
 	return &Manager{
-		paths:      paths,
-		installDir: filepath.Dir(exe),
-		logf:       logf,
+		paths:             paths,
+		credentialBackoff: backoff.New(10*time.Second, 10*time.Minute),
+		installDir:        filepath.Dir(exe),
+		logf:              logf,
 		status: model.AgentAPMHeartbeat{
 			State: "disabled", Gateway: model.APMGatewayStatus{Managed: true, GRPCPort: 4317, HTTPPort: 4318},
 			CheckedAt: time.Now().UTC(), Bundles: map[string]string{},
@@ -214,33 +222,57 @@ func (m *Manager) ensureCredential(ctx context.Context, api *client.Client, bind
 	if api == nil {
 		return credentialMaterial{}, false, fmt.Errorf("APM enrollment client is unavailable")
 	}
+	// Reconcile runs every few seconds. While the appliance is unreachable or
+	// refusing APM enrollment, retry on an exponential schedule instead of
+	// holding a connection attempt open on every pass.
+	bindingKey := fmt.Sprint(binding)
+	if bindingKey != m.credentialBindingKey {
+		m.credentialBindingKey = bindingKey
+		m.credentialRetryAt = time.Time{}
+		m.credentialBackoff.Reset()
+	}
+	if time.Now().Before(m.credentialRetryAt) && m.credentialErr != nil {
+		return credentialMaterial{}, false, m.credentialErr
+	}
+	credential, err := m.requestCredential(ctx, api, binding)
+	if err != nil {
+		m.credentialErr = err
+		m.credentialRetryAt = time.Now().Add(m.credentialBackoff.Next())
+		return credentialMaterial{}, false, err
+	}
+	m.credentialErr = nil
+	m.credentialRetryAt = time.Time{}
+	m.credentialBackoff.Reset()
+	return credential, true, nil
+}
 
+func (m *Manager) requestCredential(ctx context.Context, api *client.Client, binding credentialBinding) (credentialMaterial, error) {
 	// A cached key without matching metadata belongs to an unknown or previous
 	// context. Stop the old gateway before the controller revokes that key and
 	// issues its replacement so telemetry cannot cross bindings.
 	if err := m.stopAndWait("credential_refresh", gatewayStopTimeout); err != nil {
-		return credentialMaterial{}, false, err
+		return credentialMaterial{}, err
 	}
-	m.logf("APM credential binding is missing or changed; requesting a replacement")
+	m.logf("APM: requesting an appliance-managed ingest credential")
 	var response enrollResponse
 	_, _, err := api.PostJSON(ctx, "/api/v1/agents/apm/enroll", map[string]string{"environment": binding.Environment}, &response)
 	if err != nil {
-		return credentialMaterial{}, false, fmt.Errorf("obtain appliance-managed APM credential: %w", err)
+		return credentialMaterial{}, fmt.Errorf("obtain appliance-managed APM credential: %w", err)
 	}
 	response.Key = strings.TrimSpace(response.Key)
 	response.KeyID = strings.TrimSpace(response.KeyID)
 	response.Environment = strings.TrimSpace(response.Environment)
 	if !strings.HasPrefix(response.Key, "zpi_") || response.KeyID == "" {
-		return credentialMaterial{}, false, fmt.Errorf("controller returned an invalid APM credential")
+		return credentialMaterial{}, fmt.Errorf("controller returned an invalid APM credential")
 	}
 	if response.Environment != binding.Environment {
-		return credentialMaterial{}, false, fmt.Errorf("controller returned APM environment %q, expected %q", response.Environment, binding.Environment)
+		return credentialMaterial{}, fmt.Errorf("controller returned APM environment %q, expected %q", response.Environment, binding.Environment)
 	}
 	credential, err := persistBoundCredential(m.paths, binding, response.KeyID, response.Key)
 	if err != nil {
-		return credentialMaterial{}, false, err
+		return credentialMaterial{}, err
 	}
-	return credential, true, nil
+	return credential, nil
 }
 
 func (m *Manager) ensureConfig(cfg config.Config, agentID, serverID string) (string, bool, error) {
@@ -867,11 +899,17 @@ func (m *Manager) stopAndWait(state string, timeout time.Duration) error {
 
 func (m *Manager) setFailure(state, message string) {
 	m.mu.Lock()
+	// Reconcile repeats every few seconds; log a failure when it first
+	// appears or changes, not on every pass while it persists.
+	repeated := m.loggedFailureState == state && m.status.LastError == message
+	m.loggedFailureState = state
 	m.status.State = state
 	m.status.LastError = message
 	m.status.CheckedAt = time.Now().UTC()
 	m.mu.Unlock()
-	m.logf("APM: %s", message)
+	if !repeated {
+		m.logf("APM: %s", message)
+	}
 }
 
 func (m *Manager) detectBundles() map[string]string {
@@ -899,12 +937,17 @@ func (m *Manager) reportDiscovery(ctx context.Context, api *client.Client) {
 	}
 	m.lastDiscovery = time.Now()
 	m.mu.Unlock()
+	// Reconcile runs on its own goroutine, so a controller instrumentation
+	// command can arrive while the crash-loop guard is rolling a target back.
+	// Both rewrite the instrumentation state; take them one at a time.
+	m.instrumentMu.Lock()
 	instrumentation := m.loadInstrumentationState()
 	rows := discoverProcessesWithState(instrumentation)
 	if m.guardInstrumentationCrashLoops(ctx, rows) {
 		instrumentation = m.loadInstrumentationState()
 		rows = discoverProcessesWithState(instrumentation)
 	}
+	m.instrumentMu.Unlock()
 	var accepted struct {
 		Accepted int `json:"accepted"`
 	}
