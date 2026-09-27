@@ -244,6 +244,9 @@ class AgentResponse(BaseModel):
     config_apply_error: Optional[str]
     capabilities: List[str] = Field(default_factory=list)
     apm_status: Dict[str, Any] = Field(default_factory=dict)
+    # Latest progress of an appliance-requested upgrade (see AgentUpdateStatus);
+    # empty when the agent has not reported one.
+    update_status: Dict[str, Any] = Field(default_factory=dict)
     tags: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
@@ -345,6 +348,15 @@ class ApplianceAPMStatus(BaseModel):
     checked_at: datetime
 
 
+class AgentUpdateStatus(BaseModel):
+    """Progress of an upgrade the appliance requested (agents 1.14.1+)."""
+    state: Literal["requested", "downloading", "installing", "succeeded", "failed"]
+    target_version: str = Field(max_length=64)
+    from_version: Optional[str] = Field(default=None, max_length=64)
+    error: Optional[str] = Field(default=None, max_length=1000)
+    updated_at: Optional[datetime] = None
+
+
 class AgentHeartbeatRequest(BaseModel):
     version: str
     uptime_seconds: Optional[int] = None
@@ -358,6 +370,8 @@ class AgentHeartbeatRequest(BaseModel):
     # Optional for rollback compatibility; APM-capable agents always send the
     # complete block, including zero-valued counters.
     apm: Optional[AgentAPMHeartbeat] = None
+    # Absent from agents before 1.14.1 and when no upgrade was requested.
+    update: Optional[AgentUpdateStatus] = None
 
 
 class AgentHeartbeatResponse(BaseModel):

@@ -48,3 +48,9 @@ def download_path(platform: str, flavor: str) -> str:
     """Stable download URL for the latest package of one flavour."""
     path = f"/api/v1/agents/packages/{platform}/latest"
     return path if flavor == FLAVOR_FULL else f"{path}?flavor={flavor}"
+
+
+def versioned_download_path(platform: str, flavor: str, version: str) -> str:
+    """Download URL for one published version, used for pinned upgrades."""
+    path = f"/api/v1/agents/packages/{platform}/versions/{version}"
+    return path if flavor == FLAVOR_FULL else f"{path}?flavor={flavor}"

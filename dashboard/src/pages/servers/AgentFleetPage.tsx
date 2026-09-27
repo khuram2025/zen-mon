@@ -129,6 +129,21 @@ export function AgentFleetPage() {
   const [bulkPolicy, setBulkPolicy] = useState('')
   const [bulkRing, setBulkRing] = useState<UpdateRing>('stable')
   const [bulkVersion, setBulkVersion] = useState('')
+  // Upgrades install a package this appliance serves, so offer exactly the
+  // published Windows versions, newest first.
+  const { data: packageList } = useQuery<{ items: { platform: string; version: string }[] }>({
+    queryKey: ['agent-packages'],
+    queryFn: async () => (await api.get('/agent-fleet/packages')).data,
+    enabled: bulkAction === 'trigger_upgrade',
+  })
+  const publishedVersions = Array.from(new Set(
+    (packageList?.items ?? []).filter((p) => p.platform === 'windows').map((p) => p.version),
+  )).sort(compareVersionsDesc)
+  useEffect(() => {
+    if (bulkAction === 'trigger_upgrade' && publishedVersions.length > 0 && !publishedVersions.includes(bulkVersion)) {
+      setBulkVersion(publishedVersions[0])
+    }
+  }, [bulkAction, publishedVersions.join(','), bulkVersion])
   const [confirmDisable, setConfirmDisable] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<AgentItem | null>(null)
   const [revokeTarget, setRevokeTarget] = useState<AgentItem | null>(null)
@@ -473,13 +488,22 @@ export function AgentFleetPage() {
                 </Select>
               )}
               {bulkAction === 'trigger_upgrade' && (
-                <Input
-                  className="h-8 w-[130px]"
-                  placeholder="e.g. 1.1.0"
-                  value={bulkVersion}
-                  onChange={(e) => setBulkVersion(e.target.value)}
-                  title="Target agent version"
-                />
+                publishedVersions.length > 0 ? (
+                  <Select value={bulkVersion} onValueChange={setBulkVersion}>
+                    <SelectTrigger className="h-8 w-[150px]" title="Versions published on this appliance">
+                      <SelectValue placeholder="Version" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {publishedVersions.map((v, i) => (
+                        <SelectItem key={v} value={v}>{v}{i === 0 ? ' (latest)' : ''}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <span className="text-xs text-muted">
+                    No Windows agent package is published on this appliance.
+                  </span>
+                )
               )}
               <Button size="sm" onClick={applyBulk} disabled={applyDisabled}>
                 {bulk.isPending ? 'Applying…' : 'Apply'}
@@ -579,6 +603,7 @@ export function AgentFleetPage() {
                             → {agent.desired_version}
                           </span>
                         )}
+                        <AgentUpdateBadge status={agent.update_status} version={agent.version} />
                       </Td>
                       <Td>
                         <div className="flex items-center gap-1.5">
@@ -881,6 +906,59 @@ export function AgentFleetPage() {
       />
     </div>
   )
+}
+
+function compareVersionsDesc(a: string, b: string): number {
+  const parts = (v: string) => v.split('-')[0].split('.').map((n) => Number.parseInt(n, 10) || 0)
+  const pa = parts(a)
+  const pb = parts(b)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pb[i] ?? 0) - (pa[i] ?? 0)
+    if (d !== 0) return d
+  }
+  return 0
+}
+
+// A successful upgrade stays visible for a day, then the version speaks for itself.
+const UPDATE_SUCCESS_VISIBLE_MS = 24 * 60 * 60 * 1000
+
+function AgentUpdateBadge({ status, version }: { status: AgentItem['update_status']; version: string | null }) {
+  if (!status?.state || !status.target_version) return null
+  const when = status.updated_at ? ` · ${relativeTime(status.updated_at)}` : ''
+  switch (status.state) {
+    case 'requested':
+    case 'downloading':
+    case 'installing':
+      return (
+        <div className="mt-1">
+          <Badge variant="warning" title={`Upgrade from ${status.from_version || version || 'current'} requested by this appliance${when}`}>
+            <RefreshCw className="h-3 w-3 animate-spin" />
+            {status.state === 'installing' ? 'Installing' : 'Downloading'} {status.target_version}
+          </Badge>
+        </div>
+      )
+    case 'failed':
+      return (
+        <div className="mt-1">
+          <Badge variant="danger" title={`${status.error || 'The upgrade failed'}${when}`}>
+            <AlertTriangle className="h-3 w-3" /> Update to {status.target_version} failed
+          </Badge>
+        </div>
+      )
+    case 'succeeded': {
+      const at = status.updated_at ? Date.parse(status.updated_at) : NaN
+      if (version !== status.target_version || !(Date.now() - at < UPDATE_SUCCESS_VISIBLE_MS)) return null
+      return (
+        <div className="mt-1">
+          <Badge variant="success" title={`Upgraded from ${status.from_version || 'the previous version'}${when}`}>
+            <CheckCircle2 className="h-3 w-3" /> Updated
+          </Badge>
+        </div>
+      )
+    }
+    default:
+      return null
+  }
 }
 
 function AgentApmStatusBadge({ status }: { status: AgentItem['apm_status'] }) {

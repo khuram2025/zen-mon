@@ -31,6 +31,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -60,7 +61,11 @@ from app.schemas.agent import (
     NetworkCaptureUpload,
 )
 from app.services import package_digest
-from app.services.agent_package_names import FLAVOR_FULL, FLAVOR_PATTERN
+from app.services.agent_package_names import (
+    FLAVOR_FULL,
+    FLAVOR_PATTERN,
+    versioned_download_path,
+)
 from app.services.host_metric_service import (
     HOST_TELEMETRY_KINDS,
     HostMetricStorageError,
@@ -248,6 +253,14 @@ def _package_media_type(file_name: str) -> str:
     if lowered.endswith(".tar.gz"):
         return "application/gzip"
     return "application/octet-stream"
+
+
+VERSION_PATTERN = r"^[vV]?\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+)?$"
+_VERSION_RE = re.compile(VERSION_PATTERN)
+
+
+def _bare_version(version: str) -> str:
+    return version.lstrip("vV")
 
 
 def _verified_package_path(platform: str, package: dict) -> Path:
@@ -875,6 +888,13 @@ async def heartbeat(
                   apm_status = CASE WHEN :apm_present
                                     THEN CAST(:apm AS jsonb)
                                     ELSE apm_status END,
+                  update_status = CASE WHEN :upd_present
+                                       THEN CAST(:upd AS jsonb)
+                                       ELSE update_status END,
+                  -- A reached target is no longer desired. Clearing it stops
+                  -- the fleet view showing a pending upgrade.
+                  desired_version = CASE WHEN ltrim(desired_version, 'vV') = ltrim(CAST(:v AS TEXT), 'vV')
+                                         THEN NULL ELSE desired_version END,
                   last_ip = COALESCE(:ip, last_ip),
                   status = CASE WHEN status IN ('disabled') THEN status ELSE 'online' END,
                   updated_at = NOW()
@@ -886,6 +906,8 @@ async def heartbeat(
             "caps": json.dumps(capabilities or []),
             "apm_present": data.apm is not None,
             "apm": json.dumps(data.apm.model_dump(mode="json") if data.apm else {}),
+            "upd_present": data.update is not None,
+            "upd": json.dumps(data.update.model_dump(mode="json") if data.update else {}),
             "ip": client_ip, "id": agent["id"],
         },
     )
@@ -928,39 +950,6 @@ async def heartbeat(
         {"id": agent["id"]},
     )).mappings().first()
     etag, _ = await _config_etag_for_agent(dict(fresh_agent), db)
-
-    # This field was introduced after the host heartbeat contract. Returning it
-    # is backward-compatible (older agents ignore unknown response fields) and
-    # lets newer combined agents distinguish a healthy local gateway from an
-    # unavailable appliance writer during rolling upgrades.
-    from app.api.v1 import apm_ingest as apm_ingest_api
-
-    agent_credential_bound = False
-    if data.apm is not None and data.apm.enabled:
-        credential_row = (await db.execute(
-            text("""SELECT EXISTS (
-                        SELECT 1 FROM agent_apm_credentials credential
-                        JOIN apm_ingest_keys ingest_key
-                          ON ingest_key.id = credential.key_id
-                        WHERE credential.agent_id = :agent_id
-                          AND ingest_key.enabled = TRUE
-                          AND ingest_key.revoked_at IS NULL
-                    )"""),
-            {"agent_id": agent["id"]},
-        )).first()
-        agent_credential_bound = bool(credential_row and credential_row[0])
-    appliance_apm = apm_ingest_api.runtime_status()
-    appliance_apm["agent_credential_bound"] = agent_credential_bound
-    appliance_apm["ready_for_agent"] = bool(
-        appliance_apm.get("available") and agent_credential_bound
-    )
-    if data.apm is not None and data.apm.enabled and not agent_credential_bound:
-        if appliance_apm.get("state") != "unavailable":
-            appliance_apm["state"] = "degraded"
-        appliance_apm["message"] = (
-            "APM is not ready for this agent because it has no scoped ingest "
-            "credential; re-enroll the agent APM forwarder"
-        )
 
     # This field was introduced after the host heartbeat contract. Returning it
     # is backward-compatible (older agents ignore unknown response fields) and
@@ -1482,18 +1471,28 @@ async def packages_manifest(
     # Agents before 1.13 send no flavour and all carry the APM bundle, so the
     # default must stay the full package.
     flavor: str = Query(FLAVOR_FULL, regex=FLAVOR_PATTERN),
+    # An upgrade the appliance requested names its version; agents 1.14.1+
+    # ask for exactly that package instead of the newest one.
+    version: Optional[str] = Query(None, regex=VERSION_PATTERN),
     db: AsyncSession = Depends(get_db),
 ):
-    row = (await db.execute(
-        text("""SELECT * FROM agent_packages
-                WHERE platform = :p AND channel = :c AND arch = :a AND flavor = :fl
-                  AND is_latest = TRUE
-                ORDER BY released_at DESC LIMIT 1"""),
-        {"p": platform, "c": channel, "a": arch, "fl": flavor},
-    )).mappings().first()
-    if not row:
-        raise HTTPException(404, f"No {flavor} package published for this platform/channel/arch yet")
-    await asyncio.to_thread(_verified_package_path, platform, dict(row))
+    if version:
+        row = await _package_version(platform, db, _bare_version(version), arch, flavor)
+        if not row:
+            raise HTTPException(
+                404, f"Version {version} of the {flavor} package is not published on this appliance")
+    else:
+        row = (await db.execute(
+            text("""SELECT * FROM agent_packages
+                    WHERE platform = :p AND channel = :c AND arch = :a AND flavor = :fl
+                      AND is_latest = TRUE
+                    ORDER BY released_at DESC LIMIT 1"""),
+            {"p": platform, "c": channel, "a": arch, "fl": flavor},
+        )).mappings().first()
+        if not row:
+            raise HTTPException(404, f"No {flavor} package published for this platform/channel/arch yet")
+        row = dict(row)
+    await asyncio.to_thread(_verified_package_path, platform, row)
     return {
         "platform": platform,
         "channel": channel,
@@ -1510,7 +1509,10 @@ async def packages_manifest(
         # manifest contract explicit for every supported client generation.
         "requires_authenticode": platform == "windows",
         "released_at": row["released_at"],
-        "download_url": row["download_path"],
+        "download_url": (
+            versioned_download_path(platform, flavor, row["version"])
+            if version else row["download_path"]
+        ),
     }
 
 
@@ -1532,6 +1534,43 @@ async def _latest_package(
     return dict(row) if row else None
 
 
+async def _package_version(
+    platform: str, db: AsyncSession, version: str, arch: str = "amd64",
+    flavor: str = FLAVOR_FULL,
+) -> Optional[dict]:
+    """One published version, whether or not it is the newest.
+
+    A version quarantined for hash drift is still found here; serving it is
+    refused by _verified_package_path, which re-hashes the file.
+    """
+    row = (await db.execute(
+        text("""SELECT * FROM agent_packages
+                WHERE platform = :p AND arch = :a AND channel = 'stable'
+                  AND flavor = :fl AND version = :v
+                LIMIT 1"""),
+        {"p": platform, "a": arch, "fl": flavor, "v": version},
+    )).mappings().first()
+    return dict(row) if row else None
+
+
+@router.get("/packages/{platform}/versions/{version}")
+async def download_package_version(
+    platform: str,
+    version: str,
+    arch: str = Query("amd64"),
+    flavor: str = Query(FLAVOR_FULL, regex=FLAVOR_PATTERN),
+    db: AsyncSession = Depends(get_db),
+):
+    if platform not in ("windows", "linux", "macos"):
+        raise HTTPException(404, "Unknown platform")
+    if not _VERSION_RE.match(version):
+        raise HTTPException(404, "Unknown version")
+    pkg = await _package_version(platform, db, _bare_version(version), arch, flavor)
+    if not pkg:
+        raise HTTPException(404, f"Version {version} of the {platform} {flavor} package is not published")
+    return await _package_file_response(platform, pkg)
+
+
 @router.get("/packages/{platform}/latest")
 async def download_latest_package(
     platform: str,
@@ -1548,6 +1587,10 @@ async def download_latest_package(
             f"No {platform} {flavor} agent package published. Drop the package into "
             f"{AGENT_PKG_DIR}/{platform}/ and publish it from the Agent Fleet page.",
         )
+    return await _package_file_response(platform, pkg)
+
+
+async def _package_file_response(platform: str, pkg: dict) -> FileResponse:
     file_path = await asyncio.to_thread(_verified_package_path, platform, pkg)
     media = _package_media_type(pkg["file_name"])
     return FileResponse(file_path, media_type=media, filename=pkg["file_name"],

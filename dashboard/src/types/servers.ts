@@ -161,6 +161,9 @@ export interface AgentItem {
     checked_at?: string | null
     last_error?: string | null
   }
+  // Progress of an upgrade requested from Agent Fleet, reported by agents
+  // 1.14.1+. Empty when none has been reported.
+  update_status?: AgentUpdateStatus
   tags: string[]
   created_at: string
   updated_at: string
@@ -396,4 +399,12 @@ export interface ComplianceSummary {
   missing: number
   outdated: number
   prohibited: number
+}
+
+export interface AgentUpdateStatus {
+  state?: 'requested' | 'downloading' | 'installing' | 'succeeded' | 'failed'
+  target_version?: string
+  from_version?: string | null
+  error?: string | null
+  updated_at?: string | null
 }

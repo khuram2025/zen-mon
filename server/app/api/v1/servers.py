@@ -1134,6 +1134,7 @@ def _agent_response(row: dict) -> AgentResponse:
         config_apply_error=row.get("config_apply_error"),
         capabilities=[str(v) for v in _json_list(row.get("capabilities"))],
         apm_status=_apm_status_with_binding(row),
+        update_status=_json_object(row.get("update_status")),
         tags=list(tags) if isinstance(tags, (list, tuple)) else [],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -3219,6 +3220,21 @@ async def fleet_bulk_action(
             {"r": data.update_ring, "ids": ids},
         )
     elif data.action == "trigger_upgrade":
+        if data.target_version:
+            # Agents download the target from this appliance, so an unknown
+            # or mistyped version would only fail later on every host.
+            published = (await db.execute(
+                text("""SELECT 1 FROM agent_packages
+                        WHERE version = :v AND channel = 'stable' LIMIT 1"""),
+                {"v": data.target_version.strip().lstrip("vV")},
+            )).first()
+            if not published:
+                raise HTTPException(
+                    400,
+                    f"Agent version {data.target_version} is not published on this appliance. "
+                    "Copy its packages to the artifact store first.",
+                )
+            data.target_version = data.target_version.strip().lstrip("vV")
         await db.execute(
             text("""UPDATE agents SET desired_version = COALESCE(:v, desired_version), updated_at = NOW()
                     WHERE id = ANY(:ids)"""),
