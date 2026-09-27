@@ -59,6 +59,7 @@ from app.schemas.agent import (
     AgentResultsResponse,
     NetworkCaptureUpload,
 )
+from app.services import package_digest
 from app.services.host_metric_service import (
     HOST_TELEMETRY_KINDS,
     HostMetricStorageError,
@@ -259,11 +260,7 @@ def _verified_package_path(platform: str, package: dict) -> Path:
     if not file_path.is_file():
         raise HTTPException(410, "Published package file is missing on disk")
 
-    digest = hashlib.sha256()
-    with file_path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    actual_sha = digest.hexdigest()
+    actual_sha = package_digest.sha256_file(file_path)
     actual_size = file_path.stat().st_size
     if actual_sha != str(package["sha256"]).lower() or actual_size != int(package["file_size"]):
         logger.error(

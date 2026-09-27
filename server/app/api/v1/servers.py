@@ -31,6 +31,7 @@ from app.api.v1.apm import invalidate_ingest_key_cache
 from app.core import scoping
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.services import package_digest
 from app.services.tag_service import canonicalize_tags
 from app.core.security import get_current_user, require_operator_user
 from app.services.filesystem_monitoring import pg_capacity_filter
@@ -2473,11 +2474,7 @@ def _version_key(v: str):
 
 
 def _sha256_file(path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return package_digest.sha256_file(path)
 
 
 async def sync_agent_packages(db: AsyncSession) -> dict:
@@ -2511,7 +2508,8 @@ async def sync_agent_packages(db: AsyncSession) -> dict:
             m = _PKG_NAME_RE.match(f.name)
             if not m:
                 continue
-            found.append((m.group(1), f.name, f.stat().st_size, _sha256_file(f)))
+            digest = await asyncio.to_thread(_sha256_file, f)
+            found.append((m.group(1), f.name, f.stat().st_size, digest))
 
         if not found:
             continue
@@ -2656,7 +2654,7 @@ async def publish_agent_packages(
             if not version:
                 skipped.append(f"{platform}/{f.name}")
                 continue
-            digest = _sha256_file(f)
+            digest = await asyncio.to_thread(_sha256_file, f)
             candidates.append((version, f.name, f.stat().st_size, digest))
         if not candidates:
             continue
