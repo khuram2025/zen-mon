@@ -121,4 +121,10 @@ above remain build-host measurements, not production load measurements.
 Post-validation host incident: VMware Workstation became unresponsive and all
 three running VMs stopped answering network requests. Restarting the host UI
 preserved guest processes but did not restore access. Final live health checks
-are pending VMware recovery; no forced guest reset has been performed.
+subsequently passed after network recovery. At 10:05 UTC, both agents were
+online and authorized with fresh metrics and healthy, ready APM gateways.
+A duplicate hidden Workstation UI process held Clone 3's configuration lock;
+closing that UI restored its console to the Windows lock screen. No forced
+guest reset or lock-file deletion was performed. Appliance core/full EXE
+downloads also matched release hashes; three package-list calls took
+33.9, 30.2 and 30.3 ms from the local host.
