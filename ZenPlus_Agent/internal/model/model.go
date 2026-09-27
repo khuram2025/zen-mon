@@ -68,6 +68,8 @@ type Heartbeat struct {
 	ConfigHash       string             `json:"config_hash,omitempty"`
 	ConfigApplyError string             `json:"config_apply_error,omitempty"`
 	APM              *AgentAPMHeartbeat `json:"apm,omitempty"`
+	// Update reports the progress of a controller-requested upgrade.
+	Update *UpdateStatus `json:"update,omitempty"`
 }
 
 type APMGatewayStatus struct {
@@ -310,6 +312,17 @@ type Status struct {
 	ClockSkewSeconds         float64            `json:"clock_skew_seconds,omitempty"`
 	NextRetryAt              *time.Time         `json:"next_retry_at,omitempty"`
 	UpgradeState             string             `json:"upgrade_state,omitempty"`
+	Update                   *UpdateStatus      `json:"update,omitempty"`
 	APM                      *APMStatus         `json:"apm,omitempty"`
 	LocalAPM                 *AgentAPMHeartbeat `json:"local_apm,omitempty"`
+}
+
+// UpdateStatus is the agent's view of a controller-requested upgrade.
+// State is one of requested, downloading, installing, succeeded or failed.
+type UpdateStatus struct {
+	State         string    `json:"state"`
+	TargetVersion string    `json:"target_version"`
+	FromVersion   string    `json:"from_version,omitempty"`
+	Error         string    `json:"error,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }

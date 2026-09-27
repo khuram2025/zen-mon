@@ -33,7 +33,7 @@ func TestExecuteCommandRejectsInstrumentationWhenAPMDisabled(t *testing.T) {
 		t.Run(command, func(t *testing.T) {
 			result := executeCommand(
 				context.Background(), model.Command{Command: command}, &cfg,
-				nil, runtime.Paths{}, nil, nil, nil, enroll.Result{}, nil, func(string, ...any) {},
+				nil, runtime.Paths{}, nil, nil, nil, enroll.Result{}, nil, nil, func(string, ...any) {},
 			)
 			if result.Success || !strings.Contains(result.ErrorMessage, "APM disabled") {
 				t.Fatalf("unexpected result: %#v", result)

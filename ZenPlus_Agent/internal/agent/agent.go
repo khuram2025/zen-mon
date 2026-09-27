@@ -43,6 +43,8 @@ type supervisor struct {
 	enrollNotBefore time.Time // no enrollment attempt before this
 	authFailed      bool
 	lastSkewLogged  time.Duration
+	// updates tracks controller-requested upgrades across restarts.
+	updates *updateTracker
 }
 
 const pendingAuthorizationPollInterval = 30 * time.Second
@@ -229,6 +231,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	sup := newSupervisor()
+	sup.updates = newUpdateTracker(paths.StateDir, paths.LogDir, model.AgentVersion)
 	if !enrollment.Enrolled && enrollment.AuthorizationState != "" {
 		sup.enrollNotBefore = time.Now().UTC().Add(pendingAuthorizationPollInterval)
 		next := sup.enrollNotBefore
@@ -812,8 +815,10 @@ func sendHeartbeat(ctx context.Context, cfg config.Config, store *spool.Store, u
 		ConfigHash:       config.Hash(cfg),
 		ConfigApplyError: status.LastConfigError,
 		APM:              localAPM,
+		Update:           sup.updates.Status(),
 	}
 	status.LocalAPM = hb.APM
+	status.Update = hb.Update
 	resp, err := up.SendHeartbeat(ctx, hb)
 	status.LastHeartbeat = &now
 	if err != nil {
@@ -948,55 +953,29 @@ func handleHeartbeatResponse(ctx context.Context, hb *model.HeartbeatResponse, c
 	if hb.ConfigETag != "" && hb.ConfigETag != cfg.ConfigETag {
 		pollConfig(ctx, cfg, poller, status, logf)
 	}
-	if hb.DesiredVersion != nil && *hb.DesiredVersion != "" && *hb.DesiredVersion != model.AgentVersion {
-		logf("controller requested desired_version=%s (running %s); starting self-update", *hb.DesiredVersion, model.AgentVersion)
-		status.UpgradeState = "requested " + *hb.DesiredVersion
-		startSelfUpdate(ctx, up, cfg.UpdateRing, logf)
+	if hb.DesiredVersion != nil && *hb.DesiredVersion != "" && *hb.DesiredVersion != model.AgentVersion && sup.updates != nil {
+		sup.updates.Request(ctx, up.Client(), cfg.UpdateRing, *hb.DesiredVersion, logf)
 	}
 	if hb.HasCommands {
-		handleCommands(ctx, cfg, poller, paths, store, up, status, enrollment, apmManager, logf)
+		handleCommands(ctx, cfg, poller, paths, store, up, status, enrollment, apmManager, sup.updates, logf)
 	}
 }
 
-// startSelfUpdate checks the controller's package manifest and, when a newer
-// version is published, downloads + verifies + installs it in the background.
-// selfupdate itself serializes attempts and enforces a per-version cooldown.
-func startSelfUpdate(ctx context.Context, up *uploader.Uploader, channel string, logf func(string, ...any)) {
-	go func() {
-		m, err := selfupdate.FetchPublishedManifest(ctx, up.Client(), channel, selfupdate.InstalledFlavor())
-		if err != nil {
-			logf("self-update: manifest fetch failed: %v", err)
-			return
-		}
-		if m.LatestVersion == model.AgentVersion {
-			logf("self-update: already running the published version %s", model.AgentVersion)
-			return
-		}
-		if !selfupdate.IsNewer(m.LatestVersion, model.AgentVersion) {
-			logf("self-update: ignoring published version %s because running version %s is newer", m.LatestVersion, model.AgentVersion)
-			return
-		}
-		if err := selfupdate.Apply(ctx, up.Client(), m, model.AgentVersion, logf); err != nil {
-			logf("self-update to %s failed: %v", m.LatestVersion, err)
-		}
-	}()
-}
-
-func handleCommands(ctx context.Context, cfg *config.Config, poller *configpoller.Poller, paths runtime.Paths, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, apmManager *apmruntime.Manager, logf func(string, ...any)) {
+func handleCommands(ctx context.Context, cfg *config.Config, poller *configpoller.Poller, paths runtime.Paths, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, apmManager *apmruntime.Manager, updates *updateTracker, logf func(string, ...any)) {
 	commands, err := up.PollCommands(ctx)
 	if err != nil {
 		logf("command poll failed: %v", err)
 		return
 	}
 	for _, cmd := range commands {
-		result := executeCommand(ctx, cmd, cfg, poller, paths, store, up, status, enrollment, apmManager, logf)
+		result := executeCommand(ctx, cmd, cfg, poller, paths, store, up, status, enrollment, apmManager, updates, logf)
 		if err := up.SendCommandResult(ctx, cmd.ID, result); err != nil {
 			logf("command result failed command_id=%s: %v", cmd.ID, err)
 		}
 	}
 }
 
-func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, poller *configpoller.Poller, paths runtime.Paths, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, apmManager *apmruntime.Manager, logf func(string, ...any)) model.CommandResult {
+func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, poller *configpoller.Poller, paths runtime.Paths, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, apmManager *apmruntime.Manager, updates *updateTracker, logf func(string, ...any)) model.CommandResult {
 	if cmd.ExpiresAt != nil && time.Now().UTC().After(*cmd.ExpiresAt) {
 		return model.CommandResult{Success: false, ErrorMessage: "command expired before execution"}
 	}
@@ -1130,30 +1109,31 @@ func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, 
 	case "restart_agent":
 		return model.CommandResult{Success: false, ErrorMessage: "restart_agent requires service-manager integration and is not enabled in this foreground command handler"}
 	case "upgrade_agent":
-		manifest, err := selfupdate.FetchPublishedManifest(ctx, up.Client(), cfg.UpdateRing, selfupdate.InstalledFlavor())
-		if err != nil {
-			return model.CommandResult{Success: false, ErrorMessage: "package manifest unavailable: " + err.Error()}
+		// An explicit version is installed exactly; without one the agent
+		// takes the latest package the appliance publishes for its flavour.
+		target, _ := cmd.Params["version"].(string)
+		target = strings.TrimSpace(target)
+		if target == "" {
+			manifest, err := selfupdate.FetchPublishedManifest(ctx, up.Client(), cfg.UpdateRing, selfupdate.InstalledFlavor())
+			if err != nil {
+				return model.CommandResult{Success: false, ErrorMessage: "package manifest unavailable: " + err.Error()}
+			}
+			target = manifest.LatestVersion
 		}
-		if manifest.LatestVersion == model.AgentVersion {
+		if target == model.AgentVersion {
 			return model.CommandResult{Success: true, Output: map[string]any{
-				"status":  "already at published version",
+				"status":  "already running the requested version",
 				"version": model.AgentVersion,
 			}}
 		}
-		if target, ok := cmd.Params["version"].(string); ok && target != "" && target != manifest.LatestVersion {
-			logf("upgrade_agent requested version %s but the published manifest serves %s; installing the published version", target, manifest.LatestVersion)
+		if updates == nil {
+			return model.CommandResult{Success: false, ErrorMessage: "self-update is unavailable in this run mode"}
 		}
-		status.UpgradeState = "installing " + manifest.LatestVersion
-		go func() {
-			if err := selfupdate.Apply(ctx, up.Client(), manifest, model.AgentVersion, logf); err != nil {
-				logf("self-update to %s failed: %v", manifest.LatestVersion, err)
-			}
-		}()
+		updates.Request(ctx, up.Client(), cfg.UpdateRing, target, logf)
 		return model.CommandResult{Success: true, Output: map[string]any{
-			"status":       "upgrade started",
+			"status":       "upgrade requested",
 			"from_version": model.AgentVersion,
-			"to_version":   manifest.LatestVersion,
-			"file_name":    manifest.FileName,
+			"to_version":   target,
 		}}
 	default:
 		return model.CommandResult{Success: false, ErrorMessage: "unsupported command: " + cmd.Command}

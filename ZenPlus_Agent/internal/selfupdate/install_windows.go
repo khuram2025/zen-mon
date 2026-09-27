@@ -15,13 +15,21 @@ import (
 // launchInstaller starts the package installer detached from this process.
 // The installer stops the ZenPlusAgent service, replaces the binaries, and
 // starts the service again, so we must not wait on it.
-func launchInstaller(pkgPath string) error {
+func launchInstaller(pkgPath, logPath string) error {
 	var cmd *exec.Cmd
 	switch {
 	case strings.HasSuffix(strings.ToLower(pkgPath), ".msi"):
-		cmd = exec.Command("msiexec.exe", "/i", pkgPath, "/qn", "/norestart")
+		args := []string{"/i", pkgPath, "/qn", "/norestart"}
+		if logPath != "" {
+			args = append(args, "/L*v", logPath)
+		}
+		cmd = exec.Command("msiexec.exe", args...)
 	case strings.HasSuffix(strings.ToLower(pkgPath), ".exe"):
-		cmd = exec.Command(pkgPath, "/machine", "/quiet", "/norestart")
+		args := []string{"/machine", "/quiet", "/norestart"}
+		if logPath != "" {
+			args = append(args, "/log", logPath)
+		}
+		cmd = exec.Command(pkgPath, args...)
 	default:
 		return fmt.Errorf("unsupported package type: %s", pkgPath)
 	}

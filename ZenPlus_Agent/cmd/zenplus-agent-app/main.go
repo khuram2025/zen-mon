@@ -1033,7 +1033,12 @@ func (a *appUI) applySnapshot(snap appstate.Snapshot) {
 		}
 	}
 	a.set(a.versionStatus, "v"+model.AgentVersion+" stable")
-	if a.updateStatus != nil && (a.updateStatus.Text() == "" || a.updateStatus.Text() == "-") {
+	if text, tone, ok := applianceUpdateText(snap.Status); ok {
+		// An upgrade the appliance requested takes precedence over the
+		// public "update available" check.
+		a.set(a.updateStatus, text)
+		a.color(a.updateStatus, toneColor(tone))
+	} else if a.updateStatus != nil && (a.updateStatus.Text() == "" || a.updateStatus.Text() == "-") {
 		a.set(a.updateStatus, "Not checked")
 		a.color(a.updateStatus, muted)
 	}
@@ -1396,4 +1401,23 @@ func (a *appUI) setTrayStatus(status brand.Status) {
 	if a.tray.SetIcon(icon) == nil {
 		a.trayStatus = status
 	}
+}
+
+// applianceUpdateText describes an upgrade requested by the appliance.
+func applianceUpdateText(status *model.Status) (string, string, bool) {
+	if status == nil || status.Update == nil {
+		return "", "", false
+	}
+	u := status.Update
+	switch u.State {
+	case "downloading", "requested":
+		return "Downloading " + u.TargetVersion, "warn", true
+	case "installing":
+		return "Installing " + u.TargetVersion, "warn", true
+	case "failed":
+		return "Update to " + u.TargetVersion + " failed", "bad", true
+	case "succeeded":
+		return "Updated from " + u.FromVersion, "ok", true
+	}
+	return "", "", false
 }

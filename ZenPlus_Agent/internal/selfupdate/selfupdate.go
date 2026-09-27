@@ -141,6 +141,11 @@ func archName() string {
 // FetchManifest asks the enrolled controller which agent version is published.
 // It remains available as a compatibility fallback for private deployments.
 func FetchManifest(ctx context.Context, c *client.Client, channel, flavor string) (Manifest, error) {
+	return fetchControllerManifest(ctx, c, channel, flavor, "")
+}
+
+// fetchControllerManifest asks for the latest package, or for version when set.
+func fetchControllerManifest(ctx context.Context, c *client.Client, channel, flavor, version string) (Manifest, error) {
 	if channel == "" {
 		channel = "stable"
 	}
@@ -149,6 +154,9 @@ func FetchManifest(ctx context.Context, c *client.Client, channel, flavor string
 	}
 	endpoint := fmt.Sprintf("/api/v1/agents/packages/manifest?platform=%s&channel=%s&arch=%s&flavor=%s",
 		platformName(), url.QueryEscape(channel), archName(), url.QueryEscape(flavor))
+	if version != "" {
+		endpoint += "&version=" + url.QueryEscape(version)
+	}
 	var m Manifest
 	if _, _, err := c.GetJSON(ctx, endpoint, "", &m); err != nil {
 		return Manifest{}, err
@@ -294,6 +302,12 @@ func numericVersion(value string) []int {
 // this process). It refuses to re-attempt the same version more often than
 // once per hour so a broken package cannot cause an install loop.
 func Apply(ctx context.Context, c *client.Client, m Manifest, currentVersion string, logf func(string, ...any)) error {
+	return ApplyWithLog(ctx, c, m, currentVersion, "", logf)
+}
+
+// ApplyWithLog is Apply with the installer writing its log to logPath, so a
+// failed upgrade can be diagnosed and reported after the agent restarts.
+func ApplyWithLog(ctx context.Context, c *client.Client, m Manifest, currentVersion, logPath string, logf func(string, ...any)) error {
 	if m.LatestVersion == currentVersion {
 		return nil
 	}
@@ -324,7 +338,7 @@ func Apply(ctx context.Context, c *client.Client, m Manifest, currentVersion str
 		return err
 	}
 	logf("self-update: checksum and signature verified; launching installer for %s", m.LatestVersion)
-	if err := launchInstaller(pkgPath); err != nil {
+	if err := launchInstaller(pkgPath, logPath); err != nil {
 		_ = os.RemoveAll(filepath.Dir(pkgPath))
 		return fmt.Errorf("launch installer: %w", err)
 	}
@@ -402,4 +416,27 @@ func sha256File(path string) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// ErrVersionUnavailable reports that the requested version is not published
+// in the installed flavour.
+var ErrVersionUnavailable = errors.New("the requested agent version is not published")
+
+// FetchPublishedVersion returns the package of exactly version. The appliance
+// is asked for that version; the public channel is used only when its
+// latest release is that version (older controllers ignore the version
+// query and answer with their latest package, which is then rejected).
+func FetchPublishedVersion(ctx context.Context, c *client.Client, channel, flavor, version string) (Manifest, error) {
+	m, controllerErr := fetchControllerManifest(ctx, c, channel, flavor, version)
+	if controllerErr == nil && m.LatestVersion == version {
+		return m, nil
+	}
+	public, publicErr := FetchPublicManifest(ctx, c, channel, flavor)
+	if publicErr == nil && public.LatestVersion == version {
+		return public, nil
+	}
+	if controllerErr == nil {
+		controllerErr = fmt.Errorf("appliance offered %s", m.LatestVersion)
+	}
+	return Manifest{}, fmt.Errorf("%w (%s %s): %v", ErrVersionUnavailable, flavor, version, controllerErr)
 }
