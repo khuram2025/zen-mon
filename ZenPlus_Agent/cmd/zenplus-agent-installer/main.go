@@ -424,9 +424,7 @@ func validateEmbeddedPayloadsForFlavor(payloads []payloadFile, includesAPM bool)
 	}
 	serverFiles := []string{
 		"zenplus-agent.exe",
-		"zenplus-agentctl.exe",
 		"zenplus-agent-app.exe",
-		"zenplus-agent-user.exe",
 	}
 	if !includesAPM {
 		for _, name := range serverFiles {
@@ -1211,9 +1209,20 @@ func configureInstalledServiceRecovery() error {
 	return nil
 }
 
+// userRunnerCommand is the per-user background agent: the dashboard binary
+// in --run-agent mode. An installation from before 1.13 (for example one
+// restored by a rolled-back upgrade) still has its own zenplus-agent-user.exe.
+func userRunnerCommand(l layout) (string, []string) {
+	legacy := filepath.Join(l.InstallDir, "zenplus-agent-user.exe")
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy, []string{"--config", l.ConfigPath}
+	}
+	return filepath.Join(l.InstallDir, "zenplus-agent-app.exe"), []string{"--run-agent", "--config", l.ConfigPath}
+}
+
 func launchUserRunner(l layout) error {
-	runner := filepath.Join(l.InstallDir, "zenplus-agent-user.exe")
-	cmd := exec.Command(runner, "--config", l.ConfigPath)
+	runner, args := userRunnerCommand(l)
+	cmd := exec.Command(runner, args...)
 	cmd.SysProcAttr = detachedSysProcAttr()
 	return cmd.Start()
 }
@@ -1423,8 +1432,8 @@ func createStartupShortcut(l layout) error {
 		return err
 	}
 	if l.Scope == "user" {
-		runner := filepath.Join(l.InstallDir, "zenplus-agent-user.exe")
-		return createShortcut(filepath.Join(l.StartupDir, "ZenPlus Agent Background.lnk"), runner, "--config "+quote(l.ConfigPath), l.InstallDir, productName+" Background")
+		runner, args := userRunnerCommand(l)
+		return createShortcut(filepath.Join(l.StartupDir, "ZenPlus Agent Background.lnk"), runner, quoteArgs(args), l.InstallDir, productName+" Background")
 	}
 	return nil
 }
@@ -1510,6 +1519,18 @@ func installedSizeKB(path string) (int, error) {
 
 func quote(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
+}
+
+func quoteArgs(args []string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "--") {
+			quoted[i] = arg
+			continue
+		}
+		quoted[i] = quote(arg)
+	}
+	return strings.Join(quoted, " ")
 }
 
 func scopeArg(l layout) string {

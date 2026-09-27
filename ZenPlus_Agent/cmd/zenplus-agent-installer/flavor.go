@@ -54,3 +54,9 @@ func requireFlavorSupportsConfig(cfg config.Config, managedTargets int) error {
 // uninstallerPayloadName is the payload entry, in canonical lower case, that
 // carries the payload-free setup build installed as ZenPlusAgentSetup.exe.
 const uninstallerPayloadName = "zenplusagentsetup.exe"
+
+// agentctlShimName keeps the zenplus-agentctl command name working now that
+// its subcommands live in zenplus-agent.exe.
+const agentctlShimName = "zenplus-agentctl.cmd"
+
+const agentctlShim = "@\"%~dp0zenplus-agent.exe\" %*\r\n"

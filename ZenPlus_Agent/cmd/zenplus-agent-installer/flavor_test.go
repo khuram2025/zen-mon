@@ -97,3 +97,36 @@ func TestStagingUsesPayloadUninstallerInsteadOfCopyingSetup(t *testing.T) {
 		t.Fatalf("staged uninstaller is %d bytes, want the payload uninstaller, not a copy of setup", len(got))
 	}
 }
+
+func TestUserRunnerUsesDashboardBinaryUnlessLegacyRunnerExists(t *testing.T) {
+	dir := t.TempDir()
+	l := layout{InstallDir: dir, ConfigPath: `C:\Users\me\AppData\Local\ZenPlus\Agent\config\agent.yaml`}
+	runner, args := userRunnerCommand(l)
+	if filepath.Base(runner) != "zenplus-agent-app.exe" || args[0] != "--run-agent" {
+		t.Fatalf("runner = %s %v, want the dashboard binary in --run-agent mode", runner, args)
+	}
+	if got := quoteArgs(args); got != `--run-agent --config "`+l.ConfigPath+`"` {
+		t.Fatalf("shortcut arguments = %s", got)
+	}
+	// A rolled-back upgrade restores a pre-1.13 install with its own runner.
+	if err := os.WriteFile(filepath.Join(dir, "zenplus-agent-user.exe"), []byte("legacy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner, args = userRunnerCommand(l)
+	if filepath.Base(runner) != "zenplus-agent-user.exe" || args[0] != "--config" {
+		t.Fatalf("legacy install runner = %s %v", runner, args)
+	}
+}
+
+func TestStagingWritesAgentctlShim(t *testing.T) {
+	root := t.TempDir()
+	stage, err := stageInstallPayloads(layout{InstallDir: filepath.Join(root, "ZenPlus", "Agent")}, coreTestPayloads())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(stage)
+	got, err := os.ReadFile(filepath.Join(stage, agentctlShimName))
+	if err != nil || !strings.Contains(string(got), `zenplus-agent.exe" %*`) {
+		t.Fatalf("agentctl shim = %q, %v", got, err)
+	}
+}

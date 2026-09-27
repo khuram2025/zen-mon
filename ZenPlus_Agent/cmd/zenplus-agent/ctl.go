@@ -1,12 +1,14 @@
 package main
 
+// Local administration commands, formerly the separate zenplus-agentctl.exe.
+// That program linked the same packages as the agent itself, so it cost a
+// second ~8 MB binary for a handful of subcommands. The installer adds a
+// zenplus-agentctl.cmd shim so existing scripts keep working.
+
 import (
-	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
 	"zenplus-agent/internal/agent"
@@ -15,78 +17,45 @@ import (
 	"zenplus-agent/internal/model"
 )
 
-func main() {
-	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-}
-
-func run() error {
-	cmd := "status"
-	if len(os.Args) > 1 {
-		cmd = os.Args[1]
-	}
+// runCtlCommand handles the administration subcommands and reports whether
+// cmd was one of them.
+func runCtlCommand(cmd string, args []string) (bool, error) {
 	switch cmd {
 	case "status":
 		fs := flag.NewFlagSet("status", flag.ExitOnError)
 		configPath := fs.String("config", config.DefaultConfigPath, "agent config path")
 		jsonOut := fs.Bool("json", false, "print raw JSON")
-		_ = fs.Parse(os.Args[2:])
+		_ = fs.Parse(args)
 		status, err := agent.ReadStatus(*configPath)
 		if err != nil {
-			return err
+			return true, err
 		}
 		if *jsonOut {
 			b, _ := json.MarshalIndent(status, "", "  ")
 			fmt.Println(string(b))
-			return nil
+			return true, nil
 		}
 		printStatus(status)
-		return nil
-	case "collect-now":
-		fs := flag.NewFlagSet("collect-now", flag.ExitOnError)
-		configPath := fs.String("config", config.DefaultConfigPath, "agent config path")
-		timeout := fs.Duration("timeout", 45*time.Second, "collection timeout")
-		_ = fs.Parse(os.Args[2:])
-		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-		defer cancel()
-		return agent.CollectNow(ctx, *configPath)
+		return true, nil
 	case "print-config":
 		fs := flag.NewFlagSet("print-config", flag.ExitOnError)
 		configPath := fs.String("config", config.DefaultConfigPath, "agent config path")
-		_ = fs.Parse(os.Args[2:])
-		return agent.PrintConfig(*configPath)
+		_ = fs.Parse(args)
+		return true, agent.PrintConfig(*configPath)
 	case "service-status":
 		printServiceStatus(appstate.ReadServiceSnapshot())
-		return nil
+		return true, nil
 	case "reset-enrollment":
 		fs := flag.NewFlagSet("reset-enrollment", flag.ExitOnError)
 		configPath := fs.String("config", config.DefaultConfigPath, "agent config path")
 		force := fs.Bool("force", false, "reset without confirmation")
-		_ = fs.Parse(os.Args[2:])
+		_ = fs.Parse(args)
 		if !*force {
-			return fmt.Errorf("reset-enrollment requires --force")
+			return true, fmt.Errorf("reset-enrollment requires --force")
 		}
-		return agent.ResetEnrollment(*configPath)
-	case "register":
-		fs := flag.NewFlagSet("register", flag.ExitOnError)
-		configPath := fs.String("config", config.DefaultConfigPath, "agent config path")
-		timeout := fs.Duration("timeout", 45*time.Second, "registration timeout")
-		_ = fs.Parse(os.Args[2:])
-		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
-		defer cancel()
-		result, err := agent.RegisterNow(ctx, *configPath)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("registration_state=%s agent_id=%s server_id=%s\n", result.AuthorizationState, result.Identity.AgentID, result.Identity.ServerID)
-		return nil
-	case "version":
-		fmt.Println(model.AgentVersion)
-		return nil
+		return true, agent.ResetEnrollment(*configPath)
 	default:
-		return fmt.Errorf("unknown command %q\nusage: %s [status|collect-now|print-config|service-status|reset-enrollment|register|version]", cmd, filepath.Base(os.Args[0]))
+		return false, nil
 	}
 }
 

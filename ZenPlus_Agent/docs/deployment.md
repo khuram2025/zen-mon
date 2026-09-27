@@ -209,7 +209,7 @@ You can also force a registration poll from an elevated terminal:
 zenplus-agent.exe register
 ```
 
-`zenplus-agentctl.exe print-config` never prints the appliance-issued API key,
+`zenplus-agent.exe print-config` never prints the appliance-issued API key,
 and agent logging redacts credential and bearer values.
 
 For all-users installs, `%ProgramData%\ZenPlus\Agent` is restricted to

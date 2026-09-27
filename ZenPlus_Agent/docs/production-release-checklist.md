@@ -10,7 +10,6 @@ See `deployment.md` for the build → publish → install flow.
 - Confirm `go test ./...` passes.
 - Confirm these artifacts exist in `dist`:
   - `zenplus-agent.exe`
-  - `zenplus-agentctl.exe`
   - `zenplus-agent-app.exe`
   - `zenplus-agent-uninstaller.exe` (installed as `ZenPlusAgentSetup.exe`)
   - `ZenPlusAgentSetup-x64.exe`
@@ -87,7 +86,7 @@ See `deployment.md` for the build → publish → install flow.
 - Dashboard shows the current version and checks the public update channel at startup, every six hours, and on demand.
 - A valid signed newer release is offered; unsigned or checksum-invalid releases are blocked.
 - Only one dashboard/tray process runs per user session.
-- `zenplus-agentctl service-status` matches Services.msc.
+- `zenplus-agent service-status` (and the `zenplus-agentctl` shim) matches Services.msc.
 - Dashboard reports service stopped/degraded/healthy correctly.
 - Dashboard remains responsive during controller outage and spool growth.
 - During a controller outage, retries back off exponentially (no tight retry loop).
@@ -148,7 +147,7 @@ See `deployment.md` for the build → publish → install flow.
 - Verify config and state live under `%ProgramData%\ZenPlus\Agent`.
 - Verify credentials are stored with DPAPI and are not printed in logs/UI.
 - Verify installer and Settings expose no token, site, or policy input.
-- Verify `zenplus-agentctl print-config` and logs redact credential and bearer values.
+- Verify `zenplus-agent print-config` and logs redact credential and bearer values.
 - Review whether `LocalSystem` is still required for collectors before release.
 
 ## Release Notes

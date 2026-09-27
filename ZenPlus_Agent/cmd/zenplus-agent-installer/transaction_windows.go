@@ -136,6 +136,9 @@ func stageInstallPayloads(l layout, payloads []payloadFile) (string, error) {
 			return "", fmt.Errorf("stage installer payload %q: %w", payload.Name, err)
 		}
 	}
+	if err := os.WriteFile(filepath.Join(stage, agentctlShimName), []byte(agentctlShim), 0o644); err != nil {
+		return "", fmt.Errorf("stage %s: %w", agentctlShimName, err)
+	}
 	// Release builds ship a payload-free build of this setup program as the
 	// uninstaller. Keeping a copy of the full setup instead would leave the
 	// entire embedded product (hundreds of MB with APM) in Program Files.

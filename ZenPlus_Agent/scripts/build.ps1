@@ -341,14 +341,12 @@ try {
     Invoke-Rsrc -arch amd64 -ico "assets\zenplus-agent.ico" -manifest "cmd\zenplus-agent-installer\zenplus-agent-installer.manifest" -o "cmd\zenplus-agent-installer\rsrc.syso"
   }
   Invoke-Go build -trimpath -ldflags="-s -w$embedFlags" -o "dist\zenplus-agent.exe" ".\cmd\zenplus-agent"
-  Invoke-Go build -trimpath -ldflags="-s -w$embedFlags" -o "dist\zenplus-agentctl.exe" ".\cmd\zenplus-agentctl"
   Invoke-Go build -trimpath -ldflags="-s -w -H=windowsgui$embedFlags" -o "dist\zenplus-agent-app.exe" ".\cmd\zenplus-agent-app"
-  Invoke-Go build -trimpath -ldflags="-s -w -H=windowsgui$embedFlags" -o "dist\zenplus-agent-user.exe" ".\cmd\zenplus-agent-user"
+  # zenplus-agentctl and the per-user runner are now subcommands/modes of
+  # these two programs, which already linked the same packages.
   Invoke-SignArtifacts @(
     "dist\zenplus-agent.exe",
-    "dist\zenplus-agentctl.exe",
-    "dist\zenplus-agent-app.exe",
-    "dist\zenplus-agent-user.exe"
+    "dist\zenplus-agent-app.exe"
   )
   if (-not (Test-Path (Join-Path $apmStage "gateway\zenplus-telemetry-gateway.exe"))) {
     throw "The managed APM gateway is missing from $apmStage"
@@ -381,7 +379,7 @@ try {
     Remove-Item -Recurse -Force $payloadDir, $payloadZip -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $payloadDir | Out-Null
     try {
-      foreach ($binary in @("zenplus-agent.exe", "zenplus-agentctl.exe", "zenplus-agent-app.exe", "zenplus-agent-user.exe")) {
+      foreach ($binary in @("zenplus-agent.exe", "zenplus-agent-app.exe")) {
         Copy-Item -Force (Join-Path "dist" $binary) (Join-Path $payloadDir $binary)
       }
       Copy-Item -Force "dist\zenplus-agent-uninstaller.exe" (Join-Path $payloadDir "ZenPlusAgentSetup.exe")

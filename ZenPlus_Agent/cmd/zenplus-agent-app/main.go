@@ -94,8 +94,12 @@ func run() error {
 	applySettings := fs.Bool("apply-settings", false, "save controller and profile without installation")
 	controller := fs.String("controller", "", "controller address for settings save")
 	profile := fs.String("profile", "", "monitoring profile for settings save")
+	runAgent := fs.Bool("run-agent", false, "run the per-user background agent instead of the dashboard")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
+	}
+	if *runAgent {
+		return runUserAgent(*configPath)
 	}
 	if *applySettings {
 		err := saveSettingsFile(*configPath, *controller, *profile)
