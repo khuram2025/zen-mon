@@ -455,7 +455,7 @@ func (a *appUI) checkForUpdates(interactive bool) {
 		var manifest selfupdate.Manifest
 		if clientErr == nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			manifest, err = selfupdate.FetchPublicManifest(ctx, updateClient, cfg.UpdateRing)
+			manifest, err = selfupdate.FetchPublicManifest(ctx, updateClient, cfg.UpdateRing, selfupdate.InstalledFlavor())
 			cancel()
 		} else {
 			err = clientErr
@@ -741,9 +741,9 @@ func (a *appUI) showSettings() {
 				Background: SolidColorBrush{Color: surface},
 				Layout:     VBox{Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 9}, Spacing: 7},
 				Children: []Widget{
-					RadioButton{AssignTo: &profileCombined, Text: "Server monitoring + APM (recommended)"},
-					RadioButton{AssignTo: &profileInfrastructure, Text: "Server monitoring only"},
-					RadioButton{AssignTo: &profileAPM, Text: "APM only (agent health and inventory remain enabled)"},
+					RadioButton{AssignTo: &profileCombined, Text: "Server monitoring + APM" + apmPackageNote()},
+					RadioButton{AssignTo: &profileInfrastructure, Text: "Server monitoring only (recommended)"},
+					RadioButton{AssignTo: &profileAPM, Text: "APM only (agent health and inventory remain enabled)" + apmPackageNote()},
 					TextLabel{Text: "Server monitoring covers CPU, memory, storage, network, processes, services, Windows event logs, and inventory. APM uses the managed local OTLP gateway at 127.0.0.1:4317/4318.", TextColor: muted, MinSize: Size{Width: 520, Height: 43}, Font: Font{Family: "Segoe UI", PointSize: 9}},
 				},
 			},

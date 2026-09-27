@@ -818,8 +818,12 @@ func sendHeartbeat(ctx context.Context, cfg config.Config, store *spool.Store, u
 	return &resp, nil
 }
 
+// apmBundleInstalled is replaced in tests, whose binaries run from a
+// temporary directory without an installation next to them.
+var apmBundleInstalled = apmruntime.BundleInstalledWithAgent
+
 func capabilitiesForConfig(cfg config.Config, privileged bool) []string {
-	allowInstrumentation := privileged && cfg.APM.Enabled && cfg.APM.Profile != "infrastructure"
+	allowInstrumentation := privileged && cfg.APM.Enabled && cfg.APM.Profile != "infrastructure" && apmBundleInstalled()
 	capabilities := make([]string, 0, len(model.AgentCapabilities))
 	for _, capability := range model.AgentCapabilities {
 		if !allowInstrumentation && (capability == "apm_iis_instrumentation_v1" || capability == "apm_windows_service_instrumentation_v1") {
@@ -939,7 +943,7 @@ func handleHeartbeatResponse(ctx context.Context, hb *model.HeartbeatResponse, c
 // selfupdate itself serializes attempts and enforces a per-version cooldown.
 func startSelfUpdate(ctx context.Context, up *uploader.Uploader, channel string, logf func(string, ...any)) {
 	go func() {
-		m, err := selfupdate.FetchPublishedManifest(ctx, up.Client(), channel)
+		m, err := selfupdate.FetchPublishedManifest(ctx, up.Client(), channel, selfupdate.InstalledFlavor())
 		if err != nil {
 			logf("self-update: manifest fetch failed: %v", err)
 			return
@@ -1106,7 +1110,7 @@ func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, 
 	case "restart_agent":
 		return model.CommandResult{Success: false, ErrorMessage: "restart_agent requires service-manager integration and is not enabled in this foreground command handler"}
 	case "upgrade_agent":
-		manifest, err := selfupdate.FetchPublishedManifest(ctx, up.Client(), cfg.UpdateRing)
+		manifest, err := selfupdate.FetchPublishedManifest(ctx, up.Client(), cfg.UpdateRing, selfupdate.InstalledFlavor())
 		if err != nil {
 			return model.CommandResult{Success: false, ErrorMessage: "package manifest unavailable: " + err.Error()}
 		}

@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -38,6 +39,64 @@ type Manifest struct {
 	SignatureStatus      string    `json:"signature_status,omitempty"`
 	SigningSubject       string    `json:"signing_subject,omitempty"`
 	RequiresAuthenticode bool      `json:"requires_authenticode,omitempty"`
+	// Flavor names the package the fields above describe. Manifests written
+	// before the core/full split omit it; those packages all include APM.
+	Flavor string `json:"flavor,omitempty"`
+	// Flavors lists every package of this release by flavour.
+	Flavors map[string]Manifest `json:"flavors,omitempty"`
+}
+
+const (
+	// FlavorCore is the server-monitoring-only package.
+	FlavorCore = "core"
+	// FlavorFull adds the offline APM bundle.
+	FlavorFull = "full"
+)
+
+// ErrFlavorUnavailable reports a manifest that does not publish the flavour
+// this installation needs.
+var ErrFlavorUnavailable = errors.New("no package of the installed flavour is published")
+
+// InstalledFlavor reports which package flavour the running binaries belong
+// to. The full package installs the APM bundle next to the agent.
+func InstalledFlavor() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return FlavorFull
+	}
+	return flavorOfInstallDir(filepath.Dir(exe))
+}
+
+func flavorOfInstallDir(dir string) string {
+	if _, err := os.Stat(filepath.Join(dir, "apm", "bundle-manifest.json")); err == nil {
+		return FlavorFull
+	}
+	return FlavorCore
+}
+
+// selectFlavor returns the package of the requested flavour. Updating across
+// flavours would either silently remove APM from a server that uses it or add
+// ~200 MB of APM components to one that does not, so a manifest that cannot
+// name the right flavour is refused rather than guessed.
+func selectFlavor(m Manifest, flavor string) (Manifest, error) {
+	if flavor == "" {
+		flavor = FlavorFull
+	}
+	if entry, ok := m.Flavors[flavor]; ok {
+		entry.Flavor = flavor
+		entry.Flavors = nil
+		return entry, nil
+	}
+	top := m.Flavor
+	if top == "" {
+		top = FlavorFull // pre-split manifests only published full packages
+	}
+	if top != flavor {
+		return Manifest{}, fmt.Errorf("%w (%s)", ErrFlavorUnavailable, flavor)
+	}
+	m.Flavor = flavor
+	m.Flavors = nil
+	return m, nil
 }
 
 var (
@@ -81,14 +140,23 @@ func archName() string {
 
 // FetchManifest asks the enrolled controller which agent version is published.
 // It remains available as a compatibility fallback for private deployments.
-func FetchManifest(ctx context.Context, c *client.Client, channel string) (Manifest, error) {
+func FetchManifest(ctx context.Context, c *client.Client, channel, flavor string) (Manifest, error) {
 	if channel == "" {
 		channel = "stable"
 	}
-	endpoint := fmt.Sprintf("/api/v1/agents/packages/manifest?platform=%s&channel=%s&arch=%s",
-		platformName(), channel, archName())
+	if flavor == "" {
+		flavor = FlavorFull
+	}
+	endpoint := fmt.Sprintf("/api/v1/agents/packages/manifest?platform=%s&channel=%s&arch=%s&flavor=%s",
+		platformName(), url.QueryEscape(channel), archName(), url.QueryEscape(flavor))
 	var m Manifest
 	if _, _, err := c.GetJSON(ctx, endpoint, "", &m); err != nil {
+		return Manifest{}, err
+	}
+	// Controllers that predate flavours ignore the query and answer with
+	// their full package; selectFlavor refuses that answer for core installs.
+	m, err := selectFlavor(m, flavor)
+	if err != nil {
 		return Manifest{}, err
 	}
 	if err := normalizeManifest(&m); err != nil {
@@ -99,13 +167,17 @@ func FetchManifest(ctx context.Context, c *client.Client, channel string) (Manif
 
 // FetchPublicManifest reads the public, immutable Zentryc update channel.
 // Public packages must use HTTPS and remain on zentryc.com.
-func FetchPublicManifest(ctx context.Context, c *client.Client, channel string) (Manifest, error) {
+func FetchPublicManifest(ctx context.Context, c *client.Client, channel, flavor string) (Manifest, error) {
 	if channel == "" {
 		channel = "stable"
 	}
 	manifestURL := PublicUpdateBaseURL() + "/" + url.PathEscape(channel) + "/manifest.json"
 	var m Manifest
 	if _, _, err := c.GetJSON(ctx, manifestURL, "", &m); err != nil {
+		return Manifest{}, err
+	}
+	m, err := selectFlavor(m, flavor)
+	if err != nil {
 		return Manifest{}, err
 	}
 	if err := normalizeManifest(&m); err != nil {
@@ -124,12 +196,12 @@ func FetchPublicManifest(ctx context.Context, c *client.Client, channel string) 
 // checks and package downloads fully functional on private networks with no
 // internet route. The vendor channel is only a compatibility fallback when an
 // older controller does not expose an agent package manifest.
-func FetchPublishedManifest(ctx context.Context, c *client.Client, channel string) (Manifest, error) {
-	controllerManifest, controllerErr := FetchManifest(ctx, c, channel)
+func FetchPublishedManifest(ctx context.Context, c *client.Client, channel, flavor string) (Manifest, error) {
+	controllerManifest, controllerErr := FetchManifest(ctx, c, channel, flavor)
 	if controllerErr == nil {
 		return controllerManifest, nil
 	}
-	publicManifest, publicErr := FetchPublicManifest(ctx, c, channel)
+	publicManifest, publicErr := FetchPublicManifest(ctx, c, channel, flavor)
 	if publicErr == nil {
 		return publicManifest, nil
 	}

@@ -106,7 +106,7 @@ func TestPublicUpdateDownloadIntegration(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
-	manifest, err := FetchPublicManifest(ctx, api, "stable")
+	manifest, err := FetchPublicManifest(ctx, api, "stable", FlavorFull)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestFetchPublishedManifestUsesControllerWithoutInternet(t *testing.T) {
 	publicUpdateBaseURL = "http://127.0.0.1:1/unreachable"
 	defer func() { publicUpdateBaseURL = previous }()
 
-	manifest, err := FetchPublishedManifest(context.Background(), api, "stable")
+	manifest, err := FetchPublishedManifest(context.Background(), api, "stable", FlavorFull)
 	if err != nil {
 		t.Fatal(err)
 	}
