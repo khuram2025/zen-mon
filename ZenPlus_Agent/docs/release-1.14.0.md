@@ -3,8 +3,8 @@
 Windows x64, built 2026-09-27. Public Authenticode publisher: **Zentryc LLC**,
 issued through Microsoft Artifact Signing and timestamped by Microsoft.
 
-Performance release. Includes every 1.12.10 and 1.13.0 change. Not yet
-published to the stable channel or to any appliance.
+Performance release. Includes every 1.12.10 and 1.13.0 change. Published to
+the public stable channel and the validation appliance on 2026-09-27.
 
 ## Measured on the build host
 
@@ -82,7 +82,38 @@ Same configuration for both versions, steady state after start-up:
 | `zenplus-agent-1.14.0.exe` | 90790824 | `5574970ce124e74fab2e3da5af8a8db2a0b4b2f11fb047a49876c46412f66a24` |
 | `zenplus-agent-1.14.0.msi` | 92082176 | `355d875ae78b90706832d71bfe8a7374937ef28f37c53457895a24ae4878e158` |
 
-Limits: no live install or upgrade on a separate machine yet, and the
-controller changes (flavour migration, digest cache, gzip) are not deployed.
-Measurements come from foreground runs on the build host with an
-unreachable controller, not from a production server under load.
+## Live deployment validation — 2026-09-27
+
+- Installed the core EXE on two Windows Server 2025 VMs, then added APM at
+  the same version using the full MSI on one and the full EXE on the other.
+  Every installation exited successfully. Each VM has one installed product,
+  one agent process, one running automatic agent service, and one APM gateway.
+- The unsysprepped VMware clones shared the source Windows MachineGuid.
+  Gave them distinct hostnames and used the controller's reviewed
+  `register_clone` flow to authorize separate agent/server identities. The
+  source registration was preserved. Both new identities survived adding APM.
+- Both agents are online and authorized, send fresh heartbeats and host
+  metrics, and report healthy APM gateways with bound credentials. Verified
+  gzip `results/host` requests from both agents at the controller.
+- Sent a unique OTLP/HTTP protobuf trace through each local gateway and
+  verified its stored span and correct agent/server resource attributes in
+  ClickHouse and the trace API. This tests trace transport and attribution;
+  it does not certify every application instrumentation/runtime combination.
+- Core refuses to overwrite either active APM installation and leaves its
+  gateway running. Installed executable signatures validate on both VMs.
+- Deployed migration 122, package digest caching, flavour-aware endpoints,
+  gzip middleware and both dashboard download choices while preserving
+  appliance-local changes. 84 server tests, the strict dashboard build and
+  36 route checks passed before deployment.
+- Published all four immutable signed packages, the stable manifest and four
+  latest aliases on zentryc.com. Downloaded every public package and verified
+  its byte count and SHA-256. The appliance now advertises 1.14.0 for both
+  core and full packages, with no quarantined release packages.
+- Extended the appliance's filesystem to use its 100 GiB virtual disk and
+  removed 24 obsolete installers (3,334,718,277 bytes) after making a separate,
+  SHA-256-verified backup. Root usage fell from 91% to 42%, with 54 GiB free.
+
+Remaining validation: an interactive download-and-launch SmartScreen check
+requires signing in to the VM desktops. Valid Azure public signatures alone
+do not establish a warning-free SmartScreen result. The performance figures
+above remain build-host measurements, not production load measurements.
