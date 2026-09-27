@@ -12,6 +12,51 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestDashboardACLAcceptsWindowsCanonicalizationAndRejectsExtraAccess(t *testing.T) {
+	acls, err := newMachineACLSet(zenPlusServiceName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid, err := serviceSIDString(zenPlusServiceName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;" + sid + ")"
+	for _, tc := range []struct {
+		name, sddl string
+		trusted    bool
+	}{
+		{"canonical file", base + "(A;;0x1200a9;;;BU)", true},
+		{"canonical directory", fmt.Sprintf("O:BAG:SYD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICIIO;GXGR;;;BU)(A;;0x1200a9;;;BU)(A;OICI;FA;;;%s)", sid), true},
+		{"users write", base + "(A;;FA;;;BU)", false},
+		{"inherited users write", base + "(A;;FRFX;;;BU)(A;OICIIO;FA;;;BU)", false},
+		{"extra reader", base + "(A;;FRFX;;;BU)(A;;FR;;;WD)", false},
+		{"inherit only", base + "(A;OICIIO;GRGX;;;BU)", false},
+		{"missing users", base, false},
+		{"deny entry", base + "(A;;FRFX;;;BU)(D;;FW;;;BU)", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			actual, err := newMachineACL(tc.sddl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := equalMachineACL(actual.dacl, acls.dashboard.dacl)
+			if got != tc.trusted || (tc.trusted && err != nil) {
+				t.Fatalf("trusted = %v, error = %v; want %v", got, err, tc.trusted)
+			}
+		})
+	}
+}
+
+func TestInstalledDashboardSnapshotIntegration(t *testing.T) {
+	if os.Getenv("ZENPLUS_TEST_INSTALLED_DASHBOARD") != "1" {
+		t.Skip("enable for installed-agent release validation")
+	}
+	if err := ValidateMachineDashboardSnapshot(filepath.Join(machineDashboardDirectoryPath(), dashboardSnapshotName)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestServiceSIDStringMatchesWindowsServiceSIDAlgorithm(t *testing.T) {
 	got, err := serviceSIDString("TrustedInstaller")
 	if err != nil {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,8 +32,10 @@ type Snapshot struct {
 type ControllerSnapshot struct {
 	URL       string
 	Reachable bool
-	Status    string
-	Message   string
+	// Known is false until the agent has attempted a heartbeat.
+	Known   bool
+	Status  string
+	Message string
 }
 
 type ServiceSnapshot struct {
@@ -80,16 +81,15 @@ func Load(ctx context.Context, configPath string) Snapshot {
 		return loadPublishedMachineSnapshot(ctx, configPath, published)
 	}
 	cfg, cfgErr := config.Load(configPath)
-	if cfgErr != nil {
+	if false {
 		cfg = config.Default()
 	}
 	paths := runtime.NewPaths(cfg.DataDir)
 	snap := Snapshot{
-		Now:        time.Now().UTC(),
-		Service:    ReadServiceSnapshot(),
-		Controller: ControllerStatus(ctx, cfg.ControllerURL),
-		Config:     ConfigFrom(cfg),
-		Logs:       TailLines(paths.LogFile, 120),
+		Now:     time.Now().UTC(),
+		Service: ReadServiceSnapshot(),
+		Config:  ConfigFrom(cfg),
+		Logs:    TailLines(paths.LogFile, 120),
 		Paths: PathSnapshot{
 			Status: paths.StatusFile,
 			Spool:  paths.SpoolDB,
@@ -97,13 +97,14 @@ func Load(ctx context.Context, configPath string) Snapshot {
 			Config: configPath,
 		},
 	}
-	if cfgErr != nil {
-		snap.Controller.Message = cfgErr.Error()
-	}
 	if status, err := agent.ReadStatus(configPath); err == nil {
 		snap.Status = &status
 		snap.Spool.Depth = status.QueueDepth
 		snap.Spool.Bytes = status.SpoolBytes
+	}
+	snap.Controller = ControllerFromStatus(cfg.ControllerURL, snap.Status, cfg.HeartbeatIntervalSeconds, snap.Now)
+	if cfgErr != nil {
+		snap.Controller.Message = cfgErr.Error()
 	}
 	if id, err := readIdentity(paths.IdentityFile); err == nil {
 		snap.Identity = &id
@@ -128,7 +129,7 @@ func loadPublishedMachineSnapshot(ctx context.Context, configPath string, publis
 		Status:      &status,
 		Identity:    &id,
 		Service:     ReadServiceSnapshot(),
-		Controller:  ControllerStatus(ctx, published.Config.ControllerURL),
+		Controller:  ControllerFromStatus(published.Config.ControllerURL, &status, published.Config.HeartbeatIntervalSeconds, time.Now().UTC()),
 		Spool: SpoolSnapshot{
 			Depth: status.QueueDepth,
 			Bytes: status.SpoolBytes,
@@ -184,31 +185,6 @@ func ConfigFrom(cfg config.Config) ConfigSnapshot {
 	}
 }
 
-func ControllerStatus(ctx context.Context, controllerURL string) ControllerSnapshot {
-	out := ControllerSnapshot{URL: controllerURL, Status: "unknown"}
-	if controllerURL == "" {
-		out.Message = "controller URL is empty"
-		return out
-	}
-	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, controllerURL, nil)
-	if err != nil {
-		out.Message = err.Error()
-		return out
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		out.Status = "offline"
-		out.Message = err.Error()
-		return out
-	}
-	_ = resp.Body.Close()
-	out.Reachable = resp.StatusCode >= 200 && resp.StatusCode < 500
-	out.Status = resp.Status
-	return out
-}
-
 func TailLines(path string, maxLines int) []string {
 	if maxLines <= 0 {
 		maxLines = 100
@@ -257,6 +233,8 @@ func HealthText(s Snapshot) (string, string) {
 		return "Authorization revoked", "bad"
 	case s.Status.AuthState == "unauthorized":
 		return "Authorization required", "bad"
+	case !s.Controller.Known && !s.Controller.Reachable:
+		return "Connecting", "warn"
 	case !s.Controller.Reachable:
 		return "Controller unreachable", "bad"
 	case s.Status.LastHeartbeat == nil:

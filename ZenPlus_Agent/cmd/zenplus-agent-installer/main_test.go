@@ -6,12 +6,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/mgr"
 
 	"zenplus-agent/internal/config"
@@ -25,6 +28,85 @@ func TestParseOptionsVerifyPayload(t *testing.T) {
 	}
 	if !opts.verifyPayload || !opts.quiet {
 		t.Fatalf("verification options = %#v", opts)
+	}
+}
+
+func TestBulkInstallSwitches(t *testing.T) {
+	for _, args := range [][]string{
+		{"/QUIET", "/MACHINE", "/NORESTART", "CONTROLLER_URL=https://10.11.40.31", "INSTALL_PROFILE=infrastructure", "LOG=C:\\Temp\\agent install.log"},
+		{"/S", "/ALLUSERS", "/controller", "10.11.40.31", "/profile=infrastructure", "/log", "C:\\Temp\\agent install.log"},
+		{"--silent", "--machine", "--controller-url=https://10.11.40.31", "--profile", "infrastructure", "--log=C:\\Temp\\agent install.log"},
+	} {
+		opts, err := parseOptions(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !opts.quiet || !opts.machine || opts.profile != "infrastructure" || opts.logPath != `C:\Temp\agent install.log` {
+			t.Fatalf("incorrect options: %+v", opts)
+		}
+		url, err := config.NormalizeControllerURL(opts.controllerURL)
+		if err != nil || url != "https://10.11.40.31" {
+			t.Fatalf("controller=%s, error=%v", url, err)
+		}
+		if !hasQuietArg(args) {
+			t.Fatal("silent errors would show a dialog")
+		}
+	}
+}
+
+func TestInstallerRejectsUnrecognizedOrConflictingArguments(t *testing.T) {
+	for _, args := range [][]string{
+		{"CONTROLLER_IP=10.11.40.31", "/quiet"}, {"unexpected", "/machine"},
+		{"/machine", "/user"}, {"/controller-url"}, {"/quiet", "/unknown"}, {"PURGE=perhaps"},
+	} {
+		if _, err := parseOptions(args); err == nil {
+			t.Fatalf("accepted invalid arguments: %v", args)
+		}
+	}
+}
+
+func TestInstalledConfigDefaultOverrideAndControllerChange(t *testing.T) {
+	l := testLayout(t)
+	if err := writeInstalledConfig(l, options{}); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadForEdit(l.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initial.ControllerURL != "https://10.11.40.31" {
+		t.Fatalf("fresh-install default: %s", initial.ControllerURL)
+	}
+	initial.ControllerURL = "https://old.example"
+	if err := config.ApplyProfile(&initial, "infrastructure"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Save(l.ConfigPath, initial); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeInstalledConfig(l, options{}); err != nil {
+		t.Fatal(err)
+	}
+	preserved, err := config.LoadForEdit(l.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preserved.ControllerURL != initial.ControllerURL {
+		t.Fatal("upgrade overwrote existing controller")
+	}
+	opts, err := parseOptions([]string{"/quiet", "/machine", "CONTROLLER_URL=10.11.40.32"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeInstalledConfig(l, opts); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := config.LoadForEdit(l.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed.ControllerURL != "https://10.11.40.32" || changed.APM.Profile != "infrastructure" || changed.DataDir != l.DataDir {
+		t.Fatalf("controller change lost settings: %+v", changed)
 	}
 }
 
@@ -628,5 +710,54 @@ func assertInfrastructureCollectorsEnabled(t *testing.T, cfg config.Config) {
 		!cfg.Collectors.DiskIO.Enabled || !cfg.Collectors.Network.Enabled || !cfg.Collectors.Processes.Enabled ||
 		!cfg.Collectors.Services.Enabled || !cfg.Collectors.EventLog.Enabled || !cfg.Collectors.Inventory.Enabled {
 		t.Fatal("an infrastructure collector was not restored")
+	}
+}
+
+func TestSetupExitCodesFollowWindowsInstaller(t *testing.T) {
+	if got := exitCodeFor(nil); got != 0 {
+		t.Fatalf("success exit code = %d", got)
+	}
+	if got := exitCodeFor(fmt.Errorf("disk full")); got != exitFatal {
+		t.Fatalf("generic failure exit code = %d", got)
+	}
+	wrapped := fmt.Errorf("install: %w", withExitCode(exitAnotherInstall, fmt.Errorf("busy")))
+	if got := exitCodeFor(wrapped); got != exitAnotherInstall {
+		t.Fatalf("wrapped exit code = %d", got)
+	}
+	if _, err := parseOptions([]string{"/quiet", "/bogus"}); err == nil {
+		t.Fatal("unknown switch accepted")
+	}
+	if _, err := parseOptions([]string{"/quiet", "NOT_A_PROPERTY=1"}); err == nil {
+		t.Fatal("unknown property accepted")
+	}
+}
+
+func TestSetupLockIsExclusive(t *testing.T) {
+	release, err := acquireSetupLock("user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	// The holder is pinned to its thread, so this probe runs on another
+	// thread and must not get the (per-thread recursive) mutex.
+	done := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		name, _ := windows.UTF16PtrFromString(`Local\ZenPlusAgentSetup`)
+		h, err := windows.OpenMutex(windows.SYNCHRONIZE, false, name)
+		if err != nil {
+			done <- err
+			return
+		}
+		defer windows.CloseHandle(h)
+		event, err := windows.WaitForSingleObject(h, 0)
+		if err == nil && event != uint32(windows.WAIT_TIMEOUT) {
+			err = fmt.Errorf("second holder acquired the lock (0x%x)", event)
+		}
+		done <- err
+	}()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

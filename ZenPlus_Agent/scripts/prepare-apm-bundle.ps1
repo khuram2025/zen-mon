@@ -1,7 +1,10 @@
 param(
   [switch]$Force,
   [switch]$SkipLanguagePacks,
-  [string]$PythonPath = $env:ZENPLUS_BUILD_PYTHON
+  [string]$PythonPath = $env:ZENPLUS_BUILD_PYTHON,
+  # Production builds sign this locally built executable before running its
+  # component and configuration checks on application-controlled hosts.
+  [scriptblock]$BeforeGatewayValidation
 )
 
 $ErrorActionPreference = "Stop"
@@ -127,6 +130,9 @@ if ($Force -or -not (Test-Path $collector) -or $cachedCollectorInput -ne $collec
 if (-not (Test-Path $collector)) {
   throw "Custom telemetry gateway was not produced: $collector"
 }
+if ($BeforeGatewayValidation) {
+  & $BeforeGatewayValidation $collector
+}
 
 # Catch collector/config composition errors during the build instead of after
 # installation. The generated runtime configuration requires the resource
@@ -213,11 +219,13 @@ if (-not $SkipLanguagePacks) {
   }
 
   $javaJar = Join-Path $stage "instrumentation\java\opentelemetry-javaagent.jar"
+  $javaCache = Join-Path $cache "opentelemetry-javaagent-2.31.0.jar"
   New-Item -ItemType Directory -Force -Path (Split-Path $javaJar) | Out-Null
   Get-VerifiedFile `
     -Url "https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v2.31.0/opentelemetry-javaagent.jar" `
-    -Destination $javaJar `
+    -Destination $javaCache `
     -Sha256 "d48673b2ff956b26d809bc34243649913d4eefd9191c4e175b686da633e0134b"
+  Copy-Item -LiteralPath $javaCache -Destination $javaJar -Force
   $components += [ordered]@{
     name = "opentelemetry-javaagent"
     version = "2.31.0"

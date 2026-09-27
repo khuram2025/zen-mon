@@ -1,15 +1,34 @@
 # Deploying the ZenPlus Windows agent
 
-ZenPlus publishes one immutable, generic x64 setup executable. The package contains no
-registration secret and is never modified after it is built. The same
-checksummed (and optionally Authenticode-signed) package can be distributed to any
-number of hosts through GPO, Intune, SCCM, or another software-management
-system. Only the controller URL is configured on an endpoint.
+ZenPlus publishes immutable, generic x64 packages in two flavours:
+
+| Flavour | Files | Contents |
+| --- | --- | --- |
+| core | `zenplus-agent-core-<version>.exe` / `.msi` | Server monitoring only (about 26 MB). |
+| full | `zenplus-agent-<version>.exe` / `.msi` | Server monitoring plus the offline APM gateway and .NET, Java, Node.js and Python instrumentation (about 93 MB). |
+
+Use core for servers that only need infrastructure monitoring. Install full
+over a core installation at any time to add APM; the MSIs share an
+UpgradeCode, so either one replaces the other, even at the same version. The
+core package refuses to replace an installation that still uses APM (an APM
+profile or instrumented applications), because removing the APM components
+would break instrumented applications on their next restart.
+
+The full package keeps the historical file names on purpose: agents released
+before the split all carry the APM components, and they must keep upgrading
+to a package that still contains them. Newer agents update within their
+installed flavour.
+
+No package contains a registration secret and none is modified after it is
+built. The same checksummed, Authenticode-signed package can be distributed
+to any number of hosts through GPO, Intune, SCCM, or another
+software-management system. Only the controller URL is configured on an
+endpoint.
 
 This separation is important: changing bytes in an MSI after signing breaks
 its signature and makes package hashes non-reproducible.
 
-## 1. Build the package
+## 1. Build the packages
 
 ```powershell
 .\scripts\build.ps1 -ControllerUrl "https://192.168.8.221"
@@ -20,12 +39,33 @@ from `PATH`. It runs the Go test suite unless `-SkipTests` is explicitly set.
 
 Outputs:
 
-- `dist/zenplus-agent-<version>.exe` -- canonical x64 setup and interactive wizard.
-- `dist/zenplus-agent-<version>.msi` -- validation-only MSI wrapper; the
-  appliance publishes the setup executable.
-- `dist/ZenPlusAgentSetup-x64.exe` -- interactive/self-contained setup.
-- `dist/agent-manifest.json` -- version, architecture, file size, build time,
-  signature state, and SHA-256 of the canonical setup executable.
+- `dist/zenplus-agent-core-<version>.exe` and `.msi` -- server monitoring only.
+- `dist/zenplus-agent-<version>.exe` and `.msi` -- with APM.
+- `dist/ZenPlusAgentSetup-x64.exe` -- the full interactive setup under its
+  historical name.
+- `dist/agent-manifest.json` -- the full package in the top-level fields (for
+  agents before 1.13) and both packages under `flavors`.
+
+Each setup embeds its payload as one compressed archive and installs a
+payload-free build of itself as the uninstaller (`ZenPlusAgentSetup.exe`),
+so Program Files no longer holds a second copy of the whole package.
+
+When publishing to the public download site, point these aliases at the new
+files in `stable/`:
+
+| Alias | Target |
+| --- | --- |
+| `ZenPlusAgentCoreSetup-latest.exe` | `zenplus-agent-core-<version>.exe` |
+| `ZenPlusAgentCore-latest.msi` | `zenplus-agent-core-<version>.msi` |
+| `ZenPlusAgentSetup-latest.exe` | `zenplus-agent-<version>.exe` |
+| `ZenPlusAgent-latest.msi` | `zenplus-agent-<version>.msi` |
+
+The dashboard's Download Agent dialog links to all four.
+
+To publish to an appliance, copy the `.exe` files (and optionally the `.msi`
+files) into `/opt/zenplus/artifacts/agents/windows/`. The controller
+registers one package per version and flavour, preferring the `.exe`, and
+needs migration `migrate-122-agent-package-flavors.sql` (1.13 and later).
 
 `-ControllerUrl` may set a convenient default controller address. Credentials
 cannot be compiled into the binaries or MSI. The `CONTROLLER_URL` MSI property
@@ -43,7 +83,36 @@ The script signs and verifies each executable before it is embedded, then the
 setup executable, and finally the MSI. It creates the manifest only after
 signing, so the published checksum covers the signed bytes. Never alter a
 package after signing. Development builds may omit the thumbprint; their
-manifest reports `signature_status` as `NotSigned`.
+manifest reports `signature_status` as `NotSigned`. Unsigned development builds
+must explicitly pass `-AllowUnsignedDevelopmentBuild` and must not be published.
+
+### Microsoft Azure Artifact Signing
+
+The Zentryc public publisher profile is `zentrycsigning/zentryc-public` in East US.
+The checked-in `packaging/artifact-signing.json` contains only public resource
+identifiers and selects Azure CLI authentication. Sign in to the Zentryc tenant
+with Azure CLI before building. The identity must hold the Artifact Signing
+Certificate Profile Signer role for this profile.
+
+```powershell
+az login --tenant d8e4f4d6-451d-454f-9f21-3a20a93b1022
+.\scripts\build.ps1 -RequireSigning `
+  -ArtifactSigningMetadata .\packaging\artifact-signing.json `
+  -ArtifactSigningDlib "<client-tools>\x64\Azure.CodeSigning.Dlib.dll" `
+  -SignToolPath "<windows-sdk>\x64\signtool.exe"
+```
+
+Install Microsoft's Artifact Signing client tools (including .NET 8 and the
+Windows SDK signing tool), or use the official Microsoft NuGet packages and
+runtime. This path uses Microsoft's RFC 3161 timestamp server. Every signed
+artifact must pass SignTool verification and Windows Authenticode validation
+with a timestamp before the release manifest is written. Keep credentials in
+Azure's credential cache, never in the metadata file or release artifacts.
+
+Signing establishes the verified publisher `Zentryc LLC`; it does not guarantee
+that SmartScreen reputation checks or third-party antivirus products will
+never warn. Investigate an actual detection and submit a false-positive report
+to the detecting vendor when appropriate.
 
 ## 2. Publish it with the portal release
 
@@ -70,6 +139,9 @@ token or rewrite any MSI bytes.
 
 ## 3. Perform a scalable rollout
 
+For Group Policy, Intune, Configuration Manager and PDQ recipes, exit codes and
+the full switch reference, see [bulk-deployment.md](bulk-deployment.md).
+
 Download the setup executable once and install it with the appliance address. Each new
 installation creates its own protected registration proof and appears in
 Agent Fleet as **Pending authorization**.
@@ -81,6 +153,39 @@ Example managed rollout:
   CONTROLLER_URL="https://controller.example"
 ```
 
+Version 1.12.8 defaults new installations to `https://10.11.40.31`. Existing
+installations retain their saved controller unless an explicit controller
+argument is supplied. Run bulk commands from an administrator or SYSTEM
+process; silent machine installation fails with exit code 1 instead of waiting
+for an interactive elevation prompt.
+
+```powershell
+$p = Start-Process .\zenplus-agent-1.12.9.exe -Wait -PassThru -ArgumentList @(
+  '/machine', '/quiet', '/norestart',
+  'CONTROLLER_URL=https://10.11.40.31', 'INSTALL_PROFILE=combined',
+  '/log', '"C:\Windows\Temp\ZenPlus-install.log"'
+)
+exit $p.ExitCode
+```
+
+EXE switches are case-insensitive. `/silent`, `/verysilent`, `/S` and `/qn`
+are aliases for `/quiet`; `/allusers` means `/machine`, and `/currentuser`
+means `/user`. `--controller-url`, `/controller`, `CONTROLLER_URL=...`,
+`--profile`, `INSTALL_PROFILE=...`, `CONTROLLER_CA_FILE=...`, `/log path`,
+`/no-start-menu` and `/norestart` are supported. Profiles are `combined`,
+`infrastructure` and `apm`. A fresh install without a profile uses
+`infrastructure` (server monitoring only; APM is opt-in). An upgrade keeps the
+installed profile; a config written before APM became opt-in and with no `apm`
+section keeps its previous `combined` behaviour. The log's parent directory
+must already exist.
+Unknown switches/properties and conflicting scope choices return an error.
+
+MSI deployment supports standard Windows Installer logging and UI switches:
+
+```cmd
+msiexec /i zenplus-agent-1.12.9.msi /qn /norestart CONTROLLER_URL="https://10.11.40.31" INSTALL_PROFILE="combined" /L*v "%TEMP%\ZenPlus-install.log"
+```
+
 Approve the pending record from Agent Fleet. The appliance then issues a
 unique durable API credential, which the agent stores using Windows DPAPI.
 Until approval, the agent collects and spools locally but does not send
@@ -88,11 +193,18 @@ heartbeats or telemetry.
 
 ## Changing settings after install
 
-Open **ZenPlus Agent > Settings**. For an all-users installation, profile or
-controller changes open the installed Setup program and request administrator
-approval before updating `%ProgramData%\ZenPlus\Agent\config\agent.yaml`.
-Moving a host to another controller clears the old enrollment binding; the
-host registers with the new appliance and waits for administrator approval.
+Open **ZenPlus Agent > Settings**, edit the controller or monitoring profile,
+and press **Save**. Starting with 1.12.9, Save writes only those settings; it
+does not open Setup or reinstall the agent. All-users changes request Windows
+administrator approval. The helper rereads the protected configuration and
+preserves its other values before replacing the file atomically. The running
+agent picks up the change on its local-settings poll, without a service restart.
+A different appliance may require authorization in Agent Fleet.
+
+The unelevated dashboard reads the sanitized status snapshot. If that snapshot
+is unavailable, it opens a standalone Settings dialog with administrator
+approval. Cancel makes no changes. If applications are still instrumented,
+uninstrument them before selecting a profile that disables APM.
 
 You can also force a registration poll from an elevated terminal:
 
@@ -100,7 +212,7 @@ You can also force a registration poll from an elevated terminal:
 zenplus-agent.exe register
 ```
 
-`zenplus-agentctl.exe print-config` never prints the appliance-issued API key,
+`zenplus-agent.exe print-config` never prints the appliance-issued API key,
 and agent logging redacts credential and bearer values.
 
 For all-users installs, `%ProgramData%\ZenPlus\Agent` is restricted to
@@ -120,10 +232,38 @@ configuration, logs, and queued telemetry should also be removed:
 
 ## Agent upgrades
 
-Publish a newer generic setup package and set `desired_version` or issue
-`trigger_upgrade`. The agent downloads the portal manifest, verifies SHA-256,
-verifies the Authenticode policy, and starts the installer. Upgrades preserve
-the appliance-issued credential and the selected monitoring profile.
+For updates initiated at the Windows agent, publish the signed EXE and MSI
+under immutable versioned filenames at `https://zentryc.com/downloads/zenplus-agent/stable/`.
+Verify the uploaded sizes and SHA-256 values, then replace `stable/manifest.json`
+last. The manifest's primary download must point to the EXE; the MSI has its
+own `msi_download_url` and checksum fields. Keep the prior manifest and packages
+for recovery. Never change a package after generating its manifest.
+
+Starting with 1.12.7, open **ZenPlus Agent > Updates > Install update**. The app
+downloads from the Zentryc public channel, verifies size, SHA-256 and Windows
+Authenticode trust, then opens Setup. A machine installation requests
+administrator approval before loading its protected existing configuration.
+Complete Setup with the existing controller and monitoring profile. The
+dashboard checks on startup and every six hours; **Updates** checks immediately.
+It does not install releases without a user action.
+
+Versions through 1.12.6 open the download in a browser. Use the signed EXE once
+to upgrade those versions to 1.12.7 or later. Their service-side PowerShell
+signature check is defective, so publishing a new package alone cannot repair
+that older running updater.
+
+For an appliance-managed rollout, publish the package to the enrolled
+appliance and set `desired_version` or issue its upgrade command. The service
+prefers the appliance manifest, preserving operation on private networks;
+the public channel is a fallback when that manifest is unavailable. Updating
+zentryc.com alone does not replace a valid older appliance manifest.
+
+Before promoting a release, test an actual older enrolled installation:
+record agent/server IDs, controller, profile and heartbeat; install the update;
+confirm the new binary versions and signatures, running service, unchanged
+identity/settings and a fresh successful heartbeat. Also check the dashboard's
+up-to-date result. A successful download or installer launch alone is not a
+completed upgrade test.
 
 ## Controller clock
 

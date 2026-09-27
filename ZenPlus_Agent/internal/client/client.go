@@ -205,9 +205,17 @@ func (c *Client) do(ctx context.Context, method, endpoint string, body []byte, o
 	return resp, respBody, nil
 }
 
+// ErrDownloadTooLarge reports a response body longer than the caller allowed.
+var ErrDownloadTooLarge = errors.New("download exceeds the maximum allowed size")
+
 // Download streams a (potentially large) file from the controller to destPath.
-// It uses a generous timeout independent of the JSON client timeout.
-func (c *Client) Download(ctx context.Context, endpoint string, destPath string) error {
+// It uses a generous timeout independent of the JSON client timeout. A body
+// longer than maxBytes is rejected and removed so a hostile or broken server
+// cannot fill the disk.
+func (c *Client) Download(ctx context.Context, endpoint string, destPath string, maxBytes int64) error {
+	if maxBytes <= 0 {
+		return fmt.Errorf("download size limit must be positive")
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.resolve(endpoint), nil)
 	if err != nil {
 		return err
@@ -242,7 +250,11 @@ func (c *Client) Download(ctx context.Context, endpoint string, destPath string)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	written, err := io.Copy(f, io.LimitReader(resp.Body, maxBytes+1))
+	if err == nil && written > maxBytes {
+		err = fmt.Errorf("%w (limit %d bytes)", ErrDownloadTooLarge, maxBytes)
+	}
+	if err != nil {
 		f.Close()
 		os.Remove(destPath)
 		return err

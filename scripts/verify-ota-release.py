@@ -158,6 +158,33 @@ def main() -> None:
             if install_step is None:
                 raise RuntimeError("agent MSI appliance installation step is missing")
 
+            # Every declared package must be present, intact and installed.
+            # From 1.13 a release carries both flavours (server monitoring
+            # "core" and full with APM), each as EXE and MSI.
+            for item in packages:
+                path = f"agent-artifacts/{item.get('platform')}/{item.get('file_name')}"
+                member = members.get(path)
+                if member is None:
+                    raise RuntimeError(f"declared agent package missing from archive: {path}")
+                digest = hashlib.sha256(read_member(tar, path)).hexdigest()
+                if digest != item.get("sha256") or member.size != item.get("file_size"):
+                    raise RuntimeError(f"agent package metadata does not match its bytes: {path}")
+                dest = f"/opt/zenplus/artifacts/agents/{item.get('platform')}/{item.get('file_name')}"
+                if not any(s.get("source") == path and s.get("dest") == dest for s in manifest.get("steps", [])):
+                    raise RuntimeError(f"agent package installation step is missing: {path}")
+            if tuple(int(p) for p in args.agent_version.split(".")) >= (1, 13, 0):
+                declared = {item.get("file_name") for item in packages if item.get("platform") == "windows"}
+                required = {
+                    f"zenplus-agent-{args.agent_version}.msi",
+                    f"zenplus-agent-{args.agent_version}.exe",
+                    f"zenplus-agent-core-{args.agent_version}.exe",
+                    f"zenplus-agent-core-{args.agent_version}.msi",
+                }
+                if not required <= declared:
+                    raise RuntimeError(
+                        f"Windows agent packages missing from release: {sorted(required - declared)}"
+                    )
+
         required_sources = 0
         if args.required_source_archive:
             with tarfile.open(args.required_source_archive, "r:gz") as source_tar:
@@ -192,6 +219,7 @@ def main() -> None:
         "agent_msi_size": msi.size if msi is not None else None,
         "agent_msi_sha256": msi_hash,
         "agent_destination": expected_dest,
+        "agent_packages": [item.get("file_name") for item in packages] if not args.appliance_only else [],
         "authoritative_changed_files_verified": required_sources,
         "forbidden_files": 0,
     }, indent=2))

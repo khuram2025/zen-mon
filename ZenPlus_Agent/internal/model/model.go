@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-const AgentVersion = "1.12.5"
+const AgentVersion = "1.14.2"
 
 var AgentCapabilities = []string{
 	"network_capture_v1",
@@ -15,6 +15,9 @@ var AgentCapabilities = []string{
 	"apm_windows_service_instrumentation_v1",
 	"apm_runtime_health_v1",
 	"clone_identity_assignment_v1",
+	// set_monitoring_profile: switch between server monitoring and APM,
+	// installing or removing the APM components as needed.
+	"monitoring_profile_v1",
 }
 
 type Metric struct {
@@ -68,6 +71,12 @@ type Heartbeat struct {
 	ConfigHash       string             `json:"config_hash,omitempty"`
 	ConfigApplyError string             `json:"config_apply_error,omitempty"`
 	APM              *AgentAPMHeartbeat `json:"apm,omitempty"`
+	// Update reports the progress of a controller-requested upgrade.
+	Update *UpdateStatus `json:"update,omitempty"`
+	// PackageFlavor is "core" (server monitoring) or "full" (with APM).
+	PackageFlavor string `json:"package_flavor,omitempty"`
+	// MonitoringProfile is infrastructure, apm or combined.
+	MonitoringProfile string `json:"monitoring_profile,omitempty"`
 }
 
 type APMGatewayStatus struct {
@@ -108,6 +117,8 @@ type HeartbeatResponse struct {
 	DesiredVersion *string       `json:"desired_version"`
 	Backpressure   *Backpressure `json:"backpressure"`
 	APM            *APMStatus    `json:"apm,omitempty"`
+	// AcceptsGzip is advertised by controllers that decompress agent uploads.
+	AcceptsGzip bool `json:"accepts_gzip,omitempty"`
 }
 
 // APMStatus is a read-only appliance health snapshot. The local APM monitoring
@@ -308,6 +319,21 @@ type Status struct {
 	ClockSkewSeconds         float64            `json:"clock_skew_seconds,omitempty"`
 	NextRetryAt              *time.Time         `json:"next_retry_at,omitempty"`
 	UpgradeState             string             `json:"upgrade_state,omitempty"`
+	Update                   *UpdateStatus      `json:"update,omitempty"`
 	APM                      *APMStatus         `json:"apm,omitempty"`
 	LocalAPM                 *AgentAPMHeartbeat `json:"local_apm,omitempty"`
+}
+
+// UpdateStatus is the agent's view of a controller-requested upgrade.
+// State is one of requested, downloading, installing, succeeded or failed.
+type UpdateStatus struct {
+	// Kind is "upgrade" or "profile" (a monitoring-profile change).
+	Kind          string    `json:"kind,omitempty"`
+	State         string    `json:"state"`
+	TargetVersion string    `json:"target_version"`
+	TargetFlavor  string    `json:"target_flavor,omitempty"`
+	TargetProfile string    `json:"target_profile,omitempty"`
+	FromVersion   string    `json:"from_version,omitempty"`
+	Error         string    `json:"error,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }

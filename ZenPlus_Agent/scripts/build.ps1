@@ -3,6 +3,9 @@ param(
   # Enrollment credentials are never compiled into or patched into artifacts.
   [string]$ControllerUrl = $env:ZENPLUS_EMBED_CONTROLLER_URL,
   [string]$SigningThumbprint = $env:ZENPLUS_SIGNING_THUMBPRINT,
+  [string]$ArtifactSigningMetadata = $env:ZENPLUS_ARTIFACT_SIGNING_METADATA,
+  [string]$ArtifactSigningDlib = $env:ZENPLUS_ARTIFACT_SIGNING_DLIB,
+  [string]$SignToolPath = $env:ZENPLUS_SIGNTOOL_PATH,
   [string]$TimestampUrl = $env:ZENPLUS_TIMESTAMP_URL,
   [string]$PublicBaseUrl = "https://zentryc.com/downloads/zenplus-agent",
   [switch]$RequireSigning,
@@ -24,9 +27,26 @@ $ErrorActionPreference = "Stop"
 
 $root = Resolve-Path "$PSScriptRoot\.."
 if (-not $TimestampUrl) {
-  $TimestampUrl = "http://timestamp.digicert.com"
+  $TimestampUrl = if ($ArtifactSigningMetadata) { "http://timestamp.acs.microsoft.com" } else { "http://timestamp.digicert.com" }
 }
 $SigningThumbprint = ($SigningThumbprint -replace '\s', '').ToUpperInvariant()
+$signingEnabled = [bool]($SigningThumbprint -or $ArtifactSigningMetadata)
+if ($SigningThumbprint -and $ArtifactSigningMetadata) {
+  throw "Select either certificate-store signing or Azure Artifact Signing, not both"
+}
+if ($ArtifactSigningMetadata) {
+  if (-not (Test-Path -LiteralPath $ArtifactSigningMetadata -PathType Leaf) -or
+      -not (Test-Path -LiteralPath $ArtifactSigningDlib -PathType Leaf)) {
+    throw "Azure Artifact Signing requires an existing metadata JSON file and Azure.CodeSigning.Dlib.dll"
+  }
+  $ArtifactSigningMetadata = (Resolve-Path -LiteralPath $ArtifactSigningMetadata).Path
+  $ArtifactSigningDlib = (Resolve-Path -LiteralPath $ArtifactSigningDlib).Path
+  $signingMetadata = Get-Content -LiteralPath $ArtifactSigningMetadata -Raw | ConvertFrom-Json
+  if ($signingMetadata.Endpoint -notmatch '^https://[a-z0-9-]+\.codesigning\.azure\.net/?$' -or
+      -not $signingMetadata.CodeSigningAccountName -or -not $signingMetadata.CertificateProfileName) {
+    throw "Invalid Azure Artifact Signing endpoint, account, or certificate profile metadata"
+  }
+}
 if ($RequireSigning -and $AllowUnsignedDevelopmentBuild) {
   throw "-RequireSigning and -AllowUnsignedDevelopmentBuild cannot be used together"
 }
@@ -36,8 +56,8 @@ if ($SkipPayloadExecutionVerification -and -not $AllowUnsignedDevelopmentBuild) 
 if ($SkipLanguagePacks) {
   throw "Installer builds always require the complete offline APM bundle. Run prepare-apm-bundle.ps1 -SkipLanguagePacks directly for gateway-only development work."
 }
-if (-not $SigningThumbprint -and -not $AllowUnsignedDevelopmentBuild) {
-  throw "Production builds require -SigningThumbprint or ZENPLUS_SIGNING_THUMBPRINT. Use -AllowUnsignedDevelopmentBuild only for local test artifacts."
+if (-not $signingEnabled -and -not $AllowUnsignedDevelopmentBuild) {
+  throw "Production builds require -SigningThumbprint or -ArtifactSigningMetadata and -ArtifactSigningDlib. Use -AllowUnsignedDevelopmentBuild only for local test artifacts."
 }
 $portableGo = Join-Path $root ".tools\go\bin\go.exe"
 if (Test-Path $portableGo) {
@@ -78,10 +98,6 @@ function Invoke-Go {
   if ($LASTEXITCODE -ne 0) {
     throw "go $($args -join ' ') failed with exit code $LASTEXITCODE"
   }
-}
-
-function Invoke-Rsrc {
-  Invoke-Go run github.com/akavel/rsrc@v0.10.2 @args
 }
 
 function Update-ApmBundleManifest {
@@ -158,6 +174,9 @@ function Assert-CompleteApmBundle {
 }
 
 function Find-SignTool {
+  if ($SignToolPath) {
+    return (Resolve-Path -LiteralPath $SignToolPath).Path
+  }
   $command = Get-Command signtool.exe -ErrorAction SilentlyContinue
   if ($null -ne $command) {
     return $command.Path
@@ -176,32 +195,38 @@ function Find-SignTool {
 
 function Invoke-SignArtifacts {
   param([string[]]$Paths)
-  if (-not $SigningThumbprint) {
+  if (-not $signingEnabled) {
     return
   }
-  $currentUserCert = "Cert:\CurrentUser\My\$SigningThumbprint"
-  $localMachineCert = "Cert:\LocalMachine\My\$SigningThumbprint"
-  $useMachineStore = $false
-  if (Test-Path $currentUserCert) {
-    $certificate = Get-Item $currentUserCert
-  } elseif (Test-Path $localMachineCert) {
-    $certificate = Get-Item $localMachineCert
-    $useMachineStore = $true
-  } else {
-    throw "code-signing certificate $SigningThumbprint was not found in CurrentUser or LocalMachine My store"
-  }
-  if (-not $certificate.HasPrivateKey) {
-    throw "code-signing certificate $SigningThumbprint has no accessible private key"
-  }
-  if ($certificate.NotAfter -le (Get-Date)) {
-    throw "code-signing certificate $SigningThumbprint expired at $($certificate.NotAfter.ToString('o'))"
+  if ($SigningThumbprint) {
+    $currentUserCert = "Cert:\CurrentUser\My\$SigningThumbprint"
+    $localMachineCert = "Cert:\LocalMachine\My\$SigningThumbprint"
+    $useMachineStore = $false
+    if (Test-Path $currentUserCert) {
+      $certificate = Get-Item $currentUserCert
+    } elseif (Test-Path $localMachineCert) {
+      $certificate = Get-Item $localMachineCert
+      $useMachineStore = $true
+    } else {
+      throw "code-signing certificate $SigningThumbprint was not found in CurrentUser or LocalMachine My store"
+    }
+    if (-not $certificate.HasPrivateKey) {
+      throw "code-signing certificate $SigningThumbprint has no accessible private key"
+    }
+    if ($certificate.NotAfter -le (Get-Date)) {
+      throw "code-signing certificate $SigningThumbprint expired at $($certificate.NotAfter.ToString('o'))"
+    }
   }
   $signTool = Find-SignTool
   foreach ($path in $Paths) {
     $resolved = (Resolve-Path $path).Path
-    $signArgs = @("sign", "/sha1", $SigningThumbprint, "/fd", "SHA256", "/tr", $TimestampUrl, "/td", "SHA256")
-    if ($useMachineStore) {
-      $signArgs += "/sm"
+    $signArgs = @("sign", "/fd", "SHA256", "/tr", $TimestampUrl, "/td", "SHA256")
+    if ($ArtifactSigningMetadata) {
+      $signArgs += @("/dlib", (Resolve-Path -LiteralPath $ArtifactSigningDlib).Path,
+        "/dmdf", (Resolve-Path -LiteralPath $ArtifactSigningMetadata).Path)
+    } else {
+      $signArgs += @("/sha1", $SigningThumbprint)
+      if ($useMachineStore) { $signArgs += "/sm" }
     }
     $signArgs += $resolved
     & $signTool @signArgs
@@ -211,6 +236,10 @@ function Invoke-SignArtifacts {
     & $signTool verify /pa /all $resolved
     if ($LASTEXITCODE -ne 0) {
       throw "signtool verification failed for $resolved with exit code $LASTEXITCODE"
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $resolved
+    if ($signature.Status -ne 'Valid' -or $null -eq $signature.TimeStamperCertificate) {
+      throw "Artifact must have a trusted, timestamped Authenticode signature: $resolved"
     }
   }
 }
@@ -242,28 +271,30 @@ function Ensure-Wix {
 function Invoke-Wix {
   param(
     [string]$Candle,
-    [string]$Light
+    [string]$Light,
+    [string]$SetupExe,
+    [string]$OutMsi
   )
   $wixObj = "dist\ZenPlusAgent.wixobj"
   & $Candle `
     -nologo `
     -dProductVersion="$Version" `
-    -dSetupExe="$root\dist\ZenPlusAgentSetup-x64.exe" `
+    -dSetupExe="$root\$SetupExe" `
     -dAssetsDir="$root\assets" `
     -out $wixObj `
     "packaging\ZenPlusAgent.wxs"
   if ($LASTEXITCODE -ne 0) {
     throw "candle.exe failed with exit code $LASTEXITCODE"
   }
-  # Named zenplus-agent-<version>.msi to match the controller's publish
-  # scanner (/opt/zenplus/artifacts/agents/windows/).
+  # Both flavours share the UpgradeCode, so either MSI replaces the other,
+  # including at the same version (AllowSameVersionUpgrades).
   & $Light `
     -nologo `
     -ext WixUIExtension `
     -ext WixUtilExtension `
     -sice:ICE61 `
     -sice:ICE71 `
-    -out "dist\zenplus-agent-$Version.msi" `
+    -out $OutMsi `
     $wixObj
   if ($LASTEXITCODE -ne 0) {
     throw "light.exe failed with exit code $LASTEXITCODE"
@@ -277,7 +308,10 @@ try {
   if (-not $SkipTests) {
     Invoke-Go test ./...
   }
-  & (Join-Path $root "scripts\prepare-apm-bundle.ps1")
+  & (Join-Path $root "scripts\prepare-apm-bundle.ps1") -BeforeGatewayValidation {
+    param($GatewayPath)
+    Invoke-SignArtifacts @($GatewayPath)
+  }
   if ($LASTEXITCODE -ne 0) {
     throw "APM bundle preparation failed with exit code $LASTEXITCODE"
   }
@@ -292,105 +326,164 @@ try {
     throw "The APM bundle manifest must contain exactly one versioned zenplus-telemetry-gateway component"
   }
   $apmGatewayVersion = [string]$apmGatewayComponents[0].version
+  # Icon, manifest and version information (Zentryc LLC, ZenPlus Agent,
+  # version) for the service, dashboard and Setup executables.
+  $resources = @("cmd\zenplus-agent\rsrc.syso", "cmd\zenplus-agent-app\rsrc.syso", "cmd\zenplus-agent-installer\rsrc.syso")
   if ($UseExistingResources) {
-    foreach ($resource in @("cmd\zenplus-agent-app\rsrc.syso", "cmd\zenplus-agent-installer\rsrc.syso")) {
+    foreach ($resource in $resources) {
       if (-not (Test-Path $resource)) {
         throw "-UseExistingResources requires checked-in resource object $resource"
       }
+      # Resources from an older release would label these binaries with the
+      # wrong version in Explorer and Programs and Features.
+      $bytes = [IO.File]::ReadAllBytes((Resolve-Path $resource))
+      $even = [Text.Encoding]::Unicode.GetString($bytes)
+      $odd = [Text.Encoding]::Unicode.GetString($bytes, 1, $bytes.Length - 1)
+      if (-not ($even.Contains("$Version.0") -or $odd.Contains("$Version.0"))) {
+        throw "$resource does not carry version $Version; regenerate it with: go run .\scripts\winres"
+      }
     }
   } else {
-    Invoke-Rsrc -arch amd64 -ico "assets\zenplus-agent.ico" -manifest "cmd\zenplus-agent-app\zenplus-agent-app.manifest" -o "cmd\zenplus-agent-app\rsrc.syso"
-    Invoke-Rsrc -arch amd64 -ico "assets\zenplus-agent.ico" -manifest "cmd\zenplus-agent-installer\zenplus-agent-installer.manifest" -o "cmd\zenplus-agent-installer\rsrc.syso"
+    Invoke-Go run .\scripts\winres -root .
   }
   Invoke-Go build -trimpath -ldflags="-s -w$embedFlags" -o "dist\zenplus-agent.exe" ".\cmd\zenplus-agent"
-  Invoke-Go build -trimpath -ldflags="-s -w$embedFlags" -o "dist\zenplus-agentctl.exe" ".\cmd\zenplus-agentctl"
   Invoke-Go build -trimpath -ldflags="-s -w -H=windowsgui$embedFlags" -o "dist\zenplus-agent-app.exe" ".\cmd\zenplus-agent-app"
-  Invoke-Go build -trimpath -ldflags="-s -w -H=windowsgui$embedFlags" -o "dist\zenplus-agent-user.exe" ".\cmd\zenplus-agent-user"
+  # zenplus-agentctl and the per-user runner are now subcommands/modes of
+  # these two programs, which already linked the same packages.
   Invoke-SignArtifacts @(
     "dist\zenplus-agent.exe",
-    "dist\zenplus-agentctl.exe",
-    "dist\zenplus-agent-app.exe",
-    "dist\zenplus-agent-user.exe"
+    "dist\zenplus-agent-app.exe"
   )
-  $payloadDir = "cmd\zenplus-agent-installer\payload"
-  New-Item -ItemType Directory -Force -Path $payloadDir | Out-Null
-  Copy-Item -Force "dist\zenplus-agent.exe" (Join-Path $payloadDir "zenplus-agent.exe")
-  Copy-Item -Force "dist\zenplus-agentctl.exe" (Join-Path $payloadDir "zenplus-agentctl.exe")
-  Copy-Item -Force "dist\zenplus-agent-app.exe" (Join-Path $payloadDir "zenplus-agent-app.exe")
-  Copy-Item -Force "dist\zenplus-agent-user.exe" (Join-Path $payloadDir "zenplus-agent-user.exe")
   if (-not (Test-Path (Join-Path $apmStage "gateway\zenplus-telemetry-gateway.exe"))) {
     throw "The managed APM gateway is missing from $apmStage"
   }
-  Copy-Item -Recurse -Force $apmStage (Join-Path $payloadDir "apm")
-  try {
-    Invoke-Go build -trimpath -tags installerpayload -ldflags="-s -w -H=windowsgui$embedFlags" -o "dist\ZenPlusAgentSetup-x64.exe" ".\cmd\zenplus-agent-installer"
+
+  # A payload-free build of the setup program is installed as the uninstaller
+  # (ZenPlusAgentSetup.exe). Uninstall never needs the embedded product, so
+  # this replaces the previous practice of copying the entire setup - several
+  # hundred MB with APM - into Program Files.
+  Invoke-Go build -trimpath -ldflags="-s -w -H=windowsgui$embedFlags" -o "dist\zenplus-agent-uninstaller.exe" ".\cmd\zenplus-agent-installer"
+  Invoke-SignArtifacts @("dist\zenplus-agent-uninstaller.exe")
+
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  $wix = Ensure-Wix
+  $releasedAt = (Get-Date).ToUniversalTime().ToString("o")
+
+  # Two flavours from the same signed binaries:
+  #   core - server monitoring only:        zenplus-agent-core-<version>.exe/.msi
+  #   full - server monitoring and APM:     zenplus-agent-<version>.exe/.msi
+  # "full" keeps the historical file names, so agents released before the
+  # split (which all carry the APM bundle) keep upgrading to a package that
+  # still contains it.
+  function New-FlavorPackages {
+    param([string]$Flavor)
+    $includesApm = $Flavor -eq "full"
+    $suffix = if ($includesApm) { "" } else { "-core" }
+    $payloadDir = "cmd\zenplus-agent-installer\payload"
+    $payloadZip = "cmd\zenplus-agent-installer\payload.zip"
+    $setupBuild = "dist\ZenPlusAgentSetup-$Flavor-x64.exe"
+    Remove-Item -Recurse -Force $payloadDir, $payloadZip -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $payloadDir | Out-Null
+    try {
+      foreach ($binary in @("zenplus-agent.exe", "zenplus-agent-app.exe")) {
+        Copy-Item -Force (Join-Path "dist" $binary) (Join-Path $payloadDir $binary)
+      }
+      Copy-Item -Force "dist\zenplus-agent-uninstaller.exe" (Join-Path $payloadDir "ZenPlusAgentSetup.exe")
+      if ($includesApm) {
+        Copy-Item -Recurse -Force $apmStage (Join-Path $payloadDir "apm")
+      }
+      # CreateFromDirectory archives every file, including the NuGet `_._`
+      # placeholders the .NET instrumentation needs.
+      [System.IO.Compression.ZipFile]::CreateFromDirectory(
+        (Join-Path $root $payloadDir), (Join-Path $root $payloadZip),
+        [System.IO.Compression.CompressionLevel]::Optimal, $false)
+      Invoke-Go build -trimpath -tags installerpayload -ldflags="-s -w -H=windowsgui -X main.installerFlavor=$Flavor$embedFlags" -o $setupBuild ".\cmd\zenplus-agent-installer" | Out-Host
+    }
+    finally {
+      Remove-Item -Recurse -Force $payloadDir, $payloadZip -ErrorAction SilentlyContinue
+    }
     # Sign before executing the verifier so production builds also work on
     # Windows hosts that enforce Smart App Control or WDAC.
-    Invoke-SignArtifacts @("dist\ZenPlusAgentSetup-x64.exe")
+    Invoke-SignArtifacts @($setupBuild) | Out-Host
     if (-not $SkipPayloadExecutionVerification) {
       $payloadVerification = Start-Process `
-        -FilePath (Join-Path $root "dist\ZenPlusAgentSetup-x64.exe") `
+        -FilePath (Join-Path $root $setupBuild) `
         -ArgumentList @("/verify-payload", "/quiet") `
         -WindowStyle Hidden `
         -Wait `
         -PassThru
       if ($payloadVerification.ExitCode -ne 0) {
-        throw "Embedded installer payload verification failed with exit code $($payloadVerification.ExitCode)"
+        throw "Embedded $Flavor installer payload verification failed with exit code $($payloadVerification.ExitCode)"
       }
     }
-  }
-  finally {
-    Remove-Item -Recurse -Force $payloadDir -ErrorAction SilentlyContinue
-  }
-  $wix = Ensure-Wix
-  Invoke-Wix -Candle $wix.Candle -Light $wix.Light
-  $msiPath = Join-Path $root "dist\zenplus-agent-$Version.msi"
-  Invoke-SignArtifacts @($msiPath)
+    # Named zenplus-agent[-core]-<version> to match the controller's publish
+    # scanner (/opt/zenplus/artifacts/agents/windows/).
+    $msiPath = Join-Path $root "dist\zenplus-agent$suffix-$Version.msi"
+    Invoke-Wix -Candle $wix.Candle -Light $wix.Light -SetupExe $setupBuild -OutMsi $msiPath | Out-Host
+    Invoke-SignArtifacts @($msiPath) | Out-Host
 
-  # The standalone setup is the canonical Windows package. It owns safe
-  # in-place upgrades itself and is also the modern interactive wizard.
-  # The MSI remains an optional enterprise wrapper, but is not published as
-  # the primary update artifact.
-  $setupReleasePath = Join-Path $root "dist\zenplus-agent-$Version.exe"
-  Copy-Item -Force "dist\ZenPlusAgentSetup-x64.exe" $setupReleasePath
-  $msi = Get-Item -LiteralPath $msiPath
-  $setup = Get-Item -LiteralPath $setupReleasePath
-  $msiHash = (Get-FileHash -Algorithm SHA256 $msi.FullName).Hash.ToLowerInvariant()
-  $setupHash = (Get-FileHash -Algorithm SHA256 $setup.FullName).Hash.ToLowerInvariant()
-  $msiSignature = Get-AuthenticodeSignature $msi.FullName
-  $setupSignature = Get-AuthenticodeSignature $setup.FullName
-  $releasedAt = (Get-Date).ToUniversalTime().ToString("o")
-  $manifest = [ordered]@{
-    latest_version = $Version
-    version = $Version
-    platform = "windows"
-    arch = "amd64"
-    channel = "stable"
-    file_name = $setup.Name
-    file_size = [int64]$setup.Length
-    size_bytes = [int64]$setup.Length
-    sha256 = $setupHash
-    download_url = "$normalizedPublicBaseUrl/stable/$($setup.Name)"
-    release_notes_url = "$normalizedPublicBaseUrl/"
-    signature_status = $setupSignature.Status.ToString()
-    signing_subject = if ($null -ne $setupSignature.SignerCertificate) { $setupSignature.SignerCertificate.Subject } else { $null }
-    requires_authenticode = $true
-    install_profiles = @("infrastructure", "apm", "combined")
-    apm_profile_available = $true
-    apm_gateway_version = $apmGatewayVersion
-    setup_file_name = $setup.Name
-    setup_size_bytes = [int64]$setup.Length
-    setup_sha256 = $setupHash
-    setup_download_url = "$normalizedPublicBaseUrl/stable/$($setup.Name)"
-    setup_signature_status = $setupSignature.Status.ToString()
-    msi_file_name = $msi.Name
-    msi_size_bytes = [int64]$msi.Length
-    msi_sha256 = $msiHash
-    msi_signature_status = $msiSignature.Status.ToString()
-    released_at = $releasedAt
-    built_at_utc = $releasedAt
+    # The standalone setup is the canonical Windows package. It owns safe
+    # in-place upgrades itself and is also the modern interactive wizard.
+    # The MSI remains an optional enterprise wrapper, but is not published as
+    # the primary update artifact.
+    $setupReleasePath = Join-Path $root "dist\zenplus-agent$suffix-$Version.exe"
+    Copy-Item -Force $setupBuild $setupReleasePath
+    $msi = Get-Item -LiteralPath $msiPath
+    $setup = Get-Item -LiteralPath $setupReleasePath
+    $msiHash = (Get-FileHash -Algorithm SHA256 $msi.FullName).Hash.ToLowerInvariant()
+    $setupHash = (Get-FileHash -Algorithm SHA256 $setup.FullName).Hash.ToLowerInvariant()
+    $msiSignature = Get-AuthenticodeSignature $msi.FullName
+    $setupSignature = Get-AuthenticodeSignature $setup.FullName
+    if ($signingEnabled -and ($msiSignature.Status -ne 'Valid' -or $setupSignature.Status -ne 'Valid')) {
+      throw "Refusing to generate a production manifest for untrusted $Flavor release artifacts"
+    }
+    $profiles = if ($includesApm) { @("infrastructure", "apm", "combined") } else { @("infrastructure") }
+    return [ordered]@{
+      latest_version = $Version
+      version = $Version
+      platform = "windows"
+      arch = "amd64"
+      channel = "stable"
+      flavor = $Flavor
+      file_name = $setup.Name
+      file_size = [int64]$setup.Length
+      size_bytes = [int64]$setup.Length
+      sha256 = $setupHash
+      download_url = "$normalizedPublicBaseUrl/stable/$($setup.Name)"
+      release_notes_url = "$normalizedPublicBaseUrl/"
+      signature_status = $setupSignature.Status.ToString()
+      signing_subject = if ($null -ne $setupSignature.SignerCertificate) { $setupSignature.SignerCertificate.Subject } else { $null }
+      requires_authenticode = $true
+      install_profiles = $profiles
+      apm_profile_available = $includesApm
+      apm_gateway_version = if ($includesApm) { $apmGatewayVersion } else { $null }
+      setup_file_name = $setup.Name
+      setup_size_bytes = [int64]$setup.Length
+      setup_sha256 = $setupHash
+      setup_download_url = "$normalizedPublicBaseUrl/stable/$($setup.Name)"
+      setup_signature_status = $setupSignature.Status.ToString()
+      msi_file_name = $msi.Name
+      msi_size_bytes = [int64]$msi.Length
+      msi_sha256 = $msiHash
+      msi_download_url = "$normalizedPublicBaseUrl/stable/$($msi.Name)"
+      msi_signature_status = $msiSignature.Status.ToString()
+      released_at = $releasedAt
+      built_at_utc = $releasedAt
+    }
   }
-  $manifestJson = $manifest | ConvertTo-Json
+
+  $core = New-FlavorPackages -Flavor "core"
+  $full = New-FlavorPackages -Flavor "full"
+  # Historical name of the full interactive setup, kept for existing scripts.
+  Copy-Item -Force "dist\ZenPlusAgentSetup-full-x64.exe" "dist\ZenPlusAgentSetup-x64.exe"
+
+  # Top-level fields describe the full package so agents that predate the
+  # split never downgrade to a package without their APM components. Newer
+  # agents pick their installed flavour from "flavors".
+  $manifest = [ordered]@{}
+  foreach ($key in $full.Keys) { $manifest[$key] = $full[$key] }
+  $manifest["flavors"] = [ordered]@{ core = $core; full = $full }
+  $manifestJson = $manifest | ConvertTo-Json -Depth 6
   $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
   [System.IO.File]::WriteAllText((Join-Path $root "dist\agent-manifest.json"), $manifestJson, $utf8NoBom)
   Get-ChildItem "dist\*.exe","dist\*.msi" | ForEach-Object {

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,6 +17,51 @@ import (
 	"zenplus-agent/internal/spool"
 	"zenplus-agent/internal/uploader"
 )
+
+func TestControllerAndProfileSettingsReloadWithoutRestart(t *testing.T) {
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/agents/enroll" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(model.EnrollmentResponse{AgentID: "00000000-0000-4000-8000-000000000001", AuthorizationState: "pending"})
+	}))
+	defer controller.Close()
+	cfg := config.Default()
+	cfg.DataDir = t.TempDir()
+	paths := agentruntime.NewPaths(cfg.DataDir)
+	if err := paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(cfg.DataDir, "config", "agent.yaml")
+	localHash := localSettingsFingerprint(cfg)
+	next := cfg
+	if err := config.ApplyProfile(&next, "apm"); err != nil {
+		t.Fatal(err)
+	}
+	if localHash == localSettingsFingerprint(next) {
+		t.Fatal("profile change with APM still enabled was missed")
+	}
+	next.ControllerURL = controller.URL
+	if err := config.Save(configPath, next); err != nil {
+		t.Fatal(err)
+	}
+	store, err := spool.Open(paths.SpoolDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var up *uploader.Uploader
+	var poller *configpoller.Poller
+	enrollment := enroll.Result{}
+	status := model.Status{}
+	authStamp := authFileStamp(paths)
+	if !refreshLocalRuntime(context.Background(), configPath, &cfg, paths, store, &enrollment, &up, &poller, &status, &localHash, &authStamp, func(string, ...any) {}) {
+		t.Fatalf("refresh failed: %s", status.LastConfigError)
+	}
+	if cfg.ControllerURL != controller.URL || status.ControllerURL != controller.URL || cfg.APM.Profile != "apm" || cfg.Collectors.CPU.Enabled {
+		t.Fatal("running configuration did not adopt controller/profile")
+	}
+}
 
 func TestFailedLocalEnrollmentRefreshConsumesAuthFileChange(t *testing.T) {
 	var requests atomic.Int32

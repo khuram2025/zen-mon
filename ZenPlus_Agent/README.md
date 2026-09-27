@@ -37,15 +37,19 @@ identifier is entered on the endpoint.
 .\dist\zenplus-agent.exe install-service --config .\config\agent.yaml
 .\dist\zenplus-agent.exe uninstall-service
 .\dist\zenplus-agent-app.exe --config .\config\agent.yaml
+.\dist\zenplus-agent-app.exe --run-agent --config .\config\agent.yaml   # per-user background agent
 
-.\dist\zenplus-agentctl.exe status
-.\dist\zenplus-agentctl.exe status --json
-.\dist\zenplus-agentctl.exe collect-now
-.\dist\zenplus-agentctl.exe register
-.\dist\zenplus-agentctl.exe print-config
-.\dist\zenplus-agentctl.exe service-status
-.\dist\zenplus-agentctl.exe reset-enrollment --force
+.\dist\zenplus-agent.exe status
+.\dist\zenplus-agent.exe status --json
+.\dist\zenplus-agent.exe collect-now
+.\dist\zenplus-agent.exe print-config
+.\dist\zenplus-agent.exe service-status
+.\dist\zenplus-agent.exe reset-enrollment --force
 ```
+
+The administration commands used to be a separate `zenplus-agentctl.exe`.
+Installations include a `zenplus-agentctl.cmd` shim that forwards to
+`zenplus-agent.exe`, so existing scripts keep working.
 
 ## Windows Installer
 
@@ -148,11 +152,11 @@ To avoid Microsoft SmartScreen or "Unknown Publisher" warnings for customers, si
 - CPU, memory, filesystem, disk IO, network, process, service_state, event_log, agent_health, and inventory samples using the `kind/timestamp/data` contract.
 - Windows CPU user/system/iowait/load fields, memory committed/cache counters, and host boot time/uptime inventory.
 - Controller-only registration and appliance-managed authorization without reinstalling.
-- Local status file and `zenplus-agentctl` commands.
+- Local status file and administration subcommands of `zenplus-agent.exe` (installed with a `zenplus-agentctl` shim for existing scripts).
 - Native Windows desktop dashboard through `zenplus-agent-app.exe`.
 - Windows tray/taskbar companion with Open Dashboard, update check, hide-to-tray, and Quit UI actions.
 - Single-instance dashboard/tray process guard.
-- Service status visibility in both dashboard and `zenplus-agentctl service-status`.
+- Service status visibility in both dashboard and `zenplus-agent service-status`.
 - On-demand, cancellable network capture with process/service, endpoint, port, protocol, and byte counters.
 - Per-interface cumulative traffic, current/peak throughput, link speed, and utilisation samples during capture windows.
 - Combined, server-only, and APM-only profiles with safe profile transitions that restore the infrastructure collectors when leaving APM-only mode.

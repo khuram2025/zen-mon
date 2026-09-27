@@ -65,6 +65,8 @@ type instrumentationTarget struct {
 }
 
 func (m *Manager) Instrument(ctx context.Context, request InstrumentationRequest) (InstrumentationResult, error) {
+	m.instrumentMu.Lock()
+	defer m.instrumentMu.Unlock()
 	request.Runtime = strings.ToLower(strings.TrimSpace(request.Runtime))
 	request.TargetKind = strings.ToLower(strings.TrimSpace(request.TargetKind))
 	request.TargetName = strings.TrimSpace(request.TargetName)

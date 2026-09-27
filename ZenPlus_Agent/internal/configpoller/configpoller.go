@@ -271,15 +271,72 @@ func decodeConfig(body []byte, fallback config.Config) (config.Config, error) {
 	if err := json.Unmarshal(body, &contract); err == nil && (contract.ETag != "" || contract.ConfigVersion != 0 || contract.PolicyID != "") {
 		return applyControllerConfig(fallback, contract), nil
 	}
-	var env envelope
-	if err := yaml.Unmarshal(body, &env); err == nil && env.Config.ControllerURL != "" {
-		return env.Config, nil
+	// Legacy full-config documents overlay the current config, so fields they
+	// omit keep their local values instead of silently resetting to zero
+	// (for example verify_tls=false).
+	var probe map[string]any
+	if err := yaml.Unmarshal(body, &probe); err == nil {
+		if _, isEnvelope := probe["config"]; isEnvelope {
+			env := envelope{Config: fallback}
+			if err := yaml.Unmarshal(body, &env); err != nil {
+				return fallback, err
+			}
+			return acceptFullConfig(env.Config, fallback)
+		}
 	}
 	next := fallback
 	if err := yaml.Unmarshal(body, &next); err != nil {
 		return fallback, err
 	}
-	return next, next.Validate()
+	return acceptFullConfig(next, fallback)
+}
+
+// acceptFullConfig admits a legacy full-config document only when it leaves
+// every locally owned setting untouched. The controller owns collection
+// policy; it must never be able to repoint the agent, weaken transport
+// security, change the state directory, or switch local APM instrumentation
+// on, because a response that could do so turns one compromised or
+// intercepted poll into persistent control of the host.
+func acceptFullConfig(next, current config.Config) (config.Config, error) {
+	if err := rejectLocalOverrides(next, current); err != nil {
+		return current, err
+	}
+	if err := next.Validate(); err != nil {
+		return current, err
+	}
+	return next, nil
+}
+
+func rejectLocalOverrides(next, current config.Config) error {
+	var changed []string
+	if normalizeControllerBinding(next.ControllerURL) != normalizeControllerBinding(current.ControllerURL) {
+		changed = append(changed, "controller_url")
+	}
+	if filepath.Clean(next.DataDir) != filepath.Clean(current.DataDir) {
+		changed = append(changed, "data_dir")
+	}
+	if next.ProxyURL != current.ProxyURL {
+		changed = append(changed, "proxy_url")
+	}
+	if next.VerifyTLS != current.VerifyTLS {
+		changed = append(changed, "verify_tls")
+	}
+	if next.Security != current.Security {
+		changed = append(changed, "security")
+	}
+	if next.APM != current.APM {
+		changed = append(changed, "apm")
+	}
+	if next.Spool != current.Spool {
+		changed = append(changed, "spool")
+	}
+	if next.AgentID != current.AgentID || next.ServerID != current.ServerID {
+		changed = append(changed, "agent identity")
+	}
+	if len(changed) > 0 {
+		return fmt.Errorf("controller config attempted to change local-only settings: %s", strings.Join(changed, ", "))
+	}
+	return nil
 }
 
 func applyControllerConfig(current config.Config, remote model.AgentConfigResponse) config.Config {

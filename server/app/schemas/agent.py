@@ -24,6 +24,10 @@ ServerStatus = Literal["healthy", "warning", "critical", "unknown", "stale", "di
 AgentStatus = Literal["enrolling", "online", "stale", "offline", "disabled", "updating", "error"]
 AgentPlatform = Literal["windows", "linux", "macos", "other"]
 UpdateRing = Literal["canary", "beta", "stable", "pinned"]
+# infrastructure: server monitoring only; apm: APM only; combined: both.
+MonitoringProfile = Literal["infrastructure", "apm", "combined"]
+# core: the server-monitoring package; full: the package with APM.
+PackageFlavor = Literal["core", "full"]
 
 
 # ── Servers (admin) ──────────────────────────────────────────────────
@@ -244,6 +248,13 @@ class AgentResponse(BaseModel):
     config_apply_error: Optional[str]
     capabilities: List[str] = Field(default_factory=list)
     apm_status: Dict[str, Any] = Field(default_factory=dict)
+    # Latest progress of an appliance-requested upgrade (see AgentUpdateStatus);
+    # empty when the agent has not reported one.
+    update_status: Dict[str, Any] = Field(default_factory=dict)
+    # Installed package and effective monitoring profile, reported by
+    # agents 1.14.2+.
+    package_flavor: Optional[str] = None
+    monitoring_profile: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
@@ -253,10 +264,15 @@ class AgentBulkAction(BaseModel):
     agent_ids: List[UUID] = Field(default_factory=list)
     action: Literal["change_policy", "change_update_ring", "request_diagnostics",
                     "rotate_certificate", "trigger_upgrade", "disable", "enable",
-                    "authorize", "revoke"]
+                    "authorize", "revoke", "change_monitoring_profile"]
     policy_id: Optional[UUID] = None
     update_ring: Optional[UpdateRing] = None
     target_version: Optional[str] = None
+    # change_monitoring_profile: the profile to switch to, and consent to
+    # restore (and restart) applications instrumented by APM when turning
+    # APM off.
+    monitoring_profile: Optional[MonitoringProfile] = None
+    remove_instrumentation: bool = False
 
 
 class AgentRegistrationConflictResolve(BaseModel):
@@ -345,6 +361,19 @@ class ApplianceAPMStatus(BaseModel):
     checked_at: datetime
 
 
+class AgentUpdateStatus(BaseModel):
+    """Progress of an upgrade the appliance requested (agents 1.14.1+)."""
+    # "upgrade", or "profile" for a monitoring-profile change (1.14.2+).
+    kind: Literal["upgrade", "profile"] = "upgrade"
+    state: Literal["requested", "downloading", "installing", "succeeded", "failed"]
+    target_version: str = Field(max_length=64)
+    target_flavor: Optional[PackageFlavor] = None
+    target_profile: Optional[MonitoringProfile] = None
+    from_version: Optional[str] = Field(default=None, max_length=64)
+    error: Optional[str] = Field(default=None, max_length=1000)
+    updated_at: Optional[datetime] = None
+
+
 class AgentHeartbeatRequest(BaseModel):
     version: str
     uptime_seconds: Optional[int] = None
@@ -358,6 +387,11 @@ class AgentHeartbeatRequest(BaseModel):
     # Optional for rollback compatibility; APM-capable agents always send the
     # complete block, including zero-valued counters.
     apm: Optional[AgentAPMHeartbeat] = None
+    # Absent from agents before 1.14.1 and when no upgrade was requested.
+    update: Optional[AgentUpdateStatus] = None
+    # Absent from agents before 1.14.2.
+    package_flavor: Optional[PackageFlavor] = None
+    monitoring_profile: Optional[MonitoringProfile] = None
 
 
 class AgentHeartbeatResponse(BaseModel):
@@ -369,6 +403,8 @@ class AgentHeartbeatResponse(BaseModel):
     backpressure: Optional[Dict[str, Any]] = None
     capabilities: List[str] = Field(default_factory=list)
     apm: Optional[ApplianceAPMStatus] = None
+    # The controller accepts Content-Encoding: gzip on agent uploads.
+    accepts_gzip: bool = True
 
 
 class AgentConfigResponse(BaseModel):
@@ -614,3 +650,5 @@ class ServerMetricsResponse(BaseModel):
 class AgentPackageDownloadRequest(BaseModel):
     """Select an immutable package; authorization is appliance-managed."""
     platform: Literal["windows", "linux", "macos"] = "windows"
+    # "core" is server monitoring only; "full" adds the APM components.
+    flavor: Literal["core", "full"] = "full"

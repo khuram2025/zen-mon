@@ -35,7 +35,8 @@ import (
 
 const (
 	productName   = "ZenPlus Agent"
-	publisherName = "Zentryc"
+	// publisherName matches the code-signing certificate subject.
+	publisherName = "Zentryc LLC"
 	serviceName   = "ZenPlusAgent"
 )
 
@@ -61,6 +62,7 @@ type options struct {
 	controllerCA  string
 	apmMode       string
 	profile       string
+	logPath       string
 }
 
 func main() {
@@ -69,14 +71,31 @@ func main() {
 		if !hasQuietArg(os.Args[1:]) {
 			showMessage(productName+" Setup", fmt.Sprintf("%s setup failed:\n\n%v", productName, err), true)
 		}
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
 	}
 }
 
-func run() error {
+func run() (returnErr error) {
 	opts, err := parseOptions(os.Args[1:])
 	if err != nil {
-		return err
+		return withExitCode(exitInvalidCommandLine, err)
+	}
+	if opts.logPath != "" {
+		log, err := os.OpenFile(opts.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			return fmt.Errorf("open setup log: %w", err)
+		}
+		previous := os.Stdout
+		os.Stdout = log
+		defer func() {
+			if returnErr != nil {
+				fmt.Fprintf(log, "Setup failed: %v\n", returnErr)
+			} else {
+				fmt.Fprintln(log, "Setup completed successfully.")
+			}
+			os.Stdout = previous
+			_ = log.Close()
+		}()
 	}
 	if opts.verifyPayload {
 		return verifyEmbeddedInstallerPayload()
@@ -100,7 +119,7 @@ func run() error {
 		return err
 	}
 	if layout.Scope == "machine" && !elevated {
-		return relaunchElevated(ensureArg(os.Args[1:], "/machine"))
+		return withExitCode(exitElevationRequired, fmt.Errorf("silent machine installation requires an administrator or SYSTEM process; run the deployment command elevated"))
 	}
 	if opts.uninstall {
 		if !opts.fromTemp {
@@ -155,10 +174,29 @@ func relaunchSetupFromTempIfInstalled(elevated bool, args []string, wait bool) (
 func parseOptions(args []string) (options, error) {
 	var opts options
 	normalized := make([]string, 0, len(args))
-	for _, arg := range args {
+	aliases := map[string]string{"s": "quiet", "silent": "quiet", "verysilent": "quiet", "allusers": "machine", "currentuser": "user", "controller": "controller-url", "controller_url": "controller-url", "controller_ca_file": "controller-ca-file", "install_profile": "profile"}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		switch {
-		case strings.HasPrefix(arg, "/"):
-			normalized = append(normalized, "-"+strings.TrimLeft(arg, "/"))
+		case strings.HasPrefix(arg, "/") || strings.HasPrefix(arg, "-"):
+			key, value, hasValue := strings.Cut(strings.TrimLeft(arg, "/-"), "=")
+			key = strings.ToLower(key)
+			if alias, ok := aliases[key]; ok {
+				key = alias
+			}
+			if hasValue {
+				normalized = append(normalized, "-"+key+"="+value)
+			} else {
+				normalized = append(normalized, "-"+key)
+				switch key {
+				case "controller-url", "controller-ca-file", "apm-enabled", "profile", "log":
+					if i+1 >= len(args) {
+						return opts, fmt.Errorf("%s requires a value", arg)
+					}
+					i++
+					normalized = append(normalized, args[i])
+				}
+			}
 		case strings.Contains(arg, "="):
 			key, value, _ := strings.Cut(arg, "=")
 			switch strings.ToUpper(strings.TrimSpace(key)) {
@@ -170,12 +208,14 @@ func parseOptions(args []string) (options, error) {
 				normalized = append(normalized, "-apm-enabled", value)
 			case "INSTALL_PROFILE":
 				normalized = append(normalized, "-profile", value)
+			case "LOG":
+				normalized = append(normalized, "-log", value)
 			case "PURGE":
-				if value == "1" || strings.EqualFold(value, "true") {
-					normalized = append(normalized, "-purge")
+				if value != "" {
+					normalized = append(normalized, "-purge="+value)
 				}
 			default:
-				normalized = append(normalized, arg)
+				return opts, fmt.Errorf("unknown installer property %q", key)
 			}
 		default:
 			normalized = append(normalized, arg)
@@ -199,9 +239,16 @@ func parseOptions(args []string) (options, error) {
 	fs.StringVar(&opts.controllerCA, "controller-ca-file", "", "PEM CA bundle for the controller TLS certificate")
 	fs.StringVar(&opts.apmMode, "apm-enabled", "", "enable or disable local APM monitoring")
 	fs.StringVar(&opts.profile, "profile", "", "installation profile: infrastructure, apm, or combined")
+	fs.StringVar(&opts.logPath, "log", "", "append setup results to this existing-directory log path")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(normalized); err != nil {
 		return opts, err
+	}
+	if fs.NArg() != 0 {
+		return opts, fmt.Errorf("unexpected installer argument %q", fs.Arg(0))
+	}
+	if opts.machine && opts.user {
+		return opts, fmt.Errorf("select either machine or user installation scope")
 	}
 	if opts.apmMode != "" {
 		switch strings.ToLower(strings.TrimSpace(opts.apmMode)) {
@@ -355,6 +402,10 @@ func verifiedEmbeddedInstallerPayloads() ([]payloadFile, error) {
 }
 
 func validateEmbeddedPayloads(payloads []payloadFile) error {
+	return validateEmbeddedPayloadsForFlavor(payloads, payloadIncludesAPM())
+}
+
+func validateEmbeddedPayloadsForFlavor(payloads []payloadFile, includesAPM bool) error {
 	byName := make(map[string][]byte, len(payloads))
 	for _, payload := range payloads {
 		name, err := canonicalPayloadName(payload.Name)
@@ -372,11 +423,24 @@ func validateEmbeddedPayloads(payloads []payloadFile) error {
 		}
 		byName[name] = payload.Data
 	}
-	requiredFiles := []string{
+	serverFiles := []string{
 		"zenplus-agent.exe",
-		"zenplus-agentctl.exe",
 		"zenplus-agent-app.exe",
-		"zenplus-agent-user.exe",
+	}
+	if !includesAPM {
+		for _, name := range serverFiles {
+			if len(byName[name]) == 0 {
+				return fmt.Errorf("installer server payload is incomplete: required file %q is missing", name)
+			}
+		}
+		for name := range byName {
+			if strings.HasPrefix(name, "apm/") {
+				return fmt.Errorf("server-monitoring installer payload unexpectedly contains APM file %q", name)
+			}
+		}
+		return nil
+	}
+	requiredFiles := append(serverFiles,
 		"apm/bundle-manifest.json",
 		"apm/gateway/zenplus-telemetry-gateway.exe",
 		"apm/instrumentation/dotnet/net/opentelemetry.autoinstrumentation.startuphook.dll",
@@ -390,7 +454,7 @@ func validateEmbeddedPayloads(payloads []payloadFile) error {
 		"apm/instrumentation/python/install-zenpluspythontracing.ps1",
 		"apm/instrumentation/python/constraints.txt",
 		"apm/instrumentation/python/readme.txt",
-	}
+	)
 	for _, name := range requiredFiles {
 		if len(byName[name]) == 0 {
 			return fmt.Errorf("installer APM/server payload is incomplete: required file %q is missing", name)
@@ -652,6 +716,11 @@ func runIISAppCmdOutput(args ...string) (string, error) {
 }
 
 func install(l layout, opts options) (returnErr error) {
+	release, err := acquireSetupLock(l.Scope)
+	if err != nil {
+		return err
+	}
+	defer release()
 	logStep(opts, "Installing %s %s (%s)", productName, model.AgentVersion, l.Scope)
 	payloads, err := preflightInstall(opts)
 	if err != nil {
@@ -660,8 +729,19 @@ func install(l layout, opts options) (returnErr error) {
 	// Validate the requested configuration while the old installation is still
 	// fully available. It is rebuilt after quiescing the agent so a policy
 	// update that lands during payload staging is not overwritten.
-	if _, err := buildInstalledConfig(l, opts); err != nil {
+	plannedConfig, err := buildInstalledConfig(l, opts)
+	if err != nil {
 		return fmt.Errorf("prepare installed configuration: %w", err)
+	}
+	apmPaths := agentruntime.NewPaths(l.DataDir)
+	if !payloadIncludesAPM() {
+		managed, err := apmruntime.ManagedInstrumentationCount(apmPaths.APMInstrumentationState)
+		if err != nil {
+			return fmt.Errorf("inspect APM instrumentation before installing server monitoring only: %w", err)
+		}
+		if err := requireFlavorSupportsConfig(plannedConfig, managed); err != nil {
+			return err
+		}
 	}
 	stageDir, err := stageInstallPayloads(l, payloads)
 	if err != nil {
@@ -673,7 +753,6 @@ func install(l layout, opts options) (returnErr error) {
 			_ = os.RemoveAll(stageDir)
 		}
 	}()
-	apmPaths := agentruntime.NewPaths(l.DataDir)
 	managedPools, err := apmruntime.ManagedIISTargets(apmPaths.APMInstrumentationState)
 	if err != nil {
 		return fmt.Errorf("inspect managed IIS instrumentation before upgrade: %w", err)
@@ -769,6 +848,11 @@ func install(l layout, opts options) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("prepare quiesced installed configuration: %w", err)
 	}
+	// Re-check with the quiesced state: a controller command may have
+	// instrumented an application while the payload was being staged.
+	if err := requireFlavorSupportsConfig(nextConfig, len(managedPools)+len(managedServices)); err != nil {
+		return err
+	}
 	stoppedServices, err = stopManagedWindowsServices(managedServices)
 	if err != nil {
 		return err
@@ -858,6 +942,11 @@ func install(l layout, opts options) (returnErr error) {
 }
 
 func uninstall(l layout, opts options) (returnErr error) {
+	release, err := acquireSetupLock(l.Scope)
+	if err != nil {
+		return err
+	}
+	defer release()
 	logStep(opts, "Uninstalling %s (%s)", productName, l.Scope)
 	var serviceBefore agentServiceState
 	serviceQuiesced := false
@@ -1131,9 +1220,20 @@ func configureInstalledServiceRecovery() error {
 	return nil
 }
 
+// userRunnerCommand is the per-user background agent: the dashboard binary
+// in --run-agent mode. An installation from before 1.13 (for example one
+// restored by a rolled-back upgrade) still has its own zenplus-agent-user.exe.
+func userRunnerCommand(l layout) (string, []string) {
+	legacy := filepath.Join(l.InstallDir, "zenplus-agent-user.exe")
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy, []string{"--config", l.ConfigPath}
+	}
+	return filepath.Join(l.InstallDir, "zenplus-agent-app.exe"), []string{"--run-agent", "--config", l.ConfigPath}
+}
+
 func launchUserRunner(l layout) error {
-	runner := filepath.Join(l.InstallDir, "zenplus-agent-user.exe")
-	cmd := exec.Command(runner, "--config", l.ConfigPath)
+	runner, args := userRunnerCommand(l)
+	cmd := exec.Command(runner, args...)
 	cmd.SysProcAttr = detachedSysProcAttr()
 	return cmd.Start()
 }
@@ -1343,8 +1443,8 @@ func createStartupShortcut(l layout) error {
 		return err
 	}
 	if l.Scope == "user" {
-		runner := filepath.Join(l.InstallDir, "zenplus-agent-user.exe")
-		return createShortcut(filepath.Join(l.StartupDir, "ZenPlus Agent Background.lnk"), runner, "--config "+quote(l.ConfigPath), l.InstallDir, productName+" Background")
+		runner, args := userRunnerCommand(l)
+		return createShortcut(filepath.Join(l.StartupDir, "ZenPlus Agent Background.lnk"), runner, quoteArgs(args), l.InstallDir, productName+" Background")
 	}
 	return nil
 }
@@ -1432,6 +1532,18 @@ func quote(value string) string {
 	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
 }
 
+func quoteArgs(args []string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "--") {
+			quoted[i] = arg
+			continue
+		}
+		quoted[i] = quote(arg)
+	}
+	return strings.Join(quoted, " ")
+}
+
 func scopeArg(l layout) string {
 	if l.Scope == "machine" {
 		return "/machine"
@@ -1493,7 +1605,7 @@ func relaunchElevated(args []string) error {
 		return fmt.Errorf("read elevated setup result: %w", err)
 	}
 	if exitCode != 0 {
-		return fmt.Errorf("elevated setup failed with exit code %d", exitCode)
+		return withExitCode(int(exitCode), fmt.Errorf("elevated setup failed with exit code %d", exitCode))
 	}
 	return nil
 }
@@ -1536,7 +1648,7 @@ func ensureArg(args []string, required string) []string {
 }
 
 func logStep(opts options, format string, args ...any) {
-	if opts.quiet {
+	if opts.quiet && opts.logPath == "" {
 		return
 	}
 	fmt.Printf("[%s] %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, args...))
@@ -1545,7 +1657,8 @@ func logStep(opts options, format string, args ...any) {
 func hasQuietArg(args []string) bool {
 	for _, arg := range args {
 		arg = strings.TrimLeft(strings.ToLower(strings.TrimSpace(arg)), "-/")
-		if arg == "quiet" || arg == "qn" {
+		key, value, hasValue := strings.Cut(arg, "=")
+		if (key == "quiet" || key == "qn" || key == "s" || key == "silent" || key == "verysilent") && (!hasValue || value == "true" || value == "1") {
 			return true
 		}
 	}

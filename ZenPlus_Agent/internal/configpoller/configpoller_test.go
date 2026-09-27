@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -494,5 +495,77 @@ func TestApplyControllerConfigPreservesEventFiltersExactly(t *testing.T) {
 	remote.EventLogFilters[0].IDs[0] = 999
 	if !reflect.DeepEqual(*next.Collectors.EventLog.Filters, want) {
 		t.Fatal("local filters alias the controller response")
+	}
+}
+
+func pollOnce(t *testing.T, body string) (config.Config, config.Config, bool, error) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	current := config.Default()
+	current.ControllerURL = server.URL
+	current.VerifyTLS = true
+	current.DataDir = t.TempDir()
+	api, err := client.New(server.URL, "", true, "agent-1", "key-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, changed, _, err := New(api, "", "machine-1", "agent-1", "server-1").Poll(context.Background(), current)
+	return current, next, changed, err
+}
+
+func TestPollRejectsFullConfigThatChangesLocalSettings(t *testing.T) {
+	for name, body := range map[string]string{
+		"envelope disables TLS":     "config:\n  controller_url: %s\n  verify_tls: false\n",
+		"envelope repoints":         "config:\n  controller_url: https://attacker.example\n",
+		"raw allows plain HTTP":     "security:\n  allow_insecure_transport: true\n",
+		"raw drops signed config":   "security:\n  require_signed_config: false\n  config_public_key: AAAA\n",
+		"raw trusts another CA":     "security:\n  controller_ca_file: C:\\Users\\Public\\ca.pem\n",
+		"raw adds a proxy":          "proxy_url: http://proxy.attacker.example:8080\n",
+		"raw changes APM":           "apm:\n  enabled: true\n  profile: combined\n  bind_address: 0.0.0.0\n",
+		"raw moves the state root":  "data_dir: C:\\Users\\Public\\zenplus\n",
+		"raw rewrites the agent id": "agent_id: ${file:C:\\Windows\\win.ini}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var server *httptest.Server
+			server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if name == "envelope disables TLS" {
+					_, _ = w.Write([]byte(fmt.Sprintf(body, server.URL)))
+					return
+				}
+				_, _ = w.Write([]byte(body))
+			}))
+			defer server.Close()
+			current := config.Default()
+			current.ControllerURL = server.URL
+			current.VerifyTLS = true
+			current.DataDir = t.TempDir()
+			api, err := client.New(server.URL, "", true, "agent-1", "key-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, changed, _, err := New(api, "", "machine-1", "agent-1", "server-1").Poll(context.Background(), current)
+			if err == nil || changed {
+				t.Fatalf("accepted a config that changes local settings: changed=%v err=%v", changed, err)
+			}
+			if !reflect.DeepEqual(next, current) {
+				t.Fatalf("rejected poll still altered the config")
+			}
+		})
+	}
+}
+
+func TestPollAcceptsLegacyPolicyOnlyDocument(t *testing.T) {
+	current, next, changed, err := pollOnce(t, "collect_interval_seconds: 45\nupload_interval_seconds: 90\n")
+	if err != nil || !changed {
+		t.Fatalf("policy-only document rejected: changed=%v err=%v", changed, err)
+	}
+	if next.CollectIntervalSeconds != 45 || next.UploadIntervalSeconds != 90 {
+		t.Fatalf("policy not applied: collect=%d upload=%d", next.CollectIntervalSeconds, next.UploadIntervalSeconds)
+	}
+	if next.VerifyTLS != current.VerifyTLS || next.Security != current.Security || next.APM != current.APM {
+		t.Fatalf("policy-only document changed local settings")
 	}
 }

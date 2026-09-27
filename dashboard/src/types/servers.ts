@@ -161,6 +161,15 @@ export interface AgentItem {
     checked_at?: string | null
     last_error?: string | null
   }
+  /** Feature flags the agent advertises, e.g. monitoring_profile_v1. */
+  capabilities?: string[]
+  // Progress of an upgrade requested from Agent Fleet, reported by agents
+  // 1.14.1+. Empty when none has been reported.
+  update_status?: AgentUpdateStatus
+  // Installed package (core: server monitoring; full: with APM) and effective
+  // monitoring profile, reported by agents 1.14.2+.
+  package_flavor?: 'core' | 'full' | null
+  monitoring_profile?: MonitoringProfile | null
   tags: string[]
   created_at: string
   updated_at: string
@@ -396,4 +405,18 @@ export interface ComplianceSummary {
   missing: number
   outdated: number
   prohibited: number
+}
+
+export type MonitoringProfile = 'infrastructure' | 'apm' | 'combined'
+
+export interface AgentUpdateStatus {
+  // "profile" for a monitoring-profile change; absent or "upgrade" otherwise.
+  kind?: 'upgrade' | 'profile'
+  target_flavor?: 'core' | 'full' | null
+  target_profile?: MonitoringProfile | null
+  state?: 'requested' | 'downloading' | 'installing' | 'succeeded' | 'failed'
+  target_version?: string
+  from_version?: string | null
+  error?: string | null
+  updated_at?: string | null
 }

@@ -5,7 +5,7 @@
     Name="ZenPlus Agent"
     Language="1033"
     Version="$(var.ProductVersion)"
-    Manufacturer="Zentryc"
+    Manufacturer="Zentryc LLC"
     UpgradeCode="a605ea5d-025b-44c5-8823-3aa58eb66a21">
 
     <Package
@@ -16,7 +16,7 @@
       InstallPrivileges="elevated"
       Description="ZenPlus Agent Windows installer" />
 
-    <MajorUpgrade Schedule="afterInstallExecute" DowngradeErrorMessage="A newer version of ZenPlus Agent is already installed." />
+    <MajorUpgrade Schedule="afterInstallExecute" AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of ZenPlus Agent is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
     <Icon Id="ProductIcon" SourceFile="$(var.AssetsDir)\zenplus-agent.ico" />
@@ -113,7 +113,8 @@
 
     <UIRef Id="WixUI_Minimal" />
     <WixVariable Id="WixUILicenseRtf" Value="$(var.AssetsDir)\license.rtf" />
-    <WixVariable Id="WixUIBannerBmp" Value="$(var.AssetsDir)\installer-banner.bmp" />
+    <!-- Use WiX's title-safe banner. The custom bitmap contained a baked-in
+         product title underneath each wizard page's own title control. -->
     <WixVariable Id="WixUIDialogBmp" Value="$(var.AssetsDir)\installer-dialog.bmp" />
   </Product>
 </Wix>

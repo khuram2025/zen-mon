@@ -75,7 +75,10 @@ func run() error {
 		fmt.Println(model.AgentVersion)
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q\nusage: %s [run|service|install-service|uninstall-service|collect-now|register|version]", cmd, filepath.Base(os.Args[0]))
+		if handled, err := runCtlCommand(cmd, os.Args[2:]); handled {
+			return err
+		}
+		return fmt.Errorf("unknown command %q\nusage: %s [run|service|install-service|uninstall-service|status|collect-now|print-config|service-status|reset-enrollment|register|version]", cmd, filepath.Base(os.Args[0]))
 	}
 }
 

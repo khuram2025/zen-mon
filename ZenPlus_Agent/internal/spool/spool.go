@@ -32,7 +32,6 @@ const (
 var (
 	ErrRecordNotFound        = errors.New("spool record not found")
 	ErrStaleReplayGeneration = errors.New("stale spool replay generation")
-	errDueNow                = errors.New("spool work is due now")
 )
 
 type Store struct {
@@ -40,6 +39,12 @@ type Store struct {
 	replayMu           sync.Mutex
 	replayGenerationMu sync.RWMutex
 	replayGeneration   uint64
+
+	// indexMu guards index and indexBytes, and is held across every write to
+	// the active queue so the index changes only after the write commits.
+	indexMu    sync.Mutex
+	index      map[uint64]recordMeta
+	indexBytes int64
 }
 
 type Record struct {
@@ -92,7 +97,12 @@ func open(path string, readOnly bool) (*Store, error) {
 			return nil, err
 		}
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db}
+	if err := s.buildIndex(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
 }
 
 // repairCorruptActiveRecords prevents a damaged legacy envelope from pinning
@@ -191,14 +201,18 @@ func (s *Store) Enqueue(batchID string, payload []byte, maxBytes int64) (uint64,
 	if maxBytes > 0 && int64(len(payload)) > maxBytes {
 		return 0, fmt.Errorf("payload size %d exceeds spool limit %d", len(payload), maxBytes)
 	}
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
 	var seq uint64
+	var rec Record
+	var pruned []uint64
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		meta := tx.Bucket(bucketMeta)
 		seq = btoi(meta.Get(keySequence)) + 1
 		if err := meta.Put(keySequence, itob(seq)); err != nil {
 			return err
 		}
-		rec := Record{
+		rec = Record{
 			Key:       seq,
 			BatchID:   batchID,
 			CreatedAt: time.Now().UTC(),
@@ -212,9 +226,23 @@ func (s *Store) Enqueue(batchID string, payload []byte, maxBytes int64) (uint64,
 		if err := tx.Bucket(bucketBatches).Put(itob(seq), b); err != nil {
 			return err
 		}
-		return pruneBySize(tx, maxBytes)
+		pruned = s.oldestOverLimitLocked(maxBytes, rec.Size, nil)
+		return deleteKeys(tx.Bucket(bucketBatches), pruned)
 	})
+	if err == nil {
+		s.indexAdd(seq, recordMeta{size: rec.Size, createdAt: rec.CreatedAt})
+		s.indexRemove(pruned...)
+	}
 	return seq, err
+}
+
+func deleteKeys(b *bolt.Bucket, keys []uint64) error {
+	for _, key := range keys {
+		if err := b.Delete(itob(key)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) Peek(limit int) ([]Record, error) {
@@ -250,14 +278,31 @@ func (s *Store) PeekDue(limit int, now time.Time) ([]Record, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	// Choose the due records from the index so deferred batches are skipped
+	// without reading or decoding their payloads.
+	s.indexMu.Lock()
+	var due []uint64
+	for _, key := range s.sortedKeysLocked() {
+		if len(due) >= limit {
+			break
+		}
+		if next := s.index[key].nextAttemptAt; next.IsZero() || !next.After(now) {
+			due = append(due, key)
+		}
+	}
+	s.indexMu.Unlock()
+
 	var out []Record
 	err := s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketBatches)
 		if b == nil {
 			return nil
 		}
-		c := b.Cursor()
-		for k, v := c.First(); k != nil && len(out) < limit; k, v = c.Next() {
+		for _, key := range due {
+			v := b.Get(itob(key))
+			if v == nil {
+				continue // acknowledged since the index was read
+			}
 			var rec Record
 			if err := json.Unmarshal(v, &rec); err != nil {
 				return err
@@ -278,31 +323,19 @@ func (s *Store) NextAttempt(now time.Time) (bool, *time.Time, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
 	var next *time.Time
-	err := s.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bucketBatches)
-		if b == nil {
-			return nil
+	for _, m := range s.index {
+		if m.nextAttemptAt.IsZero() || !m.nextAttemptAt.After(now) {
+			return true, nil, nil
 		}
-		return b.ForEach(func(_, v []byte) error {
-			var rec Record
-			if err := json.Unmarshal(v, &rec); err != nil {
-				return err
-			}
-			if rec.NextAttemptAt == nil || !rec.NextAttemptAt.After(now) {
-				return errDueNow
-			}
-			if next == nil || rec.NextAttemptAt.Before(*next) {
-				candidate := rec.NextAttemptAt.UTC()
-				next = &candidate
-			}
-			return nil
-		})
-	})
-	if errors.Is(err, errDueNow) {
-		return true, nil, nil
+		if next == nil || m.nextAttemptAt.Before(*next) {
+			candidate := m.nextAttemptAt
+			next = &candidate
+		}
 	}
-	return false, next, err
+	return false, next, nil
 }
 
 func (s *Store) PeekLatest(limit int) ([]Record, error) {
@@ -332,7 +365,10 @@ func (s *Store) PeekLatest(limit int) ([]Record, error) {
 // Existing spool rows from older agents have zero-value retry fields and are
 // therefore immediately due.
 func (s *Store) Defer(key uint64, nextAttemptAt time.Time, lastError string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	var meta recordMeta
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketBatches)
 		if b == nil {
 			return ErrRecordNotFound
@@ -354,8 +390,13 @@ func (s *Store) Defer(key uint64, nextAttemptAt time.Time, lastError string) err
 		if err != nil {
 			return err
 		}
+		meta = recordMeta{size: rec.Size, createdAt: rec.CreatedAt, nextAttemptAt: next}
 		return b.Put(encodedKey, updated)
 	})
+	if err == nil {
+		s.indexAdd(key, meta)
+	}
+	return err
 }
 
 func (s *Store) DeferReplay(generation, key uint64, nextAttemptAt time.Time, lastError string) error {
@@ -368,7 +409,10 @@ func (s *Store) DeferReplay(generation, key uint64, nextAttemptAt time.Time, las
 // attempt. It is used by controller-wide circuit breakers after the individual
 // failures have already been durably counted.
 func (s *Store) Postpone(key uint64, notBefore time.Time) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	var meta *recordMeta
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketBatches)
 		if b == nil {
 			return ErrRecordNotFound
@@ -391,8 +435,13 @@ func (s *Store) Postpone(key uint64, notBefore time.Time) error {
 		if err != nil {
 			return err
 		}
+		meta = &recordMeta{size: rec.Size, createdAt: rec.CreatedAt, nextAttemptAt: next}
 		return b.Put(encodedKey, updated)
 	})
+	if err == nil && meta != nil {
+		s.indexAdd(key, *meta)
+	}
+	return err
 }
 
 func (s *Store) PostponeReplay(generation, key uint64, notBefore time.Time) error {
@@ -407,7 +456,9 @@ func (s *Store) Quarantine(key uint64, now time.Time, lastError string) error {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		active := tx.Bucket(bucketBatches)
 		quarantine := tx.Bucket(bucketQuarantine)
 		if active == nil || quarantine == nil {
@@ -449,6 +500,10 @@ func (s *Store) Quarantine(key uint64, now time.Time, lastError string) error {
 		}
 		return pruneQuarantine(tx, now.UTC(), 0)
 	})
+	if err == nil {
+		s.indexRemove(key)
+	}
+	return err
 }
 
 func (s *Store) QuarantineReplay(generation, key uint64, now time.Time, lastError string) error {
@@ -485,7 +540,9 @@ func (s *Store) Ack(keys ...uint64) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketBatches)
 		for _, key := range keys {
 			if err := b.Delete(itob(key)); err != nil {
@@ -494,6 +551,10 @@ func (s *Store) Ack(keys ...uint64) error {
 		}
 		return nil
 	})
+	if err == nil {
+		s.indexRemove(keys...)
+	}
+	return err
 }
 
 func (s *Store) AckReplay(generation uint64, keys ...uint64) error {
@@ -503,7 +564,9 @@ func (s *Store) AckReplay(generation uint64, keys ...uint64) error {
 }
 
 func (s *Store) Stats() (Stats, error) {
-	return s.bucketStats(bucketBatches)
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	return Stats{Depth: len(s.index), Bytes: s.indexBytes}, nil
 }
 
 // QuarantineStats is separate from Stats so active queue depth reaches zero
@@ -533,52 +596,40 @@ func (s *Store) QuarantineStats() (Stats, error) {
 	return st, err
 }
 
-func (s *Store) bucketStats(bucket []byte) (Stats, error) {
-	var st Stats
-	err := s.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bucket)
-		if b == nil {
-			return nil
-		}
-		return b.ForEach(func(_, v []byte) error {
-			var rec Record
-			if err := json.Unmarshal(v, &rec); err != nil {
-				return err
-			}
-			st.Depth++
-			st.Bytes += rec.Size
-			return nil
-		})
-	})
-	return st, err
-}
-
 func (s *Store) Prune(maxAge time.Duration, maxBytes int64) error {
 	if maxAge <= 0 && maxBytes <= 0 {
 		return nil
 	}
-	return s.db.Update(func(tx *bolt.Tx) error {
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	var removed []uint64
+	err := s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketBatches)
+		removed = nil
+		expired := map[uint64]bool{}
 		if maxAge > 0 {
 			cutoff := time.Now().UTC().Add(-maxAge)
-			c := b.Cursor()
-			for k, v := c.First(); k != nil; k, v = c.Next() {
-				var rec Record
-				if err := json.Unmarshal(v, &rec); err != nil {
-					return err
-				}
-				if rec.CreatedAt.Before(cutoff) {
-					if err := b.Delete(k); err != nil {
-						return err
-					}
+			for key, m := range s.index {
+				if m.createdAt.Before(cutoff) {
+					expired[key] = true
+					removed = append(removed, key)
 				}
 			}
 		}
-		if err := pruneBySize(tx, maxBytes); err != nil {
+		var expiredBytes int64
+		for key := range expired {
+			expiredBytes += s.index[key].size
+		}
+		removed = append(removed, s.oldestOverLimitLocked(maxBytes, -expiredBytes, expired)...)
+		if err := deleteKeys(b, removed); err != nil {
 			return err
 		}
 		return pruneQuarantine(tx, time.Now().UTC(), maxAge)
 	})
+	if err == nil {
+		s.indexRemove(removed...)
+	}
+	return err
 }
 
 func pruneQuarantine(tx *bolt.Tx, now time.Time, configuredMaxAge time.Duration) error {
@@ -604,49 +655,28 @@ func pruneQuarantine(tx *bolt.Tx, now time.Time, configuredMaxAge time.Duration)
 		}
 	}
 
-	for {
-		stats, err := bucketStatsInTx(b)
-		if err != nil {
-			return err
-		}
-		encodedBytes, err := encodedBytesInTx(b)
-		if err != nil {
-			return err
-		}
-		if stats.Depth <= QuarantineMaxRecords && encodedBytes <= QuarantineMaxBytes {
-			return nil
-		}
-		k, _ := b.Cursor().First()
-		if k == nil {
-			return nil
-		}
+	// Measure once, then drop the oldest records until both caps hold.
+	depth, encodedBytes := 0, int64(0)
+	if err := b.ForEach(func(_, v []byte) error {
+		depth++
+		encodedBytes += int64(len(v))
+		return nil
+	}); err != nil {
+		return err
+	}
+	var victims [][]byte
+	c = b.Cursor()
+	for k, v := c.First(); k != nil && (depth > QuarantineMaxRecords || encodedBytes > QuarantineMaxBytes); k, v = c.Next() {
+		victims = append(victims, append([]byte(nil), k...))
+		depth--
+		encodedBytes -= int64(len(v))
+	}
+	for _, k := range victims {
 		if err := b.Delete(k); err != nil {
 			return err
 		}
 	}
-}
-
-func encodedBytesInTx(b *bolt.Bucket) (int64, error) {
-	var total int64
-	err := b.ForEach(func(_, value []byte) error {
-		total += int64(len(value))
-		return nil
-	})
-	return total, err
-}
-
-func bucketStatsInTx(b *bolt.Bucket) (Stats, error) {
-	var st Stats
-	err := b.ForEach(func(_, v []byte) error {
-		var rec Record
-		if err := json.Unmarshal(v, &rec); err != nil {
-			return err
-		}
-		st.Depth++
-		st.Bytes += rec.Size
-		return nil
-	})
-	return st, err
+	return nil
 }
 
 func truncateError(message string) string {
@@ -655,42 +685,6 @@ func truncateError(message string) string {
 		return message
 	}
 	return message[:maxErrorBytes]
-}
-
-func pruneBySize(tx *bolt.Tx, maxBytes int64) error {
-	if maxBytes <= 0 {
-		return nil
-	}
-	b := tx.Bucket(bucketBatches)
-	for {
-		total, err := sizeInTx(b)
-		if err != nil {
-			return err
-		}
-		if total <= maxBytes {
-			return nil
-		}
-		k, _ := b.Cursor().First()
-		if k == nil {
-			return errors.New("spool size limit exceeded but no records can be pruned")
-		}
-		if err := b.Delete(k); err != nil {
-			return err
-		}
-	}
-}
-
-func sizeInTx(b *bolt.Bucket) (int64, error) {
-	var total int64
-	err := b.ForEach(func(_, v []byte) error {
-		var rec Record
-		if err := json.Unmarshal(v, &rec); err != nil {
-			return err
-		}
-		total += rec.Size
-		return nil
-	})
-	return total, err
 }
 
 func itob(v uint64) []byte {

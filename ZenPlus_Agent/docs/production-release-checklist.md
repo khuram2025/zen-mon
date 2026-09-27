@@ -10,12 +10,20 @@ See `deployment.md` for the build → publish → install flow.
 - Confirm `go test ./...` passes.
 - Confirm these artifacts exist in `dist`:
   - `zenplus-agent.exe`
-  - `zenplus-agentctl.exe`
   - `zenplus-agent-app.exe`
+  - `zenplus-agent-uninstaller.exe` (installed as `ZenPlusAgentSetup.exe`)
   - `ZenPlusAgentSetup-x64.exe`
-  - `zenplus-agent-<version>.exe`
-  - `zenplus-agent-<version>.msi` (optional enterprise wrapper)
-  - `agent-manifest.json`
+  - `zenplus-agent-core-<version>.exe` and `.msi` (server monitoring only)
+  - `zenplus-agent-<version>.exe` and `.msi` (with APM)
+  - `agent-manifest.json`, with top-level fields for the full package and both
+    packages under `flavors`
+- Confirm the core package is a small fraction of the full package and that
+  both setups pass `/verify-payload`.
+- Upgrade tests for the split: core over core, full over core (adds APM),
+  core over an infrastructure-profile full install (removes APM), and confirm
+  core refuses to replace a combined/APM install or one with instrumented
+  applications. Confirm Apps & Features shows a single ZenPlus Agent entry
+  after switching flavour at the same version.
 - Confirm the MSI `ProductVersion` matches `model.AgentVersion`.
 - Confirm the MSI summary template is `x64;1033`, its components are 64-bit,
   and every EXE has PE machine type `0x8664`.
@@ -31,6 +39,14 @@ See `deployment.md` for the build → publish → install flow.
 - Verify signatures with `Get-AuthenticodeSignature`.
 - Confirm an unsigned build fails the production workflow before publication.
 - Confirm the public manifest requires Authenticode and points only to immutable HTTPS release URLs.
+- Self-update accepts only packages whose validated chain has the Zentryc LLC
+  subject, the Trusted Signing identity EKU in
+  `internal/selfupdate/signer.go`, and the Microsoft Identity Verification
+  root. Run `go test ./internal/selfupdate -run Pins` on a host with a signed
+  install. If the Trusted Signing identity validation is ever renewed or
+  replaced (the EKU OID changes), first ship a release signed with the *old*
+  identity that adds the new OID to `trustedSignerIdentityEKUs`; otherwise
+  deployed agents will refuse every later update.
 
 ## Installer QA
 
@@ -70,7 +86,7 @@ See `deployment.md` for the build → publish → install flow.
 - Dashboard shows the current version and checks the public update channel at startup, every six hours, and on demand.
 - A valid signed newer release is offered; unsigned or checksum-invalid releases are blocked.
 - Only one dashboard/tray process runs per user session.
-- `zenplus-agentctl service-status` matches Services.msc.
+- `zenplus-agent service-status` (and the `zenplus-agentctl` shim) matches Services.msc.
 - Dashboard reports service stopped/degraded/healthy correctly.
 - Dashboard remains responsive during controller outage and spool growth.
 - During a controller outage, retries back off exponentially (no tight retry loop).
@@ -131,7 +147,7 @@ See `deployment.md` for the build → publish → install flow.
 - Verify config and state live under `%ProgramData%\ZenPlus\Agent`.
 - Verify credentials are stored with DPAPI and are not printed in logs/UI.
 - Verify installer and Settings expose no token, site, or policy input.
-- Verify `zenplus-agentctl print-config` and logs redact credential and bearer values.
+- Verify `zenplus-agent print-config` and logs redact credential and bearer values.
 - Review whether `LocalSystem` is still required for collectors before release.
 
 ## Release Notes

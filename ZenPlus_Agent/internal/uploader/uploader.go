@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"zenplus-agent/internal/client"
@@ -22,6 +23,8 @@ type Uploader struct {
 	agentID  string
 	serverID string
 	now      func() time.Time
+	// gzip is set once the controller advertises accepts_gzip.
+	gzip atomic.Bool
 }
 
 // The appliance can spend up to 5 seconds acquiring a batch claim and then
@@ -158,7 +161,7 @@ func (u *Uploader) drainGeneration(ctx context.Context, limit int, generation ui
 		batch.SentAt = u.currentTime()
 		var out model.ResultsResponse
 		requestCtx, cancel := context.WithTimeout(ctx, hostResultsRequestTimeout)
-		resp, _, err := u.client.PostJSON(requestCtx, "/api/v1/agents/results/host", batch, &out)
+		resp, _, err := u.postResults(requestCtx, batch, &out)
 		cancel()
 		if parentErr := ctx.Err(); parentErr != nil {
 			return removed, parentErr
@@ -526,4 +529,18 @@ func (u *Uploader) SendNetworkCapture(ctx context.Context, up model.NetworkCaptu
 func (u *Uploader) RegisterDiagnostics(ctx context.Context, req model.DiagnosticsRequest) error {
 	_, _, err := u.client.PostJSON(ctx, "/api/v1/agents/diagnostics", req, nil)
 	return err
+}
+
+// SetGzipUploads enables compressed batch uploads. The runtime calls it with
+// the controller's heartbeat advertisement; controllers that predate
+// compressed uploads keep receiving plain JSON.
+func (u *Uploader) SetGzipUploads(enabled bool) {
+	u.gzip.Store(enabled)
+}
+
+func (u *Uploader) postResults(ctx context.Context, batch model.Batch, out *model.ResultsResponse) (*http.Response, []byte, error) {
+	if u.gzip.Load() {
+		return u.client.PostGzipJSON(ctx, "/api/v1/agents/results/host", batch, out, "")
+	}
+	return u.client.PostJSON(ctx, "/api/v1/agents/results/host", batch, out)
 }

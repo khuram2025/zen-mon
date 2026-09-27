@@ -435,29 +435,66 @@ func validateMachineACL(path string, expected *machineACL) error {
 }
 
 func equalMachineACL(left, right *windows.ACL) (bool, error) {
-	if left == nil || right == nil || left.AceCount != right.AceCount {
+	if left == nil || right == nil {
 		return false, nil
 	}
-	for index := uint32(0); index < uint32(left.AceCount); index++ {
-		var leftACE, rightACE *windows.ACCESS_ALLOWED_ACE
-		if err := windows.GetAce(left, index, &leftACE); err != nil {
-			return false, fmt.Errorf("read dashboard DACL entry %d: %w", index, err)
-		}
-		if err := windows.GetAce(right, index, &rightACE); err != nil {
-			return false, fmt.Errorf("read expected dashboard DACL entry %d: %w", index, err)
-		}
-		if leftACE == nil || rightACE == nil ||
-			leftACE.Header.AceType != rightACE.Header.AceType ||
-			leftACE.Mask != rightACE.Mask {
+	// Windows maps generic file rights, reorders ACEs and splits inheritable
+	// generic grants into effective and inherit-only entries. Compare actual
+	// rights by SID instead of their serialized representation. Every entry,
+	// including inherit-only entries, must stay within the expected policy.
+	expected, _, err := machineACLGrants(right)
+	if err != nil {
+		return false, err
+	}
+	effective, all, err := machineACLGrants(left)
+	if err != nil {
+		return false, err
+	}
+	if len(effective) != len(expected) {
+		return false, nil
+	}
+	for sid, mask := range all {
+		allowed, exists := expected[sid]
+		if !exists || mask & ^allowed != 0 {
 			return false, nil
 		}
-		leftSID := (*windows.SID)(unsafe.Pointer(&leftACE.SidStart))
-		rightSID := (*windows.SID)(unsafe.Pointer(&rightACE.SidStart))
-		if !leftSID.Equals(rightSID) {
+	}
+	for sid, mask := range expected {
+		if effective[sid] != mask {
 			return false, nil
 		}
 	}
 	return true, nil
+}
+
+func machineACLGrants(acl *windows.ACL) (map[string]uint32, map[string]uint32, error) {
+	effective, all := map[string]uint32{}, map[string]uint32{}
+	for index := uint32(0); index < uint32(acl.AceCount); index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, index, &ace); err != nil {
+			return nil, nil, fmt.Errorf("read dashboard DACL entry %d: %w", index, err)
+		}
+		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			return nil, nil, fmt.Errorf("dashboard DACL contains a non-allow entry")
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart)).String()
+		mask := uint32(ace.Mask)
+		for generic, specific := range map[uint32]uint32{
+			windows.GENERIC_READ:    windows.FILE_GENERIC_READ,
+			windows.GENERIC_WRITE:   windows.FILE_GENERIC_WRITE,
+			windows.GENERIC_EXECUTE: windows.FILE_GENERIC_EXECUTE,
+			windows.GENERIC_ALL:     windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1ff,
+		} {
+			if mask&generic != 0 {
+				mask = mask & ^generic | specific
+			}
+		}
+		all[sid] |= mask
+		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE == 0 {
+			effective[sid] |= mask
+		}
+	}
+	return effective, all, nil
 }
 
 func isDPAPISecretPath(path string) bool {

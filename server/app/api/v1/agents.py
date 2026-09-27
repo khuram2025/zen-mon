@@ -31,6 +31,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -58,6 +59,12 @@ from app.schemas.agent import (
     AgentResultsBatch,
     AgentResultsResponse,
     NetworkCaptureUpload,
+)
+from app.services import package_digest
+from app.services.agent_package_names import (
+    FLAVOR_FULL,
+    FLAVOR_PATTERN,
+    versioned_download_path,
 )
 from app.services.host_metric_service import (
     HOST_TELEMETRY_KINDS,
@@ -248,6 +255,14 @@ def _package_media_type(file_name: str) -> str:
     return "application/octet-stream"
 
 
+VERSION_PATTERN = r"^[vV]?\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+)?$"
+_VERSION_RE = re.compile(VERSION_PATTERN)
+
+
+def _bare_version(version: str) -> str:
+    return version.lstrip("vV")
+
+
 def _verified_package_path(platform: str, package: dict) -> Path:
     """Resolve and verify an immutable published package before serving it."""
     package_root = AGENT_PKG_DIR.resolve()
@@ -259,11 +274,7 @@ def _verified_package_path(platform: str, package: dict) -> Path:
     if not file_path.is_file():
         raise HTTPException(410, "Published package file is missing on disk")
 
-    digest = hashlib.sha256()
-    with file_path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    actual_sha = digest.hexdigest()
+    actual_sha = package_digest.sha256_file(file_path)
     actual_size = file_path.stat().st_size
     if actual_sha != str(package["sha256"]).lower() or actual_size != int(package["file_size"]):
         logger.error(
@@ -877,6 +888,15 @@ async def heartbeat(
                   apm_status = CASE WHEN :apm_present
                                     THEN CAST(:apm AS jsonb)
                                     ELSE apm_status END,
+                  update_status = CASE WHEN :upd_present
+                                       THEN CAST(:upd AS jsonb)
+                                       ELSE update_status END,
+                  package_flavor = COALESCE(CAST(:pkg_flavor AS VARCHAR), package_flavor),
+                  monitoring_profile = COALESCE(CAST(:mon_profile AS VARCHAR), monitoring_profile),
+                  -- A reached target is no longer desired. Clearing it stops
+                  -- the fleet view showing a pending upgrade.
+                  desired_version = CASE WHEN ltrim(desired_version, 'vV') = ltrim(CAST(:v AS TEXT), 'vV')
+                                         THEN NULL ELSE desired_version END,
                   last_ip = COALESCE(:ip, last_ip),
                   status = CASE WHEN status IN ('disabled') THEN status ELSE 'online' END,
                   updated_at = NOW()
@@ -888,6 +908,10 @@ async def heartbeat(
             "caps": json.dumps(capabilities or []),
             "apm_present": data.apm is not None,
             "apm": json.dumps(data.apm.model_dump(mode="json") if data.apm else {}),
+            "upd_present": data.update is not None,
+            "upd": json.dumps(data.update.model_dump(mode="json") if data.update else {}),
+            "pkg_flavor": data.package_flavor,
+            "mon_profile": data.monitoring_profile,
             "ip": client_ip, "id": agent["id"],
         },
     )
@@ -930,39 +954,6 @@ async def heartbeat(
         {"id": agent["id"]},
     )).mappings().first()
     etag, _ = await _config_etag_for_agent(dict(fresh_agent), db)
-
-    # This field was introduced after the host heartbeat contract. Returning it
-    # is backward-compatible (older agents ignore unknown response fields) and
-    # lets newer combined agents distinguish a healthy local gateway from an
-    # unavailable appliance writer during rolling upgrades.
-    from app.api.v1 import apm_ingest as apm_ingest_api
-
-    agent_credential_bound = False
-    if data.apm is not None and data.apm.enabled:
-        credential_row = (await db.execute(
-            text("""SELECT EXISTS (
-                        SELECT 1 FROM agent_apm_credentials credential
-                        JOIN apm_ingest_keys ingest_key
-                          ON ingest_key.id = credential.key_id
-                        WHERE credential.agent_id = :agent_id
-                          AND ingest_key.enabled = TRUE
-                          AND ingest_key.revoked_at IS NULL
-                    )"""),
-            {"agent_id": agent["id"]},
-        )).first()
-        agent_credential_bound = bool(credential_row and credential_row[0])
-    appliance_apm = apm_ingest_api.runtime_status()
-    appliance_apm["agent_credential_bound"] = agent_credential_bound
-    appliance_apm["ready_for_agent"] = bool(
-        appliance_apm.get("available") and agent_credential_bound
-    )
-    if data.apm is not None and data.apm.enabled and not agent_credential_bound:
-        if appliance_apm.get("state") != "unavailable":
-            appliance_apm["state"] = "degraded"
-        appliance_apm["message"] = (
-            "APM is not ready for this agent because it has no scoped ingest "
-            "credential; re-enroll the agent APM forwarder"
-        )
 
     # This field was introduced after the host heartbeat contract. Returning it
     # is backward-compatible (older agents ignore unknown response fields) and
@@ -1481,21 +1472,36 @@ async def packages_manifest(
     platform: str = Query(..., regex="^(windows|linux|macos)$"),
     channel: str = Query("stable", regex="^(canary|beta|stable|pinned)$"),
     arch: str = Query("amd64"),
+    # Agents before 1.13 send no flavour and all carry the APM bundle, so the
+    # default must stay the full package.
+    flavor: str = Query(FLAVOR_FULL, regex=FLAVOR_PATTERN),
+    # An upgrade the appliance requested names its version; agents 1.14.1+
+    # ask for exactly that package instead of the newest one.
+    version: Optional[str] = Query(None, regex=VERSION_PATTERN),
     db: AsyncSession = Depends(get_db),
 ):
-    row = (await db.execute(
-        text("""SELECT * FROM agent_packages
-                WHERE platform = :p AND channel = :c AND arch = :a AND is_latest = TRUE
-                ORDER BY released_at DESC LIMIT 1"""),
-        {"p": platform, "c": channel, "a": arch},
-    )).mappings().first()
-    if not row:
-        raise HTTPException(404, "No package published for this platform/channel/arch yet")
-    await asyncio.to_thread(_verified_package_path, platform, dict(row))
+    if version:
+        row = await _package_version(platform, db, _bare_version(version), arch, flavor)
+        if not row:
+            raise HTTPException(
+                404, f"Version {version} of the {flavor} package is not published on this appliance")
+    else:
+        row = (await db.execute(
+            text("""SELECT * FROM agent_packages
+                    WHERE platform = :p AND channel = :c AND arch = :a AND flavor = :fl
+                      AND is_latest = TRUE
+                    ORDER BY released_at DESC LIMIT 1"""),
+            {"p": platform, "c": channel, "a": arch, "fl": flavor},
+        )).mappings().first()
+        if not row:
+            raise HTTPException(404, f"No {flavor} package published for this platform/channel/arch yet")
+        row = dict(row)
+    await asyncio.to_thread(_verified_package_path, platform, row)
     return {
         "platform": platform,
         "channel": channel,
         "arch": arch,
+        "flavor": flavor,
         "latest_version": row["version"],
         "file_name": row["file_name"],
         "file_size": row["file_size"],
@@ -1507,7 +1513,10 @@ async def packages_manifest(
         # manifest contract explicit for every supported client generation.
         "requires_authenticode": platform == "windows",
         "released_at": row["released_at"],
-        "download_url": row["download_path"],
+        "download_url": (
+            versioned_download_path(platform, flavor, row["version"])
+            if version else row["download_path"]
+        ),
     }
 
 
@@ -1516,31 +1525,76 @@ async def packages_manifest(
 # credential. Tokens gate enrollment; these endpoints only hand out the
 # published package (integrity via sha256 in the manifest) and install logic.
 
-async def _latest_package(platform: str, db: AsyncSession, arch: str = "amd64") -> Optional[dict]:
+async def _latest_package(
+    platform: str, db: AsyncSession, arch: str = "amd64", flavor: str = FLAVOR_FULL,
+) -> Optional[dict]:
     row = (await db.execute(
         text("""SELECT * FROM agent_packages
-                WHERE platform = :p AND arch = :a AND channel = 'stable' AND is_latest = TRUE
+                WHERE platform = :p AND arch = :a AND channel = 'stable' AND flavor = :fl
+                  AND is_latest = TRUE
                 ORDER BY released_at DESC LIMIT 1"""),
-        {"p": platform, "a": arch},
+        {"p": platform, "a": arch, "fl": flavor},
     )).mappings().first()
     return dict(row) if row else None
+
+
+async def _package_version(
+    platform: str, db: AsyncSession, version: str, arch: str = "amd64",
+    flavor: str = FLAVOR_FULL,
+) -> Optional[dict]:
+    """One published version, whether or not it is the newest.
+
+    A version quarantined for hash drift is still found here; serving it is
+    refused by _verified_package_path, which re-hashes the file.
+    """
+    row = (await db.execute(
+        text("""SELECT * FROM agent_packages
+                WHERE platform = :p AND arch = :a AND channel = 'stable'
+                  AND flavor = :fl AND version = :v
+                LIMIT 1"""),
+        {"p": platform, "a": arch, "fl": flavor, "v": version},
+    )).mappings().first()
+    return dict(row) if row else None
+
+
+@router.get("/packages/{platform}/versions/{version}")
+async def download_package_version(
+    platform: str,
+    version: str,
+    arch: str = Query("amd64"),
+    flavor: str = Query(FLAVOR_FULL, regex=FLAVOR_PATTERN),
+    db: AsyncSession = Depends(get_db),
+):
+    if platform not in ("windows", "linux", "macos"):
+        raise HTTPException(404, "Unknown platform")
+    if not _VERSION_RE.match(version):
+        raise HTTPException(404, "Unknown version")
+    pkg = await _package_version(platform, db, _bare_version(version), arch, flavor)
+    if not pkg:
+        raise HTTPException(404, f"Version {version} of the {platform} {flavor} package is not published")
+    return await _package_file_response(platform, pkg)
 
 
 @router.get("/packages/{platform}/latest")
 async def download_latest_package(
     platform: str,
     arch: str = Query("amd64"),
+    flavor: str = Query(FLAVOR_FULL, regex=FLAVOR_PATTERN),
     db: AsyncSession = Depends(get_db),
 ):
     if platform not in ("windows", "linux", "macos"):
         raise HTTPException(404, "Unknown platform")
-    pkg = await _latest_package(platform, db, arch)
+    pkg = await _latest_package(platform, db, arch, flavor)
     if not pkg:
         raise HTTPException(
             404,
-            f"No {platform} agent package published. Drop the package into "
+            f"No {platform} {flavor} agent package published. Drop the package into "
             f"{AGENT_PKG_DIR}/{platform}/ and publish it from the Agent Fleet page.",
         )
+    return await _package_file_response(platform, pkg)
+
+
+async def _package_file_response(platform: str, pkg: dict) -> FileResponse:
     file_path = await asyncio.to_thread(_verified_package_path, platform, pkg)
     media = _package_media_type(pkg["file_name"])
     return FileResponse(file_path, media_type=media, filename=pkg["file_name"],
@@ -1560,15 +1614,25 @@ Optional: -InstallProfile infrastructure|apm|combined  -Arch amd64
 #>
 param(
     [Parameter(Mandatory=$true)][string]$ControllerUrl,
-    [ValidateSet("infrastructure", "apm", "combined")][string]$InstallProfile = "combined",
+    [ValidateSet("infrastructure", "apm", "combined")][string]$InstallProfile = "infrastructure",
     [string]$Arch = "amd64"
 )
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $ControllerUrl = $ControllerUrl.TrimEnd("/")
 
-Write-Host "[zenplus] Fetching package manifest from $ControllerUrl ..."
-$manifest = Invoke-RestMethod -UseBasicParsing -Uri "$ControllerUrl/api/v1/agents/packages/manifest?platform=windows&channel=stable&arch=$Arch"
+# Server monitoring only needs the small core package; APM profiles need the
+# full package with the APM components.
+$Flavor = if ($InstallProfile -eq "infrastructure") { "core" } else { "full" }
+Write-Host "[zenplus] Fetching $Flavor package manifest from $ControllerUrl ..."
+try {
+    $manifest = Invoke-RestMethod -UseBasicParsing -Uri "$ControllerUrl/api/v1/agents/packages/manifest?platform=windows&channel=stable&arch=$Arch&flavor=$Flavor"
+} catch {
+    if ($Flavor -ne "core") { throw }
+    Write-Host "[zenplus] No server-monitoring-only package is published; using the full package."
+    $Flavor = "full"
+    $manifest = Invoke-RestMethod -UseBasicParsing -Uri "$ControllerUrl/api/v1/agents/packages/manifest?platform=windows&channel=stable&arch=$Arch&flavor=$Flavor"
+}
 $version = $manifest.latest_version
 $expectedSha = $manifest.sha256.ToLower()
 Write-Host "[zenplus] Latest agent version: $version"
@@ -1576,7 +1640,7 @@ Write-Host "[zenplus] Latest agent version: $version"
 $fileName = [System.IO.Path]::GetFileName($manifest.file_name)
 $installer = Join-Path $env:TEMP $fileName
 Write-Host "[zenplus] Downloading $fileName ..."
-Invoke-WebRequest -UseBasicParsing -Uri "$ControllerUrl/api/v1/agents/packages/windows/latest?arch=$Arch" -OutFile $installer
+Invoke-WebRequest -UseBasicParsing -Uri "$ControllerUrl/api/v1/agents/packages/windows/latest?arch=$Arch&flavor=$Flavor" -OutFile $installer
 
 $actualSha = (Get-FileHash -Algorithm SHA256 -Path $installer).Hash.ToLower()
 if ($actualSha -ne $expectedSha) {
@@ -1584,6 +1648,15 @@ if ($actualSha -ne $expectedSha) {
     throw "[zenplus] SHA-256 mismatch (expected $expectedSha, got $actualSha) - aborting install."
 }
 Write-Host "[zenplus] Checksum OK."
+
+# The checksum proves the file is what this appliance published; the
+# signature proves Zentryc built it.
+$signature = Get-AuthenticodeSignature -FilePath $installer
+if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch "(^|, )CN=Zentryc LLC(,|$)") {
+    Remove-Item -Force $installer
+    throw "[zenplus] The installer is not validly signed by Zentryc LLC ($($signature.Status)) - aborting install."
+}
+Write-Host "[zenplus] Signature OK (Zentryc LLC)."
 
 Write-Host "[zenplus] Installing ..."
 $extension = [System.IO.Path]::GetExtension($installer).ToLowerInvariant()
@@ -1601,7 +1674,10 @@ if ($extension -eq ".exe") {
     throw "[zenplus] Unsupported Windows installer type: $extension"
 }
 if ($proc.ExitCode -ne 0) {
-    throw "[zenplus] msiexec exited with code $($proc.ExitCode)."
+    # Pass Setup's Windows Installer exit code through, so deployment tools
+    # can tell 1618 (retry later) from 1603 (failed).
+    Write-Error "[zenplus] Setup exited with code $($proc.ExitCode)."
+    exit $proc.ExitCode
 }
 Write-Host "[zenplus] Installed. New hosts appear as Pending authorization in Agent Fleet; previously approved hosts resume automatically."
 '''

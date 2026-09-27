@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -22,6 +21,7 @@ import (
 
 	"github.com/shirou/gopsutil/v4/process"
 
+	"zenplus-agent/internal/backoff"
 	"zenplus-agent/internal/client"
 	"zenplus-agent/internal/config"
 	"zenplus-agent/internal/model"
@@ -58,18 +58,15 @@ type gatewayMetricSnapshot struct {
 	QueueSizeKnown bool
 }
 
-type rotatingGatewayLog struct {
-	mu       sync.Mutex
-	path     string
-	maxBytes int64
-	backups  int
-	file     *os.File
-	size     int64
-}
-
 type Manager struct {
 	reconcileMu                 sync.Mutex
+	instrumentMu                sync.Mutex // serializes instrumentation state changes
 	mu                          sync.Mutex
+	credentialRetryAt           time.Time
+	credentialBackoff           *backoff.Backoff
+	credentialBindingKey        string
+	credentialErr               error
+	loggedFailureState          string
 	paths                       agentruntime.Paths
 	installDir                  string
 	cmd                         *exec.Cmd
@@ -120,9 +117,10 @@ type discoveredProcess struct {
 func New(paths agentruntime.Paths, logf func(string, ...any)) *Manager {
 	exe, _ := os.Executable()
 	return &Manager{
-		paths:      paths,
-		installDir: filepath.Dir(exe),
-		logf:       logf,
+		paths:             paths,
+		credentialBackoff: backoff.New(10*time.Second, 10*time.Minute),
+		installDir:        filepath.Dir(exe),
+		logf:              logf,
 		status: model.AgentAPMHeartbeat{
 			State: "disabled", Gateway: model.APMGatewayStatus{Managed: true, GRPCPort: 4317, HTTPPort: 4318},
 			CheckedAt: time.Now().UTC(), Bundles: map[string]string{},
@@ -147,6 +145,14 @@ func (m *Manager) Reconcile(ctx context.Context, cfg config.Config, agentID, ser
 
 	if !cfg.APM.Enabled || profile == "infrastructure" {
 		m.stop("disabled")
+		return
+	}
+	// A server-monitoring-only package has no gateway to run. Report that
+	// plainly and skip credential enrollment rather than asking the appliance
+	// for an ingest key the server can never use.
+	if !BundleInstalled(m.installDir) {
+		m.stop("not_installed")
+		m.setFailure("not_installed", NotInstalledMessage)
 		return
 	}
 	if api == nil || agentID == "" || serverID == "" {
@@ -214,39 +220,66 @@ func (m *Manager) ensureCredential(ctx context.Context, api *client.Client, bind
 	if api == nil {
 		return credentialMaterial{}, false, fmt.Errorf("APM enrollment client is unavailable")
 	}
+	// Reconcile runs every few seconds. While the appliance is unreachable or
+	// refusing APM enrollment, retry on an exponential schedule instead of
+	// holding a connection attempt open on every pass.
+	bindingKey := fmt.Sprint(binding)
+	if bindingKey != m.credentialBindingKey {
+		m.credentialBindingKey = bindingKey
+		m.credentialRetryAt = time.Time{}
+		m.credentialBackoff.Reset()
+	}
+	if time.Now().Before(m.credentialRetryAt) && m.credentialErr != nil {
+		return credentialMaterial{}, false, m.credentialErr
+	}
+	credential, err := m.requestCredential(ctx, api, binding)
+	if err != nil {
+		m.credentialErr = err
+		m.credentialRetryAt = time.Now().Add(m.credentialBackoff.Next())
+		return credentialMaterial{}, false, err
+	}
+	m.credentialErr = nil
+	m.credentialRetryAt = time.Time{}
+	m.credentialBackoff.Reset()
+	return credential, true, nil
+}
 
+func (m *Manager) requestCredential(ctx context.Context, api *client.Client, binding credentialBinding) (credentialMaterial, error) {
 	// A cached key without matching metadata belongs to an unknown or previous
 	// context. Stop the old gateway before the controller revokes that key and
 	// issues its replacement so telemetry cannot cross bindings.
 	if err := m.stopAndWait("credential_refresh", gatewayStopTimeout); err != nil {
-		return credentialMaterial{}, false, err
+		return credentialMaterial{}, err
 	}
-	m.logf("APM credential binding is missing or changed; requesting a replacement")
+	m.logf("APM: requesting an appliance-managed ingest credential")
 	var response enrollResponse
 	_, _, err := api.PostJSON(ctx, "/api/v1/agents/apm/enroll", map[string]string{"environment": binding.Environment}, &response)
 	if err != nil {
-		return credentialMaterial{}, false, fmt.Errorf("obtain appliance-managed APM credential: %w", err)
+		return credentialMaterial{}, fmt.Errorf("obtain appliance-managed APM credential: %w", err)
 	}
 	response.Key = strings.TrimSpace(response.Key)
 	response.KeyID = strings.TrimSpace(response.KeyID)
 	response.Environment = strings.TrimSpace(response.Environment)
 	if !strings.HasPrefix(response.Key, "zpi_") || response.KeyID == "" {
-		return credentialMaterial{}, false, fmt.Errorf("controller returned an invalid APM credential")
+		return credentialMaterial{}, fmt.Errorf("controller returned an invalid APM credential")
 	}
 	if response.Environment != binding.Environment {
-		return credentialMaterial{}, false, fmt.Errorf("controller returned APM environment %q, expected %q", response.Environment, binding.Environment)
+		return credentialMaterial{}, fmt.Errorf("controller returned APM environment %q, expected %q", response.Environment, binding.Environment)
 	}
 	credential, err := persistBoundCredential(m.paths, binding, response.KeyID, response.Key)
 	if err != nil {
-		return credentialMaterial{}, false, err
+		return credentialMaterial{}, err
 	}
-	return credential, true, nil
+	return credential, nil
 }
 
 func (m *Manager) ensureConfig(cfg config.Config, agentID, serverID string) (string, bool, error) {
 	bind := normalizedAPMBind(cfg.APM.BindAddress)
 	if bind != "127.0.0.1" && bind != "::1" {
 		return "", false, fmt.Errorf("refusing non-loopback OTLP bind address %q", bind)
+	}
+	if !gatewayIdentifier.MatchString(agentID) || !gatewayIdentifier.MatchString(serverID) {
+		return "", false, fmt.Errorf("refusing APM gateway config: agent or server identifier has an unexpected format")
 	}
 	endpoint := strings.TrimRight(cfg.ControllerURL, "/")
 	tlsSettings := fmt.Sprintf("      insecure_skip_verify: %t", !cfg.VerifyTLS)
@@ -388,7 +421,7 @@ func (m *Manager) ensureStarted(
 	if _, err := os.Stat(binary); err != nil {
 		return fmt.Errorf("managed telemetry gateway is not installed: %s", binary)
 	}
-	logWriter, err := newRotatingGatewayLog(m.paths.APMLog, gatewayLogMaxBytes, gatewayLogBackups)
+	logWriter, err := agentruntime.OpenRotatingFile(m.paths.APMLog, gatewayLogMaxBytes, gatewayLogBackups)
 	if err != nil {
 		return fmt.Errorf("open managed telemetry gateway log: %w", err)
 	}
@@ -684,123 +717,6 @@ func directorySize(root string) int64 {
 	return size
 }
 
-func newRotatingGatewayLog(path string, maxBytes int64, backups int) (*rotatingGatewayLog, error) {
-	if err := rotateGatewayLog(path, maxBytes, backups); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	size := int64(0)
-	if info, err := file.Stat(); err == nil {
-		size = info.Size()
-	}
-	return &rotatingGatewayLog{path: path, maxBytes: maxBytes, backups: backups, file: file, size: size}, nil
-}
-
-func (w *rotatingGatewayLog) Size() int64 {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.size
-}
-
-func (w *rotatingGatewayLog) Write(data []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.file == nil {
-		return 0, os.ErrClosed
-	}
-	written := 0
-	for len(data) > 0 {
-		if w.size >= w.maxBytes {
-			if err := w.rotateLocked(); err != nil {
-				return written, err
-			}
-		}
-		remaining := w.maxBytes - w.size
-		chunk := data
-		if int64(len(chunk)) > remaining {
-			chunk = chunk[:remaining]
-		}
-		n, err := w.file.Write(chunk)
-		written += n
-		w.size += int64(n)
-		data = data[n:]
-		if err != nil {
-			return written, err
-		}
-		if n == 0 {
-			return written, io.ErrShortWrite
-		}
-	}
-	return written, nil
-}
-
-func (w *rotatingGatewayLog) rotateLocked() error {
-	if err := w.file.Close(); err != nil {
-		return err
-	}
-	w.file = nil
-	if err := rotateGatewayLog(w.path, w.maxBytes, w.backups); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	w.file = file
-	w.size = 0
-	return nil
-}
-
-func (w *rotatingGatewayLog) Close() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.file == nil {
-		return nil
-	}
-	err := w.file.Close()
-	w.file = nil
-	return err
-}
-
-func rotateGatewayLog(path string, maxBytes int64, backups int) error {
-	if strings.TrimSpace(path) == "" || maxBytes <= 0 || backups < 1 {
-		return fmt.Errorf("invalid gateway log rotation settings")
-	}
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("gateway log is not a regular file")
-	}
-	if info.Size() < maxBytes {
-		return nil
-	}
-	for index := backups; index >= 1; index-- {
-		destination := fmt.Sprintf("%s.%d", path, index)
-		if err := os.Remove(destination); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		if index == 1 {
-			if err := os.Rename(path, destination); err != nil {
-				return err
-			}
-			continue
-		}
-		source := fmt.Sprintf("%s.%d", path, index-1)
-		if err := os.Rename(source, destination); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-	}
-	return nil
-}
-
 func classifyGatewayLogChunk(chunk string) (authRejected, exportFailed bool) {
 	text := strings.ToLower(chunk)
 	authMarkers := []string{
@@ -864,11 +780,17 @@ func (m *Manager) stopAndWait(state string, timeout time.Duration) error {
 
 func (m *Manager) setFailure(state, message string) {
 	m.mu.Lock()
+	// Reconcile repeats every few seconds; log a failure when it first
+	// appears or changes, not on every pass while it persists.
+	repeated := m.loggedFailureState == state && m.status.LastError == message
+	m.loggedFailureState = state
 	m.status.State = state
 	m.status.LastError = message
 	m.status.CheckedAt = time.Now().UTC()
 	m.mu.Unlock()
-	m.logf("APM: %s", message)
+	if !repeated {
+		m.logf("APM: %s", message)
+	}
 }
 
 func (m *Manager) detectBundles() map[string]string {
@@ -896,12 +818,17 @@ func (m *Manager) reportDiscovery(ctx context.Context, api *client.Client) {
 	}
 	m.lastDiscovery = time.Now()
 	m.mu.Unlock()
+	// Reconcile runs on its own goroutine, so a controller instrumentation
+	// command can arrive while the crash-loop guard is rolling a target back.
+	// Both rewrite the instrumentation state; take them one at a time.
+	m.instrumentMu.Lock()
 	instrumentation := m.loadInstrumentationState()
 	rows := discoverProcessesWithState(instrumentation)
 	if m.guardInstrumentationCrashLoops(ctx, rows) {
 		instrumentation = m.loadInstrumentationState()
 		rows = discoverProcessesWithState(instrumentation)
 	}
+	m.instrumentMu.Unlock()
 	var accepted struct {
 		Accepted int `json:"accepted"`
 	}
@@ -1336,7 +1263,18 @@ func normalizedAPMBind(value string) string {
 	return value
 }
 
-func quoteYAML(value string) string { return strconv.Quote(value) }
+// quoteYAML renders a literal collector config string. The collector expands
+// ${...} references (file:, env:, yaml:) inside every value, so a literal "$"
+// is written as "$$". Without that, a controller-supplied identifier such as
+// "${file:C:\...}" would make the SYSTEM gateway read a local file and export
+// its contents as a span attribute.
+func quoteYAML(value string) string {
+	return strconv.Quote(strings.ReplaceAll(value, "$", "$$"))
+}
+
+// gatewayIdentifier matches the controller's UUID and slug identifiers.
+var gatewayIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+
 func netJoin(host string, port int) string {
 	if strings.Contains(host, ":") {
 		return fmt.Sprintf("[%s]:%d", host, port)

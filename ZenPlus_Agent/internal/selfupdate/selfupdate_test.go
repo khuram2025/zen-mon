@@ -2,15 +2,155 @@ package selfupdate
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"zenplus-agent/internal/client"
 )
+
+func TestPreparePackageRejectsFailuresAndCleansStaging(t *testing.T) {
+	body := []byte("unsigned installer content")
+	digest := fmt.Sprintf("%x", sha256.Sum256(body))
+	for _, tc := range []struct {
+		name       string
+		status     int
+		size       int64
+		hash, want string
+	}{
+		{"HTTP error", 503, int64(len(body)), digest, "503"},
+		{"truncated download", 200, int64(len(body) + 1), digest, "size mismatch"},
+		{"body longer than declared", 200, int64(len(body) - 1), digest, "exceeds the maximum allowed size"},
+		{"missing size", 200, 0, digest, "outside the accepted range"},
+		{"oversized manifest", 200, MaxPackageBytes + 1, digest, "outside the accepted range"},
+		{"wrong checksum", 200, int64(len(body)), strings.Repeat("a", 64), "checksum mismatch"},
+		{"unsigned installer", 200, int64(len(body)), digest, "signature verification failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "unsigned installer" && runtime.GOOS != "windows" {
+				t.Skip("Windows signature policy")
+			}
+			root := t.TempDir()
+			t.Setenv("TMP", root)
+			t.Setenv("TEMP", root)
+			t.Setenv("TMPDIR", root)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write(body)
+			}))
+			defer server.Close()
+			api, err := client.New(server.URL, "", true, "", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			path, err := PreparePackage(context.Background(), api, Manifest{LatestVersion: "1.12.7", FileName: "update.exe", FileSize: tc.size, SHA256: tc.hash, DownloadURL: server.URL + "/update.exe"})
+			if err == nil || !strings.Contains(err.Error(), tc.want) || path != "" {
+				t.Fatalf("path=%q error=%v; want %q", path, err, tc.want)
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("failed download left staging files: %v", entries)
+			}
+		})
+	}
+}
+
+func TestPreparePackageSignedDownloadIntegration(t *testing.T) {
+	paths := os.Getenv("ZENPLUS_SIGNED_TEST_PACKAGES")
+	if paths == "" {
+		t.Skip("supply signed release fixtures")
+	}
+	source := filepath.SplitList(paths)[0]
+	info, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := sha256File(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.ServeFile(w, r, source) }))
+	defer server.Close()
+	api, err := client.New(server.URL, "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := PreparePackage(context.Background(), api, Manifest{LatestVersion: "1.12.7", FileName: "release.exe", FileSize: info.Size(), SHA256: digest, DownloadURL: server.URL + "/release.exe"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(filepath.Dir(path))
+	got, err := sha256File(path)
+	if err != nil || got != digest {
+		t.Fatalf("prepared package mismatch: %s, %v", got, err)
+	}
+}
+
+func TestPublicUpdateDownloadIntegration(t *testing.T) {
+	if os.Getenv("ZENPLUS_TEST_PUBLIC_UPDATE") != "1" {
+		t.Skip("enable for live Zentryc release validation")
+	}
+	api, err := client.New(PublicUpdateBaseURL(), "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	manifest, err := FetchPublicManifest(ctx, api, "stable", FlavorFull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := PreparePackage(ctx, api, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(filepath.Dir(path))
+	t.Logf("Public channel %s: downloaded %s, verified size %d, SHA-256 %s and Windows signature", manifest.LatestVersion, manifest.FileName, manifest.FileSize, manifest.SHA256)
+}
+
+func TestPreparePackageCancellationCleansStaging(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("TMP", root)
+	t.Setenv("TEMP", root)
+	t.Setenv("TMPDIR", root)
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		w.(http.Flusher).Flush()
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	api, err := client.New(server.URL, "", true, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go func() { <-started; cancel() }()
+	path, err := PreparePackage(ctx, api, Manifest{LatestVersion: "1.12.7", FileName: "update.exe", SHA256: strings.Repeat("a", 64), DownloadURL: server.URL + "/update.exe"})
+	if err == nil || path != "" {
+		t.Fatalf("cancelled download succeeded: %s, %v", path, err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("cancelled download left staging files: %v", entries)
+	}
+}
 
 func TestIsNewer(t *testing.T) {
 	tests := []struct {
@@ -107,7 +247,7 @@ func TestFetchPublishedManifestUsesControllerWithoutInternet(t *testing.T) {
 	publicUpdateBaseURL = "http://127.0.0.1:1/unreachable"
 	defer func() { publicUpdateBaseURL = previous }()
 
-	manifest, err := FetchPublishedManifest(context.Background(), api, "stable")
+	manifest, err := FetchPublishedManifest(context.Background(), api, "stable", FlavorFull)
 	if err != nil {
 		t.Fatal(err)
 	}

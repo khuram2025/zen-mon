@@ -2,6 +2,7 @@ package spool
 
 import (
 	"bytes"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -279,5 +280,70 @@ func TestPostponeExtendsDeadlineWithoutCountingAnotherAttempt(t *testing.T) {
 	if len(records) != 1 || records[0].Attempts != 1 || records[0].NextAttemptAt == nil ||
 		!records[0].NextAttemptAt.Equal(now.Add(10*time.Minute)) {
 		t.Fatalf("postponed record = %#v", records)
+	}
+}
+
+func TestIndexMatchesDiskAfterMixedOperations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spool.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, 1000)
+	for i := range payload {
+		payload[i] = 'a'
+	}
+	body := []byte(`{"data":"` + string(payload) + `"}`)
+	var keys []uint64
+	for i := 0; i < 40; i++ {
+		key, err := store.Enqueue(fmt.Sprintf("b%d", i), body, 30*1024) // cap forces pruning
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, key)
+	}
+	now := time.Now().UTC()
+	last := keys[len(keys)-1]
+	if err := store.Ack(last - 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Defer(last-2, now.Add(time.Hour), "retry later"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Postpone(last-3, now.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Quarantine(last-4, now, "bad batch"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Prune(24*time.Hour, 20*1024); err != nil {
+		t.Fatal(err)
+	}
+	indexed, _ := store.Stats()
+	due, next, _ := store.NextAttempt(now)
+	dueRecords, err := store.PeekDue(100, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	fromDisk, _ := reopened.Stats()
+	dueDisk, nextDisk, _ := reopened.NextAttempt(now)
+	dueRecordsDisk, _ := reopened.PeekDue(100, now)
+	if indexed != fromDisk {
+		t.Fatalf("index stats %+v, disk %+v", indexed, fromDisk)
+	}
+	if fromDisk.Bytes > 20*1024 || fromDisk.Depth == 0 {
+		t.Fatalf("size cap not enforced: %+v", fromDisk)
+	}
+	if due != dueDisk || (next == nil) != (nextDisk == nil) || len(dueRecords) != len(dueRecordsDisk) {
+		t.Fatalf("scheduling differs: due %v/%v next %v/%v peek %d/%d", due, dueDisk, next, nextDisk, len(dueRecords), len(dueRecordsDisk))
 	}
 }

@@ -33,7 +33,7 @@ func TestExecuteCommandRejectsInstrumentationWhenAPMDisabled(t *testing.T) {
 		t.Run(command, func(t *testing.T) {
 			result := executeCommand(
 				context.Background(), model.Command{Command: command}, &cfg,
-				nil, runtime.Paths{}, nil, nil, nil, enroll.Result{}, nil, func(string, ...any) {},
+				nil, runtime.Paths{}, nil, nil, nil, enroll.Result{}, nil, nil, func(string, ...any) {},
 			)
 			if result.Success || !strings.Contains(result.ErrorMessage, "APM disabled") {
 				t.Fatalf("unexpected result: %#v", result)
@@ -44,12 +44,22 @@ func TestExecuteCommandRejectsInstrumentationWhenAPMDisabled(t *testing.T) {
 
 func TestCapabilitiesAdvertiseInstrumentationOnlyWhenUsable(t *testing.T) {
 	cfg := config.Default()
+	if err := config.ApplyProfile(&cfg, "combined"); err != nil {
+		t.Fatal(err)
+	}
+	previous := apmBundleInstalled
+	defer func() { apmBundleInstalled = previous }()
+	apmBundleInstalled = func() bool { return true }
 	privileged := capabilitiesForConfig(cfg, true)
 	if !containsCapability(privileged, "apm_iis_instrumentation_v1") || !containsCapability(privileged, "apm_windows_service_instrumentation_v1") {
 		t.Fatalf("privileged combined profile is missing instrumentation capabilities: %v", privileged)
 	}
+	apmBundleInstalled = func() bool { return false }
+	serverOnlyPackage := capabilitiesForConfig(cfg, true)
+	apmBundleInstalled = func() bool { return true }
 	for name, capabilities := range map[string][]string{
-		"unprivileged": capabilitiesForConfig(cfg, false),
+		"server-only package": serverOnlyPackage,
+		"unprivileged":        capabilitiesForConfig(cfg, false),
 		"disabled": func() []string {
 			disabled := cfg
 			_ = config.ApplyProfile(&disabled, "infrastructure")

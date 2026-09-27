@@ -642,73 +642,6 @@ otelcol_exporter_sent_spans_total{data_type="traces",exporter="another"} 999
 	}
 }
 
-func TestGatewayLogRotationIsBoundedAndPreservesRecentBackups(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "telemetry-gateway.log")
-	for name, contents := range map[string]string{
-		path:        "current-log",
-		path + ".1": "previous-log",
-		path + ".2": "oldest-log",
-	} {
-		if err := os.WriteFile(name, []byte(contents), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := rotateGatewayLog(path, 4, 2); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("active log still exists after rotation: %v", err)
-	}
-	for name, want := range map[string]string{
-		path + ".1": "current-log",
-		path + ".2": "previous-log",
-	} {
-		got, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(got) != want {
-			t.Fatalf("%s = %q, want %q", name, got, want)
-		}
-	}
-
-	if err := os.WriteFile(path, []byte("ok"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := rotateGatewayLog(path, 4, 2); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := os.ReadFile(path); err != nil || string(got) != "ok" {
-		t.Fatalf("small active log was rotated: %q, %v", got, err)
-	}
-
-	runtimePath := filepath.Join(dir, "runtime.log")
-	writer, err := newRotatingGatewayLog(runtimePath, 4, 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := writer.Write([]byte("abcdefghij")); err != nil {
-		t.Fatal(err)
-	}
-	if err := writer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	for name, want := range map[string]string{
-		runtimePath:        "ij",
-		runtimePath + ".1": "efgh",
-		runtimePath + ".2": "abcd",
-	} {
-		got, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(got) != want {
-			t.Fatalf("runtime rotation %s = %q, want %q", name, got, want)
-		}
-	}
-}
-
 func TestExtractIISApplicationPool(t *testing.T) {
 	cases := map[string]string{
 		`c:\windows\system32\inetsrv\w3wp.exe -ap "DefaultAppPool" -v "v4.0"`: "DefaultAppPool",
@@ -788,5 +721,161 @@ func TestDeploymentArtifactSelectsHostedApplication(t *testing.T) {
 	fingerprint, modified := deploymentArtifactFingerprint(got)
 	if len(fingerprint) != 64 || modified == nil {
 		t.Fatalf("invalid deployment fingerprint %q modified=%v", fingerprint, modified)
+	}
+}
+
+func TestCollectorConfigRefusesExpansionInIdentifiers(t *testing.T) {
+	paths := agentruntime.NewPaths(t.TempDir())
+	if err := paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	m := New(paths, func(string, ...any) {})
+	cfg := config.Default()
+	cfg.ControllerURL = "https://controller.example"
+	for _, id := range []string{`${file:C:\Windows\win.ini}`, "${env:ZENPLUS_APM_KEY}", "", "a b", "id\nkey: value"} {
+		if _, _, err := m.ensureConfig(cfg, id, "server-id"); err == nil {
+			t.Errorf("agent id %q accepted", id)
+		}
+		if _, _, err := m.ensureConfig(cfg, "agent-id", id); err == nil {
+			t.Errorf("server id %q accepted", id)
+		}
+	}
+	if _, _, err := m.ensureConfig(cfg, "3f1c9a52-7d7e-4c1b-9a51-0d2b6f3e8a10", "srv_01.prod:eu-1"); err != nil {
+		t.Fatalf("valid identifiers rejected: %v", err)
+	}
+}
+
+// Release validation: the generated config must load in the shipped gateway,
+// including a "$" in a path that would otherwise start an expansion.
+func TestGeneratedCollectorConfigValidatesInGateway(t *testing.T) {
+	gateway := os.Getenv("ZENPLUS_GATEWAY_EXE")
+	if gateway == "" {
+		t.Skip("set ZENPLUS_GATEWAY_EXE to the zenplus-telemetry-gateway.exe under test")
+	}
+	paths := agentruntime.NewPaths(filepath.Join(t.TempDir(), "state${ZENPLUS_UNSET}$dir"))
+	if err := paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	m := New(paths, func(string, ...any) {})
+	cfg := config.Default()
+	cfg.ControllerURL = "https://controller.example"
+	if _, _, err := m.ensureConfig(cfg, "3f1c9a52-7d7e-4c1b-9a51-0d2b6f3e8a10", "server-1"); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(gateway, "validate", "--config", "file:"+paths.APMConfig)
+	cmd.Env = append(os.Environ(), "ZENPLUS_APM_KEY=zp_test")
+	if out, err := cmd.CombinedOutput(); err != nil || len(strings.TrimSpace(string(out))) > 0 {
+		t.Fatalf("gateway rejected generated config: err=%v\n%s", err, out)
+	}
+}
+
+func TestQuoteYAMLEscapesCollectorExpansion(t *testing.T) {
+	for in, want := range map[string]string{
+		`C:\ProgramData\ZenPlus\Agent\apm`: `"C:\\ProgramData\\ZenPlus\\Agent\\apm"`,
+		`${file:C:\secret.txt}`:            `"$${file:C:\\secret.txt}"`,
+		`a$b$$c`:                           `"a$$b$$$$c"`,
+	} {
+		if got := quoteYAML(in); got != want {
+			t.Errorf("quoteYAML(%q) = %s, want %s", in, got, want)
+		}
+	}
+}
+
+func TestCredentialEnrollmentFailuresBackOffAndLogOnce(t *testing.T) {
+	paths := agentruntime.NewPaths(t.TempDir())
+	if err := paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts.Add(1)
+		http.Error(w, "appliance busy", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	api, err := client.New(server.URL, "", true, "agent-a", "agent-api-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs atomic.Int32
+	m := New(paths, func(format string, _ ...any) {
+		if strings.HasPrefix(format, "APM: %s") {
+			logs.Add(1)
+		}
+	})
+	m.installDir = fakeAPMInstall(t)
+	cfg := config.Default()
+	cfg.ControllerURL = server.URL
+	if err := config.ApplyProfile(&cfg, "combined"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		m.Reconcile(context.Background(), cfg, "agent-a", "server-a", api)
+	}
+	if got := posts.Load(); got != 1 {
+		t.Fatalf("appliance was asked for a credential %d times in one backoff window, want 1", got)
+	}
+	if got := logs.Load(); got != 1 {
+		t.Fatalf("persistent credential failure logged %d times, want 1", got)
+	}
+	if state := m.Snapshot().State; state != "credential_error" {
+		t.Fatalf("state = %q, want credential_error", state)
+	}
+
+	// Once the backoff expires the next reconcile retries.
+	m.credentialRetryAt = time.Now().Add(-time.Second)
+	m.Reconcile(context.Background(), cfg, "agent-a", "server-a", api)
+	if got := posts.Load(); got != 2 {
+		t.Fatalf("expired backoff did not retry: posts = %d", got)
+	}
+
+	// A new binding (re-enrollment) must not inherit the old backoff.
+	m.Reconcile(context.Background(), cfg, "agent-b", "server-b", api)
+	if got := posts.Load(); got != 3 {
+		t.Fatalf("new binding waited on the previous binding's backoff: posts = %d", got)
+	}
+}
+
+func fakeAPMInstall(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "apm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "apm", "bundle-manifest.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// On a server-monitoring-only package an APM profile must not reach the
+// appliance for an ingest credential it can never use.
+func TestReconcileWithoutAPMBundleReportsNotInstalled(t *testing.T) {
+	paths := agentruntime.NewPaths(t.TempDir())
+	if err := paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts.Add(1)
+	}))
+	defer server.Close()
+	api, err := client.New(server.URL, "", true, "agent-a", "agent-api-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(paths, func(string, ...any) {})
+	m.installDir = t.TempDir() // no apm/ directory
+	cfg := config.Default()
+	cfg.ControllerURL = server.URL
+	if err := config.ApplyProfile(&cfg, "combined"); err != nil {
+		t.Fatal(err)
+	}
+	m.Reconcile(context.Background(), cfg, "agent-a", "server-a", api)
+	snapshot := m.Snapshot()
+	if snapshot.State != "not_installed" || snapshot.LastError != NotInstalledMessage {
+		t.Fatalf("state = %q (%q), want not_installed", snapshot.State, snapshot.LastError)
+	}
+	if posts.Load() != 0 {
+		t.Fatalf("server-only install contacted the appliance %d times for APM", posts.Load())
 	}
 }

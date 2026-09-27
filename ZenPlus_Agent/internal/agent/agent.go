@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -42,6 +43,8 @@ type supervisor struct {
 	enrollNotBefore time.Time // no enrollment attempt before this
 	authFailed      bool
 	lastSkewLogged  time.Duration
+	// updates tracks controller-requested upgrades across restarts.
+	updates *updateTracker
 }
 
 const pendingAuthorizationPollInterval = 30 * time.Second
@@ -134,9 +137,18 @@ type localSettings struct {
 	ControllerCAFile    string `json:"controller_ca_file"`
 	ControllerCAFileSig string `json:"controller_ca_file_sig"`
 	APMEnabled          bool   `json:"apm_enabled"`
+	APMProfile          string `json:"apm_profile"`
 }
 
+// agentMemoryLimit is a soft limit for the Go heap. The runtime collects
+// garbage more eagerly as it is approached, instead of letting the heap grow
+// to twice the live data between collections. GOMEMLIMIT overrides it.
+const agentMemoryLimit = 64 << 20
+
 func Run(ctx context.Context, opts Options) error {
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(agentMemoryLimit)
+	}
 	cfg, err := config.Load(opts.ConfigPath)
 	if err != nil {
 		return err
@@ -209,12 +221,18 @@ func Run(ctx context.Context, opts Options) error {
 		ctx, timeout = context.WithTimeout(ctx, opts.Duration)
 		defer timeout()
 	}
+	// Deferred after apmManager.Close so the worker stops first.
+	apmReconciles := startAPMWorker(ctx, apmManager)
+	defer apmReconciles.Close()
 	if enrollment.Enrolled {
-		apmManager.Reconcile(ctx, cfg, enrollment.Identity.AgentID, enrollment.Identity.ServerID, up.Client())
-		status.LocalAPM = apmManager.Snapshot()
+		apmReconciles.Submit(apmReconcileRequest{
+			cfg: cfg, agentID: enrollment.Identity.AgentID, serverID: enrollment.Identity.ServerID, api: up.Client(),
+		})
 	}
 
 	sup := newSupervisor()
+	sup.updates = newUpdateTracker(paths.StateDir, paths.LogDir, model.AgentVersion)
+	sup.updates.configPath = opts.ConfigPath
 	if !enrollment.Enrolled && enrollment.AuthorizationState != "" {
 		sup.enrollNotBefore = time.Now().UTC().Add(pendingAuthorizationPollInterval)
 		next := sup.enrollNotBefore
@@ -262,6 +280,9 @@ func Run(ctx context.Context, opts Options) error {
 	defer apmTicker.Stop()
 	localHash := localSettingsFingerprint(cfg)
 	authStamp := authFileStamp(paths)
+	// Stat the local files before re-reading the config every tick.
+	localFiles := fileStamp(opts.ConfigPath) + "|" + authStamp
+	publisher := &statusPublisher{}
 	runtimeConnectionHash := runtimeConnectionFingerprint(cfg, enrollment)
 	syncTickers := func() {
 		if next := config.Duration(cfg.CollectIntervalSeconds, time.Minute); next != collectInterval {
@@ -309,6 +330,11 @@ func Run(ctx context.Context, opts Options) error {
 				pollConfig(ctx, &cfg, poller, &status, log.Printf)
 			}
 		case <-localConfigTicker.C:
+			stamp := fileStamp(opts.ConfigPath) + "|" + authFileStamp(paths)
+			if stamp == localFiles {
+				break // nothing changed on disk since the last check
+			}
+			localFiles = stamp
 			previousUploader := up
 			previousPoller := poller
 			rebuilt := refreshLocalRuntime(ctx, opts.ConfigPath, &cfg, paths, store, &enrollment, &up, &poller, &status, &localHash, &authStamp, log.Printf)
@@ -316,6 +342,8 @@ func Run(ctx context.Context, opts Options) error {
 				nextRuntimeConnectionHash := runtimeConnectionFingerprint(cfg, enrollment)
 				if runtimeConnectionHash != nextRuntimeConnectionHash {
 					resetSupervisorAfterRuntimeClientRefresh(sup, &status, enrollment)
+					// A different controller or credential starts without our inventory.
+					collectors.ResetSchedule()
 				} else {
 					// A local feature-only change (currently APM) does not change
 					// controller authority. Keep the existing uploader generation so
@@ -330,7 +358,10 @@ func Run(ctx context.Context, opts Options) error {
 			if enrollment.Enrolled && up != nil {
 				apmClient = up.Client()
 			}
-			apmManager.Reconcile(ctx, cfg, enrollment.Identity.AgentID, enrollment.Identity.ServerID, apmClient)
+			apmReconciles.Submit(apmReconcileRequest{
+				cfg: cfg, agentID: enrollment.Identity.AgentID, serverID: enrollment.Identity.ServerID, api: apmClient,
+			})
+			// Reports the most recent completed reconcile.
 			status.LocalAPM = apmManager.Snapshot()
 		}
 		uploadEnabled := enrollment.Enrolled && !sup.authFailed
@@ -355,8 +386,7 @@ func Run(ctx context.Context, opts Options) error {
 		status.AgentID = enrollment.Identity.AgentID
 		status.ServerID = enrollment.Identity.ServerID
 		syncAuthStatus(&status, enrollment, sup)
-		_ = writeStatus(paths.StatusFile, status)
-		_ = runtime.WriteMachineDashboardSnapshot(cfg, enrollment.Identity, status)
+		publisher.publish(paths, cfg, enrollment.Identity, status)
 	}
 }
 
@@ -418,6 +448,12 @@ func refreshLocalRuntime(ctx context.Context, configPath string, cfg *config.Con
 		cfg.ProxyURL = diskCfg.ProxyURL
 		cfg.VerifyTLS = diskCfg.VerifyTLS
 		cfg.Security.ControllerCAFile = diskCfg.Security.ControllerCAFile
+		if diskCfg.APM.Profile != cfg.APM.Profile && diskCfg.APM.Profile != "" {
+			if err := config.ApplyProfile(cfg, diskCfg.APM.Profile); err != nil {
+				status.LastConfigError = err.Error()
+				return false
+			}
+		}
 		cfg.APM.Enabled = diskCfg.APM.Enabled
 		if connectionChanged {
 			cfg.ConfigETag = ""
@@ -724,6 +760,7 @@ func tryRecoverAuth(ctx context.Context, configPath string, cfg *config.Config, 
 		return
 	}
 	*enrollment = res
+	collectors.ResetSchedule() // re-enrolled: the controller needs full inventory
 	*up = nextUp
 	*poller = nextPoller
 	status.AgentID = res.Identity.AgentID
@@ -771,16 +808,20 @@ func sendHeartbeat(ctx context.Context, cfg config.Config, store *spool.Store, u
 		localAPM = probeLocalAPM(cfg)
 	}
 	hb := model.Heartbeat{
-		Version:          model.AgentVersion,
-		Capabilities:     capabilitiesForConfig(cfg, canManageApplicationInstrumentation()),
-		UptimeSeconds:    uptimeSeconds(enrollment.Identity.BootTime, now),
-		QueueDepth:       st.Depth,
-		SpoolBytes:       st.Bytes,
-		ConfigHash:       config.Hash(cfg),
-		ConfigApplyError: status.LastConfigError,
-		APM:              localAPM,
+		Version:           model.AgentVersion,
+		Capabilities:      capabilitiesForConfig(cfg, canManageApplicationInstrumentation()),
+		UptimeSeconds:     uptimeSeconds(enrollment.Identity.BootTime, now),
+		QueueDepth:        st.Depth,
+		SpoolBytes:        st.Bytes,
+		ConfigHash:        config.Hash(cfg),
+		ConfigApplyError:  status.LastConfigError,
+		APM:               localAPM,
+		Update:            sup.updates.Status(),
+		PackageFlavor:     selfupdate.InstalledFlavor(),
+		MonitoringProfile: effectiveProfile(cfg),
 	}
 	status.LocalAPM = hb.APM
+	status.Update = hb.Update
 	resp, err := up.SendHeartbeat(ctx, hb)
 	status.LastHeartbeat = &now
 	if err != nil {
@@ -804,11 +845,20 @@ func sendHeartbeat(ctx context.Context, cfg config.Config, store *spool.Store, u
 	return &resp, nil
 }
 
+// apmBundleInstalled is replaced in tests, whose binaries run from a
+// temporary directory without an installation next to them.
+var apmBundleInstalled = apmruntime.BundleInstalledWithAgent
+
 func capabilitiesForConfig(cfg config.Config, privileged bool) []string {
-	allowInstrumentation := privileged && cfg.APM.Enabled && cfg.APM.Profile != "infrastructure"
+	allowInstrumentation := privileged && cfg.APM.Enabled && cfg.APM.Profile != "infrastructure" && apmBundleInstalled()
 	capabilities := make([]string, 0, len(model.AgentCapabilities))
 	for _, capability := range model.AgentCapabilities {
 		if !allowInstrumentation && (capability == "apm_iis_instrumentation_v1" || capability == "apm_windows_service_instrumentation_v1") {
+			continue
+		}
+		// Changing the package runs Setup for all users, which only the
+		// Windows service can do.
+		if !privileged && capability == "monitoring_profile_v1" {
 			continue
 		}
 		capabilities = append(capabilities, capability)
@@ -904,61 +954,36 @@ func pollConfigWithForce(ctx context.Context, cfg *config.Config, poller *config
 
 func handleHeartbeatResponse(ctx context.Context, hb *model.HeartbeatResponse, cfg *config.Config, poller *configpoller.Poller, paths runtime.Paths, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, apmManager *apmruntime.Manager, sup *supervisor, logf func(string, ...any)) {
 	sup.applyBackpressure(hb.Backpressure, status, logf)
+	up.SetGzipUploads(hb.AcceptsGzip)
 	if hb.APM != nil {
 		status.APM = hb.APM
 	}
 	if hb.ConfigETag != "" && hb.ConfigETag != cfg.ConfigETag {
 		pollConfig(ctx, cfg, poller, status, logf)
 	}
-	if hb.DesiredVersion != nil && *hb.DesiredVersion != "" && *hb.DesiredVersion != model.AgentVersion {
-		logf("controller requested desired_version=%s (running %s); starting self-update", *hb.DesiredVersion, model.AgentVersion)
-		status.UpgradeState = "requested " + *hb.DesiredVersion
-		startSelfUpdate(ctx, up, cfg.UpdateRing, logf)
+	if hb.DesiredVersion != nil && *hb.DesiredVersion != "" && *hb.DesiredVersion != model.AgentVersion && sup.updates != nil {
+		_ = sup.updates.Request(ctx, up.Client(), cfg.UpdateRing, *hb.DesiredVersion, false, logf)
 	}
 	if hb.HasCommands {
-		handleCommands(ctx, cfg, poller, paths, store, up, status, enrollment, apmManager, logf)
+		handleCommands(ctx, cfg, poller, paths, store, up, status, enrollment, apmManager, sup.updates, logf)
 	}
 }
 
-// startSelfUpdate checks the controller's package manifest and, when a newer
-// version is published, downloads + verifies + installs it in the background.
-// selfupdate itself serializes attempts and enforces a per-version cooldown.
-func startSelfUpdate(ctx context.Context, up *uploader.Uploader, channel string, logf func(string, ...any)) {
-	go func() {
-		m, err := selfupdate.FetchPublishedManifest(ctx, up.Client(), channel)
-		if err != nil {
-			logf("self-update: manifest fetch failed: %v", err)
-			return
-		}
-		if m.LatestVersion == model.AgentVersion {
-			logf("self-update: already running the published version %s", model.AgentVersion)
-			return
-		}
-		if !selfupdate.IsNewer(m.LatestVersion, model.AgentVersion) {
-			logf("self-update: ignoring published version %s because running version %s is newer", m.LatestVersion, model.AgentVersion)
-			return
-		}
-		if err := selfupdate.Apply(ctx, up.Client(), m, model.AgentVersion, logf); err != nil {
-			logf("self-update to %s failed: %v", m.LatestVersion, err)
-		}
-	}()
-}
-
-func handleCommands(ctx context.Context, cfg *config.Config, poller *configpoller.Poller, paths runtime.Paths, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, apmManager *apmruntime.Manager, logf func(string, ...any)) {
+func handleCommands(ctx context.Context, cfg *config.Config, poller *configpoller.Poller, paths runtime.Paths, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, apmManager *apmruntime.Manager, updates *updateTracker, logf func(string, ...any)) {
 	commands, err := up.PollCommands(ctx)
 	if err != nil {
 		logf("command poll failed: %v", err)
 		return
 	}
 	for _, cmd := range commands {
-		result := executeCommand(ctx, cmd, cfg, poller, paths, store, up, status, enrollment, apmManager, logf)
+		result := executeCommand(ctx, cmd, cfg, poller, paths, store, up, status, enrollment, apmManager, updates, logf)
 		if err := up.SendCommandResult(ctx, cmd.ID, result); err != nil {
 			logf("command result failed command_id=%s: %v", cmd.ID, err)
 		}
 	}
 }
 
-func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, poller *configpoller.Poller, paths runtime.Paths, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, apmManager *apmruntime.Manager, logf func(string, ...any)) model.CommandResult {
+func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, poller *configpoller.Poller, paths runtime.Paths, store *spool.Store, up *uploader.Uploader, status *model.Status, enrollment enroll.Result, apmManager *apmruntime.Manager, updates *updateTracker, logf func(string, ...any)) model.CommandResult {
 	if cmd.ExpiresAt != nil && time.Now().UTC().After(*cmd.ExpiresAt) {
 		return model.CommandResult{Success: false, ErrorMessage: "command expired before execution"}
 	}
@@ -1092,31 +1117,36 @@ func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, 
 	case "restart_agent":
 		return model.CommandResult{Success: false, ErrorMessage: "restart_agent requires service-manager integration and is not enabled in this foreground command handler"}
 	case "upgrade_agent":
-		manifest, err := selfupdate.FetchPublishedManifest(ctx, up.Client(), cfg.UpdateRing)
-		if err != nil {
-			return model.CommandResult{Success: false, ErrorMessage: "package manifest unavailable: " + err.Error()}
+		// An explicit version is installed exactly; without one the agent
+		// takes the latest package the appliance publishes for its flavour.
+		target, _ := cmd.Params["version"].(string)
+		target = strings.TrimSpace(target)
+		if target == "" {
+			manifest, err := selfupdate.FetchPublishedManifest(ctx, up.Client(), cfg.UpdateRing, selfupdate.InstalledFlavor())
+			if err != nil {
+				return model.CommandResult{Success: false, ErrorMessage: "package manifest unavailable: " + err.Error()}
+			}
+			target = manifest.LatestVersion
 		}
-		if manifest.LatestVersion == model.AgentVersion {
+		if target == model.AgentVersion {
 			return model.CommandResult{Success: true, Output: map[string]any{
-				"status":  "already at published version",
+				"status":  "already running the requested version",
 				"version": model.AgentVersion,
 			}}
 		}
-		if target, ok := cmd.Params["version"].(string); ok && target != "" && target != manifest.LatestVersion {
-			logf("upgrade_agent requested version %s but the published manifest serves %s; installing the published version", target, manifest.LatestVersion)
+		if updates == nil {
+			return model.CommandResult{Success: false, ErrorMessage: "self-update is unavailable in this run mode"}
 		}
-		status.UpgradeState = "installing " + manifest.LatestVersion
-		go func() {
-			if err := selfupdate.Apply(ctx, up.Client(), manifest, model.AgentVersion, logf); err != nil {
-				logf("self-update to %s failed: %v", manifest.LatestVersion, err)
-			}
-		}()
+		if err := updates.Request(ctx, up.Client(), cfg.UpdateRing, target, true, logf); err != nil {
+			return model.CommandResult{Success: false, ErrorMessage: err.Error()}
+		}
 		return model.CommandResult{Success: true, Output: map[string]any{
-			"status":       "upgrade started",
+			"status":       "upgrade requested",
 			"from_version": model.AgentVersion,
-			"to_version":   manifest.LatestVersion,
-			"file_name":    manifest.FileName,
+			"to_version":   target,
 		}}
+	case "set_monitoring_profile":
+		return changeMonitoringProfile(ctx, cmd, cfg, paths, up, updates, logf)
 	default:
 		return model.CommandResult{Success: false, ErrorMessage: "unsupported command: " + cmd.Command}
 	}
@@ -1343,6 +1373,7 @@ func localSettingsFingerprint(cfg config.Config) string {
 		ControllerCAFile:    cfg.Security.ControllerCAFile,
 		ControllerCAFileSig: fileStamp(cfg.Security.ControllerCAFile),
 		APMEnabled:          cfg.APM.Enabled,
+		APMProfile:          cfg.APM.Profile,
 	})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])

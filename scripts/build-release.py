@@ -144,6 +144,33 @@ def _agent_source_version() -> str | None:
     return match.group(1)
 
 
+# Since 1.13 each Windows release has two flavours (server monitoring
+# "core" and the full package with APM), each as EXE and MSI. The full MSI
+# is the package selected above; these are shipped beside it so an updated
+# appliance can serve and upgrade both flavours.
+FLAVORED_WINDOWS_FROM = (1, 13, 0)
+
+
+def _windows_companion_packages(platform_dir: Path, version: str) -> list[Path]:
+    names = [
+        f"zenplus-agent-{version}.exe",
+        f"zenplus-agent-core-{version}.exe",
+        f"zenplus-agent-core-{version}.msi",
+    ]
+    found = [
+        platform_dir / name for name in names
+        if (platform_dir / name).is_file() and not (platform_dir / name).is_symlink()
+    ]
+    if _version_key(version) >= FLAVORED_WINDOWS_FROM:
+        missing = [name for name in names if not (platform_dir / name).is_file()]
+        if missing:
+            raise RuntimeError(
+                f"Windows agent {version} is incomplete in {platform_dir}: missing {', '.join(missing)}. "
+                "Copy all four signed packages (core and full, EXE and MSI) into the artifact store."
+            )
+    return found
+
+
 def stage_agent_artifacts(
     build_dir: Path,
     artifact_dir: Path | None = None,
@@ -218,19 +245,22 @@ def stage_agent_artifacts(
             raise RuntimeError(
                 f"Latest Windows MSI is {version}, but vendored AgentVersion is {expected_windows}"
             )
-        if package.stat().st_size < 1_000_000:
-            raise RuntimeError(f"Agent package looks truncated ({package.stat().st_size} bytes): {package}")
-
-        destination = output_root / platform / package.name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(package, destination)
-        staged.append({
-            "platform": platform,
-            "version": version,
-            "file_name": package.name,
-            "file_size": package.stat().st_size,
-            "sha256": sha256_file(str(package)),
-        })
+        packages = [package]
+        if platform == "windows":
+            packages += _windows_companion_packages(platform_dir, version)
+        for item in packages:
+            if item.stat().st_size < 1_000_000:
+                raise RuntimeError(f"Agent package looks truncated ({item.stat().st_size} bytes): {item}")
+            destination = output_root / platform / item.name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, destination)
+            staged.append({
+                "platform": platform,
+                "version": version,
+                "file_name": item.name,
+                "file_size": item.stat().st_size,
+                "sha256": sha256_file(str(item)),
+            })
 
     windows_staged = next(
         (p["version"] for p in staged if p["platform"] == "windows"), None

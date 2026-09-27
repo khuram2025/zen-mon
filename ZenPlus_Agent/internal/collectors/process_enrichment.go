@@ -1,6 +1,7 @@
 package collectors
 
 import (
+	"context"
 	"sort"
 	"strings"
 	"time"
@@ -24,6 +25,17 @@ type processSample struct {
 	Threads    int32
 	Handles    int32
 	UserName   string
+	CreatedMs  int64
+}
+
+// processSnapshotEntry is one process as read by processSnapshot.
+type processSnapshotEntry struct {
+	PID        int32
+	Name       string
+	Threads    int32
+	Handles    int32
+	RSS        uint64
+	CPUSeconds float64
 	CreatedMs  int64
 }
 
@@ -147,4 +159,21 @@ func truncateUTF8Bytes(value string, maxBytes int) string {
 		end--
 	}
 	return strings.TrimSpace(value[:end])
+}
+
+// enrichProcessSample attaches the process handle and owner for a reported
+// process. A PID that now belongs to a different process (its start time
+// changed since the snapshot) is left without them rather than mislabelled.
+func enrichProcessSample(ctx context.Context, item *processSample) {
+	p, err := process.NewProcessWithContext(ctx, item.PID)
+	if err != nil {
+		return
+	}
+	if created, err := p.CreateTimeWithContext(ctx); err == nil && item.CreatedMs > 0 && created != item.CreatedMs {
+		return
+	}
+	item.process = p
+	if userName, err := p.UsernameWithContext(ctx); err == nil {
+		item.UserName = truncateUTF8Bytes(strings.TrimSpace(userName), maxProcessTextBytes)
+	}
 }

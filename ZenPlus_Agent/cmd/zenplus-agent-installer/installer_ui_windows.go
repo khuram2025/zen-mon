@@ -5,8 +5,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"image"
-	"image/color"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +14,7 @@ import (
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
 
+	"zenplus-agent/internal/brand"
 	"zenplus-agent/internal/config"
 	"zenplus-agent/internal/model"
 )
@@ -105,7 +104,7 @@ func (u *setupWindow) run() error {
 		MinSize:    Size{Width: 640, Height: 680},
 		Layout:     VBox{MarginsZero: true, Spacing: 0},
 		Children: []Widget{
-			setupHeader("Install "+productName, "Version "+model.AgentVersion+" | Guided Windows setup"),
+			setupHeader("Install "+productName, "Version "+model.AgentVersion+" | "+flavorDisplayName()),
 			ScrollView{
 				Background:      SolidColorBrush{Color: setupBG},
 				HorizontalFixed: true,
@@ -136,10 +135,10 @@ func (u *setupWindow) run() error {
 		u.machineScope.SetChecked(defaultMachine)
 	}
 	if u.profileCombined != nil {
-		u.profileCombined.SetChecked(u.opts.profile == "" || u.opts.profile == "combined")
+		u.profileCombined.SetChecked(u.opts.profile == "combined")
 	}
 	if u.profileInfrastructure != nil {
-		u.profileInfrastructure.SetChecked(u.opts.profile == "infrastructure")
+		u.profileInfrastructure.SetChecked(u.opts.profile == "" || u.opts.profile == "infrastructure")
 	}
 	if u.profileAPM != nil {
 		u.profileAPM.SetChecked(u.opts.profile == "apm")
@@ -190,7 +189,7 @@ func (u *setupWindow) scopePanel(defaultUser, defaultMachine bool) Widget {
 	return GroupBox{
 		Title:      "Installation Scope",
 		Background: SolidColorBrush{Color: setupPanel},
-		Layout:     VBox{Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 10}, Spacing: 5},
+		Layout:     VBox{Alignment: AlignHNearVNear, Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 10}, Spacing: 5},
 		Children: []Widget{
 			TextLabel{Text: scopeNote, MinSize: Size{Width: 560, Height: 34}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
 			RadioButton{AssignTo: &u.userScope, Text: "Current user - evaluation only (no Windows service)", OnClicked: func() {
@@ -214,28 +213,44 @@ func (u *setupWindow) settingsPanel() Widget {
 	}
 	profile := u.opts.profile
 	if profile == "" {
-		if u.opts.apmMode == "disabled" {
-			profile = "infrastructure"
-		} else {
+		if u.opts.apmMode == "enabled" {
 			profile = "combined"
+		} else {
+			profile = "infrastructure"
 		}
 	}
+	if !payloadIncludesAPM() {
+		profile = "infrastructure"
+	}
 	u.opts.profile = profile
+	muted := Font{Family: "Segoe UI", PointSize: 9}
+	children := []Widget{
+		Label{Text: "Controller URL or IP address", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9, Bold: true}},
+		LineEdit{AssignTo: &u.controllerURL, CueBanner: config.DefaultControllerURL, Text: controllerValue, Background: SolidColorBrush{Color: setupField}, TextColor: setupText, MinSize: Size{Height: 30}},
+		Label{Text: "Monitoring profile", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9, Bold: true}},
+	}
+	if payloadIncludesAPM() {
+		children = append(children,
+			RadioButton{AssignTo: &u.profileCombined, Text: "Server monitoring + APM"},
+			RadioButton{AssignTo: &u.profileInfrastructure, Text: "Server monitoring only (recommended)"},
+			RadioButton{AssignTo: &u.profileAPM, Text: "APM only (keeps agent health and inventory)"},
+			TextLabel{Text: "This package includes the managed OpenTelemetry gateway plus offline .NET, Java, Node.js, and Python assets. ZenPlus can manage IIS/.NET, Java, and Node Windows-service instrumentation; Python and other applications can send OTLP to 127.0.0.1:4317/4318.", MinSize: Size{Width: 560, Height: 48}, TextColor: setupMuted, Font: muted},
+		)
+	} else {
+		children = append(children,
+			Label{Text: "Server monitoring (this package does not include APM)", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9}},
+			TextLabel{Text: "This lightweight package monitors the server only. To add application performance monitoring (APM), install the ZenPlus Agent package with APM over this installation at any time.", MinSize: Size{Width: 560, Height: 34}, TextColor: setupMuted, Font: muted},
+		)
+	}
+	children = append(children,
+		TextLabel{Text: "During an upgrade or removal, Setup briefly stops only application pools and Windows services already managed by ZenPlus, then restores their prior running state. Windows itself is never restarted.", MinSize: Size{Width: 560, Height: 34}, TextColor: setupMuted, Font: muted},
+		TextLabel{Text: "After installation, this computer registers with the appliance as Pending authorization. An administrator approves it in Agent Fleet; the appliance then issues and manages its protected credential and policy.", MinSize: Size{Width: 560, Height: 46}, TextColor: setupMuted, Font: muted},
+	)
 	return GroupBox{
 		Title:      "Connect to ZenPlus",
 		Background: SolidColorBrush{Color: setupPanel},
-		Layout:     VBox{Margins: Margins{Left: 12, Top: 10, Right: 12, Bottom: 10}, Spacing: 8},
-		Children: []Widget{
-			Label{Text: "Controller URL or IP address", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9, Bold: true}},
-			LineEdit{AssignTo: &u.controllerURL, CueBanner: "https://192.168.8.221", Text: controllerValue, Background: SolidColorBrush{Color: setupField}, TextColor: setupText, MinSize: Size{Height: 30}},
-			Label{Text: "Monitoring profile", TextColor: setupText, Font: Font{Family: "Segoe UI", PointSize: 9, Bold: true}},
-			RadioButton{AssignTo: &u.profileCombined, Text: "Server monitoring + APM (recommended)"},
-			RadioButton{AssignTo: &u.profileInfrastructure, Text: "Server monitoring only"},
-			RadioButton{AssignTo: &u.profileAPM, Text: "APM only (keeps agent health and inventory)"},
-			TextLabel{Text: "Every package includes the managed OpenTelemetry gateway plus offline .NET, Java, Node.js, and Python assets. ZenPlus can manage IIS/.NET, Java, and Node Windows-service instrumentation; Python and other applications can send OTLP to 127.0.0.1:4317/4318.", MinSize: Size{Width: 560, Height: 48}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
-			TextLabel{Text: "During an upgrade or removal, Setup briefly stops only application pools and Windows services already managed by ZenPlus, then restores their prior running state. Windows itself is never restarted.", MinSize: Size{Width: 560, Height: 34}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
-			TextLabel{Text: "After installation, this computer registers with the appliance as Pending authorization. An administrator approves it in Agent Fleet; the appliance then issues and manages its protected credential and policy.", MinSize: Size{Width: 560, Height: 46}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
-		},
+		Layout:     VBox{Alignment: AlignHNearVNear, Margins: Margins{Left: 12, Top: 10, Right: 12, Bottom: 10}, Spacing: 8},
+		Children:   children,
 	}
 }
 
@@ -366,7 +381,7 @@ func (u *setupWindow) optionsFromUI() options {
 	opts.noStartMenu = u.noStartMenu != nil && !u.noStartMenu.Checked()
 	opts.controllerURL = strings.TrimSpace(textOf(u.controllerURL))
 	switch {
-	case u.profileInfrastructure != nil && u.profileInfrastructure.Checked():
+	case !payloadIncludesAPM() || (u.profileInfrastructure != nil && u.profileInfrastructure.Checked()):
 		opts.profile, opts.apmMode = "infrastructure", "disabled"
 	case u.profileAPM != nil && u.profileAPM.Checked():
 		opts.profile, opts.apmMode = "apm", "enabled"
@@ -547,7 +562,7 @@ func (u *uninstallWindow) uninstallScopePanel(defaultUser, defaultMachine bool) 
 	return GroupBox{
 		Title:      "Remove Installation",
 		Background: SolidColorBrush{Color: setupPanel},
-		Layout:     VBox{Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 10}, Spacing: 7},
+		Layout:     VBox{Alignment: AlignHNearVNear, Margins: Margins{Left: 12, Top: 8, Right: 12, Bottom: 10}, Spacing: 7},
 		Children: []Widget{
 			TextLabel{Text: scopeNote, MinSize: Size{Width: 530, Height: 34}, TextColor: setupMuted, Font: Font{Family: "Segoe UI", PointSize: 9}},
 			RadioButton{AssignTo: &u.userScope, Text: "Current user installation", OnClicked: func() {
@@ -749,91 +764,49 @@ func (u *uninstallWindow) withUI(fn func()) {
 	u.window.Synchronize(fn)
 }
 
+// setupBanner matches the navy of the ZenPlus mark.
+var setupBanner = walk.RGB(11, 31, 51)
+
 func setupHeader(title, subtitle string) Widget {
 	return Composite{
-		Background: SolidColorBrush{Color: setupAccent},
+		Background: SolidColorBrush{Color: setupBanner},
 		MinSize:    Size{Height: 78},
 		MaxSize:    Size{Height: 78},
 		Layout:     HBox{Margins: Margins{Left: 18, Top: 13, Right: 18, Bottom: 12}, Spacing: 12},
 		Children: []Widget{
-			Label{
-				Text:          "Z",
-				MinSize:       Size{Width: 48, Height: 48},
-				MaxSize:       Size{Width: 48, Height: 48},
-				Background:    SolidColorBrush{Color: setupOverlay},
-				TextColor:     setupAccent,
-				Font:          Font{Family: "Segoe UI", PointSize: 22, Bold: true},
-				TextAlignment: AlignCenter,
+			ImageView{
+				Image:      setupBrandBitmap(48),
+				Mode:       ImageViewModeIdeal,
+				MinSize:    Size{Width: 50, Height: 50},
+				MaxSize:    Size{Width: 50, Height: 50},
+				Background: SolidColorBrush{Color: setupBanner},
 			},
 			Composite{
-				Background: SolidColorBrush{Color: setupAccent},
+				Background: SolidColorBrush{Color: setupBanner},
 				Layout:     VBox{Margins: Margins{Left: 0, Top: 4, Right: 0, Bottom: 0}, Spacing: 3},
 				Children: []Widget{
 					Label{Text: title, TextColor: walk.RGB(255, 255, 255), Font: Font{Family: "Segoe UI", PointSize: 16, Bold: true}},
-					TextLabel{Text: subtitle, TextColor: walk.RGB(226, 255, 252), Font: Font{Family: "Segoe UI", PointSize: 9}, MinSize: Size{Width: 430, Height: 22}},
+					TextLabel{Text: subtitle, TextColor: walk.RGB(191, 219, 254), Font: Font{Family: "Segoe UI", PointSize: 9}, MinSize: Size{Width: 430, Height: 22}},
 				},
 			},
 		},
 	}
 }
 
+func setupBrandBitmap(size int) walk.Image {
+	bitmap, err := walk.NewBitmapFromImageForDPI(brand.Mark(size), 96)
+	if err != nil {
+		return nil
+	}
+	return bitmap
+}
+
 func setupIcon() *walk.Icon {
 	if icon, err := walk.NewIconFromResourceId(3); err == nil {
 		return icon
 	}
-	icon, _ := walk.NewIconFromImage(makeSetupIcon(64))
+	icon, _ := walk.NewIconFromImageForDPI(brand.Mark(64), 96)
 	return icon
-}
-
-func makeSetupIcon(size int) image.Image {
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
-			img.Set(x, y, color.RGBA{R: 0, G: 137, B: 129, A: 255})
-		}
-	}
-	white := color.RGBA{R: 255, G: 255, B: 255, A: 255}
-	thick := maxInt(2, size/7)
-	left := size / 4
-	right := size - left
-	top := size / 4
-	bottom := size - top - thick
-	fillSetupRect(img, left, top, right, top+thick, white)
-	fillSetupRect(img, left, bottom, right, bottom+thick, white)
-	for i := 0; i < right-left; i++ {
-		x := right - i - thick
-		y := top + i*(bottom-top)/(right-left)
-		fillSetupRect(img, x, y, x+thick, y+thick, white)
-	}
-	return img
-}
-
-func fillSetupRect(img *image.RGBA, left, top, right, bottom int, c color.RGBA) {
-	bounds := img.Bounds()
-	if left < bounds.Min.X {
-		left = bounds.Min.X
-	}
-	if top < bounds.Min.Y {
-		top = bounds.Min.Y
-	}
-	if right > bounds.Max.X {
-		right = bounds.Max.X
-	}
-	if bottom > bounds.Max.Y {
-		bottom = bounds.Max.Y
-	}
-	for y := top; y < bottom; y++ {
-		for x := left; x < right; x++ {
-			img.Set(x, y, c)
-		}
-	}
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func commandArgsFromOptions(opts options, uninstall bool, quiet bool) []string {
@@ -880,6 +853,9 @@ func commandArgsFromOptions(opts options, uninstall bool, quiet bool) []string {
 	}
 	if opts.profile != "" {
 		args = append(args, "INSTALL_PROFILE="+opts.profile)
+	}
+	if opts.logPath != "" {
+		args = append(args, "LOG="+opts.logPath)
 	}
 	return args
 }

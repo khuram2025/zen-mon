@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
+from app.core.gzip_request import GzipRequestMiddleware
 from app.api.v1 import auth, devices, alerts, alert_rules, alert_engine, service_checks, reports, report_schedules, discovery, discovery_v2, users, roles, auth_settings, subscription, system_updates, snmp, snmp_credentials, windows_credentials, audit_logs, netflow, manual_maps, support, traps, ncm, host_alert_rules, link_utilization, udt, netpath, tags
 from app.api.v1 import settings as settings_api
 from app.api.v1 import storage_management as storage_api
@@ -59,6 +60,9 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
     )
+
+    # Agents compress uploads once the heartbeat advertises accepts_gzip.
+    app.add_middleware(GzipRequestMiddleware)
 
     # CORS
     app.add_middleware(

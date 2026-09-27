@@ -25,6 +25,8 @@ interface AgentPackage {
   version: string
   file_name: string
   file_size: number
+  // "core" is server monitoring only; "full" adds APM. Absent before 1.13.
+  flavor?: 'core' | 'full'
   sha256?: string | null
   is_latest: boolean
 }
@@ -84,8 +86,10 @@ export function InstallTokenDialog({
     queryFn: async () => (await api.get('/agent-fleet/packages')).data,
     enabled: open,
   })
+  // Server monitoring only needs the small core package.
+  const flavor = installProfile === 'infrastructure' && platform === 'windows' ? 'core' : 'full'
   const published = (packages?.items ?? []).find(
-    (item) => item.platform === platform && item.is_latest,
+    (item) => item.platform === platform && item.is_latest && (item.flavor ?? 'full') === flavor,
   )
   const command = useMemo(
     () => deploymentCommand(platform, controllerUrl, installProfile, windowsShell),
@@ -95,7 +99,7 @@ export function InstallTokenDialog({
   const download = useMutation({
     mutationFn: async () => api.post(
       '/agent-fleet/packages/download',
-      { platform },
+      { platform, flavor },
       { responseType: 'blob', timeout: 10 * 60_000 },
     ),
     onSuccess: (response) => {
@@ -227,6 +231,18 @@ export function InstallTokenDialog({
             )}
           </div>
 
+          {platform === 'windows' && (
+            <MassDeployment
+              controllerUrl={controllerUrl.replace(/\/$/, '')}
+              installProfile={installProfile}
+              packageBase={
+                published
+                  ? published.file_name.replace(/\.(exe|msi)$/i, '')
+                  : `zenplus-agent${flavor === 'core' ? '-core' : ''}-<version>`
+              }
+            />
+          )}
+
           <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs text-muted">
             After installation, open <strong className="text-text">Agent Fleet</strong>, locate the
             pending host, and select <strong className="text-text">Authorize monitoring</strong>.
@@ -243,5 +259,84 @@ export function InstallTokenDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+/** Silent-install command lines for deployment tools (GPO, Intune, Configuration Manager, PDQ). */
+function MassDeployment({
+  controllerUrl,
+  installProfile,
+  packageBase,
+}: {
+  controllerUrl: string
+  installProfile: 'infrastructure' | 'apm' | 'combined'
+  packageBase: string
+}) {
+  const [open, setOpen] = useState(false)
+  const log = 'C:\Windows\Temp\ZenPlusAgent-install.log'
+  const commands = [
+    {
+      label: 'EXE',
+      text: `${packageBase}.exe /machine /quiet /norestart CONTROLLER_URL=${controllerUrl} INSTALL_PROFILE=${installProfile} /log "${log}"`,
+    },
+    {
+      label: 'MSI',
+      text: `msiexec /i ${packageBase}.msi /qn /norestart CONTROLLER_URL=${controllerUrl} INSTALL_PROFILE=${installProfile} /L*v "${log}"`,
+    },
+    {
+      label: 'Uninstall',
+      text: '"%ProgramFiles%\ZenPlus\Agent\ZenPlusAgentSetup.exe" /uninstall /quiet',
+    },
+  ]
+  return (
+    <div className="rounded-md border border-border">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between px-3 py-2 text-left text-xs font-medium text-text"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        Mass deployment (Group Policy, Intune, Configuration Manager)
+        <span className="text-muted">{open ? 'Hide' : 'Show'}</span>
+      </button>
+      {open && (
+        <div className="space-y-2 border-t border-border px-3 py-2">
+          {commands.map((c) => <CopyableCommand key={c.label} label={c.label} text={c.text} />)}
+          <p className="text-[11px] leading-relaxed text-muted">
+            Run as SYSTEM or an administrator. Exit codes: <strong className="text-text">0</strong> installed,{' '}
+            <strong className="text-text">1618</strong> another installation is running (retry),{' '}
+            <strong className="text-text">1639</strong> invalid switches,{' '}
+            <strong className="text-text">740</strong> not elevated,{' '}
+            <strong className="text-text">1603</strong> failed (see the log). Detect the installation by the
+            registry value <code>DisplayVersion</code> under{' '}
+            <code>HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\ZenPlus Agent</code>. Installed hosts
+            appear as Pending authorization; select them all in Agent Fleet and choose Authorize.
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CopyableCommand({ label, text }: { label: string; text: string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = async () => {
+    if (await copyText(text)) {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } else {
+      toast.error('Copy failed', 'Clipboard access was denied by the browser')
+    }
+  }
+  return (
+    <div className="flex items-start gap-2">
+      <span className="mt-2 w-16 shrink-0 text-[11px] font-medium text-muted">{label}</span>
+      <code className="min-w-0 flex-1 select-all break-all rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-[11px] leading-relaxed text-text">
+        {text}
+      </code>
+      <Button size="sm" variant="ghost" onClick={copy} aria-label={`Copy ${label} command`}>
+        {copied ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
+      </Button>
+    </div>
   )
 }

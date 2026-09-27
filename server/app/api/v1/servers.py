@@ -16,6 +16,7 @@ import re
 import secrets
 import shlex
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
@@ -31,6 +32,14 @@ from app.api.v1.apm import invalidate_ingest_key_cache
 from app.core import scoping
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.services import package_digest
+from app.services.agent_package_names import (
+    FLAVOR_FULL,
+    FLAVOR_PATTERN,
+    download_path as package_download_path,
+    parse_package_name,
+    version_key,
+)
 from app.services.tag_service import canonicalize_tags
 from app.core.security import get_current_user, require_operator_user
 from app.services.filesystem_monitoring import pg_capacity_filter
@@ -57,7 +66,9 @@ from app.schemas.agent import (
     ServerResponse,
     ServerUpdate,
 )
+from app.services.host_metric_detail import query_server_metric_detail
 from app.services.host_metric_service import (
+    get_clickhouse_client,
     query_fleet_latest_metrics,
     query_latest_process_snapshot,
     query_process_history,
@@ -758,6 +769,35 @@ async def server_metrics(
     )
 
 
+@router.get("/{server_id}/metrics/detail")
+async def server_metric_detail(
+    server_id: UUID,
+    from_: Optional[datetime] = Query(None, alias="from"),
+    to: Optional[datetime] = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """CPU, memory, disk, filesystem and network breakdowns for the detail page."""
+    row = (await db.execute(
+        text("SELECT tags FROM servers WHERE id = :id"), {"id": server_id},
+    )).mappings().first()
+    # 404, not 403: out-of-scope ids must not be confirmable.
+    if not row or not scoping.entity_visible(row["tags"], await scoping.visible_tags(db, user)):
+        raise HTTPException(404, "Server not found")
+    to = to or datetime.now(timezone.utc)
+    from_ = from_ or to - timedelta(hours=1)
+    if from_ >= to:
+        raise HTTPException(400, "from must be before to")
+    try:
+        return await asyncio.to_thread(
+            query_server_metric_detail, get_clickhouse_client(), str(server_id), from_, to,
+        )
+    except Exception as exc:
+        logger.warning("server metric detail query failed: %s", exc)
+        # A store outage must not render as an idle host.
+        raise HTTPException(503, "Metric store unavailable")
+
+
 @router.get("/{server_id}/processes")
 async def server_processes(
     server_id: UUID,
@@ -1125,6 +1165,9 @@ def _agent_response(row: dict) -> AgentResponse:
         config_apply_error=row.get("config_apply_error"),
         capabilities=[str(v) for v in _json_list(row.get("capabilities"))],
         apm_status=_apm_status_with_binding(row),
+        update_status=_json_object(row.get("update_status")),
+        package_flavor=row.get("package_flavor"),
+        monitoring_profile=row.get("monitoring_profile"),
         tags=list(tags) if isinstance(tags, (list, tuple)) else [],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -2102,12 +2145,14 @@ async def standalone_install_token(
     )
 
 
-async def _msi_download_url(platform: str, db: AsyncSession, server_url: str) -> Optional[str]:
+async def _msi_download_url(
+    platform: str, db: AsyncSession, server_url: str, flavor: str = FLAVOR_FULL,
+) -> Optional[str]:
     row = (await db.execute(
         text("""SELECT download_path FROM agent_packages
-                WHERE platform = :p AND is_latest = TRUE
+                WHERE platform = :p AND flavor = :fl AND is_latest = TRUE
                 ORDER BY released_at DESC LIMIT 1"""),
-        {"p": platform},
+        {"p": platform, "fl": flavor},
     )).first()
     if not row:
         return None
@@ -2463,36 +2508,31 @@ async def list_fleet(
 # this reconciles the agent_packages table against it, and the read paths call
 # it so dropping a file in is all that is required.
 
-_PKG_NAME_RE = re.compile(
-    r"^zenplus-agent[-_](\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+)?)\.(msi|exe|pkg|tar\.gz)$"
-)
-
-
-def _version_key(v: str):
-    return [int(p) if p.isdigit() else 0 for p in v.split("-")[0].split(".")]
+# Several files may carry the same platform/version/flavour (a release ships
+# both setup .exe and .msi). One row represents each, so prefer the setup
+# program: it is the canonical self-update package and owns in-place upgrades.
+_PKG_EXT_PREFERENCE = {"exe": 0, "msi": 1, "tar.gz": 2, "pkg": 3}
 
 
 def _sha256_file(path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return package_digest.sha256_file(path)
 
 
 async def sync_agent_packages(db: AsyncSession) -> dict:
     """Reconcile agent_packages with the files in the artifact store.
 
     Content is hashed even when name and size match. Published
-    platform/version bytes are immutable: hash drift quarantines the row by
-    clearing ``is_latest`` and is never accepted as a replacement checksum.
+    platform/version/flavour bytes are immutable: hash drift quarantines the
+    row by clearing ``is_latest`` and is never accepted as a replacement
+    checksum. ``is_latest`` is tracked per platform and flavour.
     """
     from app.api.v1.agents import AGENT_PKG_DIR
 
     registered = {
-        (r["platform"], r["arch"], r["version"], r["channel"]): r
+        (r["platform"], r["arch"], r["version"], r["channel"], r["flavor"]): r
         for r in (await db.execute(
-            text("""SELECT platform, arch, version, channel, file_name, file_size, sha256
+            text("""SELECT platform, arch, version, channel, flavor, file_name,
+                           file_size, sha256
                     FROM agent_packages""")
         )).mappings().all()
     }
@@ -2504,36 +2544,47 @@ async def sync_agent_packages(db: AsyncSession) -> dict:
         pdir = AGENT_PKG_DIR / platform
         if not pdir.is_dir():
             continue
-        found: list[tuple[str, str, int, str]] = []
+        chosen: dict[tuple[str, str], tuple[int, Path]] = {}
         for f in sorted(pdir.iterdir()):
             if not f.is_file():
                 continue
-            m = _PKG_NAME_RE.match(f.name)
-            if not m:
+            parsed = parse_package_name(f.name)
+            if not parsed:
                 continue
-            found.append((m.group(1), f.name, f.stat().st_size, _sha256_file(f)))
+            rank = _PKG_EXT_PREFERENCE.get(parsed.ext, 9)
+            slot = (parsed.flavor, parsed.version)
+            if slot not in chosen or rank < chosen[slot][0]:
+                chosen[slot] = (rank, f)
 
+        found: list[tuple[str, str, str, int, str]] = []
+        for (flavor, version), (_, f) in sorted(chosen.items()):
+            digest = await asyncio.to_thread(_sha256_file, f)
+            found.append((flavor, version, f.name, f.stat().st_size, digest))
         if not found:
             continue
-        latest_version = max((v for v, _, _, _ in found), key=_version_key)
+        latest_by_flavor = {
+            flavor: max((v for fl, v, _, _, _ in found if fl == flavor), key=version_key)
+            for flavor in {fl for fl, _, _, _, _ in found}
+        }
 
-        for version, fname, fsize, digest in found:
-            key = (platform, "amd64", version, "stable")
+        for flavor, version, fname, fsize, digest in found:
+            key = (platform, "amd64", version, "stable", flavor)
             seen.add(key)
             existing = registered.get(key)
-            is_latest = version == latest_version
+            is_latest = version == latest_by_flavor[flavor]
+            params = {"pl": platform, "v": version, "fl": flavor}
             if existing and existing["sha256"].lower() != digest:
                 await db.execute(
                     text("""UPDATE agent_packages SET is_latest = FALSE
                             WHERE platform = :pl AND arch = 'amd64'
-                              AND version = :v AND channel = 'stable'"""),
-                    {"pl": platform, "v": version},
+                              AND version = :v AND channel = 'stable' AND flavor = :fl"""),
+                    params,
                 )
                 quarantined.append(f"{platform}/{fname}")
                 logger.error(
-                    "agent package hash drift quarantined: platform=%s version=%s "
+                    "agent package hash drift quarantined: platform=%s flavor=%s version=%s "
                     "file=%s expected_sha=%s actual_sha=%s",
-                    platform, version, fname, existing["sha256"], digest,
+                    platform, flavor, version, fname, existing["sha256"], digest,
                 )
                 continue
             if (existing and existing["file_size"] == fsize
@@ -2543,9 +2594,9 @@ async def sync_agent_packages(db: AsyncSession) -> dict:
                 repair = await db.execute(
                     text("""UPDATE agent_packages SET is_latest = :latest
                             WHERE platform = :pl AND arch = 'amd64'
-                              AND version = :v AND channel = 'stable'
+                              AND version = :v AND channel = 'stable' AND flavor = :fl
                               AND is_latest IS DISTINCT FROM :latest"""),
-                    {"pl": platform, "v": version, "latest": is_latest},
+                    params | {"latest": is_latest},
                 )
                 if repair.rowcount:
                     repaired.append(f"{platform}/{fname}")
@@ -2553,18 +2604,18 @@ async def sync_agent_packages(db: AsyncSession) -> dict:
 
             accepted = (await db.execute(
                 text("""INSERT INTO agent_packages
-                          (platform, arch, version, channel, file_name, file_size,
+                          (platform, arch, version, channel, flavor, file_name, file_size,
                            sha256, download_path, is_latest)
-                        VALUES (:pl, 'amd64', :v, 'stable', :fn, :fs, :sha, :dp, :latest)
-                        ON CONFLICT (platform, arch, version, channel) DO UPDATE SET
+                        VALUES (:pl, 'amd64', :v, 'stable', :fl, :fn, :fs, :sha, :dp, :latest)
+                        ON CONFLICT (platform, arch, version, channel, flavor) DO UPDATE SET
                           file_name = EXCLUDED.file_name,
                           file_size = EXCLUDED.file_size,
                           download_path = EXCLUDED.download_path,
                           is_latest = EXCLUDED.is_latest
                         WHERE agent_packages.sha256 = EXCLUDED.sha256
                         RETURNING id"""),
-                {"pl": platform, "v": version, "fn": fname, "fs": fsize, "sha": digest,
-                 "dp": f"/api/v1/agents/packages/{platform}/latest", "latest": is_latest},
+                params | {"fn": fname, "fs": fsize, "sha": digest,
+                          "dp": package_download_path(platform, flavor), "latest": is_latest},
             )).first()
             if accepted:
                 (updated if existing else added).append(f"{platform}/{fname}")
@@ -2572,8 +2623,8 @@ async def sync_agent_packages(db: AsyncSession) -> dict:
                 await db.execute(
                     text("""UPDATE agent_packages SET is_latest = FALSE
                             WHERE platform = :pl AND arch = 'amd64'
-                              AND version = :v AND channel = 'stable'"""),
-                    {"pl": platform, "v": version},
+                              AND version = :v AND channel = 'stable' AND flavor = :fl"""),
+                    params,
                 )
                 quarantined.append(f"{platform}/{fname}")
 
@@ -2584,8 +2635,9 @@ async def sync_agent_packages(db: AsyncSession) -> dict:
             continue
         await db.execute(
             text("""DELETE FROM agent_packages
-                    WHERE platform = :pl AND arch = :a AND version = :v AND channel = :c"""),
-            {"pl": key[0], "a": key[1], "v": key[2], "c": key[3]},
+                    WHERE platform = :pl AND arch = :a AND version = :v
+                      AND channel = :c AND flavor = :fl"""),
+            {"pl": key[0], "a": key[1], "v": key[2], "c": key[3], "fl": key[4]},
         )
         removed.append(f"{key[0]}/{row['file_name']}")
 
@@ -2600,6 +2652,7 @@ async def sync_agent_packages(db: AsyncSession) -> dict:
             "quarantined": quarantined, "repaired": repaired}
 
 
+
 @fleet_router.get("/packages")
 async def list_agent_packages(
     db: AsyncSession = Depends(get_db),
@@ -2609,9 +2662,9 @@ async def list_agent_packages(
     # last call, so a new build needs no manual publish step.
     await sync_agent_packages(db)
     rows = (await db.execute(
-        text("""SELECT id, platform, arch, version, channel, file_name, file_size,
+        text("""SELECT id, platform, arch, version, channel, flavor, file_name, file_size,
                        sha256, is_latest, released_at
-                FROM agent_packages ORDER BY platform, released_at DESC"""),
+                FROM agent_packages ORDER BY platform, flavor, released_at DESC"""),
     )).mappings().all()
     return {"items": [dict(r) | {"id": str(r["id"])} for r in rows]}
 
@@ -2626,82 +2679,32 @@ async def publish_agent_packages(
     Registration also happens automatically whenever packages are listed or
     downloaded; this endpoint is for reconciling immediately after a release.
 
-    Layout: /opt/zenplus/artifacts/agents/<platform>/zenplus-agent-<version>.<ext>
-    (.msi/.exe for Windows, .tar.gz for Linux, .pkg/.tar.gz for macOS). The newest version per
-    platform is flagged is_latest and served by the download endpoint.
+    Layout: /opt/zenplus/artifacts/agents/<platform>/zenplus-agent[-core]-<version>.<ext>
+    (.exe/.msi for Windows, .tar.gz for Linux, .pkg/.tar.gz for macOS). The
+    newest version per platform and flavour is flagged is_latest and served by
+    the download endpoint.
     """
     from app.api.v1.agents import AGENT_PKG_DIR
 
-    def _parse_version(name: str) -> Optional[str]:
-        import re
-        m = re.match(
-            r"^zenplus-agent[-_](\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+)?)\."
-            r"(msi|exe|pkg|tar\.gz)$",
-            name,
-        )
-        return m.group(1) if m else None
-
-    published: list[dict] = []
-    quarantined: list[dict] = []
+    result = await sync_agent_packages(db)
     skipped: list[str] = []
     for platform in ("windows", "linux", "macos"):
         pdir = AGENT_PKG_DIR / platform
-        if not pdir.is_dir():
-            continue
-        candidates = []
-        for f in sorted(pdir.iterdir()):
-            if not f.is_file():
-                continue
-            version = _parse_version(f.name)
-            if not version:
-                skipped.append(f"{platform}/{f.name}")
-                continue
-            digest = _sha256_file(f)
-            candidates.append((version, f.name, f.stat().st_size, digest))
-        if not candidates:
-            continue
-        # Highest version (numeric-aware) becomes latest.
-        def _vkey(v: str):
-            return [int(p) if p.isdigit() else 0 for p in v.split("-")[0].split(".")]
-        candidates.sort(key=lambda c: _vkey(c[0]))
-        latest_version = candidates[-1][0]
-        for version, fname, fsize, digest in candidates:
-            accepted = (await db.execute(
-                text("""INSERT INTO agent_packages
-                          (platform, arch, version, channel, file_name, file_size, sha256,
-                           download_path, is_latest)
-                        VALUES (:pl, 'amd64', :v, 'stable', :fn, :fs, :sha, :dp, :latest)
-                        ON CONFLICT (platform, arch, version, channel) DO UPDATE SET
-                          file_name = EXCLUDED.file_name,
-                          file_size = EXCLUDED.file_size,
-                          download_path = EXCLUDED.download_path,
-                          is_latest = EXCLUDED.is_latest
-                        WHERE agent_packages.sha256 = EXCLUDED.sha256
-                        RETURNING id"""),
-                {"pl": platform, "v": version, "fn": fname, "fs": fsize, "sha": digest,
-                 "dp": f"/api/v1/agents/packages/{platform}/latest",
-                 "latest": version == latest_version},
-            )).first()
-            item = {"platform": platform, "version": version, "file_name": fname,
-                    "is_latest": version == latest_version}
-            if accepted:
-                published.append(item)
-            else:
-                await db.execute(
-                    text("""UPDATE agent_packages SET is_latest = FALSE
-                            WHERE platform = :pl AND arch = 'amd64'
-                              AND version = :v AND channel = 'stable'"""),
-                    {"pl": platform, "v": version},
-                )
-                quarantined.append(item)
-        await db.execute(
-            text("""UPDATE agent_packages SET is_latest = FALSE
-                    WHERE platform = :pl AND channel = 'stable' AND version != :v"""),
-            {"pl": platform, "v": latest_version},
-        )
-    await db.commit()
-    return {"published": published, "quarantined": quarantined, "skipped": skipped,
-            "package_dir": str(AGENT_PKG_DIR)}
+        if pdir.is_dir():
+            skipped.extend(
+                f"{platform}/{f.name}" for f in sorted(pdir.iterdir())
+                if f.is_file() and not parse_package_name(f.name)
+            )
+    rows = (await db.execute(
+        text("""SELECT platform, flavor, version, file_name, is_latest
+                FROM agent_packages ORDER BY platform, flavor, released_at DESC"""),
+    )).mappings().all()
+    return {
+        "published": [dict(r) for r in rows],
+        "quarantined": result["quarantined"],
+        "skipped": skipped,
+        "package_dir": str(AGENT_PKG_DIR),
+    }
 
 
 # ── Agent package download ───────────────────────────────────────────
@@ -2725,11 +2728,11 @@ async def download_preconfigured_package(
     )
 
     await sync_agent_packages(db)
-    pkg = await _latest_package_for_download(data.platform, db)
+    pkg = await _latest_package_for_download(data.platform, db, data.flavor)
     if not pkg:
         raise HTTPException(
             404,
-            f"No {data.platform} agent package is published yet. Drop the package into "
+            f"No {data.platform} {data.flavor} agent package is published yet. Drop the package into "
             f"{AGENT_PKG_DIR}/{data.platform}/ and publish it from this page.",
         )
     file_path = await asyncio.to_thread(_verified_package_path, data.platform, pkg)
@@ -2760,12 +2763,14 @@ async def download_preconfigured_package(
     )
 
 
-async def _latest_package_for_download(platform: str, db: AsyncSession) -> Optional[dict]:
+async def _latest_package_for_download(
+    platform: str, db: AsyncSession, flavor: str = FLAVOR_FULL,
+) -> Optional[dict]:
     row = (await db.execute(
         text("""SELECT * FROM agent_packages
-                WHERE platform = :p AND channel = 'stable' AND is_latest = TRUE
+                WHERE platform = :p AND channel = 'stable' AND flavor = :fl AND is_latest = TRUE
                 ORDER BY released_at DESC LIMIT 1"""),
-        {"p": platform},
+        {"p": platform, "fl": flavor},
     )).mappings().first()
     return dict(row) if row else None
 
@@ -3217,6 +3222,66 @@ async def delete_agent(
     return {"ok": True}
 
 
+PROFILE_CHANGE_CAPABILITY = "monitoring_profile_v1"
+
+
+def profile_change_skip_reason(agent: dict, target_flavor: str, published_flavors: set[str]) -> Optional[str]:
+    """Why an agent cannot take a monitoring-profile change, or None."""
+    if agent.get("platform") != "windows":
+        return "Only Windows agents support monitoring-profile changes"
+    if agent.get("status") == "disabled":
+        return "The agent is disabled"
+    if PROFILE_CHANGE_CAPABILITY not in {str(c) for c in _json_list(agent.get("capabilities"))}:
+        return ("Upgrade the agent to 1.14.2 or later first; current-user "
+                "installations cannot change their profile remotely")
+    if agent.get("package_flavor") != target_flavor and target_flavor not in published_flavors:
+        package = "server-monitoring" if target_flavor == "core" else "APM"
+        return f"No {package} package is published on this appliance"
+    return None
+
+
+async def _queue_profile_change(
+    ids: list, data: AgentBulkAction, user_id: Any, db: AsyncSession,
+) -> tuple[int, list[dict]]:
+    """Queue set_monitoring_profile for every agent that can take it.
+
+    Server monitoring only runs on the core package and any profile with APM
+    on the full package; agents swap packages themselves, downloading from
+    this appliance, so the needed package must be published here.
+    """
+    if not data.monitoring_profile:
+        raise HTTPException(400, "monitoring_profile required")
+    target_flavor = "core" if data.monitoring_profile == "infrastructure" else "full"
+    published_flavors = {
+        row[0] for row in (await db.execute(
+            text("""SELECT DISTINCT flavor FROM agent_packages
+                    WHERE platform = 'windows' AND channel = 'stable'"""),
+        )).all()
+    }
+    agents = (await db.execute(
+        text("""SELECT id, hostname, platform, status, capabilities, package_flavor
+                FROM agents WHERE id = ANY(:ids)"""),
+        {"ids": ids},
+    )).mappings().all()
+    params = json.dumps({
+        "profile": data.monitoring_profile,
+        "remove_instrumentation": data.remove_instrumentation,
+    })
+    queued, skipped = 0, []
+    for agent in agents:
+        reason = profile_change_skip_reason(dict(agent), target_flavor, published_flavors)
+        if reason:
+            skipped.append({"agent_id": str(agent["id"]), "hostname": agent["hostname"], "reason": reason})
+            continue
+        await db.execute(
+            text("""INSERT INTO agent_commands (agent_id, command, params, requested_by)
+                    VALUES (:aid, 'set_monitoring_profile', :p, :u)"""),
+            {"aid": agent["id"], "p": params, "u": user_id},
+        )
+        queued += 1
+    return queued, skipped
+
+
 @fleet_router.post("/bulk")
 async def fleet_bulk_action(
     data: AgentBulkAction,
@@ -3227,6 +3292,7 @@ async def fleet_bulk_action(
         return {"ok": True, "affected": 0}
     ids = list(data.agent_ids)
     affected = len(ids)
+    skipped: list[dict] = []
     apm_keys_changed = False
     if data.action == "authorize":
         affected = await _authorize_agents(ids, user.id, db)
@@ -3248,6 +3314,21 @@ async def fleet_bulk_action(
             {"r": data.update_ring, "ids": ids},
         )
     elif data.action == "trigger_upgrade":
+        if data.target_version:
+            # Agents download the target from this appliance, so an unknown
+            # or mistyped version would only fail later on every host.
+            published = (await db.execute(
+                text("""SELECT 1 FROM agent_packages
+                        WHERE version = :v AND channel = 'stable' LIMIT 1"""),
+                {"v": data.target_version.strip().lstrip("vV")},
+            )).first()
+            if not published:
+                raise HTTPException(
+                    400,
+                    f"Agent version {data.target_version} is not published on this appliance. "
+                    "Copy its packages to the artifact store first.",
+                )
+            data.target_version = data.target_version.strip().lstrip("vV")
         await db.execute(
             text("""UPDATE agents SET desired_version = COALESCE(:v, desired_version), updated_at = NOW()
                     WHERE id = ANY(:ids)"""),
@@ -3278,6 +3359,8 @@ async def fleet_bulk_action(
                         VALUES (:aid, 'rotate_certificate', :u)"""),
                 {"aid": aid, "u": user.id},
             )
+    elif data.action == "change_monitoring_profile":
+        affected, skipped = await _queue_profile_change(ids, data, user.id, db)
     elif data.action == "disable":
         await db.execute(
             text("UPDATE agents SET status = 'disabled', updated_at = NOW() WHERE id = ANY(:ids)"),
@@ -3294,7 +3377,7 @@ async def fleet_bulk_action(
     await db.commit()
     if apm_keys_changed:
         invalidate_ingest_key_cache()
-    return {"ok": True, "affected": affected}
+    return {"ok": True, "affected": affected, "skipped": skipped}
 
 
 # ── Server monitoring overview KPIs ─────────────────────────────────
