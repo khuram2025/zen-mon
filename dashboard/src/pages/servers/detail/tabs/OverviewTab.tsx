@@ -11,7 +11,7 @@ import {
 import { cn, formatBps, formatBytes, relativeTime, timeAxisTickFormatter } from '@/lib/utils'
 import type { AgentItem, ServerFilesystem, ServerItem, ServerProcess } from '@/types/servers'
 import { formatUptime } from '../ServerHeader'
-import { type MetricDetail, type TabKey, isPseudoInterface, toRows } from '../data'
+import { type MetricDetail, type TabKey, agentProfile, isPseudoInterface, toRows } from '../data'
 import {
   C, ChartStats, EmptyState, KeyValues, Meter, Panel, Pill, TimeSeries, fmtPct, pctTone, stats, type Tone,
 } from '../ui'
@@ -331,7 +331,7 @@ export function OverviewTab({
                 columns={1}
                 className="gap-y-2.5"
                 items={[
-                  ['Monitoring', agent?.monitoring_profile ? PROFILE[agent.monitoring_profile] ?? agent.monitoring_profile : '—'],
+                  ['Monitoring', agentProfile(agent) ? PROFILE[agentProfile(agent)!] ?? agentProfile(agent) : '—'],
                   ['Last heartbeat', relativeTime(server.agent_last_heartbeat_at)],
                   ['Last metrics', relativeTime(server.agent_last_metric_at ?? null)],
                   agent ? ['Queue', `${agent.queue_depth} batch${agent.queue_depth === 1 ? '' : 'es'} · ${formatBytes(agent.spool_bytes)}`] : null,

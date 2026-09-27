@@ -449,7 +449,7 @@ function StorageSection({ server, fsQ }: { server: ServerItem; fsQ: FsQuery }) {
       <Panel
         title="Volumes" icon={HardDrive} flush
         subtitle={baseItems.length
-          ? `${baseItems.length} volume${baseItems.length === 1 ? '' : 's'} · growth from the last hour of samples`
+          ? `${baseItems.length} volume${baseItems.length === 1 ? '' : 's'} · growth measured over the last week`
           : undefined}
         actions={baseItems.length > 0 ? (
           <>

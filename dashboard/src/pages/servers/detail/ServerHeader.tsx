@@ -20,7 +20,7 @@ import { OsIcon, TagList } from '@/components/servers/shared'
 import type {
   AgentItem, ServerFilesystem, ServerItem, ServerLiveMetrics, ServerProcess, ServerService,
 } from '@/types/servers'
-import type { MetricDetail, TabKey } from './data'
+import { agentProfile, type MetricDetail, type TabKey } from './data'
 import { C, Pill, StatTile, fmtPct, pctTone, type Tone } from './ui'
 
 const HEALTH: Record<ServerItem['status'], { label: string; tone: Tone }> = {
@@ -184,7 +184,7 @@ export function ServerHeader({
                       <span className={cn('h-1.5 w-1.5 rounded-full', agentMeta.tone === 'success' ? 'bg-success' : agentMeta.tone === 'warning' ? 'bg-warning' : agentMeta.tone === 'danger' ? 'bg-danger' : 'bg-muted')} />
                       Agent {agentMeta.label.toLowerCase()}
                       {server.agent_version && <span className="text-muted">v{server.agent_version}</span>}
-                      {agent?.monitoring_profile && <span className="text-muted">· {PROFILE[agent.monitoring_profile] ?? agent.monitoring_profile}</span>}
+                      {agentProfile(agent) && <span className="text-muted">· {PROFILE[agentProfile(agent)!] ?? agentProfile(agent)}</span>}
                     </>
                   ) : 'No agent'}
                 </button>

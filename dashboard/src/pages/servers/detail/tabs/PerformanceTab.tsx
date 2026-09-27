@@ -7,7 +7,7 @@
  *  crosshair, so a spike can be traced across resources at a glance. */
 
 import { useMemo, useState } from 'react'
-import { Activity, Cpu, Gauge, HardDrive, MemoryStick, Network as NetworkIcon, Timer } from 'lucide-react'
+import { Activity, CheckCircle2, Cpu, Gauge, HardDrive, MemoryStick, Network as NetworkIcon, Timer } from 'lucide-react'
 import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
 import { cn, formatBps, formatBytes, timeAxisTickFormatter } from '@/lib/utils'
 import type { ServerItem } from '@/types/servers'
@@ -66,17 +66,19 @@ function CoreHeatmap({ detail, tick }: { detail: MetricDetail; tick: (ts: number
 
   if (!columns.length || !coreCount) return <EmptyState icon={Cpu} title="Per-core data not reported" compact />
   const labelEvery = coreCount > 16 ? 4 : 1
+  // Fill about the height of the neighbouring chart whatever the core count.
+  const rowH = Math.max(6, Math.min(26, Math.floor(190 / coreCount)))
   return (
     <div>
       <div className="flex gap-2">
-        <div className="flex flex-col justify-between py-px text-[10px] tabular-nums leading-none text-muted" style={{ height: coreCount * 12 }}>
+        <div className="flex flex-col justify-between py-px text-[10px] tabular-nums leading-none text-muted" style={{ height: coreCount * (rowH + 1) }}>
           {Array.from({ length: coreCount }, (_, i) => (
-            <span key={i} className="h-3 leading-3">{i % labelEvery === 0 ? i : ''}</span>
+            <span key={i} className="flex items-center" style={{ height: rowH + 1 }}>{i % labelEvery === 0 ? i : ''}</span>
           ))}
         </div>
         <div
           className="grid flex-1 gap-px overflow-hidden rounded-md"
-          style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${coreCount}, 11px)`, gridAutoFlow: 'column' }}
+          style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${coreCount}, ${rowH}px)`, gridAutoFlow: 'column' }}
         >
           {columns.map((col) =>
             Array.from({ length: coreCount }, (_, core) => {
@@ -206,6 +208,10 @@ export function PerformanceTab({ server }: { server: ServerItem }) {
   const diskUtil = toRows(dPoints, (p) => ({ util: p.util_pct, queue: p.queue }))
   const latencyStats = stats(dPoints.map((p) => Math.max(p.read_ms ?? 0, p.write_ms ?? 0)))
   const utilStats = stats(dPoints.map((p) => p.util_pct))
+  // Stored as zero when the agent does not report them (Windows agents
+  // report throughput and operations only), so all-zero means unreported.
+  const hasLatency = dPoints.some((p) => (p.read_ms ?? 0) > 0 || (p.write_ms ?? 0) > 0)
+  const hasBusy = dPoints.some((p) => (p.util_pct ?? 0) > 0 || (p.queue ?? 0) > 0)
 
   /* Volumes */
   const volumeRows = (() => {
@@ -237,6 +243,7 @@ export function PerformanceTab({ server }: { server: ServerItem }) {
   const rxStats = stats(nPoints.map((p) => (p.rx_bytes_ps ?? 0) * 8))
   const txStats = stats(nPoints.map((p) => (p.tx_bytes_ps ?? 0) * 8))
   const errorTotal = nPoints.reduce((s, p) => s + (p.errors_ps ?? 0) + (p.drops_ps ?? 0), 0)
+  const hasPackets = nPoints.some((p) => (p.rx_pps ?? 0) + (p.tx_pps ?? 0) > 0)
 
   return (
     <div className="space-y-4">
@@ -364,26 +371,36 @@ export function PerformanceTab({ server }: { server: ServerItem }) {
                 tickFormat={tick}
               />
             </Panel>
-            <Panel title="Latency" subtitle={`Average per operation · peak ${fmtMs(latencyStats?.peak)}`}>
-              <TimeSeries
-                data={diskLatency}
-                series={[{ key: 'read', label: 'Read', color: C.teal, line: true }, { key: 'write', label: 'Write', color: C.orange, line: true }]}
-                height={180}
-                yFormat={(v) => fmtMs(v)}
-                tickFormat={tick}
-                references={[{ y: 20, label: '20 ms', tone: 'warning' }]}
-              />
-            </Panel>
-            <Panel title="Busy time and queue" subtitle={`Utilisation peak ${fmtPct(utilStats?.peak, 0)}`}>
-              <TimeSeries
-                data={diskUtil}
-                series={[{ key: 'util', label: 'Busy %', color: C.blue }, { key: 'queue', label: 'Queue', color: C.violet, line: true }]}
-                height={180}
-                yFormat={(v) => fmtNum(v)}
-                tickFormat={tick}
-              />
-            </Panel>
+            {hasLatency && (
+              <Panel title="Latency" subtitle={`Average per operation · peak ${fmtMs(latencyStats?.peak)}`}>
+                <TimeSeries
+                  data={diskLatency}
+                  series={[{ key: 'read', label: 'Read', color: C.teal, line: true }, { key: 'write', label: 'Write', color: C.orange, line: true }]}
+                  height={180}
+                  yFormat={(v) => fmtMs(v)}
+                  tickFormat={tick}
+                  references={[{ y: 20, label: '20 ms', tone: 'warning' }]}
+                />
+              </Panel>
+            )}
+            {hasBusy && (
+              <Panel title="Busy time and queue" subtitle={`Utilisation peak ${fmtPct(utilStats?.peak, 0)}`}>
+                <TimeSeries
+                  data={diskUtil}
+                  series={[{ key: 'util', label: 'Busy %', color: C.blue }, { key: 'queue', label: 'Queue', color: C.violet, line: true }]}
+                  height={180}
+                  yFormat={(v) => fmtNum(v)}
+                  tickFormat={tick}
+                />
+              </Panel>
+            )}
           </div>
+          {(!hasLatency || !hasBusy) && (
+            <p className="text-xs text-muted">
+              {!hasLatency && !hasBusy ? 'Latency and busy time are' : !hasLatency ? 'Latency is' : 'Busy time is'} not
+              reported by this agent for {activeDisk.device}.
+            </p>
+          )}
         </>
       ) : (
         <Panel><EmptyState icon={Gauge} title="No disk activity reported" compact /></Panel>
@@ -469,29 +486,39 @@ export function PerformanceTab({ server }: { server: ServerItem }) {
               tickFormat={tick}
             />
           </Panel>
-          <div className="grid gap-4 lg:grid-cols-2">
-            <Panel title="Packets" subtitle="Per second">
-              <TimeSeries
-                data={nicPackets}
-                series={[{ key: 'rx', label: 'Received', color: C.sky, line: true }, { key: 'tx', label: 'Sent', color: C.green, line: true }]}
-                height={170}
-                yFormat={(v) => fmtNum(v)}
-                tickFormat={tick}
-              />
-            </Panel>
-            <Panel
-              title="Errors and drops"
-              subtitle={errorTotal > 0 ? 'Per second · non-zero values point at cabling, drivers or congestion' : 'None in this window'}
-            >
-              <TimeSeries
-                data={nicErrors}
-                series={[{ key: 'errors', label: 'Errors', color: C.red, line: true }, { key: 'drops', label: 'Drops', color: C.orange, line: true }]}
-                height={170}
-                yFormat={(v) => fmtNum(v, 2)}
-                tickFormat={tick}
-              />
-            </Panel>
-          </div>
+          {(hasPackets || errorTotal > 0) && (
+            <div className={cn('grid gap-4', hasPackets && errorTotal > 0 && 'lg:grid-cols-2')}>
+              {hasPackets && (
+                <Panel title="Packets" subtitle="Per second">
+                  <TimeSeries
+                    data={nicPackets}
+                    series={[{ key: 'rx', label: 'Received', color: C.sky, line: true }, { key: 'tx', label: 'Sent', color: C.green, line: true }]}
+                    height={170}
+                    yFormat={(v) => fmtNum(v)}
+                    tickFormat={tick}
+                  />
+                </Panel>
+              )}
+              {errorTotal > 0 && (
+                <Panel title="Errors and drops" subtitle="Per second · non-zero values point at cabling, drivers or congestion">
+                  <TimeSeries
+                    data={nicErrors}
+                    series={[{ key: 'errors', label: 'Errors', color: C.red, line: true }, { key: 'drops', label: 'Drops', color: C.orange, line: true }]}
+                    height={170}
+                    yFormat={(v) => fmtNum(v, 2)}
+                    tickFormat={tick}
+                  />
+                </Panel>
+              )}
+            </div>
+          )}
+          {errorTotal === 0 && (
+            <div className="flex items-center gap-2 rounded-xl border border-border bg-surface px-4 py-3 text-[13px] text-text2">
+              <CheckCircle2 className="h-4 w-4 text-success" />
+              No errors or dropped packets on {activeNic.name} in this window.
+              {!hasPackets && <span className="text-xs text-muted">Packet rates are not reported by this agent.</span>}
+            </div>
+          )}
         </>
       ) : (
         <Panel><EmptyState icon={NetworkIcon} title="No network interfaces reported" compact /></Panel>

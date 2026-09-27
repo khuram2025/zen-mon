@@ -208,3 +208,14 @@ export function toRows<P extends { ts: string }>(points: P[], pick: (p: P) => Re
 export function isPseudoInterface(name: string): boolean {
   return /loopback|isatap|teredo|6to4|pseudo|wfp|qos packet scheduler|lightweight filter|npcap|vethernet \(default/i.test(name)
 }
+
+/** The agent's monitoring profile. Agents before 1.14.2 do not report it
+ *  directly, but their APM status carries the configured profile. */
+export function agentProfile(agent: AgentItem | null | undefined): string | null {
+  if (!agent) return null
+  if (agent.monitoring_profile) return agent.monitoring_profile
+  const apm = agent.apm_status
+  if (!apm) return null
+  if (apm.enabled === false) return 'infrastructure'
+  return apm.profile ?? null
+}

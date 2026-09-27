@@ -25,7 +25,7 @@ import { QueryError, TableStateRow } from '@/components/servers/tables'
 import type {
   AgentItem, CollectionMode, MonitoringProfile, ServerCommand, ServerItem, UpdateRing,
 } from '@/types/servers'
-import { useServerAgent } from '../data'
+import { agentProfile, useServerAgent } from '../data'
 import {
   EmptyState, KeyValues, Panel, Pill, Segmented, StatTile, fmtNum, type Tone,
 } from '../ui'
@@ -541,8 +541,9 @@ function AgentTiles({ agent, latest, updateAvailable, view }: {
   const meta = AGENT_STATUS_META[agent.status] ?? AGENT_STATUS_META.error
   const skew = agent.clock_skew_s ?? 0
   const skewBad = Math.abs(skew) > CLOCK_SKEW_WARN_S
-  const profile = profileMeta(agent.monitoring_profile)
-  const apm = agent.monitoring_profile && agent.monitoring_profile !== 'infrastructure' ? apmSummary(agent.apm_status) : null
+  const reportedProfile = agentProfile(agent) as MonitoringProfile | null
+  const profile = profileMeta(reportedProfile)
+  const apm = reportedProfile && reportedProfile !== 'infrastructure' ? apmSummary(agent.apm_status) : null
   const upgrading = view?.phase === 'progress'
 
   return (
@@ -758,7 +759,7 @@ function ProfilePanel({ agent, capabilities, view, busy, onApply }: {
   busy: boolean
   onApply: (profile: MonitoringProfile, removeInstrumentation: boolean) => Promise<boolean>
 }) {
-  const current = agent.monitoring_profile ?? null
+  const current = (agentProfile(agent) as MonitoringProfile | null) ?? null
   const [target, setTarget] = useState<MonitoringProfile>(current ?? 'infrastructure')
   const [removeInstr, setRemoveInstr] = useState(false)
   const [confirm, setConfirm] = useState(false)

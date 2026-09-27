@@ -30,6 +30,8 @@ MIN_BUCKET_S = 60
 MAX_RANGE = timedelta(days=30)
 # Filesystem growth is measured over this window, independent of the chart.
 GROWTH_WINDOW = timedelta(days=7)
+# A forecast needs at least this much history within that window.
+MIN_GROWTH_SPAN = timedelta(days=1)
 
 
 def bucket_seconds(range_s: float) -> int:
@@ -138,7 +140,8 @@ def query_server_metric_detail(client: Any, server_id: str, from_time: datetime,
     growth_from = (to_time - GROWTH_WINDOW).strftime("%Y-%m-%d %H:%M:%S")
     for r in rows(f"""
             SELECT mount, tupleElement(simpleLinearRegression(toUnixTimestamp(timestamp), toFloat64(used_bytes)), 1),
-                   argMax(used_bytes, timestamp), argMax(total_bytes, timestamp), count()
+                   argMax(used_bytes, timestamp), argMax(total_bytes, timestamp), count(),
+                   dateDiff('second', min(timestamp), max(timestamp))
             FROM zenplus.host_filesystem_metrics
             WHERE server_id = %(sid)s AND timestamp >= %(gf)s AND timestamp <= %(t)s AND {capacity}
             GROUP BY mount""", {"gf": growth_from}):
@@ -147,7 +150,10 @@ def query_server_metric_detail(client: Any, server_id: str, from_time: datetime,
             continue
         # The slope is bytes per second; scale before rounding.
         slope = float(r[1]) if r[1] is not None and not math.isnan(float(r[1])) else 0.0
-        per_day = slope * 86400 if (r[4] or 0) >= 10 else None
+        # Less than a day of history (a new install, say) says more about
+        # setup activity than about a trend.
+        enough = (r[4] or 0) >= 10 and (r[5] or 0) >= MIN_GROWTH_SPAN.total_seconds()
+        per_day = slope * 86400 if enough else None
         fs["growth_bytes_per_day"] = _num(per_day) if per_day is not None else None
         fs["days_until_full"] = _num(days_until_full(float(r[3] or 0), float(r[2] or 0), per_day or 0))
 

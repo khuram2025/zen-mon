@@ -40,7 +40,7 @@ class _FakeClient:
             "host_cpu_metrics": [(now, 25.0, 15.0, 10.0, 1.0, 60.0)],
             "host_memory_metrics": [(now, 8e9, 4e9, 4e9, 1e9, 5e9, 2e9, 1e8, 50.0)],
             "host_disk_io_metrics": [("C:", now, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 0.5)],
-            "simpleLinearRegression": [("C:", 1000.0 / 86400, 60e9, 100e9, 50)],
+            "simpleLinearRegression": [("C:", 1000.0 / 86400, 60e9, 100e9, 50, 3 * 86400)],
             "host_filesystem_metrics": [("C:", "NTFS", now, 60e9, 100e9, 60.0)],
             "host_network_metrics": [("Ethernet0", now, 100.0, 200.0, 1.0, 2.0, 0.0, 0.0, 1)],
         }
@@ -75,3 +75,11 @@ def test_detail_clamps_to_retention():
     to = datetime(2026, 9, 27, tzinfo=timezone.utc)
     out = query_server_metric_detail(client, "sid", to - timedelta(days=90), to)
     assert out["from"] == (to - timedelta(days=30)).isoformat()
+
+
+def test_no_forecast_from_less_than_a_day_of_history():
+    client = _FakeClient()
+    client.rows["simpleLinearRegression"] = [("C:", 1e6 / 86400, 60e9, 100e9, 50, 4 * 3600)]
+    to = datetime(2026, 9, 27, 13, 0, tzinfo=timezone.utc)
+    fs = query_server_metric_detail(client, "sid", to - timedelta(hours=1), to)["filesystems"][0]
+    assert fs["growth_bytes_per_day"] is None and fs["days_until_full"] is None
