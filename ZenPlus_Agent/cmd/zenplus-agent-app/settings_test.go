@@ -12,6 +12,9 @@ import (
 )
 
 func TestSaveSettingsWithoutInstallerPreservesOtherFieldsAndState(t *testing.T) {
+	previousInstalled := apmComponentsInstalled
+	defer func() { apmComponentsInstalled = previousInstalled }()
+	apmComponentsInstalled = func() bool { return true }
 	root := t.TempDir()
 	path := filepath.Join(root, "config", "agent.yaml")
 	cfg := config.Default()
@@ -95,5 +98,32 @@ func TestSettingsDialogVisualIntegration(t *testing.T) {
 	}
 	if after.ControllerURL != cfg.ControllerURL {
 		t.Fatal("cancel saved edited controller")
+	}
+}
+
+func TestSaveSettingsRefusesAPMOnServerOnlyPackage(t *testing.T) {
+	previousInstalled := apmComponentsInstalled
+	defer func() { apmComponentsInstalled = previousInstalled }()
+	apmComponentsInstalled = func() bool { return false }
+
+	root := t.TempDir()
+	path := filepath.Join(root, "config", "agent.yaml")
+	cfg := config.Default()
+	cfg.DataDir = root
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(path)
+	for _, profile := range []string{"combined", "apm"} {
+		if err := saveSettingsFile(path, "10.11.40.32", profile); err == nil {
+			t.Fatalf("%s profile saved on a package without APM components", profile)
+		}
+	}
+	after, _ := os.ReadFile(path)
+	if !bytes.Equal(before, after) {
+		t.Fatal("refused profile change modified the configuration")
+	}
+	if err := saveSettingsFile(path, "10.11.40.32", "infrastructure"); err != nil {
+		t.Fatalf("server-only package could not save the infrastructure profile: %v", err)
 	}
 }

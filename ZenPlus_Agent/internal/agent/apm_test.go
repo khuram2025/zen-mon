@@ -47,12 +47,19 @@ func TestCapabilitiesAdvertiseInstrumentationOnlyWhenUsable(t *testing.T) {
 	if err := config.ApplyProfile(&cfg, "combined"); err != nil {
 		t.Fatal(err)
 	}
+	previous := apmBundleInstalled
+	defer func() { apmBundleInstalled = previous }()
+	apmBundleInstalled = func() bool { return true }
 	privileged := capabilitiesForConfig(cfg, true)
 	if !containsCapability(privileged, "apm_iis_instrumentation_v1") || !containsCapability(privileged, "apm_windows_service_instrumentation_v1") {
 		t.Fatalf("privileged combined profile is missing instrumentation capabilities: %v", privileged)
 	}
+	apmBundleInstalled = func() bool { return false }
+	serverOnlyPackage := capabilitiesForConfig(cfg, true)
+	apmBundleInstalled = func() bool { return true }
 	for name, capabilities := range map[string][]string{
-		"unprivileged": capabilitiesForConfig(cfg, false),
+		"server-only package": serverOnlyPackage,
+		"unprivileged":        capabilitiesForConfig(cfg, false),
 		"disabled": func() []string {
 			disabled := cfg
 			_ = config.ApplyProfile(&disabled, "infrastructure")

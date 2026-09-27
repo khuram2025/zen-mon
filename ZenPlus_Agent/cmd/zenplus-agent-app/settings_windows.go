@@ -13,6 +13,10 @@ import (
 	agentruntime "zenplus-agent/internal/runtime"
 )
 
+// apmComponentsInstalled is replaced in tests, whose binaries do not run from
+// an installation directory.
+var apmComponentsInstalled = apm.BundleInstalledWithAgent
+
 // Save only the editable fields after rereading the actual configuration.
 // Neither installer payloads nor service registration are touched.
 func saveSettingsFile(path, controller, profile string) error {
@@ -30,6 +34,9 @@ func saveSettingsFile(path, controller, profile string) error {
 	controller, err = config.NormalizeControllerURL(controller)
 	if err != nil {
 		return err
+	}
+	if profile != "infrastructure" && !apmComponentsInstalled() {
+		return fmt.Errorf("%s", apm.NotInstalledMessage)
 	}
 	if cfg.APM.Enabled && profile == "infrastructure" {
 		resolved, err := config.Load(path)
@@ -146,4 +153,13 @@ func saveElevatedSettings(path, controller, profile string) error {
 		return fmt.Errorf("settings were not saved (helper exit %d); see the settings error dialog", code)
 	}
 	return nil
+}
+
+// apmPackageNote marks APM profiles on a server-monitoring-only package,
+// where choosing them is refused until the APM package is installed.
+func apmPackageNote() string {
+	if apmComponentsInstalled() {
+		return ""
+	}
+	return " - requires the APM package"
 }

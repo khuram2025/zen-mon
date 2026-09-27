@@ -157,6 +157,14 @@ func (m *Manager) Reconcile(ctx context.Context, cfg config.Config, agentID, ser
 		m.stop("disabled")
 		return
 	}
+	// A server-monitoring-only package has no gateway to run. Report that
+	// plainly and skip credential enrollment rather than asking the appliance
+	// for an ingest key the server can never use.
+	if !BundleInstalled(m.installDir) {
+		m.stop("not_installed")
+		m.setFailure("not_installed", NotInstalledMessage)
+		return
+	}
 	if api == nil || agentID == "" || serverID == "" {
 		m.stop("waiting_authorization")
 		m.setFailure("waiting_authorization", "Waiting for appliance authorization before starting APM")

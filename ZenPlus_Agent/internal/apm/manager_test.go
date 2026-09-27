@@ -869,6 +869,7 @@ func TestCredentialEnrollmentFailuresBackOffAndLogOnce(t *testing.T) {
 			logs.Add(1)
 		}
 	})
+	m.installDir = fakeAPMInstall(t)
 	cfg := config.Default()
 	cfg.ControllerURL = server.URL
 	if err := config.ApplyProfile(&cfg, "combined"); err != nil {
@@ -898,5 +899,50 @@ func TestCredentialEnrollmentFailuresBackOffAndLogOnce(t *testing.T) {
 	m.Reconcile(context.Background(), cfg, "agent-b", "server-b", api)
 	if got := posts.Load(); got != 3 {
 		t.Fatalf("new binding waited on the previous binding's backoff: posts = %d", got)
+	}
+}
+
+func fakeAPMInstall(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "apm"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "apm", "bundle-manifest.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// On a server-monitoring-only package an APM profile must not reach the
+// appliance for an ingest credential it can never use.
+func TestReconcileWithoutAPMBundleReportsNotInstalled(t *testing.T) {
+	paths := agentruntime.NewPaths(t.TempDir())
+	if err := paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	var posts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts.Add(1)
+	}))
+	defer server.Close()
+	api, err := client.New(server.URL, "", true, "agent-a", "agent-api-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(paths, func(string, ...any) {})
+	m.installDir = t.TempDir() // no apm/ directory
+	cfg := config.Default()
+	cfg.ControllerURL = server.URL
+	if err := config.ApplyProfile(&cfg, "combined"); err != nil {
+		t.Fatal(err)
+	}
+	m.Reconcile(context.Background(), cfg, "agent-a", "server-a", api)
+	snapshot := m.Snapshot()
+	if snapshot.State != "not_installed" || snapshot.LastError != NotInstalledMessage {
+		t.Fatalf("state = %q (%q), want not_installed", snapshot.State, snapshot.LastError)
+	}
+	if posts.Load() != 0 {
+		t.Fatalf("server-only install contacted the appliance %d times for APM", posts.Load())
 	}
 }
