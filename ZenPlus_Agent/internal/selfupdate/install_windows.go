@@ -14,8 +14,9 @@ import (
 
 // launchInstaller starts the package installer detached from this process.
 // The installer stops the ZenPlusAgent service, replaces the binaries, and
-// starts the service again, so we must not wait on it.
-func launchInstaller(pkgPath, logPath string) error {
+// starts the service again, so we must not wait on it. A non-empty profile is
+// passed to Setup; otherwise Setup keeps the installed profile.
+func launchInstaller(pkgPath, logPath, profile string) error {
 	var cmd *exec.Cmd
 	switch {
 	case strings.HasSuffix(strings.ToLower(pkgPath), ".msi"):
@@ -23,11 +24,17 @@ func launchInstaller(pkgPath, logPath string) error {
 		if logPath != "" {
 			args = append(args, "/L*v", logPath)
 		}
+		if profile != "" {
+			args = append(args, "INSTALL_PROFILE="+profile)
+		}
 		cmd = exec.Command("msiexec.exe", args...)
 	case strings.HasSuffix(strings.ToLower(pkgPath), ".exe"):
 		args := []string{"/machine", "/quiet", "/norestart"}
 		if logPath != "" {
 			args = append(args, "/log", logPath)
+		}
+		if profile != "" {
+			args = append(args, "/profile", profile)
 		}
 		cmd = exec.Command(pkgPath, args...)
 	default:

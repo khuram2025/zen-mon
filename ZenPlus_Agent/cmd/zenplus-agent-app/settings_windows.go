@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"unsafe"
 
@@ -58,19 +57,7 @@ func saveSettingsFile(path, controller, profile string) error {
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
-	// Same-directory replacement prevents the running service seeing half a
-	// YAML file. Protected directory permissions are inherited by the new file.
-	f, err := os.CreateTemp(filepath.Dir(path), ".settings-*.yaml")
-	if err != nil {
-		return err
-	}
-	temp := f.Name()
-	_ = f.Close()
-	defer os.Remove(temp)
-	if err := config.Save(temp, cfg); err != nil {
-		return err
-	}
-	return os.Rename(temp, path)
+	return config.SaveAtomic(path, cfg)
 }
 
 func settingsHelperArgs(path, controller, profile string) []string {

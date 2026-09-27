@@ -8,7 +8,7 @@ import (
 )
 
 func TestAgentVersionAndCapabilitiesContract(t *testing.T) {
-	if AgentVersion != "1.14.1" {
+	if AgentVersion != "1.14.2" {
 		t.Fatalf("unexpected agent version %q", AgentVersion)
 	}
 	want := []string{
@@ -17,6 +17,7 @@ func TestAgentVersionAndCapabilitiesContract(t *testing.T) {
 		"apm_iis_instrumentation_v1", "apm_windows_service_instrumentation_v1",
 		"apm_runtime_health_v1",
 		"clone_identity_assignment_v1",
+		"monitoring_profile_v1",
 	}
 	if !reflect.DeepEqual(AgentCapabilities, want) {
 		t.Fatalf("capabilities changed: got %v want %v", AgentCapabilities, want)

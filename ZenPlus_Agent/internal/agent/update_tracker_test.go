@@ -64,29 +64,41 @@ func TestRequestRefusesDowngradeAndRespectsCooldown(t *testing.T) {
 	tr := newUpdateTracker(filepath.Join(dir, "state"), filepath.Join(dir, "logs"), "1.14.0")
 	logf := func(string, ...any) {}
 
-	tr.Request(context.Background(), api, "stable", "1.13.0", logf)
+	_ = tr.Request(context.Background(), api, "stable", "1.13.0", false, logf)
 	if s := tr.Status(); s == nil || s.State != "failed" || !strings.Contains(s.Error, "downgrade") {
 		t.Fatalf("downgrade status = %+v", s)
 	}
 
-	tr.Request(context.Background(), api, "stable", "9.9.9", logf)
+	_ = tr.Request(context.Background(), api, "stable", "9.9.9", false, logf)
 	waitFor(t, func() bool { s := tr.Status(); return s != nil && s.State == "failed" && s.TargetVersion == "9.9.9" })
 	if !strings.Contains(tr.Status().Error, "not published") {
 		t.Fatalf("unpublished version error = %q", tr.Status().Error)
 	}
 	first := requests.Load()
+	waitFor(t, func() bool { tr.mu.Lock(); defer tr.mu.Unlock(); return !tr.inFlight })
 
 	// The same target within the cooldown is not retried on every heartbeat.
-	tr.Request(context.Background(), api, "stable", "9.9.9", logf)
+	if err := tr.Request(context.Background(), api, "stable", "9.9.9", false, logf); err != errRetryCooldown {
+		t.Fatalf("retry within cooldown returned %v", err)
+	}
 	time.Sleep(100 * time.Millisecond)
 	if requests.Load() != first {
 		t.Fatal("failed upgrade was retried within the cooldown")
 	}
 
 	// It is retried once the cooldown has passed.
-	tr.now = func() time.Time { return time.Now().UTC().Add(updateRetryCooldown + time.Minute) }
-	tr.Request(context.Background(), api, "stable", "9.9.9", logf)
+	// An operator asking explicitly retries at once.
+	if err := tr.Request(context.Background(), api, "stable", "9.9.9", true, logf); err != nil {
+		t.Fatal(err)
+	}
 	waitFor(t, func() bool { return requests.Load() > first })
+	waitFor(t, func() bool { tr.mu.Lock(); defer tr.mu.Unlock(); return !tr.inFlight })
+	second := requests.Load()
+
+	// And the heartbeat retries once the cooldown has passed.
+	tr.now = func() time.Time { return time.Now().UTC().Add(updateRetryCooldown + time.Minute) }
+	_ = tr.Request(context.Background(), api, "stable", "9.9.9", false, logf)
+	waitFor(t, func() bool { return requests.Load() > second })
 }
 
 func waitFor(t *testing.T, cond func() bool) {

@@ -232,6 +232,7 @@ func Run(ctx context.Context, opts Options) error {
 
 	sup := newSupervisor()
 	sup.updates = newUpdateTracker(paths.StateDir, paths.LogDir, model.AgentVersion)
+	sup.updates.configPath = opts.ConfigPath
 	if !enrollment.Enrolled && enrollment.AuthorizationState != "" {
 		sup.enrollNotBefore = time.Now().UTC().Add(pendingAuthorizationPollInterval)
 		next := sup.enrollNotBefore
@@ -807,15 +808,17 @@ func sendHeartbeat(ctx context.Context, cfg config.Config, store *spool.Store, u
 		localAPM = probeLocalAPM(cfg)
 	}
 	hb := model.Heartbeat{
-		Version:          model.AgentVersion,
-		Capabilities:     capabilitiesForConfig(cfg, canManageApplicationInstrumentation()),
-		UptimeSeconds:    uptimeSeconds(enrollment.Identity.BootTime, now),
-		QueueDepth:       st.Depth,
-		SpoolBytes:       st.Bytes,
-		ConfigHash:       config.Hash(cfg),
-		ConfigApplyError: status.LastConfigError,
-		APM:              localAPM,
-		Update:           sup.updates.Status(),
+		Version:           model.AgentVersion,
+		Capabilities:      capabilitiesForConfig(cfg, canManageApplicationInstrumentation()),
+		UptimeSeconds:     uptimeSeconds(enrollment.Identity.BootTime, now),
+		QueueDepth:        st.Depth,
+		SpoolBytes:        st.Bytes,
+		ConfigHash:        config.Hash(cfg),
+		ConfigApplyError:  status.LastConfigError,
+		APM:               localAPM,
+		Update:            sup.updates.Status(),
+		PackageFlavor:     selfupdate.InstalledFlavor(),
+		MonitoringProfile: effectiveProfile(cfg),
 	}
 	status.LocalAPM = hb.APM
 	status.Update = hb.Update
@@ -851,6 +854,11 @@ func capabilitiesForConfig(cfg config.Config, privileged bool) []string {
 	capabilities := make([]string, 0, len(model.AgentCapabilities))
 	for _, capability := range model.AgentCapabilities {
 		if !allowInstrumentation && (capability == "apm_iis_instrumentation_v1" || capability == "apm_windows_service_instrumentation_v1") {
+			continue
+		}
+		// Changing the package runs Setup for all users, which only the
+		// Windows service can do.
+		if !privileged && capability == "monitoring_profile_v1" {
 			continue
 		}
 		capabilities = append(capabilities, capability)
@@ -954,7 +962,7 @@ func handleHeartbeatResponse(ctx context.Context, hb *model.HeartbeatResponse, c
 		pollConfig(ctx, cfg, poller, status, logf)
 	}
 	if hb.DesiredVersion != nil && *hb.DesiredVersion != "" && *hb.DesiredVersion != model.AgentVersion && sup.updates != nil {
-		sup.updates.Request(ctx, up.Client(), cfg.UpdateRing, *hb.DesiredVersion, logf)
+		_ = sup.updates.Request(ctx, up.Client(), cfg.UpdateRing, *hb.DesiredVersion, false, logf)
 	}
 	if hb.HasCommands {
 		handleCommands(ctx, cfg, poller, paths, store, up, status, enrollment, apmManager, sup.updates, logf)
@@ -1129,12 +1137,16 @@ func executeCommand(ctx context.Context, cmd model.Command, cfg *config.Config, 
 		if updates == nil {
 			return model.CommandResult{Success: false, ErrorMessage: "self-update is unavailable in this run mode"}
 		}
-		updates.Request(ctx, up.Client(), cfg.UpdateRing, target, logf)
+		if err := updates.Request(ctx, up.Client(), cfg.UpdateRing, target, true, logf); err != nil {
+			return model.CommandResult{Success: false, ErrorMessage: err.Error()}
+		}
 		return model.CommandResult{Success: true, Output: map[string]any{
 			"status":       "upgrade requested",
 			"from_version": model.AgentVersion,
 			"to_version":   target,
 		}}
+	case "set_monitoring_profile":
+		return changeMonitoringProfile(ctx, cmd, cfg, paths, up, updates, logf)
 	default:
 		return model.CommandResult{Success: false, ErrorMessage: "unsupported command: " + cmd.Command}
 	}

@@ -6,12 +6,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/mgr"
 
 	"zenplus-agent/internal/config"
@@ -707,5 +710,54 @@ func assertInfrastructureCollectorsEnabled(t *testing.T, cfg config.Config) {
 		!cfg.Collectors.DiskIO.Enabled || !cfg.Collectors.Network.Enabled || !cfg.Collectors.Processes.Enabled ||
 		!cfg.Collectors.Services.Enabled || !cfg.Collectors.EventLog.Enabled || !cfg.Collectors.Inventory.Enabled {
 		t.Fatal("an infrastructure collector was not restored")
+	}
+}
+
+func TestSetupExitCodesFollowWindowsInstaller(t *testing.T) {
+	if got := exitCodeFor(nil); got != 0 {
+		t.Fatalf("success exit code = %d", got)
+	}
+	if got := exitCodeFor(fmt.Errorf("disk full")); got != exitFatal {
+		t.Fatalf("generic failure exit code = %d", got)
+	}
+	wrapped := fmt.Errorf("install: %w", withExitCode(exitAnotherInstall, fmt.Errorf("busy")))
+	if got := exitCodeFor(wrapped); got != exitAnotherInstall {
+		t.Fatalf("wrapped exit code = %d", got)
+	}
+	if _, err := parseOptions([]string{"/quiet", "/bogus"}); err == nil {
+		t.Fatal("unknown switch accepted")
+	}
+	if _, err := parseOptions([]string{"/quiet", "NOT_A_PROPERTY=1"}); err == nil {
+		t.Fatal("unknown property accepted")
+	}
+}
+
+func TestSetupLockIsExclusive(t *testing.T) {
+	release, err := acquireSetupLock("user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	// The holder is pinned to its thread, so this probe runs on another
+	// thread and must not get the (per-thread recursive) mutex.
+	done := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		name, _ := windows.UTF16PtrFromString(`Local\ZenPlusAgentSetup`)
+		h, err := windows.OpenMutex(windows.SYNCHRONIZE, false, name)
+		if err != nil {
+			done <- err
+			return
+		}
+		defer windows.CloseHandle(h)
+		event, err := windows.WaitForSingleObject(h, 0)
+		if err == nil && event != uint32(windows.WAIT_TIMEOUT) {
+			err = fmt.Errorf("second holder acquired the lock (0x%x)", event)
+		}
+		done <- err
+	}()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

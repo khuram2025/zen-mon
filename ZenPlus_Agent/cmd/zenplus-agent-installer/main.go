@@ -70,14 +70,14 @@ func main() {
 		if !hasQuietArg(os.Args[1:]) {
 			showMessage(productName+" Setup", fmt.Sprintf("%s setup failed:\n\n%v", productName, err), true)
 		}
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
 	}
 }
 
 func run() (returnErr error) {
 	opts, err := parseOptions(os.Args[1:])
 	if err != nil {
-		return err
+		return withExitCode(exitInvalidCommandLine, err)
 	}
 	if opts.logPath != "" {
 		log, err := os.OpenFile(opts.logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
@@ -118,7 +118,7 @@ func run() (returnErr error) {
 		return err
 	}
 	if layout.Scope == "machine" && !elevated {
-		return fmt.Errorf("silent machine installation requires an administrator or SYSTEM process; run the deployment command elevated")
+		return withExitCode(exitElevationRequired, fmt.Errorf("silent machine installation requires an administrator or SYSTEM process; run the deployment command elevated"))
 	}
 	if opts.uninstall {
 		if !opts.fromTemp {
@@ -715,6 +715,11 @@ func runIISAppCmdOutput(args ...string) (string, error) {
 }
 
 func install(l layout, opts options) (returnErr error) {
+	release, err := acquireSetupLock(l.Scope)
+	if err != nil {
+		return err
+	}
+	defer release()
 	logStep(opts, "Installing %s %s (%s)", productName, model.AgentVersion, l.Scope)
 	payloads, err := preflightInstall(opts)
 	if err != nil {
@@ -936,6 +941,11 @@ func install(l layout, opts options) (returnErr error) {
 }
 
 func uninstall(l layout, opts options) (returnErr error) {
+	release, err := acquireSetupLock(l.Scope)
+	if err != nil {
+		return err
+	}
+	defer release()
 	logStep(opts, "Uninstalling %s (%s)", productName, l.Scope)
 	var serviceBefore agentServiceState
 	serviceQuiesced := false
@@ -1594,7 +1604,7 @@ func relaunchElevated(args []string) error {
 		return fmt.Errorf("read elevated setup result: %w", err)
 	}
 	if exitCode != 0 {
-		return fmt.Errorf("elevated setup failed with exit code %d", exitCode)
+		return withExitCode(int(exitCode), fmt.Errorf("elevated setup failed with exit code %d", exitCode))
 	}
 	return nil
 }

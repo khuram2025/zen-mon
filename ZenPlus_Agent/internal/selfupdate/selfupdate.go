@@ -308,23 +308,45 @@ func Apply(ctx context.Context, c *client.Client, m Manifest, currentVersion str
 // ApplyWithLog is Apply with the installer writing its log to logPath, so a
 // failed upgrade can be diagnosed and reported after the agent restarts.
 func ApplyWithLog(ctx context.Context, c *client.Client, m Manifest, currentVersion, logPath string, logf func(string, ...any)) error {
-	if m.LatestVersion == currentVersion {
+	return ApplyWithOptions(ctx, c, m, currentVersion, ApplyOptions{LogPath: logPath}, logf)
+}
+
+// ApplyOptions controls how a verified package is installed.
+type ApplyOptions struct {
+	// LogPath receives Setup's log.
+	LogPath string
+	// Profile is passed to Setup; empty keeps the installed profile.
+	Profile string
+	// SameVersion installs a package of the running version. Switching
+	// between the core and full packages needs it.
+	SameVersion bool
+	// IgnoreCooldown retries a recently attempted package at once, for a
+	// change an operator requested explicitly.
+	IgnoreCooldown bool
+}
+
+// ApplyWithOptions verifies and launches a package. Downgrades are refused.
+func ApplyWithOptions(ctx context.Context, c *client.Client, m Manifest, currentVersion string, opts ApplyOptions, logf func(string, ...any)) error {
+	if m.LatestVersion == currentVersion && !opts.SameVersion {
 		return nil
 	}
-	if !IsNewer(m.LatestVersion, currentVersion) {
+	if m.LatestVersion != currentVersion && !IsNewer(m.LatestVersion, currentVersion) {
 		return fmt.Errorf("refusing to downgrade agent from %s to %s", currentVersion, m.LatestVersion)
 	}
+	// The same version can be installed as a different package or profile,
+	// so each combination has its own retry cooldown.
+	attemptKey := m.LatestVersion + "|" + m.Flavor + "|" + opts.Profile
 	mu.Lock()
 	if inFlight {
 		mu.Unlock()
 		return fmt.Errorf("an upgrade is already in progress")
 	}
-	if last, ok := attempted[m.LatestVersion]; ok && time.Since(last) < retryCooldown {
+	if last, ok := attempted[attemptKey]; ok && !opts.IgnoreCooldown && time.Since(last) < retryCooldown {
 		mu.Unlock()
-		return fmt.Errorf("upgrade to %s was already attempted at %s; retry after cooldown", m.LatestVersion, last.Format(time.RFC3339))
+		return fmt.Errorf("installing %s was already attempted at %s; retry after cooldown", m.LatestVersion, last.Format(time.RFC3339))
 	}
 	inFlight = true
-	attempted[m.LatestVersion] = time.Now()
+	attempted[attemptKey] = time.Now()
 	mu.Unlock()
 	defer func() {
 		mu.Lock()
@@ -338,7 +360,7 @@ func ApplyWithLog(ctx context.Context, c *client.Client, m Manifest, currentVers
 		return err
 	}
 	logf("self-update: checksum and signature verified; launching installer for %s", m.LatestVersion)
-	if err := launchInstaller(pkgPath, logPath); err != nil {
+	if err := launchInstaller(pkgPath, opts.LogPath, opts.Profile); err != nil {
 		_ = os.RemoveAll(filepath.Dir(pkgPath))
 		return fmt.Errorf("launch installer: %w", err)
 	}

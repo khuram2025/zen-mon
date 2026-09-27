@@ -2,7 +2,7 @@ package model
 
 import "time"
 
-const AgentVersion = "1.14.1"
+const AgentVersion = "1.14.2"
 
 var AgentCapabilities = []string{
 	"network_capture_v1",
@@ -15,6 +15,9 @@ var AgentCapabilities = []string{
 	"apm_windows_service_instrumentation_v1",
 	"apm_runtime_health_v1",
 	"clone_identity_assignment_v1",
+	// set_monitoring_profile: switch between server monitoring and APM,
+	// installing or removing the APM components as needed.
+	"monitoring_profile_v1",
 }
 
 type Metric struct {
@@ -70,6 +73,10 @@ type Heartbeat struct {
 	APM              *AgentAPMHeartbeat `json:"apm,omitempty"`
 	// Update reports the progress of a controller-requested upgrade.
 	Update *UpdateStatus `json:"update,omitempty"`
+	// PackageFlavor is "core" (server monitoring) or "full" (with APM).
+	PackageFlavor string `json:"package_flavor,omitempty"`
+	// MonitoringProfile is infrastructure, apm or combined.
+	MonitoringProfile string `json:"monitoring_profile,omitempty"`
 }
 
 type APMGatewayStatus struct {
@@ -320,8 +327,12 @@ type Status struct {
 // UpdateStatus is the agent's view of a controller-requested upgrade.
 // State is one of requested, downloading, installing, succeeded or failed.
 type UpdateStatus struct {
+	// Kind is "upgrade" or "profile" (a monitoring-profile change).
+	Kind          string    `json:"kind,omitempty"`
 	State         string    `json:"state"`
 	TargetVersion string    `json:"target_version"`
+	TargetFlavor  string    `json:"target_flavor,omitempty"`
+	TargetProfile string    `json:"target_profile,omitempty"`
 	FromVersion   string    `json:"from_version,omitempty"`
 	Error         string    `json:"error,omitempty"`
 	UpdatedAt     time.Time `json:"updated_at"`

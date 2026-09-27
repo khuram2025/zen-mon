@@ -4,6 +4,6 @@ package selfupdate
 
 import "fmt"
 
-func launchInstaller(pkgPath, _ string) error {
+func launchInstaller(pkgPath, _, _ string) error {
 	return fmt.Errorf("self-update install is not supported on this platform yet (package staged at %s)", pkgPath)
 }
