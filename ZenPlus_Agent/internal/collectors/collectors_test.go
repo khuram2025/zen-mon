@@ -11,59 +11,6 @@ import (
 	"zenplus-agent/internal/config"
 )
 
-func TestDecodeServicesAcceptsArray(t *testing.T) {
-	services, err := decodeServices([]byte(`{
-		"services": [
-			{
-				"service_name": "W3SVC",
-				"display_name": "World Wide Web Publishing Service",
-				"state": "Running",
-				"start_mode": "Auto",
-				"pid": 1234,
-				"exit_code": 0,
-				"description": "Web server"
-			}
-		]
-	}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(services) != 1 {
-		t.Fatalf("got %d services", len(services))
-	}
-	if services[0].ServiceName != "W3SVC" {
-		t.Fatalf("unexpected service name %q", services[0].ServiceName)
-	}
-	if services[0].State != "running" {
-		t.Fatalf("state was not normalized: %q", services[0].State)
-	}
-	if services[0].StartMode != "auto" {
-		t.Fatalf("start_mode was not normalized: %q", services[0].StartMode)
-	}
-}
-
-func TestDecodeServicesAcceptsSingleObject(t *testing.T) {
-	services, err := decodeServices([]byte(`{
-		"services": {
-			"service_name": "Spooler",
-			"display_name": "Print Spooler",
-			"state": "Stopped",
-			"start_mode": "Manual",
-			"pid": 0,
-			"exit_code": 0
-		}
-	}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(services) != 1 {
-		t.Fatalf("got %d services", len(services))
-	}
-	if services[0].ServiceName != "Spooler" || services[0].State != "stopped" || services[0].StartMode != "manual" {
-		t.Fatalf("unexpected service decode: %+v", services[0])
-	}
-}
-
 func TestAppendMissingWatchedServices(t *testing.T) {
 	services := appendMissingWatchedServices([]serviceInfo{{ServiceName: "W3SVC"}}, []string{"W3SVC", "MSSQLSERVER"})
 	if len(services) != 2 {
@@ -123,35 +70,56 @@ func resetServiceTestState() {
 	rateState.services = map[string]string{}
 }
 
-func TestEventLogScriptKeepsControllerFilterPairingsAndIDs(t *testing.T) {
+func TestEventLogQueriesKeepControllerFilterPairingsAndIDs(t *testing.T) {
 	filters := []config.EventLogFilter{
 		{Channel: "System", Levels: []string{"Error"}, IDs: []int{41, 6008}},
 		{Channel: "Application", Levels: []string{"Warning", "Critical"}, IDs: []int{1000}},
 	}
 	cfg := config.Default().Collectors.EventLog
 	cfg.Filters = &filters
+	cfg.LookbackMinutes = 5
 	// These legacy fields must not broaden an authoritative filter list.
 	cfg.Channels = []string{"Security"}
 	cfg.Levels = []string{"Verbose"}
 
-	script, err := eventLogScript(cfg)
+	queries, err := eventLogQueries(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{
-		"[pscustomobject]@{ channel='System'; levels=@('Error'); ids=@(41,6008) }",
-		"[pscustomobject]@{ channel='Application'; levels=@('Warning','Critical'); ids=@(1000) }",
-		"$query['Id'] = @($eventIds | ForEach-Object { [int]$_ })",
-		"Get-WinEvent -FilterHashtable $query",
-	} {
-		if !strings.Contains(script, want) {
-			t.Errorf("event-log script missing %q:\n%s", want, script)
-		}
+	want := []eventLogQuery{
+		{Channel: "System", Level: "error", XPaths: []string{
+			"*[System[Level=2 and TimeCreated[timediff(@SystemTime) <= 300000] and (EventID=41 or EventID=6008)]]"}},
+		{Channel: "Application", Level: "warning", XPaths: []string{
+			"*[System[Level=3 and TimeCreated[timediff(@SystemTime) <= 300000] and (EventID=1000)]]"}},
+		{Channel: "Application", Level: "critical", XPaths: []string{
+			"*[System[Level=1 and TimeCreated[timediff(@SystemTime) <= 300000] and (EventID=1000)]]"}},
 	}
-	for _, forbidden := range []string{"channel='Security'", "levels=@('Verbose')", "$channels =", "$levels ="} {
-		if strings.Contains(script, forbidden) {
-			t.Errorf("event-log script contains broadened legacy policy %q:\n%s", forbidden, script)
-		}
+	if !reflect.DeepEqual(queries, want) {
+		t.Fatalf("queries = %#v\nwant %#v", queries, want)
+	}
+}
+
+func TestEventLogQueriesSplitLongIDLists(t *testing.T) {
+	ids := make([]int, 45)
+	for i := range ids {
+		ids[i] = i + 1
+	}
+	filters := []config.EventLogFilter{{Channel: "System", Levels: []string{"Error"}, IDs: ids}}
+	cfg := config.Default().Collectors.EventLog
+	cfg.Filters = &filters
+	queries, err := eventLogQueries(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(queries) != 1 || len(queries[0].XPaths) != 3 {
+		t.Fatalf("45 IDs should split into 3 XPath queries: %#v", queries)
+	}
+	seen := 0
+	for _, xpath := range queries[0].XPaths {
+		seen += strings.Count(xpath, "EventID=")
+	}
+	if seen != 45 {
+		t.Fatalf("split queries cover %d IDs, want 45", seen)
 	}
 }
 
@@ -168,17 +136,16 @@ func TestEventLogFiltersFallBackToLegacyChannelsAndLevels(t *testing.T) {
 	if got := effectiveEventLogFilters(cfg); !reflect.DeepEqual(got, want) {
 		t.Fatalf("effective filters = %#v, want %#v", got, want)
 	}
-	script, err := eventLogScript(cfg)
+	queries, err := eventLogQueries(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, wantLiteral := range []string{
-		"channel='System'; levels=@('Error','Warning'); ids=@()",
-		"channel='Application'; levels=@('Error','Warning'); ids=@()",
-	} {
-		if !strings.Contains(script, wantLiteral) {
-			t.Errorf("legacy filter missing from script: %q", wantLiteral)
-		}
+	var pairs []string
+	for _, q := range queries {
+		pairs = append(pairs, q.Channel+"/"+q.Level)
+	}
+	if got := strings.Join(pairs, ","); got != "System/error,System/warning,Application/error,Application/warning" {
+		t.Fatalf("legacy filters produced %s", got)
 	}
 }
 
@@ -187,14 +154,14 @@ func TestExplicitEmptyEventLogFiltersDisableQueries(t *testing.T) {
 	cfg := config.Default().Collectors.EventLog
 	cfg.Filters = &filters
 	if got := effectiveEventLogFilters(cfg); len(got) != 0 {
-		t.Fatalf("explicit empty filters produced queries: %#v", got)
+		t.Fatalf("explicit empty filters produced filters: %#v", got)
 	}
-	script, err := eventLogScript(cfg)
+	queries, err := eventLogQueries(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if script != "" {
-		t.Fatalf("explicit empty filters generated a PowerShell command:\n%s", script)
+	if len(queries) != 0 {
+		t.Fatalf("explicit empty filters generated queries: %#v", queries)
 	}
 }
 
@@ -241,7 +208,7 @@ func TestEventLogPolicyRejectsInvalidOrOversizedFilters(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.Default().Collectors.EventLog
 			cfg.Filters = &tt.filters
-			if _, err := eventLogScript(cfg); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+			if _, err := eventLogQueries(cfg); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("error = %v, want containing %q", err, tt.wantErr)
 			}
 		})

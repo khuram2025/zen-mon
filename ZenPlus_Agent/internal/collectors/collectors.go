@@ -3,7 +3,6 @@ package collectors
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -108,34 +107,6 @@ type serviceInfo struct {
 	Description string `json:"description"`
 }
 
-type serviceList []serviceInfo
-
-func (l *serviceList) UnmarshalJSON(b []byte) error {
-	b = bytes.TrimSpace(b)
-	if len(b) == 0 || bytes.Equal(b, []byte("null")) {
-		*l = nil
-		return nil
-	}
-	if b[0] == '[' {
-		var items []serviceInfo
-		if err := json.Unmarshal(b, &items); err != nil {
-			return err
-		}
-		*l = items
-		return nil
-	}
-	var item serviceInfo
-	if err := json.Unmarshal(b, &item); err != nil {
-		return err
-	}
-	if item.ServiceName == "" {
-		*l = nil
-		return nil
-	}
-	*l = []serviceInfo{item}
-	return nil
-}
-
 func Collect(ctx context.Context, cfg config.Config) Result {
 	now := time.Now().UTC()
 	r := Result{
@@ -185,26 +156,95 @@ func Collect(ctx context.Context, cfg config.Config) Result {
 	return r
 }
 
+// cpuState keeps the previous CPU time counters so each collection reports
+// utilisation averaged over the interval since the last one. That needs no
+// sampling sleep (the collector used to block for a second every cycle) and
+// does not miss load between samples.
+var cpuState struct {
+	sync.Mutex
+	perCore []cpu.TimesStat
+	total   cpu.TimesStat
+	taken   bool
+}
+
+// firstCPUSampleWindow is only used for the very first collection, when there
+// is no previous reading to compare against.
+const firstCPUSampleWindow = 500 * time.Millisecond
+
 func collectCPU(ctx context.Context, add func(string, map[string]any), errs map[string]string) {
-	per, err := cpu.PercentWithContext(ctx, time.Second, true)
+	perCore, total, err := readCPUTimes(ctx)
 	if err != nil {
 		errs["cpu"] = err.Error()
 		return
 	}
-	total := average(per)
+	cpuState.Lock()
+	previousPerCore, previousTotal, havePrevious := cpuState.perCore, cpuState.total, cpuState.taken
+	cpuState.perCore, cpuState.total, cpuState.taken = perCore, total, true
+	cpuState.Unlock()
+	if !havePrevious || len(previousPerCore) != len(perCore) {
+		previousPerCore, previousTotal = perCore, total
+		select {
+		case <-ctx.Done():
+			errs["cpu"] = ctx.Err().Error()
+			return
+		case <-time.After(firstCPUSampleWindow):
+		}
+		if perCore, total, err = readCPUTimes(ctx); err != nil {
+			errs["cpu"] = err.Error()
+			return
+		}
+		cpuState.Lock()
+		cpuState.perCore, cpuState.total = perCore, total
+		cpuState.Unlock()
+	}
+
+	per := make([]float64, len(perCore))
+	for i := range perCore {
+		per[i] = busyPct(previousPerCore[i], perCore[i])
+	}
+	totalPct := average(per)
 	data := map[string]any{
-		"cpu_total_pct": total,
-		"cpu_idle_pct":  clampPct(100 - total),
+		"cpu_total_pct": totalPct,
+		"cpu_idle_pct":  clampPct(100 - totalPct),
 	}
 	if len(per) > 0 {
 		data["per_core"] = per
 	}
+	if elapsed := total.Total() - previousTotal.Total(); elapsed > 0 {
+		data["cpu_user_pct"] = clampPct((total.User - previousTotal.User) / elapsed * 100)
+		data["cpu_system_pct"] = clampPct((total.System - previousTotal.System) / elapsed * 100)
+	}
 	if runtime.GOOS == "windows" {
-		for key, value := range windowsCPUCounters(ctx) {
-			data[key] = value
+		data["cpu_iowait_pct"] = 0.0
+		if counters, err := readSystemCounters(); err == nil {
+			if queue, ok := counters["load_1"]; ok {
+				data["load_1"] = queue
+			}
 		}
 	}
 	add("cpu", data)
+}
+
+func readCPUTimes(ctx context.Context) ([]cpu.TimesStat, cpu.TimesStat, error) {
+	perCore, err := cpu.TimesWithContext(ctx, true)
+	if err != nil {
+		return nil, cpu.TimesStat{}, err
+	}
+	totals, err := cpu.TimesWithContext(ctx, false)
+	if err != nil || len(totals) == 0 {
+		return nil, cpu.TimesStat{}, fmt.Errorf("read total CPU times: %v", err)
+	}
+	return perCore, totals[0], nil
+}
+
+// busyPct is the share of elapsed CPU time spent outside idle and I/O wait.
+func busyPct(before, after cpu.TimesStat) float64 {
+	elapsed := after.Total() - before.Total()
+	if elapsed <= 0 {
+		return 0
+	}
+	idle := (after.Idle + after.Iowait) - (before.Idle + before.Iowait)
+	return clampPct((elapsed - idle) / elapsed * 100)
 }
 
 func collectMemory(ctx context.Context, add func(string, map[string]any), errs map[string]string) {
@@ -225,8 +265,12 @@ func collectMemory(ctx context.Context, add func(string, map[string]any), errs m
 		"used_pct":        vm.UsedPercent,
 	}
 	if runtime.GOOS == "windows" {
-		for key, value := range windowsMemoryCounters(ctx) {
-			data[key] = value
+		if counters, err := readSystemCounters(); err == nil {
+			for _, key := range []string{"cached_bytes", "committed_bytes"} {
+				if value, ok := counters[key]; ok {
+					data[key] = int64(value)
+				}
+			}
 		}
 	}
 	if sw, err := mem.SwapMemoryWithContext(ctx); err == nil && sw != nil {
@@ -564,12 +608,7 @@ func collectProcesses(ctx context.Context, topN int, watchlist []string, add fun
 }
 
 func collectServices(ctx context.Context, watchlist []string, add func(string, map[string]any), errs map[string]string, inv map[string]any) {
-	out, err := runPowerShellJSON(ctx, serviceScript())
-	if err != nil {
-		errs["service_state"] = err.Error()
-		return
-	}
-	services, err := decodeServices(out)
+	services, err := listServices()
 	if err != nil {
 		errs["service_state"] = err.Error()
 		return
@@ -610,20 +649,6 @@ func collectServices(ctx context.Context, watchlist []string, add func(string, m
 			"exit_code":    svc.ExitCode,
 		})
 	}
-}
-
-func decodeServices(body []byte) ([]serviceInfo, error) {
-	var parsed struct {
-		Services serviceList `json:"services"`
-	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, err
-	}
-	for i := range parsed.Services {
-		parsed.Services[i].State = normalizeState(parsed.Services[i].State)
-		parsed.Services[i].StartMode = normalizeStartMode(parsed.Services[i].StartMode)
-	}
-	return []serviceInfo(parsed.Services), nil
 }
 
 func appendMissingWatchedServices(services []serviceInfo, watchlist []string) []serviceInfo {
@@ -676,41 +701,78 @@ func serviceSignature(svc serviceInfo) string {
 }
 
 func collectEventLog(ctx context.Context, cfg config.EventLogConfig, add func(string, map[string]any), errs map[string]string) {
-	script, err := eventLogScript(cfg)
+	queries, err := eventLogQueries(cfg)
 	if err != nil {
 		errs["event_log"] = err.Error()
 		return
 	}
-	if script == "" {
-		return
-	}
-	out, err := runPowerShellJSON(ctx, script)
-	if err != nil {
-		errs["event_log"] = err.Error()
-		return
-	}
-	var rows []struct {
-		Channel   string `json:"channel"`
-		Level     string `json:"level"`
-		Count     int    `json:"count"`
-		SampleIDs []int  `json:"sample_ids"`
-		Error     string `json:"error"`
-	}
-	if err := json.Unmarshal(out, &rows); err != nil {
-		errs["event_log"] = err.Error()
-		return
-	}
-	for _, row := range rows {
-		if row.Error != "" {
-			errs["event_log:"+row.Channel+":"+row.Level] = row.Error
+	for _, q := range queries {
+		if ctx.Err() != nil {
+			errs["event_log"] = ctx.Err().Error()
+			return
+		}
+		count, sampleIDs, err := countEvents(q)
+		if err != nil {
+			errs["event_log:"+q.Channel+":"+q.Level] = err.Error()
+		}
+		if sampleIDs == nil {
+			sampleIDs = []int{}
 		}
 		add("event_log", map[string]any{
-			"log_name":    row.Channel,
-			"level":       strings.ToLower(row.Level),
-			"event_count": row.Count,
-			"sample_ids":  row.SampleIDs,
+			"log_name":    q.Channel,
+			"level":       q.Level,
+			"event_count": count,
+			"sample_ids":  sampleIDs,
 		})
 	}
+}
+
+// eventLogQuery counts one channel/level pair of the policy. A long event-ID
+// list is split across several XPath queries (the event log rejects very
+// long expressions); an event has one ID, so the counts simply add up.
+type eventLogQuery struct {
+	Channel string
+	Level   string
+	XPaths  []string
+}
+
+var eventLogLevelValues = map[string]int{
+	"critical": 1, "error": 2, "warning": 3, "information": 4, "verbose": 5,
+}
+
+const eventIDsPerXPath = 20
+
+func eventLogQueries(cfg config.EventLogConfig) ([]eventLogQuery, error) {
+	filters, err := validatedEventLogFilters(cfg)
+	if err != nil {
+		return nil, err
+	}
+	lookbackMinutes := cfg.LookbackMinutes
+	if lookbackMinutes <= 0 {
+		lookbackMinutes = 5
+	}
+	window := int64(lookbackMinutes) * 60 * 1000
+	var queries []eventLogQuery
+	for _, filter := range filters {
+		for _, level := range filter.Levels {
+			level = strings.ToLower(level)
+			q := eventLogQuery{Channel: filter.Channel, Level: level}
+			base := fmt.Sprintf("Level=%d and TimeCreated[timediff(@SystemTime) <= %d]", eventLogLevelValues[level], window)
+			if len(filter.IDs) == 0 {
+				q.XPaths = []string{fmt.Sprintf("*[System[%s]]", base)}
+			}
+			for start := 0; start < len(filter.IDs); start += eventIDsPerXPath {
+				end := min(start+eventIDsPerXPath, len(filter.IDs))
+				terms := make([]string, 0, end-start)
+				for _, id := range filter.IDs[start:end] {
+					terms = append(terms, fmt.Sprintf("EventID=%d", id))
+				}
+				q.XPaths = append(q.XPaths, fmt.Sprintf("*[System[%s and (%s)]]", base, strings.Join(terms, " or ")))
+			}
+			queries = append(queries, q)
+		}
+	}
+	return queries, nil
 }
 
 func collectInventory(ctx context.Context, r *Result) {
@@ -742,17 +804,10 @@ func collectInventory(ctx context.Context, r *Result) {
 }
 
 func collectInstalledSoftware(ctx context.Context) ([]map[string]any, error) {
-	out, err := runPowerShellJSON(ctx, installedSoftwareScript())
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	var parsed struct {
-		Software []map[string]any `json:"software"`
-	}
-	if err := json.Unmarshal(out, &parsed); err != nil {
-		return nil, err
-	}
-	return parsed.Software, nil
+	return installedSoftware()
 }
 
 func runPowerShellJSON(ctx context.Context, script string) ([]byte, error) {
@@ -774,48 +829,6 @@ func runPowerShellJSON(ctx context.Context, script string) ([]byte, error) {
 	return out, nil
 }
 
-func serviceScript() string {
-	return `
-$items = @()
-try {
-  $services = @(Get-CimInstance Win32_Service -ErrorAction Stop)
-} catch {
-  $services = @()
-}
-foreach ($svc in $services) {
-  if ($null -ne $svc) {
-    $pidValue = 0
-    $exitCode = 0
-    try { $pidValue = [int]$svc.ProcessId } catch {}
-    try { $exitCode = [int]$svc.ExitCode } catch {}
-    $items += [pscustomobject]@{
-      service_name = [string]$svc.Name
-      display_name = [string]$svc.DisplayName
-      state        = [string]$svc.State
-      start_mode   = [string]$svc.StartMode
-      pid          = $pidValue
-      exit_code    = $exitCode
-      description  = [string]$svc.Description
-    }
-  }
-}
-if ($items.Count -eq 0) {
-  foreach ($svc in @(Get-Service -ErrorAction SilentlyContinue)) {
-    $items += [pscustomobject]@{
-      service_name = [string]$svc.Name
-      display_name = [string]$svc.DisplayName
-      state        = [string]$svc.Status
-      start_mode   = ""
-      pid          = 0
-      exit_code    = 0
-      description  = ""
-    }
-  }
-}
-[pscustomobject]@{ services=@($items) } | ConvertTo-Json -Depth 6
-`
-}
-
 const (
 	maxEventLogFilters         = 32
 	maxEventLogLevelsPerFilter = 5
@@ -824,7 +837,6 @@ const (
 	maxEventLogTotalIDs        = 512
 	maxEventLogChannelBytes    = 256
 	maxEventLogLevelBytes      = 32
-	maxEventLogPowerShellBytes = 24 * 1024
 	maxWindowsEventIdentifier  = 2147483647
 )
 
@@ -834,55 +846,6 @@ var supportedEventLogLevels = map[string]bool{
 	"warning":     true,
 	"information": true,
 	"verbose":     true,
-}
-
-func eventLogScript(cfg config.EventLogConfig) (string, error) {
-	filters, err := validatedEventLogFilters(cfg)
-	if err != nil {
-		return "", err
-	}
-	if len(filters) == 0 {
-		return "", nil
-	}
-	lookbackMinutes := cfg.LookbackMinutes
-	if lookbackMinutes <= 0 {
-		lookbackMinutes = 5
-	}
-	filterLiteral := powerShellEventLogFilters(filters)
-	script := fmt.Sprintf(`
-$levelMap = @{ critical = 1; error = 2; warning = 3; information = 4; verbose = 5 }
-$filters = @(%s)
-$since = (Get-Date).ToUniversalTime().AddMinutes(-%d)
-$rows = @()
-foreach ($filter in $filters) {
-  $channel = [string]$filter.channel
-  $filterLevels = @($filter.levels)
-  $eventIds = @($filter.ids)
-  foreach ($level in $filterLevels) {
-    $err = ""
-    $events = @()
-    try {
-      $id = $levelMap[$level.ToString().ToLowerInvariant()]
-      if ($null -ne $id) {
-        $query = @{ LogName=$channel; Level=$id; StartTime=$since }
-        if ($eventIds.Count -gt 0) {
-          $query['Id'] = @($eventIds | ForEach-Object { [int]$_ })
-        }
-        $events = @(Get-WinEvent -FilterHashtable $query -ErrorAction SilentlyContinue)
-      }
-    } catch {
-      $err = $_.Exception.Message
-    }
-    $sampleIds = @($events | Select-Object -First 50 -ExpandProperty Id)
-    $rows += [pscustomobject]@{ channel=$channel; level=$level.ToString().ToLowerInvariant(); count=$events.Count; sample_ids=$sampleIds; error=$err }
-  }
-}
-ConvertTo-Json -InputObject @($rows) -Depth 5
-`, filterLiteral, lookbackMinutes)
-	if len(script) > maxEventLogPowerShellBytes {
-		return "", fmt.Errorf("event-log policy generates a %d-byte PowerShell command; maximum is %d bytes", len(script), maxEventLogPowerShellBytes)
-	}
-	return script, nil
 }
 
 func effectiveEventLogFilters(cfg config.EventLogConfig) []config.EventLogFilter {
@@ -961,163 +924,6 @@ func validatedEventLogFilters(cfg config.EventLogConfig) ([]config.EventLogFilte
 		}
 	}
 	return filters, nil
-}
-
-func powerShellEventLogFilters(filters []config.EventLogFilter) string {
-	items := make([]string, 0, len(filters))
-	for _, filter := range filters {
-		ids := make([]string, 0, len(filter.IDs))
-		for _, id := range filter.IDs {
-			ids = append(ids, fmt.Sprintf("%d", id))
-		}
-		items = append(items, fmt.Sprintf(
-			"[pscustomobject]@{ channel=%s; levels=@(%s); ids=@(%s) }",
-			quotedPowerShellString(filter.Channel), quotedArray(filter.Levels), strings.Join(ids, ","),
-		))
-	}
-	return strings.Join(items, ",")
-}
-
-func installedSoftwareScript() string {
-	return `
-$roots = @(
-  @{ Path = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*'; Architecture = 'x64'; Source = 'hklm' },
-  @{ Path = 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'; Architecture = 'x86'; Source = 'hklm_wow6432' },
-  @{ Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*'; Architecture = 'user'; Source = 'hkcu' }
-)
-$seen = @{}
-$items = @()
-foreach ($root in $roots) {
-  try {
-    $apps = @(Get-ItemProperty -Path $root.Path -ErrorAction SilentlyContinue)
-  } catch {
-    $apps = @()
-  }
-  foreach ($app in $apps) {
-    $name = [string]$app.DisplayName
-    if ([string]::IsNullOrWhiteSpace($name)) { continue }
-    $systemComponent = 0
-    try { $systemComponent = [int]$app.SystemComponent } catch {}
-    if ($systemComponent -eq 1) { continue }
-    $releaseType = [string]$app.ReleaseType
-    if ($releaseType -match '^(Update|Hotfix|Security Update)$') { continue }
-
-    $version = [string]$app.DisplayVersion
-    $vendor = [string]$app.Publisher
-    $key = ($name.Trim().ToLowerInvariant() + '|' + $version.Trim().ToLowerInvariant() + '|' + $vendor.Trim().ToLowerInvariant())
-    if ($seen.ContainsKey($key)) { continue }
-    $seen[$key] = $true
-
-    $installDate = $null
-    $rawDate = [string]$app.InstallDate
-    if ($rawDate -match '^\d{8}$') {
-      try { $installDate = [DateTime]::ParseExact($rawDate, 'yyyyMMdd', $null).ToUniversalTime().ToString('o') } catch {}
-    }
-
-    $items += [pscustomobject]@{
-      package_name     = $name.Trim()
-      name             = $name.Trim()
-      version          = $version.Trim()
-      vendor           = $vendor.Trim()
-      publisher        = $vendor.Trim()
-      install_date     = $installDate
-      install_location = ([string]$app.InstallLocation).Trim()
-      architecture     = $root.Architecture
-      source           = $root.Source
-    }
-  }
-}
-$items = @($items | Sort-Object package_name | Select-Object -First 1000)
-[pscustomobject]@{ software = $items } | ConvertTo-Json -Depth 6
-`
-}
-
-func windowsCPUCounters(ctx context.Context) map[string]any {
-	out, err := runPowerShellJSON(ctx, `
-$paths = @(
-  '\Processor(_Total)\% User Time',
-  '\Processor(_Total)\% Privileged Time',
-  '\System\Processor Queue Length'
-)
-$values = @{}
-try {
-  $counter = Get-Counter $paths -ErrorAction SilentlyContinue
-  foreach ($sample in $counter.CounterSamples) {
-    $path = $sample.Path.ToString().ToLowerInvariant()
-    if ($path.EndsWith('\% user time')) {
-      $values['cpu_user_pct'] = [double]$sample.CookedValue
-    } elseif ($path.EndsWith('\% privileged time')) {
-      $values['cpu_system_pct'] = [double]$sample.CookedValue
-    } elseif ($path.EndsWith('\processor queue length')) {
-      $values['load_1'] = [double]$sample.CookedValue
-    }
-  }
-} catch {}
-if (-not $values.ContainsKey('cpu_iowait_pct')) { $values['cpu_iowait_pct'] = 0.0 }
-[pscustomobject]$values | ConvertTo-Json -Compress
-`)
-	if err != nil {
-		return nil
-	}
-	values := map[string]float64{}
-	if err := json.Unmarshal(out, &values); err != nil {
-		return nil
-	}
-	data := make(map[string]any, len(values))
-	for key, value := range values {
-		if strings.HasPrefix(key, "cpu_") {
-			data[key] = clampPct(value)
-			continue
-		}
-		data[key] = value
-	}
-	return data
-}
-
-func windowsMemoryCounters(ctx context.Context) map[string]any {
-	out, err := runPowerShellJSON(ctx, `
-$paths = @(
-  '\Memory\Cache Bytes',
-  '\Memory\Committed Bytes'
-)
-$values = @{}
-try {
-  $counter = Get-Counter $paths -ErrorAction SilentlyContinue
-  foreach ($sample in $counter.CounterSamples) {
-    $path = $sample.Path.ToString().ToLowerInvariant()
-    if ($path.EndsWith('\cache bytes')) {
-      $values['cached_bytes'] = [int64]$sample.CookedValue
-    } elseif ($path.EndsWith('\committed bytes')) {
-      $values['committed_bytes'] = [int64]$sample.CookedValue
-    }
-  }
-} catch {}
-[pscustomobject]$values | ConvertTo-Json -Compress
-`)
-	if err != nil {
-		return nil
-	}
-	values := map[string]int64{}
-	if err := json.Unmarshal(out, &values); err != nil {
-		return nil
-	}
-	data := make(map[string]any, len(values))
-	for key, value := range values {
-		data[key] = value
-	}
-	return data
-}
-
-func quotedArray(values []string) string {
-	items := make([]string, 0, len(values))
-	for _, s := range values {
-		items = append(items, quotedPowerShellString(s))
-	}
-	return strings.Join(items, ",")
-}
-
-func quotedPowerShellString(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 func average(values []float64) float64 {
