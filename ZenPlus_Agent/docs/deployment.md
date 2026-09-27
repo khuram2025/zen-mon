@@ -1,15 +1,34 @@
 # Deploying the ZenPlus Windows agent
 
-ZenPlus publishes one immutable, generic x64 setup executable. The package contains no
-registration secret and is never modified after it is built. The same
-checksummed (and optionally Authenticode-signed) package can be distributed to any
-number of hosts through GPO, Intune, SCCM, or another software-management
-system. Only the controller URL is configured on an endpoint.
+ZenPlus publishes immutable, generic x64 packages in two flavours:
+
+| Flavour | Files | Contents |
+| --- | --- | --- |
+| core | `zenplus-agent-core-<version>.exe` / `.msi` | Server monitoring only (about 26 MB). |
+| full | `zenplus-agent-<version>.exe` / `.msi` | Server monitoring plus the offline APM gateway and .NET, Java, Node.js and Python instrumentation (about 93 MB). |
+
+Use core for servers that only need infrastructure monitoring. Install full
+over a core installation at any time to add APM; the MSIs share an
+UpgradeCode, so either one replaces the other, even at the same version. The
+core package refuses to replace an installation that still uses APM (an APM
+profile or instrumented applications), because removing the APM components
+would break instrumented applications on their next restart.
+
+The full package keeps the historical file names on purpose: agents released
+before the split all carry the APM components, and they must keep upgrading
+to a package that still contains them. Newer agents update within their
+installed flavour.
+
+No package contains a registration secret and none is modified after it is
+built. The same checksummed, Authenticode-signed package can be distributed
+to any number of hosts through GPO, Intune, SCCM, or another
+software-management system. Only the controller URL is configured on an
+endpoint.
 
 This separation is important: changing bytes in an MSI after signing breaks
 its signature and makes package hashes non-reproducible.
 
-## 1. Build the package
+## 1. Build the packages
 
 ```powershell
 .\scripts\build.ps1 -ControllerUrl "https://192.168.8.221"
@@ -20,12 +39,33 @@ from `PATH`. It runs the Go test suite unless `-SkipTests` is explicitly set.
 
 Outputs:
 
-- `dist/zenplus-agent-<version>.exe` -- canonical x64 setup and interactive wizard.
-- `dist/zenplus-agent-<version>.msi` -- validation-only MSI wrapper; the
-  appliance publishes the setup executable.
-- `dist/ZenPlusAgentSetup-x64.exe` -- interactive/self-contained setup.
-- `dist/agent-manifest.json` -- version, architecture, file size, build time,
-  signature state, and SHA-256 of the canonical setup executable.
+- `dist/zenplus-agent-core-<version>.exe` and `.msi` -- server monitoring only.
+- `dist/zenplus-agent-<version>.exe` and `.msi` -- with APM.
+- `dist/ZenPlusAgentSetup-x64.exe` -- the full interactive setup under its
+  historical name.
+- `dist/agent-manifest.json` -- the full package in the top-level fields (for
+  agents before 1.13) and both packages under `flavors`.
+
+Each setup embeds its payload as one compressed archive and installs a
+payload-free build of itself as the uninstaller (`ZenPlusAgentSetup.exe`),
+so Program Files no longer holds a second copy of the whole package.
+
+When publishing to the public download site, point these aliases at the new
+files in `stable/`:
+
+| Alias | Target |
+| --- | --- |
+| `ZenPlusAgentCoreSetup-latest.exe` | `zenplus-agent-core-<version>.exe` |
+| `ZenPlusAgentCore-latest.msi` | `zenplus-agent-core-<version>.msi` |
+| `ZenPlusAgentSetup-latest.exe` | `zenplus-agent-<version>.exe` |
+| `ZenPlusAgent-latest.msi` | `zenplus-agent-<version>.msi` |
+
+The dashboard's Download Agent dialog links to all four.
+
+To publish to an appliance, copy the `.exe` files (and optionally the `.msi`
+files) into `/opt/zenplus/artifacts/agents/windows/`. The controller
+registers one package per version and flavour, preferring the `.exe`, and
+needs migration `migrate-122-agent-package-flavors.sql` (1.13 and later).
 
 `-ControllerUrl` may set a convenient default controller address. Credentials
 cannot be compiled into the binaries or MSI. The `CONTROLLER_URL` MSI property

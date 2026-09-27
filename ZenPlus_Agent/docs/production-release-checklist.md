@@ -12,10 +12,19 @@ See `deployment.md` for the build → publish → install flow.
   - `zenplus-agent.exe`
   - `zenplus-agentctl.exe`
   - `zenplus-agent-app.exe`
+  - `zenplus-agent-uninstaller.exe` (installed as `ZenPlusAgentSetup.exe`)
   - `ZenPlusAgentSetup-x64.exe`
-  - `zenplus-agent-<version>.exe`
-  - `zenplus-agent-<version>.msi` (optional enterprise wrapper)
-  - `agent-manifest.json`
+  - `zenplus-agent-core-<version>.exe` and `.msi` (server monitoring only)
+  - `zenplus-agent-<version>.exe` and `.msi` (with APM)
+  - `agent-manifest.json`, with top-level fields for the full package and both
+    packages under `flavors`
+- Confirm the core package is a small fraction of the full package and that
+  both setups pass `/verify-payload`.
+- Upgrade tests for the split: core over core, full over core (adds APM),
+  core over an infrastructure-profile full install (removes APM), and confirm
+  core refuses to replace a combined/APM install or one with instrumented
+  applications. Confirm Apps & Features shows a single ZenPlus Agent entry
+  after switching flavour at the same version.
 - Confirm the MSI `ProductVersion` matches `model.AgentVersion`.
 - Confirm the MSI summary template is `x64;1033`, its components are 64-bit,
   and every EXE has PE machine type `0x8664`.
