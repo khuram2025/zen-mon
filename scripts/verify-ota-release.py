@@ -30,6 +30,26 @@ def read_member(tar: tarfile.TarFile, name: str) -> bytes:
     return handle.read()
 
 
+def verify_msi_container(tar: tarfile.TarFile, name: str) -> tarfile.TarInfo:
+    """Check the MSI container without assuming a historical compressed size.
+
+    Agent 1.14.2's signed full MSI is 92.8 MB. Compression and bundle changes
+    make 100 MB an invalid floor. Exact length and SHA-256 are checked against
+    the signed package metadata below; retain the builder's truncation floor
+    and reject files that are not Windows Installer compound documents.
+    """
+    try:
+        member = tar.getmember(name)
+    except KeyError as exc:
+        raise RuntimeError("full offline Windows MSI is missing or truncated") from exc
+    if not member.isfile() or member.size < 1_000_000:
+        raise RuntimeError("full offline Windows MSI is missing or truncated")
+    handle = tar.extractfile(member)
+    if handle is None or handle.read(8) != bytes.fromhex("d0cf11e0a1b11ae1"):
+        raise RuntimeError("Windows MSI has an invalid compound-document header")
+    return member
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("package")
@@ -135,9 +155,7 @@ def main() -> None:
                 raise RuntimeError("manifest declares appliance-only scope but an agent was required")
             msi_name = f"zenplus-agent-{args.agent_version}.msi"
             msi_path = f"agent-artifacts/windows/{msi_name}"
-            msi = members.get(msi_path)
-            if msi is None or msi.size < 100_000_000:
-                raise RuntimeError("full offline Windows MSI is missing or truncated")
+            msi = verify_msi_container(tar, msi_path)
             package = next(
                 (item for item in packages if item.get("file_name") == msi_name),
                 None,
