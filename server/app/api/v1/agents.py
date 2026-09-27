@@ -60,6 +60,7 @@ from app.schemas.agent import (
     NetworkCaptureUpload,
 )
 from app.services import package_digest
+from app.services.agent_package_names import FLAVOR_FULL, FLAVOR_PATTERN
 from app.services.host_metric_service import (
     HOST_TELEMETRY_KINDS,
     HostMetricStorageError,
@@ -1478,21 +1479,26 @@ async def packages_manifest(
     platform: str = Query(..., regex="^(windows|linux|macos)$"),
     channel: str = Query("stable", regex="^(canary|beta|stable|pinned)$"),
     arch: str = Query("amd64"),
+    # Agents before 1.13 send no flavour and all carry the APM bundle, so the
+    # default must stay the full package.
+    flavor: str = Query(FLAVOR_FULL, regex=FLAVOR_PATTERN),
     db: AsyncSession = Depends(get_db),
 ):
     row = (await db.execute(
         text("""SELECT * FROM agent_packages
-                WHERE platform = :p AND channel = :c AND arch = :a AND is_latest = TRUE
+                WHERE platform = :p AND channel = :c AND arch = :a AND flavor = :fl
+                  AND is_latest = TRUE
                 ORDER BY released_at DESC LIMIT 1"""),
-        {"p": platform, "c": channel, "a": arch},
+        {"p": platform, "c": channel, "a": arch, "fl": flavor},
     )).mappings().first()
     if not row:
-        raise HTTPException(404, "No package published for this platform/channel/arch yet")
+        raise HTTPException(404, f"No {flavor} package published for this platform/channel/arch yet")
     await asyncio.to_thread(_verified_package_path, platform, dict(row))
     return {
         "platform": platform,
         "channel": channel,
         "arch": arch,
+        "flavor": flavor,
         "latest_version": row["version"],
         "file_name": row["file_name"],
         "file_size": row["file_size"],
@@ -1513,12 +1519,15 @@ async def packages_manifest(
 # credential. Tokens gate enrollment; these endpoints only hand out the
 # published package (integrity via sha256 in the manifest) and install logic.
 
-async def _latest_package(platform: str, db: AsyncSession, arch: str = "amd64") -> Optional[dict]:
+async def _latest_package(
+    platform: str, db: AsyncSession, arch: str = "amd64", flavor: str = FLAVOR_FULL,
+) -> Optional[dict]:
     row = (await db.execute(
         text("""SELECT * FROM agent_packages
-                WHERE platform = :p AND arch = :a AND channel = 'stable' AND is_latest = TRUE
+                WHERE platform = :p AND arch = :a AND channel = 'stable' AND flavor = :fl
+                  AND is_latest = TRUE
                 ORDER BY released_at DESC LIMIT 1"""),
-        {"p": platform, "a": arch},
+        {"p": platform, "a": arch, "fl": flavor},
     )).mappings().first()
     return dict(row) if row else None
 
@@ -1527,15 +1536,16 @@ async def _latest_package(platform: str, db: AsyncSession, arch: str = "amd64") 
 async def download_latest_package(
     platform: str,
     arch: str = Query("amd64"),
+    flavor: str = Query(FLAVOR_FULL, regex=FLAVOR_PATTERN),
     db: AsyncSession = Depends(get_db),
 ):
     if platform not in ("windows", "linux", "macos"):
         raise HTTPException(404, "Unknown platform")
-    pkg = await _latest_package(platform, db, arch)
+    pkg = await _latest_package(platform, db, arch, flavor)
     if not pkg:
         raise HTTPException(
             404,
-            f"No {platform} agent package published. Drop the package into "
+            f"No {platform} {flavor} agent package published. Drop the package into "
             f"{AGENT_PKG_DIR}/{platform}/ and publish it from the Agent Fleet page.",
         )
     file_path = await asyncio.to_thread(_verified_package_path, platform, pkg)
@@ -1557,15 +1567,25 @@ Optional: -InstallProfile infrastructure|apm|combined  -Arch amd64
 #>
 param(
     [Parameter(Mandatory=$true)][string]$ControllerUrl,
-    [ValidateSet("infrastructure", "apm", "combined")][string]$InstallProfile = "combined",
+    [ValidateSet("infrastructure", "apm", "combined")][string]$InstallProfile = "infrastructure",
     [string]$Arch = "amd64"
 )
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $ControllerUrl = $ControllerUrl.TrimEnd("/")
 
-Write-Host "[zenplus] Fetching package manifest from $ControllerUrl ..."
-$manifest = Invoke-RestMethod -UseBasicParsing -Uri "$ControllerUrl/api/v1/agents/packages/manifest?platform=windows&channel=stable&arch=$Arch"
+# Server monitoring only needs the small core package; APM profiles need the
+# full package with the APM components.
+$Flavor = if ($InstallProfile -eq "infrastructure") { "core" } else { "full" }
+Write-Host "[zenplus] Fetching $Flavor package manifest from $ControllerUrl ..."
+try {
+    $manifest = Invoke-RestMethod -UseBasicParsing -Uri "$ControllerUrl/api/v1/agents/packages/manifest?platform=windows&channel=stable&arch=$Arch&flavor=$Flavor"
+} catch {
+    if ($Flavor -ne "core") { throw }
+    Write-Host "[zenplus] No server-monitoring-only package is published; using the full package."
+    $Flavor = "full"
+    $manifest = Invoke-RestMethod -UseBasicParsing -Uri "$ControllerUrl/api/v1/agents/packages/manifest?platform=windows&channel=stable&arch=$Arch&flavor=$Flavor"
+}
 $version = $manifest.latest_version
 $expectedSha = $manifest.sha256.ToLower()
 Write-Host "[zenplus] Latest agent version: $version"
@@ -1573,7 +1593,7 @@ Write-Host "[zenplus] Latest agent version: $version"
 $fileName = [System.IO.Path]::GetFileName($manifest.file_name)
 $installer = Join-Path $env:TEMP $fileName
 Write-Host "[zenplus] Downloading $fileName ..."
-Invoke-WebRequest -UseBasicParsing -Uri "$ControllerUrl/api/v1/agents/packages/windows/latest?arch=$Arch" -OutFile $installer
+Invoke-WebRequest -UseBasicParsing -Uri "$ControllerUrl/api/v1/agents/packages/windows/latest?arch=$Arch&flavor=$Flavor" -OutFile $installer
 
 $actualSha = (Get-FileHash -Algorithm SHA256 -Path $installer).Hash.ToLower()
 if ($actualSha -ne $expectedSha) {

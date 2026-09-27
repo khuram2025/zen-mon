@@ -16,6 +16,7 @@ import re
 import secrets
 import shlex
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
@@ -32,6 +33,13 @@ from app.core import scoping
 from app.core.config import get_settings
 from app.core.database import get_db
 from app.services import package_digest
+from app.services.agent_package_names import (
+    FLAVOR_FULL,
+    FLAVOR_PATTERN,
+    download_path as package_download_path,
+    parse_package_name,
+    version_key,
+)
 from app.services.tag_service import canonicalize_tags
 from app.core.security import get_current_user, require_operator_user
 from app.services.filesystem_monitoring import pg_capacity_filter
@@ -2103,12 +2111,14 @@ async def standalone_install_token(
     )
 
 
-async def _msi_download_url(platform: str, db: AsyncSession, server_url: str) -> Optional[str]:
+async def _msi_download_url(
+    platform: str, db: AsyncSession, server_url: str, flavor: str = FLAVOR_FULL,
+) -> Optional[str]:
     row = (await db.execute(
         text("""SELECT download_path FROM agent_packages
-                WHERE platform = :p AND is_latest = TRUE
+                WHERE platform = :p AND flavor = :fl AND is_latest = TRUE
                 ORDER BY released_at DESC LIMIT 1"""),
-        {"p": platform},
+        {"p": platform, "fl": flavor},
     )).first()
     if not row:
         return None
@@ -2464,13 +2474,10 @@ async def list_fleet(
 # this reconciles the agent_packages table against it, and the read paths call
 # it so dropping a file in is all that is required.
 
-_PKG_NAME_RE = re.compile(
-    r"^zenplus-agent[-_](\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+)?)\.(msi|exe|pkg|tar\.gz)$"
-)
-
-
-def _version_key(v: str):
-    return [int(p) if p.isdigit() else 0 for p in v.split("-")[0].split(".")]
+# Several files may carry the same platform/version/flavour (a release ships
+# both setup .exe and .msi). One row represents each, so prefer the setup
+# program: it is the canonical self-update package and owns in-place upgrades.
+_PKG_EXT_PREFERENCE = {"exe": 0, "msi": 1, "tar.gz": 2, "pkg": 3}
 
 
 def _sha256_file(path) -> str:
@@ -2481,15 +2488,17 @@ async def sync_agent_packages(db: AsyncSession) -> dict:
     """Reconcile agent_packages with the files in the artifact store.
 
     Content is hashed even when name and size match. Published
-    platform/version bytes are immutable: hash drift quarantines the row by
-    clearing ``is_latest`` and is never accepted as a replacement checksum.
+    platform/version/flavour bytes are immutable: hash drift quarantines the
+    row by clearing ``is_latest`` and is never accepted as a replacement
+    checksum. ``is_latest`` is tracked per platform and flavour.
     """
     from app.api.v1.agents import AGENT_PKG_DIR
 
     registered = {
-        (r["platform"], r["arch"], r["version"], r["channel"]): r
+        (r["platform"], r["arch"], r["version"], r["channel"], r["flavor"]): r
         for r in (await db.execute(
-            text("""SELECT platform, arch, version, channel, file_name, file_size, sha256
+            text("""SELECT platform, arch, version, channel, flavor, file_name,
+                           file_size, sha256
                     FROM agent_packages""")
         )).mappings().all()
     }
@@ -2501,37 +2510,47 @@ async def sync_agent_packages(db: AsyncSession) -> dict:
         pdir = AGENT_PKG_DIR / platform
         if not pdir.is_dir():
             continue
-        found: list[tuple[str, str, int, str]] = []
+        chosen: dict[tuple[str, str], tuple[int, Path]] = {}
         for f in sorted(pdir.iterdir()):
             if not f.is_file():
                 continue
-            m = _PKG_NAME_RE.match(f.name)
-            if not m:
+            parsed = parse_package_name(f.name)
+            if not parsed:
                 continue
-            digest = await asyncio.to_thread(_sha256_file, f)
-            found.append((m.group(1), f.name, f.stat().st_size, digest))
+            rank = _PKG_EXT_PREFERENCE.get(parsed.ext, 9)
+            slot = (parsed.flavor, parsed.version)
+            if slot not in chosen or rank < chosen[slot][0]:
+                chosen[slot] = (rank, f)
 
+        found: list[tuple[str, str, str, int, str]] = []
+        for (flavor, version), (_, f) in sorted(chosen.items()):
+            digest = await asyncio.to_thread(_sha256_file, f)
+            found.append((flavor, version, f.name, f.stat().st_size, digest))
         if not found:
             continue
-        latest_version = max((v for v, _, _, _ in found), key=_version_key)
+        latest_by_flavor = {
+            flavor: max((v for fl, v, _, _, _ in found if fl == flavor), key=version_key)
+            for flavor in {fl for fl, _, _, _, _ in found}
+        }
 
-        for version, fname, fsize, digest in found:
-            key = (platform, "amd64", version, "stable")
+        for flavor, version, fname, fsize, digest in found:
+            key = (platform, "amd64", version, "stable", flavor)
             seen.add(key)
             existing = registered.get(key)
-            is_latest = version == latest_version
+            is_latest = version == latest_by_flavor[flavor]
+            params = {"pl": platform, "v": version, "fl": flavor}
             if existing and existing["sha256"].lower() != digest:
                 await db.execute(
                     text("""UPDATE agent_packages SET is_latest = FALSE
                             WHERE platform = :pl AND arch = 'amd64'
-                              AND version = :v AND channel = 'stable'"""),
-                    {"pl": platform, "v": version},
+                              AND version = :v AND channel = 'stable' AND flavor = :fl"""),
+                    params,
                 )
                 quarantined.append(f"{platform}/{fname}")
                 logger.error(
-                    "agent package hash drift quarantined: platform=%s version=%s "
+                    "agent package hash drift quarantined: platform=%s flavor=%s version=%s "
                     "file=%s expected_sha=%s actual_sha=%s",
-                    platform, version, fname, existing["sha256"], digest,
+                    platform, flavor, version, fname, existing["sha256"], digest,
                 )
                 continue
             if (existing and existing["file_size"] == fsize
@@ -2541,9 +2560,9 @@ async def sync_agent_packages(db: AsyncSession) -> dict:
                 repair = await db.execute(
                     text("""UPDATE agent_packages SET is_latest = :latest
                             WHERE platform = :pl AND arch = 'amd64'
-                              AND version = :v AND channel = 'stable'
+                              AND version = :v AND channel = 'stable' AND flavor = :fl
                               AND is_latest IS DISTINCT FROM :latest"""),
-                    {"pl": platform, "v": version, "latest": is_latest},
+                    params | {"latest": is_latest},
                 )
                 if repair.rowcount:
                     repaired.append(f"{platform}/{fname}")
@@ -2551,18 +2570,18 @@ async def sync_agent_packages(db: AsyncSession) -> dict:
 
             accepted = (await db.execute(
                 text("""INSERT INTO agent_packages
-                          (platform, arch, version, channel, file_name, file_size,
+                          (platform, arch, version, channel, flavor, file_name, file_size,
                            sha256, download_path, is_latest)
-                        VALUES (:pl, 'amd64', :v, 'stable', :fn, :fs, :sha, :dp, :latest)
-                        ON CONFLICT (platform, arch, version, channel) DO UPDATE SET
+                        VALUES (:pl, 'amd64', :v, 'stable', :fl, :fn, :fs, :sha, :dp, :latest)
+                        ON CONFLICT (platform, arch, version, channel, flavor) DO UPDATE SET
                           file_name = EXCLUDED.file_name,
                           file_size = EXCLUDED.file_size,
                           download_path = EXCLUDED.download_path,
                           is_latest = EXCLUDED.is_latest
                         WHERE agent_packages.sha256 = EXCLUDED.sha256
                         RETURNING id"""),
-                {"pl": platform, "v": version, "fn": fname, "fs": fsize, "sha": digest,
-                 "dp": f"/api/v1/agents/packages/{platform}/latest", "latest": is_latest},
+                params | {"fn": fname, "fs": fsize, "sha": digest,
+                          "dp": package_download_path(platform, flavor), "latest": is_latest},
             )).first()
             if accepted:
                 (updated if existing else added).append(f"{platform}/{fname}")
@@ -2570,8 +2589,8 @@ async def sync_agent_packages(db: AsyncSession) -> dict:
                 await db.execute(
                     text("""UPDATE agent_packages SET is_latest = FALSE
                             WHERE platform = :pl AND arch = 'amd64'
-                              AND version = :v AND channel = 'stable'"""),
-                    {"pl": platform, "v": version},
+                              AND version = :v AND channel = 'stable' AND flavor = :fl"""),
+                    params,
                 )
                 quarantined.append(f"{platform}/{fname}")
 
@@ -2582,8 +2601,9 @@ async def sync_agent_packages(db: AsyncSession) -> dict:
             continue
         await db.execute(
             text("""DELETE FROM agent_packages
-                    WHERE platform = :pl AND arch = :a AND version = :v AND channel = :c"""),
-            {"pl": key[0], "a": key[1], "v": key[2], "c": key[3]},
+                    WHERE platform = :pl AND arch = :a AND version = :v
+                      AND channel = :c AND flavor = :fl"""),
+            {"pl": key[0], "a": key[1], "v": key[2], "c": key[3], "fl": key[4]},
         )
         removed.append(f"{key[0]}/{row['file_name']}")
 
@@ -2598,6 +2618,7 @@ async def sync_agent_packages(db: AsyncSession) -> dict:
             "quarantined": quarantined, "repaired": repaired}
 
 
+
 @fleet_router.get("/packages")
 async def list_agent_packages(
     db: AsyncSession = Depends(get_db),
@@ -2607,9 +2628,9 @@ async def list_agent_packages(
     # last call, so a new build needs no manual publish step.
     await sync_agent_packages(db)
     rows = (await db.execute(
-        text("""SELECT id, platform, arch, version, channel, file_name, file_size,
+        text("""SELECT id, platform, arch, version, channel, flavor, file_name, file_size,
                        sha256, is_latest, released_at
-                FROM agent_packages ORDER BY platform, released_at DESC"""),
+                FROM agent_packages ORDER BY platform, flavor, released_at DESC"""),
     )).mappings().all()
     return {"items": [dict(r) | {"id": str(r["id"])} for r in rows]}
 
@@ -2624,82 +2645,32 @@ async def publish_agent_packages(
     Registration also happens automatically whenever packages are listed or
     downloaded; this endpoint is for reconciling immediately after a release.
 
-    Layout: /opt/zenplus/artifacts/agents/<platform>/zenplus-agent-<version>.<ext>
-    (.msi/.exe for Windows, .tar.gz for Linux, .pkg/.tar.gz for macOS). The newest version per
-    platform is flagged is_latest and served by the download endpoint.
+    Layout: /opt/zenplus/artifacts/agents/<platform>/zenplus-agent[-core]-<version>.<ext>
+    (.exe/.msi for Windows, .tar.gz for Linux, .pkg/.tar.gz for macOS). The
+    newest version per platform and flavour is flagged is_latest and served by
+    the download endpoint.
     """
     from app.api.v1.agents import AGENT_PKG_DIR
 
-    def _parse_version(name: str) -> Optional[str]:
-        import re
-        m = re.match(
-            r"^zenplus-agent[-_](\d+\.\d+\.\d+(?:[-.][A-Za-z0-9]+)?)\."
-            r"(msi|exe|pkg|tar\.gz)$",
-            name,
-        )
-        return m.group(1) if m else None
-
-    published: list[dict] = []
-    quarantined: list[dict] = []
+    result = await sync_agent_packages(db)
     skipped: list[str] = []
     for platform in ("windows", "linux", "macos"):
         pdir = AGENT_PKG_DIR / platform
-        if not pdir.is_dir():
-            continue
-        candidates = []
-        for f in sorted(pdir.iterdir()):
-            if not f.is_file():
-                continue
-            version = _parse_version(f.name)
-            if not version:
-                skipped.append(f"{platform}/{f.name}")
-                continue
-            digest = await asyncio.to_thread(_sha256_file, f)
-            candidates.append((version, f.name, f.stat().st_size, digest))
-        if not candidates:
-            continue
-        # Highest version (numeric-aware) becomes latest.
-        def _vkey(v: str):
-            return [int(p) if p.isdigit() else 0 for p in v.split("-")[0].split(".")]
-        candidates.sort(key=lambda c: _vkey(c[0]))
-        latest_version = candidates[-1][0]
-        for version, fname, fsize, digest in candidates:
-            accepted = (await db.execute(
-                text("""INSERT INTO agent_packages
-                          (platform, arch, version, channel, file_name, file_size, sha256,
-                           download_path, is_latest)
-                        VALUES (:pl, 'amd64', :v, 'stable', :fn, :fs, :sha, :dp, :latest)
-                        ON CONFLICT (platform, arch, version, channel) DO UPDATE SET
-                          file_name = EXCLUDED.file_name,
-                          file_size = EXCLUDED.file_size,
-                          download_path = EXCLUDED.download_path,
-                          is_latest = EXCLUDED.is_latest
-                        WHERE agent_packages.sha256 = EXCLUDED.sha256
-                        RETURNING id"""),
-                {"pl": platform, "v": version, "fn": fname, "fs": fsize, "sha": digest,
-                 "dp": f"/api/v1/agents/packages/{platform}/latest",
-                 "latest": version == latest_version},
-            )).first()
-            item = {"platform": platform, "version": version, "file_name": fname,
-                    "is_latest": version == latest_version}
-            if accepted:
-                published.append(item)
-            else:
-                await db.execute(
-                    text("""UPDATE agent_packages SET is_latest = FALSE
-                            WHERE platform = :pl AND arch = 'amd64'
-                              AND version = :v AND channel = 'stable'"""),
-                    {"pl": platform, "v": version},
-                )
-                quarantined.append(item)
-        await db.execute(
-            text("""UPDATE agent_packages SET is_latest = FALSE
-                    WHERE platform = :pl AND channel = 'stable' AND version != :v"""),
-            {"pl": platform, "v": latest_version},
-        )
-    await db.commit()
-    return {"published": published, "quarantined": quarantined, "skipped": skipped,
-            "package_dir": str(AGENT_PKG_DIR)}
+        if pdir.is_dir():
+            skipped.extend(
+                f"{platform}/{f.name}" for f in sorted(pdir.iterdir())
+                if f.is_file() and not parse_package_name(f.name)
+            )
+    rows = (await db.execute(
+        text("""SELECT platform, flavor, version, file_name, is_latest
+                FROM agent_packages ORDER BY platform, flavor, released_at DESC"""),
+    )).mappings().all()
+    return {
+        "published": [dict(r) for r in rows],
+        "quarantined": result["quarantined"],
+        "skipped": skipped,
+        "package_dir": str(AGENT_PKG_DIR),
+    }
 
 
 # ── Agent package download ───────────────────────────────────────────
@@ -2723,11 +2694,11 @@ async def download_preconfigured_package(
     )
 
     await sync_agent_packages(db)
-    pkg = await _latest_package_for_download(data.platform, db)
+    pkg = await _latest_package_for_download(data.platform, db, data.flavor)
     if not pkg:
         raise HTTPException(
             404,
-            f"No {data.platform} agent package is published yet. Drop the package into "
+            f"No {data.platform} {data.flavor} agent package is published yet. Drop the package into "
             f"{AGENT_PKG_DIR}/{data.platform}/ and publish it from this page.",
         )
     file_path = await asyncio.to_thread(_verified_package_path, data.platform, pkg)
@@ -2758,12 +2729,14 @@ async def download_preconfigured_package(
     )
 
 
-async def _latest_package_for_download(platform: str, db: AsyncSession) -> Optional[dict]:
+async def _latest_package_for_download(
+    platform: str, db: AsyncSession, flavor: str = FLAVOR_FULL,
+) -> Optional[dict]:
     row = (await db.execute(
         text("""SELECT * FROM agent_packages
-                WHERE platform = :p AND channel = 'stable' AND is_latest = TRUE
+                WHERE platform = :p AND channel = 'stable' AND flavor = :fl AND is_latest = TRUE
                 ORDER BY released_at DESC LIMIT 1"""),
-        {"p": platform},
+        {"p": platform, "fl": flavor},
     )).mappings().first()
     return dict(row) if row else None
 

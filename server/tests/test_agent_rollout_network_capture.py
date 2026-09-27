@@ -515,7 +515,7 @@ async def test_package_download_streams_exact_package_without_enrollment_secret(
     async def sync(_db):
         return {"added": [], "updated": [], "removed": []}
 
-    async def latest(_platform, _db):
+    async def latest(_platform, _db, _flavor="full"):
         return {
             "id": package_id,
             "file_name": package.name,
@@ -593,7 +593,7 @@ async def test_package_sync_detects_same_size_same_name_sha_change(tmp_path, mon
             if "FROM agent_packages" in sql and sql.lstrip().startswith("SELECT"):
                 return Result([{
                     "platform": "windows", "arch": "amd64", "version": "1.3.0",
-                    "channel": "stable", "file_name": package.name,
+                    "channel": "stable", "flavor": "full", "file_name": package.name,
                     "file_size": len(payload), "sha256": "0" * 64,
                 }])
             return Result()
@@ -632,7 +632,7 @@ async def test_package_sync_commits_latest_flag_repairs(tmp_path, monkeypatch):
             if "FROM agent_packages" in sql and sql.lstrip().startswith("SELECT"):
                 return Result([{
                     "platform": "windows", "arch": "amd64", "version": "1.3.0",
-                    "channel": "stable", "file_name": package.name,
+                    "channel": "stable", "flavor": "full", "file_name": package.name,
                     "file_size": len(payload), "sha256": digest,
                 }])
             if "is_latest IS DISTINCT FROM" in sql:
@@ -702,7 +702,7 @@ async def test_public_package_download_refuses_digest_mismatch(tmp_path, monkeyp
 
     monkeypatch.setattr(agents, "AGENT_PKG_DIR", package_root)
     with pytest.raises(HTTPException) as error:
-        await agents.download_latest_package("windows", "amd64", PackageDB())
+        await agents.download_latest_package("windows", "amd64", flavor="full", db=PackageDB())
     assert error.value.status_code == 409
     assert "integrity" in error.value.detail.lower()
 
@@ -727,7 +727,7 @@ async def test_authenticated_package_download_refuses_mismatch_before_token_mint
         return {"added": [], "updated": [], "removed": [],
                 "quarantined": [], "repaired": []}
 
-    async def latest(_platform, _db):
+    async def latest(_platform, _db, _flavor="full"):
         return published
 
     class PackageDB:
@@ -1366,3 +1366,62 @@ def test_capture_migrations_cover_live_upgrade_and_fresh_install():
         "migrate-051-network-capture-flow-classification-clickhouse.sql",
     ):
         assert hashlib.sha256((scripts / name).read_bytes()).hexdigest() == locked[name]
+
+
+@pytest.mark.asyncio
+async def test_package_sync_registers_each_flavour_once_with_its_own_latest(tmp_path, monkeypatch):
+    package_root = tmp_path / "agents"
+    windows = package_root / "windows"
+    windows.mkdir(parents=True)
+    for name in (
+        "zenplus-agent-1.12.10.exe",       # older full release
+        "zenplus-agent-1.13.0.exe",        # full: setup and MSI of one version
+        "zenplus-agent-1.13.0.msi",
+        "zenplus-agent-core-1.13.0.exe",   # core: setup and MSI of one version
+        "zenplus-agent-core-1.13.0.msi",
+        "zenplus-agent-1.12.4.msi.pre-update",
+    ):
+        (windows / name).write_bytes(name.encode())
+
+    class PackageDB:
+        def __init__(self):
+            self.inserts = []
+            self.commits = 0
+
+        async def execute(self, statement, params=None):
+            sql = str(statement)
+            if "FROM agent_packages" in sql and sql.lstrip().startswith("SELECT"):
+                return Result()
+            if "INSERT INTO agent_packages" in sql:
+                self.inserts.append(params)
+                return Result([(uuid4(),)])
+            return Result()
+
+        async def commit(self):
+            self.commits += 1
+
+    db = PackageDB()
+    monkeypatch.setattr(agents, "AGENT_PKG_DIR", package_root)
+    result = await servers.sync_agent_packages(db)
+
+    rows = {(p["fl"], p["v"]): p for p in db.inserts}
+    # One row per flavour and version, preferring the setup program over the
+    # MSI instead of quarantining the second file as hash drift.
+    assert sorted(rows) == [("core", "1.13.0"), ("full", "1.12.10"), ("full", "1.13.0")]
+    assert rows[("core", "1.13.0")]["fn"] == "zenplus-agent-core-1.13.0.exe"
+    assert rows[("full", "1.13.0")]["fn"] == "zenplus-agent-1.13.0.exe"
+    assert result["quarantined"] == []
+    # Latest is tracked per flavour.
+    assert rows[("core", "1.13.0")]["latest"] is True
+    assert rows[("full", "1.13.0")]["latest"] is True
+    assert rows[("full", "1.12.10")]["latest"] is False
+    # Full keeps the URL older agents were given; core has its own.
+    assert rows[("full", "1.13.0")]["dp"] == "/api/v1/agents/packages/windows/latest"
+    assert rows[("core", "1.13.0")]["dp"] == "/api/v1/agents/packages/windows/latest?flavor=core"
+
+
+def test_windows_bootstrap_installs_core_package_for_server_monitoring():
+    script = agents._INSTALL_PS1
+    assert '$InstallProfile -eq "infrastructure"' in script
+    assert "&flavor=$Flavor" in script
+    assert "latest?arch=$Arch&flavor=$Flavor" in script

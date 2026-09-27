@@ -614,3 +614,5 @@ class ServerMetricsResponse(BaseModel):
 class AgentPackageDownloadRequest(BaseModel):
     """Select an immutable package; authorization is appliance-managed."""
     platform: Literal["windows", "linux", "macos"] = "windows"
+    # "core" is server monitoring only; "full" adds the APM components.
+    flavor: Literal["core", "full"] = "full"
