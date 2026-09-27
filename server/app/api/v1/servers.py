@@ -66,7 +66,9 @@ from app.schemas.agent import (
     ServerResponse,
     ServerUpdate,
 )
+from app.services.host_metric_detail import query_server_metric_detail
 from app.services.host_metric_service import (
+    get_clickhouse_client,
     query_fleet_latest_metrics,
     query_latest_process_snapshot,
     query_process_history,
@@ -765,6 +767,35 @@ async def server_metrics(
         interval_s=interval_s,
         series=series,
     )
+
+
+@router.get("/{server_id}/metrics/detail")
+async def server_metric_detail(
+    server_id: UUID,
+    from_: Optional[datetime] = Query(None, alias="from"),
+    to: Optional[datetime] = None,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """CPU, memory, disk, filesystem and network breakdowns for the detail page."""
+    row = (await db.execute(
+        text("SELECT tags FROM servers WHERE id = :id"), {"id": server_id},
+    )).mappings().first()
+    # 404, not 403: out-of-scope ids must not be confirmable.
+    if not row or not scoping.entity_visible(row["tags"], await scoping.visible_tags(db, user)):
+        raise HTTPException(404, "Server not found")
+    to = to or datetime.now(timezone.utc)
+    from_ = from_ or to - timedelta(hours=1)
+    if from_ >= to:
+        raise HTTPException(400, "from must be before to")
+    try:
+        return await asyncio.to_thread(
+            query_server_metric_detail, get_clickhouse_client(), str(server_id), from_, to,
+        )
+    except Exception as exc:
+        logger.warning("server metric detail query failed: %s", exc)
+        # A store outage must not render as an idle host.
+        raise HTTPException(503, "Metric store unavailable")
 
 
 @router.get("/{server_id}/processes")
