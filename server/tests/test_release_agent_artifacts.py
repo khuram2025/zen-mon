@@ -101,3 +101,55 @@ def test_apm_bundle_builder_accepts_go_from_ci_path():
     assert "Get-Command go -ErrorAction SilentlyContinue" in script
     assert 'throw "Go was not found in .tools\\go or PATH"' in script
     assert "Portable Go toolchain is missing" not in script
+
+
+def test_stage_agent_artifacts_ships_both_windows_flavours(tmp_path, monkeypatch):
+    builder = _load_builder()
+    repo = tmp_path / "repo"
+    artifacts = tmp_path / "artifacts"
+    build = tmp_path / "build"
+    build.mkdir()
+    _write_agent_source(repo, "1.14.2")
+    names = [
+        "zenplus-agent-1.14.2.msi",
+        "zenplus-agent-1.14.2.exe",
+        "zenplus-agent-core-1.14.2.exe",
+        "zenplus-agent-core-1.14.2.msi",
+    ]
+    for name in names:
+        path = artifacts / "windows" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as package:
+            package.seek(1_000_000)
+            package.write(b"\0")
+    # An older version beside it is not shipped.
+    with (artifacts / "windows" / "zenplus-agent-core-1.14.1.exe").open("wb") as old:
+        old.seek(1_000_000)
+        old.write(b"\0")
+    monkeypatch.setattr(builder, "ZENPLUS_DIR", repo)
+
+    staged = builder.stage_agent_artifacts(build, artifacts)
+
+    assert sorted(item["file_name"] for item in staged) == sorted(names)
+    assert all(item["version"] == "1.14.2" for item in staged)
+    for name in names:
+        assert (build / "agent-artifacts" / "windows" / name).is_file()
+
+
+def test_stage_agent_artifacts_refuses_a_release_missing_a_flavour(tmp_path, monkeypatch):
+    builder = _load_builder()
+    repo = tmp_path / "repo"
+    artifacts = tmp_path / "artifacts"
+    build = tmp_path / "build"
+    build.mkdir()
+    _write_agent_source(repo, "1.14.2")
+    for name in ("zenplus-agent-1.14.2.msi", "zenplus-agent-1.14.2.exe"):
+        path = artifacts / "windows" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as package:
+            package.seek(1_000_000)
+            package.write(b"\0")
+    monkeypatch.setattr(builder, "ZENPLUS_DIR", repo)
+
+    with pytest.raises(RuntimeError, match="missing zenplus-agent-core-1.14.2.exe"):
+        builder.stage_agent_artifacts(build, artifacts)
