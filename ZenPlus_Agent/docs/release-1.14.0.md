@@ -117,3 +117,8 @@ Remaining validation: an interactive download-and-launch SmartScreen check
 requires signing in to the VM desktops. Valid Azure public signatures alone
 do not establish a warning-free SmartScreen result. The performance figures
 above remain build-host measurements, not production load measurements.
+
+Post-validation host incident: VMware Workstation became unresponsive and all
+three running VMs stopped answering network requests. Restarting the host UI
+preserved guest processes but did not restore access. Final live health checks
+are pending VMware recovery; no forced guest reset has been performed.
