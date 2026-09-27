@@ -100,10 +100,6 @@ function Invoke-Go {
   }
 }
 
-function Invoke-Rsrc {
-  Invoke-Go run github.com/akavel/rsrc@v0.10.2 @args
-}
-
 function Update-ApmBundleManifest {
   param([string]$Stage)
   $manifestPath = Join-Path $Stage "bundle-manifest.json"
@@ -330,15 +326,25 @@ try {
     throw "The APM bundle manifest must contain exactly one versioned zenplus-telemetry-gateway component"
   }
   $apmGatewayVersion = [string]$apmGatewayComponents[0].version
+  # Icon, manifest and version information (Zentryc LLC, ZenPlus Agent,
+  # version) for the service, dashboard and Setup executables.
+  $resources = @("cmd\zenplus-agent\rsrc.syso", "cmd\zenplus-agent-app\rsrc.syso", "cmd\zenplus-agent-installer\rsrc.syso")
   if ($UseExistingResources) {
-    foreach ($resource in @("cmd\zenplus-agent-app\rsrc.syso", "cmd\zenplus-agent-installer\rsrc.syso")) {
+    foreach ($resource in $resources) {
       if (-not (Test-Path $resource)) {
         throw "-UseExistingResources requires checked-in resource object $resource"
       }
+      # Resources from an older release would label these binaries with the
+      # wrong version in Explorer and Programs and Features.
+      $bytes = [IO.File]::ReadAllBytes((Resolve-Path $resource))
+      $even = [Text.Encoding]::Unicode.GetString($bytes)
+      $odd = [Text.Encoding]::Unicode.GetString($bytes, 1, $bytes.Length - 1)
+      if (-not ($even.Contains("$Version.0") -or $odd.Contains("$Version.0"))) {
+        throw "$resource does not carry version $Version; regenerate it with: go run .\scripts\winres"
+      }
     }
   } else {
-    Invoke-Rsrc -arch amd64 -ico "assets\zenplus-agent.ico" -manifest "cmd\zenplus-agent-app\zenplus-agent-app.manifest" -o "cmd\zenplus-agent-app\rsrc.syso"
-    Invoke-Rsrc -arch amd64 -ico "assets\zenplus-agent.ico" -manifest "cmd\zenplus-agent-installer\zenplus-agent-installer.manifest" -o "cmd\zenplus-agent-installer\rsrc.syso"
+    Invoke-Go run .\scripts\winres -root .
   }
   Invoke-Go build -trimpath -ldflags="-s -w$embedFlags" -o "dist\zenplus-agent.exe" ".\cmd\zenplus-agent"
   Invoke-Go build -trimpath -ldflags="-s -w -H=windowsgui$embedFlags" -o "dist\zenplus-agent-app.exe" ".\cmd\zenplus-agent-app"

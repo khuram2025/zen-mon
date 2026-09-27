@@ -35,7 +35,8 @@ import (
 
 const (
 	productName   = "ZenPlus Agent"
-	publisherName = "Zentryc"
+	// publisherName matches the code-signing certificate subject.
+	publisherName = "Zentryc LLC"
 	serviceName   = "ZenPlusAgent"
 )
 

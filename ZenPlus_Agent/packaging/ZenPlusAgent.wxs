@@ -5,7 +5,7 @@
     Name="ZenPlus Agent"
     Language="1033"
     Version="$(var.ProductVersion)"
-    Manufacturer="Zentryc"
+    Manufacturer="Zentryc LLC"
     UpgradeCode="a605ea5d-025b-44c5-8823-3aa58eb66a21">
 
     <Package
