@@ -790,3 +790,60 @@ func TestDeploymentArtifactSelectsHostedApplication(t *testing.T) {
 		t.Fatalf("invalid deployment fingerprint %q modified=%v", fingerprint, modified)
 	}
 }
+
+func TestCollectorConfigRefusesExpansionInIdentifiers(t *testing.T) {
+	paths := agentruntime.NewPaths(t.TempDir())
+	if err := paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	m := New(paths, func(string, ...any) {})
+	cfg := config.Default()
+	cfg.ControllerURL = "https://controller.example"
+	for _, id := range []string{`${file:C:\Windows\win.ini}`, "${env:ZENPLUS_APM_KEY}", "", "a b", "id\nkey: value"} {
+		if _, _, err := m.ensureConfig(cfg, id, "server-id"); err == nil {
+			t.Errorf("agent id %q accepted", id)
+		}
+		if _, _, err := m.ensureConfig(cfg, "agent-id", id); err == nil {
+			t.Errorf("server id %q accepted", id)
+		}
+	}
+	if _, _, err := m.ensureConfig(cfg, "3f1c9a52-7d7e-4c1b-9a51-0d2b6f3e8a10", "srv_01.prod:eu-1"); err != nil {
+		t.Fatalf("valid identifiers rejected: %v", err)
+	}
+}
+
+// Release validation: the generated config must load in the shipped gateway,
+// including a "$" in a path that would otherwise start an expansion.
+func TestGeneratedCollectorConfigValidatesInGateway(t *testing.T) {
+	gateway := os.Getenv("ZENPLUS_GATEWAY_EXE")
+	if gateway == "" {
+		t.Skip("set ZENPLUS_GATEWAY_EXE to the zenplus-telemetry-gateway.exe under test")
+	}
+	paths := agentruntime.NewPaths(filepath.Join(t.TempDir(), "state${ZENPLUS_UNSET}$dir"))
+	if err := paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	m := New(paths, func(string, ...any) {})
+	cfg := config.Default()
+	cfg.ControllerURL = "https://controller.example"
+	if _, _, err := m.ensureConfig(cfg, "3f1c9a52-7d7e-4c1b-9a51-0d2b6f3e8a10", "server-1"); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(gateway, "validate", "--config", "file:"+paths.APMConfig)
+	cmd.Env = append(os.Environ(), "ZENPLUS_APM_KEY=zp_test")
+	if out, err := cmd.CombinedOutput(); err != nil || len(strings.TrimSpace(string(out))) > 0 {
+		t.Fatalf("gateway rejected generated config: err=%v\n%s", err, out)
+	}
+}
+
+func TestQuoteYAMLEscapesCollectorExpansion(t *testing.T) {
+	for in, want := range map[string]string{
+		`C:\ProgramData\ZenPlus\Agent\apm`: `"C:\\ProgramData\\ZenPlus\\Agent\\apm"`,
+		`${file:C:\secret.txt}`:            `"$${file:C:\\secret.txt}"`,
+		`a$b$$c`:                           `"a$$b$$$$c"`,
+	} {
+		if got := quoteYAML(in); got != want {
+			t.Errorf("quoteYAML(%q) = %s, want %s", in, got, want)
+		}
+	}
+}

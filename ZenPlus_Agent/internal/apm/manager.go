@@ -248,6 +248,9 @@ func (m *Manager) ensureConfig(cfg config.Config, agentID, serverID string) (str
 	if bind != "127.0.0.1" && bind != "::1" {
 		return "", false, fmt.Errorf("refusing non-loopback OTLP bind address %q", bind)
 	}
+	if !gatewayIdentifier.MatchString(agentID) || !gatewayIdentifier.MatchString(serverID) {
+		return "", false, fmt.Errorf("refusing APM gateway config: agent or server identifier has an unexpected format")
+	}
 	endpoint := strings.TrimRight(cfg.ControllerURL, "/")
 	tlsSettings := fmt.Sprintf("      insecure_skip_verify: %t", !cfg.VerifyTLS)
 	if caFile := strings.TrimSpace(cfg.Security.ControllerCAFile); caFile != "" {
@@ -1336,7 +1339,18 @@ func normalizedAPMBind(value string) string {
 	return value
 }
 
-func quoteYAML(value string) string { return strconv.Quote(value) }
+// quoteYAML renders a literal collector config string. The collector expands
+// ${...} references (file:, env:, yaml:) inside every value, so a literal "$"
+// is written as "$$". Without that, a controller-supplied identifier such as
+// "${file:C:\...}" would make the SYSTEM gateway read a local file and export
+// its contents as a span attribute.
+func quoteYAML(value string) string {
+	return strconv.Quote(strings.ReplaceAll(value, "$", "$$"))
+}
+
+// gatewayIdentifier matches the controller's UUID and slug identifiers.
+var gatewayIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+
 func netJoin(host string, port int) string {
 	if strings.Contains(host, ":") {
 		return fmt.Sprintf("[%s]:%d", host, port)
