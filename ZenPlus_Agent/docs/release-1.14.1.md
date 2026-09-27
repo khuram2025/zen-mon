@@ -31,6 +31,12 @@ Upgrade and presentation release. Includes every 1.14.0 change.
   with internal certificates no longer show a false "Controller unreachable".
 - The APM tiles are hidden on server-monitoring-only installs.
 - The Updates tile shows an appliance-requested upgrade and its result.
+- The status card shows a rendered status disc (check, alert, cross,
+  waiting, stopped), and the full profile name (it read "Server
+  monitoring +").
+- An unreachable controller is described plainly (data is buffered
+  locally; the saved configuration stays in use) instead of raw network
+  errors.
 
 ## Controller (same release branch)
 
@@ -53,3 +59,14 @@ Upgrade and presentation release. Includes every 1.14.0 change.
 - Controllers without this release ignore the `version` parameter. A pinned
   upgrade then falls back to the public channel only if its latest release
   is the requested version.
+
+## Packages (SHA-256)
+
+All four are Authenticode-signed by Zentryc LLC and timestamped.
+
+| File | SHA-256 |
+| --- | --- |
+| `zenplus-agent-core-1.14.1.exe` | `e4a91f9e6b042ea5983a2a326d7b534356ab5dc2a7e6f76072f82123bb717750` |
+| `zenplus-agent-core-1.14.1.msi` | `4120f56519498a5bf65ec92c8f20b0c4f2a01e6845e9a0b2c0db670454ff91ab` |
+| `zenplus-agent-1.14.1.exe` | `65f4f281ca8d9126c18ae0f13feadc22c06587c008d7a99e1f7c0b4b5a720787` |
+| `zenplus-agent-1.14.1.msi` | `08a9b29f7344d8ece4eb8c17c6cfa90c773547b3e9fe1ece21d9e377f318e89d` |
