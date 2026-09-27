@@ -53,11 +53,15 @@ type appUI struct {
 	window *walk.MainWindow
 	tray   *walk.NotifyIcon
 
-	statusBadge   *walk.Label
+	statusBadge *walk.ImageView
+	// statusGlyphs caches the rendered status discs; glyph is the one shown.
+	statusGlyphs  map[brand.Glyph]walk.Image
+	glyph         brand.Glyph
+	glyphShown    bool
 	topStatus     *walk.Label
 	topConnection *walk.Label
 	topSeparator  *walk.Label
-	profileLine   *walk.Label
+	profileLine   *walk.TextLabel
 	// apmTiles are hidden on a server-monitoring-only installation.
 	apmTiles [4]*walk.Composite
 	// trayIcons caches the status variants of the tray icon.
@@ -280,15 +284,12 @@ func (a *appUI) statusCard() Widget {
 		MaxSize:    Size{Height: 96},
 		Layout:     HBox{Margins: Margins{Left: 14, Top: 11, Right: 14, Bottom: 11}, Spacing: 14},
 		Children: []Widget{
-			Label{
-				AssignTo:      &a.statusBadge,
-				Text:          "…",
-				MinSize:       Size{Width: 54, Height: 54},
-				MaxSize:       Size{Width: 54, Height: 54},
-				Background:    SolidColorBrush{Color: surface2},
-				TextColor:     muted,
-				Font:          Font{Family: "Segoe UI Symbol", PointSize: 20, Bold: true},
-				TextAlignment: AlignCenter,
+			ImageView{
+				AssignTo:   &a.statusBadge,
+				Mode:       ImageViewModeIdeal,
+				MinSize:    Size{Width: 48, Height: 48},
+				MaxSize:    Size{Width: 48, Height: 48},
+				Background: SolidColorBrush{Color: surface},
 			},
 			Composite{
 				Background:    SolidColorBrush{Color: surface},
@@ -296,7 +297,10 @@ func (a *appUI) statusCard() Widget {
 				Layout:        VBox{Margins: Margins{Left: 0, Top: 2, Right: 0, Bottom: 0}, Spacing: 6},
 				Children: []Widget{
 					Label{AssignTo: &a.hostName, Text: "Windows host", TextColor: text, Font: Font{Family: "Segoe UI", PointSize: 12, Bold: true}},
-					Label{AssignTo: &a.profileLine, Text: "Server monitoring", MinSize: Size{Width: 320}, TextColor: muted, Font: Font{Family: "Segoe UI", PointSize: 10, Bold: true}},
+					// A TextLabel, not a Label: walk sizes a Label to its measured text,
+					// which came out a few pixels short for this bold font, so Windows
+					// wrapped "APM" onto a hidden second line.
+					TextLabel{AssignTo: &a.profileLine, Text: "Server monitoring", MinSize: Size{Width: 320}, TextColor: muted, Font: Font{Family: "Segoe UI", PointSize: 10, Bold: true}},
 					Label{AssignTo: &a.actionStatus, Text: "Agent status is loading.", TextColor: muted, Font: Font{Family: "Segoe UI", PointSize: 9}},
 				},
 			},
@@ -973,8 +977,7 @@ func (a *appUI) applySnapshot(snap appstate.Snapshot) {
 	}
 	serviceLine := serviceText(snap.Service)
 
-	a.set(a.statusBadge, badgeText(health, healthTone))
-	a.color(a.statusBadge, healthColor)
+	a.setStatusGlyph(statusGlyphFor(snap, health, healthTone))
 	a.set(a.topStatus, health)
 	a.color(a.topStatus, healthColor)
 	// Show the connection only when it adds something to the health text
@@ -988,7 +991,9 @@ func (a *appUI) applySnapshot(snap appstate.Snapshot) {
 	}
 	a.color(a.topConnection, controllerColor)
 	showAPM := snap.Config.MonitoringProfile != "infrastructure" && apmComponentsInstalled()
-	a.set(a.profileLine, friendlyProfile(snap.Config.MonitoringProfile))
+	if a.profileLine != nil && a.profileLine.Text() != friendlyProfile(snap.Config.MonitoringProfile) {
+		_ = a.profileLine.SetText(friendlyProfile(snap.Config.MonitoringProfile))
+	}
 	for _, tile := range a.apmTiles {
 		if tile != nil {
 			if tile.Visible() != showAPM {
@@ -1183,6 +1188,10 @@ func statusSummary(s appstate.Snapshot, started string, controllerDetail string)
 			return fmt.Sprintf("Monitoring active | Last heartbeat %s | Started %s", appstate.TimeAgo(s.Status.LastHeartbeat), started)
 		}
 		if s.Status.LastHeartbeatError != "" {
+			// The raw error is in agent.log; say what it means instead.
+			if isConnectivityError(s.Status.LastHeartbeatError) {
+				return "The controller is not responding. Monitoring data is being buffered locally."
+			}
 			return "Connection problem: " + compactMiddle(s.Status.LastHeartbeatError, 92)
 		}
 	}
@@ -1206,20 +1215,45 @@ func toneColor(tone string) walk.Color {
 	}
 }
 
-// badgeText is the symbol in the status card; the words beside it carry the
-// detail, so the badge stays a quick visual cue.
-func badgeText(health string, tone string) string {
+// statusGlyphFor is the symbol in the status card; the words beside it carry
+// the detail, so the badge stays a quick visual cue.
+func statusGlyphFor(snap appstate.Snapshot, health string, tone string) brand.Glyph {
+	if snap.Service.Installed && !snap.Service.Running {
+		return brand.GlyphStopped
+	}
 	switch health {
 	case "Pending authorization", "Connecting", "Waiting for agent":
-		return "…"
+		return brand.GlyphPending
 	}
 	switch tone {
 	case "ok":
-		return "✓"
+		return brand.GlyphCheck
 	case "warn":
-		return "!"
+		return brand.GlyphAlert
 	default:
-		return "✕"
+		return brand.GlyphCross
+	}
+}
+
+// setStatusGlyph swaps the status disc only when it changes.
+func (a *appUI) setStatusGlyph(g brand.Glyph) {
+	if a.statusBadge == nil || (a.glyphShown && g == a.glyph) {
+		return
+	}
+	if a.statusGlyphs == nil {
+		a.statusGlyphs = map[brand.Glyph]walk.Image{}
+	}
+	img, ok := a.statusGlyphs[g]
+	if !ok {
+		bitmap, err := walk.NewBitmapFromImageForDPI(brand.StatusGlyph(48, g), 96)
+		if err != nil {
+			return
+		}
+		img = bitmap
+		a.statusGlyphs[g] = img
+	}
+	if a.statusBadge.SetImage(img) == nil {
+		a.glyph, a.glyphShown = g, true
 	}
 }
 
@@ -1274,6 +1308,11 @@ func collectorIssueLine(status *model.Status) (string, walk.Color) {
 		return "Waiting for agent status", amber
 	}
 	if status.LastConfigError != "" {
+		// An unreachable controller is already the headline; the agent keeps
+		// collecting with its saved configuration meanwhile.
+		if isConnectivityError(status.LastConfigError) {
+			return "Using saved configuration until the controller responds", amber
+		}
 		return "Configuration: " + status.LastConfigError, red
 	}
 	if len(status.CollectorErrors) == 0 {
@@ -1420,4 +1459,20 @@ func applianceUpdateText(status *model.Status) (string, string, bool) {
 		return "Updated from " + u.FromVersion, "ok", true
 	}
 	return "", "", false
+}
+
+// isConnectivityError reports whether err only says the controller could not
+// be reached, as opposed to a rejected or invalid configuration.
+func isConnectivityError(err string) bool {
+	lower := strings.ToLower(err)
+	for _, s := range []string{
+		"failed to respond", "dial tcp", "connection refused", "no such host",
+		"i/o timeout", "context deadline exceeded", "timeout awaiting",
+		"network is unreachable", "connection reset", "forcibly closed",
+	} {
+		if strings.Contains(lower, s) {
+			return true
+		}
+	}
+	return false
 }

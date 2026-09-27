@@ -34,3 +34,31 @@ func TestMarkSizesAndTrayBadges(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusGlyphs(t *testing.T) {
+	for _, g := range []Glyph{GlyphCheck, GlyphAlert, GlyphCross, GlyphPending, GlyphStopped} {
+		img := StatusGlyph(48, g)
+		if img.Bounds().Dx() != 48 {
+			t.Fatalf("glyph %d is %d px", g, img.Bounds().Dx())
+		}
+		// The corner stays transparent; the rim carries the status colour.
+		if _, _, _, a := img.At(0, 0).RGBA(); a != 0 {
+			t.Fatalf("glyph %d corner is not transparent", g)
+		}
+		want := glyphColors[g]
+		r, gg, b, _ := img.At(24, 3).RGBA()
+		if uint8(r>>8) != want.R || uint8(gg>>8) != want.G || uint8(b>>8) != want.B {
+			t.Fatalf("glyph %d rim colour = %d,%d,%d", g, r>>8, gg>>8, b>>8)
+		}
+	}
+	if dir := os.Getenv("ZENPLUS_BRAND_PREVIEW"); dir != "" {
+		for name, g := range map[string]Glyph{"check": GlyphCheck, "alert": GlyphAlert, "cross": GlyphCross, "pending": GlyphPending, "stopped": GlyphStopped} {
+			f, err := os.Create(filepath.Join(dir, "glyph-"+name+".png"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = png.Encode(f, StatusGlyph(96, g))
+			f.Close()
+		}
+	}
+}
