@@ -31,6 +31,14 @@ See `deployment.md` for the build → publish → install flow.
 - Verify signatures with `Get-AuthenticodeSignature`.
 - Confirm an unsigned build fails the production workflow before publication.
 - Confirm the public manifest requires Authenticode and points only to immutable HTTPS release URLs.
+- Self-update accepts only packages whose validated chain has the Zentryc LLC
+  subject, the Trusted Signing identity EKU in
+  `internal/selfupdate/signer.go`, and the Microsoft Identity Verification
+  root. Run `go test ./internal/selfupdate -run Pins` on a host with a signed
+  install. If the Trusted Signing identity validation is ever renewed or
+  replaced (the EKU OID changes), first ship a release signed with the *old*
+  identity that adds the new OID to `trustedSignerIdentityEKUs`; otherwise
+  deployed agents will refuse every later update.
 
 ## Installer QA
 
