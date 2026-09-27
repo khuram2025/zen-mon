@@ -5,10 +5,13 @@ package collectors
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/shirou/gopsutil/v4/process"
 
 	"zenplus-agent/internal/config"
 )
@@ -155,5 +158,45 @@ func TestCPUCollectionNeedsNoSamplingSleepAfterTheFirst(t *testing.T) {
 	}
 	if total := data["cpu_total_pct"].(float64); total < 0 || total > 100 {
 		t.Fatalf("cpu_total_pct = %v", total)
+	}
+}
+
+func TestProcessSnapshotMatchesPerProcessQueries(t *testing.T) {
+	snapshot, err := processSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pids, err := process.Pids()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Processes come and go between the two reads, and PID 0 is omitted.
+	if diff := len(snapshot) - len(pids); diff < -10 || diff > 10 {
+		t.Fatalf("snapshot has %d processes, the system reports %d", len(snapshot), len(pids))
+	}
+	self := int32(os.Getpid())
+	var entry *processSnapshotEntry
+	for i := range snapshot {
+		if snapshot[i].PID == self {
+			entry = &snapshot[i]
+		}
+		if snapshot[i].PID == 0 {
+			t.Fatal("snapshot includes the idle process")
+		}
+	}
+	if entry == nil {
+		t.Fatal("snapshot is missing the test process")
+	}
+	p, err := process.NewProcess(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, _ := p.Name()
+	created, _ := p.CreateTime()
+	if !strings.EqualFold(entry.Name, name) || entry.CreatedMs != created {
+		t.Fatalf("snapshot %+v disagrees with gopsutil name=%q created=%d", *entry, name, created)
+	}
+	if entry.Threads <= 0 || entry.Handles <= 0 || entry.RSS == 0 {
+		t.Fatalf("snapshot counters missing: %+v", *entry)
 	}
 }

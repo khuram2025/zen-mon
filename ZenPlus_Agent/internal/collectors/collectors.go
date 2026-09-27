@@ -16,7 +16,6 @@ import (
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/mem"
 	gnet "github.com/shirou/gopsutil/v4/net"
-	"github.com/shirou/gopsutil/v4/process"
 
 	"zenplus-agent/internal/config"
 	"zenplus-agent/internal/model"
@@ -456,7 +455,7 @@ func collectProcesses(ctx context.Context, topN int, watchlist []string, add fun
 	if topN <= 0 {
 		topN = 10
 	}
-	procs, err := process.ProcessesWithContext(ctx)
+	snapshot, err := processSnapshot(ctx)
 	if err != nil {
 		errs["process"] = err.Error()
 		return
@@ -470,49 +469,34 @@ func collectProcesses(ctx context.Context, topN int, watchlist []string, add fun
 		numCPU = 1
 	}
 	dt := now.Sub(prevAt).Seconds()
-	current := make(map[procCPUKey]float64, len(procs))
+	current := make(map[procCPUKey]float64, len(snapshot))
 
-	items := make([]processSample, 0, len(procs))
-	for _, p := range procs {
-		name, _ := p.NameWithContext(ctx)
-		name = truncateUTF8Bytes(strings.TrimSpace(name), maxProcessTextBytes)
+	items := make([]processSample, 0, len(snapshot))
+	for _, p := range snapshot {
+		name := truncateUTF8Bytes(strings.TrimSpace(p.Name), maxProcessTextBytes)
 		if name == "" {
 			continue
 		}
-		memInfo, _ := p.MemoryInfoWithContext(ctx)
-		threads, _ := p.NumThreadsWithContext(ctx)
-		handles, _ := p.NumFDsWithContext(ctx)
-		userName, _ := p.UsernameWithContext(ctx)
-		var rss uint64
-		if memInfo != nil {
-			rss = memInfo.RSS
-		}
-
 		// CPU as a rate over the sampling interval, normalised to the whole
 		// machine (0-100 across all cores) so it is comparable with
 		// cpu_total_pct on the dashboard.
 		var cpuPct float64
-		createdMs, _ := p.CreateTimeWithContext(ctx)
-		key := procCPUKey{PID: p.Pid, CreatedMs: createdMs}
-		if times, err := p.TimesWithContext(ctx); err == nil && times != nil {
-			busy := times.User + times.System
-			current[key] = busy
-			if before, ok := prev[key]; ok && dt > 0 && busy >= before {
-				cpuPct = clampPct((busy - before) / dt / float64(numCPU) * 100)
-			} else if !prevAt.IsZero() {
-				cpuPct = 0
-			} else {
-				// First sample after start: no baseline yet, fall back to the
-				// lifetime average so the very first report is not all zeros.
-				lifetime, _ := p.CPUPercentWithContext(ctx)
-				cpuPct = clampPct(lifetime / float64(numCPU))
+		key := procCPUKey{PID: p.PID, CreatedMs: p.CreatedMs}
+		current[key] = p.CPUSeconds
+		if before, ok := prev[key]; ok && dt > 0 && p.CPUSeconds >= before {
+			cpuPct = clampPct((p.CPUSeconds - before) / dt / float64(numCPU) * 100)
+		} else if !prevAt.IsZero() {
+			cpuPct = 0
+		} else if p.CreatedMs > 0 {
+			// First sample after start: no baseline yet, fall back to the
+			// lifetime average so the very first report is not all zeros.
+			if lifetime := now.Sub(time.UnixMilli(p.CreatedMs)).Seconds(); lifetime > 0 {
+				cpuPct = clampPct(p.CPUSeconds / lifetime / float64(numCPU) * 100)
 			}
 		}
 		items = append(items, processSample{
-			process: p, PID: p.Pid, Name: name, CPUPercent: cpuPct, RSS: rss,
-			Threads: threads, Handles: handles,
-			UserName:  truncateUTF8Bytes(strings.TrimSpace(userName), maxProcessTextBytes),
-			CreatedMs: createdMs,
+			PID: p.PID, Name: name, CPUPercent: cpuPct, RSS: p.RSS,
+			Threads: p.Threads, Handles: p.Handles, CreatedMs: p.CreatedMs,
 		})
 	}
 	procState.cpu = current
@@ -565,6 +549,9 @@ func collectProcesses(ctx context.Context, topN int, watchlist []string, add fun
 		return ordered[i].CPUPercent > ordered[j].CPUPercent
 	})
 	for _, item := range ordered {
+		// User name and command line need per-process queries, so they are
+		// read only for the handful of processes actually reported.
+		enrichProcessSample(ctx, &item)
 		data := map[string]any{
 			"process_name": item.Name,
 			"pid":          int(item.PID),
