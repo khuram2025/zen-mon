@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -57,15 +56,6 @@ type gatewayMetricSnapshot struct {
 	gatewayMetricTotals
 	QueueSize      int64
 	QueueSizeKnown bool
-}
-
-type rotatingGatewayLog struct {
-	mu       sync.Mutex
-	path     string
-	maxBytes int64
-	backups  int
-	file     *os.File
-	size     int64
 }
 
 type Manager struct {
@@ -431,7 +421,7 @@ func (m *Manager) ensureStarted(
 	if _, err := os.Stat(binary); err != nil {
 		return fmt.Errorf("managed telemetry gateway is not installed: %s", binary)
 	}
-	logWriter, err := newRotatingGatewayLog(m.paths.APMLog, gatewayLogMaxBytes, gatewayLogBackups)
+	logWriter, err := agentruntime.OpenRotatingFile(m.paths.APMLog, gatewayLogMaxBytes, gatewayLogBackups)
 	if err != nil {
 		return fmt.Errorf("open managed telemetry gateway log: %w", err)
 	}
@@ -725,123 +715,6 @@ func directorySize(root string) int64 {
 		return nil
 	})
 	return size
-}
-
-func newRotatingGatewayLog(path string, maxBytes int64, backups int) (*rotatingGatewayLog, error) {
-	if err := rotateGatewayLog(path, maxBytes, backups); err != nil {
-		return nil, err
-	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	size := int64(0)
-	if info, err := file.Stat(); err == nil {
-		size = info.Size()
-	}
-	return &rotatingGatewayLog{path: path, maxBytes: maxBytes, backups: backups, file: file, size: size}, nil
-}
-
-func (w *rotatingGatewayLog) Size() int64 {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.size
-}
-
-func (w *rotatingGatewayLog) Write(data []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.file == nil {
-		return 0, os.ErrClosed
-	}
-	written := 0
-	for len(data) > 0 {
-		if w.size >= w.maxBytes {
-			if err := w.rotateLocked(); err != nil {
-				return written, err
-			}
-		}
-		remaining := w.maxBytes - w.size
-		chunk := data
-		if int64(len(chunk)) > remaining {
-			chunk = chunk[:remaining]
-		}
-		n, err := w.file.Write(chunk)
-		written += n
-		w.size += int64(n)
-		data = data[n:]
-		if err != nil {
-			return written, err
-		}
-		if n == 0 {
-			return written, io.ErrShortWrite
-		}
-	}
-	return written, nil
-}
-
-func (w *rotatingGatewayLog) rotateLocked() error {
-	if err := w.file.Close(); err != nil {
-		return err
-	}
-	w.file = nil
-	if err := rotateGatewayLog(w.path, w.maxBytes, w.backups); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	w.file = file
-	w.size = 0
-	return nil
-}
-
-func (w *rotatingGatewayLog) Close() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.file == nil {
-		return nil
-	}
-	err := w.file.Close()
-	w.file = nil
-	return err
-}
-
-func rotateGatewayLog(path string, maxBytes int64, backups int) error {
-	if strings.TrimSpace(path) == "" || maxBytes <= 0 || backups < 1 {
-		return fmt.Errorf("invalid gateway log rotation settings")
-	}
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("gateway log is not a regular file")
-	}
-	if info.Size() < maxBytes {
-		return nil
-	}
-	for index := backups; index >= 1; index-- {
-		destination := fmt.Sprintf("%s.%d", path, index)
-		if err := os.Remove(destination); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		if index == 1 {
-			if err := os.Rename(path, destination); err != nil {
-				return err
-			}
-			continue
-		}
-		source := fmt.Sprintf("%s.%d", path, index-1)
-		if err := os.Rename(source, destination); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-	}
-	return nil
 }
 
 func classifyGatewayLogChunk(chunk string) (authRejected, exportFailed bool) {

@@ -8,9 +8,16 @@ import (
 	"regexp"
 )
 
+// The agent log rotates at logMaxBytes and keeps logBackups older files, so
+// it can never use more than about 40 MB however long the agent runs.
+const (
+	logMaxBytes = 10 * 1024 * 1024
+	logBackups  = 3
+)
+
 type Logger struct {
 	*log.Logger
-	file *os.File
+	file *RotatingFile
 }
 
 func NewLogger(path string, mirrorStdout bool) (*Logger, error) {
@@ -20,7 +27,7 @@ func NewLogger(path string, mirrorStdout bool) (*Logger, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := OpenRotatingFile(path, logMaxBytes, logBackups)
 	if err != nil {
 		return nil, err
 	}
