@@ -16,6 +16,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.snmp_oid import display_oid
 from app.core.security import get_current_user, require_operator_user
 from app.models.device import Device
 from app.models.discovery_v2 import (
@@ -44,6 +45,7 @@ from app.schemas.discovery_v2 import (
     ImportResponse,
 )
 from app.services.audit_service import write_audit_log
+from app.services.device_service import apply_credential
 from app.services.discovery_executor import (
     cancel_run,
     expand_targets,
@@ -811,6 +813,10 @@ async def import_results(
     run = await db.get(DiscoveryRun, run_id)
     if not run:
         raise HTTPException(404, "Run not found")
+    profile = await db.get(DiscoveryProfile, run.profile_id) if run.profile_id else None
+    # The dialog leaves location blank by default; the profile's location is
+    # the operator's stated intent for everything this scan finds.
+    import_location = payload.location or (profile.default_location if profile else None)
 
     batch = DiscoveryImportBatch(
         run_id=run_id,
@@ -878,7 +884,7 @@ async def import_results(
                     sys_object_id = COALESCE(:oid, sys_object_id),
                     vendor = COALESCE(:vendor, vendor), model = COALESCE(:model, model),
                     os_version = COALESCE(:os_version, os_version)
-                    WHERE id = :id'''), {'id': existing_dev[0], 'oid': result.sys_object_id,
+                    WHERE id = :id'''), {'id': existing_dev[0], 'oid': display_oid(result.sys_object_id),
                     'vendor': result.vendor, 'model': result.model, 'os_version': result.os_version})
                 created_device_id = existing_dev[0]  # links the import result; not counted as a new node
                 report['updated_existing'] = True
@@ -891,14 +897,14 @@ async def import_results(
                         hostname=hostname,
                         ip_address=str(result.ip_address),
                         device_type=result.device_type or "other",
-                        location=payload.location,
+                        location=import_location,
                         group_id=payload.group_id or result.suggested_group_id,
                         tags=payload.tags or result.suggested_tags or [],
                         ping_enabled=payload.enable_monitoring,
                         ping_interval=payload.ping_interval,
                         snmp_enabled=bool(payload.enable_monitoring and (payload.snmp_credential_id or result.credential_used)),
                         snmp_credential_id=payload.snmp_credential_id or result.credential_used,
-                        sys_object_id=result.sys_object_id,
+                        sys_object_id=display_oid(result.sys_object_id),
                         vendor=result.vendor,
                         model=result.model,
                         os_version=result.os_version,
@@ -906,6 +912,10 @@ async def import_results(
                         status="unknown",
                         created_by=user.id,
                     )
+                    # Copy the credential onto the device row exactly like
+                    # Add Device does; the poller polls from these columns.
+                    if device.snmp_credential_id:
+                        await apply_credential(db, device, device.snmp_credential_id)
                     async with db.begin_nested():
                         db.add(device)
                         await db.flush()

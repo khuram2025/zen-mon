@@ -18,14 +18,16 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.crypto import encrypt_text, decrypt_secret
 from app.core.security import require_admin_user
+from app.models.device import Device
 from app.models.user import User
 from app.services.audit_service import write_audit_log
+from app.services.device_service import apply_credential
 
 router = APIRouter(prefix="/snmp-credentials", tags=["SNMP Credentials"])
 
@@ -77,6 +79,8 @@ class CredentialResponse(BaseModel):
     description: Optional[str]
     snmp_version: str
     community: Optional[str]
+    # The community is never returned; this says whether one is stored.
+    has_community: bool = False
     v3_username: Optional[str]
     v3_context: Optional[str]
     v3_security_level: Optional[str]
@@ -101,6 +105,16 @@ class AssignRequest(BaseModel):
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
+async def _reapply_to_devices(db: AsyncSession, cred_id: uuid.UUID, device_ids: list[uuid.UUID] | None = None) -> None:
+    """Copy the credential onto linked device rows — the poller reads SNMP
+    auth from the devices table, so a link alone polls with a blank
+    community."""
+    query = select(Device).where(Device.snmp_credential_id == cred_id)
+    if device_ids is not None:
+        query = query.where(Device.id.in_(device_ids))
+    for device in (await db.execute(query)).scalars():
+        await apply_credential(db, device, cred_id)
+
 def _row_to_response(r: dict) -> CredentialResponse:
     return CredentialResponse(
         id=str(r["id"]),
@@ -108,6 +122,7 @@ def _row_to_response(r: dict) -> CredentialResponse:
         description=r.get("description"),
         snmp_version=r["snmp_version"],
         community=None,
+        has_community=bool(r.get("community")),
         v3_username=r.get("v3_username"),
         v3_context=r.get("v3_context"),
         v3_security_level=r.get("v3_security_level"),
@@ -246,6 +261,7 @@ async def update_credential(
         await db.execute(text("UPDATE snmp_credentials SET is_default = FALSE WHERE is_default = TRUE AND id != :id"), {"id": cred_id})
 
     await db.execute(text(f"UPDATE snmp_credentials SET {', '.join(sets)} WHERE id = :id"), params)
+    await _reapply_to_devices(db, cred_id)
     audit_fields = sorted(k for k in update_data.keys() if "passphrase" not in k and k != "community")
     await write_audit_log(
         db,
@@ -303,6 +319,7 @@ async def assign_credential(
             {"cid": cred_id, "ids": uuids},
         )
         d_count = res.rowcount
+        await _reapply_to_devices(db, cred_id, uuids)
 
     if data.group_ids:
         uuids = [uuid.UUID(g) for g in data.group_ids]

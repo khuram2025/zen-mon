@@ -86,6 +86,8 @@ class Device(Base):
     )
     poll_mode: Mapped[str] = mapped_column(String(20), default="direct")
     serial_number: Mapped[str] = mapped_column(String(128), nullable=True)
+    # Chassis entPhysicalFirmwareRev, copied by the poller (migrate-126).
+    firmware_version: Mapped[str] = mapped_column(String(128), nullable=True)
     managed_ip: Mapped[str] = mapped_column(INET, nullable=True)
     managed_source: Mapped[str] = mapped_column(String(64), nullable=True)
     managed_instance: Mapped[str] = mapped_column(String(160), nullable=True)

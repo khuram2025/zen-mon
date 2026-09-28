@@ -18,6 +18,8 @@ from __future__ import annotations
 import re
 from typing import Any, Optional
 
+from app.core.snmp_oid import display_oid, normalize_oid
+
 
 # ────────────────────────────────────────────────────────────────────
 # sysObjectID prefix → vendor (subset; expand as needed)
@@ -59,6 +61,11 @@ _SYS_OBJECT_PREFIXES: list[tuple[str, str, str]] = [
 # sysDescr patterns → enrichment
 # ────────────────────────────────────────────────────────────────────
 _SYS_DESCR_PATTERNS: list[tuple[re.Pattern, dict[str, str]]] = [
+    # Catalyst / Nexus families are switches; the broad Cisco enterprise
+    # prefix would otherwise classify every Cisco box as a router.
+    (re.compile(r"\b(C29[4-7][05]|C35[56]0|C3650|C37[05]0|C38[45]0|C45\d\d|C49\d\d|C65\d\d|C68\d\d|C9[2-6]00)"
+                r"|CAT[349]K|Catalyst|Switch Software|Nexus", re.I),
+                                              {"vendor": "Cisco", "device_type": "switch"}),
     (re.compile(r"Cisco IOS-XE", re.I),       {"vendor": "Cisco", "os": "IOS-XE"}),
     (re.compile(r"Cisco IOS", re.I),          {"vendor": "Cisco", "os": "IOS"}),
     (re.compile(r"Cisco NX-OS", re.I),        {"vendor": "Cisco", "os": "NX-OS"}),
@@ -333,7 +340,7 @@ def identify(probes: dict[str, Any], protocols_requested: list[str]) -> dict[str
         if "snmp" not in out["protocols_detected"]:
             out["protocols_detected"].append("snmp")
         d = snmp_r["data"]
-        out["sys_object_id"] = out["sys_object_id"] or d.get("sys_object_id")
+        out["sys_object_id"] = out["sys_object_id"] or display_oid(d.get("sys_object_id"))
         out["sys_name"] = out["sys_name"] or d.get("sys_name")
         if d.get("sys_name") and not out["hostname"]:
             out["hostname"] = d["sys_name"]
@@ -342,20 +349,21 @@ def identify(probes: dict[str, Any], protocols_requested: list[str]) -> dict[str
         out["credential_status"] = "valid"
         out["credential_used"] = d.get("credential_id")
         confidence += 30
-        # Vendor from sysObjectID
-        oid = d.get("sys_object_id") or ""
-        for prefix, vendor, dtype in _SYS_OBJECT_PREFIXES:
-            if oid.startswith(prefix):
-                out["vendor"] = out["vendor"] or vendor
-                out["device_type"] = out["device_type"] or dtype
-                break
-        # Enrich from sysDescr
+        # sysDescr first: product-family patterns are more specific than
+        # the enterprise-prefix defaults below.
         descr = d.get("sys_descr") or ""
         for pat, hints in _SYS_DESCR_PATTERNS:
             if pat.search(descr):
                 for k, v in hints.items():
                     if out[k] is None:
                         out[k] = v
+        # Vendor / default type from sysObjectID
+        oid = normalize_oid(d.get("sys_object_id")) + "."
+        for prefix, vendor, dtype in _SYS_OBJECT_PREFIXES:
+            if oid.startswith(prefix):
+                out["vendor"] = out["vendor"] or vendor
+                out["device_type"] = out["device_type"] or dtype
+                break
         break  # First valid SNMP cred wins
 
     # ── WinRM (Windows) ──
