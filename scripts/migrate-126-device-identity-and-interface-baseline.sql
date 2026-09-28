@@ -26,17 +26,32 @@ UPDATE device_interfaces
    AND lower(COALESCE(oper_status, '')) IN ('up', '1');
 
 -- Seed identity for devices whose entities were already collected.
+-- serial_number is unique across devices (managed children key on it): a
+-- chassis serial already held elsewhere, or reported by two devices (the
+-- same switch added twice), is skipped instead of aborting the upgrade.
+WITH chassis AS (
+    SELECT DISTINCT ON (device_id) device_id,
+           LEFT(NULLIF(btrim(serial_number), ''), 128) AS serial_number,
+           LEFT(NULLIF(btrim(fw_revision), ''), 128)   AS fw_revision
+      FROM device_entities
+     WHERE class = 'chassis'
+     ORDER BY device_id, COALESCE(parent_index, 0) <> 0, ent_index
+), unique_serial AS (
+    SELECT serial_number FROM chassis
+     WHERE serial_number IS NOT NULL
+     GROUP BY serial_number HAVING count(*) = 1
+)
 UPDATE devices d
-   SET serial_number = COALESCE(NULLIF(d.serial_number, ''), c.serial_number),
-       firmware_version = COALESCE(NULLIF(d.firmware_version, ''), NULLIF(c.fw_revision, ''))
-  FROM (
-        SELECT DISTINCT ON (device_id) device_id,
-               NULLIF(btrim(serial_number), '') AS serial_number,
-               NULLIF(btrim(fw_revision), '')   AS fw_revision
-          FROM device_entities
-         WHERE class = 'chassis'
-         ORDER BY device_id, COALESCE(parent_index, 0), ent_index
-       ) c
+   SET serial_number = CASE
+           WHEN NULLIF(d.serial_number, '') IS NULL
+            AND c.serial_number IN (SELECT serial_number FROM unique_serial)
+            AND NOT EXISTS (SELECT 1 FROM devices o
+                             WHERE o.serial_number = c.serial_number AND o.id <> d.id)
+           THEN c.serial_number
+           ELSE d.serial_number
+       END,
+       firmware_version = COALESCE(NULLIF(d.firmware_version, ''), c.fw_revision)
+  FROM chassis c
  WHERE c.device_id = d.id
    AND (c.serial_number IS NOT NULL OR c.fw_revision IS NOT NULL);
 

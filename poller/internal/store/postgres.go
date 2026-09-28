@@ -749,15 +749,25 @@ func (s *PostgresStore) UpsertEntities(ctx context.Context, deviceID uuid.UUID, 
 	// Copy the chassis identity onto the device row; only non-empty values
 	// are written, so a sparse walk never blanks a field. Kept out of the
 	// batch so a failure here (e.g. migration 126 not yet applied) cannot
-	// roll back the inventory rows above.
+	// roll back the inventory rows above. serial_number is unique across
+	// devices (managed children key on it), so a serial another device
+	// already holds — the same switch added twice — is left alone rather
+	// than failing the whole update every cycle.
 	_, err := s.pool.Exec(ctx, `
 		UPDATE devices d
-		   SET serial_number    = COALESCE(LEFT(c.serial_number, 128), d.serial_number),
+		   SET serial_number    = COALESCE(c.serial, d.serial_number),
 		       model            = COALESCE(c.model_name, d.model),
 		       firmware_version = COALESCE(LEFT(c.fw_revision, 128), d.firmware_version)
-		  FROM (`+chassisEntitySQL+`) c
+		  FROM (
+		        SELECT CASE WHEN EXISTS (SELECT 1 FROM devices o
+		                                  WHERE o.serial_number = LEFT(e.serial_number, 128)
+		                                    AND o.id <> $1)
+		                    THEN NULL ELSE LEFT(e.serial_number, 128) END AS serial,
+		               e.model_name, e.fw_revision
+		          FROM (`+chassisEntitySQL+`) e
+		       ) c
 		 WHERE d.id = $1
-		   AND (   (c.serial_number IS NOT NULL AND LEFT(c.serial_number, 128) IS DISTINCT FROM d.serial_number)
+		   AND (   (c.serial IS NOT NULL AND c.serial IS DISTINCT FROM d.serial_number)
 		        OR (c.model_name IS NOT NULL AND c.model_name IS DISTINCT FROM d.model)
 		        OR (c.fw_revision IS NOT NULL AND LEFT(c.fw_revision, 128) IS DISTINCT FROM d.firmware_version))
 	`, deviceID)
