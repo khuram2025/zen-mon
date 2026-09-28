@@ -381,19 +381,25 @@ export function DevicesPage() {
 
   const enriched = useMemo(() => {
     return devices.map((d) => {
-      const health = healthOf(d)
       const m = metricsMap[d.id] || {}
+      // Ping says up, but the SNMP collector hasn't produced a sample in the
+      // current-metrics window (15 min) — surface it instead of "Healthy".
+      const snmpNoData =
+        !!metricsData && d.snmp_enabled && d.status === 'up' && !m._ts
+      const health: HealthKind = snmpNoData ? 'warning' : healthOf(d)
       const cpu = typeof m.cpu === 'number' ? Math.round(m.cpu) : null
       const mem = typeof m.memory === 'number' ? Math.round(m.memory) : null
       const uptimeSec = uptimeMap[d.id]
       const uptime = formatRealUptime(uptimeSec, health)
       const uptimePct = uptimePctMap[d.id]
-      return { device: d, health, cpu, mem, uptime, uptimePct }
+      return { device: d, health, snmpNoData, cpu, mem, uptime, uptimePct }
     })
-  }, [devices, uptimeMap, metricsMap, uptimePctMap])
+  }, [devices, uptimeMap, metricsData, metricsMap, uptimePctMap])
 
-  const filtered = useMemo(() => {
-    return enriched.filter(({ device: d, health }) => {
+  // Every filter except status — KPIs/sidebar are computed from this so they
+  // match the table, while the status KPI cards keep working as toggles.
+  const scoped = useMemo(() => {
+    return enriched.filter(({ device: d }) => {
       if (typeFilter && d.device_type !== typeFilter) return false
       if (groupFilter && d.group_id !== groupFilter) return false
       if (locationFilter && (d.location || '') !== locationFilter) return false
@@ -406,6 +412,12 @@ export function DevicesPage() {
           : wanted.some((t) => devTags.includes(t))
         if (!ok) return false
       }
+      return true
+    })
+  }, [enriched, typeFilter, groupFilter, locationFilter, managedByFilter, tagFilter, tagMode])
+
+  const filtered = useMemo(() => {
+    return scoped.filter(({ health }) => {
       if (statusFilter) {
         if (statusFilter === 'healthy' && health !== 'healthy') return false
         if (statusFilter === 'warning' && health !== 'warning') return false
@@ -415,7 +427,7 @@ export function DevicesPage() {
       }
       return true
     })
-  }, [enriched, typeFilter, groupFilter, locationFilter, managedByFilter, statusFilter, tagFilter, tagMode])
+  }, [scoped, statusFilter])
 
   const sorted = useMemo(() => {
     const arr = [...filtered]
@@ -444,7 +456,8 @@ export function DevicesPage() {
   }, [totalPages, page])
 
   // -----------------------------------------------------------------------
-  // Aggregates for KPI row + sidebar (derived from full list, not filtered)
+  // Aggregates for KPI row + sidebar (derived from the scoped list — every
+  // filter except status)
   // -----------------------------------------------------------------------
 
   const agg = useMemo(() => {
@@ -454,33 +467,36 @@ export function DevicesPage() {
     }
     const sevenDaysAgo = Date.now() - 7 * 86_400_000
     let newThisWeek = 0
-    enriched.forEach(({ device, health }) => {
+    scoped.forEach(({ device, health }) => {
       counts[health]++
       byCategory[categoryOf(device.device_type)]++
       const createdMs = device.created_at ? Date.parse(device.created_at) : NaN
       if (!Number.isNaN(createdMs) && createdMs >= sevenDaysAgo) newThisWeek++
     })
-    const total = enriched.length
+    const total = scoped.length
     return { total, ...counts, byCategory, newThisWeek }
-  }, [enriched])
+  }, [scoped])
 
   const availabilityByLocation = useMemo(
     () => buildAvailabilityRows(
-      enriched,
+      scoped,
       ({ device }) => device.location || 'Unassigned',
       (label) => label,
     ),
-    [enriched],
+    [scoped],
   )
 
   const availabilityByType = useMemo(
     () => buildAvailabilityRows(
-      enriched,
+      scoped,
       ({ device }) => device.device_type || 'other',
       (label) => titleCase(label.replace('_', ' ')),
     ),
-    [enriched],
+    [scoped],
   )
+
+  const scopeFilterActive =
+    !!(typeFilter || groupFilter || locationFilter || managedByFilter || tagFilter.length > 0)
 
   const activeFilterCount =
     (typeFilter ? 1 : 0) +
@@ -607,7 +623,7 @@ export function DevicesPage() {
       ['group', (r) => r.device.group_name || ''],
       ['location', (r) => r.device.location || ''],
       ['tags', (r) => (r.device.tags || []).join('; ')],
-      ['status', (r) => r.health],
+      ['status', (r) => (r.snmpNoData ? 'warning (snmp: no data)' : r.health)],
       ['cpu_pct', (r) => r.cpu == null ? '' : String(r.cpu)],
       ['memory_pct', (r) => r.mem == null ? '' : String(r.mem)],
       ['uptime', (r) => r.uptime],
@@ -740,6 +756,13 @@ export function DevicesPage() {
       </div>
 
       {/* ───────────────────── KPI row ───────────────────── */}
+      {scopeFilterActive && (
+        <div className="-mb-1 flex items-center gap-1.5 text-xs text-muted">
+          <Filter className="h-3.5 w-3.5" />
+          Filtered: <span className="font-medium text-text">{scoped.length}</span> of {enriched.length} devices
+          <span className="text-muted/70">· cards and charts reflect the filter</span>
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-6">
         <KpiCard
           label="Total Devices"
@@ -962,7 +985,7 @@ export function DevicesPage() {
                           <Server className="h-8 w-8 opacity-50" />
                           <div className="text-sm font-medium text-text">No devices match</div>
                           <div className="text-xs">
-                            {agg.total === 0 ? (
+                            {enriched.length === 0 ? (
                               <>
                                 Add one manually, or{' '}
                                 <Link to="/discovery" className="text-primary hover:underline">
@@ -984,7 +1007,7 @@ export function DevicesPage() {
                       </Td>
                     </Tr>
                   )}
-                  {pageRows.map(({ device: d, health, cpu, mem, uptime, uptimePct }) => {
+                  {pageRows.map(({ device: d, health, snmpNoData, cpu, mem, uptime, uptimePct }) => {
                     const isSel = selected.has(d.id)
                     const typeInfo = TYPE_STYLE[normalizeType(d.device_type)] || TYPE_STYLE.other
                     const alertCount = alertCountMap[d.id]
@@ -1108,7 +1131,7 @@ export function DevicesPage() {
                           </Td>
                         )}
                         <Td>
-                          <HealthPill kind={health} />
+                          <HealthPill kind={health} snmpNoData={snmpNoData} />
                         </Td>
                         {prefs.visible.cpu && (
                           <Td>
@@ -1376,7 +1399,7 @@ function MetricCell({ value }: { value: number | null }) {
 // Health pill (Healthy / Warning / Critical / Offline)
 // =========================================================================
 
-function HealthPill({ kind }: { kind: HealthKind }) {
+function HealthPill({ kind, snmpNoData }: { kind: HealthKind; snmpNoData?: boolean }) {
   const map: Record<HealthKind, { label: string; className: string; dot: string }> = {
     healthy:  { label: 'Healthy',  className: 'border-success/30 bg-success/10 text-success', dot: 'bg-success' },
     warning:  { label: 'Warning',  className: 'border-warning/30 bg-warning/10 text-warning', dot: 'bg-warning' },
@@ -1385,10 +1408,20 @@ function HealthPill({ kind }: { kind: HealthKind }) {
     maintenance: { label: 'Maintenance', className: 'border-primary/30 bg-primary/10 text-primary', dot: 'bg-primary' },
   }
   const v = map[kind]
-  return (
+  const pill = (
     <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-medium ${v.className}`}>
       <span className={`h-1.5 w-1.5 rounded-full ${v.dot}`} />
       {v.label}
+    </span>
+  )
+  if (!snmpNoData) return pill
+  return (
+    <span
+      className="inline-flex flex-col items-start gap-0.5"
+      title="Reachable by ping, but no SNMP data collected in the last 15 minutes"
+    >
+      {pill}
+      <span className="whitespace-nowrap text-[10px] text-muted">SNMP: no data</span>
     </span>
   )
 }

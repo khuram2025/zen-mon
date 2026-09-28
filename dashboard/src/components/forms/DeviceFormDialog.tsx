@@ -21,7 +21,7 @@ import { TagPicker } from '@/components/tags/TagPicker'
 
 type Credential = {
   id: string; name: string; snmp_version: string;
-  community: string | null; v3_username: string | null;
+  community: string | null; has_community?: boolean; v3_username: string | null;
   v3_auth_protocol: string | null; v3_priv_protocol: string | null;
   port: number; timeout_ms: number; retries: number; is_default: boolean
 }
@@ -166,9 +166,8 @@ export function DeviceFormDialog({
           payload.snmp_port = cred.port
           payload.snmp_timeout_ms = cred.timeout_ms
           payload.snmp_retries = cred.retries
-          if (cred.snmp_version !== '3') {
-            payload.snmp_community = cred.community || 'public'
-          }
+          // No community: the API redacts it, and the backend applies the
+          // saved credential's own community.
         }
       } else {
         // Manual inline credentials — drop any previously-linked credential
@@ -304,7 +303,9 @@ export function DeviceFormDialog({
                             <div className="flex items-center gap-2">
                               <Badge variant="info">v{selectedCred.snmp_version}</Badge>
                               {selectedCred.snmp_version !== '3' ? (
-                                <span>Community: ••••••••</span>
+                                selectedCred.has_community === false
+                                  ? <span className="text-danger">Community not set</span>
+                                  : <span>Community: ••••••••</span>
                               ) : (
                                 <span>User: {selectedCred.v3_username} · {selectedCred.v3_auth_protocol || 'no auth'}{selectedCred.v3_priv_protocol ? `/${selectedCred.v3_priv_protocol}` : ''}</span>
                               )}

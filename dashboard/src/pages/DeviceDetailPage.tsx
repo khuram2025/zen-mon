@@ -1,5 +1,5 @@
 import { DeviceWidgetGrid, type DeviceWidget } from '@/components/devices/DeviceWidgetGrid'
-import { alignDeviceRange } from '@/components/devices/templatePresentation'
+import { alignDeviceRange, autoDetectState } from '@/components/devices/templatePresentation'
 import { deviceAvailabilityBuckets, formatDeviceAvailability, type DeviceAvailabilityPoint } from '@/components/devices/availability'
 import { DeviceStatusExplanation } from '@/components/devices/DeviceStatusExplanation'
 import { MonitoringSites } from '@/components/MonitoringSites'
@@ -169,6 +169,13 @@ export function DeviceDetailPage() {
     enabled: !!id && !!device?.snmp_enabled && /f5/i.test(device?.vendor || ''),
   })
   const collectedModel = inventoryInsights?.groups.flatMap(group => group.metrics || []).find(metric => metric.key === 'f5_model')?.text
+  // Same query as the Inventory tab; the chassis row fills model gaps.
+  const { data: entities } = useQuery<any[]>({
+    queryKey: ['device', id, 'entities'],
+    queryFn: async () => (await api.get(`/devices/${id}/entities`)).data,
+    enabled: !!id && !!device?.snmp_enabled,
+  })
+  const chassisModel = entities?.find((e) => e.class === 'chassis')?.model_name || undefined
 
   const [maintOpen, setMaintOpen] = useState(false)
   const { data: maint } = useQuery<{ active: any[]; upcoming: any[] }>({
@@ -199,7 +206,7 @@ export function DeviceDetailPage() {
   return (
     <div className="space-y-4">
       <DeviceHeader
-        device={{ ...device, model: device.model || collectedModel }}
+        device={{ ...device, model: device.model || collectedModel || chassisModel }}
         onEdit={() => setEditOpen(true)}
         onDelete={() => setDelOpen(true)}
         onMaintenance={() => setMaintOpen(true)}
@@ -369,7 +376,7 @@ function DiagnosticsDialog({
             <Zap className="h-5 w-5 text-primary" />
             Diagnostics
           </DialogTitle>
-          <DialogDescription>Live reachability checks run from the ZenPlus server.</DialogDescription>
+          <DialogDescription>Live reachability checks run from the ZenPlus server. ICMP and SNMP are tested independently — one can pass while the other fails.</DialogDescription>
         </DialogHeader>
 
         {running || !result ? (
@@ -382,6 +389,7 @@ function DiagnosticsDialog({
             <DiagnosticRow
               icon={Activity}
               label="ICMP ping"
+              scope="Independent check"
               ok={!!ping?.ok}
               detail={
                 ping?.ok
@@ -393,8 +401,10 @@ function DiagnosticsDialog({
               <DiagnosticRow
                 icon={Shield}
                 label="SNMP GET"
+                scope="Independent check"
                 ok={!!snmp?.ok}
                 detail={snmp?.ok ? (snmp.sys_descr || 'Responded') : snmp?.reason || 'No response'}
+                extra={!snmp?.ok && snmp?.snmp_error && snmp.snmp_error !== snmp.reason ? snmp.snmp_error : undefined}
               />
             ) : (
               <DiagnosticRow icon={Shield} label="SNMP GET" ok={null} detail="SNMP is disabled for this device" />
@@ -415,12 +425,15 @@ function DiagnosticsDialog({
 }
 
 function DiagnosticRow({
-  icon: Icon, label, ok, detail,
+  icon: Icon, label, scope, ok, detail, extra,
 }: {
   icon: React.ComponentType<{ className?: string }>
   label: string
+  scope?: string
   ok: boolean | null
   detail: string
+  /** Raw tool output shown under the summary (e.g. net-snmp stderr). */
+  extra?: string
 }) {
   return (
     <div className="flex items-start gap-3 rounded-lg border border-border bg-surface2/40 p-3">
@@ -433,8 +446,10 @@ function DiagnosticRow({
           }`}>
             {ok == null ? 'Skipped' : ok ? 'Pass' : 'Fail'}
           </span>
+          {scope && <span className="ml-auto text-[10px] text-muted">{scope}</span>}
         </div>
         <div className="mt-0.5 break-words text-xs text-muted">{detail}</div>
+        {extra && <div className="mt-1 break-words rounded bg-surface2 px-1.5 py-1 font-mono text-[10px] text-muted">{extra}</div>}
       </div>
     </div>
   )
@@ -570,6 +585,14 @@ function DashboardSection({
     queryFn: async () => (await api.get(`/devices/${deviceId}/sensors`)).data,
     enabled: snmp,
   })
+  // Collector evidence (any SNMP sample in the last 7 days; same query as the
+  // Quick Actions card) — explains why auto-detect has not matched a template.
+  const { data: testRuns } = useQuery<TestRuns>({
+    queryKey: ['device', deviceId, 'test-runs'],
+    queryFn: async () => (await api.get(`/devices/${deviceId}/test-runs`)).data,
+    refetchInterval: 60_000,
+    enabled: snmp && !device.profile_name,
+  })
   // Cap to the traps endpoint's max (720h). Custom ranges may exceed it.
   const trapHours = Math.min(720, Math.max(1, Math.round(hoursRange)))
   const { data: traps } = useQuery<any[]>({
@@ -626,6 +649,10 @@ function DashboardSection({
   })
 
   /* Derived series / KPIs */
+  const snmpHasData: boolean | undefined =
+    Object.values(metrics || {}).some((m) => m.points?.length > 0) || !!testRuns?.passive?.snmp
+      ? true
+      : testRuns ? false : undefined
   const cpu = metrics?.cpu
   const isF5 = /f5/i.test(device.vendor || '') || /f5 big-ip/i.test(device.profile_name || '')
   // Use a new series for the corrected system basis, so old maximum-domain
@@ -819,7 +846,7 @@ function DashboardSection({
         <DeviceWidgetGrid deviceId={deviceId} vendor={device.vendor} deviceType={device.device_type} widgets={overviewWidgets} />
       </div>}
 
-      {section === 'metrics' && <TemplateInsightsSection deviceId={deviceId} vendor={device.vendor} deviceType={device.device_type} rangeHours={range.hours} initialGroup={metricGroup} />}
+      {section === 'metrics' && <TemplateInsightsSection deviceId={deviceId} vendor={device.vendor} deviceType={device.device_type} rangeHours={range.hours} initialGroup={metricGroup} snmpHasData={snmpHasData} />}
 
       {section === 'events' && <DeviceWidgetGrid deviceId={deviceId} vendor={device.vendor} deviceType={device.device_type} section="events" widgets={[
         { id: 'alerts', title: 'Alerts', width: 6, height: 12, minWidth: 2, minHeight: 5, content: <DeviceAlertsCard alerts={alertPreview} activeCount={activeAlertsResp?.meta?.total} loading={alertsLoading} error={alertsError} deviceId={deviceId} /> },
@@ -827,7 +854,7 @@ function DashboardSection({
       ]} />}
 
       {section === 'inventory' && <DeviceWidgetGrid deviceId={deviceId} vendor={device.vendor} deviceType={device.device_type} section="inventory" widgets={[
-        { id: 'inventory', title: 'Inventory & configuration', width: 6, height: 10, minWidth: 2, minHeight: 4, content: <InventoryConfigCard device={device} entities={entities || []} onDetails={() => setInventoryOpen(true)} /> },
+        { id: 'inventory', title: 'Inventory & configuration', width: 6, height: 10, minWidth: 2, minHeight: 4, content: <InventoryConfigCard device={device} entities={entities || []} snmpHasData={snmpHasData} onDetails={() => setInventoryOpen(true)} /> },
         { id: 'monitoring-sites', title: 'Monitoring sites', width: 6, height: 7, minWidth: 2, minHeight: 3, content: <Card><CardContent className="p-4"><MonitoringSites targetType="device" targetId={deviceId} compact /></CardContent></Card> },
         { id: 'environment', title: 'Environment & actions', width: 6, height: 9, minWidth: 2, minHeight: 4, content: <EnvironmentalActionsCard deviceId={deviceId} snmpEnabled={snmp} metrics={metrics || {}} sensors={sensors || []} openAlerts={activeAlertCount} /> },
         ...(snmp && ['switch', 'router', 'firewall'].includes(device.device_type) ? [{ id: 'connected-endpoints', title: 'Connected endpoints', width: 6, height: 9, minWidth: 3, minHeight: 4, content: <ConnectedEndpointsCard deviceId={deviceId} /> }] : []),
@@ -1492,8 +1519,8 @@ function HealthGauge({ value, color }: { value: number; color: string }) {
    ════════════════════════════════════════════════════════════ */
 
 function InventoryConfigCard({
-  device, entities, onDetails,
-}: { device: any; entities: any[]; onDetails: () => void }) {
+  device, entities, snmpHasData, onDetails,
+}: { device: any; entities: any[]; snmpHasData?: boolean; onDetails: () => void }) {
   const { data: templateInsights } = useQuery<Insights>({
     queryKey: ['device', device.id, 'template-insights'],
     queryFn: async () => (await api.get(`/devices/${device.id}/template-insights`)).data,
@@ -1503,6 +1530,9 @@ function InventoryConfigCard({
   const templateText = (names: string[]) => templateInsights?.groups.flatMap(group => group.metrics || [])
     .find(metric => metric.has_data && metric.type === 'string' && names.includes(metric.name.toLowerCase()) && metric.text)?.text
   const snmp = !!device.snmp_enabled
+  // ENTITY-MIB chassis row — fallback when the device record has no serial/firmware yet.
+  const chassis = entities.find((e) => e.class === 'chassis')
+  const auto = autoDetectState(snmpHasData)
   const { data: tagDefs } = useTags()
   const tagColors = useMemo(() => tagColorMap(tagDefs), [tagDefs])
   // Management IP, vendor/model and OS version deliberately omitted — the page
@@ -1510,15 +1540,18 @@ function InventoryConfigCard({
   // source of duplicated content on the page. This card covers how the device
   // is *monitored*, which the header does not.
   const rows: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; value: React.ReactNode }> = [
-    { icon: HardDrive, label: 'Serial number', value: device.serial_number || templateText(['chassis serial', 'serial number', 'system serial number']) || 'Not reported' },
+    { icon: HardDrive, label: 'Serial number', value: device.serial_number || chassis?.serial_number || templateText(['chassis serial', 'serial number', 'system serial number']) || 'Not reported' },
+    ...(!device.model && chassis?.model_name ? [{ icon: Box, label: 'Model', value: chassis.model_name }] : []),
     { icon: GitBranch, label: 'OS / version', value: device.os_version || templateText(['tmos version', 'os version', 'software version']) || 'Not reported' },
-    { icon: GitBranch, label: 'Firmware', value: device.firmware_version || templateText(['firmware version']) || 'Not reported' },
+    { icon: GitBranch, label: 'Firmware', value: device.firmware_version || chassis?.fw_revision || templateText(['firmware version']) || 'Not reported' },
     { icon: Shield, label: 'SNMP', value: snmp ? `v${device.snmp_version} · port ${device.snmp_port}` : 'Disabled' },
     {
       icon: Layers, label: 'Monitoring Template',
       value: device.profile_name
         ? <Link to="/settings/general?tab=templates" className="text-primary hover:underline">{device.profile_name}</Link>
-        : (snmp ? 'Default (auto-detect)' : '—'),
+        : snmp
+          ? <span title={auto.reason || undefined}>{auto.label}{auto.reason && <span className="block text-[10px] font-normal text-muted">{auto.reason}</span>}</span>
+          : '—',
     },
     { icon: Wifi, label: 'Ping', value: device.ping_enabled ? `Enabled · ${device.ping_interval}s` : 'Disabled' },
     { icon: Info, label: 'System OID', value: <span className="font-mono text-[10px] break-all">{device.sys_object_id || '—'}</span> },
@@ -1912,9 +1945,22 @@ function EnvironmentalActionsCard({
   openAlerts: number
 }) {
   const qc = useQueryClient()
-  const tempVal = latestSensor(metrics, sensors, ['temperature', 'celsius'])
+  // Template groups carry evaluated states (fan/temperature status against the
+  // template's thresholds); raw series are the fallback for untemplated devices.
+  const { data: insights } = useQuery<Insights>({
+    queryKey: ['device', deviceId, 'template-insights'],
+    queryFn: async () => (await api.get(`/devices/${deviceId}/template-insights`)).data,
+    enabled: snmpEnabled,
+    staleTime: 30_000,
+  })
+  const fanStates = templateStates(insights, /fan/i)
+  const tplTemp = templateTemperature(insights)
+  // State/status series are enums (1 = normal …), never a reading.
+  const notState = (k: string) => !/state|status|thresh/.test(k)
+  const tempVal = latestSensor(metrics, sensors, ['temperature', 'celsius', 'temp'], notState)
   const voltVal = latestSensor(metrics, sensors, ['voltage', 'volts'])
-  const fanVal = latestSensor(metrics, sensors, ['fan', 'rpm'])
+  const fanVal = latestSensor(metrics, sensors, ['fan', 'rpm'],
+    (k, unit) => notState(k) && (/rpm|%/.test(unit) || /rpm|speed/.test(k) || /(^|_)fan_?\d+$/.test(k)))
 
   // Last-run state for Ping Test + SNMP Test is hybrid, in two layers:
   //  1. the server's record — the last manual test by *any* operator, plus
@@ -1928,14 +1974,18 @@ function EnvironmentalActionsCard({
   const [localPing, setLocalPing] = useState<LastRun | null>(() => loadLastRun(pingKey))
   const [localSnmp, setLocalSnmp] = useState<LastRun | null>(() => loadLastRun(snmpKey))
 
-  const { data: testRuns } = useQuery({
+  const { data: testRuns } = useQuery<TestRuns>({
     queryKey: ['device', deviceId, 'test-runs'],
     queryFn: async () => (await api.get(`/devices/${deviceId}/test-runs`)).data,
     refetchInterval: 60_000,
   })
 
-  const lastPing = newerRun(testRuns?.ping ?? null, localPing)
-  const lastSnmp = newerRun(testRuns?.snmp ?? null, localSnmp)
+  // Collector evidence is the primary line; a manual test (server record or
+  // the one just run in this browser) is shown beside it, never instead of it.
+  const collectorPing = testRuns?.passive?.ping ?? null
+  const collectorSnmp = testRuns?.passive?.snmp ?? null
+  const manualPing = newerRun(testRuns?.manual?.ping ?? null, localPing)
+  const manualSnmp = newerRun(testRuns?.manual?.snmp ?? null, localSnmp)
   // Tick every 15s so the "1m ago" labels stay fresh.
   const [, setTick] = useState(0)
   useEffect(() => {
@@ -2029,18 +2079,44 @@ function EnvironmentalActionsCard({
 
   // Environmental tiles — only render what we actually have.
   type Tone = 'success' | 'warning' | 'danger' | 'info' | 'accent'
-  const tiles: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; value: string; unit?: string; tone: Tone }> = []
-  if (tempVal != null) {
-    tiles.push({ icon: Thermometer, label: 'Temperature', value: tempVal.toFixed(0), unit: '°C', tone: tempVal > 70 ? 'danger' : tempVal > 55 ? 'warning' : 'success' })
+  const tiles: Array<{ icon: React.ComponentType<{ className?: string }>; label: string; value: string; unit?: string; tone: Tone; title?: string; text?: boolean }> = []
+  const toneOf = (status: string): Tone | null =>
+    status === 'crit' ? 'danger' : status === 'warn' ? 'warning' : status === 'ok' ? 'success' : null
+  const hotTone = (c: number): Tone => (c > 70 ? 'danger' : c > 55 ? 'warning' : 'success')
+  if (tplTemp) {
+    // Status was evaluated server-side against the template thresholds; the
+    // fixed 55/70 °C bands only apply when the template defines none.
+    tiles.push({
+      icon: Thermometer, label: tplTemp.count > 1 ? `Temperature · max of ${tplTemp.count}` : 'Temperature',
+      value: tplTemp.max.toFixed(0), unit: '°C',
+      tone: toneOf(tplTemp.status) ?? hotTone(tplTemp.max),
+      title: tplTemp.detail,
+    })
+  } else if (tempVal != null) {
+    tiles.push({ icon: Thermometer, label: 'Temperature', value: tempVal.toFixed(0), unit: '°C', tone: hotTone(tempVal) })
   }
   if (voltVal != null) {
     tiles.push({ icon: Zap, label: 'Voltage', value: voltVal.toFixed(1), unit: 'V', tone: 'success' })
   }
-  if (fanVal != null) {
+  if (fanStates) {
+    const bad = fanStates.filter((f) => f.status === 'warn' || f.status === 'crit')
+    const worst = bad.some((f) => f.status === 'crit') ? 'crit' : bad.length ? 'warn' : fanStates.every((f) => f.status === 'ok') ? 'ok' : 'none'
+    const badTexts = [...new Set(bad.map((f) => f.text))]
+      .map((t) => `${bad.filter((f) => f.text === t).length} ${t}`).join(' · ')
+    tiles.push({
+      icon: Fan, label: 'Fan State', text: true,
+      value: bad.length
+        ? `${fanStates.length} fan${fanStates.length === 1 ? '' : 's'} · ${badTexts}`
+        : worst === 'ok' ? 'All Normal' : `${fanStates.length} fan${fanStates.length === 1 ? '' : 's'}`,
+      tone: toneOf(worst) ?? 'info',
+      title: fanStates.map((f) => `${f.label}: ${f.text}`).join('\n'),
+    })
+  } else if (fanVal != null) {
+    // Only unit-bearing speed series reach here, so ≤100 really is a percentage.
     const fanPct = fanVal > 100 ? null : fanVal
     tiles.push({
       icon: Fan, label: 'Fan Speed',
-      value: fanPct != null ? fanPct.toFixed(0) : fanVal.toFixed(0),
+      value: fanVal.toFixed(0),
       unit: fanPct != null ? '%' : 'rpm',
       tone: 'info',
     })
@@ -2079,7 +2155,8 @@ function EnvironmentalActionsCard({
             <ActionCard
               icon={Activity}
               label="Ping Test"
-              lastRun={lastPing}
+              collector={collectorPing}
+              manual={manualPing}
               loading={pingTest.isPending}
               tone="primary"
               onRun={() => pingTest.mutate()}
@@ -2087,7 +2164,8 @@ function EnvironmentalActionsCard({
             <ActionCard
               icon={Shield}
               label="SNMP Test"
-              lastRun={lastSnmp}
+              collector={collectorSnmp}
+              manual={manualSnmp}
               loading={snmpTest.isPending}
               tone="outline"
               disabled={!snmpEnabled}
@@ -2145,6 +2223,14 @@ function EnvironmentalActionsCard({
 }
 
 type LastRun = { at: string; ok: boolean; summary: string; source?: 'manual' | 'poller'; by?: string | null }
+/** /devices/{id}/test-runs — `ping`/`snmp` are the server's preferred pick;
+ *  `manual` and `passive` (collector evidence) are both sources verbatim. */
+type TestRuns = {
+  ping: LastRun | null
+  snmp: LastRun | null
+  manual?: { ping?: LastRun; snmp?: LastRun }
+  passive?: { ping?: LastRun; snmp?: LastRun }
+}
 
 /** Newest of the two, treating a missing/invalid timestamp as "no run". */
 function newerRun(a: LastRun | null, b: LastRun | null): LastRun | null {
@@ -2170,11 +2256,14 @@ function saveLastRun(key: string, value: LastRun) {
 }
 
 function ActionCard({
-  icon: Icon, label, lastRun, loading, tone, disabled, disabledReason, onRun,
+  icon: Icon, label, collector, manual, loading, tone, disabled, disabledReason, onRun,
 }: {
   icon: React.ComponentType<{ className?: string }>
   label: string
-  lastRun: LastRun | null
+  /** Latest result from the background collector/poller. */
+  collector: LastRun | null
+  /** Latest manual test (any operator, or this browser). */
+  manual: LastRun | null
   loading: boolean
   tone: 'primary' | 'outline'
   disabled?: boolean
@@ -2186,6 +2275,9 @@ function ActionCard({
     ? 'border-primary/40 bg-primary/10 hover:bg-primary/15 text-primary'
     : 'border-border bg-surface2/40 hover:bg-surface2 text-text'
   const canRun = !disabled && !loading
+  const primary = collector ?? manual
+  // A manual result older than the collector's is history, not current state.
+  const manualStale = !!(collector && manual && Date.parse(manual.at) < Date.parse(collector.at))
   return (
     <button
       type="button"
@@ -2199,28 +2291,42 @@ function ActionCard({
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5" />}
           {loading ? 'Running…' : label}
         </span>
-        {lastRun && (
+        {primary && (
           <span
-            className={`h-1.5 w-1.5 rounded-full ${lastRun.ok ? 'bg-success' : 'bg-danger'}`}
-            title={lastRun.ok ? 'Last run OK' : 'Last run failed'}
+            className={`h-1.5 w-1.5 rounded-full ${primary.ok ? 'bg-success' : 'bg-danger'}`}
+            title={`${collector ? 'Collector' : 'Last manual test'}: ${primary.ok ? 'OK' : 'failed'}`}
           />
         )}
       </span>
       <span className="mt-1 block text-[10px] leading-tight">
         {disabled ? (
           <span className="text-muted">{disabledReason}</span>
-        ) : lastRun ? (
+        ) : collector ? (
           <>
-            {/* Passive evidence is labelled as such — the monitoring stack
-              * exercised this path, nobody pressed the button. */}
-            <span className="text-muted">{lastRun.source === 'poller' ? 'Auto: ' : 'Last: '}</span>
-            <span className={lastRun.ok ? 'text-text' : 'text-danger'}>{relativeTime(lastRun.at)}</span>
-            {lastRun.summary && (
+            <span className="block truncate" title={collector.summary}>
+              <span className="text-muted">Collector: </span>
+              <span className={collector.ok ? 'text-text' : 'text-danger'}>{collector.ok ? 'OK' : 'failed'}</span>
+              <span className="text-muted"> · {relativeTime(collector.at)}</span>
+            </span>
+            {manual && (
+              <span
+                className={`mt-0.5 block truncate ${manualStale ? 'text-muted opacity-70' : manual.ok ? 'text-muted' : 'text-danger'}`}
+                title={`Manual test${manual.by ? ` by ${manual.by}` : ''} · ${new Date(manual.at).toLocaleString()} · ${manual.ok ? 'OK' : 'failed'}${manual.summary ? `: ${manual.summary}` : ''}${manualStale ? ' (older than the collector result)' : ''}`}
+              >
+                Manual test · {relativeTime(manual.at)} · {manual.ok ? 'OK' : `failed: ${manual.summary || 'no response'}`}
+              </span>
+            )}
+          </>
+        ) : manual ? (
+          <>
+            <span className="text-muted">Manual test · </span>
+            <span className={manual.ok ? 'text-text' : 'text-danger'}>{relativeTime(manual.at)}</span>
+            {manual.summary && (
               <span
                 className="block truncate text-muted"
-                title={lastRun.by ? `${lastRun.summary} — run by ${lastRun.by}` : lastRun.summary}
+                title={manual.by ? `${manual.summary} — run by ${manual.by}` : manual.summary}
               >
-                {lastRun.summary}
+                {manual.summary}
               </span>
             )}
           </>
@@ -2233,11 +2339,14 @@ function ActionCard({
 }
 
 function EnvSensorTile({
-  icon: Icon, label, value, unit, tone,
+  icon: Icon, label, value, unit, tone, title, text,
 }: {
   icon: React.ComponentType<{ className?: string }>
   label: string; value: string; unit?: string
   tone: 'success' | 'warning' | 'danger' | 'info' | 'accent'
+  title?: string
+  /** Value is a state phrase, not a number — render it smaller. */
+  text?: boolean
 }) {
   const MAP: Record<typeof tone, string> = {
     success: 'border-success/30 bg-success/5 text-success',
@@ -2247,10 +2356,10 @@ function EnvSensorTile({
     accent:  'border-accent/30 bg-accent/5 text-accent',
   }
   return (
-    <div className={`rounded-lg border px-2 py-2 text-center ${MAP[tone]}`}>
+    <div className={`rounded-lg border px-2 py-2 text-center ${MAP[tone]}`} title={title}>
       <Icon className="mx-auto h-3.5 w-3.5" />
       <div className="mt-1 flex items-baseline justify-center gap-0.5">
-        <span className="text-base font-bold leading-none tabular-nums">{value}</span>
+        <span className={text ? 'text-xs font-semibold leading-tight' : 'text-base font-bold leading-none tabular-nums'}>{value}</span>
         {unit && <span className="text-[9px]">{unit}</span>}
       </div>
       <div className="mt-0.5 text-[9px] uppercase tracking-wider opacity-80">{label}</div>
@@ -2795,24 +2904,85 @@ function latestFromMetrics(
 }
 
 function latestSensor(
-  metrics: Record<string, { points: { value: number }[] }>,
+  metrics: Record<string, { unit?: string; points: { value: number }[] }>,
   sensors: any[],
   keywords: string[],
+  accept: (key: string, unit: string) => boolean = () => true,
 ): number | null {
   for (const [k, v] of Object.entries(metrics)) {
-    if (keywords.some((kw) => k.toLowerCase().includes(kw))) {
+    const key = k.toLowerCase()
+    if (keywords.some((kw) => key.includes(kw)) && accept(key, (v.unit || '').toLowerCase())) {
       if (v.points?.length) return v.points[v.points.length - 1].value
     }
   }
   for (const s of sensors) {
     const d = (s.description || '').toLowerCase()
     const t = (s.sensor_type || '').toLowerCase()
-    if (keywords.some((kw) => d.includes(kw) || t.includes(kw))) {
+    if (keywords.some((kw) => d.includes(kw) || t.includes(kw)) && accept(d, (s.unit || t).toLowerCase())) {
       const raw = s.current_value ?? s.value
       if (typeof raw === 'number') return raw
     }
   }
   return null
+}
+
+type TemplateState = { label: string; text: string; status: string }
+
+/** Per-component states (enum readings) of the first template group matching
+ *  `match` — e.g. the Fans group's "Normal"/"Warning" rows. */
+function templateStates(insights: Insights | undefined, match: RegExp): TemplateState[] | null {
+  const group = insights?.groups.find((g) => match.test(g.key) || match.test(g.name))
+  if (!group) return null
+  const out: TemplateState[] = []
+  if (group.kind === 'table') {
+    const enums = (group.columns || []).filter((c) => c.type === 'enum')
+    const col = enums.find((c) => /state|status/i.test(`${c.key} ${c.name}`)) || enums[0]
+    if (!col) return null
+    for (const row of group.rows || []) {
+      const cell = row.cells[col.key]
+      if (cell && (cell.text || cell.value != null)) out.push({ label: row.label, text: cell.text || String(cell.value), status: cell.status })
+    }
+  } else {
+    for (const m of group.metrics || []) {
+      if (m.type === 'enum' && m.has_data) out.push({ label: m.name, text: m.text || String(m.value), status: m.status })
+    }
+  }
+  return out.length ? out : null
+}
+
+/** Hottest reading in the template's temperature group, with the worst status
+ *  across readings and state columns (evaluated against template thresholds). */
+function templateTemperature(insights: Insights | undefined): { max: number; count: number; status: string; detail: string } | null {
+  const group = insights?.groups.find((g) => /temp/i.test(g.key) || /temp/i.test(g.name))
+  if (!group) return null
+  const isCelsius = (unit?: string | null) => /^°?c$|celsius/i.test((unit || '').trim())
+  const rank: Record<string, number> = { none: 0, info: 1, ok: 2, warn: 3, crit: 4 }
+  const readings: Array<{ label: string; value: number; status: string }> = []
+  let status = 'none'
+  const bump = (st: string) => { if ((rank[st] ?? 0) > (rank[status] ?? 0)) status = st }
+  if (group.kind === 'table') {
+    const cols = group.columns || []
+    const valueCol = cols.find((c) => c.type !== 'enum' && c.type !== 'string' && isCelsius(c.unit))
+    if (!valueCol) return null
+    for (const row of group.rows || []) {
+      const cell = row.cells[valueCol.key]
+      if (cell?.value != null) readings.push({ label: row.label, value: cell.value, status: cell.status })
+      for (const c of cols) if (c.type === 'enum' && row.cells[c.key]) bump(row.cells[c.key].status)
+    }
+  } else {
+    for (const m of group.metrics || []) {
+      if (m.has_data && m.value != null && isCelsius(m.unit)) readings.push({ label: m.name, value: m.value, status: m.status })
+      else if (m.has_data && m.type === 'enum') bump(m.status)
+    }
+  }
+  if (!readings.length) return null
+  readings.forEach((r) => bump(r.status))
+  return {
+    max: Math.max(...readings.map((r) => r.value)),
+    count: readings.length,
+    status,
+    detail: readings.map((r) => `${r.label}: ${r.value.toFixed(0)} °C`).join('\n'),
+  }
 }
 
 /* ════════════════════════════════════════════════════════════

@@ -544,6 +544,7 @@ export function RunPage() {
         open={importOpen}
         onClose={() => setImportOpen(false)}
         runId={id!}
+        defaultLocation={profile?.default_location || ''}
         selectedIds={importableSelected}
         results={results}
         onImported={() => {
@@ -754,6 +755,7 @@ function ImportDrawer({
   open,
   onClose,
   runId,
+  defaultLocation,
   selectedIds,
   results,
   onImported,
@@ -761,6 +763,8 @@ function ImportDrawer({
   open: boolean
   onClose: () => void
   runId: string
+  /** The run's profile default — prefilled so the import doesn't drop it. */
+  defaultLocation: string
   selectedIds: number[]
   results: DiscoveryResult[]
   onImported: () => void
@@ -772,6 +776,10 @@ function ImportDrawer({
   const [pingInterval, setPingInterval] = useState(60)
   const [location, setLocation] = useState('')
   const [environment, setEnvironment] = useState('')
+  useEffect(() => {
+    if (open && defaultLocation && !location) setLocation(defaultLocation)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, defaultLocation])
   const [importAs, setImportAs] = useState<'auto' | 'device' | 'server' | 'both'>('auto')
   const [conflictStrategy, setConflictStrategy] = useState<'skip' | 'update' | 'import_as_new'>(
     'skip',
