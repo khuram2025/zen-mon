@@ -95,6 +95,37 @@ func (c *UdtCredential) ApplyTo(d *Device) {
 	}
 }
 
+// HasOwnAuth reports whether the device row carries usable SNMP auth
+// for its version: a community for v1/v2c, a USM username for v3.
+func (d *Device) HasOwnAuth() bool {
+	if d.Version == "3" {
+		return d.V3Username != ""
+	}
+	return d.Community != ""
+}
+
+func (c *UdtCredential) hasAuth() bool {
+	if c.Version == "3" {
+		return c.V3Username != ""
+	}
+	return c.Community != ""
+}
+
+// ApplyLinkedCredential fills a device's session settings from its linked
+// snmp_credentials row (devices.snmp_credential_id) when the device row has
+// no usable auth of its own — the Discovery import path only stores the
+// link. A device with its own auth keeps every value; a linked credential
+// without auth changes nothing. Returns true when the credential was used.
+func ApplyLinkedCredential(d *Device, c *UdtCredential) bool {
+	if c == nil || d.HasOwnAuth() || !c.hasAuth() {
+		return false
+	}
+	c.ApplyTo(d)
+	// retries is NOT NULL on snmp_credentials, so 0 is a deliberate choice.
+	d.Retries = c.Retries
+	return true
+}
+
 // SystemInfo is the result of CollectSystem.
 type SystemInfo struct {
 	SysDescr    string

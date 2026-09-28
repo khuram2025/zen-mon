@@ -6,7 +6,7 @@ import {
   Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
 import { ChevronDown, ChevronRight, LayoutTemplate, LineChart as LineChartIcon } from 'lucide-react'
-import { filterInsightRows, insightRowSeverity, readableInstanceLabel } from './templatePresentation'
+import { autoDetectState, filterInsightRows, insightRowSeverity, readableInstanceLabel } from './templatePresentation'
 import { api } from '@/lib/api'
 import {
   axisRightPad, cn, formatBps, formatBytes, relativeTime,
@@ -163,8 +163,10 @@ function formatValue(v: number | null, unit?: string | null): string {
   return unit ? `${num} ${unit}` : num
 }
 
-export function TemplateInsightsSection({ deviceId, rangeHours, summary = false, onExplore, initialGroup, vendor, deviceType }: {
+export function TemplateInsightsSection({ deviceId, rangeHours, summary = false, onExplore, initialGroup, vendor, deviceType, snmpHasData }: {
   deviceId: string; rangeHours: number; summary?: boolean; onExplore?: (group?: string) => void; initialGroup?: string
+  /** Whether the collector has any SNMP data for the device — explains a missing template. */
+  snmpHasData?: boolean
 } & DeviceLayoutContext) {
   const [chart, setChart] = useState<{ seriesKey: string; title: string; unit?: string | null } | null>(null)
   const [selectedGroup, setSelectedGroup] = useState(initialGroup || 'all')
@@ -187,7 +189,15 @@ export function TemplateInsightsSection({ deviceId, rangeHours, summary = false,
 
   if (isLoading) return <Card><CardContent className="p-4 text-sm text-muted">Loading device metrics…</CardContent></Card>
   if (isError) return <Card><CardContent className="p-4 text-sm text-warning">Device metrics could not be loaded. They will retry automatically.</CardContent></Card>
-  if (!data?.template) return summary ? null : <Card><CardContent className="p-6 text-sm text-muted">No monitoring template is assigned. Assign a template in Edit device to collect vendor-specific metrics.</CardContent></Card>
+  if (!data?.template) {
+    if (summary) return null
+    const auto = autoDetectState(snmpHasData)
+    return <Card><CardContent className="space-y-1 p-6 text-sm text-muted">
+      <div className="font-medium text-text">Monitoring template: {auto.label}</div>
+      {auto.reason && <div>{auto.reason}</div>}
+      <div className="text-xs">Vendor-specific metrics appear here once a template is attached.</div>
+    </CardContent></Card>
+  }
   const groups = (data.groups || []).filter((g) =>
     g.kind === 'table' ? (g.rows?.length || 0) > 0 : (g.metrics || []).some((m) => m.has_data),
   )

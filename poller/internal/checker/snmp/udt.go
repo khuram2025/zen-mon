@@ -55,7 +55,7 @@ func (c *Collector) CollectUDT(ctx context.Context, d *Device, s *g.GoSNMP, ifs 
 	}
 	portToIf := c.collectBasePortMap(s)
 
-	isCisco := strings.HasPrefix(strings.TrimPrefix(firstNonEmpty(d.SysObjectID), "."), "1.3.6.1.4.1.9.")
+	isCisco := strings.HasPrefix(NormalizeOID(d.SysObjectID), "1.3.6.1.4.1.9.")
 
 	// VLAN inventory: Q-BRIDGE static names, Cisco VTP as fallback/merge.
 	vlans := c.collectVlans(s, isCisco)
@@ -696,13 +696,4 @@ func ipv6FromOIDParts(parts []string) string {
 		fmt.Fprintf(&sb, "%x", uint16(b[i])<<8|uint16(b[i+1]))
 	}
 	return sb.String()
-}
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }

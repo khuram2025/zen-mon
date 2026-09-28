@@ -39,3 +39,17 @@ export function alignDeviceRange<T extends { hours: number; fromISO: string; toI
   if (range.isCustom || serverTime == null || !Number.isFinite(serverTime)) return range
   return { ...range, fromISO: new Date(serverTime - range.hours * 3600000).toISOString(), toISO: new Date(serverTime).toISOString() }
 }
+
+// A device with no template attached is waiting on auto-detection. Say why it
+// has not matched yet: no SNMP data at all, or data that no built-in template
+// recognises. `snmpHasData` undefined = still loading, reason omitted.
+export function autoDetectState(snmpHasData: boolean | undefined): { label: string; reason: string | null } {
+  return {
+    label: 'Auto-detect — no template matched yet',
+    reason: snmpHasData === false
+      ? 'Waiting for the first successful SNMP poll.'
+      : snmpHasData
+        ? 'No built-in template matches this device; assign one manually in Edit device.'
+        : null,
+  }
+}

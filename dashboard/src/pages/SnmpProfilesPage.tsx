@@ -50,7 +50,9 @@ type Credential = {
   name: string
   description: string | null
   snmp_version: string
+  /** Always redacted (null) by the API — use has_community. */
   community: string | null
+  has_community?: boolean
   v3_username: string | null
   v3_context: string | null
   v3_security_level: string | null
@@ -80,9 +82,18 @@ function VersionBadge({ ver }: { ver: string }) {
   return <Badge variant={(colors[ver] || 'outline') as any}>v{ver}</Badge>
 }
 
+// The community itself is never returned; `has_community` says whether one is
+// stored. Undefined (older API) means unknown — don't claim it is missing.
+function hasCommunity(cred: Credential): boolean | undefined {
+  if (cred.community) return true
+  return cred.has_community
+}
+
 function SecuritySummary({ cred }: { cred: Credential }) {
   if (cred.snmp_version !== '3') {
-    return <span className="text-xs text-muted">{cred.community ? 'Community set' : 'No community'}</span>
+    return hasCommunity(cred) === false
+      ? <span className="text-xs text-danger">No community</span>
+      : <span className="text-xs text-muted">Community configured</span>
   }
   const level = cred.v3_security_level || 'authPriv'
   const icons: Record<string, typeof Shield> = {
@@ -289,7 +300,7 @@ function ExpandedCredential({ cred }: { cred: Credential }) {
           <div className="space-y-1 text-sm">
             {cred.snmp_version !== '3' ? (
               <>
-                <div><span className="text-muted">Community:</span> {cred.community ? '••••••••' : <span className="text-danger">Not set</span>}</div>
+                <div><span className="text-muted">Community:</span> {hasCommunity(cred) === false ? <span className="text-danger">Not set</span> : '••••••••'}</div>
               </>
             ) : (
               <>
@@ -494,11 +505,12 @@ function CredentialFormDialog({
           {(version === '1' || version === '2c') && (
             <FormField label="Community string" required>
               <PasswordInput
-                required
+                // Editing keeps the stored community when left blank.
+                required={!isEdit || credential?.has_community === false}
                 value={community}
                 onChange={(e) => setCommunity(e.target.value)}
-                placeholder="public"
-                hasStored={!!isEdit}
+                placeholder={isEdit && credential?.has_community ? 'Unchanged — stored community kept' : 'public'}
+                hasStored={!!isEdit && credential?.has_community !== false}
                 revealing={revealing}
                 onReveal={isEdit ? fetchSecrets : undefined}
               />

@@ -109,7 +109,7 @@ export function NodeEditDialog({ node, onCancel, onSave, saving }: {
         <Field label="Device profile — swap which device this node represents">
           <select className={inputCls} value={deviceId} onChange={(e) => setDeviceId(e.target.value)} disabled={devices.isLoading}>
             {!deviceList.some((d) => d.id === node.device_id) && (
-              <option value={node.device_id}>{node.hostname}</option>
+              <option value={node.device_id}>{node.hostname}{node.ip_address ? ` · ${node.ip_address}` : ''}</option>
             )}
             {deviceList.map((d) => (
               <option key={d.id} value={d.id}>{d.hostname} · {d.ip_address}</option>

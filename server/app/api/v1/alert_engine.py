@@ -27,7 +27,7 @@ from app.services.alert_phrasing import (
     DEFAULT_EMAIL_BODY, DEFAULT_EMAIL_SUBJECT, DEFAULT_RECOVERY_EMAIL_BODY,
     DEFAULT_RECOVERY_EMAIL_SUBJECT, DEFAULT_RECOVERY_SMS, DEFAULT_SMS,
     conditions_label, default_templates, duration_between, effective_template,
-    rule_phrasing,
+    host_label, rule_phrasing,
 )
 from pydantic import BaseModel
 
@@ -538,6 +538,16 @@ def _trigger_matches(trigger: str, new_status: str) -> bool:
     return True
 
 
+def _ping_status_value(new_status: str) -> float | None:
+    """ping_status for a device transition: 0 when down, 1 while it still
+    answers (a degraded device responds; latency/loss rules own degraded)."""
+    if new_status == "down":
+        return 0.0
+    if new_status in ("up", "degraded"):
+        return 1.0
+    return None
+
+
 def _conditions_match(rule, values: dict) -> bool:
     """
     E1: evaluate a rule's metric condition(s) against live metric values.
@@ -545,22 +555,31 @@ def _conditions_match(rule, values: dict) -> bool:
     - A non-empty ``conditions`` array is evaluated element-wise and combined by
       ``condition_logic`` (AND/OR).
     - Otherwise the legacy flat metric/operator/threshold is the single
-      condition. Pure status rules (metric is ping_status/service_status, or
-      absent) are NOT metric-gated and always return True, preserving the
-      existing status-transition behaviour.
+      condition. service_status (and an absent metric) is not metric-gated.
+
+    ping_status is only evaluated on an 'any' rule. An explicit trigger_on
+    already names the state, and the wizard stores ping_status == 0 on every
+    status rule whatever the trigger, so gating on it would silence "Device
+    comes up" and "Device degraded" rules. On an 'any' rule it is the only
+    thing selecting the state — skipping it made "Device Down" fire on
+    unknown->up and up->degraded.
     """
+    status_owned = (getattr(rule, "trigger_on", None) or "any") != "any"
+
+    def one(metric, operator, threshold) -> bool:
+        if metric == "ping_status" and status_owned:
+            return True
+        return _eval_one(metric, operator, threshold, values)
+
     conds = getattr(rule, "conditions", None)
     if conds:
-        results = [
-            _eval_one(c.get("metric"), c.get("operator"), c.get("threshold"), values)
-            for c in conds
-        ]
+        results = [one(c.get("metric"), c.get("operator"), c.get("threshold")) for c in conds]
         logic = (getattr(rule, "condition_logic", "AND") or "AND").upper()
         return any(results) if logic == "OR" else all(results)
     metric = getattr(rule, "metric", None)
-    if metric in ("ping_status", "service_status", None):
+    if metric in ("service_status", None):
         return True
-    return _eval_one(metric, getattr(rule, "operator", None), getattr(rule, "threshold", None), values)
+    return one(metric, getattr(rule, "operator", None), getattr(rule, "threshold", None))
 
 
 async def _device_in_maintenance(db: AsyncSession, device_id: str) -> bool:
@@ -623,7 +642,11 @@ async def evaluate_status_change(
     No auth required - internal endpoint.
     """
     now = datetime.now(timezone.utc)
-    is_recovery = event.new_status == "up" and event.old_status in ("down", "degraded")
+    # Arriving at 'up' is never a problem. Only down/degraded -> up is a
+    # recovery; unknown/maintenance -> up (a new device's first ping, the end
+    # of a window) resolves stale status alerts silently.
+    into_up = event.new_status == "up"
+    is_recovery = into_up and event.old_status in ("down", "degraded")
     is_down = event.new_status in ("down", "degraded")
 
     # Get device info for group/location/type matching
@@ -638,8 +661,10 @@ async def evaluate_status_change(
     device_tags = _tag_set(dev_row.tags if dev_row else None)
 
     # Planned downtime: never raise alerts for a device in an active
-    # maintenance window. Recovery events still pass so open alerts resolve.
-    if not is_recovery and await _device_in_maintenance(db, event.device_id):
+    # maintenance window. Recovery events still pass so open alerts resolve,
+    # and any other move to 'up' still closes stale ones (below).
+    in_maintenance = not is_recovery and await _device_in_maintenance(db, event.device_id)
+    if in_maintenance and not into_up:
         return {"evaluated": 0, "matched": 0, "suppressed": "maintenance"}
     if is_down:
         offline_owner = await _offline_sensor_owner(db, event.device_id)
@@ -709,16 +734,17 @@ async def evaluate_status_change(
     _tz = await get_configured_timezone(db)
     suppressing_dependency = await _find_suppressing_dependency(db, event.device_id) if is_down else None
 
-    # Recovery closes ALL open down/degraded status alerts on this device,
-    # before any per-rule gating. This used to live inside the rules loop
-    # behind `rule.recovery_alert`, so rules without a recovery notification
-    # never resolved their alerts — one firewall accumulated 100+ permanently
+    # Any transition to 'up' closes ALL open status alerts on this device,
+    # before any per-rule gating, whatever status they recorded — rows from
+    # before the into-up guard ("Device Down: X is UP") close too. This used to
+    # live inside the rules loop behind `rule.recovery_alert`, so rules without
+    # a recovery notification never resolved their alerts — one firewall accumulated 100+ permanently
     # "active" DEGRADED alerts, poisoning every alert counter in the UI.
     # Service-check alerts are deliberately NOT closed here: the device
     # answering ping again says nothing about its HTTP check passing.
     recovered: dict[str, dict] = {}
     outage_duration = ""
-    if is_recovery:
+    if into_up:
         closed = (await db.execute(
             text("""
                 UPDATE alerts
@@ -729,8 +755,9 @@ async def evaluate_status_change(
                   AND device_id = :device_id
                   AND service_check_id IS NULL
                   AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
-                  AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded')
-                RETURNING rule_id, triggered_at, metadata->>'notified' AS notified
+                  AND metadata->>'new_status' IS NOT NULL
+                RETURNING rule_id, triggered_at, metadata->>'notified' AS notified,
+                          metadata->>'new_status' AS new_status
             """),
             {
                 "resolved_at": now,
@@ -739,10 +766,20 @@ async def evaluate_status_change(
                     "resolved_by_recovery": True,
                     "recovery_status": event.new_status,
                     "recovery_at": now.isoformat(),
+                } if is_recovery else {
+                    "resolved_by": "status_transition",
+                    "superseded_by_status": event.new_status,
                 }),
             },
         )).fetchall()
         resolved_alerts += len(closed)
+    if in_maintenance:
+        await db.commit()
+        return {"evaluated": 0, "matched": 0, "suppressed": "maintenance",
+                "resolved_alerts": resolved_alerts}
+    if is_recovery:
+        # Only real outages drive the reset notices and "active for".
+        closed = [r for r in closed if r.new_status in ("down", "degraded")]
         recovered = _recovery_map(closed)
         # How long was it down? A recovery notice that cannot say "for how
         # long" makes the reader go and look it up in the dashboard.
@@ -753,7 +790,7 @@ async def evaluate_status_change(
     # E1: live metric values for condition evaluation. packet_loss arrives from
     # the poller as a fraction (0..1); rule thresholds are in percent, so scale.
     metric_values = {
-        "ping_status": 1.0 if event.new_status == "up" else 0.0,
+        "ping_status": _ping_status_value(event.new_status),
         "rtt": float(event.rtt_ms or 0.0),
         "packet_loss": float(event.packet_loss or 0.0) * 100.0,
     }
@@ -774,6 +811,8 @@ async def evaluate_status_change(
             variables["duration"] = duration_between(recovered[str(rule.id)]["since"], now)
         else:
             if not _trigger_matches(trigger, event.new_status):
+                continue
+            if into_up and trigger != "up":
                 continue
             if is_recovery:
                 if not rule.recovery_alert:
@@ -813,7 +852,7 @@ async def evaluate_status_change(
         # Per-rule phrasing: the condition sentence depends on which rule
         # matched, so it is rebuilt here rather than with the shared variables.
         variables.update(rule_phrasing(
-            rule, hostname=event.hostname, is_recovery=is_recovery,
+            rule, hostname=host_label(event.hostname, event.ip_address), is_recovery=is_recovery,
             reading=variables["rtt"] if (rule.metric or "ping_status") == "rtt" else None,
             duration=variables.get("duration", ""),
         ))
@@ -890,7 +929,9 @@ async def evaluate_status_change(
                                    CAST(:m AS jsonb)
                     WHERE status IN ('pending', 'active', 'acknowledged')
                       AND device_id = :device_id AND rule_id = :rule_id
-                      AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded')
+                      AND service_check_id IS NULL
+                      AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
+                      AND metadata->>'new_status' IS NOT NULL
                 """),
                 {"now": now, "device_id": event.device_id, "rule_id": str(rule.id),
                  "m": json.dumps({"superseded_by_status": event.new_status,
@@ -1132,7 +1173,9 @@ async def evaluate_service_status_change(
     /evaluate for devices; internal endpoint, no auth.
     """
     now = datetime.now(timezone.utc)
-    is_recovery = event.new_status == "up" and event.old_status in ("down", "degraded", "warning")
+    # As on the device path: arriving at 'up' never opens a problem alert.
+    into_up = event.new_status == "up"
+    is_recovery = into_up and event.old_status in ("down", "degraded", "warning")
     is_down = event.new_status in ("down", "degraded", "warning")
 
     rules_result = await db.execute(
@@ -1188,7 +1231,7 @@ async def evaluate_service_status_change(
     # common case) were never resolved by the recovery that ended them.
     recovered: dict[str, dict] = {}
     outage_duration = ""
-    if is_recovery:
+    if into_up:
         closed = (await db.execute(
             text("""
                 UPDATE alerts
@@ -1198,8 +1241,9 @@ async def evaluate_service_status_change(
                 WHERE status IN ('pending', 'active', 'acknowledged')
                   AND service_check_id = :service_check_id
                   AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
-                  AND COALESCE(metadata->>'new_status', '') IN ('down', 'degraded', 'warning')
-                RETURNING rule_id, triggered_at, metadata->>'notified' AS notified
+                  AND metadata->>'new_status' IS NOT NULL
+                RETURNING rule_id, triggered_at, metadata->>'notified' AS notified,
+                          metadata->>'new_status' AS new_status
             """),
             {
                 "resolved_at": now,
@@ -1208,10 +1252,15 @@ async def evaluate_service_status_change(
                     "resolved_by_recovery": True,
                     "recovery_status": event.new_status,
                     "recovery_at": now.isoformat(),
+                } if is_recovery else {
+                    "resolved_by": "status_transition",
+                    "superseded_by_status": event.new_status,
                 }),
             },
         )).fetchall()
         resolved_alerts += len(closed)
+    if is_recovery:
+        closed = [r for r in closed if r.new_status in ("down", "degraded", "warning")]
         recovered = _recovery_map(closed)
         # Same question as for a device: how long was the check failing?
         outage_start = min((r.triggered_at for r in closed if r.triggered_at), default=None)
@@ -1230,6 +1279,8 @@ async def evaluate_service_status_change(
             variables["duration"] = duration_between(recovered[str(rule.id)]["since"], now)
         else:
             if not _trigger_matches(trigger, event.new_status):
+                continue
+            if into_up and trigger != "up":
                 continue
             if is_recovery:
                 if not rule.recovery_alert:
@@ -1606,7 +1657,7 @@ async def evaluate_trap(
             "trap_name": event.trap_name or "",
             "source_ip": event.source_ip or "",
             "trap_message": message,
-            **rule_phrasing(rule, hostname=subject_name),
+            **rule_phrasing(rule, hostname=host_label(subject_name, device_ip or event.source_ip)),
         }
         trap_defaults = default_templates("trap")
         email_subject = _render(effective_template(rule.email_subject, trap_defaults["email_subject"]), variables)

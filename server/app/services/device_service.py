@@ -9,7 +9,7 @@ from app.schemas.device import DeviceCreate, DeviceUpdate, DeviceSummary, Device
 from app.services import tag_service
 
 
-async def _apply_credential(db: AsyncSession, device: Device, credential_id: UUID) -> None:
+async def apply_credential(db: AsyncSession, device: Device, credential_id: UUID) -> None:
     """Expand a saved SNMP credential into the device's own columns.
 
     The poller reads SNMP auth directly from the devices table (v3 username,
@@ -229,7 +229,7 @@ async def create_device(db: AsyncSession, data: DeviceCreate, user_id: UUID | No
     if data.snmp_priv_passphrase:
         device.snmp_priv_passphrase = crypto.encrypt(data.snmp_priv_passphrase)
     if data.snmp_credential_id:
-        await _apply_credential(db, device, data.snmp_credential_id)
+        await apply_credential(db, device, data.snmp_credential_id)
     db.add(device)
     await db.commit()
     await db.refresh(device)
@@ -256,7 +256,7 @@ async def update_device(db: AsyncSession, device_id: UUID, data: DeviceUpdate) -
         raw = update_data.pop("snmp_priv_passphrase")
         device.snmp_priv_passphrase = crypto.encrypt(raw) if raw else None
 
-    # Pop credential_id so _apply_credential is the authoritative writer
+    # Pop credential_id so apply_credential is the authoritative writer
     # for credential-derived fields (version, port, community, v3 secrets).
     credential_id = update_data.pop("snmp_credential_id", "__missing__")
 
@@ -266,7 +266,7 @@ async def update_device(db: AsyncSession, device_id: UUID, data: DeviceUpdate) -
     if credential_id != "__missing__":
         device.snmp_credential_id = credential_id
         if credential_id is not None:
-            await _apply_credential(db, device, credential_id)
+            await apply_credential(db, device, credential_id)
 
     await db.commit()
     await db.refresh(device)

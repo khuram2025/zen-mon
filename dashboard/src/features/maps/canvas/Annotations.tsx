@@ -239,7 +239,7 @@ export function ShapeInspector({ shape, devices, onChange, onDelete, onZ, onLock
           <Field label="Device">
             <select value={m.exporter || ''} onChange={(e) => setMeta({ exporter: e.target.value || null })} className={cn(selCls, 'max-w-[8.5rem]')}>
               <option value="">All exporters</option>
-              {(devices || []).map((d) => <option key={d.ip} value={d.ip}>{d.hostname}</option>)}
+              {(devices || []).map((d) => <option key={d.ip} value={d.ip}>{d.hostname}{d.ip ? ` · ${d.ip}` : ''}</option>)}
             </select>
           </Field>
           <p className="text-[10px] leading-snug text-muted">

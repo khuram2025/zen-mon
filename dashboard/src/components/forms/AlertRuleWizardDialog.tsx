@@ -147,7 +147,7 @@ const APM_METRICS = [
 const TEMPLATE_VARS = [
   '{event_sentence}', '{condition}', '{condition_sentence}', '{reading}',
   '{duration}', '{duration_sentence}', '{duration_suffix}',
-  '{hostname}', '{ip_address}', '{status}', '{severity}', '{rule_name}',
+  '{hostname}', '{ip_address}', '{host_suffix}', '{status}', '{severity}', '{rule_name}',
   '{group}', '{location}', '{device_type}', '{timestamp}',
   '{metric_label}', '{threshold_value}', '{metric}', '{operator}', '{threshold}',
   '{rtt}', '{packet_loss}',
@@ -1014,7 +1014,7 @@ export function AlertRuleWizardDialog({
                         <Select value={s.device_id || '__pick__'} onValueChange={(v) => setS({ ...s, device_id: v === '__pick__' ? '' : v })}>
                           <SelectTrigger><SelectValue placeholder="Select device" /></SelectTrigger>
                           <SelectContent>
-                            {devices.map((d: any) => <SelectItem key={d.id} value={d.id}>{d.hostname}</SelectItem>)}
+                            {devices.map((d: any) => <SelectItem key={d.id} value={d.id}>{d.hostname}{d.ip_address ? ` · ${d.ip_address}` : ''}</SelectItem>)}
                           </SelectContent>
                         </Select>
                       </FormField>

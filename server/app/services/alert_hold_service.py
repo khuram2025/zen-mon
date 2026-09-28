@@ -45,7 +45,7 @@ _DUE_SQL = """
            a.metadata, a.severity AS alert_severity, a.message,
            r.enabled AS rule_enabled, r.name AS rule_name,
            r.severity AS rule_severity, r.cooldown, r.min_duration,
-           r.notify_channels, r.metric, r.operator, r.threshold,
+           r.notify_channels, r.metric, r.operator, r.threshold, r.trigger_on,
            r.conditions, r.condition_logic,
            r.email_subject, r.email_body, r.sms_template,
            r.schedule_start, r.schedule_end, r.schedule_days,
@@ -108,7 +108,7 @@ async def _dispatch_confirmed(db: AsyncSession, row, now: datetime) -> int:
         "error": (meta.get("error") or ""),
         "error_sentence": "",
         "status_intro": "An alert has been triggered:",
-        **ap.rule_phrasing(row, hostname=hostname),
+        **ap.rule_phrasing(row, hostname=ap.host_label(hostname, ip)),
     }
     subject = _render(ap.effective_template(row.email_subject, ap.DEFAULT_EMAIL_SUBJECT), variables)
     body = _render(ap.effective_template(row.email_body, ap.DEFAULT_EMAIL_BODY), variables)
@@ -161,7 +161,11 @@ async def sweep_pending_holds(db: AsyncSession) -> dict[str, int]:
             current = ((row.check_status if row.service_check_id is not None
                         else row.device_status) or "").lower()
 
-            if not row.rule_enabled or not expected or current != expected:
+            # Arriving at 'up' is only an alert for a rule that asks for it;
+            # a pending "is UP" row is a leftover of an 'any' rule and would
+            # otherwise be confirmed by the very health it reports.
+            stray_up = expected == "up" and (row.trigger_on or "any") != "up"
+            if not row.rule_enabled or not expected or current != expected or stray_up:
                 # The condition did not survive the hold (or the rule was
                 # switched off mid-hold): the blip never becomes an alert.
                 if await _settle(db, row.id, status="resolved", extra={

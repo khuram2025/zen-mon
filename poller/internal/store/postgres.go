@@ -261,11 +261,19 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 		       COALESCE(sc.v3_username, ''), COALESCE(sc.v3_context, ''),
 		       COALESCE(sc.v3_auth_protocol, ''), COALESCE(sc.v3_auth_passphrase, ''),
 		       COALESCE(sc.v3_priv_protocol, ''), COALESCE(sc.v3_priv_passphrase, ''),
-		       COALESCE(sc.timeout_ms, 0), COALESCE(sc.retries, 0)
+		       COALESCE(sc.timeout_ms, 0), COALESCE(sc.retries, 0),
+		       lc.id IS NOT NULL,
+		       COALESCE(lc.snmp_version, ''), COALESCE(lc.port, 0),
+		       COALESCE(lc.community, ''),
+		       COALESCE(lc.v3_username, ''), COALESCE(lc.v3_context, ''),
+		       COALESCE(lc.v3_auth_protocol, ''), COALESCE(lc.v3_auth_passphrase, ''),
+		       COALESCE(lc.v3_priv_protocol, ''), COALESCE(lc.v3_priv_passphrase, ''),
+		       COALESCE(lc.timeout_ms, 0), COALESCE(lc.retries, 0)
 		FROM devices d
 		LEFT JOIN device_profiles p ON p.id = d.profile_id
 		LEFT JOIN udt_device_settings us ON us.device_id = d.id
 		LEFT JOIN snmp_credentials sc ON sc.id = us.snmp_credential_id
+		LEFT JOIN snmp_credentials lc ON lc.id = d.snmp_credential_id
 		WHERE d.snmp_enabled = TRUE
 		  AND EXISTS (SELECT 1 FROM device_monitoring_vantages v WHERE v.device_id=d.id AND v.poller_id='central')
 		  AND d.ip_address IS NOT NULL
@@ -285,8 +293,8 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 		var profileID *uuid.UUID
 		var oidGroupsJSON string
 		var udtIntervalSec int
-		var hasUdtCred bool
-		var uc snmp.UdtCredential
+		var hasUdtCred, hasLinkedCred bool
+		var uc, lc snmp.UdtCredential
 		err := rows.Scan(
 			&d.ID, &d.Hostname, &d.DeviceType, &ipStr,
 			&d.Version, &d.Port, &d.Community,
@@ -302,6 +310,12 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 			&uc.AuthProtocol, &uc.AuthPassphrase,
 			&uc.PrivProtocol, &uc.PrivPassphrase,
 			&uc.TimeoutMs, &uc.Retries,
+			&hasLinkedCred,
+			&lc.Version, &lc.Port, &lc.Community,
+			&lc.V3Username, &lc.V3Context,
+			&lc.AuthProtocol, &lc.AuthPassphrase,
+			&lc.PrivProtocol, &lc.PrivPassphrase,
+			&lc.TimeoutMs, &lc.Retries,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan snmp device: %w", err)
@@ -350,6 +364,22 @@ func (s *PostgresStore) LoadSNMPDevices(ctx context.Context) ([]*snmp.Device, er
 			}
 			d.PrivPassphrase = pt
 		}
+		// The linked credential only matters when the row has no auth of its
+		// own; an undecryptable one leaves the device as loaded.
+		if hasLinkedCred && !d.HasOwnAuth() {
+			linkedOK := true
+			for _, value := range []*string{&lc.Community, &lc.AuthPassphrase, &lc.PrivPassphrase} {
+				decoded, err := snmp.DecryptText(*value)
+				if err != nil {
+					linkedOK = false
+					break
+				}
+				*value = decoded
+			}
+			if linkedOK {
+				snmp.ApplyLinkedCredential(&d, &lc)
+			}
+		}
 
 		devices = append(devices, &d)
 	}
@@ -397,8 +427,22 @@ func (s *PostgresStore) LoadUdtGlobalInterval(ctx context.Context) (int, error) 
 	return n, nil
 }
 
+// chassisEntitySQL selects a device's representative ENTITY-MIB chassis
+// row ($1 = device id): a root chassis first, then the lowest index (a
+// stacked switch's chassis rows hang off the stack entity).
+const chassisEntitySQL = `
+	SELECT NULLIF(btrim(serial_number), '') AS serial_number,
+	       NULLIF(btrim(model_name), '')    AS model_name,
+	       NULLIF(btrim(fw_revision), '')   AS fw_revision
+	  FROM device_entities
+	 WHERE device_id = $1 AND class = 'chassis'
+	 ORDER BY COALESCE(parent_index, 0) <> 0, ent_index
+	 LIMIT 1`
+
 // UpsertSystemInfo writes discovered system-group fields back to
-// devices (vendor/model/os_version/sys_object_id). The hostname is
+// devices (vendor/model/os_version/sys_object_id). The sysDescr-derived
+// model only applies while the chassis entity reports no model name —
+// UpsertEntities keeps the exact SKU from ENTITY-MIB. The hostname is
 // only overwritten when the device has opted in via
 // auto_rename_from_snmp — otherwise the operator's chosen name wins.
 // This avoids the surprise where adding SNMP to a device silently
@@ -409,17 +453,18 @@ func (s *PostgresStore) UpsertSystemInfo(
 ) error {
 	_, err := s.pool.Exec(ctx, `
 		UPDATE devices
-		SET sys_object_id = COALESCE(NULLIF($1,''), sys_object_id),
-		    vendor        = COALESCE(NULLIF($2,''), vendor),
-		    model         = COALESCE(NULLIF($3,''), model),
-		    os_version    = COALESCE(NULLIF($4,''), os_version),
+		SET sys_object_id = COALESCE(NULLIF($2,''), sys_object_id),
+		    vendor        = COALESCE(NULLIF($3,''), vendor),
+		    model         = COALESCE((SELECT c.model_name FROM (`+chassisEntitySQL+`) c),
+		                             NULLIF($4,''), model),
+		    os_version    = COALESCE(NULLIF($5,''), os_version),
 		    hostname      = CASE
 		                      WHEN auto_rename_from_snmp
 		                      THEN COALESCE(NULLIF($6,''), hostname)
 		                      ELSE hostname
 		                    END
-		WHERE id = $5
-	`, sysObjectID, vendor, model, osVersion, deviceID, sysName)
+		WHERE id = $1
+	`, deviceID, sysObjectID, vendor, model, osVersion, sysName)
 	return err
 }
 
@@ -627,8 +672,9 @@ func (s *PostgresStore) UpsertInterfaces(ctx context.Context, deviceID uuid.UUID
 			INSERT INTO device_interfaces (
 			    device_id, if_index, if_name, if_descr, if_alias,
 			    if_type, if_speed, mac_address, admin_status, oper_status,
-			    first_seen, last_seen, monitored, configured_speed_bps
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW(),$11,$12)
+			    first_seen, last_seen, monitored, configured_speed_bps, last_up_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW(),NOW(),$11,$12,
+			          CASE WHEN $13 THEN NOW() END)
 			ON CONFLICT (device_id, if_index) DO UPDATE SET
 			    if_name = EXCLUDED.if_name,
 			    if_descr = EXCLUDED.if_descr,
@@ -640,11 +686,14 @@ func (s *PostgresStore) UpsertInterfaces(ctx context.Context, deviceID uuid.UUID
 			    oper_status = EXCLUDED.oper_status,
 			    monitored = EXCLUDED.monitored,
 			    configured_speed_bps = EXCLUDED.configured_speed_bps,
-			    last_seen = NOW()
+			    last_seen = NOW(),
+			    last_up_at = CASE WHEN EXCLUDED.oper_status = 'up'
+			                      THEN NOW() ELSE device_interfaces.last_up_at END
 		`,
 			deviceID, i.IfIndex, i.IfName, i.IfDescr, i.IfAlias,
 			i.IfType, int64(i.IfSpeed), macArg, i.AdminStatus, i.OperStatus,
 			policies[i.IfIndex].Monitored, policies[i.IfIndex].Speed,
+			i.OperStatus == "up",
 		)
 	}
 	br := tx.SendBatch(ctx, batch)
@@ -693,6 +742,37 @@ func (s *PostgresStore) UpsertEntities(ctx context.Context, deviceID uuid.UUID, 
 		if _, err := br.Exec(); err != nil {
 			return fmt.Errorf("upsert entity %d: %w", ents[i].EntIndex, err)
 		}
+	}
+	if err := br.Close(); err != nil {
+		return err
+	}
+	// Copy the chassis identity onto the device row; only non-empty values
+	// are written, so a sparse walk never blanks a field. Kept out of the
+	// batch so a failure here (e.g. migration 126 not yet applied) cannot
+	// roll back the inventory rows above. serial_number is unique across
+	// devices (managed children key on it), so a serial another device
+	// already holds — the same switch added twice — is left alone rather
+	// than failing the whole update every cycle.
+	_, err := s.pool.Exec(ctx, `
+		UPDATE devices d
+		   SET serial_number    = COALESCE(c.serial, d.serial_number),
+		       model            = COALESCE(c.model_name, d.model),
+		       firmware_version = COALESCE(LEFT(c.fw_revision, 128), d.firmware_version)
+		  FROM (
+		        SELECT CASE WHEN EXISTS (SELECT 1 FROM devices o
+		                                  WHERE o.serial_number = LEFT(e.serial_number, 128)
+		                                    AND o.id <> $1)
+		                    THEN NULL ELSE LEFT(e.serial_number, 128) END AS serial,
+		               e.model_name, e.fw_revision
+		          FROM (`+chassisEntitySQL+`) e
+		       ) c
+		 WHERE d.id = $1
+		   AND (   (c.serial IS NOT NULL AND c.serial IS DISTINCT FROM d.serial_number)
+		        OR (c.model_name IS NOT NULL AND c.model_name IS DISTINCT FROM d.model)
+		        OR (c.fw_revision IS NOT NULL AND LEFT(c.fw_revision, 128) IS DISTINCT FROM d.firmware_version))
+	`, deviceID)
+	if err != nil {
+		return fmt.Errorf("sync chassis identity: %w", err)
 	}
 	return nil
 }

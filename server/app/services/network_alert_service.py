@@ -271,9 +271,10 @@ def _uptime_resets() -> set[str]:
 # ─── Postgres fetchers ──────────────────────────────────────────────────────
 
 async def _snmp_devices(db: AsyncSession) -> dict[str, dict]:
-    """{device_id: {hostname, device_type, location, group_id, tags}} for SNMP devices."""
+    """{device_id: {hostname, ip, device_type, location, group_id, tags}} for SNMP devices."""
     rows = (await db.execute(text(
-        "SELECT d.id, d.hostname, d.device_type, d.location, d.group_id, d.tags, d.snmp_poll_interval, p.oid_groups "
+        "SELECT d.id, d.hostname, d.device_type, d.location, d.group_id, d.tags, d.snmp_poll_interval, p.oid_groups, "
+        "host(d.ip_address) "
         "FROM devices d LEFT JOIN device_profiles p ON p.id = d.profile_id "
         "WHERE d.snmp_enabled = true AND d.status <> 'maintenance' ORDER BY d.id"
     ))).all()
@@ -286,6 +287,7 @@ async def _snmp_devices(db: AsyncSession) -> dict[str, dict]:
             "tags": _tag_set(r[5]),
             "poll_interval": int(r[6] or 60),
             "metric_intervals": template_intervals(r[7], int(r[6] or 60)),
+            "ip": r[8] or "",
         }
         for r in rows
     }
@@ -303,13 +305,32 @@ def freshness_budgets(dev, metrics):
                                                         if m == root or m.startswith(root + '_')])) for m in metrics}
 
 
+_warned_missing_last_up = False
+
+
 async def _interfaces(db: AsyncSession) -> dict[str, list[dict]]:
-    """{device_id: [interface dicts]} for monitored interfaces with a known speed."""
-    rows = (await db.execute(text(
-        "SELECT device_id, if_index, if_name, if_descr, if_alias, "
-        "COALESCE(configured_speed_bps, if_speed) AS speed, admin_status, monitored "
-        "FROM device_interfaces WHERE monitored = true"
-    ))).all()
+    """{device_id: [interface dicts]} for monitored interfaces with a known speed.
+
+    ``ever_up`` is false for a port the poller has never seen oper-up (an
+    unused access port): its oper-down state is its normal state, not a fault.
+    """
+    global _warned_missing_last_up
+    sql = ("SELECT device_id, if_index, if_name, if_descr, if_alias, "
+           "COALESCE(configured_speed_bps, if_speed) AS speed, admin_status, monitored, "
+           "{ever_up} FROM device_interfaces WHERE monitored = true")
+    try:
+        rows = (await db.execute(text(sql.format(ever_up="last_up_at IS NOT NULL")))).all()
+    except Exception as exc:
+        # Rolling upgrade: code deployed before migrate-126 ran. Degrade to
+        # the previous behaviour (every port eligible) with one warning.
+        if "last_up_at" not in str(exc):
+            raise
+        await db.rollback()
+        if not _warned_missing_last_up:
+            logger.warning("interface-down baseline disabled: device_interfaces.last_up_at "
+                           "missing — run migrate-126-device-identity-and-interface-baseline.sql")
+            _warned_missing_last_up = True
+        rows = (await db.execute(text(sql.format(ever_up="true")))).all()
     out: dict[str, list[dict]] = {}
     for r in rows:
         out.setdefault(str(r[0]), []).append({
@@ -317,6 +338,7 @@ async def _interfaces(db: AsyncSession) -> dict[str, list[dict]]:
             "if_name": r[2] or "", "if_descr": r[3] or "", "if_alias": r[4] or "",
             "speed": int(r[5]) if r[5] else 0,
             "admin_up": (str(r[6] or "").lower() == "up"),
+            "ever_up": bool(r[8]),
         })
     return out
 
@@ -410,23 +432,26 @@ def _eval_interface(rule, m: dict, iface: dict) -> tuple[bool, float, str] | Non
     if metric == "if_discards":
         v = m["discards"]; return _cmp(v, op, thr), v, f"{int(v)} discards"
     if metric == "if_oper_status":
-        # Only alert on interfaces that are administratively up — an admin-down
-        # port reporting oper-down is intentional, not a fault.
-        if not iface["admin_up"]:
+        # Only alert on interfaces that are administratively up and have been
+        # up at least once — an admin-down or never-used port reporting
+        # oper-down is its normal state, not a fault.
+        if not iface["admin_up"] or not iface.get("ever_up", True):
             return None
         v = float(m["oper"])
         return _cmp(v, op, thr), v, ("down" if int(v) == _OPER_DOWN else f"oper={int(v)}")
     return None
 
 
-def _message(rule, hostname: str, detail: str, iface_label: str | None) -> str:
-    where = f"{hostname}" + (f" / {iface_label}" if iface_label else "")
+def _message(rule, hostname: str, detail: str, iface_label: str | None,
+             ip_address: str = "") -> str:
+    where = ap.host_label(hostname, ip_address) + (f" / {iface_label}" if iface_label else "")
     return f"{rule.name}: {where} — {detail}"
 
 
 async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
                   iface_label: str | None = None, is_recovery: bool = False,
-                  duration: str = "", device_id=None, if_index=None) -> bool:
+                  duration: str = "", device_id=None, if_index=None,
+                  ip_address: str = "") -> bool:
     """Send one metric alert — or its all-clear. True when it was dispatched."""
     # Quiet hours: the alert row is already recorded; only the outbound
     # notification is gated by the rule's schedule window. A recovery notice is
@@ -449,11 +474,13 @@ async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
         return False
     sev = (rule.severity or "warning")
     # An interface rule is about the port, not the chassis, so the sentence
-    # names "core-router-01 / port14" and the details table repeats it.
-    where = f"{hostname} / {iface_label}" if iface_label else hostname
-    v = ap.rule_phrasing(rule, hostname=where, is_recovery=is_recovery,
-                         reading=reading, duration=duration)
-    v.update({"rule_name": rule.name or "Alert", "hostname": where,
+    # names "core-router-01 (10.0.0.1) / port14" and the details table repeats it.
+    label = ap.host_label(hostname, ip_address)
+    v = ap.rule_phrasing(rule, hostname=f"{label} / {iface_label}" if iface_label else label,
+                         is_recovery=is_recovery, reading=reading, duration=duration)
+    v.update({"rule_name": rule.name or "Alert",
+              "hostname": f"{hostname} / {iface_label}" if iface_label else hostname,
+              "ip_address": ip_address or "",
               "severity": sev.upper(),
               "status": "RESOLVED" if is_recovery else "ALERT"})
     prefix = 'recovery_' if is_recovery else ''
@@ -463,7 +490,7 @@ async def _notify(db: AsyncSession, rule, hostname: str, *, reading: str = "",
     sent = await dispatch_to_channels(db, rule.notify_channels or [], {
         "subject": subject,
         "body": body, "message": sms,
-        "hostname": hostname, "ip_address": "",
+        "hostname": hostname, "ip_address": ip_address or "",
         "status": "RESOLVED" if is_recovery else "ALERT", "severity": sev,
         "resolved": is_recovery,
         "rule_name": rule.name,
@@ -596,7 +623,8 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
                     if state is not None:
                         raised, resolved = await _apply(db, rule, did, dev['hostname'], None,
                             None, state, 0, 'Legacy component aggregate',
-                            {'legacy_aggregate': True}, raised, resolved, silences)
+                            {'legacy_aggregate': True}, raised, resolved, silences,
+                            ip_address=dev.get('ip', ''))
             for identity, label, history, extra in bound_entities:
                 await db.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
                                  {'key': f'network:{rule.id}:{did}:{identity}'})
@@ -619,7 +647,8 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
                 # Serialize this rule/entity across API workers. _apply commits
                 # the inserted/resolved row before releasing the transaction lock.
                 raised, resolved = await _apply(db, rule, did, dev['hostname'], identity,
-                    label, result.breach, value, detail, extra, raised, resolved, silences)
+                    label, result.breach, value, detail, extra, raised, resolved, silences,
+                    ip_address=dev.get('ip', ''))
                 await db.commit()
         await db.commit()
 
@@ -630,7 +659,7 @@ async def evaluate_network_rules(db: AsyncSession) -> dict[str, int]:
 
 async def _apply(db, rule, device_id, hostname, if_index, iface_label,
                  breach, value, detail, extra, raised, resolved,
-                 silences: set[tuple[str, str]] | None = None):
+                 silences: set[tuple[str, str]] | None = None, *, ip_address: str = ""):
     """Raise (if breaching and not already open) or resolve one rule/device/iface."""
     existing = await _active_alert(db, rule.id, device_id, if_index)
     if existing:
@@ -646,13 +675,13 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
         if silences and (device_id, dedupe) in silences:
             return raised, resolved
         if existing is None:
-            msg = _message(rule, hostname, detail, iface_label)
+            msg = _message(rule, hostname, detail, iface_label, ip_address)
             alert_id = await _raise(db, rule, device_id, msg, value, if_index, extra)
             if alert_id is not None:
                 raised += 1
                 await db.commit()
                 sent = await _notify(db, rule, hostname, reading=reading, iface_label=iface_label,
-                                     device_id=device_id, if_index=if_index)
+                                     device_id=device_id, if_index=if_index, ip_address=ip_address)
                 await ns.stamp(db, alert_id, sent)
                 await db.commit()
         elif await ns.is_pending(db, existing[0]):
@@ -663,7 +692,7 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
             active = (await db.execute(text("SELECT 1 FROM alerts WHERE id = :id AND status = 'active'"),
                                        {'id': existing[0]})).first()
             if active and await _notify(db, rule, hostname, reading=reading, iface_label=iface_label,
-                                       device_id=device_id, if_index=if_index):
+                                       device_id=device_id, if_index=if_index, ip_address=ip_address):
                 await ns.stamp(db, existing[0], True)
                 await db.commit()
     else:
@@ -678,7 +707,8 @@ async def _apply(db, rule, device_id, hostname, if_index, iface_label,
             # never learned it had cleared — let alone after how long.
             if notified and getattr(rule, "recovery_alert", True):
                 await _notify(db, rule, hostname, reading=reading, iface_label=iface_label,
-                              is_recovery=True, duration=ap.duration_between(started_at))
+                              is_recovery=True, duration=ap.duration_between(started_at),
+                              ip_address=ip_address)
     return raised, resolved
 
 

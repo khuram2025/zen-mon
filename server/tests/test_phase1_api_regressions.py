@@ -47,6 +47,7 @@ def _device(**overrides):
         "poll_mode": "direct",
         "managed_by_device_id": None,
         "serial_number": None,
+        "firmware_version": None,
         "managed_ip": None,
         "managed_source": None,
         "managed_last_seen": None,

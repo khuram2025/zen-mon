@@ -67,6 +67,13 @@ SUPERSEDED_CHECKSUMS: dict[str, set[str]] = {
     "migrate-006-services-v2.sql": {
         "12acd2f87031ae6e7ab7e78ab6e49e67b6b3663516acc8da0bf03eaed04dca73",
     },
+    # The first cut of 126 seeded devices.serial_number without guarding the
+    # unique index, so an appliance with a chassis serial on two devices
+    # aborted there. Where it succeeded, the columns and backfill it left are
+    # exactly what the guarded rewrite produces.
+    "migrate-126-device-identity-and-interface-baseline.sql": {
+        "f43aadd2d2f608de695d327328a86a6aed769d47dfcefe27b93d6447a38518e1",
+    },
 }
 
 

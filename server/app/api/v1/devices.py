@@ -1426,11 +1426,15 @@ async def test_device_snmp(
 
     if result is None:
         # Map net-snmp's stderr to a more actionable reason where we can.
+        # The SNMP GET is always sent, so describe its own outcome; the ping
+        # result is only context (ICMP may be filtered while UDP/161 works).
         err_lc = (snmp_err or "").lower()
-        if not reachable:
-            reason = "Host is unreachable (ping failed)"
-        elif "timeout" in err_lc and "no response" in err_lc:
-            reason = "SNMP timed out — packets reach the host but no reply (ACL, wrong community/v3 user, or SNMP service disabled)"
+        if "timeout" in err_lc and "no response" in err_lc:
+            reason = (
+                "SNMP timed out — packets reach the host but no reply (ACL, wrong community/v3 user, or SNMP service disabled)"
+                if reachable else
+                f"SNMP timed out — no reply on UDP/{cfg['port']}, and ping is unanswered too (host down, routing, or both protocols filtered)"
+            )
         elif "authentication failure" in err_lc or "usm" in err_lc:
             reason = "SNMPv3 authentication failed — wrong username/auth/priv protocol or passphrase"
         elif "unknown" in err_lc and "protocol" in err_lc:
@@ -1441,6 +1445,8 @@ async def test_device_snmp(
             reason = snmp_err
         else:
             reason = "SNMP probe failed for an unknown reason"
+        if not reachable and not reason.startswith("SNMP timed out"):
+            reason = f"{reason} (ping also unanswered)"
         result = {
             "ok": False,
             "snmp_responded": False,
@@ -1526,6 +1532,11 @@ async def _profile_name_map(db) -> dict:
 
 
 _SEV_RANK = {"ok": 0, "info": 0, "warn": 1, "crit": 2}
+
+
+# Ring-redundancy metrics that report "open" on a standalone switch, keyed to
+# the template group listing stack members.
+_STANDALONE_RING_METRICS = {"cisco_stack_ring": "stack_members"}
 
 
 def _metric_status(metric: dict, value_num, value_text: str) -> str:
@@ -1683,6 +1694,13 @@ async def device_template_insights(
             for m in gr.get("metrics", []):
                 v = by_metric.get(m["key"])
                 status = _metric_status(m, v["value_num"], v["value_text"]) if v else "none"
+                text_out = _metric_display(m, v["value_num"], v["value_text"]) if v else ""
+                members_group = _STANDALONE_RING_METRICS.get(m["key"])
+                if v and members_group and status == "warn" and v["value_num"] == 2:
+                    members = {r["instance"] for r in by_group.get(members_group, [])}
+                    if len(members) <= 1:
+                        # A single-member "stack" can never close its ring.
+                        status, text_out = "info", "Standalone — no stack ring"
                 if v:
                     bump(status)
                 metrics_out.append({
@@ -1690,7 +1708,7 @@ async def device_template_insights(
                     "type": m.get("type", "gauge"), "unit": m.get("unit"),
                     "thresholds": m.get("thresholds"),
                     "value": v["value_num"] if v else None,
-                    "text": _metric_display(m, v["value_num"], v["value_text"]) if v else "",
+                    "text": text_out,
                     "status": status,
                     "series_key": v["series_key"] if v else f"tpl_{m['key']}",
                     "has_data": v is not None,
@@ -1769,6 +1787,7 @@ def _device_to_response(
         managed_by_device_id=device.managed_by_device_id,
         managed_by_hostname=(parent_names or {}).get(device.managed_by_device_id),
         serial_number=device.serial_number,
+        firmware_version=device.firmware_version,
         managed_ip=str(device.managed_ip) if device.managed_ip else None,
         managed_source=device.managed_source,
         managed_last_seen=device.managed_last_seen,

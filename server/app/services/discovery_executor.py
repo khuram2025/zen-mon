@@ -555,7 +555,12 @@ async def execute_run(run_id: uuid.UUID) -> None:
                 matched_id, conflict_type = await _match_existing_device(
                     db, ip, ident.get("mac_address"), ident.get("hostname"),
                 )
-                if matched_id:
+                if matched_id and conflict_type == "same_hostname_diff_ip":
+                    # A different IP is a different box, even if its sysName
+                    # repeats; keep the hint but let it import as new.
+                    status = "new"
+                    new_count += 1
+                elif matched_id:
                     if conflict_type:
                         status = "changed"
                         changed_count += 1

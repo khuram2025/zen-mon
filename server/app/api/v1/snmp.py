@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal, get_db
 from app.core.security import get_current_user, require_operator_user
+from app.core.snmp_oid import normalize_oid
 from app.models.user import User
 from app.schemas.snmp import (
     DiscoveryImportRequest,
@@ -135,7 +136,8 @@ async def _snmpget_detail(
         "-r", "1",
         "-t", str(timeout_s),
         "-Oqv",   # quick + value-only per OID
-        "-OU",    # no MIB name substitution
+        "-OU",    # no units suffix
+        "-On",    # numeric OIDs (sysObjectID as .1.3.6…, never iso.3.6…)
     ]
     if version == "3":
         # SNMPv3 auth arguments
@@ -254,7 +256,7 @@ async def _classify_from_db(
         )
     )).mappings().all()
 
-    clean_oid = (sys_object_id or "").lstrip(".")
+    clean_oid = normalize_oid(sys_object_id)
 
     best_id: Optional[uuid.UUID] = None
     best_len = -1

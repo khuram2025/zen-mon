@@ -145,6 +145,7 @@ class DeviceResponse(BaseModel):
     managed_by_device_id: Optional[UUID] = None
     managed_by_hostname: Optional[str] = None
     serial_number: Optional[str] = None
+    firmware_version: Optional[str] = None
     managed_ip: Optional[str] = None
     managed_source: Optional[str] = None
     managed_last_seen: Optional[datetime] = None
