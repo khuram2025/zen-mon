@@ -148,6 +148,17 @@ func (c *Classifier) SetProfiles(profiles []*Profile) []error {
 	return errs
 }
 
+// NormalizeOID puts a sysObjectID into bare numeric dotted form so the
+// net-snmp symbolic "iso.3.6..." and the leading-dot ".1.3.6..." forms
+// compare equal to "1.3.6...".
+func NormalizeOID(oid string) string {
+	oid = strings.TrimSpace(oid)
+	if strings.HasPrefix(oid, "iso.") || oid == "iso" {
+		oid = "1" + strings.TrimPrefix(oid, "iso")
+	}
+	return strings.TrimPrefix(oid, ".")
+}
+
 // Match returns the best profile for the given sysObjectID + sysDescr.
 // Returns nil if nothing matches. Priority:
 //
@@ -157,7 +168,7 @@ func (c *Classifier) Match(sysObjectID, sysDescr string) *Profile {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	sysObjectID = strings.TrimPrefix(sysObjectID, ".")
+	sysObjectID = NormalizeOID(sysObjectID)
 
 	type hit struct {
 		cp       compiledProfile
@@ -166,8 +177,8 @@ func (c *Classifier) Match(sysObjectID, sysDescr string) *Profile {
 	var hits []hit
 	for _, cp := range c.profiles {
 		for _, pref := range cp.profile.Match.SysObjectIDPrefixes {
-			pref = strings.TrimPrefix(pref, ".")
-			if sysObjectID != "" && strings.HasPrefix(sysObjectID, pref) {
+			pref = NormalizeOID(pref)
+			if sysObjectID != "" && pref != "" && strings.HasPrefix(sysObjectID, pref) {
 				hits = append(hits, hit{cp, len(pref)})
 				break
 			}
