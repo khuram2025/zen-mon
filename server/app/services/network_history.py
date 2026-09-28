@@ -87,7 +87,9 @@ def entities(conditions, device_series, interface_series, interfaces, target_mat
                 series['if_util_pct'] = [(t, max(v, outgoing[t]) * 100 / speed
                                          if v is not None and outgoing.get(t) is not None else None)
                                          for t, v in incoming.items()]
-            if not iface['admin_up']:
+            # Admin-down and never-up ports (unused access ports) are oper-down
+            # by design; no oper-status evidence means no interface-down alert.
+            if not iface['admin_up'] or not iface.get('ever_up', True):
                 series.pop('if_oper_status', None)
             yield iface['if_index'], iface['if_name'] or iface['if_descr'], series, {'if_name': iface['if_name']}
         return

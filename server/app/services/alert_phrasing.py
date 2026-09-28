@@ -432,14 +432,29 @@ def duration_between(started, ended=None) -> str:
     return humanize_duration((ended - started).total_seconds())
 
 
+def host_label(hostname: Optional[str], ip_address: Optional[str] = None) -> str:
+    """"core-sw-01 (10.0.0.1)" — the same form the device status alerts use.
+
+    The IP is dropped when it is missing or is already the name, so an
+    unnamed device reads "10.0.0.1" rather than "10.0.0.1 (10.0.0.1)".
+    """
+    name = (hostname or "").strip()
+    ip = (ip_address or "").strip()
+    if not ip or ip == name:
+        return name or ip
+    return f"{name} ({ip})" if name else ip
+
+
 # ── Default message bodies ───────────────────────────────────────────────────
 #
 # These are `{placeholder}` templates, not finished prose: a rule may override
 # any of them, and the wizard shows the effective template for editing. The
 # variables they lean on are built by `message_variables()` below.
 
-DEFAULT_EMAIL_SUBJECT = "[{severity}] {status}: {rule_name}"
-DEFAULT_RECOVERY_EMAIL_SUBJECT = "[{severity}] Resolved: {rule_name}"
+# `{host_suffix}` names the object as " — core-sw-01 (10.0.0.1)": two switches
+# sharing a sysName are otherwise indistinguishable in an inbox.
+DEFAULT_EMAIL_SUBJECT = "[{severity}] {status}: {rule_name}{host_suffix}"
+DEFAULT_RECOVERY_EMAIL_SUBJECT = "[{severity}] Resolved: {rule_name}{host_suffix}"
 
 # The email body is the highlighted callout above a table that already lists
 # the rule, the condition, the host and the time. So it says the one thing the
@@ -459,6 +474,7 @@ DEFAULT_RECOVERY_SMS = "ZenPlus resolved — {rule_name}: {event_sentence}{durat
 LEGACY_DEFAULT_TEMPLATES = frozenset({
     "[{severity}] {status}: {rule_name}",
     "[{severity}] RESOLVED: {rule_name}",
+    "[{severity}] Resolved: {rule_name}",
     "{status_intro}\n\nRule: {rule_name}\nSeverity: {severity}\nDevice: {hostname} "
     "({ip_address})\nStatus: {status}\nMetric: {metric} {operator} {threshold}\n"
     "Time: {timestamp}\n\n--\nZenPlus Network Monitoring",
@@ -494,7 +510,8 @@ _SERVICE_TEMPLATES = {
     "email_body": "The {check_type} check “{check_name}” on {target} is {status}."
                   "{error_sentence}",
     "sms_template": "ZenPlus {severity} — {rule_name}: {check_name} is {status} ({target}).",
-    "recovery_email_subject": DEFAULT_RECOVERY_EMAIL_SUBJECT,
+    # The service path has no {host_suffix}; its subject stays name-only.
+    "recovery_email_subject": "[{severity}] Resolved: {rule_name}",
     "recovery_email_body": "The {check_type} check “{check_name}” on {target} is "
                            "passing again.{duration_sentence}",
     "recovery_sms_template": "ZenPlus resolved — {rule_name}: {check_name} is "
@@ -681,6 +698,7 @@ def phrasing_variables(*, metric: Optional[str] = None, operator: Optional[str] 
         # template can end with one without gluing words together.
         "duration_sentence": f" The condition was active for {duration}." if duration else "",
         "duration_suffix": f" Active for {duration}." if duration else "",
+        "host_suffix": f" — {subject_noun}" if subject_noun else "",
     }
 
 

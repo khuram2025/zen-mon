@@ -110,7 +110,7 @@ def test_preview_returns_rendered_email(preview_client):
     body = resp.json()
 
     alert = body["alert"]
-    assert alert["subject"] == "[CRITICAL] DOWN: Core router down"
+    assert alert["subject"] == "[CRITICAL] DOWN: Core router down — core-router-01"
     # The HTML mail, not just the template sentence.
     assert alert["email_html"].lstrip().startswith("<!DOCTYPE html>")
     assert "Core router down" in alert["email_html"]
@@ -118,7 +118,7 @@ def test_preview_returns_rendered_email(preview_client):
     assert alert["sms_body"].startswith("ZenPlus CRITICAL — Core router down:")
 
     # recovery_alert is on, so the resolved mail renders too.
-    assert body["recovery"]["subject"] == "[CRITICAL] Resolved: Core router down"
+    assert body["recovery"]["subject"] == "[CRITICAL] Resolved: Core router down — core-router-01"
 
     # The editor needs both what is stored (all defaults here) and the text
     # those defaults resolve to.
@@ -232,7 +232,7 @@ def test_preview_blank_override_falls_back_to_default(preview_client):
     cleared = client.post(
         f"/api/v1/alert-rules/{RULE_ID}/preview", json={"email_subject": ""},
     ).json()
-    assert cleared["alert"]["subject"] == "[CRITICAL] DOWN: Core router down"
+    assert cleared["alert"]["subject"] == "[CRITICAL] DOWN: Core router down — core-router-01"
 
 
 def test_preview_unknown_rule_is_404(preview_client):

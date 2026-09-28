@@ -34,7 +34,7 @@ async def run(monkeypatch, r, history, dependency=None):
     monkeypatch.setattr(network_history, 'fetch_history', lambda *args: ({'d': history}, {}))
     monkeypatch.setattr(alert_engine, '_find_suppressing_dependency', AsyncMock(return_value=dependency))
     applied = []
-    async def apply(*args):
+    async def apply(*args, **kwargs):
         applied.append(args)
         return 0, 0
     monkeypatch.setattr(worker, '_apply', apply)

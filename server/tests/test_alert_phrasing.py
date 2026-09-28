@@ -152,3 +152,40 @@ def test_sample_readings_sit_the_right_side_of_the_threshold():
     assert ap.sample_reading("host_filesystem_pct", "gt", 95) == "98%"
     # State metrics have no number worth inventing.
     assert ap.sample_reading("ping_status", "==", 0) == ""
+
+
+def test_host_label_matches_the_device_status_alert_format():
+    """Two switches sharing a sysName must be told apart (ZP-14)."""
+    assert ap.host_label("core-sw", "10.0.0.1") == "core-sw (10.0.0.1)"
+    assert ap.host_label("core-sw", "") == "core-sw"
+    assert ap.host_label("core-sw", None) == "core-sw"
+    # An unnamed device is its IP, once.
+    assert ap.host_label("10.0.0.1", "10.0.0.1") == "10.0.0.1"
+    assert ap.host_label("", "10.0.0.1") == "10.0.0.1"
+
+
+def test_default_subjects_name_the_host_and_ip():
+    v = ap.phrasing_variables(metric="ping_status", operator="==", threshold=0,
+                              subject_noun=ap.host_label("core-sw", "10.0.0.1"))
+    v.update(severity="CRITICAL", status="DOWN", rule_name="Device Down")
+    render = lambda t: t.format_map(v)
+    assert render(ap.DEFAULT_EMAIL_SUBJECT) == "[CRITICAL] DOWN: Device Down — core-sw (10.0.0.1)"
+    assert render(ap.DEFAULT_RECOVERY_EMAIL_SUBJECT) == "[CRITICAL] Resolved: Device Down — core-sw (10.0.0.1)"
+    assert "core-sw (10.0.0.1)" in render(ap.DEFAULT_SMS)
+
+
+def test_subject_suffix_is_empty_without_a_subject():
+    v = ap.phrasing_variables(metric="cpu", operator=">", threshold=90)
+    assert v["host_suffix"] == ""
+
+
+def test_old_default_recovery_subject_tracks_the_new_wording():
+    assert ap.effective_template("[{severity}] Resolved: {rule_name}",
+                                 ap.DEFAULT_RECOVERY_EMAIL_SUBJECT) == ap.DEFAULT_RECOVERY_EMAIL_SUBJECT
+
+
+def test_service_defaults_keep_no_host_suffix():
+    """The service path renders without rule_phrasing; a {host_suffix} there
+    would reach the inbox as literal text."""
+    for tpl in ap.default_templates("service").values():
+        assert "{host_suffix}" not in (tpl or "")
