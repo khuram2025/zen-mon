@@ -1,4 +1,5 @@
 import { cn } from '@/lib/utils'
+import { serverNow } from '@/lib/serverClock'
 
 /* Shared availability visuals for the services list and detail pages:
    the banded color scale, the pulsing status dot, and the per-day uptime
@@ -70,10 +71,12 @@ export type DayCell = {
   samples: number
 }
 
-/** Normalize daily rows onto the trailing `dayCount` calendar days ending today (local). */
+/** Normalize daily rows onto the trailing `dayCount` calendar days ending today (local).
+ *  "Today" is taken from the appliance clock (`serverNow()`) unless `nowMs` is given. */
 export function buildDaySeries(
   rows: Array<{ date: string; uptime_pct: number | null; sample_count: number }>,
   dayCount: number,
+  nowMs: number = serverNow(),
 ): DayCell[] {
   const byKey = new Map<string, { pct: number | null; samples: number }>()
   for (const r of rows) {
@@ -81,7 +84,7 @@ export function buildDaySeries(
     byKey.set(r.date, { pct: r.uptime_pct, samples: r.sample_count })
   }
   const out: DayCell[] = []
-  const today = new Date()
+  const today = new Date(nowMs)
   today.setHours(0, 0, 0, 0)
   for (let i = dayCount - 1; i >= 0; i--) {
     const date = new Date(today)
