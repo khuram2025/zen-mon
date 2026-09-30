@@ -105,7 +105,15 @@ export function IncidentsTab({
 
   const filtered = kind === 'all' ? outages : outages.filter((o) => o.kind === kind)
   const selected = outages.find((o) => o.id === selectedId) || null
-  const totalDown = outages.reduce((s, o) => s + ((o.end ?? nowMs) - o.start), 0) / 1000
+  // Elapsed incident time inside the selected window: incidents from the
+  // appliance carry their real start, which can precede the window.
+  const winFrom = Date.parse(fromISO)
+  const winTo = Math.min(Date.parse(toISO), nowMs)
+  const totalDown = outages.reduce((s, o) => {
+    const a = Math.max(o.start, Number.isFinite(winFrom) ? winFrom : o.start)
+    const b = Math.min(o.end ?? nowMs, Number.isFinite(winTo) ? winTo : nowMs)
+    return s + Math.max(0, b - a)
+  }, 0) / 1000
   const noEvidence = (evidence.coveragePct != null && evidence.coveragePct <= 0) || (evidence.sampleCount === 0 && (evidence.coveredSec ?? 0) <= 0)
   const partialEvidence = !noEvidence && evidence.coveragePct != null && evidence.coveragePct < 90
 
@@ -134,7 +142,7 @@ export function IncidentsTab({
         subtitle={
           <span>
             {outages.length > 0
-              ? `${total > outages.length ? `${outages.length} of ${total}` : outages.length} in ${rangePhrase(rangeLabel)} · ${formatDur(totalDown)} in window`
+              ? `${total > outages.length ? `${outages.length} of ${total}` : outages.length} in ${rangePhrase(rangeLabel)} · ${formatDur(totalDown)} elapsed in window`
               : rangeLabel}
             {' · '}select one to investigate
             {evidence.coveragePct != null && ` · ${evidence.coveragePct.toFixed(1)}% of window observed`}

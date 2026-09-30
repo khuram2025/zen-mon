@@ -331,7 +331,21 @@ function renderValue(v: unknown): string {
 
 const ACTION_TEXT: Record<string, string> = {
   create: 'Created', update: 'Changed', delete: 'Deleted', test: 'Manual test', pause: 'Paused', resume: 'Resumed',
-  import: 'Imported', bulk: 'Bulk action',
+  import: 'Imported', bulk: 'Bulk action', note: 'Incident note added',
+  'service_check.create': 'Created', 'service_check.update': 'Changed', 'service_check.delete': 'Deleted',
+  'service_check.test': 'Manual test', 'service_check.note': 'Incident note added', 'service_check.import': 'Imported',
+  'service_check_maintenance.create': 'Maintenance scheduled', 'service_check_maintenance.end': 'Maintenance ended early',
+  'service_check_maintenance.update': 'Maintenance window changed', 'service_check_maintenance.cancel': 'Maintenance cancelled',
+  'monitoring.sites.update': 'Monitoring sites changed',
+}
+
+/** Audit action code → readable label ("service_check.bulk.pause" → "Bulk: pause"). */
+function actionText(action: string): string {
+  if (ACTION_TEXT[action]) return ACTION_TEXT[action]
+  const bulk = action.match(/^service_check\.bulk\.(\w+)$/)
+  if (bulk) return `Bulk action: ${bulk[1].replace(/_/g, ' ')}`
+  const tail = action.split('.').pop() || action
+  return ACTION_TEXT[tail] || action.replace(/[._]/g, ' ')
 }
 
 export function ConfigHistory({ checkId }: { checkId: string }) {
@@ -362,7 +376,7 @@ export function ConfigHistory({ checkId }: { checkId: string }) {
             return (
               <li key={h.id} className="rounded-md border border-border bg-surface2/30 px-3 py-2">
                 <div className="flex flex-wrap items-baseline justify-between gap-2 text-[11px]">
-                  <span className="font-semibold">{ACTION_TEXT[h.action] || h.action}{h.actor ? ` by ${h.actor}` : ''}</span>
+                  <span className="font-semibold">{actionText(h.action)}{h.actor ? ` by ${h.actor}` : ''}</span>
                   <span className="font-mono tabular-nums text-muted">{exactTime(h.at)} <span className="font-sans">({relativeTime(h.at)})</span></span>
                 </div>
                 {changes.length > 0 && (
