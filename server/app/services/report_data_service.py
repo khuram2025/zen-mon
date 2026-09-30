@@ -642,17 +642,22 @@ def device_outage_episodes(start: datetime, end: datetime, device_ids: list[str]
     return window_episodes(raw, start, end, start, maintenance)
 
 
-def confirmed_down_episodes(segments, end: datetime) -> list[tuple[datetime, Optional[datetime]]]:
+def confirmed_down_episodes(segments, end: datetime, excluded=None) -> list[tuple[datetime, Optional[datetime]]]:
     """Contiguous confirmed-down runs, split exactly where summarize() splits
     incidents, so `outages` equals the detail page's incident count. A run
-    that reaches the window end is ongoing (ended_at None)."""
+    that reaches the window end is ongoing (ended_at None). Maintenance
+    (`excluded`) time is removed; a run interrupted only by it stays one."""
+    from app.services.service_availability import _bridged, merge_intervals, subtract_intervals
+    excluded = merge_intervals(excluded) if excluded else []
+    if excluded:
+        segments = subtract_intervals(segments, excluded)
     out: list[list] = []
     previous_end = None
     for lo, hi, fraction in segments:
         if hi <= lo:
             continue
         if fraction < 1:
-            if out and out[-1][2] and previous_end == lo:
+            if out and out[-1][2] and _bridged(previous_end, lo, excluded):
                 out[-1][1] = hi
             else:
                 out.append([lo, hi, True])
@@ -1160,15 +1165,26 @@ def _compliance(avail: Optional[float], target: float,
     return True, "met", used
 
 
-def _confirmed_service_evidence(services: list[dict], start: datetime, end: datetime) -> dict:
-    """service_check_id -> (summary, episodes, observed_start) on the confirmed basis."""
+def _confirmed_service_evidence(services: list[dict], start: datetime, end: datetime,
+                                maintenance: Optional[dict] = None) -> dict:
+    """service_check_id -> (summary, episodes, observed_start) on the confirmed basis.
+
+    `maintenance` maps check id -> merged maintenance intervals; that time is
+    excluded from both availability and outage episodes (B03)."""
+    maintenance = maintenance or {}
     checks = {str(s["id"]): (s.get("created_at"), s.get("check_interval") or 60) for s in services}
     out = {}
     for cid, segments, _count, observed_start in read_fleet_segments(
             get_ch_client(), checks, start, end, basis="confirmed"):
-        out[cid] = (summarize(segments, observed_start, end),
-                    confirmed_down_episodes(segments, end), observed_start)
+        excluded = maintenance.get(cid)
+        out[cid] = (summarize(segments, observed_start, end, excluded),
+                    confirmed_down_episodes(segments, end, excluded), observed_start)
     return out
+
+
+async def _service_maintenance_intervals(db, services: list[dict], start: datetime, end: datetime) -> dict:
+    from app.services import service_maintenance
+    return await service_maintenance.intervals_for_checks(db, services, start, end)
 
 
 async def build_business(
@@ -1190,13 +1206,20 @@ async def build_business(
         errors.add("service_maintenance", exc)
         maint_now = set()
 
+    svc_maintenance: dict = {}
+    if svc_ids:
+        try:
+            svc_maintenance = await _service_maintenance_intervals(db, services, start, end)
+        except Exception as exc:
+            errors.add("service_maintenance", exc)
+
     svc_rows, confirmed = [], {}
     if svc_ids:
         svc_rows, confirmed = await asyncio.gather(
             asyncio.to_thread(errors.run, "service_probes", _fetch_service_metrics,
                               start, end, svc_ids, default=[]),
             asyncio.to_thread(errors.run, "service_availability", _confirmed_service_evidence,
-                              services, start, end, default={}),
+                              services, start, end, svc_maintenance, default={}),
         )
     rows_by_service = _group_rows(svc_rows, "service_check_id")
 
@@ -1256,6 +1279,7 @@ async def build_business(
             "availability_basis": "confirmed",
             "probe_availability_pct": up / total * 100 if total else None,
             "coverage_pct": summary["coverage_pct"] if summary else None,
+            "maintenance_seconds": summary.get("maintenance_sec", 0.0) if summary else 0.0,
             "downtime_seconds": downtime_s,
             "outages": len(episodes),
             "checks_total": total,

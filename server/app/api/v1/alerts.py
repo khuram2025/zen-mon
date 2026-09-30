@@ -310,12 +310,55 @@ async def get_alert_detail(
     return payload
 
 
+class BulkAcknowledgeBody(BaseModel):
+    service_check_id: Optional[UUID] = None
+    alert_ids: Optional[list[UUID]] = None
+
+
+@router.post("/acknowledge-bulk")
+async def acknowledge_alerts_bulk(
+    data: BulkAcknowledgeBody,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Acknowledge every ACTIVE alert matching service_check_id and/or
+    alert_ids (at least one filter), restricted to the caller's scope."""
+    if data.service_check_id is None and not data.alert_ids:
+        raise HTTPException(status_code=422, detail="Give service_check_id or alert_ids")
+    if data.alert_ids and len(data.alert_ids) > 1000:
+        raise HTTPException(status_code=422, detail="At most 1000 alert ids per request")
+    alerts = await alert_service.acknowledge_bulk(
+        db, user.id, service_check_id=data.service_check_id, alert_ids=data.alert_ids,
+        visible_tags=await scoping.visible_tags(db, user),
+    )
+    for alert in alerts:
+        await write_audit_log(
+            db,
+            actor=user,
+            action="alert.acknowledge",
+            resource_type="alert",
+            resource_id=str(alert.id),
+            metadata={"severity": alert.severity, "bulk": True,
+                      "service_check_id": str(alert.service_check_id) if alert.service_check_id else None},
+        )
+    await db.commit()
+    return {"acknowledged": len(alerts)}
+
+
+async def _require_alert_in_scope(db: AsyncSession, user: User, alert_id: UUID) -> None:
+    """Mutations on an alert outside the caller's tag scope behave like a
+    missing alert (404), matching the read path."""
+    if not await scoping.alert_in_scope(db, alert_id, await scoping.visible_tags(db, user)):
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+
 @router.post("/{alert_id}/acknowledge", response_model=AlertResponse)
 async def acknowledge_alert(
     alert_id: UUID,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_operator_user),
 ):
+    await _require_alert_in_scope(db, user, alert_id)
     alert = await alert_service.acknowledge_alert(db, alert_id, user.id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
@@ -378,6 +421,7 @@ async def snooze_alert(
     Resolves the current alert and records a silence so the evaluators won't
     re-raise the same condition on this server/device until the silence expires.
     """
+    await _require_alert_in_scope(db, user, alert_id)
     key = await _alert_silence_key(db, alert_id)
     if not key:
         raise HTTPException(400, "This alert has no rule identity to snooze")
@@ -424,6 +468,7 @@ async def unsnooze_alert(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_operator_user),
 ):
+    await _require_alert_in_scope(db, user, alert_id)
     key = await _alert_silence_key(db, alert_id)
     if not key:
         raise HTTPException(400, "This alert has no rule identity to unsnooze")
@@ -441,6 +486,7 @@ async def resolve_alert(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_operator_user),
 ):
+    await _require_alert_in_scope(db, user, alert_id)
     alert = await alert_service.resolve_alert(db, alert_id)
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")

@@ -78,6 +78,9 @@ class ServiceCheck(Base):
     sla_target_pct: Mapped[float] = mapped_column(Numeric(6, 3, asdecimal=False), nullable=True)
     criticality: Mapped[str] = mapped_column(String(16), nullable=True)
     business_owner: Mapped[str] = mapped_column(String(255), nullable=True)
+    # Operational ownership (migrate-130).
+    owner_team: Mapped[str] = mapped_column(String(255), nullable=True)
+    runbook_url: Mapped[str] = mapped_column(Text, nullable=True)
 
     description: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -152,6 +155,28 @@ class ServiceCheckMaintenance(Base):
     reason: Mapped[str] = mapped_column(Text, nullable=True)
     created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    # Lifecycle (migrate-130): ending early records the effective end instead of
+    # deleting the row; a window that never started is cancelled. Effective end
+    # is LEAST(ends_at, ended_at); cancelled windows never apply.
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=True)
+    end_reason: Mapped[str] = mapped_column(Text, nullable=True)
+    cancelled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
 
     check = relationship("ServiceCheck", foreign_keys=[scope_check_id], lazy="selectin")
     group = relationship("ServiceCheckGroup", foreign_keys=[scope_group_id], lazy="selectin")
+
+
+class ServiceCheckNote(Base):
+    """Incident note / assignment on a service check (migrate-130)."""
+    __tablename__ = "service_check_notes"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    service_check_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("service_checks.id", ondelete="CASCADE"), nullable=False)
+    incident_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    assignee: Mapped[str] = mapped_column(String(255), nullable=True)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    author_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    author_name: Mapped[str] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

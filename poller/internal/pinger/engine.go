@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -144,6 +145,12 @@ type Engine struct {
 	activePings     int
 	snmpActive      int
 	snmpRunning     bool
+
+	// Maintenance reconciliation (service checks): the check IDs that were in
+	// maintenance on the previous load, and the status the engine last wrote
+	// (or first saw outside maintenance) for each check's service_status_log.
+	serviceMaint      map[uuid.UUID]struct{}
+	serviceLastLogged map[uuid.UUID]string
 }
 
 // NewEngine creates a new monitoring engine.
@@ -803,6 +810,7 @@ func (e *Engine) syncServiceChecks(ctx context.Context) error {
 			delete(e.serviceChecks, id)
 			delete(e.lastServiceAt, id)
 			delete(e.serviceFinished, id)
+			delete(e.serviceLastLogged, id)
 		}
 	}
 
@@ -904,7 +912,81 @@ func (e *Engine) runServiceAttempt(ctx context.Context, sc *checker.ServiceCheck
 		e.logger.Warnf("Cannot evaluate service maintenance; keeping confirmed state: %v", err)
 		return
 	}
+	e.reconcileServiceMaintenance(ctx, sc.ID, maintIDs)
 	e.processServiceStatusChange(ctx, result, maintIDs)
+}
+
+// reconcileServiceMaintenance repairs the confirmed history after a
+// maintenance window ends. Status changes inside a window update the
+// in-memory status but write no service_status_log row, so when a check
+// leaves maintenance in a different state than the one last logged, one
+// row (last logged -> current, reason "maintenance ended") is written.
+// It never opens alerts or publishes events. A check whose last logged
+// status is unknown is left alone.
+func (e *Engine) reconcileServiceMaintenance(ctx context.Context, attemptedID uuid.UUID, maintIDs map[uuid.UUID]struct{}) {
+	for _, ssc := range e.collectMaintenanceReconciliation(attemptedID, maintIDs, time.Now().UTC()) {
+		e.logger.Infof("Service status reconciled after maintenance: %s %s → %s",
+			ssc.ServiceCheckID, ssc.OldStatus, ssc.NewStatus)
+		if err := e.svcWriter.WriteServiceStatusChange(ctx, ssc, 0); err != nil {
+			e.logger.Errorf("Failed to write maintenance reconciliation to CH: %v", err)
+		}
+	}
+}
+
+// collectMaintenanceReconciliation diffs maintIDs against the previous load
+// and returns the reconciling rows to write, updating the remembered state.
+// attemptedID's current status seeds its last-logged status when it is first
+// seen outside maintenance.
+func (e *Engine) collectMaintenanceReconciliation(attemptedID uuid.UUID, maintIDs map[uuid.UUID]struct{}, now time.Time) []*checker.ServiceStatusChange {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.serviceLastLogged == nil {
+		e.serviceLastLogged = make(map[uuid.UUID]string)
+	}
+
+	var out []*checker.ServiceStatusChange
+	ended := make([]uuid.UUID, 0)
+	for id := range e.serviceMaint {
+		if _, still := maintIDs[id]; !still {
+			ended = append(ended, id)
+		}
+	}
+	sort.Slice(ended, func(i, j int) bool { return ended[i].String() < ended[j].String() })
+	for _, id := range ended {
+		sc, ok := e.serviceChecks[id]
+		if !ok || sc.Status == "" {
+			continue
+		}
+		last, known := e.serviceLastLogged[id]
+		if !known || last == sc.Status {
+			continue
+		}
+		out = append(out, &checker.ServiceStatusChange{
+			ServiceCheckID: sc.ID,
+			DeviceID:       sc.DeviceID,
+			CheckType:      sc.CheckType,
+			OldStatus:      last,
+			NewStatus:      sc.Status,
+			Reason:         "maintenance ended",
+			Timestamp:      now,
+		})
+		e.serviceLastLogged[id] = sc.Status
+	}
+
+	if _, muted := maintIDs[attemptedID]; !muted {
+		if _, known := e.serviceLastLogged[attemptedID]; !known {
+			if sc, ok := e.serviceChecks[attemptedID]; ok && sc.Status != "" {
+				e.serviceLastLogged[attemptedID] = sc.Status
+			}
+		}
+	}
+
+	next := make(map[uuid.UUID]struct{}, len(maintIDs))
+	for id := range maintIDs {
+		next[id] = struct{}{}
+	}
+	e.serviceMaint = next
+	return out
 }
 
 func sameServiceDefinition(a, b *checker.ServiceCheck) bool {
@@ -1033,6 +1115,10 @@ func (e *Engine) processServiceStatusChange(ctx context.Context, result *checker
 			Reason:         reason,
 			Timestamp:      time.Now().UTC(),
 		}
+		if e.serviceLastLogged == nil {
+			e.serviceLastLogged = make(map[uuid.UUID]string)
+		}
+		e.serviceLastLogged[sc.ID] = newStatus
 
 		e.logger.Infof("Service status change: %s (%s) %s → %s: %s",
 			sc.Name, sc.CheckType, oldStatus, newStatus, reason)

@@ -88,6 +88,34 @@ async def acknowledge_alert(db: AsyncSession, alert_id: UUID, user_id: UUID) -> 
     return alert
 
 
+async def acknowledge_bulk(
+    db: AsyncSession,
+    user_id: UUID,
+    service_check_id: UUID | None = None,
+    alert_ids: list[UUID] | None = None,
+    visible_tags: list[str] | None = None,
+) -> list[Alert]:
+    """Acknowledge every ACTIVE alert matching the filters, inside the caller's
+    scope. The caller writes the audit trail and commits."""
+    if service_check_id is None and not alert_ids:
+        return []
+    query = select(Alert).where(Alert.status == "active")
+    if visible_tags is not None:
+        query = query.where(_scope_clause(visible_tags))
+    if service_check_id is not None:
+        query = query.where(Alert.service_check_id == service_check_id)
+    if alert_ids:
+        query = query.where(Alert.id.in_(list(alert_ids)))
+    alerts = list((await db.execute(query)).scalars().all())
+    now = datetime.now(timezone.utc)
+    for alert in alerts:
+        alert.status = "acknowledged"
+        alert.acknowledged_at = now
+        alert.acknowledged_by = user_id
+    await db.flush()
+    return alerts
+
+
 async def resolve_alert(db: AsyncSession, alert_id: UUID) -> Alert | None:
     result = await db.execute(select(Alert).where(Alert.id == alert_id))
     alert = result.scalar_one_or_none()

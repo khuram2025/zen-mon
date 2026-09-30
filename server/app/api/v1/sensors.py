@@ -48,6 +48,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import scoping
 from app.core.database import get_db
 from app.core.config import get_settings
 from app.core.security import require_permission
@@ -987,15 +988,21 @@ async def list_sensor_vantages(
         text("SELECT 1 FROM sensors WHERE id = :id"), {"id": sensor_id}
     )).first():
         raise HTTPException(404, "Sensor not found")
-    rows = (await db.execute(text("""
+    # Service checks outside the caller's tag scope are not listed (B02).
+    scope = await scoping.visible_tags(db, user)
+    scope_sql = f" AND {scoping.text_tags_visible('sc.tags')}" if scope is not None else ""
+    params = {"poller_id": str(sensor_id)}
+    if scope is not None:
+        params[scoping.SCOPE_PARAM] = scope
+    rows = (await db.execute(text(f"""
         SELECT v.service_check_id::text, sc.name AS service_check_name,
                sc.check_type, v.state, v.last_change_at, v.last_result_at,
                v.last_latency_ms, v.last_error, v.last_tls_days_remaining
           FROM service_check_vantage_status v
           JOIN service_checks sc ON sc.id = v.service_check_id
-         WHERE v.poller_id = :poller_id
+         WHERE v.poller_id = :poller_id{scope_sql}
          ORDER BY sc.name
-    """), {"poller_id": str(sensor_id)})).mappings().all()
+    """), params)).mappings().all()
     return [
         SensorVantageResponse(
             service_check_id=row["service_check_id"],
@@ -1351,12 +1358,20 @@ async def list_assignments(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(SENSOR_VIEW),
 ):
+    # Out-of-scope service checks keep their row (so a replace round-trip
+    # preserves them) but their name is withheld (B02).
+    scope = await scoping.visible_tags(db, user)
+    sc_name = "sc.name"
+    params = {"id": sensor_id}
+    if scope is not None:
+        sc_name = f"CASE WHEN {scoping.text_tags_visible('sc.tags')} THEN sc.name END"
+        params[scoping.SCOPE_PARAM] = scope
     rows = (await db.execute(
-        text("""
+        text(f"""
             SELECT a.*,
                    CASE
                      WHEN a.target_type = 'device'        THEN d.hostname
-                     WHEN a.target_type = 'service_check' THEN sc.name
+                     WHEN a.target_type = 'service_check' THEN {sc_name}
                      WHEN a.target_type = 'group'         THEN dg.name
                    END AS target_name
             FROM sensor_assignments a
@@ -1366,7 +1381,7 @@ async def list_assignments(
             WHERE a.sensor_id = :id
             ORDER BY a.target_type, target_name NULLS LAST
         """),
-        {"id": sensor_id},
+        params,
     )).mappings().all()
     return [
         AssignmentResponse(
@@ -1399,9 +1414,24 @@ async def replace_assignments(
     }
     missing: list[str] = []
     unsupported: list[str] = []
+    scope = await scoping.visible_tags(db, user)
+    already = set()
+    if scope is not None:
+        already = {str(r[0]) for r in (await db.execute(text(
+            "SELECT target_id FROM sensor_assignments WHERE sensor_id = :id AND target_type = 'service_check'"
+        ), {"id": sensor_id})).all()}
     for item in data.items:
         table = target_tables[item.target_type]
         if item.target_type == "service_check":
+            if scope is not None and str(item.target_id) not in already:
+                # A scoped user may keep existing assignments but not add
+                # a check outside their scope (reported like a missing one).
+                visible = (await db.execute(text(
+                    f"SELECT 1 FROM service_checks sc WHERE sc.id = :id AND {scoping.text_tags_visible('sc.tags')}"
+                ), {"id": item.target_id, scoping.SCOPE_PARAM: scope})).first()
+                if not visible:
+                    missing.append(f"{item.target_type}:{item.target_id}")
+                    continue
             found = (await db.execute(
                 text("""SELECT id,
                                credential_id IS NULL
