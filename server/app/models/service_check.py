@@ -78,7 +78,7 @@ class ServiceCheck(Base):
     sla_target_pct: Mapped[float] = mapped_column(Numeric(6, 3, asdecimal=False), nullable=True)
     criticality: Mapped[str] = mapped_column(String(16), nullable=True)
     business_owner: Mapped[str] = mapped_column(String(255), nullable=True)
-    # Operational ownership (migrate-130).
+    # Operational ownership (migrate-136).
     owner_team: Mapped[str] = mapped_column(String(255), nullable=True)
     runbook_url: Mapped[str] = mapped_column(Text, nullable=True)
 
@@ -155,7 +155,7 @@ class ServiceCheckMaintenance(Base):
     reason: Mapped[str] = mapped_column(Text, nullable=True)
     created_by: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    # Lifecycle (migrate-130): ending early records the effective end instead of
+    # Lifecycle (migrate-136): ending early records the effective end instead of
     # deleting the row; a window that never started is cancelled. Effective end
     # is LEAST(ends_at, ended_at); cancelled windows never apply.
     ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -169,7 +169,7 @@ class ServiceCheckMaintenance(Base):
 
 
 class ServiceCheckNote(Base):
-    """Incident note / assignment on a service check (migrate-130)."""
+    """Incident note / assignment on a service check (migrate-136)."""
     __tablename__ = "service_check_notes"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
