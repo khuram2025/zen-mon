@@ -38,7 +38,32 @@ export interface DeviceSegmentSummary {
   down_now: number
   availability_pct: number | null
   measured: number
+  /** Confirmed outage minutes inside the window (newer backends). */
+  downtime_minutes?: number | null
+  outages?: number | null
 }
+
+/** Per availability-trend bucket, over every confirmed outage episode. */
+export interface OutageActivityPoint {
+  ts: string
+  outages_started: number
+  entities_down: number
+  downtime_minutes: number
+}
+
+export interface DowntimeByDevice {
+  device_id: string
+  hostname: string
+  location?: string | null
+  group_name?: string | null
+  device_type?: string | null
+  downtime_minutes: number | null
+  outages: number
+  ongoing: boolean
+  availability_pct: number | null
+}
+
+export interface RecoveryBin { key: string; label: string; count: number }
 
 export type ComplianceState = 'met' | 'at_risk' | 'breached' | 'not_assessed'
 
@@ -114,6 +139,8 @@ export interface ExecutiveData {
     availability_pct: number | null
     up_now?: number | null
     measured?: number | null
+    downtime_minutes?: number | null
+    outages?: number | null
   }[]
   group_summary?: DeviceSegmentSummary[] | null
   type_summary?: DeviceSegmentSummary[] | null
@@ -134,6 +161,10 @@ export interface ExecutiveData {
     kind: string
   }[]
   status_now?: StatusNow | null
+  /** Newer backends: aligned with availability_trend, over every episode. */
+  outage_activity?: OutageActivityPoint[] | null
+  downtime_by_device?: DowntimeByDevice[] | null
+  recovery_histogram?: RecoveryBin[] | null
 }
 
 export interface TechnicalData {

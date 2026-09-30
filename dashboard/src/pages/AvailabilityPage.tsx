@@ -1,6 +1,7 @@
 /**
- * Availability overview — executive-first availability reporting with an
- * Operations view for technical depth and a NOC wall mode.
+ * Availability overview — a visual executive dashboard per domain
+ * (components/availability/dashboards.tsx) with an Operations view for
+ * technical depth and a NOC wall mode.
  *
  * Rules (see Availability management review A01–A15):
  *  - Missing evidence is "Not measured", never 0% and never a target verdict.
@@ -39,9 +40,9 @@ import {
   type DeviceLite, type DeviceSummary, type FleetDomain, type ReportState, type ServiceSummary,
 } from '@/components/availability/model'
 import {
-  DecisionMetrics, DevicesExecutive, DevicesOperations, ServersExecutive, ServersOperations,
-  ServicesExecutive, ServicesOperations, type ViewCommon,
+  DecisionMetrics, DevicesOperations, ServersOperations, ServicesOperations, type ViewCommon,
 } from '@/components/availability/views'
+import { DevicesDashboard, ServersDashboard, ServicesDashboard } from '@/components/availability/dashboards'
 import { BriefPanel, DataErrorsBanner, ErrorPanel, TONE, ToneIcon } from '@/components/availability/ui'
 import { PolicyControl } from '@/components/availability/PolicyControl'
 import { buildAvailabilityCsv, downloadText } from '@/components/availability/exportCsv'
@@ -228,6 +229,10 @@ export function AvailabilityPage() {
     partial: dataErrors.length > 0,
   }
 
+  const brief = (
+    <BriefPanel brief={assessment.brief} period={domain === 'servers' ? 'Now' : placeholder ? 'Last loaded period' : periodLabel} dimmed={placeholder} loading={loading} />
+  )
+
   const lastObsMs = domain === 'devices' ? parseTs(execQ.data?.coverage?.last_observation ?? null) : null
 
   const exportCsv = () => {
@@ -393,12 +398,11 @@ export function AvailabilityPage() {
           />
         ) : (
           <>
-            <DecisionMetrics assessment={assessment} loading={loading} dimmed={placeholder} large={noc} />
-            {mode === 'executive' && (
-              <BriefPanel brief={assessment.brief} period={domain === 'servers' ? 'Now' : placeholder ? 'Last loaded period' : periodLabel} dimmed={placeholder} loading={loading} />
-            )}
+            {mode === 'operations' && <DecisionMetrics assessment={assessment} loading={loading} dimmed={placeholder} large={noc} />}
 
-            {domain === 'devices' && mode === 'executive' && <DevicesExecutive c={common} exec={execQ.data} />}
+            {domain === 'devices' && mode === 'executive' && (
+              <DevicesDashboard c={common} exec={execQ.data} live={deviceSummaryQ.data} brief={brief} />
+            )}
             {domain === 'devices' && mode === 'operations' && (
               <DevicesOperations
                 c={common}
@@ -411,12 +415,12 @@ export function AvailabilityPage() {
               />
             )}
             {domain === 'services' && mode === 'executive' && (
-              <ServicesExecutive c={common} business={bizQ.data} rows={serviceRows} counts={counts} />
+              <ServicesDashboard c={common} business={bizQ.data} rows={serviceRows} counts={counts} live={serviceSummaryQ.data} brief={brief} />
             )}
             {domain === 'services' && mode === 'operations' && (
               <ServicesOperations c={common} business={bizQ.data} rows={serviceRows} live={serviceSummaryQ.data} />
             )}
-            {domain === 'servers' && mode === 'executive' && <ServersExecutive c={common} overview={serversQ.data} />}
+            {domain === 'servers' && mode === 'executive' && <ServersDashboard c={common} overview={serversQ.data} brief={brief} />}
             {domain === 'servers' && mode === 'operations' && <ServersOperations overview={serversQ.data} />}
 
             <p className="text-sm text-muted">

@@ -1,32 +1,29 @@
 /**
  * Domain views for the Availability page.
  *
- * Executive view (default): four decision metrics, the factual brief, trend
- * or target plot, top risks, a site/group matrix and the incident timeline.
- * Operations view: the technical depth (groups, types, inventories, alert
- * noise, pressure) that used to dominate the first screen.
+ * The executive dashboards live in dashboards.tsx. This module holds the
+ * Operations views (groups, types, inventories, alert noise, pressure) and
+ * the pieces both share (decision metrics, top risks, timeline items).
  */
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/Skeleton'
 import type {
-  BusinessData, ComplianceState, DeviceSegmentSummary, ExecutiveData, TechnicalData,
+  BusinessData, DeviceSegmentSummary, ExecutiveData, TechnicalData,
 } from '@/hooks/useReports'
 import type { ServerMonitoringOverview, TopPressureItem } from '@/types/servers'
 import {
   fmtAvail, fmtDateTime, fmtDuration, fmtTarget, parseTs, plural,
 } from './format'
 import type {
-  Assessment, ComplianceCounts, DeviceLite, DeviceSummary, ServiceRow, ServiceSummary, Tone,
+  Assessment, DeviceLite, DeviceSummary, ServiceRow, ServiceSummary, Tone,
 } from './model'
-import { CRITICALITY_WEIGHT, rankServices } from './model'
+import { rankServices } from './model'
+import { AvailCell, complianceMeta, type TimelineItem } from './charts'
+import { AlertVolumeChart } from './viz'
 import {
-  AvailCell, AvailabilityTrendChart, ComplianceStack, IncidentTimeline, ServiceTargetPlot, complianceMeta,
-  type TimelineItem,
-} from './charts'
-import {
-  BriefPanel, CountDistribution, EvidenceEmpty, MetricCard, Panel, RiskList, SeverityPill, SimpleTable,
+  CountDistribution, EvidenceEmpty, MetricCard, Panel, RiskList, SeverityPill, SimpleTable,
   StatusPill, TONE, ToneIcon, type CountSegment,
 } from './ui'
 
@@ -47,7 +44,7 @@ export interface ViewCommon {
 }
 
 const NOT_ASSIGNED = new Set(['', 'unknown', 'unassigned', 'none', 'ungrouped', 'not assigned'])
-function isUnassigned(name: string | null | undefined) {
+export function isUnassigned(name: string | null | undefined) {
   return !name || NOT_ASSIGNED.has(name.trim().toLowerCase())
 }
 
@@ -63,7 +60,7 @@ export function DecisionMetrics({ assessment, loading, dimmed, large }: Pick<Vie
   )
 }
 
-function TopRisksPanel({ c, className, emptyText }: { c: ViewCommon; className?: string; emptyText: string }) {
+export function TopRisksPanel({ c, className, emptyText }: { c: ViewCommon; className?: string; emptyText: string }) {
   const { assessment, loading, partial } = c
   const noEvidence = assessment.state === 'not_measured'
   return (
@@ -87,7 +84,7 @@ function TopRisksPanel({ c, className, emptyText }: { c: ViewCommon; className?:
 
 /* ── Devices ──────────────────────────────────────────────────────────── */
 
-function deviceTimelineItems(exec?: ExecutiveData, limit = 10): TimelineItem[] {
+export function deviceTimelineItems(exec?: ExecutiveData, limit = 10): TimelineItem[] {
   return [...(exec?.outage_timeline || [])]
     .sort((a, b) => Number(!!b.ongoing) - Number(!!a.ongoing) || (parseTs(b.started_at) ?? 0) - (parseTs(a.started_at) ?? 0))
     .slice(0, limit)
@@ -106,99 +103,6 @@ function deviceTimelineItems(exec?: ExecutiveData, limit = 10): TimelineItem[] {
       startKnown: o.start_known !== false,
       inWindowMin: o.in_window_minutes ?? null,
     }))
-}
-
-export function DevicesExecutive({ c, exec }: { c: ViewCommon; exec?: ExecutiveData }) {
-  const { assessment, fromMs, toMs, loading, dimmed, large, partial } = c
-  const target = assessment.target
-  const timeline = useMemo(() => deviceTimelineItems(exec, 10), [exec])
-  const markers = useMemo(
-    () => (exec?.outage_timeline || [])
-      .filter((o) => o.start_known !== false)
-      .map((o) => ({ startMs: parseTs(o.started_at) ?? NaN, label: o.hostname }))
-      .filter((m) => Number.isFinite(m.startMs)),
-    [exec],
-  )
-  const [allSites, setAllSites] = useState(false)
-  const locations = useMemo(() => [...(exec?.location_summary || [])].sort((a, b) =>
-    Number(isUnassigned(b.location)) - Number(isUnassigned(a.location))
-    || b.down - a.down
-    || (a.availability_pct ?? 101) - (b.availability_pct ?? 101)), [exec])
-
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="grid gap-4 lg:grid-cols-12">
-        <TopRisksPanel c={c} className="order-1 lg:order-2 lg:col-span-4" emptyText="No devices are down and no confirmed outages were recorded in the period." />
-        <Panel
-          className={cn('order-2 lg:order-1 lg:col-span-8', dimmed && 'opacity-60')}
-          title="Availability trend"
-          subtitle={`Device ping availability · ${c.periodLabel}`}
-        >
-          {loading ? <Skeleton className="h-[280px] w-full" /> : (
-            <AvailabilityTrendChart
-              points={exec?.availability_trend || []}
-              fromMs={fromMs}
-              toMs={toMs}
-              target={target}
-              incidents={markers}
-              height={large ? 360 : 280}
-              basis="Ping reachability · maintenance excluded"
-            />
-          )}
-        </Panel>
-      </div>
-      <div className={cn('grid gap-4 lg:grid-cols-2', dimmed && 'opacity-60')}>
-        <Panel
-          title="Site matrix"
-          subtitle={`Down now is current; availability is for ${c.period}`}
-          actions={locations.length > 10 ? (
-            <button type="button" onClick={() => setAllSites((v) => !v)} className="min-h-[36px] rounded-lg border border-border px-2.5 text-sm text-primary hover:bg-primary/5">
-              {allSites ? 'Show fewer' : `Show all ${locations.length}`}
-            </button>
-          ) : undefined}
-        >
-          {loading ? <Skeleton className="h-40 w-full" /> : (
-            <SimpleTable
-              caption="Availability by site"
-              columns={[{ label: 'Site' }, { label: 'Devices', numeric: true }, { label: 'Down now', numeric: true }, { label: 'Availability', numeric: true }]}
-              empty={partial
-                ? <EvidenceEmpty kind="partial">Site data did not load completely.</EvidenceEmpty>
-                : <EvidenceEmpty kind="no_evidence">No site assignments are reported.</EvidenceEmpty>}
-              rows={(allSites ? locations : locations.slice(0, 10)).map((row) => ({
-                key: row.location || 'unassigned',
-                cells: [
-                  isUnassigned(row.location)
-                    ? <span className="inline-flex items-center gap-1.5 text-muted" title="No site assigned"><ToneIcon tone="unknown" className="h-3.5 w-3.5" />{row.location ? `Not assigned (${row.location})` : 'Not assigned'}</span>
-                    : <span className="font-medium text-text">{row.location}</span>,
-                  row.measured != null && row.measured < row.devices
-                    ? <span title="Devices with at least one sample in the period">{row.devices} <span className="text-sm text-warning">({row.measured} measured)</span></span>
-                    : row.devices,
-                  row.down > 0
-                    ? <span className="inline-flex items-center gap-1 font-semibold text-danger"><ToneIcon tone="breach" className="h-3.5 w-3.5" />{row.down}</span>
-                    : <span className="text-text2">0</span>,
-                  <AvailCell value={row.availability_pct} target={target} />,
-                ],
-              }))}
-            />
-          )}
-        </Panel>
-        <Panel title="Outage timeline" subtitle={`Confirmed device outages · ${c.periodLabel}`}>
-          {loading ? <Skeleton className="h-40 w-full" /> : (
-            <IncidentTimeline
-              items={timeline}
-              fromMs={fromMs}
-              toMs={toMs}
-              empty={partial
-                ? <EvidenceEmpty kind="partial">No outages in the data that loaded; some sources failed.</EvidenceEmpty>
-                : assessment.state === 'not_measured'
-                  ? <EvidenceEmpty kind="no_evidence">No outage evidence: nothing was measured in this period.</EvidenceEmpty>
-                  : <EvidenceEmpty kind="no_findings">No confirmed outages were recorded in this period.</EvidenceEmpty>}
-            />
-          )}
-        </Panel>
-      </div>
-    </div>
-  )
 }
 
 function SegmentTable({ rows, target, empty }: { rows?: DeviceSegmentSummary[] | null; target: number | null; empty: string }) {
@@ -280,6 +184,14 @@ export function DevicesOperations({
           )}
         </Panel>
       </div>
+
+      <Panel
+        title="Alert volume by severity"
+        subtitle={`Alerts raised per interval · ${c.periodLabel}`}
+        className={cn(dimmed && 'opacity-60')}
+      >
+        {technicalLoading ? <Skeleton className="h-48 w-full" /> : <AlertVolumeChart points={technical?.alert_volume_by_severity || []} fromMs={c.fromMs} toMs={c.toMs} height={200} />}
+      </Panel>
 
       <div className={cn('grid gap-4 lg:grid-cols-2', dimmed && 'opacity-60')}>
         <Panel title="By group" subtitle={`Same period and denominator as the headline · ${c.periodLabel}`}>
@@ -396,7 +308,7 @@ export function DevicesOperations({
 
 /* ── Services ─────────────────────────────────────────────────────────── */
 
-function serviceTimelineItems(business?: BusinessData, limit = 10, fromMs = 0): TimelineItem[] {
+export function serviceTimelineItems(business?: BusinessData, limit = 10, fromMs = 0): TimelineItem[] {
   return [...(business?.service_outages || [])]
     .sort((a, b) => Number(!!b.ongoing) - Number(!!a.ongoing) || (parseTs(b.started_at) ?? 0) - (parseTs(a.started_at) ?? 0))
     .slice(0, limit)
@@ -413,134 +325,6 @@ function serviceTimelineItems(business?: BusinessData, limit = 10, fromMs = 0): 
       // to the start itself; that start is not the real one.
       startKnown: !(o.ongoing !== undefined && (parseTs(o.started_at) ?? Infinity) <= fromMs + 1_000),
     }))
-}
-
-export function ServicesExecutive({
-  c, business, rows, counts,
-}: {
-  c: ViewCommon
-  business?: BusinessData
-  rows: ServiceRow[]
-  counts: ComplianceCounts
-}) {
-  const { fromMs, toMs, loading, dimmed, partial, assessment } = c
-  const [filter, setFilter] = useState<ComplianceState | null>(null)
-  const [showAll, setShowAll] = useState(false)
-  const ranked = useMemo(() => rankServices(rows), [rows])
-  const exceptions = ranked.filter((r) => r.compliance === 'breached' || r.compliance === 'at_risk')
-  const plotted = filter
-    ? ranked.filter((r) => r.compliance === filter)
-    : showAll ? ranked : (exceptions.length ? exceptions : ranked.filter((r) => r.availability != null).slice(0, 8))
-  const timeline = useMemo(() => serviceTimelineItems(business, 10, fromMs), [business, fromMs])
-
-  const groups = useMemo(() => {
-    const map = new Map<string, { name: string; unassigned: boolean; total: number; met: number; at_risk: number; breached: number; not_assessed: number; down: number; worst: number }>()
-    for (const r of rows) {
-      const key = r.group ?? '__none__'
-      const cur = map.get(key) ?? { name: r.group ?? 'Not assigned', unassigned: !r.group, total: 0, met: 0, at_risk: 0, breached: 0, not_assessed: 0, down: 0, worst: 0 }
-      cur.total += 1
-      cur[r.compliance] += 1
-      if (r.status === 'down') cur.down += 1
-      cur.worst = Math.max(cur.worst, CRITICALITY_WEIGHT[r.criticality ?? ''] ?? 0)
-      map.set(key, cur)
-    }
-    return [...map.values()].sort((a, b) => Number(b.unassigned) - Number(a.unassigned) || b.breached - a.breached || b.total - a.total)
-  }, [rows])
-
-  const plotEmpty = partial
-    ? <EvidenceEmpty kind="partial">No services to show in the data that loaded; some sources failed.</EvidenceEmpty>
-    : !rows.length
-      ? <EvidenceEmpty kind="no_evidence">No service checks are configured.</EvidenceEmpty>
-      : <EvidenceEmpty kind={filter === 'not_assessed' ? 'no_evidence' : 'no_findings'}>No services in this category.</EvidenceEmpty>
-
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="grid gap-4 lg:grid-cols-12">
-        <div className="order-1 flex flex-col gap-4 lg:order-2 lg:col-span-4">
-          <TopRisksPanel c={c} emptyText="No services are down, breached or at risk in this period." />
-          <Panel title="Target compliance" subtitle={c.periodLabel} className={cn(dimmed && 'opacity-60')}>
-            {loading ? <Skeleton className="h-32 w-full" /> : <ComplianceStack counts={counts} active={filter} onSelect={setFilter} />}
-          </Panel>
-        </div>
-        <Panel
-          className={cn('order-2 lg:order-1 lg:col-span-8', dimmed && 'opacity-60')}
-          title={filter ? `Services: ${complianceMeta(filter).label.toLowerCase()}` : showAll ? 'All services against target' : exceptions.length ? 'Services below or at risk of target' : 'Services against target'}
-          subtitle={`${assessment.basis} ${c.periodLabel}.`}
-          actions={(
-            <div className="flex items-center gap-2">
-              {filter && (
-                <button type="button" onClick={() => setFilter(null)} className="min-h-[36px] rounded-lg border border-border px-2.5 text-sm text-text2 hover:text-text">Clear filter</button>
-              )}
-              {!filter && rows.length > 0 && (
-                <button type="button" onClick={() => setShowAll((v) => !v)} className="min-h-[36px] rounded-lg border border-border px-2.5 text-sm text-primary hover:bg-primary/5">
-                  {showAll ? 'Exceptions only' : `Show all ${rows.length}`}
-                </button>
-              )}
-            </div>
-          )}
-        >
-          {loading ? <Skeleton className="h-60 w-full" /> : (
-            <>
-              {!filter && !showAll && !exceptions.length && rows.some((r) => r.availability != null) && (
-                <p className="mb-2 text-sm text-muted">No exceptions: every measured service met its target. Showing the lowest measured services.</p>
-              )}
-              <ServiceTargetPlot rows={plotted} emptyText={plotEmpty} />
-            </>
-          )}
-        </Panel>
-      </div>
-
-      <div className={cn('grid gap-4 lg:grid-cols-2', dimmed && 'opacity-60')}>
-        <Panel title="Business group matrix" subtitle={`Target compliance by group · down now is current`}>
-          {loading ? <Skeleton className="h-40 w-full" /> : (
-            <SimpleTable
-              caption="Target compliance by business group"
-              columns={[{ label: 'Group' }, { label: 'Services', numeric: true }, { label: 'Met', numeric: true }, { label: 'At risk', numeric: true }, { label: 'Breached', numeric: true }, { label: 'Not assessed', numeric: true }, { label: 'Down now', numeric: true }]}
-              empty={<EvidenceEmpty kind="no_evidence">No services are configured.</EvidenceEmpty>}
-              rows={groups.map((g) => ({
-                key: g.name,
-                cells: [
-                  g.unassigned
-                    ? <span className="inline-flex items-center gap-1.5 text-muted" title="Services without a business group cannot be assessed for customer impact"><ToneIcon tone="unknown" className="h-3.5 w-3.5" />Not assigned</span>
-                    : <span className="font-medium text-text">{g.name}</span>,
-                  g.total,
-                  <MatrixCount n={g.met} tone="met" />,
-                  <MatrixCount n={g.at_risk} tone="risk" />,
-                  <MatrixCount n={g.breached} tone="breach" />,
-                  <MatrixCount n={g.not_assessed} tone="unknown" />,
-                  <MatrixCount n={g.down} tone="breach" />,
-                ],
-              }))}
-            />
-          )}
-          {!loading && rows.some((r) => !r.group) && (
-            <p className="mt-3 text-sm text-muted">
-              {plural(rows.filter((r) => !r.group).length, 'service')} not assigned to a business group — customer impact is not assessed for them.
-            </p>
-          )}
-        </Panel>
-        <Panel title="Service incident timeline" subtitle={`Confirmed outages, start to recovery · ${c.periodLabel}`}>
-          {loading ? <Skeleton className="h-40 w-full" /> : (
-            <IncidentTimeline
-              items={timeline}
-              fromMs={fromMs}
-              toMs={toMs}
-              empty={partial
-                ? <EvidenceEmpty kind="partial">No outages in the data that loaded; some sources failed.</EvidenceEmpty>
-                : assessment.state === 'not_measured'
-                  ? <EvidenceEmpty kind="no_evidence">No outage evidence: nothing was measured in this period.</EvidenceEmpty>
-                  : <EvidenceEmpty kind="no_findings">No confirmed service outages in this period.</EvidenceEmpty>}
-            />
-          )}
-          {business?.confirmed_downtime_minutes != null && (
-            <p className="mt-3 text-sm text-muted">
-              Total confirmed downtime {fmtDuration(business.confirmed_downtime_minutes)} — elapsed time with at least one service down, overlaps merged.
-            </p>
-          )}
-        </Panel>
-      </div>
-    </div>
-  )
 }
 
 function MatrixCount({ n, tone }: { n: number; tone: Tone }) {
@@ -682,7 +466,7 @@ export function ServicesOperations({
 
 /* ── Servers (current snapshot) ───────────────────────────────────────── */
 
-function serverSegments(overview?: ServerMonitoringOverview): CountSegment[] {
+export function serverSegments(overview?: ServerMonitoringOverview): CountSegment[] {
   const s = overview?.status_counts || {}
   // Neutral/amber only: a health snapshot is not an availability SLA.
   return [
@@ -694,7 +478,7 @@ function serverSegments(overview?: ServerMonitoringOverview): CountSegment[] {
   ]
 }
 
-function SitesPanel({ overview }: { overview?: ServerMonitoringOverview }) {
+export function SitesPanel({ overview }: { overview?: ServerMonitoringOverview }) {
   const total = overview?.total ?? 0
   const sites = overview?.sites || []
   const assigned = sites.reduce((s, x) => s + x.server_count, 0)
@@ -714,21 +498,7 @@ function SitesPanel({ overview }: { overview?: ServerMonitoringOverview }) {
   )
 }
 
-export function ServersExecutive({ c, overview }: { c: ViewCommon; overview?: ServerMonitoringOverview }) {
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="grid gap-4 lg:grid-cols-12">
-        <TopRisksPanel c={c} className="lg:col-span-4" emptyText="No servers are critical, stale or under sustained CPU pressure now." />
-        <Panel title="Server health now" subtitle="Current snapshot — the selected period does not apply" className="lg:col-span-4">
-          {overview ? <CountDistribution segments={serverSegments(overview)} total={overview.total} empty="No servers enrolled" /> : <Skeleton className="h-20 w-full" />}
-        </Panel>
-        <div className="lg:col-span-4"><SitesPanel overview={overview} /></div>
-      </div>
-    </div>
-  )
-}
-
-function PressureList({ title, items, unit = 'pct' }: { title: string; items: TopPressureItem[]; unit?: 'pct' | 'bps' }) {
+export function PressureList({ title, items, unit = 'pct' }: { title: string; items: TopPressureItem[]; unit?: 'pct' | 'bps' }) {
   const fmtBps = (value: number) => {
     const units = ['B/s', 'KB/s', 'MB/s', 'GB/s', 'TB/s']
     let v = value

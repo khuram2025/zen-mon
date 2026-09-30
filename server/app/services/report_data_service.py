@@ -517,6 +517,80 @@ def _episode_stats(eps: list[dict]) -> dict:
     }
 
 
+# Completed-episode duration classes for the time-to-recover distribution.
+_RECOVERY_CLASSES = (
+    (5 * 60, "lt_5m", "< 5 min"),
+    (30 * 60, "5m_30m", "5–30 min"),
+    (2 * 3600, "30m_2h", "30 min–2 h"),
+    (8 * 3600, "2h_8h", "2–8 h"),
+    (24 * 3600, "8h_1d", "8–24 h"),
+    (None, "gte_1d", "≥ 1 day"),
+)
+
+
+def _recovery_histogram(eps: list[dict]) -> list[dict]:
+    """Episodes that recovered inside the window, by full outage duration —
+    the distribution behind the MTTR headline."""
+    counts = {k: 0 for _, k, _ in _RECOVERY_CLASSES}
+    for e in eps:
+        if not e["completed_in_window"] or e["duration_s"] is None:
+            continue
+        for limit, k, _ in _RECOVERY_CLASSES:
+            if limit is None or e["duration_s"] < limit:
+                counts[k] += 1
+                break
+    return [{"key": k, "label": label, "count": counts[k]}
+            for _, k, label in _RECOVERY_CLASSES]
+
+
+def _outage_activity(eps: list[dict], start: datetime, end: datetime,
+                     maintenance: Optional[MaintWindows] = None) -> list[dict]:
+    """Per trend bucket: outage episodes that started in it, distinct entities
+    down at any point in it, and down-minutes inside it (maintenance time
+    subtracted like the headline). Buckets align with the availability trend."""
+    interval, _ = _trend_bucket(start, end)
+    step = _BUCKET_SECONDS[interval]
+    first = math.floor(start.timestamp() / step) * step
+    last = int(math.ceil(end.timestamp()))
+    keys = list(range(first, last, step))
+    if not keys:
+        return []
+    started = [0] * len(keys)
+    affected: list[set[str]] = [set() for _ in keys]
+    down_s = [0.0] * len(keys)
+    maintenance = maintenance or {}
+    for e in eps:
+        lo = e["clipped_start"]
+        hi = min(end, e["ended_at"] or end)
+        if hi <= lo:
+            continue
+        if e["started_at"] is not None and start <= e["started_at"] < end:
+            i = int((e["started_at"].timestamp() - first) // step)
+            if 0 <= i < len(keys):
+                started[i] += 1
+        wins = maintenance.get(e["entity_id"])
+        i0 = max(0, int((lo.timestamp() - first) // step))
+        i1 = min(len(keys) - 1, int((hi.timestamp() - first) // step))
+        for i in range(i0, i1 + 1):
+            b_lo = datetime.fromtimestamp(keys[i], tz=timezone.utc)
+            b_hi = b_lo + timedelta(seconds=step)
+            a, b = max(lo, b_lo), min(hi, b_hi)
+            if b <= a:
+                continue
+            secs = (b - a).total_seconds() - _overlap_seconds(a, b, wins)
+            if secs > 0:
+                down_s[i] += secs
+                affected[i].add(e["entity_id"])
+    return [
+        {"ts": datetime.fromtimestamp(k, tz=timezone.utc).isoformat(),
+         "outages_started": started[i],
+         "entities_down": len(affected[i]),
+         "downtime_minutes": round(down_s[i] / 60, 2)}
+        for i, k in enumerate(keys)
+    ]
+
+
+
 def _device_transitions(span_start: datetime, end: datetime,
                         device_ids: list[str]) -> dict[str, list[tuple[datetime, datetime]]]:
     """device_id -> paired outage episodes over [span_start, end].
@@ -636,13 +710,18 @@ def _status_now(states: list[str]) -> dict:
 
 
 def _breakdown(devices: list[dict], key, counts: dict[str, tuple[float, float]],
-               states: dict[str, str]) -> list[dict]:
-    """{name, devices, up_now, down_now, availability_pct, measured} per bucket,
-    over the same counts (bounds, maintenance, inventory) as the headline."""
+               states: dict[str, str],
+               downtime_s: Optional[dict[str, float]] = None,
+               outages: Optional[dict[str, int]] = None) -> list[dict]:
+    """{name, devices, up_now, down_now, availability_pct, measured,
+    downtime_minutes, outages} per bucket, over the same counts (bounds,
+    maintenance, inventory) and outage episodes as the headline."""
     buckets: dict[str, set[str]] = defaultdict(set)
     for d in devices:
         buckets[key(d)].add(str(d["id"]))
     measured = _measured_ids(counts)
+    downtime_s = downtime_s or {}
+    outages = outages or {}
     rows = [
         {
             "name": name,
@@ -651,6 +730,8 @@ def _breakdown(devices: list[dict], key, counts: dict[str, tuple[float, float]],
             "down_now": sum(1 for i in ids if states.get(i) == "down"),
             "availability_pct": _pct_from_counts(counts, ids),
             "measured": len(ids & measured),
+            "downtime_minutes": round(sum(downtime_s.get(i, 0.0) for i in ids) / 60, 2),
+            "outages": sum(outages.get(i, 0) for i in ids),
         }
         for name, ids in buckets.items()
     ]
@@ -767,9 +848,28 @@ async def build_executive(
     location_summary = [
         {"location": r["name"], "devices": r["devices"], "down": r["down_now"],
          "availability_pct": r["availability_pct"], "up_now": r["up_now"],
-         "measured": r["measured"]}
-        for r in _breakdown(devices, lambda d: d.get("location") or "Unknown", counts, states)
+         "measured": r["measured"], "downtime_minutes": r["downtime_minutes"],
+         "outages": r["outages"]}
+        for r in _breakdown(devices, lambda d: d.get("location") or "Unknown", counts, states,
+                            downtime_by_dev, outages_by_dev)
     ]
+
+    # Every device with confirmed downtime in the window, worst first.
+    downtime_by_device = []
+    for did in sorted((d for d in outages_by_dev if d in device_map),
+                      key=lambda d: (-downtime_by_dev[d], -outages_by_dev[d]))[:25]:
+        d = device_map[did]
+        downtime_by_device.append({
+            "device_id": did,
+            "hostname": d.get("hostname", "Unknown"),
+            "location": d.get("location"),
+            "group_name": d.get("group_name"),
+            "device_type": d.get("device_type"),
+            "downtime_minutes": _minutes(downtime_by_dev[did]),
+            "outages": outages_by_dev[did],
+            "ongoing": ongoing_by_dev[did],
+            "availability_pct": _pct_from_counts(counts, {did}),
+        })
 
     outage_timeline = []
     for e in sorted(episodes, key=lambda e: e["clipped_start"], reverse=True)[:50]:
@@ -830,10 +930,14 @@ async def build_executive(
         "top_issues": top_issues,
         "location_summary": location_summary,
         "group_summary": _breakdown(devices, lambda d: d.get("group_name") or "Ungrouped",
-                                    counts, states),
+                                    counts, states, downtime_by_dev, outages_by_dev),
         "type_summary": _breakdown(devices, lambda d: d.get("device_type") or "other",
-                                   counts, states),
+                                   counts, states, downtime_by_dev, outages_by_dev),
         "outage_timeline": outage_timeline,
+        # Visual breakdowns over EVERY episode (outage_timeline is capped).
+        "outage_activity": _outage_activity(episodes, start, end, maint),
+        "downtime_by_device": downtime_by_device,
+        "recovery_histogram": _recovery_histogram(episodes),
     }
 
 

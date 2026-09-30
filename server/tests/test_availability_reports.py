@@ -675,3 +675,56 @@ def test_device_uptime_stats_is_scoped(client, monkeypatch, visible):
         assert all(p["ids"] == [D1] and "IN %(ids)s" in q for q, p in calls)
     else:
         assert r.json()["devices"] == {} and calls == []
+
+
+# ── visual breakdowns over every episode ────────────────────────────────────
+
+def test_outage_activity_histogram_and_downtime_ranking(monkeypatch):
+    # D1: 90-minute outage 01:15→02:45; D2: 20-minute outage 10:00→10:20,
+    # then down again from 22:00 until after the window (ongoing).
+    ch = FakeCH(samples={(START, END): {D1: (90.0, 100.0), D2: (80.0, 100.0)}},
+                transitions=[(D1, START - timedelta(days=3), "unknown", "up"),
+                             (D2, START - timedelta(days=3), "unknown", "up"),
+                             (D1, START + timedelta(hours=1, minutes=15), "up", "down"),
+                             (D1, START + timedelta(hours=2, minutes=45), "down", "up"),
+                             (D2, START + timedelta(hours=10), "up", "down"),
+                             (D2, START + timedelta(hours=10, minutes=20), "down", "up"),
+                             (D2, START + timedelta(hours=22), "up", "down")])
+    data = run_executive(monkeypatch, ReportDB([device(D1, group="Core"), device(D2, group="Edge")]), ch)
+
+    activity = data["outage_activity"]
+    assert len(activity) == len(data["availability_trend"]) == 48      # 30-minute buckets
+    by_ts = {a["ts"]: a for a in activity}
+    at = lambda h, m=0: by_ts[(START + timedelta(hours=h, minutes=m)).isoformat()]
+    assert at(1)["outages_started"] == 1 and at(1)["downtime_minutes"] == pytest.approx(15)
+    assert at(1, 30)["downtime_minutes"] == pytest.approx(30) and at(1, 30)["outages_started"] == 0
+    assert at(2, 30)["downtime_minutes"] == pytest.approx(15)
+    assert at(3)["entities_down"] == 0
+    assert at(23, 30)["entities_down"] == 1                             # ongoing to window end
+    total = sum(a["downtime_minutes"] for a in activity)
+    assert total == pytest.approx(data["kpis"]["outage_downtime_minutes"])
+    assert sum(a["outages_started"] for a in activity) == data["kpis"]["outage_episodes"] == 3
+
+    hist = {h["key"]: h["count"] for h in data["recovery_histogram"]}
+    assert hist["5m_30m"] == 1 and hist["30m_2h"] == 1                  # ongoing one excluded
+    assert sum(hist.values()) == 2
+
+    top = data["downtime_by_device"]
+    assert [r["device_id"] for r in top] == [D2, D1]                     # 140 min vs 90 min
+    assert top[0]["ongoing"] is True and top[0]["outages"] == 2
+    assert top[1]["downtime_minutes"] == pytest.approx(90)
+    groups = {g["name"]: g for g in data["group_summary"]}
+    assert groups["Core"]["downtime_minutes"] == pytest.approx(90) and groups["Core"]["outages"] == 1
+    assert groups["Edge"]["outages"] == 2
+    [loc] = data["location_summary"]
+    assert loc["outages"] == 3
+
+
+def test_outage_activity_subtracts_maintenance():
+    s = START
+    eps = [{"entity_id": D1, "started_at": s + timedelta(hours=1), "clipped_start": s + timedelta(hours=1),
+            "ended_at": s + timedelta(hours=2), "ongoing": False, "duration_s": 3600.0,
+            "in_window_s": 1800.0, "completed_in_window": True}]
+    maint = {D1: [(s + timedelta(hours=1, minutes=30), s + timedelta(hours=3))]}
+    rows = rds._outage_activity(eps, s, s + timedelta(hours=24), maint)
+    assert sum(r["downtime_minutes"] for r in rows) == pytest.approx(30)
