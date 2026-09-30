@@ -1,4 +1,5 @@
 import axios, { AxiosError } from 'axios'
+import { recordFromHeaders } from './serverClock'
 
 // Token storage — Zustand persists it but we also keep it here for
 // the axios interceptor, which runs outside React.
@@ -15,6 +16,7 @@ export const api = axios.create({
 })
 
 api.interceptors.request.use((config) => {
+  ;(config as any).__sentAt = Date.now()
   if (currentToken) {
     config.headers.Authorization = `Bearer ${currentToken}`
   }
@@ -22,8 +24,13 @@ api.interceptors.request.use((config) => {
 })
 
 api.interceptors.response.use(
-  (r) => r,
+  (r) => {
+    // Calibrate the appliance clock from every response (B01).
+    recordFromHeaders(r.headers as any, (r.config as any)?.__sentAt ?? Date.now(), Date.now())
+    return r
+  },
   (err: AxiosError) => {
+    if (err.response) recordFromHeaders(err.response.headers as any, (err.config as any)?.__sentAt ?? Date.now(), Date.now())
     if (err.response?.status === 401) {
       // Wipe token and bounce to login. The auth store listens for
       // this custom event so it can clear its own state too.
