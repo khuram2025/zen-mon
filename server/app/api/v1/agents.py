@@ -35,7 +35,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pathlib import Path
 
@@ -446,10 +446,18 @@ async def _default_policy_id(platform: str, db: AsyncSession):
     return row[0] if row else None
 
 
-async def _ensure_pending_server(data: AgentEnrollRequest, db: AsyncSession):
+async def _ensure_pending_server(data: AgentEnrollRequest, db: AsyncSession, agent_id: Any = None):
+    # A server row that another agent already reports into belongs to that
+    # machine: cloned VMs often keep the template's hostname, and adopting its
+    # row would mix two machines' monitoring history.
     existing = (await db.execute(
-        text("SELECT id FROM servers WHERE hostname = :h LIMIT 1"),
-        {"h": data.hostname},
+        text("""SELECT s.id FROM servers s
+                WHERE s.hostname = :h
+                  AND NOT EXISTS (SELECT 1 FROM agents a
+                                   WHERE a.server_id = s.id
+                                     AND a.id IS DISTINCT FROM CAST(:aid AS uuid))
+                ORDER BY s.created_at LIMIT 1"""),
+        {"h": data.hostname, "aid": str(agent_id) if agent_id else None},
     )).first()
     if existing:
         return existing[0]
@@ -470,6 +478,57 @@ async def _ensure_pending_server(data: AgentEnrollRequest, db: AsyncSession):
         },
     )).first()
     return row[0]
+
+
+async def _register_clone_candidate(
+    db: AsyncSession,
+    source: dict,
+    data: AgentEnrollRequest,
+    agent_uid: str,
+    pending_hash: str,
+    client_ip: Optional[str],
+) -> dict:
+    """Create a separate pending agent for a duplicated agent_uid.
+
+    The (reported uid, pending-secret hash) resolution routes this
+    installation's later polls to its own row until it adopts the assigned
+    uid. Callers hold the source row lock, so concurrent retries of one
+    installation cannot create two entries.
+    """
+    assigned_uid = f"{str(source.get('platform') or data.platform or 'agent')[:12]}-clone-{uuid4()}"
+    row = (await db.execute(
+        text("""INSERT INTO agents
+                  (site_id, agent_uid, hostname, platform, version, install_id,
+                   policy_id, pending_secret_hash, authorization_source,
+                   status, current_version, last_ip, update_ring)
+                VALUES (:site, :uid, :hn, :plat, :v, :iid,
+                        :pol, :pending, 'pending_clone',
+                        'enrolling', :v, :ip, :ring)
+                RETURNING *"""),
+        {
+            "site": source.get("site_id"), "uid": assigned_uid, "hn": data.hostname,
+            "plat": data.platform, "v": data.version, "iid": data.install_id,
+            "pol": source.get("policy_id"), "pending": pending_hash, "ip": client_ip,
+            "ring": source.get("update_ring") or "stable",
+        },
+    )).mappings().first()
+    await db.execute(
+        text("""INSERT INTO agent_registration_resolutions
+                  (reported_agent_uid, pending_secret_hash, action,
+                   source_agent_id, assigned_agent_id, assigned_agent_uid,
+                   conflict_revision, candidate_ip, candidate_hostname,
+                   candidate_version, candidate_install_id, approved_by,
+                   first_claimed_at, last_seen_at)
+                VALUES (:reported, :pending, 'register_clone', :source,
+                        :assigned, :assigned_uid, gen_random_uuid(), :ip,
+                        :hn, :v, :iid, NULL, NOW(), NOW())"""),
+        {
+            "reported": agent_uid, "pending": pending_hash, "source": source["id"],
+            "assigned": row["id"], "assigned_uid": assigned_uid, "ip": client_ip,
+            "hn": data.hostname, "v": data.version, "iid": data.install_id,
+        },
+    )
+    return dict(row)
 
 
 async def _enroll_pending_agent(
@@ -513,11 +572,10 @@ async def _enroll_pending_agent(
     current = dict(current)
     stored_pending = current.get("pending_secret_hash")
     if not stored_pending or not hmac.compare_digest(str(stored_pending), pending_hash):
-        # An administrator can explicitly keep a cloned host as a new machine.
-        # The durable resolution is bound to both the duplicated reported UID
-        # and this installation's protected pending-secret hash. This allows
-        # the controller to route only the reviewed candidate to its assigned
-        # identity; IP address and hostname are never used as proof.
+        # A cloned installation keeps reporting the template's agent_uid until
+        # it adopts its assigned identity. The resolution is bound to both
+        # that reported uid and this installation's protected pending-secret
+        # hash, so only this installation is routed to its own entry.
         resolution = (await db.execute(
             text("""SELECT action, assigned_agent_id, assigned_agent_uid
                     FROM agent_registration_resolutions
@@ -552,44 +610,21 @@ async def _enroll_pending_agent(
                 await db.rollback()
                 raise HTTPException(409, "Assigned clone installation secret no longer matches")
 
-        if resolution:
-            # The approved candidate is now handled against its separate agent
-            # row. Continue through the normal pending/authorized response path.
-            pass
-        else:
-            # A reinstalled/reset agent can keep the same stable agent_uid while
-            # generating a new OS-protected pending secret. Persist the candidate
-            # hash and safe identifying metadata before returning 409 so Agent
-            # Fleet can explain and resolve the collision. This commit is
-            # intentional: raising HTTPException would otherwise roll the update
-            # back with the request transaction.
-            await db.execute(
-                text("""UPDATE agents SET
-                          pending_conflict_secret_hash = CAST(:pending AS varchar),
-                          registration_conflict_revision = CASE
-                            WHEN pending_conflict_secret_hash IS DISTINCT FROM CAST(:pending AS varchar)
-                              THEN gen_random_uuid()
-                            ELSE COALESCE(registration_conflict_revision, gen_random_uuid())
-                          END,
-                          registration_conflict_at = NOW(),
-                          registration_conflict_ip = :ip,
-                          registration_conflict_attempts = registration_conflict_attempts + 1,
-                          registration_conflict_install_id = :iid,
-                          registration_conflict_hostname = :hn,
-                          registration_conflict_version = :v,
-                          updated_at = NOW()
-                        WHERE id = :id"""),
-                {
-                    "pending": pending_hash,
-                    "ip": client_ip,
-                    "iid": data.install_id,
-                    "hn": data.hostname,
-                    "v": data.version,
-                    "id": current["id"],
-                },
+        if not resolution:
+            # Another installation already owns this agent_uid — typically a
+            # VM cloned from a template that contained the agent. Give this
+            # installation its own pending entry, bound to its protected
+            # pending-secret hash, so every clone is listed for approval and
+            # its retries never touch the original or another clone. IP and
+            # hostname are display metadata, never proof of identity.
+            current = await _register_clone_candidate(
+                db, current, data, agent_uid, pending_hash, client_ip,
             )
             await db.commit()
-            raise HTTPException(409, "Pending registration belongs to another agent installation")
+            return AgentEnrollResponse(
+                agent_id=str(current["id"]), authorization_state="pending",
+                policy_id=str(current["policy_id"]) if current.get("policy_id") else None,
+            )
 
     await db.execute(
         text("""UPDATE agents SET hostname = :hn, platform = :plat,
@@ -626,12 +661,11 @@ async def _enroll_pending_agent(
         return AgentEnrollResponse(
             agent_id=str(current["id"]),
             server_id=str(current["server_id"]) if current.get("server_id") else None,
-            assigned_agent_uid=assigned_agent_uid,
             authorization_state="pending",
             policy_id=str(current["policy_id"]) if current.get("policy_id") else None,
         )
 
-    server_id = current.get("server_id") or await _ensure_pending_server(data, db)
+    server_id = current.get("server_id") or await _ensure_pending_server(data, db, current["id"])
     await _sync_server_identity(
         db,
         server_id,

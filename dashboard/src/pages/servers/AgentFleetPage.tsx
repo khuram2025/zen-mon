@@ -164,6 +164,7 @@ export function AgentFleetPage() {
   }, [bulkAction, publishedVersions.join(','), bulkVersion])
   const [confirmDisable, setConfirmDisable] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<AgentItem | null>(null)
+  const [cloneDecision, setCloneDecision] = useState<{ agent: AgentItem; action: 'replace_original' | 'block' } | null>(null)
   const [revokeTarget, setRevokeTarget] = useState<AgentItem | null>(null)
   const [conflictTarget, setConflictTarget] = useState<AgentItem | null>(null)
   const [conflictAction, setConflictAction] = useState<ConflictResolutionAction>('register_clone')
@@ -294,6 +295,23 @@ export function AgentFleetPage() {
       invalidate()
     },
     onError: (e) => toast.error('Agent removal failed', apiErrorMessage(e)),
+  })
+
+  const decideClone = useMutation({
+    mutationFn: async ({ agent, action }: { agent: AgentItem; action: 'replace_original' | 'block' }) => {
+      setPendingRow(agent.id)
+      return api.post(`/agent-fleet/${agent.id}/clone-decision`, { action })
+    },
+    onSuccess: (_response, variables) => {
+      if (variables.action === 'replace_original') {
+        toast.success('Accepted as a reinstall', 'The installation takes over the original agent on its next check-in')
+      } else {
+        toast.success('Installation blocked', 'The original agent is unchanged; this installation cannot register')
+      }
+      invalidate()
+    },
+    onError: (e) => toast.error('Could not apply the decision', apiErrorMessage(e)),
+    onSettled: () => setPendingRow(null),
   })
 
   const resolveConflict = useMutation({
@@ -684,6 +702,14 @@ export function AgentFleetPage() {
                       <Td>
                         <div className="flex flex-col items-start gap-1">
                           <AuthorizationBadge state={agent.authorization_state} source={agent.authorization_source} />
+                          {agent.clone_of_hostname && (
+                            <Badge
+                              variant={agent.authorization_state === 'pending' ? 'info' : 'outline'}
+                              title={`This installation reported the agent identity of ${agent.clone_of_hostname} (typically a VM cloned from a template). Approving it registers it as a separate machine.`}
+                            >
+                              <CopyPlus className="h-3 w-3" /> Clone of {agent.clone_of_hostname}
+                            </Badge>
+                          )}
                           {agent.registration_conflict && (
                             <Badge
                               variant="danger"
@@ -746,14 +772,38 @@ export function AgentFleetPage() {
                               </Button>
                             </>
                           ) : (
-                            <Button
-                              variant="ghost" size="icon" className="h-7 w-7 text-warning hover:text-warning"
-                              onClick={() => authorize.mutate(agent.id)}
-                              disabled={pendingRow === agent.id}
-                              title={agent.authorization_state === 'revoked' ? 'Re-authorize agent' : 'Authorize agent'}
-                            >
-                              <CheckCircle2 className="h-3.5 w-3.5" />
-                            </Button>
+                            <>
+                              <Button
+                                variant="ghost" size="icon" className="h-7 w-7 text-warning hover:text-warning"
+                                onClick={() => authorize.mutate(agent.id)}
+                                disabled={pendingRow === agent.id}
+                                title={agent.authorization_state === 'revoked'
+                                  ? 'Re-authorize agent'
+                                  : agent.clone_of_hostname ? 'Approve as a separate machine' : 'Authorize agent'}
+                              >
+                                <CheckCircle2 className="h-3.5 w-3.5" />
+                              </Button>
+                              {agent.clone_of_hostname && agent.authorization_state === 'pending' && (
+                                <>
+                                  <Button
+                                    variant="ghost" size="icon" className="h-7 w-7"
+                                    onClick={() => setCloneDecision({ agent, action: 'replace_original' })}
+                                    disabled={pendingRow === agent.id}
+                                    title={`Not a clone — this is a reinstall of ${agent.clone_of_hostname}`}
+                                  >
+                                    <RefreshCw className="h-3.5 w-3.5" />
+                                  </Button>
+                                  <Button
+                                    variant="ghost" size="icon" className="h-7 w-7 text-muted hover:text-danger"
+                                    onClick={() => setCloneDecision({ agent, action: 'block' })}
+                                    disabled={pendingRow === agent.id}
+                                    title="Block this installation"
+                                  >
+                                    <Ban className="h-3.5 w-3.5" />
+                                  </Button>
+                                </>
+                              )}
+                            </>
                           )}
                           <Button
                             variant="ghost" size="icon" className="h-7 w-7 text-muted hover:text-danger"
@@ -899,6 +949,31 @@ export function AgentFleetPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <ConfirmDialog
+        open={Boolean(cloneDecision)}
+        onOpenChange={(o) => { if (!o) setCloneDecision(null) }}
+        title={cloneDecision?.action === 'block' ? 'Block this installation' : 'Accept as a reinstall'}
+        description={cloneDecision?.action === 'block' ? (
+          <>
+            Block the installation on <span className="font-semibold text-text">{cloneDecision?.agent.hostname}</span>
+            {cloneDecision?.agent.last_ip ? <> ({cloneDecision.agent.last_ip})</> : null}? It will be refused from now on.
+            The original agent on <span className="font-semibold text-text">{cloneDecision?.agent.clone_of_hostname}</span> is not affected.
+          </>
+        ) : (
+          <>
+            Treat <span className="font-semibold text-text">{cloneDecision?.agent.hostname}</span> as a reinstall of
+            {' '}<span className="font-semibold text-text">{cloneDecision?.agent.clone_of_hostname}</span>? It takes over that
+            agent and its history; the previous installation's key stops working. Use Approve instead if these are two machines.
+          </>
+        )}
+        confirmText={cloneDecision?.action === 'block' ? 'Block' : 'Replace original'}
+        destructive
+        loading={decideClone.isPending}
+        onConfirm={() => {
+          if (cloneDecision) decideClone.mutate(cloneDecision)
+          setCloneDecision(null)
+        }}
+      />
       <ConfirmDialog
         open={Boolean(deleteTarget)}
         onOpenChange={(o) => { if (!o) setDeleteTarget(null) }}

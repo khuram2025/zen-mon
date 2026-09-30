@@ -122,6 +122,9 @@ export interface AgentItem {
   registration_conflict_install_id: string | null
   registration_conflict_hostname: string | null
   registration_conflict_version: string | null
+  /** Set when this entry is a cloned installation that reported another agent's identity. */
+  clone_of_agent_id?: string | null
+  clone_of_hostname?: string | null
   last_heartbeat_at: string | null
   last_metric_at: string | null
   last_config_hash: string | null

@@ -232,6 +232,10 @@ class AgentResponse(BaseModel):
     registration_conflict_install_id: Optional[str] = None
     registration_conflict_hostname: Optional[str] = None
     registration_conflict_version: Optional[str] = None
+    # Set when this entry is a cloned installation that reported another
+    # agent's identity; approving it keeps it a separate machine.
+    clone_of_agent_id: Optional[str] = None
+    clone_of_hostname: Optional[str] = None
     last_heartbeat_at: Optional[datetime]
     last_metric_at: Optional[datetime]
     last_config_hash: Optional[str]
@@ -273,6 +277,17 @@ class AgentBulkAction(BaseModel):
     # APM off.
     monitoring_profile: Optional[MonitoringProfile] = None
     remove_instrumentation: bool = False
+
+
+class AgentCloneDecision(BaseModel):
+    """Administrator decision for a pending cloned installation.
+
+    Approving a clone needs no decision — plain authorize keeps it a separate
+    machine. These cover the other outcomes: the installation is really a
+    reinstall of the original machine, or it must never register.
+    """
+
+    action: Literal["replace_original", "block"]
 
 
 class AgentRegistrationConflictResolve(BaseModel):
