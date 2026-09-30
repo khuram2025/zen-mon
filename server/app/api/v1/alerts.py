@@ -1102,6 +1102,36 @@ async def unsnooze_alert(alert_id: UUID, db: AsyncSession = Depends(get_db),
     return {"removed": removed}
 
 
+class BulkAcknowledgeBody(BaseModel):
+    service_check_id: Optional[UUID] = None
+    alert_ids: Optional[list[UUID]] = Field(default=None, max_length=1000)
+
+
+@router.post("/acknowledge-bulk")
+async def acknowledge_alerts_bulk(body: BulkAcknowledgeBody, db: AsyncSession = Depends(get_db),
+                                  user: User = Depends(can_triage)):
+    """Acknowledge every ACTIVE alert matching service_check_id and/or
+    alert_ids (at least one), inside the caller's scope. Used by the service
+    detail page; each alert goes through the guarded workflow transition."""
+    if body.service_check_id is None and not body.alert_ids:
+        raise HTTPException(422, "Give service_check_id or alert_ids")
+    f = svc.AlertFilters(status="active",
+                         service_check_id=body.service_check_id,
+                         ids=[str(i) for i in body.alert_ids] if body.alert_ids else None,
+                         visible_tags=await scoping.visible_tags(db, user))
+    rows, _ = await svc.list_rows(db, f, limit=1000, count=False)
+    done = 0
+    for r in rows:
+        try:
+            async with db.begin_nested():
+                if await wf.acknowledge(db, r.id, user, source="bulk"):
+                    done += 1
+        except wf.WorkflowError:
+            continue
+    await db.commit()
+    return {"acknowledged": done}
+
+
 class BulkBody(BaseModel):
     ids: list[UUID] = Field(..., min_length=1, max_length=500)
     action: Literal["acknowledge", "resolve", "snooze", "assign"]
