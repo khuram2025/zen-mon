@@ -71,7 +71,8 @@ export default function ExecutiveReport() {
   }
 
   const k = data.kpis
-  const slaMet = k.sla_attained_pct >= k.sla_target_pct
+  // Unmeasured attainment is null on newer backends — no verdict then.
+  const slaMet = k.sla_attained_pct != null && k.sla_attained_pct >= k.sla_target_pct
 
   return (
     <div className="space-y-5">
@@ -108,9 +109,9 @@ export default function ExecutiveReport() {
         <KpiTile
           label={`SLA  (target ${k.sla_target_pct}%)`}
           value={fmtPct(k.sla_attained_pct)}
-          accent={slaMet ? 'success' : 'danger'}
+          accent={k.sla_attained_pct == null ? 'info' : slaMet ? 'success' : 'danger'}
           icon={<Target className="h-4 w-4" />}
-          subtitle={slaMet ? 'Target met' : `${(k.sla_target_pct - k.sla_attained_pct).toFixed(2)}% short`}
+          subtitle={k.sla_attained_pct == null ? 'Not measured' : slaMet ? 'Target met' : `${(k.sla_target_pct - k.sla_attained_pct).toFixed(2)} pp short`}
         />
         <KpiTile
           label="Incidents"
@@ -276,7 +277,7 @@ export default function ExecutiveReport() {
                 header: 'Duration',
                 align: 'right',
                 render: (r) => fmtMin(r.duration_minutes),
-                sortValue: (r) => r.duration_minutes,
+                sortValue: (r) => r.duration_minutes ?? -1,
               },
             ]}
             defaultSortKey="started_at"

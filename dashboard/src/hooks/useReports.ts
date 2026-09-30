@@ -10,9 +10,44 @@ interface RangeArgs {
 /*  Types                                                              */
 /* ------------------------------------------------------------------ */
 
+/* Fields marked "newer backends" arrive with the availability rework
+ * (feat/availability-management). Older appliances omit them, so every
+ * consumer must treat them as possibly missing. A `null` percentage means
+ * NOT MEASURED — never zero. */
+
+/** A sub-query that failed; the response is partial when non-empty. */
+export interface ReportDataError {
+  source: string
+  message: string
+}
+
+export interface StatusNow {
+  up: number
+  down: number
+  degraded: number
+  maintenance: number
+  unknown: number
+  total: number
+}
+
+/** Device breakdown computed with the headline's bounds and denominator. */
+export interface DeviceSegmentSummary {
+  name: string
+  devices: number
+  up_now: number
+  down_now: number
+  availability_pct: number | null
+  measured: number
+}
+
+export type ComplianceState = 'met' | 'at_risk' | 'breached' | 'not_assessed'
+
 export interface ExecutiveData {
   from: string
   to: string
+  /** Server time of the response (newer backends). */
+  generated_at?: string
+  data_errors?: ReportDataError[]
   /** Span the figures were actually measured over. Shorter than [from, to]
    *  when retention or a collection gap means the window is only partly
    *  covered — a 30-day request on an appliance with eight days of samples
@@ -21,7 +56,13 @@ export interface ExecutiveData {
     source_table: string | null
     from: string | null
     to: string | null
-  }
+    measured_entities?: number | null
+    expected_entities?: number | null
+    /** Share of the window between first and last sample — not a guarantee
+     *  of continuous collection. */
+    covered_pct?: number | null
+    last_observation?: string | null
+  } | null
   kpis: {
     availability_pct: number | null
     availability_delta_pct: number | null
@@ -30,37 +71,76 @@ export interface ExecutiveData {
     mttr_delta_minutes: number | null
     devices_monitored: number
     sla_target_pct: number
-    sla_attained_pct: number
+    sla_attained_pct: number | null
+    /** Confirmed device outage episodes (newer backends); alert count before. */
     incidents_count: number
-    incidents_delta: number
+    incidents_delta: number | null
     /** Device-minutes of planned maintenance excluded from availability. */
     maintenance_minutes?: number
+    configured_target_pct?: number | null
+    target_source?: 'policy' | 'default' | null
+    sla_met?: boolean | null
+    availability_delta_pp?: number | null
+    outage_episodes?: number | null
+    ongoing_outages?: number | null
+    outage_downtime_minutes?: number | null
+    alerts_count?: number | null
+    alert_mttr_minutes?: number | null
+    active_critical_now?: number | null
+    critical_raised_in_period?: number | null
+    devices_expected?: number | null
+    devices_measured?: number | null
   }
   availability_trend: { ts: string; availability_pct: number | null }[]
   top_issues: {
     device_id: string
     hostname: string
     issue: string
-    duration_minutes: number
+    duration_minutes: number | null
     alert_count: number
     severity: string
+    downtime_minutes?: number | null
+    outages?: number | null
+    category?: 'outage' | 'degraded' | 'alert_noise' | null
+    availability_pct?: number | null
   }[]
   /** `availability_pct` is measured over the selected window (maintenance
    *  excluded) and is null when the location reported no samples in it;
    *  `devices`/`down` are live counts. */
-  location_summary: { location: string; devices: number; down: number; availability_pct: number | null }[]
+  location_summary: {
+    location: string
+    devices: number
+    down: number
+    availability_pct: number | null
+    up_now?: number | null
+    measured?: number | null
+  }[]
+  group_summary?: DeviceSegmentSummary[] | null
+  type_summary?: DeviceSegmentSummary[] | null
   outage_timeline: {
     device_id: string
     hostname: string
     started_at: string | null
-    duration_minutes: number
+    ended_at?: string | null
+    ongoing?: boolean
+    /** Full episode length (to now when ongoing); null only when genuinely
+     *  unknown (newer backends). */
+    duration_minutes: number | null
+    /** Part of the episode inside the selected window (newer backends). */
+    in_window_minutes?: number | null
+    /** false when the log opens on a recovery: started_at is the clipped
+     *  window start and the real start is unknown. */
+    start_known?: boolean
     kind: string
   }[]
+  status_now?: StatusNow | null
 }
 
 export interface TechnicalData {
   from: string
   to: string
+  generated_at?: string
+  data_errors?: ReportDataError[]
   worst_devices: {
     device_id: string
     hostname: string
@@ -99,7 +179,11 @@ export interface TechnicalData {
     device_id: string
     hostname: string
     started_at: string | null
-    duration_minutes: number
+    ended_at?: string | null
+    ongoing?: boolean
+    duration_minutes: number | null
+    in_window_minutes?: number | null
+    start_known?: boolean
     kind: string
   }[]
 }
@@ -107,15 +191,33 @@ export interface TechnicalData {
 export interface BusinessData {
   from: string
   to: string
+  generated_at?: string
+  data_errors?: ReportDataError[]
+  /** "confirmed" on newer backends. */
+  availability_basis?: string | null
   service_availability: {
     service_check_id: string
     name: string
     type: string
     group_name: string
     status: string
+    /** Confirmed-incident basis on newer backends; raw probe ratio before. */
     availability_pct: number | null
     checks_total: number
     checks_failed: number
+    probe_availability_pct?: number | null
+    coverage_pct?: number | null
+    downtime_seconds?: number | null
+    outages?: number | null
+    target_pct?: number | null
+    target_source?: 'service' | 'policy' | 'default' | null
+    meets_target?: boolean | null
+    compliance?: ComplianceState | null
+    error_budget_used_pct?: number | null
+    criticality?: 'critical' | 'high' | 'medium' | 'low' | null
+    business_owner?: string | null
+    grouped?: boolean | null
+    availability_basis?: string | null
   }[]
   response_time_quantiles: {
     service_check_id: string
@@ -130,14 +232,33 @@ export interface BusinessData {
     tls_expiry_date: string | null
     days_remaining: number
     severity: string
+    warn_days?: number | null
+    critical_days?: number | null
   }[]
-  customer_impact_minutes: number
+  /** null when no service has a business mapping (newer backends). */
+  customer_impact_minutes: number | null
   service_outages: {
     service_check_id: string
     name: string
+    group_name?: string | null
     started_at: string | null
-    duration_minutes: number
+    ended_at?: string | null
+    ongoing?: boolean
+    duration_minutes: number | null
   }[]
+  compliance_summary?: {
+    met: number
+    at_risk: number
+    breached: number
+    not_assessed: number
+    eligible: number
+  } | null
+  impact_assessed_services?: number | null
+  impact_unassessed_services?: number | null
+  impact_basis?: 'confirmed_downtime_merged' | null
+  confirmed_downtime_minutes?: number | null
+  tls_evidence?: { eligible: number; with_expiry_data: number } | null
+  status_now?: StatusNow | null
 }
 
 export interface InventoryData {
@@ -176,6 +297,11 @@ export interface InventoryData {
 
 const RETRY_COUNT = 1
 
+interface ReportQueryOptions {
+  /** Skip fetching (e.g. a panel that is not on screen). Defaults to true. */
+  enabled?: boolean
+}
+
 /** Keep prior report data visible while the time window refetches. */
 const keepPrev = <T,>(prev: T | undefined) => prev
 
@@ -212,9 +338,10 @@ function rangeKey({ fromISO, toISO }: RangeArgs) {
   return { key: [bucketKey(fromISO, ms), bucketKey(toISO, ms)], staleMs: ms }
 }
 
-export function useExecutiveReport({ fromISO, toISO }: RangeArgs) {
+export function useExecutiveReport({ fromISO, toISO }: RangeArgs, opts: ReportQueryOptions = {}) {
   const { key, staleMs } = rangeKey({ fromISO, toISO })
   return useQuery<ExecutiveData>({
+    enabled: opts.enabled ?? true,
     queryKey: ['report', 'executive', ...key],
     queryFn: async () => (await api.get('/reports/data/executive', { params: { from: fromISO, to: toISO } })).data,
     staleTime: staleMs,
@@ -223,9 +350,10 @@ export function useExecutiveReport({ fromISO, toISO }: RangeArgs) {
   })
 }
 
-export function useTechnicalReport({ fromISO, toISO }: RangeArgs) {
+export function useTechnicalReport({ fromISO, toISO }: RangeArgs, opts: ReportQueryOptions = {}) {
   const { key, staleMs } = rangeKey({ fromISO, toISO })
   return useQuery<TechnicalData>({
+    enabled: opts.enabled ?? true,
     queryKey: ['report', 'technical', ...key],
     queryFn: async () => (await api.get('/reports/data/technical', { params: { from: fromISO, to: toISO } })).data,
     staleTime: staleMs,
@@ -234,14 +362,31 @@ export function useTechnicalReport({ fromISO, toISO }: RangeArgs) {
   })
 }
 
-export function useBusinessReport({ fromISO, toISO }: RangeArgs) {
+export function useBusinessReport({ fromISO, toISO }: RangeArgs, opts: ReportQueryOptions = {}) {
   const { key, staleMs } = rangeKey({ fromISO, toISO })
   return useQuery<BusinessData>({
+    enabled: opts.enabled ?? true,
     queryKey: ['report', 'business', ...key],
     queryFn: async () => (await api.get('/reports/data/business', { params: { from: fromISO, to: toISO } })).data,
     staleTime: staleMs,
     retry: RETRY_COUNT,
     placeholderData: keepPrev,
+  })
+}
+
+export interface AvailabilityPolicy {
+  default_target_pct: number
+  source?: string | null
+}
+
+/** Appliance-wide default availability target. 404 on older backends. */
+export function useAvailabilityPolicy(enabled = true) {
+  return useQuery<AvailabilityPolicy>({
+    queryKey: ['availability-policy'],
+    queryFn: async () => (await api.get('/reports/availability-policy')).data,
+    staleTime: 5 * 60_000,
+    retry: false,
+    enabled,
   })
 }
 

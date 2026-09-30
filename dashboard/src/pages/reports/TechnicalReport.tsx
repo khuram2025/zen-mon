@@ -299,7 +299,7 @@ export default function TechnicalReport() {
                   header: 'Duration',
                   align: 'right',
                   render: (r) => fmtMin(r.duration_minutes),
-                  sortValue: (r) => r.duration_minutes,
+                  sortValue: (r) => r.duration_minutes ?? -1,
                 },
               ]}
               defaultSortKey="started_at"

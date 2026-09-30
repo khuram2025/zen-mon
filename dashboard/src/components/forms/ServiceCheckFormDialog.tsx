@@ -61,6 +61,30 @@ type State = {
   check_interval: number
   timeout: number
   description: string
+  // Availability objective (blank target = appliance default policy)
+  sla_target_pct: string
+  criticality: '' | ServiceCriticality
+  business_owner: string
+}
+
+type ServiceCriticality = 'critical' | 'high' | 'medium' | 'low'
+
+const CRITICALITY_OPTIONS: Array<{ value: ServiceCriticality; label: string }> = [
+  { value: 'critical', label: 'Critical' },
+  { value: 'high', label: 'High' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'low', label: 'Low' },
+]
+
+/** Returns an error message, or null when the target is blank or valid. */
+function slaTargetError(raw: string): string | null {
+  const text = raw.trim()
+  if (!text) return null
+  const value = Number(text)
+  if (!Number.isFinite(value) || value <= 0 || value > 100) {
+    return 'Enter a percentage greater than 0 and at most 100, or leave blank to use the default.'
+  }
+  return null
 }
 
 type ServiceTestStep = {
@@ -156,6 +180,9 @@ const empty: State = {
   check_interval: 60,
   timeout: 10,
   description: '',
+  sla_target_pct: '',
+  criticality: '',
+  business_owner: '',
 }
 
 function ServiceTestResultPanel({ result }: { result: ServiceTestResult }) {
@@ -252,6 +279,20 @@ export function ServiceCheckFormDialog({
   })
   const sourceCheck = freshCheck || check
 
+  // Default objective shown as the placeholder for a blank per-service target.
+  // Older appliances have no policy endpoint; the hint then omits the value.
+  const { data: availabilityPolicy } = useQuery<{ default_target_pct?: number | null }>({
+    queryKey: ['availability-policy'],
+    queryFn: async () => (await api.get('/reports/availability-policy')).data,
+    enabled: open,
+    retry: false,
+    staleTime: 5 * 60_000,
+  })
+  const defaultTargetPct = typeof availabilityPolicy?.default_target_pct === 'number'
+    ? availabilityPolicy.default_target_pct
+    : null
+  const targetError = slaTargetError(s.sla_target_pct)
+
   const { data: groups = [] } = useQuery<ServiceCheckGroup[]>({
     queryKey: ['service-check-groups'],
     queryFn: async () => (await api.get('/service-check-groups')).data,
@@ -341,6 +382,13 @@ export function ServiceCheckFormDialog({
         check_interval: sourceCheck.check_interval || 60,
         timeout: sourceCheck.timeout || 10,
         description: sourceCheck.description || '',
+        sla_target_pct: sourceCheck.sla_target_pct != null && sourceCheck.sla_target_pct !== ''
+          ? String(Number(sourceCheck.sla_target_pct))
+          : '',
+        criticality: CRITICALITY_OPTIONS.some((option) => option.value === sourceCheck.criticality)
+          ? sourceCheck.criticality
+          : '',
+        business_owner: sourceCheck.business_owner || '',
       })
     } else {
       setS(empty)
@@ -403,6 +451,11 @@ export function ServiceCheckFormDialog({
       timeout: s.timeout,
       description: s.description || null,
       config: { ...(sourceCheck?.config || {}) },
+      sla_target_pct: s.sla_target_pct.trim() && !slaTargetError(s.sla_target_pct)
+        ? Number(s.sla_target_pct.trim())
+        : null,
+      criticality: s.criticality || null,
+      business_owner: s.business_owner.trim() || null,
     }
     if (s.check_type === 'http') {
       base.config.ip_version = s.ip_version
@@ -447,6 +500,11 @@ export function ServiceCheckFormDialog({
 
   function submit(e: FormEvent) {
     e.preventDefault()
+    const targetError = slaTargetError(s.sla_target_pct)
+    if (targetError) {
+      toast.error('Invalid availability target', targetError)
+      return
+    }
     if (s.check_type === 'http' && !hostFromUrl(s.target_url)) {
       toast.error('Invalid URL', 'Enter a complete URL beginning with http:// or https://')
       return
@@ -822,6 +880,60 @@ export function ServiceCheckFormDialog({
                 />
               </div>
             </FormField>
+          </div>
+
+          <div className="space-y-3 rounded-md border border-border p-3">
+            <div className="text-xs font-semibold uppercase tracking-wider text-muted">
+              Availability objective
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <FormField
+                label="Target availability (%)"
+                error={targetError}
+                hint={defaultTargetPct != null
+                  ? `Blank uses the default target (${defaultTargetPct}%).`
+                  : 'Blank uses the appliance default target.'}
+              >
+                <Input
+                  type="number"
+                  inputMode="decimal"
+                  min={0.001}
+                  max={100}
+                  step="any"
+                  placeholder={defaultTargetPct != null ? String(defaultTargetPct) : 'Default'}
+                  value={s.sla_target_pct}
+                  onChange={(e) => setS({ ...s, sla_target_pct: e.target.value })}
+                />
+              </FormField>
+              <FormField label="Business criticality" hint="Used to rank exposure on the Availability page.">
+                <Select
+                  value={s.criticality || 'none'}
+                  onValueChange={(v) => setS({ ...s, criticality: v === 'none' ? '' : v as ServiceCriticality })}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Not classified" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">Not classified</SelectItem>
+                    {CRITICALITY_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </FormField>
+              <FormField label="Business owner">
+                <Input
+                  maxLength={255}
+                  placeholder="Team or person accountable"
+                  value={s.business_owner}
+                  onChange={(e) => setS({ ...s, business_owner: e.target.value })}
+                />
+              </FormField>
+            </div>
+            <p className="text-xs text-muted">
+              Target compliance is judged on confirmed incidents. Customer impact is assessed only for services with a
+              business group and criticality.
+            </p>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
