@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Boolean, Integer, Float, SmallInteger, Text, DateTime, ForeignKey, LargeBinary
+from sqlalchemy import String, Boolean, Integer, Float, Numeric, SmallInteger, Text, DateTime, ForeignKey, LargeBinary
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID, JSONB
@@ -73,6 +73,11 @@ class ServiceCheck(Base):
     tls_days_remaining: Mapped[int] = mapped_column(Integer, nullable=True)
     tls_issuer: Mapped[str] = mapped_column(String(512), nullable=True)
     tls_subject: Mapped[str] = mapped_column(String(512), nullable=True)
+
+    # Availability objective and business mapping (migrate-129); NULL = not configured.
+    sla_target_pct: Mapped[float] = mapped_column(Numeric(6, 3, asdecimal=False), nullable=True)
+    criticality: Mapped[str] = mapped_column(String(16), nullable=True)
+    business_owner: Mapped[str] = mapped_column(String(255), nullable=True)
 
     description: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

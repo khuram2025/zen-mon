@@ -1,16 +1,19 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response, HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import scoping
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
+from app.services import availability_policy
+from app.services.audit_service import write_audit_log
 from app.services.report_service import generate_report
 from app.services.export_service import generate_excel_report, generate_csv_report
 from app.services.report_data_service import (
@@ -103,10 +106,16 @@ async def generate_report_endpoint(
                 },
             )
 
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Report generation failed: {str(e)}")
+    except Exception:
+        logger.exception("report generation failed")
+        raise HTTPException(status_code=500, detail="Report generation failed")
+
+
+def _check_bounds(from_time: Optional[datetime], to_time: Optional[datetime]) -> None:
+    def utc(ts: datetime) -> datetime:
+        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    if from_time and to_time and utc(from_time) >= utc(to_time):
+        raise HTTPException(status_code=400, detail="'from' must be before 'to'")
 
 
 @router.get("/data/executive")
@@ -117,12 +126,13 @@ async def get_executive_data(
     current_user: User = Depends(get_current_user),
 ):
     """KPIs, availability trend, top issues, location summary, outage timeline."""
+    _check_bounds(from_time, to_time)
+    scope = await scoping.visible_tags(db, current_user)
     try:
-        return await build_executive(db, from_time, to_time)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Executive report data failed: {e}")
+        return await build_executive(db, from_time, to_time, visible_tags=scope)
+    except Exception:
+        logger.exception("executive report data failed")
+        raise HTTPException(status_code=500, detail="Executive report data failed")
 
 
 @router.get("/data/technical")
@@ -133,12 +143,13 @@ async def get_technical_data(
     current_user: User = Depends(get_current_user),
 ):
     """Top-N worst devices, noisy alerts, bandwidth interfaces, alert volume."""
+    _check_bounds(from_time, to_time)
+    scope = await scoping.visible_tags(db, current_user)
     try:
-        return await build_technical(db, from_time, to_time)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Technical report data failed: {e}")
+        return await build_technical(db, from_time, to_time, visible_tags=scope)
+    except Exception:
+        logger.exception("technical report data failed")
+        raise HTTPException(status_code=500, detail="Technical report data failed")
 
 
 @router.get("/data/business")
@@ -149,12 +160,13 @@ async def get_business_data(
     current_user: User = Depends(get_current_user),
 ):
     """Service availability, response time quantiles, TLS warnings, customer impact."""
+    _check_bounds(from_time, to_time)
+    scope = await scoping.visible_tags(db, current_user)
     try:
-        return await build_business(db, from_time, to_time)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Business report data failed: {e}")
+        return await build_business(db, from_time, to_time, visible_tags=scope)
+    except Exception:
+        logger.exception("business report data failed")
+        raise HTTPException(status_code=500, detail="Business report data failed")
 
 
 @router.get("/data/inventory")
@@ -165,10 +177,40 @@ async def get_inventory_data(
     """Devices by type/vendor/location, interfaces totals, sensor fleet, recently added."""
     try:
         return await build_inventory(db)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Inventory report data failed: {e}")
+    except Exception:
+        logger.exception("inventory report data failed")
+        raise HTTPException(status_code=500, detail="Inventory report data failed")
+
+
+class AvailabilityPolicyBody(BaseModel):
+    default_target_pct: float = Field(..., ge=availability_policy.MIN_TARGET_PCT, le=100)
+
+
+@router.get("/availability-policy")
+async def get_availability_policy(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Default availability target applied to services without their own."""
+    target, source = await availability_policy.load_default_target(db)
+    return {"default_target_pct": target, "source": source}
+
+
+@router.put("/availability-policy")
+async def update_availability_policy(
+    body: AvailabilityPolicyBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_operator_user),
+):
+    previous, _source = await availability_policy.load_default_target(db)
+    await availability_policy.save_default_target(db, body.default_target_pct)
+    await write_audit_log(
+        db, actor=current_user, action="reports.availability_policy.update",
+        resource_type="system_settings", resource_id=availability_policy.SETTINGS_KEY,
+        metadata={"default_target_pct": body.default_target_pct, "previous": previous},
+    )
+    await db.commit()
+    return {"default_target_pct": body.default_target_pct, "source": "policy"}
 
 
 @router.get("/shared/{token}", response_class=HTMLResponse)

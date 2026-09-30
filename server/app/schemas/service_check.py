@@ -1,9 +1,16 @@
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 from urllib.parse import urlsplit
 from uuid import UUID
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+Criticality = Literal["critical", "high", "medium", "low"]
+
+
+def _blank_to_none(value: Optional[str]) -> Optional[str]:
+    return (value or "").strip() or None
 
 
 _STATUS_PATTERN_RE = re.compile(r"^\s*([1-5][0-9xX]{2}|[1-5][0-9]{2}-[1-5][0-9]{2})\s*$")
@@ -164,11 +171,19 @@ class ServiceCheckCreate(NetworkConfigMixin):
     check_interval: int = Field(default=60, ge=10, le=3600)
     timeout: int = Field(default=10, ge=1, le=60)
     description: Optional[str] = None
+    sla_target_pct: Optional[float] = Field(default=None, gt=0, le=100)
+    criticality: Optional[Criticality] = None
+    business_owner: Optional[str] = Field(default=None, max_length=255)
 
     @field_validator("http_expected_statuses")
     @classmethod
     def _check_statuses(cls, v):
         return _validate_statuses(v)
+
+    @field_validator("business_owner")
+    @classmethod
+    def _blank_owner(cls, v):
+        return _blank_to_none(v)
 
     @model_validator(mode="after")
     def _check_workflow(self):
@@ -209,11 +224,20 @@ class ServiceCheckUpdate(NetworkConfigMixin):
     check_interval: Optional[int] = Field(default=None, ge=10, le=3600)
     timeout: Optional[int] = Field(default=None, ge=1, le=60)
     description: Optional[str] = None
+    # Explicit null clears the objective back to the policy default.
+    sla_target_pct: Optional[float] = Field(default=None, gt=0, le=100)
+    criticality: Optional[Criticality] = None
+    business_owner: Optional[str] = Field(default=None, max_length=255)
 
     @field_validator("http_expected_statuses")
     @classmethod
     def _check_statuses(cls, v):
         return _validate_statuses(v)
+
+    @field_validator("business_owner")
+    @classmethod
+    def _blank_owner(cls, v):
+        return _blank_to_none(v)
 
 
 class ServiceCheckResponse(BaseModel):
@@ -263,6 +287,9 @@ class ServiceCheckResponse(BaseModel):
     tls_issuer: Optional[str] = None
     tls_subject: Optional[str] = None
     description: Optional[str] = None
+    sla_target_pct: Optional[float] = None
+    criticality: Optional[str] = None
+    business_owner: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 

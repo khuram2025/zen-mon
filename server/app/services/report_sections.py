@@ -34,6 +34,7 @@ each underlying builder at most once no matter how many sections consume it.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from datetime import datetime, timedelta, timezone
@@ -67,6 +68,7 @@ from app.services.report_data_service import (
     build_executive,
     build_inventory,
     build_technical,
+    device_outage_episodes,
 )
 
 logger = logging.getLogger("zenplus.reports")
@@ -204,7 +206,7 @@ def _section(id: str, title: str, **parts: Any) -> dict:
 
 # ─── Availability sections ──────────────────────────────────────────────────
 
-SLA_TARGET_PCT = 99.9  # mirrors report_data_service.build_executive
+SLA_TARGET_PCT = 99.9  # fallback only; the configured policy default wins
 
 
 async def _node_availability(ctx: SectionCtx) -> dict:
@@ -288,21 +290,23 @@ async def _node_availability(ctx: SectionCtx) -> dict:
         trend = [{"t": b.isoformat(), "v": round(upw / sc * 100, 2)}
                  for b, (upw, sc) in sorted(per_bucket.items()) if sc > 0]
 
-        out_rows = ctx.ch().query(
-            f"""
-            SELECT device_id, timestamp, duration_sec
-            FROM zenplus.device_status_log
-            WHERE timestamp >= %(f)s AND timestamp <= %(t)s{id_cond}
-              AND lower(new_status) IN ('down', 'offline')
-            """, parameters=ch_params).result_rows
-        for did, ts, dur in out_rows:
-            if _in_maint(str(did), ts):
-                continue  # planned downtime
-            s = stats.setdefault(str(did), {})
-            s["outages"] = s.get("outages", 0) + 1
-            s["logged_down_s"] = s.get("logged_down_s", 0) + int(dur or 0)
     except Exception:
         logger.exception("node availability query failed")
+
+    # Outage episodes pair each down transition with its recovery; the log's
+    # duration_sec column is always 0, so it cannot supply durations.
+    try:
+        episodes = await asyncio.to_thread(
+            device_outage_episodes, ctx.frm, ctx.to, [d["id"] for d in devices], maint)
+        for e in episodes:
+            s = stats.setdefault(e["entity_id"], {})
+            s["outages"] = s.get("outages", 0) + 1
+            s["logged_down_s"] = s.get("logged_down_s", 0) + e["in_window_s"]
+    except Exception:
+        logger.exception("node outage episodes query failed")
+
+    from app.services.availability_policy import load_default_target
+    sla_target, _source = await load_default_target(ctx.db)
 
     window_min = ctx.hours * 60
     nodes = []
@@ -331,7 +335,8 @@ async def _node_availability(ctx: SectionCtx) -> dict:
         "trend": trend,
         "overall": round(overall, 3) if overall is not None else None,
         "up": sum(1 for n in nodes if n["status"] == "up"),
-        "below_sla": sum(1 for n in reporting if n["avail"] < SLA_TARGET_PCT),
+        "below_sla": sum(1 for n in reporting if n["avail"] < sla_target),
+        "sla_target": sla_target,
         "downtime_min": round(sum(n["downtime_min"] or 0 for n in nodes), 1),
         "outage_events": sum(n["outages"] for n in nodes),
         "filtered": bool(ids),
@@ -344,6 +349,7 @@ async def _node_availability(ctx: SectionCtx) -> dict:
 async def _sec_availability_kpis(ctx: SectionCtx) -> dict:
     na = await _node_availability(ctx)
     avail = na["overall"]
+    target = na.get("sla_target", SLA_TARGET_PCT)
     scope = f"{len(na['nodes'])} selected node(s)" if na["filtered"] else "all monitored nodes"
     maint_note = ([f"Planned maintenance excluded: {na['maint_excluded_min']:,.0f} "
                    "device-minutes fell inside maintenance windows and do not "
@@ -355,10 +361,11 @@ async def _sec_availability_kpis(ctx: SectionCtx) -> dict:
         description=f"Computed over {scope} for the reporting window.",
         kpis=[
             {"label": "Availability", "value": _fmt_pct(avail),
-             "accent": "success" if (avail or 0) >= SLA_TARGET_PCT else "danger"},
+             "accent": ("neutral" if avail is None else
+                        "success" if avail >= target else "danger")},
             {"label": f"Nodes up (of {len(na['nodes'])})", "value": str(na["up"]),
              "accent": "success" if na["up"] == len(na["nodes"]) else "warning"},
-            {"label": f"Below SLA target ({SLA_TARGET_PCT}%)", "value": str(na["below_sla"]),
+            {"label": f"Below configured target ({target:g}%)", "value": str(na["below_sla"]),
              "accent": "danger" if na["below_sla"] else "success"},
             {"label": "Total downtime", "value": f"{na['downtime_min']:,.0f} min",
              "accent": "warning" if na["downtime_min"] else "success"},
@@ -423,9 +430,15 @@ async def _sec_device_uptime(ctx: SectionCtx) -> dict:
 async def _sec_top_outages(ctx: SectionCtx) -> dict:
     d = await ctx.dataset("executive")
     outages = sorted(d.get("outage_timeline") or [],
-                     key=lambda o: -(o.get("duration_minutes") or 0))[:15]
-    rows = [[o.get("hostname") or "—", _iso_short(o.get("started_at")),
-             f"{o.get('duration_minutes') or 0:,.0f} min"] for o in outages]
+                     key=lambda o: -(o.get("duration_minutes") or o.get("in_window_minutes") or 0))[:15]
+
+    def _duration(o: dict) -> str:
+        minutes = o.get("duration_minutes")
+        text_ = "unknown" if minutes is None else f"{minutes:,.0f} min"
+        return f"{text_} (ongoing)" if o.get("ongoing") else text_
+
+    rows = [[o.get("hostname") or "—", _iso_short(o.get("started_at")), _duration(o)]
+            for o in outages]
     return _section(
         "top_outages", "Longest Outages", half=True,
         tables=[{"headers": ["Device", "Started", "Duration"],

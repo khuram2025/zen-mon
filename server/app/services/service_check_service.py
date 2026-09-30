@@ -41,6 +41,9 @@ from app.schemas.service_check import (
 )
 
 
+_OBJECTIVE_FIELDS = {"sla_target_pct", "criticality", "business_owner"}
+
+
 def _to_response(sc: ServiceCheck, in_maintenance: bool = False, parent_name: str | None = None) -> ServiceCheckResponse:
     return ServiceCheckResponse(
         id=sc.id,
@@ -89,6 +92,9 @@ def _to_response(sc: ServiceCheck, in_maintenance: bool = False, parent_name: st
         tls_issuer=sc.tls_issuer,
         tls_subject=sc.tls_subject,
         description=sc.description,
+        sla_target_pct=_finite(getattr(sc, "sla_target_pct", None)),
+        criticality=getattr(sc, "criticality", None),
+        business_owner=getattr(sc, "business_owner", None),
         created_at=sc.created_at,
         updated_at=sc.updated_at,
     )
@@ -350,7 +356,9 @@ async def update_service_check(db: AsyncSession, check_id: UUID, data: ServiceCh
         update_data["tags"] = await tag_service.canonicalize_tags(db, update_data["tags"])
     for key, value in update_data.items():
         setattr(sc, key, value)
-    if update_data:
+    # Business metadata does not change how the check probes, so it must not
+    # restart an in-progress confirmation.
+    if set(update_data) - _OBJECTIVE_FIELDS:
         sc.verification_attempt = 0
     if "credential_id" in update_data:
         sc.credential = credential
@@ -543,6 +551,9 @@ async def export_service_checks(db: AsyncSession) -> list[dict]:
             "timeout": sc.timeout,
             "status": sc.status,
             "description": sc.description,
+            "sla_target_pct": _finite(sc.sla_target_pct),
+            "criticality": sc.criticality,
+            "business_owner": sc.business_owner,
         })
     return export
 

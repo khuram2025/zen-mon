@@ -19,6 +19,7 @@ Design system
 
 import io
 import base64
+import logging
 import glob
 import re
 import statistics
@@ -35,6 +36,7 @@ import matplotlib.font_manager as _fm
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import scoping
 from app.core.database import get_ch_client
 
 
@@ -1501,9 +1503,13 @@ async def _fetch_devices(db: AsyncSession,
                          device_ids: list[str] | None = None,
                          group_ids: list[str] | None = None,
                          locations: list[str] | None = None,
-                         device_types: list[str] | None = None) -> list[dict]:
+                         device_types: list[str] | None = None,
+                         visible_tags: list[str] | None = None) -> list[dict]:
     filt, params = _build_device_filter_sql(device_ids, group_ids, "d",
                                             locations=locations, device_types=device_types)
+    if visible_tags is not None:
+        filt = " AND ".join(c for c in (filt, scoping.jsonb_tags_visible("d.tags")) if c)
+        params[scoping.SCOPE_PARAM] = visible_tags
     where = f"WHERE {filt}" if filt else ""
     q = text(f"""
         SELECT d.id, d.hostname, d.ip_address, d.device_type, d.location,
@@ -1519,27 +1525,42 @@ async def _fetch_devices(db: AsyncSession,
     return [dict(r._mapping) for r in rows]
 
 
-async def _fetch_service_checks(db: AsyncSession) -> list[dict]:
-    q = text("""
-        SELECT id, name, check_type, target_host, target_url, status,
-               last_check_at, last_response_ms, last_error,
-               tls_days_remaining, tls_expiry_date
-        FROM service_checks
-        ORDER BY name
+async def _fetch_service_checks(db: AsyncSession,
+                                visible_tags: list[str] | None = None) -> list[dict]:
+    where, params = "", {}
+    if visible_tags is not None:
+        where = f"WHERE {scoping.text_tags_visible('sc.tags')}"
+        params[scoping.SCOPE_PARAM] = visible_tags
+    q = text(f"""
+        SELECT sc.id, sc.name, sc.check_type, sc.target_host, sc.target_url, sc.status,
+               sc.last_check_at, sc.last_response_ms, sc.last_error,
+               sc.tls_days_remaining, sc.tls_expiry_date,
+               sc.tls_warn_days, sc.tls_critical_days, sc.enabled,
+               sc.created_at, sc.check_interval, sc.group_id,
+               scg.name AS group_name,
+               sc.sla_target_pct, sc.criticality, sc.business_owner
+        FROM service_checks sc
+        LEFT JOIN service_check_groups scg ON scg.id = sc.group_id
+        {where}
+        ORDER BY sc.name
     """)
-    result = await db.execute(q)
+    result = await db.execute(q, params)
     return [dict(r._mapping) for r in result.fetchall()]
 
 
 async def _fetch_alerts(db: AsyncSession, start: datetime, end: datetime,
-                        device_ids: list[str] | None = None) -> list[dict]:
+                        device_ids: list[str] | None = None,
+                        visible_tags: list[str] | None = None) -> list[dict]:
     dev_clause = ""
     params: dict = {"start": start, "end": end}
     if device_ids:
         dev_clause = "AND a.device_id = ANY(:device_ids)"
         params["device_ids"] = device_ids
+    if visible_tags is not None:
+        dev_clause += f" AND {scoping.alert_visible('a')}"
+        params[scoping.SCOPE_PARAM] = visible_tags
     q = text(f"""
-        SELECT a.id, a.device_id, a.status, a.severity, a.message,
+        SELECT a.id, a.device_id, a.service_check_id, a.status, a.severity, a.message,
                a.triggered_at, a.acknowledged_at, a.resolved_at,
                d.hostname
         FROM alerts a
@@ -1686,10 +1707,11 @@ def _fetch_service_status_log(start: datetime, end: datetime,
 # Metric aggregation helpers
 # ---------------------------------------------------------------------------
 
-def _device_uptime_pct(ping_rows: list[dict], device_id: str) -> float:
+def _device_uptime_pct(ping_rows: list[dict], device_id: str) -> float | None:
+    """None when unmeasured: no samples is not zero availability."""
     rows = [r for r in ping_rows if str(r["device_id"]) == str(device_id)]
     if not rows:
-        return 0.0
+        return None
     up = sum(1 for r in rows if r.get("is_up"))
     return (up / len(rows)) * 100
 
@@ -1730,10 +1752,10 @@ def _device_rtt_stats(ping_rows: list[dict], device_id: str) -> dict:
     }
 
 
-def _service_uptime_pct(svc_rows: list[dict], svc_id: str) -> float:
+def _service_uptime_pct(svc_rows: list[dict], svc_id: str) -> float | None:
     rows = [r for r in svc_rows if str(r["service_check_id"]) == str(svc_id)]
     if not rows:
-        return 0.0
+        return None
     up = sum(1 for r in rows if r.get("is_up"))
     return (up / len(rows)) * 100
 
@@ -1838,10 +1860,9 @@ async def _build_executive_summary(pdf: ZenPlusReport, db: AsyncSession,
     services = await _fetch_service_checks(db)
     filtered_device_ids = [str(d["id"]) for d in devices] if devices else device_ids
     alerts = await _fetch_alerts(db, start, end, filtered_device_ids)
+    maint = await _fetch_device_maintenance_windows(db, start, end)
     ping_rows = _exclude_maintenance_samples(
-        _fetch_ping_metrics(start, end, filtered_device_ids),
-        await _fetch_device_maintenance_windows(db, start, end),
-    )
+        _fetch_ping_metrics(start, end, filtered_device_ids), maint)
 
     pdf.add_page()
     pdf.section_title(
@@ -1919,12 +1940,15 @@ async def _build_executive_summary(pdf: ZenPlusReport, db: AsyncSession,
         did = str(a.get("device_id", ""))
         device_alert_count[did] = device_alert_count.get(did, 0) + 1
 
-    status_log = _fetch_device_status_log(start, end, filtered_device_ids)
+    # Downtime from paired down→recovery transitions: the status log's
+    # duration_sec column is always 0.
+    from app.services.report_data_service import device_outage_episodes
     device_downtime: dict[str, float] = {}
-    for entry in status_log:
-        did = str(entry["device_id"])
-        if (entry.get("new_status") or "").lower() in ("down", "offline"):
-            device_downtime[did] = device_downtime.get(did, 0) + (entry.get("duration_sec") or 0)
+    try:
+        for e in device_outage_episodes(start, end, [str(d["id"]) for d in devices], maint):
+            device_downtime[e["entity_id"]] = device_downtime.get(e["entity_id"], 0) + e["in_window_s"]
+    except Exception:
+        logging.getLogger(__name__).warning("outage episodes unavailable", exc_info=True)
 
     problem_scores: dict[str, float] = {}
     for did in (str(d["id"]) for d in devices):
@@ -2122,7 +2146,8 @@ async def _build_service_health(pdf: ZenPlusReport, db: AsyncSession,
 
     # --- KPIs ---
     up_now = sum(1 for s in services if (s.get("status") or "").lower() in ("up", "online"))
-    uptimes = [_service_uptime_pct(svc_rows, str(s["id"])) for s in services]
+    uptimes = [u for u in (_service_uptime_pct(svc_rows, str(s["id"])) for s in services)
+               if u is not None]
     avg_uptime = statistics.mean(uptimes) if uptimes else None
     all_resp = [r["response_ms"] for r in svc_rows if r.get("response_ms")]
     tls_soon = sum(1 for s in services

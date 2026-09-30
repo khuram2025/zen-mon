@@ -150,19 +150,44 @@ def _ping_uptime_sql(table: str, where: str) -> str:
 @router.get("/dashboard/uptime-stats")
 async def dashboard_uptime_stats(
     hours: int = Query(default=24, ge=1, le=8760),
+    from_: Optional[datetime] = Query(default=None, alias="from"),
+    to: Optional[datetime] = Query(default=None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Get uptime percentages per device over a time range from ClickHouse metrics."""
+    """Get uptime percentages per device over a time range from ClickHouse metrics.
+
+    Explicit `from`/`to` bound the window exactly (so a historical range is not
+    answered with one ending now); otherwise it is the last `hours`.
+    """
     from app.core.database import get_clickhouse_client
     client = get_clickhouse_client()
 
-    to_time = datetime.utcnow()
-    from_time = to_time - timedelta(hours=hours)
+    def naive_utc(ts: datetime) -> datetime:
+        return ts.astimezone(timezone.utc).replace(tzinfo=None) if ts.tzinfo else ts
+
+    to_time = naive_utc(to) if to else datetime.now(timezone.utc).replace(tzinfo=None)
+    from_time = naive_utc(from_) if from_ else to_time - timedelta(hours=hours)
+    if from_time >= to_time:
+        raise HTTPException(status_code=400, detail="'from' must be before 'to'")
+    span_hours = (to_time - from_time).total_seconds() / 3600
+
+    # Tag visibility scope, as on the device list: a scoped user only gets
+    # uptime for devices they can see; unscoped users are unrestricted.
+    where = "timestamp >= %(from)s AND timestamp <= %(to)s"
+    params: dict = {"from": from_time, "to": to_time}
+    scope = await scoping.visible_tags(db, user)
+    if scope is not None:
+        visible = (await db.execute(
+            text(f"SELECT d.id::text FROM devices d WHERE {scoping.jsonb_tags_visible('d.tags')}"),
+            {scoping.SCOPE_PARAM: scope},
+        )).scalars().all()
+        params["ids"] = [str(i) for i in visible]
+        where += " AND toString(device_id) IN %(ids)s"
 
     # Coarsest-but-longest-lived table that covers the window, then finer ones
     # as a fallback for installs whose rollups have not caught up yet.
-    preferred = ping_table_for_hours(hours)
+    preferred = ping_table_for_hours(span_hours)
     tables_to_try = [preferred] + [
         t for t in ("ping_metrics_5m", "ping_metrics") if t != preferred
     ]
@@ -171,11 +196,10 @@ async def dashboard_uptime_stats(
     counts: dict[str, list[float]] = {}
     chosen_table: str | None = None
     for table in tables_to_try:
+        if scope is not None and not params["ids"]:
+            break
         try:
-            result = client.query(
-                _ping_uptime_sql(table, "timestamp >= %(from)s AND timestamp <= %(to)s"),
-                parameters={"from": from_time, "to": to_time},
-            )
+            result = client.query(_ping_uptime_sql(table, where), parameters=params)
             if len(result.result_rows) > 0:
                 for row in result.result_rows:
                     up, total = float(row[1] or 0), float(row[2] or 0)
