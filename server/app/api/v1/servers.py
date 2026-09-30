@@ -50,6 +50,7 @@ from app.schemas.agent import (
     AgentPolicyCreate,
     AgentPolicyResponse,
     AgentPolicyUpdate,
+    AgentCloneDecision,
     AgentRegistrationConflictResolve,
     AgentResponse,
     BaselineCreate,
@@ -1149,6 +1150,8 @@ def _agent_response(row: dict) -> AgentResponse:
         registration_conflict_install_id=row.get("registration_conflict_install_id"),
         registration_conflict_hostname=row.get("registration_conflict_hostname"),
         registration_conflict_version=row.get("registration_conflict_version"),
+        clone_of_agent_id=str(row["clone_of_agent_id"]) if row.get("clone_of_agent_id") else None,
+        clone_of_hostname=row.get("clone_of_hostname"),
         last_heartbeat_at=row.get("last_heartbeat_at"),
         last_metric_at=row.get("last_metric_at"),
         last_config_hash=row.get("last_config_hash"),
@@ -2459,6 +2462,8 @@ async def list_fleet(
     rows = (await db.execute(
         text(f"""SELECT a.*, p.name AS policy_name, st.name AS site_name,
                         s.display_name AS server_name,
+                        clone_src.id AS clone_of_agent_id,
+                        clone_src.hostname AS clone_of_hostname,
                         EXISTS (
                             SELECT 1 FROM agent_apm_credentials credential
                             JOIN apm_ingest_keys ingest_key
@@ -2471,6 +2476,13 @@ async def list_fleet(
                  LEFT JOIN agent_policies p ON p.id = a.policy_id
                  LEFT JOIN sites st ON st.id = a.site_id
                  LEFT JOIN servers s ON s.id = a.server_id
+                 LEFT JOIN LATERAL (
+                     SELECT src.id, src.hostname
+                       FROM agent_registration_resolutions r
+                       JOIN agents src ON src.id = r.source_agent_id
+                      WHERE r.assigned_agent_id = a.id
+                      ORDER BY r.approved_at DESC LIMIT 1
+                 ) clone_src ON TRUE
                  WHERE {where_sql}
                  ORDER BY {sort_col} {sort_dir} NULLS LAST
                  LIMIT :limit OFFSET :offset"""),
@@ -2784,6 +2796,8 @@ async def get_agent(
     row = (await db.execute(
         text("""SELECT a.*, p.name AS policy_name, st.name AS site_name,
                        s.display_name AS server_name,
+                        clone_src.id AS clone_of_agent_id,
+                        clone_src.hostname AS clone_of_hostname,
                        EXISTS (
                            SELECT 1 FROM agent_apm_credentials credential
                            JOIN apm_ingest_keys ingest_key
@@ -2796,6 +2810,13 @@ async def get_agent(
                 LEFT JOIN agent_policies p ON p.id = a.policy_id
                 LEFT JOIN sites st ON st.id = a.site_id
                 LEFT JOIN servers s ON s.id = a.server_id
+                 LEFT JOIN LATERAL (
+                     SELECT src.id, src.hostname
+                       FROM agent_registration_resolutions r
+                       JOIN agents src ON src.id = r.source_agent_id
+                      WHERE r.assigned_agent_id = a.id
+                      ORDER BY r.approved_at DESC LIMIT 1
+                 ) clone_src ON TRUE
                 WHERE a.id = :id"""),
         {"id": agent_id},
     )).mappings().first()
@@ -2824,6 +2845,98 @@ async def authorize_agent(
     if not affected:
         raise HTTPException(404, "Agent not found")
     return {"ok": True, "authorization_state": "authorized"}
+
+
+@fleet_router.post("/{agent_id}/clone-decision")
+async def decide_pending_clone(
+    agent_id: UUID,
+    data: AgentCloneDecision,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_operator_user),
+):
+    """Reinstall-or-block outcome for a pending cloned installation.
+
+    ``replace_original`` hands the original agent identity to this
+    installation (its protected pending-secret hash replaces the original's)
+    and removes the clone entry; ``block`` refuses this installation for good.
+    Either way the original agent is only changed by an explicit replace.
+    """
+    clone = (await db.execute(
+        text("""SELECT a.id, a.hostname, a.version, a.install_id, a.last_ip,
+                       a.pending_secret_hash, a.authorized_at,
+                       r.id AS resolution_id, r.source_agent_id
+                  FROM agents a
+                  JOIN agent_registration_resolutions r
+                    ON r.assigned_agent_id = a.id AND r.action = 'register_clone'
+                 WHERE a.id = :id
+                 FOR UPDATE OF a, r"""),
+        {"id": agent_id},
+    )).mappings().first()
+    if not clone:
+        raise HTTPException(404, "Not a cloned installation")
+    if clone["authorized_at"] is not None:
+        raise HTTPException(409, "This clone is already approved as a separate machine; revoke or delete it instead")
+
+    if data.action == "replace_original":
+        source_id = clone["source_agent_id"]
+        if not source_id:
+            raise HTTPException(409, "The original agent no longer exists; approve this installation instead")
+        await db.execute(
+            text("""UPDATE apm_ingest_keys AS key SET
+                      enabled = FALSE, revoked_at = NOW(), rotated_at = NOW()
+                    FROM agent_apm_credentials AS credential
+                    WHERE credential.key_id = key.id
+                      AND credential.agent_id = :id
+                      AND key.revoked_at IS NULL"""),
+            {"id": source_id},
+        )
+        await db.execute(text("DELETE FROM agent_apm_credentials WHERE agent_id = :id"), {"id": source_id})
+        await db.execute(text("DELETE FROM agents WHERE id = :id"), {"id": agent_id})
+        await db.execute(
+            text("""UPDATE agents SET
+                      pending_secret_hash = :pending,
+                      hostname = COALESCE(:hostname, hostname),
+                      version = COALESCE(:version, version),
+                      current_version = COALESCE(:version, current_version),
+                      install_id = COALESCE(:install_id, install_id),
+                      last_ip = COALESCE(:ip, last_ip),
+                      api_key_hash = NULL, api_key_prefix = NULL, api_key_rotated_at = NULL,
+                      authorized_at = NOW(), authorized_by = :user,
+                      revoked_at = NULL, revoked_by = NULL,
+                      authorization_source = 'admin_replacement',
+                      status = 'enrolling', updated_at = NOW()
+                    WHERE id = :source"""),
+            {
+                "pending": clone["pending_secret_hash"], "hostname": clone["hostname"],
+                "version": clone["version"], "install_id": clone["install_id"],
+                "ip": clone["last_ip"], "user": user.id, "source": source_id,
+            },
+        )
+        result = {"ok": True, "action": "replace_original", "agent_id": str(source_id),
+                  "detail": "This installation takes over the original agent on its next poll"}
+    else:
+        await db.execute(
+            text("""UPDATE agent_registration_resolutions SET
+                      action = 'block', assigned_agent_id = NULL, assigned_agent_uid = NULL,
+                      approved_by = :user, approved_at = NOW()
+                    WHERE id = :rid"""),
+            {"rid": clone["resolution_id"], "user": user.id},
+        )
+        await db.execute(text("DELETE FROM agents WHERE id = :id"), {"id": agent_id})
+        result = {"ok": True, "action": "block",
+                  "detail": "This installation is blocked; the original agent is unchanged"}
+
+    await write_audit_log(
+        db, actor=user, action=f"agent.clone.{data.action}",
+        resource_type="agent", resource_id=str(agent_id),
+        metadata={"source_agent_id": str(clone["source_agent_id"]) if clone["source_agent_id"] else None,
+                  "candidate_hostname": clone["hostname"],
+                  "candidate_ip": str(clone["last_ip"]) if clone["last_ip"] else None},
+    )
+    await db.commit()
+    if data.action == "replace_original":
+        invalidate_ingest_key_cache()
+    return result
 
 
 @fleet_router.post("/{agent_id}/resolve-registration-conflict")

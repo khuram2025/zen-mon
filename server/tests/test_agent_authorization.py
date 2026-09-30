@@ -4,7 +4,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.v1 import agents, servers
-from app.schemas.agent import AgentEnrollRequest, AgentRegistrationConflictResolve
+from app.schemas.agent import AgentCloneDecision, AgentEnrollRequest, AgentRegistrationConflictResolve
 
 
 class Result:
@@ -120,7 +120,10 @@ class ConflictDB:
             })
         if "FROM agent_registration_resolutions" in sql and "SELECT action" in sql:
             return Result(mapping=None)
-        if "UPDATE agents SET" in sql and "pending_conflict_secret_hash" in sql:
+        if "INSERT INTO agents" in sql and "RETURNING *" in sql:
+            self.clone_id = uuid4()
+            return Result(mapping={"id": self.clone_id, "policy_id": None, **(params or {})})
+        if "INSERT INTO agent_registration_resolutions" in sql:
             return Result()
         raise AssertionError(sql)
 
@@ -128,35 +131,44 @@ class ConflictDB:
         self.commits += 1
 
 @pytest.mark.asyncio
-async def test_pending_secret_conflict_is_persisted_before_409():
+async def test_cloned_installation_gets_its_own_pending_entry():
+    # A VM cloned from a template reports the template's agent_uid with its
+    # own pending secret: it must be listed for approval as a separate entry,
+    # never parked on (or overwriting) the original agent.
     db = ConflictDB()
     request = AgentEnrollRequest(
         agent_uid="win-12345678",
         pending_secret="new-secret" * 4,
-        hostname="WEB01",
+        hostname="WEB02",
         platform="windows",
         version="1.11.2",
         install_id="install-new",
         architecture="amd64",
     )
 
-    with pytest.raises(HTTPException) as exc:
-        await agents._enroll_pending_agent(request, "192.0.2.20", db)
+    response = await agents._enroll_pending_agent(request, "192.0.2.20", db)
 
-    assert exc.value.status_code == 409
+    assert response.authorization_state == "pending"
+    assert response.agent_id == str(db.clone_id)
+    assert response.assigned_agent_uid is None  # handed over on approval
     assert db.commits == 1
-    update = next(
-        (params for sql, params in db.calls if "pending_conflict_secret_hash" in sql),
-        None,
-    )
-    assert update is not None
-    assert update["pending"] == agents._sha256("new-secret" * 4)
-    assert update["ip"] == "192.0.2.20"
-    assert update["iid"] == "install-new"
+    clone = next(params for sql, params in db.calls if "INSERT INTO agents" in sql)
+    assert clone["pending"] == agents._sha256("new-secret" * 4)
+    assert clone["uid"].startswith("windows-clone-") and clone["uid"] != "win-12345678"
+    assert clone["hn"] == "WEB02" and clone["ip"] == "192.0.2.20"
+    resolution = next(params for sql, params in db.calls if "INSERT INTO agent_registration_resolutions" in sql)
+    assert resolution["reported"] == "win-12345678"
+    assert resolution["pending"] == agents._sha256("new-secret" * 4)
+    assert resolution["source"] == db.agent_id
+    assert resolution["assigned"] == db.clone_id
+    # The original agent row is never written.
+    assert not any(sql.lstrip().startswith("UPDATE agents") for sql, _ in db.calls)
 
 
 @pytest.mark.asyncio
-async def test_legacy_authorized_agent_without_continuity_secret_requires_review():
+async def test_legacy_agent_without_continuity_secret_is_not_taken_over():
+    # agent_uid is not a secret: a pending registration for a token-enrolled
+    # agent (no stored pending secret) becomes a separate entry for review.
     db = ConflictDB(pending_secret_hash=None)
     request = AgentEnrollRequest(
         agent_uid="win-legacy01",
@@ -167,12 +179,11 @@ async def test_legacy_authorized_agent_without_continuity_secret_requires_review
         install_id="install-new",
     )
 
-    with pytest.raises(HTTPException) as exc:
-        await agents._enroll_pending_agent(request, "192.0.2.21", db)
+    response = await agents._enroll_pending_agent(request, "192.0.2.21", db)
 
-    assert exc.value.status_code == 409
-    assert db.commits == 1
-    assert any("registration_conflict_revision" in sql for sql, _ in db.calls)
+    assert response.authorization_state == "pending"
+    assert response.agent_id == str(db.clone_id)
+    assert not any(sql.lstrip().startswith("UPDATE agents") for sql, _ in db.calls)
 
 
 class MutationDB:
@@ -372,7 +383,7 @@ class ApprovedCloneEnrollmentDB:
                 "server_id": self.server_id,
                 "policy_id": self.policy_id,
                 "pending_secret_hash": agents._sha256("clone-secret" * 4),
-                "authorized_at": None,
+                "authorized_at": object() if getattr(self, "authorized", False) else None,
                 "revoked_at": None,
             })
         return Result()
@@ -385,7 +396,7 @@ class ApprovedCloneEnrollmentDB:
 
 
 @pytest.mark.asyncio
-async def test_approved_clone_receives_and_persists_assigned_uid():
+async def test_pending_clone_retry_routes_to_its_own_entry():
     db = ApprovedCloneEnrollmentDB()
     request = AgentEnrollRequest(
         agent_uid="win-12345678",
@@ -400,7 +411,36 @@ async def test_approved_clone_receives_and_persists_assigned_uid():
     assert response.authorization_state == "pending"
     assert response.agent_id == str(db.assigned_id)
     assert response.server_id == str(db.server_id)
+    # Retries route to the clone's own entry; no new entry is created and the
+    # identity is only handed over once an administrator approves it.
+    assert response.assigned_agent_uid is None
+    assert not any("INSERT INTO agents" in sql for sql, _ in db.calls)
+    assert db.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_approved_clone_receives_assigned_uid_and_credentials(monkeypatch):
+    db = ApprovedCloneEnrollmentDB()
+    db.authorized = True
+
+    async def no_sync(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(agents, "_sync_server_identity", no_sync)
+    request = AgentEnrollRequest(
+        agent_uid="win-12345678",
+        pending_secret="clone-secret" * 4,
+        hostname="WEB01",
+        platform="windows",
+        version="1.12.0",
+    )
+
+    response = await agents._enroll_pending_agent(request, "192.0.2.21", db)
+
+    assert response.authorization_state == "authorized"
+    assert response.agent_id == str(db.assigned_id)
     assert response.assigned_agent_uid == db.assigned_uid
+    assert response.api_key
     assert db.commits == 1
 
 
@@ -497,3 +537,100 @@ def test_clone_resolution_migration_binds_only_hashed_candidate_secrets():
     assert "pending_secret_hash" in migration
     assert "register_clone" in migration
     assert "pending_secret " not in migration
+
+
+class CloneDecisionDB:
+    def __init__(self, authorized=False, source=True):
+        self.clone_id = uuid4()
+        self.source_id = uuid4() if source else None
+        self.resolution_id = uuid4()
+        self.authorized = authorized
+        self.calls = []
+        self.commits = 0
+
+    async def execute(self, statement, params=None):
+        sql = str(statement)
+        self.calls.append((sql, params or {}))
+        if "JOIN agent_registration_resolutions r" in sql:
+            return Result(mapping={
+                "id": self.clone_id, "hostname": "WEB02", "version": "1.14.3",
+                "install_id": "install-clone", "last_ip": "192.0.2.29",
+                "pending_secret_hash": agents._sha256("clone-secret" * 4),
+                "authorized_at": object() if self.authorized else None,
+                "resolution_id": self.resolution_id, "source_agent_id": self.source_id,
+            })
+        return Result()
+
+    async def commit(self):
+        self.commits += 1
+
+
+def _operator():
+    return type("User", (), {"id": uuid4(), "username": "operator", "role": "operator"})()
+
+
+@pytest.mark.asyncio
+async def test_clone_can_be_accepted_as_reinstall_of_original(monkeypatch):
+    monkeypatch.setattr(servers, "write_audit_log", _noop_audit)
+    db = CloneDecisionDB()
+    out = await servers.decide_pending_clone(db.clone_id, AgentCloneDecision(action="replace_original"), db, _operator())
+
+    assert out["agent_id"] == str(db.source_id)
+    sql = "\n".join(statement for statement, _ in db.calls)
+    assert "DELETE FROM agents WHERE id" in sql
+    update = next(params for statement, params in db.calls if "authorization_source = 'admin_replacement'" in statement)
+    assert update["source"] == db.source_id
+    assert update["pending"] == agents._sha256("clone-secret" * 4)
+    assert db.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_blocking_a_clone_leaves_the_original_untouched(monkeypatch):
+    monkeypatch.setattr(servers, "write_audit_log", _noop_audit)
+    db = CloneDecisionDB()
+    out = await servers.decide_pending_clone(db.clone_id, AgentCloneDecision(action="block"), db, _operator())
+
+    assert out["action"] == "block"
+    sql = "\n".join(statement for statement, _ in db.calls)
+    assert "action = 'block'" in sql and "assigned_agent_id = NULL" in sql
+    assert "admin_replacement" not in sql and "UPDATE apm_ingest_keys" not in sql
+
+
+@pytest.mark.asyncio
+async def test_approved_clone_cannot_be_redirected():
+    db = CloneDecisionDB(authorized=True)
+    with pytest.raises(HTTPException) as exc:
+        await servers.decide_pending_clone(db.clone_id, AgentCloneDecision(action="replace_original"), db, _operator())
+    assert exc.value.status_code == 409
+    assert db.commits == 0
+
+
+async def _noop_audit(*args, **kwargs):
+    return None
+
+
+class ServerLinkDB:
+    def __init__(self):
+        self.calls = []
+
+    async def execute(self, statement, params=None):
+        self.calls.append((str(statement), params or {}))
+        if "SELECT s.id FROM servers s" in str(statement):
+            return Result(row=None)
+        return Result(row=(uuid4(),))
+
+
+@pytest.mark.asyncio
+async def test_new_agent_never_adopts_a_server_another_agent_reports_into():
+    # Clones often keep the template's hostname; matching servers by hostname
+    # alone would merge two machines' monitoring history.
+    db = ServerLinkDB()
+    agent_id = uuid4()
+    request = AgentEnrollRequest(agent_uid="windows-clone-x", pending_secret="s" * 40,
+                                 hostname="WEB01", platform="windows", version="1.14.3")
+    await agents._ensure_pending_server(request, db, agent_id)
+
+    lookup_sql, lookup_params = db.calls[0]
+    assert "NOT EXISTS" in lookup_sql and "a.server_id = s.id" in lookup_sql
+    assert lookup_params["aid"] == str(agent_id)
+    assert any("INSERT INTO servers" in sql for sql, _ in db.calls)

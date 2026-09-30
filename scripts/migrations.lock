@@ -136,3 +136,4 @@ d63ea33c94ec06ddc1b55fe3b083f4af6920f95693939ef6c746d172e0c8fe3e  migrate-123-ag
 fd1597a3aeae8f3644f25475baa0f45028f3c54a579332a71c7b19d39aa99759  migrate-125-agent-command-set-monitoring-profile.sql
 4c7ae4ac17773371e018626aedf0f1cc77df6f1174c35cb1b468ebc9f40629b6  migrate-127-resolve-stale-up-status-alerts.sql
 9de4ec2fe8fa077b01afbc6d0225d9d1eb1abb8eccdcf734253eca132afc3232  migrate-126-device-identity-and-interface-baseline.sql
+b736003c4f8169553bedd09dc22acbc62ec559ab4a31a232c0f2cb9f7d94e6ff  migrate-128-agent-clone-pending-entries.sql
