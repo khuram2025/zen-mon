@@ -169,7 +169,7 @@ type UdtSummary = {
   logins_24h: number
 }
 
-type NcmOverview = { total_devices: number; backed_up: number; enrolled: number }
+type NcmOverview = { total_devices: number; backed_up: number; enrolled: number; eligible: number; fresh: number }
 
 type ExecutiveData = {
   kpis: { availability_pct: number | null; availability_delta_pct: number | null; sla_target_pct: number }
@@ -286,7 +286,7 @@ export function NetworkSecurityDashboard() {
 
   const ncm = useQuery<NcmOverview>({
     queryKey: ['netsec', 'ncm'],
-    queryFn: async () => (await api.get('/ncm/overview')).data,
+    queryFn: async () => (await api.get('/ncm/overview', { params: { page_size: 1 } })).data,
     refetchInterval: 5 * 60_000,
     retry: 1,
   }).data
@@ -345,7 +345,8 @@ export function NetworkSecurityDashboard() {
       .slice(0, 6)
   }, [devices, alertCounts])
 
-  const backupPct = ncm && ncm.total_devices > 0 ? (ncm.backed_up / ncm.total_devices) * 100 : null
+  // Protection = fresh, validated captures of eligible devices (row counts are not recovery evidence).
+  const backupPct = ncm && ncm.eligible > 0 ? (ncm.fresh / ncm.eligible) * 100 : null
 
   /* — render — */
 
@@ -685,14 +686,14 @@ export function NetworkSecurityDashboard() {
             />
             <div className="border-t border-border pt-3">
               <div className="flex items-baseline justify-between text-xs">
-                <span className="text-text2">Config backup coverage</span>
+                <span className="text-text2">Config backup protection</span>
                 <span className="font-mono text-[12px] font-semibold tabular-nums">
                   {backupPct != null ? `${backupPct.toFixed(0)}%` : '—'}
                 </span>
               </div>
               <div className="mt-1.5"><PctBar value={backupPct ?? 0} warnAt={101} dangerAt={102} /></div>
               <div className="mt-1 flex items-center justify-between text-[10px] text-muted">
-                <span>{ncm?.backed_up ?? 0}/{ncm?.total_devices ?? 0} devices backed up</span>
+                <span>{ncm?.fresh ?? 0}/{ncm?.eligible ?? 0} eligible devices fresh &amp; validated</span>
                 <Link to="/ncm" className="text-primary hover:underline">NCM →</Link>
               </div>
             </div>

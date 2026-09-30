@@ -136,9 +136,13 @@ def test_coverage_requires_all_types_and_validated_runs():
     assert not state(config_types=['running','startup'])['fresh']
     assert not state(verified_types={})['fresh']
     assert not state(ncm_enabled=False)['fresh']
-    assert state(ip='127.0.0.1')['backup_state']=='excluded'
-    assert state(ip=None)['backup_state']=='excluded'
-    assert state(device_type='server')['backup_state']=='excluded'
+    # Enrolled devices outside the automatic scope keep their operational state
+    # but are excluded from coverage; unenrolled ones read as excluded.
+    assert state(ip='127.0.0.1')['coverage']=='excluded' and not state(ip='127.0.0.1')['eligible']
+    assert state(ip=None,platform=None)['backup_state']=='excluded'
+    assert state(device_type='server',platform=None)['backup_state']=='excluded'
+    assert state(device_type='server')['backup_state']=='fresh' and state(device_type='server')['coverage']=='excluded'
+    assert state(last_status='blocked',verified_types={})['backup_state']=='blocked'
     assert not state(verified_types={'running':(datetime.now(timezone.utc)-timedelta(days=2)).isoformat()})['fresh']
 
 

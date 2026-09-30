@@ -1,5 +1,6 @@
 import { type ClassValue, clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
+import { serverNow } from './serverClock'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -68,7 +69,9 @@ export function relativeTime(iso: string | null | undefined): string {
   if (!hasTz) s = s.replace(' ', 'T') + 'Z'
   const then = new Date(s).getTime()
   if (isNaN(then)) return '—'
-  const diff = (Date.now() - then) / 1000
+  // Measured against the appliance clock, so a skewed browser clock cannot
+  // make fresh events look hours old (see lib/serverClock).
+  const diff = (serverNow() - then) / 1000
   if (diff < 0) return 'just now'          // clock skew: don't show "future"
   if (diff < 10) return 'just now'
   if (diff < 60) return `${Math.floor(diff)}s ago`

@@ -24,11 +24,18 @@ const guides = {
     limit: 'devicereader excludes password profiles and other administrator accounts; vsysreader is scoped and omits device/network settings. Choose these only for an explicitly partial capture. Running configuration is not a device-state bundle, candidate configuration or certificate/private-key recovery package.',
     url: 'https://docs.paloaltonetworks.com/ngfw/help/12-2/configure-an-admin-role-profile-pan-os',
   },
+  aruba: {
+    label: 'Aruba AOS-CX / ArubaOS-Switch / Mobility Controller',
+    role: 'AOS-CX: a local or RADIUS/TACACS+ user in the built-in "auditors" group (or a custom role allowing show running-config). ArubaOS-Switch: an operator/manager account whose command authorization permits show running-config and show config. Mobility Controller: a read-only management role.',
+    commands: 'AOS-CX: no page; show running-config; show startup-config. ArubaOS-Switch: no page; show running-config; show config (startup). Mobility Controller: no paging; show running-config. Select the exact Aruba driver — autodetection cannot always distinguish these families.',
+    limit: 'ArubaOS-Switch hides password-manager secrets unless "include-credentials" is enabled; do not enable it just for backups without a decision on secret handling. AOS-CX checkpoints and certificates are not captured. Verify completeness against a reference export in the pilot.',
+    url: 'https://www.arubanetworks.com/techdocs/AOS-CX/10.12/HTML/security_6300-6400/Content/Chp_Loc_AAA/loc-aaa-rol-10.htm',
+  },
   other: {
     label: 'Cisco NX-OS / ASA and other platforms',
     role: 'Use a dedicated SSH account and the OS-specific read-only role or command authorization policy. IOS privilege levels do not apply universally to NX-OS, ASA, Junos or other operating systems.',
     commands: 'Permit the selected driver’s configuration-read and session-only pager/width commands. Select the exact platform on the device and validate with the administrator for that OS release.',
-    limit: 'Do not grant write, restore or firmware permissions for collection. Aruba and F5 have no explicit collector in this release; selecting another vendor’s driver does not certify support. A successful login does not establish configuration completeness.',
+    limit: 'Do not grant write, restore or firmware permissions for collection. F5 has no collector in this release (a native UCS collector is planned); selecting another vendor’s driver does not certify support. A successful login does not establish configuration completeness.',
     url: '',
   },
 }
@@ -49,6 +56,6 @@ export function ConnectionAccessGuide() {
       <p className="mt-2 break-words">{guide.commands}</p><p className="mt-2 text-muted">{guide.limit}</p>
       {guide.url && <a className="mt-2 inline-block text-primary underline" href={guide.url} target="_blank" rel="noreferrer">Vendor access documentation</a>}
     </details>
-    <p className="text-muted">SSH username/password is required; this collector does not use SNMP communities or API tokens. This selector shows guidance only. Select the actual driver in each device’s backup settings. Confirm the exact firmware and permitted commands during the pilot.</p>
+    <p className="text-muted">SSH with a username and password or an SSH key is required; this collector does not use SNMP communities or API tokens. This selector shows guidance only. Select the actual driver in each device’s backup settings. Confirm the exact firmware and permitted commands during the pilot.</p>
   </section>
 }

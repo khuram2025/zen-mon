@@ -28,7 +28,7 @@ router = APIRouter(prefix="/report-schedules", tags=["Report Schedules"])
 
 _REPORT_TYPES = ("executive_summary|device_health|service_health|alert_analysis|full_report"
                  "|availability|performance|traffic|usage|apm_performance"
-                 "|capacity|alerts|inventory|custom")
+                 "|capacity|alerts|inventory|rum_usage|ncm_protection|custom")
 _PERIODS = "last_24h|last_7d|last_30d|last_90d"
 _FORMATS = "pdf|excel|csv|none"
 _FREQS = "daily|weekly|monthly"

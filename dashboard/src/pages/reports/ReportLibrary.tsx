@@ -7,6 +7,7 @@ import {
   AppWindow,
   BarChart3,
   Boxes,
+  FileCode,
   Briefcase,
   CalendarClock,
   Clock,
@@ -50,6 +51,7 @@ const TYPE_ICONS: Record<string, LucideIcon> = {
   apm_performance: AppWindow,
   usage: PieChart,
   inventory: Boxes,
+  ncm_protection: FileCode,
 }
 
 const CATEGORY_ORDER = ['Personas', 'Operations', 'Applications', 'Assets']

@@ -17,13 +17,18 @@ export function FormField({
   className?: string
   children: React.ReactNode
 }) {
+  // Associate the label with a single control so it has an accessible name.
+  const generated = React.useId()
+  const only = React.Children.count(children) === 1 && React.isValidElement(children) ? (children as React.ReactElement<any>) : null
+  const id = only ? (only.props.id ?? generated) : undefined
+  const control = only && only.props.id == null ? React.cloneElement(only, { id }) : children
   return (
     <div className={cn('space-y-1.5', className)}>
-      <Label>
+      <Label htmlFor={id}>
         {label}
         {required && <span className="ml-0.5 text-danger">*</span>}
       </Label>
-      {children}
+      {control}
       {hint && !error && <p className="text-[11px] text-muted">{hint}</p>}
       {error && <p className="text-[11px] text-danger">{error}</p>}
     </div>
