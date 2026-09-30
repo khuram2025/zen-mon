@@ -695,7 +695,7 @@ export function HealthTiles({ tiles, target, empty }: { tiles: HealthTile[]; tar
   const colors = useVizColors()
   if (!tiles.length) return <>{empty}</>
   return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4 min-[2000px]:grid-cols-5 min-[2400px]:grid-cols-6">
       {tiles.map((t) => {
         const band = availBand(t.availability, target)
         const color = bandColor(band, colors)

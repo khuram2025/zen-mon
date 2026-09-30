@@ -270,7 +270,7 @@ export function AvailabilityPage() {
 
   return (
     <div className={cn('relative', noc && 'fixed inset-0 z-40 overflow-y-auto bg-bg p-4 md:p-6')}>
-      <div className="mx-auto flex max-w-[1600px] flex-col gap-4 animate-fade-in">
+      <div className="flex w-full flex-col gap-4 animate-fade-in">
         {/* Header */}
         <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
           <div className="min-w-0">
