@@ -3548,9 +3548,8 @@ async def overview(
         asyncio.to_thread(query_top_pressure, "network", 5),
     )
 
-    # Enrich with display names; under a visibility scope this join is also
-    # the filter — ClickHouse rows for hidden servers are dropped, not
-    # passed through unhydrated.
+    # Enrich with display names. The join is also the filter: metrics for
+    # servers that no longer exist (or are hidden by scope) are dropped.
     async def _hydrate(items: list[dict]) -> list[dict]:
         if not items:
             return []
@@ -3571,8 +3570,6 @@ async def overview(
                     "display_name": r["display_name"],
                     "hostname": r.get("hostname"),
                 })
-            elif scope is None:
-                out.append(it)
         return out
 
     return {

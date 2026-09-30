@@ -195,7 +195,12 @@ export interface ComplianceCounts {
 }
 
 export function complianceCounts(rows: ServiceRow[], business?: BusinessData): ComplianceCounts {
-  if (business?.compliance_summary) return business.compliance_summary
+  if (business?.compliance_summary) {
+    // The API's `eligible` counts measured services only (met + at risk +
+    // breached); here it is the whole portfolio, not-assessed included.
+    const c = business.compliance_summary
+    return { ...c, eligible: c.met + c.at_risk + c.breached + c.not_assessed }
+  }
   const counts = { met: 0, at_risk: 0, breached: 0, not_assessed: 0, eligible: rows.length }
   for (const row of rows) counts[row.compliance] += 1
   return counts
@@ -781,7 +786,7 @@ export function assessServers({ overview, loading, error }: ServerInput): Assess
     },
     {
       key: 'cpu',
-      label: 'Peak CPU utilisation now',
+      label: 'Peak CPU · last 10 min',
       value: cpu ? `${cpu.value.toFixed(1)}%` : 'Not reported',
       valueTone: cpu ? (cpu.value >= 90 ? 'breach' : cpu.value >= 75 ? 'risk' : 'neutral') : 'unknown',
       verdict: cpu ? { tone: cpu.value >= 90 ? 'breach' : cpu.value >= 75 ? 'risk' : 'neutral', text: nameOf(cpu) } : null,
@@ -790,7 +795,7 @@ export function assessServers({ overview, loading, error }: ServerInput): Assess
         `Disk peak ${disk ? `${disk.value.toFixed(1)}% (${nameOf(disk)})` : 'not reported'}`,
       ],
       to: cpu ? `/servers/${cpu.server_id}` : '/servers',
-      definition: 'Highest current CPU utilisation; thresholds 75% (amber) and 90% (red). Utilisation alone is not business impact.',
+      definition: 'Highest 10-minute average CPU utilisation among reporting servers; thresholds 75% (amber) and 90% (red). Utilisation alone is not business impact.',
     },
   ]
 
