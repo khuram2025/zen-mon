@@ -231,6 +231,15 @@ export interface ServiceMaintenanceWindow {
   reason: string | null
   active: boolean
   created_at: string
+  /** Lifecycle (newer appliances): ending early records ended_at; a window
+   *  that never started is cancelled. Records are kept for SLA history. */
+  ended_at?: string | null
+  ended_by_name?: string | null
+  end_reason?: string | null
+  cancelled_at?: string | null
+  effective_ends_at?: string | null
+  state?: 'scheduled' | 'active' | 'ended' | 'cancelled' | 'expired'
+  created_by_name?: string | null
 }
 
 export interface ServiceCheck {

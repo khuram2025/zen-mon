@@ -23,10 +23,35 @@ export const DialogOverlay = React.forwardRef<
 ))
 DialogOverlay.displayName = DialogPrimitive.Overlay.displayName
 
+/**
+ * True when a DialogDescription is rendered directly in the content tree
+ * (including inside DialogHeader or fragments). Descriptions rendered by
+ * a nested custom component are not visible here; such callers can pass
+ * `aria-describedby` explicitly.
+ */
+function containsDescription(node: React.ReactNode, depth = 0): boolean {
+  if (depth > 6) return false
+  let found = false
+  React.Children.forEach(node, (child) => {
+    if (found || !React.isValidElement(child)) return
+    if (child.type === DialogDescription) { found = true; return }
+    const nested = (child.props as { children?: React.ReactNode })?.children
+    if (nested != null && containsDescription(nested, depth + 1)) found = true
+  })
+  return found
+}
+
 export const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
->(({ className, children, ...props }, ref) => (
+>(({ className, children, ...props }, ref) => {
+  // Radix points aria-describedby at a description id by default and warns
+  // when none is rendered. Without a description, drop the dangling
+  // reference (the title still names the dialog); callers may override.
+  const describedBy = 'aria-describedby' in props || containsDescription(children)
+    ? {}
+    : { 'aria-describedby': undefined }
+  return (
   <DialogPortal>
     <DialogOverlay />
     <DialogPrimitive.Content
@@ -37,6 +62,7 @@ export const DialogContent = React.forwardRef<
         'data-[state=open]:animate-fade-in',
         className,
       )}
+      {...describedBy}
       {...props}
     >
       {children}
@@ -46,7 +72,8 @@ export const DialogContent = React.forwardRef<
       </DialogPrimitive.Close>
     </DialogPrimitive.Content>
   </DialogPortal>
-))
+  )
+})
 DialogContent.displayName = DialogPrimitive.Content.displayName
 
 export const DialogHeader = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (

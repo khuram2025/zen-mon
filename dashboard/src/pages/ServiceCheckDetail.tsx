@@ -2,32 +2,28 @@ import { DailyProbeFailures } from '@/components/services/DailyProbeFailures'
 import { explainServiceFailure } from '@/components/services/failureReason'
 import { ServiceFailureReason } from '@/components/services/ServiceFailureReason'
 import { MonitoringSites } from '@/components/MonitoringSites'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
   AlertCircle,
   AlertTriangle,
-  ArrowDownRight,
   ArrowLeft,
-  ArrowUpRight,
   Bell,
-  BellOff,
   CalendarDays,
   Check,
   CheckCircle2,
   ChevronRight,
-  Clock,
+  Copy,
   Download,
+  FileSpreadsheet,
   FileText,
   Gauge,
   Globe,
-  HelpCircle,
   Info,
   LineChart,
   Loader2,
-  LockKeyhole,
   MoreHorizontal,
   Network,
   Pause,
@@ -39,58 +35,104 @@ import {
   Settings as SettingsIcon,
   ShieldCheck,
   SlidersHorizontal,
-  Terminal,
   Timer,
   Trash2,
   TrendingUp,
+  Users,
   Wrench,
   XCircle,
 } from 'lucide-react'
 import {
-  Area,
-  AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
   Cell,
-  ReferenceArea,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts'
 import { api } from '@/lib/api'
+import { serverNow, useClockOffset } from '@/lib/serverClock'
 import {
   apiErrorMessage,
-  axisRightPad,
   cn,
   relativeTime,
-  timeAxisTickFormatter,
-  timeTicks,
   timeTooltipLabelFormatter,
 } from '@/lib/utils'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/Dialog'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/Dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/DropdownMenu'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/Tabs'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Badge } from '@/components/ui/Badge'
 import { Skeleton } from '@/components/ui/Skeleton'
-import { Table, THead, TBody, Tr, Th, Td } from '@/components/ui/Table'
 import { toast } from '@/components/ui/Toast'
 import { ServiceCheckFormDialog } from '@/components/forms/ServiceCheckFormDialog'
-import { TimeRangePicker, rangePhrase, useTimeRange } from '@/components/TimeRangePicker'
+import { TimeRangePicker, rangePhrase, timezoneLabel, useTimeRange } from '@/components/TimeRangePicker'
 import {
   BAND_FILL,
   BAND_TEXT,
   PulseDot,
   UptimeBars,
   pulseStatusOf,
-  uptimeBand,
-  type UptimeBand,
 } from '@/components/services/uptime'
-import type { ServiceCheck, ServiceMetricPoint, ServiceMetricResponse } from '@/types'
+import { ClockSkewBanner, useServerNowTick } from '@/components/services/detail/clock'
+import { withCapability } from '@/components/services/detail/capabilities'
+import {
+  NEVER_CHECKED,
+  NO_DATA,
+  availabilityBand,
+  cleanAlertMessage,
+  colourPct,
+  exactTime,
+  formatAvailability,
+  formatDur,
+  formatMs,
+  isRecoveryAlert,
+  pct,
+} from '@/components/services/detail/format'
+import {
+  buildOutages,
+  lastEventBefore,
+  seedHistoryWithPrior,
+  useServerIncidents,
+  type SeededEvent,
+} from '@/components/services/detail/incidents'
+import {
+  MaintenanceBanner,
+  MaintenanceDialog,
+  isActiveWindow,
+  useCheckMaintenance,
+  useEndMaintenance,
+  useStartMaintenance,
+} from '@/components/services/detail/maintenance'
+import { useAckAll, useActiveAlertCount, useRuleCoverage, useWindowAlerts } from '@/components/services/detail/alerts'
+import { PerformanceChart } from '@/components/services/detail/PerformanceChart'
+import { SlaSummaryCard, SloCard } from '@/components/services/detail/SlaCards'
+import { ConfigSummaryCard, ConfigTab, RunbookLink } from '@/components/services/detail/ConfigSections'
+import { IncidentsTab } from '@/components/services/detail/IncidentsTab'
+import { DetailTabPanel, DetailTabs } from '@/components/services/detail/DetailTabs'
+import { downloadServiceReport } from '@/components/services/detail/report'
+import type {
+  HourlyUptime,
+  MetricPoint,
+  MetricResponse,
+  Outage,
+  ServiceAlert,
+  ServiceCheckExt,
+  SlaStats,
+  StatusHistoryEvent,
+} from '@/components/services/detail/types'
+import type { ServiceCheck } from '@/types'
 
 const UP_COLOR = 'rgb(var(--success))'
 const DOWN_COLOR = 'rgb(var(--danger))'
@@ -110,7 +152,7 @@ const statusMeta: Record<string, { label: string; tone: 'success' | 'danger' | '
   down: { label: 'Down', tone: 'danger', Icon: XCircle },
   degraded: { label: 'Degraded', tone: 'warning', Icon: AlertTriangle },
   warning: { label: 'Warning', tone: 'warning', Icon: AlertTriangle },
-  unknown: { label: 'Unknown', tone: 'outline', Icon: HelpCircle },
+  unknown: { label: 'Unknown', tone: 'outline', Icon: Info },
 }
 
 const typeMeta: Record<string, { label: string; Icon: typeof Globe }> = {
@@ -119,24 +161,6 @@ const typeMeta: Record<string, { label: string; Icon: typeof Globe }> = {
   tls: { label: 'TLS', Icon: ShieldCheck },
   icmp: { label: 'ICMP', Icon: Radar },
   dns: { label: 'DNS', Icon: Network },
-}
-
-type StatusHistoryEvent = {
-  timestamp: string
-  old_status: string | null
-  new_status: string
-  reason?: string | null
-  duration_sec?: number | null
-}
-
-type ServiceAlert = {
-  id: string
-  status: 'active' | 'acknowledged' | 'resolved'
-  severity: string
-  message: string
-  triggered_at: string
-  acknowledged_at?: string | null
-  resolved_at?: string | null
 }
 
 type RelatedResponse = {
@@ -186,64 +210,7 @@ type ActivityEvent = {
   href?: string
 }
 
-type SlaStats = {
-  availability_basis?: string
-  probe_uptime_pct?: number | null
-  probe_downtime_sec?: number
-  probe_error_rate_pct?: number | null
-  uptime_pct: number | null
-  sample_count: number
-  incident_count: number
-  total_downtime_sec: number
-  longest_incident_sec: number
-  mttr_sec: number | null
-  mtbf_sec: number | null
-  avg_response_ms: number | null
-  p95_response_ms: number | null
-  max_response_ms: number | null
-  error_rate_pct: number | null
-  uptime_streak_sec: number | null
-  uptime_streak_started_at?: string | null
-  covered_sec?: number
-  coverage_pct?: number
-  unknown_sec?: number
-}
-
-type HourlyUptime = { ts: string; uptime_pct: number | null; sample_count: number; covered_sec?: number }
-
-type Outage = {
-  start: number
-  end: number | null
-  kind: 'down' | 'warn'
-  reason?: string
-  clippedStart: boolean
-  /** The outage continued past the window's end — `end` is the window edge, not a recovery. */
-  clippedEnd?: boolean
-}
-
-/* ─── Formatters ────────────────────────────────────────────────────────── */
-
-function formatDur(sec: number | null | undefined): string {
-  if (sec == null || !Number.isFinite(sec) || sec <= 0) return '—'
-  const d = Math.floor(sec / 86400)
-  const h = Math.floor((sec % 86400) / 3600)
-  const m = Math.floor((sec % 3600) / 60)
-  if (d > 0) return `${d}d ${h}h`
-  if (h > 0) return `${h}h ${m}m`
-  if (m > 0) return `${m}m ${Math.floor(sec % 60)}s`
-  return `${Math.floor(sec)}s`
-}
-
-function formatMs(n: number | null | undefined): string {
-  if (n == null || !Number.isFinite(n)) return '—'
-  if (n >= 1000) return `${(n / 1000).toFixed(1)} s`
-  return `${n.toFixed(n < 10 ? 1 : 0)} ms`
-}
-
-function pct(n: number | null | undefined, digits = 2): string {
-  if (n == null || !Number.isFinite(n)) return '—'
-  return `${n.toFixed(digits)}%`
-}
+type LatestMode = 'latest' | 'window' | 'status'
 
 function statusOf(s: string) {
   return statusMeta[s] || statusMeta.unknown
@@ -255,10 +222,6 @@ function normalizeSeverity(s: string): ActivityEvent['severity'] {
   if (v === 'warning' || v === 'degraded') return 'warning'
   if (v === 'success' || v === 'up' || v === 'ok') return 'success'
   return 'info'
-}
-
-function cleanAlertMessage(msg: string): string {
-  return (msg || 'Alert').replace(/^\[ZenPlus\s+[A-Z]+\]\s*/, '')
 }
 
 /* ─── Page ──────────────────────────────────────────────────────────────── */
@@ -279,20 +242,23 @@ export function ServiceCheckDetailPage() {
   }
 
   const [editOpen, setEditOpen] = useState(false)
+  const [dupOpen, setDupOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [hsOpen, setHsOpen] = useState(false)
   const [maintOpen, setMaintOpen] = useState(false)
   const [eventsOpen, setEventsOpen] = useState(false)
+  const [ackConfirmOpen, setAckConfirmOpen] = useState(false)
   const [hsConfig, setHsConfig] = useState<HealthScoreConfig>(() => loadHealthScoreConfig())
   const [manualProbe, setManualProbe] = useState<{ result: ProbeEvidenceResult; observedAt: string } | null>(null)
-  const [nowTick, setNowTick] = useState(() => Date.now())
+  const [incidentLimit, setIncidentLimit] = useState(100)
+  const nowTick = useServerNowTick(1000)
+  // Coarser "now" for memoised reconstruction so it does not rebuild every second.
+  const nowHalfMinute = Math.floor(nowTick / 30_000) * 30_000
+  const { skewed } = useClockOffset()
 
-  useEffect(() => {
-    const h = setInterval(() => setNowTick(Date.now()), 1000)
-    return () => clearInterval(h)
-  }, [])
+  useEffect(() => { setIncidentLimit(100) }, [range.fromISO, range.toISO])
 
-  const { data: check, isLoading, isError } = useQuery<ServiceCheck>({
+  const { data: check, isLoading, isError } = useQuery<ServiceCheckExt>({
     queryKey: ['service-check', id],
     queryFn: async () => (await api.get(`/service-checks/${id}`)).data,
     enabled: !!id,
@@ -301,44 +267,73 @@ export function ServiceCheckDetailPage() {
 
   const fromTs = Date.parse(range.fromISO)
   const toTs = Date.parse(range.toISO)
+  // Raw for ≤ 24 h (requesting enough rows for a 10 s check); newer appliances
+  // pick exact buckets for longer ranges from `auto`.
   const granularity = range.hours <= 24 ? 'raw' : 'auto'
 
-  const metricsQ = useQuery<ServiceMetricResponse>({
+  const metricsQ = useQuery<MetricResponse>({
     queryKey: ['service-check-metrics', id, range.fromISO, range.toISO, granularity],
     queryFn: async () =>
-      (await api.get(
-        `/service-checks/${id}/metrics?from=${encodeURIComponent(range.fromISO)}&to=${encodeURIComponent(range.toISO)}&granularity=${granularity}`,
-      )).data,
+      (await api.get(`/service-checks/${id}/metrics`, {
+        params: { from: range.fromISO, to: range.toISO, granularity, ...(granularity === 'raw' ? { limit: 20000 } : {}) },
+      })).data,
     enabled: !!id && !!check,
     refetchInterval: 30_000,
   })
-  const points: ServiceMetricPoint[] = metricsQ.data?.points || []
+  const points: MetricPoint[] = metricsQ.data?.points || []
 
-  const { data: statusHistory = [] } = useQuery<StatusHistoryEvent[]>({
+  // Newest scheduled probes regardless of the selected range (B13).
+  const latestQ = useQuery<MetricPoint[] | null>({
+    queryKey: ['service-check-latest-probes', id],
+    queryFn: () => withCapability('latest-probes', async () => {
+      const r = (await api.get(`/service-checks/${id}/latest-probes`, { params: { limit: 6 } })).data
+      const rows: MetricPoint[] = Array.isArray(r) ? r : r?.data || []
+      return [...rows].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))
+    }),
+    enabled: !!id && !!check,
+    refetchInterval: 15_000,
+    retry: false,
+  })
+
+  const statusHistoryQ = useQuery<StatusHistoryEvent[]>({
     queryKey: ['service-status-history', id, range.fromISO, range.toISO],
     queryFn: async () =>
-      (await api.get(
-        `/service-checks/${id}/status-history?from=${encodeURIComponent(range.fromISO)}&to=${encodeURIComponent(range.toISO)}&limit=500`,
-      )).data,
+      (await api.get(`/service-checks/${id}/status-history`, { params: { from: range.fromISO, to: range.toISO, limit: 500 } })).data,
     enabled: !!id && !!check,
     refetchInterval: 60_000,
   })
+  const statusHistory = useMemo(() => statusHistoryQ.data || [], [statusHistoryQ.data])
+
+  // The state entering the window: the newest transition before `from`, from any age.
+  const priorQ = useQuery<StatusHistoryEvent | null>({
+    queryKey: ['service-status-prior', id, range.fromISO],
+    queryFn: async () => {
+      const lookback = check?.created_at && Date.parse(check.created_at) < fromTs
+        ? new Date(Date.parse(check.created_at) - 60_000).toISOString()
+        : new Date(fromTs - 365 * 86_400_000).toISOString()
+      const rows: StatusHistoryEvent[] = (await api.get(`/service-checks/${id}/status-history`, {
+        params: { from: lookback, to: new Date(fromTs - 1000).toISOString(), limit: 1 },
+      })).data || []
+      return lastEventBefore(rows, fromTs)
+    },
+    enabled: !!id && !!check,
+    staleTime: 60_000,
+  })
 
   const slaQ = useQuery<SlaStats>({
-    // Send explicit bounds: `hours` alone always ends at now, so a custom historical range
+    // Explicit bounds: `hours` alone always ends at now, so a custom historical range
     // would silently be scored against the last N hours instead.
     queryKey: ['service-sla', id, range.fromISO, range.toISO, 'confirmed'],
     queryFn: async () =>
-      (await api.get(
-        `/service-checks/${id}/sla?basis=confirmed&hours=${range.hours}&from=${encodeURIComponent(range.fromISO)}&to=${encodeURIComponent(range.toISO)}`,
-      )).data,
+      (await api.get(`/service-checks/${id}/sla`, {
+        params: { basis: 'confirmed', hours: range.hours, from: range.fromISO, to: range.toISO },
+      })).data,
     enabled: !!id && !!check,
     refetchInterval: 30_000,
   })
   const sla = slaQ.data
 
-  // Fixed windows for the hero strip — always the last 24h/7d/30d ending now, independent
-  // of the range picker, the way uptime products present a monitor.
+  // Fixed context windows ending now, independent of the range picker.
   const sla24Q = useQuery<SlaStats>({
     queryKey: ['service-sla-fixed', id, 24, 'confirmed'],
     queryFn: async () => (await api.get(`/service-checks/${id}/sla?basis=confirmed&hours=24`)).data,
@@ -364,38 +359,14 @@ export function ServiceCheckDetailPage() {
     enabled: !!id && !!check,
     refetchInterval: 60_000,
   })
-  const hourly = hourlyQ.data?.hours || []
+  const hourly = useMemo(() => hourlyQ.data?.hours || [], [hourlyQ.data])
 
-  const { data: alertsResp } = useQuery<{ data: ServiceAlert[]; meta: { total: number } }>({
-    queryKey: ['service-alerts', id],
-    queryFn: async () => (await api.get(`/alerts?service_check_id=${id}&limit=50`)).data,
-    enabled: !!id && !!check,
-    refetchInterval: 30_000,
-  })
-  const alerts = useMemo(() => alertsResp?.data || [], [alertsResp])
-  const activeAlerts = useMemo(() => alerts.filter((a) => a.status === 'active'), [alerts])
-
-  // Whether any enabled alert rule can ever produce an alert for this check. When none
-  // does, an empty Alerts panel is expected behaviour rather than a fault, and saying so
-  // is the difference between a useful empty state and a confusing one.
-  const { data: ruleCoverage } = useQuery<{ covered: boolean; count: number }>({
-    queryKey: ['service-alert-rule-coverage', id, check?.group_id],
-    queryFn: async () => {
-      const raw = (await api.get('/alert-rules')).data
-      const rules: any[] = Array.isArray(raw) ? raw : raw?.data || []
-      const matches = rules.filter(
-        (r) =>
-          r?.enabled !== false &&
-          (r?.service_check_id === id ||
-            (!!check?.group_id && r?.service_check_group_id === check.group_id) ||
-            r?.metric === 'service_status'),
-      )
-      return { covered: matches.length > 0, count: matches.length }
-    },
-    enabled: !!id && !!check,
-    staleTime: 120_000,
-    retry: false,
-  })
+  // Alerts triggered in the selected window (activity feed); the Incidents tab pages its own.
+  const windowAlertsQ = useWindowAlerts(id, range.fromISO, range.toISO, 'all', 0, 50, !!id && !!check)
+  const alerts = useMemo(() => windowAlertsQ.data?.data || [], [windowAlertsQ.data])
+  const activeCountQ = useActiveAlertCount(id, !!id && !!check)
+  const activeAlertCount = activeCountQ.data ?? 0
+  const { data: ruleCoverage } = useRuleCoverage(id, check?.group_id, !!id && !!check)
 
   const { data: related, isError: relatedError } = useQuery<RelatedResponse>({
     queryKey: ['service-related', id, check?.device_id, check?.group_id, check?.target_host, check?.parent_check_id],
@@ -410,21 +381,25 @@ export function ServiceCheckDetailPage() {
     refetchInterval: 60_000,
   })
 
-  // 30-day status history, always loaded. It serves three jobs: the activity fallback for a
-  // quiet window, the day drill-down failure list on the Uptime tab, and — critically — the
-  // state *entering* the selected window. A range that sits wholly inside a long outage
-  // contains zero transitions, so without the prior event every range-scoped panel would
-  // claim the service was fine while its day renders red.
-  const wideFrom = useMemo(() => new Date(Date.now() - 720 * 3600_000).toISOString(), [])
+  // 30-day status history: the day drill-down and the activity fallback for a quiet window.
+  const wideFrom = useMemo(() => new Date(serverNow() - 720 * 3600_000).toISOString(), [id])
   const { data: wideHistory = [], isLoading: wideHistoryLoading, isError: wideHistoryError } = useQuery<StatusHistoryEvent[]>({
     queryKey: ['service-status-history-wide', id],
     queryFn: async () =>
-      (await api.get(
-        `/service-checks/${id}/status-history?from=${encodeURIComponent(wideFrom)}&to=${encodeURIComponent(new Date().toISOString())}&limit=500`,
-      )).data,
+      (await api.get(`/service-checks/${id}/status-history`, {
+        params: { from: wideFrom, to: new Date(serverNow()).toISOString(), limit: 500 },
+      })).data,
     enabled: !!id && !!check,
     refetchInterval: 60_000,
   })
+
+  const maintenance = useCheckMaintenance(check, range)
+  const activeWindows = maintenance.windows.filter((w) => isActiveWindow(w, nowTick))
+  const endMaintenance = useEndMaintenance(id)
+  const { preset: startMaintenance, custom: startMaintenanceCustom } = useStartMaintenance(id, () => setMaintOpen(false))
+
+  const incidentsQ = useServerIncidents(id, range.fromISO, range.toISO, incidentLimit, nowHalfMinute, !!id && !!check)
+  const serverIncidents = incidentsQ.data?.supported ? incidentsQ.data : null
 
   const del = useMutation({
     mutationFn: async () => api.delete(`/service-checks/${id}`),
@@ -439,10 +414,11 @@ export function ServiceCheckDetailPage() {
   const runNow = useMutation({
     mutationFn: async () => (await api.post(`/service-checks/${id}/test`, {})).data,
     onSuccess: (d: any) => {
-      setManualProbe({ result: d as ProbeEvidenceResult, observedAt: new Date().toISOString() })
+      setManualProbe({ result: d as ProbeEvidenceResult, observedAt: new Date(serverNow()).toISOString() })
       toast.success('Probe complete', d?.status === 'up' ? `Up · ${Math.round(d.response_time_ms || 0)} ms` : `Down: ${d?.error || ''}`)
       qc.invalidateQueries({ queryKey: ['service-check', id] })
       qc.invalidateQueries({ queryKey: ['service-check-metrics', id] })
+      qc.invalidateQueries({ queryKey: ['service-check-latest-probes', id] })
       qc.invalidateQueries({ queryKey: ['service-sla', id] })
       qc.invalidateQueries({ queryKey: ['service-status-history', id] })
     },
@@ -459,95 +435,11 @@ export function ServiceCheckDetailPage() {
     onError: (e: any) => toast.error('Failed', apiErrorMessage(e)),
   })
 
-  const startMaintenance = useMutation({
-    mutationFn: async (durationHours: number) => {
-      const now = new Date()
-      const end = new Date(now.getTime() + durationHours * 3_600_000)
-      return (
-        await api.post('/service-check-maintenance', {
-          scope_type: 'check',
-          scope_check_id: id,
-          starts_at: now.toISOString(),
-          ends_at: end.toISOString(),
-          reason: `Manual ${durationHours}h window from service detail`,
-        })
-      ).data
-    },
-    onSuccess: () => {
-      toast.success('Maintenance window started')
-      setMaintOpen(false)
-      qc.invalidateQueries({ queryKey: ['service-check', id] })
-      qc.invalidateQueries({ queryKey: ['service-checks'] })
-    },
-    onError: (e: any) => toast.error('Failed to start maintenance', apiErrorMessage(e)),
-  })
-
-  const startMaintenanceCustom = useMutation({
-    mutationFn: async (args: { startsAtISO: string; endsAtISO: string }) =>
-      (
-        await api.post('/service-check-maintenance', {
-          scope_type: 'check',
-          scope_check_id: id,
-          starts_at: args.startsAtISO,
-          ends_at: args.endsAtISO,
-          reason: 'Custom maintenance window from service detail',
-        })
-      ).data,
-    onSuccess: (_d, args) => {
-      const start = new Date(args.startsAtISO)
-      const isFuture = start.getTime() > Date.now() + 60_000
-      toast.success(
-        isFuture ? 'Maintenance window scheduled' : 'Maintenance window started',
-        `${start.toLocaleString()} → ${new Date(args.endsAtISO).toLocaleString()}`,
-      )
-      setMaintOpen(false)
-      qc.invalidateQueries({ queryKey: ['service-check', id] })
-      qc.invalidateQueries({ queryKey: ['service-checks'] })
-    },
-    onError: (e: any) => toast.error('Failed to start maintenance', apiErrorMessage(e)),
-  })
-
-  const endMaintenance = useMutation({
-    mutationFn: async () => {
-      const list: any[] = (await api.get('/service-check-maintenance')).data || []
-      const now = Date.now()
-      const active = list.filter(
-        (m) =>
-          m.scope_type === 'check' &&
-          m.scope_check_id === id &&
-          Date.parse(m.starts_at) <= now &&
-          Date.parse(m.ends_at) >= now,
-      )
-      if (active.length === 0) throw new Error('No active maintenance window for this check')
-      await Promise.all(active.map((m) => api.delete(`/service-check-maintenance/${m.id}`)))
-      return active.length
-    },
-    onSuccess: (n: number) => {
-      toast.success(n > 1 ? `Ended ${n} overlapping maintenance windows` : 'Maintenance window ended')
-      setMaintOpen(false)
-      qc.invalidateQueries({ queryKey: ['service-check', id] })
-      qc.invalidateQueries({ queryKey: ['service-checks'] })
-    },
-    onError: (e: any) => toast.error('Failed to end maintenance', apiErrorMessage(e)),
-  })
-
-  const ackAllAlerts = useMutation({
-    mutationFn: async () => {
-      if (activeAlerts.length === 0) throw new Error('No active alerts to acknowledge')
-      await Promise.all(activeAlerts.map((a) => api.post(`/alerts/${a.id}/acknowledge`)))
-      return activeAlerts.length
-    },
-    onSuccess: (n: number) => {
-      toast.success(`Acknowledged ${n} alert${n === 1 ? '' : 's'}`)
-      qc.invalidateQueries({ queryKey: ['service-alerts', id] })
-      qc.invalidateQueries({ queryKey: ['alerts'] })
-    },
-    onError: (e: any) => toast.info('Nothing to acknowledge', apiErrorMessage(e)),
-  })
+  const ackAll = useAckAll(id)
 
   const exportConfig = () => {
     if (!check) return
-    const blob = new Blob([JSON.stringify({ ...check, _exported_at: new Date().toISOString() }, null, 2)], { type: 'application/json' })
+    const blob = new Blob([JSON.stringify({ ...check, _exported_at: new Date(serverNow()).toISOString() }, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -559,6 +451,26 @@ export function ServiceCheckDetailPage() {
     toast.success('Config exported')
   }
 
+  const seededHistory = useMemo(
+    () => seedHistoryWithPrior(statusHistory, priorQ.data ?? lastEventBefore(wideHistory, fromTs), fromTs),
+    [statusHistory, priorQ.data, wideHistory, fromTs],
+  )
+
+  const clientOutages = useMemo(
+    () => (check ? buildOutages(seededHistory, fromTs, toTs, check.created_at, nowHalfMinute) : []),
+    [seededHistory, fromTs, toTs, check?.created_at, nowHalfMinute],
+  )
+  const outages: Outage[] = serverIncidents ? serverIncidents.outages : clientOutages
+  // "Currently down for" must not be clipped by a short selected range: rebuild the
+  // current incident from 30 days of history (server incidents carry the real start).
+  const wideOngoing = useMemo(() => {
+    if (!check) return null
+    const wideFromTs = Date.parse(wideFrom)
+    const seeded = seedHistoryWithPrior(wideHistory, null, wideFromTs)
+    return buildOutages(seeded, wideFromTs, nowHalfMinute, check.created_at, nowHalfMinute).find((o) => o.end == null) || null
+  }, [wideHistory, wideFrom, check?.created_at, nowHalfMinute])
+  const outageTotal = serverIncidents ? serverIncidents.total : clientOutages.length
+
   const activityEvents = useMemo(
     () => buildActivityEvents(statusHistory, alerts, range.fromISO, range.toISO, check),
     [statusHistory, alerts, range.fromISO, range.toISO, check],
@@ -566,31 +478,19 @@ export function ServiceCheckDetailPage() {
   const fallbackEvents = useMemo(
     () =>
       activityEvents.length === 0
-        ? buildActivityEvents(wideHistory, alerts, wideFrom, new Date().toISOString(), check)
+        ? buildActivityEvents(wideHistory, alerts, wideFrom, new Date(nowHalfMinute).toISOString(), check)
         : [],
-    [activityEvents.length, wideHistory, alerts, wideFrom, check],
-  )
-
-  // The window's true opening state, taken from the last transition before it. Prepending it
-  // as a synthetic event lets the timeline, outage bands and outage table handle a window
-  // that starts mid-outage (or mid-uptime) without any transition of its own.
-  const seededHistory = useMemo(
-    () => seedHistoryWithPrior(statusHistory, wideHistory, fromTs),
-    [statusHistory, wideHistory, fromTs],
+    [activityEvents.length, wideHistory, alerts, wideFrom, check, nowHalfMinute],
   )
 
   const derived = useMemo(
-    () => (check ? deriveWindowStats(points, seededHistory, check, fromTs, toTs) : {
+    () => (check ? deriveWindowStats(points, seededHistory, check, fromTs, toTs, nowHalfMinute) : {
       uptime_pct: null, error_rate_pct: null, incident_count: 0, avg_ms: null, p95_ms: null, streak_sec: null,
     }),
-    [points, seededHistory, check, fromTs, toTs],
+    [points, seededHistory, check, fromTs, toTs, nowHalfMinute],
   )
 
-  const outages = useMemo(
-    () => (check ? buildOutages(seededHistory, fromTs, toTs, check) : []),
-    [seededHistory, fromTs, toTs, check],
-  )
-  const days = useMemo(() => buildDailyUptime(hourly, 30), [hourly])
+  const days = useMemo(() => buildDailyUptime(hourly, 30, nowHalfMinute), [hourly, nowHalfMinute])
 
   const outagesForDay = useMemo(
     () => (d: DayUptime): Outage[] => {
@@ -599,9 +499,10 @@ export function ServiceCheckDetailPage() {
         const t = Date.parse(h.timestamp)
         return Number.isFinite(t) && t >= d.start && t < d.end
       })
-      return buildOutages(seedHistoryWithPrior(inDay, wideHistory, d.start), d.start, Math.min(d.end, Date.now()), check)
+      const seeded = seedHistoryWithPrior(inDay, lastEventBefore(wideHistory, d.start), d.start)
+      return buildOutages(seeded, d.start, Math.min(d.end, nowHalfMinute), check.created_at, nowHalfMinute)
     },
-    [wideHistory, check],
+    [wideHistory, check, nowHalfMinute],
   )
 
   if (isLoading) return <DetailSkeleton />
@@ -626,44 +527,106 @@ export function ServiceCheckDetailPage() {
     : (check.verification_attempt ?? 0) > 0 ? (check.retry_delay_s ?? 10) : (check.check_interval || 60)
   const intervalMs = currentInterval * 1000
   const expectedRunMs = (check.timeout || 10) * Math.max(1, check.workflow_steps?.length || 0) * 1000
+  // Freshness is judged on the appliance clock (B01), so browser skew cannot fake staleness.
   const probeStale = !!lastCheckMs && nowTick - lastCheckMs > Math.max(intervalMs * 2, intervalMs + expectedRunMs * 2)
   const nextPollMs = lastCheckMs ? lastCheckMs + intervalMs : null
   const secsToNext = nextPollMs ? Math.max(0, Math.floor((nextPollMs - nowTick) / 1000)) : null
 
-  const uptimePct = sla ? sla.uptime_pct : null
-  const errorRatePct = sla ? sla.error_rate_pct : null
-  const incidentCount = sla?.incident_count ?? derived.incident_count
-  const avgMs = sla?.avg_response_ms ?? derived.avg_ms
-  const p95Ms = sla?.p95_response_ms ?? derived.p95_ms
-  const streakSec = sla?.uptime_streak_sec ?? derived.streak_sec
-  const downtimeSec = sla?.total_downtime_sec ?? 0
+  const noLatency = sla?.latency_sample_count === 0 ||
+    (!!sla && sla.latency_sample_count == null && sla.avg_response_ms == null && sla.p95_response_ms == null)
+  const avgMs = sla ? (noLatency ? null : sla.avg_response_ms) : derived.avg_ms
+  const p95Ms = sla ? (noLatency ? null : sla.p95_response_ms) : derived.p95_ms
+  const incidentCount = sla?.incident_count ?? outageTotal
 
   const healthScore = computeHealthScore(
-    { uptime_pct: uptimePct, error_rate_pct: errorRatePct, incident_count: incidentCount, p95_response_ms: p95Ms },
+    {
+      uptime_pct: sla ? sla.uptime_pct : null,
+      probe_error_rate_pct: sla?.probe_error_rate_pct ?? null,
+      incident_count: sla ? sla.incident_count : null,
+      p95_response_ms: sla ? (noLatency ? null : sla.p95_response_ms) : null,
+    },
     hsConfig,
   )
 
-  const latestPoint = latestProbePoint(points, check)
+  const createdTs = Date.parse(check.created_at)
+  const windowReachesNow = toTs >= nowTick - Math.max(2 * intervalMs, 120_000)
 
-  // The poller updates Postgres and ClickHouse on separate paths, so a live last_check_at
-  // with no stored samples means the metrics pipeline is broken, not that the service is idle.
+  // Latest probe (B13): independent of the range when the appliance supports it; otherwise
+  // only a raw window reaching now may stand in, and a rollup is never shown as a probe.
+  const latestList = latestQ.data && latestQ.data.length > 0 ? latestQ.data : null
+  let latestMode: LatestMode | null = null
+  let latestPoint: MetricPoint | null = null
+  let recentProbes: MetricPoint[] = []
+  if (latestList) {
+    latestMode = 'latest'
+    latestPoint = latestList[0]
+    recentProbes = latestList
+  } else if (metricsQ.data?.granularity === 'raw' && points.length > 0 && windowReachesNow) {
+    latestMode = 'window'
+    latestPoint = points[points.length - 1]
+    recentProbes = points.slice(-6).reverse()
+  } else if (check.last_check_at) {
+    latestMode = 'status'
+    latestPoint = {
+      timestamp: check.last_check_at,
+      response_ms: check.last_response_ms,
+      is_up: check.status === 'up' ? true : check.status === 'down' ? false : null,
+      status_code: null,
+      tls_days_remaining: check.tls_days_remaining,
+      error_message: check.last_error,
+    }
+  }
+
+  // Pipeline diagnostic (B16): only for a window that reaches now, after the check existed,
+  // containing a fresh result, with a successful but empty metrics response.
   const metricsStale =
     !!lastCheckMs &&
+    lastCheckMs >= fromTs &&
     nowTick - lastCheckMs < Math.max(10 * 60_000, intervalMs * 5) &&
+    windowReachesNow &&
+    metricsQ.isSuccess &&
     points.length === 0 &&
-    !metricsQ.isLoading &&
+    (metricsQ.data?.total_samples ?? 0) === 0 &&
     check.enabled &&
-    toTs - fromTs >= intervalMs * 3
+    toTs - Math.max(fromTs, Number.isFinite(createdTs) ? createdTs : fromTs) >= intervalMs * 3
+
+  const incidentsLoading = serverIncidents ? false : incidentsQ.isLoading || statusHistoryQ.isLoading || priorQ.isLoading
+  const incidentsError = serverIncidents ? false : incidentsQ.isError || statusHistoryQ.isError
+  const dimDays = isCustom || range.hours >= 24
+  const slaExcludesMaintenance = sla?.maintenance_sec !== undefined
+  const policyTarget = check.sla_target_pct != null && check.sla_target_pct !== '' && Number.isFinite(Number(check.sla_target_pct))
+    ? { pct: Number(check.sla_target_pct), source: 'service target' }
+    : { pct: 99.9, source: 'built-in default' }
+
+  const zoomTo = (fromISO: string, toISO: string) => setCustom(fromISO, toISO)
+  const downloadReport = async (format: 'csv' | 'json') => {
+    try {
+      const how = await downloadServiceReport({
+        check, format, fromISO: range.fromISO, toISO: range.toISO, sla, outages, maintenance: maintenance.rangeWindows,
+      })
+      toast.success(how === 'server' ? 'Report downloaded' : 'Summary downloaded', how === 'server' ? undefined : 'Generated in the browser: this appliance has no report export yet.')
+    } catch (e) {
+      toast.error('Report download failed', apiErrorMessage(e))
+    }
+  }
 
   return (
     <div className="space-y-4 pb-10">
+      <ClockSkewBanner />
       {slaQ.isError && (
         <div role="alert" className="rounded-lg border border-danger/30 bg-danger/5 p-4 text-sm">Availability report could not be loaded. <button className="font-medium text-primary underline" onClick={() => slaQ.refetch()}>Retry</button></div>
       )}
       {probeStale && check.enabled && (
         <div role="status" className="flex items-start gap-3 rounded-lg border border-warning/30 bg-warning/5 p-4 text-sm">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
-          <div><strong>Monitoring results are overdue</strong><p className="mt-1 text-muted">Last result {relativeTime(check.last_check_at!)}. Check the assigned sensor and its connection. Missing results are shown as no data and do not count as uptime or downtime.</p></div>
+          <div>
+            <strong>Monitoring results are overdue</strong>
+            <p className="mt-1 text-muted">
+              Last result {relativeTime(check.last_check_at!)} ({exactTime(check.last_check_at)}), judged on the appliance clock.
+              {' '}Check the assigned sensor and its connection. Missing results are shown as no data and do not count as uptime or downtime.
+              {skewed && ' The browser clock difference noted above is already corrected for and is not the cause.'}
+            </p>
+          </div>
         </div>
       )}
       <ServiceHeader
@@ -680,30 +643,29 @@ export function ServiceCheckDetailPage() {
           />
         )}
         onEdit={() => setEditOpen(true)}
+        onDuplicate={() => setDupOpen(true)}
         onDelete={() => setDeleteOpen(true)}
         onRunProbe={() => runNow.mutate()}
         runPending={runNow.isPending}
         onPause={() => togglePause.mutate()}
         pausePending={togglePause.isPending}
-        onMaintenance={() => {
-          if (check.in_maintenance) endMaintenance.mutate()
-          else setMaintOpen(true)
-        }}
-        onAck={() => ackAllAlerts.mutate()}
-        activeAlertCount={activeAlerts.length}
+        inMaintenance={!!check.in_maintenance || activeWindows.length > 0}
+        onMaintenance={() => setMaintOpen(true)}
+        onAck={() => setAckConfirmOpen(true)}
+        activeAlertCount={activeAlertCount}
         onLogs={() => navigate(`/services/${id}/incidents?filter=all`)}
         onExport={exportConfig}
+        onReport={downloadReport}
       />
 
-      {check.in_maintenance && (
-        <StatusBanner
-          tone="info"
-          icon={Wrench}
-          title="In maintenance"
-          body="Probes still run. Alerts are suppressed and this window is excluded from SLA."
-          actionLabel={endMaintenance.isPending ? 'Ending…' : 'End now'}
-          onAction={() => endMaintenance.mutate()}
-          actionDisabled={endMaintenance.isPending}
+      {(check.in_maintenance || activeWindows.length > 0) && (
+        <MaintenanceBanner
+          windows={activeWindows}
+          supported={maintenance.supported}
+          slaExcludesMaintenance={slaExcludesMaintenance}
+          nowMs={nowTick}
+          onEnd={(w) => endMaintenance.mutate({ window: w, legacyAllowed: true })}
+          ending={endMaintenance.isPending}
         />
       )}
       {!check.enabled && !check.in_maintenance && (
@@ -723,7 +685,7 @@ export function ServiceCheckDetailPage() {
           icon={check.status === 'down' ? XCircle : AlertTriangle}
           title={check.status === 'down' ? 'Service is down' : 'Service is degraded'}
           body={explainServiceFailure(check.last_error, { timeoutSeconds: check.timeout })}
-          meta={check.last_check_at ? `Last probe ${relativeTime(check.last_check_at)}` : undefined}
+          meta={check.last_check_at ? `Last probe ${relativeTime(check.last_check_at)} · ${exactTime(check.last_check_at)}` : undefined}
           mono
         />
       )}
@@ -744,145 +706,169 @@ export function ServiceCheckDetailPage() {
         sla7d={sla7dQ.data}
         sla30d={sla30dQ.data}
         loading={sla24Q.isLoading && sla7dQ.isLoading}
-        ongoingOutage={outages.find((o) => o.end == null) || null}
+        ongoingOutage={(serverIncidents ? outages.find((o) => o.end == null && !o.clippedStart) : null) ?? wideOngoing ?? outages.find((o) => o.end == null) ?? null}
         nowTick={nowTick}
+        probeStale={probeStale}
       />
 
-      <p className="text-xs text-muted">Availability uses observed time. Results remain valid for up to two check intervals; longer gaps are no data. Daily history uses local calendar days.</p>
+      <p className="text-xs text-muted">
+        Confirmed availability for the selected window ({range.label}) and fixed 7- and 30-day context. Only confirmed incidents
+        count as downtime; results remain valid for up to two check intervals and longer gaps are no data. Calendar days use {timezoneLabel(nowTick)}.
+      </p>
       <ThirtyDayStrip
         days={days}
         fromTs={fromTs}
         toTs={toTs}
-        onSelectDay={(d) => setCustom(new Date(d.start).toISOString(), new Date(Math.min(d.end, Date.now())).toISOString())}
+        dim={dimDays}
+        onSelectDay={(d) => setCustom(new Date(d.start).toISOString(), new Date(Math.min(d.end, serverNow())).toISOString())}
       />
 
-      <div
-        role="tablist"
-        aria-label="Service detail sections"
-        className="sticky top-0 z-20 -mx-1 flex gap-1 overflow-x-auto border-b border-border bg-bg/95 px-1 backdrop-blur supports-[backdrop-filter]:bg-bg/80"
-      >
-        {TABS.map((t) => {
-          const active = tab === t.key
-          const count = t.key === 'incidents' ? outages.length + activeAlerts.length : 0
-          return (
-            <button
-              key={t.key}
-              role="tab"
-              aria-selected={active}
-              onClick={() => setTab(t.key)}
-              className={cn(
-                'inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-4 py-2.5 text-sm font-medium transition-colors',
-                active ? 'border-primary text-primary' : 'border-transparent text-muted hover:border-border hover:text-text',
-              )}
-            >
-              <t.Icon className="h-4 w-4" />
-              {t.label}
-              {count > 0 && (
-                <span className="ml-0.5 rounded-full bg-surface3 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-text2">
-                  {count}
-                </span>
-              )}
-            </button>
-          )
-        })}
-      </div>
+      <DetailTabs
+        label="Service detail sections"
+        active={tab}
+        onChange={setTab}
+        tabs={TABS.map((t) => ({ ...t, count: t.key === 'incidents' ? outageTotal + activeAlertCount : 0 }))}
+      />
 
       {tab === 'overview' && (
-        <div className="space-y-4">
-          <MonitoringSites targetType="service_check" targetId={check.id} />
-          <AvailabilityTimeline
-            points={points}
-            statusHistory={seededHistory}
-            sla={sla}
-            check={check}
-            rangeLabel={range.label}
-            fromTs={fromTs}
-            toTs={toTs}
-          />
-
-          <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.85fr)]">
-            <PerformanceChart
+        <DetailTabPanel tab="overview">
+          <div className="space-y-4">
+            <MonitoringSites targetType="service_check" targetId={check.id} />
+            <AvailabilityTimeline
               points={points}
               statusHistory={seededHistory}
+              sla={sla}
+              check={check}
               rangeLabel={range.label}
-              rangeHours={range.hours}
               fromTs={fromTs}
               toTs={toTs}
-              loading={metricsQ.isLoading}
-              error={metricsQ.isError}
-              onRetry={() => metricsQ.refetch()}
-              stats={[
-                { label: 'Avg', value: formatMs(avgMs) },
-                { label: 'P95', value: formatMs(p95Ms) },
-                { label: 'Probe error', value: pct(sla?.probe_error_rate_pct, 2) },
-                { label: 'Incidents', value: String(incidentCount) },
-              ]}
             />
-            <div className="space-y-4">
-              <LatestProbeCard check={check} latest={latestPoint} recent={points.slice(-6).reverse()} manualProbe={manualProbe} />
-              <HealthScoreCard
-                score={healthScore.score}
-                tint={healthScore.tint}
-                label={healthScore.label}
-                factors={healthScore.factors}
-                onViewDetails={() => setHsOpen(true)}
+
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.85fr)]">
+              <PerformanceChart
+                response={metricsQ.data}
+                points={points}
+                statusHistory={seededHistory}
+                maintenance={maintenance.rangeWindows}
+                intervalSec={check.check_interval || 60}
+                createdAt={check.created_at}
+                rangeLabel={range.label}
+                rangeHours={range.hours}
+                fromTs={fromTs}
+                toTs={toTs}
+                nowMs={nowHalfMinute}
+                loading={metricsQ.isLoading}
+                error={metricsQ.isError}
+                onRetry={() => metricsQ.refetch()}
+                onZoom={zoomTo}
+                stats={[
+                  { label: 'Avg', value: formatMs(avgMs, NO_DATA), title: 'Mean of successful probes in the window' },
+                  { label: 'P95', value: formatMs(p95Ms, NO_DATA), title: 'P95 of all successful probes in the window (appliance)' },
+                  { label: 'Probe failures', value: pct(sla?.probe_error_rate_pct, 2, NO_DATA), title: 'Failed probes ÷ all probes, including unconfirmed failures' },
+                  { label: 'Incidents', value: String(incidentCount) },
+                ]}
               />
+              <div className="space-y-4">
+                <LatestProbeCard check={check} latest={latestPoint} mode={latestMode} recent={recentProbes} manualProbe={manualProbe} />
+                <HealthScoreCard
+                  score={healthScore.score}
+                  tint={healthScore.tint}
+                  label={healthScore.label}
+                  factors={healthScore.factors}
+                  coverage={healthScore.coverage}
+                  onViewDetails={() => setHsOpen(true)}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <ActivityLogCard
+                events={activityEvents.length > 0 ? activityEvents : fallbackEvents}
+                rangeLabel={range.label}
+                showingFallback={activityEvents.length === 0 && fallbackEvents.length > 0}
+                onViewAll={() => setEventsOpen(true)}
+                onWiden={() => setPreset(3)}
+              />
+              <RelatedServicesCard related={related} failed={relatedError} />
+              <ConfigSummaryCard check={check} onEdit={() => setEditOpen(true)} onOpenConfig={() => setTab('config')} />
             </div>
           </div>
-
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <ActivityLogCard
-              events={activityEvents.length > 0 ? activityEvents : fallbackEvents}
-              rangeLabel={range.label}
-              showingFallback={activityEvents.length === 0 && fallbackEvents.length > 0}
-              onViewAll={() => setEventsOpen(true)}
-              onWiden={() => setPreset(3)}
-            />
-            <RelatedServicesCard related={related} failed={relatedError} />
-            <ConfigSummaryCard check={check} onEdit={() => setEditOpen(true)} onOpenConfig={() => setTab('config')} />
-          </div>
-        </div>
+        </DetailTabPanel>
       )}
 
       {tab === 'uptime' && (
-        <div className="space-y-4">
-          <UptimeCalendar
-            days={days}
-            fromTs={fromTs}
-            toTs={toTs}
-            loading={hourlyQ.isLoading}
-            error={hourlyQ.isError}
-            onRetry={() => hourlyQ.refetch()}
-            onSelectDay={(d) => setCustom(new Date(d.start).toISOString(), new Date(Math.min(d.end, Date.now())).toISOString())}
-            outagesFor={outagesForDay}
-            checkId={check.id}
-            intervalSeconds={check.check_interval || 60}
-            historyLoading={wideHistoryLoading}
-            historyError={wideHistoryError}
-          />
-          <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1.3fr)_minmax(300px,0.9fr)]">
-            <DailyUptimeChart days={days} fromTs={fromTs} toTs={toTs} />
-            <SlaSummaryCard sla={sla} rangeLabel={range.label} loading={slaQ.isLoading} error={slaQ.isError} onRetry={() => slaQ.refetch()} />
+        <DetailTabPanel tab="uptime">
+          <div className="space-y-4">
+            <SectionHeading title={`Selected window · ${range.label}`} note="Results for the range chosen above." />
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+              <SloCard sla={sla} rangeLabel={range.label} loading={slaQ.isLoading} error={slaQ.isError} onRetry={() => slaQ.refetch()} fallbackTarget={policyTarget} />
+              <SlaSummaryCard sla={sla} rangeLabel={range.label} loading={slaQ.isLoading} error={slaQ.isError} onRetry={() => slaQ.refetch()} nowMs={nowTick} />
+            </div>
+            <SectionHeading title="Last 30 days · context" note="Fixed to the last 30 calendar days, independent of the selected range." />
+            <UptimeCalendar
+              days={days}
+              fromTs={fromTs}
+              toTs={toTs}
+              dim={dimDays}
+              loading={hourlyQ.isLoading}
+              error={hourlyQ.isError}
+              onRetry={() => hourlyQ.refetch()}
+              onSelectDay={(d) => setCustom(new Date(d.start).toISOString(), new Date(Math.min(d.end, serverNow())).toISOString())}
+              outagesFor={outagesForDay}
+              checkId={check.id}
+              intervalSeconds={check.check_interval || 60}
+              historyLoading={wideHistoryLoading}
+              historyError={wideHistoryError}
+              nowMs={nowTick}
+            />
+            <DailyUptimeChart days={days} fromTs={fromTs} toTs={toTs} dim={dimDays} />
           </div>
-        </div>
+        </DetailTabPanel>
       )}
 
       {tab === 'incidents' && (
-        <IncidentsTab
-          outages={outages}
-          alerts={alerts}
-          rangeLabel={range.label}
-          checkId={id}
-          ruleCovered={ruleCoverage?.covered}
-          onAck={() => ackAllAlerts.mutate()}
-          ackDisabled={activeAlerts.length === 0 || ackAllAlerts.isPending}
-          onWiden={() => setPreset(3)}
-        />
+        <DetailTabPanel tab="incidents">
+          <IncidentsTab
+            checkId={id}
+            intervalSec={check.check_interval || 60}
+            timeoutSec={check.timeout}
+            outages={outages}
+            total={outageTotal}
+            source={serverIncidents ? 'server' : 'client'}
+            loading={incidentsLoading}
+            error={incidentsError}
+            onRetry={() => { void incidentsQ.refetch(); void statusHistoryQ.refetch(); void priorQ.refetch() }}
+            canLoadMore={!!serverIncidents && serverIncidents.total > outages.length && incidentLimit < 500}
+            onLoadMore={() => setIncidentLimit((n) => Math.min(500, n + 100))}
+            historyTruncated={!serverIncidents && statusHistory.length >= 500}
+            evidence={{
+              coveragePct: serverIncidents?.response.coverage_pct ?? sla?.coverage_pct ?? null,
+              sampleCount: serverIncidents?.response.sample_count ?? sla?.sample_count ?? null,
+              coveredSec: sla?.covered_sec ?? null,
+            }}
+            fromISO={range.fromISO}
+            toISO={range.toISO}
+            rangeLabel={range.label}
+            nowMs={nowTick}
+            maintenance={maintenance.rangeWindows}
+            activeAlertCount={activeCountQ.data}
+            ruleCovered={ruleCoverage?.covered}
+            onAckAll={() => setAckConfirmOpen(true)}
+            ackPending={ackAll.isPending}
+            onWiden={() => setPreset(3)}
+            onZoom={zoomTo}
+          />
+        </DetailTabPanel>
       )}
 
-      {tab === 'config' && <ConfigTab check={check} onEdit={() => setEditOpen(true)} onExport={exportConfig} />}
+      {tab === 'config' && (
+        <DetailTabPanel tab="config">
+          <ConfigTab check={check} onEdit={() => setEditOpen(true)} onExport={exportConfig} />
+        </DetailTabPanel>
+      )}
 
       <ServiceCheckFormDialog open={editOpen} onOpenChange={setEditOpen} check={check} />
+      <ServiceCheckFormDialog open={dupOpen} onOpenChange={setDupOpen} check={check} mode="duplicate" />
       <ConfirmDialog
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
@@ -893,13 +879,24 @@ export function ServiceCheckDetailPage() {
         loading={del.isPending}
         onConfirm={() => del.mutate()}
       />
+      <ConfirmDialog
+        open={ackConfirmOpen}
+        onOpenChange={setAckConfirmOpen}
+        title={`Acknowledge ${activeAlertCount} active alert${activeAlertCount === 1 ? '' : 's'}?`}
+        description="Acknowledges every active alert for this monitor, including any triggered outside the selected window. Acknowledging stops escalation reminders; it does not resolve the alerts."
+        confirmText="Acknowledge all"
+        loading={ackAll.isPending}
+        onConfirm={() => ackAll.mutate(undefined, { onSettled: () => setAckConfirmOpen(false) })}
+      />
       <MaintenanceDialog
         open={maintOpen}
         onOpenChange={setMaintOpen}
-        inMaintenance={!!check.in_maintenance}
-        onStart={(hours) => startMaintenance.mutate(hours)}
+        activeWindows={activeWindows}
+        supported={maintenance.supported}
+        nowMs={nowTick}
+        onStart={(minutes) => startMaintenance.mutate(minutes)}
         onStartCustom={(startsAtISO, endsAtISO) => startMaintenanceCustom.mutate({ startsAtISO, endsAtISO })}
-        onEnd={() => endMaintenance.mutate()}
+        onEnd={(w) => endMaintenance.mutate({ window: w, legacyAllowed: true })}
         starting={startMaintenance.isPending || startMaintenanceCustom.isPending}
         ending={endMaintenance.isPending}
       />
@@ -910,6 +907,7 @@ export function ServiceCheckDetailPage() {
         tint={healthScore.tint}
         label={healthScore.label}
         factors={healthScore.factors}
+        coverage={healthScore.coverage}
         config={hsConfig}
         onConfigChange={(next) => {
           setHsConfig(next)
@@ -946,12 +944,20 @@ function DetailSkeleton() {
   )
 }
 
+function SectionHeading({ title, note }: { title: string; note?: string }) {
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 pt-1">
+      <h2 className="text-xs font-semibold uppercase tracking-wider text-text2">{title}</h2>
+      {note && <span className="text-[11px] text-muted">{note}</span>}
+    </div>
+  )
+}
+
 function PanelState({
-  loading, error, empty, onRetry, loadingText, errorText, children,
+  loading, error, onRetry, loadingText, errorText, children,
 }: {
   loading?: boolean
   error?: boolean
-  empty?: boolean
   onRetry?: () => void
   loadingText?: string
   errorText?: string
@@ -974,7 +980,6 @@ function PanelState({
       </div>
     )
   }
-  if (empty) return <>{children}</>
   return <>{children}</>
 }
 
@@ -1023,23 +1028,26 @@ function SectionCard({
 /* ─── Header ────────────────────────────────────────────────────────────── */
 
 function ServiceHeader({
-  check, secsToNext, rangePicker, onEdit, onDelete, onRunProbe, runPending,
-  onPause, pausePending, onMaintenance, onAck, activeAlertCount, onLogs, onExport,
+  check, secsToNext, rangePicker, onEdit, onDuplicate, onDelete, onRunProbe, runPending,
+  onPause, pausePending, inMaintenance, onMaintenance, onAck, activeAlertCount, onLogs, onExport, onReport,
 }: {
-  check: ServiceCheck
+  check: ServiceCheckExt
   secsToNext: number | null
   rangePicker: React.ReactNode
   onEdit: () => void
+  onDuplicate: () => void
   onDelete: () => void
   onRunProbe: () => void
   runPending: boolean
   onPause: () => void
   pausePending: boolean
+  inMaintenance: boolean
   onMaintenance: () => void
   onAck: () => void
   activeAlertCount: number
   onLogs: () => void
   onExport: () => void
+  onReport: (format: 'csv' | 'json') => void
 }) {
   const t = typeMeta[check.check_type] || typeMeta.http
   const target = check.target_url || `${check.target_host}${check.target_port ? `:${check.target_port}` : ''}`
@@ -1081,9 +1089,14 @@ function ServiceHeader({
               </span>
             )}
             <span className="inline-flex items-center gap-1 rounded border border-border bg-surface2/60 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-muted">
-              <t.Icon className="h-2.5 w-2.5" />{t.label}
+              <t.Icon className="h-2.5 w-2.5" />{t.label} · L{check.level ?? 1}
             </span>
-            {check.in_maintenance && <Badge variant="info"><Wrench className="h-3 w-3" />Maintenance</Badge>}
+            {check.criticality && (
+              <span className="rounded border border-border px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-muted" title="Business criticality">
+                {check.criticality}
+              </span>
+            )}
+            {inMaintenance && <Badge variant="info"><Wrench className="h-3 w-3" />Maintenance</Badge>}
             {activeAlertCount > 0 && <Badge variant="danger"><Bell className="h-3 w-3" />{activeAlertCount} active</Badge>}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-muted">
@@ -1094,7 +1107,11 @@ function ServiceHeader({
             <Dot />
             <span className="inline-flex items-center gap-1"><Timer className="h-3 w-3" />every {check.check_interval}s</span>
             <Dot />
-            <span>checked {check.last_check_at ? relativeTime(check.last_check_at) : 'never'}</span>
+            <span title={check.last_check_at ? exactTime(check.last_check_at) : undefined}>
+              {check.last_check_at
+                ? <>checked {relativeTime(check.last_check_at)} <span className="font-mono">({new Date(check.last_check_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })})</span></>
+                : NEVER_CHECKED.toLowerCase()}
+            </span>
             <Dot />
             <span className="tabular-nums">next in {nextLabel}</span>
             {check.device_id && (
@@ -1111,6 +1128,24 @@ function ServiceHeader({
                 <span>{check.group_name}</span>
               </>
             )}
+            {check.owner_team && (
+              <>
+                <Dot />
+                <span className="inline-flex items-center gap-1" title="Owner / team"><Users className="h-3 w-3" />{check.owner_team}</span>
+              </>
+            )}
+            {check.business_owner && !check.owner_team && (
+              <>
+                <Dot />
+                <span className="inline-flex items-center gap-1" title="Business owner"><Users className="h-3 w-3" />{check.business_owner}</span>
+              </>
+            )}
+            {check.runbook_url && (
+              <>
+                <Dot />
+                <RunbookLink url={check.runbook_url} className="text-[11px]" />
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -1118,7 +1153,7 @@ function ServiceHeader({
       <div className="flex flex-wrap items-center justify-end gap-2">
         {rangePicker}
         <span className="hidden h-5 w-px bg-border sm:inline-block" />
-        <Button size="sm" className="h-8" onClick={onRunProbe} disabled={runPending}>
+        <Button size="sm" className="h-8" onClick={onRunProbe} disabled={runPending} title="Runs one probe now. A manual probe is diagnostic only and does not change status or SLA.">
           {runPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
           Run probe
         </Button>
@@ -1129,24 +1164,36 @@ function ServiceHeader({
         <Button variant="outline" size="sm" className="h-8" onClick={onEdit}>
           <Pencil className="h-3.5 w-3.5" /> Edit
         </Button>
-        <MoreMenu
-          items={[
-            { label: check.in_maintenance ? 'End maintenance' : 'Schedule maintenance', icon: Wrench, onSelect: onMaintenance },
-            { label: `Acknowledge alerts${activeAlertCount > 0 ? ` (${activeAlertCount})` : ''}`, icon: Check, onSelect: onAck, disabled: activeAlertCount === 0 },
-            { label: 'Incident log', icon: FileText, onSelect: onLogs },
-            { label: 'Export config', icon: Download, onSelect: onExport },
-            { label: 'Delete check', icon: Trash2, onSelect: onDelete, destructive: true },
-          ]}
-        />
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="outline" size="icon" className="h-8 w-8" aria-label="More actions">
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent className="w-60">
+            <DropdownMenuItem onSelect={onMaintenance}><Wrench />{inMaintenance ? 'Manage maintenance' : 'Schedule maintenance'}</DropdownMenuItem>
+            <DropdownMenuItem onSelect={onAck} disabled={activeAlertCount === 0}>
+              <Check />Acknowledge all active{activeAlertCount > 0 ? ` (${activeAlertCount})` : ''}
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onDuplicate}><Copy />Duplicate monitor</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => onReport('csv')}><FileSpreadsheet />Download window report (CSV)</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => onReport('json')}><FileText />Download window report (JSON)</DropdownMenuItem>
+            <DropdownMenuItem onSelect={onLogs}><FileText />Incident log</DropdownMenuItem>
+            <DropdownMenuItem onSelect={onExport}><Download />Export config</DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={onDelete} destructive><Trash2 />Delete check</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </div>
   )
 }
 
-/* ─── Hero strip: fixed-window availability, uptime-product style ───────── */
+/* ─── Hero strip: current status, selected window, fixed context ───────── */
 
-function HeroStrip({ check, sla24, slaRange, rangeLabel, sla7d, sla30d, loading, ongoingOutage, nowTick }: {
-  check: ServiceCheck
+function HeroStrip({ check, sla24, slaRange, rangeLabel, sla7d, sla30d, loading, ongoingOutage, nowTick, probeStale }: {
+  check: ServiceCheckExt
   sla24?: SlaStats
   slaRange?: SlaStats
   rangeLabel: string
@@ -1155,6 +1202,7 @@ function HeroStrip({ check, sla24, slaRange, rangeLabel, sla7d, sla30d, loading,
   loading: boolean
   ongoingOutage: Outage | null
   nowTick: number
+  probeStale: boolean
 }) {
   if (loading) {
     return (
@@ -1170,8 +1218,8 @@ function HeroStrip({ check, sla24, slaRange, rangeLabel, sla7d, sla30d, loading,
   let statusCell: { label: string; value: string; tone: string; sub: string }
   if (!check.enabled) {
     statusCell = { label: 'Monitoring', value: 'Paused', tone: 'text-muted', sub: 'probes are not scheduled' }
-  } else if (check.last_check_at && nowTick - Date.parse(check.last_check_at) > (check.check_interval || 60) * 2000) {
-    statusCell = { label: 'Monitoring', value: 'Results overdue', tone: 'text-warning', sub: 'check the assigned sensor' }
+  } else if (probeStale) {
+    statusCell = { label: 'Monitoring', value: 'Results overdue', tone: 'text-warning', sub: check.last_check_at ? `last result ${exactTime(check.last_check_at, false)}` : 'check the assigned sensor' }
   } else if (isDown) {
     statusCell = {
       label: check.status === 'down' ? 'Currently down for' : 'Degraded for',
@@ -1187,30 +1235,32 @@ function HeroStrip({ check, sla24, slaRange, rangeLabel, sla7d, sla30d, loading,
       value: formatDur(sla24?.uptime_streak_started_at ? Math.max(0, (nowTick - Date.parse(sla24.uptime_streak_started_at)) / 1000) : null),
       tone: 'text-success',
       sub: sla24?.uptime_streak_started_at
-        ? `observed since ${new Date(sla24.uptime_streak_started_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
+        ? `observed since ${exactTime(sla24.uptime_streak_started_at, false)}`
         : 'recovery time unavailable',
     }
   }
 
   const windowCell = (label: string, s?: SlaStats) => {
-    const band = uptimeBand(s?.uptime_pct)
     const down = s?.total_downtime_sec || 0
     const inc = s?.incident_count || 0
+    const coverage: string[] = []
+    if (s?.uptime_pct != null) {
+      coverage.push(`${(s.coverage_pct ?? 0).toFixed(1)}% of window observed`)
+      if ((s.maintenance_sec ?? 0) > 0) coverage.push(`${formatDur(s.maintenance_sec)} maintenance excluded`)
+    }
     return {
       label,
-      value: s?.uptime_pct != null ? `${s.uptime_pct.toFixed(s.uptime_pct >= 99.95 ? 2 : 2)}%` : '—',
-      tone: BAND_TEXT[band],
+      value: formatAvailability(s?.uptime_pct, s?.total_downtime_sec, 2),
+      tone: BAND_TEXT[availabilityBand(s?.uptime_pct, s?.total_downtime_sec)],
       sub: s?.uptime_pct == null
-        ? 'no data in this window'
+        ? 'no monitoring evidence in this window'
         : down > 0
           ? `${formatDur(down)} down · ${inc} incident${inc === 1 ? '' : 's'}`
-          : 'no observed downtime',
-      coverage: s?.uptime_pct != null ? `${(s.coverage_pct ?? 0).toFixed(1)}% of window observed` : undefined,
+          : 'no confirmed downtime',
+      coverage: coverage.length ? coverage.join(' · ') : undefined,
     }
   }
 
-  // The second cell tracks the range picker so the strip reacts to the selected window;
-  // 7 days and 30 days stay as fixed reference points.
   const cells = [
     { ...statusCell, coverage: undefined, selected: false },
     { ...windowCell(rangeLabel, slaRange), selected: true },
@@ -1222,7 +1272,7 @@ function HeroStrip({ check, sla24, slaRange, rangeLabel, sla7d, sla30d, loading,
     <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
       {cells.map((c, i) => (
         <div
-          key={c.label}
+          key={`${i}-${c.label}`}
           className={cn(
             'rounded-xl border bg-surface px-4 py-3 transition-colors',
             c.selected ? 'border-primary/40 ring-1 ring-primary/25' : 'border-border hover:border-border-strong',
@@ -1231,14 +1281,15 @@ function HeroStrip({ check, sla24, slaRange, rangeLabel, sla7d, sla30d, loading,
           <div className="flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
             {i === 0 && <PulseDot status={pulseStatusOf(check.status, check.enabled)} size="sm" />}
             <span className="truncate" title={c.label}>{c.label}</span>
-            {c.selected && (
-              <span className="ml-auto shrink-0 rounded bg-primary/10 px-1.5 py-px text-[9px] font-semibold text-primary">
-                Selected
-              </span>
-            )}
+            {c.selected ? (
+              <span className="ml-auto shrink-0 rounded bg-primary/10 px-1.5 py-px text-[9px] font-semibold text-primary">Selected</span>
+            ) : i > 1 ? (
+              <span className="ml-auto shrink-0 rounded bg-surface2 px-1.5 py-px text-[9px] font-semibold text-muted">Context</span>
+            ) : null}
           </div>
           <div className={cn('mt-1 text-[24px] font-bold leading-none tabular-nums', c.tone)}>{c.value}</div>
-          <div className="mt-1 truncate text-[10.5px] text-muted" title={c.sub}>{c.sub}</div>{c.coverage && <div className="mt-1 text-[10px] text-muted">{c.coverage}</div>}
+          <div className="mt-1 truncate text-[10.5px] text-muted" title={c.sub}>{c.sub}</div>
+          {c.coverage && <div className="mt-1 text-[10px] text-muted">{c.coverage}</div>}
         </div>
       ))}
     </div>
@@ -1247,30 +1298,32 @@ function HeroStrip({ check, sla24, slaRange, rangeLabel, sla7d, sla30d, loading,
 
 /* ─── 30-day bar strip ──────────────────────────────────────────────────── */
 
-function ThirtyDayStrip({ days, fromTs, toTs, onSelectDay }: {
+function ThirtyDayStrip({ days, fromTs, toTs, dim, onSelectDay }: {
   days: DayUptime[]
   fromTs: number
   toTs: number
+  /** Dim days outside the selected range (only for day-scale ranges). */
+  dim: boolean
   onSelectDay: (d: DayUptime) => void
 }) {
   const overall = coveredWeightedUptime(days)
   const totalDowntime = days.reduce((s, d) => s + d.downtimeSec, 0)
 
-  // Dim days outside the selected window, so the strip visibly tracks the range picker —
-  // unless the range covers everything (or nothing), where dimming would only add noise.
   const inRange = (d: DayUptime) => d.end > fromTs && d.start < toTs
   const inCount = days.filter(inRange).length
-  const dimOthers = inCount > 0 && inCount < days.length
+  const dimOthers = dim && inCount > 0 && inCount < days.length
 
-  const cells = days.map((d) => ({
-    key: d.key,
-    pct: d.uptimePct,
-    dim: dimOthers && !inRange(d),
-    title:
-      d.uptimePct == null
-        ? `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} — no data`
-        : `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} — ${d.uptimePct.toFixed(2)}% up${d.downtimeSec > 0 ? ` · ${formatDur(d.downtimeSec)} down` : ''}`,
-  }))
+  const cells = days.map((d) => {
+    const when = d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+    return {
+      key: d.key,
+      pct: colourPct(d.uptimePct, d.downtimeSec),
+      dim: dimOthers && !inRange(d),
+      title: d.uptimePct == null
+        ? `${when} — no data`
+        : `${when} — ${formatAvailability(d.uptimePct, d.downtimeSec, 3)} available${d.downtimeSec > 0 ? ` · ${formatDur(d.downtimeSec)} down` : ''}`,
+    }
+  })
 
   return (
     <Card>
@@ -1278,13 +1331,13 @@ function ThirtyDayStrip({ days, fromTs, toTs, onSelectDay }: {
         <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2">
           <div className="flex items-baseline gap-2">
             <h3 className="text-sm font-semibold tracking-tight">Last 30 days</h3>
-            <span className="text-[11px] text-muted">click a day to zoom the page to it</span>
+            <span className="text-[11px] text-muted">context · click a day to zoom the page to it</span>
           </div>
           <div className="flex items-baseline gap-3 text-xs">
             {totalDowntime > 0 && <span className="text-muted">{formatDur(totalDowntime)} down</span>}
             {overall != null && (
-              <span className={cn('font-mono font-semibold tabular-nums', BAND_TEXT[uptimeBand(overall)])}>
-                {overall.toFixed(3)}%
+              <span className={cn('font-mono font-semibold tabular-nums', BAND_TEXT[availabilityBand(overall, totalDowntime)])}>
+                {formatAvailability(overall, totalDowntime, 3)}
               </span>
             )}
           </div>
@@ -1308,69 +1361,6 @@ function ThirtyDayStrip({ days, fromTs, toTs, onSelectDay }: {
 
 function Dot() {
   return <span aria-hidden className="text-border-strong">·</span>
-}
-
-function MoreMenu({ items }: {
-  items: Array<{ label: string; icon: typeof Wrench; onSelect: () => void; disabled?: boolean; destructive?: boolean }>
-}) {
-  const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
-    document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [open])
-
-  return (
-    <div ref={ref} className="relative">
-      <Button
-        variant="outline"
-        size="icon"
-        className="h-8 w-8"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label="More actions"
-        onClick={() => setOpen((v) => !v)}
-      >
-        <MoreHorizontal className="h-4 w-4" />
-      </Button>
-      {open && (
-        <div
-          role="menu"
-          className="absolute right-0 z-30 mt-1 w-56 overflow-hidden rounded-lg border border-border bg-surface p-1 shadow-elevated"
-        >
-          {items.map((it) => (
-            <button
-              key={it.label}
-              role="menuitem"
-              disabled={it.disabled}
-              onClick={() => { setOpen(false); it.onSelect() }}
-              className={cn(
-                'flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs font-medium transition-colors',
-                it.disabled
-                  ? 'cursor-not-allowed text-muted/50'
-                  : it.destructive
-                    ? 'text-danger hover:bg-danger/10'
-                    : 'text-text2 hover:bg-surface2 hover:text-text',
-              )}
-            >
-              <it.icon className="h-3.5 w-3.5 shrink-0" />
-              {it.label}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  )
 }
 
 function StatusBanner({
@@ -1411,13 +1401,15 @@ function StatusBanner({
 
 /* ─── Availability timeline ─────────────────────────────────────────────── */
 
+const PARTIAL_COLOR = 'rgb(var(--warning))'
+
 function AvailabilityTimeline({
   points, statusHistory, check, rangeLabel, fromTs, toTs, sla,
 }: {
   sla?: SlaStats
-  points: ServiceMetricPoint[]
-  statusHistory: StatusHistoryEvent[]
-  check: ServiceCheck
+  points: MetricPoint[]
+  statusHistory: SeededEvent[]
+  check: ServiceCheckExt
   rangeLabel: string
   fromTs: number
   toTs: number
@@ -1427,25 +1419,26 @@ function AvailabilityTimeline({
     [points, statusHistory, check, fromTs, toTs],
   )
   const covered = buckets.filter((b) => b.state !== 'gap')
-  const downCount = covered.filter((b) => b.state === 'down' || b.state === 'warn').length
+  const downCount = covered.filter((b) => b.state === 'down').length
+  const partialCount = covered.filter((b) => b.state === 'partial').length
   const pctUp = sla?.probe_uptime_pct ?? null
-  const coverage = sla?.coverage_pct ?? 0
+  const coverage = sla?.coverage_pct ?? null
 
   return (
     <SectionCard
       title="Probe availability timeline"
       subtitle={
         <span>
-          {rangeLabel}
-          {points.length > 0 && ` · ${points.length} chart point${points.length === 1 ? '' : 's'}`}
-          {coverage < 99.5 && ` · ${coverage.toFixed(0)}% of the window has data`}
+          {rangeLabel} · every probe, including failures that recovered before confirmation
+          {coverage != null && coverage < 99.5 && ` · ${coverage.toFixed(0)}% of the window has data`}
         </span>
       }
       actions={
         <div className="flex items-baseline gap-3 text-xs">
-          {downCount > 0 && <span className="font-medium text-danger">{downCount} bad interval{downCount === 1 ? '' : 's'}</span>}
+          {downCount > 0 && <span className="font-medium text-danger">{downCount} failed interval{downCount === 1 ? '' : 's'}</span>}
+          {partialCount > 0 && <span className="font-medium text-warning">{partialCount} with partial failures</span>}
           {pctUp != null && (
-            <span className={cn('font-mono font-semibold tabular-nums', BAND_TEXT[uptimeBand(pctUp)])}>{pctUp.toFixed(2)}% probe availability</span>
+            <span className="font-mono font-semibold tabular-nums text-text2">{pctUp.toFixed(2)}% probe success</span>
           )}
         </div>
       }
@@ -1459,7 +1452,7 @@ function AvailabilityTimeline({
         />
       ) : (
         <>
-          <div className="flex h-9 gap-[1px] overflow-hidden rounded-lg bg-surface2">
+          <div className="flex h-9 gap-[1px] overflow-hidden rounded-lg bg-surface2" role="img" aria-label={`Probe availability for ${rangePhrase(rangeLabel)}: ${downCount} failed and ${partialCount} partially failed intervals`}>
             {buckets.map((b, i) => (
               <div
                 key={i}
@@ -1468,28 +1461,28 @@ function AvailabilityTimeline({
                   backgroundColor:
                     b.state === 'up' ? UP_COLOR
                       : b.state === 'down' ? DOWN_COLOR
-                        : b.state === 'warn' ? WARN_COLOR
+                        : b.state === 'partial' ? PARTIAL_COLOR
                           : 'transparent',
                 }}
                 title={
                   b.state === 'gap'
                     ? `${timeTooltipLabelFormatter(b.start)} — no data`
-                    : `${timeTooltipLabelFormatter(b.start)} — ${b.state.toUpperCase()}${b.reason ? ` · ${explainServiceFailure(b.reason)}` : ''}`
+                    : `${timeTooltipLabelFormatter(b.start)} — ${b.down} failed of ${b.up + b.down} probe${b.up + b.down === 1 ? '' : 's'}`
                 }
               />
             ))}
           </div>
           <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-            <span className="text-[10px] tabular-nums text-muted">{timeTooltipLabelFormatter(fromTs)}</span>
+            <span className="text-[10px] tabular-nums text-muted">{exactTime(fromTs, false)}</span>
             <div className="flex items-center gap-3 text-[10px] text-muted">
-              <Swatch color={UP_COLOR} label="Up" />
-              <Swatch color={WARN_COLOR} label="Warn" />
-              <Swatch color={DOWN_COLOR} label="Down" />
+              <Swatch color={UP_COLOR} label="All passed" />
+              <Swatch color={PARTIAL_COLOR} label="Some failed" />
+              <Swatch color={DOWN_COLOR} label="All failed" />
               <span className="inline-flex items-center gap-1">
                 <span className="h-2 w-2 rounded-sm bg-surface2 ring-1 ring-inset ring-border" />No data
               </span>
             </div>
-            <span className="text-[10px] tabular-nums text-muted">{timeTooltipLabelFormatter(toTs)}</span>
+            <span className="text-[10px] tabular-nums text-muted">{exactTime(toTs, false)}</span>
           </div>
         </>
       )}
@@ -1506,9 +1499,9 @@ function Swatch({ color, label }: { color: string; label: string }) {
 }
 
 function buildAvailabilityBuckets(
-  points: ServiceMetricPoint[],
-  _history: StatusHistoryEvent[],
-  check: ServiceCheck,
+  points: Array<{ timestamp: string; is_up: boolean | null; sample_count?: number | null; failed_count?: number | null }>,
+  _history: unknown[],
+  check: { check_interval?: number },
   fromTs: number,
   toTs: number,
 ) {
@@ -1519,279 +1512,74 @@ function buildAvailabilityBuckets(
   const intervalMs = Math.max(1, (check.check_interval || 60) * 1000)
   const count = Math.max(12, Math.min(96, Math.floor(span / Math.max(span / 96, intervalMs))))
   const width = span / count
-  const slots: Array<{ start: number; end: number; up: number; down: number; warn: number; reason?: string }> =
-    Array.from({ length: count }, (_, i) => ({ start: fromTs + i * width, end: fromTs + (i + 1) * width, up: 0, down: 0, warn: 0 }))
+  const slots: Array<{ start: number; end: number; up: number; down: number }> =
+    Array.from({ length: count }, (_, i) => ({ start: fromTs + i * width, end: fromTs + (i + 1) * width, up: 0, down: 0 }))
 
   for (const p of points) {
     const ts = Date.parse(p.timestamp)
     if (!Number.isFinite(ts) || ts < fromTs || ts >= toTs) continue
     const i = Math.min(count - 1, Math.floor((ts - fromTs) / width))
     if (i < 0) continue
-    if (p.is_up === true) slots[i].up++
+    // Rollup buckets carry exact counts, so one failed probe in a healthy bucket stays visible.
+    if (p.sample_count != null && p.failed_count != null) {
+      slots[i].down += Math.max(0, p.failed_count)
+      slots[i].up += Math.max(0, p.sample_count - p.failed_count)
+    } else if (p.is_up === true) slots[i].up++
     else if (p.is_up === false) slots[i].down++
   }
 
   return slots.map((s) => {
-    let st: 'up' | 'down' | 'warn' | 'gap' = 'gap'
-    if (s.down > 0) st = 'down'
-    else if (s.warn > 0) st = 'warn'
+    let st: 'up' | 'down' | 'partial' | 'gap' = 'gap'
+    if (s.down > 0 && s.up > 0) st = 'partial'
+    else if (s.down > 0) st = 'down'
     else if (s.up > 0) st = 'up'
-
-    return { start: s.start, end: s.end, state: st, reason: s.reason }
+    return { start: s.start, end: s.end, state: st, up: s.up, down: s.down }
   })
 }
 
-/* ─── Performance chart ─────────────────────────────────────────────────── */
-
-function PerformanceChart({
-  points, statusHistory, rangeLabel, rangeHours, fromTs, toTs, loading, error, onRetry, stats,
-}: {
-  points: ServiceMetricPoint[]
-  statusHistory: StatusHistoryEvent[]
-  rangeLabel: string
-  rangeHours: number
-  fromTs: number
-  toTs: number
-  loading: boolean
-  error: boolean
-  onRetry: () => void
-  stats?: Array<{ label: string; value: string }>
-}) {
-  const { p95Window, displayBucketMs, errBucketMs } = useMemo(() => {
-    if (rangeHours <= 6) return { p95Window: 20, displayBucketMs: 0, errBucketMs: 5 * 60_000 }
-    if (rangeHours <= 24) return { p95Window: 12, displayBucketMs: 0, errBucketMs: 15 * 60_000 }
-    if (rangeHours <= 24 * 7) return { p95Window: 24, displayBucketMs: 30 * 60_000, errBucketMs: 2 * 3600_000 }
-    return { p95Window: 12, displayBucketMs: 3600_000, errBucketMs: 6 * 3600_000 }
-  }, [rangeHours])
-
-  const merged = useMemo(() => {
-    const base = points
-      .map((p) => ({ ts: Date.parse(p.timestamp), ms: p.response_ms, up: p.is_up }))
-      .filter((b) => Number.isFinite(b.ts))
-    const p95s = rollingPercentile(base.map((b) => ({ ts: b.ts, ms: b.up ? b.ms : null })), 0.95, p95Window)
-    const errBucket = new Map<number, { up: number; down: number }>()
-    for (const p of points) {
-      const k = Math.floor(Date.parse(p.timestamp) / errBucketMs) * errBucketMs
-      const b = errBucket.get(k) || { up: 0, down: 0 }
-      if (p.is_up) b.up++
-      else b.down++
-      errBucket.set(k, b)
-    }
-    const enriched = base.map((b, i) => {
-      const bb = errBucket.get(Math.floor(b.ts / errBucketMs) * errBucketMs)
-      return {
-        ts: b.ts,
-        avg: b.up ? b.ms : null,
-        p95: p95s[i]?.p95 ?? null,
-        err: bb ? (bb.down / Math.max(1, bb.up + bb.down)) * 100 : 0,
-      }
-    })
-    if (displayBucketMs === 0 || enriched.length === 0) return enriched
-    type Bin = { ts: number; avgSum: number; avgN: number; p95Max: number | null; errSum: number; errN: number }
-    const bins = new Map<number, Bin>()
-    for (const e of enriched) {
-      const k = Math.floor(e.ts / displayBucketMs) * displayBucketMs
-      let bin = bins.get(k)
-      if (!bin) { bin = { ts: k, avgSum: 0, avgN: 0, p95Max: null, errSum: 0, errN: 0 }; bins.set(k, bin) }
-      if (e.avg != null && Number.isFinite(e.avg)) { bin.avgSum += e.avg; bin.avgN++ }
-      if (e.p95 != null && Number.isFinite(e.p95)) bin.p95Max = bin.p95Max == null ? e.p95 : Math.max(bin.p95Max, e.p95)
-      bin.errSum += e.err; bin.errN++
-    }
-    return Array.from(bins.values()).sort((a, b) => a.ts - b.ts).map((b) => ({
-      ts: b.ts,
-      avg: b.avgN > 0 ? b.avgSum / b.avgN : null,
-      p95: b.p95Max,
-      err: b.errN > 0 ? b.errSum / b.errN : 0,
-    }))
-  }, [points, p95Window, errBucketMs, displayBucketMs])
-
-  const bands = useMemo(() => statusBands(statusHistory, fromTs, toTs), [statusHistory, fromTs, toTs])
-  const axisData = merged.length > 0 ? merged : [{ ts: fromTs, avg: null, p95: null, err: 0 }, { ts: toTs, avg: null, p95: null, err: 0 }]
-  const tickFormatter = useMemo(() => timeAxisTickFormatter(rangeHours), [rangeHours])
-  const ticks = useMemo(() => timeTicks(fromTs, toTs, rangeHours), [fromTs, toTs, rangeHours])
-  const hasSeries = merged.some((m) => m.avg != null || m.p95 != null)
-  const singlePoint = merged.filter((m) => m.avg != null).length === 1
-
-  return (
-    <SectionCard
-      title="Response & outages"
-      subtitle={
-        <div className="flex flex-wrap items-center gap-3">
-          <LegendDot color="rgb(var(--info))" label="Avg ms" />
-          <LegendDot color="rgb(var(--accent))" label="P95 ms" />
-          <LegendDot color="rgb(var(--warning))" label="Error %" />
-          <LegendDot color="rgb(var(--danger) / 0.4)" label="Outage" />
-        </div>
-      }
-      actions={
-        <div className="flex flex-wrap items-center gap-2">
-          {stats?.map((s) => (
-            <span key={s.label} className="inline-flex items-baseline gap-1 rounded-md border border-border bg-surface2/50 px-2 py-0.5">
-              <span className="text-[9.5px] font-semibold uppercase tracking-wider text-muted">{s.label}</span>
-              <span className="font-mono text-[11px] font-medium tabular-nums text-text">{s.value}</span>
-            </span>
-          ))}
-          <span className="text-[11px] font-medium text-muted">{rangeLabel}</span>
-        </div>
-      }
-      bodyClassName="flex flex-col p-4"
-    >
-      <PanelState loading={loading} error={error} onRetry={onRetry} loadingText="Loading probe samples…" errorText="Could not load probe metrics.">
-        <div className="min-h-[236px] w-full flex-1">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={axisData} margin={{ top: 8, right: axisRightPad(rangeHours) + 18, bottom: 0, left: 0 }}>
-              <defs>
-                <linearGradient id="svcRespG" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="rgb(var(--info))" stopOpacity={0.4} />
-                  <stop offset="100%" stopColor="rgb(var(--info))" stopOpacity={0} />
-                </linearGradient>
-                <linearGradient id="svcP95G" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="rgb(var(--accent))" stopOpacity={0.25} />
-                  <stop offset="100%" stopColor="rgb(var(--accent))" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid stroke="rgb(var(--border) / 0.4)" strokeDasharray="3 3" vertical={false} />
-              <XAxis
-                dataKey="ts"
-                type="number"
-                domain={[fromTs, toTs]}
-                scale="time"
-                ticks={ticks}
-                interval={0}
-                tickFormatter={tickFormatter}
-                tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
-                axisLine={false}
-                tickLine={false}
-              />
-              <YAxis
-                yAxisId="ms"
-                tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
-                width={52}
-                axisLine={false}
-                tickLine={false}
-                tickFormatter={(v) => (v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${v}ms`)}
-              />
-              <YAxis
-                yAxisId="err"
-                orientation="right"
-                tick={{ fontSize: 10, fill: 'rgb(var(--warning))' }}
-                width={36}
-                axisLine={false}
-                tickLine={false}
-                tickFormatter={(v) => `${Number(v).toFixed(0)}%`}
-                domain={[0, (dataMax: number) => Math.max(10, dataMax * 1.2)]}
-              />
-              <Tooltip
-                contentStyle={{
-                  background: 'rgb(var(--surface))',
-                  border: '1px solid rgb(var(--border))',
-                  borderRadius: 6,
-                  fontSize: 11,
-                  color: 'rgb(var(--text))',
-                }}
-                labelFormatter={timeTooltipLabelFormatter}
-                formatter={(v: any, name: any) => {
-                  if (v == null) return ['—', name]
-                  if (name === 'Error Rate') return [`${Number(v).toFixed(2)}%`, name]
-                  return [`${Number(v).toFixed(1)} ms`, name]
-                }}
-              />
-              {bands.map((b, i) => (
-                <ReferenceArea
-                  key={i}
-                  yAxisId="ms"
-                  x1={Math.max(b.start, fromTs)}
-                  x2={Math.min(b.end, toTs)}
-                  stroke="none"
-                  fill={b.kind === 'down' ? 'rgb(var(--danger))' : 'rgb(var(--warning))'}
-                  fillOpacity={0.16}
-                />
-              ))}
-              <Area yAxisId="err" type="stepAfter" dataKey="err" name="Error Rate" stroke="rgb(var(--warning))" fill="rgb(var(--warning) / 0.12)" strokeWidth={1.25} isAnimationActive={false} dot={false} />
-              <Area yAxisId="ms" type="monotone" dataKey="avg" name="Avg Response" stroke="rgb(var(--info))" fill="url(#svcRespG)" strokeWidth={2} isAnimationActive={false} connectNulls={false} dot={singlePoint ? { r: 3 } : false} />
-              <Area yAxisId="ms" type="monotone" dataKey="p95" name="P95" stroke="rgb(var(--accent))" fill="url(#svcP95G)" strokeWidth={1.5} isAnimationActive={false} connectNulls={false} dot={false} />
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
-        {!hasSeries && (
-          <div className="mt-1 text-center text-[11px] text-muted">
-            {bands.length > 0
-              ? 'No response samples in this window — outage intervals are shaded from the status log.'
-              : `No probe samples in ${rangePhrase(rangeLabel)}.`}
-          </div>
-        )}
-      </PanelState>
-    </SectionCard>
-  )
-}
-
-function statusBands(history: StatusHistoryEvent[], fromTs: number, toTs: number) {
-  const sorted = [...history].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
-  const out: { start: number; end: number; kind: 'down' | 'warn' }[] = []
-  let open: { start: number; kind: 'down' | 'warn' } | null = null
-  for (const ev of sorted) {
-    const t = Date.parse(ev.timestamp)
-    const kind = ev.new_status === 'up' ? null : ev.new_status === 'down' ? 'down' : 'warn'
-    if (kind && !open) open = { start: t, kind }
-    else if (!kind && open) {
-      out.push({ start: open.start, end: t, kind: open.kind })
-      open = null
-    } else if (kind && open && kind !== open.kind) {
-      out.push({ start: open.start, end: t, kind: open.kind })
-      open = { start: t, kind }
-    }
-  }
-  if (open) out.push({ start: open.start, end: Date.now(), kind: open.kind })
-  return out.filter((b) => b.end > fromTs && b.start < toTs)
-}
-
-function LegendDot({ color, label }: { color: string; label: string }) {
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className="h-2 w-2 rounded-full" style={{ background: color }} />
-      <span>{label}</span>
-    </span>
-  )
-}
+/* ─── Performance chart: see components/services/detail/PerformanceChart ─── */
 
 /* ─── Latest probe ──────────────────────────────────────────────────────── */
 
-function latestProbePoint(points: ServiceMetricPoint[], check: ServiceCheck): ServiceMetricPoint | null {
-  if (points.length > 0) return points[points.length - 1]
-  if (!check.last_check_at) return null
-  return {
-    timestamp: check.last_check_at,
-    response_ms: check.last_response_ms,
-    is_up: check.status === 'up' ? true : check.status === 'down' ? false : null,
-    status_code: null,
-    tls_days_remaining: check.tls_days_remaining,
-    error_message: check.last_error,
-  }
+const LATEST_TITLE: Record<LatestMode, string> = {
+  latest: 'Latest probe',
+  window: 'Last probe in selected window',
+  status: 'Last result',
 }
 
-function LatestProbeCard({ check, latest, recent, manualProbe }: {
-  check: ServiceCheck
-  latest: ServiceMetricPoint | null
-  recent: ServiceMetricPoint[]
+function LatestProbeCard({ check, latest, mode, recent, manualProbe }: {
+  check: ServiceCheckExt
+  latest: MetricPoint | null
+  mode: LatestMode | null
+  recent: MetricPoint[]
   manualProbe: { result: ProbeEvidenceResult; observedAt: string } | null
 }) {
   const expected = check.http_expected_statuses || String(check.http_expected_status || 200)
   const authLabel = check.credential_name
     ? `${check.credential_name} · ${check.credential_auth_type === 'ntlm' ? 'NTLM' : check.credential_auth_type}`
     : 'No saved credential'
-  const resultLabel = latest?.is_up == null ? 'No data' : latest.is_up ? 'UP' : 'DOWN'
+  const resultLabel = latest?.is_up == null ? NO_DATA : latest.is_up ? 'UP' : 'DOWN'
   const resultTone = latest?.is_up == null ? 'text-muted' : latest.is_up ? 'text-success' : 'text-danger'
+  const when = latest?.timestamp
+    ? `${relativeTime(latest.timestamp)} · ${new Date(latest.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
+    : check.enabled ? 'Waiting for the first probe' : NEVER_CHECKED
 
   return (
     <SectionCard
-      title="Latest probe"
+      title={mode ? LATEST_TITLE[mode] : 'Latest probe'}
+      subtitle={mode === 'status' ? 'From the monitor status; individual probe details are not available here' : mode === 'window' ? 'This appliance cannot report probes outside the selected window' : undefined}
       actions={check.check_type === 'http' ? (
         <span className="rounded-full border border-border bg-surface2/50 px-2 py-0.5 text-[10px] text-muted">Expect HTTP {expected}</span>
       ) : undefined}
     >
       <div className="grid grid-cols-2 gap-2">
-        <ProbeStat label="Result" value={resultLabel} className={resultTone} sub={latest?.timestamp ? relativeTime(latest.timestamp) : 'Waiting for poller'} />
-        <ProbeStat label="Response" value={formatMs(latest?.response_ms)} className="text-info" sub={latest?.status_code != null ? `HTTP ${latest.status_code}` : authLabel} />
+        <ProbeStat label="Result" value={resultLabel} className={resultTone} sub={when} title={latest?.timestamp ? exactTime(latest.timestamp) : undefined} />
+        <ProbeStat
+          label="Response"
+          value={formatMs(latest?.response_ms, NO_DATA)}
+          className="text-info"
+          sub={latest?.status_code != null ? `HTTP ${latest.status_code}` : check.check_type === 'http' ? authLabel : (typeMeta[check.check_type]?.label || '') + ' probe'}
+        />
       </div>
       {(latest?.error_message || check.last_error) && latest?.is_up === false && (
         <div className="mt-2 rounded-md border border-danger/30 bg-danger/10 px-2 py-1.5 text-danger">
@@ -1820,11 +1608,12 @@ function LatestProbeCard({ check, latest, recent, manualProbe }: {
                 {manualProbe.result.status.toUpperCase()}
               </span>
             </span>
-            <span className="font-normal text-muted">{relativeTime(manualProbe.observedAt)}</span>
+            <span className="font-normal text-muted" title={exactTime(manualProbe.observedAt)}>{relativeTime(manualProbe.observedAt)}</span>
           </div>
           <div className="mt-1 text-[11px] text-muted">
             {formatMs(manualProbe.result.response_time_ms)}
             {manualProbe.result.details?.status_code != null ? ` · HTTP ${manualProbe.result.details.status_code}` : ''}
+            {' · diagnostic only; not counted in status or SLA'}
           </div>
           {manualProbe.result.error && <div className="mt-1 text-danger"><ServiceFailureReason reason={manualProbe.result.error} timeoutSeconds={check.timeout} /></div>}
           {(manualProbe.result.details?.steps?.length || 0) > 1 && (
@@ -1843,12 +1632,12 @@ function LatestProbeCard({ check, latest, recent, manualProbe }: {
       )}
       {recent.length > 0 && (
         <div className="mt-3 border-t border-border/60 pt-2">
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Recent scheduled</div>
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted">Recent scheduled probes</div>
           <div className="space-y-1">
             {recent.slice(0, 5).map((p, i) => (
               <div key={`${p.timestamp}-${i}`} className="flex items-center gap-2 text-[11px]">
                 <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', p.is_up ? 'bg-success' : 'bg-danger')} />
-                <span className="w-[68px] shrink-0 tabular-nums text-muted">
+                <span className="w-[68px] shrink-0 tabular-nums text-muted" title={exactTime(p.timestamp)}>
                   {new Date(p.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                 </span>
                 <span className={cn('font-medium', p.is_up ? 'text-success' : 'text-danger')}>{p.is_up ? 'UP' : 'DOWN'}</span>
@@ -1865,9 +1654,9 @@ function LatestProbeCard({ check, latest, recent, manualProbe }: {
   )
 }
 
-function ProbeStat({ label, value, sub, className }: { label: string; value: string; sub: string; className?: string }) {
+function ProbeStat({ label, value, sub, className, title }: { label: string; value: string; sub: string; className?: string; title?: string }) {
   return (
-    <div className="rounded-lg border border-border bg-surface2/30 px-2.5 py-2">
+    <div className="rounded-lg border border-border bg-surface2/30 px-2.5 py-2" title={title}>
       <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
       <div className={cn('mt-0.5 text-lg font-semibold tabular-nums', className)}>{value}</div>
       <div className="truncate text-[10px] text-muted" title={sub}>{sub}</div>
@@ -1877,23 +1666,25 @@ function ProbeStat({ label, value, sub, className }: { label: string; value: str
 
 /* ─── Health score ──────────────────────────────────────────────────────── */
 
-function HealthScoreCard({ score, tint, label, factors, onViewDetails }: {
+function HealthScoreCard({ score, tint, label, factors, coverage, onViewDetails }: {
   score: number | null
   tint: string
   label: string
   factors: HealthFactor[]
+  coverage: number
   onViewDetails: () => void
 }) {
   const radius = 36
   const circ = 2 * Math.PI * radius
   const offset = circ - ((score ?? 0) / 100) * circ
+  const missing = factors.filter((f) => !f.available)
   return (
     <SectionCard
       title="Health score"
       actions={<button type="button" onClick={onViewDetails} className="text-xs text-primary hover:underline">How it's scored</button>}
     >
       <div className="flex items-center gap-4">
-        <div className="relative h-[84px] w-[84px] shrink-0">
+        <div className="relative h-[84px] w-[84px] shrink-0" role="img" aria-label={score == null ? 'Health score: no data' : `Health score ${score} of 100, ${label}`}>
           <svg viewBox="0 0 100 100" className="h-full w-full -rotate-90">
             <circle cx="50" cy="50" r={radius} fill="none" stroke="rgb(var(--border))" strokeWidth="8" />
             <circle cx="50" cy="50" r={radius} fill="none" stroke={tint} strokeWidth="8" strokeLinecap="round" strokeDasharray={circ} strokeDashoffset={offset} />
@@ -1909,14 +1700,21 @@ function HealthScoreCard({ score, tint, label, factors, onViewDetails }: {
             <div key={f.key} className="flex items-center gap-2 text-[10px]">
               <span className="w-[68px] shrink-0 truncate text-muted">{f.label}</span>
               <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface2">
-                <div
-                  className="h-full rounded-full transition-all"
-                  style={{ width: `${f.subScore}%`, background: f.subScore > 90 ? UP_COLOR : f.subScore > 70 ? WARN_COLOR : DOWN_COLOR }}
-                />
+                {f.available && (
+                  <div
+                    className="h-full rounded-full transition-all"
+                    style={{ width: `${f.subScore}%`, background: f.subScore > 90 ? UP_COLOR : f.subScore > 70 ? WARN_COLOR : DOWN_COLOR }}
+                  />
+                )}
               </div>
-              <span className="w-6 shrink-0 text-right font-mono tabular-nums">{f.subScore}</span>
+              <span className="w-10 shrink-0 text-right font-mono tabular-nums">{f.available ? f.subScore : 'n/a'}</span>
             </div>
           ))}
+          {score != null && missing.length > 0 && (
+            <p className="text-[10px] text-muted">
+              Coverage {Math.round(coverage * 100)}%: {missing.map((f) => f.label.toLowerCase()).join(', ')} not measured and excluded; remaining weights rescaled.
+            </p>
+          )}
         </div>
       </div>
     </SectionCard>
@@ -1930,7 +1728,7 @@ function buildActivityEvents(
   alerts: ServiceAlert[],
   fromISO: string,
   toISO: string,
-  check?: ServiceCheck,
+  check?: ServiceCheckExt,
 ): ActivityEvent[] {
   const fromMs = Date.parse(fromISO)
   const toMs = Date.parse(toISO)
@@ -1942,25 +1740,29 @@ function buildActivityEvents(
   const statusEvents: ActivityEvent[] = history.filter((h) => inRange(h.timestamp)).map((h, i) => {
     const up = h.new_status === 'up'
     const down = h.new_status === 'down'
+    const gap = !up && !down && h.new_status !== 'warning' && h.new_status !== 'degraded'
     return {
       id: `status-${h.timestamp}-${i}`,
       timestamp: h.timestamp,
       kind: 'status',
-      severity: up ? 'success' : down ? 'critical' : 'warning',
-      title: up ? (h.old_status === 'unknown' ? 'Monitoring resumed' : 'Service recovered') : down ? 'Service went down' : `Status → ${statusOf(h.new_status).label}`,
+      severity: up ? 'success' : down ? 'critical' : gap ? 'info' : 'warning',
+      title: up ? (h.old_status === 'unknown' ? 'Monitoring resumed' : 'Service recovered') : down ? 'Service went down' : gap ? 'Monitoring evidence stopped' : `Status → ${statusOf(h.new_status).label}`,
       subtitle: [h.reason ? explainServiceFailure(h.reason) : null, h.old_status ? `${h.old_status} → ${h.new_status}` : null].filter(Boolean).join(' · ') || undefined,
     }
   })
 
-  const alertEvents: ActivityEvent[] = alerts.filter((a) => inRange(a.triggered_at)).map((a) => ({
-    id: `alert-${a.id}`,
-    timestamp: a.triggered_at,
-    kind: 'alert',
-    severity: normalizeSeverity(a.severity),
-    title: a.status === 'resolved' ? 'Alert resolved' : a.status === 'acknowledged' ? 'Alert acknowledged' : 'Alert fired',
-    subtitle: cleanAlertMessage(a.message),
-    href: `/alerts/${a.id}`,
-  }))
+  const alertEvents: ActivityEvent[] = alerts.filter((a) => inRange(a.triggered_at)).map((a) => {
+    const recovery = isRecoveryAlert(a)
+    return {
+      id: `alert-${a.id}`,
+      timestamp: a.triggered_at,
+      kind: 'alert',
+      severity: recovery ? 'success' : normalizeSeverity(a.severity),
+      title: recovery ? 'Recovery notification' : a.status === 'resolved' ? 'Alert (resolved)' : a.status === 'acknowledged' ? 'Alert acknowledged' : 'Alert fired',
+      subtitle: cleanAlertMessage(a.message),
+      href: `/alerts/${a.id}`,
+    }
+  })
 
   const extra: ActivityEvent[] = []
   if (
@@ -1998,13 +1800,15 @@ function ActivityLogCard({ events, rangeLabel, showingFallback, onViewAll, onWid
   return (
     <SectionCard
       title="Activity"
-      subtitle={showingFallback ? `Nothing in ${rangePhrase(rangeLabel)} — showing the most recent history` : rangeLabel}
+      subtitle={showingFallback ? `Nothing in ${rangePhrase(rangeLabel)} — showing the most recent 30-day history` : rangeLabel}
       actions={<button type="button" onClick={onViewAll} className="text-xs text-primary hover:underline">View all</button>}
     >
-      <div className="mb-3 flex gap-0.5 rounded-md bg-surface2/60 p-0.5">
+      <div className="mb-3 flex gap-0.5 rounded-md bg-surface2/60 p-0.5" role="group" aria-label="Activity filter">
         {(['all', 'status', 'alert'] as const).map((f) => (
           <button
             key={f}
+            type="button"
+            aria-pressed={filter === f}
             onClick={() => setFilter(f)}
             className={cn(
               'flex-1 rounded px-2 py-1 text-[11px] font-medium capitalize transition-colors',
@@ -2032,7 +1836,7 @@ function ActivityLogCard({ events, rangeLabel, showingFallback, onViewAll, onWid
                 : e.severity === 'warning' ? 'bg-warning/15 text-warning ring-warning/30'
                   : e.severity === 'success' ? 'bg-success/15 text-success ring-success/30'
                     : 'bg-info/15 text-info ring-info/30'
-            const Icon = e.kind === 'alert' ? Bell : e.severity === 'success' ? CheckCircle2 : e.severity === 'critical' ? XCircle : AlertTriangle
+            const Icon = e.kind === 'alert' ? Bell : e.severity === 'success' ? CheckCircle2 : e.severity === 'critical' ? XCircle : e.severity === 'info' ? Info : AlertTriangle
             const inner = (
               <>
                 <span className={cn('relative z-10 flex h-7 w-7 shrink-0 items-center justify-center rounded-full ring-2', tone)}>
@@ -2043,9 +1847,7 @@ function ActivityLogCard({ events, rangeLabel, showingFallback, onViewAll, onWid
                     <div className="truncate text-[11px] font-semibold" title={e.title}>{e.title}</div>
                     <div className="shrink-0 text-[10px] tabular-nums text-muted">{relativeTime(e.timestamp)}</div>
                   </div>
-                  <div className="font-mono text-[10px] tabular-nums text-text2">
-                    {new Date(e.timestamp).toLocaleString(undefined, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                  </div>
+                  <div className="font-mono text-[10px] tabular-nums text-text2">{exactTime(e.timestamp)}</div>
                   {e.subtitle && <div className="truncate text-[10px] text-muted" title={e.subtitle}>{e.subtitle}</div>}
                 </div>
               </>
@@ -2074,6 +1876,7 @@ function EventsDialog({ open, onOpenChange, events, rangeLabel, checkId }: {
       <DialogContent className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Activity · {rangeLabel}</DialogTitle>
+          <DialogDescription className="text-xs">Status changes and alerts for this monitor, newest first.</DialogDescription>
         </DialogHeader>
         <div className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
           {events.length === 0 && <div className="py-8 text-center text-xs text-muted">No events in this window.</div>}
@@ -2083,7 +1886,7 @@ function EventsDialog({ open, onOpenChange, events, rangeLabel, checkId }: {
                 <span className="text-xs font-semibold">{e.title}</span>
                 <span className="text-[10px] text-muted">{relativeTime(e.timestamp)}</span>
               </div>
-              <div className="mt-0.5 font-mono text-[10px] text-muted">{new Date(e.timestamp).toLocaleString()}</div>
+              <div className="mt-0.5 font-mono text-[10px] text-muted">{exactTime(e.timestamp)}</div>
               {e.subtitle && <div className="mt-1 break-words text-[11px] text-muted">{e.subtitle}</div>}
               {e.href && <Link to={e.href} className="mt-1 inline-block text-[11px] text-primary hover:underline">Open alert</Link>}
             </div>
@@ -2189,7 +1992,7 @@ function RelatedServicesCard({ related, failed }: { related?: RelatedResponse; f
                     >
                       <span className={cn(
                         'h-1.5 w-1.5 shrink-0 rounded-full',
-                        c.status === 'up' ? 'bg-success' : c.status === 'down' ? 'bg-danger' : 'bg-warning',
+                        c.status === 'up' ? 'bg-success' : c.status === 'down' ? 'bg-danger' : c.status === 'unknown' ? 'bg-muted/60' : 'bg-warning',
                       )} />
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-[11px] font-medium">{c.name}</div>
@@ -2209,50 +2012,6 @@ function RelatedServicesCard({ related, failed }: { related?: RelatedResponse; f
   )
 }
 
-/* ─── Config summary (overview) ─────────────────────────────────────────── */
-
-function ConfigSummaryCard({ check, onEdit, onOpenConfig }: { check: ServiceCheck; onEdit: () => void; onOpenConfig: () => void }) {
-  const rows: Array<{ label: string; value: string; mono?: boolean }> = [
-    { label: 'Target', value: check.target_url || check.target_host || '—', mono: true },
-    { label: 'Method', value: check.http_method || '—' },
-    { label: 'Auth', value: check.credential_name ? `${check.credential_name} (${check.credential_auth_type})` : 'None' },
-    { label: 'Journey', value: (check.workflow_steps?.length || 0) > 0 ? `${check.workflow_steps?.length} steps · ${(check.workflow_operator || 'all').toUpperCase()}` : 'Single request' },
-    { label: 'Expected', value: check.http_expected_statuses || String(check.http_expected_status || '—') },
-    { label: 'Timeout', value: `${check.timeout}s` },
-    { label: 'Interval', value: `${check.check_interval}s` },
-    { label: 'Group', value: check.group_name || 'Unassigned' },
-  ]
-  return (
-    <SectionCard
-      title="Configuration"
-      actions={
-        <div className="flex items-center gap-2">
-          <button type="button" onClick={onOpenConfig} className="text-xs text-primary hover:underline">Full</button>
-          <button type="button" onClick={onEdit} className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
-            <Pencil className="h-3 w-3" /> Edit
-          </button>
-        </div>
-      }
-    >
-      <dl className="space-y-1.5">
-        {rows.map((r) => (
-          <div key={r.label} className="grid grid-cols-[80px_1fr] items-start gap-2 text-[11px]">
-            <dt className="text-muted">{r.label}</dt>
-            <dd className={cn('min-w-0 truncate font-medium', r.mono && 'font-mono')} title={r.value}>{r.value}</dd>
-          </div>
-        ))}
-      </dl>
-      {check.tags.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-1 border-t border-border/60 pt-2.5">
-          {check.tags.map((t) => (
-            <span key={t} className="rounded-full border border-border bg-surface2/50 px-2 py-0.5 text-[10px] text-muted">{t}</span>
-          ))}
-        </div>
-      )}
-    </SectionCard>
-  )
-}
-
 /* ─── Uptime tab: 30-day calendar ───────────────────────────────────────── */
 
 type DayUptime = {
@@ -2264,59 +2023,67 @@ type DayUptime = {
   samples: number
   coveredSec: number
   downtimeSec: number
-  hours: Array<{ hour: number; uptimePct: number | null; samples: number }>
+  maintenanceSec: number
+  /** One slot per real clock hour of the local day (23/24/25 around DST changes). */
+  hours: Array<{ hour: number; start: number; uptimePct: number | null; samples: number }>
 }
 
-function buildDailyUptime(hours: HourlyUptime[], dayCount: number): DayUptime[] {
-  const byDay = new Map<string, { pctSum: number; pctN: number; total: number; hours: Map<number, { pct: number | null; samples: number }> }>()
-  for (const h of hours) {
-    const t = Date.parse(h.ts)
-    if (!Number.isFinite(t)) continue
-    const d = new Date(t)
-    const key = dayKey(d)
-    let entry = byDay.get(key)
-    if (!entry) { entry = { pctSum: 0, pctN: 0, total: 0, hours: new Map() }; byDay.set(key, entry) }
-    // Weight each hour by observed seconds, including partial current hours.
-    if (h.uptime_pct != null) {
-      const weight = h.covered_sec ?? 0
-      entry.pctSum += h.uptime_pct * weight
-      entry.pctN += weight
-      entry.total += h.sample_count || 0
-    }
-    entry.hours.set(d.getHours(), { pct: h.uptime_pct, samples: h.sample_count || 0 })
-  }
-
-  const out: DayUptime[] = []
-  const today = new Date()
+function buildDailyUptime(hours: Array<{ ts: string; uptime_pct: number | null; sample_count: number; covered_sec?: number; maintenance_sec?: number }>, dayCount: number, nowMs: number = Date.now()): DayUptime[] {
+  // Local-midnight boundaries via calendar arithmetic, never +24 h: DST days are 23 or 25 hours.
+  const today = new Date(nowMs)
   today.setHours(0, 0, 0, 0)
+  const days: DayUptime[] = []
   for (let i = dayCount - 1; i >= 0; i--) {
     const date = new Date(today)
     date.setDate(today.getDate() - i)
-    const key = dayKey(date)
-    const entry = byDay.get(key)
+    const next = new Date(date)
+    next.setDate(next.getDate() + 1)
     const start = date.getTime()
-    const nextDay = new Date(date)
-    nextDay.setDate(nextDay.getDate() + 1)
-    const end = nextDay.getTime()
-    const uptimePct = entry && entry.pctN > 0 ? entry.pctSum / entry.pctN : null
-    const coveredSec = entry ? Math.min(86_400, entry.pctN) : 0
-    const downtimeSec = uptimePct == null ? 0 : ((100 - uptimePct) / 100) * coveredSec
-    out.push({
-      key,
+    const end = next.getTime()
+    const slots = Math.max(1, Math.round((end - start) / 3_600_000))
+    days.push({
+      key: dayKey(date),
       start,
       end,
       date,
-      uptimePct,
-      samples: entry?.total ?? 0,
-      downtimeSec,
-      coveredSec,
-      hours: Array.from({ length: 24 }, (_, hour) => {
-        const hv = entry?.hours.get(hour)
-        return { hour, uptimePct: hv?.pct ?? null, samples: hv?.samples ?? 0 }
-      }),
+      uptimePct: null,
+      samples: 0,
+      coveredSec: 0,
+      downtimeSec: 0,
+      maintenanceSec: 0,
+      hours: Array.from({ length: slots }, (_, h) => ({ hour: h, start: start + h * 3_600_000, uptimePct: null, samples: 0 })),
     })
   }
-  return out
+  const acc = days.map(() => ({ pctSum: 0, weight: 0, samples: 0, maint: 0 }))
+  for (const h of hours) {
+    const t = Date.parse(h.ts)
+    if (!Number.isFinite(t)) continue
+    const di = days.findIndex((d) => t >= d.start && t < d.end)
+    if (di < 0) continue
+    const d = days[di]
+    const a = acc[di]
+    const slot = Math.floor((t - d.start) / 3_600_000)
+    if (slot >= 0 && slot < d.hours.length) d.hours[slot] = { ...d.hours[slot], uptimePct: h.uptime_pct, samples: h.sample_count || 0 }
+    a.maint += h.maintenance_sec || 0
+    // Weight each hour by observed seconds, including partial current hours.
+    if (h.uptime_pct != null) {
+      const weight = h.covered_sec ?? 0
+      a.pctSum += h.uptime_pct * weight
+      a.weight += weight
+      a.samples += h.sample_count || 0
+    }
+  }
+  days.forEach((d, i) => {
+    const a = acc[i]
+    const uptimePct = a.weight > 0 ? a.pctSum / a.weight : null
+    const coveredSec = Math.min((d.end - d.start) / 1000, a.weight)
+    d.uptimePct = uptimePct
+    d.coveredSec = coveredSec
+    d.samples = a.samples
+    d.maintenanceSec = a.maint
+    d.downtimeSec = uptimePct == null ? 0 : ((100 - uptimePct) / 100) * coveredSec
+  })
+  return days
 }
 
 /** Availability weighted by each day's covered wall-clock hours, so a day with one stored
@@ -2340,10 +2107,11 @@ function dayKey(d: Date): string {
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
-function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectDay, outagesFor, checkId, intervalSeconds, historyLoading, historyError }: {
+function UptimeCalendar({ days, fromTs, toTs, dim, loading, error, onRetry, onSelectDay, outagesFor, checkId, intervalSeconds, historyLoading, historyError, nowMs }: {
   days: DayUptime[]
   fromTs: number
   toTs: number
+  dim: boolean
   loading: boolean
   error: boolean
   onRetry: () => void
@@ -2353,6 +2121,7 @@ function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectD
   intervalSeconds: number
   historyLoading: boolean
   historyError: boolean
+  nowMs: number
 }) {
   const [selected, setSelected] = useState<string | null>(null)
   const measured = days.filter((d) => d.uptimePct != null)
@@ -2362,10 +2131,10 @@ function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectD
   const selectedDay = days.find((d) => d.key === selected) || null
   const selectedOutages = selectedDay ? outagesFor(selectedDay) : []
 
-  // Dim days outside the range picker's window, matching the 30-day strip.
+  // Dim days outside a day-scale selected range; a 1-hour range would dim nearly everything.
   const inRange = (d: DayUptime) => d.end > fromTs && d.start < toTs
   const inCount = days.filter(inRange).length
-  const dimOthers = inCount > 0 && inCount < days.length
+  const dimOthers = dim && inCount > 0 && inCount < days.length
 
   // Monday-first grid: pad the first week so each column is a weekday.
   const leadPad = days.length ? (days[0].date.getDay() + 6) % 7 : 0
@@ -2377,7 +2146,7 @@ function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectD
       actions={
         <div className="flex items-center gap-3 text-xs">
           {overall != null && (
-            <span className={cn('font-mono font-semibold tabular-nums', BAND_TEXT[uptimeBand(overall)])}>{overall.toFixed(3)}%</span>
+            <span className={cn('font-mono font-semibold tabular-nums', BAND_TEXT[availabilityBand(overall, totalDowntime)])}>{formatAvailability(overall, totalDowntime, 3)}</span>
           )}
           {totalDowntime > 0 && <span className="text-muted">{formatDur(totalDowntime)} down</span>}
         </div>
@@ -2394,34 +2163,37 @@ function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectD
           <>
             <div className="grid grid-cols-7 gap-1.5">
               {WEEKDAYS.map((w) => (
-                <div key={w} className="pb-0.5 text-center text-[10px] font-semibold uppercase tracking-wider text-muted">{w}</div>
+                <div key={w} aria-hidden className="pb-0.5 text-center text-[10px] font-semibold uppercase tracking-wider text-muted">{w}</div>
               ))}
-              {Array.from({ length: leadPad }).map((_, i) => <div key={`pad-${i}`} />)}
+              {Array.from({ length: leadPad }).map((_, i) => <div key={`pad-${i}`} aria-hidden />)}
               {days.map((d) => {
-                const band = uptimeBand(d.uptimePct)
+                const band = availabilityBand(d.uptimePct, d.downtimeSec)
                 const isSelected = selected === d.key
+                const label = formatAvailability(d.uptimePct, d.downtimeSec, 2, '—')
+                const when = d.date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })
+                const coverage = d.uptimePct == null ? 'no monitoring evidence'
+                  : `${Math.round((d.coveredSec / Math.max(1, (Math.min(d.end, nowMs) - d.start) / 1000)) * 100)}% of the day observed`
+                const aria = d.uptimePct == null
+                  ? `${when}: no data`
+                  : `${when}: ${formatAvailability(d.uptimePct, d.downtimeSec, 3)} available, ${d.downtimeSec > 0 ? `${formatDur(d.downtimeSec)} confirmed downtime` : 'no confirmed downtime'}, ${coverage}${d.maintenanceSec > 0 ? `, ${formatDur(d.maintenanceSec)} maintenance` : ''}`
                 return (
                   <button
                     key={d.key}
                     type="button"
+                    aria-pressed={isSelected}
+                    aria-label={aria}
                     onClick={() => setSelected(isSelected ? null : d.key)}
-                    title={
-                      d.uptimePct == null
-                        ? `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })} — no data`
-                        : `${d.date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })}\n${d.uptimePct.toFixed(3)}% up · ${d.samples > 0 ? `${d.samples} samples` : 'observed coverage'}${d.downtimeSec > 0 ? `\n${formatDur(d.downtimeSec)} down` : ''}`
-                    }
+                    title={aria}
                     className={cn(
-                      'group relative flex h-[62px] flex-col items-center justify-center rounded-lg border transition-all',
+                      'group relative flex h-[62px] flex-col items-center justify-center rounded-lg border transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/60',
                       isSelected ? 'border-primary ring-2 ring-primary/40' : 'border-border hover:border-border-strong',
                       d.uptimePct == null && 'bg-surface2/40',
-                      dimOthers && !inRange(d) && !isSelected && 'opacity-45 hover:opacity-100',
+                      dimOthers && !inRange(d) && !isSelected && 'opacity-60 hover:opacity-100',
                     )}
                     style={d.uptimePct != null ? { backgroundColor: withAlpha(BAND_FILL[band], band === 'perfect' ? 0.22 : 0.28) } : undefined}
                   >
                     <span className="text-[11px] font-semibold tabular-nums text-text">{d.date.getDate()}</span>
-                    <span className={cn('text-[9px] font-medium tabular-nums', BAND_TEXT[band])}>
-                      {d.uptimePct == null ? '—' : d.uptimePct >= 99.95 ? '100%' : `${d.uptimePct.toFixed(d.uptimePct >= 99 ? 1 : 0)}%`}
-                    </span>
+                    <span className={cn('text-[10px] font-medium tabular-nums', BAND_TEXT[band])}>{label}</span>
                     <span
                       className="absolute inset-x-1.5 bottom-1 h-[3px] rounded-full"
                       style={{ backgroundColor: BAND_FILL[band] }}
@@ -2433,7 +2205,7 @@ function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectD
 
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-border/60 pt-3">
               <div className="flex flex-wrap items-center gap-3 text-[10px] text-muted">
-                <Swatch color={BAND_FILL.perfect} label="100%" />
+                <Swatch color={BAND_FILL.perfect} label="100% (no confirmed downtime)" />
                 <Swatch color={BAND_FILL.good} label="≥ 99%" />
                 <Swatch color={BAND_FILL.fair} label="≥ 95%" />
                 <Swatch color={BAND_FILL.poor} label="< 95%" />
@@ -2441,26 +2213,33 @@ function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectD
                   <span className="h-2 w-2 rounded-sm bg-surface2 ring-1 ring-inset ring-border" />No data
                 </span>
               </div>
-              {worst && (worst.uptimePct as number) < 100 && (
+              {worst && (worst.downtimeSec > 0 || (worst.uptimePct as number) < 100) && (
                 <span className="text-[11px] text-muted">
                   Worst day{' '}
-                  <span className={BAND_TEXT[uptimeBand(worst.uptimePct)]}>
-                    {worst.date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · {(worst.uptimePct as number).toFixed(2)}%
+                  <span className={BAND_TEXT[availabilityBand(worst.uptimePct, worst.downtimeSec)]}>
+                    {worst.date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · {formatAvailability(worst.uptimePct, worst.downtimeSec, 2)}
                   </span>
                 </span>
               )}
             </div>
+            <p className="mt-1.5 text-[10px] text-muted">Percentages are truncated, never rounded up: 100% means no confirmed downtime that day.</p>
 
             {selectedDay && (
               <div className="mt-3 rounded-lg border border-border bg-surface2/30 p-3">
                 <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                   <div className="text-xs font-semibold">
                     {selectedDay.date.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
-                    <span className={cn('ml-2 font-mono font-medium tabular-nums', BAND_TEXT[uptimeBand(selectedDay.uptimePct)])}>
-                      {selectedDay.uptimePct == null ? 'no data' : `${selectedDay.uptimePct.toFixed(3)}%`}
+                    <span className={cn('ml-2 font-mono font-medium tabular-nums', BAND_TEXT[availabilityBand(selectedDay.uptimePct, selectedDay.downtimeSec)])}>
+                      {formatAvailability(selectedDay.uptimePct, selectedDay.downtimeSec, 3)}
                     </span>
                     {selectedDay.downtimeSec > 0 && (
                       <span className="ml-2 text-[11px] font-normal text-muted">{formatDur(selectedDay.downtimeSec)} down</span>
+                    )}
+                    {selectedDay.maintenanceSec > 0 && (
+                      <span className="ml-2 text-[11px] font-normal text-muted">{formatDur(selectedDay.maintenanceSec)} maintenance excluded</span>
+                    )}
+                    {selectedDay.hours.length !== 24 && (
+                      <span className="ml-2 text-[11px] font-normal text-muted">({selectedDay.hours.length}-hour day, clock change)</span>
                     )}
                   </div>
                   <Button variant="outline" size="sm" className="h-7" onClick={() => onSelectDay(selectedDay)}>
@@ -2468,20 +2247,23 @@ function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectD
                   </Button>
                 </div>
                 <div className="flex gap-[2px]">
-                  {selectedDay.hours.map((h) => (
-                    <div
-                      key={h.hour}
-                      className="h-6 flex-1 rounded-sm"
-                      style={{
-                        backgroundColor: h.uptimePct == null ? 'rgb(var(--surface3) / 0.5)' : BAND_FILL[uptimeBand(h.uptimePct)],
-                      }}
-                      title={
-                        h.uptimePct == null
-                          ? `${String(h.hour).padStart(2, '0')}:00 — no data`
-                          : `${String(h.hour).padStart(2, '0')}:00 — ${h.uptimePct.toFixed(1)}% up · ${h.samples > 0 ? `${h.samples} samples` : 'observed coverage'}`
-                      }
-                    />
-                  ))}
+                  {selectedDay.hours.map((h) => {
+                    const hh = new Date(h.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                    return (
+                      <div
+                        key={h.hour}
+                        className="h-6 flex-1 rounded-sm"
+                        style={{
+                          backgroundColor: h.uptimePct == null ? 'rgb(var(--surface3) / 0.5)' : BAND_FILL[availabilityBand(h.uptimePct, h.uptimePct < 100 ? 1 : 0)],
+                        }}
+                        title={
+                          h.uptimePct == null
+                            ? `${hh} — no data`
+                            : `${hh} — ${formatAvailability(h.uptimePct, undefined, 2)} · ${h.samples > 0 ? `${h.samples} samples` : 'observed coverage'}`
+                        }
+                      />
+                    )
+                  })}
                 </div>
                 <div className="mt-1 flex justify-between text-[9px] tabular-nums text-muted">
                   <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span>
@@ -2500,14 +2282,16 @@ function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectD
                   {historyLoading ? <p className="text-[11px] text-muted">Loading confirmed status incidents…</p>
                     : historyError ? <p className="text-[11px] text-danger">Could not load confirmed status incidents.</p>
                     : selectedOutages.length === 0 ? (
-                    <p className="text-[11px] text-muted">No confirmed Down or Warning incidents recorded for this day.</p>
+                    <p className="text-[11px] text-muted">
+                      {selectedDay.coveredSec > 0 ? 'No confirmed Down or Warning incidents recorded for this day.' : 'No monitoring evidence for this day.'}
+                    </p>
                   ) : (
                     <div className="space-y-1.5">
-                      {selectedOutages.map((o, i) => {
-                        const end = o.end ?? Date.now()
+                      {selectedOutages.map((o) => {
+                        const end = o.end ?? nowMs
                         const fmt = (t: number) => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
                         return (
-                          <div key={`${o.start}-${i}`} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
+                          <div key={o.id} className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
                             <span className={cn(
                               'inline-flex shrink-0 items-center rounded px-1.5 py-px text-[9px] font-semibold uppercase tracking-wider',
                               o.kind === 'down' ? 'bg-danger/15 text-danger' : 'bg-warning/15 text-warning',
@@ -2520,6 +2304,7 @@ function UptimeCalendar({ days, fromTs, toTs, loading, error, onRetry, onSelectD
                             <span className="font-mono font-medium tabular-nums text-danger">
                               {o.clippedStart || o.clippedEnd ? '≥ ' : ''}{formatDur((end - o.start) / 1000)}
                             </span>
+                            {o.endKind === 'gap' && <span className="text-muted">evidence stopped</span>}
                             {o.reason && (
                               <div className="basis-full pl-1 text-text2"><ServiceFailureReason reason={o.reason} /></div>
                             )}
@@ -2543,28 +2328,29 @@ function withAlpha(rgbExpr: string, alpha: number): string {
   return `rgb(${inner} / ${alpha})`
 }
 
-function DailyUptimeChart({ days, fromTs, toTs }: { days: DayUptime[]; fromTs: number; toTs: number }) {
+function DailyUptimeChart({ days, fromTs, toTs, dim }: { days: DayUptime[]; fromTs: number; toTs: number; dim: boolean }) {
   const inRangeCount = days.filter((d) => d.end > fromTs && d.start < toTs).length
-  const dimOthers = inRangeCount > 0 && inRangeCount < days.length
+  const dimOthers = dim && inRangeCount > 0 && inRangeCount < days.length
   const data = days.map((d) => ({
     label: d.date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
     pct: d.uptimePct,
-    band: uptimeBand(d.uptimePct),
+    downtime: d.downtimeSec,
+    band: availabilityBand(d.uptimePct, d.downtimeSec),
     dim: dimOthers && !(d.end > fromTs && d.start < toTs),
   }))
   const hasData = data.some((d) => d.pct != null)
   return (
-    <SectionCard title="Daily availability" subtitle="Last 30 days" bodyClassName="flex flex-col p-4">
+    <SectionCard title="Daily availability" subtitle="Last 30 days · context" bodyClassName="flex flex-col p-4">
       {!hasData ? (
         <EmptyState icon={Gauge} title="No daily data" description="Daily availability appears once probe results have been stored." />
       ) : (
-        <div className="min-h-[220px] w-full flex-1">
+        <div className="h-[240px] w-full">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={data} margin={{ top: 6, right: 8, bottom: 0, left: 0 }}>
               <CartesianGrid stroke="rgb(var(--border) / 0.35)" strokeDasharray="3 3" vertical={false} />
               <XAxis
                 dataKey="label"
-                tick={{ fontSize: 9, fill: 'rgb(var(--muted))' }}
+                tick={{ fontSize: 10, fill: 'rgb(var(--muted))' }}
                 axisLine={false}
                 tickLine={false}
                 interval={Math.max(0, Math.floor(data.length / 8) - 1)}
@@ -2586,585 +2372,16 @@ function DailyUptimeChart({ days, fromTs, toTs }: { days: DayUptime[]; fromTs: n
                   fontSize: 11,
                   color: 'rgb(var(--text))',
                 }}
-                formatter={(v: any) => [v == null ? 'no data' : `${Number(v).toFixed(3)}%`, 'Uptime']}
+                formatter={(v: any, _n: any, item: any) => [v == null ? 'no data' : formatAvailability(Number(v), item?.payload?.downtime, 3), 'Availability']}
               />
               <Bar dataKey="pct" radius={[3, 3, 0, 0]} isAnimationActive={false}>
-                {data.map((d, i) => <Cell key={i} fill={BAND_FILL[d.band]} fillOpacity={d.dim ? 0.3 : 1} />)}
+                {data.map((d, i) => <Cell key={i} fill={BAND_FILL[d.band]} fillOpacity={d.dim ? 0.45 : 1} />)}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
         </div>
       )}
     </SectionCard>
-  )
-}
-
-function SlaSummaryCard({ sla, rangeLabel, loading, error, onRetry }: {
-  sla?: SlaStats
-  rangeLabel: string
-  loading: boolean
-  error: boolean
-  onRetry: () => void
-}) {
-  const rows: Array<{ label: string; value: string; tone?: string; hint?: string }> = [
-    { label: 'Confirmed availability', value: pct(sla?.uptime_pct, 3), tone: BAND_TEXT[uptimeBand(sla?.uptime_pct)] },
-    { label: 'Raw probe availability', value: pct(sla?.probe_uptime_pct, 3), hint: 'includes unconfirmed failures' },
-    { label: 'Confirmed downtime rate', value: pct(sla?.error_rate_pct, 3) },
-    // A clean window really has zero downtime; "—" would read as "unknown".
-    { label: 'Total downtime', value: (sla?.total_downtime_sec || 0) > 0 ? formatDur(sla?.total_downtime_sec) : '0s', tone: (sla?.total_downtime_sec || 0) > 0 ? 'text-danger' : 'text-success' },
-    { label: 'Incidents', value: String(sla?.incident_count ?? 0) },
-    { label: 'Longest outage', value: (sla?.longest_incident_sec || 0) > 0 ? formatDur(sla?.longest_incident_sec) : '0s' },
-    { label: 'MTTR', value: sla?.mttr_sec != null ? formatDur(sla.mttr_sec) : 'n/a', hint: 'mean time to recovery' },
-    { label: 'MTBF', value: sla?.mtbf_sec != null ? formatDur(sla.mtbf_sec) : 'n/a', hint: 'mean time between failures' },
-    { label: 'Avg response', value: formatMs(sla?.avg_response_ms) },
-    { label: 'P95 response', value: formatMs(sla?.p95_response_ms) },
-    { label: 'Max response', value: formatMs(sla?.max_response_ms) },
-    { label: 'Samples', value: (sla?.sample_count ?? 0).toLocaleString() },
-    { label: 'Current streak', value: formatDur(sla?.uptime_streak_sec), tone: 'text-success' },
-  ]
-  return (
-    <SectionCard title="SLA summary" subtitle={`${rangeLabel} · confirmed Down incidents only`} bodyClassName="p-0">
-      <PanelState loading={loading} error={error} onRetry={onRetry} loadingText="Computing SLA…" errorText="Could not compute SLA for this window.">
-        <dl className="divide-y divide-border/60">
-          {rows.map((r) => (
-            <div key={r.label} className="flex items-baseline justify-between gap-3 px-4 py-2">
-              <dt className="text-[11px] text-muted">
-                {r.label}
-                {r.hint && <span className="ml-1 text-[10px] text-muted/70">({r.hint})</span>}
-              </dt>
-              <dd className={cn('font-mono text-xs font-medium tabular-nums', r.tone)}>{r.value}</dd>
-            </div>
-          ))}
-        </dl>
-      </PanelState>
-    </SectionCard>
-  )
-}
-
-/* ─── Incidents tab ─────────────────────────────────────────────────────── */
-
-/** Prepend the last transition before `fromTs` as a synthetic event at `fromTs`, so a window
-    that opens mid-outage (or mid-uptime) carries its true starting state. */
-function seedHistoryWithPrior(
-  history: StatusHistoryEvent[],
-  wideHistory: StatusHistoryEvent[],
-  fromTs: number,
-): StatusHistoryEvent[] {
-  if (history.some((h) => Date.parse(h.timestamp) <= fromTs)) return history
-  const prior = wideHistory
-    .filter((h) => {
-      const t = Date.parse(h.timestamp)
-      return Number.isFinite(t) && t < fromTs
-    })
-    .sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp))[0]
-  if (!prior) return history
-  const synthetic: StatusHistoryEvent = {
-    timestamp: new Date(fromTs).toISOString(),
-    old_status: prior.old_status,
-    new_status: prior.new_status,
-    reason: prior.reason,
-  }
-  return [synthetic, ...history]
-}
-
-function buildOutages(history: StatusHistoryEvent[], fromTs: number, toTs: number, check: ServiceCheck): Outage[] {
-  const sorted = [...history]
-    .filter((h) => Number.isFinite(Date.parse(h.timestamp)))
-    .sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
-
-  const out: Outage[] = []
-  let open: { start: number; kind: 'down' | 'warn'; reason?: string; clipped: boolean } | null = null
-
-  // Any outage can only start once the check exists — clamp inferred/seeded starts so a
-  // 30-day window over a week-old check doesn't invent weeks of downtime.
-  const createdTs = Date.parse(check.created_at)
-  const clampStart = (t: number) => Math.max(t, Number.isFinite(createdTs) ? createdTs : t)
-
-  for (const ev of sorted) {
-    const t = Date.parse(ev.timestamp)
-    if (ev.new_status === 'up' || !['down', 'warning', 'degraded'].includes(ev.new_status)) {
-      if (open) {
-        out.push({ start: open.start, end: t, kind: open.kind, reason: open.reason, clippedStart: open.clipped })
-        open = null
-      }
-    } else if (['down', 'warning', 'degraded'].includes(ev.new_status) && !open) {
-      open = {
-        start: clampStart(t),
-        kind: ev.new_status === 'down' ? 'down' : 'warn',
-        reason: ev.reason || undefined,
-        // A seeded event lands exactly on the window edge: the outage actually began earlier.
-        clipped: t <= fromTs,
-      }
-    }
-  }
-  if (open) out.push({ start: open.start, end: null, kind: open.kind, reason: open.reason, clippedStart: open.clipped })
-
-  // A historical window's trailing outage isn't "ongoing" — its recovery simply lies beyond
-  // the window. Clip it (and any recovery past the edge) to the window end.
-  const nowMs = Date.now()
-  const windowReachesNow = toTs >= nowMs - 60_000
-  const clipped = out.map((o) => {
-    if (o.end == null) {
-      if (windowReachesNow) return o
-      return { ...o, end: Math.min(toTs, nowMs), clippedEnd: true }
-    }
-    if (o.end > toTs) return { ...o, end: toTs, clippedEnd: true }
-    return o
-  })
-
-  return clipped.filter((o) => (o.end ?? nowMs) > fromTs && o.start < toTs).sort((a, b) => b.start - a.start)
-}
-
-function IncidentsTab({
-  outages, alerts, rangeLabel, checkId, ruleCovered, onAck, ackDisabled, onWiden,
-}: {
-  outages: Outage[]
-  alerts: ServiceAlert[]
-  rangeLabel: string
-  checkId: string
-  ruleCovered?: boolean
-  onAck: () => void
-  ackDisabled: boolean
-  onWiden: () => void
-}) {
-  const [kind, setKind] = useState<'all' | 'down' | 'warn'>('all')
-  const [alertStatus, setAlertStatus] = useState<'all' | 'active' | 'acknowledged' | 'resolved'>('all')
-
-  const filteredOutages = kind === 'all' ? outages : outages.filter((o) => o.kind === kind)
-  const filteredAlerts = alertStatus === 'all' ? alerts : alerts.filter((a) => a.status === alertStatus)
-  const totalDown = outages.reduce((s, o) => s + ((o.end ?? Date.now()) - o.start), 0) / 1000
-
-  return (
-    <div className="space-y-4">
-      <SectionCard
-        title="Outages"
-        subtitle={
-          outages.length > 0
-            ? `${outages.length} in ${rangePhrase(rangeLabel)} · ${formatDur(totalDown)} total`
-            : rangeLabel
-        }
-        actions={
-          <div className="flex gap-0.5 rounded-md bg-surface2/60 p-0.5">
-            {(['all', 'down', 'warn'] as const).map((k) => (
-              <button
-                key={k}
-                onClick={() => setKind(k)}
-                className={cn(
-                  'rounded px-2 py-1 text-[11px] font-medium capitalize transition-colors',
-                  kind === k ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text',
-                )}
-              >
-                {k === 'all' ? 'All' : k === 'down' ? 'Down' : 'Warning'}
-              </button>
-            ))}
-          </div>
-        }
-        bodyClassName="p-0"
-      >
-        {filteredOutages.length === 0 ? (
-          <EmptyState
-            icon={CheckCircle2}
-            title={outages.length === 0 ? `No outages in ${rangePhrase(rangeLabel)}` : 'Nothing matches this filter'}
-            description={
-              outages.length === 0
-                ? 'The service stayed healthy for the whole window. Widen the range to look further back.'
-                : 'Try switching the filter back to All.'
-            }
-            action={outages.length === 0 ? <Button variant="outline" size="sm" onClick={onWiden}>Widen to 30 days</Button> : undefined}
-          />
-        ) : (
-          <Table>
-            <THead>
-              <Tr>
-                <Th>Status</Th>
-                <Th>Started</Th>
-                <Th>Recovered</Th>
-                <Th className="text-right">Duration</Th>
-                <Th>Reason</Th>
-              </Tr>
-            </THead>
-            <TBody>
-              {filteredOutages.map((o, i) => {
-                const end = o.end ?? Date.now()
-                const ongoing = o.end == null
-                return (
-                  <Tr key={`${o.start}-${i}`}>
-                    <Td>
-                      <Badge variant={o.kind === 'down' ? 'danger' : 'warning'}>
-                        {o.kind === 'down' ? <XCircle className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
-                        {o.kind === 'down' ? 'Down' : 'Warning'}
-                      </Badge>
-                    </Td>
-                    <Td>
-                      <div className="font-mono text-[11px] tabular-nums">{new Date(o.start).toLocaleString()}</div>
-                      <div className="text-[10px] text-muted">
-                        {o.clippedStart ? 'started before this window' : relativeTime(new Date(o.start).toISOString())}
-                      </div>
-                    </Td>
-                    <Td>
-                      {ongoing ? (
-                        <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-danger">
-                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-danger" /> Ongoing
-                        </span>
-                      ) : (
-                        <>
-                          <div className="font-mono text-[11px] tabular-nums">{new Date(end).toLocaleString()}</div>
-                          <div className="text-[10px] text-muted">
-                            {o.clippedEnd ? 'continued past this window' : relativeTime(new Date(end).toISOString())}
-                          </div>
-                        </>
-                      )}
-                    </Td>
-                    <Td className="text-right font-mono text-xs font-medium tabular-nums">
-                      {o.clippedStart || o.clippedEnd ? '≥ ' : ''}{formatDur((end - o.start) / 1000)}
-                    </Td>
-                    <Td>
-                      <div className="max-w-[380px] text-muted"><ServiceFailureReason reason={o.reason} /></div>
-                    </Td>
-                  </Tr>
-                )
-              })}
-            </TBody>
-          </Table>
-        )}
-      </SectionCard>
-
-      <SectionCard
-        title="Alerts"
-        subtitle={alerts.length > 0 ? `${alerts.length} for this check` : 'Alerts raised for this service check'}
-        actions={
-          <div className="flex items-center gap-2">
-            <div className="flex gap-0.5 rounded-md bg-surface2/60 p-0.5">
-              {(['all', 'active', 'acknowledged', 'resolved'] as const).map((s) => (
-                <button
-                  key={s}
-                  onClick={() => setAlertStatus(s)}
-                  className={cn(
-                    'rounded px-2 py-1 text-[11px] font-medium capitalize transition-colors',
-                    alertStatus === s ? 'bg-surface text-text shadow-sm' : 'text-muted hover:text-text',
-                  )}
-                >
-                  {s === 'acknowledged' ? 'Ack' : s}
-                </button>
-              ))}
-            </div>
-            <Button variant="outline" size="sm" className="h-7" onClick={onAck} disabled={ackDisabled}>
-              <Check className="h-3 w-3" /> Ack all
-            </Button>
-          </div>
-        }
-        bodyClassName="p-0"
-      >
-        {filteredAlerts.length === 0 ? (
-          ruleCovered === false ? (
-            <EmptyState
-              icon={BellOff}
-              title="No alert rule covers this check"
-              description="Outages are recorded above, but nothing will page anyone: no enabled alert rule targets this check, its group, or the service_status metric. Create one to get notified when it goes down."
-              action={<Button variant="outline" size="sm" asChild><Link to="/alert-rules">Create an alert rule</Link></Button>}
-            />
-          ) : (
-            <EmptyState
-              icon={Bell}
-              title={alerts.length === 0 ? 'No alerts for this check' : 'Nothing matches this filter'}
-              description={
-                alerts.length === 0
-                  ? 'Alerts raised by a rule scoped to this check will be listed here.'
-                  : 'Try switching the status filter back to All.'
-              }
-            />
-          )
-        ) : (
-          <Table>
-            <THead>
-              <Tr>
-                <Th>Severity</Th>
-                <Th>Message</Th>
-                <Th>Status</Th>
-                <Th>Triggered</Th>
-                <Th>Resolved</Th>
-              </Tr>
-            </THead>
-            <TBody>
-              {filteredAlerts.map((a) => (
-                <Tr key={a.id} className="cursor-pointer">
-                  <Td>
-                    <Badge variant={a.severity === 'critical' ? 'danger' : a.severity === 'warning' ? 'warning' : 'info'}>
-                      {a.severity}
-                    </Badge>
-                  </Td>
-                  <Td>
-                    <Link to={`/alerts/${a.id}`} className="block max-w-[420px] truncate text-[11px] hover:text-primary hover:underline" title={cleanAlertMessage(a.message)}>
-                      {cleanAlertMessage(a.message)}
-                    </Link>
-                  </Td>
-                  <Td>
-                    <span className={cn(
-                      'text-[11px] font-medium capitalize',
-                      a.status === 'active' ? 'text-danger' : a.status === 'acknowledged' ? 'text-warning' : 'text-success',
-                    )}>
-                      {a.status}
-                    </span>
-                  </Td>
-                  <Td className="text-[11px] tabular-nums text-muted">{relativeTime(a.triggered_at)}</Td>
-                  <Td className="text-[11px] tabular-nums text-muted">{a.resolved_at ? relativeTime(a.resolved_at) : '—'}</Td>
-                </Tr>
-              ))}
-            </TBody>
-          </Table>
-        )}
-      </SectionCard>
-    </div>
-  )
-}
-
-/* ─── Config tab ────────────────────────────────────────────────────────── */
-
-function ConfigTab({ check, onEdit, onExport }: { check: ServiceCheck; onEdit: () => void; onExport: () => void }) {
-  const steps = check.workflow_steps || []
-  return (
-    <div className="space-y-4">
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-3">
-        <SectionCard
-          title="Endpoint"
-          actions={<button type="button" onClick={onEdit} className="inline-flex items-center gap-1 text-xs text-primary hover:underline"><Pencil className="h-3 w-3" /> Edit</button>}
-        >
-          <InfoGrid rows={[
-            { label: 'Type', value: (typeMeta[check.check_type] || typeMeta.http).label },
-            { label: 'Target URL', value: check.target_url || '—', mono: true },
-            { label: 'Host', value: check.target_host || '—', mono: true },
-            { label: 'Port', value: check.target_port != null ? String(check.target_port) : '—' },
-            { label: 'Method', value: check.http_method || '—' },
-            { label: 'Expected status', value: check.http_expected_statuses || String(check.http_expected_status || '—') },
-            { label: 'Content match', value: check.http_content_match || '—', mono: !!check.http_content_match },
-            { label: 'Follow redirects', value: check.http_follow_redirects ? 'Yes' : 'No' },
-          ]} />
-        </SectionCard>
-
-        <SectionCard title="Check schedule">
-          <InfoGrid rows={[
-            { label: 'Normal interval', value: `${check.check_interval}s` },
-            { label: 'Request timeout', value: `${check.timeout}s` },
-            ...(check.check_type === 'http' ? [{ label: 'IP version', value: check.config?.ip_version === 'ipv4' ? 'IPv4 only' : check.config?.ip_version === 'ipv6' ? 'IPv6 only' : 'Auto' }] : []),
-            { label: 'Enabled', value: check.enabled ? 'Yes' : 'Paused' },
-          ]} />
-        </SectionCard>
-
-        <SectionCard title="Failure confirmation">
-          <InfoGrid rows={[
-            { label: 'Consecutive failures', value: `${check.retry_count ?? 1} total attempts` },
-            { label: 'Retry gap', value: `${check.retry_delay_s ?? 10}s after each failure` },
-            { label: 'On successful retry', value: 'Reset confirmation; remain Up' },
-            { label: 'SLA downtime', value: 'Starts when Down is confirmed' },
-          ]} />
-          <p className="mt-3 text-xs text-muted">Includes the initial attempt. Every failed probe remains in diagnostics. Controller and sensor checks use the same confirmation policy.</p>
-        </SectionCard>
-
-        <SectionCard title="Recovery">
-          <InfoGrid rows={[
-            { label: 'Check while Down', value: `Every ${check.down_check_interval ?? 30}s` },
-            { label: 'Mark recovered', value: 'First successful check' },
-            { label: 'After recovery', value: `Resume ${check.check_interval}s interval` },
-            { label: 'Overlapping checks', value: 'Prevented' },
-          ]} />
-        </SectionCard>
-
-        <SectionCard title="Monitoring context">
-          <InfoGrid rows={[
-            { label: 'Level', value: `L${check.level ?? 1}` },
-            { label: 'Maintenance', value: check.in_maintenance ? 'Active window' : 'None' },
-            { label: 'Group', value: check.group_name || 'Unassigned' },
-            { label: 'Parent check', value: check.parent_check_name || '—' },
-          ]} />
-        </SectionCard>
-
-        <SectionCard title="Security & TLS">
-          <InfoGrid rows={[
-            { label: 'Credential', value: check.credential_name || 'None' },
-            { label: 'Auth type', value: check.credential_auth_type || '—' },
-            { label: 'Ignore TLS errors', value: check.http_ignore_tls_errors ? 'Yes' : 'No' },
-            { label: 'Allow insecure auth', value: check.http_allow_insecure_auth ? 'Yes' : 'No' },
-            { label: 'Cert expires', value: check.tls_expiry_date ? new Date(check.tls_expiry_date).toLocaleDateString() : '—' },
-            { label: 'Days remaining', value: check.tls_days_remaining != null ? String(check.tls_days_remaining) : '—' },
-            { label: 'Issuer', value: check.tls_issuer || '—' },
-            { label: 'Warn / critical', value: `${check.tls_warn_days}d / ${check.tls_critical_days}d` },
-          ]} />
-        </SectionCard>
-      </div>
-
-      {steps.length > 0 && (
-        <SectionCard
-          title="Authenticated journey"
-          subtitle={`Cookie-preserving · ${(check.workflow_operator || 'all').toUpperCase()} rule · ${steps.length} step${steps.length === 1 ? '' : 's'}`}
-          actions={check.credential_name ? (
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 px-2.5 py-1 text-[10px] font-semibold text-success">
-              <LockKeyhole className="h-3 w-3" /> {check.credential_name} · {check.credential_auth_type}
-            </span>
-          ) : undefined}
-        >
-          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-            {steps.map((step, index) => (
-              <div key={`${step.name}-${index}`} className="rounded-lg border border-border bg-surface2/30 p-3">
-                <div className="flex items-center gap-2">
-                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[10px] font-bold text-primary">{index + 1}</span>
-                  <span className="truncate text-xs font-semibold">{step.name}</span>
-                </div>
-                <div className="mt-2 truncate font-mono text-[10px] text-muted" title={step.url}>{step.method} {step.url}</div>
-                <div className="mt-1 text-[10px] text-muted">
-                  Expect {step.expected_statuses || '200'}{step.content_match ? ' + content validation' : ''}
-                </div>
-              </div>
-            ))}
-          </div>
-        </SectionCard>
-      )}
-
-      <SectionCard
-        title="Metadata"
-        actions={<Button variant="outline" size="sm" className="h-7" onClick={onExport}><Download className="h-3 w-3" /> Export JSON</Button>}
-      >
-        <InfoGrid rows={[
-          { label: 'Description', value: check.description || '—' },
-          { label: 'Tags', value: check.tags.length ? check.tags.join(', ') : '—' },
-          { label: 'Check id', value: check.id, mono: true },
-          { label: 'Created', value: new Date(check.created_at).toLocaleString() },
-          { label: 'Updated', value: check.updated_at ? new Date(check.updated_at).toLocaleString() : '—' },
-        ]} />
-      </SectionCard>
-    </div>
-  )
-}
-
-function InfoGrid({ rows }: { rows: Array<{ label: string; value: string; mono?: boolean }> }) {
-  return (
-    <dl className="space-y-1.5">
-      {rows.map((r) => (
-        <div key={r.label} className="grid grid-cols-[112px_1fr] items-start gap-2 text-[11px]">
-          <dt className="text-muted">{r.label}</dt>
-          <dd className={cn('min-w-0 truncate font-medium', r.mono && 'font-mono')} title={r.value}>{r.value}</dd>
-        </div>
-      ))}
-    </dl>
-  )
-}
-
-/* ─── Maintenance dialog ────────────────────────────────────────────────── */
-
-function MaintenanceDialog({
-  open, onOpenChange, inMaintenance, onStart, onStartCustom, onEnd, starting, ending,
-}: {
-  open: boolean
-  onOpenChange: (o: boolean) => void
-  inMaintenance: boolean
-  onStart: (hours: number) => void
-  onStartCustom: (startsAtISO: string, endsAtISO: string) => void
-  onEnd: () => void
-  starting: boolean
-  ending: boolean
-}) {
-  const [mode, setMode] = useState<'preset' | 'custom'>('preset')
-  const toLocalInput = (d: Date) => {
-    const pad = (n: number) => String(n).padStart(2, '0')
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
-  }
-  const [startsAt, setStartsAt] = useState(() => toLocalInput(new Date()))
-  const [endsAt, setEndsAt] = useState(() => toLocalInput(new Date(Date.now() + 60 * 60_000)))
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (open) {
-      setMode('preset')
-      setError(null)
-      setStartsAt(toLocalInput(new Date()))
-      setEndsAt(toLocalInput(new Date(Date.now() + 60 * 60_000)))
-    }
-  }, [open])
-
-  const presets = [
-    { label: '15 min', hours: 0.25 },
-    { label: '1 hour', hours: 1 },
-    { label: '4 hours', hours: 4 },
-    { label: '24 hours', hours: 24 },
-  ]
-
-  const submitCustom = () => {
-    setError(null)
-    const s = new Date(startsAt)
-    const e = new Date(endsAt)
-    if (Number.isNaN(s.getTime()) || Number.isNaN(e.getTime())) {
-      setError('Please enter both start and end times.')
-      return
-    }
-    if (e <= s) {
-      setError('End time must be after the start time.')
-      return
-    }
-    onStartCustom(s.toISOString(), e.toISOString())
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Wrench className="h-4 w-4 text-primary" />
-            {inMaintenance ? 'Active maintenance' : 'Start maintenance'}
-          </DialogTitle>
-        </DialogHeader>
-        <p className="text-xs text-muted">
-          {inMaintenance
-            ? 'Alerts are suppressed for this service while the window is open.'
-            : 'Suppress alerts for this service for a defined period. Probes keep running.'}
-        </p>
-        {inMaintenance ? (
-          <DialogFooter>
-            <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>Close</Button>
-            <Button size="sm" variant="destructive" onClick={onEnd} disabled={ending}>{ending ? 'Ending…' : 'End now'}</Button>
-          </DialogFooter>
-        ) : (
-          <>
-            <div className="flex gap-0.5 rounded-md bg-surface2 p-0.5">
-              {(['preset', 'custom'] as const).map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setMode(m)}
-                  className={cn('flex-1 rounded px-2 py-1 text-[11px] font-medium', mode === m ? 'bg-surface text-text' : 'text-muted')}
-                >
-                  {m === 'preset' ? 'Quick presets' : 'Custom'}
-                </button>
-              ))}
-            </div>
-            {mode === 'preset' ? (
-              <div className="grid grid-cols-2 gap-2">
-                {presets.map((p) => (
-                  <Button key={p.hours} variant="outline" size="sm" disabled={starting} onClick={() => onStart(p.hours)}>
-                    <Clock className="h-3 w-3" />{p.label}
-                  </Button>
-                ))}
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <label className="block">
-                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted">Starts at</span>
-                  <input type="datetime-local" value={startsAt} onChange={(e) => setStartsAt(e.target.value)} className="w-full rounded-md border border-border bg-surface2 px-2 py-1.5 text-xs" />
-                </label>
-                <label className="block">
-                  <span className="mb-1 block text-[10px] uppercase tracking-wider text-muted">Ends at</span>
-                  <input type="datetime-local" value={endsAt} onChange={(e) => setEndsAt(e.target.value)} className="w-full rounded-md border border-border bg-surface2 px-2 py-1.5 text-xs" />
-                </label>
-                {error && <div className="rounded-md border border-danger/40 bg-danger/10 px-2 py-1.5 text-[11px] text-danger">{error}</div>}
-              </div>
-            )}
-            <DialogFooter>
-              <Button variant="outline" size="sm" onClick={() => onOpenChange(false)} disabled={starting}>Cancel</Button>
-              {mode === 'custom' && (
-                <Button size="sm" onClick={submitCustom} disabled={starting}>{starting ? 'Starting…' : 'Start'}</Button>
-              )}
-            </DialogFooter>
-          </>
-        )}
-      </DialogContent>
-    </Dialog>
   )
 }
 
@@ -3188,24 +2405,43 @@ const DEFAULT_HEALTH_SCORE_CONFIG: HealthScoreConfig = {
 
 const HEALTH_SCORE_CONFIG_KEY = 'zp-health-score-config-v1'
 
+/** Stored configurations are validated; anything malformed falls back to the defaults. */
 function loadHealthScoreConfig(): HealthScoreConfig {
   try {
     const raw = localStorage.getItem(HEALTH_SCORE_CONFIG_KEY)
-    if (!raw) return { ...DEFAULT_HEALTH_SCORE_CONFIG }
+    if (!raw) return cloneDefaultHealthConfig()
     const parsed = JSON.parse(raw)
-    return {
-      weights: { ...DEFAULT_HEALTH_SCORE_CONFIG.weights, ...(parsed.weights || {}) },
-      thresholds: { ...DEFAULT_HEALTH_SCORE_CONFIG.thresholds, ...(parsed.thresholds || {}) },
-      latencyTargetMs: parsed.latencyTargetMs ?? DEFAULT_HEALTH_SCORE_CONFIG.latencyTargetMs,
-      errorScale: parsed.errorScale ?? DEFAULT_HEALTH_SCORE_CONFIG.errorScale,
-      incidentScale: parsed.incidentScale ?? DEFAULT_HEALTH_SCORE_CONFIG.incidentScale,
+    const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) ? v : d)
+    const D = DEFAULT_HEALTH_SCORE_CONFIG
+    const cfg: HealthScoreConfig = {
+      weights: {
+        availability: num(parsed?.weights?.availability, D.weights.availability),
+        latency: num(parsed?.weights?.latency, D.weights.latency),
+        errors: num(parsed?.weights?.errors, D.weights.errors),
+        incidents: num(parsed?.weights?.incidents, D.weights.incidents),
+      },
+      thresholds: {
+        excellent: num(parsed?.thresholds?.excellent, D.thresholds.excellent),
+        good: num(parsed?.thresholds?.good, D.thresholds.good),
+        degraded: num(parsed?.thresholds?.degraded, D.thresholds.degraded),
+      },
+      latencyTargetMs: num(parsed?.latencyTargetMs, D.latencyTargetMs),
+      errorScale: num(parsed?.errorScale, D.errorScale),
+      incidentScale: num(parsed?.incidentScale, D.incidentScale),
     }
+    return validateHealthScoreConfig(cfg).length === 0 ? cfg : cloneDefaultHealthConfig()
   } catch {
-    return { ...DEFAULT_HEALTH_SCORE_CONFIG }
+    return cloneDefaultHealthConfig()
   }
 }
 
+function cloneDefaultHealthConfig(): HealthScoreConfig {
+  const D = DEFAULT_HEALTH_SCORE_CONFIG
+  return { ...D, weights: { ...D.weights }, thresholds: { ...D.thresholds } }
+}
+
 function saveHealthScoreConfig(cfg: HealthScoreConfig) {
+  if (validateHealthScoreConfig(cfg).length > 0) return
   try { localStorage.setItem(HEALTH_SCORE_CONFIG_KEY, JSON.stringify(cfg)) } catch { /* ignore */ }
 }
 
@@ -3216,75 +2452,109 @@ type HealthFactor = {
   formula: string
   subScore: number
   weight: number
+  /** False when the input was not measured; the factor is then excluded and weights rescaled. */
+  available: boolean
   contribution: number
 }
 
+/**
+ * Health score (B09). Inputs are independent: availability is confirmed
+ * availability, errors are raw probe failures (probe_error_rate_pct, which
+ * includes failures that never became incidents), latency is P95 of
+ * successful probes. A missing input is excluded rather than scored as
+ * perfect; the remaining weights are rescaled and `coverage` reports the
+ * share of configured weight that was actually measured.
+ */
 function computeHealthScore(
-  args: { uptime_pct: number | null; error_rate_pct: number | null; incident_count: number; p95_response_ms: number | null },
+  args: { uptime_pct: number | null; probe_error_rate_pct?: number | null; incident_count?: number | null; p95_response_ms: number | null },
   cfg: HealthScoreConfig = DEFAULT_HEALTH_SCORE_CONFIG,
 ) {
-  if (args.uptime_pct == null) return { score: null, tint: 'rgb(var(--muted))', label: 'No data', factors: [] as HealthFactor[] }
+  const GOOD_COLOR = 'rgb(var(--success) / 0.7)'
+  const empty = { score: null as number | null, tint: 'rgb(var(--muted))', label: 'No data', factors: [] as HealthFactor[], coverage: 0 }
+  if (args.uptime_pct == null) return empty
+  const conf = validateHealthScoreConfig(cfg).length === 0 ? cfg : DEFAULT_HEALTH_SCORE_CONFIG
   const up = args.uptime_pct
-  const err = args.error_rate_pct ?? 0
-  const inc = args.incident_count || 0
+  const err = args.probe_error_rate_pct
+  const inc = args.incident_count
   const p95 = args.p95_response_ms
-  const availabilitySub = clamp(up, 0, 100)
-  const target = Math.max(1, cfg.latencyTargetMs)
-  const latencySub = p95 == null ? 100 : p95 <= target ? 100 : clamp(100 - ((p95 - target) / target) * 100, 0, 100)
-  const errorsSub = clamp(100 - err * cfg.errorScale, 0, 100)
-  const incidentsSub = clamp(100 - inc * cfg.incidentScale, 0, 100)
-  const w = cfg.weights
-  const totalW = Math.max(1, w.availability + w.latency + w.errors + w.incidents)
+  const target = Math.max(1, conf.latencyTargetMs)
+  const w = conf.weights
   const factors: HealthFactor[] = [
     {
       key: 'availability',
       label: 'Availability',
-      raw: args.uptime_pct == null ? 'no data' : `${up.toFixed(2)}%`,
-      formula: args.uptime_pct == null ? 'no samples — defaults to 100' : `uptime % = ${availabilitySub.toFixed(1)}`,
-      subScore: Math.round(availabilitySub),
+      raw: `${up.toFixed(2)}% confirmed`,
+      formula: `confirmed availability % = ${clamp(up, 0, 100).toFixed(1)}`,
+      subScore: Math.round(clamp(up, 0, 100)),
       weight: w.availability,
-      contribution: (availabilitySub * w.availability) / totalW,
+      available: true,
+      contribution: 0,
     },
     {
       key: 'latency',
       label: 'Latency',
-      raw: p95 == null ? 'no data' : `${Math.round(p95)} ms p95`,
-      formula: p95 == null ? 'no samples — defaults to 100' : p95 <= target
-        ? `${Math.round(p95)} ms ≤ ${cfg.latencyTargetMs} ms → 100`
-        : `100 − ((${Math.round(p95)} − ${cfg.latencyTargetMs}) / ${cfg.latencyTargetMs}) × 100`,
-      subScore: Math.round(latencySub),
+      raw: p95 == null ? 'not measured' : `${Math.round(p95)} ms p95`,
+      formula: p95 == null ? 'no successful probes with a response time — excluded' : p95 <= target
+        ? `${Math.round(p95)} ms ≤ ${conf.latencyTargetMs} ms → 100`
+        : `100 − ((${Math.round(p95)} − ${conf.latencyTargetMs}) / ${conf.latencyTargetMs}) × 100`,
+      subScore: p95 == null ? 0 : Math.round(p95 <= target ? 100 : clamp(100 - ((p95 - target) / target) * 100, 0, 100)),
       weight: w.latency,
-      contribution: (latencySub * w.latency) / totalW,
+      available: p95 != null,
+      contribution: 0,
     },
     {
       key: 'errors',
-      label: 'Errors',
-      raw: args.error_rate_pct == null ? 'no data' : `${err.toFixed(2)}%`,
-      formula: args.error_rate_pct == null ? 'no data — defaults to 100' : `100 − ${err.toFixed(2)} × ${cfg.errorScale}`,
-      subScore: Math.round(errorsSub),
+      label: 'Probe errors',
+      raw: err == null ? 'not measured' : `${err.toFixed(2)}% of probes failed`,
+      formula: err == null ? 'raw probe error rate not reported — excluded' : `100 − ${err.toFixed(2)} × ${conf.errorScale}`,
+      subScore: err == null ? 0 : Math.round(clamp(100 - err * conf.errorScale, 0, 100)),
       weight: w.errors,
-      contribution: (errorsSub * w.errors) / totalW,
+      available: err != null,
+      contribution: 0,
     },
     {
       key: 'incidents',
       label: 'Incidents',
-      raw: `${inc} in window`,
-      formula: `100 − ${inc} × ${cfg.incidentScale}`,
-      subScore: Math.round(incidentsSub),
+      raw: inc == null ? 'not measured' : `${inc} in window`,
+      formula: inc == null ? 'incident count not reported — excluded' : `100 − ${inc} × ${conf.incidentScale}`,
+      subScore: inc == null ? 0 : Math.round(clamp(100 - inc * conf.incidentScale, 0, 100)),
       weight: w.incidents,
-      contribution: (incidentsSub * w.incidents) / totalW,
+      available: inc != null,
+      contribution: 0,
     },
   ]
-  const rawScore = factors.reduce((s, f) => s + f.contribution, 0)
-  const score = Math.max(0, Math.min(100, Math.round(rawScore)))
-  const t = cfg.thresholds
-  const tint = score >= t.excellent ? UP_COLOR : score >= t.good ? WARN_COLOR : DOWN_COLOR
+  const totalW = factors.reduce((s, f) => s + f.weight, 0)
+  const measuredW = factors.reduce((s, f) => s + (f.available ? f.weight : 0), 0)
+  if (measuredW <= 0) return { ...empty, factors, coverage: 0 }
+  for (const f of factors) f.contribution = f.available ? (f.subScore * f.weight) / measuredW : 0
+  const score = Math.max(0, Math.min(100, Math.round(factors.reduce((s, f) => s + f.contribution, 0))))
+  const t = conf.thresholds
+  const tint = score >= t.excellent ? UP_COLOR : score >= t.good ? GOOD_COLOR : score >= t.degraded ? WARN_COLOR : DOWN_COLOR
   const label = score >= t.excellent ? 'Excellent' : score >= t.good ? 'Good' : score >= t.degraded ? 'Degraded' : 'Critical'
-  return { score, tint, label, factors }
+  return { score, tint, label, factors, coverage: totalW > 0 ? measuredW / totalW : 0 }
+}
+
+/** Returns human-readable problems; an empty list means the configuration is usable. */
+function validateHealthScoreConfig(cfg: HealthScoreConfig): string[] {
+  const errors: string[] = []
+  const finite = (v: unknown) => typeof v === 'number' && Number.isFinite(v)
+  const ws = [cfg?.weights?.availability, cfg?.weights?.latency, cfg?.weights?.errors, cfg?.weights?.incidents]
+  if (!ws.every((v) => finite(v) && (v as number) >= 0)) errors.push('Weights must be numbers of 0 or more.')
+  else if (ws.reduce((s: number, v) => s + (v as number), 0) <= 0) errors.push('At least one weight must be greater than 0.')
+  const th = cfg?.thresholds
+  if (![th?.excellent, th?.good, th?.degraded].every((v) => finite(v) && (v as number) >= 0 && (v as number) <= 100)) {
+    errors.push('Thresholds must be numbers between 0 and 100.')
+  } else if (!(th.excellent >= th.good && th.good >= th.degraded)) {
+    errors.push('Thresholds must be ordered: Excellent ≥ Good ≥ Degraded.')
+  }
+  if (!finite(cfg?.latencyTargetMs) || cfg.latencyTargetMs <= 0) errors.push('Latency target must be greater than 0 ms.')
+  if (!finite(cfg?.errorScale) || cfg.errorScale < 0) errors.push('Error scale must be 0 or more.')
+  if (!finite(cfg?.incidentScale) || cfg.incidentScale < 0) errors.push('Incident penalty must be 0 or more.')
+  return errors
 }
 
 function HealthScoreDetailsDialog({
-  open, onOpenChange, score, tint, label, factors, config, onConfigChange,
+  open, onOpenChange, score, tint, label, factors, coverage, config, onConfigChange,
 }: {
   open: boolean
   onOpenChange: (o: boolean) => void
@@ -3292,6 +2562,7 @@ function HealthScoreDetailsDialog({
   tint: string
   label: string
   factors: HealthFactor[]
+  coverage: number
   config: HealthScoreConfig
   onConfigChange: (next: HealthScoreConfig) => void
 }) {
@@ -3305,15 +2576,15 @@ function HealthScoreDetailsDialog({
     }
   }, [open, config])
 
-  const totalW = Math.max(1, draft.weights.availability + draft.weights.latency + draft.weights.errors + draft.weights.incidents)
+  const totalW = draft.weights.availability + draft.weights.latency + draft.weights.errors + draft.weights.incidents
+  const problems = validateHealthScoreConfig(draft)
   const dirty = JSON.stringify(draft) !== JSON.stringify(config)
+  const toNum = (raw: string) => (raw.trim() === '' ? NaN : Number(raw))
   const setWeight = (k: keyof HealthScoreConfig['weights'], v: number) => {
-    const n = Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : 0
-    setDraft({ ...draft, weights: { ...draft.weights, [k]: n } })
+    setDraft({ ...draft, weights: { ...draft.weights, [k]: Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : v } })
   }
   const setThreshold = (k: keyof HealthScoreConfig['thresholds'], v: number) => {
-    const n = Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : 0
-    setDraft({ ...draft, thresholds: { ...draft.thresholds, [k]: n } })
+    setDraft({ ...draft, thresholds: { ...draft.thresholds, [k]: Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : v } })
   }
 
   return (
@@ -3323,11 +2594,16 @@ function HealthScoreDetailsDialog({
           <DialogTitle className="flex items-center gap-2">
             <TrendingUp className="h-5 w-5 text-primary" /> Health score
           </DialogTitle>
+          <DialogDescription className="text-xs">
+            A weighted summary of confirmed availability, P95 latency, raw probe errors and incidents in the selected window.
+            Criteria are stored in this browser only.
+          </DialogDescription>
         </DialogHeader>
         <div className="flex items-center justify-between rounded-md border border-border bg-surface2/40 px-3 py-2">
           <div>
             <div className="text-xs text-muted">Current score</div>
             <div className="text-[11px]" style={{ color: tint }}>{label}</div>
+            {score != null && coverage < 1 && <div className="text-[10px] text-muted">Coverage {Math.round(coverage * 100)}% of configured weight</div>}
           </div>
           <div className="text-3xl font-bold tabular-nums" style={{ color: tint }}>
             {score ?? '—'}<span className="text-sm text-muted">/100</span>
@@ -3339,8 +2615,9 @@ function HealthScoreDetailsDialog({
             <TabsTrigger value="configure"><SettingsIcon className="mr-1.5 h-3.5 w-3.5" />Configure</TabsTrigger>
           </TabsList>
           <TabsContent value="breakdown" className="space-y-2 pt-3">
+            {factors.length === 0 && <p className="text-xs text-muted">No observed availability in this window.</p>}
             {factors.map((f) => {
-              const tone = f.subScore > 90 ? 'text-success' : f.subScore > 70 ? 'text-warning' : 'text-danger'
+              const tone = !f.available ? 'text-muted' : f.subScore > 90 ? 'text-success' : f.subScore > 70 ? 'text-warning' : 'text-danger'
               return (
                 <div key={f.key} className="grid grid-cols-[1fr_auto_auto_auto] items-start gap-x-3 border-b border-border/40 py-2 last:border-0">
                   <div className="min-w-0">
@@ -3348,9 +2625,9 @@ function HealthScoreDetailsDialog({
                     <div className="text-[11px] text-muted">{f.raw}</div>
                     <div className="mt-0.5 font-mono text-[10px] text-muted/80">{f.formula}</div>
                   </div>
-                  <span className={cn('text-right font-mono text-xs tabular-nums', tone)}>{f.subScore}</span>
-                  <span className="text-right font-mono text-xs tabular-nums text-muted">{f.weight}%</span>
-                  <span className="text-right font-mono text-xs tabular-nums">{f.contribution.toFixed(1)}</span>
+                  <span className={cn('text-right font-mono text-xs tabular-nums', tone)}>{f.available ? f.subScore : 'n/a'}</span>
+                  <span className="text-right font-mono text-xs tabular-nums text-muted">{f.weight}</span>
+                  <span className="text-right font-mono text-xs tabular-nums">{f.available ? f.contribution.toFixed(1) : '—'}</span>
                 </div>
               )
             })}
@@ -3359,45 +2636,50 @@ function HealthScoreDetailsDialog({
             <div className="flex items-center justify-between text-xs">
               <span className="font-semibold">Factor weights</span>
               <span className={cn('font-mono', totalW === 100 ? 'text-muted' : 'text-warning')}>
-                Total: {totalW}{totalW !== 100 ? ' (normalized)' : ''}
+                Total: {Number.isFinite(totalW) ? totalW : '—'}{Number.isFinite(totalW) && totalW !== 100 ? ' (normalized)' : ''}
               </span>
             </div>
             {(['availability', 'latency', 'errors', 'incidents'] as const).map((k) => (
               <div key={k} className="grid grid-cols-[140px_1fr_70px] items-center gap-3">
-                <label className="text-xs capitalize">{k}</label>
-                <input type="range" min={0} max={100} value={draft.weights[k]} onChange={(e) => setWeight(k, Number(e.target.value))} className="accent-primary" />
-                <Input type="number" min={0} max={100} value={draft.weights[k]} onChange={(e) => setWeight(k, Number(e.target.value))} className="h-8 text-xs" />
+                <label htmlFor={`hs-w-${k}`} className="text-xs capitalize">{k === 'errors' ? 'Probe errors' : k}</label>
+                <input type="range" min={0} max={100} value={Number.isFinite(draft.weights[k]) ? draft.weights[k] : 0} aria-label={`${k} weight slider`} onChange={(e) => setWeight(k, Number(e.target.value))} className="accent-primary" />
+                <Input id={`hs-w-${k}`} type="number" min={0} max={100} value={Number.isFinite(draft.weights[k]) ? draft.weights[k] : ''} onChange={(e) => setWeight(k, toNum(e.target.value))} className="h-8 text-xs" />
               </div>
             ))}
             <div className="text-xs font-semibold">Status thresholds (score ≥)</div>
             {(['excellent', 'good', 'degraded'] as const).map((k) => (
               <div key={k} className="grid grid-cols-[140px_1fr_70px] items-center gap-3">
-                <label className="text-xs capitalize">{k}</label>
-                <input type="range" min={0} max={100} value={draft.thresholds[k]} onChange={(e) => setThreshold(k, Number(e.target.value))} className="accent-primary" />
-                <Input type="number" min={0} max={100} value={draft.thresholds[k]} onChange={(e) => setThreshold(k, Number(e.target.value))} className="h-8 text-xs" />
+                <label htmlFor={`hs-t-${k}`} className="text-xs capitalize">{k}</label>
+                <input type="range" min={0} max={100} value={Number.isFinite(draft.thresholds[k]) ? draft.thresholds[k] : 0} aria-label={`${k} threshold slider`} onChange={(e) => setThreshold(k, Number(e.target.value))} className="accent-primary" />
+                <Input id={`hs-t-${k}`} type="number" min={0} max={100} value={Number.isFinite(draft.thresholds[k]) ? draft.thresholds[k] : ''} onChange={(e) => setThreshold(k, toNum(e.target.value))} className="h-8 text-xs" />
               </div>
             ))}
             <div className="grid grid-cols-[140px_1fr] items-center gap-3">
-              <label className="text-xs">Latency target (ms)</label>
-              <Input type="number" min={1} value={draft.latencyTargetMs} onChange={(e) => setDraft({ ...draft, latencyTargetMs: Math.max(1, Number(e.target.value) || 1) })} className="h-8 text-xs" />
+              <label htmlFor="hs-latency" className="text-xs">Latency target (ms)</label>
+              <Input id="hs-latency" type="number" min={1} value={Number.isFinite(draft.latencyTargetMs) ? draft.latencyTargetMs : ''} onChange={(e) => setDraft({ ...draft, latencyTargetMs: toNum(e.target.value) })} className="h-8 text-xs" />
             </div>
             <div className="grid grid-cols-[140px_1fr] items-center gap-3">
-              <label className="text-xs">Error scale</label>
-              <Input type="number" min={0} step={0.5} value={draft.errorScale} onChange={(e) => setDraft({ ...draft, errorScale: Math.max(0, Number(e.target.value) || 0) })} className="h-8 text-xs" />
+              <label htmlFor="hs-errscale" className="text-xs">Error scale</label>
+              <Input id="hs-errscale" type="number" min={0} step={0.5} value={Number.isFinite(draft.errorScale) ? draft.errorScale : ''} onChange={(e) => setDraft({ ...draft, errorScale: toNum(e.target.value) })} className="h-8 text-xs" />
             </div>
             <div className="grid grid-cols-[140px_1fr] items-center gap-3">
-              <label className="text-xs">Incident penalty</label>
-              <Input type="number" min={0} step={1} value={draft.incidentScale} onChange={(e) => setDraft({ ...draft, incidentScale: Math.max(0, Number(e.target.value) || 0) })} className="h-8 text-xs" />
+              <label htmlFor="hs-incscale" className="text-xs">Incident penalty</label>
+              <Input id="hs-incscale" type="number" min={0} step={1} value={Number.isFinite(draft.incidentScale) ? draft.incidentScale : ''} onChange={(e) => setDraft({ ...draft, incidentScale: toNum(e.target.value) })} className="h-8 text-xs" />
             </div>
+            {problems.length > 0 && (
+              <ul role="alert" className="space-y-0.5 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-[11px] text-danger">
+                {problems.map((p) => <li key={p}>{p}</li>)}
+              </ul>
+            )}
           </TabsContent>
         </Tabs>
         <DialogFooter>
           {tab === 'configure' ? (
             <>
-              <Button variant="outline" size="sm" onClick={() => setDraft({ ...DEFAULT_HEALTH_SCORE_CONFIG })}>Reset</Button>
+              <Button variant="outline" size="sm" onClick={() => setDraft(cloneDefaultHealthConfig())}>Reset</Button>
               <div className="flex gap-2">
                 <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>Cancel</Button>
-                <Button size="sm" disabled={!dirty} onClick={() => { onConfigChange(draft); toast.success('Health score criteria updated'); onOpenChange(false) }}>Save</Button>
+                <Button size="sm" disabled={!dirty || problems.length > 0} onClick={() => { onConfigChange(draft); toast.success('Health score criteria updated'); onOpenChange(false) }}>Save</Button>
               </div>
             </>
           ) : (
@@ -3411,42 +2693,25 @@ function HealthScoreDetailsDialog({
 
 /* ─── Series helpers ────────────────────────────────────────────────────── */
 
-function rollingPercentile(
-  data: Array<{ ts: number; ms: number | null }>,
-  q: number,
-  window: number,
-): Array<{ ts: number; p95: number | null }> {
-  const out: Array<{ ts: number; p95: number | null }> = []
-  for (let i = 0; i < data.length; i++) {
-    const slice = data.slice(Math.max(0, i - window), i + 1).map((d) => d.ms).filter((x): x is number => x != null && x > 0)
-    if (slice.length < 3) {
-      out.push({ ts: data[i].ts, p95: null })
-      continue
-    }
-    slice.sort((a, b) => a - b)
-    out.push({ ts: data[i].ts, p95: slice[Math.max(0, Math.floor(slice.length * q) - 1)] })
-  }
-  return out
-}
-
 function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n))
 }
 
 function deriveWindowStats(
-  points: ServiceMetricPoint[],
+  points: MetricPoint[],
   history: StatusHistoryEvent[],
-  check: ServiceCheck,
+  check: ServiceCheckExt,
   fromTs: number,
   toTs: number,
+  nowMs: number,
 ) {
   const buckets = buildAvailabilityBuckets(points, history, check, fromTs, toTs)
   const covered = buckets.filter((b) => b.state !== 'gap')
   const upCount = covered.filter((b) => b.state === 'up').length
-  const downCount = covered.filter((b) => b.state === 'down').length
+  const failCount = covered.filter((b) => b.state === 'down' || b.state === 'partial').length
   const uptime_pct = covered.length ? (upCount / covered.length) * 100 : null
-  const error_rate_pct = covered.length ? (downCount / covered.length) * 100 : null
-  const incident_count = history.filter((h) => h.new_status !== 'up').length
+  const error_rate_pct = covered.length ? (failCount / covered.length) * 100 : null
+  const incident_count = history.filter((h) => h.new_status === 'down' || h.new_status === 'warning' || h.new_status === 'degraded').length
 
   const samples = points.filter((p) => p.is_up && p.response_ms != null && p.response_ms > 0).map((p) => p.response_ms as number)
   const avg_ms = samples.length ? samples.reduce((a, b) => a + b, 0) / samples.length : null
@@ -3458,9 +2723,9 @@ function deriveWindowStats(
   let streak_sec: number | null = null
   if (check.status === 'up' && recovered) {
     const rec = Date.parse(recovered.timestamp)
-    if (!lastDown || Date.parse(lastDown.timestamp) <= rec) streak_sec = Math.max(0, (Date.now() - rec) / 1000)
+    if (!lastDown || Date.parse(lastDown.timestamp) <= rec) streak_sec = Math.max(0, (nowMs - rec) / 1000)
   } else if (check.status === 'up' && check.last_check_at && !lastDown) {
-    streak_sec = Math.max(0, (Date.now() - Date.parse(check.last_check_at)) / 1000)
+    streak_sec = Math.max(0, (nowMs - Date.parse(check.last_check_at)) / 1000)
   }
 
   return { uptime_pct, error_rate_pct, incident_count, avg_ms, p95_ms, streak_sec }
