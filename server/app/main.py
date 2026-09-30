@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +30,8 @@ from app.api.v1 import apm_usage as apm_usage_api
 from app.api.v1 import apm_p3 as apm_p3_api
 from app.api.v1 import apm_insights as apm_insights_api
 from app.api.websocket import realtime
+from app.api.v1 import service_checks_ops
+from app.api.v1 import system_time as system_time_api
 
 settings = get_settings()
 
@@ -53,6 +56,30 @@ class _DynamicRumCORSMiddleware(CORSMiddleware):
         await super().__call__(scope, receive, send)
 
 
+class ServerTimeHeaderMiddleware:
+    """Pure ASGI: add `X-Server-Time: <epoch ms>` to every HTTP response.
+
+    Stamped when the response starts, so it reflects the appliance clock at
+    the moment the data was produced (streaming responses included)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_time(message):
+            if message.get("type") == "http.response.start":
+                headers = list(message.get("headers") or [])
+                headers.append((b"x-server-time", str(int(time.time() * 1000)).encode()))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_time)
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.APP_NAME,
@@ -64,6 +91,10 @@ def create_app() -> FastAPI:
     # Agents compress uploads once the heartbeat advertises accepts_gzip.
     app.add_middleware(GzipRequestMiddleware)
 
+    # Appliance clock on every response (B01): the UI calibrates relative
+    # ranges, freshness and countdowns against it instead of the browser clock.
+    app.add_middleware(ServerTimeHeaderMiddleware)
+
     # CORS
     app.add_middleware(
         _DynamicRumCORSMiddleware,
@@ -71,6 +102,7 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["X-Server-Time"],
     )
 
     # API routes
@@ -88,6 +120,8 @@ def create_app() -> FastAPI:
     app.include_router(network_events.router, prefix="/api/v1")
     app.include_router(ncm.router, prefix="/api/v1")
     app.include_router(ncm.device_router, prefix="/api/v1")
+    # Fixed /service-checks/{report,bulk,import} paths must precede /{check_id}.
+    app.include_router(service_checks_ops.router, prefix="/api/v1")
     app.include_router(service_checks.router, prefix="/api/v1")
     app.include_router(service_checks.groups_router, prefix="/api/v1")
     app.include_router(service_checks.maintenance_router, prefix="/api/v1")
@@ -148,6 +182,8 @@ def create_app() -> FastAPI:
     # APM OTLP receiver mounted at ROOT so the path is exactly /v1/traces.
     app.include_router(apm_ingest_api.router)
     app.include_router(apm_p3_api.router)
+
+    app.include_router(system_time_api.router, prefix="/api/v1")
 
     @app.get("/api/v1/system/health")
     async def health_check():

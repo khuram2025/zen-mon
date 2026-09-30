@@ -409,9 +409,12 @@ def service(sid, *, group=None, criticality=None, target=None, check_type="http"
             "tls_expiry_date": None, "tls_warn_days": warn, "tls_critical_days": critical}
 
 
-def run_business(monkeypatch, services, segments, policy=(99.9, "default")):
+def run_business(monkeypatch, services, segments, policy=(99.9, "default"), maintenance=None):
     async def fetch(db, visible_tags=None):
         return services
+
+    async def svc_maint(db, rows, start, end):
+        return maintenance or {}
 
     async def load(db):
         return policy
@@ -431,6 +434,7 @@ def run_business(monkeypatch, services, segments, policy=(99.9, "default")):
     monkeypatch.setattr(rds, "_fetch_service_metrics", lambda s, e, ids: [])
     monkeypatch.setattr(rds, "get_ch_client", lambda: None)
     monkeypatch.setattr(service_check_service, "active_maintenance_check_ids", no_maint)
+    monkeypatch.setattr(rds, "_service_maintenance_intervals", svc_maint)
     return asyncio.run(rds.build_business(None, START, END))
 
 
@@ -453,6 +457,17 @@ def test_customer_impact_is_null_when_unmapped(monkeypatch):
     assert rows[a]["availability_basis"] == "confirmed" and rows[a]["probe_availability_pct"] is None
     [first] = [o for o in data["service_outages"] if o["service_check_id"] == a]
     assert first["duration_minutes"] == pytest.approx(30) and first["ongoing"] is False
+
+
+def test_business_report_excludes_service_maintenance(monkeypatch):
+    a = str(uuid4())
+    window = [(START + timedelta(minutes=60), START + timedelta(minutes=75))]
+    data = run_business(monkeypatch, [service(a)], {a: _down(60, 90)}, maintenance={a: window})
+    [row] = data["service_availability"]
+    assert row["downtime_seconds"] == pytest.approx(900)
+    assert row["maintenance_seconds"] == pytest.approx(900)
+    assert row["outages"] == 1
+    assert data["data_errors"] == []
 
 
 def test_customer_impact_merges_overlaps_per_group(monkeypatch):

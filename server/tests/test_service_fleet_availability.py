@@ -106,7 +106,10 @@ async def test_fleet_report_scopes_checks_and_keeps_no_data_unknown(monkeypatch)
     class DB:
         async def execute(self, query):
             queries.append(query)
-            return SimpleNamespace(all=lambda: [('visible', None, 60), ('empty', None, 60)])
+            # (id, created_at, interval, group_id, tags); maintenance lookups find none.
+            return SimpleNamespace(all=lambda: [('visible', None, 60, None, ['team-a']),
+                                                ('empty', None, 60, None, ['team-a'])],
+                                   scalars=lambda: SimpleNamespace(all=lambda: []))
 
     def read(ch, checks, start, end):
         assert set(checks) == {'visible', 'empty'}
@@ -115,7 +118,7 @@ async def test_fleet_report_scopes_checks_and_keeps_no_data_unknown(monkeypatch)
 
     monkeypatch.setattr(database, 'get_clickhouse_client', lambda: None)
     monkeypatch.setattr(service_availability, 'read_fleet_segments', read)
-    result = await service.get_confirmed_uptime_all(DB(), visible_tags=['team-a'])
+    result = await service.get_confirmed_uptime_all(DB(), visible_tags=['team-a'], use_cache=False)
     assert result['checks'] == {'visible': 100, 'empty': None}
     assert result['availability_basis'] == 'confirmed'
     assert 'WHERE' in str(queries[0])

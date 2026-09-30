@@ -1538,7 +1538,7 @@ async def _fetch_service_checks(db: AsyncSession,
                sc.tls_warn_days, sc.tls_critical_days, sc.enabled,
                sc.created_at, sc.check_interval, sc.group_id,
                scg.name AS group_name,
-               sc.sla_target_pct, sc.criticality, sc.business_owner
+               sc.sla_target_pct, sc.criticality, sc.business_owner, sc.tags
         FROM service_checks sc
         LEFT JOIN service_check_groups scg ON scg.id = sc.group_id
         {where}

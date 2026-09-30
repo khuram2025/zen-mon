@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Clock } from 'lucide-react'
+import { serverNow, useClockOffset } from '@/lib/serverClock'
 
 export const TIME_RANGE_OPTIONS = [
   { key: '1h', label: '1h', hours: 1 },
@@ -41,6 +42,27 @@ function calendarBounds(key: CalendarRangeKey, nowMs: number): { from: Date; to:
 
 function isCalendarKey(key: string | null): key is CalendarRangeKey {
   return CALENDAR_RANGE_OPTIONS.some((option) => option.key === key)
+}
+
+/** Both bounds present, parseable and ordered (from < to). */
+export function isValidRange(from: string | null | undefined, to: string | null | undefined): boolean {
+  if (!from || !to) return false
+  const a = Date.parse(from)
+  const b = Date.parse(to)
+  return Number.isFinite(a) && Number.isFinite(b) && a < b
+}
+
+/** The browser timezone shown next to custom inputs, e.g. "Asia/Riyadh (UTC+03:00)". */
+export function timezoneLabel(at: number = Date.now()): string {
+  let zone = 'local time'
+  try {
+    zone = Intl.DateTimeFormat().resolvedOptions().timeZone || zone
+  } catch { /* older engines */ }
+  const off = -new Date(at).getTimezoneOffset()
+  const abs = Math.abs(off)
+  const hh = String(Math.floor(abs / 60)).padStart(2, '0')
+  const mm = String(abs % 60).padStart(2, '0')
+  return `${zone} (UTC${off >= 0 ? '+' : '-'}${hh}:${mm})`
 }
 
 /**
@@ -84,7 +106,9 @@ export function useTimeRange(): {
   const key = searchParams.get('range')
   const customFromParam = searchParams.get('from')
   const customToParam = searchParams.get('to')
-  const isCustom = key === 'custom' && !!customFromParam && !!customToParam
+  // A custom URL range must hold two valid, ordered timestamps; anything else
+  // falls back to the default preset instead of scoring a different period (B26).
+  const isCustom = key === 'custom' && isValidRange(customFromParam, customToParam)
   const calendarKey = !isCustom && isCalendarKey(key) ? key : null
 
   const idx = (() => {
@@ -92,23 +116,25 @@ export function useTimeRange(): {
     return i >= 0 ? i : 0
   })()
 
-  // Preset ranges slide with wall clock; bucket to the minute so query keys
-  // keyed on fromISO/toISO do not change every render (see useReports.ts).
-  const minuteFloor = () => Math.floor(Date.now() / 60_000) * 60_000
+  // Preset ranges slide with the appliance clock (B01); bucket to the minute so
+  // query keys keyed on fromISO/toISO do not change every render (see useReports.ts).
+  const minuteFloor = () => Math.floor(serverNow() / 60_000) * 60_000
+  const { offsetMs } = useClockOffset()
   const [nowMs, setNowMs] = useState(minuteFloor)
   useEffect(() => {
+    setNowMs(minuteFloor())
     const id = window.setInterval(() => setNowMs(minuteFloor()), 60_000)
     return () => clearInterval(id)
-  }, [])
+  }, [offsetMs])
 
   const fromISO = useMemo(() => {
-    if (isCustom) return customFromParam!
+    if (isCustom) return new Date(customFromParam!).toISOString()
     if (calendarKey) return calendarBounds(calendarKey, nowMs).from.toISOString()
     return new Date(nowMs - TIME_RANGE_OPTIONS[idx].hours * 3_600_000).toISOString()
   }, [isCustom, customFromParam, calendarKey, idx, nowMs])
 
   const toISO = useMemo(() => {
-    if (isCustom) return customToParam!
+    if (isCustom) return new Date(customToParam!).toISOString()
     if (calendarKey) return calendarBounds(calendarKey, nowMs).to.toISOString()
     return new Date(nowMs).toISOString()
   }, [isCustom, customToParam, calendarKey, nowMs])
@@ -175,39 +201,70 @@ export function TimeRangePicker({
   presetLabels, calendarPresets, activeKey, onCalendar,
 }: PickerProps) {
   const [open, setOpen] = useState(false)
+  const uid = useId()
   const toLocal = (iso: string) => {
     const d = new Date(iso)
+    if (Number.isNaN(d.getTime())) return ''
     const pad = (n: number) => String(n).padStart(2, '0')
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
   }
   const [fromInput, setFromInput] = useState(() => toLocal(customFrom))
   const [toInput, setToInput] = useState(() => toLocal(customTo))
+  const [error, setError] = useState<{ field: 'from' | 'to' | 'both'; message: string } | null>(null)
+  // Re-seed the inputs only when the popover opens; edits survive a failed Apply.
   useEffect(() => {
     if (open) {
       setFromInput(toLocal(customFrom))
       setToInput(toLocal(customTo))
+      setError(null)
     }
-  }, [open, customFrom, customTo])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [open])
+
+  const apply = () => {
+    if (!fromInput && !toInput) { setError({ field: 'both', message: 'Enter a start and an end time.' }); return }
+    if (!fromInput) { setError({ field: 'from', message: 'Enter a start time.' }); return }
+    if (!toInput) { setError({ field: 'to', message: 'Enter an end time.' }); return }
+    const from = new Date(fromInput)
+    const to = new Date(toInput)
+    if (Number.isNaN(from.getTime())) { setError({ field: 'from', message: 'The start time is not a valid date.' }); return }
+    if (Number.isNaN(to.getTime())) { setError({ field: 'to', message: 'The end time is not a valid date.' }); return }
+    if (from.getTime() >= to.getTime()) { setError({ field: 'both', message: 'The end time must be after the start time.' }); return }
+    setError(null)
+    onCustom(from.toISOString(), to.toISOString())
+    setOpen(false)
+  }
+
+  const btn = (active: boolean) =>
+    `whitespace-nowrap rounded px-2 py-1 text-[11px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
+      active ? 'bg-primary text-black' : 'text-muted hover:text-text'
+    }`
+  const errId = `${uid}-err`
+  const tzId = `${uid}-tz`
 
   return (
     <div className="relative">
       <div
         className="inline-flex flex-wrap items-center gap-0.5 rounded-md border border-border bg-surface2/40 p-0.5"
-        role="tablist"
+        role="group"
         aria-label="Time range"
       >
-        <Clock className="ml-1 mr-0.5 h-3 w-3 text-muted" />
+        <Clock className="ml-1 mr-0.5 h-3 w-3 text-muted" aria-hidden />
         {TIME_RANGE_OPTIONS.map((r, i) => {
           const active = !isCustom && rangeIdx === i
           return (
             <button
               key={r.key}
-              role="tab"
-              aria-selected={active}
+              type="button"
+              aria-pressed={active}
               onClick={() => { setOpen(false); onPreset(i) }}
-              className={`whitespace-nowrap rounded px-2 py-1 text-[11px] font-semibold transition-colors ${
-                active ? 'bg-primary text-black' : 'text-muted hover:text-text'
-              }`}
+              className={btn(active)}
             >
               {presetLabels?.[r.key] ?? r.label}
             </button>
@@ -218,25 +275,23 @@ export function TimeRangePicker({
           return (
             <button
               key={r.key}
-              role="tab"
-              aria-selected={active}
+              type="button"
+              aria-pressed={active}
               title={r.title}
               onClick={() => { setOpen(false); onCalendar(r.key) }}
-              className={`whitespace-nowrap rounded px-2 py-1 text-[11px] font-semibold transition-colors ${
-                active ? 'bg-primary text-black' : 'text-muted hover:text-text'
-              }`}
+              className={btn(active)}
             >
               {r.label}
             </button>
           )
         })}
         <button
-          role="tab"
-          aria-selected={isCustom}
+          type="button"
+          aria-pressed={isCustom}
+          aria-expanded={open}
+          aria-haspopup="dialog"
           onClick={() => setOpen((v) => !v)}
-          className={`whitespace-nowrap rounded px-2 py-1 text-[11px] font-semibold transition-colors ${
-            isCustom ? 'bg-primary text-black' : 'text-muted hover:text-text'
-          }`}
+          className={btn(isCustom)}
         >
           Custom
         </button>
@@ -245,47 +300,60 @@ export function TimeRangePicker({
       {open && (
         <>
           <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full z-30 mt-1 w-72 rounded-md border border-border bg-surface p-3 shadow-lg">
-            <div className="space-y-2">
-              <label className="block">
-                <span className="text-[10px] uppercase tracking-wider text-muted">From</span>
+          <div
+            role="dialog"
+            aria-label="Custom time range"
+            className="absolute right-0 top-full z-30 mt-1 w-72 rounded-md border border-border bg-surface p-3 shadow-lg"
+          >
+            <form
+              className="space-y-2"
+              noValidate
+              onSubmit={(e) => { e.preventDefault(); apply() }}
+            >
+              <div>
+                <label htmlFor={`${uid}-from`} className="text-[10px] uppercase tracking-wider text-muted">From</label>
                 <input
+                  id={`${uid}-from`}
                   type="datetime-local"
                   value={fromInput}
+                  required
+                  aria-invalid={error?.field === 'from' || error?.field === 'both'}
+                  aria-describedby={error ? `${errId} ${tzId}` : tzId}
                   onChange={(e) => setFromInput(e.target.value)}
-                  className="mt-1 w-full rounded border border-border bg-transparent px-2 py-1 text-xs text-text"
+                  className="mt-1 w-full rounded border border-border bg-transparent px-2 py-1 text-xs text-text aria-[invalid=true]:border-danger"
                 />
-              </label>
-              <label className="block">
-                <span className="text-[10px] uppercase tracking-wider text-muted">To</span>
+              </div>
+              <div>
+                <label htmlFor={`${uid}-to`} className="text-[10px] uppercase tracking-wider text-muted">To</label>
                 <input
+                  id={`${uid}-to`}
                   type="datetime-local"
                   value={toInput}
+                  required
+                  aria-invalid={error?.field === 'to' || error?.field === 'both'}
+                  aria-describedby={error ? `${errId} ${tzId}` : tzId}
                   onChange={(e) => setToInput(e.target.value)}
-                  className="mt-1 w-full rounded border border-border bg-transparent px-2 py-1 text-xs text-text"
+                  className="mt-1 w-full rounded border border-border bg-transparent px-2 py-1 text-xs text-text aria-[invalid=true]:border-danger"
                 />
-              </label>
+              </div>
+              <p id={tzId} className="text-[10px] text-muted">Times are in {timezoneLabel()}.</p>
+              {error && <p id={errId} role="alert" className="text-[11px] text-danger">{error.message}</p>}
               <div className="flex justify-end gap-2 pt-1">
                 <button
+                  type="button"
                   onClick={() => setOpen(false)}
                   className="rounded px-2 py-1 text-[11px] text-muted hover:text-text"
                 >
                   Cancel
                 </button>
                 <button
-                  onClick={() => {
-                    const fromISO = new Date(fromInput).toISOString()
-                    const toISO = new Date(toInput).toISOString()
-                    if (Date.parse(fromISO) >= Date.parse(toISO)) return
-                    onCustom(fromISO, toISO)
-                    setOpen(false)
-                  }}
+                  type="submit"
                   className="rounded bg-primary px-2 py-1 text-[11px] font-semibold text-black"
                 >
                   Apply
                 </button>
               </div>
-            </div>
+            </form>
           </div>
         </>
       )}

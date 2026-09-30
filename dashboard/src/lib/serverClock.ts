@@ -103,9 +103,9 @@ export function useClockOffset(): { offsetMs: number; calibrated: boolean; skewe
 
 /** Human description of the disagreement, e.g. "6h 12m ahead of". */
 export function describeSkew(ms: number): string {
-  const abs = Math.abs(ms)
-  const h = Math.floor(abs / 3_600_000)
-  const m = Math.round((abs % 3_600_000) / 60_000)
+  const totalMin = Math.round(Math.abs(ms) / 60_000)
+  const h = Math.floor(totalMin / 60)
+  const m = totalMin % 60
   const size = h ? `${h}h ${m}m` : `${Math.max(1, m)} min`
   // offset = server - browser: positive means the browser is behind.
   return `${size} ${ms > 0 ? 'behind' : 'ahead of'}`

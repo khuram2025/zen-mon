@@ -1,9 +1,10 @@
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, CalendarClock, Plus, Trash2 } from 'lucide-react'
+import { ArrowLeft, CalendarClock, Plus, Square, XCircle } from 'lucide-react'
 import { api } from '@/lib/api'
 import { apiErrorMessage, relativeTime } from '@/lib/utils'
+import { serverNow } from '@/lib/serverClock'
 import { Card, CardContent } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -12,6 +13,7 @@ import { Table, TBody, THead, Td, Th, Tr } from '@/components/ui/Table'
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -24,12 +26,24 @@ import {
   SelectValue,
 } from '@/components/ui/Select'
 import { FormField } from '@/components/ui/FormField'
-import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { toast } from '@/components/ui/Toast'
 import type { ServiceCheck, ServiceCheckGroup, ServiceMaintenanceWindow } from '@/types'
 
+type WindowState = 'scheduled' | 'active' | 'ended' | 'cancelled' | 'expired'
+
+/** Server state when reported; otherwise derived with the appliance clock. */
+function windowState(w: ServiceMaintenanceWindow, now = serverNow()): WindowState {
+  if (w.state) return w.state
+  if (w.cancelled_at) return 'cancelled'
+  const s = Date.parse(w.starts_at)
+  const e = Date.parse(w.effective_ends_at || w.ends_at)
+  if (w.ended_at && Date.parse(w.ended_at) < Date.parse(w.ends_at)) return e <= now ? 'ended' : 'active'
+  if (e <= now) return 'expired'
+  return s > now ? 'scheduled' : 'active'
+}
+
 function isoLocalInputNow(offsetMinutes = 0): string {
-  const d = new Date(Date.now() + offsetMinutes * 60_000)
+  const d = new Date(serverNow() + offsetMinutes * 60_000)
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
@@ -37,7 +51,8 @@ function isoLocalInputNow(offsetMinutes = 0): string {
 export function ServiceMaintenancePage() {
   const qc = useQueryClient()
   const [formOpen, setFormOpen] = useState(false)
-  const [deleting, setDeleting] = useState<ServiceMaintenanceWindow | null>(null)
+  const [ending, setEnding] = useState<ServiceMaintenanceWindow | null>(null)
+  const [endReason, setEndReason] = useState('')
 
   const [form, setForm] = useState<{
     scope_type: 'check' | 'group' | 'tag' | 'all'
@@ -82,19 +97,19 @@ export function ServiceMaintenancePage() {
     enabled: formOpen,
   })
 
-  const { active, upcoming, past } = useMemo(() => {
+  const { active, upcoming, history } = useMemo(() => {
     const a: ServiceMaintenanceWindow[] = []
     const u: ServiceMaintenanceWindow[] = []
-    const p: ServiceMaintenanceWindow[] = []
-    const now = Date.now()
+    const h: ServiceMaintenanceWindow[] = []
+    const now = serverNow()
     for (const w of windows) {
-      const s = Date.parse(w.starts_at)
-      const e = Date.parse(w.ends_at)
-      if (e < now) p.push(w)
-      else if (s > now) u.push(w)
-      else a.push(w)
+      const st = windowState(w, now)
+      if (st === 'active') a.push(w)
+      else if (st === 'scheduled') u.push(w)
+      else h.push(w)
     }
-    return { active: a, upcoming: u, past: p }
+    h.sort((x, y) => Date.parse(y.starts_at) - Date.parse(x.starts_at))
+    return { active: a, upcoming: u, history: h }
   }, [windows])
 
   const create = useMutation({
@@ -119,15 +134,28 @@ export function ServiceMaintenancePage() {
     onError: (e: any) => toast.error('Save failed', apiErrorMessage(e)),
   })
 
-  const del = useMutation({
-    mutationFn: async (id: string) => api.delete(`/service-check-maintenance/${id}`),
-    onSuccess: () => {
-      toast.success('Window deleted')
+  // Ending keeps the record (its excluded interval stays in SLA history);
+  // a window that has not started is cancelled. Older appliances only
+  // support DELETE.
+  const end = useMutation({
+    mutationFn: async (w: ServiceMaintenanceWindow) => {
+      try {
+        return await api.post(`/service-check-maintenance/${w.id}/end`, { reason: endReason.trim() || null })
+      } catch (e: any) {
+        if (e?.response?.status === 404 || e?.response?.status === 405) {
+          if (!w.state) return api.delete(`/service-check-maintenance/${w.id}`)
+        }
+        throw e
+      }
+    },
+    onSuccess: (_r, w) => {
+      toast.success(windowState(w) === 'scheduled' ? 'Window cancelled' : 'Window ended — kept in history')
       qc.invalidateQueries({ queryKey: ['service-check-maintenance'] })
       qc.invalidateQueries({ queryKey: ['service-checks'] })
-      setDeleting(null)
+      setEnding(null)
+      setEndReason('')
     },
-    onError: (e: any) => toast.error('Delete failed', apiErrorMessage(e)),
+    onError: (e: any) => toast.error('Could not end the window', apiErrorMessage(e)),
   })
 
   const canSubmit =
@@ -154,8 +182,9 @@ export function ServiceMaintenancePage() {
             Maintenance windows
           </h1>
           <p className="text-xs text-muted">
-            While a window is active, status transitions are suppressed for the covered checks.
-            Metrics keep recording so uptime/SLA stays accurate.
+            While a window is active, alerts and status transitions are suppressed for the covered
+            monitors. Probes keep recording, and the window is excluded from SLA. Ending or cancelling a
+            window keeps its record so past reports stay reproducible.
           </p>
         </div>
         <Button onClick={() => setFormOpen(true)}>
@@ -163,19 +192,18 @@ export function ServiceMaintenancePage() {
         </Button>
       </div>
 
-      {active.length > 0 && <WindowTable title="Active" rows={active} onDelete={setDeleting} tone="danger" />}
-      {upcoming.length > 0 && <WindowTable title="Upcoming" rows={upcoming} onDelete={setDeleting} tone="primary" />}
-      <WindowTable
-        title="All windows"
-        rows={windows}
-        onDelete={setDeleting}
-        emptyMessage="No maintenance windows scheduled."
-      />
+      <WindowTable title="Active now" rows={active} onEnd={setEnding} tone="danger" emptyMessage="No maintenance is active." />
+      <WindowTable title="Upcoming" rows={upcoming} onEnd={setEnding} tone="primary" emptyMessage="No windows scheduled." />
+      <WindowTable title="History" rows={history} emptyMessage="No past windows." />
 
       <Dialog open={formOpen} onOpenChange={setFormOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>Schedule maintenance window</DialogTitle>
+            <DialogDescription>
+              Covered monitors keep probing; alerts are suppressed and the window is excluded from SLA.
+              Times are in this browser's timezone.
+            </DialogDescription>
           </DialogHeader>
           <form
             className="space-y-3"
@@ -193,7 +221,7 @@ export function ServiceMaintenancePage() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">All checks</SelectItem>
+                  <SelectItem value="all">All monitors</SelectItem>
                   <SelectItem value="check">Single check</SelectItem>
                   <SelectItem value="group">Group</SelectItem>
                   <SelectItem value="tag">Tag</SelectItem>
@@ -300,34 +328,49 @@ export function ServiceMaintenancePage() {
         </DialogContent>
       </Dialog>
 
-      <ConfirmDialog
-        open={!!deleting}
-        onOpenChange={(o) => !o && setDeleting(null)}
-        title="Delete maintenance window?"
-        description={
-          deleting?.active
-            ? "This window is currently active. Deleting it will re-enable status transitions immediately."
-            : "Remove this scheduled window."
-        }
-        confirmText="Delete"
-        destructive
-        loading={del.isPending}
-        onConfirm={() => { if (deleting) del.mutate(deleting.id) }}
-      />
+      <Dialog open={!!ending} onOpenChange={(o) => { if (!o) { setEnding(null); setEndReason('') } }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{ending && windowState(ending) === 'scheduled' ? 'Cancel scheduled window?' : 'End maintenance now?'}</DialogTitle>
+            <DialogDescription>
+              {ending && windowState(ending) === 'scheduled'
+                ? 'The window has not started. It will be marked cancelled and never apply.'
+                : `Status transitions and alerts resume immediately for ${ending?.scope_type === 'check' ? 'this monitor' : `every monitor in scope (${ending?.scope_label || ending?.scope_type})`}. The time already in maintenance stays excluded from SLA.`}
+            </DialogDescription>
+          </DialogHeader>
+          <FormField label="Reason (optional)">
+            <Input value={endReason} onChange={(e) => setEndReason(e.target.value)} placeholder="Work finished early" maxLength={500} />
+          </FormField>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => { setEnding(null); setEndReason('') }}>Keep window</Button>
+            <Button type="button" variant="destructive" disabled={end.isPending} onClick={() => { if (ending) end.mutate(ending) }}>
+              {ending && windowState(ending) === 'scheduled' ? 'Cancel window' : 'End now'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
+}
+
+const STATE_META: Record<WindowState, { label: string; cls: string }> = {
+  active: { label: 'Active', cls: 'border-danger/30 bg-danger/10 text-danger' },
+  scheduled: { label: 'Upcoming', cls: 'border-primary/30 bg-primary/10 text-primary' },
+  ended: { label: 'Ended early', cls: 'border-border-strong bg-surface2 text-text2' },
+  expired: { label: 'Completed', cls: 'border-border-strong bg-surface2 text-muted' },
+  cancelled: { label: 'Cancelled', cls: 'border-border bg-surface2 text-muted line-through' },
 }
 
 function WindowTable({
   title,
   rows,
-  onDelete,
+  onEnd,
   tone,
   emptyMessage,
 }: {
   title: string
   rows: ServiceMaintenanceWindow[]
-  onDelete: (w: ServiceMaintenanceWindow) => void
+  onEnd?: (w: ServiceMaintenanceWindow) => void
   tone?: 'danger' | 'primary'
   emptyMessage?: string
 }) {
@@ -355,47 +398,57 @@ function WindowTable({
                 <Th>Ends</Th>
                 <Th>Reason</Th>
                 <Th>State</Th>
-                <Th className="w-16 text-right">Actions</Th>
+                <Th className="w-24 text-right">Actions</Th>
               </Tr>
             </THead>
             <TBody>
               {rows.map((w) => {
-                const now = Date.now()
-                const s = Date.parse(w.starts_at)
-                const e = Date.parse(w.ends_at)
-                const state =
-                  e < now ? { label: 'Ended', cls: 'border-border-strong bg-surface2 text-muted' }
-                  : s > now ? { label: 'Upcoming', cls: 'border-primary/30 bg-primary/10 text-primary' }
-                  : { label: 'Active', cls: 'border-danger/30 bg-danger/10 text-danger' }
+                const st = windowState(w)
+                const meta = STATE_META[st]
+                const effEnd = w.effective_ends_at || w.ended_at || w.ends_at
+                const endedEarly = !!w.ended_at && Date.parse(w.ended_at) < Date.parse(w.ends_at)
                 return (
                   <Tr key={w.id}>
                     <Td className="text-xs">
-                      <span className="font-medium">{w.scope_type}</span>
-                      {w.scope_label && (
+                      <span className="font-medium">{w.scope_type === 'all' ? 'All monitors' : w.scope_type}</span>
+                      {w.scope_label && w.scope_type !== 'all' && (
                         <span className="ml-1 text-muted">· {w.scope_label}</span>
                       )}
                     </Td>
                     <Td className="text-xs">{new Date(w.starts_at).toLocaleString()}</Td>
                     <Td className="text-xs">
-                      {new Date(w.ends_at).toLocaleString()}
-                      <div className="text-[10px] text-muted">{relativeTime(w.ends_at)}</div>
+                      {new Date(effEnd).toLocaleString()}
+                      {endedEarly ? (
+                        <div className="text-[10px] text-muted">
+                          Ended early{w.ended_by_name ? ` by ${w.ended_by_name}` : ''} · scheduled {new Date(w.ends_at).toLocaleString()}
+                          {w.end_reason ? ` · ${w.end_reason}` : ''}
+                        </div>
+                      ) : st !== 'cancelled' ? (
+                        <div className="text-[10px] text-muted">{relativeTime(effEnd)}</div>
+                      ) : (
+                        <div className="text-[10px] text-muted">Cancelled {w.cancelled_at ? relativeTime(w.cancelled_at) : ''}</div>
+                      )}
                     </Td>
                     <Td className="text-xs text-muted">{w.reason || '—'}</Td>
                     <Td>
-                      <Badge variant="outline" className={`border ${state.cls}`}>
-                        {state.label}
+                      <Badge variant="outline" className={`border ${meta.cls}`}>
+                        {meta.label}
                       </Badge>
                     </Td>
                     <Td>
                       <div className="flex justify-end">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7 text-muted hover:text-danger"
-                          onClick={() => onDelete(w)}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
+                        {onEnd && (st === 'active' || st === 'scheduled') && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 gap-1 px-2 text-xs text-muted hover:text-danger"
+                            onClick={() => onEnd(w)}
+                            title={st === 'active' ? 'End this window now (record kept)' : 'Cancel this scheduled window (record kept)'}
+                          >
+                            {st === 'active' ? <Square className="h-3.5 w-3.5" /> : <XCircle className="h-3.5 w-3.5" />}
+                            {st === 'active' ? 'End now' : 'Cancel'}
+                          </Button>
+                        )}
                       </div>
                     </Td>
                   </Tr>

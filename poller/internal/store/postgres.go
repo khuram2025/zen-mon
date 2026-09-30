@@ -809,7 +809,9 @@ func (s *PostgresStore) UpsertSensors(ctx context.Context, deviceID uuid.UUID, s
 // LoadActiveMaintenanceCheckIDs returns the set of service-check IDs currently
 // inside an active maintenance window (scope: check, group, tag, or all).
 // Used by the poller to suppress status-change writes (alerts) while still
-// collecting metrics during planned downtime.
+// collecting metrics during planned downtime. A window's effective end is the
+// earlier of its scheduled ends_at and an early ended_at; cancelled windows
+// (cancelled_at set) never apply.
 func (s *PostgresStore) LoadActiveMaintenanceCheckIDs(ctx context.Context) (map[uuid.UUID]struct{}, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT DISTINCT sc.id
@@ -820,7 +822,9 @@ func (s *PostgresStore) LoadActiveMaintenanceCheckIDs(ctx context.Context) (map[
 		    OR (m.scope_type = 'tag'   AND m.scope_tag       = ANY (sc.tags))
 		    OR (m.scope_type = 'all')
 		)
-		WHERE m.starts_at <= now() AND m.ends_at >= now()
+		WHERE m.cancelled_at IS NULL
+		  AND m.starts_at <= now()
+		  AND LEAST(m.ends_at, COALESCE(m.ended_at, m.ends_at)) >= now()
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("load maintenance ids: %w", err)
