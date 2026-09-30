@@ -954,23 +954,17 @@ def test_import_rejects_unknown_document():
 # ── Alerts bulk acknowledge ─────────────────────────────────────────────────
 
 def test_bulk_acknowledge_is_scoped_and_requires_a_filter(api):
+    # Rebuilt by the Alerts review on alert_workflow; the filter it builds
+    # must carry the caller's scope and only select active alerts.
     from app.services import alert_service
     r = api["client"].post("/api/v1/alerts/acknowledge-bulk", json={})
     assert r.status_code == 422
-
-    seen = []
-
-    class DB:
-        async def execute(self, stmt, params=None):
-            seen.append(str(stmt))
-            return Res([SimpleNamespace(id=uuid4(), status="active", severity="critical", service_check_id=None)])
-
-        async def flush(self):
-            pass
-    alerts = asyncio.run(alert_service.acknowledge_bulk(DB(), uuid4(), service_check_id=uuid4(),
-                                                        visible_tags=["team-a"]))
-    assert alerts[0].status == "acknowledged" and alerts[0].acknowledged_at is not None
-    assert "service_checks _vc" in seen[0] and "alerts.status" in seen[0]
+    f = alert_service.AlertFilters(status="active", service_check_id=uuid4(),
+                                   visible_tags=["team-a"])
+    clauses, params = f.where()
+    assert any("service_checks _vc" in c for c in clauses)
+    assert "a.status = :status" in clauses and params["status"] == "active"
+    assert params["vis_tags"] == ["team-a"]
 
 
 # ── Fleet cache ─────────────────────────────────────────────────────────────
@@ -1013,7 +1007,8 @@ def test_fleet_report_route_is_not_shadowed_by_check_id(api):
 
 @pytest.mark.parametrize("path", ["acknowledge", "resolve", "snooze", "unsnooze"])
 def test_single_alert_mutations_are_scoped(api, monkeypatch, path):
-    from app.services import alert_service
+    from app.core import security
+    from app.services import alert_workflow
     touched = []
 
     async def out_of_scope(db, alert_id, scope):
@@ -1021,10 +1016,15 @@ def test_single_alert_mutations_are_scoped(api, monkeypatch, path):
 
     async def mutate(*a, **k):
         touched.append(path)
+        return True
+
+    async def perms(db, role):
+        return ["alerts.view", "alerts.acknowledge"]
 
     monkeypatch.setattr(scoping, "alert_in_scope", out_of_scope)
-    monkeypatch.setattr(alert_service, "acknowledge_alert", mutate)
-    monkeypatch.setattr(alert_service, "resolve_alert", mutate)
+    monkeypatch.setattr(security, "get_role_permissions", perms)
+    for name in ("acknowledge", "resolve", "snooze", "unsnooze"):
+        monkeypatch.setattr(alert_workflow, name, mutate)
     body = {"minutes": 30} if path == "snooze" else None
     r = api["client"].post(f"/api/v1/alerts/{uuid4()}/{path}", json=body)
     assert r.status_code == 404 and not touched
