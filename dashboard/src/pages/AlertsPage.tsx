@@ -512,7 +512,7 @@ export function AlertsPage() {
   const pageIds = rows.map((r) => r.id)
   const allOnPage = pageIds.length > 0 && pageIds.every((id) => selected.has(id))
   const someOnPage = pageIds.some((id) => selected.has(id))
-  const colCount = canTriage ? 9 : 7
+  const colCount = canTriage ? 8 : 6
   const wl = windowLabel(s)
 
   return (
@@ -717,11 +717,11 @@ export function AlertsPage() {
                       </span>
                     </div>
                     <div className={cn('overflow-hidden rounded-md border border-border', list.isPlaceholderData && 'opacity-70')}>
-                      <Table className="min-w-[1040px] [&_td]:px-2.5 [&_th]:px-2.5">
+                      <Table className="min-w-[940px] table-fixed [&_td]:px-2.5 [&_th]:px-2.5">
                         <THead className="bg-surface2/50">
                           <Tr>
                             {canTriage && (
-                              <Th className="w-10">
+                              <Th className="w-9">
                                 <HeaderCheckbox
                                   checked={allOnPage}
                                   indeterminate={!allOnPage && someOnPage}
@@ -733,14 +733,13 @@ export function AlertsPage() {
                                 />
                               </Th>
                             )}
-                            <Th className="w-28">Severity</Th>
                             <Th>Alert</Th>
-                            <Th>Entity</Th>
-                            <Th>Status</Th>
-                            <Th>Owner</Th>
-                            <Th>{s.view === 'resolved' ? 'Closed' : 'Age'}</Th>
-                            <Th title="Configured routing and recorded delivery outcome">Notify</Th>
-                            {canTriage && <Th className="text-right"><span className="sr-only">Actions</span></Th>}
+                            <Th className="w-[150px] min-[1440px]:w-[176px]">Entity</Th>
+                            <Th className="w-[122px] min-[1440px]:w-[136px]">Status</Th>
+                            <Th className="w-[124px]">Owner</Th>
+                            <Th className="w-[104px] min-[1440px]:w-[132px]">{s.view === 'resolved' ? 'Closed' : 'Age'}</Th>
+                            <Th className="w-[116px]" title="Configured routing and recorded delivery outcome">Notify</Th>
+                            {canTriage && <Th className="w-[108px] text-right"><span className="sr-only">Actions</span></Th>}
                           </Tr>
                         </THead>
                         <TBody>
@@ -1172,7 +1171,7 @@ function AlertTableRow({
   return (
     <Tr data-state={selected ? 'selected' : undefined}>
       {canTriage && (
-        <Td className="w-10">
+        <Td>
           <input
             type="checkbox"
             checked={selected}
@@ -1182,8 +1181,7 @@ function AlertTableRow({
           />
         </Td>
       )}
-      <Td><SeverityBadge severity={a.severity} /></Td>
-      <Td className="min-w-[260px] max-w-[340px]">
+      <Td>
         <div className="flex items-start gap-1.5">
           <button
             onClick={onToggleExpand}
@@ -1202,7 +1200,10 @@ function AlertTableRow({
             >
               {msg}
             </Link>
-            <div className="truncate text-xs text-muted">{a.rule_name ? `Rule: ${a.rule_name}` : 'No rule'}</div>
+            <div className="mt-0.5 flex min-w-0 items-center gap-1.5">
+              <SeverityBadge severity={a.severity} />
+              <span className="truncate text-xs text-muted">{a.rule_name ? `Rule: ${a.rule_name}` : 'No rule'}</span>
+            </div>
             {expanded && (
               <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-2 gap-y-0.5 text-xs text-text2">
                 <dt className="text-muted">Triggered</dt><dd>{fmtAlertDate(a.triggered_at, { seconds: true, year: 'always' })}</dd>
@@ -1243,7 +1244,7 @@ function AlertTableRow({
             <div className={cn('text-sm tabular-nums', age.future && 'text-warning', (age.seconds ?? 0) > 7 * 86400 && 'font-medium text-warning')}>
               {fmtAge(a.triggered_at, now)}
             </div>
-            <div className="text-xs text-muted">{fmtAlertDate(a.triggered_at)}</div>
+            <div className="hidden text-xs text-muted min-[1440px]:block">{fmtAlertDate(a.triggered_at)}</div>
           </div>
         )}
       </Td>
