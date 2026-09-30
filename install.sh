@@ -882,6 +882,12 @@ server {
     }
     # END ZenPlus host-results ingest timeout
 
+    # The alert engine is called only by the local poller on 127.0.0.1:8000
+    # and carries no user authentication; never expose it through the proxy.
+    location /api/v1/alert-engine/ {
+        return 404;
+    }
+
     location /api/ {
         proxy_pass http://127.0.0.1:8000;
         proxy_set_header Host $host;

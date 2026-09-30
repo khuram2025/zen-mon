@@ -28,7 +28,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import alert_phrasing as ap
 from app.services import alert_notify_state as ns
-from app.services.server_health_service import create_server_alert, resolve_server_alerts
+from app.services.server_health_service import (
+    create_server_alert, resolve_server_alerts, server_condition_silenced,
+)
 from app.services.filesystem_monitoring import pg_capacity_filter
 from app.services.host_metric_service import telemetry_freshness_seconds
 
@@ -120,55 +122,94 @@ async def _gateway_config(db: AsyncSession, ch, gw_type: str) -> dict | None:
 
 
 async def dispatch_to_channels(db: AsyncSession, channel_ids: list, ctx: dict) -> int:
-    """Send a host alert to the rule's notification channels. Best-effort."""
-    from app.api.v1.alert_engine import _send_email, _send_sms, _dispatch_channel
+    """Send an alert to notification channels. Best-effort; returns how many
+    channels ACCEPTED it. Every channel's outcome is written to the delivery
+    log (accepted / failed / skipped) against ``ctx['alert_id']`` if given."""
+    from app.api.v1.alert_engine import _send_email, _send_sms, _dispatch_channel_result
+    from app.services import alert_delivery_log as dl
 
+    kind = dl.kind_from_ctx(ctx)
     sent = 0
     for ch_id in channel_ids or []:
+        ch = None
+        timer = dl.Timer()
+
+        async def _log(outcome: str, error=None):
+            await dl.record(
+                db, alert_id=ctx.get("alert_id"), rule_id=ctx.get("rule_id"),
+                channel_id=ch_id, channel_name=getattr(ch, "name", None),
+                channel_type=getattr(ch, "type", None), kind=kind, outcome=outcome,
+                error=error, latency_ms=timer.ms if outcome != "skipped" else None)
+
         try:
             ch = (await db.execute(text(
-                "SELECT type, config, gateway_id, enabled FROM notification_channels WHERE id = :id"
+                "SELECT name, type, config, gateway_id, enabled FROM notification_channels WHERE id = :id"
             ), {"id": ch_id})).first()
-            if not ch or not ch.enabled:
+            if not ch:
+                await _log("skipped", "config: channel no longer exists")
+                continue
+            if not ch.enabled:
+                await _log("skipped", "config: channel disabled")
                 continue
             cfg = decrypt_config(ch.config)
             if ch.type == "email":
                 rcpt = cfg.get("recipients", "")
                 gw = await _gateway_config(db, ch, "smtp")
-                if rcpt and gw:
-                    from app.services.email_render import build_alert_email_html
-                    from app.api.v1.alert_engine import _clean_details
-                    mail_ctx = {
-                        "severity": ctx.get("severity"),
-                        "status": ctx.get("status"),
-                        "resolved": bool(ctx.get("resolved")) or (ctx.get("status") == "RESOLVED"),
-                        "title": ctx.get("rule_name"),
-                        "hostname": ctx.get("hostname"),
-                        "ip_address": ctx.get("ip_address"),
-                        # `body` is the prose written for mail; `message` is the
-                        # SMS line. Reading them the wrong way round put a 140-
-                        # character telegram in the callout of a full-width mail.
-                        "message": ctx.get("body") or ctx.get("message"),
-                        "notice": ctx.get("notice") or "",
-                        "details": _clean_details(ctx.get("details") or []),
-                        "headline_metric": ctx.get("headline_metric") or {},
-                        "action_url": ctx.get("action_url") or "",
-                        "timestamp": ctx.get("triggered_at"),
-                    }
-                    await _send_email(gw, rcpt, ctx["subject"], mail_ctx["message"],
-                                      html_body=build_alert_email_html(mail_ctx))
+                if not rcpt or not gw:
+                    await _log("skipped", "config: no recipients" if not rcpt
+                               else "config: no enabled SMTP gateway")
+                    continue
+                from app.services.email_render import build_alert_email_html
+                from app.api.v1.alert_engine import _clean_details
+                mail_ctx = {
+                    "severity": ctx.get("severity"),
+                    "status": ctx.get("status"),
+                    "resolved": bool(ctx.get("resolved")) or (ctx.get("status") == "RESOLVED"),
+                    "title": ctx.get("rule_name"),
+                    "hostname": ctx.get("hostname"),
+                    "ip_address": ctx.get("ip_address"),
+                    # `body` is the prose written for mail; `message` is the
+                    # SMS line. Reading them the wrong way round put a 140-
+                    # character telegram in the callout of a full-width mail.
+                    "message": ctx.get("body") or ctx.get("message"),
+                    "notice": ctx.get("notice") or "",
+                    "details": _clean_details(ctx.get("details") or []),
+                    "headline_metric": ctx.get("headline_metric") or {},
+                    "action_url": ctx.get("action_url") or "",
+                    "timestamp": ctx.get("triggered_at"),
+                }
+                if await _send_email(gw, rcpt, ctx["subject"], mail_ctx["message"],
+                                     html_body=build_alert_email_html(mail_ctx)):
                     sent += 1
+                    await _log("accepted")
+                else:
+                    await _log("skipped", "config: SMTP gateway has no host")
             elif ch.type == "sms":
                 phones = cfg.get("phone_numbers", "")
                 gw = await _gateway_config(db, ch, "sms")
-                if phones and gw:
-                    await _send_sms(gw, phones, ctx["message"])
+                if not phones or not gw:
+                    await _log("skipped", "config: no phone numbers" if not phones
+                               else "config: no enabled SMS gateway")
+                    continue
+                if await _send_sms(gw, phones, ctx["message"]):
                     sent += 1
+                    await _log("accepted")
+                else:
+                    await _log("skipped", "config: SMS gateway is not a usable HTTP gateway")
             elif ch.type in ("webhook", "slack", "teams", "discord", "pagerduty"):
-                if await _dispatch_channel(ch.type, cfg, ctx):
+                ok, err = await _dispatch_channel_result(ch.type, cfg, ctx)
+                if ok:
                     sent += 1
+                    await _log("accepted")
+                elif err is not None:
+                    await _log("failed", err)
+                else:
+                    await _log("skipped", "config: no URL or routing key")
+            else:
+                await _log("skipped", f"config: unsupported channel type {ch.type}")
         except Exception as exc:
-            logger.warning("host alert: notify channel %s failed: %s", ch_id, exc)
+            logger.warning("alert notify: channel %s failed: %s", ch_id, exc)
+            await _log("failed", exc)
     return sent
 
 
@@ -251,7 +292,7 @@ async def _open_alert_started(db: AsyncSession, server_id: str, dedupe: str):
 
 async def _notify_rule(db: AsyncSession, rule, hostname: str, *, reading: str = "",
                        detail: str = "", is_recovery: bool = False,
-                       duration: str = "") -> None:
+                       duration: str = "", alert_id=None) -> None:
     """Send a host metric alert, or its all-clear, in the shared house style."""
     sev = rule.severity or "warning"
     v = ap.rule_phrasing(rule, hostname=hostname, is_recovery=is_recovery,
@@ -280,6 +321,8 @@ async def _notify_rule(db: AsyncSession, rule, hostname: str, *, reading: str = 
                     ("Active for", duration if is_recovery else None)],
         "triggered_at": datetime.now(timezone.utc).isoformat(),
         "rule_id": str(rule.id), "rule_name": rule.name,
+        "alert_id": str(alert_id) if alert_id else None,
+        "is_recovery": is_recovery,
     })
 
 
@@ -333,31 +376,37 @@ async def evaluate_host_rules(db: AsyncSession) -> dict[str, int]:
                     await db.commit()
                     # Quiet hours: alert is recorded above; only suppress the
                     # outbound notification when outside the rule's schedule.
+                    new_id = await ns.open_alert_id(db, sid, dedupe)
                     if allowed:
-                        await _notify_rule(db, rule, hostname, reading=reading, detail=detail)
-                    await ns.stamp(db, await ns.open_alert_id(db, sid, dedupe), allowed)
+                        await _notify_rule(db, rule, hostname, reading=reading, detail=detail,
+                                           alert_id=new_id)
+                    await ns.stamp(db, new_id, allowed)
                     await db.commit()
-                elif allowed:
+                elif allowed and not await server_condition_silenced(db, sid, dedupe):
                     # Trigger was suppressed by quiet hours and the host is
                     # still breaching — announce it now the window has opened,
-                    # otherwise the breach is never reported at all.
+                    # otherwise the breach is never reported at all. A snoozed
+                    # condition stays quiet: snoozing no longer closes the row.
                     alert_id = await ns.open_alert_id(db, sid, dedupe)
                     if await ns.is_pending(db, alert_id):
-                        await _notify_rule(db, rule, hostname, reading=reading, detail=detail)
+                        await _notify_rule(db, rule, hostname, reading=reading, detail=detail,
+                                           alert_id=alert_id)
                         await ns.stamp(db, alert_id, True)
                         await db.commit()
             else:
                 # Read when it started before closing it, so the all-clear can
                 # say how long the host sat over the threshold.
                 started_at = await _open_alert_started(db, sid, dedupe)
-                notified = await ns.was_notified(db, await ns.open_alert_id(db, sid, dedupe))
+                open_id = await ns.open_alert_id(db, sid, dedupe)
+                notified = await ns.was_notified(db, open_id)
                 n = await resolve_server_alerts(db, sid, dedupe)
                 resolved += n
                 if n and notified and getattr(rule, "recovery_alert", True):
                     await db.commit()
                     await _notify_rule(db, rule, hostname, reading=reading, detail=detail,
                                        is_recovery=True,
-                                       duration=ap.duration_between(started_at))
+                                       duration=ap.duration_between(started_at),
+                                       alert_id=open_id)
         await db.commit()
 
     if raised or resolved:

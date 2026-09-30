@@ -66,3 +66,6 @@ class AlertStats(BaseModel):
     critical: int
     warning: int
     info: int
+    suppressed: int = 0
+    pending: int = 0
+    server_time: Optional[datetime] = None

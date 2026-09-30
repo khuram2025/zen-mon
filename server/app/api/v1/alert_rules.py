@@ -12,7 +12,13 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
+from app.services import alert_rule_scope as rs
+from app.services.audit_service import write_audit_log
+
+# Rule and routing changes are policy administration, separate from triage
+# (Alerts review A05): alerts.manage, plus the tag-scope guard per rule.
+require_rule_manager = require_permission("alerts.manage")
 from app.models.user import User
 from app.services import alert_phrasing as ap
 
@@ -417,9 +423,10 @@ async def list_alert_rules(
 async def create_alert_rule(
     data: AlertRuleCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_rule_manager),
 ):
     now = datetime.now(timezone.utc)
+    await rs.guard_rule_change(db, user, data.model_dump())
 
     # E1: when compound conditions are supplied, they are authoritative and the
     # flat metric/operator/threshold columns mirror conditions[0] (those columns
@@ -509,11 +516,17 @@ async def create_alert_rule(
         ),
         params,
     )
-    await db.commit()
     row = result.first()
     if not row:
         raise HTTPException(status_code=500, detail="Failed to create alert rule")
-    return _with_templates(_row_to_dict(row))
+    created = _row_to_dict(row)
+    await write_audit_log(db, actor=user, action="alert_rule.create", resource_type="alert_rule",
+                          resource_id=created["id"],
+                          metadata={"name": created["name"],
+                                    "scope": rs.describe_scope(created)["label"],
+                                    "fields": rs.rule_changes({}, created)})
+    await db.commit()
+    return _with_templates(created)
 
 
 @router.get("/{rule_id}")
@@ -537,11 +550,15 @@ async def update_alert_rule(
     rule_id: UUID,
     data: AlertRuleUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_rule_manager),
 ):
     fields = data.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
+    before = await rs.rule_row(db, rule_id)
+    if not before:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    await rs.guard_rule_change(db, user, before, {**before, **fields})
 
     # E1: keep flat metric/operator/threshold mirrored to conditions[0] when a
     # non-empty conditions array is supplied (empty array reverts to legacy).
@@ -635,10 +652,16 @@ async def update_alert_rule(
         ),
         params,
     )
-    await db.commit()
     row = result.first()
     if not row:
         raise HTTPException(status_code=404, detail="Alert rule not found")
+    after = await rs.rule_row(db, rule_id)
+    await write_audit_log(db, actor=user, action="alert_rule.update", resource_type="alert_rule",
+                          resource_id=str(rule_id),
+                          metadata={"name": after.get("name") if after else None,
+                                    "changes": rs.rule_changes(before, after),
+                                    "affected": await rs.affected(db, after or before)})
+    await db.commit()
     return _with_templates(_row_to_dict(row))
 
 
@@ -646,36 +669,77 @@ async def update_alert_rule(
 async def delete_alert_rule(
     rule_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_rule_manager),
 ):
+    before = await rs.rule_row(db, rule_id)
+    if not before:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    await rs.guard_rule_change(db, user, before)
+    affected = await rs.affected(db, before)
     result = await db.execute(
         text("DELETE FROM alert_rules WHERE id = :id RETURNING id"),
         {"id": rule_id},
     )
-    await db.commit()
     row = result.first()
     if not row:
         raise HTTPException(status_code=404, detail="Alert rule not found")
+    await write_audit_log(db, actor=user, action="alert_rule.delete", resource_type="alert_rule",
+                          resource_id=str(rule_id),
+                          metadata={"name": before.get("name"), "affected": affected,
+                                    "rule": rs.rule_changes({}, before)})
+    await db.commit()
+
+
+class ToggleBody(BaseModel):
+    """Explicit target state (a stale page cannot flip a rule the wrong way)
+    and an optional reason for the audit trail."""
+    enabled: Optional[bool] = None
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
+@router.get("/{rule_id}/impact")
+async def alert_rule_impact(
+    rule_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Who a change to this rule affects: scope, target count, open alerts."""
+    rule = await rs.rule_row(db, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    return await rs.impact(db, rule)
 
 
 @router.post("/{rule_id}/toggle")
 async def toggle_alert_rule(
     rule_id: UUID,
+    body: Optional[ToggleBody] = None,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_rule_manager),
 ):
+    before = await rs.rule_row(db, rule_id)
+    if not before:
+        raise HTTPException(status_code=404, detail="Alert rule not found")
+    await rs.guard_rule_change(db, user, before)
+    target = (not before["enabled"]) if body is None or body.enabled is None else body.enabled
     result = await db.execute(
         text(
-            "UPDATE alert_rules SET enabled = NOT enabled, updated_at = :now "
+            "UPDATE alert_rules SET enabled = :enabled, updated_at = :now "
             "WHERE id = :id "
             "RETURNING id, name, enabled"
         ),
-        {"id": rule_id, "now": datetime.now(timezone.utc)},
+        {"id": rule_id, "now": datetime.now(timezone.utc), "enabled": target},
     )
-    await db.commit()
     row = result.first()
     if not row:
         raise HTTPException(status_code=404, detail="Alert rule not found")
+    if bool(before["enabled"]) != bool(row.enabled):
+        await write_audit_log(db, actor=user, action="alert_rule.toggle", resource_type="alert_rule",
+                              resource_id=str(rule_id),
+                              metadata={"name": row.name, "enabled": row.enabled,
+                                        "reason": body.reason if body else None,
+                                        "affected": await rs.affected(db, before)})
+    await db.commit()
     return {
         "id": str(row.id),
         "name": row.name,
@@ -952,7 +1016,7 @@ async def preview_alert_rule(
 async def simulate_alert_rule(
     rule_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_rule_manager),
 ):
     import httpx
     import smtplib

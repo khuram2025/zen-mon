@@ -9,10 +9,15 @@ set of channels once its ``after_minutes`` deadline passes — level 1 after
 Rules of the game (the ones an on-call engineer expects):
 
 * Acknowledging the alert stops all further escalation — a human owns it now.
-* Resolving the alert sends an all-clear to every channel that was escalated
+* A genuine recovery sends an all-clear to every channel that was escalated
   to, so a tier-2 manager paged at 03:10 also hears it ended at 03:25. Base
   channels are excluded from that all-clear when the rule already sends its
-  own recovery notification (they would get it twice).
+  own recovery notification (they would get it twice). A manual closure sends
+  "closed by an operator" instead — it is not evidence the condition cleared —
+  and superseded/administrative/legacy-snooze closures send nothing.
+* A suppressed (snoozed) condition does not escalate: someone chose to mute
+  it. Its incident stays open, so the escalation clock is still honest when
+  the snooze ends.
 * A level may repeat (``repeat_every_minutes``) until ack/resolve;
   ``alert_rules.max_repeat`` caps the number of repeats (0 = unlimited).
 * A trigger that was never announced (quiet hours / flap cooldown recorded
@@ -36,6 +41,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services import alert_phrasing as ap
+from app.services.alert_workflow import closure_reason, record_event, suppressed_sql
 
 logger = logging.getLogger("zenplus.alert_escalation")
 
@@ -138,7 +144,7 @@ _SWEEP_SQL = """
       AND jsonb_typeof(r.escalation_levels) = 'array'
       AND jsonb_array_length(r.escalation_levels) > 0
       AND (
-            a.status = 'active'
+            (a.status = 'active' AND NOT """ + suppressed_sql("a") + """)
          OR (a.status = 'resolved'
              AND jsonb_exists(COALESCE(a.metadata, '{}'::jsonb), 'escalation')
              AND COALESCE(a.metadata->'escalation'->>'closed', 'false') <> 'true'
@@ -207,38 +213,55 @@ async def _dispatch_escalation(db: AsyncSession, row, level_no: int,
         "rule_id": str(row.rule_id),
         "is_recovery": False,
         "escalation_level": level_no,
+        "alert_id": str(row.id),
     })
     return sent
 
 
 async def _dispatch_all_clear(db: AsyncSession, row, channels: list[str],
-                              *, action_url: str) -> int:
-    """Resolution notice to the channels that were escalated to."""
+                              *, action_url: str, manual: bool = False) -> int:
+    """Resolution notice to the channels that were escalated to. ``manual``
+    closures are announced as closed by an operator, never as all clear."""
     from app.services.host_alert_service import dispatch_to_channels
 
     hostname, ip = _subject_noun(row)
     sev = (row.rule_severity or row.alert_severity or "warning")
     duration = ap.duration_between(row.triggered_at, row.resolved_at)
-    body = (f"The escalated alert has been resolved."
-            + (f" It was active for {duration}." if duration else ""))
-    sms = (f"ZenPlus resolved — {row.rule_name}: {hostname} all clear."
-           + (f" Active for {duration}." if duration else ""))
+    meta = dict(row.metadata or {})
+    if manual:
+        who = meta.get("resolved_by_name") or "an operator"
+        note = meta.get("resolution_note")
+        body = (f"The escalated alert was closed by {who}. This is a manual closure, "
+                f"not a confirmed recovery; the monitored condition may still be present."
+                + (f" Note: {note}" if note else ""))
+        sms = (f"ZenPlus closed — {row.rule_name}: {hostname} closed by {who} "
+               f"(manual, not a confirmed recovery).")
+        subject = f"[{sev.upper()}] Closed by operator: {row.rule_name} — {hostname}"
+    else:
+        body = (f"The escalated alert has been resolved."
+                + (f" It was active for {duration}." if duration else ""))
+        sms = (f"ZenPlus resolved — {row.rule_name}: {hostname} all clear."
+               + (f" Active for {duration}." if duration else ""))
+        subject = f"[{sev.upper()}] Resolved: {row.rule_name} — {hostname}"
     return await dispatch_to_channels(db, channels, {
-        "subject": f"[{sev.upper()}] Resolved: {row.rule_name} — {hostname}",
+        "subject": subject,
         "body": body,
         "message": sms,
         "hostname": hostname, "ip_address": ip,
-        "status": "RESOLVED",
+        "status": "CLOSED" if manual else "RESOLVED",
         "severity": sev, "resolved": True,
         "rule_name": row.rule_name,
         "details": [
             ("Alert rule", row.rule_name),
             ("Active for", duration),
+            ("Closure", "Manual (operator)" if manual else "Recovered"),
         ],
         "triggered_at": datetime.now(timezone.utc).isoformat(),
         "action_url": action_url,
         "rule_id": str(row.rule_id),
         "is_recovery": True,
+        "alert_id": str(row.id),
+        "delivery_kind": "closure" if manual else "all_clear",
     })
 
 
@@ -277,12 +300,17 @@ async def sweep_escalations(db: AsyncSession) -> dict[str, int]:
             if row.status == "resolved":
                 # All-clear for the tiers that were paged. Base channels are
                 # left out when the rule sends its own recovery notification.
+                # Only a genuine recovery is "all clear"; a manual closure is
+                # announced as such, and superseded / legacy-snooze /
+                # administrative closures are not news to anyone.
+                reason = closure_reason("resolved", meta)
                 chans = [str(c) for c in (state or {}).get("channels") or []]
-                if row.recovery_alert:
+                if row.recovery_alert and reason == "recovered":
                     base = {str(c) for c in (row.notify_channels or [])}
                     chans = [c for c in chans if c not in base]
-                if chans:
-                    await _dispatch_all_clear(db, row, chans, action_url=action_url)
+                if chans and reason in ("recovered", "manual"):
+                    await _dispatch_all_clear(db, row, chans, action_url=action_url,
+                                              manual=(reason == "manual"))
                 new_state = dict(state or {})
                 new_state["closed"] = True
                 new_state["closed_at"] = now.isoformat()
@@ -314,6 +342,15 @@ async def sweep_escalations(db: AsyncSession) -> dict[str, int]:
             # dispatch retries next sweep via repeat cadence rather than
             # double-paging every tier.
             await _store_state(db, row.id, new_state)
+            ch_ids = [str(c) for c in (level.get("notify_channels") or [])]
+            ch_names = [r[0] for r in (await db.execute(text(
+                "SELECT name FROM notification_channels WHERE id::text = ANY(CAST(:ids AS text[]))"
+                " ORDER BY name"), {"ids": ch_ids})).fetchall()] if ch_ids else []
+            await record_event(db, row.id, "escalated", source="system",
+                               old_status=row.status, new_status=row.status,
+                               detail={"level": level_no, "repeat": kind == "repeat",
+                                       "channels": ch_ids, "channel_names": ch_names,
+                                       "of_levels": len(levels)})
             await _dispatch_escalation(db, row, level_no, level,
                                        is_repeat=(kind == "repeat"),
                                        action_url=action_url)
@@ -356,4 +393,14 @@ async def escalation_sweeper_loop() -> None:
             raise
         except Exception:
             logger.exception("alert hold sweep failed")
+        # Snoozes that ended while their condition is still open: clear the
+        # suppression stamp and remind the rule's channels.
+        try:
+            from app.services.alert_workflow import sweep_suppression_expiry
+            async with AsyncSessionLocal() as db:
+                await sweep_suppression_expiry(db)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("suppression expiry sweep failed")
         await asyncio.sleep(EVAL_INTERVAL_S)

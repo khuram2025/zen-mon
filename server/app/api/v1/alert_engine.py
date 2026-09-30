@@ -1,4 +1,6 @@
 from app.services.notification_transport import NotificationHTTPClient
+from app.services import alert_delivery_log as dl
+from app.services.alert_delivery_log import DeliveryRejected, ensure_accepted
 from app.core.crypto import encrypt_config, decrypt_config
 import ssl
 """
@@ -14,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import UUID
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text
 
@@ -31,7 +33,27 @@ from app.services.alert_phrasing import (
 )
 from pydantic import BaseModel
 
-router = APIRouter(prefix="/alert-engine", tags=["Alert Engine (Internal)"])
+_LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+
+
+async def require_internal_caller(request: Request) -> None:
+    """Engine endpoints are for the local poller only.
+
+    They carry no user authentication — a forged "up" transition would close
+    real outages and a forged "down" would page people — yet nginx proxies all
+    of /api/ to this app. The poller calls http://localhost:8000 directly;
+    anything relayed by nginx arrives from loopback too but always carries
+    X-Real-IP / X-Forwarded-For, so those are refused. 404 so the surface is
+    not advertised.
+    """
+    host = request.client.host if request.client else ""
+    relayed = request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip")
+    if host not in _LOOPBACK or relayed:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+router = APIRouter(prefix="/alert-engine", tags=["Alert Engine (Internal)"],
+                   dependencies=[Depends(require_internal_caller)])
 
 
 class StatusChangeEvent(BaseModel):
@@ -117,6 +139,22 @@ async def _smtp_gateway(db: AsyncSession, gw_id) -> Optional[dict]:
     return decrypt_config(row.config)
 
 
+async def _sms_gateway(db: AsyncSession, gw_id) -> Optional[dict]:
+    """SMS twin of _smtp_gateway: a gateway disabled on the Gateways page must
+    stop delivery (the engine loops used to read the config blob regardless)."""
+    if gw_id:
+        row = (await db.execute(
+            text("SELECT config, enabled FROM notification_gateways WHERE id = :id"),
+            {"id": gw_id})).first()
+    else:
+        row = (await db.execute(text(
+            "SELECT config, enabled FROM notification_gateways "
+            "WHERE type = 'sms' AND is_default = true LIMIT 1"))).first()
+    if not row or not row.enabled:
+        return None
+    return decrypt_config(row.config)
+
+
 def _clean_details(pairs: list) -> list:
     """Drop rows the alert had no value for.
 
@@ -161,10 +199,11 @@ def _sms_fill(template: str, values: dict, *, is_get: bool) -> str:
     return template
 
 
-async def _send_sms(gw_config: dict, phones: str, message: str):
-    """Send SMS via custom HTTP gateway."""
+async def _send_sms(gw_config: dict, phones: str, message: str) -> bool:
+    """Send SMS via custom HTTP gateway. False when the gateway is not usable
+    (nothing sent); raises when the gateway rejects the request."""
     if gw_config.get("provider") != "custom_http" or not gw_config.get("api_url"):
-        return
+        return False
 
     is_get = gw_config.get("http_method", "GET").upper() != "POST"
     template = _sms_fill(gw_config.get("request_template", ""), {
@@ -180,17 +219,19 @@ async def _send_sms(gw_config: dict, phones: str, message: str):
 
     async with NotificationHTTPClient(timeout=15.0, verify=True) as client:
         if not is_get:
-            await client.post(gw_config["api_url"], content=template, headers=headers, auth=auth)
+            resp = await client.post(gw_config["api_url"], content=template, headers=headers, auth=auth)
         else:
             url = gw_config["api_url"]
             if template:
                 sep = "&" if "?" in url else "?"
                 url = f"{url}{sep}{template}"
-            await client.get(url, headers=headers, auth=auth)
+            resp = await client.get(url, headers=headers, auth=auth)
+    ensure_accepted(resp)
+    return True
 
 
 async def _send_email(gw_config: dict, recipients: str, subject: str, body: str,
-                      html_body: str | None = None):
+                      html_body: str | None = None) -> bool:
     """Send email via SMTP gateway.
 
     When ``html_body`` is provided the message is sent as multipart/alternative
@@ -198,7 +239,7 @@ async def _send_email(gw_config: dict, recipients: str, subject: str, body: str,
     while text-only clients still get a readable fallback.
     """
     if not gw_config.get("host"):
-        return
+        return False
 
     recipient_list = [r.strip() for r in recipients.split(",") if r.strip()]
     if html_body:
@@ -222,8 +263,11 @@ async def _send_email(gw_config: dict, recipients: str, subject: str, body: str,
         server.starttls(context=ssl.create_default_context())
     if gw_config.get("username"):
         server.login(gw_config["username"], gw_config.get("password", ""))
-    server.sendmail(gw_config.get("from_email", ""), recipient_list, msg.as_string())
+    refused = server.sendmail(gw_config.get("from_email", ""), recipient_list, msg.as_string())
     server.quit()
+    if refused and len(refused) >= len(recipient_list):
+        raise DeliveryRejected(f"all {len(refused)} recipient(s) refused")
+    return True
 
 
 def _severity_color(severity: str) -> int:
@@ -250,9 +294,10 @@ async def _send_webhook(ch_config: dict, ctx: dict) -> None:
         payload = _render(body, ctx)
     async with NotificationHTTPClient(timeout=10.0, verify=ch_config.get("tls_verify", True)) as client:
         if isinstance(payload, str):
-            await client.post(url, content=payload, headers=headers)
+            resp = await client.post(url, content=payload, headers=headers)
         else:
-            await client.post(url, json=payload, headers=headers)
+            resp = await client.post(url, json=payload, headers=headers)
+    ensure_accepted(resp)
 
 
 async def _send_slack(ch_config: dict, ctx: dict) -> None:
@@ -280,7 +325,8 @@ async def _send_slack(ch_config: dict, ctx: dict) -> None:
         }],
     }
     async with NotificationHTTPClient(timeout=10.0) as client:
-        await client.post(url, json=payload)
+        resp = await client.post(url, json=payload)
+    ensure_accepted(resp)
 
 
 async def _send_teams(ch_config: dict, ctx: dict) -> None:
@@ -313,7 +359,8 @@ async def _send_teams(ch_config: dict, ctx: dict) -> None:
         }],
     }
     async with NotificationHTTPClient(timeout=10.0) as client:
-        await client.post(url, json=card)
+        resp = await client.post(url, json=card)
+    ensure_accepted(resp)
 
 
 async def _send_discord(ch_config: dict, ctx: dict) -> None:
@@ -339,7 +386,8 @@ async def _send_discord(ch_config: dict, ctx: dict) -> None:
         }],
     }
     async with NotificationHTTPClient(timeout=10.0) as client:
-        await client.post(url, json=payload)
+        resp = await client.post(url, json=payload)
+    ensure_accepted(resp)
 
 
 async def _send_pagerduty(ch_config: dict, ctx: dict) -> None:
@@ -348,7 +396,12 @@ async def _send_pagerduty(ch_config: dict, ctx: dict) -> None:
     if not routing_key:
         return
     is_recovery = bool(ctx.get("is_recovery"))
-    dedup_key = f"zenplus:{ctx.get('rule_id', 'unknown')}:{ctx.get('device_id', 'unknown')}"
+    # Trigger and resolve must share one key per condition. Device alerts key
+    # on device_id as before; server/service/host alerts used to collapse into
+    # "<rule>:unknown", so one entity's recovery resolved another's incident.
+    subject = (ctx.get("device_id") or ctx.get("server_id") or ctx.get("service_check_id")
+               or ctx.get("hostname") or "unknown")
+    dedup_key = ctx.get("dedup_key") or f"zenplus:{ctx.get('rule_id', 'unknown')}:{subject}"
     payload = {
         "routing_key": routing_key,
         "event_action": "resolve" if is_recovery else "trigger",
@@ -363,20 +416,49 @@ async def _send_pagerduty(ch_config: dict, ctx: dict) -> None:
         },
     }
     async with NotificationHTTPClient(timeout=10.0) as client:
-        await client.post("https://events.pagerduty.com/v2/enqueue", json=payload)
+        resp = await client.post("https://events.pagerduty.com/v2/enqueue", json=payload)
+    ensure_accepted(resp)
+
+
+_HTTP_SENDERS = {
+    "webhook": lambda cfg, ctx: _send_webhook(cfg, ctx),
+    "slack": lambda cfg, ctx: _send_slack(cfg, ctx),
+    "teams": lambda cfg, ctx: _send_teams(cfg, ctx),
+    "discord": lambda cfg, ctx: _send_discord(cfg, ctx),
+    "pagerduty": lambda cfg, ctx: _send_pagerduty(cfg, ctx),
+}
+
+
+async def _dispatch_channel_result(ch_type: str, ch_config: dict, ctx: dict):
+    """(accepted, error) for one webhook-family channel. accepted=False with
+    error=None means the type is unsupported/unconfigured (nothing sent)."""
+    sender = _HTTP_SENDERS.get(ch_type)
+    if not sender:
+        return False, None
+    if not (ch_config.get("url") or ch_config.get("webhook_url")
+            or ch_config.get("routing_key") or ch_config.get("integration_key")):
+        return False, None
+    try:
+        await sender(ch_config, ctx)
+        return True, None
+    except Exception as exc:
+        print(f"ERROR dispatch {ch_type}: {exc}")
+        return False, exc
 
 
 async def _dispatch_channel(ch_type: str, ch_config: dict, ctx: dict) -> bool:
-    """Single dispatch point. Returns True if a notification was attempted."""
-    try:
-        if ch_type == "webhook":   await _send_webhook(ch_config, ctx);   return True
-        if ch_type == "slack":     await _send_slack(ch_config, ctx);     return True
-        if ch_type == "teams":     await _send_teams(ch_config, ctx);     return True
-        if ch_type == "discord":   await _send_discord(ch_config, ctx);   return True
-        if ch_type == "pagerduty": await _send_pagerduty(ch_config, ctx); return True
-    except Exception as exc:
-        print(f"ERROR dispatch {ch_type}: {exc}")
-    return False
+    """Single dispatch point. Returns True if the provider accepted it."""
+    ok, _err = await _dispatch_channel_result(ch_type, ch_config, ctx)
+    return ok
+
+
+async def _log_delivery(db: AsyncSession, alert_id, rule, ch_id, ch, is_recovery: bool,
+                        outcome: str, error=None, latency_ms: int | None = None) -> None:
+    await dl.record(
+        db, alert_id=alert_id, rule_id=getattr(rule, "id", None), channel_id=ch_id,
+        channel_name=getattr(ch, "name", None), channel_type=getattr(ch, "type", None),
+        kind="recovery" if is_recovery else "trigger", outcome=outcome, error=error,
+        latency_ms=latency_ms if outcome != "skipped" else None)
 
 
 async def _find_suppressing_dependency(db: AsyncSession, device_id: str):
@@ -455,9 +537,12 @@ def _recovery_map(closed_rows) -> dict:
         sent = row.notified is None or str(row.notified).lower() == "true"
         entry = out.get(rid)
         if entry is None:
-            out[rid] = {"notified": sent, "since": row.triggered_at}
+            out[rid] = {"notified": sent, "since": row.triggered_at,
+                        "alert_id": getattr(row, "id", None)}
             continue
         entry["notified"] = entry["notified"] or sent
+        if entry.get("alert_id") is None:
+            entry["alert_id"] = getattr(row, "id", None)
         if row.triggered_at and (entry["since"] is None or row.triggered_at < entry["since"]):
             entry["since"] = row.triggered_at
     return out
@@ -756,7 +841,7 @@ async def evaluate_status_change(
                   AND service_check_id IS NULL
                   AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
                   AND metadata->>'new_status' IS NOT NULL
-                RETURNING rule_id, triggered_at, metadata->>'notified' AS notified,
+                RETURNING id, rule_id, triggered_at, metadata->>'notified' AS notified,
                           metadata->>'new_status' AS new_status
             """),
             {
@@ -1006,53 +1091,60 @@ async def evaluate_status_change(
         elif trigger != "up" and not recovered[str(rule.id)]["notified"]:
             continue
 
-        # Send notifications to channels
+        # Send notifications to channels. Every channel's outcome goes to the
+        # delivery log against the incident it is about: the new row for a
+        # trigger, the closed incident for a recovery.
         channel_ids = rule.notify_channels or []
+        delivery_alert_id = (recovered.get(str(rule.id), {}).get("alert_id")
+                             if is_recovery else new_alert_id)
         for ch_id in channel_ids:
+            ch = None
+            timer = dl.Timer()
             try:
                 ch_result = await db.execute(
-                    text("SELECT type, config, gateway_id, enabled FROM notification_channels WHERE id = :id"),
+                    text("SELECT name, type, config, gateway_id, enabled FROM notification_channels WHERE id = :id"),
                     {"id": ch_id},
                 )
                 ch = ch_result.first()
                 if not ch or not ch.enabled:
+                    await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
+                                        "skipped", "config: channel disabled or deleted")
                     continue
 
                 ch_config = decrypt_config(ch.config)
 
                 if ch.type == "sms":
                     phones = ch_config.get("phone_numbers", "")
-                    if not phones:
+                    gw_cfg = await _sms_gateway(db, ch.gateway_id or ch_config.get("gateway_id")) if phones else None
+                    if not phones or not gw_cfg:
+                        await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery, "skipped",
+                                            "config: no phone numbers" if not phones else "config: no enabled SMS gateway")
                         continue
-
-                    # Get SMS gateway
-                    gw_id = ch.gateway_id or ch_config.get("gateway_id")
-                    if gw_id:
-                        gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})
-                    else:
-                        gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'sms' AND is_default = true LIMIT 1"))
-                    gw_row = gw_res.first()
-                    if gw_row:
-                        # Pre-fill device placeholders in the gateway template
-                        # (encoded per HTTP method); {message}/{recipients}/
-                        # {sender} are filled by _send_sms itself.
-                        gw_cfg = decrypt_config(gw_row.config)
-                        gw_cfg["request_template"] = _sms_fill(
-                            gw_cfg.get("request_template", ""),
-                            {"hostname": event.hostname,
-                             "ip_address": event.ip_address,
-                             "status": event.new_status.upper()},
-                            is_get=gw_cfg.get("http_method", "GET").upper() != "POST",
-                        )
-                        await _send_sms(gw_cfg, phones, sms_body)
+                    # Pre-fill device placeholders in the gateway template
+                    # (encoded per HTTP method); {message}/{recipients}/
+                    # {sender} are filled by _send_sms itself.
+                    gw_cfg["request_template"] = _sms_fill(
+                        gw_cfg.get("request_template", ""),
+                        {"hostname": event.hostname,
+                         "ip_address": event.ip_address,
+                         "status": event.new_status.upper()},
+                        is_get=gw_cfg.get("http_method", "GET").upper() != "POST",
+                    )
+                    if await _send_sms(gw_cfg, phones, sms_body):
                         notifications_sent += 1
+                        await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
+                                            "accepted", None, timer.ms)
+                    else:
+                        await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
+                                            "skipped", "config: SMS gateway is not a usable HTTP gateway")
 
                 elif ch.type == "email":
                     recipients = ch_config.get("recipients", "")
-                    if not recipients:
+                    gw_conf = await _smtp_gateway(db, ch.gateway_id or ch_config.get("gateway_id")) if recipients else None
+                    if not recipients or not gw_conf:
+                        await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery, "skipped",
+                                            "config: no recipients" if not recipients else "config: no enabled SMTP gateway")
                         continue
-
-                    gw_conf = await _smtp_gateway(db, ch.gateway_id or ch_config.get("gateway_id"))
                     if gw_conf:
                         email_html = build_alert_email_html({
                             "severity": rule.severity or "warning",
@@ -1084,9 +1176,14 @@ async def evaluate_status_change(
                             "action_url": await _dashboard_url(db, "/alerts"),
                             "timestamp": now.isoformat(),
                         })
-                        await _send_email(gw_conf, recipients, email_subject,
-                                          email_body, html_body=email_html)
-                        notifications_sent += 1
+                        if await _send_email(gw_conf, recipients, email_subject,
+                                             email_body, html_body=email_html):
+                            notifications_sent += 1
+                            await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
+                                                "accepted", None, timer.ms)
+                        else:
+                            await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
+                                                "skipped", "config: SMTP gateway has no host")
 
                 elif ch.type in ("webhook", "slack", "teams", "discord", "pagerduty"):
                     # Shared context for every outbound provider.
@@ -1101,13 +1198,22 @@ async def evaluate_status_change(
                         "device_id":    event.device_id,
                         "rule_id":      str(rule.id),
                         "rule_name":    rule.name,
+                        "alert_id":     str(delivery_alert_id) if delivery_alert_id else None,
+                        "event_type":   "recovery" if is_recovery else "trigger",
                     }
-                    if await _dispatch_channel(ch.type, ch_config, ctx):
+                    ok, err = await _dispatch_channel_result(ch.type, ch_config, ctx)
+                    if ok:
                         notifications_sent += 1
+                    await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
+                                        "accepted" if ok else ("failed" if err else "skipped"),
+                                        err if err else (None if ok else "config: no URL or routing key"),
+                                        timer.ms)
 
             except Exception as exc:
                 # Log but don't fail the whole evaluation
                 print(f"ERROR sending notification to channel {ch_id}: {exc}")
+                await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
+                                    "failed", exc, timer.ms)
 
     await db.commit()
 
@@ -1242,7 +1348,7 @@ async def evaluate_service_status_change(
                   AND service_check_id = :service_check_id
                   AND COALESCE(metadata->>'is_recovery', 'false') != 'true'
                   AND metadata->>'new_status' IS NOT NULL
-                RETURNING rule_id, triggered_at, metadata->>'notified' AS notified,
+                RETURNING id, rule_id, triggered_at, metadata->>'notified' AS notified,
                           metadata->>'new_status' AS new_status
             """),
             {
@@ -1417,37 +1523,71 @@ async def evaluate_service_status_change(
             continue
 
         channel_ids = rule.notify_channels or []
+        delivery_alert_id = (recovered.get(str(rule.id), {}).get("alert_id")
+                             if is_recovery else svc_alert_id)
         for ch_id in channel_ids:
+            ch = None
+            timer = dl.Timer()
             try:
                 ch_result = await db.execute(
-                    text("SELECT type, config, gateway_id, enabled FROM notification_channels WHERE id = :id"),
+                    text("SELECT name, type, config, gateway_id, enabled FROM notification_channels WHERE id = :id"),
                     {"id": ch_id},
                 )
                 ch = ch_result.first()
                 if not ch or not ch.enabled:
+                    await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
+                                        "skipped", "config: channel disabled or deleted")
                     continue
 
                 ch_config = decrypt_config(ch.config)
 
                 if ch.type == "sms":
                     phones = ch_config.get("phone_numbers", "")
-                    if not phones:
+                    gw_cfg = await _sms_gateway(db, ch.gateway_id or ch_config.get("gateway_id")) if phones else None
+                    if not phones or not gw_cfg:
+                        await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery, "skipped",
+                                            "config: no phone numbers" if not phones else "config: no enabled SMS gateway")
                         continue
-                    gw_id = ch.gateway_id or ch_config.get("gateway_id")
-                    if gw_id:
-                        gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE id = :id"), {"id": gw_id})
-                    else:
-                        gw_res = await db.execute(text("SELECT config FROM notification_gateways WHERE type = 'sms' AND is_default = true LIMIT 1"))
-                    gw_row = gw_res.first()
-                    if gw_row:
-                        await _send_sms(decrypt_config(gw_row.config), phones, sms_body)
+                    if await _send_sms(gw_cfg, phones, sms_body):
                         notifications_sent += 1
+                        await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
+                                            "accepted", None, timer.ms)
+                    else:
+                        await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
+                                            "skipped", "config: SMS gateway is not a usable HTTP gateway")
+
+                elif ch.type in ("webhook", "slack", "teams", "discord", "pagerduty"):
+                    # Service alerts never reached webhook-family channels:
+                    # only SMS and email were implemented on this path.
+                    ctx = {
+                        "hostname":     variables.get("check_name") or variables.get("hostname"),
+                        "ip_address":   variables.get("target") or "",
+                        "status":       (event.new_status or "").upper(),
+                        "severity":     rule.severity or "warning",
+                        "message":      sms_body,
+                        "triggered_at": now.isoformat(),
+                        "is_recovery":  is_recovery,
+                        "service_check_id": event.service_check_id,
+                        "rule_id":      str(rule.id),
+                        "rule_name":    rule.name,
+                        "alert_id":     str(delivery_alert_id) if delivery_alert_id else None,
+                        "event_type":   "recovery" if is_recovery else "trigger",
+                    }
+                    ok, err = await _dispatch_channel_result(ch.type, ch_config, ctx)
+                    if ok:
+                        notifications_sent += 1
+                    await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
+                                        "accepted" if ok else ("failed" if err else "skipped"),
+                                        err if err else (None if ok else "config: no URL or routing key"),
+                                        timer.ms)
 
                 elif ch.type == "email":
                     recipients = ch_config.get("recipients", "")
-                    if not recipients:
+                    gw_conf = await _smtp_gateway(db, ch.gateway_id or ch_config.get("gateway_id")) if recipients else None
+                    if not recipients or not gw_conf:
+                        await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery, "skipped",
+                                            "config: no recipients" if not recipients else "config: no enabled SMTP gateway")
                         continue
-                    gw_conf = await _smtp_gateway(db, ch.gateway_id or ch_config.get("gateway_id"))
                     if gw_conf:
                         email_html = build_alert_email_html({
                             "severity": rule.severity or "warning",
@@ -1473,12 +1613,19 @@ async def evaluate_service_status_change(
                             "action_url": await _dashboard_url(db, "/services"),
                             "timestamp": now.isoformat(),
                         })
-                        await _send_email(gw_conf, recipients, email_subject,
-                                          email_body, html_body=email_html)
-                        notifications_sent += 1
+                        if await _send_email(gw_conf, recipients, email_subject,
+                                             email_body, html_body=email_html):
+                            notifications_sent += 1
+                            await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
+                                                "accepted", None, timer.ms)
+                        else:
+                            await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
+                                                "skipped", "config: SMTP gateway has no host")
 
             except Exception as exc:
                 print(f"ERROR sending service notification to channel {ch_id}: {exc}")
+                await _log_delivery(db, delivery_alert_id, rule, ch_id, ch, is_recovery,
+                                    "failed", exc, timer.ms)
 
     await db.commit()
 
