@@ -37,6 +37,7 @@ from app.schemas.alert import AlertStats
 from app.services import alert_rule_scope as rs
 from app.services import alert_service as svc
 from app.services import alert_workflow as wf
+from app.services import netflow_alert_service as nfa
 from app.services.audit_service import write_audit_log
 
 router = APIRouter(prefix="/alerts", tags=["Alerts"])
@@ -118,7 +119,13 @@ def _closure(row) -> dict | None:
             "by": by, "note": meta.get("resolution_note")}
 
 
-async def _enrich(db: AsyncSession, rows) -> dict:
+async def _netflow_redacted(db: AsyncSession, user: User | None) -> bool:
+    """Whether NetFlow alert details must be withheld from this caller (it
+    lacks netflow.view; X-01). No caller (internal use) sees everything."""
+    return await nfa.netflow_details_withheld(db, user)
+
+
+async def _enrich(db: AsyncSession, rows, user: User | None = None) -> dict:
     """Batch lookups for a page of rows: channels, silences, deliveries."""
     ids = [str(r.id) for r in rows]
     channel_ids = sorted({str(c) for r in rows for c in (r.notify_channels or [])
@@ -161,7 +168,8 @@ async def _enrich(db: AsyncSession, rows) -> dict:
             except Exception:
                 await db.rollback()
     return {"channels": channels, "silences": silences, "deliveries": deliveries,
-            "targets": await wf.response_targets(db)}
+            "targets": await wf.response_targets(db),
+            "redact_netflow": await _netflow_redacted(db, user)}
 
 
 def serialize(row, ctx: dict) -> dict:
@@ -175,7 +183,7 @@ def serialize(row, ctx: dict) -> dict:
     assigned = None
     if getattr(row, "assigned_to", None):
         assigned = _person(row.assigned_to, row.assignee_username, row.assignee_full_name)
-    return {
+    out = {
         "id": str(row.id),
         "status": row.status,
         "severity": row.severity,
@@ -210,6 +218,9 @@ def serialize(row, ctx: dict) -> dict:
         "delivery": ctx["deliveries"].get(str(row.id)),
         "metadata": meta,
     }
+    if ctx.get("redact_netflow"):
+        return nfa.redact_alert_payload(out)
+    return out
 
 
 def _parse_severity(value: str | None) -> list[str]:
@@ -282,6 +293,7 @@ async def alert_filters(
         basis=basis, age=age, rule_state=rule_state, search=search,
         delivery=delivery, as_of=as_of,
         visible_tags=await scoping.visible_tags(db, user), user_id=user.id,
+        hide_netflow_text=await _netflow_redacted(db, user),
     )
 
 
@@ -297,7 +309,7 @@ async def _row_payload(db: AsyncSession, user: User, alert_id) -> dict:
     rows, _ = await svc.list_rows(db, f, limit=1, count=False)
     if not rows:
         raise HTTPException(404, "Alert not found")
-    return serialize(rows[0], await _enrich(db, rows))
+    return serialize(rows[0], await _enrich(db, rows, user))
 
 
 async def _perms(db: AsyncSession, user: User) -> list[str]:
@@ -317,11 +329,12 @@ async def list_alerts(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(can_view),
 ):
     if sort not in svc.SORTS:
         raise HTTPException(422, f"sort must be one of {', '.join(svc.SORTS)}")
     rows, total = await svc.list_rows(db, f, sort=sort, skip=skip, limit=limit)
-    ctx = await _enrich(db, rows)
+    ctx = await _enrich(db, rows, user)
     now = (await db.execute(text("SELECT NOW()"))).scalar()
     newer = None
     if f.as_of is not None:
@@ -452,7 +465,7 @@ async def export_alerts(
     if sort not in svc.SORTS:
         raise HTTPException(422, "Unknown sort")
     rows, total = await svc.list_rows(db, f, sort=sort, skip=0, limit=svc.EXPORT_CAP)
-    ctx = await _enrich(db, rows)
+    ctx = await _enrich(db, rows, user)
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["id", "severity", "status", "closure", "suppressed", "entity_kind", "entity",
@@ -794,7 +807,7 @@ async def _recurrence(db: AsyncSession, row, scope) -> dict:
     }
 
 
-async def _related(db: AsyncSession, row, scope) -> list[dict]:
+async def _related(db: AsyncSession, row, scope, redact_netflow: bool = False) -> list[dict]:
     """Related incidents, each with WHY it is related. Every query carries the
     caller's visibility scope (A03) and a typed entity relationship — the old
     'same severity' fallback matched unrelated incidents fleet-wide."""
@@ -830,7 +843,8 @@ async def _related(db: AsyncSession, row, scope) -> list[dict]:
             " host(s.primary_ip) AS server_ip, sc.name AS service_check_name, sen.name AS sensor_name"
             f"{owner} {frm}" + svc._where(clauses) + " ORDER BY a.triggered_at DESC LIMIT :lim"
         ), {**params, "lim": limit + len(seen)})).fetchall()
-        ctx = {"channels": {}, "silences": {}, "deliveries": {}, "targets": {}}
+        ctx = {"channels": {}, "silences": {}, "deliveries": {}, "targets": {},
+               "redact_netflow": redact_netflow}
         n = 0
         for r in rows:
             if str(r.id) in seen or n >= limit:
@@ -933,7 +947,7 @@ async def get_alert_detail(
         # 404, not 403: out-of-scope ids must not be confirmable.
         raise HTTPException(404, "Alert not found")
     row = rows[0]
-    ctx = await _enrich(db, rows)
+    ctx = await _enrich(db, rows, user)
     payload = serialize(row, ctx)
     perms = await _perms(db, user)
     payload["server_time"] = (await db.execute(text("SELECT NOW()"))).scalar()
@@ -944,12 +958,14 @@ async def get_alert_detail(
         "can_suppress_forever": has_permission(perms, "alerts.manage"),
         "can_edit_rule": bool(payload["rule"] and payload["rule"]["editable"]),
     }
-    meta = row.metadata or {}
+    # The (possibly redacted) metadata: evidence must not re-expose what the
+    # payload withholds from a caller without netflow.view.
+    meta = payload["metadata"] or {}
     payload["policy_snapshot"] = meta.get("policy_snapshot")
     payload["escalation_state"] = meta.get("escalation") if isinstance(meta.get("escalation"), dict) else None
     payload["evidence"] = _evidence(meta)
     payload["recurrence"] = await _recurrence(db, row, scope)
-    payload["related"] = await _related(db, row, scope)
+    payload["related"] = await _related(db, row, scope, ctx.get("redact_netflow", False))
     payload["related_alerts"] = [r for r in payload["related"] if r["relation"] == "same_entity"]
     payload["events"] = await _events(db, payload, row)
     payload["deliveries"] = []

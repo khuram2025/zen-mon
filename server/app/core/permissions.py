@@ -36,6 +36,9 @@ PERMISSION_MODULES: list[tuple[str, str, list[tuple[str, str, str]]]] = [
     ]),
     ("netflow", "NetFlow", [
         ("netflow.view", "View", "View NetFlow traffic analytics"),
+        ("netflow.manage", "Manage",
+         "Manage NetFlow settings, mappings, rules and shared views"),
+        ("netflow.export", "Export raw", "Export complete raw flow result sets"),
     ]),
     ("udt", "User Device Tracker", [
         ("udt.view", "View", "View tracked endpoints and ports"),
@@ -100,6 +103,7 @@ _OPERATOR = [
     "dashboard.view", "devices.view", "devices.manage", "discovery.view",
     "discovery.run", "alerts.view", "alerts.acknowledge", "alerts.manage",
     "service_checks.view", "service_checks.manage", "netflow.view",
+    "netflow.manage", "netflow.export",
     "udt.view", "udt.view_users", "udt.manage", "netpath.view", "netpath.manage",
     "ncm.view", "ncm.manage", "apm.view",
     "apm.manage", "reports.view", "reports.export", "maps.view",

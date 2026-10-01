@@ -14,10 +14,15 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.netflow import access as nf_access
+from app.api.v1.netflow.common import INTERFACE_5M, RAW, table_ref
+from app.api.v1.netflow.sql import DST, EXPORTER, IF_IN, IF_OUT, SRC, VOLUME_GUARD, display
+from app.core import scoping
 from app.core.database import get_db
 from app.core.security import get_current_user, require_operator_user
 from app.models.user import User
 from app.services.audit_service import write_audit_log
+from app.services.interface_speed import effective_speed
 from app.services.tag_service import canonicalize_tags, clean_tags
 
 logger = logging.getLogger("zenplus.link_utilization")
@@ -64,13 +69,6 @@ def _bucket_seconds(hours: int) -> int:
     if hours <= 24 * 7:
         return 1800
     return 7200
-
-
-def _effective_speed(row: dict) -> int:
-    manual = row.get("configured_speed_bps")
-    if manual and int(manual) > 0:
-        return int(manual)
-    return int(row.get("if_speed") or 0)
 
 
 def _util_pct(in_bps: float, out_bps: float, speed: int) -> float | None:
@@ -267,6 +265,18 @@ def _health_payload(d: dict, window_seconds: float) -> dict:
     }
 
 
+async def _require_device_visible(db: AsyncSession, user: User, device_id) -> None:
+    """404 for a device outside the caller's tag scope, as GET /devices/{id}
+    answers: link utilization must not expose (or let a scoped operator tag)
+    another team's devices and interfaces (X-15)."""
+    scope = await scoping.visible_tags(db, user)
+    if scope is None:
+        return
+    row = (await db.execute(text("SELECT tags FROM devices WHERE id = :id"), {"id": str(device_id)})).first()
+    if row is None or not scoping.entity_visible(row[0], scope):
+        raise HTTPException(status_code=404, detail="interface not found")
+
+
 async def _favorite_keys(db: AsyncSession, user_id) -> set[tuple[str, int]]:
     """(device_id, if_index) pairs this user has starred.
 
@@ -412,12 +422,17 @@ async def list_links(
         # `total_favorites` still reports the user's stars: the fleet having no
         # samples in this window doesn't mean they have no favourites, and the
         # UI's empty state says different things for the two cases.
+        # Same summary shape as a populated fleet, so the page's tiles read 0
+        # rather than "undefined" on an appliance with no interface samples.
         return {
             "items": [],
             "summary": {
-                "total": 0, "high_util": 0, "with_netflow": 0, "avg_util": None,
-                "favorites": 0, "total_favorites": len(favorites),
+                "total": 0, "high_util": 0, "warning_util": 0, "with_netflow": 0, "avg_util": None,
+                "favorites": 0, "total_favorites": len(favorites), "returned": 0,
+                "with_errors": 0, "with_discards": 0, "flapping": 0, "critical_health": 0,
+                "unhealthy": 0, "total_errors": 0, "total_discards": 0, "tags": [],
             },
+            "hours": hours,
         }
 
     # Inventory from Postgres.
@@ -429,7 +444,11 @@ async def list_links(
     # extra interfaces it returns are dropped by the metrics lookup below.
     device_ids = sorted({k[0] for k in metrics})
 
-    inv_rows = (await db.execute(text("""
+    # Only devices in the caller's tag scope (X-15): every interface, rate and
+    # health figure below is keyed off this inventory.
+    scope = await scoping.visible_tags(db, user)
+    scope_sql = f" AND {scoping.jsonb_tags_visible('d.tags')}" if scope is not None else ""
+    inv_rows = (await db.execute(text(f"""
         SELECT di.device_id::text, di.if_index, di.if_name, di.if_descr, di.if_alias,
                di.if_speed, di.configured_speed_bps, di.oper_status, di.admin_status,
                di.monitored, d.hostname, d.ip_address::text, d.id::text,
@@ -437,33 +456,43 @@ async def list_links(
         FROM device_interfaces di
         JOIN devices d ON d.id = di.device_id
         WHERE di.device_id = ANY(CAST(:device_ids AS uuid[]))
-          AND di.monitored = TRUE
-    """), {"device_ids": device_ids})).all()
+          AND di.monitored = TRUE{scope_sql}
+    """), {"device_ids": device_ids, **({scoping.SCOPE_PARAM: scope} if scope is not None else {})})).all()
 
-    # NetFlow-enabled interfaces in the same window.
+    # NetFlow-enabled interfaces in the same window, keyed by the device that
+    # owns the exporter: ownership follows the NetFlow rule (explicit
+    # exporter->device mapping first, then management IP), so a router that
+    # exports from a loopback still lights up its interfaces. Only exporters
+    # the caller may see count, and nothing is flagged without netflow.view.
+    #
+    # Read from the 5-minute interface rollup (one row per exporter,
+    # interface, direction and slot) rather than scanning every raw flow of
+    # the window for its interface pair: the window reaches 30 days, where a
+    # raw DISTINCT reads hundreds of millions of rows to answer a yes/no
+    # question. The rollup already skips ifIndex 0 and records without volume.
     nf_set: set[tuple[str, int]] = set()
-    nf_params: dict = {}
-    nf_window = _window_filter(hours, from_time, to_time, nf_params)
-    try:
-        nf = client.query(
-            f"""
-            SELECT DISTINCT toString(exporter_ip) AS ip, ifindex
-            FROM (
-                SELECT exporter_ip, input_snmp AS ifindex
-                FROM zenplus.flow_records
-                WHERE {nf_window} AND input_snmp != 0
-                UNION ALL
-                SELECT exporter_ip, output_snmp AS ifindex
-                FROM zenplus.flow_records
-                WHERE {nf_window} AND output_snmp != 0
+    vis = await nf_access.visibility_for_user(db, user)
+    if vis.can(nf_access.VIEW_PERMISSION) and not vis.is_empty:
+        owners = await nf_access.resolve_exporter_owners(db)
+        vis_sql, nf_params = nf_access.visibility_predicate(vis, param="lu_vis")
+        nf_window = _window_filter(hours, from_time, to_time, nf_params)
+        scope = f" AND {vis_sql}" if vis_sql else ""
+        try:
+            nf = client.query(
+                f"""
+                SELECT {display(EXPORTER)} AS ip, ifindex
+                FROM {table_ref(INTERFACE_5M)}
+                WHERE {nf_window}{scope}
+                GROUP BY exporter_ip, exporter_ip6, ifindex
+                """,
+                parameters=nf_params,
             )
-            """,
-            parameters=nf_params,
-        )
-        for r in nf.result_rows:
-            nf_set.add((str(r[0]), int(r[1])))
-    except Exception:
-        logger.exception("netflow interface lookup failed")
+            for r in nf.result_rows:
+                owner = owners.get(nf_access.canonical_ip(r[0]))
+                if owner is not None:
+                    nf_set.add((owner.device_id, int(r[1])))
+        except Exception:
+            logger.exception("netflow interface lookup failed")
 
     items = []
     for row in inv_rows:
@@ -473,7 +502,8 @@ async def list_links(
         # the window; they cannot be ranked, so leave them out as before.
         if m is None:
             continue
-        speed = _effective_speed({"configured_speed_bps": row[6], "if_speed": row[5]})
+        # 0 = unknown: _util_pct then reports no percentage.
+        speed = effective_speed(row[6], None, row[5]) or 0
         in_bps = m.get("in_bps", 0.0)
         out_bps = m.get("out_bps", 0.0)
         util = _util_pct(in_bps, out_bps, speed)
@@ -493,11 +523,10 @@ async def list_links(
             # forwards. Flag it so the UI doesn't show a contradictory
             # "Up · 0% available" instead of hiding the number.
             oper_unreliable = True
-        # ip_address is inet, so ::text yields "192.168.100.102/32", but the
-        # flow exporter IPs from ClickHouse carry no prefix. Comparing the raw
-        # values never matched, so has_netflow was always False.
+        # ip_address is inet, so ::text yields "192.168.100.102/32"; strip it
+        # for display. NetFlow presence is keyed by device, not by this IP.
         ip = _clean_ip(row[11])
-        has_nf = (ip, idx) in nf_set
+        has_nf = (did, idx) in nf_set
         health = m.get("health") or {}
         # An administratively shut port isn't a fault — don't let its flap
         # count or stale counters read as a health problem.
@@ -663,16 +692,18 @@ async def list_favorites(
     discovery has since removed — is reported with `exists: false` rather than
     as a nameless row.
     """
-    rows = (await db.execute(text("""
+    scope = await scoping.visible_tags(db, user)
+    scope_sql = f" AND {scoping.jsonb_tags_visible('d.tags')}" if scope is not None else ""
+    rows = (await db.execute(text(f"""
         SELECT f.device_id::text, f.if_index, f.created_at,
                d.hostname, di.if_name, di.if_descr, di.if_alias
         FROM link_favorites f
         JOIN devices d ON d.id = f.device_id
         LEFT JOIN device_interfaces di
                ON di.device_id = f.device_id AND di.if_index = f.if_index
-        WHERE f.user_id = :uid
+        WHERE f.user_id = :uid{scope_sql}
         ORDER BY f.created_at DESC
-    """), {"uid": str(user.id)})).all()
+    """), {"uid": str(user.id), **({scoping.SCOPE_PARAM: scope} if scope is not None else {})})).all()
     return {
         "items": [
             {
@@ -698,6 +729,7 @@ async def add_favorite(
     user: User = Depends(get_current_user),
 ):
     """Star a link. Idempotent — re-starring keeps the original timestamp."""
+    await _require_device_visible(db, user, device_id)
     known = (await db.execute(text("""
         SELECT 1 FROM device_interfaces WHERE device_id = :did AND if_index = :idx
     """), {"did": device_id, "idx": if_index})).first()
@@ -760,6 +792,7 @@ async def set_link_tags(
     Goes through canonicalize_tags so a link only ever carries registry
     spellings and unknown labels auto-register, exactly as device tagging does.
     """
+    await _require_device_visible(db, user, device_id)
     names = await canonicalize_tags(db, payload.tags)
     res = await db.execute(text("""
         UPDATE device_interfaces SET tags = CAST(:tags AS jsonb)
@@ -794,6 +827,8 @@ async def bulk_tag_links(
         raise HTTPException(status_code=400, detail="nothing to add or remove")
 
     pairs = [(str(l.device_id), l.if_index) for l in payload.links]
+    for did in sorted({p[0] for p in pairs}):
+        await _require_device_visible(db, user, did)
     res = await db.execute(text("""
         UPDATE device_interfaces di SET tags = (
             SELECT COALESCE(jsonb_agg(DISTINCT el), '[]'::jsonb) FROM (
@@ -830,6 +865,7 @@ async def link_detail(
     """Per-link drill-down: SNMP traffic/errors + optional NetFlow overlay."""
     from app.core.database import get_clickhouse_client
 
+    await _require_device_visible(db, user, device_id)
     inv = (await db.execute(text("""
         SELECT di.if_name, di.if_descr, di.if_alias, di.if_speed, di.configured_speed_bps,
                di.oper_status, di.admin_status, di.mac_address,
@@ -841,7 +877,7 @@ async def link_detail(
     if not inv:
         raise HTTPException(404, "interface not found")
 
-    speed = _effective_speed({"configured_speed_bps": inv[4], "if_speed": inv[3]})
+    speed = effective_speed(inv[4], None, inv[3]) or 0
     client = get_clickhouse_client()
     bucket = _bucket_seconds(hours)
     did = str(device_id)
@@ -995,16 +1031,44 @@ async def link_detail(
             **health,
         }
 
-    # Strip the inet prefix before querying ClickHouse — flow_records stores
-    # bare exporter IPs, so "192.168.41.105/32" matched nothing and every
-    # interface reported "no flow records".
-    exporter_ip = _clean_ip(inv[9])
-    netflow = {"has_flows": False, "timeseries": [], "top_talkers": [], "protocols": []}
+    # NetFlow overlay. The device's flows come from every exporter it owns
+    # under the NetFlow ownership rule (explicit mapping first, then the
+    # management IP), limited to the exporters the caller may see; `status`
+    # says why there is no overlay instead of an unexplained empty chart:
+    #   ok           flows were queried (has_flows says whether any matched)
+    #   forbidden    the caller lacks netflow.view
+    #   no_exporter  no visible exporter belongs to this device
+    #   failed       the ClickHouse query failed (logged)
+    netflow: dict = {
+        "status": "ok", "has_flows": False, "exporters": [],
+        "timeseries": [], "top_talkers": [], "protocols": [],
+        # The exporters whose flows crossed this ifIndex in the window, by
+        # bytes: what a NetFlow deep link names (interface = exporter + ifIndex).
+        "interface_exporters": [],
+    }
+    vis = await nf_access.visibility_for_user(db, user)
+    exporters: list[str] = []
+    if not vis.can(nf_access.VIEW_PERMISSION):
+        netflow["status"] = "forbidden"
+    else:
+        owners = await nf_access.resolve_exporter_owners(db)
+        exporters = [ip for ip in nf_access.device_exporters(owners, device_id) if vis.allows(ip)]
+        # A management address that never exported is not a flow exporter.
+        flowing = await nf_access.flow_exporters()
+        if flowing is not None:
+            exporters = [ip for ip in exporters if ip in flowing]
+        netflow["exporters"] = exporters
+        if not exporters:
+            netflow["status"] = "no_exporter"
 
-    if exporter_ip:
+    if exporters:
         nf_bucket = 60 if hours <= 6 else (300 if hours <= 48 else 1800)
-        nf_params: dict = {"ip": exporter_ip, "if": if_index}
+        exp_sql, nf_params = nf_access.exporters_predicate(exporters, param="lu_exp")
+        nf_params["if"] = if_index
         nf_window = _window_filter(hours, from_time, to_time, nf_params)
+        # Same guard as every NetFlow aggregate (corrupt byte counts, NSEL
+        # create/deny events that carry no volume of their own).
+        base = f"{exp_sql} AND {VOLUME_GUARD} AND {nf_window}"
         try:
             # The inner aliases must not shadow `bytes`: aliasing sum(bytes) AS
             # bytes made the outer sum() resolve to sum(sum(bytes)), which
@@ -1018,20 +1082,16 @@ async def link_detail(
                            sum(bytes) * 8.0 / {nf_bucket} AS bucket_in_bps,
                            0 AS bucket_out_bps,
                            sum(bytes) AS bucket_bytes
-                    FROM zenplus.flow_records
-                    WHERE exporter_ip = %(ip)s
-                      AND input_snmp = %(if)s
-                      AND {nf_window}
+                    FROM {table_ref(RAW)}
+                    WHERE {base} AND {IF_IN} = %(if)s
                     GROUP BY ts
                     UNION ALL
                     SELECT toUnixTimestamp(toStartOfInterval(timestamp, INTERVAL {nf_bucket} SECOND)) * 1000 AS ts,
                            0 AS bucket_in_bps,
                            sum(bytes) * 8.0 / {nf_bucket} AS bucket_out_bps,
                            sum(bytes) AS bucket_bytes
-                    FROM zenplus.flow_records
-                    WHERE exporter_ip = %(ip)s
-                      AND output_snmp = %(if)s
-                      AND {nf_window}
+                    FROM {table_ref(RAW)}
+                    WHERE {base} AND {IF_OUT} = %(if)s
                     GROUP BY ts
                 )
                 GROUP BY ts ORDER BY ts
@@ -1048,23 +1108,23 @@ async def link_detail(
             netflow["timeseries"] = sorted(ts_map.values(), key=lambda x: x["ts"])
             netflow["has_flows"] = len(netflow["timeseries"]) > 0
 
+            # Grouped on the address value, rendered afterwards: toString()
+            # per row inside GROUP BY is the latency cliff the NetFlow API
+            # avoids everywhere.
             talkers = client.query(
                 f"""
-                SELECT ip, sum(bytes) AS total_bytes, sum(packets) AS total_packets, count() AS flows
+                SELECT {display('addr')} AS ip, sum(bytes) AS total_bytes,
+                       sum(packets) AS total_packets, count() AS flows
                 FROM (
-                    SELECT toString(src_addr) AS ip, bytes, packets
-                    FROM zenplus.flow_records
-                    WHERE exporter_ip = %(ip)s
-                      AND (input_snmp = %(if)s OR output_snmp = %(if)s)
-                      AND {nf_window}
+                    SELECT {SRC} AS addr, bytes, packets
+                    FROM {table_ref(RAW)}
+                    WHERE {base} AND ({IF_IN} = %(if)s OR {IF_OUT} = %(if)s)
                     UNION ALL
-                    SELECT toString(dst_addr) AS ip, bytes, packets
-                    FROM zenplus.flow_records
-                    WHERE exporter_ip = %(ip)s
-                      AND (input_snmp = %(if)s OR output_snmp = %(if)s)
-                      AND {nf_window}
+                    SELECT {DST} AS addr, bytes, packets
+                    FROM {table_ref(RAW)}
+                    WHERE {base} AND ({IF_IN} = %(if)s OR {IF_OUT} = %(if)s)
                 )
-                GROUP BY ip ORDER BY total_bytes DESC LIMIT 10
+                GROUP BY addr ORDER BY total_bytes DESC LIMIT 10
                 """,
                 parameters=nf_params,
             )
@@ -1073,25 +1133,41 @@ async def link_detail(
                 for r in talkers.result_rows
             ]
 
+            # Per exporter and protocol in one pass: the protocol mix, and
+            # which of the device's exporters carried this ifIndex. NetFlow
+            # names an interface by exporter + ifIndex, so a deep link must
+            # name the exporter that saw the traffic -- the device's
+            # management address need not be a flow exporter at all (X-19).
             protos = client.query(
                 f"""
-                SELECT protocol, sum(bytes) AS total_bytes
-                FROM zenplus.flow_records
-                WHERE exporter_ip = %(ip)s
-                  AND (input_snmp = %(if)s OR output_snmp = %(if)s)
-                  AND {nf_window}
-                GROUP BY protocol ORDER BY total_bytes DESC LIMIT 8
+                SELECT {display(EXPORTER)} AS exporter, protocol, sum(bytes) AS total_bytes
+                FROM {table_ref(RAW)}
+                WHERE {base} AND ({IF_IN} = %(if)s OR {IF_OUT} = %(if)s)
+                GROUP BY {EXPORTER}, protocol
                 """,
                 parameters=nf_params,
             )
+            by_proto: dict[int, int] = {}
+            by_exporter: dict[str, int] = {}
+            for r in protos.result_rows:
+                ip = nf_access.canonical_ip(r[0]) or str(r[0])
+                by_proto[int(r[1])] = by_proto.get(int(r[1]), 0) + int(r[2])
+                by_exporter[ip] = by_exporter.get(ip, 0) + int(r[2])
             netflow["protocols"] = [
-                {"protocol": int(r[0]), "bytes": int(r[1])} for r in protos.result_rows
+                {"protocol": p, "bytes": b}
+                for p, b in sorted(by_proto.items(), key=lambda x: (-x[1], x[0]))[:8]
+            ]
+            netflow["interface_exporters"] = [
+                {"exporter": ip, "bytes": b}
+                for ip, b in sorted(by_exporter.items(), key=lambda x: (-x[1], x[0]))
             ]
         except Exception:
             # NetFlow is an optional overlay, so a failure here must not break
-            # the SNMP view — but log it. Swallowing silently hid a malformed
-            # query that made every interface report "no flow records".
-            logger.exception("netflow overlay failed for %s/%s", exporter_ip, if_index)
+            # the SNMP view -- but log it and say so. Swallowing silently hid a
+            # malformed query that made every interface report "no flow records".
+            logger.exception("netflow overlay failed for %s/%s", ",".join(exporters), if_index)
+            netflow.update(status="failed", has_flows=False, timeseries=[], top_talkers=[], protocols=[],
+                           interface_exporters=[])
 
     # Same SPAN/mirror-port correction as the list endpoint: ifOperStatus says
     # down, but the latest sample carries traffic — the port is forwarding.
@@ -1119,7 +1195,7 @@ async def link_detail(
         "device_id": did,
         "if_index": if_index,
         "hostname": inv[8],
-        "device_ip": exporter_ip,
+        "device_ip": _clean_ip(inv[9]),
         "if_name": inv[0],
         "if_descr": inv[1],
         "if_alias": inv[2],

@@ -3,17 +3,24 @@
 Endpoints live in topic modules, each collecting its routes on a prefix-less
 ``APIRouter``; shared helpers live in ``common``:
 
-    overview     /overview, /timeseries, /device-status, /heatmap, /exporters
+    overview     /overview, /timeseries(/compare), /device-status, /heatmap, /exporters
+    explain      /explain (what changed)
     breakdowns   /top-talkers, /top-endpoints, /top-conversations, /protocols,
                  /ports, /applications, /interfaces, /dscp, /tcp-flags,
-                 /network-classes, /countries, /ip-groups
-    forensics    /forensics
-    capacity     /capacity
-    anomalies    /anomalies
+                 /network-classes, /countries, /asns, /next-hops, /ip-groups
+    forensics    /forensics (search, paging, export jobs)
     saved_views  /saved-views
-    exporters    /exporter-devices
-    health, settings, hosts, explain
-                 placeholders for upcoming work (no routes yet)
+    capacity     /capacity (+ trends, forecast, billing, overrides)
+    anomalies    /anomalies, /findings, detector settings, exceptions, threat intel
+    exporters    /exporter-devices (mapping, suggestions), /exporters/settings
+    health       /exporters/status, /collector/health, /setup, exporter checks
+    settings     /settings/* (IP groups, application rules, enrichment)
+    hosts        /hosts/{ip} (host profile)
+    meta         /coverage, /retention
+
+Shared building blocks: ``common`` (errors, windows, query execution, response
+meta), ``sql`` (address expressions, table capabilities, source planner),
+``filters`` (the filter model and compiler) and ``access`` (visibility).
 
 This module registers every sub-module route on the one ``router`` that
 main.py includes, in the order they had when this was a single file (FastAPI
@@ -21,11 +28,19 @@ matches routes in registration order), so ``router.routes`` stays a flat list
 of ``APIRoute``s. ``include_router`` is not used for the sub-routers: on this
 FastAPI version it nests them (``router.routes`` would hold ``_IncludedRouter``
 nodes) and it cannot interleave routes coming from different modules.
+
+Every route is registered with:
+
+* the router-level ``netflow.view`` permission (403 without it), the same
+  dependency ``access.flow_visibility`` uses, so it is evaluated once;
+* ``common.NetflowRoute``, which renders errors as the safe NetFlow shape
+  (string ``detail``, ``error_id``, ``code``) and adds ``{"data", "meta"}``
+  when the client asks for ``envelope=1``.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.routing import APIRoute
 
 from . import (
@@ -37,30 +52,17 @@ from . import (
     forensics,
     health,
     hosts,
+    meta,
     overview,
     saved_views,
     settings,
 )
+from .access import require_view
+from .common import NetflowRoute
 
-# Re-exported for code and tests that import them from app.api.v1.netflow.
-from .common import (
-    _NET_CLASS_RANGES,
-    _application_for_flow,
-    _application_for_port,
-    _resolve_window,
-    _scope,
-)
+__all__ = ["router"]
 
-__all__ = [
-    "router",
-    "_NET_CLASS_RANGES",
-    "_application_for_flow",
-    "_application_for_port",
-    "_resolve_window",
-    "_scope",
-]
-
-router = APIRouter(prefix="/netflow", tags=["NetFlow"])
+router = APIRouter(prefix="/netflow", tags=["NetFlow"], dependencies=[Depends(require_view)])
 
 # APIRoute attributes carried over when a sub-module route is registered on
 # ``router`` (every add_api_route() option besides path/endpoint/route class).
@@ -102,11 +104,16 @@ def _mount(sub: APIRouter, *paths: str) -> None:
             continue
         if not isinstance(route, APIRoute):
             raise TypeError(f"netflow: unsupported route type {type(route).__name__}")
+        # Plain routes get the NetFlow error/envelope handling; a module that
+        # brings its own route class must subclass NetflowRoute to keep it.
+        route_class = NetflowRoute if type(route) is APIRoute else type(route)
+        if not issubclass(route_class, NetflowRoute):
+            raise TypeError(f"netflow: route class {route_class.__name__} must subclass NetflowRoute")
         _mounted.add(id(route))
         router.add_api_route(
             route.path,
             route.endpoint,
-            route_class_override=type(route),
+            route_class_override=route_class,
             **{attr: getattr(route, attr) for attr in _ROUTE_ATTRS},
         )
 
@@ -130,6 +137,6 @@ _mount(overview.router, "/exporters")
 # later is registered after the ones above instead of being silently dropped.
 for _module in (
     overview, breakdowns, forensics, capacity, anomalies, saved_views, exporters,
-    health, settings, hosts, explain,
+    meta, health, settings, hosts, explain,
 ):
     _mount(_module.router)

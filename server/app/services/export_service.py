@@ -161,8 +161,11 @@ async def _collect_data(
     group_ids: Optional[list[str]] = None,
     locations: Optional[list[str]] = None,
     device_types: Optional[list[str]] = None,
+    redact_netflow: bool = False,
 ) -> dict:
-    """Fetch all data needed for *report_type* and return as a dict."""
+    """Fetch all data needed for *report_type* and return as a dict.
+    ``redact_netflow``: the requester lacks netflow.view, so NetFlow alert
+    messages are withheld (``_fetch_alerts``)."""
 
     if report_type not in VALID_REPORT_TYPES:
         raise ValueError(f"Unknown report type: {report_type!r}. "
@@ -208,7 +211,7 @@ async def _collect_data(
     # --- Alerts -----------------------------------------------------------
     if need_alerts:
         d_ids = [d["id"] for d in devices]
-        alerts = await _fetch_alerts(db, start, end, d_ids if d_ids else None)
+        alerts = await _fetch_alerts(db, start, end, d_ids if d_ids else None, redact_netflow=redact_netflow)
         data["alerts"] = alerts
 
     # --- Status logs ------------------------------------------------------
@@ -541,11 +544,14 @@ async def generate_excel_report(
     group_ids: Optional[list[str]] = None,
     locations: Optional[list[str]] = None,
     device_types: Optional[list[str]] = None,
+    *,
+    redact_netflow: bool = False,  # the requester lacks netflow.view
 ) -> bytes:
     """Generate a styled Excel (.xlsx) workbook and return it as bytes."""
 
     data = await _collect_data(db, report_type, period, from_time, to_time,
-                               device_ids, group_ids, locations, device_types)
+                               device_ids, group_ids, locations, device_types,
+                               redact_netflow=redact_netflow)
 
     wb = Workbook()
 
@@ -576,11 +582,14 @@ async def generate_csv_report(
     group_ids: Optional[list[str]] = None,
     locations: Optional[list[str]] = None,
     device_types: Optional[list[str]] = None,
+    *,
+    redact_netflow: bool = False,  # the requester lacks netflow.view
 ) -> bytes:
     """Generate a CSV export and return it as UTF-8 encoded bytes."""
 
     data = await _collect_data(db, report_type, period, from_time, to_time,
-                               device_ids, group_ids, locations, device_types)
+                               device_ids, group_ids, locations, device_types,
+                               redact_netflow=redact_netflow)
 
     sio = io.StringIO()
     writer = csv.writer(sio)

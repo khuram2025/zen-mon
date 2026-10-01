@@ -1550,7 +1550,13 @@ async def _fetch_service_checks(db: AsyncSession,
 
 async def _fetch_alerts(db: AsyncSession, start: datetime, end: datetime,
                         device_ids: list[str] | None = None,
-                        visible_tags: list[str] | None = None) -> list[dict]:
+                        visible_tags: list[str] | None = None,
+                        *, redact_netflow: bool = False) -> list[dict]:
+    """Alerts triggered in the window. ``metadata`` carries the alert's
+    ``source`` only. With ``redact_netflow`` (the report's requester lacks
+    netflow.view) a NetFlow alert's flow-derived message is replaced the way
+    the Alert Center does it (``netflow_alert_service.redact_alert_payload``),
+    so no report table, sample or grouping key can show it."""
     dev_clause = ""
     params: dict = {"start": start, "end": end}
     if device_ids:
@@ -1562,7 +1568,8 @@ async def _fetch_alerts(db: AsyncSession, start: datetime, end: datetime,
     q = text(f"""
         SELECT a.id, a.device_id, a.service_check_id, a.status, a.severity, a.message,
                a.triggered_at, a.acknowledged_at, a.resolved_at,
-               d.hostname
+               d.hostname,
+               jsonb_build_object('source', a.metadata->'source') AS metadata
         FROM alerts a
         LEFT JOIN devices d ON d.id = a.device_id
         WHERE a.triggered_at >= :start AND a.triggered_at <= :end
@@ -1570,7 +1577,12 @@ async def _fetch_alerts(db: AsyncSession, start: datetime, end: datetime,
         ORDER BY a.triggered_at DESC
     """)
     result = await db.execute(q, params)
-    return [dict(r._mapping) for r in result.fetchall()]
+    rows = [dict(r._mapping) for r in result.fetchall()]
+    if redact_netflow:
+        from app.services.netflow_alert_service import redact_alert_payload
+
+        rows = [redact_alert_payload(r) for r in rows]
+    return rows
 
 
 def _fetch_ping_metrics(start: datetime, end: datetime,
@@ -2238,8 +2250,9 @@ async def _build_service_health(pdf: ZenPlusReport, db: AsyncSession,
 
 async def _build_alert_analysis(pdf: ZenPlusReport, db: AsyncSession,
                                 start: datetime, end: datetime,
-                                device_ids: list[str] | None):
-    alerts = await _fetch_alerts(db, start, end, device_ids)
+                                device_ids: list[str] | None,
+                                redact_netflow: bool = False):
+    alerts = await _fetch_alerts(db, start, end, device_ids, redact_netflow=redact_netflow)
 
     pdf.add_page()
     pdf.section_title(
@@ -2390,6 +2403,8 @@ async def generate_report(
     group_ids: list[str] | None = None,
     locations: list[str] | None = None,
     device_types: list[str] | None = None,
+    *,
+    redact_netflow: bool = False,  # the requester lacks netflow.view
 ) -> bytes:
     """Generate a professional PDF report and return the raw PDF bytes."""
 
@@ -2430,14 +2445,14 @@ async def generate_report(
         await _build_service_health(pdf, db, start, end)
 
     elif report_type == "alert_analysis":
-        await _build_alert_analysis(pdf, db, start, end, resolved_device_ids)
+        await _build_alert_analysis(pdf, db, start, end, resolved_device_ids, redact_netflow)
 
     elif report_type == "full_report":
         pdf.toc(expected_entries=12)
         await _build_executive_summary(pdf, db, start, end, resolved_device_ids, group_ids)
         await _build_device_health(pdf, db, start, end, resolved_device_ids, group_ids)
         await _build_service_health(pdf, db, start, end)
-        await _build_alert_analysis(pdf, db, start, end, resolved_device_ids)
+        await _build_alert_analysis(pdf, db, start, end, resolved_device_ids, redact_netflow)
 
     else:
         pdf.add_page()

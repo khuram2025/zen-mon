@@ -2,9 +2,10 @@ import uuid
 from datetime import datetime, timezone
 from sqlalchemy import Text, DateTime, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
-from sqlalchemy.dialects.postgresql import UUID, INET
+from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.database import Base
+from app.models.netflow_governance import InetType as INET
 
 
 class NetflowExporterDevice(Base):

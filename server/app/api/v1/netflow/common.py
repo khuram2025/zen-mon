@@ -1,62 +1,306 @@
 """Shared NetFlow API helpers.
 
-Time-window resolution, the ClickHouse query wrappers, protocol/port/application
-classification, host enrichment (reverse DNS, IP groups, GeoIP), drill-down
-scope filters, rollup eligibility, DSCP labels and exporter/interface name
-resolution. Imported by every endpoint module in this package.
+The contract-level pieces every endpoint builds on (docs/netflow-review-contract.md):
+
+* errors (§9.2): ``NetflowError`` carries the safe ``{detail, error_id, code}`` body;
+* time (§7): ``Window`` / ``resolve_window`` / ``window_params``;
+* query execution (§9.1): ``run_query`` with a ClickHouse budget and safe error mapping;
+* response metadata (§9.3): the per-request ``QueryMeta``, the ``envelope=1`` wrapper and
+  ``NetflowRoute``, the route class that renders errors and envelopes for every
+  /netflow route;
+* retention: table TTLs and earliest data, cached (``get_retention``), and the
+  NetFlow v5 sampling repair state (``get_sampling_repair``, X-02 disclosure).
+
+Below those sit the older helpers the endpoint modules still use: protocol, port and
+application labels, host enrichment (reverse DNS, IP groups, GeoIP), exporter and
+interface name resolution and DSCP labels. Filter compilation lives in ``filters``,
+address expressions and the raw/rollup source planner in ``sql``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import concurrent.futures
-import ipaddress
+import contextlib
+import contextvars
 import json
-import os
+import logging
+import math
+import re
+import secrets
 import socket
 import threading
 import time
+import uuid
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from typing import Any, Callable
+from zoneinfo import available_timezones
 
-from fastapi import HTTPException, Query
-from sqlalchemy import String, cast, select, text
+from fastapi import HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response
+from fastapi.routing import APIRoute
+from sqlalchemy import select
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_ch_client
-from app.services import geoip
-from app.models.device import Device
+from app.core import database as _database
+from app.services import geoip, netflow_groups
 from app.models.device_interface import DeviceInterface
 
-import logging
+from .access import canonical_ip, resolve_exporter_owners
 
 logger = logging.getLogger(__name__)
 
 
-def _resolve_window(
-    hours: int, from_ts: str | None, to_ts: str | None, minutes: int | None = None
-) -> tuple[datetime, datetime]:
-    """Return (start, end) UTC bounds. Custom from/to wins, then an explicit
-    `minutes` (used by the NOC dashboard for sub-day windows), then `hours`."""
-    if from_ts and to_ts:
-        try:
-            start = datetime.fromisoformat(from_ts.replace("Z", "+00:00"))
-            end = datetime.fromisoformat(to_ts.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid from/to timestamp: {exc}") from exc
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=timezone.utc)
-        if end.tzinfo is None:
-            end = end.replace(tzinfo=timezone.utc)
+# ── Tables ────────────────────────────────────────────────────────────────────
+# Every table name is qualified through table_ref() so tests can point the
+# query builders at a scratch database (monkeypatch CH_DB) without rewriting SQL.
+CH_DB = "zenplus"
+
+RAW = "flow_records"
+CONVERSATIONS_1H = "flow_conversations_1h"
+QOS_1H = "flow_qos_1h"
+INTERFACE_5M = "flow_interface_5m"
+EXPORTER_MINUTES = "flow_exporter_minutes"
+TRAFFIC_5M = "flow_traffic_5m"
+
+
+def table_ref(name: str) -> str:
+    """``<db>.<table>`` for a bare table name (qualified names pass through)."""
+    return name if "." in name else f"{CH_DB}.{name}"
+
+
+# ── Errors (§9.2) ─────────────────────────────────────────────────────────────
+
+ERROR_CODES = frozenset({"query_failed", "query_timeout", "invalid_filter", "invalid_window", "unavailable"})
+
+# Query-string keys that describe the time window; a validation failure on one
+# of them is reported as invalid_window rather than invalid_filter.
+WINDOW_KEYS = frozenset({"hours", "minutes", "from", "to", "tz"})
+
+
+def new_error_id() -> str:
+    """Correlation id shown to the user and written to the server log."""
+    return "nf-" + secrets.token_hex(4)
+
+
+class NetflowError(HTTPException):
+    """An HTTPException whose body is the NetFlow error shape:
+    ``{"detail": str, "error_id": str | None, "code": str, "fields"?: {key: msg}}``.
+
+    ``detail`` is always a plain string (a failure's includes "(ref nf-…)"), so
+    generic clients that only read ``detail`` keep working. Outside a NetflowRoute
+    (for example a report section calling run_query) FastAPI renders just
+    ``{"detail": …}``, which is still free of database text.
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        message: str,
+        *,
+        code: str,
+        error_id: str | None = None,
+        fields: dict[str, str] | None = None,
+    ) -> None:
+        if code not in ERROR_CODES:
+            raise ValueError(f"unknown NetFlow error code {code!r}")
+        detail = f"{message} (ref {error_id})" if error_id else message
+        super().__init__(status_code=status_code, detail=detail)
+        self.code = code
+        self.error_id = error_id
+        self.fields = dict(fields) if fields else None
+
+    def body(self) -> dict:
+        out: dict[str, Any] = {"detail": self.detail, "error_id": self.error_id, "code": self.code}
+        if self.fields:
+            out["fields"] = self.fields
+        return out
+
+
+def invalid_filter(message: str, fields: dict[str, str] | None = None) -> NetflowError:
+    return NetflowError(400, message, code="invalid_filter", fields=fields)
+
+
+def invalid_window(message: str, key: str | None = None) -> NetflowError:
+    return NetflowError(400, message, code="invalid_window", fields={key: message} if key else None)
+
+
+def _validation_error(exc: RequestValidationError) -> NetflowError:
+    """FastAPI's 422 (a list of objects) as a 400 with a readable string.
+
+    Rendering FastAPI's array ``detail`` verbatim crashed the Forensics page;
+    every NetFlow client can rely on ``detail`` being a string instead.
+    """
+    fields: dict[str, str] = {}
+    for err in exc.errors():
+        loc = [str(p) for p in err.get("loc", ()) if p not in ("query", "path", "body", "header")]
+        key = ".".join(loc) or "request"
+        fields.setdefault(key, str(err.get("msg") or "Invalid value"))
+    message = "; ".join(f"Invalid value for {k}: {m}" for k, m in fields.items()) or "Invalid request"
+    code = "invalid_window" if fields and set(fields) <= WINDOW_KEYS else "invalid_filter"
+    return NetflowError(400, message, code=code, fields=fields)
+
+
+# ── Time (§7) ─────────────────────────────────────────────────────────────────
+
+MAX_RELATIVE_HOURS = 2232                  # 93 days
+MAX_SPAN_ROLLUP = timedelta(days=93)       # endpoints that can read the rollups
+MAX_SPAN_RAW = timedelta(days=31)          # raw-only (forensics search, ad-hoc anomaly run)
+FUTURE_TOLERANCE = timedelta(seconds=60)   # a `to` beyond server now + this is clamped
+MIN_YEAR = 2000
+
+
+def now_utc() -> datetime:
+    """The appliance clock, whole seconds (ClickHouse binds datetimes at second
+    precision, so bounds with microseconds would not stay half-open)."""
+    return datetime.now(timezone.utc).replace(microsecond=0)
+
+
+@lru_cache(maxsize=1)
+def _timezones() -> frozenset[str]:
+    return frozenset(available_timezones()) | {"UTC"}
+
+
+def validate_tz(tz: str | None, key: str = "tz") -> str:
+    """An IANA zone name (default UTC); 400 for anything zoneinfo does not know."""
+    if tz is None or tz == "":
+        return "UTC"
+    if tz not in _timezones():
+        raise invalid_window(f"Unknown time zone '{tz[:64]}'", key)
+    return tz
+
+
+@dataclass(frozen=True)
+class Window:
+    """A resolved query window: half-open ``[start, end)`` in aware UTC."""
+
+    start: datetime
+    end: datetime
+    mode: str        # 'relative' | 'fixed'
+    tz: str = "UTC"  # IANA zone for hour/day-of-week/day buckets
+
+    @property
+    def seconds(self) -> int:
+        return max(1, int((self.end - self.start).total_seconds()))
+
+    def shifted(self, delta: timedelta) -> "Window":
+        """The same-length window moved by ``delta`` (negative = earlier)."""
+        return replace(self, start=self.start + delta, end=self.end + delta)
+
+    def as_meta(self) -> dict:
+        return {"from": _to_iso_utc(self.start), "to": _to_iso_utc(self.end), "mode": self.mode, "tz": self.tz}
+
+
+def _parse_bound(value: str, key: str) -> datetime:
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00").replace("z", "+00:00"))
+    except ValueError:
+        raise invalid_window(
+            f"Invalid {key} timestamp '{value[:64]}'; use ISO 8601, e.g. 2026-09-01T00:00:00Z", key
+        ) from None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _span_label(span: timedelta) -> str:
+    days = span.total_seconds() / 86400
+    return f"{days:.0f} days" if days >= 2 else f"{span.total_seconds() / 3600:.0f} hours"
+
+
+def resolve_window(
+    hours: int | None = None,
+    minutes: int | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+    tz: str | None = None,
+    *,
+    max_span: timedelta,
+    now: datetime | None = None,
+    default_hours: int = 24,
+    record: bool = True,
+) -> Window:
+    """Resolve and validate a query window (contract §7).
+
+    * ``from``/``to`` come together or not at all; when present ``hours`` and
+      ``minutes`` are ignored (the UI may still send a rounded ``hours``).
+    * Years outside [2000, next year] are rejected before they can reach
+      ClickHouse (``0001-01-01`` used to surface as a CANNOT_PARSE_DATETIME 500).
+    * ``to`` is clamped to server now + 60 s; explicit bounds are otherwise
+      never shifted. Bounds are truncated to whole seconds.
+    * A relative window is ``minutes`` (wins) or ``hours`` (1..2232) ending at
+      server now.
+    * Any span longer than ``max_span`` is a 400 naming the limit.
+
+    The first window resolved during a request is recorded as the response's
+    ``meta.window`` unless ``record`` is false.
+    """
+    now = (now or now_utc()).replace(microsecond=0)
+    tz_name = validate_tz(tz)
+    if (from_ts is None or from_ts == "") != (to_ts is None or to_ts == ""):
+        raise invalid_window("A custom range needs both from and to", "from" if not from_ts else "to")
+    if from_ts:
+        start = _parse_bound(from_ts, "from").replace(microsecond=0)
+        end = _parse_bound(to_ts, "to").replace(microsecond=0)
+        for key, dt in (("from", start), ("to", end)):
+            if not MIN_YEAR <= dt.year <= now.year + 1:
+                raise invalid_window(f"{key} must be between {MIN_YEAR} and {now.year + 1}", key)
         if end <= start:
-            raise HTTPException(status_code=400, detail="`to` must be after `from`")
-        return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
-    end = datetime.now(timezone.utc)
-    start = end - (timedelta(minutes=minutes) if minutes else timedelta(hours=hours))
-    return start, end
+            raise invalid_window("The range end must be after its start", "to")
+        end = min(end, now + FUTURE_TOLERANCE)
+        if end <= start:
+            raise invalid_window("The range starts in the future", "from")
+        mode = "fixed"
+        key = "from"
+    else:
+        if minutes is not None:
+            limit = int(max_span.total_seconds() // 60)
+            if not 1 <= minutes <= limit:
+                raise invalid_window(f"minutes must be between 1 and {limit}", "minutes")
+            span = timedelta(minutes=minutes)
+            key = "minutes"
+        else:
+            h = default_hours if hours is None else hours
+            if not 1 <= h <= MAX_RELATIVE_HOURS:
+                raise invalid_window(f"hours must be between 1 and {MAX_RELATIVE_HOURS}", "hours")
+            span = timedelta(hours=h)
+            key = "hours"
+        start, end, mode = now - span, now, "relative"
+    if end - start > max_span:
+        raise invalid_window(
+            f"This view covers at most {_span_label(max_span)} per query "
+            f"(requested {_span_label(end - start)}); choose a shorter range",
+            key,
+        )
+    window = Window(start=start, end=end, mode=mode, tz=tz_name)
+    if record:
+        current_meta().set_window(window)
+    return window
 
 
-def _window_seconds(start: datetime, end: datetime) -> int:
-    return max(1, int((end - start).total_seconds()))
+def window_params(default_hours: int = 24, max_span: timedelta = MAX_SPAN_ROLLUP) -> Callable[..., Window]:
+    """FastAPI dependency factory: ``win: Window = Depends(window_params(24))``.
+
+    ``hours``/``minutes`` carry no FastAPI bounds on purpose: they are ignored
+    when ``from``/``to`` are present (the UI sends a rounded ``hours`` with
+    custom ranges, and a 20-minute custom range rounds to 0), and validated by
+    resolve_window when they are used.
+    """
+
+    def dependency(
+        hours: int | None = Query(default=None, description=f"Relative window, 1..{MAX_RELATIVE_HOURS} (default {default_hours})"),
+        minutes: int | None = Query(default=None, description="Relative window in minutes (wins over hours)"),
+        from_ts: str | None = Query(default=None, alias="from", description="Custom range start (ISO 8601)"),
+        to_ts: str | None = Query(default=None, alias="to", description="Custom range end, exclusive (ISO 8601)"),
+        tz: str | None = Query(default=None, description="IANA time zone for hour/day buckets (default UTC)"),
+    ) -> Window:
+        return resolve_window(hours, minutes, from_ts, to_ts, tz, max_span=max_span, default_hours=default_hours)
+
+    return dependency
 
 
 def _to_iso_utc(value) -> str | None:
@@ -75,6 +319,629 @@ def _to_iso_utc(value) -> str | None:
         return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + f"{value.microsecond // 1000:03d}Z"
     return str(value)
 
+
+# ── Per-request response metadata (§9.3) ──────────────────────────────────────
+
+@dataclass
+class QueryMeta:
+    """What a NetFlow response knows about how it was produced.
+
+    One instance per request (set by NetflowRoute); helpers write into it —
+    resolve_window the window, the flow_filter dependency the filters, the
+    source planner the source and effective bounds, compile_filter the
+    visibility scope — and endpoints add truncation, sampling and warnings.
+    It becomes ``meta`` when the client asks for ``envelope=1``.
+    """
+
+    route: str = ""
+    query: Any = None                        # the request's query parameters
+    window: Window | None = None
+    source: str | None = None
+    tables: set[str] = field(default_factory=set)   # flow tables that served the answer
+    effective_from: datetime | None = None
+    effective_to: datetime | None = None
+    granularity_s: int | None = None
+    restricted: bool = False
+    filter: Any = None                       # the request's FlowFilter
+    dropped: set[str] = field(default_factory=set)
+    truncated: dict | None = None
+    sampling: dict | None = None
+    warnings: list[dict] = field(default_factory=list)
+    retention_limited: bool = False
+    # The effective bounds already account for retention (a source plan, or
+    # an endpoint that measured them); otherwise build_meta infers the cut.
+    retention_checked: bool = False
+    started: float = field(default_factory=time.monotonic)
+    # ClickHouse gave no answer at all within a budget during this request
+    # (NF-31): the request's remaining flow queries fail fast instead of each
+    # waiting out its own budget.
+    ch_unanswered: bool = False
+
+    def query_value(self, key: str) -> str | None:
+        """A query parameter of the current request (None outside a request)."""
+        return self.query.get(key) if self.query is not None else None
+
+    def set_window(self, window: Window, *, force: bool = False) -> None:
+        if force or self.window is None:
+            self.window = window
+
+    def set_source(
+        self,
+        source: str,
+        effective_from: datetime | None = None,
+        effective_to: datetime | None = None,
+        granularity_s: int | None = None,
+        *,
+        force: bool = False,
+        retention_checked: bool = False,
+    ) -> None:
+        """Record the data source; the first one recorded wins (an endpoint's
+        primary query plans first) unless ``force``. ``retention_checked``:
+        the bounds given already exclude what retention removed."""
+        if self.source is not None and not force:
+            return
+        self.source = source
+        self.effective_from = effective_from
+        self.effective_to = effective_to
+        self.granularity_s = granularity_s
+        self.retention_checked = retention_checked
+
+    def warn(self, code: str, message: str) -> None:
+        if not any(w["code"] == code for w in self.warnings):
+            self.warnings.append({"code": code, "message": message})
+
+    def set_truncated(self, limit: int, returned: int, more: bool | None = None) -> None:
+        self.truncated = {"limit": int(limit), "returned": int(returned),
+                          "more": bool(returned >= limit) if more is None else bool(more)}
+
+    def set_sampling(self, sampled_share: float | None, max_interval: int | None) -> None:
+        self.sampling = {"sampled_share": sampled_share, "max_interval": max_interval}
+
+
+_META: contextvars.ContextVar[QueryMeta | None] = contextvars.ContextVar("netflow_meta", default=None)
+
+
+def current_meta() -> QueryMeta:
+    """The request's QueryMeta. Outside a NetflowRoute request (tests, report
+    sections, background loops) a throwaway instance absorbs the writes."""
+    meta = _META.get()
+    return meta if meta is not None else QueryMeta()
+
+
+async def build_meta(meta: QueryMeta) -> dict:
+    """The ``meta`` object of an ``envelope=1`` response (§9.3)."""
+    retention = await get_retention()
+    now = now_utc()
+    window = None
+    source = meta.source
+    limited = meta.retention_limited
+    warnings = list(meta.warnings)
+    if meta.window is not None:
+        w = meta.window
+        source = source or "raw"
+        effective_from = meta.effective_from
+        if not limited and not meta.retention_checked:
+            # A source planner already reported its retention cuts; for the
+            # endpoints that pick a table themselves, infer them here.
+            code, label, days = {
+                "raw": ("raw_retention", "Raw flow records", retention.raw_days),
+                "hybrid": ("rollup_retention", "Hourly rollups", retention.rollup_days),
+                "rollup": ("rollup_retention", "Hourly rollups", retention.rollup_days),
+                "interface_rollup": ("interface_retention", "Interface rollups", retention.interface_days),
+            }.get(source, (None, None, None))
+            horizon = now - timedelta(days=days) if days is not None else None
+            limited = horizon is not None and w.start < horizon
+            if limited:
+                # Nothing older than the table's retention can be in the answer.
+                effective_from = min(max(effective_from or w.start, horizon), w.end)
+                warnings.append({"code": code,
+                                 "message": f"{label} are kept for {days} days; "
+                                            "the part of the range before that is not included"})
+        window = {
+            **w.as_meta(),
+            "effective_from": _to_iso_utc(effective_from or w.start),
+            "effective_to": _to_iso_utc(meta.effective_to or w.end),
+            "source": source,
+            "granularity_s": meta.granularity_s if meta.granularity_s is not None else (1 if source == "raw" else None),
+        }
+    filters: dict = {}
+    if meta.filter is not None:
+        applied = meta.filter.without(*meta.dropped) if meta.dropped else meta.filter
+        filters = applied.canonical()
+    if not retention.known:
+        warnings.append({"code": "retention_unknown", "message": "Data retention could not be read"})
+    if meta.window is not None and meta.tables & SAMPLING_REPAIRED_TABLES:
+        warnings.extend(sampling_repair_warnings(await get_sampling_repair(), meta.window))
+    return {
+        "window": window,
+        "server_time": _to_iso_utc(now),
+        "query_ms": int((time.monotonic() - meta.started) * 1000),
+        "restricted": bool(meta.restricted),
+        "filters": filters,
+        "retention": {
+            "raw_days": retention.raw_days,
+            "rollup_days": retention.rollup_days,
+            "interface_days": retention.interface_days,
+            "limited": bool(limited),
+        },
+        "truncated": meta.truncated,
+        "sampling": meta.sampling,
+        "warnings": warnings,
+    }
+
+
+def wants_envelope(request: Request) -> bool:
+    return request.query_params.get("envelope", "").lower() in ("1", "true", "yes")
+
+
+async def envelope(data: Any, meta: QueryMeta | None = None) -> dict:
+    """``{"data": data, "meta": {...}}`` for callers that build the response themselves."""
+    return {"data": data, "meta": await build_meta(meta or current_meta())}
+
+
+_HOP_HEADERS = {"content-length", "content-type"}
+
+
+class NetflowRoute(APIRoute):
+    """Route class for every /netflow route (installed by the package ``__init__``).
+
+    * gives each request its own QueryMeta;
+    * renders NetflowError as the §9.2 body, and FastAPI's request-validation
+      422 as a 400 with a string ``detail``;
+    * turns any other unexpected exception into a 500 that names only an
+      error id — ClickHouse, SQL or driver text never reaches the client;
+    * wraps a JSON result in ``{"data", "meta"}`` when ``envelope=1`` is asked
+      for, leaving the legacy shape untouched otherwise.
+    """
+
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+        route_path = self.path
+
+        async def netflow_route_handler(request: Request) -> Response:
+            meta = QueryMeta(route=route_path, query=request.query_params)
+            token = _META.set(meta)
+            try:
+                try:
+                    response = await handler(request)
+                except NetflowError as exc:
+                    return JSONResponse(exc.body(), status_code=exc.status_code, headers=exc.headers)
+                except RequestValidationError as exc:
+                    err = _validation_error(exc)
+                    return JSONResponse(err.body(), status_code=err.status_code)
+                except StarletteHTTPException:
+                    raise
+                except Exception:
+                    error_id = new_error_id()
+                    logger.exception("netflow request failed [%s] %s %s", error_id, request.method, route_path)
+                    err = NetflowError(500, "The NetFlow request failed", code="query_failed", error_id=error_id)
+                    return JSONResponse(err.body(), status_code=500)
+                if wants_envelope(request) and response.media_type == "application/json" and 200 <= response.status_code < 300:
+                    response = await _envelope_response(response, meta)
+                return response
+            finally:
+                _META.reset(token)
+
+        return netflow_route_handler
+
+
+async def _envelope_response(response: Response, meta: QueryMeta) -> Response:
+    data = json.loads(response.body) if response.body else None
+    headers = {k: v for k, v in response.headers.items() if k.lower() not in _HOP_HEADERS}
+    return JSONResponse(
+        await envelope(data, meta),
+        status_code=response.status_code,
+        headers=headers,
+        background=response.background,
+    )
+
+
+# ── Query execution (§9.1) ────────────────────────────────────────────────────
+
+# NetFlow's own thread-local ClickHouse clients (NF-31). The shared factory
+# (app.core.database.get_ch_client) waits up to 300 s for any answer --
+# including the version query a new client sends when it is created -- so on
+# a server that accepts connections and never answers, each new worker thread
+# stalled for five minutes. These clients connect and initialise with short
+# timeouts; every query then sets its own read timeout from its budget
+# (``_read_timeout``), so no worker thread outlives the request that used it.
+CH_CONNECT_TIMEOUT_S = 10
+CH_INIT_TIMEOUT_S = 15
+_nf_local = threading.local()
+
+
+def get_ch_client():
+    """Thread-local NetFlow ClickHouse client (one session per worker thread,
+    like the shared factory; tests replace this function)."""
+    client = getattr(_nf_local, "client", None)
+    if client is None:
+        import clickhouse_connect
+
+        cfg = _database.settings
+        client = clickhouse_connect.get_client(
+            host=cfg.CLICKHOUSE_HOST, port=cfg.CLICKHOUSE_HTTP_PORT, database=cfg.CLICKHOUSE_DB,
+            username=cfg.CLICKHOUSE_USER, password=cfg.CLICKHOUSE_PASSWORD,
+            connect_timeout=CH_CONNECT_TIMEOUT_S, send_receive_timeout=CH_INIT_TIMEOUT_S,
+        )
+        _nf_local.client = client
+    return client
+
+BUDGET_INTERACTIVE = 20.0
+BUDGET_FORENSICS = 30.0
+BUDGET_EXPORT = 300.0
+BUDGET_BACKGROUND = 120.0
+# ClickHouse enforces max_execution_time itself; this grace covers the HTTP
+# round trip before the API gives up on a query the server did not stop.
+_BUDGET_GRACE_S = 5.0
+
+_CH_CODE_RE = re.compile(r"(?:error code|Code:)\s*(\d+)", re.IGNORECASE)
+_TIMEOUT_CODES = frozenset({159, 160})            # TIMEOUT_EXCEEDED, TOO_SLOW
+_BUSY_CODES = frozenset({202, 203, 241, 242})     # too many queries, no free connection, memory limit, table read-only
+_NETWORK_CODES = frozenset({209, 210})            # SOCKET_TIMEOUT, NETWORK_ERROR
+_LABEL_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _ch_error_code(exc: BaseException) -> int | None:
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return code
+    m = _CH_CODE_RE.search(str(exc))
+    return int(m.group(1)) if m else None
+
+
+def _is_transport_error(exc: BaseException) -> bool:
+    from clickhouse_connect.driver.exceptions import OperationalError
+
+    return isinstance(exc, (OperationalError, ConnectionError, TimeoutError, OSError))
+
+
+def map_query_error(
+    exc: BaseException,
+    *,
+    budget_s: float,
+    label: str,
+    sql: str | None = None,
+    timed_out: bool = False,
+    unanswered: bool = False,
+) -> NetflowError:
+    """A ClickHouse/driver exception as a safe NetflowError; the original is
+    logged (with its id) for operators, never returned."""
+    error_id = new_error_id()
+    code = _ch_error_code(exc)
+    unreachable = False
+    if unanswered:
+        status, err_code = 503, "unavailable"
+        message = "Flow data is temporarily unavailable"
+        logger.error("netflow query not sent [%s] label=%s: %s", error_id, label, exc)
+        return NetflowError(status, message, code=err_code, error_id=error_id)
+    if timed_out or code in _TIMEOUT_CODES:
+        status, err_code = 504, "query_timeout"
+        message = f"The flow query exceeded its {budget_s:g} s budget; narrow the time range or add filters"
+    elif code in _BUSY_CODES:
+        status, err_code = 503, "unavailable"
+        message = "The flow database is busy; try again shortly"
+    elif code in _NETWORK_CODES or (code is None and _is_transport_error(exc)):
+        status, err_code = 503, "unavailable"
+        message = "Flow data is temporarily unavailable"
+        unreachable = True
+    else:
+        status, err_code = 500, "query_failed"
+        message = "The flow query failed"
+    logger.error(
+        "netflow query failed [%s] label=%s clickhouse_code=%s: %s",
+        error_id, label, code, exc, exc_info=exc,
+    )
+    if sql is not None:
+        logger.debug("netflow query [%s] sql=%s", error_id, sql)
+    err = NetflowError(status, message, code=err_code, error_id=error_id)
+    err.unreachable = unreachable       # no connection or no answer (run_query fails the rest fast)
+    return err
+
+
+def _run_sync(sql: str, params: dict | None, budget_s: float, query_id: str, label: str):
+    try:
+        client = get_ch_client()
+        # The thread-local client waits up to its default receive timeout
+        # (300 s) for an answer; bound this query's read to its budget plus
+        # the grace, so a server that never answers frees the worker thread
+        # when the request gives up, not minutes later (NF-31).
+        with _read_timeout(client, budget_s + _BUDGET_GRACE_S):
+            return client.query(
+                sql,
+                parameters=params or {},
+                settings={"max_execution_time": max(1, math.ceil(budget_s)), "query_id": query_id},
+            )
+    except Exception as exc:
+        raise map_query_error(exc, budget_s=budget_s, label=label, sql=sql) from exc
+
+
+def _bounded_timeout(previous: Any, read_s: float):
+    """``previous`` (a urllib3 Timeout) with its read timeout set to
+    ``read_s``; None when the client has no such timeout (test doubles)."""
+    try:
+        from urllib3 import Timeout
+    except ImportError:  # pragma: no cover - clickhouse_connect depends on urllib3
+        return None
+    if not isinstance(previous, Timeout):
+        return None
+    return Timeout(connect=previous.connect_timeout, read=read_s)
+
+
+@contextlib.contextmanager
+def _read_timeout(client: Any, seconds: float):
+    """The thread-local client's read timeout for one call (NF-31): the
+    call's budget plus grace, whatever the client was created with."""
+    previous = getattr(client, "timeout", None)
+    bounded = _bounded_timeout(previous, seconds)
+    if bounded is not None:
+        client.timeout = bounded
+    try:
+        yield client
+    finally:
+        if bounded is not None:
+            client.timeout = previous
+
+
+def _kill_query(query_id: str) -> None:
+    try:
+        client = get_ch_client()
+        with _read_timeout(client, 10):
+            client.command("KILL QUERY WHERE query_id = %(q)s ASYNC", parameters={"q": query_id})
+    except Exception:
+        logger.debug("netflow: KILL QUERY %s failed", query_id, exc_info=True)
+
+
+async def run_query(sql: str, params: dict | None = None, *, budget_s: float = BUDGET_INTERACTIVE, label: str | None = None):
+    """Run a ClickHouse query in the thread pool under a time budget.
+
+    ClickHouse stops the query at ``budget_s`` (``max_execution_time``); if the
+    server does not answer within the budget plus a short grace the query is
+    killed by id. Failures raise NetflowError: 504 ``query_timeout``, 503
+    ``unavailable`` (unreachable or busy), 500 ``query_failed`` — each with an
+    error id that is also in the server log next to the real exception.
+    """
+    meta = current_meta()
+    label = _LABEL_RE.sub("-", label or meta.route or "netflow").strip("-") or "netflow"
+    if meta.ch_unanswered:
+        # An earlier query of this request got no answer within its budget:
+        # do not make the caller wait out another budget (NF-31).
+        raise map_query_error(
+            TimeoutError("the flow database did not answer an earlier query of this request"),
+            budget_s=budget_s, label=label, unanswered=True,
+        )
+    query_id = f"nf-{label[:40]}-{secrets.token_hex(6)}"
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_run_sync, sql, params, budget_s, query_id, label),
+            timeout=budget_s + _BUDGET_GRACE_S,
+        )
+    except NetflowError as err:
+        if getattr(err, "unreachable", False):
+            meta.ch_unanswered = True       # no connection / no answer: fail the rest fast
+        raise
+    except asyncio.TimeoutError:
+        meta.ch_unanswered = True
+        asyncio.get_running_loop().run_in_executor(None, _kill_query, query_id)
+        raise map_query_error(
+            TimeoutError(f"no answer within {budget_s + _BUDGET_GRACE_S:g} s; killing {query_id}"),
+            budget_s=budget_s, label=label, timed_out=True,
+        ) from None
+
+
+# ── Retention ─────────────────────────────────────────────────────────────────
+
+_RETENTION_TABLES = (RAW, CONVERSATIONS_1H, QOS_1H, INTERFACE_5M, EXPORTER_MINUTES)
+_RETENTION_TTL_S = 300.0
+
+
+@dataclass(frozen=True)
+class Retention:
+    """Configured retention (table TTL, applied by Settings -> Storage) and the
+    earliest data actually present, per flow table. ``None`` days = no TTL."""
+
+    days: dict[str, int | None]
+    earliest: dict[str, datetime | None]
+    known: bool = True
+
+    @property
+    def raw_days(self) -> int | None:
+        return self.days.get(RAW)
+
+    @property
+    def rollup_days(self) -> int | None:
+        return self.days.get(CONVERSATIONS_1H)
+
+    @property
+    def qos_days(self) -> int | None:
+        return self.days.get(QOS_1H)
+
+    @property
+    def interface_days(self) -> int | None:
+        return self.days.get(INTERFACE_5M)
+
+    @property
+    def exporter_minutes_days(self) -> int | None:
+        return self.days.get(EXPORTER_MINUTES)
+
+    def horizon(self, table: str, now: datetime) -> datetime | None:
+        """The oldest instant ``table`` still holds by its TTL (None = unlimited)."""
+        days = self.days.get(table.split(".")[-1])
+        return None if days is None else now - timedelta(days=days)
+
+
+# Used when ClickHouse cannot be asked: retention unknown (null, never a
+# guessed number); plans then treat every table as unlimited.
+_UNKNOWN_RETENTION = Retention(days={}, earliest={}, known=False)
+_retention_cache: dict[str, Any] = {"value": None, "at": 0.0, "lock": None, "loop": None}
+
+
+def _retention_lock() -> asyncio.Lock:
+    # One lock per event loop: a lock that once waited is bound to its loop.
+    loop = asyncio.get_running_loop()
+    if _retention_cache["loop"] is not loop:
+        _retention_cache.update(lock=asyncio.Lock(), loop=loop)
+    return _retention_cache["lock"]
+
+
+def _retention_sync() -> Retention:
+    from app.services.storage_service import _parse_ttl_days
+
+    client = get_ch_client()
+    with _read_timeout(client, 15):
+        tables = client.query(
+            "SELECT name, engine_full FROM system.tables WHERE database = %(db)s AND name IN %(names)s",
+            parameters={"db": CH_DB, "names": _RETENTION_TABLES},
+            settings={"max_execution_time": 10},
+        ).result_rows
+        parts = client.query(
+            "SELECT table, min(min_time) FROM system.parts "
+            "WHERE active AND database = %(db)s AND table IN %(names)s GROUP BY table",
+            parameters={"db": CH_DB, "names": _RETENTION_TABLES},
+            settings={"max_execution_time": 10},
+        ).result_rows
+    days = {name: _parse_ttl_days(engine_full) for name, engine_full in tables}
+    earliest: dict[str, datetime | None] = {}
+    for table, min_time in parts:
+        if isinstance(min_time, datetime) and min_time.year >= MIN_YEAR:
+            earliest[table] = min_time if min_time.tzinfo else min_time.replace(tzinfo=timezone.utc)
+    return Retention(days=days, earliest=earliest, known=True)
+
+
+async def get_retention(*, refresh: bool = False) -> Retention:
+    """Flow-table retention, cached for five minutes. Never raises: when
+    ClickHouse cannot be read every value is None with ``known=False`` (and
+    responses carry a ``retention_unknown`` warning)."""
+    cached = _retention_cache["value"]
+    if not refresh and cached is not None and time.monotonic() - _retention_cache["at"] < _RETENTION_TTL_S:
+        return cached
+    unreachable_before = _retention_cache.get("unreachable_seq", 0)
+    async with _retention_lock():
+        cached = _retention_cache["value"]
+        if not refresh and cached is not None and time.monotonic() - _retention_cache["at"] < _RETENTION_TTL_S:
+            if _retention_cache.get("unreachable_seq", 0) != unreachable_before:
+                # The lookup this request waited for found ClickHouse not
+                # answering: its flow queries fail fast too (NF-31).
+                current_meta().ch_unanswered = True
+            return cached
+        try:
+            value = await asyncio.wait_for(asyncio.to_thread(_retention_sync), timeout=15)
+        except Exception as exc:
+            if isinstance(exc, asyncio.TimeoutError) or (_ch_error_code(exc) is None and _is_transport_error(exc)):
+                # No answer (or no connection): the request's flow queries
+                # fail fast instead of each waiting out a budget (NF-31).
+                current_meta().ch_unanswered = True
+                _retention_cache["unreachable_seq"] = _retention_cache.get("unreachable_seq", 0) + 1
+            logger.warning("netflow: retention lookup failed", exc_info=True)
+            # Retry sooner than a successful read would.
+            _retention_cache.update(value=_UNKNOWN_RETENTION, at=time.monotonic() - _RETENTION_TTL_S + 30)
+            return _UNKNOWN_RETENTION
+        _retention_cache.update(value=value, at=time.monotonic())
+        return value
+
+
+# ── NetFlow v5 sampling repair (X-02 disclosure) ──────────────────────────────
+# Before schema v2 the collector stored sampled NetFlow v5 traffic ~165x too
+# large (unmasked sampling-mode bits). migrate-137 corrects raw records and the
+# rollup healer rebuilds the rollup hours raw still covers; older rollup hours
+# (and hours whose raw expired before their rebuild) cannot be corrected.
+# netflow_rollup.repair_status() says how far that got; responses served from
+# the conversation/QoS rollups disclose it when it matters.
+
+# The rollups that existed before the correction and so held inflated bytes;
+# flow_interface_5m and flow_exporter_minutes were built from corrected raw.
+SAMPLING_REPAIRED_TABLES = frozenset({CONVERSATIONS_1H, QOS_1H, TRAFFIC_5M})
+_REPAIR_TTL_S = 300.0
+_REPAIR_TIMEOUT_S = 5.0
+_repair_cache: dict[str, Any] = {"value": None, "at": 0.0, "lock": None, "loop": None}
+_UNREADABLE = object()
+
+
+def _repair_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    if _repair_cache["loop"] is not loop:
+        _repair_cache.update(lock=asyncio.Lock(), loop=loop)
+    return _repair_cache["lock"]
+
+
+def sampling_repair_affected(status: dict) -> bool:
+    """True when this appliance held sampled v5 traffic the repair had to act
+    on (any hour queued, rebuilt or lost, or bad rows seen after the upgrade).
+    An appliance that never received sampled v5 has nothing to disclose."""
+    return bool(
+        status.get("pending_hours")
+        or any((status.get("rebuilt_hours") or {}).values())
+        or any((status.get("unrecoverable_hours") or {}).values())
+        or status.get("rows_found_after_upgrade")
+    )
+
+
+async def get_sampling_repair(*, refresh: bool = False) -> dict | None:
+    """``netflow_rollup.repair_status()`` plus ``affected``, cached for five
+    minutes; None when it cannot be read (unknown, never "nothing to repair")."""
+    from app.services import netflow_rollup
+
+    cached = _repair_cache["value"]
+    if not refresh and cached is not None and time.monotonic() - _repair_cache["at"] < _REPAIR_TTL_S:
+        return None if cached is _UNREADABLE else cached
+    async with _repair_lock():
+        cached = _repair_cache["value"]
+        if not refresh and cached is not None and time.monotonic() - _repair_cache["at"] < _REPAIR_TTL_S:
+            return None if cached is _UNREADABLE else cached
+        try:
+            status = await asyncio.wait_for(netflow_rollup.repair_status(), timeout=_REPAIR_TIMEOUT_S)
+        except Exception:
+            logger.warning("netflow: sampling repair status unavailable", exc_info=True)
+            _repair_cache.update(value=_UNREADABLE, at=time.monotonic() - _REPAIR_TTL_S + 30)
+            return None
+        value = {**status, "affected": sampling_repair_affected(status)}
+        _repair_cache.update(value=value, at=time.monotonic())
+        return value
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def sampling_repair_warnings(status: dict | None, window: Window) -> list[dict]:
+    """Warnings for a response whose totals come (partly) from a rollup in
+    SAMPLING_REPAIRED_TABLES."""
+    if not status or not status.get("affected"):
+        return []
+    out: list[dict] = []
+    if status.get("pending_hours"):
+        out.append({
+            "code": "sampling_repair_pending",
+            "message": "Hourly rollups holding sampled NetFlow v5 traffic are still being corrected; "
+                       "long-range totals may still change",
+        })
+    verified_from = _parse_iso(status.get("verified_from"))
+    if verified_from is not None and window.start < verified_from:
+        out.append({
+            "code": "sampling_unverified",
+            "message": f"Rollup totals before {verified_from:%Y-%m-%d %H:%M} UTC predate the NetFlow v5 "
+                       "sampling correction and could not be re-checked; sampled v5 exporters may be "
+                       "overstated there",
+        })
+    # Hours queued at reconciliation (so after verified_from, before
+    # reconciled_at) whose raw records expired before they were rebuilt.
+    lost = sum((status.get("unrecoverable_hours") or {}).values())
+    reconciled_at = _parse_iso(status.get("reconciled_at"))
+    if lost and reconciled_at is not None and window.start < reconciled_at:
+        out.append({
+            "code": "sampling_unrecoverable",
+            "message": f"{lost} rollup hour{'s' if lost != 1 else ''} holding sampled NetFlow v5 traffic "
+                       "could not be corrected because their raw records had expired; they remain overstated",
+        })
+    return out
+
+
+# ── Protocol, port and application labels ─────────────────────────────────────
 
 PROTO_LABELS = {
     1: "ICMP",
@@ -236,69 +1103,6 @@ COMMON_PORTS = {
 }
 
 
-# Maps ports to higher-level "applications" for the dashboard donut.
-APPLICATION_BUCKETS = [
-    ("Web (HTTP/HTTPS)", {80, 443, 8000, 8080, 8443, 3000, 8006}),
-    ("Streaming Media", {554, 1755, 1935, 5004, 5005, 8554}),
-    ("DNS", {53, 5353}),
-    ("Email (SMTP/IMAP/POP)", {25, 110, 143, 465, 587, 993, 995}),
-    ("File Transfer (FTP/SMB/NFS)", {20, 21, 69, 115, 445, 989, 990, 2049, 873}),
-    ("Remote Access (SSH/RDP/VNC)", {22, 23, 3389, 5900, 5938, 5985, 5986}),
-    ("Database", {1433, 1434, 1521, 3306, 5432, 6379, 9042, 27017, 11211, 9200, 9300, 8123, 9000}),
-    ("VoIP / Video Conf.", {1719, 1720, 3478, 3479, 5060, 5061, 16384, 19302}),
-    ("Messaging / Queue", {1883, 5222, 5269, 5672, 8883, 9092, 15672, 4369}),
-    ("Directory / Auth", {88, 389, 636, 49, 1645, 1646, 1812, 1813, 3268, 3269}),
-    ("VPN / Tunneling", {500, 1194, 1701, 1723, 4500, 4789}),
-    ("Container / Orchestration", {2375, 2376, 2379, 6443, 10250, 2181}),
-    ("Observability", {9090, 9100, 5601, 8086, 10050, 5666, 6514}),
-    ("Network Mgmt", {123, 161, 162, 514, 6343, 2055, 179, 520}),
-]
-
-
-def _application_for_port(port: int) -> str:
-    if port == 0:
-        return "Other"
-    for name, ports in APPLICATION_BUCKETS:
-        if port in ports:
-            return name
-    if 1 <= port <= 1023:
-        return "System Services"
-    return "Other"
-
-
-# Portless protocols that still identify an application. Without this, ESP/GRE
-# tunnel traffic (often the biggest slice on a site-to-site network) all lands
-# in "Other" and the applications donut becomes meaningless.
-_PROTO_APPLICATIONS = {
-    47: "VPN / Tunneling",   # GRE
-    50: "VPN / Tunneling",   # ESP
-    51: "VPN / Tunneling",   # AH
-    1: "ICMP",
-    58: "ICMP",              # ICMPv6
-}
-
-
-def _application_for_flow(port: int, proto: int) -> str:
-    by_proto = _PROTO_APPLICATIONS.get(int(proto))
-    if by_proto:
-        return by_proto
-    return _application_for_port(int(port))
-
-
-def _query_sync(sql: str, params: dict):
-    """Blocking ClickHouse query on the calling thread's own client session."""
-    try:
-        return get_ch_client().query(sql, parameters=params)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"ClickHouse query failed: {exc}") from exc
-
-
-async def _query(sql: str, params: dict):
-    """Run a ClickHouse query in the threadpool so a slow scan never blocks the
-    event loop (the dashboard fires ~15 of these concurrently)."""
-    return await asyncio.to_thread(_query_sync, sql, params)
-
-
 def _protocol_name(proto: int) -> str:
     return PROTO_LABELS.get(int(proto), f"Protocol {proto}")
 
@@ -316,34 +1120,23 @@ def _port_name(port: int, proto: int | None = None) -> str:
     return str(port)
 
 
-def _port_class(port: int) -> str:
-    if port == 0:
-        return "No transport port"
-    if 1 <= port <= 1023:
-        return "Well-known system port"
-    if 1024 <= port <= 49151:
-        return "Registered/user port"
-    return "Dynamic/private port"
-
-
-def _port_summary(port: int, proto: int | None = None, bytes_: int = 0, packets: int = 0, flows: int = 0) -> dict:
-    return {
-        "port": int(port),
-        "service": _port_name(int(port), proto),
-        "application": _application_for_port(int(port)),
-        "bytes": int(bytes_ or 0),
-        "packets": int(packets or 0),
-        "flows": int(flows or 0),
-    }
-
-
 # ── Reverse-DNS enrichment (Phase 2) ──────────────────────────────────────────
 # Best-effort PTR lookups for the small set of IPs shown in top-N views. TTL
 # cached; bounded by an overall deadline so a slow resolver never stalls the API.
 # Opt-in per request (?resolve=1) because it adds latency and outbound DNS.
+#
+# One bounded pool for the process (not one per request). A lookup still
+# running at the deadline is neither cancelled nor recorded as "no name": it
+# keeps running and writes its answer to the cache when it finishes, and the
+# row says the name is pending. Only answers are cached; "no PTR record" for a
+# shorter time than a name, so a transient resolver failure heals quickly.
 _RDNS_TTL = 3600.0
+_RDNS_NEGATIVE_TTL = 300.0
 _rdns_cache: dict[str, tuple[float, str | None]] = {}
+_rdns_inflight: dict[str, concurrent.futures.Future] = {}
 _rdns_lock = threading.Lock()
+_rdns_pool = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="netflow-rdns")
+RDNS_PENDING = object()
 
 
 def _rdns_one(ip: str) -> str | None:
@@ -353,107 +1146,57 @@ def _rdns_one(ip: str) -> str | None:
         return None
 
 
-def _resolve_hostnames(ips: list[str], deadline: float = 2.0) -> dict[str, str | None]:
+def _rdns_store(ip: str, fut: concurrent.futures.Future) -> None:
+    host = fut.result() if not fut.cancelled() and fut.exception() is None else None
+    ttl = _RDNS_TTL if host else _RDNS_NEGATIVE_TTL
+    with _rdns_lock:
+        _rdns_cache[ip] = (time.monotonic() + ttl, host)
+        _rdns_inflight.pop(ip, None)
+
+
+def _resolve_hostnames(ips: list[str], deadline: float = 2.0) -> dict[str, object]:
+    """{ip: hostname | None (no PTR record) | RDNS_PENDING (still resolving)}."""
     now = time.monotonic()
-    out: dict[str, str | None] = {}
-    todo: list[str] = []
+    out: dict[str, object] = {}
+    waiting: dict[str, concurrent.futures.Future] = {}
+    started: list[tuple[str, concurrent.futures.Future]] = []
     with _rdns_lock:
         for ip in dict.fromkeys(ips):  # de-dup, preserve order
             ent = _rdns_cache.get(ip)
             if ent and ent[0] > now:
                 out[ip] = ent[1]
+                continue
+            fut = _rdns_inflight.get(ip)
+            if fut is None:
+                fut = _rdns_pool.submit(_rdns_one, ip)
+                _rdns_inflight[ip] = fut
+                started.append((ip, fut))
+            waiting[ip] = fut
+    # Outside the lock: a callback on an already-finished future runs inline.
+    for ip, fut in started:
+        fut.add_done_callback(lambda f, ip=ip: _rdns_store(ip, f))
+    if waiting:
+        concurrent.futures.wait(list(waiting.values()), timeout=deadline)
+        for ip, fut in waiting.items():
+            if fut.done() and not fut.cancelled() and fut.exception() is None:
+                out[ip] = fut.result()
             else:
-                todo.append(ip)
-    if todo:
-        results: dict[str, str | None] = {ip: None for ip in todo}
-        ex = concurrent.futures.ThreadPoolExecutor(max_workers=min(16, len(todo)))
-        futs = {ex.submit(_rdns_one, ip): ip for ip in todo}
-        try:
-            for fut in concurrent.futures.as_completed(futs, timeout=deadline):
-                results[futs[fut]] = fut.result()
-        except concurrent.futures.TimeoutError:
-            pass  # slow lookups finish in the background and populate the cache
-        ex.shutdown(wait=False, cancel_futures=True)
-        exp = time.monotonic() + _RDNS_TTL
-        with _rdns_lock:
-            for ip, host in results.items():
-                _rdns_cache[ip] = (exp, host)
-                out[ip] = host
+                out[ip] = RDNS_PENDING
     return out
 
 
-# ── User-defined IP groups / sites (Phase 2) ──────────────────────────────────
-# Appliance-local config (NOT shipped in releases) mapping named groups to CIDRs:
-#   [{"name": "Datacenter A", "cidrs": ["10.0.0.0/16", "10.1.0.0/16"]}, ...]
-_IP_GROUPS_PATH = os.getenv("NETFLOW_IP_GROUPS_FILE", "/opt/zenplus/data/netflow-ip-groups.json")
-_ip_groups_cache: dict = {"mtime": None, "groups": []}
-_ip_groups_lock = threading.Lock()
-
-
-def _load_ip_groups() -> list[tuple[str, list]]:
-    """Returns [(name, [ip_network, ...])], reloaded when the JSON file changes."""
-    try:
-        mtime = os.stat(_IP_GROUPS_PATH).st_mtime
-    except OSError:
-        return []
-    with _ip_groups_lock:
-        if _ip_groups_cache["mtime"] == mtime:
-            return _ip_groups_cache["groups"]
-        try:
-            raw = json.loads(open(_IP_GROUPS_PATH).read())
-        except (OSError, ValueError):
-            return _ip_groups_cache["groups"]
-        groups: list[tuple[str, list]] = []
-        for g in raw if isinstance(raw, list) else []:
-            name = str(g.get("name", "")).strip()
-            nets = []
-            for c in g.get("cidrs", []):
-                try:
-                    nets.append(ipaddress.ip_network(str(c), strict=False))
-                except ValueError:
-                    continue
-            if name and nets:
-                groups.append((name, nets))
-        _ip_groups_cache["mtime"] = mtime
-        _ip_groups_cache["groups"] = groups
-        return groups
-
+# ── IP groups / sites ─────────────────────────────────────────────────────────
+# Groups are DB-backed (services/netflow_groups). These read its cached
+# snapshot, which the flow_filter dependency refreshes on every request.
 
 def _classify_ip(ip: str) -> str | None:
-    try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
-        return None
-    for name, nets in _load_ip_groups():
-        if any(addr in n for n in nets):
-            return name
-    return None
+    return netflow_groups.classify_ip(ip)
 
 
-def _group_predicate(name: str) -> str | None:
-    """ClickHouse predicate: a flow touches this group on src OR dst. Returns
-    None if the group is unknown. CIDRs are validated, so inlining is safe."""
-    nets = next((nets for gname, nets in _load_ip_groups() if gname == name), None)
-    if not nets:
-        return None
-    terms = []
-    for n in nets:
-        c = str(n)
-        terms.append(f"isIPAddressInRange(toString(src_addr), '{c}')")
-        terms.append(f"isIPAddressInRange(toString(dst_addr), '{c}')")
-    return "(" + " OR ".join(terms) + ")"
-
-
-async def _enrich_hosts_async(rows: list[dict], resolve: bool) -> list[dict]:
-    """Like _enrich_hosts, but keeps blocking PTR lookups off the event loop."""
-    if resolve:
-        return await asyncio.to_thread(_enrich_hosts, rows, True)
-    return _enrich_hosts(rows, False)
-
-
-def _enrich_hosts(rows: list[dict], resolve: bool) -> list[dict]:
-    """Attach `group` (IP-group membership), GeoIP `country`/`asn` (no-op without a
-    DB), and — when resolve is set — reverse-DNS `hostname` to each per-IP row."""
+def _enrich_hosts(rows: list[dict]) -> list[dict]:
+    """Attach `group` (IP-group membership) and GeoIP `country`/`asn` (no-op
+    without a DB) to each per-IP row. Reverse DNS is breakdowns._rdns, which
+    honours the operator's switch and deadline (settings.rdns_config)."""
     for row in rows:
         ip = str(row.get("ip", ""))
         row["group"] = _classify_ip(ip)
@@ -462,266 +1205,38 @@ def _enrich_hosts(rows: list[dict], resolve: bool) -> list[dict]:
         row["country_name"] = g["country_name"]
         row["asn"] = g["asn"]
         row["as_name"] = g["as_name"]
-    if resolve:
-        hosts = _resolve_hostnames([str(row["ip"]) for row in rows if row.get("ip")])
-        for row in rows:
-            row["hostname"] = hosts.get(str(row.get("ip")))
-    else:
-        for row in rows:
-            row["hostname"] = None
+        row["hostname"] = None
     return rows
 
 
-def _exporter_filter(exporter: str | None) -> tuple[str, dict]:
-    """Returns (extra SQL WHERE-clause fragment, extra params) for an optional exporter filter."""
-    if exporter:
-        return " AND exporter_ip = %(exporter)s", {"exporter": exporter}
-    return "", {}
-
-
-def _interface_filter(iface: int | None) -> tuple[str, dict]:
-    """Filter flows that touched the given SNMP ifIndex on either ingress or egress."""
-    if iface is not None:
-        return " AND (input_snmp = %(iface)s OR output_snmp = %(iface)s)", {"iface": int(iface)}
-    return "", {}
-
-
-# Used by the network-class filter to translate the human label back to a CIDR.
-_NET_CLASS_RANGES = {
-    "Private 10/8": "10.0.0.0/8",
-    "Private 172.16/12": "172.16.0.0/12",
-    "Private 192.168/16": "192.168.0.0/16",
-    "Loopback": "127.0.0.0/8",
-    "Link-local": "169.254.0.0/16",
-    "Multicast": "224.0.0.0/4",
-    "CGNAT": "100.64.0.0/10",
-}
-
-
-def scope_params(
-    exporter: str | None = Query(default=None),
-    iface: int | None = Query(default=None),
-    talker: str | None = Query(default=None),
-    protocol: int | None = Query(default=None),
-    dscp_filter: int | None = Query(default=None, alias="dscp"),
-    application: str | None = Query(default=None, alias="app"),
-    net_class: str | None = Query(default=None, alias="netclass"),
-    tcp_flag: str | None = Query(default=None, alias="tcpflag"),
-    hour: int | None = Query(default=None),
-    dow: int | None = Query(default=None),
-    group: str | None = Query(default=None),
-) -> dict:
-    """FastAPI dependency: collects every drill-down filter into a single dict the endpoint can splat into _scope()."""
-    return {
-        "exporter": exporter,
-        "iface": iface,
-        "talker": talker,
-        "protocol": protocol,
-        "dscp_filter": dscp_filter,
-        "application": application,
-        "net_class": net_class,
-        "tcp_flag": tcp_flag,
-        "hour": hour,
-        "dow": dow,
-        "group": group,
-    }
-
-
-ROLLUP_TABLE = "zenplus.flow_conversations_1h"
 # Below this span the rollup's hour-bucket edges would visibly skew the
 # numbers, and raw scans are fast enough anyway.
 ROLLUP_MIN_SECONDS = 72 * 3600
 
 
-def _rollup_eligible(start: datetime, end: datetime, scope: dict) -> bool:
-    """True when the hourly conversation rollup can serve this request.
-
-    Needs a long window (short ones stay on raw for exact edges and speed),
-    and no drill-down filter that requires per-flow columns the rollup does
-    not keep: ifIndex equality (only uniq-array states survive), DSCP (tos is
-    dropped), and TCP flag patterns (per-flow flags are OR-merged).
-    """
-    if _window_seconds(start, end) < ROLLUP_MIN_SECONDS:
-        return False
-    return (
-        scope.get("iface") is None
-        and scope.get("dscp_filter") is None
-        and scope.get("tcp_flag") is None
-    )
-
-
-def _floor_hour(dt: datetime) -> datetime:
-    """Widen a window edge to its hour bucket so the rollup drops no data."""
-    return dt.replace(minute=0, second=0, microsecond=0)
-
-
-QOS_ROLLUP_TABLE = "zenplus.flow_qos_1h"
-
-
-def _qos_rollup_eligible(start: datetime, end: datetime, scope: dict) -> bool:
-    """True when the hourly QoS rollup can serve this request.
-
-    That table keys on exporter/protocol/tos/tcp_flags only, so DSCP and
-    flag-pattern filters are fine, but any filter needing addresses, ports or
-    ifIndexes forces the raw path.
-    """
-    if _window_seconds(start, end) < ROLLUP_MIN_SECONDS:
-        return False
-    return all(
-        scope.get(k) is None
-        for k in ("iface", "talker", "application", "net_class", "group")
-    )
-
-
-def _scope(
-    exporter: str | None = None,
-    iface: int | None = None,
-    talker: str | None = None,
-    protocol: int | None = None,
-    dscp_filter: int | None = None,
-    application: str | None = None,
-    net_class: str | None = None,
-    tcp_flag: str | None = None,
-    hour: int | None = None,
-    dow: int | None = None,
-    group: str | None = None,
-    table: str = "flow_records",
-) -> tuple[str, dict]:
-    """Build a combined WHERE-clause fragment for every supported drill-down dimension."""
-    # Defence in depth (BUG-01): a single corrupt/garbage flow with an
-    # astronomically large byte count must never dominate an aggregate. The
-    # collector now prevents and drops such rows at ingest, but we also bound
-    # them out of every API aggregate that uses this shared scope. 1e12 bytes
-    # (~1 TB) is far above any plausible single flow within a poll window.
-    # Qualified as flow_records.bytes so it resolves to the column, never to a
-    # "sum(bytes) AS bytes" SELECT alias (which would raise ILLEGAL_AGGREGATION).
-    # Stored bytes are sampling-adjusted (collector multiplies by the 1-in-N
-    # rate), so the guard divides by sampling_interval to test the unsampled-
-    # equivalent value — legitimate sampled flows are kept, corruption is not.
-    # The rollup table has no sampling_interval and was ingested through the
-    # same guard (see migrate-071's MV), so it skips the predicate.
-    parts: list[str] = []
-    if table == "flow_records":
-        parts.append("flow_records.bytes / greatest(flow_records.sampling_interval, 1) <= 1000000000000")
-    params: dict = {}
-    if exporter:
-        parts.append("exporter_ip = %(exporter)s"); params["exporter"] = exporter
-    if iface is not None:
-        parts.append("(input_snmp = %(iface)s OR output_snmp = %(iface)s)"); params["iface"] = int(iface)
-    if talker:
-        parts.append("(toString(src_addr) = %(talker)s OR toString(dst_addr) = %(talker)s)"); params["talker"] = talker
-    if protocol is not None:
-        parts.append("protocol = %(proto_eq)s"); params["proto_eq"] = int(protocol)
-    if dscp_filter is not None:
-        parts.append("bitShiftRight(tos, 2) = %(dscp_eq)s"); params["dscp_eq"] = int(dscp_filter)
-    if application:
-        # Protocol-derived buckets (tunnels, ICMP) match on protocol; port
-        # buckets exclude those protocols so the filters partition the traffic
-        # the same way /applications does.
-        app_protos = sorted(p for p, name in _PROTO_APPLICATIONS.items() if name == application)
-        proto_excl = ",".join(str(p) for p in sorted(_PROTO_APPLICATIONS))
-        port_set = next((ports for name, ports in APPLICATION_BUCKETS if name == application), None)
-        if port_set:
-            ports_sql = ",".join(str(int(p)) for p in port_set)
-            clause = f"dst_port IN ({ports_sql}) AND protocol NOT IN ({proto_excl})"
-            if app_protos:  # e.g. "VPN / Tunneling" is both a port bucket and GRE/ESP/AH
-                clause = f"({clause} OR protocol IN ({','.join(str(p) for p in app_protos)}))"
-            parts.append(clause)
-        elif app_protos:
-            parts.append(f"protocol IN ({','.join(str(p) for p in app_protos)})")
-        elif application == "System Services":
-            all_bucket_ports = set().union(*(ports for _, ports in APPLICATION_BUCKETS))
-            sys_ports = sorted(set(range(1, 1024)) - all_bucket_ports)
-            ports_sql = ",".join(str(p) for p in sys_ports)
-            parts.append(f"dst_port BETWEEN 1 AND 1023 AND dst_port IN ({ports_sql}) AND protocol NOT IN ({proto_excl})")
-        elif application == "Other":
-            all_bucket_ports = set().union(*(ports for _, ports in APPLICATION_BUCKETS))
-            ports_sql = ",".join(str(p) for p in sorted(all_bucket_ports))
-            parts.append(f"(dst_port = 0 OR dst_port > 1023) AND dst_port NOT IN ({ports_sql}) AND protocol NOT IN ({proto_excl})")
-    if net_class:
-        rng = _NET_CLASS_RANGES.get(net_class)
-        if rng:
-            parts.append("(isIPAddressInRange(toString(src_addr), %(nc_cidr)s) OR isIPAddressInRange(toString(dst_addr), %(nc_cidr)s))")
-            params["nc_cidr"] = rng
-        elif net_class == "Public":
-            cidrs = list(_NET_CLASS_RANGES.values())
-            src_neg = " AND ".join(f"NOT isIPAddressInRange(toString(src_addr), '{c}')" for c in cidrs)
-            dst_neg = " AND ".join(f"NOT isIPAddressInRange(toString(dst_addr), '{c}')" for c in cidrs)
-            parts.append(f"(({src_neg}) OR ({dst_neg}))")
-    if tcp_flag:
-        flag_clause = {
-            "syn_only": "protocol = 6 AND bitAnd(tcp_flags, 2) != 0 AND bitAnd(tcp_flags, 16) = 0",
-            "ack_only": "protocol = 6 AND bitAnd(tcp_flags, 16) != 0 AND bitAnd(tcp_flags, 2) = 0",
-            "rst": "protocol = 6 AND bitAnd(tcp_flags, 4) != 0",
-            "fin": "protocol = 6 AND bitAnd(tcp_flags, 1) != 0",
-            "psh": "protocol = 6 AND bitAnd(tcp_flags, 8) != 0",
-            "urg": "protocol = 6 AND bitAnd(tcp_flags, 32) != 0",
-            "no_flags": "protocol = 6 AND tcp_flags = 0",
-        }.get(tcp_flag)
-        if flag_clause:
-            parts.append(f"({flag_clause})")
-    if hour is not None:
-        parts.append("toHour(timestamp) = %(hour_eq)s"); params["hour_eq"] = int(hour)
-    if dow is not None:
-        parts.append("toDayOfWeek(timestamp) = %(dow_eq)s"); params["dow_eq"] = int(dow)
-    if group:
-        pred = _group_predicate(group)
-        if pred:
-            parts.append(pred)
-
-    return ((" AND " + " AND ".join(parts)) if parts else "", params)
-
-
-async def _exporter_device_overrides(
-    db: AsyncSession, exporter_ips: list[str]
-) -> dict[str, tuple]:
-    """{exporter_ip -> (device_id, hostname)} from netflow_exporter_devices.
-
-    Tolerates the table not existing yet so an appliance running this code
-    before migrate-054 keeps the previous behaviour instead of erroring.
-    """
-    if not exporter_ips:
-        return {}
-    try:
-        rows = (await db.execute(
-            text("""
-                SELECT host(m.exporter_ip) AS exporter_ip, d.id, d.hostname
-                FROM netflow_exporter_devices m
-                JOIN devices d ON d.id = m.device_id
-                WHERE host(m.exporter_ip) = ANY(:ips)
-            """),
-            {"ips": exporter_ips},
-        )).all()
-    except Exception:
-        logger.debug("exporter->device mapping lookup skipped", exc_info=True)
-        return {}
-    return {r.exporter_ip: (r.id, r.hostname) for r in rows}
-
+# ── Exporter and interface names ──────────────────────────────────────────────
 
 async def _resolve_interface_names(rows: list[tuple], db: AsyncSession) -> dict[tuple[str, int], dict]:
-    """Build a {(exporter_ip, ifindex) -> {if_name, if_alias, if_speed}} map from device_interfaces."""
+    """{(exporter_ip, ifindex) -> {if_name, if_descr, if_alias, if_speed,
+    device_hostname}} for ``rows`` of (exporter, ifindex), from the interfaces
+    of the device that owns each exporter.
+
+    Ownership comes from the one resolver visibility uses
+    (access.resolve_exporter_owners): an explicit exporter mapping wins over a
+    management-IP match (X-46), so interface names and who may read the
+    exporter's flows always agree. Keys keep the exporter text as given.
+    """
     keys = {(str(r[0]), int(r[1])) for r in rows}
     if not keys:
         return {}
-    exporter_ips = list({ip for ip, _ in keys})
-    # `Device.ip_address` is INET; compare via text cast so we can use a plain str list.
-    devices_q = await db.execute(
-        select(Device.id, Device.ip_address, Device.hostname).where(
-            cast(Device.ip_address, String).in_([f"{ip}/32" for ip in exporter_ips] + exporter_ips)
-        )
-    )
-    ip_to_device = {str(row.ip_address).split("/")[0]: (row.id, row.hostname) for row in devices_q.all()}
-
-    # Exporters whose source IP is not the device's management IP (loopback or
-    # WAN-sourced export) never match above; fall back to the operator-defined
-    # mapping so their ifIndex values still resolve to real interface names.
-    unmapped = [ip for ip in exporter_ips if ip not in ip_to_device]
-    if unmapped:
-        ip_to_device.update(await _exporter_device_overrides(db, unmapped))
-
+    owners = await resolve_exporter_owners(db, list({ip for ip, _ in keys}))
+    ip_to_device: dict[str, tuple[uuid.UUID, str | None]] = {}
+    for ip, _ in keys:
+        owner = owners.get(canonical_ip(ip) or "")
+        if owner is not None:
+            ip_to_device[ip] = (uuid.UUID(owner.device_id), owner.hostname)
     if not ip_to_device:
         return {}
-    device_ids = [d[0] for d in ip_to_device.values()]
     ifs_q = await db.execute(
         select(
             DeviceInterface.device_id,
@@ -730,7 +1245,7 @@ async def _resolve_interface_names(rows: list[tuple], db: AsyncSession) -> dict[
             DeviceInterface.if_descr,
             DeviceInterface.if_alias,
             DeviceInterface.if_speed,
-        ).where(DeviceInterface.device_id.in_(device_ids))
+        ).where(DeviceInterface.device_id.in_({d[0] for d in ip_to_device.values()}))
     )
     by_device: dict = {}
     for row in ifs_q.all():
@@ -745,8 +1260,7 @@ async def _resolve_interface_names(rows: list[tuple], db: AsyncSession) -> dict[
         dev = ip_to_device.get(ip)
         if not dev:
             continue
-        ifs = by_device.get(dev[0]) or {}
-        meta = ifs.get(idx)
+        meta = (by_device.get(dev[0]) or {}).get(idx)
         if meta:
             out[(ip, idx)] = {**meta, "device_hostname": dev[1]}
     return out

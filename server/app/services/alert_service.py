@@ -98,6 +98,9 @@ class AlertFilters:
     ids: list[str] | None = None
     visible_tags: list[str] | None = None
     user_id: Any = None
+    # The caller lacks netflow.view: a search must not match a NetFlow
+    # alert's (withheld) message text (X-01).
+    hide_netflow_text: bool = False
 
     def describe(self) -> list[str]:
         """Human labels of the population-narrowing filters (for 'Filtered: …')."""
@@ -210,8 +213,10 @@ class AlertFilters:
         if self.search and self.search.strip():
             q = self.search.strip()
             p["q"] = _like(q)
+            message = ("(a.message ILIKE :q AND COALESCE(a.metadata->>'source', '') <> 'netflow')"
+                       if self.hide_netflow_text else "a.message ILIKE :q")
             ors = [
-                "a.message ILIKE :q", "d.hostname ILIKE :q", "host(d.ip_address) ILIKE :q",
+                message, "d.hostname ILIKE :q", "host(d.ip_address) ILIKE :q",
                 "sc.name ILIKE :q", "s.hostname ILIKE :q", "s.display_name ILIKE :q",
                 "host(s.primary_ip) ILIKE :q", "sen.name ILIKE :q", "r.name ILIKE :q",
                 "a.metadata->>'monitor_name' ILIKE :q", "a.metadata->>'slo_name' ILIKE :q",

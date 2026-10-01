@@ -211,6 +211,28 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
     data = None
     secs: list[dict] = []
     sec_meta: dict = {}
+    scope_error: str | None = None
+    # NetFlow data sees what the schedule's owner may see. A schedule whose
+    # owner is gone or deactivated withholds NetFlow data (it would otherwise
+    # run with the appliance's unrestricted view).
+    owner = None
+    if schedule.get("id"):
+        from app.models.user import User as _User
+        from app.services.netflow_report import ORPHANED_OWNER
+        owner_id = (await db.execute(text(
+            "SELECT created_by FROM report_schedules WHERE id = :id"), {"id": schedule["id"]})).scalar()
+        owner = await db.get(_User, owner_id) if owner_id else None
+        if owner is None or not getattr(owner, "is_active", True):
+            owner = ORPHANED_OWNER
+    # Legacy attachments list alert messages: a NetFlow alert's is withheld
+    # unless the owner has netflow.view (X-01). Decided here, before the run
+    # row is committed (a commit may expire the owner's loaded attributes).
+    netflow_withheld = False
+    if not is_sections:
+        from app.api.v1.netflow.access import VIEW_PERMISSION
+        from app.services.netflow_report import flow_visibility_for
+
+        netflow_withheld = not (await flow_visibility_for(db, owner)).can(VIEW_PERMISSION)
     if is_sections:
         # Section-engine report types (availability/performance/traffic/…/custom).
         custom_id = schedule.get("custom_report_id")
@@ -218,14 +240,30 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
             db, "custom" if report_type == "custom" else report_type,
             str(custom_id) if custom_id else None)
         title = schedule.get("name") or preset_title
-        secs = await _sections.build_sections(db, section_ids, start, end, filters or None)
+        if (filters or {}).get("netflow") is not None:
+            # A stored scope the API would now reject (saved before
+            # validation existed): the run cannot be a clean success.
+            from app.api.v1.netflow.common import NetflowError
+            from app.services import netflow_classify, netflow_groups, netflow_report as _nfr
+
+            await netflow_classify.load_rules()
+            await netflow_groups.load_groups()
+            try:
+                _nfr.scope_from_mapping(filters["netflow"])
+            except NetflowError as exc:
+                scope_error = f"NetFlow scope is not valid ({exc.detail}); NetFlow sections were not generated"
+        secs = await _sections.build_sections(db, section_ids, start, end, filters or None,
+                                              requester=owner)
         cat = (_sections.REPORT_PRESETS.get(report_type) or {}).get("category") or \
             ("Custom Report" if report_type == "custom" else "")
         dev_filter = (filters or {}).get("device_ids")
+        scope_bits = [f"{len(dev_filter)} selected device(s)"] if dev_filter else []
+        if (filters or {}).get("netflow"):
+            from app.services import netflow_report
+            scope_bits.append(f"NetFlow: {netflow_report.describe(filters['netflow'])}")
         sec_meta = await _sections.build_report_meta(
             db, title, start, end, description=_desc, category=cat,
-            scope_label=(f"{len(dev_filter)} selected device(s)" if dev_filter
-                         else "All monitored infrastructure"))
+            scope_label=" · ".join(scope_bits) if scope_bits else "All monitored infrastructure")
     else:
         # Legacy types: executive dataset drives the universal HTML/email summary.
         data = await build_executive(db, start, end)
@@ -278,7 +316,8 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
                               device_ids=filters.get("device_ids"),
                               group_ids=filters.get("group_ids"),
                               locations=filters.get("locations"),
-                              device_types=filters.get("device_types"))
+                              device_types=filters.get("device_types"),
+                              redact_netflow=netflow_withheld)
                 if fmt == "excel":
                     payload = await generate_excel_report(**common)
                     attachment = (f"ZenPlus-{safe}-{ts}.xlsx", bytes(payload),
@@ -392,6 +431,10 @@ async def generate_and_deliver(db: AsyncSession, schedule: dict, *, triggered_by
         status = "partial"
     else:
         status = "failed"
+    if scope_error:
+        errors.append(scope_error)
+        if status == "success":
+            status = "partial"
     await db.execute(
         text("UPDATE report_runs SET delivered_to = CAST(:d AS jsonb), status = :st, error = :err WHERE id = :id"),
         {"d": json.dumps(delivered), "st": status,

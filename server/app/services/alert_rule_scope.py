@@ -43,6 +43,8 @@ def family(rule) -> str:
         return "netpath"
     if metric.startswith("udt_"):
         return "udt"
+    if metric.startswith("netflow_"):
+        return "netflow"
     if (_get(rule, "service_check_id") or _get(rule, "service_check_group_id")
             or metric == "service_status"):
         return "service"
@@ -68,6 +70,9 @@ def describe_scope(rule, names: dict | None = None) -> dict:
                 "target": target}
     if fam == "udt":
         return {"kind": "udt", "label": "User device tracking", "target": target}
+    if fam == "netflow":
+        return {"kind": "netflow", "label": f"NetFlow — {_netflow_scope_label(rule)}", "target": target,
+                "flow_scope": _netflow_scope(rule)}
     if fam == "service":
         if _get(rule, "service_check_id"):
             return {"kind": "service_check",
@@ -102,6 +107,41 @@ def describe_scope(rule, names: dict | None = None) -> dict:
     if target:
         label += f" — interface {target}"
     return {"kind": kind, "label": label, "target": target}
+
+
+def _netflow_scope(rule) -> dict:
+    scope = _get(rule, "flow_scope") or {}
+    if isinstance(scope, str):
+        import json
+
+        try:
+            scope = json.loads(scope)
+        except ValueError:
+            scope = {}
+    return scope if isinstance(scope, dict) else {}
+
+
+def _netflow_scope_label(rule) -> str:
+    from app.services.netflow_alert_service import describe_scope as nf_describe
+
+    metric = (_get(rule, "metric") or "").lower()
+    label = nf_describe(_netflow_scope(rule))
+    if metric == "netflow_finding":
+        return f"detection findings ({label})" if _netflow_scope(rule) else "all detection findings"
+    if metric == "netflow_exporter_silent" and not _netflow_scope(rule):
+        return "every flow exporter"
+    return label
+
+
+def _netflow_exporter(rule) -> str | None:
+    """The exporter a NetFlow rule is pinned to (exporter=, or iface=N@exporter)."""
+    scope = _netflow_scope(rule)
+    if scope.get("exporter"):
+        return str(scope["exporter"])
+    iface = str(scope.get("iface") or "")
+    if "@" in iface:
+        return iface.split("@", 1)[1]
+    return None
 
 
 async def scope_names(db: AsyncSession, rule) -> dict:
@@ -148,6 +188,10 @@ async def affected(db: AsyncSession, rule) -> dict:
                 return {"count": 1, "noun": "path probe", "shared": False}
             n = (await db.execute(text("SELECT count(*) FROM netpath_probes"))).scalar() or 0
             return {"count": int(n), "noun": "path probes", "shared": n != 1}
+        if fam == "netflow":
+            if _netflow_exporter(rule):
+                return {"count": 1, "noun": "flow exporter", "shared": False}
+            return {"count": None, "noun": "flow exporters", "shared": True}
         if fam in ("apm", "udt"):
             return {"count": None, "noun": "APM services" if fam == "apm" else "tracked endpoints",
                     "shared": not bool(_get(rule, "target"))}
@@ -192,6 +236,17 @@ async def rule_in_user_scope(db: AsyncSession, rule, scope: list[str] | None) ->
         tags = (await db.execute(text("SELECT tags FROM service_checks WHERE id = :id"),
                                  {"id": _get(rule, "service_check_id")})).scalar()
         return scoping.entity_visible(tags, scope)
+    if family(rule) == "netflow":
+        # A scoped user may only watch an exporter whose owner device they can
+        # see; fleet-wide flow policy (no exporter) needs unrestricted access.
+        exporter = _netflow_exporter(rule)
+        if not exporter:
+            return False
+        from app.api.v1.netflow.access import canonical_ip, resolve_exporter_owners
+
+        ip = canonical_ip(exporter)
+        owner = (await resolve_exporter_owners(db, [ip])).get(ip) if ip else None
+        return owner is not None and bool(set(owner.tags) & set(scope))
     tag = _get(rule, "scope_tag")
     if tag and family(rule) == "device":
         return bool(tag_set([tag]) & set(scope))
