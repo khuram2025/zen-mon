@@ -15,11 +15,23 @@
   --muted2: 148 163 184;
   --primary: 37 99 235;
   --primary-hover: 29 78 216;
+  /* Text and icons on a solid primary fill (buttons, selected segments): white on the light
+     theme's blue, near-black on the dark theme's light blue (white there is 2.2:1). */
+  --on-primary: 255 255 255;
   --success: 22 163 74;
   --warning: 234 88 12;
   --danger: 220 38 38;
   --info: 14 165 233;
   --accent: 168 85 247;
+
+  /* Status foreground: text and icons on status-tinted fills (bg-danger/5 … /15) and plain
+     surfaces. The base status colours are fill colours; as text they measure 2.5–3.2:1 on light
+     backgrounds. Each *-fg keeps at least 4.5:1 on those fills in both themes
+     (scripts/test-netflow-foundation.mjs checks the ratios). */
+  --danger-fg: 185 28 28;
+  --warning-fg: 154 52 18;
+  --success-fg: 22 101 52;
+  --info-fg: 7 89 133;
 
   /* Sidebar — light variant; .dark overrides below for dark mode */
   --sidebar-bg: 255 255 255;
@@ -42,11 +54,17 @@
   --muted2: 100 116 139;
   --primary: 99 179 255;
   --primary-hover: 125 196 255;
+  --on-primary: 7 10 16;
   --success: 74 222 128;
   --warning: 251 146 60;
   --danger: 248 113 113;
   --info: 56 189 248;
   --accent: 192 132 252;
+
+  --danger-fg: 252 165 165;
+  --warning-fg: 253 186 116;
+  --success-fg: 134 239 172;
+  --info-fg: 125 211 252;
 
   --sidebar-bg: 3 7 14;
   --sidebar-text: 203 213 225;

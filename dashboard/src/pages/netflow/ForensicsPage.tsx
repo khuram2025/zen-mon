@@ -1,332 +1,648 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, ChevronRight, Download, Loader2, Network, Search, Save } from 'lucide-react'
-import { api } from '@/lib/api'
-import { formatBytes, relativeTime } from '@/lib/utils'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
-import { Badge } from '@/components/ui/Badge'
-import { Table, TBody, THead, Td, Th, Tr } from '@/components/ui/Table'
-import { TimeRangePicker, useTimeRange } from '@/components/TimeRangePicker'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { Link, useLocation, useSearchParams } from 'react-router-dom'
+import { keepPreviousData, useInfiniteQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query'
+import { Bookmark, Columns3, DatabaseZap, Loader2, RefreshCw, RotateCcw, Save, Search } from 'lucide-react'
+import { Card, CardContent } from '@/components/ui/Card'
+import { Button } from '@/components/ui/Button'
+import { toast } from '@/components/ui/Toast'
+import { TimeRangePicker } from '@/components/TimeRangePicker'
+import { NetflowPageHeader } from '@/components/netflow/NetflowPageHeader'
+import { QueryPanel, PanelMessage } from '@/components/netflow/QueryPanel'
+import { DataQualityBar } from '@/components/netflow/DataQualityBar'
+import { FilterChips } from '@/components/netflow/FilterChips'
+import { SaveViewDialog, type SaveViewDraft } from '@/components/netflow/SaveViewDialog'
+import { useCan } from '@/stores/auth'
+import { cn } from '@/lib/utils'
+import { nf, nfRetry, paramsKey, useNfQuery } from '@/lib/netflow/api'
+import {
+  buildSavedQuery,
+  FLOW_FILTER_ALIASES,
+  isFlowFilterEmpty,
+  FLOW_FILTER_KEYS,
+  type FlowFilterKey,
+} from '@/lib/netflow/filters'
+import { formatCountExact, formatDateTime, formatDuration } from '@/lib/netflow/format'
+import { buildNetflowLink } from '@/lib/netflow/links'
+import type { NfResult, NfRetention } from '@/lib/netflow/types'
+import { savedQueryWindow, useNfWindow, windowParams } from '@/lib/netflow/window'
+import { serverNow } from '@/lib/serverClock'
+import { errorText, saveBlob, useSavedView, useSavedViewMutations } from './forensics/api'
+import { EvidenceBanner } from './forensics/EvidenceBanner'
+import { ExportControls, ExportJobsPanel } from './forensics/ExportControls'
+import { ADVANCED_KEYS, FilterBuilder } from './forensics/FilterBuilder'
+import { ResultsTable, useNarrowScreen } from './forensics/ResultsTable'
+import {
+  appliedSearchFromUrl,
+  broadenToHostLink,
+  COLUMNS,
+  columnsSearchParams,
+  displayedRowsCsv,
+  displayedRowsFilename,
+  draftFromApplied,
+  draftsEqual,
+  EVIDENCE_PARAMS,
+  exportApiParams,
+  firewallEventCount,
+  flowRecordsOnlyParams,
+  forensicsHeaderLinks,
+  invalidKeys,
+  isDefaultColumns,
+  isRunnable,
+  nextSort,
+  parseDraft,
+  resetSearchParams,
+  sameSearchParams,
+  searchApiParams,
+  searchHeading,
+  showingLabel,
+  sortLabel,
+  sortSearchParams,
+  submitSearchParams,
+  type DraftState,
+  type ForensicsPageData,
+  type ForensicsSort,
+} from './forensics/model'
 
-type FlowRow = {
-  timestamp: string
-  exporter_ip: string
-  src: string
-  dst: string
-  src_port: number
-  dst_port: number
-  protocol: number
-  protocol_name: string
-  tcp_flags: number
-  dscp: number
-  input_snmp: number
-  output_snmp: number
-  input_interface?: InterfaceRef | null
-  output_interface?: InterfaceRef | null
-  packets: number
-  bytes: number
-  duration_ms: number
-  service: string
-}
+/** Records per page: 500 in the table, 100 as cards on a phone (each page is still complete and ordered). */
+const PAGE_SIZE = 500
+const PAGE_SIZE_NARROW = 100
+type SearchData = InfiniteData<NfResult<ForensicsPageData>>
 
-type InterfaceRef = {
-  ifindex: number
-  display_name?: string | null
-  if_name?: string | null
-  if_descr?: string | null
-  if_alias?: string | null
-}
-
-const PROTO_OPTIONS = [
-  { value: '', label: 'Any' },
-  { value: '6', label: 'TCP (6)' },
-  { value: '17', label: 'UDP (17)' },
-  { value: '1', label: 'ICMP (1)' },
-  { value: '47', label: 'GRE (47)' },
-  { value: '50', label: 'ESP (50)' },
-]
-
+/**
+ * Flow Forensics: search individual flow records (NF-08, NF-09, NF-10, NF-11, NF-12, FE-04).
+ *
+ * The URL holds the applied search; the form is a draft applied on Search or Enter. Results are
+ * paged with a keyset cursor ("Load more"), the total is counted separately (exact or a lower
+ * bound), and exports say exactly what they contain.
+ */
 export function NetflowForensicsPage() {
-  const { range, rangeIdx, isCustom, setPreset, setCustom } = useTimeRange()
-  const [params] = useSearchParams()
-  const [src, setSrc] = useState(params.get('src') || '')
-  const [dst, setDst] = useState(params.get('dst') || '')
-  const [proto, setProto] = useState(params.get('proto') || '')
-  const [srcPort, setSrcPort] = useState(params.get('src_port') || '')
-  const [dstPort, setDstPort] = useState(params.get('dst_port') || '')
-  const [minBytes, setMinBytes] = useState(params.get('min_bytes') || '')
-  const [dscp, setDscp] = useState(params.get('dscp') || '')
-  const [exporter, setExporter] = useState(params.get('exporter') || '')
-  const [sort, setSort] = useState<'timestamp' | 'bytes' | 'packets' | 'src_port' | 'dst_port'>('timestamp')
-  const [order, setOrder] = useState<'asc' | 'desc'>('desc')
-  const seeded = !!(params.get('src') || params.get('dst') || params.get('proto') || params.get('exporter'))
-  const [armed, setArmed] = useState(seeded)
-  // If we navigated in with URL params, automatically run on mount.
-  useEffect(() => { if (seeded) setArmed(true) }, [seeded])
+  const [sp, setSp] = useSearchParams()
+  const location = useLocation()
+  const qc = useQueryClient()
+  const can = useCan()
+  const nfw = useNfWindow()
+  const pageSize = useNarrowScreen() ? PAGE_SIZE_NARROW : PAGE_SIZE
+  const w = nfw.window
+  const qs = sp.toString()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const applied = useMemo(() => appliedSearchFromUrl(sp), [qs])
+  const appliedDraft = useMemo(() => draftFromApplied(applied), [applied])
+  const appliedKey = JSON.stringify(appliedDraft)
 
-  const qs = useMemo(() => {
-    const p = new URLSearchParams({ hours: String(range.hours), limit: '500', sort, order })
-    if (isCustom) { p.set('from', range.fromISO); p.set('to', range.toISO) }
-    if (src.trim()) p.set('src', src.trim())
-    if (dst.trim()) p.set('dst', dst.trim())
-    if (proto) p.set('proto', proto)
-    if (srcPort) p.set('src_port', srcPort)
-    if (dstPort) p.set('dst_port', dstPort)
-    if (minBytes) p.set('min_bytes', minBytes)
-    if (dscp) p.set('dscp', dscp)
-    if (exporter.trim()) p.set('exporter', exporter.trim())
-    return p.toString()
-  }, [range.hours, range.fromISO, range.toISO, isCustom, src, dst, proto, srcPort, dstPort, minBytes, dscp, exporter, sort, order])
+  /* ─── Draft (NF-11) ─── */
+  const [draft, setDraft] = useState<DraftState>(appliedDraft)
+  const [showErrors, setShowErrors] = useState(false)
+  const [advancedOpen, setAdvancedOpen] = useState(() => ADVANCED_KEYS.some((k) => appliedDraft[k] !== ''))
+  // Back/Forward and links change the applied search: the form follows it.
+  useEffect(() => {
+    setDraft(appliedDraft)
+    setShowErrors(false)
+    if (ADVANCED_KEYS.some((k) => appliedDraft[k] !== '')) setAdvancedOpen(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appliedKey])
+  const draftResult = useMemo(() => parseDraft(draft), [draft])
+  const dirty = !draftsEqual(draft, appliedDraft)
+  const badKeys = invalidKeys(applied)
+  const runnable = isRunnable(applied)
+  const formRef = useRef<HTMLFormElement>(null)
 
-  const flows = useQuery<FlowRow[]>({
-    queryKey: ['netflow', 'forensics', qs, armed],
-    queryFn: async () => (await api.get(`/netflow/forensics?${qs}`)).data,
-    enabled: armed,
+  /* ─── Search ─── */
+  const apiParams = useMemo(
+    () => ({ ...windowParams(w), ...searchApiParams(applied.filter, applied.sort, applied.order, pageSize) }),
+    [w, applied, pageSize],
+  )
+  const queryKey = useMemo(() => ['netflow', 'forensics-search', paramsKey(apiParams)] as const, [apiParams])
+  const search = useInfiniteQuery({
+    queryKey,
+    queryFn: ({ pageParam, signal }) =>
+      nf.get<ForensicsPageData>('/netflow/forensics/search', { ...apiParams, cursor: pageParam }, { signal, timeoutMs: 45_000 }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.data?.next_cursor ?? undefined,
+    enabled: runnable,
+    retry: nfRetry,
+    placeholderData: keepPreviousData,
+    // Forensics never refreshes by itself: results are a snapshot until Refresh or a new search.
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
     refetchInterval: false,
   })
+  const pages = search.data?.pages ?? []
+  // While a new search loads, the previous search's rows stay on screen (dimmed), but its count,
+  // quality bar, snapshot and export totals are not this search's: they are withheld until it answers.
+  const placeholder = search.isPlaceholderData
+  const first = placeholder ? undefined : pages[0]?.data
+  const meta = placeholder ? null : pages[0]?.meta ?? null
+  const rows = useMemo(() => pages.flatMap((p) => p.data?.items ?? []), [pages])
 
-  const exportCsv = () => {
-    const rows = flows.data || []
-    if (rows.length === 0) return
-    const header = ['timestamp', 'exporter_ip', 'src', 'src_port', 'dst', 'dst_port', 'protocol', 'service', 'tcp_flags', 'dscp', 'input_interface', 'output_interface', 'input_snmp', 'output_snmp', 'bytes', 'packets', 'duration_ms']
-    const esc = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`
-    const csv = [header.join(','), ...rows.map((r) => header.map((h) => {
-      if (h === 'input_interface') return esc(interfaceLabel(r.input_interface, r.input_snmp))
-      if (h === 'output_interface') return esc(interfaceLabel(r.output_interface, r.output_snmp))
-      return esc((r as any)[h])
-    }).join(','))].join('\n')
-    const blob = new Blob([csv], { type: 'text/csv' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `netflow-forensics-${new Date().toISOString().slice(0, 19)}.csv`
-    a.click()
-    URL.revokeObjectURL(url)
+  const refresh = () => {
+    // Only the first page is fetched again (with a new snapshot); later pages load on demand.
+    qc.setQueryData<SearchData>(queryKey, (d) => (d ? { pages: d.pages.slice(0, 1), pageParams: d.pageParams.slice(0, 1) } : d))
+    void search.refetch()
   }
 
-  const saveView = async () => {
-    const name = window.prompt('Save this query as…')
-    if (!name) return
-    await api.post('/netflow/saved-views', {
-      name,
-      query: { src, dst, proto, src_port: srcPort, dst_port: dstPort, min_bytes: minBytes, dscp, exporter, sort, order },
-      pinned: false,
-    })
-    alert('Saved.')
+  const submit = (e?: FormEvent) => {
+    e?.preventDefault()
+    setShowErrors(true)
+    if (!draftResult.ok) {
+      // Focus the first field with a problem; nothing is sent.
+      const firstBad = FLOW_FILTER_KEYS.find((k) => draftResult.errors[k])
+      const el = firstBad ? formRef.current?.querySelector<HTMLElement>(`[id$="-${firstBad}"]`) : null
+      if (firstBad && ADVANCED_KEYS.includes(firstBad)) setAdvancedOpen(true)
+      window.setTimeout(() => el?.focus(), 0)
+      return
+    }
+    const next = submitSearchParams(sp, draftResult.filter, { keepEvidence: !dirty })
+    if (runnable && sameSearchParams(next, sp)) {
+      refresh()
+      return
+    }
+    setSp(next)
   }
 
   const reset = () => {
-    setSrc(''); setDst(''); setProto(''); setSrcPort(''); setDstPort(''); setMinBytes(''); setDscp(''); setExporter(''); setArmed(false)
+    setDraft(draftFromApplied({ filter: {}, invalid: {} }))
+    setShowErrors(false)
+    setSp(resetSearchParams(sp))
   }
+
+  const runAll = () => {
+    const next = new URLSearchParams(sp)
+    next.set('run', '1')
+    setSp(next)
+  }
+
+  const removeKeys = (keys: FlowFilterKey[]) => {
+    const next = new URLSearchParams(sp)
+    for (const k of keys) {
+      next.delete(k)
+      for (const a of FLOW_FILTER_ALIASES[k] ?? []) next.delete(a)
+      if (k === 'iface') next.delete('iface_dir')
+    }
+    for (const k of [...EVIDENCE_PARAMS, 'cursor']) next.delete(k)
+    next.set('run', '1')
+    setSp(next)
+  }
+
+  const onSort = (col: ForensicsSort) => {
+    const n = nextSort({ sort: applied.sort, order: applied.order }, col)
+    setSp(sortSearchParams(sp, n.sort, n.order))
+  }
+
+  /* ─── Columns ─── */
+  const [columnsOpen, setColumnsOpen] = useState(false)
+  const toggleColumn = (key: string) => {
+    const set = new Set(applied.columns)
+    if (set.has(key)) {
+      if (set.size === 1) return
+      set.delete(key)
+    } else set.add(key)
+    setSp(columnsSearchParams(sp, [...set]), { replace: true })
+  }
+
+  /* ─── Expanded rows (kept across refresh and Load more) ─── */
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set())
+  const toggle = (id: string) =>
+    setExpanded((s) => {
+      const n = new Set(s)
+      if (n.has(id)) n.delete(id)
+      else n.add(id)
+      return n
+    })
+
+  /* ─── Retention (FE-11) ─── */
+  const retention = useNfQuery<NfRetention>('/netflow/retention', null, { refetchInterval: false, staleTime: 300_000 })
+  const rawDays = meta?.retention?.raw_days ?? retention.data?.data?.raw_days ?? null
+
+  /* ─── Save view / update view (NF-12, NF-34) ─── */
+  const [saveOpen, setSaveOpen] = useState(false)
+  const { create, update } = useSavedViewMutations()
+  const openedView = useSavedView(applied.viewId)
+  const view = openedView.data?.data ?? null
+  const columnsToSave = isDefaultColumns(applied.columns) ? null : applied.columns
+  const sortToSave = applied.sort === 'timestamp' && applied.order === 'desc' ? null : applied.sort
+
+  const saveNew = (d: SaveViewDraft) => {
+    const query = buildSavedQuery({
+      kind: 'forensics',
+      filter: applied.filter,
+      window: savedQueryWindow(w, d.timeMode, meta?.window),
+      sort: sortToSave,
+      order: sortToSave ? applied.order : null,
+      columns: columnsToSave,
+    })
+    create.mutate(
+      { name: d.name, description: d.description || null, visibility: d.visibility, pinned: d.pinned, kind: 'forensics', query },
+      {
+        onSuccess: (v) => {
+          setSaveOpen(false)
+          toast.success('View saved', `"${v.name}" is in Saved Views.`)
+          const next = new URLSearchParams(sp)
+          next.set('view', v.id)
+          setSp(next, { replace: true })
+        },
+      },
+    )
+  }
+
+  const updateView = () => {
+    if (!view) return
+    const previous = view.query as { window?: { mode?: string } } | null
+    const mode = previous?.window?.mode === 'fixed' || w.key === 'custom' ? 'fixed' : 'relative'
+    const query = buildSavedQuery({
+      kind: 'forensics',
+      filter: applied.filter,
+      window: savedQueryWindow(w, mode, meta?.window),
+      sort: sortToSave,
+      order: sortToSave ? applied.order : null,
+      columns: columnsToSave,
+    })
+    update.mutate(
+      { id: view.id, patch: { query } },
+      {
+        onSuccess: (v) => toast.success('Saved view updated', `"${v.name}" now reopens this search.`),
+        onError: (err) => toast.error('The view was not updated', errorText(err)),
+      },
+    )
+  }
+
+  /* ─── Export ─── */
+  const [jobsOpen, setJobsOpen] = useState(false)
+  // Pinned to the period and the received-at snapshot of the search, so the file holds exactly the
+  // rows counted (records arriving later with timestamps inside the window are not added).
+  const exportParams = useMemo(
+    () => exportApiParams({ filter: applied.filter, sort: applied.sort, order: applied.order, page: first, windowParams: windowParams(w), tz: w.tz }),
+    [applied, first, w],
+  )
+  const exportDisplayed = () => {
+    const csv = displayedRowsCsv(rows, applied.columns)
+    saveBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), displayedRowsFilename(rows.length, serverNow()))
+    toast.success('Displayed rows exported', `${formatCountExact(rows.length)} rows (only the rows loaded on this page).`)
+  }
+
+  // When the period is beyond raw retention the results panel explains it; the bar must not also
+  // claim a zero-length "covered" period.
+  const barMeta =
+    first?.unavailable && meta?.window ? { ...meta, window: { ...meta.window, effective_from: null, effective_to: null } } : meta
+  const evidence = applied.finding !== null || applied.findingId !== null
+  const loaded = rows.length
+  const total = first?.total ?? null
+  const exact = first?.total_exact ?? false
+  const copyLink = `${location.pathname}?${qs}`
+  const retentionNote = rawDays != null ? `Raw records are kept for ${rawDays} days.` : null
+  const headerLinks = forensicsHeaderLinks(applied.filter, w)
+  // NSEL create/deny events match unless the search already chose firewall events (FE: volume cards exclude them).
+  const fwEvents = applied.filter.fw_event === undefined ? firewallEventCount(first) : 0
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <div className="mb-1 flex items-center gap-1.5 text-[11px] text-muted">
-            <Link to="/netflow" className="inline-flex items-center gap-1 hover:text-text">
-              <ArrowLeft className="h-3 w-3" />
-              NetFlow
+      <NetflowPageHeader
+        title="Flow Forensics"
+        icon={Search}
+        crumb="Forensics"
+        rootTo={headerLinks.root}
+        parents={headerLinks.parents}
+        description={
+          <>
+            Search individual flow records by any retained field, page through complete results and export them.{' '}
+            {retentionNote}
+          </>
+        }
+        actions={
+          <>
+            <TimeRangePicker
+              rangeIdx={nfw.rangeIdx}
+              isCustom={nfw.isCustom}
+              customFrom={nfw.range.fromISO}
+              customTo={nfw.range.toISO}
+              onPreset={nfw.setPreset}
+              onCustom={nfw.setCustom}
+            />
+            <Link
+              to="/netflow/saved-views"
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-border bg-surface px-3 text-xs font-medium text-text hover:bg-surface2"
+            >
+              <Bookmark className="h-4 w-4" aria-hidden />
+              Saved views
             </Link>
-            <ChevronRight className="h-3 w-3" />
-            <span>Forensics</span>
-          </div>
-          <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
-            <Search className="h-5 w-5 text-primary" />
-            Flow Forensics
-          </h1>
-          <p className="text-xs text-muted">Search un-aggregated flow records by any field, sort, and export to CSV.</p>
-        </div>
-        <TimeRangePicker
-          rangeIdx={rangeIdx}
-          isCustom={isCustom}
-          customFrom={range.fromISO}
-          customTo={range.toISO}
-          onPreset={setPreset}
-          onCustom={setCustom}
+          </>
+        }
+      />
+
+      {evidence && (
+        <EvidenceBanner
+          finding={applied.finding}
+          findingId={applied.findingId}
+          filter={applied.filter}
+          window={w}
+          runnable={runnable}
+          broadenLink={(host) => broadenToHostLink(sp, host, applied.filter.exporter)}
         />
-      </div>
+      )}
 
       <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm">Filters</CardTitle>
-          <p className="text-[11px] text-muted">Leave a field blank to skip it. Source/Dest accept IPs and CIDRs (e.g. 10.0.0.0/8).</p>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-3 xl:grid-cols-4">
-            <Field label="Source IP / CIDR" value={src} onChange={setSrc} placeholder="10.0.0.0/8" />
-            <Field label="Destination IP / CIDR" value={dst} onChange={setDst} placeholder="8.8.8.8" />
-            <SelectField label="Protocol" value={proto} onChange={setProto} options={PROTO_OPTIONS} />
-            <Field label="Exporter (collector)" value={exporter} onChange={setExporter} placeholder="192.168.100.102" />
-            <Field label="Source port" value={srcPort} onChange={setSrcPort} placeholder="any" inputMode="numeric" />
-            <Field label="Destination port" value={dstPort} onChange={setDstPort} placeholder="443" inputMode="numeric" />
-            <Field label="DSCP code-point" value={dscp} onChange={setDscp} placeholder="46 = EF" inputMode="numeric" />
-            <Field label="Min bytes" value={minBytes} onChange={setMinBytes} placeholder="1048576" inputMode="numeric" />
-          </div>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <button
-              onClick={() => setArmed(true)}
-              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-4 py-1.5 text-xs font-semibold text-black hover:bg-primary/90"
-            >
-              <Search className="h-3.5 w-3.5" />
-              Search
-            </button>
-            <button onClick={reset} className="rounded-md border border-border px-3 py-1.5 text-xs text-muted hover:text-text">
-              Reset
-            </button>
-            <button
-              onClick={saveView}
-              disabled={!armed}
-              className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs text-muted hover:text-text disabled:opacity-50"
-            >
-              <Save className="h-3.5 w-3.5" />
-              Save view
-            </button>
-            <button
-              onClick={exportCsv}
-              disabled={!flows.data?.length}
-              className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs text-muted hover:text-text disabled:opacity-50"
-            >
-              <Download className="h-3.5 w-3.5" />
-              Export CSV
-            </button>
-            <span className="ml-auto text-[11px] text-muted">
-              {flows.data ? `${flows.data.length} rows · ${range.label}` : range.label}
-            </span>
-          </div>
+        <CardContent className="p-4">
+          <form ref={formRef} onSubmit={submit} noValidate aria-label="Search flow records" className="space-y-3">
+            <FilterBuilder
+              draft={draft}
+              onChange={(k, v) => setDraft((d) => ({ ...d, [k]: v }))}
+              errors={draftResult.errors}
+              showErrors={showErrors}
+              advancedOpen={advancedOpen}
+              onToggleAdvanced={() => setAdvancedOpen((o) => !o)}
+              tz={w.tz}
+            />
+            <div className="flex flex-wrap items-center gap-2 border-t border-border pt-3">
+              <Button type="submit" size="sm" className="gap-1.5">
+                <Search aria-hidden />
+                {runnable && !dirty ? 'Search again' : 'Search'}
+              </Button>
+              <Button type="button" variant="outline" size="sm" className="gap-1.5" onClick={reset}>
+                <RotateCcw aria-hidden />
+                Reset
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                onClick={() => {
+                  create.reset()
+                  setSaveOpen(true)
+                }}
+                disabled={!runnable || dirty}
+                title={dirty ? 'Apply the search first: a view saves the applied search' : undefined}
+              >
+                <Save aria-hidden />
+                Save view
+              </Button>
+              {view?.can_edit && (
+                <Button type="button" variant="outline" size="sm" className="gap-1.5" onClick={updateView} disabled={!runnable || dirty || update.isPending}>
+                  {update.isPending ? <Loader2 className="animate-spin" aria-hidden /> : <Bookmark aria-hidden />}
+                  Update “{view.name}”
+                </Button>
+              )}
+              <span className="text-[11px] text-text2" role="status" aria-live="polite">
+                {dirty
+                  ? showErrors && !draftResult.ok
+                    ? 'Fix the highlighted fields to search.'
+                    : 'Changes not applied yet: press Search or Enter.'
+                  : ''}
+              </span>
+            </div>
+          </form>
         </CardContent>
       </Card>
 
+      {(runnable || badKeys.length > 0) && (
+        <section aria-label="Applied search" className="space-y-2">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-text2">
+            <span className="font-semibold uppercase tracking-wide">Applied search</span>
+            <span>{applied.sort !== 'timestamp' || applied.order !== 'desc' ? sortLabel({ sort: applied.sort, order: applied.order }) : 'Newest first'}</span>
+            {isFlowFilterEmpty(applied.filter) && badKeys.length === 0 && <span>No filters: every record in {w.label}</span>}
+          </div>
+          <FilterChips
+            filter={applied.filter}
+            invalid={applied.invalid}
+            errors={applied.errors}
+            tz={w.tz}
+            onRemove={removeKeys}
+            onClearAll={reset}
+            copyLink={copyLink}
+          />
+          {badKeys.length > 0 && (
+            <p role="alert" className="text-[11px] font-medium text-danger-fg">
+              The link contains filters that are not valid. Fix them in the form or remove them; the search does not run until then.
+            </p>
+          )}
+          {runnable && barMeta !== null && <DataQualityBar meta={barMeta} window={w} filter={applied.filter} />}
+        </section>
+      )}
+
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between pb-3">
-          <CardTitle className="text-sm">Results</CardTitle>
-          {flows.isFetching && <Loader2 className="h-4 w-4 animate-spin text-muted" />}
-        </CardHeader>
-        <CardContent>
-          {!armed ? (
-            <div className="rounded-md border border-dashed border-border bg-surface2/30 p-10 text-center text-xs text-muted">
-              Configure filters above and click <span className="text-text">Search</span> to query raw flow records.
-            </div>
-          ) : flows.error ? (
-            <div className="rounded-md border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-300">
-              Query failed: {(flows.error as any)?.response?.data?.detail || (flows.error as any)?.message}
-            </div>
-          ) : (flows.data?.length ?? 0) === 0 ? (
-            <div className="rounded-md border border-dashed border-border bg-surface2/30 p-10 text-center text-xs text-muted">
-              No flow records matched these filters.
-            </div>
+        <CardContent className="space-y-3 p-4">
+          {!runnable ? (
+            <PanelMessage
+              className="py-10"
+              icon={Search}
+              title={badKeys.length ? 'Fix the invalid filters to search' : 'Search raw flow records'}
+              detail={
+                <>
+                  Enter one or more conditions and press Search, or search every record of the period. Addresses accept IPv4,
+                  IPv6 and CIDR prefixes; a host matches as source or destination.
+                  {badKeys.length === 0 && (
+                    <span className="mt-3 block">
+                      <Button type="button" size="sm" variant="outline" onClick={runAll}>
+                        Search all records in {w.label}
+                      </Button>
+                    </span>
+                  )}
+                </>
+              }
+            />
           ) : (
-            <Table>
-              <THead>
-                <Tr>
-                  <Th><HeaderSort label="When" col="timestamp" sort={sort} order={order} setSort={setSort} setOrder={setOrder} /></Th>
-                  <Th>Exporter</Th>
-                  <Th>Source</Th>
-                  <Th><HeaderSort label="SPort" col="src_port" sort={sort} order={order} setSort={setSort} setOrder={setOrder} /></Th>
-                  <Th>Destination</Th>
-                  <Th><HeaderSort label="DPort" col="dst_port" sort={sort} order={order} setSort={setSort} setOrder={setOrder} /></Th>
-                  <Th>Service</Th>
-                  <Th>Proto</Th>
-                  <Th>Flags</Th>
-                  <Th>DSCP</Th>
-                  <Th>If In/Out</Th>
-                  <Th className="text-right"><HeaderSort label="Bytes" col="bytes" sort={sort} order={order} setSort={setSort} setOrder={setOrder} /></Th>
-                  <Th className="text-right"><HeaderSort label="Pkts" col="packets" sort={sort} order={order} setSort={setSort} setOrder={setOrder} /></Th>
-                </Tr>
-              </THead>
-              <TBody>
-                {(flows.data || []).map((r, i) => (
-                  <Tr key={`${r.timestamp}-${r.src}-${r.dst}-${r.src_port}-${r.dst_port}-${i}`}>
-                    <Td className="text-[11px] text-muted" title={r.timestamp}>{relativeTime(r.timestamp)}</Td>
-                    <Td className="font-mono text-[10px]">{r.exporter_ip}</Td>
-                    <Td className="font-mono text-[11px]">{r.src}</Td>
-                    <Td className="text-[11px]">{r.src_port}</Td>
-                    <Td className="font-mono text-[11px]">{r.dst}</Td>
-                    <Td className="text-[11px]">{r.dst_port}</Td>
-                    <Td className="text-[11px]">{r.service}</Td>
-                    <Td><Badge variant="outline">{r.protocol_name}</Badge></Td>
-                    <Td className="font-mono text-[10px]">{flagsString(r.tcp_flags)}</Td>
-                    <Td className="text-[11px]">{r.dscp}</Td>
-                    <Td className="text-[10px]">
-                      <div className="font-medium">{interfaceLabel(r.input_interface, r.input_snmp)}</div>
-                      <div className="text-muted">{interfaceLabel(r.output_interface, r.output_snmp)}</div>
-                    </Td>
-                    <Td className="text-right font-mono text-[11px]">{formatBytes(r.bytes)}</Td>
-                    <Td className="text-right text-[11px]">{r.packets.toLocaleString()}</Td>
-                  </Tr>
-                ))}
-              </TBody>
-            </Table>
+            <>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                <div className="min-w-0 flex-1">
+                  <div className={cn('text-sm font-semibold', search.isError && !first ? 'text-danger-fg' : 'text-text')} aria-live="polite">
+                    {searchHeading({ page: first, placeholder, failed: search.isError, loaded })}
+                  </div>
+                  {placeholder && rows.length > 0 && (
+                    <div className="text-[11px] text-text2">The dimmed rows below are from the previous search until this one finishes.</div>
+                  )}
+                  {first && !first.unavailable && (
+                    <div className="text-[11px] text-text2">
+                      {first.snapshot_at ? `Records received up to ${formatDateTime(first.snapshot_at, w.tz)}` : ''}
+                      {meta?.query_ms != null ? ` · query ${formatDuration(meta.query_ms)}` : ''}
+                      {!exact && total !== null ? ' · counting stopped at its time limit, the total is a lower bound' : ''}
+                    </div>
+                  )}
+                  {fwEvents > 0 && (
+                    <div className="text-[11px] text-text2">
+                      Includes {first?.fw_events?.exact === false ? 'at least ' : ''}{formatCountExact(fwEvents)} firewall event records
+                      (NSEL connection created/denied) without traffic volume, which traffic totals and cards leave out.{' '}
+                      <button type="button" className="font-medium text-primary underline-offset-2 hover:underline" onClick={() => setSp(flowRecordsOnlyParams(sp))}>
+                        Show flow records only
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="gap-1.5"
+                  onClick={refresh}
+                  disabled={search.isFetching}
+                  aria-label="Refresh results"
+                >
+                  <RefreshCw className={cn(search.isFetching && !search.isFetchingNextPage && 'animate-spin')} aria-hidden />
+                  <span className="hidden sm:inline">Refresh</span>
+                </Button>
+                {!first?.unavailable && (
+                  <>
+                    <div className="relative">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5"
+                        aria-expanded={columnsOpen}
+                        aria-controls="nf-forensics-columns"
+                        onClick={() => setColumnsOpen((o) => !o)}
+                      >
+                        <Columns3 aria-hidden />
+                        <span className="hidden sm:inline">Columns</span>
+                        <span className="sr-only sm:hidden">Choose columns</span>
+                      </Button>
+                      {columnsOpen && (
+                        <fieldset
+                          onKeyDown={(e) => {
+                            if (e.key === 'Escape') setColumnsOpen(false)
+                          }}
+                          id="nf-forensics-columns"
+                          className="absolute right-0 z-30 mt-1 w-64 rounded-md border border-border bg-surface p-2 shadow-elevated"
+                        >
+                          <legend className="sr-only">Visible columns</legend>
+                          <div className="max-h-72 space-y-0.5 overflow-auto">
+                            {COLUMNS.map((c) => (
+                              <label key={c.key} className="flex cursor-pointer items-center gap-2 rounded px-1.5 py-1 text-xs hover:bg-surface2">
+                                <input
+                                  type="checkbox"
+                                  checked={applied.columns.includes(c.key)}
+                                  onChange={() => toggleColumn(c.key)}
+                                  className="accent-[rgb(var(--primary))]"
+                                />
+                                {c.label}
+                              </label>
+                            ))}
+                          </div>
+                          <div className="mt-1 flex justify-between border-t border-border pt-1">
+                            <button
+                              type="button"
+                              className="rounded px-1.5 py-0.5 text-[11px] text-text2 hover:text-text"
+                              onClick={() => setSp(columnsSearchParams(sp, []), { replace: true })}
+                            >
+                              Default columns
+                            </button>
+                            <button type="button" className="rounded px-1.5 py-0.5 text-[11px] font-medium text-text" onClick={() => setColumnsOpen(false)}>
+                              Done
+                            </button>
+                          </div>
+                        </fieldset>
+                      )}
+                    </div>
+                    {first && (
+                    <ExportControls
+                      displayedCount={loaded}
+                      onExportDisplayed={exportDisplayed}
+                      total={total}
+                      exact={exact}
+                      allowed={first?.export?.allowed ?? can('netflow.export')}
+                      streamMax={first?.export?.stream_max_rows ?? 100_000}
+                      jobMax={first?.export?.job_max_rows ?? 2_000_000}
+                      params={exportParams}
+                      jobsOpen={jobsOpen}
+                      onJobsOpenChange={setJobsOpen}
+                    />
+                    )}
+                  </>
+                )}
+              </div>
+              {jobsOpen && <ExportJobsPanel tz={w.tz} onClose={() => setJobsOpen(false)} />}
+
+              {first?.unavailable ? (
+                <PanelMessage
+                  className="py-10"
+                  icon={DatabaseZap}
+                  iconClass="text-warning-fg"
+                  title="Individual records for this period no longer exist"
+                  detail={
+                    <>
+                      {first.unavailable.message}
+                      <span className="mt-3 block">
+                        <Link
+                          className="font-medium text-primary underline-offset-2 hover:underline"
+                          to={buildNetflowLink('/netflow', { filter: applied.filter, window: w })}
+                        >
+                          Open the overview for this period
+                        </Link>
+                      </span>
+                    </>
+                  }
+                />
+              ) : (
+                <QueryPanel
+                  query={search}
+                  label="flow records"
+                  skeleton="rows"
+                  isEmpty={(d: SearchData) => (d.pages[0]?.data?.items.length ?? 0) === 0}
+                  empty={`No flow records matched this search in ${w.label}`}
+                >
+                  {() => (
+                    <div className="space-y-3">
+                      <ResultsTable
+                        rows={rows}
+                        columns={applied.columns}
+                        sort={applied.sort}
+                        order={applied.order}
+                        onSort={onSort}
+                        onSortChange={(s2, o2) => setSp(sortSearchParams(sp, s2, o2))}
+                        expanded={expanded}
+                        onToggle={toggle}
+                        tz={w.tz}
+                        window={w}
+                        filter={applied.filter}
+                        dimmed={search.isFetching && !search.isFetchingNextPage}
+                      />
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-text2">
+                        <span>{placeholder ? 'Previous search: updating…' : showingLabel(loaded, total, exact)}</span>
+                        {placeholder ? null : search.hasNextPage ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="gap-1.5"
+                            onClick={() => void search.fetchNextPage()}
+                            disabled={search.isFetchingNextPage}
+                          >
+                            {search.isFetchingNextPage && <Loader2 className="animate-spin" aria-hidden />}
+                            {search.isFetchingNextPage ? 'Loading…' : `Load the next ${formatCountExact(pageSize)}`}
+                          </Button>
+                        ) : (
+                          loaded > 0 && <span>End of results</span>
+                        )}
+                      </div>
+                      {search.isFetchNextPageError && (
+                        <p role="alert" className="text-[11px] text-danger-fg">
+                          The next page could not be loaded: {errorText(search.error)}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </QueryPanel>
+              )}
+            </>
           )}
         </CardContent>
       </Card>
+
+      <SaveViewDialog
+        open={saveOpen}
+        onOpenChange={setSaveOpen}
+        filter={applied.filter}
+        window={w}
+        metaWindow={meta?.window ?? null}
+        pending={create.isPending}
+        error={create.isError ? errorText(create.error) : null}
+        extraSummary={
+          <>
+            {sortLabel({ sort: applied.sort, order: applied.order }) ?? 'Newest first'}
+            {columnsToSave ? ` · ${columnsToSave.length} chosen columns` : ''}
+          </>
+        }
+        onSubmit={saveNew}
+      />
     </div>
   )
 }
-
-function interfaceLabel(iface: InterfaceRef | null | undefined, fallbackIndex: number): string {
-  if (!fallbackIndex) return '—'
-  return iface?.display_name || iface?.if_name || iface?.if_descr || iface?.if_alias || `ifIndex ${fallbackIndex}`
-}
-
-function flagsString(flags: number): string {
-  const out: string[] = []
-  if (flags & 32) out.push('U')
-  if (flags & 16) out.push('A')
-  if (flags & 8) out.push('P')
-  if (flags & 4) out.push('R')
-  if (flags & 2) out.push('S')
-  if (flags & 1) out.push('F')
-  return out.join('') || '—'
-}
-
-function HeaderSort({ label, col, sort, order, setSort, setOrder }: { label: string; col: any; sort: any; order: any; setSort: any; setOrder: any }) {
-  const active = sort === col
-  return (
-    <button
-      onClick={() => {
-        if (active) setOrder(order === 'asc' ? 'desc' : 'asc')
-        else { setSort(col); setOrder('desc') }
-      }}
-      className="flex items-center gap-1 hover:text-text"
-    >
-      {label}{active ? (order === 'asc' ? ' ↑' : ' ↓') : ''}
-    </button>
-  )
-}
-
-function Field({ label, value, onChange, placeholder, inputMode }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string; inputMode?: any }) {
-  return (
-    <label className="block">
-      <span className="text-[10px] uppercase tracking-wider text-muted">{label}</span>
-      <input
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        inputMode={inputMode}
-        className="mt-1 w-full rounded-md border border-border bg-surface2/60 px-2 py-1.5 text-xs text-text placeholder:text-muted focus:border-primary focus:outline-none"
-      />
-    </label>
-  )
-}
-
-function SelectField({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: { value: string; label: string }[] }) {
-  return (
-    <label className="block">
-      <span className="text-[10px] uppercase tracking-wider text-muted">{label}</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="mt-1 w-full rounded-md border border-border bg-surface2/60 px-2 py-1.5 text-xs text-text focus:border-primary focus:outline-none"
-      >
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>{o.label}</option>
-        ))}
-      </select>
-    </label>
-  )
-}
-
-// Tag the Network icon use so the import isn't pruned.
-export const _Network = Network

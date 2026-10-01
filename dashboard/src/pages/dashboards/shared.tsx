@@ -60,7 +60,7 @@ export function RangePills({ value, onChange, keys }: {
           key={r.key}
           onClick={() => onChange(r.key)}
           className={`rounded px-2 py-1 text-[11px] font-medium transition-colors ${
-            r.key === value ? 'bg-primary text-white shadow-sm' : 'text-muted hover:bg-surface3 hover:text-text'
+            r.key === value ? 'bg-primary text-on-primary shadow-sm' : 'text-text2 hover:bg-surface3 hover:text-text'
           }`}
         >
           {r.label}
@@ -85,23 +85,35 @@ export function LiveClock() {
   )
 }
 
-export function TeamHeader({ title, subtitle, right }: {
+export function TeamHeader({ title, subtitle, right, live = 'live' }: {
   title: string
   subtitle?: React.ReactNode
   right?: React.ReactNode
+  /** 'stale' when some panels show data kept after a failed refresh: the badge must not say LIVE. */
+  live?: 'live' | 'stale'
 }) {
   return (
     <div className="flex flex-wrap items-end justify-between gap-3">
       <div>
         <div className="flex items-center gap-2.5">
           <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-          <span className="flex items-center gap-1.5 rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-[10px] font-bold tracking-widest text-success">
-            <span className="relative flex h-1.5 w-1.5">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-60" />
-              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-success" />
+          {live === 'stale' ? (
+            <span
+              className="flex items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-[10px] font-bold tracking-widest text-warning-fg"
+              title="Some panels could not refresh and show earlier data"
+            >
+              <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-warning" />
+              STALE
             </span>
-            LIVE
-          </span>
+          ) : (
+            <span className="flex items-center gap-1.5 rounded-full border border-success/30 bg-success/10 px-2 py-0.5 text-[10px] font-bold tracking-widest text-success-fg">
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-60" />
+                <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-success" />
+              </span>
+              LIVE
+            </span>
+          )}
         </div>
         {subtitle && <p className="mt-0.5 text-xs text-muted">{subtitle}</p>}
       </div>

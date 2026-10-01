@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { Clock } from 'lucide-react'
-import { serverNow, useClockOffset } from '@/lib/serverClock'
+import { isClockCalibrated, serverNow, useClockOffset } from '@/lib/serverClock'
 
 export const TIME_RANGE_OPTIONS = [
   { key: '1h', label: '1h', hours: 1 },
@@ -84,7 +84,16 @@ export interface TimeRange {
   key: TimeRangeKey
   /** Human-readable label, e.g. "Last 1h" or "4/28, 12:00 PM → 1:00 PM". */
   label: string
+  /**
+   * A calendar period whose bounds still come from the uncalibrated browser clock (no appliance
+   * time sample yet): a browser hours off would query the wrong month. Data queries wait until it
+   * clears (the first API response, or `CALIBRATION_WAIT_MS` without any).
+   */
+  pending?: boolean
 }
+
+/** How long a calendar range waits for the appliance clock before falling back to the browser's. */
+export const CALIBRATION_WAIT_MS = 4_000
 
 /**
  * Hook that reads/writes the active time range from the URL query string.
@@ -118,14 +127,25 @@ export function useTimeRange(): {
 
   // Preset ranges slide with the appliance clock (B01); bucket to the minute so
   // query keys keyed on fromISO/toISO do not change every render (see useReports.ts).
-  const minuteFloor = () => Math.floor(serverNow() / 60_000) * 60_000
-  const { offsetMs } = useClockOffset()
-  const [nowMs, setNowMs] = useState(minuteFloor)
+  const { offsetMs, calibrated } = useClockOffset()
+  const [tick, setTick] = useState(0)
   useEffect(() => {
-    setNowMs(minuteFloor())
-    const id = window.setInterval(() => setNowMs(minuteFloor()), 60_000)
+    const id = window.setInterval(() => setTick((n) => n + 1), 60_000)
     return () => clearInterval(id)
-  }, [offsetMs])
+  }, [])
+  // Recomputed in the very render where the clock offset or calibration changes (not in an effect
+  // afterwards), so no request is built from the previous, uncalibrated "now".
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const nowMs = useMemo(() => Math.floor(serverNow() / 60_000) * 60_000, [tick, offsetMs, calibrated])
+  // Calendar bounds are only resolved on the appliance clock: until the first response calibrates
+  // it, the range is pending (and NetFlow queries wait) rather than querying the browser's month.
+  const [gaveUp, setGaveUp] = useState(false)
+  const awaitingClock = !!calendarKey && !calibrated && !isClockCalibrated() && !gaveUp
+  useEffect(() => {
+    if (!awaitingClock) return
+    const id = window.setTimeout(() => setGaveUp(true), CALIBRATION_WAIT_MS)
+    return () => clearTimeout(id)
+  }, [awaitingClock])
 
   const fromISO = useMemo(() => {
     if (isCustom) return new Date(customFromParam!).toISOString()
@@ -171,7 +191,7 @@ export function useTimeRange(): {
   }
 
   return {
-    range: { hours, fromISO, toISO, isCustom, label, key: activeKey },
+    range: { hours, fromISO, toISO, isCustom, label, key: activeKey, pending: awaitingClock },
     // -1 while a calendar preset is active so no rolling preset shows selected.
     rangeIdx: calendarKey ? -1 : idx,
     isCustom,
@@ -243,7 +263,7 @@ export function TimeRangePicker({
 
   const btn = (active: boolean) =>
     `whitespace-nowrap rounded px-2 py-1 text-[11px] font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
-      active ? 'bg-primary text-black' : 'text-muted hover:text-text'
+      active ? 'bg-primary text-on-primary' : 'text-text2 hover:text-text'
     }`
   const errId = `${uid}-err`
   const tzId = `${uid}-tz`
@@ -348,7 +368,7 @@ export function TimeRangePicker({
                 </button>
                 <button
                   type="submit"
-                  className="rounded bg-primary px-2 py-1 text-[11px] font-semibold text-black"
+                  className="rounded bg-primary px-2 py-1 text-[11px] font-semibold text-on-primary"
                 >
                   Apply
                 </button>

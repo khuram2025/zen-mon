@@ -76,6 +76,11 @@ import { NetflowForensicsPage } from '@/pages/netflow'
 import { NetflowSavedViewsPage } from '@/pages/netflow'
 import { NetflowCapacityPage } from '@/pages/netflow'
 import { NetflowAnomaliesPage } from '@/pages/netflow'
+import { NetflowHealthPage } from '@/pages/netflow/HealthPage'
+import { NetflowSetupPage } from '@/pages/netflow/SetupPage'
+import { NetflowSettingsPage } from '@/pages/netflow/SettingsPage'
+import { NetflowHostProfilePage } from '@/pages/netflow/HostProfilePage'
+import { NetflowAccessGate } from '@/components/netflow/NetflowAccess'
 
 const ExecutiveReport = lazy(() => import('@/pages/reports/ExecutiveReport'))
 const TechnicalReport = lazy(() => import('@/pages/reports/TechnicalReport'))
@@ -187,13 +192,20 @@ export default function App() {
         <Route path="netpath/probes/:id" element={<NetPathDetailPage />} />
         <Route path="maps" element={<Navigate to="/maps/manual" replace />} />
         <Route path="maps/manual" element={<ManualMapsEntry />} />
-        <Route path="netflow" element={<NetflowPage />} />
-        <Route path="netflow/forensics" element={<NetflowForensicsPage />} />
-        <Route path="netflow/saved-views" element={<NetflowSavedViewsPage />} />
-        <Route path="netflow/capacity" element={<NetflowCapacityPage />} />
-        <Route path="netflow/anomalies" element={<NetflowAnomaliesPage />} />
-        <Route path="netflow/devices/:ip" element={<NetflowDevicePage />} />
-        <Route path="netflow/:section" element={<NetflowSectionPage />} />
+        {/* One access-denied state without netflow.view; empty-scope banner (NetflowAccess.tsx). */}
+        <Route element={<NetflowAccessGate />}>
+          <Route path="netflow" element={<NetflowPage />} />
+          <Route path="netflow/forensics" element={<NetflowForensicsPage />} />
+          <Route path="netflow/saved-views" element={<NetflowSavedViewsPage />} />
+          <Route path="netflow/capacity" element={<NetflowCapacityPage />} />
+          <Route path="netflow/anomalies" element={<NetflowAnomaliesPage />} />
+          <Route path="netflow/health" element={<NetflowHealthPage />} />
+          <Route path="netflow/setup" element={<NetflowSetupPage />} />
+          <Route path="netflow/settings" element={<NetflowSettingsPage />} />
+          <Route path="netflow/devices/:ip" element={<NetflowDevicePage />} />
+          <Route path="netflow/hosts/:ip" element={<NetflowHostProfilePage />} />
+          <Route path="netflow/:section" element={<NetflowSectionPage />} />
+        </Route>
         <Route path="mibs" element={<Navigate to="/settings/general?tab=mibs" replace />} />
         <Route path="templates" element={<Navigate to="/settings/general?tab=templates" replace />} />
         <Route path="sensors" element={<SensorsPage />} />

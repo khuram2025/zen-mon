@@ -1,38 +1,52 @@
-import { Link } from 'react-router-dom'
-import { Network } from 'lucide-react'
-import { formatBytes } from '@/lib/utils'
-import { Badge } from '@/components/ui/Badge'
-import { DetailMetric, PortBreakdown } from './parts'
+import { buildNetflowLink } from '@/lib/netflow/links'
+import { formatBytes, formatBytesExact, formatCountExact, formatDateTime, protocolLabel } from '@/lib/netflow/format'
+import { drillFilter, forensicsLink, serviceText } from '../cards/model'
+import type { ProtocolRow } from '../cards/shapes'
+import { BytesMetric, DetailLink, DetailListPanel } from './parts'
+import type { DetailContext } from './IpTrafficDetailPanel'
 
-function ProtocolDetailPanel({ row, filterTo }: { row: any; filterTo: string }) {
-  const avgPackets = row.flows ? Number(row.packets || 0) / Number(row.flows) : 0
-  const firstSeen = row.first_seen ? new Date(row.first_seen).toLocaleString() : '—'
-  const lastSeen = row.last_seen ? new Date(row.last_seen).toLocaleString() : '—'
+/** One IP protocol with its top services; portless protocols say that services do not apply. */
+export function ProtocolDetailPanel({ row, ctx }: { row: ProtocolRow; ctx: DetailContext }) {
+  const known = row.request_bytes + row.response_bytes
+  const tz = ctx.meta?.tz ?? ctx.window.tz
   return (
-    <div className="rounded-lg border border-border bg-surface p-4 shadow-sm">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <Network className="h-4 w-4 text-primary" />
-            <span className="text-sm font-semibold text-text">{row.name}</span>
-            <Badge variant="outline">IP protocol {row.protocol}</Badge>
+    <div className="space-y-3 rounded-lg border border-border bg-surface p-3 sm:p-4">
+      <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-text">{protocolLabel(row.protocol)}</div>
+          <div className="text-[11px] text-text2">
+            Seen {formatDateTime(row.first_seen, tz, { zone: 'offset' })} → {formatDateTime(row.last_seen, tz, { zone: 'none' })}
           </div>
-          <div className="mt-1 text-[11px] text-muted">first seen {firstSeen} · last seen {lastSeen}</div>
+          {!row.port_applicable && (
+            <div className="mt-0.5 text-[11px] text-text2">{row.name} carries no transport ports: services are not applicable{row.protocol === 1 || row.protocol === 58 ? '; message types are listed instead' : ''}.</div>
+          )}
         </div>
-        <Link to={filterTo} className="inline-flex shrink-0 items-center justify-center rounded-md border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/15">
-          Filter dashboard
-        </Link>
+        <div className="flex flex-wrap gap-1.5">
+          <DetailLink to={forensicsLink(ctx.filter, { protocol: row.protocol }, ctx.window, ctx.meta)} primary>Raw flows</DetailLink>
+          <DetailLink to={buildNetflowLink('/netflow', { filter: drillFilter(ctx.filter, { protocol: row.protocol }), window: ctx.window })}>Filter overview</DetailLink>
+        </div>
       </div>
-      <div className="mt-4 grid gap-3 md:grid-cols-3">
-        <DetailMetric label="Traffic" value={formatBytes(row.bytes || 0)} sub={`${Number(row.flows || 0).toLocaleString()} flows`} />
-        <DetailMetric label="Packets" value={Number(row.packets || 0).toLocaleString()} sub={`${avgPackets.toFixed(1)} avg / flow`} />
-        <DetailMetric label="Ports Seen" value={String((row.ports || []).length)} sub={row.protocol === 6 || row.protocol === 17 ? 'destination services' : 'non TCP/UDP may have none'} />
+      <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-3">
+        <BytesMetric label="Traffic" bytes={row.bytes} sub={`${formatCountExact(row.flows)} flows · ${formatCountExact(row.packets)} packets`} />
+        <BytesMetric label="Requests" bytes={known > 0 ? row.request_bytes : null} sub={known > 0 ? undefined : 'Direction unknown (no service port)'} />
+        <BytesMetric label="Responses" bytes={known > 0 ? row.response_bytes : null} sub={known > 0 && row.bytes > known ? `${formatBytes(row.bytes - known)} direction unknown` : known > 0 ? undefined : 'Direction unknown (no service port)'} />
       </div>
-      <div className="mt-4">
-        <PortBreakdown ports={row.ports || []} totalBytes={Number(row.bytes || 0)} />
-      </div>
+      <DetailListPanel title={row.port_applicable ? 'Top services' : row.protocol === 1 || row.protocol === 58 ? 'Message types' : 'Traffic'}>
+        <ul role="list" className="space-y-1">
+          {row.services.map((s) => (
+            <li key={`${s.port}-${s.icmp_type_code ?? ''}`} className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="min-w-0 break-words">
+                <span className="font-medium text-text">{serviceText(s)}</span>
+                <span className="ml-1 text-[11px] text-text2">{s.application}</span>
+              </span>
+              <span className="flex items-center gap-2">
+                <span className="tabular-nums text-text" title={formatBytesExact(s.bytes)}>{formatBytes(s.bytes)}</span>
+                <DetailLink to={forensicsLink(ctx.filter, { ...s.drill }, ctx.window, ctx.meta)}>Flows</DetailLink>
+              </span>
+            </li>
+          ))}
+        </ul>
+      </DetailListPanel>
     </div>
   )
 }
-
-export { ProtocolDetailPanel }

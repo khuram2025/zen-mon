@@ -1,43 +1,57 @@
-import { Card, CardContent } from '@/components/ui/Card'
+import type { ReactNode } from 'react'
+import type { LucideIcon } from 'lucide-react'
+import { Skeleton } from '@/components/ui/Skeleton'
+import { cn } from '@/lib/utils'
 
 // ─────────────────────────────────────────────────────────────────
-// KPI Cards
+// KPI card (NF-30): the deciding value is never truncated. Number and
+// unit are split so the unit stays visible, the value wraps instead of
+// ending in an ellipsis, and the exact figure is one hover (or one
+// screen-reader label) away. Neutral ink: KPIs carry no status colour.
 // ─────────────────────────────────────────────────────────────────
 
-function KpiCard({
-  icon: Icon,
-  label,
-  value,
-  sub,
-  tone,
-}: {
-  icon: React.ComponentType<{ className?: string }>
+export interface KpiCardProps {
+  icon: LucideIcon
   label: string
-  value: string
-  sub?: React.ReactNode
-  tone: 'cyan' | 'violet' | 'amber' | 'emerald' | 'pink'
-}) {
-  const ringMap: Record<typeof tone, string> = {
-    cyan: 'bg-cyan-500/15 text-cyan-300 ring-cyan-400/30 shadow-[0_0_22px_-4px_rgba(34,211,238,0.55)]',
-    violet: 'bg-violet-500/15 text-violet-300 ring-violet-400/30 shadow-[0_0_22px_-4px_rgba(167,139,250,0.55)]',
-    amber: 'bg-amber-500/15 text-amber-300 ring-amber-400/30 shadow-[0_0_22px_-4px_rgba(251,191,36,0.55)]',
-    emerald: 'bg-emerald-500/15 text-emerald-300 ring-emerald-400/30 shadow-[0_0_22px_-4px_rgba(52,211,153,0.55)]',
-    pink: 'bg-pink-500/15 text-pink-300 ring-pink-400/30 shadow-[0_0_22px_-4px_rgba(244,114,182,0.55)]',
-  }
-  return (
-    <Card className="relative overflow-hidden">
-      <CardContent className="flex items-center gap-3 p-4">
-        <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full ring-1 ${ringMap[tone]}`}>
-          <Icon className="h-5 w-5" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="text-[10px] font-medium uppercase tracking-wider text-muted">{label}</div>
-          <div className="mt-0.5 truncate text-2xl font-semibold leading-tight text-text">{value}</div>
-          <div className="mt-0.5 truncate text-[10px] text-muted">{sub}</div>
-        </div>
-      </CardContent>
-    </Card>
-  )
+  /** Formatted value, e.g. "113.5 GB"; "—" (or null) means unknown. */
+  value: string | null | undefined
+  /** Exact value or explanation for hover and assistive technology. */
+  title?: string
+  sub?: ReactNode
+  /** A small chip beside the value (e.g. change vs the previous period). */
+  badge?: ReactNode
+  loading?: boolean
 }
 
-export { KpiCard }
+/** "113.5 GB" → ["113.5", "GB"]; values without a unit stay whole. */
+export function splitUnit(value: string): [string, string] {
+  const m = /^([−+-]?[<>]?[\d.,]+(?:[kMBT])?)\s+(\S.*)$/.exec(value)
+  return m ? [m[1], m[2]] : [value, '']
+}
+
+export function KpiCard({ icon: Icon, label, value, title, sub, badge, loading }: KpiCardProps) {
+  const shown = value == null || value === '' ? '—' : value
+  const [num, unit] = splitUnit(shown)
+  return (
+    <div
+      role="group"
+      aria-label={`${label}: ${title ?? shown}`}
+      className="flex min-w-0 flex-col gap-1 rounded-lg border border-border bg-surface p-3 shadow-card dark:shadow-card-dark"
+    >
+      <div className="flex items-center gap-1.5 text-xs font-medium text-text2">
+        <Icon className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden />
+        <span className="min-w-0 break-words leading-snug">{label}</span>
+      </div>
+      {loading ? (
+        <Skeleton className="h-7 w-24" />
+      ) : (
+        <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-1" title={title}>
+          <span className="break-all text-xl font-semibold leading-tight tabular-nums text-text sm:text-2xl">{num}</span>
+          {unit && <span className="text-sm font-medium text-text2">{unit}</span>}
+          {badge}
+        </div>
+      )}
+      {sub && <div className={cn('text-[11px] leading-snug text-text2', loading && 'invisible')}>{sub}</div>}
+    </div>
+  )
+}

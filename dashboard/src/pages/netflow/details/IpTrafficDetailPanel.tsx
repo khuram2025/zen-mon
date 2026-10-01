@@ -1,64 +1,86 @@
-import { Link } from 'react-router-dom'
-import { ChevronRight } from 'lucide-react'
-import { formatBytes } from '@/lib/utils'
-import { Badge } from '@/components/ui/Badge'
-import { DetailMetric, DetailListPanel, PillList, TrafficShapeBar } from './parts'
+import { buildNetflowLink } from '@/lib/netflow/links'
+import { formatCountExact, formatDateTime, formatPercent, ipDisplay, protocolName } from '@/lib/netflow/format'
+import type { FlowFilter } from '@/lib/netflow/filters'
+import type { NfMetaWindow, NfWindow } from '@/lib/netflow/window'
+import { drillFilter, forensicsLink, hostLink, isUnspecifiedIp, rankPhrase, serviceText, UNRECORDED_ADDRESS_HINT, UNRECORDED_ADDRESS_LABEL } from '../cards/model'
+import type { RankBy, Talker } from '../cards/shapes'
+import { BytesMetric, DetailLink, DetailListPanel, DirectionBar, PillList } from './parts'
 
-function IpTrafficDetailPanel({ row, mode, filterTo, forensicsTo }: { row: any; mode: 'talker' | 'endpoint'; filterTo: string; forensicsTo: string }) {
-  const srcBytes = Number(row.src_bytes || 0)
-  const dstBytes = Number(row.dst_bytes || 0)
-  const totalBytes = Math.max(1, Number(row.bytes || 0))
-  const avgBytes = row.flows ? Number(row.bytes || 0) / Number(row.flows) : 0
-  const firstSeen = row.first_seen ? new Date(row.first_seen).toLocaleString() : '—'
-  const lastSeen = row.last_seen ? new Date(row.last_seen).toLocaleString() : '—'
+export interface DetailContext {
+  filter: FlowFilter
+  window: NfWindow
+  /** Bounds of the data on screen (freezes evidence links). */
+  meta?: Pick<NfMetaWindow, 'from' | 'to' | 'tz'> | null
+}
 
+/**
+ * One host of a talker/endpoint ranking: what it sent and received (the ranked metric first),
+ * the services it took part in, where it was observed, and links that keep the page filter and
+ * the exact window: raw flows either side (talker), only as source, only as destination.
+ */
+export function IpTrafficDetailPanel({ row, by, ctx }: { row: Talker; by: RankBy; ctx: DetailContext }) {
+  const tz = ctx.meta?.tz ?? ctx.window.tz
+  const ip = row.ip
+  const shown = ipDisplay(ip)
+  const ranked = by === 'src' ? row.src_bytes : by === 'dst' ? row.dst_bytes : row.bytes
   return (
-    <div className="rounded-lg border border-border bg-surface p-4 shadow-sm">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-sm font-semibold text-text">{row.ip}</span>
-            <Badge variant="outline">{mode === 'endpoint' ? 'Endpoint' : 'Talker'}</Badge>
+    <div className="space-y-3 rounded-lg border border-border bg-surface p-3 sm:p-4">
+      <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="break-all font-mono text-sm font-semibold text-text">{shown}</div>
+          {isUnspecifiedIp(ip) && <div className="text-[11px] italic text-text2" title={UNRECORDED_ADDRESS_HINT}>{UNRECORDED_ADDRESS_LABEL}: {UNRECORDED_ADDRESS_HINT}</div>}
+          {row.hostname && <div className="break-all text-[11px] text-text2">{row.hostname}</div>}
+          <div className="mt-0.5 text-[11px] text-text2">
+            {rankPhrase(by)} · seen {formatDateTime(row.first_seen, tz, { zone: 'offset' })} → {formatDateTime(row.last_seen, tz, { zone: 'none' })}
           </div>
-          <div className="mt-1 text-[11px] text-muted">first seen {firstSeen} · last seen {lastSeen}</div>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Link to={filterTo} className="inline-flex items-center justify-center rounded-md border border-border px-3 py-1.5 text-xs font-medium text-muted hover:text-text">
-            Filter dashboard
-          </Link>
-          <Link to={forensicsTo} className="inline-flex items-center justify-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/15">
-            Open raw flows
-            <ChevronRight className="h-3 w-3" />
-          </Link>
+        <div className="flex flex-wrap gap-1.5">
+          <DetailLink to={forensicsLink(ctx.filter, { talker: ip }, ctx.window, ctx.meta)} primary>Raw flows (either side)</DetailLink>
+          <DetailLink to={forensicsLink(ctx.filter, { src: ip }, ctx.window, ctx.meta)}>Sent</DetailLink>
+          <DetailLink to={forensicsLink(ctx.filter, { dst: ip }, ctx.window, ctx.meta)}>Received</DetailLink>
+          {!isUnspecifiedIp(ip) && <DetailLink to={hostLink(ip, ctx.filter, ctx.window, ctx.meta)}>Host profile</DetailLink>}
+          <DetailLink to={buildNetflowLink('/netflow', { filter: drillFilter(ctx.filter, { talker: ip }), window: ctx.window })}>Filter overview</DetailLink>
         </div>
       </div>
 
-      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <DetailMetric label="Total Traffic" value={formatBytes(row.bytes || 0)} sub={`${Number(row.flows || 0).toLocaleString()} flows`} />
-        <DetailMetric label="Packets" value={Number(row.packets || 0).toLocaleString()} sub={`${avgBytes ? formatBytes(avgBytes) : '0 B'} avg / flow`} />
-        <DetailMetric label="As Source" value={formatBytes(srcBytes)} sub={`${Number(row.src_flows || 0).toLocaleString()} source flows`} />
-        <DetailMetric label="As Destination" value={formatBytes(dstBytes)} sub={`${Number(row.dst_flows || 0).toLocaleString()} destination flows`} />
+      <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2 xl:grid-cols-4">
+        <BytesMetric label={by === 'src' ? 'Sent (ranked)' : 'Sent'} bytes={row.src_bytes} sub={`${formatCountExact(row.src_flows)} flows · ${formatCountExact(row.src_packets)} packets`} />
+        <BytesMetric label={by === 'dst' ? 'Received (ranked)' : 'Received'} bytes={row.dst_bytes} sub={`${formatCountExact(row.dst_flows)} flows · ${formatCountExact(row.dst_packets)} packets`} />
+        <BytesMetric label={by === 'total' ? 'Total (ranked)' : 'Total'} bytes={row.bytes} sub={`${formatCountExact(row.flows)} flows`} />
+        <BytesMetric label="Ranked value" bytes={ranked} sub={row.share_pct != null ? `${formatPercent(row.share_pct)} of traffic in scope` : undefined} />
       </div>
+      <DirectionBar a={row.src_bytes} b={row.dst_bytes} aLabel="Sent" bLabel="Received" />
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(260px,0.8fr)]">
-        <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
-          <div className="mb-2 flex items-center justify-between text-[11px]">
-            <span className="font-semibold uppercase tracking-wider text-muted">Direction Split</span>
-            <span className="text-muted">{formatBytes(totalBytes)} total</span>
-          </div>
-          <TrafficShapeBar label="Source bytes" value={srcBytes} max={totalBytes} display={`${((srcBytes / totalBytes) * 100).toFixed(0)}%`} color="bg-cyan-400" />
-          <div className="mt-2">
-            <TrafficShapeBar label="Destination bytes" value={dstBytes} max={totalBytes} display={`${((dstBytes / totalBytes) * 100).toFixed(0)}%`} color="bg-violet-400" />
-          </div>
-        </div>
-        <DetailListPanel title="Observed Context">
-          <PillList label="Protocols" values={(row.protocols || []).map((p: any) => p.name || `Protocol ${p.protocol}`)} empty="No protocol detail" />
-          <PillList label="Ports" values={(row.ports || []).map((p: any) => p.service || String(p.port))} empty="No destination ports" />
-          <PillList label="Exporters" values={(row.exporters || []).map((e: any) => e.hostname || e.ip)} empty="No exporter detail" mono />
+      <div className="grid gap-3 lg:grid-cols-2">
+        <DetailListPanel title="Services this host took part in">
+          {row.services.length ? (
+            <ul role="list" className="space-y-1">
+              {row.services.map((s) => (
+                <li key={`${s.protocol}-${s.service_port ?? s.icmp_type_code ?? 'x'}`} className="flex flex-wrap items-center justify-between gap-x-2 text-xs">
+                  <span className="min-w-0 break-words text-text">
+                    {serviceText({ ...s, protocol_name: protocolName(s.protocol) ?? undefined })}
+                    <span className="ml-1 text-[11px] text-text2">{s.application}</span>
+                  </span>
+                  <DetailLink to={forensicsLink(ctx.filter, { talker: ip, ...s.drill }, ctx.window, ctx.meta)}>
+                    <span className="tabular-nums">{formatCountExact(s.flows)} flows</span>
+                  </DetailLink>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="text-xs text-text2">No service detail.</div>
+          )}
+        </DetailListPanel>
+        <DetailListPanel title="Observed by">
+          <PillList label="Exporters" values={row.exporters.map((e) => ipDisplay(e.ip))} empty="Exporter not reported" mono />
+          <PillList label="IP protocols" values={row.protocols.map((p) => `${p.name} (${p.protocol})`)} empty="—" />
+          <PillList
+            label="Context"
+            values={[row.group ? `Group: ${row.group}` : '', row.country_name ? `Country: ${row.country_name}` : '', row.asn ? `AS${row.asn}${row.as_name ? ` ${row.as_name}` : ''}` : '']}
+            empty="No group, GeoIP or AS context"
+          />
         </DetailListPanel>
       </div>
     </div>
   )
 }
-
-export { IpTrafficDetailPanel }

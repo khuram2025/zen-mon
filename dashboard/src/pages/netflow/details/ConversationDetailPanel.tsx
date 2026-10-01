@@ -1,141 +1,142 @@
-import { Link } from 'react-router-dom'
-import { ArrowDownUp, ChevronRight, Cable, Layers, Network, Router } from 'lucide-react'
-import { formatBytes } from '@/lib/utils'
-import { Badge } from '@/components/ui/Badge'
-import type { Conversation } from '../types'
-import { normalizeInterfaceRefs, describeTcpFlags, inferApplication, describePortClass } from '../model'
-import { DetailMetric, PortBadge, TrafficShapeBar, InterfaceChipGroup } from './parts'
+import { ArrowLeftRight, ArrowRight, Layers, Network, Timer } from 'lucide-react'
+import { buildNetflowLink } from '@/lib/netflow/links'
+import { formatBytes, formatCountExact, formatDateTime, formatDuration, ipDisplay } from '@/lib/netflow/format'
+import { conversationLinks, CONFIDENCE_LABELS, drillFilter, hostLink, isUnspecifiedIp, serviceText } from '../cards/model'
+import { ConfidenceChip } from '../cards/parts'
+import type { Conversation } from '../cards/shapes'
+import { BytesMetric, DetailLink, DetailListPanel, DetailMetric, DirectionBar, InterfaceList, PillList } from './parts'
+import type { DetailContext } from './IpTrafficDetailPanel'
 
-function ConversationDetailPanel({ row, forensicsTo }: { row: Conversation; forensicsTo: string }) {
-  const exporters = row.exporters || []
-  const firstSeen = row.first_seen ? new Date(row.first_seen).toLocaleString() : '—'
-  const lastSeen = row.last_seen ? new Date(row.last_seen).toLocaleString() : '—'
-  const avgBytes = row.avg_bytes || (row.flows ? row.bytes / row.flows : 0)
-  const avgPackets = row.avg_packets || (row.flows ? row.packets / row.flows : 0)
-  const tcpFlags = describeTcpFlags(row.tcp_flags || 0)
-  const application = row.application || inferApplication(row.dst_port)
-  const portClass = row.port_class || describePortClass(row.dst_port)
-  const sourcePorts = (row.src_ports || []).slice(0, 10)
-  const inputIfs = normalizeInterfaceRefs(row.input_interfaces, row.input_snmp).slice(0, 8)
-  const outputIfs = normalizeInterfaceRefs(row.output_interfaces, row.output_snmp).slice(0, 8)
-  const durationMs = Math.max(0, row.avg_duration_ms || 0)
+const FLAG_NAMES: [number, string][] = [[1, 'FIN'], [2, 'SYN'], [4, 'RST'], [8, 'PSH'], [16, 'ACK'], [32, 'URG']]
 
+export function describeTcpFlags(flags: number | null, known: boolean, protocol: number): { primary: string; detail: string } {
+  if (protocol !== 6) return { primary: 'Not applicable', detail: 'TCP flags exist only on TCP' }
+  if (!known || flags === null) return { primary: 'Unknown', detail: 'The exporters did not export TCP flags for these records' }
+  if (flags === 0) return { primary: 'None set', detail: 'Flags were exported and all zero' }
+  const found = FLAG_NAMES.filter(([bit]) => (flags & bit) !== 0).map(([, name]) => name)
+  return { primary: found.join(' + '), detail: `Union of the control bits seen in this conversation (mask ${flags})` }
+}
+
+/**
+ * One conversation: client → server on a service with both directions (NF-20). Service,
+ * inferred application and IP protocol are separate facts; the classification states how it was
+ * reached and with what confidence; interfaces are listed per exporter as observed (X-29). Raw
+ * evidence links open each direction exactly, with the page filter and the frozen window.
+ */
+export function ConversationDetailPanel({ row, ctx }: { row: Conversation; ctx: DetailContext }) {
+  const tz = ctx.meta?.tz ?? ctx.window.tz
+  const links = conversationLinks(row, ctx.filter, ctx.window, ctx.meta)
+  const flags = describeTcpFlags(row.tcp_flags, row.tcp_flags_known, row.protocol)
+  const ifaceFilter = (i: { iface: string }) => buildNetflowLink('/netflow', { filter: drillFilter(ctx.filter, { iface: i.iface }), window: ctx.window })
+  const orient = links.labels
   return (
-    <div className="rounded-lg border border-border bg-surface p-4 shadow-sm">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+    <div className="space-y-3 rounded-lg border border-border bg-surface p-3 sm:p-4">
+      <div className="flex flex-col gap-2 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-mono text-sm font-semibold text-text">{row.src}</span>
-            <ArrowDownUp className="h-4 w-4 text-primary" />
-            <span className="font-mono text-sm font-semibold text-text">{row.dst}</span>
-            <Badge variant="outline">{row.protocol_name}</Badge>
-            <Badge variant="outline">{row.service}</Badge>
+          <div className="flex flex-wrap items-center gap-1.5 text-sm">
+            <span className="text-[11px] text-text2">{orient.a}</span>
+            <span className="break-all font-mono font-semibold text-text">{ipDisplay(row.client)}</span>
+            {row.orientation === 'client_server' ? <ArrowRight className="h-4 w-4 text-text2" aria-hidden /> : <ArrowLeftRight className="h-4 w-4 text-text2" aria-hidden />}
+            <span className="text-[11px] text-text2">{orient.b}</span>
+            <span className="break-all font-mono font-semibold text-text">{ipDisplay(row.server)}</span>
           </div>
-          <div className="mt-1 text-[11px] text-muted">
-            Port {row.dst_port} · first seen {firstSeen} · last seen {lastSeen}
+          <div className="mt-0.5 text-[11px] text-text2">
+            {serviceText(row)} · first {formatDateTime(row.first_seen, tz, { zone: 'offset' })} · last {formatDateTime(row.last_seen, tz, { zone: 'none' })}
           </div>
-        </div>
-        <Link
-          to={forensicsTo}
-          className="inline-flex shrink-0 items-center justify-center gap-1 rounded-md border border-primary/40 bg-primary/10 px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/15"
-        >
-          Open raw flows
-          <ChevronRight className="h-3 w-3" />
-        </Link>
-      </div>
-
-      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <DetailMetric label="Total Traffic" value={formatBytes(row.bytes)} sub={`${row.flows.toLocaleString()} flows`} />
-        <DetailMetric label="Packets" value={row.packets.toLocaleString()} sub={`${avgPackets.toFixed(1)} avg / flow`} />
-        <DetailMetric label="Avg Flow Size" value={formatBytes(avgBytes)} sub={`${durationMs.toFixed(durationMs >= 100 ? 0 : 1)} ms avg duration`} />
-        <DetailMetric label="TCP Flags" value={tcpFlags.primary} sub={tcpFlags.detail} />
-      </div>
-
-      <div className="mt-4 grid gap-3 lg:grid-cols-3">
-        <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
-          <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
-            <Layers className="h-3.5 w-3.5 text-primary" />
-            Application
-          </div>
-          <div className="text-base font-semibold text-text">{application}</div>
-          <div className="mt-1 text-[11px] text-muted">
-            {application === 'Other'
-              ? 'No known application bucket matched this destination port.'
-              : 'Inferred from the destination service port.'}
-          </div>
-        </div>
-
-        <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
-          <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
-            <Cable className="h-3.5 w-3.5 text-primary" />
-            Ports Used
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <PortBadge label="Source" value={sourcePorts.length ? sourcePorts.join(', ') : 'Not reported'} />
-            <PortBadge label="Destination" value={`${row.dst_port}`} />
-          </div>
-          <div className="mt-2 text-[11px] text-muted">{portClass}</div>
-        </div>
-
-        <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
-          <div className="mb-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
-            <Network className="h-3.5 w-3.5 text-primary" />
-            Protocol / Service
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            <Badge variant="outline">{row.protocol_name}</Badge>
-            <Badge variant="outline">{row.service}</Badge>
-            <Badge variant="outline">IP proto {row.protocol}</Badge>
-          </div>
-          <div className="mt-2 text-[11px] text-muted">
-            {row.protocol_name === 'TCP' || row.protocol_name === 'UDP'
-              ? `${row.protocol_name} conversation to destination port ${row.dst_port}.`
-              : `${row.protocol_name} traffic does not normally expose TCP/UDP application ports.`}
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(280px,0.8fr)]">
-        <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
-          <div className="mb-2 flex items-center justify-between text-[11px]">
-            <span className="font-semibold uppercase tracking-wider text-muted">Traffic Shape</span>
-            <span className="text-muted">{formatBytes(row.bytes)} total</span>
-          </div>
-          <div className="grid gap-2 sm:grid-cols-3">
-            <TrafficShapeBar label="Bytes / flow" value={avgBytes} max={Math.max(avgBytes, row.bytes / Math.max(1, row.flows))} display={formatBytes(avgBytes)} color="bg-cyan-400" />
-            <TrafficShapeBar label="Packets / flow" value={avgPackets} max={Math.max(1, avgPackets)} display={avgPackets.toFixed(1)} color="bg-violet-400" />
-            <TrafficShapeBar label="Duration" value={durationMs} max={Math.max(1, durationMs)} display={`${durationMs.toFixed(durationMs >= 100 ? 0 : 1)} ms`} color="bg-emerald-400" />
-          </div>
-        </div>
-
-        <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
-          <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-muted">Exporting Device</div>
-          {exporters.length === 0 ? (
-            <div className="text-xs text-muted">Exporter not reported for this group.</div>
-          ) : (
-            <div className="space-y-1.5">
-              {exporters.map((exporter) => (
-                <Link
-                  key={exporter.ip}
-                  to={`/netflow/devices/${encodeURIComponent(exporter.ip)}`}
-                  className="flex items-center gap-2 rounded border border-border/70 bg-surface px-2 py-1.5 hover:border-primary/50 hover:bg-primary/5"
-                >
-                  <Router className="h-3.5 w-3.5 text-primary" />
-                  <span className="min-w-0 flex-1 truncate text-xs font-medium">{exporter.hostname || exporter.ip}</span>
-                  <span className="font-mono text-[10px] text-muted">{exporter.ip}</span>
-                </Link>
-              ))}
+          {row.orientation !== 'client_server' && (
+            <div className="mt-0.5 text-[11px] text-text2">
+              Direction unknown (no service port identifies a server): endpoints are ordered by address.
             </div>
           )}
         </div>
+        <div className="flex flex-wrap gap-1.5">
+          <DetailLink to={links.forward} primary>Raw flows {orient.forward}</DetailLink>
+          <DetailLink to={links.reverse}>Raw flows {orient.reverse}</DetailLink>
+          {!isUnspecifiedIp(row.client) && <DetailLink to={hostLink(row.client, ctx.filter, ctx.window, ctx.meta)}>{orient.a} profile</DetailLink>}
+          {!isUnspecifiedIp(row.server) && <DetailLink to={hostLink(row.server, ctx.filter, ctx.window, ctx.meta)}>{orient.b} profile</DetailLink>}
+        </div>
       </div>
 
-      <div className="mt-4 grid gap-3 md:grid-cols-2">
-        <InterfaceChipGroup title="Input Interfaces" values={inputIfs} empty="No input interface reported" />
-        <InterfaceChipGroup title="Output Interfaces" values={outputIfs} empty="No output interface reported" />
+      <div className="grid grid-cols-1 gap-2 min-[420px]:grid-cols-2 xl:grid-cols-4">
+        <BytesMetric label="Total" bytes={row.bytes} sub={`${formatCountExact(row.flows)} flows · ${formatCountExact(row.packets)} packets`} />
+        <BytesMetric label={orient.forward} bytes={row.bytes_c2s} sub={`${formatCountExact(row.flows_c2s)} flows`} />
+        <BytesMetric label={orient.reverse} bytes={row.bytes_s2c} sub={`${formatCountExact(row.flows_s2c)} flows`} />
+        <DetailMetric
+          label="Avg flow duration"
+          value={formatDuration(row.avg_duration_ms)}
+          sub={row.avg_duration_ms == null ? 'No valid start/end times exported' : `over ${formatCountExact(row.duration_valid_flows)} flows with valid times`}
+        />
+      </div>
+      <DirectionBar a={row.bytes_c2s} b={row.bytes_s2c} aLabel={`${orient.forward} ${formatBytes(row.bytes_c2s)}`} bLabel={`${orient.reverse} ${formatBytes(row.bytes_s2c)}`} />
+
+      <div className="grid gap-3 lg:grid-cols-3">
+        <DetailListPanel title="Service">
+          <div className="flex items-start gap-2">
+            <Network className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden />
+            <div className="min-w-0 text-xs">
+              <div className="font-semibold text-text">{serviceText(row)}</div>
+              <div className="text-[11px] text-text2">
+                {row.port_applicable
+                  ? row.service_port
+                    ? `Service port ${row.service_port}, identified on either side of the flow (requests and responses).`
+                    : 'Neither port matches a known service, so no service is claimed.'
+                  : `${row.protocol_name} has no transport ports; a service does not apply.`}
+              </div>
+              {row.client_ports.length > 0 && (
+                <div className="mt-1">
+                  <PillList label="Client ports" values={row.client_ports.map(String)} empty="—" mono />
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="mt-2">
+            <DetailLink to={buildNetflowLink('/netflow', { filter: drillFilter(ctx.filter, { ...row.drill }), window: ctx.window })}>Filter overview to this service</DetailLink>
+          </div>
+        </DetailListPanel>
+        <DetailListPanel title="Application (inferred)">
+          <div className="flex items-start gap-2">
+            <Layers className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden />
+            <div className="min-w-0 text-xs">
+              <div className="flex flex-wrap items-center gap-1.5 font-semibold text-text">
+                {row.application}
+                <ConfidenceChip confidence={row.confidence} title={CONFIDENCE_LABELS[row.confidence]} />
+              </div>
+              <div className="text-[11px] text-text2">{row.basis_text} · category {row.category}</div>
+              {row.visibility_note && <div className="mt-1 text-[11px] font-medium text-warning-fg">{row.visibility_note}</div>}
+            </div>
+          </div>
+        </DetailListPanel>
+        <DetailListPanel title="IP protocol and TCP flags">
+          <div className="flex items-start gap-2">
+            <Timer className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden />
+            <div className="min-w-0 text-xs">
+              <div className="font-semibold text-text">{row.ip_protocol} ({row.protocol})</div>
+              <div className="mt-1 text-text">Flags: {flags.primary}</div>
+              <div className="text-[11px] text-text2">{flags.detail}</div>
+            </div>
+          </div>
+        </DetailListPanel>
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        <DetailListPanel title="Where it was observed">
+          <PillList label="Exporters" values={row.exporters.map((e) => (e.hostname ? `${e.hostname} (${ipDisplay(e.ip)})` : ipDisplay(e.ip)))} empty="Exporter not reported" />
+          <InterfaceList title={`${orient.a}-side interfaces`} values={row.client_side_interfaces} empty="Not exported" filterTo={ifaceFilter} />
+          <InterfaceList title={`${orient.b}-side interfaces`} values={row.server_side_interfaces} empty="Not exported" filterTo={ifaceFilter} />
+        </DetailListPanel>
+        <DetailListPanel title="Per flow">
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-text2">Avg size</div>
+              <div className="font-semibold tabular-nums text-text">{formatBytes(row.avg_bytes)}</div>
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-text2">Avg packets</div>
+              <div className="font-semibold tabular-nums text-text">{row.avg_packets == null ? '—' : row.avg_packets.toLocaleString('en-US', { maximumFractionDigits: row.avg_packets < 10 ? 1 : 0 })}</div>
+            </div>
+          </div>
+        </DetailListPanel>
       </div>
     </div>
   )
 }
-
-export { ConversationDetailPanel }

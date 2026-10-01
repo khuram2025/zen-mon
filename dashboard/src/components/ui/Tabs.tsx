@@ -11,7 +11,8 @@ export const TabsList = React.forwardRef<
   <TabsPrimitive.List
     ref={ref}
     className={cn(
-      'inline-flex h-10 items-center justify-start gap-1 rounded-md bg-surface2 p-1 text-muted',
+      // Inactive tabs in text2: muted on surface2 is 4.3:1 in the light theme (NF-29).
+      'inline-flex h-10 items-center justify-start gap-1 rounded-md bg-surface2 p-1 text-text2',
       className,
     )}
     {...props}

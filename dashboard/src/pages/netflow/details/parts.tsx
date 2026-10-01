@@ -1,124 +1,120 @@
-import { formatBytes } from '@/lib/utils'
-import { Badge } from '@/components/ui/Badge'
-import type { NetflowInterfaceRef } from '../types'
-import { interfaceLabel, describePortClass } from '../model'
+import type { ReactNode } from 'react'
+import { Link } from 'react-router-dom'
+import { ChevronRight } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { formatBytes, formatBytesExact, ipDisplay } from '@/lib/netflow/format'
+import type { InterfaceRef } from '../cards/shapes'
 
-function DetailMetric({ label, value, sub }: { label: string; value: string; sub: string }) {
+/** A labelled figure; the value is never truncated (it wraps on narrow screens). */
+function DetailMetric({ label, value, sub, title }: { label: string; value: ReactNode; sub?: ReactNode; title?: string }) {
   return (
-    <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">{label}</div>
-      <div className="mt-1 text-lg font-semibold tabular-nums text-text">{value}</div>
-      <div className="mt-0.5 text-[11px] text-muted">{sub}</div>
+    <div className="min-w-0 rounded-md border border-border/70 bg-surface2/30 p-3" title={title}>
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-text2">{label}</div>
+      <div className="mt-1 break-words text-lg font-semibold tabular-nums leading-tight text-text">{value}</div>
+      {sub && <div className="mt-0.5 text-[11px] text-text2">{sub}</div>}
     </div>
   )
 }
 
-function DetailListPanel({ title, children }: { title: string; children: React.ReactNode }) {
+function BytesMetric({ label, bytes, sub }: { label: string; bytes: number | null | undefined; sub?: ReactNode }) {
+  return <DetailMetric label={label} value={formatBytes(bytes)} sub={sub} title={formatBytesExact(bytes)} />
+}
+
+function DetailListPanel({ title, children, className }: { title: string; children: ReactNode; className?: string }) {
   return (
-    <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
-      <div className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-muted">{title}</div>
-      <div className="space-y-3">{children}</div>
-    </div>
+    <section className={cn('min-w-0 rounded-md border border-border/70 bg-surface2/30 p-3', className)}>
+      <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-text2">{title}</h4>
+      <div className="space-y-2">{children}</div>
+    </section>
   )
 }
 
 function PillList({ label, values, empty, mono = false }: { label: string; values: string[]; empty: string; mono?: boolean }) {
-  const clean = Array.from(new Set(values.filter(Boolean))).slice(0, 8)
+  const clean = Array.from(new Set(values.filter(Boolean))).slice(0, 12)
   return (
     <div>
-      <div className="mb-1 text-[10px] uppercase tracking-wider text-muted">{label}</div>
+      <div className="mb-1 text-[10px] uppercase tracking-wider text-text2">{label}</div>
       {clean.length ? (
-        <div className="flex flex-wrap gap-1.5">
+        <ul role="list" className="flex flex-wrap gap-1.5">
           {clean.map((value) => (
-            <span key={value} className={`rounded border border-border bg-surface px-2 py-1 text-[11px] text-text ${mono ? 'font-mono' : ''}`}>
+            <li key={value} className={cn('rounded border border-border bg-surface px-2 py-0.5 text-[11px] text-text', mono && 'font-mono')}>
               {value}
-            </span>
+            </li>
           ))}
-        </div>
+        </ul>
       ) : (
-        <div className="text-xs text-muted">{empty}</div>
+        <div className="text-xs text-text2">{empty}</div>
       )}
     </div>
   )
 }
 
-function PortBreakdown({ ports, totalBytes }: { ports: any[]; totalBytes: number }) {
-  const clean = ports.slice(0, 8)
-  if (!clean.length) {
-    return <div className="rounded-md border border-dashed border-border bg-surface2/30 p-5 text-center text-xs text-muted">No TCP/UDP destination port detail for this item.</div>
-  }
-  const max = Math.max(1, ...clean.map((p) => Number(p.bytes || 0)), totalBytes || 0)
-  return (
-    <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
-      <div className="mb-3 flex items-center justify-between text-[11px]">
-        <span className="font-semibold uppercase tracking-wider text-muted">Top Services / Ports</span>
-        <span className="text-muted">{formatBytes(totalBytes || clean.reduce((sum, p) => sum + Number(p.bytes || 0), 0))} total</span>
-      </div>
-      <div className="space-y-2">
-        {clean.map((port) => {
-          const bytes = Number(port.bytes || 0)
-          return (
-            <div key={`${port.port}-${port.service}`}>
-              <div className="flex items-center justify-between gap-2 text-[11px]">
-                <span className="flex min-w-0 items-center gap-1.5">
-                  <Badge variant="outline">{port.service || `Port ${port.port}`}</Badge>
-                  <span className="truncate text-muted">{port.application || describePortClass(Number(port.port || 0))}</span>
-                </span>
-                <span className="shrink-0 font-medium text-text">{formatBytes(bytes)} · {Number(port.flows || 0).toLocaleString()} flows</span>
-              </div>
-              <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface">
-                <div className="h-full rounded-full bg-primary" style={{ width: `${Math.max(4, (bytes / max) * 100)}%` }} />
-              </div>
-            </div>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-function PortBadge({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded border border-border bg-surface px-2 py-1.5">
-      <div className="text-[10px] uppercase tracking-wider text-muted">{label}</div>
-      <div className="mt-0.5 truncate font-mono text-xs font-semibold text-text">{value}</div>
-    </div>
-  )
-}
-
-function TrafficShapeBar({ label, value, max, display, color }: { label: string; value: number; max: number; display: string; color: string }) {
-  const width = Math.max(6, Math.min(100, (value / Math.max(1, max)) * 100))
+/** Interfaces as observed: each one names its exporter (never a cross product of lists). */
+function InterfaceList({ title, values, empty, filterTo }: { title: string; values: InterfaceRef[]; empty: string; filterTo?: (i: InterfaceRef) => string }) {
   return (
     <div>
-      <div className="flex items-center justify-between gap-2 text-[11px]">
-        <span className="text-muted">{label}</span>
-        <span className="font-medium text-text">{display}</span>
-      </div>
-      <div className="mt-1 h-2 overflow-hidden rounded-full bg-surface">
-        <div className={`h-full rounded-full ${color}`} style={{ width: `${width}%` }} />
-      </div>
-    </div>
-  )
-}
-
-function InterfaceChipGroup({ title, values, empty }: { title: string; values: NetflowInterfaceRef[]; empty: string }) {
-  return (
-    <div className="rounded-md border border-border/70 bg-surface2/30 p-3">
-      <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted">{title}</div>
+      <div className="mb-1 text-[10px] uppercase tracking-wider text-text2">{title}</div>
       {values.length ? (
-        <div className="flex flex-wrap gap-1.5">
-          {values.map((value) => (
-            <span key={`${value.exporter_ip}-${value.ifindex}`} className="rounded border border-border bg-surface px-2 py-1 text-[11px] text-text">
-              <span className="font-medium">{interfaceLabel(value)}</span>
-              <span className="ml-1 font-mono text-muted">#{value.ifindex}</span>
-            </span>
-          ))}
-        </div>
+        <ul role="list" className="flex flex-wrap gap-1.5">
+          {values.map((v) => {
+            const text = (
+              <>
+                <span className="font-medium">{v.display_name || `ifIndex ${v.ifindex}`}</span>
+                <span className="ml-1 font-mono text-text2">#{v.ifindex}</span>
+                <span className="ml-1 text-text2">@ {v.device_hostname || ipDisplay(v.exporter_ip)}</span>
+              </>
+            )
+            return (
+              <li key={v.iface} className="rounded border border-border bg-surface px-2 py-0.5 text-[11px] text-text">
+                {filterTo ? (
+                  <Link to={filterTo(v)} className="hover:text-primary hover:underline" title={`Filter to interface ${v.iface}`}>
+                    {text}
+                  </Link>
+                ) : (
+                  text
+                )}
+              </li>
+            )
+          })}
+        </ul>
       ) : (
-        <div className="text-xs text-muted">{empty}</div>
+        <div className="text-xs text-text2">{empty}</div>
       )}
     </div>
   )
 }
 
-export { DetailMetric, DetailListPanel, PillList, PortBreakdown, PortBadge, TrafficShapeBar, InterfaceChipGroup }
+/** A navigation action inside a detail panel (keyboard reachable, named). */
+function DetailLink({ to, children, primary }: { to: string; children: ReactNode; primary?: boolean }) {
+  return (
+    <Link
+      to={to}
+      className={cn(
+        'inline-flex items-center justify-center gap-1 rounded-md border px-2.5 py-1.5 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50',
+        primary ? 'border-primary/40 bg-primary/10 text-primary hover:bg-primary/15' : 'border-border bg-surface text-text hover:bg-surface2',
+      )}
+    >
+      {children}
+      <ChevronRight className="h-3 w-3" aria-hidden />
+    </Link>
+  )
+}
+
+/** Horizontal two-part bar with its legend in words. */
+function DirectionBar({ a, b, aLabel, bLabel }: { a: number; b: number; aLabel: string; bLabel: string }) {
+  const sum = a + b
+  return (
+    <div>
+      <div className="flex h-2 w-full gap-[2px] overflow-hidden rounded-full bg-surface" aria-hidden>
+        {sum > 0 && a > 0 && <div className="h-full bg-[#2a78d6] dark:bg-[#3987e5]" style={{ flexGrow: a, flexBasis: 0 }} />}
+        {sum > 0 && b > 0 && <div className="h-full bg-[#eb6834] dark:bg-[#d95926]" style={{ flexGrow: b, flexBasis: 0 }} />}
+      </div>
+      <div className="mt-1 flex flex-wrap justify-between gap-x-3 text-[11px] tabular-nums text-text2">
+        <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-[#2a78d6] dark:bg-[#3987e5]" aria-hidden />{aLabel}</span>
+        <span className="inline-flex items-center gap-1"><span className="h-2 w-2 rounded-sm bg-[#eb6834] dark:bg-[#d95926]" aria-hidden />{bLabel}</span>
+      </div>
+    </div>
+  )
+}
+
+export { DetailMetric, BytesMetric, DetailListPanel, PillList, InterfaceList, DetailLink, DirectionBar }
