@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import scoping
 from app.core.database import get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
 from app.models.service_check import ServiceCheck, ServiceCheckGroup, ServiceCheckNote
 from app.models.user import User
 from app.schemas.service_check import ServiceCheckNoteCreate, ServiceMaintenanceCreate
@@ -121,7 +121,7 @@ class BulkRequest(BaseModel):
 async def bulk_service_check_action(
     data: BulkRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     """All ids must be visible (else 404, nothing done); per-item results."""
     from app.services import tag_service
@@ -222,7 +222,7 @@ async def import_service_checks(
     document: dict = Body(...),
     dry_run: bool = Query(default=True),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     """Portable (schema_version 2) import; dry_run defaults to true."""
     from app.services import service_reports
@@ -329,7 +329,7 @@ async def create_service_check_note(
     check_id: UUID,
     data: ServiceCheckNoteCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     sc = await _visible(db, check_id, current_user)
     note = ServiceCheckNote(

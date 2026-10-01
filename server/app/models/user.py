@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, Boolean, DateTime, Integer
+from sqlalchemy import String, Boolean, DateTime, Integer, BigInteger, Text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 
@@ -22,6 +22,19 @@ class User(Base):
     # Empty = unrestricted; system.admin roles bypass. See app/core/scoping.py.
     scope_tags: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
     token_version: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # Sign-in lifecycle (migrate-150)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    password_changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    failed_login_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_failed_login: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    locked_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    # TOTP multi-factor (local accounts). The secret is encrypted at rest.
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    mfa_secret_enc: Mapped[str] = mapped_column(Text, nullable=True)
+    mfa_recovery_hashes: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    mfa_enrolled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    mfa_last_counter: Mapped[int] = mapped_column(BigInteger, nullable=True)
+    external_id: Mapped[str] = mapped_column(Text, nullable=True)
     last_login: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))

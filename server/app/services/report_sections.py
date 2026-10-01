@@ -1581,6 +1581,15 @@ async def _sec_ncm_changes(ctx: SectionCtx) -> dict:
 
 SectionFn = Callable[[SectionCtx], Awaitable[dict]]
 
+# Sections that honour ``filters['device_ids']`` end to end. Accounts limited to
+# a visibility scope may render only these (the API pins the filter to the
+# devices they can see); every other section reads fleet-wide data.
+DEVICE_SCOPABLE_SECTIONS = frozenset({
+    "availability_kpis", "availability_trend", "device_availability",
+    "ncm_protection", "ncm_breakdown", "ncm_outcomes", "ncm_at_risk",
+    "ncm_compliance", "ncm_changes",
+})
+
 SECTION_REGISTRY: dict[str, dict[str, Any]] = {
     # NCCM
     "ncm_protection": {"fn": _sec_ncm_protection, "title": "Configuration Protection", "category": "Configuration",

@@ -19,12 +19,24 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user, require_admin_user
+from app.core import scoping
+from app.core.security import get_current_user, require_admin_user, require_permission
 from app.models.user import User
 from app.services.alert_schedule import get_configured_timezone
 from app.services.report_scheduler import compute_next_run, generate_and_deliver
 
 router = APIRouter(prefix="/report-schedules", tags=["Report Schedules"])
+
+
+async def _refuse_scoped(db: AsyncSession, user: User) -> None:
+    """Scheduled reports render fleet-wide data without a user context and email
+    it onward, so an account limited to a visibility scope may not create or
+    change them (fail closed)."""
+    if await scoping.visible_tags(db, user) is not None:
+        raise HTTPException(
+            status_code=403,
+            detail="Accounts limited to a visibility scope cannot manage report schedules",
+        )
 
 _REPORT_TYPES = ("executive_summary|device_health|service_health|alert_analysis|full_report"
                  "|availability|performance|traffic|usage|apm_performance"
@@ -100,7 +112,7 @@ _SELECT = "SELECT * FROM report_schedules"
 @router.get("")
 async def list_report_schedules(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("reports.view")),
 ):
     rows = (await db.execute(text(f"{_SELECT} ORDER BY created_at DESC"))).fetchall()
     return {"data": [_row_to_dict(r) for r in rows]}
@@ -110,8 +122,9 @@ async def list_report_schedules(
 async def create_report_schedule(
     data: ReportScheduleCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("reports.manage")),
 ):
+    await _refuse_scoped(db, user)
     tz_name = await get_configured_timezone(db)
     sched = data.model_dump()
     next_run = compute_next_run(sched, tz_name) if data.enabled else None
@@ -145,8 +158,9 @@ async def update_report_schedule(
     schedule_id: UUID,
     data: ReportScheduleUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("reports.manage")),
 ):
+    await _refuse_scoped(db, user)
     fields = data.model_dump(exclude_unset=True)
     if not fields:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -189,8 +203,9 @@ async def update_report_schedule(
 async def delete_report_schedule(
     schedule_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("reports.manage")),
 ):
+    await _refuse_scoped(db, user)
     row = (await db.execute(
         text("DELETE FROM report_schedules WHERE id = :id RETURNING id"), {"id": schedule_id}
     )).first()
@@ -203,8 +218,9 @@ async def delete_report_schedule(
 async def toggle_report_schedule(
     schedule_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("reports.manage")),
 ):
+    await _refuse_scoped(db, user)
     row = (await db.execute(
         text(f"{_SELECT} WHERE id = :id"), {"id": schedule_id}
     )).first()
@@ -228,8 +244,9 @@ async def toggle_report_schedule(
 async def run_report_schedule_now(
     schedule_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_admin_user),
+    user: User = Depends(require_permission("reports.manage")),
 ):
+    await _refuse_scoped(db, user)
     row = (await db.execute(
         text(f"{_SELECT} WHERE id = :id"), {"id": schedule_id}
     )).first()
@@ -250,7 +267,7 @@ async def run_report_schedule_now(
 async def list_runs(
     schedule_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("reports.view")),
 ):
     rows = (await db.execute(
         text("""SELECT id, token, title, status, delivered_to, error, generated_at

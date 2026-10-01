@@ -58,7 +58,11 @@ export const DialogContent = React.forwardRef<
       ref={ref}
       className={cn(
         'fixed left-1/2 top-1/2 z-50 grid w-full max-w-lg -translate-x-1/2 -translate-y-1/2 gap-4',
-        'rounded-lg border border-border bg-surface p-6 shadow-xl duration-200',
+        // Bound the whole dialog to the visible viewport (dynamic units follow
+        // the on-screen keyboard) and scroll inside it, so header, close button
+        // and footer stay reachable on short or zoomed screens.
+        'max-h-[calc(100dvh-1rem)] overflow-y-auto overscroll-contain',
+        'rounded-lg border border-border bg-surface p-4 shadow-xl duration-200 sm:p-6',
         'data-[state=open]:animate-fade-in',
         className,
       )}
@@ -79,8 +83,14 @@ DialogContent.displayName = DialogPrimitive.Content.displayName
 export const DialogHeader = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
   <div className={cn('flex flex-col gap-1.5 text-left', className)} {...props} />
 )
+// Sticks to the bottom of a scrolling dialog so Save / Cancel are always in
+// reach. Negative margins cancel the dialog padding, which is re-added inside,
+// so a dialog that does not overflow looks exactly as before.
 export const DialogFooter = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
-  <div className={cn('flex justify-end gap-2', className)} {...props} />
+  <div
+    className={cn('sticky bottom-0 z-10 -mx-4 -mb-4 flex flex-wrap justify-end gap-2 border-t border-border/50 bg-surface px-4 pb-4 pt-3 sm:-mx-6 sm:-mb-6 sm:px-6 sm:pb-6', className)}
+    {...props}
+  />
 )
 
 export const DialogTitle = React.forwardRef<

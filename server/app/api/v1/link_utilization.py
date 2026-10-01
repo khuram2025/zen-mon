@@ -15,7 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
 from app.models.user import User
 from app.services.audit_service import write_audit_log
 from app.services.tag_service import canonicalize_tags, clean_tags
@@ -695,7 +695,7 @@ async def add_favorite(
     device_id: UUID,
     if_index: int,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("devices.view")),
 ):
     """Star a link. Idempotent — re-starring keeps the original timestamp."""
     known = (await db.execute(text("""
@@ -716,7 +716,7 @@ async def remove_favorite(
     device_id: UUID,
     if_index: int,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("devices.view")),
 ):
     """Unstar a link. Succeeds whether or not it was starred, so the UI toggle
     can't get stuck on a favourite that another tab already cleared."""
@@ -753,7 +753,7 @@ async def set_link_tags(
     if_index: int,
     payload: LinkTagsUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     """Replace the tags on one link.
 
@@ -780,7 +780,7 @@ async def set_link_tags(
 async def bulk_tag_links(
     payload: LinkTagsBulk,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     """Add and/or remove tags across a selection of links.
 

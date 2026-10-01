@@ -115,6 +115,7 @@ export function apiErrorMessage(e: any, fallback = 'Something went wrong'): stri
   if (typeof d === 'string') return d
   if (Array.isArray(d)) return d.map((x: any) => x.msg || String(x)).join(', ')
   if (d?.msg) return d.msg
+  if (d?.message) return String(d.message)
   return e?.message || fallback
 }
 

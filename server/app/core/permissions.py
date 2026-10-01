@@ -28,7 +28,8 @@ PERMISSION_MODULES: list[tuple[str, str, list[tuple[str, str, str]]]] = [
     ("alerts", "Alerting", [
         ("alerts.view", "View", "View alerts and alert history"),
         ("alerts.acknowledge", "Acknowledge", "Acknowledge and resolve alerts"),
-        ("alerts.manage", "Manage", "Create and edit alert rules, channels, and gateways"),
+        ("alerts.manage", "Manage",
+         "Create and edit alert rules, notification channels, and escalation policies"),
     ]),
     ("service_checks", "Service Checks", [
         ("service_checks.view", "View", "View service checks and their status"),
@@ -36,6 +37,10 @@ PERMISSION_MODULES: list[tuple[str, str, list[tuple[str, str, str]]]] = [
     ]),
     ("netflow", "NetFlow", [
         ("netflow.view", "View", "View NetFlow traffic analytics"),
+        ("netflow.manage", "Manage",
+         "Save personal NetFlow views and map flow exporters to devices"),
+        ("netflow.manage_shared", "Manage shared views",
+         "Create, edit, and delete NetFlow views shared with every user"),
     ]),
     ("udt", "User Device Tracker", [
         ("udt.view", "View", "View tracked endpoints and ports"),
@@ -71,15 +76,21 @@ PERMISSION_MODULES: list[tuple[str, str, list[tuple[str, str, str]]]] = [
     ]),
     ("users", "Users & Roles", [
         ("users.view", "View users", "View user accounts"),
-        ("users.manage", "Manage users", "Create, edit, and delete user accounts"),
-        ("roles.manage", "Manage roles", "Create and edit roles and their permissions"),
+        ("users.manage", "Manage users",
+         "Create, edit, disable, and delete user accounts up to your own access level; "
+         "reset passwords and revoke sessions"),
+        ("roles.view", "View roles", "View roles, their permissions, and their members"),
+        ("roles.manage", "Manage roles",
+         "Create and edit roles up to your own access level (you cannot grant what you lack)"),
     ]),
     ("audit", "Audit", [
-        ("audit.view", "View", "View the audit log"),
+        ("audit.view", "View", "Read the audit log (does not include any administration rights)"),
     ]),
     ("settings", "System Settings", [
         ("settings.view", "View", "View system settings"),
-        ("settings.manage", "Manage", "Change system settings (SMTP, company, storage, ...)"),
+        ("settings.manage", "Manage",
+         "Change company, monitoring-threshold, and SMTP/SMS gateway settings. "
+         "Security, storage, updates, and authentication providers need Full administration"),
     ]),
     ("system", "System Administration", [
         ("system.admin", "Full administration",
@@ -98,43 +109,142 @@ _ALL_SET = set(ALL_PERMISSIONS)
 
 SUPERUSER_PERMISSION = "system.admin"
 
+# Risk classification shown in the role editor and used for confirmation /
+# reason prompts. "standard" permissions are not listed here.
+#   sensitive  - exposes data most operators should not read by default
+#   privileged - changes who can do what, or changes shared infrastructure
+#   critical   - unrestricted control of the appliance
+PERMISSION_RISK: dict[str, str] = {
+    "audit.view": "sensitive",
+    "udt.view_users": "sensitive",
+    "ncm.export": "sensitive",
+    "ncm.credentials": "privileged",
+    "ncm.trust": "privileged",
+    "users.manage": "privileged",
+    "roles.manage": "privileged",
+    "settings.manage": "privileged",
+    "netflow.manage_shared": "privileged",
+    SUPERUSER_PERMISSION: "critical",
+}
+
+# Permissions that make a role able to change access for other people. A role
+# holding any of these must never be editable by an actor who lacks them.
+ACCESS_CONTROL_PERMISSIONS = frozenset({"users.manage", "roles.manage", SUPERUSER_PERMISSION})
+
+# Intentional dependencies: the editor offers to add the right-hand side when
+# the left-hand permission is selected. Enforcement stays explicit (no hidden
+# grants), so a role is always exactly what the administrator saved.
+PERMISSION_IMPLIES: dict[str, list[str]] = {
+    "devices.manage": ["devices.view"],
+    "discovery.run": ["discovery.view"],
+    "alerts.acknowledge": ["alerts.view"],
+    "alerts.manage": ["alerts.view"],
+    "service_checks.manage": ["service_checks.view"],
+    "netflow.manage": ["netflow.view"],
+    "netflow.manage_shared": ["netflow.manage", "netflow.view"],
+    "udt.view_users": ["udt.view"],
+    "udt.manage": ["udt.view"],
+    "netpath.manage": ["netpath.view"],
+    "ncm.manage": ["ncm.view"],
+    "ncm.credentials": ["ncm.view"],
+    "ncm.export": ["ncm.view"],
+    "ncm.baseline": ["ncm.view"],
+    "ncm.trust": ["ncm.view"],
+    "ncm.compliance": ["ncm.view"],
+    "apm.manage": ["apm.view"],
+    "reports.export": ["reports.view"],
+    "reports.manage": ["reports.view"],
+    "maps.manage": ["maps.view"],
+    "users.manage": ["users.view", "roles.view"],
+    "roles.manage": ["roles.view"],
+    "settings.manage": ["settings.view"],
+}
+
 _OPERATOR = [
     "dashboard.view", "devices.view", "devices.manage", "discovery.view",
     "discovery.run", "alerts.view", "alerts.acknowledge", "alerts.manage",
     "service_checks.view", "service_checks.manage", "netflow.view",
+    "netflow.manage", "netflow.manage_shared",
     "udt.view", "udt.view_users", "udt.manage", "netpath.view", "netpath.manage",
     "ncm.view", "ncm.manage", "apm.view",
-    "apm.manage", "reports.view", "reports.export", "maps.view",
+    "apm.manage", "reports.view", "reports.export", "reports.manage", "maps.view",
     "maps.manage", "settings.view",
 ]
 
+_VIEWER = [
+    "dashboard.view", "devices.view", "discovery.view", "alerts.view",
+    "alerts.acknowledge", "service_checks.view", "netflow.view",
+    "udt.view", "netpath.view", "ncm.view", "apm.view", "reports.view",
+    "reports.export", "maps.view",
+]
+
+_READ_ONLY = [
+    "dashboard.view", "devices.view", "alerts.view",
+    "service_checks.view", "netflow.view", "udt.view", "netpath.view",
+    "apm.view", "reports.view", "maps.view",
+]
+
+# Version of the built-in role definitions below. Persisted on is_system role
+# rows (roles.definition_version); when the code's version is newer the
+# built-in rows are reconciled at startup. Custom roles are NEVER touched, so a
+# newly introduced permission is never granted to a custom role implicitly.
+BUILTIN_ROLE_DEFINITION_VERSION = 2
+
+BUILTIN_ROLE_DEFINITIONS: dict[str, list[str]] = {
+    "admin": list(ALL_PERMISSIONS),
+    "operator": _OPERATOR,
+    "viewer": _VIEWER,
+    "read_only": _READ_ONLY,
+}
+
 # Fallback when the roles table is unavailable or the role has no DB row.
-# Mirrors the migrate-074 seeds; "editor" predates the roles table.
+# Mirrors the built-ins; "editor" and "owner" are pre-RBAC aliases kept only so
+# a mid-update appliance keeps working. They are reserved: a custom role can
+# never take these names (see RESERVED_ROLE_NAMES).
 LEGACY_ROLE_PERMISSIONS: dict[str, list[str]] = {
     "admin": ALL_PERMISSIONS,
     "owner": ALL_PERMISSIONS,
     "operator": _OPERATOR,
     "editor": _OPERATOR,
-    "viewer": [
-        "dashboard.view", "devices.view", "discovery.view", "alerts.view",
-        "alerts.acknowledge", "service_checks.view", "netflow.view",
-        "udt.view", "netpath.view", "ncm.view", "apm.view", "reports.view",
-        "reports.export", "maps.view",
-    ],
-    "read_only": [
-        "dashboard.view", "devices.view", "alerts.view",
-        "service_checks.view", "netflow.view", "udt.view", "netpath.view",
-        "apm.view", "reports.view", "maps.view",
-    ],
+    "viewer": _VIEWER,
+    "read_only": _READ_ONLY,
 }
+
+# Names a custom role may not use: built-ins, pre-RBAC aliases and words that
+# read as an authority level. Authorization never depends on a role *name*;
+# this only prevents a custom role being mistaken for (or colliding with) one.
+RESERVED_ROLE_NAMES = frozenset({
+    "admin", "administrator", "owner", "root", "superuser", "super_admin",
+    "system", "operator", "editor", "viewer", "read_only", "readonly",
+    "guest", "anonymous", "service", "agent", "sensor",
+})
 
 
 def is_known_permission(perm: str) -> bool:
     return perm in _ALL_SET
 
 
-def has_permission(granted: list[str] | set[str], required: str) -> bool:
+def has_permission(granted: list[str] | set[str] | frozenset[str], required: str) -> bool:
     return SUPERUSER_PERMISSION in granted or required in granted
+
+
+def effective_permissions(granted) -> frozenset[str]:
+    """The concrete permission set a role grants: ``system.admin`` expands to
+    the whole vocabulary."""
+    granted = set(granted or [])
+    if SUPERUSER_PERMISSION in granted:
+        return frozenset(_ALL_SET)
+    return frozenset(p for p in granted if p in _ALL_SET)
+
+
+def exceeds(target, ceiling) -> list[str]:
+    """Permissions in ``target`` that ``ceiling`` does not hold. An empty list
+    means the target is within the ceiling (an actor may grant / manage it)."""
+    return sorted(effective_permissions(target) - effective_permissions(ceiling))
+
+
+def risk_of(perm: str) -> str:
+    return PERMISSION_RISK.get(perm, "standard")
 
 
 def catalog() -> list[dict]:
@@ -144,7 +254,13 @@ def catalog() -> list[dict]:
             "module": module_id,
             "label": label,
             "permissions": [
-                {"id": pid, "label": plabel, "description": pdesc}
+                {
+                    "id": pid,
+                    "label": plabel,
+                    "description": pdesc,
+                    "risk": risk_of(pid),
+                    "implies": PERMISSION_IMPLIES.get(pid, []),
+                }
                 for pid, plabel, pdesc in perms
             ],
         }

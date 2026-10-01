@@ -15,6 +15,7 @@ class NetflowSavedView(Base):
     description: Mapped[str] = mapped_column(String(500), nullable=True)
     query: Mapped[dict] = mapped_column(JSON, nullable=False)
     pinned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_shared: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false", nullable=False)
     owner_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )

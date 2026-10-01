@@ -29,7 +29,7 @@ export function FormField({
         {required && <span className="ml-0.5 text-danger">*</span>}
       </Label>
       {control}
-      {hint && !error && <p className="text-[11px] text-muted">{hint}</p>}
+      {hint && !error && <div className="text-[11px] text-muted">{hint}</div>}
       {error && <p className="text-[11px] text-danger">{error}</p>}
     </div>
   )

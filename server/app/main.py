@@ -3,6 +3,7 @@ import logging
 import time
 
 from fastapi import FastAPI
+from app.core.route_policy import policy
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
@@ -107,35 +108,35 @@ def create_app() -> FastAPI:
 
     # API routes
     app.include_router(auth.router, prefix="/api/v1")
-    app.include_router(monitoring_sites.router, prefix="/api/v1")
-    app.include_router(devices.router, prefix="/api/v1")
-    app.include_router(devices.maintenance_router, prefix="/api/v1")
-    app.include_router(tags.router, prefix="/api/v1")
-    app.include_router(alerts.router, prefix="/api/v1")
-    app.include_router(settings_api.router, prefix="/api/v1")
-    app.include_router(alert_rules.router, prefix="/api/v1")
-    app.include_router(host_alert_rules.router, prefix="/api/v1")
+    app.include_router(monitoring_sites.router, prefix="/api/v1", dependencies=[policy("monitoring_sites")])
+    app.include_router(devices.router, prefix="/api/v1", dependencies=[policy("devices")])
+    app.include_router(devices.maintenance_router, prefix="/api/v1", dependencies=[policy("devices")])
+    app.include_router(tags.router, prefix="/api/v1", dependencies=[policy("tags")])
+    app.include_router(alerts.router, prefix="/api/v1", dependencies=[policy("alerts")])
+    app.include_router(settings_api.router, prefix="/api/v1", dependencies=[policy("settings", allow_public=True)])
+    app.include_router(alert_rules.router, prefix="/api/v1", dependencies=[policy("alerts")])
+    app.include_router(host_alert_rules.router, prefix="/api/v1", dependencies=[policy("alerts")])
     app.include_router(alert_engine.router, prefix="/api/v1")
-    app.include_router(traps.router, prefix="/api/v1")
-    app.include_router(network_events.router, prefix="/api/v1")
-    app.include_router(ncm.router, prefix="/api/v1")
-    app.include_router(ncm.device_router, prefix="/api/v1")
+    app.include_router(traps.router, prefix="/api/v1", dependencies=[policy("events")])
+    app.include_router(network_events.router, prefix="/api/v1", dependencies=[policy("events")])
+    app.include_router(ncm.router, prefix="/api/v1", dependencies=[policy("ncm")])
+    app.include_router(ncm.device_router, prefix="/api/v1", dependencies=[policy("ncm")])
     # Fixed /service-checks/{report,bulk,import} paths must precede /{check_id}.
-    app.include_router(service_checks_ops.router, prefix="/api/v1")
-    app.include_router(ncm_compliance.router, prefix="/api/v1")
-    app.include_router(ncm_compliance.device_router, prefix="/api/v1")
-    app.include_router(service_checks.router, prefix="/api/v1")
-    app.include_router(service_checks.groups_router, prefix="/api/v1")
-    app.include_router(service_checks.maintenance_router, prefix="/api/v1")
-    app.include_router(service_checks.templates_router, prefix="/api/v1")
-    app.include_router(service_checks.credentials_router, prefix="/api/v1")
-    app.include_router(reports.router, prefix="/api/v1")
-    app.include_router(report_schedules.router, prefix="/api/v1")
+    app.include_router(service_checks_ops.router, prefix="/api/v1", dependencies=[policy("service_checks")])
+    app.include_router(ncm_compliance.router, prefix="/api/v1", dependencies=[policy("ncm")])
+    app.include_router(ncm_compliance.device_router, prefix="/api/v1", dependencies=[policy("ncm")])
+    app.include_router(service_checks.router, prefix="/api/v1", dependencies=[policy("service_checks")])
+    app.include_router(service_checks.groups_router, prefix="/api/v1", dependencies=[policy("service_checks")])
+    app.include_router(service_checks.maintenance_router, prefix="/api/v1", dependencies=[policy("service_checks")])
+    app.include_router(service_checks.templates_router, prefix="/api/v1", dependencies=[policy("service_checks")])
+    app.include_router(service_checks.credentials_router, prefix="/api/v1", dependencies=[policy("service_checks")])
+    app.include_router(reports.router, prefix="/api/v1", dependencies=[policy("reports", allow_public=True)])
+    app.include_router(report_schedules.router, prefix="/api/v1", dependencies=[policy("reports")])
     app.include_router(realtime.router, prefix="/api/v1")
-    app.include_router(discovery.router, prefix="/api/v1")
-    app.include_router(discovery_v2.router, prefix="/api/v1")
-    app.include_router(users.router, prefix="/api/v1")
-    app.include_router(roles.router, prefix="/api/v1")
+    app.include_router(discovery.router, prefix="/api/v1", dependencies=[policy("discovery")])
+    app.include_router(discovery_v2.router, prefix="/api/v1", dependencies=[policy("discovery")])
+    app.include_router(users.router, prefix="/api/v1", dependencies=[policy("access")])
+    app.include_router(roles.router, prefix="/api/v1", dependencies=[policy("access")])
     app.include_router(auth_settings.router, prefix="/api/v1")
     app.include_router(subscription.router, prefix="/api/v1")
     app.include_router(system_updates.router, prefix="/api/v1")
@@ -144,46 +145,46 @@ def create_app() -> FastAPI:
     app.include_router(probe_trust_router, prefix="/api/v1")
     app.include_router(management_access.router, prefix="/api/v1")
     app.include_router(support.router, prefix="/api/v1")
-    app.include_router(snmp.router, prefix="/api/v1")
+    app.include_router(snmp.router, prefix="/api/v1", dependencies=[policy("snmp")])
     app.include_router(snmp_credentials.router, prefix="/api/v1")
-    app.include_router(windows_credentials.router, prefix="/api/v1")
+    app.include_router(windows_credentials.router, prefix="/api/v1", dependencies=[policy("windows_credentials")])
     app.include_router(audit_logs.router, prefix="/api/v1")
-    app.include_router(netflow.router, prefix="/api/v1")
-    app.include_router(link_utilization.router, prefix="/api/v1")
-    app.include_router(udt.router, prefix="/api/v1")
-    app.include_router(netpath.router, prefix="/api/v1")
-    app.include_router(manual_maps.router, prefix="/api/v1")
+    app.include_router(netflow.router, prefix="/api/v1", dependencies=[policy("netflow")])
+    app.include_router(link_utilization.router, prefix="/api/v1", dependencies=[policy("link_utilization")])
+    app.include_router(udt.router, prefix="/api/v1", dependencies=[policy("udt")])
+    app.include_router(netpath.router, prefix="/api/v1", dependencies=[policy("netpath")])
+    app.include_router(manual_maps.router, prefix="/api/v1", dependencies=[policy("maps")])
     app.include_router(sensors_admin_api.router, prefix="/api/v1")
     app.include_router(sensors_admin_api.sites_router, prefix="/api/v1")
     app.include_router(sensor_api.router, prefix="/api/v1")
     app.include_router(agents_runtime_api.router, prefix="/api/v1")
-    app.include_router(servers_admin_api.router, prefix="/api/v1")
-    app.include_router(servers_admin_api.policies_router, prefix="/api/v1")
-    app.include_router(servers_admin_api.fleet_router, prefix="/api/v1")
-    app.include_router(servers_admin_api.overview_router, prefix="/api/v1")
-    app.include_router(servers_admin_api.baselines_router, prefix="/api/v1")
+    app.include_router(servers_admin_api.router, prefix="/api/v1", dependencies=[policy("apm")])
+    app.include_router(servers_admin_api.policies_router, prefix="/api/v1", dependencies=[policy("apm")])
+    app.include_router(servers_admin_api.fleet_router, prefix="/api/v1", dependencies=[policy("apm")])
+    app.include_router(servers_admin_api.overview_router, prefix="/api/v1", dependencies=[policy("apm")])
+    app.include_router(servers_admin_api.baselines_router, prefix="/api/v1", dependencies=[policy("apm")])
     # Agent APM enrollment/discovery; host route uses the existing agent credential.
     app.include_router(apm_agents_api.router, prefix="/api/v1")
-    app.include_router(apm_agents_api.admin_router, prefix="/api/v1")
+    app.include_router(apm_agents_api.admin_router, prefix="/api/v1", dependencies=[policy("apm")])
     # APM control plane (ingest keys, enrollment tokens) under /api/v1/apm/*
-    app.include_router(apm_control_api.router, prefix="/api/v1")
+    app.include_router(apm_control_api.router, prefix="/api/v1", dependencies=[policy("apm")])
     # APM trace explorer + waterfall under /api/v1/apm/traces
-    app.include_router(apm_traces_api.router, prefix="/api/v1")
+    app.include_router(apm_traces_api.router, prefix="/api/v1", dependencies=[policy("apm")])
     # APM services RED + service map under /api/v1/apm/services|service-map
-    app.include_router(apm_services_api.router, prefix="/api/v1")
+    app.include_router(apm_services_api.router, prefix="/api/v1", dependencies=[policy("apm")])
     # APM error tracking / issues under /api/v1/apm/errors
-    app.include_router(apm_errors_api.router, prefix="/api/v1")
+    app.include_router(apm_errors_api.router, prefix="/api/v1", dependencies=[policy("apm")])
     # APM SLOs (CRUD + error-budget status) under /api/v1/apm/slos
-    app.include_router(apm_slos_api.router, prefix="/api/v1")
+    app.include_router(apm_slos_api.router, prefix="/api/v1", dependencies=[policy("apm")])
     # APM synthetic user scenarios under /api/v1/apm/synthetics
-    app.include_router(apm_synthetics_api.router, prefix="/api/v1")
+    app.include_router(apm_synthetics_api.router, prefix="/api/v1", dependencies=[policy("apm")])
     # APM usage analytics (pages/operations/users) under /api/v1/apm/usage
-    app.include_router(apm_usage_api.router, prefix="/api/v1")
+    app.include_router(apm_usage_api.router, prefix="/api/v1", dependencies=[policy("apm")])
     # APM deep-dive (heatmap, exemplars, facets, deployments, hosts, logs)
-    app.include_router(apm_insights_api.router, prefix="/api/v1")
+    app.include_router(apm_insights_api.router, prefix="/api/v1", dependencies=[policy("apm")])
     # APM OTLP receiver mounted at ROOT so the path is exactly /v1/traces.
     app.include_router(apm_ingest_api.router)
-    app.include_router(apm_p3_api.router)
+    app.include_router(apm_p3_api.router, dependencies=[policy("apm", allow_public=True)])
 
     app.include_router(system_time_api.router, prefix="/api/v1")
 
@@ -193,6 +194,14 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _start_background_tasks():
+        # Built-in roles: reconcile persisted definitions with the code (versioned).
+        try:
+            from app.core.database import AsyncSessionLocal as _RoleSession
+            from app.services.role_service import reconcile_builtin_roles
+            async with _RoleSession() as _db:
+                await reconcile_builtin_roles(_db)
+        except Exception:
+            logging.getLogger(__name__).exception("built-in role reconciliation skipped")
         # Agent/server staleness sweep (online → stale → offline + alerts).
         from app.services.server_health_service import health_sweeper_loop
         app.state.health_sweeper = asyncio.create_task(health_sweeper_loop())

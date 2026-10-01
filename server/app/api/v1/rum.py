@@ -37,7 +37,7 @@ from app.core.security import get_current_user
 from app.services import geoip
 from app.services.rum_routes import apply_route_rules, rules_from_options
 from app.services import rum_symbolicate
-from app.core.security import require_operator_user
+from app.core.security import require_permission
 
 router = APIRouter(tags=["APM RUM"])
 
@@ -2628,7 +2628,7 @@ async def rum_error_status(
     fingerprint: str,
     body: IssueStatusUpdate,
     db: AsyncSession = Depends(get_db),
-    user=Depends(get_current_user),
+    user=Depends(require_permission("apm.manage")),
 ):
     """Resolve, ignore or reopen an error group."""
     if not 1 <= len(fingerprint) <= 128:
@@ -2868,7 +2868,7 @@ async def rum_upload_source_map(
     file_name: str = Query(..., min_length=1, max_length=512),
     release: str = Query(default="", max_length=128),
     db: AsyncSession = Depends(get_db),
-    user=Depends(require_operator_user),
+    user=Depends(require_permission("apm.manage")),
 ):
     """Upload one source map. The request body is the map file itself:
 
@@ -2918,7 +2918,7 @@ async def rum_upload_source_map(
 async def rum_delete_source_map(
     map_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(require_operator_user),
+    _user=Depends(require_permission("apm.manage")),
 ):
     result = await db.execute(text("DELETE FROM rum_source_maps WHERE id = :id"), {"id": str(map_id)})
     await db.commit()
@@ -3160,7 +3160,7 @@ async def rum_funnels(application_id: str | None = None, db: AsyncSession = Depe
 
 
 @router.post("/api/v1/apm/rum/funnels", status_code=201)
-async def rum_create_funnel(body: FunnelBody, db: AsyncSession = Depends(get_db), user=Depends(require_operator_user)):
+async def rum_create_funnel(body: FunnelBody, db: AsyncSession = Depends(get_db), user=Depends(require_permission("apm.manage"))):
     actor = str(getattr(user, "username", "") or "")
     try:
         row = (await db.execute(text("""
@@ -3178,7 +3178,7 @@ async def rum_create_funnel(body: FunnelBody, db: AsyncSession = Depends(get_db)
 
 
 @router.put("/api/v1/apm/rum/funnels/{funnel_id}")
-async def rum_update_funnel(funnel_id: uuid.UUID, body: FunnelBody, db: AsyncSession = Depends(get_db), _user=Depends(require_operator_user)):
+async def rum_update_funnel(funnel_id: uuid.UUID, body: FunnelBody, db: AsyncSession = Depends(get_db), _user=Depends(require_permission("apm.manage"))):
     row = (await db.execute(text("""
         UPDATE rum_funnels SET application_id = :app, name = :name, description = :description,
                steps = CAST(:steps AS jsonb), window_seconds = :window, updated_at = now()
@@ -3192,7 +3192,7 @@ async def rum_update_funnel(funnel_id: uuid.UUID, body: FunnelBody, db: AsyncSes
 
 
 @router.delete("/api/v1/apm/rum/funnels/{funnel_id}", status_code=204)
-async def rum_delete_funnel(funnel_id: uuid.UUID, db: AsyncSession = Depends(get_db), _user=Depends(require_operator_user)):
+async def rum_delete_funnel(funnel_id: uuid.UUID, db: AsyncSession = Depends(get_db), _user=Depends(require_permission("apm.manage"))):
     result = await db.execute(text("DELETE FROM rum_funnels WHERE id = :id"), {"id": str(funnel_id)})
     await db.commit()
     if not result.rowcount:
@@ -3325,7 +3325,7 @@ async def rum_retention(_user=Depends(get_current_user)):
 
 
 @router.patch("/api/v1/apm/rum/retention")
-async def rum_set_retention(body: RetentionBody, _user=Depends(require_operator_user)):
+async def rum_set_retention(body: RetentionBody, _user=Depends(require_permission("apm.manage"))):
     """Change how long raw events and 5-minute rollups are kept (ClickHouse TTL).
 
     Shortening a window drops the excess parts on the next merge; lengthening

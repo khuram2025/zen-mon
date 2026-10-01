@@ -121,3 +121,54 @@ async def visible_apm_service_names(db: AsyncSession, scope: list[str]) -> set[s
         {SCOPE_PARAM: scope},
     )).scalars().all()
     return set(rows)
+
+
+# A UUID no row can carry. Filters treat an empty id list as "no filter", so a
+# scope that matches nothing must be expressed as a list that matches nothing.
+NO_MATCH_ID = "00000000-0000-0000-0000-000000000000"
+
+
+async def visible_device_ids(db: AsyncSession, scope: list[str]) -> list[str]:
+    """Device ids in scope (devices sharing at least one scope tag)."""
+    rows = (await db.execute(
+        text(f"SELECT id::text FROM devices d WHERE {jsonb_tags_visible('d.tags')}"),
+        {SCOPE_PARAM: scope},
+    )).scalars().all()
+    return list(rows)
+
+
+async def scoped_device_filter(
+    db: AsyncSession, user: User, requested: list[str] | None
+) -> tuple[bool, list[str] | None]:
+    """Resolve a caller-supplied device filter against the user's scope.
+
+    Returns ``(scoped, ids)``. For an unrestricted user ``ids`` is the request
+    unchanged. For a scoped user it is the request narrowed to visible devices
+    (or every visible device when none was requested); a client filter can
+    never widen visibility, and an empty result is expressed as ``[NO_MATCH_ID]``.
+    """
+    scope = await visible_tags(db, user)
+    if scope is None:
+        return False, requested
+    visible = set(await visible_device_ids(db, scope))
+    ids = [i for i in (requested or sorted(visible)) if str(i) in visible]
+    return True, ids or [NO_MATCH_ID]
+
+
+async def visible_exporter_ips(db: AsyncSession, scope: list[str]) -> list[str]:
+    """NetFlow exporter IPs that belong to devices in scope: a device's own
+    management IP, or an exporter an operator explicitly mapped to such a
+    device. An exporter that resolves to no visible device is not visible."""
+    rows = (await db.execute(
+        text(
+            "SELECT DISTINCT ip FROM ("
+            " SELECT host(CAST(d.ip_address AS inet)) AS ip FROM devices d"
+            f" WHERE d.ip_address IS NOT NULL AND {jsonb_tags_visible('d.tags')}"
+            " UNION"
+            " SELECT host(m.exporter_ip) FROM netflow_exporter_devices m"
+            f" JOIN devices d ON d.id = m.device_id WHERE {jsonb_tags_visible('d.tags')}"
+            ") x WHERE ip IS NOT NULL"
+        ),
+        {SCOPE_PARAM: scope},
+    )).scalars().all()
+    return sorted(rows)

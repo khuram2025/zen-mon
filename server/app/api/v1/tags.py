@@ -25,7 +25,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
 from app.models.user import User
 from app.services.tag_service import (
     MAX_TAG_LEN, TAG_ARRAY_SURFACES, TAG_RENAME_ONLY_SURFACES, TAG_SCOPE_COLUMNS,
@@ -189,7 +189,7 @@ async def list_tags(
 async def create_tag(
     payload: TagCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage", "service_checks.manage", "apm.manage")),
 ):
     name = payload.name.strip()
     if not name:
@@ -213,7 +213,7 @@ async def update_tag(
     tag_id: UUID,
     payload: TagUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage", "service_checks.manage", "apm.manage")),
 ):
     cur = (await db.execute(
         text("SELECT name FROM tags WHERE id = :id"), {"id": tag_id}
@@ -258,7 +258,7 @@ async def update_tag(
 async def delete_tag(
     tag_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage", "service_checks.manage", "apm.manage")),
 ):
     cur = (await db.execute(
         text("SELECT name FROM tags WHERE id = :id"), {"id": tag_id}

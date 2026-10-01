@@ -15,7 +15,7 @@ from app.core.crypto import decrypt, encrypt
 from app.core.database import get_db
 from app.core.hostnames import normalize_host
 from app.core.security import (
-    get_current_user, require_admin_user, require_operator_user,
+    get_current_user, require_admin_user, require_permission,
 )
 from app.models.discovery_v2 import WindowsCredential
 from app.models.user import User
@@ -98,7 +98,7 @@ async def list_creds(
 async def create_cred(
     payload: WinCredCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage", "service_checks.manage")),
 ):
     existing = (
         await db.execute(select(WindowsCredential).where(WindowsCredential.name == payload.name))
@@ -135,7 +135,7 @@ async def update_cred(
     cred_id: uuid.UUID,
     payload: WinCredUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage", "service_checks.manage")),
 ):
     c = await db.get(WindowsCredential, cred_id)
     if not c:
@@ -165,7 +165,7 @@ async def update_cred(
 async def delete_cred(
     cred_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage", "service_checks.manage")),
 ):
     c = await db.get(WindowsCredential, cred_id)
     if not c:
@@ -186,7 +186,7 @@ async def test_cred(
     cred_id: uuid.UUID,
     payload: dict,
     db: AsyncSession = Depends(get_db),
-    _user: User = Depends(require_operator_user),
+    _user: User = Depends(require_permission("devices.manage", "service_checks.manage")),
 ):
     """Run a WinRM connection test against this credential's target host.
 

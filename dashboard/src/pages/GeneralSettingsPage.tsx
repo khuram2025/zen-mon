@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Activity, Building2, Download, HardDrive, KeyRound, LayoutTemplate, LifeBuoy, Loader2, Mail, Palette, Plug, Save, Send, Settings, ShieldCheck, Upload, User as UserIcon, Users } from 'lucide-react'
 import { api } from '@/lib/api'
-import { apiErrorMessage } from '@/lib/utils'
+import { apiErrorMessage, relativeTime } from '@/lib/utils'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -23,7 +23,10 @@ import { StorageTabContent } from '@/components/StorageTabContent'
 import { SecurityTabContent } from '@/components/SecurityTabContent'
 import { MibsTabContent } from '@/components/MibsTabContent'
 import { TemplatesTabContent } from '@/components/TemplatesTabContent'
-import { AccessTabContent } from '@/components/access/AccessTabContent'
+import { AccessTabContent, ACCESS_TAB_PERMISSIONS } from '@/components/access/AccessTabContent'
+import { MfaPanel } from '@/components/security/MfaPanel'
+import { NewPasswordFields, usePasswordCheck } from '@/components/security/PasswordFields'
+import { QueryBoundary } from '@/components/ui/QueryState'
 
 // `permission`: hidden unless the user's role grants it (system.admin
 // always passes). Tabs without one are visible to everyone.
@@ -32,7 +35,7 @@ const TABS = [
   { value: 'monitoring', label: 'Monitoring', icon: Activity, permission: 'settings.manage' },
   { value: 'smtp', label: 'SMTP / Email', icon: Mail, permission: 'settings.manage' },
   { value: 'appearance', label: 'Appearance', icon: Palette },
-  { value: 'users', label: 'Users & Access', icon: Users, permission: 'users.view' },
+  { value: 'users', label: 'Users & Access', icon: Users, permission: ACCESS_TAB_PERMISSIONS },
   { value: 'licenses', label: 'Licenses', icon: KeyRound, permission: 'system.admin' },
   { value: 'updates', label: 'Updates', icon: Download, permission: 'system.admin' },
   { value: 'storage', label: 'Storage', icon: HardDrive, permission: 'system.admin' },
@@ -48,7 +51,11 @@ type TabValue = typeof TABS[number]['value']
 
 export function GeneralSettingsPage() {
   const can = useCan()
-  const visibleTabs = TABS.filter((t) => !('permission' in t) || !t.permission || can(t.permission))
+  const visibleTabs = TABS.filter((t) => {
+    if (!('permission' in t) || !t.permission) return true
+    const needed = (Array.isArray(t.permission) ? t.permission : [t.permission]) as readonly string[]
+    return needed.some((p) => can(p))
+  })
   const [searchParams, setSearchParams] = useSearchParams()
   const requested = searchParams.get('tab') as TabValue | null
   const fallback: TabValue = visibleTabs.some((t) => t.value === 'company') ? 'company' : (visibleTabs[0]?.value ?? 'profile')
@@ -255,20 +262,35 @@ function AppearanceCard() {
 }
 
 function ProfileCard() {
-  const { user } = useAuth()
+  const { user, logout } = useAuth()
+  const qc = useQueryClient()
   const [currentPass, setCurrentPass] = useState('')
   const [newPass, setNewPass] = useState('')
   const [confirmPass, setConfirmPass] = useState('')
   const isLocal = (user?.auth_source || 'local') === 'local'
+  const check = usePasswordCheck(newPass, confirmPass, { username: user?.username, email: user?.email })
 
   const changePw = useMutation({
     mutationFn: async () =>
       (await api.post('/users/me/change-password', { current_password: currentPass, new_password: newPass })).data,
     onSuccess: () => {
-      toast.success('Password changed')
+      // The API signs every session out on a password change, this one included.
+      toast.success('Password changed', 'Sign in again with your new password.')
       setCurrentPass(''); setNewPass(''); setConfirmPass('')
+      logout()
     },
     onError: (e: any) => toast.error('Change failed', apiErrorMessage(e)),
+  })
+
+  type MySession = { id: string; created_at: string; last_seen_at: string; ip_address: string | null; user_agent: string | null; auth_method: string; mfa_verified: boolean }
+  const sessions = useQuery<{ data: MySession[] }>({
+    queryKey: ['users', 'me', 'sessions'],
+    queryFn: async () => (await api.get('/users/me/sessions')).data,
+  })
+  const revokeSession = useMutation({
+    mutationFn: async (id: string) => api.delete(`/users/me/sessions/${id}`),
+    onSuccess: () => { toast.success('Session revoked'); qc.invalidateQueries({ queryKey: ['users', 'me', 'sessions'] }) },
+    onError: (e: any) => toast.error('Could not revoke', apiErrorMessage(e)),
   })
 
   return (
@@ -282,10 +304,11 @@ function ProfileCard() {
             ['Full name', user?.full_name || '—'],
             ['Role', user?.role || '—'],
             ['Sign-in', (user?.auth_source || 'local').toUpperCase()],
+            ['Visibility', (user?.scope_tags || []).length ? `Tags: ${(user?.scope_tags || []).join(', ')}` : 'All resources your role permits'],
           ].map(([k, v]) => (
             <div key={k} className="flex items-baseline justify-between gap-4 border-b border-border pb-2 last:border-0 last:pb-0">
               <span className="text-xs uppercase tracking-wider text-muted">{k}</span>
-              <span>{v}</span>
+              <span className="text-right">{v}</span>
             </div>
           ))}
         </CardContent>
@@ -295,20 +318,16 @@ function ProfileCard() {
         <CardContent>
           {isLocal ? (
             <form
-              onSubmit={(e: FormEvent) => { e.preventDefault(); changePw.mutate() }}
+              onSubmit={(e: FormEvent) => { e.preventDefault(); if (check.ok && currentPass) changePw.mutate() }}
               className="space-y-3"
             >
               <FormField label="Current password" required>
                 <Input required type="password" value={currentPass} onChange={(e) => setCurrentPass(e.target.value)} autoComplete="current-password" />
               </FormField>
-              <FormField label="New password" required hint="Minimum 6 characters">
-                <Input required type="password" minLength={6} value={newPass} onChange={(e) => setNewPass(e.target.value)} autoComplete="new-password" />
-              </FormField>
-              <FormField label="Confirm new password" required hint={confirmPass && confirmPass !== newPass ? 'Passwords do not match' : undefined}>
-                <Input required type="password" value={confirmPass} onChange={(e) => setConfirmPass(e.target.value)} autoComplete="new-password" />
-              </FormField>
+              <NewPasswordFields password={newPass} onPassword={setNewPass} confirm={confirmPass} onConfirm={setConfirmPass} ctx={{ username: user?.username, email: user?.email }} />
+              <p className="text-[11px] text-muted">Changing your password signs you out of every session, including this one.</p>
               <div className="flex justify-end">
-                <Button type="submit" disabled={changePw.isPending || newPass.length < 6 || newPass !== confirmPass}>
+                <Button type="submit" disabled={changePw.isPending || !currentPass || !check.ok}>
                   {changePw.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Change password
                 </Button>
               </div>
@@ -318,6 +337,36 @@ function ProfileCard() {
               Your account signs in via {(user?.auth_source || '').toUpperCase()}; your password is managed by that directory.
             </p>
           )}
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>Two-step verification</CardTitle></CardHeader>
+        <CardContent><MfaPanel /></CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>Where you are signed in</CardTitle></CardHeader>
+        <CardContent>
+          <QueryBoundary query={sessions} what="your sessions" skeleton={<div className="h-16 animate-pulse rounded bg-surface2/50" />}>
+            {(s) => s.data.length === 0 ? (
+              <p className="text-sm text-muted">No tracked sessions. (Sessions started before this release are not listed.)</p>
+            ) : (
+              <ul className="divide-y divide-border rounded-md border border-border">
+                {s.data.map((row) => {
+                  const current = row.id === user?.session_id
+                  return (
+                    <li key={row.id} className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs">
+                      <div className="min-w-0">
+                        <div className="font-medium">{row.ip_address || 'unknown address'} {current && <span className="ml-1 rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">This session</span>}</div>
+                        <div className="truncate text-muted" title={row.user_agent || ''}>{row.user_agent || 'unknown client'}</div>
+                        <div className="text-muted">Started {new Date(row.created_at).toLocaleString()} · last seen {relativeTime(row.last_seen_at)}</div>
+                      </div>
+                      {!current && <Button size="sm" variant="outline" disabled={revokeSession.isPending} onClick={() => revokeSession.mutate(row.id)}>Revoke</Button>}
+                    </li>
+                  )
+                })}
+              </ul>
+            )}
+          </QueryBoundary>
         </CardContent>
       </Card>
     </div>

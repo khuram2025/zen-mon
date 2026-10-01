@@ -38,7 +38,7 @@ from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionLocal, get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
 from app.core.snmp_oid import normalize_oid
 from app.models.user import User
 from app.schemas.snmp import (
@@ -502,7 +502,7 @@ async def _run_discovery_job(job_id: uuid.UUID) -> None:
 async def create_discovery_job(
     data: DiscoveryJobCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("discovery.run")),
 ):
     try:
         net = ipaddress.ip_network(data.cidr, strict=False)
@@ -645,7 +645,7 @@ async def import_discovery_results(
     job_id: uuid.UUID,
     data: DiscoveryImportRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("discovery.run")),
 ):
     rows = (await db.execute(
         text("""
@@ -710,7 +710,7 @@ async def import_discovery_results(
 async def delete_discovery_job(
     job_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("discovery.run")),
 ):
     res = await db.execute(text("DELETE FROM discovery_jobs WHERE id = :id"), {"id": job_id})
     await db.commit()
@@ -731,7 +731,7 @@ async def upload_mib(
     name: Optional[str] = Form(default=None),
     description: Optional[str] = Form(default=None),
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     # Filename must be safe — no path traversal.
     raw_name = file.filename or ""
@@ -789,7 +789,7 @@ async def list_mibs(
 async def delete_mib(
     mib_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     row = (await db.execute(
         text("SELECT filename FROM snmp_mibs WHERE id = :id"), {"id": mib_id}
@@ -807,7 +807,7 @@ async def delete_mib(
 
 
 @router.post('/mibs/compile')
-async def compile_mibs(db: AsyncSession = Depends(get_db), user: User = Depends(require_operator_user)):
+async def compile_mibs(db: AsyncSession = Depends(get_db), user: User = Depends(require_permission("devices.manage"))):
     rows = (await db.execute(text('SELECT filename, sha256 FROM snmp_mibs ORDER BY filename'))).mappings().all()
     # Run the untrusted ASN.1 parser in a bounded child process. Generated
     # output is JSON, never executable Python; dependencies stay offline.
@@ -1067,7 +1067,7 @@ async def export_profile(profile_id: uuid.UUID, db: AsyncSession = Depends(get_d
 
 @router.post('/profiles/import', response_model=ProfileResponse, status_code=201)
 async def import_profile(bundle: ProfileBundle, db: AsyncSession = Depends(get_db),
-                         user: User = Depends(require_operator_user)):
+                         user: User = Depends(require_permission("devices.manage"))):
     if bundle.format_version != 1:
         raise HTTPException(422, 'Unsupported template format version')
     return await create_profile(bundle.profile, db, user)
@@ -1078,7 +1078,7 @@ async def assign_profile(
     profile_id: uuid.UUID,
     data: ProfileAssignRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     """Attach a template to the given devices (operator override — sticks
     even if auto-classification would pick something else)."""
@@ -1101,7 +1101,7 @@ async def assign_profile(
 async def unassign_profile(
     data: ProfileAssignRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     """Detach any template from the given devices (back to Default monitoring).
     Old template metric values are removed so stale vendor data doesn't linger."""

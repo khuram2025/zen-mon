@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import scoping
 from app.core.database import get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
 from app.models.user import User
 from app.services import availability_policy
 from app.services.audit_service import write_audit_log
@@ -47,14 +47,32 @@ class ReportRequest(BaseModel):
     format: str = "pdf"  # pdf | excel | csv
 
 
+# Legacy report types that read fleet-wide data the service layer cannot scope.
+_LEGACY_UNSCOPABLE = {"service_health", "full_report"}
+
+
 @router.post("/generate")
 async def generate_report_endpoint(
     data: ReportRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("reports.export")),
 ):
     name = REPORT_NAMES.get(data.report_type, 'Report')
     ts = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+
+    # A tag-scoped account may only export what it can see: the report is
+    # confined to its visible devices, and report types whose sections read
+    # fleet-wide data are refused rather than leaked.
+    scoped, device_ids = await scoping.scoped_device_filter(db, current_user, data.device_ids)
+    if scoped:
+        if data.report_type in _LEGACY_UNSCOPABLE:
+            raise HTTPException(
+                403,
+                "This report includes fleet-wide sections and is unavailable to accounts "
+                "limited to a visibility scope. Choose Device Health, Executive Summary or "
+                "Alert Analysis instead.",
+            )
+        data = data.model_copy(update={"group_ids": None, "locations": None, "device_types": None})
 
     try:
         common_args = dict(
@@ -63,7 +81,7 @@ async def generate_report_endpoint(
             period=data.period,
             from_time=data.from_time,
             to_time=data.to_time,
-            device_ids=data.device_ids,
+            device_ids=device_ids,
             group_ids=data.group_ids,
             locations=data.locations,
             device_types=data.device_types,
@@ -175,6 +193,8 @@ async def get_inventory_data(
     current_user: User = Depends(get_current_user),
 ):
     """Devices by type/vendor/location, interfaces totals, sensor fleet, recently added."""
+    if await scoping.visible_tags(db, current_user) is not None:
+        raise HTTPException(403, "The fleet inventory report is unavailable to accounts limited to a visibility scope")
     try:
         return await build_inventory(db)
     except Exception:
@@ -200,7 +220,7 @@ async def get_availability_policy(
 async def update_availability_policy(
     body: AvailabilityPolicyBody,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("reports.manage")),
 ):
     previous, _source = await availability_policy.load_default_target(db)
     await availability_policy.save_default_target(db, body.default_target_pct)
@@ -422,6 +442,22 @@ async def render_section_report(
     if application_id:
         filters = {**(filters or {}), "application_id": application_id.strip()}
 
+    # Fail closed for tag-scoped accounts: only sections that honour a device
+    # filter may run, and the filter is pinned to the devices the user can see.
+    omitted = 0
+    scoped, scoped_ids = await scoping.scoped_device_filter(
+        db, current_user, (filters or {}).get("device_ids"))
+    if scoped:
+        kept = [sid for sid in section_ids if sid in _rs.DEVICE_SCOPABLE_SECTIONS]
+        omitted = len(section_ids) - len(kept)
+        if not kept:
+            raise HTTPException(
+                403, "This report contains only fleet-wide sections, which are unavailable "
+                     "to accounts limited to a visibility scope")
+        section_ids = kept
+        filters = {**(filters or {}), "device_ids": scoped_ids}
+        filters.pop("application_id", None)
+
     start, end = _window_from_query(from_, to, hours)
     sections = await _rs.build_sections(db, section_ids, start, end, filters)
     category = (_rs.REPORT_PRESETS.get(key) or {}).get("category") or \
@@ -432,6 +468,9 @@ async def render_section_report(
     if filters and filters.get("application_id"):
         scope_bits.append(f"application “{filters['application_id']}”")
     scope_label = " · ".join(scope_bits) if scope_bits else "All monitored infrastructure"
+    if scoped:
+        scope_label = "Limited to your visibility scope" + (
+            f" ({omitted} fleet-wide section(s) omitted)" if omitted else "")
     meta = await _rs.build_report_meta(db, title, start, end,
                                       description=description,
                                       category=category,
@@ -485,7 +524,7 @@ def _validate_custom(body: CustomReportBody) -> None:
 async def create_custom_report(
     body: CustomReportBody,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("reports.manage")),
 ):
     _validate_custom(body)
     import json as _json
@@ -503,7 +542,7 @@ async def update_custom_report(
     report_id: _uuid.UUID,
     body: CustomReportBody,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("reports.manage")),
 ):
     _validate_custom(body)
     import json as _json
@@ -522,7 +561,7 @@ async def update_custom_report(
 async def delete_custom_report(
     report_id: _uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("reports.manage")),
 ):
     res = await db.execute(text(
         "DELETE FROM custom_reports WHERE id=:id"), {"id": str(report_id)})

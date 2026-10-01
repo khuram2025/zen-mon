@@ -24,7 +24,7 @@ from app.api.v1.agents import _authenticate as authenticate_agent
 from app.api.v1.agents import _strip_bearer
 from app.api.v1.apm import _new_ingest_key, invalidate_ingest_key_cache
 from app.core.database import get_ch_client, get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
 from app.models.user import User
 from app.services.audit_service import write_audit_log
 
@@ -452,7 +452,7 @@ async def set_process_instrumentation(
     process_id: uuid.UUID,
     body: InstrumentationRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("apm.manage")),
 ):
     process = (await db.execute(
         text("""

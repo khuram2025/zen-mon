@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextvars
 import csv
 import io
 import ipaddress
@@ -10,6 +11,7 @@ import os
 import socket
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,8 +19,9 @@ from fastapi.responses import Response
 from sqlalchemy import String, cast, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import scoping
 from app.core.database import get_ch_client, get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
 from app.services import geoip
 from app.models.device import Device
 from app.models.device_interface import DeviceInterface
@@ -30,7 +33,35 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/netflow", tags=["NetFlow"])
+# Visibility scope for the current request (RP-09). NetFlow rows carry no tags,
+# so a tag-scoped account sees only flows from exporters that resolve to
+# devices in its scope. The router dependency below sets this before any
+# handler runs; _scope() and _exporter_filter() - the two choke points every
+# flow query goes through - apply it, so a client filter can only narrow it.
+#   None  -> unrestricted
+#   [...] -> exporter IPs the account may see ([] = none)
+_VISIBLE_EXPORTERS: contextvars.ContextVar = contextvars.ContextVar(
+    "netflow_visible_exporters", default=None)
+
+
+async def netflow_visibility_guard(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    scope = await scoping.visible_tags(db, user)
+    _VISIBLE_EXPORTERS.set(None if scope is None else await scoping.visible_exporter_ips(db, scope))
+
+
+def _visibility_predicate() -> tuple[str, dict]:
+    visible = _VISIBLE_EXPORTERS.get()
+    if visible is None:
+        return "", {}
+    if not visible:
+        return " AND 0", {}
+    return " AND exporter_ip IN %(zp_visible_exporters)s", {"zp_visible_exporters": list(visible)}
+
+
+router = APIRouter(prefix="/netflow", tags=["NetFlow"], dependencies=[Depends(netflow_visibility_guard)])
 
 
 def _resolve_window(
@@ -475,9 +506,10 @@ def _enrich_hosts(rows: list[dict], resolve: bool) -> list[dict]:
 
 def _exporter_filter(exporter: str | None) -> tuple[str, dict]:
     """Returns (extra SQL WHERE-clause fragment, extra params) for an optional exporter filter."""
+    vis_sql, vis_params = _visibility_predicate()
     if exporter:
-        return " AND exporter_ip = %(exporter)s", {"exporter": exporter}
-    return "", {}
+        return " AND exporter_ip = %(exporter)s" + vis_sql, {"exporter": exporter, **vis_params}
+    return vis_sql, vis_params
 
 
 def _interface_filter(iface: int | None) -> tuple[str, dict]:
@@ -605,6 +637,10 @@ def _scope(
     if table == "flow_records":
         parts.append("flow_records.bytes / greatest(flow_records.sampling_interval, 1) <= 1000000000000")
     params: dict = {}
+    vis_sql, vis_params = _visibility_predicate()
+    if vis_sql:
+        parts.append(vis_sql.removeprefix(" AND "))
+        params.update(vis_params)
     if exporter:
         parts.append("exporter_ip = %(exporter)s"); params["exporter"] = exporter
     if iface is not None:
@@ -2198,10 +2234,11 @@ async def netflow_anomalies(
 
 
 class SavedViewIn(BaseModel):
-    name: str = Field(..., max_length=120)
+    name: str = Field(..., min_length=1, max_length=120)
     description: str | None = Field(None, max_length=500)
     query: dict
     pinned: bool = False
+    shared: bool = False
 
 
 class SavedViewOut(BaseModel):
@@ -2210,6 +2247,10 @@ class SavedViewOut(BaseModel):
     description: str | None
     query: dict
     pinned: bool
+    shared: bool = False
+    owner_id: str | None = None
+    owned: bool = False
+    editable: bool = False
     created_at: str
     updated_at: str
 
@@ -2309,56 +2350,78 @@ async def netflow_ip_groups(
     return out
 
 
+async def _can_manage_shared_views(db: AsyncSession, user: User) -> bool:
+    from app.core.security import user_has_permission
+    return await user_has_permission(db, user, "netflow.manage_shared")
+
+
+def _view_out(v: NetflowSavedView, user: User, can_shared: bool) -> SavedViewOut:
+    owned = v.owner_id is not None and v.owner_id == user.id
+    return SavedViewOut(
+        id=str(v.id),
+        name=v.name,
+        description=v.description,
+        query=v.query,
+        pinned=v.pinned,
+        shared=bool(v.is_shared),
+        owner_id=str(v.owner_id) if v.owner_id else None,
+        owned=owned,
+        editable=(can_shared if v.is_shared else owned),
+        created_at=v.created_at.isoformat(),
+        updated_at=v.updated_at.isoformat(),
+    )
+
+
 @router.get("/saved-views", response_model=list[SavedViewOut])
 async def list_saved_views(
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("netflow.view")),
     db: AsyncSession = Depends(get_db),
 ):
-    rows = (await db.execute(select(NetflowSavedView).order_by(NetflowSavedView.pinned.desc(), NetflowSavedView.updated_at.desc()))).scalars().all()
-    return [
-        SavedViewOut(
-            id=str(v.id),
-            name=v.name,
-            description=v.description,
-            query=v.query,
-            pinned=v.pinned,
-            created_at=v.created_at.isoformat(),
-            updated_at=v.updated_at.isoformat(),
-        )
-        for v in rows
-    ]
+    """Views the caller may open: their own and those shared with everyone."""
+    can_shared = await _can_manage_shared_views(db, user)
+    rows = (await db.execute(
+        select(NetflowSavedView)
+        .where((NetflowSavedView.is_shared.is_(True)) | (NetflowSavedView.owner_id == user.id))
+        .order_by(NetflowSavedView.pinned.desc(), NetflowSavedView.updated_at.desc())
+    )).scalars().all()
+    return [_view_out(v, user, can_shared) for v in rows]
 
 
 @router.post("/saved-views", response_model=SavedViewOut)
 async def create_saved_view(
     body: SavedViewIn,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("netflow.manage")),
     db: AsyncSession = Depends(get_db),
 ):
-    view = NetflowSavedView(name=body.name, description=body.description, query=body.query, pinned=body.pinned, owner_id=user.id)
+    can_shared = await _can_manage_shared_views(db, user)
+    if body.shared and not can_shared:
+        raise HTTPException(status_code=403, detail="Sharing a view with every user needs the 'Manage shared views' permission")
+    view = NetflowSavedView(name=body.name, description=body.description, query=body.query,
+                            pinned=body.pinned, is_shared=body.shared, owner_id=user.id)
     db.add(view)
     await db.commit()
     await db.refresh(view)
-    return SavedViewOut(
-        id=str(view.id),
-        name=view.name,
-        description=view.description,
-        query=view.query,
-        pinned=view.pinned,
-        created_at=view.created_at.isoformat(),
-        updated_at=view.updated_at.isoformat(),
-    )
+    return _view_out(view, user, can_shared)
 
 
 @router.delete("/saved-views/{view_id}")
 async def delete_saved_view(
     view_id: str,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_permission("netflow.manage")),
     db: AsyncSession = Depends(get_db),
 ):
-    res = await db.execute(select(NetflowSavedView).where(NetflowSavedView.id == view_id))
-    view = res.scalar_one_or_none()
-    if not view:
+    try:
+        vid = uuid.UUID(view_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Saved view not found")
+    view = (await db.execute(select(NetflowSavedView).where(NetflowSavedView.id == vid))).scalar_one_or_none()
+    can_shared = await _can_manage_shared_views(db, user)
+    # A view the caller cannot see is reported as missing (no id probing).
+    if not view or not (view.is_shared or view.owner_id == user.id):
+        raise HTTPException(status_code=404, detail="Saved view not found")
+    if view.is_shared and not can_shared:
+        raise HTTPException(status_code=403, detail="Shared views can only be deleted with the 'Manage shared views' permission")
+    if not view.is_shared and view.owner_id != user.id:
         raise HTTPException(status_code=404, detail="Saved view not found")
     await db.delete(view)
     await db.commit()
@@ -2383,14 +2446,15 @@ async def list_exporter_devices(
     the case where the UI can only show raw ifIndex numbers.
     """
     start, end = _resolve_window(hours, None, None)
+    vis_sql, vis_params = _visibility_predicate()
     rows = (await _query(
-        """
+        f"""
         SELECT exporter_ip, count() AS flows, max(timestamp) AS last_seen
         FROM zenplus.flow_records
-        WHERE timestamp >= %(start)s AND timestamp <= %(end)s
+        WHERE timestamp >= %(start)s AND timestamp <= %(end)s{vis_sql}
         GROUP BY exporter_ip ORDER BY flows DESC LIMIT 200
         """,
-        {"start": start, "end": end},
+        {"start": start, "end": end, **vis_params},
     )).result_rows
     exporter_ips = [str(r[0]) for r in rows]
     if not exporter_ips:
@@ -2426,7 +2490,7 @@ async def list_exporter_devices(
 async def set_exporter_device(
     exporter_ip: str,
     body: ExporterDeviceIn,
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("netflow.manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """Link a NetFlow exporter IP to the device that owns it."""
@@ -2465,7 +2529,7 @@ async def set_exporter_device(
 @router.delete("/exporter-devices/{exporter_ip}", status_code=204)
 async def delete_exporter_device(
     exporter_ip: str,
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("netflow.manage")),
     db: AsyncSession = Depends(get_db),
 ):
     await db.execute(

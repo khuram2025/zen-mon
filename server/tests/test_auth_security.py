@@ -6,8 +6,8 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
-from app.core.security import create_access_token, require_operator_user
-from conftest import make_user
+from app.core.security import create_access_token, invalidate_role_cache, require_permission
+from conftest import FakeDB, make_user
 
 
 def test_auth_me_returns_current_user(client, as_admin):
@@ -88,18 +88,21 @@ def test_viewer_cannot_mutate_apm_security_or_triage(client, as_viewer):
 
 
 @pytest.mark.asyncio
-async def test_operator_dependency_allows_operator_and_admin():
-    operator = await require_operator_user(make_user("operator"))
-    admin = await require_operator_user(make_user("admin"))
+async def test_manage_permission_allows_operator_and_admin():
+    invalidate_role_cache()
+    guard = require_permission("devices.manage")
+    operator = await guard(make_user("operator"), FakeDB())
+    admin = await guard(make_user("admin"), FakeDB())
 
     assert operator.role == "operator"
     assert admin.role == "admin"
 
 
 @pytest.mark.asyncio
-async def test_operator_dependency_rejects_viewer():
+async def test_manage_permission_rejects_viewer():
+    invalidate_role_cache()
     with pytest.raises(HTTPException) as exc_info:
-        await require_operator_user(make_user("viewer"))
+        await require_permission("devices.manage")(make_user("viewer"), FakeDB())
 
     assert exc_info.value.status_code == 403
 

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import scoping
 from app.core.database import get_db
-from app.core.security import get_current_user, require_admin_user, require_operator_user
+from app.core.security import get_current_user, require_admin_user, require_permission
 from app.models.user import User
 from app.schemas.service_check import (
     ServiceCheckCreate,
@@ -195,7 +195,7 @@ async def list_service_check_templates(
 async def create_service_check_template(
     data: ServiceCheckTemplateCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     return await service_check_service.create_template(db, data, current_user.id)
 
@@ -217,7 +217,7 @@ async def update_service_check_template(
     template_id: UUID,
     data: ServiceCheckTemplateUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     t = await service_check_service.update_template(db, template_id, data)
     if not t:
@@ -229,7 +229,7 @@ async def update_service_check_template(
 async def delete_service_check_template(
     template_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     ok = await service_check_service.delete_template(db, template_id)
     if not ok:
@@ -242,7 +242,7 @@ async def apply_service_check_template(
     template_id: UUID,
     data: ServiceCheckTemplateApply,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     try:
         return await service_check_service.apply_template(
@@ -265,7 +265,7 @@ async def list_service_check_maintenance(
 async def create_service_check_maintenance(
     data: ServiceMaintenanceCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     try:
         m = await service_maintenance.create_window(db, data, current_user.id, await _scope(db, current_user))
@@ -282,7 +282,7 @@ async def end_service_check_maintenance(
     maintenance_id: UUID,
     data: ServiceMaintenanceEnd | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     """Active -> ended now; scheduled -> cancelled. The record is kept (B04)."""
     reason = data.reason if data else None
@@ -303,7 +303,7 @@ async def patch_service_check_maintenance(
     maintenance_id: UUID,
     data: ServiceMaintenancePatch,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     try:
         m, changes = await service_maintenance.patch_window(db, maintenance_id, data, await _scope(db, current_user))
@@ -319,7 +319,7 @@ async def patch_service_check_maintenance(
 async def delete_service_check_maintenance(
     maintenance_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     """Cancel a window that has not started (record kept). Started windows: 409."""
     try:
@@ -385,7 +385,7 @@ async def list_service_check_groups(
 async def create_service_check_group(
     data: ServiceCheckGroupCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     return await service_check_service.create_group(db, data)
 
@@ -395,7 +395,7 @@ async def update_service_check_group(
     group_id: UUID,
     data: ServiceCheckGroupUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     out = await service_check_service.update_group(db, group_id, data)
     if not out:
@@ -407,7 +407,7 @@ async def update_service_check_group(
 async def delete_service_check_group(
     group_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     ok = await service_check_service.delete_group(db, group_id)
     if not ok:
@@ -464,7 +464,7 @@ async def service_check_daily_uptime(
 async def create_service_check(
     data: ServiceCheckCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     try:
         out = await service_check_service.create_service_check(
@@ -491,7 +491,7 @@ async def create_service_check(
 async def test_service_check_configuration(
     data: ServiceCheckCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     """Test an unsaved HTTP configuration without persisting it or its response body."""
     if data.check_type != "http":
@@ -539,7 +539,7 @@ async def update_service_check(
     check_id: UUID,
     data: ServiceCheckUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     changes: dict = {}
     try:
@@ -565,7 +565,7 @@ async def update_service_check(
 async def delete_service_check(
     check_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     sc = await visible_check_or_404(db, check_id, current_user)
     name = sc.name
@@ -588,7 +588,7 @@ class BulkDeleteRequest(BaseModel):
 async def bulk_delete_service_checks(
     data: BulkDeleteRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     """All-or-nothing: any missing/out-of-scope id -> 404 and nothing is deleted."""
     rows = await service_check_service.get_visible_checks(db, data.check_ids, await _scope(db, current_user))
@@ -723,7 +723,7 @@ async def get_service_check_sla(
 async def test_service_check(
     check_id: UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_operator_user),
+    current_user: User = Depends(require_permission("service_checks.manage")),
 ):
     """Run an on-demand test of a service check and return the result."""
     import socket

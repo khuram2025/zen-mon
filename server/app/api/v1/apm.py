@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import decrypt, encrypt
 from app.core.database import get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
 from app.models.user import User
 from app.services.audit_service import write_audit_log
 
@@ -341,7 +341,7 @@ async def list_ingest_keys(
 async def create_ingest_key(
     body: IngestKeyCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("apm.manage")),
 ):
     if body.kind == "rum":
         if not body.application_id:
@@ -401,7 +401,7 @@ async def create_ingest_key(
 async def reveal_ingest_key(
     key_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("apm.manage")),
 ):
     """Return the plaintext of a public browser RUM key.
 
@@ -445,7 +445,7 @@ async def update_ingest_key(
     key_id: uuid.UUID,
     body: IngestKeyUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("apm.manage")),
 ):
     """Edit a key's scope and snippet settings in place.
 
@@ -519,7 +519,7 @@ async def update_ingest_key(
 async def revoke_ingest_key(
     key_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("apm.manage")),
 ):
     res = await db.execute(
         text("UPDATE apm_ingest_keys SET revoked_at = NOW(), enabled = FALSE "
@@ -569,7 +569,7 @@ class EnrollmentTokenCreated(EnrollmentTokenResponse):
 async def create_enrollment_token(
     body: EnrollmentTokenCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("apm.manage")),
 ):
     prefix = RUM_KEY_PREFIX if body.kind == "rum" else SDK_KEY_PREFIX
     raw = prefix + "enroll_" + secrets.token_urlsafe(24)
@@ -613,7 +613,7 @@ async def create_enrollment_token(
 async def revoke_enrollment_token(
     token_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("apm.manage")),
 ):
     res = await db.execute(
         text("UPDATE apm_enrollment_tokens SET revoked_at = NOW() "

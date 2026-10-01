@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import scoping
 from app.core.database import get_db
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
 from app.models.user import User
 from app.schemas.device import (
     DeviceCreate, DeviceUpdate, DeviceResponse, DeviceSummary, DeviceGroupResponse,
@@ -420,7 +420,7 @@ async def list_device_types(
 async def bulk_delete_devices(
     data: dict,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     ids = data.get("device_ids", [])
     if not ids:
@@ -439,7 +439,7 @@ class BulkTagRequest(BaseModel):
 async def bulk_tag_devices(
     data: BulkTagRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     if not data.device_ids:
         raise HTTPException(status_code=400, detail="No device IDs provided")
@@ -453,7 +453,7 @@ async def bulk_tag_devices(
 async def create_device(
     data: DeviceCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     device = await device_service.create_device(db, data, user.id)
     return _device_to_response(device)
@@ -463,7 +463,7 @@ async def create_device(
 async def bulk_import_devices(
     data: BulkImportRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     return await device_service.bulk_import_devices(db, data.devices, user.id)
 
@@ -537,7 +537,7 @@ async def update_device(
     device_id: UUID,
     data: DeviceUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     current = await device_service.get_device(db, device_id)
     if not current:
@@ -574,7 +574,7 @@ async def update_device(
 async def delete_device(
     device_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     deleted = await device_service.delete_device(db, device_id)
     if not deleted:
@@ -702,7 +702,7 @@ async def update_device_interface_speed(
     if_index: int,
     payload: InterfaceSpeedUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     """Set or clear manual speed/bandwidth for a single interface."""
     row = (await db.execute(
@@ -731,7 +731,7 @@ async def bulk_update_device_interface_speed(
     device_id: UUID,
     payload: InterfaceBulkSpeedUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     """Apply manual speed/bandwidth to multiple interfaces at once."""
     result = await db.execute(
@@ -1328,7 +1328,7 @@ async def get_status_history(
 async def test_device_ping(
     device_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     """Run an on-demand ICMP probe (3 packets) and return whether the device
     replied, along with an approximate round-trip time."""
@@ -1401,7 +1401,7 @@ async def test_device_ping(
 async def test_device_snmp(
     device_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     """Run an on-demand SNMP probe against the device and return whether it
     responded, plus the sysDescr/sysName/sysObjectID/sysUpTime values we got."""
@@ -1922,7 +1922,7 @@ async def list_device_maintenance(
 async def create_device_maintenance(
     data: DeviceMaintenanceCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     from app.models.device import DeviceMaintenance
     from app.services.audit_service import write_audit_log
@@ -1984,7 +1984,7 @@ async def create_device_maintenance(
 async def delete_device_maintenance(
     maintenance_id: UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("devices.manage")),
 ):
     from sqlalchemy import select
     from app.models.device import DeviceMaintenance

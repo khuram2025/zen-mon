@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import scoping
 from app.core.database import get_ch_client, get_db, AsyncSessionLocal
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
 from app.models.user import User
 from app.services import tag_service
 from app.services.apm_rollup import align_ms_window, bucket_for, table_for
@@ -287,7 +287,7 @@ async def update_service_meta(
     name: str,
     payload: ServiceMetaUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("apm.manage")),
 ):
     """Classification metadata for an APM service. Applies to every (name,
     env) row so a service keeps one identity across environments. Tags are

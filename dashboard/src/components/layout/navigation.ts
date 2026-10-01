@@ -68,7 +68,7 @@ export type NavNode = {
   /** Active only on an exact pathname match (for section landing pages). */
   end?: boolean
   /** Hidden unless the signed-in role grants this permission. */
-  permission?: string
+  permission?: string | readonly string[]
   /** Live counter rendered as a pill on the right of the row. */
   badge?: 'alerts'
   /** Extra path prefixes this node also owns (detail routes that have no row). */
@@ -88,7 +88,7 @@ export type NavGroup = {
 }
 
 /** Settings is one page with tabs, so its children match on `?tab=`. */
-function settingsTab(tab: string, label: string, icon: NavIcon, permission?: string): NavNode {
+function settingsTab(tab: string, label: string, icon: NavIcon, permission?: string | readonly string[]): NavNode {
   return {
     to: tab === 'company' ? '/settings/general' : `/settings/general?tab=${tab}`,
     label,
@@ -298,7 +298,7 @@ export const NAV_GROUPS: NavGroup[] = [
           settingsTab('company', 'Company', Building2, 'settings.manage'),
           settingsTab('smtp', 'SMTP / Email', Mail, 'settings.manage'),
           settingsTab('appearance', 'Appearance', Palette),
-          settingsTab('users', 'Users & Access', Users, 'users.view'),
+          settingsTab('users', 'Users & Access', Users, ['users.view', 'users.manage', 'roles.view', 'roles.manage', 'system.admin']),
           settingsTab('security', 'Security & TLS', ShieldCheck, 'system.admin'),
           settingsTab('licenses', 'Licenses', KeyRound, 'system.admin'),
           settingsTab('updates', 'Updates', Download, 'system.admin'),

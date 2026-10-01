@@ -12,7 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_clickhouse_client, get_db
-from app.core.security import require_operator_user
+from app.core.security import require_permission
 from app.models.user import User
 
 router = APIRouter(prefix="/maps", tags=["Manual Maps"])
@@ -178,7 +178,7 @@ def _row_link(row) -> dict:
 @router.get("")
 async def list_maps(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.view")),
 ):
     rows = (await db.execute(
         text("""
@@ -238,7 +238,7 @@ async def list_maps(
 async def create_map(
     data: MapCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.manage")),
 ):
     row = (await db.execute(
         text("""
@@ -261,7 +261,7 @@ async def create_map(
 async def get_map(
     map_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.view")),
 ):
     map_row = (await db.execute(
         text("""
@@ -332,7 +332,7 @@ async def update_map(
     map_id: uuid.UUID,
     data: MapUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.manage")),
 ):
     fields = data.model_dump(exclude_unset=True)
     if not fields:
@@ -361,7 +361,7 @@ async def update_map(
 async def delete_map(
     map_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.manage")),
 ):
     row = (await db.execute(text("DELETE FROM manual_maps WHERE id = :id RETURNING id"), {"id": map_id})).first()
     if not row:
@@ -375,7 +375,7 @@ async def create_node(
     map_id: uuid.UUID,
     data: NodeCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.manage")),
 ):
     map_exists = (await db.execute(text("SELECT id FROM manual_maps WHERE id = :id"), {"id": map_id})).first()
     if not map_exists:
@@ -410,7 +410,7 @@ async def update_node(
     node_id: uuid.UUID,
     data: NodeUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.manage")),
 ):
     fields = data.model_dump(exclude_unset=True)
     if not fields:
@@ -458,7 +458,7 @@ async def delete_node(
     map_id: uuid.UUID,
     node_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.manage")),
 ):
     row = (await db.execute(
         text("DELETE FROM manual_map_nodes WHERE id = :node_id AND map_id = :map_id RETURNING id"),
@@ -476,7 +476,7 @@ async def create_link(
     map_id: uuid.UUID,
     data: LinkCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.manage")),
 ):
     if data.source_node_id == data.target_node_id:
         raise HTTPException(status_code=400, detail="Source and target must be different")
@@ -523,7 +523,7 @@ async def update_link(
     link_id: uuid.UUID,
     data: LinkUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.manage")),
 ):
     fields = data.model_dump(exclude_unset=True)
     if not fields:
@@ -586,7 +586,7 @@ async def delete_link(
     map_id: uuid.UUID,
     link_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.manage")),
 ):
     row = (await db.execute(
         text("DELETE FROM manual_map_links WHERE id = :link_id AND map_id = :map_id RETURNING id"),
@@ -707,7 +707,7 @@ async def _compute_suggested_links(db: AsyncSession, map_id: uuid.UUID) -> list[
 async def suggested_links(
     map_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.view")),
 ):
     map_exists = (await db.execute(text("SELECT id FROM manual_maps WHERE id = :id"), {"id": map_id})).first()
     if not map_exists:
@@ -720,7 +720,7 @@ async def suggested_links(
 async def auto_connect_discovered(
     map_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.manage")),
 ):
     """Create manual links for every discovered adjacency among placed
     devices that isn't linked yet. Each link is bound to its interface
@@ -863,7 +863,7 @@ def _iface_payload(row: dict) -> dict:
 async def links_live(
     map_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.view")),
 ):
     """Return live interface + throughput data for every link on the map.
 
@@ -1113,7 +1113,7 @@ async def links_live(
 async def nodes_live(
     map_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.view")),
 ):
     """Live per-device health for every node on the map.
 
@@ -1215,7 +1215,7 @@ async def create_shape(
     map_id: uuid.UUID,
     data: ShapeCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.manage")),
 ):
     if data.kind not in SHAPE_KINDS:
         raise HTTPException(status_code=400, detail=f"kind must be one of {SHAPE_KINDS}")
@@ -1251,7 +1251,7 @@ async def update_shape(
     shape_id: uuid.UUID,
     data: ShapeUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.manage")),
 ):
     fields = data.model_dump(exclude_unset=True)
     if not fields:
@@ -1290,7 +1290,7 @@ async def delete_shape(
     map_id: uuid.UUID,
     shape_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("maps.manage")),
 ):
     row = (await db.execute(
         text("DELETE FROM manual_map_shapes WHERE id = :shape_id AND map_id = :map_id RETURNING id"),

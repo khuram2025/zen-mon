@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.snmp_oid import display_oid
-from app.core.security import get_current_user, require_operator_user
+from app.core.security import get_current_user, require_permission
 from app.models.device import Device
 from app.models.discovery_v2 import (
     DiscoveryIgnoredDevice,
@@ -162,7 +162,7 @@ async def list_profiles(
 async def create_profile(
     payload: DiscoveryProfileCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("discovery.run")),
 ):
     existing = (
         await db.execute(select(DiscoveryProfile).where(DiscoveryProfile.name == payload.name))
@@ -255,7 +255,7 @@ async def update_profile(
     profile_id: uuid.UUID,
     payload: DiscoveryProfileUpdate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("discovery.run")),
 ):
     p = await db.get(DiscoveryProfile, profile_id)
     if not p:
@@ -283,7 +283,7 @@ async def update_profile(
 async def clone_profile(
     profile_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("discovery.run")),
 ):
     src = await db.get(DiscoveryProfile, profile_id)
     if not src:
@@ -346,7 +346,7 @@ async def clone_profile(
 async def delete_profile(
     profile_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("discovery.run")),
 ):
     p = await db.get(DiscoveryProfile, profile_id)
     if not p:
@@ -402,7 +402,7 @@ async def upsert_schedule(
     profile_id: uuid.UUID,
     payload: DiscoveryScheduleCreate,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("discovery.run")),
 ):
     p = await db.get(DiscoveryProfile, profile_id)
     if not p:
@@ -450,7 +450,7 @@ async def upsert_schedule(
 async def delete_schedule(
     schedule_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("discovery.run")),
 ):
     s = await db.get(DiscoverySchedule, schedule_id)
     if not s:
@@ -470,7 +470,7 @@ async def delete_schedule(
 async def pause_schedule(
     schedule_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("discovery.run")),
 ):
     s = await db.get(DiscoverySchedule, schedule_id)
     if not s:
@@ -489,7 +489,7 @@ async def pause_schedule(
 async def resume_schedule(
     schedule_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("discovery.run")),
 ):
     s = await db.get(DiscoverySchedule, schedule_id)
     if not s:
@@ -513,7 +513,7 @@ async def start_run(
     profile_id: uuid.UUID,
     payload: DiscoveryRunStartRequest | None = None,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("discovery.run")),
 ):
     p = await db.get(DiscoveryProfile, profile_id)
     if not p:
@@ -603,7 +603,7 @@ async def get_run(
 async def cancel_run_endpoint(
     run_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("discovery.run")),
 ):
     r = await db.get(DiscoveryRun, run_id)
     if not r:
@@ -805,7 +805,7 @@ async def import_results(
     run_id: uuid.UUID,
     payload: ImportRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("discovery.run")),
 ):
     # Serialize inventory imports, including separate discovery runs. A
     # read-before-insert check alone allows concurrent batches to duplicate IPs.
@@ -1036,7 +1036,7 @@ async def import_results(
 async def ignore_devices(
     payload: IgnoreRequest,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("discovery.run")),
 ):
     ignored: list[str] = []
     if payload.result_ids:
@@ -1119,7 +1119,7 @@ async def list_ignored(
 async def remove_ignored(
     ignored_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(require_operator_user),
+    user: User = Depends(require_permission("discovery.run")),
 ):
     r = await db.get(DiscoveryIgnoredDevice, ignored_id)
     if not r:

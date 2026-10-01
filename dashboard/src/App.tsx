@@ -1,6 +1,7 @@
 import { useEffect, lazy, Suspense } from 'react'
 import { Routes, Route, Navigate, useParams } from 'react-router-dom'
 import { useAuth } from '@/stores/auth'
+import { AccountGate } from '@/components/security/AccountGate'
 import { Layout } from '@/components/Layout'
 import { LoginPage } from '@/pages/LoginPage'
 import { DashboardPage } from '@/pages/DashboardPage'
@@ -100,7 +101,8 @@ import { NotFoundPage } from '@/pages/NotFoundPage'
 function Protected({ children }: { children: React.ReactNode }) {
   const token = useAuth((s) => s.token)
   if (!token) return <Navigate to="/login" replace />
-  return <>{children}</>
+  // Forced password change / required MFA enrolment come before anything else.
+  return <AccountGate>{children}</AccountGate>
 }
 
 /* Redirect old /settings/:tab to new routes */
