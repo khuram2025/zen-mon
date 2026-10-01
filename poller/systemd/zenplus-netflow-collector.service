@@ -12,8 +12,43 @@ WorkingDirectory=/opt/zenplus/poller
 EnvironmentFile=/opt/zenplus/.env
 Environment=NETFLOW_COLLECTOR_ID=netflow-01
 Environment=NETFLOW_LISTEN=:2055
+# sFlow v5 (flow and interface counter samples, e.g. from campus switches)
+# on its own UDP port; set it empty to disable. The host firewall must allow
+# inbound UDP 6343 as well as 2055. If the port cannot be opened the collector
+# keeps collecting NetFlow/IPFIX and reports it in /health.
+Environment=NETFLOW_SFLOW_LISTEN=:6343
 Environment=NETFLOW_HEALTH_LISTEN=127.0.0.1:8091
+# Flows that cannot be written while ClickHouse is down or restarting are
+# kept here (bounded by NETFLOW_SPOOL_MAX_MB, oldest dropped first) and
+# replayed with their deduplication tokens once it is back or after a restart.
+# Up to NETFLOW_QUEUE_MAX_RECORDS (default 100000, ~50 MB) wait in memory
+# before older batches spill to this spool. The directory also keeps the
+# exporters' v9/IPFIX templates and sampling rates (templates.json), so a
+# restart does not drop their data until they re-announce templates.
+# A top-level state directory on purpose: /var/lib/zenplus is root-only
+# (0750) on OVA appliances (bin/first-boot-init.sh), so the zenplus user
+# could not reach a spool below it.
+StateDirectory=zenplus-netflow
+StateDirectoryMode=0750
+Environment=NETFLOW_SPOOL_DIR=/var/lib/zenplus-netflow/spool
+Environment=NETFLOW_SPOOL_MAX_MB=1024
+# Socket receive buffer requested for flow bursts. The kernel caps it at
+# net.core.rmem_max, which the installer, `zenplus update` and the OTA updater
+# raise to at least this value (scripts/setup-netflow-sysctl.sh,
+# /etc/sysctl.d/99-zenplus-netflow.conf). /health shows the granted size and
+# reports "receive buffer smaller than requested" when the cap still applies.
+Environment=NETFLOW_RCVBUF=8388608
+# clamp: a flow time more than 2 minutes ahead of or 2 hours behind the
+# appliance clock is placed at the receipt time and counted. trust keeps
+# exporter times as sent (only for replaying historical captures).
+Environment=NETFLOW_CLOCK_POLICY=clamp
 ExecStart=/opt/zenplus/bin/zenplus-netflow-collector
+# A stop drains the queue to ClickHouse for NETFLOW_SHUTDOWN_TIMEOUT_SECONDS
+# (default 15 s) and spools the rest to disk. An insert already in flight
+# when the stop begins may run to its own NETFLOW_INSERT_TIMEOUT_SECONDS
+# (default 30 s) on a hung ClickHouse, and the last statistics get 5 s more;
+# SIGKILL before that would lose what is still in memory.
+TimeoutStopSec=60
 Restart=always
 RestartSec=10
 StandardOutput=journal

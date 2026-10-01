@@ -3,19 +3,17 @@ package netflow
 import (
 	"encoding/binary"
 	"fmt"
-	"net"
+	"net/netip"
 	"time"
 )
 
 const IPFIXHeaderLen = 16
 
-// ParseIPFIX decodes an IPFIX (NetFlow v10, RFC 7011) message. Templates and the
-// sampling interval are cached exactly like v9, and field decoding reuses
-// assignV9Field because IPFIX Information Element IDs match the v9 field-type
-// numbers for the common flow IEs (octets=1, packets=2, protocol=4, ports 7/11,
-// IPv4 addrs 8/12, interfaces 10/14, …). Enterprise-specific IEs and
-// variable-length fields are parsed for correct alignment but not assigned.
-func ParseIPFIX(data []byte, exporter net.IP, collectorID string, receivedAt time.Time, cache *V9TemplateCache) ([]Record, V9Stats, error) {
+// ParseIPFIX decodes an IPFIX (NetFlow v10, RFC 7011) message. Templates,
+// samplers and field decoding are shared with v9: IPFIX information element
+// IDs match the v9 field-type numbers for the common flow IEs. Enterprise-
+// specific and variable-length fields are parsed for correct alignment.
+func ParseIPFIX(data []byte, exporter netip.Addr, collectorID string, receivedAt time.Time, cache *V9TemplateCache) ([]Record, V9Stats, error) {
 	var stats V9Stats
 	if len(data) < IPFIXHeaderLen {
 		return nil, stats, fmt.Errorf("ipfix packet too short: %d bytes", len(data))
@@ -27,16 +25,28 @@ func ParseIPFIX(data []byte, exporter net.IP, collectorID string, receivedAt tim
 	if msgLen <= 0 || msgLen > len(data) {
 		msgLen = len(data)
 	}
+	exporter = CanonicalAddr(exporter)
 	exportSecs := binary.BigEndian.Uint32(data[4:8])
-	sequence := binary.BigEndian.Uint32(data[8:12])
-	domainID := binary.BigEndian.Uint32(data[12:16])
-
-	exporter4 := exporter.To4()
-	if exporter4 == nil {
-		exporter4 = net.IPv4(0, 0, 0, 0).To4()
+	stats.Sequence = binary.BigEndian.Uint32(data[8:12])
+	stats.Domain = binary.BigEndian.Uint32(data[12:16])
+	if exportSecs != 0 {
+		stats.ExportTime = time.Unix(int64(exportSecs), 0).UTC()
 	}
+	ctx := &decodeCtx{
+		exporter:    exporter,
+		exporterIP:  ExporterStorageIP(exporter),
+		domain:      stats.Domain,
+		collectorID: collectorID,
+		receivedAt:  receivedAt,
+		exportTime:  stats.ExportTime,
+		sequence:    stats.Sequence,
+		version:     10,
+		protocol:    ProtocolIPFIX,
+		cache:       cache,
+	}
+	ctx.sysInitMS, ctx.hasSysInit = cache.InitTime(exporter, stats.Domain)
 
-	records := make([]Record, 0)
+	var records []Record
 	for off := IPFIXHeaderLen; off+4 <= msgLen; {
 		setID := binary.BigEndian.Uint16(data[off : off+2])
 		setLen := int(binary.BigEndian.Uint16(data[off+2 : off+4]))
@@ -51,168 +61,164 @@ func ParseIPFIX(data []byte, exporter net.IP, collectorID string, receivedAt tim
 
 		switch {
 		case setID == 2: // Template Set
-			stats.TemplatesUpdated += parseIPFIXTemplates(body, exporter4, domainID, cache)
+			parseIPFIXTemplates(body, ctx, &stats)
 		case setID == 3: // Options Template Set
-			stats.OptionsTemplatesUpdated += parseIPFIXOptionsTemplates(body, exporter4, domainID, cache)
-		case setID >= 256: // Data Set (setID == template ID)
-			if tpl, ok := cache.Get(exporter4, domainID, setID); ok {
-				sampler := cache.GetSampler(exporter4, domainID)
-				decoded := parseIPFIXDataSet(body, tpl, exporter4, collectorID, receivedAt, exportSecs, sequence, sampler)
+			parseIPFIXOptionsTemplates(body, ctx, &stats)
+		case setID >= 256: // Data Set (set ID == template ID)
+			if tpl, ok := cache.Get(exporter, ctx.domain, setID); ok {
+				decoded, seen, unsupported := decodeDataSet(body, tpl, ctx)
 				stats.RecordsDecoded += len(decoded)
+				stats.RecordsUnsupported += unsupported
+				stats.DataRecords = addKnown(stats.DataRecords, seen)
 				records = append(records, decoded...)
 				break
 			}
-			if otpl, ok := cache.GetOptions(exporter4, domainID, setID); ok {
-				// Options data: learn the sampler (BUG-05), then skip — never a flow.
-				if iv, found := extractSampler(body, otpl); found {
-					cache.PutSampler(exporter4, domainID, iv)
-					stats.SamplersLearned++
-				}
-				stats.OptionsDataSkipped++
+			if otpl, ok := cache.GetOptions(exporter, ctx.domain, setID); ok {
+				res := decodeOptionsSet(body, otpl, ctx)
+				stats.OptionsRecords += res.records
+				stats.SamplersLearned += res.samplers
+				stats.AppNames = append(stats.AppNames, res.apps...)
+				stats.DataRecords = addKnown(stats.DataRecords, res.records)
 				break
 			}
 			stats.DataSetsWaiting++
+			stats.DataRecords = -1 // how many records the set held is unknowable
 		}
 		off = end
 	}
 	return records, stats, nil
 }
 
+// addKnown adds n to a running record count unless the count is already
+// unknown (-1).
+func addKnown(total, n int) int {
+	if total < 0 {
+		return total
+	}
+	return total + n
+}
+
 // parseIPFIXFieldSpecifiers reads fieldCount field specifiers starting at off.
 // Returns the fields, the new offset, the summed fixed length (variable-length
 // fields contribute 0), and ok=false on truncation.
 func parseIPFIXFieldSpecifiers(body []byte, off, fieldCount int) ([]V9TemplateField, int, int, bool) {
-	fields := make([]V9TemplateField, 0, fieldCount)
+	// The capacity is bounded by what the set can hold (4 bytes per
+	// specifier), never taken from the field count alone: a forged count of
+	// 65535 in every 8-byte template record would otherwise allocate 512 KB
+	// per record, gigabytes per datagram.
+	fields := make([]V9TemplateField, 0, min(fieldCount, max(len(body)-off, 0)/4))
 	total := 0
 	for i := 0; i < fieldCount; i++ {
 		if off+4 > len(body) {
 			return fields, off, total, false
 		}
-		ieID := binary.BigEndian.Uint16(body[off : off+2])
-		flen := binary.BigEndian.Uint16(body[off+2 : off+4])
+		f := V9TemplateField{Type: binary.BigEndian.Uint16(body[off : off+2]), Length: binary.BigEndian.Uint16(body[off+2 : off+4])}
 		off += 4
-		if ieID&0x8000 != 0 { // enterprise-specific IE: 4-byte enterprise number follows
+		if f.Type&0x8000 != 0 { // enterprise-specific IE: 4-byte enterprise number follows
 			if off+4 > len(body) {
 				return fields, off, total, false
 			}
+			f.Enterprise = binary.BigEndian.Uint32(body[off : off+4])
 			off += 4
 		}
-		// Keep the enterprise bit set so the IE never collides with a standard
-		// field type in assignV9Field — its value is skipped, alignment preserved.
-		fields = append(fields, V9TemplateField{Type: ieID, Length: flen})
-		if flen != 0xFFFF {
-			total += int(flen)
+		fields = append(fields, f)
+		if f.Length != 0xFFFF {
+			total += int(f.Length)
 		}
 	}
 	return fields, off, total, true
 }
 
-func parseIPFIXTemplates(body []byte, exporter net.IP, domainID uint32, cache *V9TemplateCache) int {
-	count := 0
+// parseIPFIXTemplates handles Template Set records, including withdrawals
+// (RFC 7011 §8.1: field count 0 withdraws that template ID; template ID 2 with
+// field count 0 withdraws every data template of the domain).
+func parseIPFIXTemplates(body []byte, ctx *decodeCtx, stats *V9Stats) {
 	for off := 0; off+4 <= len(body); {
 		templateID := binary.BigEndian.Uint16(body[off : off+2])
 		fieldCount := int(binary.BigEndian.Uint16(body[off+2 : off+4]))
 		off += 4
-		if templateID == 0 && fieldCount == 0 {
-			break // padding
+		if fieldCount == 0 {
+			switch {
+			case templateID == 0:
+				return // padding
+			case templateID == 2:
+				ctx.cache.WithdrawAll(ctx.exporter, ctx.domain, false)
+			case templateID >= 256:
+				ctx.cache.Withdraw(ctx.exporter, ctx.domain, templateID)
+			}
+			continue
 		}
 		fields, newOff, total, ok := parseIPFIXFieldSpecifiers(body, off, fieldCount)
 		if !ok {
-			break
+			return
 		}
 		off = newOff
-		if len(fields) > 0 {
-			cache.Put(exporter, domainID, V9Template{ID: templateID, Fields: fields, Length: total})
-			count++
+		if templateID < 256 || !decodable(fields) {
+			continue
+		}
+		stats.TemplatesUpdated++
+		register, stored := ctx.cache.Put(ctx.exporter, ctx.domain, V9Template{ID: templateID, Fields: fields, Length: total})
+		if !stored {
+			stats.TemplatesRefused++
+		}
+		if register {
+			stats.TemplatesChanged++
+			stats.Templates = append(stats.Templates, TemplateInfo{
+				Exporter: ctx.exporter, Domain: ctx.domain, Protocol: ctx.protocol, ID: templateID, Fields: fields,
+			})
 		}
 	}
-	return count
 }
 
-func parseIPFIXOptionsTemplates(body []byte, exporter net.IP, domainID uint32, cache *V9TemplateCache) int {
-	count := 0
-	for off := 0; off+6 <= len(body); {
+// parseIPFIXOptionsTemplates handles Options Template Set records:
+// templateID(2) | fieldCount(2) | scopeFieldCount(2) | specifiers..., or a
+// 4-byte withdrawal (field count 0; template ID 3 withdraws all options templates).
+func parseIPFIXOptionsTemplates(body []byte, ctx *decodeCtx, stats *V9Stats) {
+	for off := 0; off+4 <= len(body); {
 		templateID := binary.BigEndian.Uint16(body[off : off+2])
 		fieldCount := int(binary.BigEndian.Uint16(body[off+2 : off+4]))
+		if fieldCount == 0 {
+			off += 4
+			switch {
+			case templateID == 0:
+				return // padding
+			case templateID == 3:
+				ctx.cache.WithdrawAll(ctx.exporter, ctx.domain, true)
+			case templateID >= 256:
+				ctx.cache.Withdraw(ctx.exporter, ctx.domain, templateID)
+			}
+			continue
+		}
+		if off+6 > len(body) {
+			return
+		}
 		scopeCount := int(binary.BigEndian.Uint16(body[off+4 : off+6]))
 		off += 6
-		if templateID == 0 && fieldCount == 0 {
-			break
-		}
 		if scopeCount == 0 || scopeCount > fieldCount {
-			break
+			return
 		}
 		fields, newOff, total, ok := parseIPFIXFieldSpecifiers(body, off, fieldCount)
 		if !ok {
-			break
+			return
 		}
 		off = newOff
+		if templateID < 256 || !decodable(fields) {
+			continue
+		}
 		tpl := V9OptionsTemplate{
 			ID:          templateID,
 			ScopeFields: fields[:scopeCount],
 			Fields:      fields[scopeCount:],
 			Length:      total,
 		}
-		cache.PutOptions(exporter, domainID, tpl)
-		count++
-	}
-	return count
-}
-
-func parseIPFIXDataSet(body []byte, tpl V9Template, exporter net.IP, collectorID string, receivedAt time.Time, exportSecs uint32, sequence uint32, sampler uint32) []Record {
-	if len(tpl.Fields) == 0 {
-		return nil
-	}
-	if sampler == 0 {
-		sampler = 1
-	}
-	records := make([]Record, 0)
-	for off := 0; off < len(body); {
-		r := Record{
-			Timestamp:        receivedAt.UTC(),
-			ReceivedAt:       receivedAt.UTC(),
-			CollectorID:      collectorID,
-			ExporterIP:       exporter,
-			FlowVersion:      10,
-			FlowSequence:     sequence,
-			SamplingInterval: sampler,
+		stats.OptionsTemplatesUpdated++
+		register, stored := ctx.cache.PutOptions(ctx.exporter, ctx.domain, tpl)
+		if !stored {
+			stats.TemplatesRefused++
 		}
-		pos := off
-		var firstMS, lastMS uint32
-		var firstAbsMS, lastAbsMS uint64
-		ok := true
-		for _, f := range tpl.Fields {
-			flen := int(f.Length)
-			if f.Length == 0xFFFF { // RFC 7011 variable-length encoding
-				if pos >= len(body) {
-					ok = false
-					break
-				}
-				flen = int(body[pos])
-				pos++
-				if flen == 255 {
-					if pos+2 > len(body) {
-						ok = false
-						break
-					}
-					flen = int(binary.BigEndian.Uint16(body[pos : pos+2]))
-					pos += 2
-				}
-			}
-			if pos+flen > len(body) {
-				ok = false
-				break
-			}
-			assignV9Field(&r, f.Type, body[pos:pos+flen], &firstMS, &lastMS, &firstAbsMS, &lastAbsMS)
-			pos += flen
+		if register {
+			stats.TemplatesChanged++
+			stats.Templates = append(stats.Templates, optionsTemplateInfo(ctx, tpl))
 		}
-		if !ok || pos == off {
-			break // trailing padding / truncated record
-		}
-		applyFlowTimes(&r, firstMS, lastMS, firstAbsMS, lastAbsMS, exportSecs, 0, receivedAt)
-		fillMissingAddrs(&r)
-		records = append(records, r)
-		off = pos
 	}
-	return records
 }
